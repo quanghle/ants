@@ -91,7 +91,7 @@ async fn sense_tools_are_served_with_its_prefix_and_the_json_argument() {
 
     let (ok, text) = call(&client, "sense_brief", json!({})).await;
     assert!(!ok, "{text}");
-    assert!(text.starts_with("The brief is not available: sense keeps no data here"), "{text}");
+    assert!(text.starts_with("sense keeps no data here"), "{text}");
     let result =
         client.call_tool(CallToolRequestParams::new("sense_brief").with_arguments(json_object(json!({"json": true}))));
     let result = result.await.unwrap();

@@ -268,7 +268,7 @@ async fn malformed_ranges_and_unsafe_paths_are_refused_before_any_file_access() 
         json!({"path": "source.rs", "end": 1}),
     ] {
         let answer = refused(&sense, cited(json!([citation]))).await;
-        assert_eq!(answer.json["error"], "invalid", "{citation}");
+        assert_eq!(answer.json["error"], "invalid_arguments", "{citation}");
     }
     assert!(events(&store).await.is_empty());
 }

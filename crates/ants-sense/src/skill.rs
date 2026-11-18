@@ -17,12 +17,13 @@ use std::path::{Component, Path, PathBuf};
 
 use ants_proto::UserId;
 use ants_proto::provider::{BoxFuture, ToolCall};
-use serde_json::{Map, Value, json};
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::Sense;
 use crate::export::skills_dir;
 use crate::items::{Item, ItemId, Values};
-use crate::memory::{holds_recalled_marker, invalid, redacted};
+use crate::memory::{holds_recalled_marker, redacted};
 use crate::proposal::{self, Proposal, ProposalItem, Status, time};
 use crate::sanitize::{Limit, Redaction, sanitize_body};
 use crate::store::{Items, StoreError};
@@ -221,51 +222,72 @@ pub fn skill<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> 
     Box::pin(async move { answer(sense, call).await.unwrap_or_else(|refused| refused) })
 }
 
+/// The arguments of a `sense_skill` call.
+#[derive(Deserialize)]
+struct Request {
+    name: Option<String>,
+    content: Option<String>,
+    /// Paths to their text, or to none to remove the file.
+    files: Option<BTreeMap<String, Option<String>>>,
+    remove: Option<bool>,
+    path: Option<String>,
+    history: Option<bool>,
+    proposal: Option<String>,
+    reason: Option<String>,
+    finding: Option<String>,
+}
+
+impl Request {
+    /// Whether it gives content, files or remove: a change to propose.
+    fn changes(&self) -> bool {
+        self.content.is_some() || self.files.is_some() || self.remove.is_some()
+    }
+}
+
 async fn answer(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
-    let arguments = &call.arguments;
-    let items = sense.items(&call.context.ant).await.map_err(proposal::unavailable)?;
-    let path = text(arguments, "path")?;
-    if let Some(id) = text(arguments, "proposal")? {
-        let id = id.parse::<ItemId>().map_err(|_| invalid("proposal must be a proposal's id.".into()))?;
+    let request: Request = crate::tools::arguments(call)?;
+    let items = sense.items(&call.context.ant).await?;
+    let path = nonblank(request.path.as_deref());
+    if let Some(id) = nonblank(request.proposal.as_deref()) {
+        let id = id.parse::<ItemId>().map_err(|_| Answer::invalid("proposal must be a proposal's id."))?;
         return show_proposal(&*items, &id, path).await;
     }
-    let Some(name) = text(arguments, "name")? else {
-        if ["content", "files", "remove", "path", "history"].iter().any(|key| given(arguments, key)) {
-            return Err(invalid("Name the skill.".into()));
+    let Some(name) = nonblank(request.name.as_deref()) else {
+        if request.changes() || request.path.is_some() || request.history.is_some() {
+            return Err(Answer::invalid("Name the skill."));
         }
         return list(&*items).await;
     };
     if !valid_name(name) {
-        return Err(invalid(format!(
+        return Err(Answer::invalid(format!(
             "{name:?} is no skill name: 1 to {MAX_NAME_CHARS} lowercase letters, digits and single hyphens inside."
         )));
     }
-    if !["content", "files", "remove"].iter().any(|key| given(arguments, key)) {
-        if flag(arguments, "history")? {
+    if !request.changes() {
+        if request.history == Some(true) {
             return show_history(&*items, name).await;
         }
         return show(&*items, name, path).await;
     }
-    if path.is_some() || given(arguments, "history") {
-        return Err(invalid("path and history show a skill: pass them without content, files or remove.".into()));
+    if path.is_some() || request.history.is_some() {
+        return Err(Answer::invalid("path and history show a skill: pass them without content, files or remove."));
     }
-    propose(&*items, call, name).await
+    propose(&*items, call, &request, name).await
 }
 
-/// Propose the skill `name` as `call` gives it.
-async fn propose(items: &dyn Items, call: &ToolCall, name: &str) -> Result<Answer, Answer> {
-    let (arguments, context) = (&call.arguments, &call.context);
-    let reason = proposal::reason(arguments)?;
-    let finding = proposal::finding(arguments)?;
+/// Propose the skill `name` as `request`, of `call`, gives it.
+async fn propose(items: &dyn Items, call: &ToolCall, request: &Request, name: &str) -> Result<Answer, Answer> {
+    let context = &call.context;
+    let reason = proposal::reason(request.reason.as_deref())?;
+    let finding = proposal::finding(request.finding.as_deref())?;
     proposal::refuse_untrusted(items, context, finding.as_deref()).await?;
     let id = skill_id(name);
-    let current = items.get(&id).await.map_err(proposal::unavailable)?;
+    let current = items.get(&id).await?;
     let live = current.as_ref().and_then(Skill::of);
-    let remove = flag(arguments, "remove")?;
     let mut redactions = Vec::new();
-    let (mut version, summary) = if remove {
-        if given(arguments, "content") || given(arguments, "files") {
-            return Err(invalid("remove takes no content or files.".into()));
+    let (mut version, summary) = if request.remove == Some(true) {
+        if request.content.is_some() || request.files.is_some() {
+            return Err(Answer::invalid("remove takes no content or files."));
         }
         let Some(live) = &live else {
             return Err(Answer::error("not_found", format!("No skill {name} to remove.")));
@@ -277,7 +299,7 @@ async fn propose(items: &dyn Items, call: &ToolCall, name: &str) -> Result<Answe
         version.insert("files".into(), Value::Null);
         (version, format!("Remove skill {name}: {}", live.description))
     } else {
-        edited(items, arguments, name, live.as_ref(), &mut redactions).await?
+        edited(items, request, name, live.as_ref(), &mut redactions).await?
     };
     version.insert("reason".into(), json!(reason));
     let made = Proposal {
@@ -293,7 +315,7 @@ async fn propose(items: &dyn Items, call: &ToolCall, name: &str) -> Result<Answe
         superseded_by: None,
         decided: None,
     };
-    let (made, superseded) = proposal::propose(items, made).await.map_err(proposal::unavailable)?;
+    let (made, superseded) = proposal::propose(items, made).await?;
     let mut text = format!(
         "Proposed skill change {}: a dream from {} offers it, applied confirming it.",
         made.id(),
@@ -308,10 +330,10 @@ async fn propose(items: &dyn Items, call: &ToolCall, name: &str) -> Result<Answe
     Ok(Answer { text, json, is_error: false })
 }
 
-/// The version of skill `name`, now `live`, and its summary, that `arguments` make with their content and files.
+/// The version of skill `name`, now `live`, and its summary, that `request` makes with its content and files.
 async fn edited(
     items: &dyn Items,
-    arguments: &Map<String, Value>,
+    request: &Request,
     name: &str,
     live: Option<&Skill>,
     redactions: &mut Vec<Redaction>,
@@ -319,29 +341,19 @@ async fn edited(
     let id = skill_id(name);
     let mut files = live.map_or_else(BTreeMap::new, |live| live.files.clone());
     let mut changes = BTreeMap::new();
-    if let Some(content) = text(arguments, "content")? {
+    if let Some(content) = nonblank(request.content.as_deref()) {
         let content = file(SKILL_FILE, content, redactions)?;
         changes.insert(SKILL_FILE.to_owned(), Some(content));
     }
-    match arguments.get("files") {
-        None | Some(Value::Null) => {}
-        Some(Value::Object(given)) => {
-            for (path, text) in given {
-                if !valid_path(path) {
-                    return Err(invalid(format!(
-                        "File {path:?}: a relative path of plain names, at most {MAX_PATH_CHARS} characters; \
-                         SKILL.md comes as content."
-                    )));
-                }
-                let text = match text {
-                    Value::Null => None,
-                    Value::String(text) => Some(file(path, text, redactions)?),
-                    _ => return Err(invalid(format!("File {path}: its text, or null to remove it."))),
-                };
-                changes.insert(path.clone(), text);
-            }
+    for (path, text) in request.files.iter().flatten() {
+        if !valid_path(path) {
+            return Err(Answer::invalid(format!(
+                "File {path:?}: a relative path of plain names, at most {MAX_PATH_CHARS} characters; SKILL.md comes \
+                 as content."
+            )));
         }
-        Some(_) => return Err(invalid("files maps paths to their text, or to null to remove one.".into())),
+        let text = text.as_deref().map(|text| file(path, text, redactions)).transpose()?;
+        changes.insert(path.clone(), text);
     }
     for (path, text) in &changes {
         match text {
@@ -351,13 +363,15 @@ async fn edited(
     }
     let content = files
         .get(SKILL_FILE)
-        .ok_or_else(|| invalid(format!("A new skill comes with its content, its {SKILL_FILE}.")))?;
-    let (named, description) = front_matter(content).map_err(|why| invalid(format!("{why}.")))?;
+        .ok_or_else(|| Answer::invalid(format!("A new skill comes with its content, its {SKILL_FILE}.")))?;
+    let (named, description) = front_matter(content).map_err(|why| Answer::invalid(format!("{why}.")))?;
     if named != name {
-        return Err(invalid(format!("The front matter names the skill {named:?}, not {name:?}.")));
+        return Err(Answer::invalid(format!("The front matter names the skill {named:?}, not {name:?}.")));
     }
     if description.contains('\n') || !(1..=MAX_DESCRIPTION_CHARS).contains(&description.chars().count()) {
-        return Err(invalid(format!("The description is one line of at most {MAX_DESCRIPTION_CHARS} characters.")));
+        return Err(Answer::invalid(format!(
+            "The description is one line of at most {MAX_DESCRIPTION_CHARS} characters."
+        )));
     }
     if files.len() > MAX_FILES + 1 {
         return Err(Answer::error(
@@ -374,8 +388,8 @@ async fn edited(
         return Err(Answer::error("unchanged", format!("Skill {name} is that already: nothing to propose.")));
     }
     if live.is_none() {
-        let count = skills(items).await.map_err(proposal::unavailable)?.len();
-        let new = proposal::pending(items).await.map_err(proposal::unavailable)?;
+        let count = skills(items).await?.len();
+        let new = proposal::pending(items).await?;
         let new = new.iter().filter(|found| found.proposal.kind == SKILL && found.proposal.target != id).count();
         if count + new >= MAX_SKILLS {
             let message =
@@ -432,8 +446,8 @@ fn file(path: &str, text: &str, redactions: &mut Vec<Redaction>) -> Result<Strin
 
 /// The skills, by name and description, then the pending proposals of skills.
 async fn list(items: &dyn Items) -> Result<Answer, Answer> {
-    let skills = skills(items).await.map_err(proposal::unavailable)?;
-    let pending = proposal::pending(items).await.map_err(proposal::unavailable)?;
+    let skills = skills(items).await?;
+    let pending = proposal::pending(items).await?;
     let pending: Vec<_> = pending.into_iter().filter(|found| found.proposal.kind == SKILL).collect();
     let mut text = if skills.is_empty() {
         "No skills yet: propose one with sense_skill, giving its name, its content (SKILL.md) and a reason.".to_owned()
@@ -464,9 +478,9 @@ async fn list(items: &dyn Items) -> Result<Answer, Answer> {
 /// Skill `name`: its `SKILL.md` and the paths of its other files, or file `path` alone; then its pending proposal.
 async fn show(items: &dyn Items, name: &str, path: Option<&str>) -> Result<Answer, Answer> {
     let id = skill_id(name);
-    let item = items.get(&id).await.map_err(proposal::unavailable)?;
+    let item = items.get(&id).await?;
     let skill = item.as_ref().and_then(Skill::of);
-    let pending = proposal::pending_for(items, &id).await.map_err(proposal::unavailable)?;
+    let pending = proposal::pending_for(items, &id).await?;
     let Some(skill) = skill else {
         let mut message = format!("No skill {name}.");
         if let Some(pending) = &pending {
@@ -508,7 +522,7 @@ async fn show(items: &dyn Items, name: &str, path: Option<&str>) -> Result<Answe
 
 /// Proposal `id` of a skill in full: what it changes, its reason and its `SKILL.md`, or its file `path`.
 async fn show_proposal(items: &dyn Items, id: &ItemId, path: Option<&str>) -> Result<Answer, Answer> {
-    let found = items.get(id).await.map_err(proposal::unavailable)?.and_then(ProposalItem::of);
+    let found = items.get(id).await?.and_then(ProposalItem::of);
     let found = found
         .filter(|found| found.proposal.kind == SKILL)
         .ok_or_else(|| Answer::error("not_found", format!("No skill proposal {id}.")))?;
@@ -531,7 +545,7 @@ async fn show_proposal(items: &dyn Items, id: &ItemId, path: Option<&str>) -> Re
 
 /// Every version of skill `name`, the newest first, each with the reason it was confirmed for.
 async fn show_history(items: &dyn Items, name: &str) -> Result<Answer, Answer> {
-    let versions = proposal::versions(items, &skill_id(name)).await.map_err(proposal::unavailable)?;
+    let versions = proposal::versions(items, &skill_id(name)).await?;
     if versions.is_empty() {
         return Err(Answer::error("not_found", format!("No skill {name}.")));
     }
@@ -557,24 +571,8 @@ async fn show_history(items: &dyn Items, name: &str) -> Result<Answer, Answer> {
     Ok(Answer { text, json: json!({"versions": json}), is_error: false })
 }
 
-fn given(arguments: &Map<String, Value>, key: &str) -> bool {
-    arguments.get(key).is_some_and(|value| !value.is_null())
-}
-
-fn text<'a>(arguments: &'a Map<String, Value>, name: &str) -> Result<Option<&'a str>, Answer> {
-    match arguments.get(name) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(text.trim()).filter(|text| !text.is_empty())),
-        Some(_) => Err(invalid(format!("{name} must be a string."))),
-    }
-}
-
-fn flag(arguments: &Map<String, Value>, name: &str) -> Result<bool, Answer> {
-    match arguments.get(name) {
-        None | Some(Value::Null) => Ok(false),
-        Some(Value::Bool(flag)) => Ok(*flag),
-        Some(_) => Err(invalid(format!("{name} must be true or false."))),
-    }
+fn nonblank(given: Option<&str>) -> Option<&str> {
+    given.map(str::trim).filter(|text| !text.is_empty())
 }
 
 #[cfg(test)]

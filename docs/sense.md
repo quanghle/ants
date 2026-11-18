@@ -6,7 +6,8 @@ the daemon, one serving all the ants of a daemon process, and opens no network c
 of humans: no approvals, gates, review queues or notifications.
 
 This document says what an ant using sense can do and is told, what an operator sees and configures, and the limits.
-How each part works is in the module docs of crate `ants-sense`, and those of `ants-daemon` for the daemon's part:
+How each part works is in the module docs of crate `ants-sense`, and those of `ants-daemon`'s `sense` module, the
+only one of the daemon reaching that crate, for the daemon's part: keeping each ant's sense data and event log,
 scheduling reminders, maintenance and dreams, and making a review's checkouts.
 
 ## Overview
@@ -69,7 +70,7 @@ vote or propose.
 | What | Limit |
 |---|---|
 | Tools | 12 |
-| Brief | 8000 bytes, cut section by section ([Brief](#brief)) |
+| Brief | 8000 bytes; over it, the work is cut first and the persona last ([Brief](#brief)) |
 | Memory | title 200 characters, body 4 KiB; the live core memories 2,000 bytes in all |
 | Self-model, relationship record | title 200 characters, body 2,000 bytes |
 | Persona | 500 bytes a field |
@@ -106,6 +107,16 @@ effect, briefs are empty and `sense_brief` answers `unavailable`. A daemon serve
 sense before starting any of them, so an event of one ant about another, as a clone's about its source, finds the
 other's data whichever starts first; an event of an ant the daemon serves no sense data of, as one queued under a name
 the ant has left, is acked with no effect.
+
+## Arguments and refusals
+
+Each tool reads its arguments into a typed request: an argument given as `null` counts as left out, and one missing,
+of the wrong type or out of its bounds refuses the call with `invalid_arguments`, its message naming the argument. A
+store failing a call is refused alike by every tool: `not_found` for an item missing, `conflict` for an item at another
+revision than the call expected (the current item as `current` in JSON) or one other writers kept changing, and
+`unavailable` when sense's data cannot be read or written. A write deciding from what it read decides again when
+another writer changed the item meanwhile, up to 8 times, then answers `conflict`. Each refusal carries a stable `error`
+code: these, and those each tool names below.
 
 ## Identity
 
@@ -171,7 +182,8 @@ maintenance recheck them: changed or missing lines mark the memory `needs_review
 vote. A path leaving the repository is refused; citations of another repository stay unchecked. Arguments it does not
 know, such as a writer or a trust, are ignored. In order, it refuses:
 
-- invalid arguments (`invalid`), and a title over 200 characters or a body over 4 KiB (`too_long`);
+- invalid arguments ([Arguments and refusals](#arguments-and-refusals)), and a title over 200 characters or a body
+  over 4 KiB (`too_long`);
 - a text holding a whole block of recalled memories, as recall shows them (`recalled_block`);
 - a `supersedes` naming no memory (`not_found`) or one no longer live (`conflict`, naming its replacement);
 - an exact duplicate, a live memory of the same scope whose body has the same words, case aside, even with `force`
@@ -179,8 +191,7 @@ know, such as a writer or a trust, are ignored. In order, it refuses:
 - unless `force`, near duplicates: live memories of the same scope sharing at least 60% of the words of their title
   and body, the first 3 named with a suggestion to supersede or vote on them (`near_duplicate`);
 - a core memory taking the live core memories past 2,000 bytes of titles and bodies, listing them to trim
-  (`core_cap`);
-- with sense unavailable, `unavailable`.
+  (`core_cap`).
 
 The memory a new one supersedes is left out of those checks; a memory superseded meanwhile is refused (`conflict`). A
 memory is `untrusted` when its thread came from a webhook, the call passes `quotes`, or its text holds one marker of the
@@ -205,8 +216,9 @@ redacted.
   people searched ([Self-model and relationships](#self-model-and-relationships)).
 - A full read by `id` from a thread no webhook started counts as a use of the memory, once a UTC day
   ([Memory maintenance](#memory-maintenance)); recall changes nothing else.
-- Refusals: `invalid` (both `query` and `id`, `history` without a memory's `id`, a `limit` out of range, a `repo` that
-  is no git remote, a `with` entry that is no name), `not_found`, `unavailable`.
+- Refusals: invalid arguments ([Arguments and refusals](#arguments-and-refusals): both `query` and `id`, `history`
+  without a memory's `id`, a `limit` out of range, a `repo` that is no git remote, a `with` entry that is no name) and
+  an `id` naming no memory (`not_found`).
 
 `sense_vote` takes the `id` of a live memory, a `vote` and an optional `reason` (at most 500 characters):
 
@@ -215,8 +227,8 @@ redacted.
 - `wrong` retires it as `wrong`, out of recall and the duplicate checks.
 
 A thread voting again replaces its vote, so each thread counts once. A thread a webhook started may not vote
-(`untrusted`): outside content could steer its votes. Other refusals: `invalid`, `too_long`, `not_found`, `conflict` (a
-memory no longer live, naming what superseded it), `unavailable`. The answer gives the counts, the vote replaced and
+(`untrusted`): outside content could steer its votes. Other refusals: `too_long`, `not_found`, `conflict` (a memory no
+longer live, naming what superseded it). The answer gives the counts, the vote replaced and
 the memory's new status.
 
 ## Memory maintenance
@@ -285,8 +297,8 @@ rejected, to be proposed again; deciding a proposal already decided is refused w
 
 Proposals resting on untrusted text are refused (`untrusted`): those on a thread a webhook started, those naming in
 `finding` a dream finding marked untrusted, and any made on the thread of a dream whose packet holds an untrusted
-finding or the history of an untrusted thread. Other refusals: `invalid`, `too_long`, `too_many`, `unchanged`,
-`not_found` (a skill, file, proposal or finding), `recalled_block`, `unavailable`. The answer names the proposal and
+finding or the history of an untrusted thread. Other refusals: `too_long`, `too_many`, `unchanged`, `not_found` (a
+skill, file, proposal or finding), `recalled_block`. The answer names the proposal and
 when a dream can offer it.
 
 The confirmed skills are also files in the ant's home, `.sense/skills/<name>/`, which an export carries
@@ -325,7 +337,7 @@ checkpoint on its thread, or a checkpoint on another thread naming it in `acknow
 named in `acknowledges` must exist (`not_found`, before anything is written).
 
 Texts over their limit are refused with `too_long`: 2,000 characters for the goal, the step, the next action and each
-entry of a list, 500 for the branch and each file, 50 entries a list. Other refusals: `invalid`, `unavailable`.
+entry of a list, 500 for the branch and each file, 50 entries a list.
 
 ## Work and reminders
 
@@ -466,8 +478,7 @@ finding marked untrusted is open, unanswered or deferred, what `sense_remember` 
 untrusted. Finishing the dream, or beginning the next one while it is unfinished, writes its diary: an episode memory
 counting the findings applied, rejected, deferred and unanswered, with each verdict and reason. A verdict on a proposal
 decides it at once ([Persona and skills](#persona-and-skills)). Refusals: `no_dream`, `not_dream_thread`, `done` (the
-dream is finished), `not_found` (a finding or item), `too_soon`, `stale` and `decided` (a proposal), `invalid`,
-`too_long`, `unavailable`.
+dream is finished), `not_found` (a finding or item), `too_soon`, `stale` and `decided` (a proposal), `too_long`.
 
 ## Brief
 
@@ -492,10 +503,19 @@ Sense's brief ([Briefs](architecture.md#briefs)) holds, in order, the sections i
 12. `## Skills`: each skill's name and description;
 13. `## Core loop`: each sense tool and when to use it.
 
-The brief stays within the request's budget, 8000 bytes. Over it, the self-model, relationship records and memories
-are shortened to their titles, and the skills to their names, first; then the longest sections but the warnings, the
-identity and the core loop are cut (`ants_sense::brief`). Each shortened or cut section ends with a line naming the
-call that shows the rest:
+The brief stays within the request's budget, 8000 bytes. Over it, the brief gives up what other calls show first and
+the ant's identity last, each step taken only while the brief is still over (`ants_sense::brief`):
+
+1. the memories are shortened to their titles and the skills to their names;
+2. the work sections (the register, handoffs, commitments, reminders and tasks), the memories and the skills are cut,
+   the longest first;
+3. the core loop is shortened to the tools' names, each tool's description telling when to use it;
+4. the relationship records are shortened to their titles, then cut;
+5. the self-model likewise;
+6. the persona is cut.
+
+The warnings and the identity are never cut. Each shortened or cut section ends with a line naming the call that shows
+the rest:
 
 - `… more: sense_checkpoint without arguments`, for the register and the handoffs;
 - `… more: sense_promise action=list`, for commitments;

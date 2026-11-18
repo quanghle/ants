@@ -9,7 +9,7 @@ use ants_proto::{ChannelId, Envelope, Humans, ThreadId, UserId};
 use chrono::Utc;
 
 use crate::profile::identity::Identity;
-use crate::sense::normalize_remote;
+use crate::sense::{normalize_remote, remote_url};
 
 /// Where the daemon finds who the provider calls of its ant are for: the ant, the machine serving it, and its identity
 /// record, whose id is read when a call needs it ([`Identity::id`] keeps it once read).
@@ -116,30 +116,6 @@ pub fn repository(dir: &Path) -> Option<String> {
     remote_url(&config).and_then(normalize_remote)
 }
 
-/// The URL of remote `origin` in `config`, a git config file, else of the first remote with one.
-fn remote_url(config: &str) -> Option<&str> {
-    let (mut remote, mut first) = (None, None);
-    for line in config.lines().map(str::trim) {
-        if let Some(header) = line.strip_prefix('[') {
-            remote = header.split_once(']').and_then(|(header, _)| {
-                let (section, name) = header.split_once(char::is_whitespace)?;
-                section.eq_ignore_ascii_case("remote").then(|| name.trim().trim_matches('"'))
-            });
-            continue;
-        }
-        let (Some(name), Some((key, value))) = (remote, line.split_once('=')) else { continue };
-        let Some(url) = value.split_whitespace().next().map(|url| url.trim_matches('"')) else { continue };
-        if !key.trim().eq_ignore_ascii_case("url") || url.is_empty() {
-            continue;
-        }
-        if name == "origin" {
-            return Some(url);
-        }
-        first.get_or_insert(url);
-    }
-    first
-}
-
 /// Where the thread of `envelope`, a message as the daemon took it on arrival, came from, on `channel` when a post on
 /// it is the message, in this order:
 /// - a provider's wake request ([`Envelope::wake_provider`]): the provider's, as a thread the wake starts is; a wake on
@@ -221,13 +197,6 @@ mod tests {
     fn the_repository_is_the_origin_remote_else_the_first_normalized() {
         let config = "[core]\n\tbare = false\n[remote \"upstream\"]\n\turl = https://github.com/up/repo.git\n\
                       [Remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n\tURL = \"git@GitHub.com:o/r.git\"\n";
-        assert_eq!(remote_url(config), Some("git@GitHub.com:o/r.git"));
-        assert_eq!(
-            remote_url("[remote \"fork\"]\nurl = ssh://git@host:22/f/r # mine\n"),
-            Some("ssh://git@host:22/f/r")
-        );
-        assert_eq!(remote_url("[core]\n\turl = https://h/o/r\n[branch \"main\"]\n\tremote = origin\n"), None);
-
         let dir = ants_test_support::scratch_dir("repository");
         let main = dir.join("main");
         std::fs::create_dir_all(main.join(".git/worktrees/w")).unwrap();

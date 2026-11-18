@@ -87,10 +87,10 @@ async fn votes_are_refused_on_unknown_memories_bad_arguments_and_webhook_threads
     let hook = context(Starter::Webhook { user: "hook".parse().unwrap() });
     let cases = [
         (json!({"id": ItemId::new(), "vote": "helpful"}), context(human()), "not_found"),
-        (json!({"vote": "helpful"}), context(human()), "invalid"),
-        (json!({"id": "nope", "vote": "helpful"}), context(human()), "invalid"),
-        (json!({"id": id, "vote": "meh"}), context(human()), "invalid"),
-        (json!({"id": id}), context(human()), "invalid"),
+        (json!({"vote": "helpful"}), context(human()), "invalid_arguments"),
+        (json!({"id": "nope", "vote": "helpful"}), context(human()), "invalid_arguments"),
+        (json!({"id": id, "vote": "meh"}), context(human()), "invalid_arguments"),
+        (json!({"id": id}), context(human()), "invalid_arguments"),
         (json!({"id": id, "vote": "wrong", "reason": "r".repeat(501)}), context(human()), "too_long"),
         (json!({"id": id, "vote": "wrong"}), hook, "untrusted"),
     ];

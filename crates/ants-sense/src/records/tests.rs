@@ -111,10 +111,10 @@ async fn each_human_or_ant_has_one_relationship_record() {
 
     for scope in [json!(null), json!("self"), json!("repo:github.com/o/r"), json!("human:")] {
         let record = json!({"kind": "relationship", "scope": scope, "title": "Who", "body": "Someone."});
-        refused(&sense, record, "invalid").await;
+        refused(&sense, record, "invalid_arguments").await;
     }
     let record = json!({"kind": "self_model", "scope": "human:bob", "title": "Me", "body": "Myself."});
-    refused(&sense, record, "invalid").await;
+    refused(&sense, record, "invalid_arguments").await;
 }
 
 #[tokio::test]
@@ -124,7 +124,7 @@ async fn records_are_sanitized_and_marked_untrusted_like_memories() {
     refused(&sense, json!({"kind": "self_model", "title": "Me", "body": block}), "recalled_block").await;
     let long = "x".repeat(MAX_RECORD_BYTES + 1);
     refused(&sense, json!({"kind": "self_model", "title": "Me", "body": long}), "too_long").await;
-    refused(&sense, json!({"kind": "self_model", "title": "Me"}), "invalid").await;
+    refused(&sense, json!({"kind": "self_model", "title": "Me"}), "invalid_arguments").await;
 
     let secret = json!({"kind": "self_model", "title": "Me", "body": "Uses ghp_abcdefghijklmnopqrstuvwxyz0123456789."});
     let answer = saved(&sense, secret).await;

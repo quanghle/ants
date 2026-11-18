@@ -33,7 +33,7 @@ use super::{
 };
 use crate::identity::{self, Dormancy};
 use crate::items::{ItemId, Values};
-use crate::store::{Items, StoreError, Write};
+use crate::store::{Items, StoreError, Write, read_modify_write};
 
 /// The kind of the item recording the last maintenance run ([`Maintenance`]).
 pub const MAINTENANCE: &str = "maintenance";
@@ -61,8 +61,6 @@ pub const MAX_CLUSTERS: usize = 50;
 const BY: &str = "sense:maintenance";
 /// The name of the record's item ([`ItemId::named`]).
 const RECORD: &str = "daily";
-/// How many times a run is decided again on memories changed meanwhile.
-const TRIES: usize = 3;
 
 /// What maintenance did to a memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,7 +239,8 @@ pub async fn maintain(
         Some(workdir) => recheck_citations(items, workdir).await?,
         None => Default::default(),
     };
-    for _ in 0..TRIES {
+    let citations = &citations;
+    read_modify_write(|| async move {
         let Some(revision) = due_revision(items, now).await? else { return Ok(None) };
         let memories: Vec<_> = items.list(MEMORY, usize::MAX).await?.into_iter().filter_map(MemoryItem::of).collect();
         let card = identity::card(items).await?;
@@ -262,13 +261,10 @@ pub async fn maintain(
             values: run.values(),
             expected: Some(revision),
         });
-        match items.write(&writes, BY).await {
-            Ok(_) => return Ok(Some(run)),
-            Err(StoreError::Conflict { .. }) => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Err(StoreError::Unavailable("memories kept changing during maintenance".into()))
+        items.write(&writes, BY).await?;
+        Ok(Some(run))
+    })
+    .await
 }
 
 /// The revision of the record when a run is due, 0 for none.

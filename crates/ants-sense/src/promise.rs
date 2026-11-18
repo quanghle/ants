@@ -3,6 +3,7 @@
 
 use ants_proto::provider::{BoxFuture, ToolCall};
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::items::{Item, ItemId, Values};
@@ -12,6 +13,12 @@ use crate::store::{Items, StoreError, Write};
 use crate::{Answer, Sense};
 
 pub const KIND: &str = "promise";
+/// The most characters of a commitment's title.
+pub const MAX_TITLE_CHARS: usize = 2_000;
+/// The most characters naming a commitment's promisee.
+pub const MAX_PROMISEE_CHARS: usize = 500;
+/// The most characters of the reason a commitment is resolved for.
+pub const MAX_RESOLUTION_CHARS: usize = 2_000;
 
 /// Open commitments, overdue first, then by due time and creation time.
 pub async fn open(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<Item>, StoreError> {
@@ -31,13 +38,38 @@ pub fn schema() -> Value {
             "action": {"enum": ["create", "list", "show", "keep", "break", "release", "renegotiate"],
                        "description": "Without arguments, list open commitments, overdue first."},
             "id": {"type": "string"},
-            "title": {"type": "string", "minLength": 1, "maxLength": 2000},
-            "promisee": {"type": "string", "minLength": 1, "maxLength": 500},
+            "title": {"type": "string", "minLength": 1, "maxLength": MAX_TITLE_CHARS},
+            "promisee": {"type": "string", "minLength": 1, "maxLength": MAX_PROMISEE_CHARS},
             "due": {"type": "string", "format": "date-time", "description": "RFC 3339 due time, normalized to UTC."},
             "revision": {"type": "integer", "minimum": 1, "description": "Optional compare-and-set revision."},
-            "reason": {"type": "string", "maxLength": 2000}
+            "reason": {"type": "string", "maxLength": MAX_RESOLUTION_CHARS}
         }
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Action {
+    Create,
+    List,
+    Show,
+    Keep,
+    Break,
+    Release,
+    Renegotiate,
+}
+
+/// The arguments of a `sense_promise` call.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Request {
+    action: Option<Action>,
+    id: Option<ItemId>,
+    title: Option<String>,
+    promisee: Option<String>,
+    due: Option<DateTime<Utc>>,
+    revision: Option<u64>,
+    reason: Option<String>,
 }
 
 pub fn promise<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
@@ -45,27 +77,17 @@ pub fn promise<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer
 }
 
 async fn handle(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
-    let args = &call.arguments;
-    for key in args.keys() {
-        if !["action", "id", "title", "promisee", "due", "revision", "reason"].contains(&key.as_str()) {
-            return Err(invalid(&format!("Unknown promise argument {key:?}.")));
-        }
+    let request: Request = crate::tools::arguments(call)?;
+    let action = request.action.unwrap_or(match (&request.title, &request.id) {
+        (Some(_), _) => Action::Create,
+        (None, Some(_)) => Action::Show,
+        (None, None) => Action::List,
+    });
+    if request.revision == Some(0) {
+        return Err(Answer::invalid("revision must be positive."));
     }
-    let action = match args.get("action") {
-        Some(Value::String(action)) => action.as_str(),
-        None => {
-            if args.contains_key("title") {
-                "create"
-            } else if args.contains_key("id") {
-                "show"
-            } else {
-                "list"
-            }
-        }
-        _ => return Err(invalid("action must be a string.")),
-    };
     let items = sense.items(&call.context.ant).await.map_err(refused)?;
-    if action == "list" {
+    if action == Action::List {
         let promises = open(&*items, call.context.at).await.map_err(refused)?;
         let text = if promises.is_empty() {
             "No open commitments.".into()
@@ -74,8 +96,8 @@ async fn handle(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         };
         return Ok(Answer { text, json: json!({"promises": promises}), is_error: false });
     }
-    if action == "create" {
-        let values = terms(call, None)?;
+    if action == Action::Create {
+        let values = terms(call, &request, None)?;
         let id = ItemId::new();
         let writes = creation(id, values, call.context.at, sense.workdir(&call.context))?;
         let item = crate::remind::write_creations(&*items, &writes, call.context.thread.as_str(), call.context.at)
@@ -84,53 +106,47 @@ async fn handle(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
             .remove(0);
         return Ok(answer(item, call.context.at));
     }
-    let id: ItemId = args
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid("id must name a commitment."))?
-        .parse()
-        .map_err(|_| invalid("id must be an item id."))?;
+    let id = request.id.as_ref().ok_or_else(|| Answer::invalid("id must name a commitment."))?;
     let item = items
-        .get(&id)
+        .get(id)
         .await
         .map_err(refused)?
         .filter(|item| item.kind == KIND)
         .ok_or_else(|| Answer::error("not_found", format!("No commitment {id}.")))?;
-    if let Some(revision) = args.get("revision") {
-        let revision = revision.as_u64().filter(|n| *n > 0).ok_or_else(|| invalid("revision must be positive."))?;
-        if revision != item.revision {
-            return Err(refused(StoreError::Conflict { expected: revision, current: Box::new(item) }));
-        }
+    if let Some(revision) = request.revision
+        && revision != item.revision
+    {
+        return Err(refused(StoreError::Conflict { expected: revision, current: Box::new(item) }));
     }
-    if action == "show" {
+    if action == Action::Show {
         return Ok(answer(item, call.context.at));
     }
     if item.text("status") != "open" {
         return Err(Answer::error("closed", format!("Commitment {id} is {}.", item.text("status"))));
     }
-    resolve(&*items, call, item, action, sense.workdir(&call.context)).await
+    resolve(&*items, call, &request, item, action, sense.workdir(&call.context)).await
 }
 
 async fn resolve(
     items: &dyn Items,
     call: &ToolCall,
+    request: &Request,
     item: Item,
-    action: &str,
+    action: Action,
     workdir: Option<std::path::PathBuf>,
 ) -> Result<Answer, Answer> {
     let id = item.id.clone();
-    let args = &call.arguments;
-    let reason = optional_text(args.get("reason"), "reason", 2000)?;
+    let reason = text(request.reason.as_deref(), "reason", MAX_RESOLUTION_CHARS)?;
     let mut changed = Values::new();
     changed.insert("reason".into(), reason.clone().into());
     changed.insert("resolved_at".into(), json!(call.context.at));
     changed.insert(WRITER.into(), writer(&call.context));
     let status = match action {
-        "keep" => "kept",
-        "break" => "broken",
-        "release" => "released",
-        "renegotiate" => "renegotiated",
-        _ => return Err(invalid("Unknown promise action.")),
+        Action::Keep => "kept",
+        Action::Break => "broken",
+        Action::Release => "released",
+        Action::Renegotiate => "renegotiated",
+        Action::Create | Action::List | Action::Show => return Err(Answer::invalid("No resolution of a commitment.")),
     };
     changed.insert("status".into(), status.into());
     let mut writes = vec![Write::Change { id: id.clone(), values: changed, expected: Some(item.revision) }];
@@ -145,8 +161,8 @@ async fn resolve(
             expected: Some(reminder.revision),
         });
     }
-    if action == "renegotiate" {
-        let mut replacement = terms(call, Some(&item))?;
+    if action == Action::Renegotiate {
+        let mut replacement = terms(call, request, Some(&item))?;
         let mut history = item.values.get("history").and_then(Value::as_array).cloned().unwrap_or_default();
         history.push(json!({
             "id": item.id, "title": item.text("title"), "promisee": item.text("promisee"),
@@ -165,7 +181,7 @@ async fn resolve(
         .await
         .map_err(refused)?;
     let previous = changed.remove(0);
-    if action == "renegotiate" {
+    if action == Action::Renegotiate {
         let replacement = changed.into_iter().find(|item| item.kind == KIND).expect("replacement promise");
         let mut result = answer(replacement, call.context.at);
         result.json["previous"] = json!(previous);
@@ -193,24 +209,20 @@ fn creation(
     Ok(vec![Write::Create { id, kind: KIND.into(), values }, reminder])
 }
 
-fn terms(call: &ToolCall, previous: Option<&Item>) -> Result<Values, Answer> {
-    let args = &call.arguments;
+fn terms(call: &ToolCall, request: &Request, previous: Option<&Item>) -> Result<Values, Answer> {
     let mut values = Values::new();
-    for (name, max) in [("title", 2000), ("promisee", 500)] {
-        let value = optional_text(args.get(name), name, max)?
+    let given = [("title", &request.title, MAX_TITLE_CHARS), ("promisee", &request.promisee, MAX_PROMISEE_CHARS)];
+    for (name, given, max) in given {
+        let value = text(given.as_deref(), name, max)?
             .or_else(|| previous.map(|item| item.text(name).to_owned()))
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| invalid(&format!("{name} must be nonempty.")))?;
+            .ok_or_else(|| Answer::invalid(format!("{name} must be nonempty.")))?;
         values.insert(name.into(), value.into());
     }
-    let due = match args.get("due") {
-        Some(Value::String(due)) => Some(due.as_str()),
-        None => previous.map(|item| item.text("due")),
-        _ => return Err(invalid("due must be an RFC 3339 time.")),
-    }
-    .ok_or_else(|| invalid("due must be an RFC 3339 time."))?
-    .parse::<DateTime<Utc>>()
-    .map_err(|_| invalid("due must be an RFC 3339 time."))?;
+    let due = request
+        .due
+        .or_else(|| previous.and_then(|item| item.text("due").parse().ok()))
+        .ok_or_else(|| Answer::invalid("due must be an RFC 3339 time."))?;
     values.insert("due".into(), json!(due));
     values.insert("status".into(), "open".into());
     values.insert("source_thread".into(), call.context.thread.as_str().into());
@@ -218,14 +230,12 @@ fn terms(call: &ToolCall, previous: Option<&Item>) -> Result<Values, Answer> {
     Ok(values)
 }
 
-fn optional_text(value: Option<&Value>, name: &str, max: usize) -> Result<Option<String>, Answer> {
-    match value {
-        None => Ok(None),
-        Some(Value::String(text)) => sanitize(text, Lines::Single, Limit::Chars(max))
-            .map(|text| Some(text.text))
-            .map_err(|e| invalid(&format!("{name}: {e}"))),
-        _ => Err(invalid(&format!("{name} must be a string."))),
-    }
+/// The text `given` for argument `name`, sanitized to a line of at most `max` characters.
+fn text(given: Option<&str>, name: &str, max: usize) -> Result<Option<String>, Answer> {
+    given
+        .map(|text| sanitize(text, Lines::Single, Limit::Chars(max)).map(|text| text.text))
+        .transpose()
+        .map_err(|e| Answer::invalid(format!("{name}: {e}.")))
 }
 
 fn line(item: &Item, now: DateTime<Utc>) -> String {
@@ -245,18 +255,11 @@ fn answer(item: Item, now: DateTime<Utc>) -> Answer {
     Answer { text: line(&item, now), json: json!({"promise": item}), is_error: false }
 }
 
-fn invalid(message: &str) -> Answer {
-    Answer::error("invalid_arguments", message.into())
-}
-
+/// The refusal of a call its store failed, showing the commitment found at another revision.
 fn refused(error: StoreError) -> Answer {
-    let code = if matches!(error, StoreError::Conflict { .. }) { "conflict" } else { "unavailable" };
-    let mut answer = Answer::error(code, format!("Commitment not changed: {error}."));
-    if let StoreError::Conflict { current, .. } = error {
-        if current.kind == KIND {
-            answer.json["promise"] = json!(current);
-        }
-        answer.json["current"] = json!(current);
+    let mut answer = Answer::from(error);
+    if answer.json["current"]["kind"] == KIND {
+        answer.json["promise"] = answer.json["current"].clone();
     }
     answer
 }
