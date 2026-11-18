@@ -294,7 +294,9 @@ fn render(
             follow_up = match earlier {
                 Earlier::Sage(_) => {
                     " Hold the threads against the earlier findings below and what became of them, and answer an \
-                     earlier finding that did not hold with a finding of kind follow_up naming its id."
+                     earlier finding that did not hold with a finding of kind follow_up naming its id. The vital \
+                     signs beside an applied finding are numbers side by side, not its effect: a few threads make \
+                     weak evidence."
                 }
                 Earlier::Last(_) | Earlier::Reviewing(..) => "",
             },

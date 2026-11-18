@@ -4,14 +4,16 @@
 //! dream and the thread. The sage's answer gives its findings by kind ([`review_answered`]), read as the ant's daemon
 //! reads it ([`super::parse`]) and numbered as the ant numbers them, `<dream>.<n>`; the first answer stays. Each later
 //! review message of the ant tells what is new in the verdicts and outcomes of the sage's earlier findings
-//! ([`ants_proto::ReviewOutcomes`]), which go to the records of the reviews that made them. A record holds the kinds,
-//! verdicts and outcomes alone: no text of the ant's threads, nor of the findings. Each message changes the records
-//! once and a repeat nothing.
+//! ([`ants_proto::ReviewOutcomes`]), which go to the records of the reviews that made them. With the answer the sage's
+//! daemon tells what the review thread spent, from its spend ledger ([`ReviewSpend`]). A record holds the kinds,
+//! verdicts, outcomes and spend alone: no text of the ant's threads, nor of the findings. Each message changes the
+//! records once and a repeat nothing.
 //!
 //! The sage's tally is counted from the records by a query of the cache each time it is asked ([`review_tally`]): the
 //! findings made, applied, rejected, deferred and unanswered, and of the applied how many still hold, in all, by kind
-//! and by ant. The sage's identity shows it: the brief, `sense_identity` and the memories view. An ant that reviewed
-//! nobody has none. A clone inherits no record ([`crate::fork::KEPT`]).
+//! and by ant, with the tokens and cost of a review and of a finding still holding, over the reviews whose spend is
+//! known ([`ReviewCost`]). The sage's identity shows it: the brief, `sense_identity` and the memories view. An ant that
+//! reviewed nobody has none. A clone inherits no record ([`crate::fork::KEPT`]).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -22,6 +24,7 @@ use rusqlite::{Connection, ToSql, named_params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::vitals::cost;
 use super::{Judgement, parse};
 use crate::cache::CacheError;
 use crate::identity::BY;
@@ -48,6 +51,18 @@ pub struct ReviewRecord {
     /// The findings of the answer, in their order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<ReviewedFinding>,
+    /// What the review thread spent by the answer, when the sage's daemon knew.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent: Option<ReviewSpend>,
+}
+
+/// What a sage's review thread spent, as its daemon's spend ledger counted it: every prompt on it, retries included.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewSpend {
+    /// The tokens the harness reported.
+    pub tokens: u64,
+    /// The cost the harness reported, in millionths of its unit (US dollars for Claude).
+    pub cost_micros: u64,
 }
 
 /// A finding of a sage's answer to a review, and what the ant made of it.
@@ -80,7 +95,8 @@ impl ReviewRecord {
     }
 
     fn new(ant: &UserId, dream: u64, thread: &ThreadId, at: DateTime<Utc>) -> Self {
-        Self { ant: ant.clone(), dream, thread: thread.clone(), received: at, answered: None, findings: Vec::new() }
+        let (answered, findings, spent) = (None, Vec::new(), None);
+        Self { ant: ant.clone(), dream, thread: thread.clone(), received: at, answered, findings, spent }
     }
 
     /// Apply `told` at `at`: the ant's verdict on one of its findings, and whether it still holds.
@@ -165,15 +181,16 @@ pub async fn review_received(
     .await
 }
 
-/// Note in `items`, a sage's, its answer `text` at `at` to the review of dream `dream` of `ant` on `thread`: its
-/// findings, as the ant's daemon reads them ([`parse`]), by kind; none when it holds none readable. Whether it changed
-/// the record: once answered, a review keeps its first answer.
+/// Note in `items`, a sage's, its answer `text` at `at` to the review of dream `dream` of `ant` on `thread`, which
+/// `spent` what its daemon knew: its findings, as the ant's daemon reads them ([`parse`]), by kind; none when it holds
+/// none readable. Whether it changed the record: once answered, a review keeps its first answer.
 pub async fn review_answered(
     items: &dyn Items,
     ant: &UserId,
     thread: &ThreadId,
     dream: u64,
     text: &str,
+    spent: Option<ReviewSpend>,
     at: DateTime<Utc>,
 ) -> Result<bool, StoreError> {
     let findings: Vec<_> = parse(text)
@@ -201,6 +218,7 @@ pub async fn review_answered(
         }
         record.answered = Some(at);
         record.findings.clone_from(findings);
+        record.spent = spent;
         let expected = item.map_or(0, |item| item.revision);
         items.put(id, REVIEW, record.values(), Some(expected), BY).await?;
         Ok(true)
@@ -255,6 +273,46 @@ impl FindingTally {
     }
 }
 
+/// What the reviews of a [`ReviewTally`], or of one ant, spent: those whose spend is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ReviewCost {
+    /// The reviews whose spend is known, at least one.
+    pub reviews: u32,
+    /// What they spent in all.
+    pub spent: ReviewSpend,
+    /// Their findings applied that still hold.
+    pub holding: u32,
+}
+
+impl ReviewCost {
+    /// What a review spent, on average.
+    pub fn per_review(&self) -> ReviewSpend {
+        per(self.spent, self.reviews)
+    }
+
+    /// What a finding applied and still holding cost, on average: what the reviews spent over the findings of theirs
+    /// still holding; none when none holds.
+    pub fn per_holding(&self) -> Option<ReviewSpend> {
+        (self.holding > 0).then(|| per(self.spent, self.holding))
+    }
+
+    /// What a review and a finding still holding cost, on one line.
+    pub fn line(&self) -> String {
+        let spend = |spent: ReviewSpend| format!("{} tokens and cost {}", spent.tokens, cost(spent.cost_micros));
+        let holding = self.per_holding().map_or_else(
+            || "no finding still holding".to_owned(),
+            |spent| format!("{} a finding still holding", spend(spent)),
+        );
+        let reviews = if self.reviews == 1 { "1 review".to_owned() } else { format!("{} reviews", self.reviews) };
+        format!("{} a review, {holding}, over {reviews} of known spend", spend(self.per_review()))
+    }
+}
+
+fn per(spent: ReviewSpend, count: u32) -> ReviewSpend {
+    let count = u64::from(count.max(1));
+    ReviewSpend { tokens: spent.tokens / count, cost_micros: spent.cost_micros / count }
+}
+
 /// A sage's tally of its reviews, from their records ([`review_tally`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReviewTally {
@@ -265,6 +323,9 @@ pub struct ReviewTally {
     pub last: DateTime<Utc>,
     /// The findings of every review.
     pub findings: FindingTally,
+    /// What the reviews spent; none when no review's spend is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ReviewCost>,
     /// The kinds of the most findings, the most first.
     pub by_kind: Vec<KindTally>,
     /// The ants of the most reviews, the most first, then the latest.
@@ -286,6 +347,9 @@ pub struct AntTally {
     /// When its last review arrived, to the millisecond.
     pub last: DateTime<Utc>,
     pub findings: FindingTally,
+    /// What its reviews spent; none when no review's spend is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ReviewCost>,
 }
 
 /// The tally of the reviews `items`, a sage's, records, with the `top` kinds and ants of the most findings and reviews;
@@ -294,19 +358,23 @@ pub async fn review_tally(items: &dyn Items, top: usize) -> Result<Option<Review
     items.review_tally(top).await
 }
 
-/// The review records of the cache's items, and their findings, each with its kind, its verdict, null while
-/// unanswered, and whether it holds.
+/// The review records of the cache's items, with whether their spend is known and what it was, and their findings, each
+/// with its kind, its verdict, null while unanswered, whether it holds and whether its review's spend is known.
 const RECORDS: &str = "
 WITH reviews AS (
     SELECT
         json_extract(item, '$.values.ant') AS ant,
         julianday(json_extract(item, '$.values.received')) AS received,
-        json_extract(item, '$.values.findings') AS findings
+        json_extract(item, '$.values.findings') AS findings,
+        json_extract(item, '$.values.spent') IS NOT NULL AS spent,
+        json_extract(item, '$.values.spent.tokens') AS tokens,
+        json_extract(item, '$.values.spent.cost_micros') AS cost_micros
     FROM items WHERE kind = :kind
 ),
 findings AS (
     SELECT
         reviews.ant AS ant,
+        reviews.spent AS spent,
         json_extract(finding.value, '$.kind') AS kind,
         json_extract(finding.value, '$.verdict') AS verdict,
         ifnull(json_extract(finding.value, '$.holds'), 0) AS holds
@@ -322,12 +390,20 @@ const TALLY: &str = "
     ifnull(sum(findings.verdict = 'deferred'), 0),
     count(findings.kind) - count(findings.verdict)";
 
+/// The findings of the rows of `findings` a query groups applied and still holding of reviews whose spend is known:
+/// the last of the four columns of a [`ReviewCost`].
+const HOLDING: &str = "ifnull(sum(findings.spent AND findings.verdict = 'applied' AND findings.holds), 0)";
+
 const TOTALS: &str = "
 SELECT
     (SELECT count(*) FROM reviews),
     (SELECT count(DISTINCT ant) FROM reviews),
     (SELECT strftime('%Y-%m-%dT%H:%M:%fZ', max(received)) FROM reviews),
-    {tally}
+    {tally},
+    (SELECT ifnull(sum(spent), 0) FROM reviews),
+    (SELECT ifnull(sum(tokens), 0) FROM reviews),
+    (SELECT ifnull(sum(cost_micros), 0) FROM reviews),
+    {holding}
 FROM findings";
 
 const BY_KIND: &str = "
@@ -335,8 +411,13 @@ SELECT findings.kind, {tally} FROM findings
 GROUP BY findings.kind ORDER BY count(*) DESC, findings.kind LIMIT :top";
 
 const BY_ANT: &str = "
-SELECT reviewed.ant, reviewed.reviews, strftime('%Y-%m-%dT%H:%M:%fZ', reviewed.last), {tally}
-FROM (SELECT ant, count(*) AS reviews, max(received) AS last FROM reviews GROUP BY ant) AS reviewed
+SELECT reviewed.ant, reviewed.reviews, strftime('%Y-%m-%dT%H:%M:%fZ', reviewed.last), {tally},
+    reviewed.spent, reviewed.tokens, reviewed.cost_micros, {holding}
+FROM (
+    SELECT ant, count(*) AS reviews, max(received) AS last, ifnull(sum(spent), 0) AS spent,
+        ifnull(sum(tokens), 0) AS tokens, ifnull(sum(cost_micros), 0) AS cost_micros
+    FROM reviews GROUP BY ant
+) AS reviewed
 LEFT JOIN findings ON findings.ant = reviewed.ant
 GROUP BY reviewed.ant ORDER BY reviewed.reviews DESC, reviewed.last DESC, reviewed.ant LIMIT :top";
 
@@ -352,13 +433,23 @@ fn tally_at(row: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<FindingTally
     })
 }
 
+/// The [`ReviewCost`] in the four columns of `row` from `at`; none when no review's spend is known.
+fn cost_at(row: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Option<ReviewCost>> {
+    let reviews: u32 = row.get(at)?;
+    let unsigned = |at| row.get::<_, i64>(at).map(|n| u64::try_from(n).unwrap_or_default());
+    let spent = ReviewSpend { tokens: unsigned(at + 1)?, cost_micros: unsigned(at + 2)? };
+    Ok((reviews > 0).then_some(ReviewCost { reviews, spent, holding: row.get(at + 3)? }))
+}
+
 /// The tally counted from the review records of the items of `db` ([`review_tally`]).
 pub(crate) fn count(db: &Connection, top: usize) -> Result<Option<ReviewTally>, CacheError> {
-    let query = |sql: &str| format!("{RECORDS}{}", sql.replace("{tally}", TALLY));
+    let query = |sql: &str| format!("{RECORDS}{}", sql.replace("{tally}", TALLY).replace("{holding}", HOLDING));
     let totals = |row: &rusqlite::Row<'_>| {
-        Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?, row.get::<_, Option<String>>(2)?, tally_at(row, 3)?))
+        let (reviews, ants, last) = (row.get::<_, u32>(0)?, row.get::<_, u32>(1)?, row.get::<_, Option<String>>(2)?);
+        Ok((reviews, ants, last, tally_at(row, 3)?, cost_at(row, 9)?))
     };
-    let (reviews, ants, last, findings) = db.query_row(&query(TOTALS), named_params! {":kind": REVIEW}, totals)?;
+    let (reviews, ants, last, findings, cost) =
+        db.query_row(&query(TOTALS), named_params! {":kind": REVIEW}, totals)?;
     let Some(last) = last.and_then(|last| last.parse().ok()).filter(|_| reviews > 0) else { return Ok(None) };
     let params: &[(&str, &dyn ToSql)] = &[(":kind", &REVIEW), (":top", &i64::try_from(top).unwrap_or(i64::MAX))];
     let mut by_kind = Vec::new();
@@ -370,18 +461,19 @@ pub(crate) fn count(db: &Connection, top: usize) -> Result<Option<ReviewTally>, 
     let mut by_ant = Vec::new();
     let mut ants_query = db.prepare(&query(BY_ANT))?;
     let rows = ants_query.query_map(params, |row| {
-        Ok((row.get::<_, String>(0)?, row.get(1)?, row.get::<_, String>(2)?, tally_at(row, 3)?))
+        Ok((row.get::<_, String>(0)?, row.get(1)?, row.get::<_, String>(2)?, tally_at(row, 3)?, cost_at(row, 9)?))
     })?;
     for row in rows {
-        let (ant, reviews, last, findings) = row?;
+        let (ant, reviews, last, findings, cost) = row?;
         if let (Ok(ant), Ok(last)) = (ant.parse(), last.parse()) {
-            by_ant.push(AntTally { ant, reviews, last, findings });
+            by_ant.push(AntTally { ant, reviews, last, findings, cost });
         }
     }
-    Ok(Some(ReviewTally { reviews, ants, last, findings, by_kind, by_ant }))
+    Ok(Some(ReviewTally { reviews, ants, last, findings, cost, by_kind, by_ant }))
 }
 
-/// The lines of `tally` the sage's identity shows: its reviews and their findings, then by kind and by ant.
+/// The lines of `tally` the sage's identity shows: its reviews and their findings, what they spent, then by kind and by
+/// ant.
 pub fn tally_lines(tally: &ReviewTally) -> String {
     let plural = |count: u32, noun: &str| if count == 1 { format!("1 {noun}") } else { format!("{count} {noun}s") };
     let mut lines = format!(
@@ -391,6 +483,9 @@ pub fn tally_lines(tally: &ReviewTally) -> String {
         tally.last.format("%Y-%m-%d"),
         tally.findings.counts()
     );
+    if let Some(cost) = &tally.cost {
+        let _ = write!(lines, "\nSpend of the reviews: {}.", cost.line());
+    }
     if !tally.by_kind.is_empty() {
         let kinds: Vec<_> =
             tally.by_kind.iter().map(|kind| format!("{} {}", kind.kind, kind.findings.counts())).collect();
@@ -402,7 +497,8 @@ pub fn tally_lines(tally: &ReviewTally) -> String {
             .iter()
             .map(|ant| {
                 let (reviews, last) = (plural(ant.reviews, "review"), ant.last.format("%Y-%m-%d"));
-                format!("{}, {reviews}, the last {last}: {}", ant.ant, ant.findings.counts())
+                let cost = ant.cost.map_or_default(|cost| format!(" ({})", cost.line()));
+                format!("{}, {reviews}, the last {last}: {}{cost}", ant.ant, ant.findings.counts())
             })
             .collect();
         let _ = write!(lines, "\nReviews by ant, the most first: {}.", ants.join("; "));

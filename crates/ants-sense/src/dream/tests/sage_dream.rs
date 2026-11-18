@@ -8,9 +8,21 @@ use super::*;
 /// its earlier reviews, and answered with a finding of each of `kinds`.
 async fn review(
     items: &dyn Items,
+    review: (&str, u64, u8),
+    told: &[(String, FindingVerdict, bool)],
+    kinds: &[&str],
+    at: DateTime<Utc>,
+) {
+    review_spending(items, review, told, kinds, None, at).await;
+}
+
+/// [`review`], the sage's review thread having spent `spent`.
+async fn review_spending(
+    items: &dyn Items,
     (ant, dream, thread): (&str, u64, u8),
     told: &[(String, FindingVerdict, bool)],
     kinds: &[&str],
+    spent: Option<ReviewSpend>,
     at: DateTime<Utc>,
 ) {
     let (ant, thread) = (ant.parse().unwrap(), on(thread).thread);
@@ -20,7 +32,7 @@ async fn review(
         .collect();
     let message = ReviewOutcomes { dream, findings };
     assert!(review_received(items, &ant, &thread, &message, at).await.unwrap());
-    assert!(review_answered(items, &ant, &thread, dream, &answer_of(kinds), at).await.unwrap());
+    assert!(review_answered(items, &ant, &thread, dream, &answer_of(kinds), spent, at).await.unwrap());
 }
 
 /// Verdicts on findings `dream`.1 on, one per outcome.
@@ -122,6 +134,57 @@ async fn an_ant_leaving_half_the_findings_of_its_last_three_reviews_unanswered_i
     assert!(reviewed(3, &[0, 0], now).await.is_empty(), "the latest review's verdicts come with the next");
     assert!(reviewed(5, &[0, 2, 1, 1], now).await.is_empty(), "the first review is not among the last three");
     assert!(reviewed(4, &left_three, now - Duration::days(PRACTICE_DAYS)).await.is_empty(), "reviewed 14 days ago");
+}
+
+/// A sage that reviewed dreams of dev-b once a day, the last at `at`, review `n` spending `spent[n - 1]` (tokens, cost
+/// in millionths) and giving a finding, and each telling the verdict on the finding of the one before: applied for
+/// the review `applied`, rejected for the others.
+async fn spending(spent: &[Option<(u64, u64)>], applied: Option<u64>, at: DateTime<Utc>) -> Vec<(String, Option<u64>)> {
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let reviews = spent.len() as u64;
+    for (dream, spent) in (1..).zip(spent) {
+        let verdict = if applied == Some(dream - 1) { Applied } else { Rejected };
+        let told = if dream > 1 { told(dream - 1, &[(verdict, false)]) } else { Vec::new() };
+        let spent = spent.map(|(tokens, cost_micros)| ReviewSpend { tokens, cost_micros });
+        let received = at - Duration::hours(i64::try_from(24 * (reviews - dream)).unwrap());
+        let review = ("dev-b", dream, u8::try_from(dream).unwrap());
+        review_spending(&*items, review, &told, &["lesson"], spent, received).await;
+    }
+    found(&*items, "costly_reviews", Utc::now()).await
+}
+
+#[tokio::test]
+async fn an_ant_whose_last_five_reviews_cost_too_much_with_no_finding_applied_is_found() {
+    let now = Utc::now();
+    let tokens = Some((COSTLY_REVIEW_TOKENS + 100_000, 0));
+    let costly = keyed(&[("costly_reviews:ant:dev-b", 1)]);
+    assert_eq!(spending(&[tokens; 6], None, now).await, costly, "the latest review left out");
+    let cost = Some((0, 2 * COSTLY_REVIEW_COST_MICROS));
+    assert_eq!(spending(&[cost; 6], None, now).await, keyed(&[("costly_reviews:ant:dev-b", 2)]), "twice the cost");
+    let unknown = [tokens, tokens, None, tokens, tokens, tokens, tokens];
+    assert_eq!(spending(&unknown, None, now).await, costly, "5 of known spend");
+    assert_eq!(spending(&[tokens; 7], Some(1), now).await, costly, "the finding applied was of the first review");
+
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let spent = Some(ReviewSpend { tokens: 1_100_000, cost_micros: 1_500_000 });
+    for dream in 1..=6 {
+        review_spending(&*items, ("dev-b", dream, dream as u8), &[], &[], spent, now).await;
+    }
+    let reviews = review_records(&*items, usize::MAX).await.unwrap();
+    let gathered = crate::dream::practice_findings::gather(&*items, &reviews, &memory::Ages::new(now, [])).await;
+    let costly = gathered.unwrap().into_iter().find(|found| found.kind == FindingKind::CostlyReviews).unwrap();
+    let text = costly.text;
+    assert!(text.contains("of its dreams 1, 2, 3, 4, 5, spent 5500000 tokens and cost 7.50 in all"), "{text}");
+
+    let limit = Some((COSTLY_REVIEW_TOKENS, COSTLY_REVIEW_COST_MICROS));
+    assert!(spending(&[limit; 6], None, now).await.is_empty(), "no more than the limit");
+    assert!(spending(&[tokens; 6], Some(3), now).await.is_empty(), "a finding applied");
+    assert!(spending(&[tokens; 5], None, now).await.is_empty(), "4 reviews before the latest");
+    assert!(spending(&[tokens, tokens, None, tokens, tokens, tokens], None, now).await.is_empty(), "4 of known spend");
+    let long_ago = now - Duration::days(PRACTICE_DAYS);
+    assert!(spending(&[tokens; 6], None, long_ago).await.is_empty(), "reviewed 14 days ago");
 }
 
 #[tokio::test]

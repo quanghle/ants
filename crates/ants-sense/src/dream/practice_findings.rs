@@ -8,7 +8,10 @@
 //! - an ant reviewed within those days that left [`UNANSWERED_PERCENT`] percent or more of the findings of its last
 //!   [`UNANSWERED_REVIEWS`] reviews with findings unanswered, its latest review left out, as the verdicts on it come
 //!   with the next; one finding each;
-//! - no relationship record of an ant reviewed [`RELATIONSHIP_AFTER_REVIEWS`] times or more, one finding each.
+//! - no relationship record of an ant reviewed [`RELATIONSHIP_AFTER_REVIEWS`] times or more, one finding each;
+//! - an ant reviewed within those days whose last [`COSTLY_REVIEWS`] reviews of known spend, its latest review left
+//!   out, spent more than [`COSTLY_REVIEW_TOKENS`] tokens or [`COSTLY_REVIEW_COST_MICROS`] of cost a review on
+//!   average, and none of whose findings it applied; one finding each.
 //!
 //! Each names the answers open to the sage: a lesson with `sense_remember`, its self-model or a relationship record of
 //! an ant with `sense_identity`, or a skill for how it reviews with `sense_skill`. Its count steps coarsely
@@ -21,6 +24,7 @@ use ants_proto::UserId;
 use chrono::{DateTime, Duration, Utc};
 
 use super::identity_findings::{step, subject};
+use super::vitals::cost;
 use super::{FindingKind, Gathered, Judgement, ReviewRecord, ReviewedFinding};
 use crate::memory::{self, Scope};
 use crate::records;
@@ -40,6 +44,13 @@ pub const UNANSWERED_REVIEWS: usize = 3;
 pub const UNANSWERED_PERCENT: u32 = 50;
 /// The reviews of an ant after which a sage without its relationship record is asked to write one.
 pub const RELATIONSHIP_AFTER_REVIEWS: u32 = 3;
+/// The reviews of an ant of known spend over which their cost counts, none of whose findings applied.
+pub const COSTLY_REVIEWS: usize = 5;
+/// The tokens a review of [`COSTLY_REVIEWS`] spends on average above which they make a finding.
+pub const COSTLY_REVIEW_TOKENS: u64 = 1_000_000;
+/// The cost a review of [`COSTLY_REVIEWS`] spends on average above which they make a finding, in millionths of the
+/// harness's unit (US dollars for Claude).
+pub const COSTLY_REVIEW_COST_MICROS: u64 = 2_000_000;
 /// The most findings an undone findings' finding names.
 const MAX_NAMED: usize = 5;
 
@@ -49,7 +60,7 @@ const ANSWERS: &str = "a lesson with sense_remember, the self-model with sense_i
 
 /// The findings on the practice of a sage that made `reviews`, the active days counted by `ages`: the rejected kinds,
 /// by kind, then the undone findings, then the ants leaving findings unanswered, then the relationships, the most
-/// reviewed first. None for an ant that reviewed nobody.
+/// reviewed first, then the ants whose reviews cost much for nothing applied. None for an ant that reviewed nobody.
 pub(super) async fn gather(
     items: &dyn Items,
     reviews: &[ReviewRecord],
@@ -60,7 +71,20 @@ pub(super) async fn gather(
     found.extend(undone(reviews, &recent));
     found.extend(unanswered(reviews, &recent));
     found.extend(relationships(items, reviews).await?);
+    found.extend(costly(reviews, &recent));
     Ok(found)
+}
+
+/// `reviews` by ant, each ant's by dream.
+fn by_ant(reviews: &[ReviewRecord]) -> BTreeMap<&UserId, Vec<&ReviewRecord>> {
+    let mut by_ant: BTreeMap<&UserId, Vec<&ReviewRecord>> = BTreeMap::new();
+    for review in reviews {
+        by_ant.entry(&review.ant).or_default().push(review);
+    }
+    for reviews in by_ant.values_mut() {
+        reviews.sort_by_key(|review| review.dream);
+    }
+    by_ant
 }
 
 fn rejected_kinds(reviews: &[ReviewRecord], recent: &dyn Fn(Option<DateTime<Utc>>) -> bool) -> Vec<Gathered> {
@@ -117,14 +141,9 @@ fn undone(reviews: &[ReviewRecord], recent: &dyn Fn(Option<DateTime<Utc>>) -> bo
 }
 
 fn unanswered(reviews: &[ReviewRecord], recent: &dyn Fn(Option<DateTime<Utc>>) -> bool) -> Vec<Gathered> {
-    let mut by_ant: BTreeMap<&UserId, Vec<&ReviewRecord>> = BTreeMap::new();
-    for review in reviews {
-        by_ant.entry(&review.ant).or_default().push(review);
-    }
-    by_ant
+    by_ant(reviews)
         .into_iter()
-        .filter_map(|(ant, mut reviews)| {
-            reviews.sort_by_key(|review| review.dream);
+        .filter_map(|(ant, reviews)| {
             let (latest, earlier) = reviews.split_last()?;
             if !recent(Some(latest.received)) {
                 return None;
@@ -176,4 +195,50 @@ async fn relationships(items: &dyn Items, reviews: &[ReviewRecord]) -> Result<Ve
             subject(FindingKind::NoReviewedRelationship, &who.to_string(), step(n, RELATIONSHIP_AFTER_REVIEWS), text)
         })
         .collect())
+}
+
+fn costly(reviews: &[ReviewRecord], recent: &dyn Fn(Option<DateTime<Utc>>) -> bool) -> Vec<Gathered> {
+    by_ant(reviews)
+        .into_iter()
+        .filter_map(|(ant, reviews)| {
+            let (latest, earlier) = reviews.split_last()?;
+            if !recent(Some(latest.received)) {
+                return None;
+            }
+            let mut spent: Vec<_> = earlier
+                .iter()
+                .rev()
+                .filter_map(|review| review.spent.map(|spent| (review, spent)))
+                .take(COSTLY_REVIEWS)
+                .collect();
+            if spent.len() < COSTLY_REVIEWS {
+                return None;
+            }
+            let mut findings = spent.iter().flat_map(|(review, _)| &review.findings);
+            if findings.any(|finding| finding.verdict == Some(Judgement::Applied)) {
+                return None;
+            }
+            spent.reverse();
+            let tokens: u64 = spent.iter().map(|(_, spent)| spent.tokens).sum();
+            let cost_micros: u64 = spent.iter().map(|(_, spent)| spent.cost_micros).sum();
+            let reviews = COSTLY_REVIEWS as u64;
+            let (tokens_over, cost_over) = (reviews * COSTLY_REVIEW_TOKENS, reviews * COSTLY_REVIEW_COST_MICROS);
+            if tokens <= tokens_over && cost_micros <= cost_over {
+                return None;
+            }
+            let times = (tokens / tokens_over).max(cost_micros / cost_over);
+            let who = Scope::Ant(ant.clone());
+            let dreams: Vec<_> = spent.iter().map(|(review, _)| review.dream.to_string()).collect();
+            let text = format!(
+                "The last {COSTLY_REVIEWS} reviews of {who} of known spend, of its dreams {}, spent {tokens} tokens \
+                 and cost {} in all, and {who} applied none of their findings: keep what that teaches of reviewing \
+                 {who} for what it takes up, in a relationship record with sense_identity, giving relationship, who \
+                 {who} and a title, or as {ANSWERS}.",
+                dreams.join(", "),
+                cost(cost_micros)
+            );
+            let times = u32::try_from(times).unwrap_or(u32::MAX);
+            Some(subject(FindingKind::CostlyReviews, &who.to_string(), step(times, 1), text))
+        })
+        .collect()
 }

@@ -15,7 +15,8 @@ use std::time::SystemTime;
 use ants_proto::provider::{BoxFuture, CallContext, Host, Origin, Starter, WakeRequest};
 use ants_proto::{ColonyEntry, Envelope, JsDomain, NoticeKind, REVIEW_ALLOW, ReviewCommit, ThreadId, UserId};
 use ants_sense::dream::{
-    self, Commit, Covered, Dream, IDLE_MINUTES, PACKET_BUDGET, Reader, Reviewed, SAGE_TIMEOUT_HOURS, Start, Thread,
+    self, Commit, Covered, Dream, IDLE_MINUTES, PACKET_BUDGET, Reader, ReviewSpend, Reviewed, SAGE_TIMEOUT_HOURS,
+    Start, Thread,
 };
 use ants_sense::store::Items;
 use anyhow::Result;
@@ -205,12 +206,17 @@ pub(crate) async fn review_received(items: &dyn Items, envelope: &Envelope) -> R
 }
 
 /// Note in `items`, a sage's sense data, its answer `text` to the review message `request` asked
-/// ([`dream::review_answered`]): the findings it gives, by kind. Nothing when the message tells no dream; once
-/// answered, a review keeps its first answer.
-pub(crate) async fn review_given(items: &dyn Items, request: &Envelope, text: &str) -> Result<()> {
+/// ([`dream::review_answered`]): the findings it gives, by kind, and what its thread `spent`, when known. Nothing when
+/// the message tells no dream; once answered, a review keeps its first answer.
+pub(crate) async fn review_given(
+    items: &dyn Items,
+    request: &Envelope,
+    text: &str,
+    spent: Option<ReviewSpend>,
+) -> Result<()> {
     let Some(told) = &request.review_outcomes else { return Ok(()) };
     let (ant, thread) = (&request.from, &request.thread_id);
-    if dream::review_answered(items, ant, thread, told.dream, text, Utc::now()).await? {
+    if dream::review_answered(items, ant, thread, told.dream, text, spent, Utc::now()).await? {
         tracing::info!(%ant, dream = told.dream, "sense noted the sage's answer to a review");
     }
     Ok(())

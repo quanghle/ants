@@ -287,10 +287,12 @@ async fn a_served_sage_reviews_the_packet_on_a_thread_of_its_own_and_its_finding
     assert!(dream::review_records(&*sage_items, 10).await.unwrap().is_empty(), "a message telling no dream");
     asked.review_outcomes = begun.review_outcomes();
     review_received(&*sage_items, &asked).await.unwrap();
-    review_given(&*sage_items, &asked, &format!("```json\n{findings}\n```")).await.unwrap();
+    let spent = dream::ReviewSpend { tokens: 40_000, cost_micros: 250_000 };
+    review_given(&*sage_items, &asked, &format!("```json\n{findings}\n```"), Some(spent)).await.unwrap();
     let record = dream::review_record(&*sage_items, &ant(), 1).await.unwrap().unwrap();
     let kinds: Vec<_> = record.findings.iter().map(|finding| finding.kind.as_str()).collect();
     assert_eq!((&record.thread, kinds.as_slice()), (&review.thread, ["lesson", "mistake"].as_slice()));
+    assert_eq!(record.spent, Some(spent), "what the review thread spent");
 
     let timeout = now + chrono::Duration::hours(dream::SAGE_TIMEOUT_HOURS + 1);
     *fake.idle.locked() = Some(timeout - chrono::Duration::hours(1));

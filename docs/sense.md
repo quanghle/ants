@@ -80,8 +80,8 @@ vote or propose. So is a review an ant asks of its sage ([Dreams](#dreams)), who
     deferred, or unanswered), with the rejected ones resting, then the vital signs of the periods of the last 5 dreams
     keeping them, which count all calls of sense's tools;
   - for a sage, the tally of the reviews it made (below): the reviews and ants, and their findings by what came of
-    them, in all, for the 10 kinds and the 10 ants of the most, then how many are left; no line for an ant that
-    reviewed nobody;
+    them, and what the reviews spent, in all, for the 10 kinds and the 10 ants of the most (the ants with their
+    spend), then how many are left; no line for an ant that reviewed nobody;
   - its persona and self-model, with their revisions and the proposals, and the threads and active days since the
     self-model was written;
   - the people who started its threads, bucketed by how many, against its relationship records, the 10 of the most
@@ -235,9 +235,10 @@ and only those times count toward its days and tallies.
 
 A sage's identity adds, after the experience, the tally of the reviews it made of other ants, counted from its review
 records each time it is shown ([Dreams](#dreams)): its reviews, the ants reviewed and the day of the last review, and
-the findings made, applied (and how many of those still hold), rejected, deferred and unanswered; then the same counts
-for the 3 kinds of the most findings, and for the 3 ants of the most reviews with their reviews and the day of the last.
-An ant that reviewed nobody shows no tally.
+the findings made, applied (and how many of those still hold), rejected, deferred and unanswered; then the tokens and
+cost of its reviews of known spend ([Dreams](#dreams)), a review and a finding still holding; then the same counts for
+the 3 kinds of the most findings, and for the 3 ants of the most reviews with their reviews, the day of the last and
+their spend. An ant that reviewed nobody shows no tally, and one whose reviews' spend is all unknown no spend.
 
 `sense_identity` without arguments shows who the ant is, whole: `## Identity`, the card and the experience as the brief
 shows them, with the tally of a sage's reviews, without the return; `## Persona`, the persona, its profile among its fields, and its pending proposal
@@ -579,6 +580,10 @@ of another sage left out. Each comes with its suggested action and the ant's las
 (marked when the packet offers it again), and, for one applied, what became of each item the verdict names: a memory's
 status (marked when it changed since the verdict), the days it was read and its helpful, stale and wrong votes; a
 proposal's status; whether a self-model or relationship record was replaced since; or that the item is no longer kept.
+Beside a finding applied come the ant's vital signs (below) of the dream it was given in and up to 4 before, and of up
+to 5 dreams since, the one being reviewed included, side by side: the threads, the prompts cancelled by a human, the
+share of tool calls failed, the tool requests rejected and the tokens a thread; a dream keeping none is left out. They
+are numbers, not the finding's effect, and the packet tells the sage that a few threads make weak evidence.
 A tally by kind follows, with a line for all: findings made, applied (and how many of those still hold), rejected,
 deferred and unanswered. An applied finding still holds while every item it names is kept, a memory active, superseded
 or in the status it had at the verdict, a proposal pending or confirmed. The section takes at most an eighth of the
@@ -625,10 +630,13 @@ untrusted, after the identity findings and before `vitals`:
 - `unanswered_reviews`: an ant reviewed within the last 14 active days that left half or more of the findings of its
   last 3 reviews with findings unanswered, its latest review left out, one finding each;
 - `no_reviewed_relationship`: no relationship record of an ant reviewed 3 times or more, one finding each, the most
-  reviewed first.
+  reviewed first;
+- `costly_reviews`: an ant reviewed within the last 14 active days whose last 5 reviews of known spend, its latest
+  review left out, spent more than 1,000,000 tokens or a cost of 2.00 a review on average and had none of their
+  findings applied, one finding each.
 
 Each counts as the identity findings do, rounded down to its threshold doubled any number of times (for
-`unanswered_reviews`, to a power of 2). Unlike the others, one applied rests as one rejected does: its records change
+`unanswered_reviews`, to a power of 2; for `costly_reviews`, the times its spend passed the limit, to a power of 2). Unlike the others, one applied rests as one rejected does: its records change
 only with the reviews to come. What a sage keeps of an ant shows in the reviews of that ant alone: a review's origin
 names the ant under review, so its brief shows the sage's relationship record and memories of that ant
 ([Brief](#brief)). The numbers are first guesses, to tune on real reviews.
@@ -686,8 +694,11 @@ an item of kind `review` named after the ant and its dream, and applies the verd
 records of the earlier reviews; the sage's answer gives the record its findings by kind, read and numbered as the ant's
 daemon reads them, the first answer kept. Sense alone writes the records, as it does the thread records, from the
 ant, the dream, the review thread, when the message arrived and was answered, and each finding's id, kind, verdict,
-whether it holds and when that was last told: no text of the ant's threads nor of the findings. A message or answer
-delivered again changes nothing. A finding's verdict and outcome reach the records only while its dream is within the
+whether it holds and when that was last told: no text of the ant's threads nor of the findings. With the answer, the
+sage's daemon hands over what the review thread spent, from its spend ledger (`<ant>.<thread>.spend`,
+[config.md](config.md#prompt-limits-and-spending-caps)): the tokens and cost the harness reported over every prompt on
+it, retries and restarts included, which the record keeps as the review's spend; nothing reported leaves it unknown,
+and a human's message on the thread starts the ledger over. A message or answer delivered again changes nothing. A finding's verdict and outcome reach the records only while its dream is within the
 30 active days the earlier findings cover, and the findings of an answer arriving after the ant went on with the packet
 alone stay unanswered. The tally of the sage's identity is counted from these records ([Identity](#identity)). A clone
 inherits no review record.

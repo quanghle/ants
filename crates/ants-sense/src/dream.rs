@@ -28,7 +28,8 @@
 //!
 //! A sage's own dream covers the reviews it was asked as threads too ([`Covered::review`]), but its packet lists them by
 //! their records ([`Reviewing`]), leaving out their text, the packets of other ants' work: so they make nothing of the
-//! dream untrusted.
+//! dream untrusted. Each record keeps what its review thread spent ([`ReviewSpend`]), which the sage's tally shows a
+//! review and a finding still holding ([`ReviewCost`]).
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
@@ -63,15 +64,15 @@ pub use packet::{
     TrackRecord, compose, packet, reviewing, track_record,
 };
 pub use practice_findings::{
-    JUDGED_FINDINGS, PRACTICE_DAYS, REJECTED_FINDINGS, RELATIONSHIP_AFTER_REVIEWS, UNANSWERED_PERCENT,
-    UNANSWERED_REVIEWS, UNDONE_FINDINGS,
+    COSTLY_REVIEW_COST_MICROS, COSTLY_REVIEW_TOKENS, COSTLY_REVIEWS, JUDGED_FINDINGS, PRACTICE_DAYS, REJECTED_FINDINGS,
+    RELATIONSHIP_AFTER_REVIEWS, UNANSWERED_PERCENT, UNANSWERED_REVIEWS, UNDONE_FINDINGS,
 };
 pub use review::{
     Advice, Evidence, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse, review_sent, untrusted_on,
 };
 pub use reviews::{
-    AntTally, FindingTally, KindTally, REVIEW, ReviewRecord, ReviewTally, ReviewedFinding, review_answered, review_id,
-    review_received, review_record, review_records, review_tally, tally_lines,
+    AntTally, FindingTally, KindTally, REVIEW, ReviewCost, ReviewRecord, ReviewSpend, ReviewTally, ReviewedFinding,
+    review_answered, review_id, review_received, review_record, review_records, review_tally, tally_lines,
 };
 pub use tool::{dream, schema};
 pub use vitals::{
@@ -212,6 +213,8 @@ pub enum FindingKind {
     UnansweredReviews,
     /// No relationship record of an ant a sage reviewed some times.
     NoReviewedRelationship,
+    /// An ant whose reviews by a sage cost much, with none of their findings applied.
+    CostlyReviews,
 }
 
 impl FindingKind {
@@ -227,7 +230,11 @@ impl FindingKind {
     fn practice(self) -> bool {
         matches!(
             self,
-            Self::RejectedKind | Self::UndoneFindings | Self::UnansweredReviews | Self::NoReviewedRelationship
+            Self::RejectedKind
+                | Self::UndoneFindings
+                | Self::UnansweredReviews
+                | Self::NoReviewedRelationship
+                | Self::CostlyReviews
         )
     }
 }
@@ -251,6 +258,7 @@ impl fmt::Display for FindingKind {
             Self::UndoneFindings => "undone_findings",
             Self::UnansweredReviews => "unanswered_reviews",
             Self::NoReviewedRelationship => "no_reviewed_relationship",
+            Self::CostlyReviews => "costly_reviews",
         })
     }
 }

@@ -111,11 +111,22 @@ impl Sense {
         scheduler::review_received(&*items, envelope).await
     }
 
-    /// Note in the sense data of `sage` its answer `text` to the review message `request`, if sense keeps them
-    /// ([`scheduler::review_given`]).
-    pub(crate) async fn review_given(&self, sage: &UserId, request: &Envelope, text: &str) -> Result<()> {
+    /// Note in the sense data of `sage` its answer `text` to the review message `request`, with what its thread `spent`
+    /// when known, if sense keeps them ([`scheduler::review_given`]).
+    pub(crate) async fn review_given(
+        &self,
+        sage: &UserId,
+        request: &Envelope,
+        text: &str,
+        spent: Option<crate::limits::caps::Spent>,
+    ) -> Result<()> {
         let Some(items) = self.kept(sage).await? else { return Ok(()) };
-        scheduler::review_given(&*items, request, text).await
+        // Saturates on a cost out of range, and a negative one counts as none.
+        let spent = spent.map(|spent| ants_sense::dream::ReviewSpend {
+            tokens: spent.tokens,
+            cost_micros: (spent.cost * 1e6).round() as u64,
+        });
+        scheduler::review_given(&*items, request, text, spent).await
     }
 
     /// Keep what `workload` puts in `ant`'s colony entry of its sense data current, until dropped: the profile of the

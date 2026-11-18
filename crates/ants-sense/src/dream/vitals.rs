@@ -131,7 +131,7 @@ impl Tally {
     }
 
     /// The share of the calls that failed; none without calls.
-    fn failed_share(&self) -> Option<f64> {
+    pub(super) fn failed_share(&self) -> Option<f64> {
         (self.calls > 0).then(|| f64::from(self.failed) / f64::from(self.calls))
     }
 }
@@ -412,11 +412,11 @@ fn failed_text(failed: u32) -> String {
     if failed == 0 { String::new() } else { format!(" ({failed} failed)") }
 }
 
-fn percent(share: f64) -> String {
+pub(super) fn percent(share: f64) -> String {
     format!("{:.0}%", share * 100.0)
 }
 
-fn cost(micros: u64) -> String {
+pub(super) fn cost(micros: u64) -> String {
     format!("{:.2}", micros as f64 / 1e6)
 }
 

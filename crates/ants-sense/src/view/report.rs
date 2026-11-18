@@ -405,6 +405,9 @@ fn reviews_lines(text: &mut String, tally: Option<&ReviewTally>) {
         day(tally.last),
         tally.findings.counts()
     );
+    if let Some(cost) = &tally.cost {
+        let _ = writeln!(text, "  Spend: {}.", cost.line());
+    }
     for kind in &tally.by_kind {
         let _ = writeln!(text, "  {} findings: {}.", kind.kind, kind.findings.counts());
     }
@@ -415,11 +418,12 @@ fn reviews_lines(text: &mut String, tally: Option<&ReviewTally>) {
     for ant in &tally.by_ant {
         let _ = writeln!(
             text,
-            "  {}: {} reviews, the last {}; findings {}.",
+            "  {}: {} reviews, the last {}; findings {}{}.",
             ant.ant,
             ant.reviews,
             day(ant.last),
-            ant.findings.counts()
+            ant.findings.counts(),
+            ant.cost.map_or_default(|cost| format!("; spend {}", cost.line()))
         );
     }
     let shown = u32::try_from(tally.by_ant.len()).unwrap_or(u32::MAX);
@@ -756,9 +760,13 @@ Thresholds: a dream finds no persona after 5 threads, no self-model after 5, no 
             ants: 12,
             last: at,
             findings: made(5),
+            cost: None,
             by_kind: vec![dream::KindTally { kind: "lesson".into(), findings: made(3) }],
             by_ant: (0..TOP)
-                .map(|n| dream::AntTally { ant: name(&format!("dev-{n}")), reviews: 1, last: at, findings: made(0) })
+                .map(|n| {
+                    let ant = name(&format!("dev-{n}"));
+                    dream::AntTally { ant, reviews: 1, last: at, findings: made(0), cost: None }
+                })
                 .collect(),
         };
         let mut text = String::new();

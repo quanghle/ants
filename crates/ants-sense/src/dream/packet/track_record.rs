@@ -1,7 +1,8 @@
 //! The earlier findings section of a sage's review packet: what the sage reading found in the ant's work over its last
 //! [`TRACK_RECORD_DAYS`] active days, the latest reviews first, each finding with its suggested action, the ant's
-//! verdict and reason and, for one applied, what became of what the ant wrote or voted on for it ([`outcome`]); then a
-//! tally by kind. The sage keeps nothing between reviews: its record of an ant lives in the ant's dreams and comes back
+//! verdict and reason and, for one applied, what became of what the ant wrote or voted on for it ([`outcome`]) and the
+//! ant's vital signs over the dreams before it was applied and since, side by side ([`Vitals`]); then a tally by kind.
+//! The sage keeps nothing between reviews: its record of an ant lives in the ant's dreams and comes back
 //! in each packet, holding the findings of that sage alone. It takes at most a share of the packet's budget
 //! ([`TRACK_RECORD_SHARE`]), the earlier reviews' findings left out first, and shrinks to its tally for room before the
 //! identity is cut to titles.
@@ -12,7 +13,8 @@ use std::fmt::Write as _;
 use ants_proto::{FindingOutcome, FindingVerdict, UserId};
 use chrono::{DateTime, Duration, Utc};
 
-use crate::dream::{Dream, Finding, FindingKind, FindingTally, Judgement, Verdict, get};
+use crate::dream::vitals::percent;
+use crate::dream::{Dream, Finding, FindingKind, FindingTally, Judgement, Signs, TREND, Verdict, get};
 use crate::items::ItemId;
 use crate::memory::{self, Memory, Scope, Status};
 use crate::proposal::{self, ProposalItem};
@@ -85,23 +87,27 @@ pub async fn track_record(
     let ages = memory::Ages::new(dream.at, card.iter().flat_map(|card| card.dormant(dream.at)));
     let dreams = earlier(items, dream.number, &ages).await?;
     let verdicts = last_verdicts(&dreams);
+    let mut vitals = Vitals::new(items, dream, &dreams);
     let mut record = TrackRecord {
         head: format!(
             "\n## Earlier findings of {sage}\n\nWhat {sage} found in the work of {ant} over its last \
              {TRACK_RECORD_DAYS} active days, the latest reviews first: each finding with its suggested action, the \
-             verdict of {ant} and, for one applied, what became of what {ant} wrote or voted on for it.\n"
+             verdict of {ant} and, for one applied, what became of what {ant} wrote or voted on for it and the vital \
+             signs of {ant} over the dreams before it was applied and since, side by side.\n"
         ),
         ..TrackRecord::default()
     };
     let mut tallies: BTreeMap<String, FindingTally> = BTreeMap::new();
     for earlier in dreams.iter().filter(|earlier| earlier.sage.as_ref() == Some(sage)) {
         for (n, finding) in own(earlier).enumerate() {
-            let verdict = verdicts.get(finding.id.as_str()).copied();
-            let mut written = Vec::new();
-            if let Some(applied) = verdict.filter(|verdict| verdict.verdict == Judgement::Applied) {
+            let found = verdicts.get(finding.id.as_str()).copied();
+            let verdict = found.map(|(_, verdict)| verdict);
+            let (mut written, mut signs) = (Vec::new(), None);
+            if let Some((number, applied)) = found.filter(|(_, verdict)| verdict.verdict == Judgement::Applied) {
                 for id in &applied.items {
                     written.push(outcome(items, id, applied.at).await?);
                 }
+                signs = vitals.around(number).await?;
             }
             let holds = written.iter().all(|(_, holds)| *holds);
             tallies.entry(kind(finding)).or_default().add(verdict.map(|verdict| verdict.verdict), holds);
@@ -111,7 +117,7 @@ pub async fn track_record(
                 let _ = write!(entry, "\n### Review of dream {number}, {day}\n\n");
             }
             let again = dream.findings.iter().any(|offered| offered.id == finding.id);
-            entry.push_str(&finding_entry(finding, verdict, &written, again));
+            entry.push_str(&finding_entry(finding, verdict, &written, signs.as_deref(), again));
             record.findings.push(entry);
         }
     }
@@ -145,15 +151,93 @@ async fn earlier(items: &dyn Items, number: u64, ages: &memory::Ages) -> Result<
 }
 
 /// The last verdict on each finding of `dreams`, the latest first, in the dream that offered it or one offering it
-/// again.
-fn last_verdicts(dreams: &[Dream]) -> HashMap<&str, &Verdict> {
+/// again, with the number of that dream.
+fn last_verdicts(dreams: &[Dream]) -> HashMap<&str, (u64, &Verdict)> {
     let mut verdicts = HashMap::new();
     for earlier in dreams.iter().rev() {
         for verdict in &earlier.verdicts {
-            verdicts.insert(verdict.finding.as_str(), verdict);
+            verdicts.insert(verdict.finding.as_str(), (earlier.number, verdict));
         }
     }
     verdicts
+}
+
+/// The vital signs of the ant's dreams, by number, each read once: those of the packet's dream and of the dreams the
+/// track record covers known from the start.
+struct Vitals<'a> {
+    items: &'a dyn Items,
+    /// The number of the packet's dream, the last whose signs count as since.
+    last: u64,
+    known: BTreeMap<u64, Option<Signs>>,
+}
+
+impl<'a> Vitals<'a> {
+    fn new(items: &'a dyn Items, dream: &Dream, earlier: &[Dream]) -> Self {
+        let known = earlier.iter().chain([dream]).map(|dream| (dream.number, dream.vitals.clone())).collect();
+        Self { items, last: dream.number, known }
+    }
+
+    async fn of(&mut self, number: u64) -> Result<Option<Signs>, StoreError> {
+        if let Some(signs) = self.known.get(&number) {
+            return Ok(signs.clone());
+        }
+        let signs = get(self.items, number).await?.and_then(|(dream, _)| dream.vitals);
+        self.known.insert(number, signs.clone());
+        Ok(signs)
+    }
+
+    /// The line of the signs of a finding applied in dream `number`: those of the [`TREND`] dreams up to it, the work
+    /// before it was applied, beside those of the [`TREND`] dreams after it up to the packet's; none when none of them
+    /// kept any.
+    async fn around(&mut self, number: u64) -> Result<Option<String>, StoreError> {
+        let mut before = Vec::new();
+        for earlier in number.saturating_sub(TREND - 1).max(1)..=number {
+            before.extend(self.of(earlier).await?.map(|signs| (earlier, signs)));
+        }
+        let mut since = Vec::new();
+        for later in number + 1..=self.last.min(number + TREND) {
+            since.extend(self.of(later).await?.map(|signs| (later, signs)));
+        }
+        if before.is_empty() && since.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(signs_line(&before, &since)))
+    }
+}
+
+/// A sign beside an applied finding: its label and its value.
+type Sign = (&'static str, fn(&Signs) -> String);
+
+/// The signs beside an applied finding.
+const SIGNS: &[Sign] = &[
+    ("threads", |signs| signs.threads.to_string()),
+    ("prompts cancelled", |signs| signs.prompts.cancelled.to_string()),
+    ("tool calls failed", |signs| signs.all_calls().failed_share().map_or_else(|| "-".to_owned(), percent)),
+    ("tool requests rejected", |signs| signs.rejected.to_string()),
+    ("tokens a thread", |signs| {
+        if signs.threads == 0 { "-".to_owned() } else { (signs.tokens / u64::from(signs.threads)).to_string() }
+    }),
+];
+
+/// The signs of the dreams `before` an applied finding beside those `since`, numbers alone, each dream's in turn.
+fn signs_line(before: &[(u64, Signs)], since: &[(u64, Signs)]) -> String {
+    let side = |dreams: &[(u64, Signs)], value: &dyn Fn(u64, &Signs) -> String| {
+        if dreams.is_empty() {
+            return "none".to_owned();
+        }
+        dreams.iter().map(|(number, signs)| value(*number, signs)).collect::<Vec<_>>().join(", ")
+    };
+    let numbers = |dreams| side(dreams, &|number, _| number.to_string());
+    let mut line = format!("  Signs of dreams {} before it was applied | {} since:", numbers(before), numbers(since));
+    let signs: Vec<_> = SIGNS
+        .iter()
+        .map(|(label, value)| {
+            let value = |_, signs: &Signs| value(signs);
+            format!("{label} {} | {}", side(before, &value), side(since, &value))
+        })
+        .collect();
+    let _ = writeln!(line, " {}", signs.join("; "));
+    line
 }
 
 /// The findings the sage gave in the review of `dream`.
@@ -181,7 +265,7 @@ pub(in crate::dream) async fn outcomes(
     }
     let mut outcomes = Vec::new();
     for finding in by_sage.into_iter().flat_map(own) {
-        let Some(verdict) = verdicts.get(finding.id.as_str()) else { continue };
+        let Some((_, verdict)) = verdicts.get(finding.id.as_str()) else { continue };
         let mut holds = verdict.verdict == Judgement::Applied;
         if holds {
             for id in &verdict.items {
@@ -203,9 +287,15 @@ pub(in crate::dream) async fn outcomes(
     Ok(outcomes)
 }
 
-/// `finding` as the section shows it, with the last `verdict` on it and what became of the items `written` for it;
-/// `again` when the dream of the packet offers it again.
-fn finding_entry(finding: &Finding, verdict: Option<&Verdict>, written: &[(String, bool)], again: bool) -> String {
+/// `finding` as the section shows it, with the last `verdict` on it, what became of the items `written` for it and the
+/// line of the vital `signs` around it; `again` when the dream of the packet offers it again.
+fn finding_entry(
+    finding: &Finding,
+    verdict: Option<&Verdict>,
+    written: &[(String, bool)],
+    signs: Option<&str>,
+    again: bool,
+) -> String {
     let mut entry = format!("- {} ({}): {}\n", finding.id, kind(finding), finding.text);
     if let Some(advice) = &finding.advice {
         let _ = writeln!(entry, "  Suggested action: {}", advice.action);
@@ -224,6 +314,7 @@ fn finding_entry(finding: &Finding, verdict: Option<&Verdict>, written: &[(Strin
         let lines: Vec<_> = written.iter().map(|(line, _)| line.as_str()).collect();
         let _ = writeln!(entry, "  Written: {}", lines.join("; "));
     }
+    entry.push_str(signs.unwrap_or_default());
     entry
 }
 
