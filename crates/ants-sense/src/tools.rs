@@ -170,10 +170,13 @@ pub const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "identity",
-        description: "Show who the ant is: card, experience, persona and its pending proposal, self-model, \
-                      relationship records and skills. With self_model, or relationship and who, replace that record \
-                      from the revision read. With persona fields and a reason, propose a persona change, which a \
-                      dream at least 12 hours later confirms or rejects; with history, show every persona version.",
+        description: concat!(
+            "Show who the ant is: card, experience, persona and its pending proposal, self-model, relationship \
+             records and skills. With self_model, or relationship and who, replace that record from the revision \
+             read. With persona fields and a reason, propose a persona change, which a dream at least ",
+            crate::proposal::confirm_after_hours!(),
+            " hours later confirms or rejects; with history, show every persona version."
+        ),
         schema: crate::identity::schema,
         handler: crate::identity::identity,
     },
