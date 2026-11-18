@@ -1,11 +1,12 @@
 //! What the daemon keeps running and reconciles with the ants and schedules listed on a reload: the ants' tasks, the
-//! schedules, the host connection and the follower of the shared settings.
+//! schedules, the host connection, sense's link of its own and the follower of the shared settings.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use ants_daemon::host::{self, Host};
 use ants_daemon::profile::shared::{self, Shared, Via};
+use ants_daemon::provider::Providers;
 use ants_daemon::schedule::Schedule;
 use ants_daemon::{Config, Stop};
 use ants_proto::{Machine, UserId};
@@ -13,7 +14,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::Instrument as _;
 
-use super::Served;
+use super::{SenseLink, Served};
 
 /// The schedules running, each in its task, which stops with them.
 #[derive(Default)]
@@ -63,18 +64,37 @@ impl Drop for Schedules {
     }
 }
 
-/// The machine's links to the bus besides its ants' own: its host connection, or else the reading of the shared
-/// settings without one.
-#[derive(Default)]
+/// The machine's links to the bus besides its ants' own: its host connection, or else sense's link of its own and the
+/// reading of the shared settings without one.
 pub(super) struct Links {
     host: HostRun,
+    sense: SenseRun,
     follower: Follower,
+    /// The providers of the process's ants, whose sense the links reach their data for.
+    providers: Providers,
 }
 
 impl Links {
-    /// Run the host connection `host` and the reading of the shared settings `served` lists; with neither, both stop.
+    pub(super) fn new(providers: Providers) -> Self {
+        Self { host: HostRun::default(), sense: SenseRun::default(), follower: Follower::default(), providers }
+    }
+
+    /// Run the host connection `host`, and sense's link of its own and the reading of the shared settings `served`
+    /// lists; with neither, all stop. Sense is told first why it keeps none of its ants' data where `served` says so,
+    /// for each of its ants to say so as it starts.
     pub(super) fn reconcile(&mut self, host: Option<(Host, Vec<UserId>)>, served: Option<&Served>) {
+        if let Some(served) = served {
+            let off = match &served.sense {
+                Some(SenseLink::Off(why)) => Some(why.clone()),
+                _ => None,
+            };
+            self.providers.sense().unkept(off);
+        }
         self.host.reconcile(host);
+        self.sense.reconcile(match served.and_then(|s| s.sense.as_ref()) {
+            Some(SenseLink::Own(host)) => Some(Host { providers: self.providers.clone(), ..Host::clone(host) }),
+            _ => None,
+        });
         let machine = served.and_then(|s| s.machine.clone());
         self.follower.reconcile(served.and_then(Served::vias), served.and_then(|s| s.shared.as_ref()), machine);
     }
@@ -109,18 +129,73 @@ impl HostRun {
             return;
         }
         let (sender, receiver) = watch::channel(ants);
-        let started = wanted.clone();
-        let sense = wanted.providers.sense().hosting();
+        let (started, providers) = (wanted.clone(), wanted.providers.clone());
+        let sense = providers.sense().hosting();
         let task = tokio::spawn(
             async move {
                 if let Err(e) = Box::pin(host::run_keeping(started, receiver, Some(sense))).await {
                     tracing::error!(error = format!("{e:#}"), "host connection stopped");
+                    providers.sense().unkept(Some(format!("the host connection stopped: {e:#}")));
                 }
             }
             .instrument(tracing::info_span!("host")),
         );
         if let Some(old) = self.0.replace(HostTask { host: wanted, creds, ants: sender, task }) {
             old.task.abort();
+        }
+    }
+}
+
+/// Sense's link of its own without a host connection ([`host::run_sense`]), if any, in its task.
+#[derive(Default)]
+pub(super) struct SenseRun(Option<SenseTask>);
+
+pub(super) struct SenseTask {
+    host: Host,
+    /// The contents of its credentials file when it started ([`creds_snapshot`]).
+    creds: Option<Vec<u8>>,
+    task: JoinHandle<()>,
+}
+
+impl SenseRun {
+    /// Run the link `wanted`: the one running carries on unless it changed, its credentials file changed or it stopped,
+    /// when it starts again; with none wanted, it stops.
+    fn reconcile(&mut self, wanted: Option<Host>) {
+        let Some(wanted) = wanted else {
+            if let Some(old) = self.0.take() {
+                tracing::info!("stopping sense's link");
+                old.task.abort();
+            }
+            return;
+        };
+        let creds = creds_snapshot(wanted.creds.as_deref());
+        // Each reload makes the ants' restarts afresh, which sense's link does not use.
+        let same = |r: &SenseTask| r.host == Host { restarts: r.host.restarts.clone(), ..wanted.clone() };
+        if self.0.as_ref().is_some_and(|r| same(r) && r.creds == creds && !r.task.is_finished()) {
+            return;
+        }
+        let (started, providers) = (wanted.clone(), wanted.providers.clone());
+        let sense = providers.sense().hosting();
+        let task = tokio::spawn(
+            async move {
+                if let Err(e) = Box::pin(host::run_sense(started, sense)).await {
+                    tracing::error!(error = format!("{e:#}"), "sense's link stopped");
+                    let why = format!("sense's link with the host credentials stopped: {e:#}");
+                    providers.sense().unkept(Some(why));
+                }
+            }
+            .instrument(tracing::info_span!("sense")),
+        );
+        if let Some(old) = self.0.replace(SenseTask { host: wanted, creds, task }) {
+            old.task.abort();
+        }
+    }
+}
+
+impl Drop for SenseRun {
+    fn drop(&mut self) {
+        if let Some(run) = &self.0 {
+            run.task.abort();
         }
     }
 }

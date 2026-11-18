@@ -56,9 +56,45 @@ fn the_file_names_the_machine_as_the_host_connection_would() {
     crate::auth::issue_host(&team, &"m1".parse().unwrap(), None, &dir.join("h.creds")).unwrap();
     let with_creds = format!("{top}[host]\ncreds = \"h.creds\"\n");
     assert_eq!(listed(&with_creds, "").machine, Some("m1".parse().unwrap()), "the credentials' machine comes first");
+    let one = listed(&with_creds, "--ant messenger");
+    assert_eq!(one.host, None, "one ant served makes no host connection");
+    assert_eq!(
+        one.sense_link.and_then(|s| s.creds),
+        Some(dir.join("h.creds")),
+        "sense links with the host's credentials"
+    );
     let flags = ants(&args("--ant dev-a"), &dir.join("none.toml"), "gen-4f2a.internal").unwrap();
     assert_eq!(flags.machine, None, "an ant described by flags goes by the host name");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn without_a_host_connection_sense_links_with_the_host_credentials_where_the_ants_have_their_own() {
+    use ants_daemon::provider::Setting;
+    let config = |name: &str, creds: bool, provider: Setting| {
+        let mut p = ant(name);
+        p.creds = creds.then(|| PathBuf::from(format!("{name}.creds")));
+        p.provider_setting = provider;
+        configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None, None).unwrap().remove(0)
+    };
+    let link = |settings: Option<HostSettings>, configs: &[Config]| {
+        sense_link(None, settings, configs, "nats://cli:4222", None, "box.local")
+    };
+    let creds = Some(PathBuf::from("host.creds"));
+    let settings =
+        HostSettings { creds: creds.clone(), nats: Some("nats://hub:4222".to_owned()), ..Default::default() };
+    let authed = [config("dev-a", true, Setting::Sense), config("dev-b", true, Setting::None)];
+    let Some(SenseLink::Own(own)) = link(Some(settings.clone()), &authed) else { panic!("a link of its own") };
+    assert_eq!((&own.creds, own.nats.as_str()), (&creds, "nats://hub:4222"));
+    let Some(SenseLink::Off(why)) = link(None, &authed) else { panic!("no link without host credentials") };
+    assert!(why.contains("no host credentials on box") && why.contains("`ants auth host box`"), "{why}");
+    let anonymous = [config("dev-a", false, Setting::Sense)];
+    let Some(SenseLink::Own(own)) = link(None, &anonymous) else { panic!("a link as no one") };
+    assert_eq!((own.creds, own.nats.as_str()), (None, "nats://cli:4222"), "no authentication: connected as no one");
+    assert_eq!(link(Some(settings.clone()), &[config("dev-b", true, Setting::None)]), None, "no ant uses sense");
+    let (host, _) = host(Some(settings.clone()), &authed, "nats://cli:4222", None, None).unwrap();
+    let carried = sense_link(Some(&host), Some(settings), &authed, "nats://cli:4222", None, "box.local");
+    assert_eq!(carried, None, "the host connection carries sense");
 }
 
 #[test]

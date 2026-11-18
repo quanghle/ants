@@ -114,6 +114,8 @@ pub struct Reply {
     pub text: String,
     /// Why the prompt was cancelled, if it was.
     pub cut: Option<String>,
+    /// Whether the thread's session was rebuilt for the prompt: lost, or outgrown and started anew ([`crate::pool`]).
+    pub rebuilt: bool,
 }
 
 pub(super) struct Turn {

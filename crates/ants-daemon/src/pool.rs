@@ -343,8 +343,11 @@ impl Pool {
         let review = self.launch.policy().reviewing(thread);
         let lease = self.checkout(thread, fallback, review).await.map_err(on)?;
         let before = lease.session.id();
-        let reply = lease.session.run(prompt).await.map_err(on);
+        let mut reply = lease.session.run(prompt).await.map_err(on);
         let after = lease.session.id();
+        if let Ok(reply) = &mut reply {
+            reply.rebuilt = lease.rebuilt || after != before;
+        }
         if after != before {
             tracing::info!(%thread, session = %after, "the harness moved to a new session");
             if let Some(lifecycle) = &self.lifecycle {
@@ -465,7 +468,9 @@ impl Pool {
             let mut changed = pin!(self.changed.notified());
             changed.as_mut().enable();
             match self.claim(thread, fallback, review) {
-                Claim::Live(session) => return Ok(Lease { pool: self, thread: thread.clone(), session }),
+                Claim::Live(session) => {
+                    return Ok(Lease { pool: self, thread: thread.clone(), session, rebuilt: false });
+                }
                 Claim::Start => return self.start(thread, fallback, review).await,
                 Claim::Wait => changed.await,
             }
@@ -570,7 +575,7 @@ impl Pool {
         let live = Live { session: session.clone(), fallback, review, last_used: Instant::now(), busy: 1, restarts };
         self.slots().insert(thread.clone(), Slot::Ready(live));
         starting.done = true;
-        Ok(Lease { pool: self, thread: thread.clone(), session })
+        Ok(Lease { pool: self, thread: thread.clone(), session, rebuilt: lost })
     }
 }
 
@@ -595,6 +600,8 @@ struct Lease<'a> {
     pool: &'a Pool,
     thread: ThreadId,
     session: Arc<Session>,
+    /// Whether the session was started anew, the harness having lost the stored one.
+    rebuilt: bool,
 }
 
 impl Drop for Lease<'_> {

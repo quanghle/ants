@@ -18,7 +18,7 @@ use async_nats::jetstream;
 use serde::Serialize;
 
 use self::ants::{
-    check_ants, check_bypassed, check_host, check_machine_name, check_reactions, check_sense_logs,
+    check_ants, check_bypassed, check_host, check_machine_name, check_reactions, check_sense_kept, check_sense_logs,
     check_shared_workdirs,
 };
 use self::credentials::{check_backup, check_cli_creds};
@@ -159,6 +159,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     if let Some(loaded) = &loaded {
         let hostname = ants_daemon::colony::machine().await;
         checks.push(check_host(&loaded.host, ants, &hostname, now));
+        checks.extend(check_sense_kept(&loaded.host, ants, &hostname));
         checks.extend(check_machine_name(&loaded.host, &hostname));
     }
     checks.extend(check_shared_workdirs(ants, &setup.config));

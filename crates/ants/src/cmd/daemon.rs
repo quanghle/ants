@@ -50,10 +50,12 @@ pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Resul
             }
         }
         let schedules = scheduler::resolve(listed.schedules, conn.nats, domain)?;
+        let settings = listed.host.clone().or(listed.sense_link);
         let host = serve::host(listed.host, &configs, conn.nats, domain, Some(edited.clone()))
             .map(|(host, ants)| (ants_daemon::host::Host { leaf: serve::leaf_node(), ..host }, ants));
+        let sense = serve::sense_link(host.as_ref().map(|(h, _)| h), settings, &configs, conn.nats, domain, &hostname);
         let shared = Some(edited.shared.clone());
-        Ok(serve::Served { configs, schedules, metrics: listed.metrics, host, shared, machine: listed.machine })
+        Ok(serve::Served { configs, schedules, metrics: listed.metrics, host, sense, shared, machine: listed.machine })
     };
     // One listener for the managed nats-server's start and the serving, so a signal between them is not missed.
     let stop = serve::stop_signal();

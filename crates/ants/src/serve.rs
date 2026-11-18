@@ -36,6 +36,8 @@ pub struct Served {
     pub metrics: Option<SocketAddr>,
     /// The machine's host connection, with the ants to record as the machine's ([`host`]).
     pub host: Option<(Host, Vec<UserId>)>,
+    /// Sense's link of its own, without a host connection ([`sense_link`]); None with one, or no ant using sense.
+    pub sense: Option<SenseLink>,
     /// The shared settings `configs` were overlaid with: kept current by the host connection, else, without one, by
     /// reading them as the ants ([`shared::follow`]).
     ///
@@ -93,6 +95,43 @@ pub fn host(
     Some((host, configs.iter().map(|c| c.ant.clone()).collect()))
 }
 
+/// What sense reaches its ants' data over in a daemon without a host connection ([`sense_link`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SenseLink {
+    /// A link of its own with the machine's host credentials, carrying none of a host connection's other duties
+    /// ([`ants_daemon::host::run_sense`]).
+    Own(Box<Host>),
+    /// None: sense keeps none of the ants' data, for this reason ([`ants_daemon::host::uncredentialed`]).
+    Off(String),
+}
+
+/// What sense reaches the data of `configs` over in a daemon whose host connection is `host`: None with one, which
+/// carries it, or no ant using sense; else a link of its own as `settings` describe the machine's host connection,
+/// `nats` and `js_domain` standing for what the file does not set, where the rule of [`Host::new`] makes one, and
+/// otherwise none, why named after the machine as `hostname` stands for it.
+pub fn sense_link(
+    host: Option<&Host>,
+    settings: Option<HostSettings>,
+    configs: &[Config],
+    nats: &str,
+    js_domain: Option<&JsDomain>,
+    hostname: &str,
+) -> Option<SenseLink> {
+    if host.is_some() || !configs.iter().any(|c| matches!(c.provider, ants_daemon::provider::Setting::Sense)) {
+        return None;
+    }
+    let settings = settings.unwrap_or_default();
+    let (fallback, named) = (settings.fallback(), settings.machine_or(hostname));
+    let HostSettings { creds, machine, nats: file_nats, js_domain: file_domain, .. } = settings;
+    let nats = file_nats.unwrap_or_else(|| nats.to_owned());
+    let domain = file_domain.or(js_domain.cloned());
+    let ant_creds = configs.iter().map(|c| c.connection.creds.is_some());
+    Some(match Host::quietly(machine, fallback, nats, creds, domain, ant_creds) {
+        Some(host) => SenseLink::Own(Box::new(host)),
+        None => SenseLink::Off(ants_daemon::host::uncredentialed(&named)),
+    })
+}
+
 /// How long [`run`] waits at start for the first read of the shared settings, by the host connection or without one,
 /// to serve the ants with them rather than restart them once read.
 const SHARED_FIRST_READ: Duration = Duration::from_secs(5);
@@ -137,7 +176,7 @@ pub async fn run(
     // The ants served, which the host connection's admin orders restart, and their providers, which they reach.
     let (restarts, providers) = (Restarts::default(), Providers::default());
     let serve = |ant| serve(ant, restarts.clone(), providers.clone());
-    let mut links = Links::default();
+    let mut links = Links::new(providers.clone());
     links.reconcile(hosted(served.host.clone(), &restarts, &providers), Some(&served));
     let served = after_first_read(served, &reload, &mut links, &restarts, &providers).await;
     providers.reconcile(served.configs.iter().map(|c| (&c.ant, &c.provider)));

@@ -137,9 +137,15 @@ async fn the_human_decides_and_silence_rejects() {
     let escalation = told.escalation.as_deref().map(|e| (e.reason, &e.thread_id));
     assert_eq!(escalation, Some((EscalationReason::Approval, &thread)), "pushed as escalations are");
 
+    assert_eq!(impatient.asked(&thread), 1, "the turn's requests are counted");
+
     // With the turn over, the default human is told.
     drop(turn);
-    assert_eq!(impatient.decide(thread, tool(), (vec![Verdict::AllowOnce], BTreeMap::new())).await, Verdict::Reject);
+    assert_eq!(
+        impatient.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())).await,
+        Verdict::Reject
+    );
+    assert_eq!(impatient.asked(&thread), 0, "counted only while a turn lasts");
     let stored = stream.direct_get_last_for_subject(subject::inbox(&UserId::human(), &ant)).await.unwrap();
     let told: Envelope = serde_json::from_slice(&stored.payload).unwrap();
     assert_eq!((&told.to, &told.owner), (&UserId::human(), &None));

@@ -1,0 +1,21 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "message": "019a7d2e-0000-7000-8000-000000000001",
+  "entries": [
+    {
+      "type": "ended",
+      "how": "capped",
+      "duration_ms": 95000,
+      "tokens": 41200,
+      "cost": 0.37,
+      "asked": 2,
+      "rebuilt": true
+    }
+  ],
+  "at": "2025-01-01T12:01:00Z"
+}

@@ -1020,7 +1020,7 @@ where
         () = inbox.hear_mcp() => {}
         () = async {
             match inbox.sense {
-                Some(sense) => sense.publish_profile(&config.ant, inbox.workload).await,
+                Some(sense) => sense.publish(&config.ant, inbox.workload).await,
                 None => std::future::pending().await,
             }
         } => {}

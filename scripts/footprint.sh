@@ -3,20 +3,22 @@
 # nats-server.
 #
 #   scripts/footprint.sh                          # idle private memory; fails at or above 10 MB
-#   scripts/footprint.sh --bare                   # idle without the host connection, sense keeping nothing
+#   scripts/footprint.sh --bare                   # idle without the host connection or sense data
 #   scripts/footprint.sh --ask "reply with ok"    # also one harness session (runs the real harness)
 #   scripts/footprint.sh --metrics 127.0.0.1:9464 # idle, with health and metrics served and scraped
 #
 # By default the daemon serves a config file whose one ant has sense as its provider (the default), over the host
 # connection the file gives the machine, after `ants init`: telling sense of the ant added opens the ant's sense data
 # (its event log in the ANTS_SENSE stream and its cache in <home>/.sense/cache.db) and records its card. The idle
-# samples start once that is done, with no harness session and no trigger due.
+# samples start once that is done, with no harness session and no trigger due. With --bare it serves that ant alone
+# (`ants daemon --ant`), its provider "none": a daemon serving one ant makes no host connection, and sense, which
+# would link with the host credentials for an ant using it, keeps no data.
 #
 # Options:  --ants PATH     ants binary (default: $ANTS_BIN, else target/release/ants, built when missing)
 #           --port N        nats-server port (default: $FOOTPRINT_PORT or 14722)
 #           --max-mb N      idle private memory limit in MB (default: $FOOTPRINT_MAX_MB or 10)
 #           --harness NAME  harness of the ant (default: $FOOTPRINT_HARNESS or copilot)
-#           --bare          serve the ant described by flags (`ants daemon --ant`): no host connection, no sense data
+#           --bare          serve the ant alone, provider "none": no host connection, no sense data
 #           --ask TEXT      send TEXT to the ant and measure again with its harness session live
 #           --metrics ADDR  serve health and metrics on ADDR, and scrape both before each idle sample (needs curl)
 # Env:      NATS_SERVER (default: nats-server on PATH), FOOTPRINT_DIR (parent of the scratch directory,
@@ -55,7 +57,7 @@ while [ $# -gt 0 ]; do
     --bare) bare=1; shift ;;
     --ask) ask=$2; shift 2 ;;
     --metrics) metrics=$2; shift 2 ;;
-    -h | --help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
     esac
 done
@@ -165,18 +167,19 @@ nats_pid=$!
 wait_for "$work/nats.log" "Server is ready" 15 "$nats_pid"
 
 url=nats://127.0.0.1:$port
+{
+    printf 'messenger = false\nsage = "none"\nharness = "%s"\n' "$harness"
+    [ -z "$metrics" ] || printf 'metrics = "%s"\n' "$metrics"
+    printf '\n[[ant]]\nname = "footprint"\nworkdir = "%s"\nhome = "%s"\n' "$work/workdir" "$work/home"
+    [ -z "$bare" ] || printf 'provider = "none"\n'
+} >"$work/config.toml"
 if [ -n "$bare" ]; then
-    ANTS_LOG=${ANTS_LOG:-info} "$ants" --nats "$url" daemon --ant footprint --harness "$harness" \
-        --workdir "$work/workdir" --home "$work/home" ${metrics:+--metrics "$metrics"} >"$work/daemon.log" 2>&1 &
+    ANTS_LOG=${ANTS_LOG:-info} "$ants" --nats "$url" daemon --config "$work/config.toml" --ant footprint \
+        >"$work/daemon.log" 2>&1 &
     daemon_pid=$!
     wait_for "$work/daemon.log" "serving inbox" 30 "$daemon_pid"
 else
     "$ants" --nats "$url" init >"$work/init.log" 2>&1 || { cat "$work/init.log" >&2; die "ants init failed"; }
-    {
-        printf 'messenger = false\nsage = "none"\nharness = "%s"\n' "$harness"
-        [ -z "$metrics" ] || printf 'metrics = "%s"\n' "$metrics"
-        printf '\n[[ant]]\nname = "footprint"\nworkdir = "%s"\nhome = "%s"\n' "$work/workdir" "$work/home"
-    } >"$work/config.toml"
     ANTS_LOG=${ANTS_LOG:-info} "$ants" --nats "$url" daemon --config "$work/config.toml" >"$work/daemon.log" 2>&1 &
     daemon_pid=$!
     wait_for "$work/daemon.log" "serving inbox" 30 "$daemon_pid"
@@ -221,7 +224,7 @@ done
 
 printf 'ants       %s (%s)\n' "$("$ants" --version)" "$(uname -sm)"
 if [ -n "$bare" ]; then
-    printf 'serving    one ant described by flags, no host connection, sense keeping nothing\n'
+    printf 'serving    one ant of a config file alone, provider none: no host connection, no sense data\n'
 else
     printf 'serving    one ant of a config file, host connection up, its sense data open\n'
 fi

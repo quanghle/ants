@@ -6,7 +6,7 @@
 //! 3. its self-model;
 //! 4. each relationship record;
 //! 5. its skills, by name and description;
-//! 6. its last dream: the title of its diary, with its verdict counts;
+//! 6. its last dream: the title of its diary, with its verdict counts and the vital signs of its period;
 //! 7. its core memories, then its top [`DEFAULT_LIMIT`] memories of every scope, as `sense_recall` ranks them without
 //!    a query.
 //!
@@ -108,7 +108,8 @@ async fn persona_entry(items: &dyn Items) -> Result<Option<MemoryEntry>, StoreEr
     Ok(Some(MemoryEntry { key, content }))
 }
 
-/// The last dream: the title of its diary, when it began, where it stands; none before the first.
+/// The last dream: the title of its diary, when it began, where it stands, and the vital signs of its period; none
+/// before the first.
 async fn dream_entry(items: &dyn Items) -> Result<Option<MemoryEntry>, StoreError> {
     let Some((dream, revision)) = dream::last(items).await? else { return Ok(None) };
     let mut content = format!("{}\nBegan {}, {}", dream.summary(), time(dream.at), dream.state);
@@ -116,6 +117,9 @@ async fn dream_entry(items: &dyn Items) -> Result<Option<MemoryEntry>, StoreErro
         let _ = write!(content, "; diary {diary}");
     }
     content.push('.');
+    if let Some(vitals) = &dream.vitals {
+        let _ = write!(content, "\nVital signs: {}.", vitals.line());
+    }
     Ok(Some(MemoryEntry {
         key: format!("{} ({DREAM}, self), trust self, revision {revision}", Dream::id(dream.number)),
         content,
@@ -209,8 +213,17 @@ mod tests {
             assert!(!call(identity::identity, arguments).await.is_error);
         }
         let writer = context(human());
-        let start =
-            Start { at: Utc::now(), recipient: Recipient::Ant, threads: vec![], commits: vec![], writer: &writer };
+        let mut signs = dream::Signs { threads: 1, ..dream::Signs::default() };
+        signs.prompts.replied = 2;
+        let vitals = vec![(ants_proto::ThreadId::generate(), signs)];
+        let start = Start {
+            at: Utc::now(),
+            recipient: Recipient::Ant,
+            threads: vec![],
+            commits: vec![],
+            writer: &writer,
+            vitals,
+        };
         dream::begin(&*items, start).await.unwrap().unwrap();
         let remember =
             |title: &str, body: &str, core| json!({"kind": "lesson", "title": title, "body": body, "core": core});
@@ -247,6 +260,7 @@ mod tests {
             "{}",
             content(5)
         );
+        assert!(content(5).ends_with(".\nVital signs: 2 prompts (2 replied)."), "{}", content(5));
         assert!(content(6).starts_with("Always rebase\nMerges hide history."), "{}", content(6));
     }
 

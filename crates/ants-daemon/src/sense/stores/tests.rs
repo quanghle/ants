@@ -55,6 +55,38 @@ async fn nothing_is_kept_without_a_host_connection_and_nothing_reached_while_it_
     std::fs::remove_dir_all(&home).unwrap();
 }
 
+/// Sense's link of its own, as a daemon serving one ant opens it, reaches the ant's data with none of a host
+/// connection's other duties, writing no machine record; without it the process keeps none of them, saying why.
+#[tokio::test]
+async fn sense_s_own_link_reaches_the_data_and_records_no_machine() {
+    let Some(server) = NatsServer::start() else { return };
+    let home = scratch_dir("sense-stores-own-link");
+    let stores = SenseStores::new();
+    serve(&stores, &dev_a(), &home);
+    let why = "no host credentials on studio";
+    stores.unkept(Some(why.to_owned()));
+    let unkept = stores.items(&dev_a()).await.err().unwrap();
+    assert!(matches!(&unkept, StoreError::NotKept(said) if said == why), "{unkept:?}");
+    stores.unkept(None);
+    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let machines = js.create_key_value(crate::hub::machines_config()).await.unwrap();
+    let studio = Some(Machine::from_hostname("studio"));
+    let host = crate::host::Host::quietly(studio, None, server.url.clone(), None, None, [false].into_iter()).unwrap();
+    let checked = async {
+        eventually("the link up", async || stores.items(&dev_a()).await.is_ok()).await;
+        Sense::with_stores(stores.clone()).event(added("id1")).await.unwrap();
+        let messages = js.get_stream(SENSE_STREAM).await.unwrap().info().await.unwrap().state.messages;
+        assert_eq!(messages, 1);
+        let recorded = futures::StreamExt::next(&mut machines.keys().await.unwrap()).await;
+        assert!(recorded.is_none(), "no machine record");
+    };
+    tokio::select! {
+        ended = crate::host::run_sense(host, stores.hosting()) => panic!("the link runs until dropped: {ended:?}"),
+        () = checked => {}
+    }
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
 /// An ant served again with credentials changed in place, as after a revoke and re-add, opens its items anew to sign
 /// with them; served again with the same, it keeps them.
 #[test]

@@ -154,8 +154,8 @@ pub use threads::{
 };
 pub use timeline::{
     MAX_TIMELINE_CALLS, MAX_TIMELINE_ENTRIES, MAX_TIMELINE_PATH, MAX_TIMELINE_STEPS, MAX_TIMELINE_TITLE, MergedCall,
-    MergedNoReply, MergedRejection, NoReplyWhy, TIMELINE_EVERY, Timeline, TimelineCall, TimelineEntry,
-    TimelineRejection, Timelines,
+    MergedEnd, MergedNoReply, MergedRejection, NoReplyWhy, PromptEnd, TIMELINE_EVERY, Timeline, TimelineCall,
+    TimelineEnd, TimelineEntry, TimelineRejection, Timelines,
 };
 pub use trails::{
     CallAnswer, JournalEntry, MAX_TRAIL_ARGS, MAX_TRAIL_DESCRIPTION, MAX_TRAIL_PHASES, MAX_TRAIL_SCRIPT, PendingCall,

@@ -27,6 +27,7 @@ fn entry_on(ant: &str, machine: &str) -> ColonyEntry {
         capabilities: vec!["rust".to_owned()],
         whoami: Some("Maintain the Rust backend.".to_owned()),
         profile: None,
+        sense_unkept: None,
         workdir: None,
         started_at: now,
         heartbeat_at: now,

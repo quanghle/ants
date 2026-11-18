@@ -264,6 +264,10 @@ pub struct Listed {
     pub managers: Option<(Vec<UserId>, PathBuf)>,
     /// The machine's host connection the file describes: only when the daemon serves the whole file.
     pub host: Option<HostSettings>,
+    /// The machine's host settings for sense's link of its own ([`crate::serve::sense_link`]): only when the daemon
+    /// serves one ant, making no host connection; for an ant described by flags those of the file at `default_path`,
+    /// on the ant's server rather than the file's.
+    pub sense_link: Option<HostSettings>,
     /// The machine's name as the file's host settings give it ([`HostSettings::named`]); None for an ant described by
     /// flags, which goes by the host name.
     pub machine: Option<Machine>,
@@ -275,9 +279,9 @@ pub struct Listed {
 }
 
 /// The ants to serve, the harnesses they may name and the schedules to run: those of the config file, or for an ant
-/// described by flags the harnesses of the file at `default_path` if it exists, and its top-level `harness` unless
-/// the flags name one. The schedules run only when the
-/// daemon serves the whole file, not one ant picked with `--ant`. `hostname` names the machine where the file does
+/// described by flags the harnesses and host settings of the file at `default_path` if it exists, and its top-level
+/// `harness` unless the flags name one. The schedules run only when the daemon serves the whole file, not one ant
+/// picked with `--ant`. `hostname` names the machine where the file does
 /// not. A daemon serving the whole file says once why it leaves the built-in sage to another machine
 /// ([`config::Loaded::sage_elsewhere`]).
 pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Listed> {
@@ -291,6 +295,7 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Li
             let harnesses = summary.harnesses;
             let (schedules, metrics) = (Vec::new(), args.metrics);
             let (managers, host, machine, nats_server) = (None, None, None, None);
+            let sense_link = Some(HostSettings { nats: None, js_domain: None, ..summary.host });
             let auto_update = config::AutoUpdate::Off;
             Ok(Listed {
                 ants: vec![ant],
@@ -299,6 +304,7 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Li
                 metrics,
                 managers,
                 host,
+                sense_link,
                 machine,
                 nats_server,
                 auto_update,
@@ -322,12 +328,23 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Li
                 .collect();
             let managers = whole.then(|| (managers, path.clone()));
             let machine = Some(loaded.host.named(hostname));
-            let host = whole.then_some(loaded.host);
+            let (host, sense_link) = if whole { (Some(loaded.host), None) } else { (None, Some(loaded.host)) };
             let nats_server = loaded.nats_server.filter(|_| whole);
             let auto_update = if whole { loaded.auto_update } else { config::AutoUpdate::Off };
             let ants = pick(loaded.ants, loaded.sage_elsewhere.as_deref(), args, &path)?;
             let harnesses = loaded.harnesses;
-            Ok(Listed { ants, harnesses, schedules, metrics, managers, host, machine, nats_server, auto_update })
+            Ok(Listed {
+                ants,
+                harnesses,
+                schedules,
+                metrics,
+                managers,
+                host,
+                sense_link,
+                machine,
+                nats_server,
+                auto_update,
+            })
         }
     }
 }

@@ -25,6 +25,8 @@ async fn a_human_cancels_a_running_prompt_and_the_sender_gets_what_it_wrote() {
         assert_eq!(next_reply(&mut to_dev_b).await, (t1.clone(), "after".to_owned()), "the thread goes on");
         assert!(!cancel(&bus, &t1).await, "nothing left to cancel");
         assert!(timeout(Duration::from_millis(300), to_human.next()).await.is_err(), "no escalation");
+        let ends: Vec<_> = ends_on(&bus, &t1, 2).await.into_iter().map(|(_, end)| end.how).collect();
+        assert_eq!(ends, [PromptEnd::Cancelled, PromptEnd::Replied]);
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);

@@ -17,6 +17,8 @@ async fn a_failed_message_is_retried_before_the_rest_of_its_thread() {
         // The failed attempt may have run tools too, so the retry carries the warning.
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), warned("flaky a")));
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()));
+        let ends: Vec<_> = ends_on(&bus, &t1, 3).await.into_iter().map(|(_, end)| end.how).collect();
+        assert_eq!(ends, [PromptEnd::Failed, PromptEnd::Replied, PromptEnd::Replied], "each run's end");
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
