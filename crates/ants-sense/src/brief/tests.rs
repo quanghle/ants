@@ -16,6 +16,7 @@ use crate::tools::Handler;
 
 mod citations;
 mod cuts;
+mod experience;
 mod persona;
 mod records;
 mod work;
@@ -45,6 +46,7 @@ async fn sense() -> (Sense, Arc<dyn Items>) {
 
 const THREAD: &str = "019a7d2c-0000-7000-8000-000000000001";
 const OTHER: &str = "019a7d2c-0000-7000-8000-000000000002";
+const THIRD: &str = "019a7d2c-0000-7000-8000-000000000003";
 
 fn context(thread: &str) -> CallContext {
     CallContext {
@@ -86,6 +88,25 @@ async fn filled() -> (Sense, Arc<dyn Items>) {
     let fact = json!({"kind": "fact", "title": "Tokens are spans", "body": "The lexer yields byte spans."});
     call(&sense, memory::remember, THREAD, fact).await;
     (sense, items)
+}
+
+/// Thread records of the ant of the briefs: two threads alice started in github.com/o/r, one of them done, and one
+/// ant dev-b started, on two days.
+async fn worked(sense: &Sense) {
+    let alice = || Starter::Human { user: "alice".parse().unwrap() };
+    let started = |by, repo: Option<&str>| EventKind::ThreadStarted {
+        origin: Origin { by, channel: None },
+        repo: repo.map(Into::into),
+    };
+    let told = [
+        (THREAD, "2025-01-01T09:00:00Z", started(alice(), Some("github.com/o/r"))),
+        (THREAD, "2025-01-01T11:00:00Z", EventKind::ThreadDone),
+        (OTHER, "2025-01-02T09:00:00Z", started(alice(), Some("github.com/o/r"))),
+        (THIRD, "2025-01-02T10:00:00Z", started(Starter::Ant { user: "dev-b".parse().unwrap() }, None)),
+    ];
+    for (thread, at, kind) in told {
+        sense.event(Event { thread: Some(thread.parse().unwrap()), ..lifecycle(kind, at) }).await.unwrap();
+    }
 }
 
 fn position(brief: &str, text: &str) -> usize {
@@ -269,6 +290,7 @@ async fn no_budget_is_ever_exceeded_even_with_multibyte_text() {
     call(&sense, thread::checkpoint, THREAD, register).await;
     let body = "Ünïcödé 🦀 ".repeat(40);
     call(&sense, memory::remember, THREAD, json!({"kind": "gotcha", "title": "Crabs 🦀", "body": body})).await;
+    worked(&sense).await;
     let card = identity::card(&*items).await.unwrap();
     for budget in (0..4_000).step_by(97).chain([8_000]) {
         let brief = compose(&*items, &context(THREAD), card.as_ref(), budget).await.unwrap();

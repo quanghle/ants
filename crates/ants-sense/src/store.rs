@@ -12,6 +12,7 @@ use crate::cache::{Cache, CacheError, Hit, Pending};
 use crate::export::SenseExport;
 use crate::items::{Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, Values};
 use crate::log::{APPEND_TRIES, AntLog, Break, Checked, EventLog, LogError, Position, Signer, Stored, Verifier};
+use crate::thread::experience::Experience;
 
 /// Why a store did not answer.
 #[derive(Debug, thiserror::Error)]
@@ -224,6 +225,11 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         limit: usize,
     ) -> Result<Vec<Item>, StoreError> {
         Ok(self.cache.list_by(kind, name, value, limit)?)
+    }
+
+    /// [`Cache::experience`].
+    pub fn experience(&self, own: &[UserId], top: usize) -> Result<Option<Experience>, StoreError> {
+        Ok(self.cache.experience(own, top)?)
     }
 
     /// The items matching `text` best ([`Cache::search`]).
@@ -593,6 +599,9 @@ pub trait Items: Send + Sync {
         kind: Option<&'a str>,
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<Hit>, StoreError>>;
+    /// [`Store::experience`].
+    fn experience<'a>(&'a self, own: &'a [UserId], top: usize)
+    -> BoxFuture<'a, Result<Option<Experience>, StoreError>>;
     /// [`Store::history`].
     /// Cached history, including pending revisions with sequence 0; never requires another network round trip.
     fn history<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Vec<Revision>, StoreError>>;
@@ -720,6 +729,18 @@ where
             let mut store = self.lock().await;
             store.refresh().await?;
             store.search(text, kind, limit)
+        })
+    }
+
+    fn experience<'a>(
+        &'a self,
+        own: &'a [UserId],
+        top: usize,
+    ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>> {
+        Box::pin(async move {
+            let mut store = self.lock().await;
+            store.refresh().await?;
+            store.experience(own, top)
         })
     }
 
