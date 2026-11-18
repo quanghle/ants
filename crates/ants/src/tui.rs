@@ -156,6 +156,8 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's; `ants chat` shows what a human reads and answers");
     }
+    // The connection's log lines would go on the main screen before the full screen takes it.
+    let _held = live::HeldLogs::hold();
     let (client, js) = match tokio::time::timeout(CONNECT_WITHIN, nats.connect_only("ants-chat")).await {
         Ok(Ok(connected)) => connected,
         Ok(Err(e)) => match Unreached::of(&e, nats.creds.is_some()) {

@@ -21,7 +21,7 @@ use futures::future::LocalBoxFuture;
 use futures::{FutureExt as _, StreamExt as _};
 use tokio::sync::mpsc;
 
-pub use self::screen::{Screen, bracket_pastes, warning};
+pub use self::screen::{HeldLogs, Screen, bracket_pastes, warning};
 pub use self::state::{History, Link, State};
 use crate::colony;
 use crate::threads::thread::{self, Entry, Kind, Parser};

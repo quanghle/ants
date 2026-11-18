@@ -343,6 +343,19 @@ impl Model {
         }
     }
 
+    /// The empty bar's hint: what Enter does with text alone in the view on screen, as [`Model::say`] has it, then
+    /// what else may be typed.
+    pub fn enter_hint(&self) -> String {
+        let enter = match (self.channel_on_view(), self.page()) {
+            (Some((channel, Some(_))), _) => format!("Enter posts on the thread in #{channel}"),
+            (Some((channel, None)), _) => format!("Enter starts a thread in #{channel}"),
+            (None, Page::Thread(_)) => "Enter replies on the thread".to_owned(),
+            (None, Page::Dm(page)) => format!("Enter writes to {} on a new thread", page.with),
+            (None, _) => "Enter asks the assistant or the messenger".to_owned(),
+        };
+        format!("{enter} · @ ant · # channel · Ctrl-K commands")
+    }
+
     /// Open the bar to reply on `thread` to the message `quoted`, its text begun with an @mention of `mention` in
     /// place of any it began with.
     pub(super) fn quote(&mut self, thread: ThreadId, quoted: Quoted, mention: Option<&UserId>) {

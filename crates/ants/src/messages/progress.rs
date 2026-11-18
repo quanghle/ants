@@ -48,9 +48,9 @@ static HELD: Mutex<Option<Vec<String>>> = Mutex::new(None);
 /// How many of the latest log lines are kept.
 const HELD_MAX: usize = 100;
 
-/// Keep log lines instead of writing them to stderr, until [`release_logs`].
+/// Keep log lines instead of writing them to stderr, until [`release_logs`]; those already kept stay.
 pub fn hold_logs() {
-    *HELD.locked() = Some(Vec::new());
+    HELD.locked().get_or_insert_with(Vec::new);
 }
 
 /// Write log lines to stderr again; returns those kept meanwhile.
@@ -341,6 +341,17 @@ pub fn start(mut sub: async_nats::Subscriber, mut status: Status, interrupt: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_lines_held_before_the_screen_opens_stay_held_with_those_after() {
+        use std::io::Write as _;
+        hold_logs();
+        log_writer().write_all(b"connected\n").unwrap();
+        hold_logs();
+        log_writer().write_all(b"drawn\n").unwrap();
+        assert_eq!(release_logs(), ["connected", "drawn"]);
+        assert_eq!(release_logs(), Vec::<String>::new());
+    }
 
     fn line(status: &mut Status, updates: impl IntoIterator<Item = StatusUpdate>) -> String {
         let (ant, thread): (UserId, ants_proto::ThreadId) = ("dev-b".parse().unwrap(), "t1".parse().unwrap());

@@ -471,7 +471,11 @@ impl Page {
         first.push(Line::styled("─".repeat(usize::from(top.width)), style::dim()));
         frame.render_widget(Paragraph::new(first), top);
         if items.is_empty() {
-            let text = if data.live.stored_at.is_some() { "nothing waits on a human" } else { "reading the stream…" };
+            let text = match data.live.stored_at {
+                None => vec![Line::raw("reading the stream…")],
+                Some(_) if data.live.order.is_empty() => what_to_type(),
+                Some(_) => vec![Line::raw("nothing waits on a human")],
+            };
             frame.render_widget(Paragraph::new(text), area);
             return;
         }
@@ -546,6 +550,20 @@ impl Page {
         let list = List::new(rows).highlight_style(style::highlight(focused));
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
     }
+}
+
+/// What home says with no thread read: what can be typed.
+fn what_to_type() -> Vec<Line<'static>> {
+    let row = |keys: &str, does: &str| {
+        Line::from(vec![Span::styled(format!("  {keys:<21}"), Style::new().bold()), Span::raw(does.to_owned())])
+    };
+    vec![
+        Line::raw("No thread read yet. Type:"),
+        row("@ant and a text", "to ask an ant"),
+        row("#channel and a text", "to post in a channel"),
+        row("Ctrl-K and a text", "for the assistant or the messenger"),
+        row("?", "for the keys"),
+    ]
 }
 
 #[cfg(test)]

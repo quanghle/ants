@@ -50,7 +50,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Credentials(page) => page.draw(frame, view, data, now, focused),
         Page::Held(page) => page.draw(frame, view, data, now, focused),
     }
-    model.bar.draw(frame, bar, &model.completions());
+    model.bar.draw(frame, bar, &model.completions(), &model.enter_hint());
     if nav_focused && !model.fold.nav(width) {
         let over = Rect { width: NAV_WIDTH.min(view.width), ..view };
         frame.render_widget(Clear, over);
@@ -326,10 +326,29 @@ mod tests {
     }
 
     #[test]
+    fn with_no_thread_read_home_says_what_to_type_and_the_bar_what_enter_does() {
+        let mut m = model();
+        m.stored(vec![], at(0));
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("@ant and a text") && shown.contains("Ctrl-K and a text"), "{shown}");
+        assert!(shown.contains("Enter asks the assistant or the messenger · @ ant · # channel"), "{shown}");
+        let thread = ThreadId::generate();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
+        let shown = screen(&m, at(2));
+        assert!(shown.contains("nothing waits on a human") && !shown.contains("@ant and a text"), "{shown}");
+        m.select(nav::Item::Work(None));
+        screen(&m, at(2));
+        m.key(Key::Enter, at(2));
+        assert!(screen(&m, at(2)).contains("Enter replies on the thread · @ ant"));
+        m.select(nav::Item::Channel("ops".parse().unwrap()));
+        assert!(screen(&m, at(2)).contains("Enter starts a thread in #ops · @ ant"));
+    }
+
+    #[test]
     fn the_command_bar_shows_its_hint_then_its_text_status_and_keys() {
         let mut m = model();
         let shown = screen(&m, at(0));
-        assert!(shown.contains("Ctrl-K commands · @ ant · # channel"), "{shown}");
+        assert!(shown.contains("· @ ant · # channel · Ctrl-K commands"), "{shown}");
         m.key(Key::Char('@'), at(0));
         let shown = screen(&m, at(0));
         assert!(shown.contains("@bob") && shown.contains("human"), "{shown}");
