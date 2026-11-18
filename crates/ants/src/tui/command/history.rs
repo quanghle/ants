@@ -1,11 +1,12 @@
 //! The history of the bar: the texts sent from it, latest first, which Ctrl-P and Ctrl-N recall and Ctrl-R searches,
 //! and those Esc twice emptied it of. The latest [`KEPT`] are kept on the device in [`FILE`] beside
 //! `chat-state.json`, readable by its owner only, with the drafts of the conversations; a text or draft addressed to
-//! another human, which goes sealed, is kept for the run only.
+//! another human, which goes sealed, or a slash command acting on a thread where it would, is kept for the run only.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
+use ants_proto::ThreadId;
 use anyhow::Result;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -70,7 +71,7 @@ struct KeptDraft {
 
 impl History {
     /// Add `text` as the latest, `private` when it is addressed to another human.
-    fn push(&mut self, text: &str, private: bool) {
+    pub(super) fn push(&mut self, text: &str, private: bool) {
         if text.trim().is_empty() {
             return;
         }
@@ -120,11 +121,35 @@ impl Data {
     }
 }
 
+/// The slash commands acting on no thread.
+const THREADLESS: &[&str] = &["goto", "search", "digest", "attach", "detach", "retire", "quit", "notify"];
+
 impl Model {
+    /// Whether `text` typed in `conversation` is kept for the run only: addressed to another human ([`Data::private`]),
+    /// or a slash command acting on a thread where a text would be: the one open or selected for the conversation
+    /// shown, the conversation's own for another, and any thread when not known.
+    pub(super) fn sealed(&self, conversation: &Conversation, text: &str) -> bool {
+        let data = &self.data;
+        if data.private(conversation, text) {
+            return true;
+        }
+        let Some(command) = text.trim_start().strip_prefix('/').filter(|c| !c.starts_with('/')) else { return false };
+        let name = command.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
+        if THREADLESS.contains(&name.as_str()) {
+            return false;
+        }
+        let target: Option<ThreadId> = match conversation {
+            Conversation::Thread(thread) => Some(thread.clone()),
+            _ if conversation == data.drafts.here() => self.target().ok(),
+            _ => None,
+        };
+        target.is_none_or(|thread| data.private(&Conversation::Thread(thread), text))
+    }
+
     /// Add `text`, typed in the conversation shown, to the bar's history as the latest; kept for the run only when
-    /// addressed to another human.
+    /// [`Self::sealed`].
     pub fn push_history(&mut self, text: &str) {
-        let private = self.data.private(self.data.drafts.here(), text);
+        let private = self.sealed(self.data.drafts.here(), text);
         self.data.history.push(text, private);
     }
 
@@ -253,8 +278,7 @@ impl Model {
         self.follow_drafts();
     }
 
-    /// Keep the history and the drafts in the file they were taken from, leaving out what is addressed to another
-    /// human.
+    /// Keep the history and the drafts in the file they were taken from, leaving out those [`Self::sealed`].
     pub fn keep_history(&mut self) {
         let Some(path) = self.data.history.file.clone() else { return };
         self.data.history.unsaved = false;
@@ -270,7 +294,7 @@ impl Model {
         let kept = data.drafts.kept().map(|(conversation, draft)| (conversation, draft.text()));
         let drafts = std::iter::once(here)
             .chain(kept)
-            .filter(|(conversation, text)| !text.trim().is_empty() && !data.private(conversation, text))
+            .filter(|(conversation, text)| !text.trim().is_empty() && !self.sealed(conversation, text))
             .map(|(conversation, text)| KeptDraft { conversation: conversation.clone(), text })
             .collect();
         if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
@@ -423,6 +447,36 @@ mod tests {
         m.pages.push(Page::Thread(thread::Page::new(ours)));
         m.follow_drafts();
         assert_eq!(m.bar.text(), "ship it", "the thread's draft is in its bar");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_command_for_a_sealed_thread_selected_on_home_stays_out_of_the_file() {
+        let dir = ants_test_support::scratch_dir("bar-sealed-command");
+        let path = dir.join(FILE);
+        let theirs = ThreadId::generate();
+        let mut m = model();
+        m.load_history(Some(path.clone()));
+        m.stored(vec![message(1, &theirs, "bob", "alice", "lunch?")], at(1));
+        assert_eq!(m.target(), Ok(theirs), "home selects the thread between two humans");
+        sent(&mut m, "/title Bob surprise party");
+        sent(&mut m, "/search budget");
+        m.bar.focused = true;
+        typed(&mut m, "/title Bob cake");
+        m.key(Key::Esc, at(1));
+        m.key(Key::Esc, at(1));
+        assert!(m.bar.is_empty(), "Esc twice empties the bar into the history");
+        m.bar.focused = true;
+        typed(&mut m, "/title Bob balloons");
+        m.keep_history();
+        let kept = std::fs::read_to_string(&path).unwrap();
+        for private in ["surprise", "cake", "balloons"] {
+            assert!(!kept.contains(private), "{private} is in {kept}");
+        }
+        assert!(kept.contains("/search budget"), "a command acting on no thread is kept: {kept}");
+        m.bar.set_text("");
+        m.key(Key::Ctrl('p'), at(1));
+        assert_eq!(m.bar.text(), "/title Bob cake", "kept for the run");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

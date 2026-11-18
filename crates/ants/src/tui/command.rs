@@ -98,6 +98,8 @@ impl Model {
             return None;
         }
         let slash = matches!(command, Ok(Command::Slash(_)));
+        // Before the command moves the view, and so what it acts on.
+        let sealed = self.sealed(self.data.drafts.here(), &text);
         let route = self.route(&text);
         let done = command.and_then(|command| match command {
             Command::Slash(command) => self.command(command, now),
@@ -114,7 +116,7 @@ impl Model {
                 return None;
             }
         };
-        self.push_history(&text);
+        self.data.history.push(&text, sealed);
         self.bar.set_text("");
         self.bar.status = None;
         if slash {
