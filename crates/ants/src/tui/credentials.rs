@@ -18,8 +18,8 @@ use futures::future::LocalBoxFuture;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{ListState, Paragraph, Wrap};
 use tokio::time::Instant;
 
 use super::model::{Action, Data, Key, To};
@@ -295,7 +295,7 @@ impl Page {
         let tall = u16::try_from(about.len() * 2).unwrap_or(u16::MAX);
         let [top, list] = Layout::vertical([Constraint::Max(tall), Constraint::Min(0)]).areas(inner);
         frame.render_widget(Paragraph::new(about).wrap(Wrap { trim: false }), top);
-        let rows: Vec<ListItem> = heard
+        let rows: Vec<Text> = heard
             .asked
             .iter()
             .map(|a| {
@@ -307,7 +307,7 @@ impl Page {
                     Asked::Enroll(_) => "a approve · r reject",
                     Asked::Renew(_) => "a renew",
                 };
-                ListItem::new(vec![
+                Text::from(vec![
                     Line::from(vec![
                         Span::styled(format!("{label:<8}"), Style::new().fg(color)),
                         Span::raw(a.describe()),
@@ -318,7 +318,7 @@ impl Page {
             })
             .collect();
         let selected = self.selected.at(&Self::ids(&heard.asked));
-        let list_widget = List::new(rows).highlight_style(style::highlight(focused));
+        let list_widget = style::list(rows, Some(selected), focused);
         frame.render_stateful_widget(list_widget, list, &mut ListState::default().with_selected(Some(selected)));
     }
 }

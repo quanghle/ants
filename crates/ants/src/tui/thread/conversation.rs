@@ -2,7 +2,7 @@
 //! no reply in the order stored, how deep each nests, the indent and `⎿` drawn before them and the lines each row
 //! draws as.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -20,7 +20,9 @@ use crate::tui::{attach, images, markdown, react, style};
 
 /// How deep delegations nest, deeper ones shown at this depth.
 const MAX_DEPTH: usize = 4;
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub(super) const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// How long a spinner shows each frame, in milliseconds: 8 a second, or one a second with `[cli] animate = false`.
+pub const SPIN_MS: i64 = 125;
 /// Before a message, a turn or a tool call.
 const BULLET: &str = "●";
 /// Before a human's message at the top level.
@@ -192,6 +194,8 @@ pub(super) struct Shown<'a> {
     pub(super) marked: Option<(u64, usize)>,
     /// Where the images drawn go among the lines.
     pub(super) placed: RefCell<Vec<images::Placed>>,
+    /// Whether a spinner was drawn.
+    pub(super) spun: Cell<bool>,
 }
 
 /// Whether message `id` was withdrawn: here, or as the daemon's notice answering it among `entries` tells.
@@ -481,7 +485,10 @@ impl Shown<'_> {
     }
 
     fn spinner(&self) -> &'static str {
-        SPINNER[usize::try_from(self.now.timestamp()).unwrap_or(0) % SPINNER.len()]
+        self.spun.set(true);
+        let frame =
+            if self.data.looks.animates() { self.now.timestamp_millis() / SPIN_MS } else { self.now.timestamp() };
+        SPINNER[usize::try_from(frame).unwrap_or(0) % SPINNER.len()]
     }
 }
 

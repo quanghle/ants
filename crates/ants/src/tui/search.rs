@@ -16,8 +16,8 @@ use futures::future::LocalBoxFuture;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{ListState, Paragraph};
 
 use super::model::{Data, Key, To};
 use super::style::{self, ago};
@@ -150,8 +150,8 @@ impl Page {
             frame.render_widget(Paragraph::new(text).block(block), area);
             return;
         }
-        let items: Vec<ListItem> = self.matches().iter().map(|e| ListItem::new(self.row(e, data, now))).collect();
-        let list = List::new(items).block(block).highlight_style(style::highlight(focused));
+        let items: Vec<Text> = self.matches().iter().map(|e| Text::from(self.row(e, data, now))).collect();
+        let list = style::list(items, Some(self.selected), focused).block(block);
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(self.selected)));
     }
 

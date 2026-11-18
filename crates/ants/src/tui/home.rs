@@ -12,8 +12,8 @@ use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{ListState, Paragraph};
 
 use super::acts::Change;
 use super::approvals;
@@ -477,7 +477,7 @@ impl Page {
         let selected = self.at(&items);
         let width = usize::from(area.width.saturating_sub(9));
         let cursor = self.card(data, now).map(|(cursor, _)| cursor);
-        let rows: Vec<ListItem> = items
+        let rows: Vec<Text> = items
             .iter()
             .enumerate()
             .map(|(at, i)| {
@@ -531,10 +531,10 @@ impl Page {
                 } else {
                     lines.push(Line::styled(format!("         {} · {}", i.why.keys(), i.why.enter()), style::dim()));
                 }
-                ListItem::new(lines)
+                Text::from(lines)
             })
             .collect();
-        let list = List::new(rows).highlight_style(style::highlight(focused));
+        let list = style::list(rows, Some(selected), focused);
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
     }
 }

@@ -334,6 +334,14 @@ impl Chat {
         self.model.data.looks.tick(shown, started.elapsed().as_secs_f64())
     }
 
+    /// Whether a spinner on screen is due its next frame since the screen was `drawn`.
+    fn spin(&self, drawn: Instant) -> bool {
+        let frame = |at: chrono::DateTime<Utc>| at.timestamp_millis() / thread::SPIN_MS;
+        let now = Utc::now();
+        self.model.spinning()
+            && frame(now) != frame(now - chrono::TimeDelta::from_std(drawn.elapsed()).unwrap_or_default())
+    }
+
     /// Read the terminal and draw what changed, or everything every `REDRAW`.
     fn tick(
         &mut self,
@@ -349,6 +357,7 @@ impl Chat {
         *dirty |= self.held_log(logged);
         self.cards.threads(&self.model.data.live.order);
         *dirty |= self.animate(started);
+        *dirty |= self.spin(*drawn);
         if *dirty || drawn.elapsed() >= REDRAW {
             self.model.look(Utc::now());
             terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;

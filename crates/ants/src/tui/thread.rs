@@ -21,7 +21,7 @@ use ants_proto::{Quote, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -37,6 +37,7 @@ use crate::threads::thread::{Entry, Kind};
 
 mod conversation;
 
+pub use conversation::SPIN_MS;
 use conversation::{Item, Shown, busy, cut, glyphs, hm, rows, started, withdrawn_from, woken};
 
 /// How wide the side panel is, shown only when the view is at least [`PANEL_FROM`] wide.
@@ -78,6 +79,8 @@ pub struct Page {
     scroll: Cell<Scroll>,
     /// What the conversation drawn last laid out.
     laid: RefCell<Laid>,
+    /// Whether the conversation drawn last showed a spinner.
+    pub spinning: Cell<bool>,
     /// What the side panel shows of the thread besides its messages, once read.
     pub about: Option<About>,
     /// The message the thread was opened at, selected and held at the top of the view until a key moves it.
@@ -96,6 +99,7 @@ impl Page {
             top: Cell::new(0),
             scroll: Cell::new(Scroll::Latest),
             laid: RefCell::default(),
+            spinning: Cell::new(false),
             about: None,
             at: None,
             mark: attach::Mark::default(),
@@ -418,6 +422,7 @@ impl Page {
         let block = style::block(title, focused);
         let inner = block.inner(area);
         let (outer, area) = (area, catchup::draw_tldr(frame, inner, model, thread, now));
+        let [gutter, area] = Layout::horizontal([Constraint::Length(1), Constraint::Min(0)]).areas(area);
         let width = usize::from(area.width);
         let mut lines = vec![work::why(data, thread)];
         if let Some((line, at)) = data.live.progress_of(thread, width.saturating_sub(16)) {
@@ -428,7 +433,7 @@ impl Page {
         }
         let marked = self.attached().map(|e| (e.seq, self.mark.at(e.seq, e.attachments.len())));
         let busy = data.live.progress.contains_key(thread);
-        let shown = Shown { data, now, busy, width, marked, placed: RefCell::default() };
+        let shown = Shown { data, now, busy, width, marked, placed: RefCell::default(), spun: Cell::new(false) };
         let calls = data.calls.get(thread).map_or(&[][..], |c| c.calls());
         let ends = data.calls.get(thread).map_or(&[][..], |c| c.ends());
         let rows = rows(&self.history.entries, calls, ends, data.tools, busy, |u| data.is_human(u));
@@ -445,9 +450,7 @@ impl Page {
             if let Item::Message(e) = row.item {
                 messages.push((e.seq, start, lines.len()));
                 if Some(e.seq) == selected {
-                    for line in &mut lines[start..] {
-                        line.style = line.style.patch(style::highlight(focused));
-                    }
+                    lines[start].style = lines[start].style.add_modifier(Modifier::BOLD);
                     range = Some((start, lines.len()));
                 }
             }
@@ -465,6 +468,7 @@ impl Page {
             self.scroll.set(Scroll::At(top));
         }
         self.top.set(top);
+        self.spinning.set(shown.spun.get());
         let newer = messages.iter().filter(|(_, start, _)| *start >= top + height).count();
         *self.laid.borrow_mut() = Laid { height, lines: lines.len(), messages };
         let block = match newer {
@@ -476,6 +480,11 @@ impl Page {
         frame.render_widget(block, outer);
         let paragraph = Paragraph::new(lines).scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
         frame.render_widget(paragraph, area);
+        if let Some((start, end)) = range {
+            let bars =
+                (top..top + height).map(|at| if (start..end).contains(&at) { style::bar(focused) } else { "".into() });
+            frame.render_widget(Paragraph::new(bars.map(Line::from).collect::<Vec<_>>()), gutter);
+        }
         images::draw(frame, &data.images, &shown.placed.borrow(), top, area);
         if let Some(panel) = panel {
             let lines = self.panel(data, calls, now, usize::from(PANEL_WIDTH.saturating_sub(4)));
@@ -944,6 +953,31 @@ mod tests {
     }
 
     #[test]
+    fn a_spinner_turns_eight_times_a_second_unless_animate_is_off() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let entries = vec![message(1, &thread, "alice", "dev-a", "fix the build")];
+        m.stored(entries.clone(), at(1));
+        m.data.calls.status(&tool(&thread, "dev-a", "c1", Some("Run `cargo test`"), "in_progress", 2));
+        let busy = ants_proto::StatusUpdate::State { state: ants_proto::State::Working };
+        m.data.live.status(
+            &ants_proto::StatusEvent::new(crate::test_support::live::user("dev-a"), thread.clone(), busy),
+            at(2),
+        );
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let spinner = |m: &Model, now| {
+            let shown = screen(&page, m, 80, now);
+            shown.chars().find(|c| conversation::SPINNER.iter().any(|s| s.starts_with(*c))).unwrap()
+        };
+        let later = at(10) + chrono::TimeDelta::milliseconds(125);
+        assert_ne!(spinner(&m, at(10)), spinner(&m, later));
+        assert!(page.spinning.get());
+        m.data.looks = crate::tui::faces::Looks::new(crate::avatars::Depth::Plain, ants_proto::Theme::Dark, false);
+        assert_eq!(spinner(&m, at(10)), spinner(&m, later), "a frame a second");
+    }
+
+    #[test]
     fn the_view_shows_the_timeline_with_running_calls_and_a_panel_beside_it() {
         let thread = ThreadId::generate();
         let mut m = model();
@@ -1086,8 +1120,8 @@ mod tests {
         m.data.reactions.insert(nested, vec![reacted("check", &["alice"])]);
         let shown = screen(&page, &m, 100, at(2));
         // A wide glyph's second cell shows as a space on the test screen.
-        assert!(shown.contains("│  👀  2  :shipit: 1"), "{shown}");
-        assert!(shown.contains("│      ✅  1"), "under a nested message too: {shown}");
+        assert!(shown.contains("│   👀  2  :shipit: 1"), "{shown}");
+        assert!(shown.contains("│       ✅  1"), "under a nested message too: {shown}");
 
         m.pages.push(super::super::model::Page::Thread(page));
         m.key(Key::Home, at(2));
@@ -1122,12 +1156,12 @@ mod tests {
         page.history.loaded(&thread, Ok(entries)).unwrap();
         let rows = |page: &Page| screen(page, &m, 80, at(40)).lines().map(str::to_owned).collect::<Vec<_>>();
         let shown = rows(&page);
-        assert!(shown[1].starts_with("│❯ alice → dev-a"), "{shown:#?}");
-        assert_eq!(shown[2].trim_end_matches('│').trim_end(), "│  line 5");
+        assert!(shown[1].starts_with("│▌❯ alice → dev-a"), "selected: {shown:#?}");
+        assert_eq!(shown[2].trim_end_matches('│').trim_end(), "│▌  line 5");
         assert_eq!(page.key(Key::Char('y'), &m.data, at(40)), Some(To::Do(Action::Copy("line 5".to_owned()))));
         assert_eq!(rows(&page)[2], shown[2], "held until moved");
         page.key(Key::Up, &m.data, at(40));
-        assert_eq!(rows(&page)[2].trim_end_matches('│').trim_end(), "│  line 4", "moving starts from it");
+        assert_eq!(rows(&page)[2].trim_end_matches('│').trim_end(), "│▌  line 4", "moving starts from it");
         page.key(Key::End, &m.data, at(40));
         assert!(rows(&page)[22].contains("line 30"), "the latest at the bottom");
     }
@@ -1256,10 +1290,10 @@ mod tests {
         let shown = screen(&page, &m, 80, at(40));
         let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
         let from = shown.iter().position(|l| l.contains("alice → dev-a")).unwrap();
-        assert_eq!(shown[from + 1..from + 5], ["│  done:", "│", "│  • one", "│  • two"], "{shown:#?}");
-        assert!(shown[from + 5].starts_with("│  ⎿ ● dev-a → dev-b  check retry.rs  "), "one line on its heading");
-        assert!(shown[from + 6].starts_with("│      ⎿ ● dev-b → notes  "), "{shown:#?}");
-        assert_eq!(shown[from + 7..from + 10], ["│          Found", "│", "│          in two places"]);
+        assert_eq!(shown[from + 1..from + 5], ["│   done:", "│", "│   • one", "│   • two"], "{shown:#?}");
+        assert!(shown[from + 5].starts_with("│   ⎿ ● dev-a → dev-b  check retry.rs  "), "one line on its heading");
+        assert!(shown[from + 6].starts_with("│       ⎿ ● dev-b → notes  "), "{shown:#?}");
+        assert_eq!(shown[from + 7..from + 10], ["│           Found", "│", "│           in two places"]);
     }
 
     #[test]
@@ -1274,8 +1308,8 @@ mod tests {
         let shown = screen(&page, &m, 80, at(40));
         let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
         let from = shown.iter().position(|l| l.contains("alice → dev-b")).unwrap();
-        let quoted = "│  ↪ replying to dev-a: picked dev-b for the deploy";
-        assert_eq!(shown[from + 1..from + 3], [quoted, "│  why that one?"], "{shown:#?}");
+        let quoted = "│   ↪ replying to dev-a: picked dev-b for the deploy";
+        assert_eq!(shown[from + 1..from + 3], [quoted, "│   why that one?"], "{shown:#?}");
     }
 
     #[test]
@@ -1298,11 +1332,11 @@ mod tests {
         let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
         let from = shown.iter().position(|l| l.contains("alice → bob")).unwrap();
         assert!(shown[from].contains("alice → bob  🔒 "), "{shown:#?}");
-        assert_eq!(shown[from + 1], "│  lunch at noon?");
+        assert_eq!(shown[from + 1], "│   lunch at noon?");
         assert!(shown[from + 3].contains("🔒") && !shown[from + 3].contains("forged"), "{shown:#?}");
-        assert_eq!(shown[from + 4], "│  [sealed] sent before this device had a key");
+        assert_eq!(shown[from + 4], "│   [sealed] sent before this device had a key");
         assert!(shown[from + 6].contains("🔒") && shown[from + 6].contains("  forged  "), "{shown:#?}");
-        assert!(shown[from + 7].starts_with("│  [forged] "), "{shown:#?}");
+        assert!(shown[from + 7].starts_with("│   [forged] "), "{shown:#?}");
     }
 
     #[test]
@@ -1406,8 +1440,8 @@ mod tests {
         page.history.loaded(&thread, Ok(entries)).unwrap();
         let shown = screen(&page, &m, 80, at(3));
         // The paperclip takes two cells.
-        assert!(shown.contains("│  📎  before.png (1.5 KiB) image/png ◂"), "{shown}");
-        assert!(shown.contains("│  📎  after.png (1.5 KiB) image/png  "), "{shown}");
+        assert!(shown.contains("│   📎  before.png (1.5 KiB) image/png ◂"), "{shown}");
+        assert!(shown.contains("│   📎  after.png (1.5 KiB) image/png  "), "{shown}");
 
         let open = |page: &mut Page| match page.key(Key::Char('o'), &m.data, at(3)) {
             Some(To::Do(Action::Run(Job::Open(listed), text))) if text.is_empty() => listed.attachment.name,
@@ -1459,6 +1493,6 @@ mod tests {
             .filter(|&(x, y)| terminal.backend().buffer()[(x, y)].bg == red)
             .collect();
         let y = u16::try_from(line).unwrap() + 1;
-        assert_eq!(drawn, [(3, y), (4, y), (5, y), (6, y), (3, y + 1), (4, y + 1), (5, y + 1), (6, y + 1)]);
+        assert_eq!(drawn, [(4, y), (5, y), (6, y), (7, y), (4, y + 1), (5, y + 1), (6, y + 1), (7, y + 1)]);
     }
 }

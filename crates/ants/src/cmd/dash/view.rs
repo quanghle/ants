@@ -7,13 +7,13 @@ use chrono::{DateTime, TimeDelta, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Clear, ListState, Paragraph, Wrap};
 
 use super::model::{Detail, Level, Model, Pane};
 use crate::live::Link;
 use crate::threads::thread;
-use crate::tui::style::{self, ago, block, dim, highlight};
+use crate::tui::style::{self, ago, block, dim};
 use crate::{colony, tools};
 
 /// How old the last read of the stream may be before it shows as stale: a few of the dashboard's periodic reads.
@@ -88,9 +88,9 @@ fn draw_threads(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>
     };
     let focused = model.focus == Pane::Threads && model.detail.is_none();
     let title = format!(" Threads ({}, {since}) ", model.live.order.len());
-    let items: Vec<ListItem> = model.live.order.iter().map(|t| ListItem::new(thread_row(model, t, now))).collect();
+    let items: Vec<Text> = model.live.order.iter().map(|t| Text::from(thread_row(model, t, now))).collect();
     let selected = model.selected.as_ref().and_then(|s| model.live.order.iter().position(|t| t == s));
-    let list = List::new(items).block(block(title, focused)).highlight_style(highlight(focused));
+    let list = style::list(items, selected, focused).block(block(title, focused));
     if model.live.order.is_empty() {
         let text = if model.live.stored_at.is_some() { "no threads" } else { "reading the stream…" };
         frame.render_widget(Paragraph::new(text).block(block(" Threads ".to_owned(), focused)), area);
@@ -150,8 +150,8 @@ fn draw_approvals(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Ut
         frame.render_widget(Paragraph::new("none pending").block(block), area);
         return;
     }
-    let items: Vec<ListItem> = model.live.approvals.iter().map(|r| ListItem::new(approval_row(r, now))).collect();
-    let list = List::new(items).block(block).highlight_style(highlight(focused));
+    let items: Vec<Text> = model.live.approvals.iter().map(|r| Text::from(approval_row(r, now))).collect();
+    let list = style::list(items, Some(model.approval), focused).block(block);
     frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(model.approval)));
 }
 

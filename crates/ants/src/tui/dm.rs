@@ -10,8 +10,8 @@ use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{ListState, Paragraph};
 
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
@@ -132,12 +132,12 @@ fn said(said: &Said, width: usize) -> String {
 
 /// The row of a direct thread in the list: its unread badge and title, how many messages it has and when the latest
 /// came, then what that one says.
-fn row(data: &Data, dm: &Dm, width: usize, now: DateTime<Utc>) -> ListItem<'static> {
+fn row(data: &Data, dm: &Dm, width: usize, now: DateTime<Utc>) -> Text<'static> {
     let unread = unread_on(data, dm);
     let badge = if unread == 0 { "   ".to_owned() } else { format!("{unread:>2} ") };
     let count = dm.messages.len();
     let plural = if count == 1 { "" } else { "s" };
-    ListItem::new(vec![
+    Text::from(vec![
         Line::from(vec![
             Span::styled(badge, Style::new().fg(Color::Yellow).bold()),
             Span::raw(data.title(&dm.thread)),
@@ -232,9 +232,9 @@ impl Page {
             frame.render_widget(Paragraph::new(text).block(block), list);
         } else {
             let width = usize::from(list.width.saturating_sub(4));
-            let rows: Vec<ListItem> = dms.iter().map(|dm| row(data, dm, width, now)).collect();
-            let list_widget = List::new(rows).block(block).highlight_style(style::highlight(focused));
+            let rows: Vec<Text> = dms.iter().map(|dm| row(data, dm, width, now)).collect();
             let selected = self.selected.at(&dms.iter().map(|dm| dm.thread.clone()).collect::<Vec<_>>());
+            let list_widget = style::list(rows, Some(selected), focused).block(block);
             frame.render_stateful_widget(list_widget, list, &mut ListState::default().with_selected(Some(selected)));
         }
         let (text, style) = match &self.draft {

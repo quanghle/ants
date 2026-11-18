@@ -764,6 +764,11 @@ impl Model {
     }
 
     /// The ant shown, for its queue to be read.
+    /// Whether the view drawn last shows a spinner that moves, so that the screen is drawn at its frame rate.
+    pub fn spinning(&self) -> bool {
+        self.data.looks.animates() && matches!(self.page(), Page::Thread(page) if page.spinning.get())
+    }
+
     pub fn ant_shown(&self) -> Option<UserId> {
         let Page::Ant(page) = self.page() else { return None };
         Some(page.ant.clone())
