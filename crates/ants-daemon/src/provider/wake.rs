@@ -27,17 +27,23 @@ pub const WAKES_PER_HOUR: usize = 60;
 
 const HOUR: Duration = Duration::from_hours(1);
 
-/// The ants this process serves, each with what wakes it.
-static SERVED: Mutex<BTreeMap<UserId, Arc<Waker>>> = Mutex::new(BTreeMap::new());
+/// The ants a process serves, each with what wakes it ([`serve`]); clones share them.
+#[derive(Clone, Default)]
+pub struct Wakers(Arc<Mutex<BTreeMap<UserId, Arc<Waker>>>>);
 
-/// What ants serves a provider: wake requests for the ants of this process that have it as their provider.
-#[derive(Default)]
+/// What ants serves a provider: wake requests for the ants of the process that have it as their provider.
 pub struct Ants {
     /// The provider's name, once connected.
     name: OnceLock<String>,
+    served: Wakers,
 }
 
 impl Ants {
+    /// Wake requests for the ants `served` lists.
+    pub fn new(served: Wakers) -> Self {
+        Self { name: OnceLock::new(), served }
+    }
+
     /// Take the provider, connected, as named `name`.
     pub fn named(&self, name: &str) {
         let _ = self.name.set(name.to_owned());
@@ -50,7 +56,7 @@ impl Host for Ants {
             let Some(provider) = self.name.get() else {
                 return Err(unavailable("the provider is not connected yet"));
             };
-            let waker = SERVED.locked().get(&request.ant).cloned();
+            let waker = self.served.0.locked().get(&request.ant).cloned();
             let Some(waker) = waker else {
                 return Err(unavailable(&format!("ant {} is not served here", request.ant)));
             };
@@ -61,36 +67,38 @@ impl Host for Ants {
 
 /// While it lives, the ant's daemon takes wake requests from the ant's provider ([`serve`]).
 pub struct Serving {
+    served: Wakers,
     waker: Arc<Waker>,
 }
 
 impl Drop for Serving {
     fn drop(&mut self) {
-        let mut served = SERVED.locked();
+        let mut served = self.served.0.locked();
         if served.get(&self.waker.ant).is_some_and(|w| Arc::ptr_eq(w, &self.waker)) {
             served.remove(&self.waker.ant);
         }
     }
 }
 
-/// Take the wake requests of `ant`'s provider, if it has one, with what its daemon serves it with: the outbox it sends
-/// as the ant through, its sessions, and `marks`, its keys of [`ants_proto::ATTEMPTS_BUCKET`].
+/// Take the wake requests of `ant`'s provider among `providers`, if it has one, with what its daemon serves it with: the
+/// outbox it sends as the ant through, its sessions, and `marks`, its keys of [`ants_proto::ATTEMPTS_BUCKET`].
 pub async fn serve(
+    providers: &super::Providers,
     ant: &UserId,
     js: &jetstream::Context,
     outbox: Outbox,
     sessions: SessionStore,
     marks: DirectKv,
 ) -> Option<Serving> {
-    let provider = super::of(ant).await?;
+    let provider = providers.of(ant).await?;
     let waker = Waker::new(ant.clone(), provider.name(), outbox, sessions, marks, Owners::new(js.clone()));
-    Some(register(waker))
+    Some(register(providers.wakers(), waker))
 }
 
-fn register(waker: Waker) -> Serving {
+fn register(served: &Wakers, waker: Waker) -> Serving {
     let waker = Arc::new(waker);
-    SERVED.locked().insert(waker.ant.clone(), waker.clone());
-    Serving { waker }
+    served.0.locked().insert(waker.ant.clone(), waker.clone());
+    Serving { served: served.clone(), waker }
 }
 
 /// What wakes one ant.

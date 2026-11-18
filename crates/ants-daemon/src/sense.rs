@@ -7,7 +7,7 @@
 //! keeps the sense data in it ([`take_over`]).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use ants_proto::provider::Provider;
 use ants_proto::{Envelope, UserId};
@@ -25,20 +25,25 @@ pub(crate) use scheduler::{Daemon, Dreaming, Serving};
 pub use stores::{Hosting, Link};
 
 use crate::daemon::Config;
-use crate::provider::Setting;
+use crate::provider::wake::Wakers;
 use stores::SenseStores;
 
-/// Built-in sense of a process: one serves all its ants whose setting names sense, each call naming its ant.
+/// Built-in sense of a process ([`crate::provider::Providers::sense`]): one serves all its ants whose setting names
+/// sense, each call naming its ant.
 pub struct Sense {
     stores: Arc<SenseStores>,
     provider: Arc<ants_sense::Sense>,
+    workdirs: workdirs::Directories,
+    /// The ants of the process its schedules wake.
+    wakers: Wakers,
 }
 
 impl Sense {
-    fn new() -> Self {
-        let stores = SenseStores::new();
-        let provider = ants_sense::Sense::with_stores(stores.clone()).with_workdirs(Arc::new(workdirs::Directories));
-        Self { stores, provider: Arc::new(provider) }
+    /// Sense waking the ants `wakers` lists.
+    pub(crate) fn new(wakers: Wakers) -> Self {
+        let (stores, workdirs) = (SenseStores::new(), workdirs::Directories::default());
+        let provider = ants_sense::Sense::with_stores(stores.clone()).with_workdirs(Arc::new(workdirs.clone()));
+        Self { stores, provider: Arc::new(provider), workdirs, wakers }
     }
 
     /// Serve the sense data of `ant`, whose home is `home` and whose credentials are at `creds`, if any
@@ -61,7 +66,7 @@ impl Sense {
     /// daemon what `dreaming` gives. Start only after the ant holds its colony registration and its wake service is
     /// installed.
     pub(crate) fn schedule(&self, config: &Config, machine: &str, dreaming: Arc<dyn Dreaming>) -> Serving {
-        scheduler::serve(self.provider.clone(), config, machine, dreaming)
+        scheduler::serve(self.provider.clone(), self.wakers.clone(), config, machine, dreaming)
     }
 
     /// Take `envelope`, a message from an ant to `ant`, if it is its sage's answer to the review of a dream: whether
@@ -78,19 +83,8 @@ impl Sense {
 
     /// Resolve the file access of `ant` through `dirs`, the workdirs of its threads, until the guard drops.
     pub(crate) fn workdirs(&self, ant: &UserId, dirs: crate::mcp::Directories) -> workdirs::Serving {
-        workdirs::serve(ant, Arc::new(dirs))
+        workdirs::serve(&self.workdirs, ant, Arc::new(dirs))
     }
-}
-
-/// Built-in sense of the process.
-pub fn built_in() -> &'static Sense {
-    static BUILT_IN: LazyLock<Sense> = LazyLock::new(Sense::new);
-    &BUILT_IN
-}
-
-/// Built-in sense of the process when `setting` names it.
-pub fn of(setting: &Setting) -> Option<&'static Sense> {
-    matches!(setting, Setting::Sense).then(built_in)
 }
 
 /// List among the earlier names of `ant`, whose home is `home`, the name the sense data there were last of, when

@@ -36,7 +36,7 @@ pub(super) async fn export(
     if let Err(e) = listed(orders, order) {
         return refused(order, &e);
     }
-    export_from(js, orders, order, identity, crate::provider::of(&order.ant).await.as_ref()).await
+    export_from(js, orders, order, identity, orders.providers.of(&order.ant).await.as_ref()).await
 }
 
 /// The export of the ant of `order` from `provider`, stored.
@@ -88,7 +88,7 @@ pub(super) async fn import(
     if let Err(e) = listed(orders, order) {
         return refused(order, &e);
     }
-    import_into(js, orders, order, identity, payload, crate::provider::of(&order.ant).await.as_ref()).await
+    import_into(js, orders, order, identity, payload, orders.providers.of(&order.ant).await.as_ref()).await
 }
 
 /// Hand `provider` the export stored at `payload` for the ant of `order`.

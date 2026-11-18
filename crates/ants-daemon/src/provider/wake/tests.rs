@@ -187,12 +187,13 @@ impl Provider for Clock {
 async fn a_provider_wakes_only_the_ants_served_here() {
     let Some(setup) = Setup::start().await else { return };
     let clock = Arc::new(Clock::default());
-    super::super::connect(clock.clone()).await.expect("connects");
+    let served = Wakers::default();
+    super::super::connect(clock.clone(), &served).await.expect("connects");
     let host = clock.host.locked().clone().unwrap();
     let ant = p("wake-served");
     let unserved = host.wake(request(&ant, None, "r1")).await.unwrap_err();
     assert_eq!(unserved.code, RpcError::UNAVAILABLE);
-    let serving = register(setup.waker(&ant).await);
+    let serving = register(&served, setup.waker(&ant).await);
     let woken = host.wake(request(&ant, None, "r1")).await.unwrap();
     assert_eq!(setup.sent()[0].thread_id, woken.thread);
     drop(serving);

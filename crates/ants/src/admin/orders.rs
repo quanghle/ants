@@ -507,6 +507,7 @@ mod tests {
             remote_admin: true,
             config: None,
             restarts: Restarts::default(),
+            providers: Default::default(),
             leaf: None,
         };
         let (ants, watched) = tokio::sync::watch::channel(vec![dev_a.clone()]);

@@ -62,11 +62,12 @@ impl Drop for Serving {
 /// Start only after the ant holds its colony registration and its wake service is installed.
 pub(super) fn serve(
     sense: Arc<Sense>,
+    wakers: crate::provider::wake::Wakers,
     config: &crate::daemon::Config,
     machine: &str,
     dreaming: Arc<dyn Dreaming>,
 ) -> Serving {
-    let host = crate::provider::wake::Ants::default();
+    let host = crate::provider::wake::Ants::new(wakers);
     host.named(ants_sense::NAME);
     let settings = Settings {
         ant: config.ant.clone(),

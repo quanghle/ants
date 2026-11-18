@@ -169,7 +169,7 @@ async fn restarts_back_off_from_a_second_to_a_minute_and_again_after_a_minute_up
 async fn tools_are_offered_while_up_and_calls_meanwhile_say_why() {
     let fake = Fake::new(vec![None, None], provider);
     let supervised = Arc::new(Supervised::with_spawn("fake", Protocol::Provider, fake.spawn()));
-    let connected = crate::provider::connect(supervised.clone()).await.unwrap();
+    let connected = crate::provider::connect(supervised.clone(), &Default::default()).await.unwrap();
     assert_eq!(connected.name(), "fake", "named as the config names it");
     assert_eq!(connected.capabilities(), Capabilities { tools: true, ..Capabilities::NONE });
     assert_eq!(names(&connected.list_tools().await.unwrap()), ["echo"]);
@@ -194,13 +194,13 @@ async fn tools_are_offered_while_up_and_calls_meanwhile_say_why() {
 async fn a_provider_down_at_connect_declares_what_it_may() {
     let spawn: Spawn = Arc::new(|| Err(std::io::Error::other("no such file")));
     let supervised = Arc::new(Supervised::with_spawn("memo", Protocol::Provider, spawn.clone()));
-    let connected = crate::provider::connect(supervised.clone()).await.unwrap();
+    let connected = crate::provider::connect(supervised.clone(), &Default::default()).await.unwrap();
     assert_eq!(connected.capabilities(), super::super::USES);
     let down = connected.brief(brief()).await.unwrap_err();
     assert_eq!(down.message, "provider unavailable: memo is down: could not start: no such file; restarting in 1 s");
 
     let mcp = Arc::new(Supervised::with_spawn("github", Protocol::Mcp, spawn));
-    let connected = crate::provider::connect(mcp).await.unwrap();
+    let connected = crate::provider::connect(mcp, &Default::default()).await.unwrap();
     assert_eq!(connected.capabilities(), Capabilities { tools: true, ..Capabilities::NONE });
 }
 
@@ -208,7 +208,7 @@ async fn a_provider_down_at_connect_declares_what_it_may() {
 async fn an_mcp_server_serves_its_tools_alone() {
     let fake = Fake::new(vec![None], mcp_server);
     let supervised = Arc::new(Supervised::with_spawn("github", Protocol::Mcp, fake.spawn()));
-    let connected = crate::provider::connect(supervised.clone()).await.unwrap();
+    let connected = crate::provider::connect(supervised.clone(), &Default::default()).await.unwrap();
     assert_eq!((connected.name(), connected.agreed().provider.version.as_str()), ("github", "2.0"));
     assert_eq!(connected.capabilities(), Capabilities { tools: true, ..Capabilities::NONE });
     assert_eq!(names(&connected.list_tools().await.unwrap()), ["search_issues", "get"]);
@@ -238,7 +238,7 @@ async fn a_provider_process_that_exits_is_started_again() {
         protocol: Protocol::Provider,
     };
     let supervised = Arc::new(Supervised::start(&definition));
-    let connected = crate::provider::connect(supervised.clone()).await.unwrap();
+    let connected = crate::provider::connect(supervised.clone(), &Default::default()).await.unwrap();
     assert_eq!(connected.list_tools().await.unwrap(), ToolList::default());
     until(&supervised, |s| matches!(s, State::Down { .. })).await;
     let down = connected.call_tool(call("x")).await.unwrap_err().message;
