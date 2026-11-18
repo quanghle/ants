@@ -244,6 +244,9 @@ async fn humans_list_and_show_the_runs_conductors_keep() {
             thread: step.clone(),
             message: Uuid::now_v7(),
             sent_at: now - TimeDelta::minutes(1),
+            sent: true,
+            turn_budget: 8,
+            retries: 0,
         }],
         queued: vec![QueuedCall { call: 3, function: TrailFunction::Agent, args: json!({"prompt": "announce"}) }],
     };
