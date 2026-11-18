@@ -26,7 +26,8 @@ use crate::store::{Items, StoreError};
 /// The days of the ant's active time, its dormancies not counted, a sage's earlier findings reach back over.
 pub const TRACK_RECORD_DAYS: i64 = 30;
 /// The days of the ant's active time, its dormancies not counted, over which the verdicts on a sage's findings, and
-/// whether an applied one still holds, are told to the sage's records (`review_outcomes`): further than the packet shows.
+/// whether an applied one still holds, are told to the sage's records (`review_outcomes`): further than the packet
+/// shows.
 pub const OUTCOME_DAYS: i64 = 90;
 /// The share of a packet's budget the sage's earlier findings take at most: one part in this many.
 pub const TRACK_RECORD_SHARE: usize = 8;

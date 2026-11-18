@@ -784,8 +784,8 @@ impl Gathered {
 /// first, then those on the identity of the ant ([`identity_findings`]), then those on its practice as a sage from the
 /// records of the `reviews` it made ([`practice_findings`]), then those on the vital signs of the work ([`vitals`]), up
 /// to [`MAX_FINDINGS`]. An open finding on the identity, the practice or the vital signs holds while its ground does,
-/// taking the text, count and trust gathered now. One of the `rested` stays out while what it is about is unchanged and the
-/// ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts; `rested` keeps those resting on.
+/// taking the text, count and trust gathered now. One of the `rested` stays out while what it is about is unchanged and
+/// the ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts; `rested` keeps those resting on.
 async fn findings(
     items: &dyn Items,
     previous: Option<&Dream>,
