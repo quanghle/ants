@@ -235,6 +235,7 @@ fn record(conductor: &UserId, trail: Option<&str>, state: RunState, started: chr
             args: json!({"branch": "main"}),
             first_call: 0,
             started_at: started,
+            steps: 2,
         }],
         owner: Some(p("alice")),
         thread: ThreadId::generate(),
@@ -269,14 +270,17 @@ fn a_child_run_shows_the_call_it_answers_and_a_trail_call_its_child() {
         turn_budget: 0,
         retries: 0,
     };
-    let shown = |run: &TrailRun, pending: Vec<PendingCall>| {
-        runs::render(&runs::Detail { run: run.clone(), pending, queued: Vec::new(), journal: Vec::new() }, now)
+    let shown = |run: &TrailRun, pending: Vec<PendingCall>, children: Vec<TrailRun>| {
+        let detail = runs::Detail { run: run.clone(), pending, queued: Vec::new(), journal: Vec::new(), children };
+        runs::render(&detail, now)
     };
-    let text = shown(&child, Vec::new());
+    let text = shown(&child, Vec::new(), Vec::new());
     assert!(text.contains(&format!("\nchild run answering call 1 of run {}\n", parent.run)), "{text}");
-    let text = shown(&parent, vec![call]);
+    assert!(!text.contains("child runs:"), "{text}");
+    let text = shown(&parent, vec![call], vec![child.clone()]);
     let row = format!("  1  trail  run {}  sent 0s ago  thread {}  trail review\n", child.run, child.thread);
     assert!(text.contains(&row) && !text.contains("child run answering"), "{text}");
+    assert!(text.contains(&format!("\nchild runs:\n  {}  review  running  call 1\n", child.run)), "{text}");
 }
 
 #[test]
@@ -290,16 +294,24 @@ fn a_run_shows_the_legs_of_its_route_and_the_gotos_it_made() {
         args: json!({"version": "1.2"}),
         first_call: 2,
         started_at: now,
+        steps: 1,
     };
     run.route.push(next);
     let goto = |args, answer| JournalEntry { call: 1, function: TrailFunction::Goto, args, answer };
     let refused = goto(json!({"trail": "triage"}), CallAnswer::Error("the run entered trail triage before".into()));
-    let detail = runs::Detail { run: run.clone(), pending: Vec::new(), queued: Vec::new(), journal: vec![refused] };
+    let detail = runs::Detail {
+        run: run.clone(),
+        pending: Vec::new(),
+        queued: Vec::new(),
+        journal: vec![refused],
+        children: Vec::new(),
+    };
     let text = runs::render(&detail, now);
-    let (_, route) = text.split_once("\nroute:\n").unwrap_or_else(|| panic!("{text}"));
+    assert!(text.starts_with(&format!("run {} of trail triage\n", run.run)), "the trail it started: {text}");
+    let (_, route) = text.split_once("\nroute: triage -> release@review\n").unwrap_or_else(|| panic!("{text}"));
     let legs: Vec<&str> = route.lines().take(2).collect();
-    assert!(legs[0].starts_with("  1  trail triage at its start ") && legs[0].contains("  started "), "{text}");
-    assert!(legs[1].starts_with("  2  trail release at waypoint review  started "), "{text}");
+    assert!(legs[0].starts_with("  0  triage   start   started ") && legs[0].ends_with("  steps 2"), "{text}");
+    assert!(legs[1].starts_with("  1  release  review  started ") && legs[1].contains("  steps 1  "), "{text}");
     assert!(legs[1].ends_with("  state {\"version\":\"1.2\"}"), "{text}");
     assert!(text.contains("args: {\"branch\":\"main\"}\n"), "the run's input is its first leg's: {text}");
     let row = "  1  goto  dev-a  trail triage at its start  error: the run entered trail triage before\n";
@@ -307,10 +319,8 @@ fn a_run_shows_the_legs_of_its_route_and_the_gotos_it_made() {
     let header = serde_json::from_str::<serde_json::Value>(&runs::header_json(&run).unwrap()).unwrap();
     let route = header["route"].as_array().unwrap();
     assert!(route.len() == 2 && route.iter().all(|leg| leg.get("script").is_none()), "{header}");
-    assert!(
-        !runs::render(&runs::Detail { run: record(&p("dev-a"), None, RunState::Running, now), ..detail }, now)
-            .contains("route:")
-    );
+    let inline = runs::render(&runs::Detail { run: record(&p("dev-a"), None, RunState::Running, now), ..detail }, now);
+    assert!(inline.contains("\nroute: inline\n  0  inline  start  started "), "{inline}");
 }
 
 /// Put `value` under `key` of [`TRAIL_RUNS_BUCKET`], as the conductor owning the key does.
@@ -386,6 +396,7 @@ async fn humans_list_and_show_the_runs_conductors_keep() {
     let detail = runs::detail(&js, &waiting.run).await.unwrap();
     let json = serde_json::to_value(&detail).unwrap();
     assert!(json.get("session").is_none() && json["journal"].as_array().unwrap().len() == 2, "{json}");
+    assert!(detail.children.is_empty() && json.get("children").is_none(), "{json}");
     let text = runs::render(&detail, now);
     for line in [
         format!("run {} of trail deploy", waiting.run),

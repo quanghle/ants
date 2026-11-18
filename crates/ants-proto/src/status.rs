@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 #[cfg(doc)]
 use crate::ToolCall;
-use crate::{Error, Escalation, Questions, RunId, ThreadId, UserId, Verdict, subject};
+use crate::{Error, Escalation, Questions, RunId, ThreadId, TrailName, UserId, Verdict, subject};
 
 /// The most paths a tool call carries, in [`StatusUpdate::Tool`] and in timeline records.
 pub const MAX_TOOL_PATHS: usize = 8;
@@ -183,6 +183,17 @@ pub enum StatusUpdate {
         to: UserId,
         step_thread: ThreadId,
         stage: StepStage,
+    },
+    /// A leg of the trail run `run`, which the ant conducts and which reports on the thread, started: the leg `leg` of
+    /// its route, counted from 0, the first at the run's start and each next one a goto() led to, entering the saved
+    /// trail `trail` (absent for an inline script) at the waypoint `waypoint` (absent for the trail's start).
+    Leg {
+        run: RunId,
+        leg: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trail: Option<TrailName>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        waypoint: Option<String>,
     },
 }
 

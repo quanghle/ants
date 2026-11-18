@@ -54,13 +54,15 @@ pub(super) fn header_json(run: &TrailRun) -> Result<String> {
     Ok(value.to_string())
 }
 
-/// A run as `ants trail show RUN` shows it: its header, the calls it waits on, and its journal by call.
+/// A run as `ants trail show RUN` shows it: its header, the calls it waits on, its journal by call, and its child runs.
 #[derive(Debug, Serialize)]
 pub(super) struct Detail {
     pub(super) run: TrailRun,
     pub(super) pending: Vec<PendingCall>,
     pub(super) queued: Vec<QueuedCall>,
     pub(super) journal: Vec<JournalEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) children: Vec<TrailRun>,
 }
 
 /// The run `run`, of whichever conductor keeps it.
@@ -126,7 +128,7 @@ fn picked(runs: Vec<TrailRun>, pick: &Pick, listed: &str) -> Result<TrailRun> {
     }
 }
 
-/// The run `run` with the calls it waits on and its journal.
+/// The run `run` with the calls it waits on, its journal and its child runs.
 pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detail> {
     let header = find(js, run).await?;
     let session = session(js, &header).await?;
@@ -135,7 +137,9 @@ pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detai
         latest_in(js, TRAIL_RUNS_BUCKET, &calls).await?.iter().filter_map(|(k, v)| parse(k, v)).collect();
     journal.sort_by_key(|entry| entry.call);
     let (pending, queued) = session.map_or_default(|s| (s.pending, s.queued));
-    Ok(Detail { run: header, pending, queued, journal })
+    let mut children = list(js, Some(&header.conductor)).await?;
+    children.retain(|child| child.parent.as_ref().is_some_and(|parent| parent.run == *run));
+    Ok(Detail { run: header, pending, queued, journal, children })
 }
 
 /// The session the conductor of `run` keeps: the calls the run waits on and those queued. None before its first.
@@ -245,22 +249,41 @@ fn starter(by: &Starter) -> String {
     }
 }
 
-/// A row per leg of a run's route: where it entered which trail, when, and with what state after the first.
-fn legs(route: &[TrailLeg]) -> Vec<[String; 4]> {
+/// A row per leg of a run's route, counted from 0: its trail, the waypoint it entered at, when it started, the steps
+/// it sent, and the state it took after the first.
+fn legs(route: &[TrailLeg]) -> Vec<[String; 6]> {
     route
         .iter()
         .enumerate()
         .map(|(at, leg)| {
             let input = if at == 0 { String::new() } else { format!("state {}", excerpt(&leg.args.to_string(), 60)) };
-            [(at + 1).to_string(), entered(leg), format!("started {}", local(leg.started_at)), input]
+            [
+                at.to_string(),
+                leg.trail.as_ref().map_or_else(|| "inline".to_owned(), ToString::to_string),
+                leg.at.clone().unwrap_or_else(|| "start".to_owned()),
+                format!("started {}", local(leg.started_at)),
+                format!("steps {}", leg.steps),
+                input,
+            ]
         })
         .collect()
 }
 
-/// The run's header, limits, pending and queued calls and journal.
+/// A row per child run: its id, its route, its state and the call it answers.
+fn children(children: &[TrailRun]) -> Vec<[String; 4]> {
+    children
+        .iter()
+        .map(|child| {
+            let call = child.parent.as_ref().map_or_default(|parent| format!("call {}", parent.call));
+            [child.run.to_string(), child.route_text(), state(&child.state).to_owned(), call]
+        })
+        .collect()
+}
+
+/// The run's header, limits, route, child runs, pending and queued calls and journal.
 pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
-    let Detail { run: r, pending, queued, journal } = detail;
-    let mut out = match r.trail() {
+    let Detail { run: r, pending, queued, journal, children: kids } = detail;
+    let mut out = match r.first_trail() {
         Some(trail) => format!("run {} of trail {trail}\n", r.run),
         None => format!("run {} of an inline script\n", r.run),
     };
@@ -309,9 +332,11 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
     if !args.is_null() {
         let _ = writeln!(out, "args: {}", excerpt(&args.to_string(), 200));
     }
-    if r.route.len() > 1 {
-        out.push_str("\nroute:\n");
-        out.push_str(&indented(&super::columns(&legs(&r.route))));
+    let _ = writeln!(out, "\nroute: {}", r.route_text());
+    out.push_str(&indented(&super::columns(&legs(&r.route))));
+    if !kids.is_empty() {
+        out.push_str("\nchild runs:\n");
+        out.push_str(&indented(&super::columns(&children(kids))));
     }
     if !pending.is_empty() {
         out.push_str("\npending calls:\n");
@@ -338,27 +363,31 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
     }
     if !journal.is_empty() {
         out.push_str("\njournal:\n");
-        let rows: Vec<[String; 5]> = journal
-            .iter()
-            .map(|e| {
-                let answer = match &e.answer {
-                    CallAnswer::Ok(value) => {
-                        format!("ok: {}", excerpt(&value.as_str().map_or_else(|| value.to_string(), str::to_owned), 40))
-                    }
-                    CallAnswer::Error(error) => format!("error: {}", excerpt(error, 60)),
-                };
-                let whom = match e.function {
-                    TrailFunction::Agent => whom(&e.args),
-                    TrailFunction::Human => r.owner.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string),
-                    TrailFunction::Trail | TrailFunction::Goto => r.conductor.to_string(),
-                };
-                let gist = if e.function == TrailFunction::Goto { destination(&e.args) } else { gist(&e.args) };
-                [e.call.to_string(), function(e.function).to_owned(), whom, gist, answer]
-            })
-            .collect();
-        out.push_str(&indented(&super::columns(&rows)));
+        out.push_str(&indented(&super::columns(&answered(r, journal))));
     }
     out
+}
+
+/// A row per call of the journal of `run`: its function, whom it asked, what, and its answer.
+fn answered(run: &TrailRun, journal: &[JournalEntry]) -> Vec<[String; 5]> {
+    journal
+        .iter()
+        .map(|e| {
+            let answer = match &e.answer {
+                CallAnswer::Ok(value) => {
+                    format!("ok: {}", excerpt(&value.as_str().map_or_else(|| value.to_string(), str::to_owned), 40))
+                }
+                CallAnswer::Error(error) => format!("error: {}", excerpt(error, 60)),
+            };
+            let whom = match e.function {
+                TrailFunction::Agent => whom(&e.args),
+                TrailFunction::Human => run.owner.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string),
+                TrailFunction::Trail | TrailFunction::Goto => run.conductor.to_string(),
+            };
+            let gist = if e.function == TrailFunction::Goto { destination(&e.args) } else { gist(&e.args) };
+            [e.call.to_string(), function(e.function).to_owned(), whom, gist, answer]
+        })
+        .collect()
 }
 
 /// A step of a trail run: the script's call `call`, labelled `label`, sent to `to` on its own thread `thread`, at

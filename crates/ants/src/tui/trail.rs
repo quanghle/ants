@@ -159,6 +159,7 @@ mod tests {
             args: json!(null),
             first_call: 0,
             started_at: Utc::now(),
+            steps: 0,
         }
     }
 

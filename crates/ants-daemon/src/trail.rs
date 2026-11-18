@@ -233,7 +233,7 @@ impl Leg {
             .numbered_from(first_call);
         let session = serde_json::to_string(engine.state()).map_err(|e| e.to_string())?;
         let at = engine.state().entry().map(str::to_owned);
-        let leg = TrailLeg { trail, at, script, args, first_call, started_at: Utc::now() };
+        let leg = TrailLeg { trail, at, script, args, first_call, started_at: Utc::now(), steps: 0 };
         Ok((leg, engine, session))
     }
 }
@@ -415,6 +415,7 @@ impl Trails {
         self.save_header(&slot).await?;
         self.inner.store.list(&run, true).await?;
         self.report_start(&started, &meta).await;
+        self.report_leg(&started);
         locked(&self.inner.runs).insert(run.clone(), slot);
         self.wake(&run);
         tracing::info!(run = %run, parent = ?started.parent.map(|parent| parent.run), "trail run started");

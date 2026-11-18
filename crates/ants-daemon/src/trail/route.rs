@@ -93,6 +93,9 @@ impl Trails {
         };
         let stored = stored.await;
         self.abandon(&header, &dropped).await;
+        if stored.is_ok() {
+            self.report_route(&header).await;
+        }
         self.wake_starved(&header);
         stored
     }

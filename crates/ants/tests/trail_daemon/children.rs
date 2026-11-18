@@ -198,6 +198,8 @@ async fn stopping_a_run_stops_its_child_and_resuming_it_resumes_the_child() {
     assert_eq!(lead.header(&run).await.state, RunState::Stopped { by: human.clone() });
     let told = lead.told().await;
     assert!(told.text.starts_with(&format!("Run {run} was stopped by human")), "{}", told.text);
+    let ended = lead.notes(&lead.header(&child).await.thread, 2).await.pop().unwrap();
+    assert!(ended.ends_with(&format!("; `ants trail resume {run}` continues it.")), "the parent's resume: {ended}");
     assert!(lead.reply(&step, "late").await, "the stopped child's step's reply is not prompted");
     assert!(lead.sends_no_step(Duration::from_secs(1)).await);
 

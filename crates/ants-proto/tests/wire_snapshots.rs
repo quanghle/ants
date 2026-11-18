@@ -967,6 +967,27 @@ fn status() {
                 via: None,
             },
         ),
+        (
+            "step",
+            StatusUpdate::Step {
+                run: run(),
+                call: 3,
+                label: Some("review".to_owned()),
+                to: user("dev-a"),
+                step_thread: other_thread(),
+                stage: StepStage::Answered,
+            },
+        ),
+        (
+            "leg",
+            StatusUpdate::Leg {
+                run: run(),
+                leg: 1,
+                trail: Some("release".parse().unwrap()),
+                waypoint: Some("review".to_owned()),
+            },
+        ),
+        ("leg_inline", StatusUpdate::Leg { run: run(), leg: 0, trail: None, waypoint: None }),
     ];
     for (kind, update) in updates {
         let event = StatusEvent { ant: user("dev-a"), thread_id: thread(), update, at: at(0) };
@@ -1327,6 +1348,7 @@ fn trail_child_runs() {
             args: serde_json::json!({"pr": 7}),
             first_call: 0,
             started_at: at(4),
+            steps: 1,
         }],
         owner: Some(user("alice")),
         thread: other_thread(),
@@ -1371,6 +1393,7 @@ fn routed_run() -> TrailRun {
                 args: serde_json::json!({"bug": 7}),
                 first_call: 0,
                 started_at: at(0),
+                steps: 2,
             },
             TrailLeg {
                 trail: Some("release".parse().unwrap()),
@@ -1379,6 +1402,7 @@ fn routed_run() -> TrailRun {
                 args: serde_json::json!({"version": "1.2.0"}),
                 first_call: 3,
                 started_at: at(2),
+                steps: 1,
             },
         ],
         owner: Some(user("alice")),
@@ -1415,6 +1439,7 @@ fn trails() {
         },
     );
     let header = routed_run();
+    assert_eq!(header.route_text(), "triage -> release@review");
     snap("trail_run", &header);
     let mut newer = serde_json::to_value(&header).unwrap();
     newer["paused_at"] = serde_json::json!("2025-01-01T12:05:00Z");

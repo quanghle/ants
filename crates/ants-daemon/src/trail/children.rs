@@ -228,6 +228,20 @@ impl Trails {
         self.ancestors(header).last().map_or_else(|| header.clone(), |slot| slot.header())
     }
 
+    /// The run whose resume resumes the child run of `header`, stopped by `by`: its farthest ancestor in memory stopped
+    /// along with it, else itself, unless the conductor stopped it alone, as its parent's goto() or end does.
+    pub(super) fn stopped_root(&self, header: &TrailRun, by: &UserId) -> Option<RunId> {
+        let stopped = self
+            .ancestors(header)
+            .into_iter()
+            .map(|slot| slot.header())
+            .take_while(|ancestor| matches!(ancestor.state, RunState::Stopped { .. }));
+        match stopped.last() {
+            Some(ancestor) => Some(ancestor.run),
+            None => (*by != self.inner.ant).then(|| header.run.clone()),
+        }
+    }
+
     /// The runs in memory of the tree whose root is `root`.
     fn tree(&self, root: &RunId) -> Vec<Arc<Slot>> {
         let runs = locked(&self.inner.runs);
@@ -266,7 +280,7 @@ impl Trails {
         }
         for slot in self.ancestors(header) {
             let mut book = slot.book();
-            book.header.steps = book.header.steps.saturating_add(steps);
+            driver::count_steps(&mut book.header, steps);
             book.header.turns = book.header.turns.saturating_add(turns);
         }
     }

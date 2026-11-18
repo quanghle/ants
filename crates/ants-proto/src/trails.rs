@@ -260,6 +260,17 @@ impl TrailRun {
         self.leg().and_then(|leg| leg.trail.as_ref())
     }
 
+    /// The saved trail the run started; none for a script given inline.
+    pub fn first_trail(&self) -> Option<&TrailName> {
+        self.route.first().and_then(|leg| leg.trail.as_ref())
+    }
+
+    /// The run's route in a line: each leg's [`TrailLeg::entry`], in order, joined by ` -> `, as in
+    /// `triage -> fix@patch -> triage@report`.
+    pub fn route_text(&self) -> String {
+        self.route.iter().map(TrailLeg::entry).collect::<Vec<_>>().join(" -> ")
+    }
+
     /// Whether the run is over: done or failed. A stopped run may still resume within its wall time.
     pub fn finished(&self) -> bool {
         self.state.finished()
@@ -286,6 +297,26 @@ pub struct TrailLeg {
     #[serde(default)]
     pub first_call: u32,
     pub started_at: DateTime<Utc>,
+    /// Steps sent during the leg, re-asks not counted, the steps of child runs it called included.
+    #[serde(default)]
+    pub steps: u32,
+}
+
+impl TrailLeg {
+    /// Where the leg entered, as a route names it ([`leg_entry`]).
+    pub fn entry(&self) -> String {
+        leg_entry(self.trail.as_ref(), self.at.as_deref())
+    }
+}
+
+/// Where a leg entered, as a route names it: its trail, `inline` for a script given inline, and `@` and the waypoint
+/// when it entered at one: `fix@patch`.
+pub fn leg_entry(trail: Option<&TrailName>, at: Option<&str>) -> String {
+    let trail = trail.map_or("inline", TrailName::as_str);
+    match at {
+        Some(at) => format!("{trail}@{at}"),
+        None => trail.to_owned(),
+    }
 }
 
 /// The run a child run answers a trail() call of ([`TrailRun::parent`]). A child run has its parent's conductor, owner

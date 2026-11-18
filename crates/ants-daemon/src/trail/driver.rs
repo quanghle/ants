@@ -335,7 +335,7 @@ impl Trails {
             steps += 1;
             {
                 let mut book = slot.book();
-                book.header.steps += 1;
+                count_steps(&mut book.header, 1);
                 book.pending.push(pending);
             }
             self.charge(&header, 1, 0);
@@ -449,6 +449,14 @@ struct Issued {
     answers: Vec<JournalEntry>,
     /// Whether a call waits for turns no step it waits on will give back.
     out_of_turns: bool,
+}
+
+/// Count `steps` sent to the run of `header` and to the leg it is on.
+pub(super) fn count_steps(header: &mut TrailRun, steps: u32) {
+    header.steps = header.steps.saturating_add(steps);
+    if let Some(leg) = header.route.last_mut() {
+        leg.steps = leg.steps.saturating_add(steps);
+    }
 }
 
 /// The turns a pending step may still spend.

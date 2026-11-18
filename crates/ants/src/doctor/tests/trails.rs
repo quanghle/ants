@@ -27,6 +27,7 @@ fn record(conductor: &str, state: RunState, hours: i64, now: DateTime<Utc>) -> T
             args: serde_json::Value::Null,
             first_call: 0,
             started_at: now - TimeDelta::hours(hours),
+            steps: 0,
         }],
         owner: Some(p("alice")),
         thread: ThreadId::generate(),

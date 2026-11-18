@@ -14,7 +14,8 @@ expression: value
           "bug": 7
         },
         "first_call": 0,
-        "started_at": "2025-01-01T12:00:00Z"
+        "started_at": "2025-01-01T12:00:00Z",
+        "steps": 2
       },
       {
         "trail": "release",
@@ -24,7 +25,8 @@ expression: value
           "version": "1.2.0"
         },
         "first_call": 3,
-        "started_at": "2025-01-01T12:02:00Z"
+        "started_at": "2025-01-01T12:02:00Z",
+        "steps": 1
       }
     ],
     "owner": "alice",
@@ -62,7 +64,8 @@ expression: value
           "bug": 7
         },
         "first_call": 0,
-        "started_at": "2025-01-01T12:00:00Z"
+        "started_at": "2025-01-01T12:00:00Z",
+        "steps": 2
       },
       {
         "trail": "release",
@@ -72,7 +75,8 @@ expression: value
           "version": "1.2.0"
         },
         "first_call": 3,
-        "started_at": "2025-01-01T12:02:00Z"
+        "started_at": "2025-01-01T12:02:00Z",
+        "steps": 1
       }
     ],
     "owner": "alice",
@@ -110,7 +114,8 @@ expression: value
           "bug": 7
         },
         "first_call": 0,
-        "started_at": "2025-01-01T12:00:00Z"
+        "started_at": "2025-01-01T12:00:00Z",
+        "steps": 2
       },
       {
         "trail": "release",
@@ -120,7 +125,8 @@ expression: value
           "version": "1.2.0"
         },
         "first_call": 3,
-        "started_at": "2025-01-01T12:02:00Z"
+        "started_at": "2025-01-01T12:02:00Z",
+        "steps": 1
       }
     ],
     "owner": "alice",
@@ -159,7 +165,8 @@ expression: value
           "bug": 7
         },
         "first_call": 0,
-        "started_at": "2025-01-01T12:00:00Z"
+        "started_at": "2025-01-01T12:00:00Z",
+        "steps": 2
       },
       {
         "trail": "release",
@@ -169,7 +176,8 @@ expression: value
           "version": "1.2.0"
         },
         "first_call": 3,
-        "started_at": "2025-01-01T12:02:00Z"
+        "started_at": "2025-01-01T12:02:00Z",
+        "steps": 1
       }
     ],
     "owner": "alice",

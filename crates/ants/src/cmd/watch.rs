@@ -265,6 +265,10 @@ impl Printer {
                     "[{thread}] {named}{forged}: trail run {run} step {call}{label} to {to} {stage} on {step_thread}"
                 ));
             }
+            StatusUpdate::Leg { run, leg, trail, waypoint } => {
+                let entry = ants_proto::leg_entry(trail.as_ref(), waypoint.as_deref());
+                return self.line(&format!("[{thread}] {named}{forged}: trail run {run} leg {leg} {entry} started"));
+            }
         };
         let key = (who.clone(), thread.clone(), verb);
         if !forged.is_empty() {

@@ -231,3 +231,99 @@ async fn an_untrusted_run_s_child_goes_on_untrusted_and_its_parent_takes_its_end
     assert_eq!(route(&lead.header(&run).await), [entered("relay", None)]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+const INTAKE: &str = r#"
+async def intake(args):
+    review = await trail("review")
+    await goto("fix", state=review)
+
+async def report(state):
+    return state
+"#;
+
+/// The leg and step events of the run on `thread`, in short, until `count` are in.
+async fn legs_and_steps(status: &mut async_nats::Subscriber, run: &RunId, count: usize) -> Vec<String> {
+    let mut seen = Vec::new();
+    while seen.len() < count {
+        let event = tokio::time::timeout(Duration::from_secs(10), status.next()).await.expect("a status").unwrap();
+        let event: StatusEvent = serde_json::from_slice(&event.payload).unwrap();
+        match event.update {
+            StatusUpdate::Leg { run: of, leg, trail, waypoint } => {
+                assert_eq!(&of, run);
+                seen.push(format!("leg {leg}: {}", ants_proto::leg_entry(trail.as_ref(), waypoint.as_deref())));
+            }
+            StatusUpdate::Step { label, to, stage, .. } => {
+                seen.push(format!("step {} to {to}: {}", label.unwrap_or_default(), stage.as_str()));
+            }
+            _ => {}
+        }
+    }
+    seen
+}
+
+#[tokio::test]
+async fn a_run_tells_its_route_on_its_thread_in_its_end_and_in_ants_trail_show() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-goto-told");
+    save(&dir, "triage", &["intake", "report"], INTAKE);
+    save(&dir, "review", &[], "await agent(\"review it\", ant=\"dev\")\n");
+    save(
+        &dir,
+        "fix",
+        &[],
+        "patch = await agent(f\"fix {args}\", ant=\"dev\")\nawait goto(\"triage\", at=\"report\", state=patch)\n",
+    );
+    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    let thread = ThreadId::generate();
+    let mut status = lead.client.subscribe(subject::status(&ant("lead"), &thread)).await.unwrap();
+    let run = lead.start_saved("triage", human_origin(), TrailLimits::default(), thread.clone()).await;
+    let reviewed = lead.step().await;
+    let child = reviewed.trail_step.as_ref().unwrap().run.clone();
+    assert!(lead.reply(&reviewed, "fine").await);
+    let fixed = lead.step().await;
+    assert_eq!(fixed.text, "fix fine");
+    assert!(lead.reply(&fixed, "patched").await);
+    assert_eq!(lead.result(&run).await, json!("patched"));
+
+    let route = "triage@intake -> fix -> triage@report";
+    let events = [
+        "leg 0: triage@intake",
+        "step trail review to lead: started",
+        "step trail review to lead: answered",
+        "leg 1: fix",
+        "step  to dev: started",
+        "step  to dev: answered",
+        "leg 2: triage@report",
+    ];
+    assert_eq!(legs_and_steps(&mut status, &run, events.len()).await, events);
+    let notes = lead.notes(&thread, 3).await;
+    let started = format!("Run {run} of trail triage started: a test");
+    assert_eq!(notes, [started, "route: triage@intake -> fix".to_owned(), format!("route: {route}")]);
+    let told = lead.told().await;
+    assert!(told.text.starts_with(&format!("Run {run} of trail triage is done (3 steps, ")), "{}", told.text);
+    assert!(told.text.ends_with(&format!("patched\nroute: {route}")), "{}", told.text);
+    let header = lead.header(&run).await;
+    let steps: Vec<u32> = header.route.iter().map(|leg| leg.steps).collect();
+    assert_eq!((header.route_text(), steps), (route.to_owned(), vec![2, 1, 0]), "the child's step is its leg's");
+
+    let show = |json: bool| {
+        let mut command = tokio::process::Command::new(ants_binary());
+        command.args(["--nats", &server.url, "trail", "show", run.as_str()]).env("HOME", &dir).env_remove("ANTS_CREDS");
+        command.env_remove("ANTS_CONFIG").args(json.then_some("--json"));
+        command.output()
+    };
+    let shown = show(false).await.unwrap();
+    let text = String::from_utf8_lossy(&shown.stdout);
+    assert!(shown.status.success(), "{}", String::from_utf8_lossy(&shown.stderr));
+    let (_, legs) = text.split_once(&format!("\nroute: {route}\n")).unwrap_or_else(|| panic!("{text}"));
+    let legs: Vec<&str> = legs.lines().take(3).collect();
+    assert!(legs[0].starts_with("  0  triage  intake  started ") && legs[0].ends_with("  steps 2"), "{text}");
+    assert!(legs[1].starts_with("  1  fix     start   started ") && legs[1].contains("  steps 1  state \"fine\""));
+    assert!(legs[2].starts_with("  2  triage  report  started ") && legs[2].contains("  steps 0  state "), "{text}");
+    assert!(text.contains(&format!("\nchild runs:\n  {child}  review  done  call 0\n")), "{text}");
+    let shown = show(true).await.unwrap();
+    let json: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(json["children"][0]["run"], child.as_str(), "{json}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
