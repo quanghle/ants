@@ -15,7 +15,7 @@ use crate::{
     OWNERS_BUCKET, Permissions, REACTIONS_BUCKET, READ_BUCKET, ReadMarker, SESSIONS_BUCKET, THREADS_BUCKET,
 };
 #[cfg(doc)]
-use crate::{JournalEntry, TrailRun, TrailRunIndex, TrailSession};
+use crate::{JournalEntry, TrailRun, TrailRunIndex, TrailSession, TrailStepThread};
 use crate::{
     PERMISSIONS_VERSION, PermissionsVersion, Reaction, RunId, TRAIL_RUNS_BUCKET, ThreadId, UserId, WEBHOOKS_BUCKET,
     subject,
@@ -393,6 +393,8 @@ pub fn webhook_marker_subject(webhook: &UserId) -> String {
 
 /// The key token of a conductor's [`TrailRunIndex`] ([`trail_runs_index_key`]), which no [`RunId`] is.
 pub const TRAIL_RUNS_INDEX: &str = "runs";
+/// The key token under which a conductor keeps its [`TrailStepThread`]s ([`trail_step_key`]), which no [`RunId`] is.
+pub const TRAIL_STEPS: &str = "steps";
 
 /// Key of a trail run's [`TrailRun`] in [`TRAIL_RUNS_BUCKET`]. Every key of a run starts with its conductor, so its
 /// credentials can be confined to its own runs.
@@ -413,6 +415,11 @@ pub fn trail_call_key(conductor: &UserId, run: &RunId, call: u32) -> String {
 /// Key of a conductor's [`TrailRunIndex`] in [`TRAIL_RUNS_BUCKET`].
 pub fn trail_runs_index_key(conductor: &UserId) -> String {
     format!("{conductor}.{TRAIL_RUNS_INDEX}")
+}
+
+/// Key of the [`TrailStepThread`] of the step thread `thread` of one of a conductor's runs in [`TRAIL_RUNS_BUCKET`].
+pub fn trail_step_key(conductor: &UserId, thread: &ThreadId) -> String {
+    format!("{conductor}.{TRAIL_STEPS}.{thread}")
 }
 
 /// The subject of every key of a conductor's runs in the stream of [`TRAIL_RUNS_BUCKET`]: those its credentials write.

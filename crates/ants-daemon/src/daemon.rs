@@ -441,7 +441,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         home: &config.storage.home,
         lifecycle: lifecycle.as_ref(),
         sense: providers.sense_of(&config.provider),
-        trails: trails(config, &client, &js, &humans, &colony, outbox, attempts_kv).await,
+        trails: trails(config, &client, &js, &humans, &colony, outbox, attempts_kv, notes.clone()).await,
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     forget_if_retired(&served, config, &js, retired_before).await;
@@ -451,6 +451,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
 
 /// The trails the ant conducts, their runs continued from their records; None, with a warning, when the bus keeps no
 /// runs.
+#[expect(clippy::too_many_arguments, reason = "the services a conductor writes through, each built by serve")]
 async fn trails(
     config: &Config,
     client: &async_nats::Client,
@@ -459,6 +460,7 @@ async fn trails(
     colony: &Colony,
     outbox: crate::mcp::Outbox,
     attempts: crate::records::direct_kv::DirectKv,
+    notes: std::sync::Arc<dyn NotesStore>,
 ) -> Option<Trails> {
     let conducting = crate::trail::Conducting {
         js: js.clone(),
@@ -471,6 +473,7 @@ async fn trails(
         colony: colony.clone(),
         outbox,
         attempts,
+        notes,
     };
     match Trails::new(conducting).await {
         Ok(trails) => {

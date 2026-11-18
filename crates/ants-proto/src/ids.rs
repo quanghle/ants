@@ -11,8 +11,8 @@ use uuid::Uuid;
 #[cfg(doc)]
 use crate::{AttachmentHandle, HUMANS_BUCKET, Humans, INTAKE_STREAM, STREAM, link_outbox, owner_outbox};
 use crate::{
-    Error, FILES_BUCKET, LINKS_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET, TRAIL_RUNS_INDEX, inbox_prefix,
-    subject,
+    Error, FILES_BUCKET, LINKS_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET, TRAIL_RUNS_INDEX, TRAIL_STEPS,
+    inbox_prefix, subject,
 };
 
 /// Whether `s` is safe as one NATS subject token and as a JetStream consumer name.
@@ -87,9 +87,9 @@ token_id!(JsDomain, "JetStream domain");
 token_id!(TrailName, "trail name");
 token_id!(
     /// A trail run's id, unique to its conductor's runs: one key token in [`crate::TRAIL_RUNS_BUCKET`], so never
-    /// [`TRAIL_RUNS_INDEX`], the key token of the conductor's index.
+    /// [`TRAIL_RUNS_INDEX`] or [`TRAIL_STEPS`], the key tokens of the conductor's index and step threads.
     RunId,
-    |s: &str| valid_token(s) && s != TRAIL_RUNS_INDEX,
+    |s: &str| valid_token(s) && s != TRAIL_RUNS_INDEX && s != TRAIL_STEPS,
     |value| Error::InvalidId { kind: "trail run id", value }
 );
 
@@ -321,7 +321,7 @@ mod tests {
     fn run_ids_are_tokens_other_than_the_index_key() {
         let run = RunId::generate();
         assert_eq!(run.as_str().parse::<RunId>().unwrap(), run);
-        for bad in [TRAIL_RUNS_INDEX, "a.b", "", "-r"] {
+        for bad in [TRAIL_RUNS_INDEX, TRAIL_STEPS, "a.b", "", "-r"] {
             assert!(bad.parse::<RunId>().is_err(), "{bad:?} should be rejected");
         }
     }

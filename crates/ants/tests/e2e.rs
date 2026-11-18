@@ -30,7 +30,7 @@ fn main() {
     if Path::new(&me).file_stem().is_some_and(|name| name == "copilot" || name == "stub-adapter") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 8] = [
+    let tests: [(&str, fn()); 9] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
         ("a_daemon_exits_once_its_executable_was_replaced", a_daemon_exits_once_its_executable_was_replaced),
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
@@ -44,6 +44,10 @@ fn main() {
         (
             "setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_threads",
             setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_threads,
+        ),
+        (
+            "a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread",
+            a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread,
         ),
     ];
     let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
@@ -857,6 +861,94 @@ fn setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_thr
     drop(server);
     assert!(complete(&["ants", "post", "o"]).is_empty(), "no server, no candidates");
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A run conducted by dev-a sends its step to dev-b, both served by one daemon: dev-b's reply comes back through
+/// dev-a's inbox to the run, not to dev-a's harness, and the run's thread shows its notes and its end.
+fn a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread() {
+    use ants_proto::{
+        ThreadId, TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailSource, subject,
+    };
+    use futures::StreamExt as _;
+
+    let Some(server) = NatsServer::start() else { return };
+    let dir = scratch_dir("trail");
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    link_self(&bin, "copilot");
+    let ants = |args: &[&str]| {
+        let mut command = Command::new(ANTS);
+        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
+        command
+    };
+    assert!(run(ants(&["init"])).status.success());
+    let metrics = format!("127.0.0.1:{}", free_port());
+    let mut config = format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\nmetrics = {metrics:?}\n");
+    for name in ["dev-a", "dev-b"] {
+        let (workdir, home) = (dir.join(name), dir.join(format!("{name}-home")));
+        std::fs::create_dir_all(&workdir).unwrap();
+        let _ = write!(config, "[[ant]]\nname = {name:?}\nworkdir = {workdir:?}\nhome = {home:?}\n");
+    }
+    std::fs::write(dir.join("config.toml"), config).unwrap();
+    let log = || std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
+    let mut daemon = ants(&["daemon", "--config"]);
+    daemon.arg(dir.join("config.toml")).env("HOME", &dir).env("PATH", &bin).env("RUST_LOG", "info");
+    let _daemon = Killed(
+        daemon.stdout(Stdio::null()).stderr(std::fs::File::create(dir.join("daemon.log")).unwrap()).spawn().unwrap(),
+    );
+    let start = Instant::now();
+    while log().matches("serving inbox").count() < 2 {
+        assert!(start.elapsed() < WAIT, "daemon log:\n{}", log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let script = "meta = {\"name\": \"e2e\", \"description\": \"one step\", \"phases\": [\"asking\"]}\n\
+                  phase(\"asking\")\nlog(\"to dev-b\")\nawait agent(\"say hi\", ant=\"dev-b\")\n";
+    let thread = ThreadId::generate();
+    let (dev_a, human) = ("dev-a".parse::<UserId>().unwrap(), UserId::human());
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let outcome = runtime.block_on(async {
+        let (client, _) = ants_daemon::bus::connect(&server.url, None, None, &human, "e2e").await.unwrap();
+        let mut answers = client.subscribe(subject::trailed(&dev_a)).await.unwrap();
+        let action = TrailAction::Start {
+            trail: TrailSource::Script(script.to_owned()),
+            args: serde_json::Value::Null,
+            thread: thread.clone(),
+            limits: TrailLimits::default(),
+        };
+        let request = TrailRequest::new(dev_a.clone(), human.clone(), action);
+        client.publish(request.subject(), serde_json::to_vec(&request).unwrap().into()).await.unwrap();
+        let answer = tokio::time::timeout(WAIT, answers.next()).await.expect("an answer").unwrap();
+        serde_json::from_slice::<TrailReply>(&answer.payload).unwrap().outcome
+    });
+    let TrailOutcome::Started { run: started } = outcome else { panic!("not started: {outcome:?}\n{}", log()) };
+
+    let start = Instant::now();
+    let shown = loop {
+        let shown = run(ants(&["thread", "show", thread.as_str()]));
+        let shown = String::from_utf8_lossy(&shown.stdout).into_owned();
+        if shown.contains(" is done (") {
+            break shown;
+        }
+        assert!(start.elapsed() < WAIT, "the run did not end:\n{shown}\ndaemon log:\n{}", log());
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let done = format!("Run {started} is done (1 steps, 1 turns):");
+    assert!(shown.contains("dev-a -> notes") && shown.contains("phase: asking\n  log: to dev-b"), "{shown}");
+    assert!(shown.contains("dev-a -> human") && shown.contains(&done) && shown.contains("stub: "), "{shown}");
+    // A prompt is counted as it ends, which may be after its reply arrived.
+    let start = Instant::now();
+    let exposition = loop {
+        let (_, exposition) = get(&metrics, "/metrics");
+        if exposition.lines().any(|l| l == "ants_prompts_total{ant=\"dev-b\"} 1") {
+            break exposition;
+        }
+        assert!(start.elapsed() < WAIT, "{exposition}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!exposition.contains("ants_prompts_total{ant=\"dev-a\"} 1"), "dev-a was prompted: {exposition}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Run `command` to completion, killing it after [`WAIT`].

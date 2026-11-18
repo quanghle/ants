@@ -4,7 +4,9 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use ants_proto::{DEFAULT_TURN_BUDGET, PendingCall, RunId, RunState, ThreadId, TrailFunction, TrailRun};
+use ants_proto::{
+    DEFAULT_TURN_BUDGET, PendingCall, RunId, RunState, StepStage, ThreadId, TrailFunction, TrailRun, TrailStepThread,
+};
 use ants_trail::{Call, Event, Function, JournalEntry, Progress, Run, RunError, Status};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -13,7 +15,7 @@ use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-use super::{Answer, Slot, Step, Trails, load, locked, report, steps};
+use super::{Answer, Slot, Step, Trails, load, locked, steps};
 
 /// Workers computing at once, across all the daemon's runs.
 pub const WORKERS: usize = 4;
@@ -173,15 +175,18 @@ impl Trails {
                 if let Event::Phase(phase) = event {
                     book.header.phase = Some(phase.clone());
                 }
-                report::reported(&book.header, event);
             }
             let (cancelled, pending) =
                 std::mem::take(&mut book.pending).into_iter().partition(|call| progress.cancelled.contains(&call.call));
             book.pending = pending;
             (book.header.clone(), cancelled)
         };
+        self.report_events(&header, &progress.events).await;
         for call in &cancelled {
             self.retire(&header.run, call);
+            if call.sent {
+                self.report_step(&header, call, StepStage::Dropped);
+            }
             self.withdraw_own(&header, call).await;
         }
     }
@@ -214,7 +219,10 @@ impl Trails {
         self.inner.store.list(&header.run, false).await?;
         locked(&self.inner.runs).remove(&header.run);
         self.forget(&header.run);
-        report::ended(&slot.header());
+        for call in pending.iter().filter(|call| call.sent) {
+            self.report_step(&header, call, StepStage::Dropped);
+        }
+        self.report_end(&slot.header()).await;
         Ok(())
     }
 
@@ -338,12 +346,18 @@ impl Trails {
         }
         for call in &unsent {
             let message = steps::envelope(&header, call).map_err(|e| anyhow!(e))?;
+            let thread = TrailStepThread {
+                run: header.run.clone(),
+                call: call.call,
+                to: call.to.clone(),
+                run_thread: header.thread.clone(),
+            };
+            self.inner.store.put_step(&call.thread, &thread).await?;
             (self.inner.outbox)(message).await?;
-            let mut book = slot.book();
-            if let Some(pending) = book.pending.iter_mut().find(|pending| pending.message == call.message) {
+            if let Some(pending) = slot.book().pending.iter_mut().find(|pending| pending.message == call.message) {
                 pending.sent = true;
             }
-            report::sent(&header, call);
+            self.report_step(&header, call, StepStage::Started);
         }
         self.save_session(slot).await
     }
