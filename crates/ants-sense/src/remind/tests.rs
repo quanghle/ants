@@ -122,8 +122,11 @@ async fn a_malformed_reminder_hides_itself_alone_from_listings() {
     let malformed = Values::from_iter([("status".to_owned(), json!("active")), ("title".to_owned(), json!(5))]);
     items.write(&[Write::Create { id: ItemId::new(), kind: KIND.into(), values: malformed }], "t1").await.unwrap();
     let firing = prepare_firing(&*items, &good, now(), "time due").await.unwrap().unwrap();
-    assert_eq!(pending_work(&*items).await.unwrap(), [firing.clone()]);
-    assert_eq!(due(&*items, now()).await.unwrap().into_iter().map(|due| due.id).collect::<Vec<_>>(), [good.clone()]);
+    assert_eq!(pending_work(&*items).await.unwrap(), std::slice::from_ref(&firing));
+    assert_eq!(
+        due(&*items, now()).await.unwrap().into_iter().map(|due| due.id).collect::<Vec<_>>(),
+        std::slice::from_ref(&good)
+    );
     let [fired, upcoming] = brief(&*items, now()).await.unwrap();
     assert_eq!(fired.lines.len(), 1, "{:?}", fired.lines);
     assert!(fired.lines[0].starts_with(&format!("- {good} ")), "{}", fired.lines[0]);
