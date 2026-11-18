@@ -2,10 +2,10 @@
 //! options, and once an answer is stored, who answered and with what. `1`-`9` answers the card the keys answer with
 //! that option at once when it asks one question; on several it picks for the first and focuses the card. Enter
 //! focuses that card ([`Cursor`]): with several questions, a tab for each (its header, else `Q1`…) and a last one to
-//! submit, ←→ (Tab) moving between them; it lists the current question's options one per line under a cursor: ↑↓ move
+//! submit, ←→ and Tab moving between them; it lists the current question's options one per line under a cursor: ↑↓ move
 //! it, Enter picks the option highlighted, digits pick at once, or where several may be picked, Space and digits
 //! toggle options and Enter confirms them; where the question allows a typed answer, a last row takes the text in
-//! place, Enter picking it (or, empty on a card of one question, opening the command bar on `/answer`). A pick sends
+//! place, edited as in the command bar (←→ moving in it, Tab alone then moving between questions), Enter picking it (or, empty on a card of one question, opening the command bar on `/answer`). A pick sends
 //! the answer of a card of one question, as `ants answer` does, and moves on to the next tab of several, the last
 //! sending every pick at once with Enter; Esc leaves the card.
 
@@ -17,6 +17,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::exec::Job;
+use super::input::Input;
 use super::model::{Action, Data, Key, To};
 use super::style;
 use crate::text::excerpt;
@@ -104,7 +105,7 @@ struct Tab {
     multi: bool,
     at: usize,
     toggled: BTreeSet<u32>,
-    typed: String,
+    typed: Input,
     pick: Option<Pick>,
 }
 
@@ -142,7 +143,7 @@ impl Cursor {
                 multi: q.multi_select,
                 at: 0,
                 toggled: BTreeSet::new(),
-                typed: String::new(),
+                typed: Input::default(),
                 pick: None,
             })
             .collect();
@@ -166,10 +167,11 @@ impl Cursor {
     /// key leads as the card leaves it, if anywhere.
     pub fn key(&mut self, key: Key, thread: &ThreadId) -> Option<Option<To>> {
         let (several, last) = (self.several(), if self.several() { self.tabs.len() } else { 0 });
+        let typing = self.tabs.get(self.tab).is_some_and(Tab::typing);
         match key {
             Key::Esc => return Some(None),
-            Key::Left => self.tab = self.tab.saturating_sub(1),
-            Key::Right => self.tab = (self.tab + 1).min(last),
+            Key::Left if !typing => self.tab = self.tab.saturating_sub(1),
+            Key::Right if !typing => self.tab = (self.tab + 1).min(last),
             Key::Tab => self.tab = if self.tab >= last { 0 } else { self.tab + 1 },
             _ => {}
         }
@@ -192,20 +194,16 @@ impl Cursor {
                 tab.at = (tab.at + 1).min(tab.rows().saturating_sub(1));
                 None
             }
-            Key::Enter if typing && tab.typed.trim().is_empty() => {
+            Key::Enter if typing && tab.typed.text().trim().is_empty() => {
                 return (!several).then(|| Some(To::Bar("/answer ".to_owned())));
             }
-            Key::Enter if typing => Some(Pick::Typed(tab.typed.trim().to_owned())),
+            Key::Enter if typing => Some(Pick::Typed(tab.typed.text().trim().to_owned())),
             Key::Enter if tab.multi && !tab.toggled.is_empty() => {
                 Some(Pick::Options(tab.toggled.iter().copied().collect()))
             }
             Key::Enter => Some(Pick::option(u32::try_from(tab.at + 1).unwrap_or(u32::MAX))),
-            Key::Backspace if typing => {
-                tab.typed.pop();
-                None
-            }
-            Key::Char(c) if typing => {
-                tab.typed.push(c);
+            key if typing => {
+                tab.typed.key(key);
                 None
             }
             Key::Char(' ') if tab.multi => {
@@ -259,7 +257,7 @@ impl Cursor {
     pub fn paste(&mut self, text: &str) -> bool {
         let Some(tab) = self.tabs.get_mut(self.tab).filter(|t| t.free_text) else { return false };
         tab.at = tab.options;
-        tab.typed.push_str(text);
+        tab.typed.paste(text);
         true
     }
 
@@ -276,7 +274,7 @@ impl Cursor {
             (false, true, _) => "type an answer · Enter send (empty: the bar on /answer) · ↑↓ move · Esc leave",
             (false, false, false) => "↑↓ move · Enter pick · 1-9 answer · Esc leave",
             (false, false, true) => "↑↓ move · Space, 1-9 toggle · Enter send · Esc leave",
-            (true, true, _) => "type an answer · Enter pick · ↑↓ move · ←→ questions · Esc leave",
+            (true, true, _) => "type an answer · Enter pick · ↑↓ move · Tab questions · Esc leave",
             (true, false, false) => "↑↓ move · Enter, 1-9 pick · ←→ questions · Esc leave",
             (true, false, true) => "↑↓ move · Space, 1-9 toggle · Enter confirm · ←→ questions · Esc leave",
         }
@@ -311,7 +309,7 @@ pub fn body(questions: &Questions, id: Uuid, cursor: Option<&Cursor>, width: usi
     match (questions.questions.get(cursor.tab), cursor.tabs.get(cursor.tab)) {
         (Some(question), Some(tab)) => {
             if cursor.several() {
-                lines.push(Line::raw(excerpt(&question.text, width)));
+                lines.extend(wrapped(&question.text, width));
             }
             lines.extend(rows(question, tab, focused, width));
         }
@@ -383,13 +381,20 @@ fn rows(question: &Question, tab: &Tab, focused: bool, width: usize) -> Vec<Line
         row(usize::try_from(n - 1).unwrap_or_default(), head, &text, Style::new());
     }
     if question.free_text {
-        let caret = if at == Some(tab.options) { "▏" } else { "" };
-        let typed = &tab.typed;
-        let text =
-            if typed.is_empty() && caret.is_empty() { TYPE.to_owned() } else { format!("{TYPE}: {typed}{caret}") };
+        let text = match (at == Some(tab.options), tab.typed.is_empty()) {
+            // The whole answer, wrapped as the row is.
+            (true, _) => format!("{TYPE}: {}", tab.typed.caret(usize::MAX)),
+            (false, true) => TYPE.to_owned(),
+            (false, false) => format!("{TYPE}: {}", tab.typed.text()),
+        };
         row(tab.options, String::new(), &text, style::dim());
     }
     lines
+}
+
+/// A question's `text` in lines at most `width` wide, each of its lines wrapped.
+fn wrapped(text: &str, width: usize) -> impl Iterator<Item = Line<'static>> {
+    text.lines().flat_map(move |line| wrap(line, width)).map(Line::raw)
 }
 
 /// `text` in lines at most `width` wide, broken between words where it can be.
@@ -443,22 +448,25 @@ impl Card<'_> {
     }
 
     /// The questions, each with its options in a line, then the answers, at most `width` wide; on the card the keys
-    /// answer, its [`body`] under `cursor` while focused, then the keys it takes: Enter focusing it with `enter`.
-    pub fn lines(&self, width: usize, cursor: Option<&Cursor>, enter: bool) -> Vec<Line<'static>> {
+    /// answer, its [`body`] under `cursor` while focused, then the keys it takes: Enter focusing it with `enter`, the
+    /// digits only once ↑ selects a message while `writing` in its thread.
+    pub fn lines(&self, width: usize, cursor: Option<&Cursor>, (enter, writing): (bool, bool)) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         let questions = self.question.questions.as_slice();
         match (self.keys, self.asked.id) {
             (true, Some(id)) => {
                 if let [one] = questions {
-                    lines.push(Line::raw(excerpt(&one.text, width)));
+                    lines.extend(wrapped(&one.text, width));
                 }
                 lines.extend(body(self.question, id, cursor, width));
                 let keys = match cursor {
                     Some(cursor) => cursor.keys(),
+                    None if writing && enter => "Enter choose · ↑ then 1-9 answer",
+                    None if writing => "↑ then 1-9 answer",
                     None if enter => "1-9 answer · Enter choose",
                     None => "1-9 answer",
                 };
-                lines.push(Line::styled(keys, style::dim()));
+                lines.push(Line::styled(style::hints(keys, width), style::dim()));
             }
             _ => {
                 for (n, question) in (1..).zip(questions) {
@@ -517,6 +525,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::live::{at, message};
+    use crate::tui::input::{Typed, exercise};
     use crate::tui::test_support::model;
 
     fn question(text: &str, options: &[&str], free_text: bool) -> Question {
@@ -538,7 +547,7 @@ mod tests {
         let card = &cards(&m.data, &entries, at(2))[0];
         assert_eq!(card.title(), " question from dev-b ");
         assert_eq!(
-            shown(&card.lines(80, None, true)),
+            shown(&card.lines(80, None, (true, false))),
             ["Which retry policy?", "  1 exponential", "  2 fixed 5s", "  type an answer", "1-9 answer · Enter choose"]
         );
 
@@ -552,7 +561,7 @@ mod tests {
         let card = &cards(&m.data, &entries, at(3))[0];
         assert_eq!(card.answers, ["answered by alice: option 2, fixed 5s"]);
         assert_eq!(
-            shown(&card.lines(80, None, true)),
+            shown(&card.lines(80, None, (true, false))),
             ["Which retry policy?", "1 exponential  2 fixed 5s", "answered by alice: option 2, fixed 5s"]
         );
         assert_eq!(thread_key(Key::Char('1'), &m.data, &thread, &entries, at(3)), None, "answered");
@@ -608,6 +617,25 @@ mod tests {
         cursor.key(Key::Down, &thread);
         assert!(!cursor.typing());
         assert_eq!(body(&closed, id, Some(&cursor), 80).len(), 2, "no row to type in");
+    }
+
+    #[test]
+    fn the_typed_answer_edits_as_the_bar_does_tab_moving_between_questions() {
+        let (thread, id) = (ThreadId::generate(), Uuid::now_v7());
+        let mut questions: Questions = question("Ship it?", &["yes", "no"], true).into();
+        questions.questions.push(question("When?", &["now", "later"], false));
+        let mut cursor = Cursor::new(id, &questions);
+        cursor.key(Key::Down, &thread);
+        cursor.key(Key::Down, &thread);
+        let want = exercise(|typed| match typed {
+            Typed::Key(key) => assert_eq!(cursor.key(key, &thread), None),
+            Typed::Paste(text) => assert!(cursor.paste(text)),
+        });
+        assert_eq!(cursor.tab, 0, "←→ moved in the text");
+        assert_eq!(shown(&body(&questions, id, Some(&cursor), 80))[4], "› type an answer: X▏a b hi");
+        assert_eq!(cursor.tabs[0].typed.text(), want);
+        cursor.key(Key::Tab, &thread);
+        assert_eq!(cursor.tab, 1);
     }
 
     #[test]
@@ -673,7 +701,7 @@ mod tests {
         let card = &cards(&m.data, &entries, at(2))[0];
         assert_eq!(card.title(), " questions from dev-b ");
         assert_eq!(
-            shown(&card.lines(80, None, false)),
+            shown(&card.lines(80, None, (false, false))),
             ["[Q1]  Q2  Submit", "Ship it?", "  1 yes", "  2 no", "1-9 answer"]
         );
         let Some(Keyed::Focus(cursor)) = thread_key(Key::Char('2'), &m.data, &thread, &entries, at(2)) else {
@@ -695,7 +723,7 @@ mod tests {
             entries.push(asked);
         }
         let shown: Vec<Vec<String>> =
-            cards(&m.data, &entries, at(3)).iter().map(|c| shown(&c.lines(80, None, false))).collect();
+            cards(&m.data, &entries, at(3)).iter().map(|c| shown(&c.lines(80, None, (false, false)))).collect();
         assert_eq!(shown, [vec!["Ship it?", "1 yes  2 no"], vec!["Tag it?", "  1 yes", "  2 no", "1-9 answer"]]);
         let job =
             Job::Answer { thread: thread.clone(), question: entries[1].id.unwrap(), picks: vec![Pick::option(1)] };

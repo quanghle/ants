@@ -4,30 +4,42 @@
 use ants_proto::{ApprovalRequest, Verdict};
 use chrono::{DateTime, Utc};
 
-use super::{Action, Focus, Key, Level, Model, Page, To};
+use super::{Action, Focus, Key, Level, Model, Page, QUIT_WITHIN, To};
 use crate::tui::approvals::{Answer, Asking};
 use crate::tui::command::{Note, Tone};
 use crate::tui::exec::Job;
+use crate::tui::help::Help;
 use crate::tui::react::{self, Pick, Picker};
-use crate::tui::{channel, credentials, held, nav, thread, work};
+use crate::tui::{channel, credentials, held, nav, notices, thread, work};
 
 impl Model {
     pub fn key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
+        let action = self.dispatch(key, now);
+        self.settle();
+        action
+    }
+
+    fn dispatch(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
+        self.follow_drafts();
+        let quitting = self.quitting.take().is_some_and(|at| now - at < QUIT_WITHIN);
+        self.notice.take_if(|n| n.level == Level::Error);
         if key == Key::Interrupt {
-            return Some(Action::Quit);
+            return self.ctrl_c(quitting, now);
         }
-        if self.asking.as_ref().is_some_and(Asking::takes_keys) && !self.help {
+        if self.esc_again(key, now) {
+            return None;
+        }
+        if key == Key::Char('q') && self.overlaid() {
+            self.closed_by_q = Some(now);
+        }
+        if self.asking.as_ref().is_some_and(Asking::takes_keys) && self.help.is_none() {
             return self.answer(key, now);
         }
         if self.compact {
             return self.compact_key(key, now);
         }
-        if self.help {
-            self.help = false;
-            return None;
-        }
-        if self.catchup.shown() {
-            return self.digest_key(key);
+        if let Some(taken) = self.overlay_key(key) {
+            return taken;
         }
         if self.interrupting.is_some() {
             return self.confirm_key(key);
@@ -50,26 +62,14 @@ impl Model {
                 }
             };
         }
-        if !self.bar.focused
-            && self.focus == Focus::View
-            && let Some(Page::Dm(page)) = self.pages.last_mut()
-            && let Some(action) = page.write(key)
-        {
-            return action;
+        if let Some(action) = self.fold_key(key, now) {
+            return Some(action);
         }
-        if !self.bar.focused
-            && self.focus == Focus::View
-            && let Some(Page::Ant(page)) = self.pages.last_mut()
-            && let Some(action) = page.write(key)
-        {
-            return action;
+        if key == Key::Ctrl('t') {
+            return self.next_unread(now);
         }
-        if !self.bar.focused
-            && self.focus == Focus::View
-            && let Some(Page::Channel(page)) = self.pages.last_mut()
-            && let Some(to) = page.write(key, &self.data)
-        {
-            return to.and_then(|to| self.go(to, now));
+        if let Some(action) = self.typed_key(key, now) {
+            return action;
         }
         if !self.bar.focused
             && self.focus == Focus::View
@@ -77,23 +77,37 @@ impl Model {
         {
             return action;
         }
+        if self.bar.focused
+            && self.focus == Focus::View
+            && matches!(key, Key::PageUp | Key::PageDown | Key::CtrlHome | Key::CtrlEnd)
+            && matches!(self.page(), Page::Thread(_))
+        {
+            return self.view_key(key, now);
+        }
+        if let Some(action) = self.conversation_key(key, now) {
+            return action;
+        }
         if let Some(action) = self.bar_key(key, now) {
             return action;
         }
         match key {
-            Key::Char('q') => Some(Action::Quit),
-            Key::Char('/') => {
+            Key::Char('q') => self.quit(now),
+            Key::Char('/') | Key::Ctrl('f') => {
                 self.bar.focused = true;
                 if self.bar.is_empty() {
-                    self.bar.set_text("/search ");
+                    self.bar.set_text(if key == Key::Ctrl('f') { "/search " } else { "/" });
                 }
                 None
             }
             Key::Char('?') => {
-                self.help = true;
+                self.help = Some(Help::default());
                 None
             }
-            Key::Char('R') => Some(Action::Refresh),
+            Key::Char('N') => {
+                self.log = Some(notices::Log::default());
+                None
+            }
+            Key::Char('R') => self.reread(),
             Key::Tab => {
                 self.focus = match self.focus {
                     Focus::Nav => Focus::View,
@@ -108,14 +122,137 @@ impl Model {
         }
     }
 
+    /// Take `key` if it is typed into what the view on screen holds: the text found in a thread, an ant's prompt
+    /// or a channel's editor.
+    fn typed_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
+        if self.bar.focused || self.focus != Focus::View {
+            return None;
+        }
+        match self.pages.last_mut()? {
+            Page::Thread(page) => page.find_key(key).then_some(None),
+            Page::Ant(page) => page.write(key),
+            Page::Channel(page) => {
+                let to = page.write(key, &self.data)?;
+                Some(to.and_then(|to| self.go(to, now)))
+            }
+            _ => None,
+        }
+    }
+
+    /// R: read everything again, the shown ant's memories, MCP servers and settings too.
+    fn reread(&mut self) -> Option<Action> {
+        if let Some(Page::Ant(page)) = self.pages.last_mut() {
+            page.reread();
+        }
+        Some(Action::Refresh)
+    }
+
+    /// Take `key` in the help, the notices or the digest, if one is shown.
+    fn overlay_key(&mut self, key: Key) -> Option<Option<Action>> {
+        if let Some(help) = &mut self.help {
+            if !help.key(key) {
+                self.help = None;
+            }
+            return Some(None);
+        }
+        if let Some(log) = &mut self.log {
+            if !log.key(key) {
+                self.log = None;
+            }
+            return Some(None);
+        }
+        self.catchup.shown().then(|| self.digest_key(key))
+    }
+
+    /// Whether the help, the notices, the digest or a tool request in full covers the view.
+    fn overlaid(&self) -> bool {
+        self.help.is_some()
+            || self.log.is_some()
+            || self.catchup.shown()
+            || self.asking.as_ref().is_some_and(Asking::takes_keys)
+    }
+
+    /// q: quit, unless the bar holds text or q closed an overlay within [`QUIT_WITHIN`], which a q coming that soon
+    /// again extends.
+    pub(in crate::tui) fn quit(&mut self, now: DateTime<Utc>) -> Option<Action> {
+        if self.closed_by_q.is_some_and(|at| now - at < QUIT_WITHIN) {
+            self.closed_by_q = Some(now);
+            return None;
+        }
+        if !self.bar.is_empty() {
+            self.notify("q quits with the bar empty: Ctrl-C empties it".to_owned(), Level::Info, now);
+            return None;
+        }
+        Some(Action::Quit)
+    }
+
+    /// Ctrl-C: close what is open, else empty the bar, else quit when `quitting`, the Ctrl-C before having asked for
+    /// it, else ask for a second one.
+    fn ctrl_c(&mut self, quitting: bool, now: DateTime<Utc>) -> Option<Action> {
+        if self.close(now) {
+            return None;
+        }
+        if !self.bar.is_empty() || self.bar.quoting.is_some() || self.bar.noting.is_some() {
+            self.empty_into_history();
+            return None;
+        }
+        if quitting {
+            return Some(Action::Quit);
+        }
+        self.quitting = Some(now);
+        None
+    }
+
+    /// Close what is open, the topmost first: the help or the notices, the digest, a tool request in full, a prompt, the
+    /// bar's list or the palette, or what the view asks, finds or has being written. Whether anything was.
+    fn close(&mut self, now: DateTime<Utc>) -> bool {
+        if self.help.take().is_some() || self.log.take().is_some() {
+            return true;
+        }
+        if let Some(digest) = self.catchup.digest.as_mut().filter(|d| d.shown) {
+            digest.shown = false;
+            return true;
+        }
+        if self.asking.as_ref().is_some_and(Asking::takes_keys) {
+            self.answer(Key::Esc, now);
+            return true;
+        }
+        if self.picking.take().is_some() || self.interrupting.take().is_some() || self.snoozing.take().is_some() {
+            return true;
+        }
+        if self.bar.focused && !self.completions().is_empty() {
+            self.bar.pick.closed = true;
+            return true;
+        }
+        if !self.palette(now).is_empty() {
+            self.close_palette();
+            return true;
+        }
+        if self.bar.focused || self.focus != Focus::View {
+            return false;
+        }
+        let data = &self.data;
+        let closed = match self.pages.last_mut() {
+            Some(Page::Thread(page)) => page.find_key(Key::Esc),
+            Some(Page::Ant(page)) => page.write(Key::Esc).is_some() || page.disarm(),
+            Some(Page::Channel(page)) => page.write(Key::Esc, data).is_some(),
+            Some(Page::Tree(page)) => page.disarm(),
+            Some(Page::Credentials(page)) => page.disarm(),
+            Some(Page::Held(page)) => page.disarm(),
+            _ => false,
+        };
+        closed || self.card_key(Key::Esc, now).is_some()
+    }
+
     /// Take `text` pasted: into the prompt or the draft being typed, on one line, else into the bar, focused for it,
     /// line breaks and all; dropped where only keys are answered (help, the digest, a tool request, a confirmation) and
     /// in the compact view, rather than taken as keys.
     pub fn paste(&mut self, text: &str, now: DateTime<Utc>) {
+        self.follow_drafts();
         let text = pasted(text);
         if text.is_empty()
             || self.compact
-            || self.help
+            || self.help.is_some()
             || self.catchup.shown()
             || self.interrupting.is_some()
             || self.asking.as_ref().is_some_and(Asking::takes_keys)
@@ -228,7 +365,7 @@ impl Model {
 
     fn nav_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         let by = match key {
-            Key::Enter => {
+            Key::Enter | Key::Esc => {
                 self.focus = Focus::View;
                 return None;
             }
@@ -238,7 +375,7 @@ impl Model {
             Key::End => isize::MAX,
             _ => return None,
         };
-        let items = nav::items(&self.data, now);
+        let items = nav::items(&self.data, &self.nav, now);
         let at = items.iter().position(|i| *i == self.nav).unwrap_or(0);
         let to = items.get(at.saturating_add_signed(by).min(items.len().saturating_sub(1)))?.clone();
         if to == self.nav {
@@ -315,6 +452,10 @@ impl Model {
             To::Unread(thread, from) => self.mark_unread(thread, from, now),
             To::Remind(thread, message) => self.remind(thread, message),
             To::Unremind(thread) => Some(self.set_reminder(thread, None)),
+            To::Write => {
+                self.bar.focused = true;
+                None
+            }
             To::Bar(text) => {
                 self.bar.set_text(&text);
                 self.bar.focused = true;
@@ -386,8 +527,8 @@ fn write(page: &mut Page, line: &str) -> bool {
         return page.paste(line);
     }
     line.chars().all(|c| match page {
-        Page::Dm(page) => page.write(Key::Char(c)).is_some(),
         Page::Ant(page) => page.write(Key::Char(c)).is_some(),
+        Page::Thread(page) => page.finding() && page.find_key(Key::Char(c)),
         _ => false,
     })
 }

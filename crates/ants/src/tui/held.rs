@@ -15,8 +15,8 @@ use futures::future::LocalBoxFuture;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{ListState, Paragraph, Wrap};
 
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
@@ -129,11 +129,16 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "↑↓ select · a confirm · r deny · Esc back";
     pub const ARMED_KEYS: &str = "y gives the answer above · any other key leaves the order held";
 
-    pub fn keys(&self) -> &'static str {
-        if self.armed.is_some() { Self::ARMED_KEYS } else { Self::KEYS }
+    /// Drop the confirmation asked for, if any: whether there was one.
+    pub fn disarm(&mut self) -> bool {
+        self.armed.take().is_some()
+    }
+
+    /// The keys of the answer `a` or `r` asked to confirm, while it waits.
+    pub fn prompt(&self) -> Option<&'static str> {
+        self.armed.as_ref().map(|_| Self::ARMED_KEYS)
     }
 
     fn ids(orders: &[AdminOrder]) -> Vec<Uuid> {
@@ -199,7 +204,7 @@ impl Page {
         let tall = u16::try_from(about.len() * 2).unwrap_or(u16::MAX);
         let [top, list] = Layout::vertical([Constraint::Max(tall), Constraint::Min(0)]).areas(inner);
         frame.render_widget(Paragraph::new(about).wrap(Wrap { trim: false }), top);
-        let rows: Vec<ListItem> = held
+        let rows: Vec<Text> = held
             .orders
             .iter()
             .map(|o| {
@@ -210,7 +215,7 @@ impl Page {
                     Some(ActAnswer::Deny) => Span::styled("denied, to be refused", Style::new().fg(style::ERROR)),
                     None => Span::styled("a confirm · r deny", style::dim()),
                 };
-                ListItem::new(vec![
+                Text::from(vec![
                     Line::from(vec![
                         Span::styled(format!("{:<8}", o.op.kind()), Style::new().fg(Color::Yellow)),
                         Span::raw(format!("{} ordered {} of {} on {}", o.admin, o.op.describe(), o.ant, o.machine)),
@@ -224,7 +229,7 @@ impl Page {
             })
             .collect();
         let selected = self.selected.at(&Self::ids(&held.orders));
-        let list_widget = List::new(rows).highlight_style(style::highlight(focused));
+        let list_widget = style::list(rows, Some(selected), focused);
         frame.render_stateful_widget(list_widget, list, &mut ListState::default().with_selected(Some(selected)));
     }
 }
@@ -356,7 +361,7 @@ mod tests {
         let shown = screen(&m, at(3));
         assert!(shown.contains("pa ordered pause of dev-a on m1") && shown.contains("expires in 6d23h"), "{shown}");
         assert!(shown.contains(&format!("m1/dev-a/{} · a confirm · r deny", pause.id)), "{shown}");
-        assert!(shown.contains(Page::KEYS), "{shown}");
+        assert!(shown.contains("a confirm · r deny · Esc back · ↑↓ select"), "{shown}");
 
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "y alone gives no answer");
         m.key(Key::Char('a'), at(3));

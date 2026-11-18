@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::home::{self, Why};
-use super::model::{Action, Data, Focus, Key, Level, Model};
+use super::model::{Action, Data, Focus, Key, Level, Model, Page};
 use super::nav;
 use super::style::{self, ago};
 use super::work::dollars;
@@ -81,14 +81,18 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         spans.push(Span::styled(format!("○ disconnected {}", ago(since, now)), Style::new().fg(style::ERROR)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), first);
-    frame.render_widget(Paragraph::new(second_line(model, &items, now)), second);
+    frame.render_widget(Paragraph::new(second_line(model, &items, now, second.width)), second);
 }
 
 /// The latest notice, else the top home item with the keys.
-fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>) -> Line<'static> {
+fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>, width: u16) -> Line<'static> {
+    if model.quitting_at(now) {
+        return Line::styled(format!("      {}", super::frame::QUIT_AGAIN), Style::new().fg(style::INFO));
+    }
     if let Some(notice) = model.notice_at(now) {
-        let color = if notice.level == Level::Error { style::ERROR } else { style::INFO };
-        return Line::styled(format!("      {}", notice.text), Style::new().fg(color));
+        let mut line = style::notice(&notice.text, notice.level == Level::Error, width.saturating_sub(5));
+        line.spans.insert(0, Span::raw("     "));
+        return line;
     }
     if let Some(line) = model.asking.as_ref().and_then(super::approvals::Asking::status) {
         return line;
@@ -129,7 +133,7 @@ impl Model {
     /// does.
     pub(super) fn compact_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         match key {
-            Key::Char('q') => return Some(Action::Quit),
+            Key::Char('q') => return self.quit(now),
             Key::Char('R') => return Some(Action::Refresh),
             Key::Up | Key::Down | Key::Char('j' | 'k') | Key::PageUp | Key::PageDown | Key::Home | Key::End => {
                 return None;
@@ -139,10 +143,13 @@ impl Model {
         }
         // Home again, its selection on the top item.
         self.select(nav::Item::Home);
+        if let Page::Home(home) = self.page() {
+            home.compacted();
+        }
         self.focus = Focus::View;
         let action = self.view_key(key, now);
-        // Opened, or replying in the bar: the full view shows it.
-        if key == Key::Enter || self.bar.focused {
+        // Opened, replying in the bar, or a request shown in full: the full view shows it.
+        if key == Key::Enter || self.bar.focused || self.asking.as_ref().is_some_and(|a| a.full) {
             self.compact = false;
         }
         action
@@ -156,7 +163,6 @@ mod tests {
     use super::*;
     use crate::test_support::live::{at, message, request, user};
     use crate::tools::Update;
-    use crate::tui::model::Page;
     use crate::tui::test_support::model;
 
     fn pane(m: &Model, now: DateTime<Utc>) -> String {
@@ -210,5 +216,18 @@ mod tests {
         m.data.live.approval(&Update::Pending(push));
         let shown = pane(&m, at(3));
         assert!(shown.contains("dev-a asks to run execute: git push · A always: Yes, and don't ask again"), "{shown}");
+    }
+
+    #[test]
+    fn a_top_tool_request_too_long_for_the_pane_opens_in_full_on_its_keys() {
+        let mut m = model();
+        let mut push = request("dev-a", "git push", vec![Verdict::AllowOnce]);
+        push.tool.input = Some(serde_json::json!({ "command": "echo long ".repeat(20) }).to_string());
+        m.data.live.approval(&Update::Pending(push.clone()));
+        let _ = crate::test_support::render::rendered(140, 30, |f| crate::tui::frame::draw(f, &m, at(3)));
+        m.compact = true;
+        assert_eq!(m.key(Key::Char('a'), at(3)), None);
+        assert!(!m.compact && m.asking.as_ref().is_some_and(|a| a.full), "the request in full in the full view");
+        assert_eq!(m.key(Key::Char('a'), at(3)), Some(Action::Decide(Box::new(push), Verdict::AllowOnce)));
     }
 }

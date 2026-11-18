@@ -2,7 +2,7 @@
 //! no reply in the order stored, how deep each nests, the indent and `⎿` drawn before them and the lines each row
 //! draws as.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -20,7 +20,9 @@ use crate::tui::{attach, images, markdown, react, style};
 
 /// How deep delegations nest, deeper ones shown at this depth.
 const MAX_DEPTH: usize = 4;
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub(super) const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// How long a spinner shows each frame, in milliseconds: 8 a second, or one a second with `[cli] animate = false`.
+pub const SPIN_MS: i64 = 125;
 /// Before a message, a turn or a tool call.
 const BULLET: &str = "●";
 /// Before a human's message at the top level.
@@ -192,6 +194,10 @@ pub(super) struct Shown<'a> {
     pub(super) marked: Option<(u64, usize)>,
     /// Where the images drawn go among the lines.
     pub(super) placed: RefCell<Vec<images::Placed>>,
+    /// The message whose card shows under the conversation, by its sequence: the conversation gives it one line.
+    pub(super) carded: Option<u64>,
+    /// Whether a spinner was drawn.
+    pub(super) spun: Cell<bool>,
 }
 
 /// Whether message `id` was withdrawn: here, or as the daemon's notice answering it among `entries` tells.
@@ -255,6 +261,7 @@ impl Shown<'_> {
                 lines.push(self.stamped(Line::from(Span::styled(said, style::dim())), end.at));
             }
             Item::Message(e) if e.notice.is_some() => self.notice(lines, e, first, rest),
+            Item::Message(e) if self.carded == Some(e.seq) => self.carded(lines, e, entries, first, row.depth == 0),
             Item::Turn(turn) => self.turn(lines, turn, first, rest),
             Item::Message(e) if row.depth == 0 => self.block(lines, e, entries),
             Item::Message(e) => self.nested(lines, e, entries, first, rest),
@@ -323,6 +330,19 @@ impl Shown<'_> {
         lines.extend(self.reactions(e).map(|line| indented("  ", line)));
     }
 
+    /// A message whose card shows under the conversation: its heading after `first`, at the `top` level or not, and its
+    /// text's first line, cut, on one line.
+    fn carded(&self, lines: &mut Vec<Line<'static>>, e: &Entry, entries: &[Entry], first: &str, top: bool) {
+        const BELOW: &str = " · card below";
+        let mut head = Line::raw(first.to_owned());
+        head.spans.extend(self.heading(e, entries, top));
+        let text = e.text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
+        let room = self.width.saturating_sub(head.width() + 2 + BELOW.len() + STAMP);
+        head.spans.push(Span::raw(format!("  {}", cut(text, room))));
+        head.spans.push(Span::styled(BELOW, style::dim()));
+        lines.push(self.stamped(head, e.stored_at));
+    }
+
     /// A message nested under another: its heading after `first` and its time, and its text on the heading's line
     /// when one line short enough, else under it at `rest`.
     fn nested(&self, lines: &mut Vec<Line<'static>>, e: &Entry, entries: &[Entry], first: &str, rest: &str) {
@@ -365,7 +385,7 @@ impl Shown<'_> {
             lines.push(self.stamped(Line::from(Span::styled(format!("{head}  {text}"), style)), e.stored_at));
         } else {
             lines.push(self.stamped(Line::from(Span::styled(head, style)), e.stored_at));
-            push(lines, &format!("{rest}{text}"), rest, style, self.width);
+            push(lines, &text, rest, style, self.width);
         }
     }
 
@@ -481,7 +501,10 @@ impl Shown<'_> {
     }
 
     fn spinner(&self) -> &'static str {
-        SPINNER[usize::try_from(self.now.timestamp()).unwrap_or(0) % SPINNER.len()]
+        self.spun.set(true);
+        let frame =
+            if self.data.looks.animates() { self.now.timestamp_millis() / SPIN_MS } else { self.now.timestamp() };
+        SPINNER[usize::try_from(frame).unwrap_or(0) % SPINNER.len()]
     }
 }
 
@@ -586,13 +609,11 @@ fn indented(indent: &str, line: Line<'static>) -> Line<'static> {
     Line::from(spans).style(line.style)
 }
 
-/// Add `line`, cut to `width` characters a line, those after the first begun with `rest`.
-fn push(lines: &mut Vec<Line<'static>>, line: &str, rest: &str, style: Style, width: usize) {
-    let mut chars = line.chars().peekable();
-    lines.push(Line::styled(chars.by_ref().take(width.max(1)).collect::<String>(), style));
-    let room = width.saturating_sub(rest.chars().count()).max(1);
-    while chars.peek().is_some() {
-        lines.push(Line::styled(format!("{rest}{}", chars.by_ref().take(room).collect::<String>()), style));
+/// Add `line`, wrapped at words into lines `width` columns wide begun with `indent`, a word too long cut.
+fn push(lines: &mut Vec<Line<'static>>, line: &str, indent: &str, style: Style, width: usize) {
+    let room = width.saturating_sub(indent.chars().count()).max(1);
+    for row in markdown::wrap(&[Span::raw(line.to_owned())], room) {
+        lines.push(indented(indent, Line::from(row)).style(style));
     }
 }
 
