@@ -292,6 +292,22 @@ async fn a_codex_thread_streams_its_turns_through_the_translator() {
 }
 
 #[tokio::test]
+async fn codex_threads_open_with_the_ants_skills_as_an_extra_root() {
+    let codex = Fixture::new("codex-skills", "");
+    let skills = codex.dir.join(".sense/skills");
+    std::fs::create_dir_all(skills.join("deploy")).unwrap();
+    std::fs::write(skills.join("deploy/SKILL.md"), "---\nname: deploy\ndescription: Deploy.\n---\n").unwrap();
+    codex.script(Some(1), &[signed_in(), vec![vec![ok(3, json!({}))], vec![opened(4, THREAD)]]].concat());
+    let launch = codex.launch(ModelSettings::default()).with_skills(skills.clone());
+
+    Session::start(&launch, Some(SessionId::new(THREAD))).await.unwrap().close().await;
+    let received = codex.received(1);
+    let set = json!({ "id": 3, "method": "skills/extraRoots/set", "params": { "extraRoots": [skills] } });
+    assert_eq!(received[3], set, "before the thread opens");
+    assert_eq!(received[4]["method"], "thread/resume");
+}
+
+#[tokio::test]
 async fn codex_threads_resume_and_fork_with_their_permissions_and_mcp_servers() {
     let codex = Fixture::new("codex-sessions", "mode = \"full-access\"");
     codex.script(Some(1), &[signed_in(), vec![vec![opened(3, THREAD)]]].concat());

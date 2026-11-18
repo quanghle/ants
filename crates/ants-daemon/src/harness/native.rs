@@ -51,7 +51,7 @@ pub(crate) use rpc::RpcError;
 pub(crate) use rpc::{Incoming, Rpc};
 
 use super::mcp_sign_in::Report;
-use super::{Harness, ModelSettings, SteerRequest, SteerResponse, advertise_steering};
+use super::{Harness, ModelSettings, SteerRequest, SteerResponse, advertise_steering, skills};
 use crate::sync::MutexExt as _;
 
 /// The protocol a harness definition's CLI speaks on stdio: its `protocol` key.
@@ -185,7 +185,7 @@ fn open_host<N: Native>(
     Box::pin(async move {
         let native = N::start(cli).await?;
         let mcp_servers = servers(native.info().http_mcp);
-        let session = native.new_session(Open { cwd, mcp_servers, sign_ins: None }).await?;
+        let session = native.new_session(Open { cwd, mcp_servers, sign_ins: None, skills: None }).await?;
         Ok(Box::new(Host { _native: native, session }) as Box<dyn McpHost>)
     })
 }
@@ -341,6 +341,8 @@ pub(crate) struct Open {
     /// serving a thread, not one opened to read them ([`mcp_host`]), to probe the harness or to fork (the session/load
     /// following it signs in).
     pub sign_ins: Option<Report>,
+    /// The directory of the ant's confirmed skills to offer it, if any ([`super::skills`]).
+    pub skills: Option<PathBuf>,
 }
 
 /// A setting the daemon selects on a session.
@@ -841,14 +843,18 @@ impl<N: Native> Translator<N> {
     }
 
     async fn new_session(self: Arc<Self>, request: NewSessionRequest) -> Result<NewSessionResponse, Error> {
-        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: self.cli.report.clone() };
+        let skills = skills::of_meta(request.meta.as_ref());
+        let open =
+            Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: self.cli.report.clone(), skills };
         let session = self.opening()?.new_session(open).await?;
         let (id, modes, options) = self.opened(SessionId::new(session.id()), session);
         Ok(NewSessionResponse::new(id).modes(modes).config_options(options))
     }
 
     async fn load_session(self: Arc<Self>, request: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
-        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: self.cli.report.clone() };
+        let skills = skills::of_meta(request.meta.as_ref());
+        let open =
+            Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: self.cli.report.clone(), skills };
         let session = self.opening()?.load_session(&request.session_id.0, open).await?;
         let (_, modes, options) = self.opened(request.session_id, session);
         Ok(LoadSessionResponse::new().modes(modes).config_options(options))
@@ -859,7 +865,7 @@ impl<N: Native> Translator<N> {
         if !native.info().fork {
             return Err(unsupported("session/fork"));
         }
-        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: None };
+        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: None, skills: None };
         let session = native.fork_session(&request.session_id.0, open).await?;
         let (id, modes, options) = self.opened(SessionId::new(session.id()), session);
         Ok(ForkSessionResponse::new(id).modes(modes).config_options(options))
