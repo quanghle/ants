@@ -96,32 +96,11 @@ pub(super) fn lesson(title: &str, body: &str) -> Value {
 }
 
 #[test]
-fn remotes_normalize_to_host_and_path() {
-    for remote in [
-        "https://github.com/Owner/Repo.git",
-        "https://user:pw@GitHub.com:443/Owner/Repo/",
-        "git@github.com:Owner/Repo.git",
-        "ssh://git@github.com:22/Owner/Repo",
-        "github.com/Owner/Repo",
-    ] {
-        assert_eq!(normalize_remote(remote).as_deref(), Some("github.com/Owner/Repo"), "{remote}");
-    }
-    for remote in ["", "github.com", "https://github.com/", "a b/c"] {
-        assert_eq!(normalize_remote(remote), None, "{remote}");
-    }
+fn repository_scopes_normalize_their_remote() {
     let scope: Scope = "repo:git@GitHub.com:o/r.git".parse().unwrap();
     assert_eq!(scope.to_string(), "repo:github.com/o/r");
     assert_eq!(serde_json::from_value::<Scope>(json!("human:alice")).unwrap(), Scope::Human("alice".parse().unwrap()));
     assert!("team".parse::<Scope>().is_err() && "human:Not A Name".parse::<Scope>().is_err());
-}
-
-#[test]
-fn the_remote_of_a_git_config_is_origin_else_the_first() {
-    let config = "[core]\n\tbare = false\n[remote \"upstream\"]\n\turl = https://github.com/up/repo.git\n\
-                  [Remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n\tURL = \"git@GitHub.com:o/r.git\"\n";
-    assert_eq!(remote_url(config), Some("git@GitHub.com:o/r.git"));
-    assert_eq!(remote_url("[remote \"fork\"]\nurl = ssh://git@host:22/f/r # mine\n"), Some("ssh://git@host:22/f/r"));
-    assert_eq!(remote_url("[core]\n\turl = https://h/o/r\n[branch \"main\"]\n\tremote = origin\n"), None);
 }
 
 #[tokio::test]

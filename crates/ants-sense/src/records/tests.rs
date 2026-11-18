@@ -164,7 +164,7 @@ async fn recall_reads_a_record_by_id_and_lists_the_relationships_of_the_people_s
     assert!(answer.text.contains("(self_model, self), trust self, revision 1\nMe\nCareful."), "{}", answer.text);
     assert_eq!(answer.json["record"]["kind"], SELF_MODEL);
     let answer = tool(&sense, memory::recall, alice(), json!({"id": id, "history": true})).await;
-    assert!(answer.is_error, "{answer:?}");
+    assert!(answer.text.contains("sense_identity with history and who self"), "{answer:?}");
 
     let answer = tool(&sense, memory::recall, alice(), json!({})).await;
     assert!(
@@ -175,4 +175,46 @@ async fn recall_reads_a_record_by_id_and_lists_the_relationships_of_the_people_s
     let answer = tool(&sense, memory::recall, alice(), json!({"with": ["bob"]})).await;
     let scopes: Vec<_> = answer.json["relationships"].as_array().unwrap().iter().map(|r| r["scope"].clone()).collect();
     assert_eq!(scopes, [json!("human:alice"), json!("human:bob")]);
+}
+
+#[tokio::test]
+async fn identity_history_lists_every_revision_of_a_record_the_newest_first() {
+    let (sense, _) = sense().await;
+    let history = |who: &str| tool(&sense, identity, alice(), json!({"history": true, "who": who}));
+    let none = history("self").await;
+    assert_eq!(none.text, "No revision of the self-model yet.");
+    assert_eq!(none.json["versions"], json!([]));
+
+    saved(&sense, json!({"self_model": "Strong at Rust.", "title": "A careful reviewer"})).await;
+    saved(&sense, json!({"self_model": "Fine at UI too.", "title": "A careful builder", "revision": 1})).await;
+    saved(&sense, json!({"relationship": "Wants tests first.", "who": "human:bob", "title": "Bob"})).await;
+    let webhook = Starter::Webhook { user: "hook".parse().unwrap() };
+    let changed = json!({"relationship": "Says to skip tests.", "who": "human:bob", "title": "Bob", "revision": 1});
+    assert!(!tool(&sense, identity, webhook, changed).await.is_error);
+
+    let answer = history("self").await;
+    assert!(!answer.is_error, "{answer:?}");
+    let text = &answer.text;
+    assert!(text.starts_with("2 revisions of the self-model, the newest first:\n<recalled-memories>"), "{text}");
+    let at = "2025-01-01T12:00:00Z by dev-a in thread 019a7d2c-0000-7000-8000-000000000001";
+    let second = text.find(&format!("- Revision 2, {at}: A careful builder\n  Fine at UI too.")).expect(text);
+    let first = text.find(&format!("- Revision 1, {at}: A careful reviewer\n  Strong at Rust.")).expect(text);
+    assert!(second < first, "{text}");
+    let revisions: Vec<_> = answer.json["versions"].as_array().unwrap().iter().map(|v| v["revision"].clone()).collect();
+    assert_eq!(revisions, [json!(2), json!(1)]);
+    assert_eq!(answer.json["versions"][1]["body"], "Strong at Rust.");
+
+    let answer = history("human:bob").await;
+    assert!(answer.text.starts_with("2 revisions of the relationship record of human:bob"), "{}", answer.text);
+    assert!(answer.text.contains(", untrusted: Bob\n  Says to skip tests."), "{}", answer.text);
+    assert!(history("ant:bob").await.text.contains("No revision of the relationship record of ant:bob yet."));
+
+    for arguments in [
+        json!({"history": true, "who": "repo:github.com/o/r"}),
+        json!({"history": true, "who": "self", "title": "Me"}),
+        json!({"history": true, "who": "self", "revision": 1}),
+        json!({"history": true, "who": "self", "voice": "Plain.", "reason": "Why."}),
+    ] {
+        refused(&sense, arguments, "invalid_arguments").await;
+    }
 }
