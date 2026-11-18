@@ -211,10 +211,10 @@ fn end_state(run: &TrailRun, resume: Option<&RunId>) -> Option<String> {
         (RunState::Running | RunState::Waiting, _) => return None,
         (RunState::Stopped { by }, Some(resume)) => format!("{name} was stopped by {by} ({spent}); {resume}."),
         (RunState::Stopped { by }, None) => format!("{name} was stopped by {by} ({spent})."),
-        (RunState::Failed { error }, Some(resume)) if error.contains("limit") => {
+        (RunState::Failed { error, limit: Some(_) }, Some(resume)) => {
             format!("{name} failed ({spent}): {error}\n{resume}, under raised limits.")
         }
-        (RunState::Failed { error }, _) => format!("{name} failed ({spent}): {error}"),
+        (RunState::Failed { error, .. }, _) => format!("{name} failed ({spent}): {error}"),
         (RunState::Done { result }, _) => {
             let (text, fence) = match result {
                 serde_json::Value::Null => return Some(format!("{name} is done ({spent}).")),

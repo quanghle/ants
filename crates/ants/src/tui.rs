@@ -18,6 +18,7 @@ mod command;
 mod compact;
 mod complete;
 mod credentials;
+mod dead;
 mod dm;
 mod exec;
 mod faces;
@@ -38,6 +39,7 @@ mod model;
 mod mouse;
 mod nav;
 mod notices;
+mod notify;
 mod palette;
 #[cfg(test)]
 mod parity;
@@ -761,7 +763,7 @@ impl Chat {
             Action::Answer(answer) => {
                 if !self.held.answer(answer) {
                     self.model.data.held.busy = None;
-                    self.model.notify("another answer to a held order runs", Level::Error, Utc::now());
+                    self.model.notify("another answer to what is held runs", Level::Error, Utc::now());
                 }
             }
             Action::Refresh => {

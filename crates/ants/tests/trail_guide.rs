@@ -268,7 +268,7 @@ impl<'a> Drive<'a> {
         self.children += 1;
         match self.run(name, args.get("args").cloned().unwrap_or(Value::Null), callers).await {
             Status::Done { result } => Answer::Ok(result),
-            Status::Failed { error } => Answer::Error(format!("trail {name} failed: {error}")),
+            Status::Failed { error, .. } => Answer::Error(format!("trail {name} failed: {error}")),
             Status::Running => panic!("{name}: a child run that never ended"),
         }
     }
@@ -302,7 +302,7 @@ async fn every_example_of_the_guide_runs_to_its_end() {
             let mut drive = Drive::new(&worker, &trails, Some(seed));
             match drive.run(name, args.clone(), &[]).await {
                 Status::Done { .. } => {}
-                Status::Failed { error } if error.ends_with(&format!("RuntimeError: {FAILED}")) => {}
+                Status::Failed { error, .. } if error.ends_with(&format!("RuntimeError: {FAILED}")) => {}
                 other => panic!("{name} with failing steps ({seed}): {other:?}\nevents: {:?}", drive.events),
             }
         }

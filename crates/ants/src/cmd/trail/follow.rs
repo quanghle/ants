@@ -176,7 +176,7 @@ pub(super) async fn follow(js: &jetstream::Context, run: TrailRun, json: bool) -
         let id = &last.run;
         match &last.state {
             RunState::Done { result } => break Ok(text(result)),
-            RunState::Failed { error } => break Err(anyhow!("run {id} failed: {error}")),
+            RunState::Failed { error, .. } => break Err(anyhow!("run {id} failed: {error}")),
             RunState::Stopped { by } => {
                 break Err(anyhow!("run {id} was stopped by {by}: `ants trail resume {id}` resumes it"));
             }

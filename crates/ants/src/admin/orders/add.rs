@@ -7,14 +7,33 @@ use std::time::Duration;
 use ants_daemon::config::{self, Ant};
 use ants_proto::{AdminOp, Machine, OrderState, UserId};
 use anyhow::{Context as _, Result, bail};
+use async_nats::jetstream;
 use serde_json::{Map, Value};
 
+use super::Admin;
 use crate::connection::Nats;
 use crate::serve::AntOptions;
 
-/// The settings of an `[[ant]]` table named `name` that `options` give, as an add order carries them: no name, and a
-/// workdir only when given.
+/// The arguments of `ants ant add`, which `/add` of `ants chat` takes too.
+#[derive(clap::Args, Debug)]
+pub struct Args {
+    pub name: UserId,
+    /// The machine to run the ant on.
+    #[arg(long = "on", value_name = "MACHINE")]
+    pub on: Machine,
+    #[command(flatten)]
+    pub options: Box<AntOptions>,
+    /// How long to wait for the daemon's outcome (a duration such as 90s, 10m or 1h).
+    #[arg(long, value_name = "DURATION", default_value = "3m", value_parser = ants_proto::duration::parse)]
+    pub wait: Duration,
+}
+
+/// The settings of an `[[ant]]` table named `name` that `options` give, as an add or clone order carries them: no
+/// name, and a workdir only when given. Refused for a human's name.
 pub fn settings(name: &UserId, options: &AntOptions) -> Result<Map<String, Value>> {
+    if name.is_human() {
+        bail!("{name} is a human's name: an ant's name is lowercase");
+    }
     let ant = options.apply(Ant::new(name.clone(), PathBuf::new()));
     let entry = config::entry(&ant)?;
     let parsed: toml::Table = toml::from_str(&entry).context("the settings given")?;
@@ -28,27 +47,31 @@ pub fn settings(name: &UserId, options: &AntOptions) -> Result<Map<String, Value
 }
 
 /// `ants ant add`: send the order and wait up to `wait` for its outcome.
-pub async fn run(nats: &Nats<'_>, name: &UserId, machine: Machine, options: &AntOptions, wait: Duration) -> Result<()> {
-    if name.is_human() {
-        bail!("{name} is a human's name: an ant's name is lowercase");
-    }
-    let settings = settings(name, options)?;
+pub async fn run(nats: &Nats<'_>, args: Args) -> Result<()> {
+    let settings = settings(&args.name, &args.options)?;
     let (_, js) = nats.connect("ants-ant-add").await?;
-    let (order, outcome) =
-        super::send(nats, &js, Some(machine.clone()), name, AdminOp::Add { settings, assistant_of: None }, wait)
-            .await?;
-    let Some(outcome) = outcome else {
-        println!("{}", super::pending_note(&order));
-        return Ok(());
-    };
-    match outcome.state {
-        OrderState::Applied => {
-            let key = outcome.result.as_ref().and_then(|r| r["key"].as_str()).map(|k| format!(" with key {k}"));
-            println!("{name} added on {machine}{}; its daemon starts it.", key.unwrap_or_default());
-            Ok(())
-        }
-        _ => bail!("the daemon of {machine} refused to add {name}: {}", super::reason(&outcome)),
+    println!("{}", add(&Admin::of(nats)?, &js, &args.name, args.on, settings, args.wait).await?);
+    Ok(())
+}
+
+/// Send the add order for `name` with `settings`, signed by `admin`, to `machine`, and wait up to `wait` for its
+/// outcome: what it did, or that it is still pending. Fails when the daemon refused it.
+pub async fn add(
+    admin: &Admin,
+    js: &jetstream::Context,
+    name: &UserId,
+    machine: Machine,
+    settings: Map<String, Value>,
+    wait: Duration,
+) -> Result<String> {
+    let op = AdminOp::Add { settings, assistant_of: None };
+    let (order, outcome) = admin.send(js, Some(machine.clone()), name, op, wait).await?;
+    let Some(outcome) = outcome else { return Ok(super::pending_note(&order)) };
+    if outcome.state != OrderState::Applied {
+        bail!("the daemon of {machine} refused to add {name}: {}", super::reason(&outcome));
     }
+    let key = outcome.result.as_ref().and_then(|r| r["key"].as_str()).map(|k| format!(" with key {k}"));
+    Ok(format!("{name} added on {machine}{}; its daemon starts it.", key.unwrap_or_default()))
 }
 
 #[cfg(test)]

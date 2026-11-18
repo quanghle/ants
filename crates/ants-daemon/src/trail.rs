@@ -26,9 +26,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
-    Envelope, JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, NoticeKind, PendingCall, QueuedCall, Role, RunId, RunState,
-    StepStage, ThreadId, TrailFunction, TrailLeg, TrailLimits, TrailName, TrailRun, TrailSession, TrailSource,
-    TrailStart, UserId, WaitingStep,
+    Envelope, JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, NoticeKind, PendingCall, QueuedCall, Role, RunId, RunLimit,
+    RunState, StepStage, ThreadId, TrailFunction, TrailLeg, TrailLimits, TrailName, TrailRun, TrailSession,
+    TrailSource, TrailStart, UserId, WaitingStep,
 };
 use ants_trail::{Answer, JournalEntry, Limits, Run, Worker};
 use anyhow::Result;
@@ -183,6 +183,8 @@ struct Book {
     queued: Vec<QueuedCall>,
     /// Answers whose journal entries are stored, for the next pass to hand the script.
     answers: Vec<(u32, Answer)>,
+    /// The limit one of those answers raises for: a child run's, failed on it.
+    broke: Option<RunLimit>,
     /// Whether the wall time passed with the run woken for it.
     late: bool,
     /// Whether a call waits for turns the steps of other runs of its tree hold.
@@ -407,6 +409,7 @@ impl Trails {
             pending: Vec::new(),
             queued: Vec::new(),
             answers: Vec::new(),
+            broke: None,
             late: false,
             starved: false,
         };
@@ -498,9 +501,10 @@ impl Trails {
         let header = self.inner.store.header(run).await.map_err(stored)?;
         let mut header = header.ok_or_else(|| format!("{} conducts no run {run}", self.inner.ant))?;
         match &header.state {
-            RunState::Stopped { .. } => {}
-            RunState::Failed { error } if error.contains("limit") => {}
-            RunState::Failed { error } => return Err(format!("run {run} failed, not on a limit: {error}")),
+            RunState::Stopped { .. } | RunState::Failed { limit: Some(_), .. } => {}
+            RunState::Failed { error, limit: None } => {
+                return Err(format!("run {run} failed, not on a limit: {error}"));
+            }
             RunState::Done { .. } => return Err(format!("run {run} is done")),
             RunState::Running | RunState::Waiting => return Err(format!("run {run} is not stopped")),
         }
@@ -594,6 +598,20 @@ impl Trails {
         answer: Answer,
         spent: u32,
     ) -> Result<()> {
+        self.resolve_on(slot, header, pending, answer, spent, None).await
+    }
+
+    /// [`Trails::resolve`], with an answer raising for `broke`: the limit the run fails on should the script fail on
+    /// it.
+    async fn resolve_on(
+        &self,
+        slot: &Slot,
+        header: &TrailRun,
+        pending: &PendingCall,
+        answer: Answer,
+        spent: u32,
+        broke: Option<RunLimit>,
+    ) -> Result<()> {
         let run = &header.run;
         let entry = JournalEntry {
             call: pending.call,
@@ -607,6 +625,7 @@ impl Trails {
             book.pending.retain(|call| call.call != pending.call);
             book.header.turns = book.header.turns.saturating_add(spent);
             book.answers.push((entry.call, entry.answer.clone()));
+            book.broke = book.broke.or(broke);
         }
         self.charge(header, 0, spent);
         self.retire(run, pending);

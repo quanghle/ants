@@ -9,7 +9,7 @@ use monty_types::{
 };
 use serde_json::value::RawValue;
 
-use crate::protocol::{Answer, Call, Event, Function, Limits, Request, Response};
+use crate::protocol::{Answer, Call, Event, Function, Limit, Limits, Request, Response};
 use crate::trail;
 use crate::value::{from_monty, to_monty};
 
@@ -167,30 +167,35 @@ enum Outcome {
 impl Outcome {
     fn respond(self, mut session: Session) -> Response {
         session.flush(true);
-        let Session { events, calls, limits, .. } = session;
+        let Session { events, calls, limits, limit, .. } = session;
         match self {
             Self::Done(result) => Response::Done { result, calls, events },
-            Self::Failed(error) => Response::Failed { error, calls, events },
+            Self::Failed(error) => Response::Failed { error, calls, events, limit },
             Self::Waiting(waiting) => {
                 let pending = waiting.pending_call_ids().to_vec();
                 let snapshot = match serde_json::to_string(&RunProgress::ResolveFutures(*waiting)) {
                     Ok(snapshot) => snapshot,
                     Err(e) => {
-                        return Response::Failed { error: format!("cannot dump the session: {e}"), calls, events };
+                        let error = format!("cannot dump the session: {e}");
+                        return Response::Failed { error, calls, events, limit: None };
                     }
                 };
-                let limit = limits.dump_bytes;
-                if snapshot.len() > limit {
+                let most = limits.dump_bytes;
+                if snapshot.len() > most {
                     let size = snapshot.len();
                     return Response::Failed {
-                        error: format!("the dumped session of {size} bytes passes the limit of {limit} bytes"),
+                        error: format!("the dumped session of {size} bytes passes the limit of {most} bytes"),
                         calls,
                         events,
+                        limit: Some(Limit::Session),
                     };
                 }
                 match RawValue::from_string(snapshot) {
                     Ok(snapshot) => Response::Suspended { snapshot, calls, pending, events },
-                    Err(e) => Response::Failed { error: format!("cannot dump the session: {e}"), calls, events },
+                    Err(e) => {
+                        let error = format!("cannot dump the session: {e}");
+                        Response::Failed { error, calls, events, limit: None }
+                    }
                 }
             }
         }
@@ -205,24 +210,36 @@ struct Session {
     calls: Vec<Call>,
     events: Vec<Event>,
     print: String,
+    /// The limit the script broke, should it fail: one of time or memory it failed on, else the steps once a call
+    /// past them raised.
+    limit: Option<Limit>,
 }
 
 impl Session {
     fn new(limits: Limits, seed: u64, steps: u32) -> Self {
-        Self { limits, seed, steps, calls: Vec::new(), events: Vec::new(), print: String::new() }
+        Self { limits, seed, steps, calls: Vec::new(), events: Vec::new(), print: String::new(), limit: None }
     }
 
     fn failed(&mut self, exception: MontyException) -> Response {
         self.flush(true);
         let (calls, events) = (std::mem::take(&mut self.calls), std::mem::take(&mut self.events));
-        Response::Failed { error: trail::render(exception), calls, events }
+        Response::Failed { error: trail::render(exception), calls, events, limit: None }
     }
 
     /// Runs the script until it waits on its steps, ends or raises.
     fn drive(&mut self, mut progress: Result<RunProgress, MontyException>) -> Outcome {
         loop {
             progress = match progress {
-                Err(e) => return Outcome::Failed(trail::render(e)),
+                Err(e) => {
+                    // Monty's time and memory limits raise these, which the script cannot catch.
+                    let broke = match e.exc_type() {
+                        ExcType::TimeoutError => Some(Limit::Compute),
+                        ExcType::MemoryError => Some(Limit::Memory),
+                        _ => None,
+                    };
+                    self.limit = broke.or(self.limit);
+                    return Outcome::Failed(trail::render(e));
+                }
                 Ok(RunProgress::Complete(result)) => {
                     return match from_monty(result.as_ref()) {
                         Ok(result) => Outcome::Done(result),
@@ -262,6 +279,7 @@ impl Session {
         let result = match function {
             None => ExtFunctionResult::NotFound(call.function_name.clone()),
             Some(function) if function.is_step() && self.steps >= self.limits.steps => {
+                self.limit = Some(Limit::Steps);
                 ExtFunctionResult::Error(MontyException::new(
                     ExcType::RuntimeError,
                     Some(format!("the run reached its limit of {} steps", self.limits.steps)),

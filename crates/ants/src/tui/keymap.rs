@@ -121,7 +121,7 @@ impl View {
             Self::Mcp => "an ant's MCP servers",
             Self::Settings => "an ant's settings",
             Self::Credentials => "credentials",
-            Self::Held => "held orders",
+            Self::Held => "held for confirmation",
             Self::Bar => "the command bar",
             Self::Request => "a tool request in full",
             Self::Pending => "a thread's waiting cards",
@@ -380,7 +380,14 @@ const HOME: &[Entry] = &[
     Entry::new(&[Key::Char('t')], "t", "tree", "the delegation tree of the selected thread", 20, home_selected),
     Entry::new(&[Key::Char('s')], "s", "digest", "the digest of what came while away", 21, always),
     Entry::new(&[Key::Char('c')], "c", "creds", "the credentials asked for", 22, always),
-    Entry::new(&[Key::Char('o')], "o", "held", "the admin orders held", 23, always),
+    Entry::new(
+        &[Key::Char('o')],
+        "o",
+        "held",
+        "the admin orders and tool decisions of the assistant held for confirmation",
+        23,
+        always,
+    ),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
 
@@ -633,10 +640,11 @@ const ANT: &[Entry] = &[
         2,
         ant_restart_armed,
     ),
-    Entry::new(&[Key::Char('X')], "X", "retire", "retire the ant, in the command bar", 25, always),
-    Entry::new(&[Key::Char('c')], "c", "creds", "the credentials asked for", 26, always),
-    Entry::new(&[Key::Char('['), Key::Char(']')], "[ ]", "scroll", "scroll the about or now column", 27, always),
-    Entry::new(&[Key::Char('\\')], "\\", "column", "switch between the about and now columns", 28, always),
+    Entry::new(&[Key::Char('C')], "C", "clone", "clone the ant by admin order, in the command bar", 25, always),
+    Entry::new(&[Key::Char('X')], "X", "retire", "retire the ant, in the command bar", 26, always),
+    Entry::new(&[Key::Char('c')], "c", "creds", "the credentials asked for", 27, always),
+    Entry::new(&[Key::Char('['), Key::Char(']')], "[ ]", "scroll", "scroll the about or now column", 28, always),
+    Entry::new(&[Key::Char('\\')], "\\", "column", "switch between the about and now columns", 29, always),
 ];
 
 const ANT_QUEUE: &[Entry] = &[
@@ -676,9 +684,9 @@ const CREDENTIALS: &[Entry] = &[
 ];
 
 const HELD: &[Entry] = &[
-    Entry::new(UP_DOWN, "↑↓", "select", "select an order", 10, always),
-    Entry::new(&[Key::Char('a')], "a", "confirm", "confirm the selected order, once y confirms", 5, always),
-    Entry::new(&[Key::Char('r')], "r", "deny", "deny the selected order, once y confirms", 6, always),
+    Entry::new(UP_DOWN, "↑↓", "select", "select an order or a decision", 10, always),
+    Entry::new(&[Key::Char('a')], "a", "confirm", "confirm the selected order or decision, once y confirms", 5, always),
+    Entry::new(&[Key::Char('r')], "r", "deny", "deny the selected order or decision, once y confirms", 6, always),
     Entry::new(&[Key::Char('y')], "y", "confirm", "give the answer a or r asked for", 1, page_armed),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
@@ -785,7 +793,7 @@ const BAR: &[Entry] = &[
 ];
 
 const START: &[Entry] = &[
-    Entry::new(&[Key::Char('y')], "y", "start", "start the run its summary shows, on a new thread", 1, always),
+    Entry::new(&[Key::Char('y')], "y", "start", "start the run its summary shows, then show its thread", 1, always),
     Entry::new(&[Key::Esc], "Esc", "not started", "leave the run unstarted, as any key but y and ? does", 2, always),
     Entry::new(&[Key::Char('?')], "?", "help", "the keys of the run to start", HELP_ONLY, always),
 ];

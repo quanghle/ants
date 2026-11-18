@@ -1,7 +1,8 @@
 //! The steps of the trail runs reporting on a thread, as its thread view lists them: heard as the conductor's status
 //! updates tell each start and end ([`StatusUpdate::Step`]), and read from the records of the runs in
 //! [`ants_proto::TRAIL_RUNS_BUCKET`] when the thread shows ([`Io`]), as status updates are never stored: a run's
-//! thread opened after its steps ran shows them all the same.
+//! thread opened after its steps ran shows them all the same. Each conductor keeps its steps under the thread of their
+//! run ([`ants_proto::trail_thread_step_key`]), so a thread's read takes its own steps alone.
 
 use std::collections::HashMap;
 
@@ -144,9 +145,11 @@ impl Io {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::RunId;
+    use ants_proto::{RunId, TRAIL_RUNS_BUCKET, TrailStepThread, trail_step_key, trail_thread_step_key};
 
     use super::*;
+    use crate::connection::Nats;
+    use crate::test_support::Server;
     use crate::test_support::live::{at, user};
 
     fn step(thread: &ThreadId, step_thread: &ThreadId, call: u32, stage: StepStage, secs: i64) -> StatusEvent {
@@ -202,6 +205,33 @@ mod tests {
         assert_eq!(steps.of(&thread)[1].label.as_deref(), Some("review 2"), "the label heard stays");
         steps.read(&thread, vec![stored(&heard, 2, StepStage::Dropped, 5)], at(11));
         assert_eq!(steps.of(&thread)[1].stage, StepStage::Dropped, "an end read replaces another heard");
+    }
+
+    #[tokio::test]
+    async fn a_thread_reads_only_the_steps_kept_under_it() {
+        let Some(server) = Server::start() else { return };
+        let creds = server.creds_as(&user("alice"), ants_proto::Role::Human);
+        let (_alice, js) = Nats::new(&server.url, Some(&creds), None).unwrap().connect("test").await.unwrap();
+        let lead = user("lead");
+        let (_lead, lead_js) = server.connect(&lead).await;
+        let run: RunId = "0198c4ab-0000-7000-8000-000000000000".parse().unwrap();
+        let (thread, other) = (ThreadId::generate(), ThreadId::generate());
+        let (own, unindexed, elsewhere) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let put = async |key: String, call: u32, run_thread: &ThreadId| {
+            let marker = TrailStepThread { run: run.clone(), call, to: user("dev-b"), run_thread: run_thread.clone() };
+            let payload = serde_json::to_vec(&marker).unwrap().into();
+            lead_js.publish(format!("$KV.{TRAIL_RUNS_BUCKET}.{key}"), payload).await.unwrap().await.unwrap();
+        };
+        put(trail_thread_step_key(&lead, &thread, &own), 1, &thread).await;
+        put(trail_step_key(&lead, &unindexed), 2, &thread).await;
+        put(trail_thread_step_key(&lead, &other, &elsewhere), 3, &other).await;
+
+        let mut io = Io::new(js);
+        io.watch(Some((thread.clone(), vec![lead.clone()])));
+        let Event(read, steps) = io.next().await;
+        assert_eq!(read, thread);
+        let steps: Vec<_> = steps.unwrap().into_iter().map(|s| (s.thread, s.call, s.conductor)).collect();
+        assert_eq!(steps, [(own, 1, lead)], "neither a step kept under another thread nor one kept by its own alone");
     }
 
     #[test]

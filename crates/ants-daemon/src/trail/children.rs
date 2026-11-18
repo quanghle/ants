@@ -108,7 +108,7 @@ impl Trails {
         let Some(link) = &child.parent else { return Ok(()) };
         let answer = match &child.state {
             RunState::Done { result } => Answer::Ok(result.clone()),
-            RunState::Failed { error } => {
+            RunState::Failed { error, .. } => {
                 let name = child.trail().map_or_else(|| child.run.to_string(), ToString::to_string);
                 Answer::Error(format!("trail {name} failed: {error}"))
             }
@@ -121,7 +121,7 @@ impl Trails {
             (book.header.clone(), book.pending.iter().find(answered).cloned())
         };
         let Some(pending) = pending else { return Ok(()) };
-        self.resolve(&slot, &header, &pending, answer, 0).await
+        self.resolve_on(&slot, &header, &pending, answer, 0, child.state.failed_on()).await
     }
 
     /// Stop the child runs answering `calls` for `by`. Returns the steps to other ants they waited on.

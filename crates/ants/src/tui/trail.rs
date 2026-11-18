@@ -1,6 +1,7 @@
-//! `/trail`: the runs of trails as `ants trail` lists, starts, stops and resumes them, with the CLI's own code. `/trail
-//! runs` shows the CLI's table of runs in the pager; `/trail run` shows what `ants trail run` prints of the run before
-//! it starts, the trail and what the run may spend, over the view, until `y` starts it, on a new thread then shown, or
+//! `/trail`: the saved trails and the runs of trails as `ants trail` lists, shows, starts, stops and resumes them,
+//! with the CLI's own code. `/trail list`, `/trail show` and `/trail runs` show what `ants trail list`, `ants trail
+//! show` and `ants trail runs` print in the pager; `/trail run` shows what `ants trail run` prints of the run before it
+//! starts, the trail and what the run may spend, over the view, until `y` starts it, on a new thread then shown, or
 //! another key leaves it unstarted; `/trail stop` and `/trail resume` ask the run's conductor as `ants trail stop` and
 //! `ants trail resume` do.
 
@@ -22,7 +23,7 @@ use super::model::{Action, Key, Model};
 use super::style::{block, dim};
 use crate::cmd::send;
 use crate::cmd::trail::runs::{self, Pick};
-use crate::cmd::trail::{control, start};
+use crate::cmd::trail::{self as cli, Shown, control, saved, start};
 
 /// How wide the summary of a run to start is at most.
 const WIDTH: u16 = 100;
@@ -54,7 +55,7 @@ impl Planned {
         frame.render_widget(Clear, area);
         frame.render_widget(outer, area);
         frame.render_widget(Paragraph::new(rows), body);
-        let line = " y starts it, on a new thread · another key leaves it unstarted";
+        let line = " y starts it · another key leaves it unstarted";
         frame.render_widget(Paragraph::new(Line::styled(line, dim())), keys);
     }
 }
@@ -76,6 +77,28 @@ impl Model {
     }
 }
 
+/// The saved trails, as `ants trail list` lists them, for the pager.
+pub async fn trails(ctx: &Ctx) -> Result<Done> {
+    let listed = cli::saved_trails(&ctx.js).await?;
+    let line = match listed.len() {
+        0 => return Ok(Done { line: "no saved trails".to_owned(), ..Done::default() }),
+        1 => "1 saved trail: the pager lists it".to_owned(),
+        n => format!("{n} saved trails: the pager lists them"),
+    };
+    Ok(Done { line, page: Some(saved::table(&listed, Utc::now())), ..Done::default() })
+}
+
+/// The saved trail `what` names, else the run, as `ants trail show` shows it, for the pager.
+pub async fn shown(ctx: &Ctx, what: Shown) -> Result<Done> {
+    let now = Utc::now();
+    let (page, shows) = match cli::find(&ctx.js, what, ctx.me.role.is_human()).await? {
+        cli::Found::Trail(found) => (saved::render(&found, now), "its meta and script"),
+        cli::Found::Run(run) => (cli::run_shown(&ctx.js, &run, now).await?, "its record and journal"),
+    };
+    let line = format!("{}: the pager shows {shows}", page.lines().next().unwrap_or_default());
+    Ok(Done { line, page: Some(page), ..Done::default() })
+}
+
 /// The runs of trails conductors recorded, as `ants trail runs` lists them, for the pager.
 pub async fn listed(ctx: &Ctx) -> Result<Done> {
     let listed = runs::list(&ctx.js, None).await?;
@@ -89,18 +112,26 @@ pub async fn listed(ctx: &Ctx) -> Result<Done> {
 }
 
 /// Plan a run of the saved trail `name` with `args` on `conductor`, else whom a message naming no one goes to, under
-/// the default limits, reporting on a new thread: summed up as `ants trail run` sums it up, for `y` to start.
-pub async fn planned(ctx: &Ctx, name: &TrailName, conductor: Option<UserId>, args: Option<Value>) -> Result<Done> {
+/// `limits`, reporting on `thread`, else a new one: summed up as `ants trail run` sums it up, for `y` to start.
+pub async fn planned(
+    ctx: &Ctx,
+    name: &TrailName,
+    conductor: Option<UserId>,
+    args: Option<Value>,
+    limits: TrailLimits,
+    thread: Option<ThreadId>,
+) -> Result<Done> {
     let args = start::sized(args, "ARGS")?;
     let plan = start::saved_plan(&ctx.js, name).await?;
     let conductor = match conductor {
         Some(conductor) => conductor,
         None => send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await.to,
     };
-    let limits = TrailLimits::DEFAULT;
-    let summary = start::summary(&plan, &conductor, None, &limits);
-    let line = format!("trail {} on {conductor}, at most {}: y starts it", plan.name, start::limits_line(&limits));
-    let start = start::Start { source: plan.source, args, conductor, thread: ThreadId::generate(), limits };
+    let summary = start::summary(&plan, &conductor, thread.as_ref(), &limits);
+    let on = thread.as_ref().map_or_default(|thread| format!(", reporting on thread {thread}"));
+    let line = format!("trail {} on {conductor}{on}, at most {}: y starts it", plan.name, start::limits_line(&limits));
+    let thread = thread.unwrap_or_else(ThreadId::generate);
+    let start = start::Start { source: plan.source, args, conductor, thread, limits };
     Ok(Done { line, planned: Some(Box::new(Planned { summary, start })), ..Done::default() })
 }
 
@@ -137,7 +168,7 @@ mod tests {
 
     use super::*;
     use crate::connection::Nats;
-    use crate::test_support::live::{at, user};
+    use crate::test_support::live::{at, message, user};
     use crate::tui::exec::Outcome;
     use crate::tui::model::{Focus, Page};
     use crate::tui::test_support::model;
@@ -174,12 +205,13 @@ mod tests {
     #[test]
     fn trail_run_shows_what_the_run_may_spend_until_y_starts_it_and_another_key_leaves_it() {
         let mut m = model();
-        let Some(Action::Run(Job::TrailPlan { trail, conductor, args }, _)) =
+        let Some(Action::Run(Job::TrailPlan { trail, conductor, args, limits, thread }, _)) =
             run(&mut m, r#"/trail run review @lead {"files": ["a.rs"]}"#)
         else {
             panic!("no plan")
         };
         assert_eq!((trail.as_str(), conductor, args), ("review", Some(user("lead")), Some(json!({"files": ["a.rs"]}))));
+        assert_eq!((limits, thread), (TrailLimits::DEFAULT, None), "the default limits, on a new thread");
         let plan = start::Plan {
             name: "review".to_owned(),
             from: "saved for the colony by alice 1m ago".to_owned(),
@@ -208,7 +240,10 @@ mod tests {
 
         m.outcome(done(plan_done()));
         assert_eq!(m.key(Key::Char('?'), at(2)), None);
-        assert!(screen(&m).contains("start the run its summary shows, on a new thread"), "the help lists its keys");
+        assert!(
+            screen(&m).contains("start the run its summary shows, then show its thread"),
+            "the help lists its keys"
+        );
         m.key(Key::Esc, at(2));
         assert!(m.help.is_none() && m.starting.is_some(), "the run waits on after the help");
         let Some(Action::Run(Job::TrailStart(asked), _)) = m.key(Key::Char('y'), at(2)) else { panic!("no start") };
@@ -224,6 +259,30 @@ mod tests {
         let Some(Action::Run(Job::TrailStop(pick), _)) = run(&mut m, "/trail stop 0190ab") else { panic!("no stop") };
         assert_eq!(pick.to_string(), "0190ab");
         assert!(matches!(run(&mut m, "/trail resume 0190ab"), Some(Action::Run(Job::TrailResume(_), _))));
+    }
+
+    #[test]
+    fn trail_run_reports_on_a_thread_read_the_latest_or_the_one_open() {
+        let (older, newer) = ("0190aaaa-0000-7000-8000-000000000001", "0190bbbb-0000-7000-8000-000000000002");
+        let (older, newer): (ThreadId, ThreadId) = (older.parse().unwrap(), newer.parse().unwrap());
+        let mut m = model();
+        m.stored(vec![message(1, &older, "alice", "dev-a", "a"), message(2, &newer, "alice", "dev-a", "b")], at(1));
+        let thread = |m: &mut Model, text: &str| match run(m, text) {
+            Some(Action::Run(Job::TrailPlan { thread, limits, .. }, _)) => Ok((thread, limits.steps)),
+            _ => Err(m.bar.status.as_ref().unwrap().text.clone()),
+        };
+        assert_eq!(thread(&mut m, "/trail run review --thread 0190a --steps 10"), Ok((Some(older.clone()), 10)));
+        assert_eq!(thread(&mut m, "/trail run review --thread last"), Ok((Some(newer), 50)));
+        assert_eq!(
+            thread(&mut m, "/trail run review --thread 0190"),
+            Err("2 threads start 0190: give more of the id".into())
+        );
+        assert_eq!(thread(&mut m, "/trail run review --thread ffff"), Err("no thread ffff read".into()));
+        assert_eq!(thread(&mut m, "/trail run review --thread here"), Err("no thread open or selected".into()));
+        m.pages.push(Page::Thread(crate::tui::thread::Page::new(older.clone())));
+        assert_eq!(thread(&mut m, "/trail run review --thread here"), Ok((Some(older), 50)));
+        let error = thread(&mut m, "/trail run review --steps 501").unwrap_err();
+        assert_eq!(error, "--steps is over the most a run may take, 500");
     }
 
     /// Answer each request on `ant`'s control subject as its daemon does: a run started, stopped with a step left
@@ -249,17 +308,15 @@ mod tests {
         });
     }
 
-    #[tokio::test]
-    async fn the_trail_jobs_list_plan_start_stop_and_resume_runs_as_ants_trail_does() {
-        let Some(server) = crate::test_support::Server::start() else { return };
-        let alice = user("alice");
-        let creds = server.creds_as(&alice, Role::Human);
+    /// The jobs' context, as `me`, a human.
+    async fn human(server: &crate::test_support::Server, me: &UserId) -> Ctx {
+        let creds = server.creds_as(me, Role::Human);
         let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
         let (client, js) = nats.connect("test").await.unwrap();
         let (me, sealing) = (nats.me.clone(), crate::people::sealed::Sealing::of(&nats));
-        let ctx = Ctx {
+        Ctx {
             client,
-            js: js.clone(),
+            js,
             me,
             domain: None,
             meta: Err("unused".into()),
@@ -267,31 +324,113 @@ mod tests {
             account: None,
             keyring: None,
             admin: Err("unused".into()),
+        }
+    }
+
+    const SCRIPT: &str = "meta = {\"name\": \"review\", \"description\": \"Reviews\", \"phases\": []}\nagent(\"go\")\n";
+
+    /// Save [`SCRIPT`] for the colony as `name`, by the human of `ctx`.
+    async fn save(ctx: &Ctx, name: &TrailName) -> SavedTrail {
+        let saved = SavedTrail {
+            name: name.clone(),
+            description: "Reviews".to_owned(),
+            phases: Vec::new(),
+            waypoints: Vec::new(),
+            script: SCRIPT.to_owned(),
+            saved_by: ctx.me.id.clone(),
+            saved_at: Utc::now(),
         };
+        let payload = serde_json::to_vec(&saved).unwrap();
+        ctx.js.publish(format!("$KV.{TRAILS_BUCKET}.{name}"), payload.into()).await.unwrap().await.unwrap();
+        saved
+    }
+
+    /// Record a run of `trail` that `lead` conducts for `owner` on `thread`, as `lead`'s daemon does.
+    async fn record(
+        server: &crate::test_support::Server,
+        lead: &UserId,
+        owner: &UserId,
+        trail: &TrailName,
+        thread: ThreadId,
+    ) -> TrailRun {
+        let record = TrailRun {
+            run: "0190aaaa-0000-7000-8000-000000000001".parse().unwrap(),
+            conductor: lead.clone(),
+            route: vec![first_leg(trail, SCRIPT)],
+            owner: Some(owner.clone()),
+            thread,
+            parent: None,
+            origin: Origin { by: Starter::Human { user: owner.clone() }, channel: None },
+            limits: TrailLimits::DEFAULT,
+            state: RunState::Running,
+            phase: None,
+            steps: 1,
+            turns: 2,
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+            ended_at: None,
+        };
+        let (_, lead_js) = server.connect(lead).await;
+        let payload = serde_json::to_vec(&record).unwrap();
+        let subject = format!("$KV.{TRAIL_RUNS_BUCKET}.{}", record.key());
+        lead_js.publish(subject, payload.into()).await.unwrap().await.unwrap();
+        record
+    }
+
+    #[tokio::test]
+    async fn the_trail_jobs_list_and_show_saved_trails_and_runs_as_ants_trail_does() {
+        let Some(server) = crate::test_support::Server::start() else { return };
+        let (alice, lead) = (user("alice"), user("lead"));
+        let ctx = human(&server, &alice).await;
+        // A name no machine's ~/.ants/trails holds, as this one's are looked in too.
+        let name: TrailName = "chat-test-review".parse().unwrap();
+        let error = shown(&ctx, Shown::Trail(name.clone())).await.unwrap_err().to_string();
+        assert!(error.starts_with("no trail chat-test-review"), "{error}");
+        save(&ctx, &name).await;
+
+        let listed = trails(&ctx).await.unwrap();
+        assert!(listed.line.contains("saved trail") && listed.line.contains(": the pager lists"), "{}", listed.line);
+        let table = listed.page.unwrap();
+        let row = table.lines().find(|row| row.starts_with(name.as_str())).unwrap_or_else(|| panic!("{table}"));
+        assert!(row.contains("colony") && row.contains("alice") && row.ends_with("Reviews"), "{row}");
+
+        let trail = shown(&ctx, Shown::Trail(name.clone())).await.unwrap();
+        assert_eq!(trail.line, format!("trail {name}: the pager shows its meta and script"));
+        let page = trail.page.unwrap();
+        assert!(page.contains("saved for the colony by alice") && page.ends_with(SCRIPT), "{page}");
+
+        let record = record(&server, &lead, &alice, &name, ThreadId::generate()).await;
+        let heading = format!("run {} of trail {name}", record.run);
+        for what in [Shown::Run(record.run.clone()), Shown::Trail("0190aaaa".parse().unwrap())] {
+            let run = shown(&ctx, what).await.unwrap();
+            assert_eq!(run.line, format!("{heading}: the pager shows its record and journal"));
+            let page = run.page.unwrap();
+            assert!(page.starts_with(&heading) && page.contains("limits: steps 1 of 50, turns 2 of 200"), "{page}");
+        }
+        let error = shown(&ctx, Shown::Trail("0190c".parse().unwrap())).await.unwrap_err().to_string();
+        assert!(error.starts_with("no trail 0190c"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn the_trail_jobs_list_plan_start_stop_and_resume_runs_as_ants_trail_does() {
+        let Some(server) = crate::test_support::Server::start() else { return };
+        let alice = user("alice");
+        let ctx = human(&server, &alice).await;
         let lead = user("lead");
         conductor(&server, &lead).await;
 
         assert_eq!(listed(&ctx).await.unwrap().line, "no runs of trails");
         // A name no machine's ~/.ants/trails holds, as this one's are looked in too.
         let name: TrailName = "chat-test-review".parse().unwrap();
-        let error = planned(&ctx, &name, None, None).await.unwrap_err().to_string();
+        let error = planned(&ctx, &name, None, None, TrailLimits::DEFAULT, None).await.unwrap_err().to_string();
         assert!(error.starts_with("no trail chat-test-review"), "{error}");
-        let script = "meta = {\"name\": \"review\", \"description\": \"Reviews\", \"phases\": []}\nagent(\"go\")\n";
-        let saved = SavedTrail {
-            name: name.clone(),
-            description: "Reviews".to_owned(),
-            phases: Vec::new(),
-            waypoints: Vec::new(),
-            script: script.to_owned(),
-            saved_by: alice.clone(),
-            saved_at: Utc::now(),
-        };
-        let payload = serde_json::to_vec(&saved).unwrap();
-        js.publish(format!("$KV.{TRAILS_BUCKET}.{name}"), payload.into()).await.unwrap().await.unwrap();
+        let saved = save(&ctx, &name).await;
         let big = Some(json!("x".repeat(ants_proto::MAX_TRAIL_ARGS)));
-        let error = planned(&ctx, &saved.name, None, big).await.unwrap_err().to_string();
+        let error = planned(&ctx, &saved.name, None, big, TrailLimits::DEFAULT, None).await.unwrap_err().to_string();
         assert!(error.starts_with("ARGS has 65538 bytes of JSON"), "{error}");
-        let plan = planned(&ctx, &saved.name, None, Some(json!({"files": ["a.rs"]}))).await.unwrap();
+        let plan = planned(&ctx, &saved.name, None, Some(json!({"files": ["a.rs"]})), TrailLimits::DEFAULT, None)
+            .await
+            .unwrap();
         let Planned { summary, start } = *plan.planned.unwrap();
         let messenger = UserId::messenger();
         assert_eq!(
@@ -304,10 +443,20 @@ mod tests {
         assert!(summary.contains(&format!("conductor {messenger}, reporting on a new thread")), "{summary}");
         assert_eq!((start.source, start.args), (TrailSource::Saved(saved.name.clone()), json!({"files": ["a.rs"]})));
 
-        let start = start::Start {
-            conductor: lead.clone(),
-            ..planned(&ctx, &saved.name, Some(lead.clone()), None).await.unwrap().planned.unwrap().start
-        };
+        let limits = TrailLimits { steps: 10, wall_secs: 7200, ..TrailLimits::DEFAULT };
+        let thread = ThreadId::generate();
+        let plan = planned(&ctx, &saved.name, Some(lead.clone()), None, limits, Some(thread.clone())).await.unwrap();
+        assert_eq!(
+            plan.line,
+            format!(
+                "trail {name} on lead, reporting on thread {thread}, at most 10 steps, 4 at once, 200 turns, 2h of wall \
+                 time: y starts it"
+            )
+        );
+        let Planned { summary, start } = *plan.planned.unwrap();
+        assert!(summary.contains(&format!("conductor lead, reporting on thread {thread}")), "{summary}");
+        assert!(summary.contains("steps:      10,") && summary.contains("wall time:  2h,"), "{summary}");
+        assert_eq!((&start.thread, start.limits), (&thread, limits));
         let started = started(&ctx, &start).await.unwrap();
         assert_eq!(started.open.as_ref(), Some(&start.thread));
         assert!(
@@ -317,31 +466,7 @@ mod tests {
             started.line
         );
 
-        let (_, lead_js) = server.connect(&lead).await;
-        let record = TrailRun {
-            run: "0190aaaa-0000-7000-8000-000000000001".parse().unwrap(),
-            conductor: lead.clone(),
-            route: vec![first_leg(&saved.name, script)],
-            owner: Some(alice.clone()),
-            thread: start.thread.clone(),
-            parent: None,
-            origin: Origin { by: Starter::Human { user: alice.clone() }, channel: None },
-            limits: TrailLimits::DEFAULT,
-            state: RunState::Running,
-            phase: None,
-            steps: 1,
-            turns: 2,
-            started_at: Utc::now(),
-            updated_at: Utc::now(),
-            ended_at: None,
-        };
-        let payload = serde_json::to_vec(&record).unwrap();
-        lead_js
-            .publish(format!("$KV.{TRAIL_RUNS_BUCKET}.{}", record.key()), payload.into())
-            .await
-            .unwrap()
-            .await
-            .unwrap();
+        let record = record(&server, &lead, &alice, &saved.name, start.thread.clone()).await;
         let runs = listed(&ctx).await.unwrap();
         assert_eq!(runs.line, "1 run recorded, 1 not over: the pager lists them");
         assert!(runs.page.unwrap().contains(record.run.as_str()));

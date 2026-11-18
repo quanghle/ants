@@ -3,12 +3,14 @@
 
 use std::time::Duration;
 
-use ants_proto::{ChannelId, ChannelNotify, Reaction, ThreadId, TrailName, UserId};
+use ants_proto::{ChannelId, ChannelNotify, Machine, Reaction, ThreadId, TrailLimits, TrailName, UserId};
 use chrono::TimeDelta;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::snooze;
+use crate::admin::orders::{add, clone};
 use crate::cmd::trail::runs::Pick;
+use crate::cmd::trail::{LimitArgs, Shown};
 use crate::threads::thread_meta::Marking;
 
 /// The slash commands: name, arguments and what each does, as the list shows them. A command of several forms lists
@@ -28,16 +30,18 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("unmute", "", "notify of the thread again"),
     (
         "notify",
-        "all|humans|mentions",
-        "which unread posts of the channel count: all, by humans and @mentions, @mentions",
+        "all|humans|mentions | snooze DURATION | resume | status",
+        "which unread posts of the channel count; snooze or resume push notifications, or show what holds them",
     ),
     ("snooze", "[DURATION]", "keep the thread off home, 1h unless given"),
     ("unsnooze", "", "bring the thread back on home"),
     ("remind", "DURATION|TIME [NOTE]", "remind of the thread (or selected message) on home and by push then"),
     ("unremind", "", "clear the thread's reminder"),
+    ("reminders", "", "every reminder, the soonest due first, in the pager"),
     ("archive", "", "archive the thread"),
     ("unarchive", "", "unarchive the thread"),
     ("title", "TEXT", "title the thread"),
+    ("notes", "TEXT", "post to the thread's notes: wakes nobody, renews their turn budget"),
     ("react", "NAME", "react to the latest message"),
     ("goto", "THREAD|#channel|@user", "show a thread, channel or user"),
     ("search", "QUERY", "search the threads"),
@@ -48,11 +52,19 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("attach", "PATH", "attach a file to the next message"),
     ("detach", "", "drop the files attached"),
     ("save", "[PATH]", "save the marked attachment"),
+    ("add", "NAME --on MACHINE [FLAGS]", "add an ant by admin order, with the flags of ants ant add"),
+    ("clone", "ANT NEW [FLAGS]", "clone the ant as NEW by admin order, with the flags of ants ant clone"),
     ("retire", "ANT", "retire the ant by admin order, its home kept"),
     (
+        "dead",
+        "replay [SEQ] | drop [SEQ]",
+        "send a dead letter (the one selected, else the thread's latest) to its ant again, or drop it once y confirms",
+    ),
+    (
         "trail",
-        "runs | run NAME [@ANT] [ARGS] | stop RUN | resume RUN",
-        "list the runs of trails, start a run of a saved trail once y confirms its limits, stop or resume a run",
+        "list | show NAME|RUN | runs | run NAME [@ANT] [--steps N] [--at-once N] [--turns N] [--wall DUR] \
+         [--thread THREAD] [ARGS] | stop RUN | resume RUN",
+        "list or show saved trails and runs, start a run of a saved trail once y confirms it, stop or resume a run",
     ),
     ("quit", "", "leave ants chat"),
 ];
@@ -95,15 +107,18 @@ pub enum Slash {
     Mark(Marking),
     Mute(Option<Duration>),
     Unmute,
-    /// Set the notify level of the channel on view.
-    Notify(ChannelNotify),
+    Notify(Notify),
     /// Keep the thread off home this long.
     Snooze(TimeDelta),
     Unsnooze,
     /// Remind of the thread as `DURATION|TIME [NOTE]` says.
     Remind(String),
     Unremind,
+    /// List every reminder, as `ants remind list` does.
+    Reminders,
     Title(String),
+    /// Post the text to the thread's notes.
+    Notes(String),
     React(Reaction),
     Goto(Goto),
     Search(String),
@@ -120,25 +135,92 @@ pub enum Slash {
     Detach,
     /// Save the marked attachment of the selected message, to the path if given.
     Save(Option<String>),
+    /// Add the ant `name` on `machine` with `settings` by admin order, waiting up to `wait` for its outcome, as
+    /// `ants ant add` does.
+    Add {
+        name: UserId,
+        machine: Machine,
+        settings: Map<String, Value>,
+        wait: Duration,
+    },
+    /// Clone `src` as `new` with `settings` over its own by admin order to `machine`, else to the machine serving it,
+    /// waiting up to `wait` for its outcome, as `ants ant clone` does.
+    Clone {
+        src: UserId,
+        new: UserId,
+        machine: Option<Machine>,
+        settings: Map<String, Value>,
+        wait: Duration,
+    },
     /// Retire the ant by admin order.
     Retire(UserId),
+    Dead(Dead),
     Trail(Trail),
     Quit,
 }
 
-/// What `/trail` asks of the runs of trails, as `ants trail` does.
+/// What `/notify` asks: the notify level of the channel on view, as `ants channel notify` sets it, or of the human's
+/// push notifications, as `ants notify` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notify {
+    Level(ChannelNotify),
+    /// Hold them back on every device this long.
+    Snooze(Duration),
+    Resume,
+    Status,
+}
+
+/// What `/trail` asks of the saved trails and the runs of trails, as `ants trail` does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trail {
+    List,
+    /// Show the saved trail, else the run, named.
+    Show(Shown),
     Runs,
     /// Start a run of the saved trail `trail` with `args`, a JSON value, on `conductor`, else whom a message naming no
-    /// one goes to, once confirmed.
+    /// one goes to, under `limits`, reporting on `thread`, else a new one, once confirmed.
     Run {
         trail: TrailName,
         conductor: Option<UserId>,
         args: Option<Value>,
+        limits: TrailLimits,
+        thread: Option<OnThread>,
     },
     Stop(Pick),
     Resume(Pick),
+}
+
+/// The thread `/trail run --thread` names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnThread {
+    /// A thread, by its id or a start of one, as `/goto` takes it.
+    Id(String),
+    /// The thread most recently active among those read: `last`.
+    Last,
+    /// The thread slash commands act on, the open one, else the one selected: `here`.
+    Here,
+}
+
+impl std::str::FromStr for OnThread {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "last" => Ok(Self::Last),
+            "here" => Ok(Self::Here),
+            id if id.parse::<ThreadId>().is_ok() => Ok(Self::Id(id.to_owned())),
+            id => Err(format!("{id} is no thread id, start of one, `last` or `here`")),
+        }
+    }
+}
+
+/// What `/dead` does with a dead letter, as `ants dead replay|drop` does: the one at the stream sequence given, else
+/// the one selected or the thread's latest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dead {
+    Replay(Option<u64>),
+    /// Drop it unreplayed, once `y` confirms.
+    Drop(Option<u64>),
 }
 
 /// Where `/goto` leads.
@@ -249,12 +331,14 @@ fn slash(text: &str) -> Result<Slash, String> {
         "mute" if args.is_empty() => Ok(Slash::Mute(None)),
         "mute" => ants_proto::duration::parse(args).map(|hold| Slash::Mute(Some(hold))).map_err(|e| e.to_string()),
         "unmute" => bare(Slash::Unmute),
-        "notify" => text()?.parse().map(Slash::Notify),
+        "notify" => notify(args).map(Slash::Notify).map_err(|why| why.unwrap_or_else(usage)),
         "snooze" => snooze::duration(args).map(Slash::Snooze),
         "unsnooze" => bare(Slash::Unsnooze),
         "remind" => text().map(Slash::Remind),
         "unremind" => bare(Slash::Unremind),
+        "reminders" => bare(Slash::Reminders),
         "title" => text().map(Slash::Title),
+        "notes" => text().map(Slash::Notes),
         "react" => text()?.parse().map(Slash::React).map_err(|e| e.to_string()),
         "goto" => goto(&text()?).map(Slash::Goto),
         "search" => text().map(Slash::Search),
@@ -269,10 +353,21 @@ fn slash(text: &str) -> Result<Slash, String> {
         "attach" => text().map(Slash::Attach),
         "detach" => bare(Slash::Detach),
         "save" => Ok(Slash::Save(optional())),
+        "add" => {
+            let args: add::Args = flags("/add", args).map_err(|why| why.unwrap_or_else(usage))?;
+            let settings = add::settings(&args.name, &args.options).map_err(|e| format!("{e:#}"))?;
+            Ok(Slash::Add { name: args.name, machine: args.on, settings, wait: args.wait })
+        }
+        "clone" => {
+            let args: clone::Args = flags("/clone", args).map_err(|why| why.unwrap_or_else(usage))?;
+            let settings = add::settings(&args.new, &args.options).map_err(|e| format!("{e:#}"))?;
+            Ok(Slash::Clone { src: args.src, new: args.new, machine: args.machine, settings, wait: args.wait })
+        }
         "retire" => {
             let ant = text()?;
             ant.strip_prefix('@').unwrap_or(&ant).parse().map(Slash::Retire).map_err(|e| format!("{e}"))
         }
+        "dead" => dead(args).map(Slash::Dead).map_err(|why| why.unwrap_or_else(usage)),
         "trail" => trail(args).map(Slash::Trail).map_err(|why| why.unwrap_or_else(usage)),
         "quit" => bare(Slash::Quit),
         _ if COMMANDS.iter().any(|(n, ..)| *n == name) => Err(usage()),
@@ -280,33 +375,134 @@ fn slash(text: &str) -> Result<Slash, String> {
     }
 }
 
+/// What `/notify`'s `args` ask, or why not: None for its usage.
+fn notify(args: &str) -> Result<Notify, Option<String>> {
+    match first_word(args) {
+        ("", _) | ("snooze", "") => Err(None),
+        ("snooze", hold) => ants_proto::duration::parse(hold).map(Notify::Snooze).map_err(|e| Some(e.to_string())),
+        ("resume", "") => Ok(Notify::Resume),
+        ("status", "") => Ok(Notify::Status),
+        ("resume" | "status", _) => Err(None),
+        _ => args.parse().map(Notify::Level).map_err(Some),
+    }
+}
+
+/// What `/dead`'s `args` ask, or why not: None for its usage.
+fn dead(args: &str) -> Result<Dead, Option<String>> {
+    let (verb, seq) = first_word(args);
+    let dead = match verb {
+        "replay" => Dead::Replay,
+        "drop" => Dead::Drop,
+        _ => return Err(None),
+    };
+    match seq {
+        "" => Ok(dead(None)),
+        seq => seq.parse().map(|seq| dead(Some(seq))).map_err(|_| Some(format!("SEQ not a number: {seq}"))),
+    }
+}
+
 /// What `/trail`'s `args` ask, or why not: None for its usage.
 fn trail(args: &str) -> Result<Trail, Option<String>> {
     let error = |e: &dyn std::fmt::Display| Some(e.to_string());
     match first_word(args) {
-        ("runs", "") => Ok(Trail::Runs),
-        ("run", rest) if !rest.is_empty() => {
-            let (name, rest) = first_word(rest);
-            let trail = name.parse().map_err(|e| error(&e))?;
-            let (conductor, rest) = match rest.strip_prefix('@') {
-                Some(after) => {
-                    let (ant, rest) = first_word(after);
-                    (Some(ant.parse().map_err(|e| error(&e))?), rest)
-                }
-                None => (None, rest),
-            };
-            let args = match rest {
-                "" => None,
-                json => Some(crate::cmd::trail::start::json_args(json).map_err(|e| Some(format!("ARGS {e}")))?),
-            };
-            Ok(Trail::Run { trail, conductor, args })
+        ("list", "") => Ok(Trail::List),
+        ("show", what) if !what.is_empty() && !what.contains(char::is_whitespace) => {
+            what.to_ascii_lowercase().parse().map(Trail::Show).map_err(|e| error(&e))
         }
+        ("runs", "") => Ok(Trail::Runs),
+        ("run", rest) if !rest.is_empty() => trail_run(rest),
         (verb @ ("stop" | "resume"), run) if !run.is_empty() && !run.contains(char::is_whitespace) => {
             let run = run.parse().map_err(|e: String| Some(e))?;
             Ok(if verb == "stop" { Trail::Stop(run) } else { Trail::Resume(run) })
         }
         _ => Err(None),
     }
+}
+
+/// The run `/trail run`'s `args` ask for: the trail's name, then the conductor and the options of `ants trail run` in
+/// any order, then the script's args; None for its usage.
+fn trail_run(args: &str) -> Result<Trail, Option<String>> {
+    let error = |e: &dyn std::fmt::Display| Some(e.to_string());
+    let (name, mut rest) = first_word(args);
+    let trail = name.parse().map_err(|e| error(&e))?;
+    let (mut conductor, mut limits, mut thread) = (None, LimitArgs::default(), None);
+    loop {
+        let (word, after) = first_word(rest);
+        if let Some(ant) = word.strip_prefix('@') {
+            if conductor.is_some() {
+                return Err(None);
+            }
+            conductor = Some(ant.parse().map_err(|e| error(&e))?);
+            rest = after;
+            continue;
+        }
+        let Some(option) = word.strip_prefix("--") else { break };
+        let (option, value, after) = match option.split_once('=') {
+            Some((option, value)) => (option, value, after),
+            None => {
+                let (value, after) = first_word(after);
+                (option, value, after)
+            }
+        };
+        let placeholder = match option {
+            "steps" | "at-once" | "turns" => "N",
+            "wall" => "DUR",
+            "thread" => "THREAD",
+            _ => return Err(Some(format!("no option --{option}: /trail run takes {OPTIONS}"))),
+        };
+        let shown = format!("'--{option} <{placeholder}>'");
+        if value.is_empty() {
+            return Err(Some(format!("a value is required for {shown} but none was supplied")));
+        }
+        let invalid = |e: &dyn std::fmt::Display| Some(format!("invalid value '{value}' for {shown}: {e}"));
+        let given = match option {
+            "steps" => once(&mut limits.steps, value.parse().map_err(|e| invalid(&e))?),
+            "at-once" => once(&mut limits.at_once, value.parse().map_err(|e| invalid(&e))?),
+            "turns" => once(&mut limits.turns, value.parse().map_err(|e| invalid(&e))?),
+            "wall" => once(&mut limits.wall, ants_proto::duration::parse(value).map_err(|e| invalid(&e))?),
+            _ => once(&mut thread, value.parse().map_err(|e| invalid(&e))?),
+        };
+        if !given {
+            return Err(Some(format!("{shown} is given twice")));
+        }
+        rest = after;
+    }
+    let limits = limits.over(TrailLimits::DEFAULT).map_err(|e| error(&e))?;
+    let args = match rest {
+        "" => None,
+        json => Some(crate::cmd::trail::start::json_args(json).map_err(|e| Some(format!("ARGS {e}")))?),
+    };
+    Ok(Trail::Run { trail, conductor, args, limits, thread })
+}
+
+/// The options `/trail run` takes, as `ants trail run` names them.
+const OPTIONS: &str = "--steps, --at-once, --turns, --wall and --thread";
+
+/// Set `slot` to `value` unless set already: whether it was not.
+fn once<T>(slot: &mut Option<T>, value: T) -> bool {
+    slot.replace(value).is_none()
+}
+
+/// `args` read as the command line reads the arguments `T` of its command: words as [`quoted_words`] splits them,
+/// those before the first flag without a leading `@`. Or why not: clap's error in a line, None when none was given.
+fn flags<T: clap::Args>(command: &'static str, args: &str) -> Result<T, Option<String>> {
+    let mut words = quoted_words(args);
+    if words.is_empty() {
+        return Err(None);
+    }
+    for word in words.iter_mut().take_while(|word| !word.starts_with('-')) {
+        if let Some(ant) = word.strip_prefix('@') {
+            *word = ant.to_owned();
+        }
+    }
+    let command = clap::Command::new(command).no_binary_name(true).disable_help_flag(true);
+    let told = |e: clap::Error| {
+        let text = e.to_string();
+        let first = text.split("\n\n").next().unwrap_or_default();
+        Some(first.trim_start_matches("error: ").split_whitespace().collect::<Vec<_>>().join(" "))
+    };
+    let matches = T::augment_args(command).try_get_matches_from(words).map_err(told)?;
+    T::from_arg_matches(&matches).map_err(told)
 }
 
 fn goto(to: &str) -> Result<Goto, String> {
@@ -324,6 +520,8 @@ fn goto(to: &str) -> Result<Goto, String> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::test_support::live::user;
 
@@ -364,10 +562,19 @@ mod tests {
         assert_eq!(ok("/grant"), Slash::Grant(None));
         assert_eq!(ok("/answer ship it"), Slash::Answer("ship it".into()));
         assert_eq!(ok("/mute 2h"), Slash::Mute(Some(Duration::from_hours(2))));
-        assert_eq!(ok("/notify mentions"), Slash::Notify(ChannelNotify::Mentions));
-        assert!(parse("/notify").unwrap_err().starts_with("usage: /notify all|humans|mentions"));
+        assert_eq!(ok("/notify mentions"), Slash::Notify(Notify::Level(ChannelNotify::Mentions)));
+        assert_eq!(ok("/notify snooze 90m"), Slash::Notify(Notify::Snooze(Duration::from_mins(90))));
+        assert_eq!(ok("/NOTIFY resume"), Slash::Notify(Notify::Resume));
+        assert_eq!(ok("/notify status"), Slash::Notify(Notify::Status));
+        let usage = "usage: /notify all|humans|mentions | snooze DURATION | resume | status";
+        for refused in ["/notify", "/notify snooze", "/notify resume now", "/notify status --json"] {
+            assert_eq!(parse(refused).unwrap_err(), usage, "{refused}");
+        }
+        assert!(parse("/notify snooze soon").is_err());
         assert!(parse("/notify some").unwrap_err().starts_with("unknown notify level"));
         assert_eq!(ok("/react eyes"), Slash::React("eyes".parse().unwrap()));
+        assert_eq!(ok("/notes split  the work"), Slash::Notes("split  the work".into()));
+        assert_eq!(parse("/notes").unwrap_err(), "usage: /notes TEXT");
         assert_eq!(ok("/goto #ops"), Slash::Goto(Goto::Channel("ops".parse().unwrap())));
         assert_eq!(ok("/goto @bob"), Slash::Goto(Goto::User(user("bob"))));
         assert_eq!(ok("/retire @dev-a"), Slash::Retire(user("dev-a")));
@@ -378,6 +585,9 @@ mod tests {
         assert_eq!(ok("/unsnooze"), Slash::Unsnooze);
         assert_eq!(ok("/remind 2h look again"), Slash::Remind("2h look again".into()));
         assert_eq!(ok("/unremind"), Slash::Unremind);
+        assert_eq!(ok("/reminders"), Slash::Reminders);
+        assert_eq!(parse("/reminders soon").unwrap_err(), "usage: /reminders");
+        assert_eq!(parse("/remind").unwrap_err(), "usage: /remind DURATION|TIME [NOTE]");
         assert_eq!(ok("/forward @dev-b"), Slash::Forward { to: user("dev-b"), note: String::new() });
         assert_eq!(ok("/forward @dev-b take it"), Slash::Forward { to: user("dev-b"), note: "take it".into() });
         assert_eq!(parse("/forward dev-b").unwrap_err(), "usage: /forward @ANT [TEXT]");
@@ -391,16 +601,23 @@ mod tests {
     }
 
     #[test]
-    fn trail_lists_starts_stops_and_resumes_runs() {
+    fn trail_lists_and_shows_trails_and_lists_starts_stops_and_resumes_runs() {
         let trail = |text: &str| match parse(text) {
             Ok(Command::Slash(Slash::Trail(trail))) => trail,
             other => panic!("{text}: {other:?}"),
         };
+        assert_eq!(trail("/trail list"), Trail::List);
+        assert_eq!(trail("/trail show review"), Trail::Show(Shown::Trail("review".parse().unwrap())));
+        assert_eq!(trail("/trail show 0190AB"), Trail::Show(Shown::Trail("0190ab".parse().unwrap())));
+        let run = "0190aaaa-0000-7000-8000-000000000001";
+        assert_eq!(trail(&format!("/trail show {run}")), Trail::Show(Shown::Run(run.parse().unwrap())));
         assert_eq!(trail("/trail runs"), Trail::Runs);
         let run = |conductor: Option<&str>, args| Trail::Run {
             trail: "review".parse().unwrap(),
             conductor: conductor.map(user),
             args,
+            limits: TrailLimits::DEFAULT,
+            thread: None,
         };
         assert_eq!(trail("/trail run review"), run(None, None));
         assert_eq!(trail("/TRAIL run review @lead"), run(Some("lead"), None));
@@ -409,30 +626,144 @@ mod tests {
         assert_eq!(trail(r#"/trail run review {"files": ["a.rs", "b.rs"]}"#), run(None, args));
         assert_eq!(trail("/trail stop 0190AB"), Trail::Stop("0190ab".parse().unwrap()));
         assert_eq!(trail("/trail resume 0190ab"), Trail::Resume("0190ab".parse().unwrap()));
-        let usage = "usage: /trail runs | run NAME [@ANT] [ARGS] | stop RUN | resume RUN";
-        for refused in ["/trail", "/trail runs all", "/trail run", "/trail stop", "/trail stop a b", "/trail list"] {
+        let usage = "usage: /trail list | show NAME|RUN | runs | run NAME [@ANT] [--steps N] [--at-once N] [--turns N] \
+                     [--wall DUR] [--thread THREAD] [ARGS] | stop RUN | resume RUN";
+        for refused in [
+            "/trail",
+            "/trail runs all",
+            "/trail run",
+            "/trail stop",
+            "/trail stop a b",
+            "/trail list all",
+            "/trail show",
+        ] {
             assert_eq!(parse(refused).unwrap_err(), usage, "{refused}");
         }
+        assert_eq!(parse("/trail show a b").unwrap_err(), usage);
+        assert!(parse("/trail show Not_A_Name").unwrap_err().contains("trail name"));
         assert!(parse("/trail run Not_A_Name").unwrap_err().contains("trail name"));
         assert!(parse("/trail run review {files").unwrap_err().starts_with("ARGS not JSON"));
         assert!(parse("/trail run review @Lead").is_err());
         assert!(parse("/trail stop review").unwrap_err().contains("hex digits"));
     }
 
+    #[test]
+    fn trail_run_takes_the_limits_and_thread_of_ants_trail_run_before_its_args() {
+        let trail = |text: &str| match parse(text) {
+            Ok(Command::Slash(Slash::Trail(trail))) => trail,
+            other => panic!("{text}: {other:?}"),
+        };
+        let limits = TrailLimits { steps: 10, concurrency: 2, turns: 2000, wall_secs: 7200, ..TrailLimits::DEFAULT };
+        assert_eq!(
+            trail(r#"/trail run review --steps 10 --at-once=2 @lead --turns 2000 --wall 2h --thread 0190AB [1, -2]"#),
+            Trail::Run {
+                trail: "review".parse().unwrap(),
+                conductor: Some(user("lead")),
+                args: Some(serde_json::json!([1, -2])),
+                limits,
+                thread: Some(OnThread::Id("0190ab".into())),
+            }
+        );
+        let thread = |text: &str| match trail(text) {
+            Trail::Run { thread, limits, .. } => (thread, limits.steps),
+            other => panic!("{text}: {other:?}"),
+        };
+        assert_eq!(thread("/trail run review --thread last"), (Some(OnThread::Last), 50));
+        assert_eq!(thread("/trail run review --thread=HERE --steps 500"), (Some(OnThread::Here), 500));
+        for (refused, why) in [
+            ("/trail run review --steps 0", "--steps must be more than 0"),
+            ("/trail run review --at-once 17", "--at-once is over the most a run may take, 16"),
+            ("/trail run review --turns 2001", "--turns is over the most a run may take, 2000"),
+            ("/trail run review --wall 8d", "--wall is over the most a run may take, 7d"),
+            ("/trail run review --steps ten", "invalid value 'ten' for '--steps <N>': invalid digit found in string"),
+            ("/trail run review --wall", "a value is required for '--wall <DUR>' but none was supplied"),
+            ("/trail run review --steps 2 --steps=3", "'--steps <N>' is given twice"),
+            (
+                "/trail run review --thread a.b",
+                "invalid value 'a.b' for '--thread <THREAD>': a.b is no thread id, start of one, `last` or `here`",
+            ),
+            (
+                "/trail run review --yes",
+                "no option --yes: /trail run takes --steps, --at-once, --turns, --wall and --thread",
+            ),
+        ] {
+            assert_eq!(parse(refused).unwrap_err(), why, "{refused}");
+        }
+        assert!(parse("/trail run review @lead @dev-a").unwrap_err().starts_with("usage: /trail"));
+        assert!(parse("/trail run review {} --steps 2").unwrap_err().starts_with("ARGS not JSON"));
+    }
+
+    #[test]
+    fn dead_replays_or_drops_a_dead_letter() {
+        let dead = |text: &str| match parse(text) {
+            Ok(Command::Slash(Slash::Dead(dead))) => dead,
+            other => panic!("{text}: {other:?}"),
+        };
+        assert_eq!(dead("/dead replay"), Dead::Replay(None));
+        assert_eq!(dead("/DEAD drop  12"), Dead::Drop(Some(12)));
+        let usage = "usage: /dead replay [SEQ] | drop [SEQ]";
+        for refused in ["/dead", "/dead list", "/dead 12"] {
+            assert_eq!(parse(refused).unwrap_err(), usage, "{refused}");
+        }
+        assert_eq!(parse("/dead drop 12 13").unwrap_err(), "SEQ not a number: 12 13");
+        assert_eq!(parse("/dead replay -1").unwrap_err(), "SEQ not a number: -1");
+    }
+
+    #[test]
+    fn add_and_clone_take_the_arguments_of_ants_ant_add_and_clone() {
+        let ok = |text: &str| match parse(text) {
+            Ok(Command::Slash(slash)) => slash,
+            other => panic!("{text}: {other:?}"),
+        };
+        let settings = |value: Value| match value {
+            Value::Object(settings) => settings,
+            other => panic!("{other}"),
+        };
+        let m1: Machine = "m1".parse().unwrap();
+        let add = ok("/add @dev-c --on m1 --model gpt-5 --whoami 'Reviews PRs' --capability rust,docs --wait 10m");
+        let expected = json!({ "model": "gpt-5", "whoami": "Reviews PRs", "capabilities": ["rust", "docs"] });
+        let wait = Duration::from_mins(10);
+        assert_eq!(add, Slash::Add { name: user("dev-c"), machine: m1.clone(), settings: settings(expected), wait });
+        let clone = ok("/CLONE dev-a @dev-c --machine m1 --home /srv/dev-c");
+        let (src, new, machine) = (user("dev-a"), user("dev-c"), Some(m1));
+        let settings = settings(json!({ "home": "/srv/dev-c" }));
+        assert_eq!(clone, Slash::Clone { src, new, machine, settings, wait: Duration::from_mins(40) });
+        let Slash::Add { wait, .. } = ok("/add dev-c --on m1") else { panic!("an add") };
+        assert_eq!(wait, Duration::from_mins(3), "the wait of ants ant add");
+
+        assert_eq!(parse("/add").unwrap_err(), "usage: /add NAME --on MACHINE [FLAGS]");
+        assert_eq!(parse("/clone").unwrap_err(), "usage: /clone ANT NEW [FLAGS]");
+        assert_eq!(
+            parse("/add dev-c").unwrap_err(),
+            "the following required arguments were not provided: --on <MACHINE>"
+        );
+        assert_eq!(parse("/clone dev-a").unwrap_err(), "the following required arguments were not provided: <NEW>");
+        let unknown = parse("/add dev-c --on m1 --colour red").unwrap_err();
+        assert!(unknown.starts_with("unexpected argument '--colour' found"), "{unknown}");
+        assert!(!unknown.contains('\n'), "one line: {unknown}");
+        assert!(parse("/add dev-c --on m1 --help").unwrap_err().starts_with("unexpected argument '--help'"));
+        assert_eq!(parse("/add human --on m1").unwrap_err(), "human is a human's name: an ant's name is lowercase");
+        assert!(parse("/clone dev-a 'dev c'").unwrap_err().starts_with("invalid value 'dev c' for '<NEW>'"));
+    }
+
     /// A sample of an argument [`COMMANDS`] names; a new placeholder needs one here.
     fn sample(arg: &str) -> &str {
         match arg {
             "ID" | "THREAD" | "RUN" => "019a",
+            "SEQ" => "12",
             "TEXT" | "NOTE" | "QUERY" => "ship it",
             "N" => "2",
             "PICK..." => "2 'after lunch'",
-            "DURATION" => "2h",
+            "DURATION" | "DUR" => "2h",
             "TIME" => "17:00",
             "SINCE" => "1d",
             "NAME" => "eyes",
             "#channel" => "#ops",
             "@user" | "@ANT" => "@dev-b",
             "ANT" => "dev-a",
+            "NEW" => "dev-c",
+            "MACHINE" => "m1",
+            "FLAGS" => "--model gpt-5 --allow 'execute:cargo test*'",
             "PATH" => "notes.txt",
             "ARGS" => r#"{"files": ["a.rs"]}"#,
             literal if literal.starts_with("--") || literal.chars().all(|c| c.is_ascii_lowercase()) => literal,
@@ -440,16 +771,33 @@ mod tests {
         }
     }
 
+    /// The arguments of `form`: its words, those of a bracketed run, as `[--steps N]`, one.
+    fn arguments(form: &str) -> Vec<String> {
+        let mut args: Vec<String> = Vec::new();
+        let mut open = false;
+        for word in form.split_whitespace() {
+            match args.last_mut() {
+                Some(last) if open => *last = format!("{last} {word}"),
+                _ => args.push(word.to_owned()),
+            }
+            open = (open || word.starts_with('[')) && !word.ends_with(']');
+        }
+        args
+    }
+
     #[test]
     fn every_listed_command_parses_with_its_arguments() {
         for (name, form) in COMMANDS.iter().flat_map(|(name, forms, _)| forms.split(" | ").map(move |f| (name, f))) {
             let mut lines = vec![format!("/{name}")];
-            for arg in form.split_whitespace() {
+            for arg in arguments(form) {
                 let (alternatives, optional) = match arg.strip_prefix('[').and_then(|a| a.strip_suffix(']')) {
                     Some(arg) => (arg, true),
-                    None => (arg, false),
+                    None => (arg.as_str(), false),
                 };
-                let samples: Vec<_> = alternatives.split('|').map(sample).collect();
+                let samples: Vec<String> = alternatives
+                    .split('|')
+                    .map(|words| words.split_whitespace().map(sample).collect::<Vec<_>>().join(" "))
+                    .collect();
                 lines = lines
                     .iter()
                     .flat_map(|line| {

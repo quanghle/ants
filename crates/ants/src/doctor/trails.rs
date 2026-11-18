@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ants_proto::{ColonyEntry, PendingCall, RunId, RunState, TRAIL_RUNS_BUCKET, TrailFunction, TrailLimits, TrailRun};
+use ants_proto::{
+    ColonyEntry, PendingCall, RunId, RunLimit, RunState, TRAIL_RUNS_BUCKET, TrailFunction, TrailLimits, TrailRun,
+};
 use ants_trail::{GRACE, Limits, Request, Response, Worker};
 use chrono::{DateTime, Utc};
 
@@ -119,8 +121,8 @@ pub(super) fn stuck(
                         format!("{name}, conducted by {}, was stopped by {by} {} ago", run.conductor, ago(None));
                     (detail, format!("ants trail resume {}{wall}", run.run))
                 }
-                RunState::Failed { error } => {
-                    let raise = raised(run, error, elapsed)?;
+                RunState::Failed { error, .. } => {
+                    let raise = raised(run, elapsed)?;
                     let error = error.lines().rfind(|line| !line.trim().is_empty()).unwrap_or_default();
                     let detail = format!(
                         "{name}, conducted by {}, failed {} ago: {}",
@@ -187,24 +189,27 @@ pub(super) fn stuck(
     found
 }
 
-/// The flags of `ants trail resume` raising the limit `error` names, `run`'s steps, turns or wall time, to twice it
-/// at most its maximum, with the wall time `run` needs `elapsed` after its start; None when `error` names none of
-/// them, that limit is at its maximum already, or no wall time reaches that far.
-fn raised(run: &TrailRun, error: &str, elapsed: Duration) -> Option<String> {
+/// The flags of `ants trail resume` raising the limit failed `run` broke, its steps, turns or wall time, to twice it
+/// at most its maximum, with the wall time `run` needs `elapsed` after its start; None when it broke none of them,
+/// that limit is at its maximum already, or no wall time reaches that far.
+fn raised(run: &TrailRun, elapsed: Duration) -> Option<String> {
     let (limits, max) = (&run.limits, TrailLimits::MAX);
     let doubled = |value: u32, most: u32| (value < most).then(|| value.saturating_mul(2).min(most));
-    if error.contains("wall time limit") {
-        let wall = wall_needed(limits.wall_time(), elapsed)?;
-        return Some(format!(" --wall {}", ants_proto::duration::format(wall)));
+    match run.state.failed_on()? {
+        RunLimit::Wall => {
+            let wall = wall_needed(limits.wall_time(), elapsed)?;
+            Some(format!(" --wall {}", ants_proto::duration::format(wall)))
+        }
+        RunLimit::Turns => {
+            let needed = wall_past(limits, elapsed)?;
+            doubled(limits.turns, max.turns).map(|turns| format!(" --turns {turns}{needed}"))
+        }
+        RunLimit::Steps => {
+            let needed = wall_past(limits, elapsed)?;
+            doubled(limits.steps, max.steps).map(|steps| format!(" --steps {steps}{needed}"))
+        }
+        RunLimit::Compute | RunLimit::Session | RunLimit::Memory => None,
     }
-    let needed = wall_past(limits, elapsed)?;
-    if error.contains(&format!("limit of {} turns", limits.turns)) {
-        return doubled(limits.turns, max.turns).map(|turns| format!(" --turns {turns}{needed}"));
-    }
-    if error.contains(&format!("limit of {} steps", limits.steps)) {
-        return doubled(limits.steps, max.steps).map(|steps| format!(" --steps {steps}{needed}"));
-    }
-    None
 }
 
 /// The `--wall` flag a run under `limits` needs to resume `elapsed` after its start: none while its wall time is

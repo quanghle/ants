@@ -102,8 +102,11 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
 
 /// The error the footer shows, wrapped, if one waits for a key and no prompt takes the footer.
 fn error_shown(model: &Model, now: DateTime<Utc>) -> Option<&Notice> {
-    let prompt =
-        model.quitting_at(now) || model.picking.is_some() || model.interrupting.is_some() || model.starting.is_some();
+    let prompt = model.quitting_at(now)
+        || model.picking.is_some()
+        || model.interrupting.is_some()
+        || model.dropping.is_some()
+        || model.starting.is_some();
     let error = model.notice_at(now).filter(|n| n.level == Level::Error);
     error.filter(|_| !prompt && model.snoozing.is_none())
 }
@@ -138,6 +141,9 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
     }
     if let Some(confirm) = &model.interrupting {
         return confirm.line();
+    }
+    if let Some(letter) = &model.dropping {
+        return letter.line();
     }
     if let Some(planned) = &model.starting {
         return planned.line();

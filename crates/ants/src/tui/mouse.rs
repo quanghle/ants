@@ -189,6 +189,10 @@ impl Mouse {
         if event.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) || model.compact {
             return None;
         }
+        // The box of a run to start takes keys alone: a wheel over it would leave the run unstarted as another key.
+        if model.starting.is_some() && model.help.is_none() {
+            return None;
+        }
         let point = Position::new(event.column, event.row);
         let target = model.data.mouse.hit(point)?;
         let by = match event.kind {
@@ -404,6 +408,38 @@ mod tests {
         let Page::Thread(page) = m.page() else { panic!("thread") };
         assert_eq!(page.mouse_top(), top);
         assert!(m.help.is_some());
+    }
+
+    #[test]
+    fn the_mouse_over_the_box_of_a_run_to_start_leaves_it_waiting_for_its_keys() {
+        use crate::cmd::trail::start::Start;
+        use ants_proto::{TrailLimits, TrailSource};
+
+        let mut m = test_support::model();
+        let start = Start {
+            source: TrailSource::Saved("review".parse().unwrap()),
+            args: serde_json::Value::Null,
+            conductor: crate::test_support::live::user("lead"),
+            thread: ants_proto::ThreadId::generate(),
+            limits: TrailLimits::DEFAULT,
+        };
+        m.starting = Some(super::super::trail::Planned { summary: "trail review\n".to_owned(), start: start.clone() });
+        draw(&m);
+        let mut mouse = Mouse::default();
+        let at_box = |kind| MouseEvent { kind, column: 60, row: 15, modifiers: KeyModifiers::NONE };
+        for kind in [MouseEventKind::ScrollDown, MouseEventKind::ScrollUp, MouseEventKind::Down(MouseButton::Left)] {
+            assert_eq!(mouse.event(&mut m, at_box(kind), at(1)), None);
+            assert!(m.starting.is_some(), "{kind:?} leaves the run waiting");
+        }
+        m.key(Key::Char('?'), at(1));
+        draw(&m);
+        assert_eq!(mouse.event(&mut m, at_box(MouseEventKind::ScrollDown), at(1)), None);
+        assert!(m.help.is_some() && m.starting.is_some(), "the wheel scrolls the help over the box");
+        m.key(Key::Esc, at(1));
+        let Some(Action::Run(super::super::exec::Job::TrailStart(asked), _)) = m.key(Key::Char('y'), at(1)) else {
+            panic!("y starts the run")
+        };
+        assert_eq!(*asked, start);
     }
 
     #[test]

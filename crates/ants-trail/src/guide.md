@@ -9,8 +9,8 @@ the result; the top level then holds only meta, imports, definitions and constan
   reply's text, or with `schema=` (a JSON Schema dict) the reply's JSON, asked for again at most twice on a mismatch.
 - `await human(questions)`: asks the run's owner as ask_human does (1-4 `{"question", "options": [2-9 labels]}`);
   returns the answer's text, for one question the label picked.
-- `await trail(name, args=None)`: one step answered by a child run of the saved trail `name` (no recursion); returns
-  its result; its steps and turns count against this run's limits.
+- `await trail(name, args=None)`: one step answered by a child run of saved trail `name` on a spin-off thread (no
+  recursion); returns its result; its steps and turns count against the root run's limits.
 - `await goto(trail=None, at=None, state=None)`: ends this leg where called (its steps waited on dropped) and goes on
   in saved trail `trail` (this one without it) at waypoint `at` (its start without it), `state` (JSON) its `args`. A
   run enters each (trail, waypoint) once: a goto to one entered before, or to one missing, raises RuntimeError, to
@@ -20,9 +20,9 @@ the result; the top level then holds only meta, imports, definitions and constan
 - `await pipeline(items, *stages)`: each item through the async stages on its own, no barrier; results in item order.
 - A failed step raises RuntimeError where awaited; an uncaught exception fails the run with its traceback.
 - No files, environment, network or sleep; the clock and random are fixed per leg; no type checking.
-- Limits: 50 steps (500 at most; the call past it raises), 4 at once (16; the rest wait), 200 turns (2000), 24 h of
-  wall time (7 d), 10 s of compute per resume and a 768 KiB stored session; past one the run fails, naming it. A
-  run's start sets the first four (run_trail's `limits`: `steps`, `at_once`, `turns`, `wall`).
+- Limits: 50 steps (500 at most, child runs included; the call past it raises), 4 at once (16; the rest wait),
+  200 turns (2000), 24 h of wall time (7 d), 10 s of compute per resume and a 768 KiB stored session; past one the run
+  fails, naming it. A run's start sets the first four (run_trail's `limits`: `steps`, `at_once`, `turns`, `wall`).
 Patterns: pipeline by default, parallel only when a stage needs every result; verify each finding with a skeptic step
 on another ant than its author; repeat discovery until a round finds nothing new, under a round cap; log whatever is
 skipped or capped; schema= for every reply whose fields are read; self-contained prompts; try/except RuntimeError

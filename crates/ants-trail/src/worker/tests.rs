@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use super::serve;
-use crate::protocol::{Answer, Call, Event, Function, Limits, Request, Response};
+use crate::protocol::{Answer, Call, Event, Function, Limit, Limits, Request, Response};
 
 const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": []}\n";
 
@@ -55,8 +55,13 @@ fn result(response: Response) -> Value {
 }
 
 fn error(response: Response) -> String {
+    failed(response).0
+}
+
+/// The error of a failed response, and the limit it failed on.
+fn failed(response: Response) -> (String, Option<Limit>) {
     match response {
-        Response::Failed { error, .. } => error,
+        Response::Failed { error, limit, .. } => (error, limit),
         other => panic!("not failed: {other:?}"),
     }
 }
@@ -130,7 +135,8 @@ fn an_error_answer_raises_where_the_call_is_awaited() {
 
 #[test]
 fn an_uncaught_error_fails_with_the_traceback_of_the_script() {
-    let error = error(start("def f():\n    raise ValueError('bad')\nf()\n", Limits::default()));
+    let (error, limit) = failed(start("def f():\n    raise ValueError('bad')\nf()\n", Limits::default()));
+    assert_eq!(limit, None, "no limit broken");
     assert!(error.contains("File \"trail.py\", line 4, in <module>"), "{error}");
     assert!(error.contains("File \"trail.py\", line 3, in f"), "{error}");
     assert!(error.ends_with("ValueError: bad"), "{error}");
@@ -144,6 +150,12 @@ fn the_call_past_the_step_limit_raises() {
     let call = calls(&started)[0].call;
     let done = resume_with(&started, &[(call, Answer::Ok(json!(1)))], limits, 1);
     assert_eq!(result(done), json!("the run reached its limit of 1 steps"));
+
+    let started = start("for i in range(5):\n    await agent(str(i))\n", limits);
+    let call = calls(&started)[0].call;
+    let (error, limit) = failed(resume_with(&started, &[(call, Answer::Ok(json!(1)))], limits, 1));
+    assert!(error.ends_with("RuntimeError: the run reached its limit of 1 steps"), "{error}");
+    assert_eq!(limit, Some(Limit::Steps), "the run failed on its steps");
 }
 
 #[test]
@@ -185,7 +197,8 @@ fn a_step_argument_json_cannot_hold_raises_type_error() {
 #[test]
 fn a_session_dumped_past_its_limit_fails() {
     let limits = Limits { dump_bytes: 1024, ..Limits::default() };
-    let error = error(start("await agent('x')\n", limits));
+    let (error, limit) = failed(start("await agent('x')\n", limits));
+    assert_eq!(limit, Some(Limit::Session));
     assert!(
         error.starts_with("the dumped session of ") && error.ends_with("passes the limit of 1024 bytes"),
         "{error}"

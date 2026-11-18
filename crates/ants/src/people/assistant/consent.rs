@@ -6,8 +6,8 @@
 use ants_daemon::Allowlist;
 use ants_daemon::admin::held::held_orders;
 use ants_proto::{
-    ASSISTANT_ORDER_KINDS, Act, ActAnswer, AdminOrder, Confirmations, HUMANS_BUCKET, MACHINES_BUCKET, MAX_PRE_ALLOW,
-    ORDER_HOLD, ORDER_RULE, PreAllow, STREAM, UserId, confirmations_key, pre_allow_key, pre_allow_rule,
+    ASSISTANT_ORDER_KINDS, Act, ActAnswer, AdminOrder, ApprovalRequest, Confirmations, HUMANS_BUCKET, MACHINES_BUCKET,
+    MAX_PRE_ALLOW, ORDER_HOLD, ORDER_RULE, PreAllow, STREAM, UserId, confirmations_key, pre_allow_key, pre_allow_rule,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -19,6 +19,7 @@ use serde::de::DeserializeOwned;
 use super::{CONFLICTS, after, designated, device_creds, signing_creds};
 use crate::connection::Nats;
 use crate::people::humans;
+use crate::tools::HeldAct;
 use crate::{auth, tools};
 
 /// `ants assistant confirm [ACT] [--deny]`.
@@ -77,19 +78,34 @@ pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool) -> Result<(
     let request = tools::select(requests, &query)
         .with_context(|| format!("no decision of an assistant on {query} waits for {human} to confirm it"))?;
     let acts = held.into_iter().find(|(r, _)| r.id == request.id).map_or_default(|(_, acts)| acts);
-    let Some(assistant) = designated(&js, nats.account.as_deref(), human).await else {
+    println!("{}", answer_decision(&js, creds, nats.account.as_deref(), human, &request, &acts, answer).await?);
+    Ok(())
+}
+
+/// Record `human`'s `answer` to the decision on `request`, of those its assistants made for it (`held`), that the
+/// assistant its grant names now made, signed with the device credentials `creds` of the team of `account`. What was
+/// done, in a line.
+pub(crate) async fn answer_decision(
+    js: &jetstream::Context,
+    creds: &std::path::Path,
+    account: Option<&str>,
+    human: &UserId,
+    request: &ApprovalRequest,
+    held: &[HeldAct],
+    answer: ActAnswer,
+) -> Result<String> {
+    let Some(assistant) = designated(js, account, human).await else {
         bail!("{human} has no assistant: nothing an assistant decided takes effect");
     };
-    let Some(held) = acts.into_iter().rev().find(|a| a.assistant == assistant) else {
-        bail!("{assistant}, the assistant of {human}, decided nothing on {}", tools::qualified(&request));
+    let Some(held) = held.iter().rev().find(|a| a.assistant == assistant && a.human == *human) else {
+        bail!("{assistant}, the assistant of {human}, decided nothing on {}", tools::qualified(request));
     };
-    record(&js, creds, human, &assistant, held.act(&request), answer, request.expires_at).await?;
-    let (verdict, id) = (tools::spelling(held.verdict), tools::qualified(&request));
-    match answer {
-        ActAnswer::Confirm => println!("confirmed: {assistant}'s {verdict} on request {id} takes effect for {human}"),
-        ActAnswer::Deny => println!("denied: {assistant}'s {verdict} on request {id} is dropped"),
-    }
-    Ok(())
+    record(js, creds, human, &assistant, held.act(request), answer, request.expires_at).await?;
+    let (verdict, id) = (tools::spelling(held.verdict), tools::qualified(request));
+    Ok(match answer {
+        ActAnswer::Confirm => format!("confirmed: {assistant}'s {verdict} on request {id} takes effect for {human}"),
+        ActAnswer::Deny => format!("denied: {assistant}'s {verdict} on request {id} is dropped"),
+    })
 }
 
 /// Record `human`'s `answer` to `act` its assistant `assistant` made, standing `until`, signed with the device

@@ -114,7 +114,7 @@ impl Hub {
         };
         Ok(match ended {
             RunState::Done { result } => format!("Run {run} is done. Result:\n{result}"),
-            RunState::Failed { error } => format!("Run {run} failed: {error}"),
+            RunState::Failed { error, .. } => format!("Run {run} failed: {error}"),
             RunState::Stopped { by } => format!("Run {run} was stopped by {by}."),
             RunState::Running | RunState::Waiting => format!("{started} It is still running."),
         })
@@ -170,7 +170,8 @@ fn state(header: &TrailRun) -> String {
         RunState::Waiting => "waiting on humans".to_owned(),
         RunState::Stopped { by } => format!("stopped by {by}"),
         RunState::Done { .. } => "done".to_owned(),
-        RunState::Failed { error } => format!("failed: {error}"),
+        RunState::Failed { error, limit: Some(limit) } => format!("failed on its {limit} limit: {error}"),
+        RunState::Failed { error, limit: None } => format!("failed: {error}"),
     }
 }
 

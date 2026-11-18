@@ -80,6 +80,7 @@ impl Trails {
             book.session = session;
             book.queued.clear();
             book.answers.clear();
+            book.broke = None;
             (book.header.clone(), std::mem::take(&mut book.pending))
         };
         for call in &dropped {

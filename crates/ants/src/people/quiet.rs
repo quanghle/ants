@@ -1,5 +1,6 @@
-//! What a human holds back of its notifications, on all its devices: a snooze (`ants notify snooze|resume|status`),
-//! muted threads (`ants thread mute|unmute`) and each channel's notify level (`ants channel notify`), kept as one
+//! What a human holds back of its notifications, on all its devices: a snooze (`ants notify snooze|resume|status`, and
+//! `/notify snooze|resume|status` in `ants chat`), muted threads (`ants thread mute|unmute`) and each channel's notify
+//! level (`ants channel notify`), kept as one
 //! [`NotifyPrefs`] under the human's key in [`NOTIFY_BUCKET`] and updated with compare-and-set, so devices changing
 //! them at once keep each other's changes. Each hold carries its deadline and ends there on its own.
 
@@ -97,50 +98,73 @@ async fn connect(nats: &Nats<'_>, what: &str) -> Result<jetstream::Context> {
 pub async fn snooze(nats: &Nats<'_>, hold: Duration) -> Result<()> {
     until(Utc::now(), hold).context("snooze")?;
     let js = connect(nats, "snoozing notifications").await?;
-    let prefs = update(&js, &nats.me.id, |prefs, now| prefs.snoozed_until = until(now, hold).ok()).await?;
-    let until = prefs.snoozed_until.map_or_default(local);
-    println!("notifications of {} snoozed until {until}, on every device", nats.me.id);
+    println!("{}", snoozed(&js, &nats.me.id, hold).await?);
     Ok(())
+}
+
+/// Snooze the notifications of `human` for `hold`, through `js`; what `ants notify snooze` prints.
+pub async fn snoozed(js: &jetstream::Context, human: &UserId, hold: Duration) -> Result<String> {
+    until(Utc::now(), hold).context("snooze")?;
+    let prefs = update(js, human, |prefs, now| prefs.snoozed_until = until(now, hold).ok()).await?;
+    let until = prefs.snoozed_until.map_or_default(local);
+    Ok(format!("notifications of {human} snoozed until {until}, on every device"))
 }
 
 /// `ants notify resume`.
 pub async fn resume(nats: &Nats<'_>) -> Result<()> {
     let js = connect(nats, "resuming notifications").await?;
+    println!("{}", resumed(&js, &nats.me.id).await?);
+    Ok(())
+}
+
+/// End the snooze of `human`'s notifications, through `js`; what `ants notify resume` prints.
+pub async fn resumed(js: &jetstream::Context, human: &UserId) -> Result<String> {
     let snoozed = std::cell::Cell::new(false);
-    update(&js, &nats.me.id, |prefs, now| {
+    update(js, human, |prefs, now| {
         snoozed.set(prefs.snoozed(now));
         prefs.snoozed_until = None;
     })
     .await?;
-    if snoozed.get() {
-        println!("notifications of {} resumed", nats.me.id);
+    Ok(if snoozed.get() {
+        format!("notifications of {human} resumed")
     } else {
-        println!("notifications of {} were not snoozed", nats.me.id);
-    }
-    Ok(())
+        format!("notifications of {human} were not snoozed")
+    })
 }
 
 /// `ants notify status`.
 pub async fn status(nats: &Nats<'_>, json: bool) -> Result<()> {
     let js = connect(nats, "showing held notifications").await?;
-    let kv = ensure_bucket(&js).await?;
-    let (mut prefs, _) = load(&kv, &nats.me.id).await?;
-    prefs.prune(Utc::now());
+    let prefs = holding(&js, &nats.me.id).await?;
     if json {
         println!("{}", serde_json::to_string(&prefs)?);
         return Ok(());
     }
-    match prefs.snoozed_until {
-        Some(until) => println!("snoozed until {}", local(until)),
-        None => println!("not snoozed"),
-    }
-    for (thread, until) in &prefs.muted {
-        println!("muted thread {thread} until {}", local(*until));
-    }
-    for (channel, level) in &prefs.channels {
-        println!("#{channel} notifies {level} ({})", level.describe());
+    for line in status_lines(&prefs) {
+        println!("{line}");
     }
     Ok(())
+}
+
+/// The holds of `human` in force now, through `js`, as `ants notify status` shows them.
+pub async fn holding(js: &jetstream::Context, human: &UserId) -> Result<NotifyPrefs> {
+    let kv = ensure_bucket(js).await?;
+    let (mut prefs, _) = load(&kv, human).await?;
+    prefs.prune(Utc::now());
+    Ok(prefs)
+}
+
+/// What `ants notify status` prints of `prefs`, a line each: the snooze, then each muted thread and each channel's
+/// notify level other than the default.
+pub fn status_lines(prefs: &NotifyPrefs) -> Vec<String> {
+    let snooze = match prefs.snoozed_until {
+        Some(until) => format!("snoozed until {}", local(until)),
+        None => "not snoozed".to_owned(),
+    };
+    let muted = prefs.muted.iter().map(|(thread, until)| format!("muted thread {thread} until {}", local(*until)));
+    let levels =
+        prefs.channels.iter().map(|(channel, level)| format!("#{channel} notifies {level} ({})", level.describe()));
+    std::iter::once(snooze).chain(muted).chain(levels).collect()
 }
 
 /// Set the notify level of `channel` for `human` to `level`, through `js`; what `ants channel notify` prints.

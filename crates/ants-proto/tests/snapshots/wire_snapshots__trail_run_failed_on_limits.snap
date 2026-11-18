@@ -1,0 +1,36 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  {
+    "state": "failed",
+    "error": "past its steps limit",
+    "limit": "steps"
+  },
+  {
+    "state": "failed",
+    "error": "past its turns limit",
+    "limit": "turns"
+  },
+  {
+    "state": "failed",
+    "error": "past its wall time limit",
+    "limit": "wall"
+  },
+  {
+    "state": "failed",
+    "error": "past its compute limit",
+    "limit": "compute"
+  },
+  {
+    "state": "failed",
+    "error": "past its session size limit",
+    "limit": "session"
+  },
+  {
+    "state": "failed",
+    "error": "past its memory limit",
+    "limit": "memory"
+  }
+]

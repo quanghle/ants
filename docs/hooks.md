@@ -29,7 +29,8 @@ They publish no message, answer no tool request, cancel no prompt and write no b
 credentials file lets no one act for an ant or a human. They read no inbox, notes or channel subject, nor `STREAM.INFO`
 or `STREAM.MSG.GET` on `ANTS`. Every KV bucket other than `ants_colony` is denied too: `ants_sessions`, `ants_attempts`,
 `ants_owners`, `ants_links`, `ants_chains`, `ants_humans`, `ants_channels`, `ants_webhooks`, `ants_read`,
-`ants_presence`, `ants_notify`, `ants_reactions`, `ants_threads`, `ants_devices`, `ants_machines` and `ants_identities`, and the attachment store `ants_files`.
+`ants_presence`, `ants_notify`, `ants_reactions`, `ants_threads`, `ants_devices`, `ants_machines`, `ants_identities`,
+`ants_trails` and `ants_trail_runs`, and the attachment store `ants_files`.
 
 Event payloads can still contain prompt or tool text:
 
@@ -148,10 +149,11 @@ message is not part of it.
  "at": "2025-01-01T12:00:00Z"}
 ```
 
-`escalation` is an `Escalation`: `reason` is `turn_budget`, `cap`, `notes`, `dead_letter`, `approval`, `asked` or
-`context_window`; `request_id` names the tool request of an `approval` one; `level` is the chain level, 0 before it
-went up any chain, and `leader` who leads at that level; `stand_in`, when present, names the sending ant's stand-in on
-one sent to a human. Direct notices that emit no `StatusEvent` here: the
+`escalation` is an `Escalation`: `reason` is `turn_budget`, `cap`, `notes`, `dead_letter`, `approval`, `asked`,
+`context_window` or `question` (an `ask_human` question sent to the human's assistant first); `request_id` names the
+tool request of an `approval` one; `level` is the chain level, 0 before it went up any chain, and `leader` who leads at
+that level; `assistant_of`, when present, names the human whose assistant leads that level; `stand_in`, when present,
+names the sending ant's stand-in on one sent to a human. Direct notices that emit no `StatusEvent` here: the
 `dead_letter` notice `ants dead watch` sends with human credentials (observed via `ants.dead.<ant>`), the `harness`
 notice of a harness failing to start (observed via `failing` in `ants_colony`), and the `storage` capacity warning.
 
@@ -218,7 +220,8 @@ Check: `subject == "ants.timeline." + thread_id + "." + ant`.
 
 What a daemon says of an ant it serves: `ant`, `machine`, `instance`, `harness`, `agent`? (`{name, version}`),
 `model`? (`{model, reasoning_effort, context}`), `capabilities`, `whoami`?, `profile`? (what the ant is good for, in
-its own words), `workdir`, `started_at`, `heartbeat_at`,
+its own words), `sense_unkept`? (why sense keeps none of the ant's data on `machine`), `workdir`?, `started_at`,
+`heartbeat_at`,
 `activity` (`idle`, `working`), `handling`, `harnesses`, `escalate_to`?, `sage`? (the ant reviewing it), `drift`?
 (`[field, ...]`), `version`, `perms`, `signed_out`?, `limited`?, `failing`?, `fallback`?, `memory_low`? (`{since,
 available, max_harnesses}`), `paused`? (`{since, by?}`), `mcp`? (`true` when the harness's protocol reports its MCP

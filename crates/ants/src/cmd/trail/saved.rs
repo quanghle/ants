@@ -196,7 +196,7 @@ fn read_local(path: &Path) -> Result<Trail> {
 
 /// A trail as `ants trail list` lists it.
 #[derive(Debug, Serialize)]
-pub(super) struct Listed {
+pub(crate) struct Listed {
     #[serde(flatten)]
     pub(super) trail: Trail,
     /// A local trail of a name the colony has too, whose trail runs instead.
@@ -213,7 +213,7 @@ pub(super) fn listing(colony: Vec<SavedTrail>, local: Vec<Trail>) -> Vec<Listed>
 }
 
 /// The listed trails in columns, their waypoints in a column of their own when one has any.
-pub(super) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
+pub(crate) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
     let header = ["NAME", "SOURCE", "SAVED BY", "SAVED", "PHASES", "WAYPOINTS", "DESCRIPTION"].map(str::to_owned);
     let rows: Vec<[String; 7]> = std::iter::once(header)
         .chain(listed.iter().map(|Listed { trail, shadowed }| {
@@ -245,7 +245,7 @@ pub(super) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
 
 /// The trail `ants trail show NAME` shows, which a run of NAME runs.
 #[derive(Debug)]
-pub(super) struct Found {
+pub(crate) struct Found {
     pub(super) trail: Trail,
     /// The local file of the same name the colony's trail runs instead of.
     pub(super) shadows: Option<PathBuf>,
@@ -286,7 +286,7 @@ impl<'a> From<&'a Found> for Shown<'a> {
 }
 
 /// The trail's meta and where it is, then its script.
-pub(super) fn render(found: &Found, now: DateTime<Utc>) -> String {
+pub(crate) fn render(found: &Found, now: DateTime<Utc>) -> String {
     let Found { trail, shadows } = found;
     let mut out = format!("trail {}\n", trail.name);
     match &trail.source {

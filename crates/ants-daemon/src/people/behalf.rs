@@ -145,9 +145,9 @@ pub fn held_notice(envelope: &Envelope, decision: &ApprovalDecision, human: &Use
     let (from, to, id) = (&envelope.from, &envelope.to, decision.request_id);
     let text = format!(
         "[ants] {from}, as the assistant of {human}, decided tool request {to}/{id} for {human}: {}. Held until \
-         {human} confirms it (`ants assistant confirm {to}/{id}`, or `--deny` to drop it), unless a pre-allow rule \
-         of {human} covers the call (`ants assistant allow`). {human} may also decide the request itself (`ants \
-         tools approve {to}/{id}` or `ants tools reject {to}/{id}`).",
+         {human} confirms it (`o` on the home of ants chat lists it, or `ants assistant confirm {to}/{id}`, or \
+         `--deny` to drop it), unless a pre-allow rule of {human} covers the call (`ants assistant allow`). {human} \
+         may also decide the request itself (`ants tools approve {to}/{id}` or `ants tools reject {to}/{id}`).",
         decision.verdict.as_str()
     );
     report(to.clone(), human, text)

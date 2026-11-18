@@ -23,7 +23,9 @@ message instead.
 ## The file
 
 A trail is a `.py` file whose first statement is a literal `meta`: a `name` of letters, digits, `-` and `_`, a
-`description`, and the `phases` the script announces. The meta is read without running the script; a file without it
+`description`, the `phases` the script announces, and optional `waypoints` (up to 32 top-level `async def` entry points
+taking one state argument, the first entered at start, with the top level then holding only `meta`, imports,
+definitions and constants). The meta is read without running the script; a file without it
 is refused. A trail is saved under a name of 1-64 lowercase letters, digits and `-`: its meta's `name` when it is one,
 else the name `ants trail save --name` gives. The script runs top to bottom with `await` allowed at the top level, and
 the value of its last expression, which must be JSON (None, bools, numbers, strings, lists, dicts with string keys),
@@ -121,9 +123,10 @@ their coroutines to `parallel`. Their arguments must be JSON: anything else rais
 
 A step that fails (an `ant=` naming a human or no valid ant name, a `capability=` no ant but the conductor
 advertises, malformed questions, a reply still off its schema after two retries, the step's message withdrawn from its
-recipient's queue, a child run that failed, the run's step limit reached) raises `RuntimeError` with the reason where
-the step is awaited. A step to an ant no daemon serves raises nothing: it waits in that ant's queue, as any message
-does, until the run ends or a human stops it. An exception the script does not catch fails the run with
+recipient's queue, an unknown trail, ancestor cycle or failed child run in `trail()`, the run's step limit reached)
+raises `RuntimeError` with the reason where the step is awaited. A step to an ant no daemon serves raises nothing: it
+waits in that ant's queue, as any message does, until the run ends or a human stops it. An exception the script does
+not catch fails the run with
 its traceback, lines numbered as in the file. Inside `parallel` or `pipeline`, an uncaught exception of one coroutine
 fails the whole gather, and the run abandons the other steps. Catch a step's error inside the per-item coroutine when
 the trail can go on without that item, and log what was lost.
@@ -143,7 +146,7 @@ the trail can go on without that item, and log what was lost.
 
 | Limit | Default (maximum) | Past it |
 |---|---|---|
-| Steps, `agent()`, `human()` and `trail()` calls | 50 (500) | the call raises `RuntimeError: the run reached its limit of N steps` |
+| Steps, `agent()`, `human()` and `trail()` calls (child runs included) | 50 (500) | the call raises `RuntimeError: the run reached its limit of N steps` |
 | Steps at once | 4 (16) | later steps wait in the run until a step is answered; nothing raises |
 | Turns, spent by the steps as ant messages spend turns | 200 (2000) | the run fails, naming the limit |
 | Wall time | 24 h (7 d) | the run fails, naming the limit |

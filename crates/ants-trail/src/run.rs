@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
 
-use crate::protocol::{Answer, Call, Event, JournalEntry, Limits, Request, Response};
+use crate::protocol::{Answer, Call, Event, JournalEntry, Limit, Limits, Request, Response};
 use crate::runner::{self, Worker, WorkerError};
 use crate::trail::{self, Meta, TrailError};
 
@@ -20,7 +20,12 @@ pub enum Status {
     /// The script ended with this result.
     Done { result: Value },
     /// The script raised, a limit stopped it, or its host failed it.
-    Failed { error: String },
+    Failed {
+        error: String,
+        /// The limit that stopped it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<Limit>,
+    },
 }
 
 /// What one start or resume brought.
@@ -343,9 +348,14 @@ impl Run {
 
     /// Fails the run, as when its host cancels it. Returns the calls the host may abandon.
     pub fn fail(&mut self, error: impl Into<String>) -> Progress {
+        self.fail_on(None, error)
+    }
+
+    /// Fails the run on `limit`, as [`Run::fail`] does.
+    pub fn fail_on(&mut self, limit: Option<Limit>, error: impl Into<String>) -> Progress {
         let mut progress = Progress::default();
         if self.state.status == Status::Running {
-            self.end(Status::Failed { error: error.into() }, &mut progress);
+            self.end(Status::Failed { error: error.into(), limit }, &mut progress);
         }
         progress
     }
@@ -422,18 +432,14 @@ impl Run {
                 return self.absorb(response);
             }
             Err(WorkerError::ComputeLimit(_)) => {
-                let limit = self.state.limits.compute();
-                self.end(
-                    Status::Failed { error: format!("the trail ran past its compute limit of {limit:?}") },
-                    &mut progress,
-                );
+                let most = self.state.limits.compute();
+                let error = format!("the trail ran past its compute limit of {most:?}");
+                self.end(Status::Failed { error, limit: Some(Limit::Compute) }, &mut progress);
             }
             Err(WorkerError::OutOfMemory) => {
-                let limit = self.state.limits.memory_bytes;
-                self.end(
-                    Status::Failed { error: format!("the trail ran out of memory ({limit} bytes)") },
-                    &mut progress,
-                );
+                let most = self.state.limits.memory_bytes;
+                let error = format!("the trail ran out of memory ({most} bytes)");
+                self.end(Status::Failed { error, limit: Some(Limit::Memory) }, &mut progress);
             }
             Err(e) => return Err(e.into()),
         }
@@ -460,9 +466,9 @@ impl Run {
                 progress.events = events;
                 self.end(Status::Done { result }, &mut progress);
             }
-            Response::Failed { error, events, .. } => {
+            Response::Failed { error, events, limit, .. } => {
                 progress.events = events;
-                self.end(Status::Failed { error }, &mut progress);
+                self.end(Status::Failed { error, limit }, &mut progress);
             }
             Response::Refused { error } => return Err(RunError::Refused(error)),
             Response::Unrestorable { error } => return Err(RunError::Unrestorable(error)),
@@ -565,7 +571,8 @@ mod tests {
         let started = std::time::Instant::now();
         run.start(&fake("run-slow", "exec sleep 30")).await.unwrap();
         assert!(started.elapsed() < GRACE + Duration::from_secs(2));
-        assert_eq!(*run.status(), Status::Failed { error: "the trail ran past its compute limit of 1ms".to_owned() });
+        let error = "the trail ran past its compute limit of 1ms".to_owned();
+        assert_eq!(*run.status(), Status::Failed { error, limit: Some(Limit::Compute) });
         assert!(matches!(run.resume(&fake("run-slow", "exit 1")).await, Err(RunError::Ended)));
     }
 
@@ -574,6 +581,6 @@ mod tests {
         let mut run = run(Limits::default());
         run.start(&fake("run-oom", "exit 65")).await.unwrap();
         let error = format!("the trail ran out of memory ({} bytes)", Limits::DEFAULT_MEMORY_BYTES);
-        assert_eq!(*run.status(), Status::Failed { error });
+        assert_eq!(*run.status(), Status::Failed { error, limit: Some(Limit::Memory) });
     }
 }
