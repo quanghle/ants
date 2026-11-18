@@ -139,6 +139,7 @@ fn listed(name: &str, capabilities: &[&str]) -> ColonyEntry {
         handling: 0,
         harnesses: 0,
         escalate_to: Vec::new(),
+        sage: None,
         version: ants_proto::ANTS_VERSION.to_owned(),
         perms: ants_proto::PERMISSIONS_VERSION,
         signed_out: None,

@@ -170,6 +170,7 @@ impl Bus {
             handling: 0,
             harnesses: 0,
             escalate_to: escalate_to.to_vec(),
+            sage: None,
             version: ants_proto::ANTS_VERSION.to_owned(),
             perms: ants_proto::PERMISSIONS_VERSION,
             signed_out: None,

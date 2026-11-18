@@ -298,7 +298,8 @@ async fn codex_threads_open_with_the_ants_skills_as_an_extra_root() {
     std::fs::create_dir_all(skills.join("deploy")).unwrap();
     std::fs::write(skills.join("deploy/SKILL.md"), "---\nname: deploy\ndescription: Deploy.\n---\n").unwrap();
     codex.script(Some(1), &[signed_in(), vec![vec![ok(3, json!({}))], vec![opened(4, THREAD)]]].concat());
-    let launch = codex.launch(ModelSettings::default()).with_skills(skills.clone());
+    let offered = crate::harness::Skills { dir: skills.clone(), plugin: codex.dir.join(".sense") };
+    let launch = codex.launch(ModelSettings::default()).with_skills(offered);
 
     Session::start(&launch, Some(SessionId::new(THREAD))).await.unwrap().close().await;
     let received = codex.received(1);

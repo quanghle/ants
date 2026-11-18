@@ -1,15 +1,14 @@
 //! The ant's persona (requirement ants-x39hk.6.5): its values, voice, boundaries and working style, one item of kind
-//! [`PERSONA`]. Only `sense_persona` changes it, and only through a proposal ([`crate::proposal`]) the ant confirms in a
-//! dream [`crate::proposal::CONFIRM_AFTER_HOURS`] or more later, at most once in [`PERSONA_EVERY_HOURS`]; each
-//! revision keeps the reason of its proposal. The brief shows it after the identity.
+//! [`PERSONA`]. Only `sense_identity` changes it ([`propose`]), and only through a proposal ([`crate::proposal`]) the
+//! ant confirms in a dream [`crate::proposal::CONFIRM_AFTER_HOURS`] or more later, at most once in
+//! [`PERSONA_EVERY_HOURS`]; each revision keeps the reason of its proposal. The brief shows it after the identity, and
+//! so does `sense_identity` without arguments.
 
 use std::fmt::Write as _;
 
-use ants_proto::provider::{BoxFuture, ToolCall};
-use serde::Deserialize;
+use ants_proto::provider::CallContext;
 use serde_json::{Value, json};
 
-use crate::Sense;
 use crate::items::{Item, ItemId, Values, stamp};
 use crate::memory::{holds_recalled_marker, redacted, sanitized};
 use crate::proposal::{self, Confirmation, Proposal, ProposalItem, Status, time};
@@ -37,6 +36,12 @@ pub async fn current(items: &dyn Items) -> Result<Option<Item>, StoreError> {
     items.get(&persona_id()).await
 }
 
+/// The headings of the fields the persona `values` holds, in the order shown.
+pub fn headings(values: &Values) -> Vec<&'static str> {
+    let held = FIELDS.iter().filter(|(field, _)| values.get(*field).is_some_and(|value| !value.is_null()));
+    held.map(|(_, heading)| *heading).collect()
+}
+
 /// The fields of the persona `values` holds, one paragraph each under its heading.
 pub fn text(values: &Values) -> String {
     let mut text = String::new();
@@ -51,53 +56,25 @@ pub fn text(values: &Values) -> String {
     text
 }
 
-/// Answers a `sense_persona` call: without fields, show the persona and its pending proposal, or with `history`
-/// every version; with fields and a reason, propose the persona they make with the current one.
-pub fn persona<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
-    Box::pin(async move { answer(sense, call).await.unwrap_or_else(|refused| refused) })
-}
-
-/// The arguments of a `sense_persona` call.
-#[derive(Deserialize)]
-struct Request {
-    values: Option<String>,
-    voice: Option<String>,
-    boundaries: Option<String>,
-    working_style: Option<String>,
-    reason: Option<String>,
-    finding: Option<String>,
-    #[serde(default)]
-    history: bool,
-}
-
-async fn answer(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
-    let request: Request = crate::tools::arguments(call)?;
-    let context = &call.context;
-    let items = sense.items(&context.ant).await?;
+/// Propose the persona the fields `given`, in the order of [`FIELDS`], make with the current one, for `reason`, in
+/// answer to the dream finding `finding` when there is one: a `sense_identity` call of the ant of `context`.
+pub(crate) async fn propose(
+    items: &dyn Items,
+    context: &CallContext,
+    given: [Option<&str>; FIELDS.len()],
+    reason: Option<&str>,
+    finding: Option<&str>,
+) -> Result<Answer, Answer> {
     let mut redactions = Vec::new();
-    let fields = fields(
-        [
-            request.values.as_deref(),
-            request.voice.as_deref(),
-            request.boundaries.as_deref(),
-            request.working_style.as_deref(),
-        ],
-        &mut redactions,
-    )?;
+    let fields = fields(given, &mut redactions)?;
     if fields.is_empty() {
-        if request.reason.is_some() {
-            return Err(Answer::invalid("Name the fields to change: values, voice, boundaries or working_style."));
-        }
-        return if request.history { show_history(&*items).await } else { show(&*items).await };
+        return Err(Answer::invalid("Name the fields to change: values, voice, boundaries or working_style."));
     }
-    if request.history {
-        return Err(Answer::invalid("history shows the versions: pass it without fields."));
-    }
-    let reason = proposal::reason(request.reason.as_deref())?;
-    let finding = proposal::finding(request.finding.as_deref())?;
-    proposal::refuse_untrusted(&*items, context, finding.as_deref()).await?;
+    let reason = proposal::reason(reason)?;
+    let finding = proposal::finding(finding)?;
+    proposal::refuse_untrusted(items, context, finding.as_deref()).await?;
 
-    let current = current(&*items).await?;
+    let current = current(items).await?;
     let mut version = current.as_ref().map_or_else(Values::new, |current| proposal::content(&current.values));
     for (field, value) in fields {
         match value {
@@ -133,7 +110,7 @@ async fn answer(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         superseded_by: None,
         decided: None,
     };
-    let (made, superseded) = proposal::propose(&*items, made).await?;
+    let (made, superseded) = proposal::propose(items, made).await?;
     let mut text = format!(
         "Proposed persona change {}: a dream from {} offers it, applied confirming it.",
         made.id(),
@@ -172,7 +149,7 @@ fn fields(
 }
 
 /// The persona, its revision and the reason of its last change, then its pending proposal.
-async fn show(items: &dyn Items) -> Result<Answer, Answer> {
+pub(crate) async fn show(items: &dyn Items) -> Result<Answer, Answer> {
     let current = current(items).await?;
     let pending = proposal::pending_for(items, &persona_id()).await?;
     let mut text = match &current {
@@ -186,7 +163,7 @@ async fn show(items: &dyn Items) -> Result<Answer, Answer> {
                 self::text(&current.values)
             )
         }
-        None => "No persona yet: propose one with sense_persona, giving values, voice, boundaries or working_style \
+        None => "No persona yet: propose one with sense_identity, giving values, voice, boundaries or working_style \
                  and a reason."
             .to_owned(),
     };
@@ -201,7 +178,7 @@ async fn show(items: &dyn Items) -> Result<Answer, Answer> {
 }
 
 /// Every version of the persona, the newest first, each with the reason it was confirmed for.
-async fn show_history(items: &dyn Items) -> Result<Answer, Answer> {
+pub(crate) async fn history(items: &dyn Items) -> Result<Answer, Answer> {
     let versions = proposal::versions(items, &persona_id()).await?;
     if versions.is_empty() {
         return Ok(Answer { text: "No persona yet.".into(), json: json!({"versions": []}), is_error: false });
@@ -234,15 +211,16 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::identity::identity;
     use crate::memory::tests::{context, human, sense, tool};
     use crate::proposal::tests::error;
 
     #[tokio::test]
     async fn a_proposal_is_checked_and_shown_with_the_persona() {
         let (sense, _) = sense().await;
-        let call = |arguments| tool(&sense, persona, arguments, context(human()));
+        let call = |arguments| tool(&sense, identity, arguments, context(human()));
         let shown = call(json!({})).await;
-        assert!(shown.text.starts_with("No persona yet"), "{}", shown.text);
+        assert!(shown.text.contains("## Persona\nNo persona yet: propose one with sense_identity"), "{}", shown.text);
         let refusals = [
             (json!({"voice": "Plain."}), "invalid_arguments"),
             (json!({"reason": "Why."}), "invalid_arguments"),

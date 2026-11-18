@@ -1,5 +1,5 @@
 //! Proposals (requirements ants-x39hk.6.5 and ants-x39hk.6.7): how the ant changes its persona ([`crate::persona`]) and
-//! its skills ([`crate::skill`]). A call of `sense_persona` or `sense_skill` changes nothing yet: it writes a proposal,
+//! its skills ([`crate::skill`]). A call of `sense_identity` or `sense_skill` changes nothing yet: it writes a proposal,
 //! an item of kind [`PROPOSAL`] holding the whole version proposed, its reason and the revision of its target it was
 //! made from. A target has at most one pending proposal, a new one superseding it.
 //!

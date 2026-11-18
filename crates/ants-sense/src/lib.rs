@@ -19,6 +19,7 @@ pub mod cache;
 pub mod dream;
 pub mod export;
 pub mod fork;
+pub mod home;
 pub mod identity;
 pub mod items;
 pub mod log;
@@ -344,7 +345,7 @@ mod tests {
                 "task",
                 "promise",
                 "remind",
-                "persona",
+                "identity",
                 "skill",
                 "dream"
             ]
