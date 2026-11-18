@@ -129,6 +129,19 @@ impl Bus {
         (bus, replies)
     }
 
+    /// Have dev-a use built-in sense keeping its data in its home, linked to the test server as over a host
+    /// connection, until the guard drops.
+    fn keep_sense(&mut self) -> crate::sense::Hosting {
+        let sense = crate::sense::Sense::new(crate::provider::wake::Wakers::default());
+        sense.serve(&self.dev, &self._server.dir().join("dev-a"), None);
+        sense.identify(&self.dev, None);
+        let hosting = sense.hosting();
+        let machine = ants_proto::Machine::from_hostname("test-machine");
+        hosting.up(crate::sense::Link::new(self.js.clone(), None, Vec::new(), machine));
+        self.sense = Some(sense);
+        hosting
+    }
+
     /// Send `text` from the human, returning the envelope and its stream sequence.
     async fn send(&self, thread: &ThreadId, text: &str) -> (Envelope, u64) {
         self.send_from(UserId::human(), thread, text).await

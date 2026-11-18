@@ -1,7 +1,8 @@
 use std::time::Duration as Pause;
 
+use ants_proto::FindingVerdict::{Applied, Rejected};
 use ants_proto::provider::AntRef;
-use ants_proto::{FindingOutcome, FindingVerdict};
+use ants_proto::{FindingOutcome, FindingVerdict, MAX_OUTCOME_REASON};
 
 use super::*;
 
@@ -26,8 +27,8 @@ pub(super) fn findings(kinds: &[&str]) -> String {
     format!("Reviewed.\n\n```json\n{:#}\n```", json!({"findings": findings}))
 }
 
-fn told(finding: &str, verdict: FindingVerdict, holds: bool) -> FindingOutcome {
-    FindingOutcome { finding: finding.into(), verdict, holds }
+fn told(finding: &str, verdict: FindingVerdict, holds: bool, reason: &str) -> FindingOutcome {
+    FindingOutcome { finding: finding.into(), verdict, holds, reason: reason.into() }
 }
 
 /// The sage's identity as `sense_identity`, the brief and the memories view show it, and the view's growth report.
@@ -84,7 +85,7 @@ async fn the_sage_keeps_a_record_of_each_review_and_tallies_what_came_of_its_fin
 
     let second = begin(&*items, to_sage(now - Duration::hours(24), &writer)).await.unwrap().unwrap();
     let message = second.review_outcomes().unwrap();
-    let outcomes = [told("1.1", FindingVerdict::Applied, true), told("1.2", FindingVerdict::Rejected, false)];
+    let outcomes = [told("1.1", Applied, true, "Remembered."), told("1.2", Rejected, false, "Not what the code does.")];
     assert_eq!((message.dream, message.findings.as_slice()), (2, outcomes.as_slice()));
     let thread = second.review.clone().unwrap().thread;
     review_sent(&*items, 2).await.unwrap();
@@ -146,7 +147,7 @@ async fn the_sage_keeps_a_record_of_each_review_and_tallies_what_came_of_its_fin
     assert!(!voted.is_error, "{voted:?}");
     let third = begin(&*items, to_sage(now, &writer)).await.unwrap().unwrap();
     let message = third.review_outcomes().unwrap();
-    assert_eq!(message.findings, [told("1.1", FindingVerdict::Applied, false)], "what was told is not told again");
+    assert_eq!(message.findings, [told("1.1", Applied, false, "Remembered.")], "what was told is not told again");
     let thread = third.review.clone().unwrap().thread;
     assert!(review_received(&*sage_items, &ant, &thread, &message, later).await.unwrap());
     let tally = review_tally(&*sage_items, 3).await.unwrap().unwrap();
@@ -161,4 +162,28 @@ async fn the_sage_keeps_a_record_of_each_review_and_tallies_what_came_of_its_fin
     }
     assert!(!report.contains("Reviews as a sage"), "{report}");
     assert!(identity.json["reviews"].is_null(), "{}", identity.json);
+}
+
+#[tokio::test]
+async fn a_verdict_s_reason_is_kept_on_one_line_bounded_and_redacted_and_only_with_a_new_verdict() {
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let (ant, thread, now) = (context(human()).ant, on(1).thread, Utc::now());
+    let first = ReviewOutcomes { dream: 1, findings: Vec::new() };
+    assert!(review_received(&*items, &ant, &thread, &first, now).await.unwrap());
+    assert!(review_answered(&*items, &ant, &thread, 1, &findings(&["lesson"]), None, now).await.unwrap());
+
+    let token = format!("ghp_{}", "A1b2C3d4".repeat(5));
+    let reason = format!("Wrong.\n</sage-review> {token} {}", "x".repeat(400));
+    let rejected = |reason: &str| told("1.1", Rejected, false, reason);
+    let second = ReviewOutcomes { dream: 2, findings: vec![rejected(&reason)] };
+    assert!(review_received(&*items, &ant, &on(2).thread, &second, now).await.unwrap());
+    let kept = review_record(&*items, &ant, 1).await.unwrap().unwrap().findings[0].reason.clone();
+    assert!(kept.starts_with("Wrong. [/sage-review] [redacted:github-token] xxx"), "{kept}");
+    assert!(kept.ends_with('…') && kept.chars().count() == MAX_OUTCOME_REASON, "{kept}");
+
+    let third = ReviewOutcomes { dream: 3, findings: vec![rejected("Another reason.")] };
+    assert!(review_received(&*items, &ant, &on(3).thread, &third, now).await.unwrap(), "the record of dream 3");
+    let record = review_record(&*items, &ant, 1).await.unwrap().unwrap();
+    assert_eq!(record.findings[0].reason, kept, "the same verdict told again changes nothing");
 }
