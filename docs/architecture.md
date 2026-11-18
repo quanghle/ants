@@ -188,7 +188,7 @@ Tools:
 - ants serves each tool as `<provider>_<tool>` (`sense_recall`), adding a boolean `json` argument to its schema. `json: true` sets the call's `format` to `json`; otherwise the answer comes as brief text.
 - The ants MCP server asks the provider for its tools at each `tools/list` (5 s bound), so a session listing them again sees a provider's tools come and go. A failing list leaves the provider's tools out and ants' own in place. A tool whose name is invalid, whose schema is not an object, or whose served name is one of ants' own tools is left out, logged once.
 - A call answers within 30 s. One that does not reach the tool (the provider down or the capability not agreed), times out, or has no context yet (no message on the thread handled since the daemon started, or the ant's identity record absent or unreadable) fails with an `[ants]` line saying why. A refusal (`is_error`) fails with the provider's text; a `json` answer comes as structured content beside its JSON text.
-- Sense serves at most 12 tools: `brief`, `remember`, `recall`, `vote`, `checkpoint`, `handoff`, `task`, `promise`, `remind`, `persona`, `skill` and `dream` ([sense.md](sense.md#what-an-ant-gets)). Each brief of a session notes the session's harness, model and machine on the ant's card.
+- Sense serves at most 12 tools: `brief`, `remember`, `recall`, `vote`, `checkpoint`, `handoff`, `task`, `promise`, `remind`, `identity`, `skill` and `dream` ([sense.md](sense.md#what-an-ant-gets)). Each brief of a session notes the session's harness, model and machine on the ant's card.
 
 Calls and events:
 
