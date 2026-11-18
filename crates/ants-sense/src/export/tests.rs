@@ -294,3 +294,32 @@ fn only_files_under_skills_are_skill_files() {
         assert_eq!(skill_path(path), None, "{path}");
     }
 }
+
+#[tokio::test]
+async fn the_records_of_threads_sense_writes_survive_an_export_and_import() {
+    use ants_proto::provider::{Event, EventKind, Origin, Starter};
+
+    use crate::thread::record::{record, record_event};
+
+    let (a, b, sense) = (Bus::new(), Bus::new(), SenseId::new());
+    let thread: ants_proto::ThreadId = "019a7d2c-0000-7000-8000-000000000001".parse().unwrap();
+    let origin = Origin { by: Starter::Human { user: ant("alice") }, channel: None };
+    let started = EventKind::ThreadStarted { origin, repo: Some("github.com/o/r".to_owned()) };
+    let event = |kind| Event {
+        id: uuid::Uuid::now_v7(),
+        ant: ant("dev-a"),
+        identity: "0f1e".into(),
+        thread: Some(thread.clone()),
+        at: chrono::Utc::now(),
+        kind,
+    };
+    let store = tokio::sync::Mutex::new(a.store(&sense, "dev-a", &[]).await);
+    record_event(&store, &event(started)).await.unwrap();
+    let recorded = record_event(&store, &event(EventKind::ThreadDone)).await.unwrap().unwrap();
+    drop(store);
+
+    let export = a.export(&sense, "dev-a", vec![]).await;
+    import(&mut b.ant_log(&sense, "dev-a", &[]), &export).await.unwrap();
+    let store = tokio::sync::Mutex::new(b.store(&sense, "dev-a", &[]).await);
+    assert_eq!(record(&store, &thread).await.unwrap(), Some(recorded));
+}

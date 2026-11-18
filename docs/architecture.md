@@ -202,7 +202,7 @@ Calls and events:
   - `ant_added`, `ant_moved`, `ant_retired`, `ant_revived`;
   - `ant_renamed` (`from`);
   - `ant_cloned` (`from`, `from_identity`);
-  - `thread_started` (`origin`);
+  - `thread_started` (`origin`; `repo`, the repository of the ant's working directory, named and left out as the context's `repo`);
   - `thread_done`, `thread_expired`;
   - `session_lost`;
   - `session_rebuilt` (`reason`: `lost` or `overflow`).
@@ -246,7 +246,7 @@ The message.
 
 ### Lifecycle events
 
-ants sends an ant's provider its lifecycle events only when both declared `events` at initialize, as sense does: it writes them on the ant's card ([sense.md](sense.md#identity)). Each event carries the ant, the id of its identity record, the thread when there is one and the time, never a message, prompt or reply.
+ants sends an ant's provider its lifecycle events only when both declared `events` at initialize, as sense does: it writes them on the ant's card and the thread's record ([sense.md](sense.md#identity)). Each event carries the ant, the id of its identity record, the thread when there is one and the time, never a message, prompt or reply.
 
 | Kind | Sent when |
 |---|---|
@@ -255,7 +255,7 @@ ants sends an ant's provider its lifecycle events only when both declared `event
 | `ant_revived` | A daemon serves an ant whose home is marked retired. |
 | `ant_cloned` | A clone order queues it in the clone's home, with the source ant and its identity id; the clone gets no `ant_added`. sense forks the source's identity on it ([sense.md](sense.md#identity)). |
 | `ant_moved`, `ant_renamed` | `ants ant import` queues `ant_moved`, then `ant_renamed` under `--as`, in the new home; the ant gets no `ant_added`. No other rename exists, and a daemon of the same bus taking an ant over is not a move. |
-| `thread_started` | A message comes on a thread the ant holds no session of, with the message's `origin`. |
+| `thread_started` | A message comes on a thread the ant holds no session of, with the message's `origin` and the repository of the ant's working directory (`repo`). |
 | `thread_expired` | A thread's worktree goes because its session expired (threads in worktrees only). |
 | `session_lost`, `session_rebuilt` | A stored session fails to resume and a new one starts (`lost`); the harness moves to a new session on a full context window (`overflow`). |
 | `thread_done` | A thread the ant holds a session of is marked done (`ants thread done`, an assistant's `done_for_human`), at the time it was marked. The daemon hears each done state put in `ants_threads` through the ant's durable consumer `done-<ant>`, filtered on `done.*`, one at a time, and acks it once the event is queued, so a thread marked done while no daemon served the ant is told once one does, unless the ant was retired meanwhile; a repeat carries the same id. A done state cleared (`ants thread undone`) tells nothing. |
@@ -326,7 +326,7 @@ Human traffic costs 0 turns; ant-to-ant messages cost 1 turn (`ask_ant` requires
 ### Messenger and thread notes
 
 - **Messenger:** unaddressed `ants ask` (from a human with no assistant, see [auth.md](auth.md#assistant-grant)) and unmentioned human/webhook channel posts route through `messenger`. Unless `messenger = false` or `[[ant]]` defines `messenger`, daemons run a built-in `messenger` (`~/.ants/messenger`, `~/.config/ants/auth/messenger.creds` if present) with automatic standby failover via `ants_colony` (~1 s on exit or 30 s TTL expiry), yielding immediately to an explicit `[[ant]] name = "messenger"`. It suggests a short title (`suggest_thread_title`) for a thread a human's request starts.
-- **Sage:** each ant names the ant that reviews it (`sage`, [config.md](config.md#the-sage)): by default the built-in `sage`, which daemons serve on the file's top-level harness (`~/.ants/sage`, `~/.config/ants/auth/sage.creds` if present) with the messenger's standby failover, while an ant names it and `[[ant]]` defines no `sage`. A sage has no sage of its own.
+- **Sage:** each ant names the ant that reviews it (`sage`, [config.md](config.md#the-sage)): by default the built-in `sage`, which daemons serve on the file's top-level harness (`~/.ants/sage`, `~/.config/ants/auth/sage.creds` if present; on a server with authentication only where that file exists) with the messenger's standby failover, while an ant names it and `[[ant]]` defines no `sage`. A sage has no sage of its own.
 - **Thread notes:** `ants.notes.<thread>.<from>` provides a passive shared board per thread (wakes nobody). An ant's `post_notes` spends 1 turn via CAS from `min(message_budget, last_note_budget)`; exhausting turns escalates `notes` until a human runs `ants notes <thread> TEXT` (8 fresh turns) or escalation climbs a level.
 - **Questions (`ask_human` / `ants answer`):** a message to the human carrying `question` asks 1–4 questions (`questions`: each text, optional `header`, numbered options of `label` and optional `description`, `multi_select`, `free_text`), its text repeating every question and its numbered options for readers that do not know the field; `ants inbox` and `ants thread show` print them and how to answer, and `thread show` lists the answers stored with them. `ants answer MESSAGE PICK...` finds the message among messages to the human, takes a pick for each question in order (`N`, `N,M` where `multi_select`, typed words only where `free_text`; a lone question takes every word), and replies on the thread with the answers' text and `answer` (`question`: the message id, `picks`: `{"options": [N, …]}` or `{"typed": "…"}` for each question). An answer prompts the ant once, with an `[ants]` line for each question naming it and the options picked, or saying its answer is typed; an answer to no question the ant sent the human is an ordinary message. Only ants ask, so answers go to ants in the clear; a question from a human (no CLI sends one) is refused, pointing at `ants ask @HUMAN`. A stored question is emitted on the ant's status as `asked` (`ants hook run --on question`) and pushed by `ants webhook serve` to the human's sinks (`questions` per `[[human]]`, [webhooks.md](webhooks.md#notifications)).
 

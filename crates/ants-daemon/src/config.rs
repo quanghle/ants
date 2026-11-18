@@ -109,7 +109,8 @@
 //!
 //! A file also serves the built-in messenger ([`builtin_messenger`]) unless it sets `messenger = false` or lists an
 //! ant named `messenger`; an empty file is a complete one. It serves the built-in sage ([`builtin_sage`]) while one of
-//! its other ants names `sage` as its sage, as each does by default, and it lists no ant named `sage`.
+//! its other ants names `sage` as its sage, as each does by default, and it lists no ant named `sage`, unless the
+//! server takes credentials and the sage has none on the machine ([`Loaded::sage_elsewhere`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -281,6 +282,10 @@ pub struct Loaded {
     pub nats_server: Option<NatsServer>,
     /// The top-level `auto_update`.
     pub auto_update: AutoUpdate,
+    /// Where the built-in sage's credentials belong, when an ant of the file names the sage but the machine leaves it
+    /// to another, the server taking credentials and the sage having none there ([`sage::served_here`]); the sage is
+    /// then not among [`Self::ants`], which name it all the same.
+    pub sage_elsewhere: Option<PathBuf>,
     /// The file's directory, which relative paths are relative to, and the home directory `~` stands for.
     base: PathBuf,
     home: PathBuf,
@@ -295,7 +300,8 @@ pub fn load(path: &Path) -> Result<Loaded> {
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
 /// directory, apply the top-level `harness`, `nats`, `js_domain` and `human`, check that names are unique, workdirs
 /// exist and every harness named is defined, add the built-in messenger unless `messenger = false` or an ant is
-/// named `messenger`, settle each ant's sage and add the built-in sage while an ant names it ([`sage::settle`]), and
+/// named `messenger`, settle each ant's sage and add the built-in sage while an ant names it ([`sage::settle`]) and
+/// the machine serves it ([`sage::served_here`]), and
 /// check the schedules, each named once and after no ant, with the top-level `nats`,
 /// `js_domain` and `timezone` where they set none.
 pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
@@ -342,11 +348,16 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         .with_context(|| format!("config {}", path.display()))?;
     check_added(&mut ants, &templates).with_context(|| format!("config {}", path.display()))?;
     let file_sage = file.sage.clone().unwrap_or_default();
+    let mut sage_elsewhere = None;
     if sage::settle(&mut ants, &file_sage).with_context(|| format!("config {}", path.display()))? {
         let sage = builtin_sage(file.harness.as_deref(), home);
         names.insert(sage.name.clone());
         let sage = settle_ant(sage, &file, (&harnesses, &providers), base, home, path)?;
-        ants.push(Ant { file_sage, is_sage: true, ..sage });
+        if sage::served_here(&sage, &ants, &host) {
+            ants.push(Ant { file_sage, is_sage: true, ..sage });
+        } else {
+            sage_elsewhere = Some(ant::builtin_creds(&sage.name, home));
+        }
     }
     let entries = std::mem::take(&mut file.schedules);
     let schedules = schedules(entries, &file, timezone.as_ref(), &names, base, home, path)?;
@@ -361,6 +372,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         host,
         nats_server,
         auto_update: file.auto_update,
+        sage_elsewhere,
         base,
         home,
     })
