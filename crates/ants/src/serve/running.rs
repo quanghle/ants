@@ -110,7 +110,7 @@ impl HostRun {
         }
         let (sender, receiver) = watch::channel(ants);
         let started = wanted.clone();
-        let sense = ants_daemon::provider::sense::stores().hosting();
+        let sense = ants_daemon::sense::built_in().hosting();
         let task = tokio::spawn(
             async move {
                 if let Err(e) = Box::pin(host::run_keeping(started, receiver, Some(sense))).await {

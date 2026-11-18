@@ -6,10 +6,10 @@ use std::path::Path;
 
 use ants_proto::provider::{CallContext, Origin, Starter};
 use ants_proto::{ChannelId, Envelope, Humans, ThreadId, UserId};
-use ants_sense::memory::normalize_remote;
 use chrono::Utc;
 
 use crate::profile::identity::Identity;
+use crate::sense::normalize_remote;
 
 /// Where the daemon finds who the provider calls of its ant are for: the ant, the machine serving it, and its identity
 /// record, whose id is read when a call needs it ([`Identity::id`] keeps it once read).

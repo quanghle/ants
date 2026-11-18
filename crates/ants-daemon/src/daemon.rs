@@ -438,7 +438,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         identity: identity.as_ref(),
         home: &config.storage.home,
         lifecycle: lifecycle.as_ref(),
-        sense: crate::provider::sense_of(&config.provider),
+        sense: crate::sense::of(&config.provider),
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     forget_if_retired(&served, config, &js, retired_before).await;
@@ -549,8 +549,9 @@ async fn services(
     let ledger = ledger(&config.ant, &config.spending, &sessions_kv);
     let escalator = escalator(config, js, &colony, humans, &ledger, &redactor, assistants);
     let (identity, identity_id) = ant_records(config, js).await;
-    if matches!(config.provider, crate::provider::Setting::Sense) {
-        crate::provider::sense::stores().serve(&config.ant, &config.storage.home, config.connection.creds.clone());
+    let sense = crate::sense::of(&config.provider);
+    if let Some(sense) = sense {
+        sense.serve(&config.ant, &config.storage.home, config.connection.creds.clone());
     }
     let lifecycle = match &identity_id {
         Some(id) => Lifecycle::open(events::outbox(), &config.ant, id, &config.storage.home).await,
@@ -573,8 +574,8 @@ async fn services(
     }
     let mcp_sign_ins = mcp_sign_in::Untold::default();
     let mut launch = launch(&config.harness, policy, &mcp).with_mcp_sign_ins(mcp_sign_ins.sink());
-    if matches!(config.provider, crate::provider::Setting::Sense) {
-        launch = launch.with_skills(ants_sense::export::skills_dir(&config.storage.home));
+    if let Some(sense) = sense {
+        launch = launch.with_skills(sense.skills(&config.storage.home));
     }
     Ok(Services {
         redactor,
@@ -923,11 +924,23 @@ fn log_serving(config: &Config) {
     );
 }
 
-fn sense_workdirs(inbox: &Inbox<'_>, config: &Config) -> Option<crate::provider::workdirs::Serving> {
-    if !matches!(config.provider, crate::provider::Setting::Sense) {
-        return None;
-    }
-    Some(crate::provider::workdirs::serve(&config.ant, inbox.mcp?.workdirs()))
+/// What the dreams of the ant `config` serves take from its daemon.
+fn dreaming(inbox: &Inbox<'_>, config: &Config) -> std::sync::Arc<dyn crate::sense::Dreaming> {
+    std::sync::Arc::new(crate::sense::Daemon {
+        js: inbox.js.clone(),
+        ant: config.ant.clone(),
+        reading: inbox.reading,
+        origins: inbox.mcp.and_then(crate::mcp::Mcp::origin_store).cloned(),
+        workload: inbox.workload.clone(),
+        started: chrono::Utc::now(),
+        workdir: config.harness.workdir.clone(),
+        sage: config.policy.sage.clone(),
+        lookup: crate::mcp::jetstream_lookup(inbox.js.clone()),
+        outbox: redacting_outbox(
+            crate::mcp::jetstream_outbox(inbox.js.clone()),
+            std::sync::Arc::new(inbox.redactor.clone()),
+        ),
+    })
 }
 
 /// Serve the inbox, and the ant's watches beside it, until a stop, the hand-over or the move: which one ended it. A
@@ -954,23 +967,8 @@ where
     )
     .await?
     .reading(inbox.reading);
-    let _sense_workdirs = sense_workdirs(inbox, config);
-    let dreaming = crate::provider::scheduler::Daemon {
-        js: inbox.js.clone(),
-        ant: config.ant.clone(),
-        reading: inbox.reading,
-        origins: inbox.mcp.and_then(crate::mcp::Mcp::origin_store).cloned(),
-        workload: inbox.workload.clone(),
-        started: chrono::Utc::now(),
-        workdir: config.harness.workdir.clone(),
-        sage: config.policy.sage.clone(),
-        lookup: crate::mcp::jetstream_lookup(inbox.js.clone()),
-        outbox: redacting_outbox(
-            crate::mcp::jetstream_outbox(inbox.js.clone()),
-            std::sync::Arc::new(inbox.redactor.clone()),
-        ),
-    };
-    let scheduler = crate::provider::scheduler::serve(config, inbox.machine, std::sync::Arc::new(dreaming));
+    let _sense_workdirs = inbox.sense.zip(inbox.mcp).map(|(sense, mcp)| sense.workdirs(&config.ant, mcp.workdirs()));
+    let scheduler = inbox.sense.map(|sense| sense.schedule(config, inbox.machine, dreaming(inbox, config)));
     let (stopping, moving, mut asked) = (std::cell::Cell::new(false), std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request, the hand-over or the move, after which the prompts in flight finish;
     // the second only Ctrl-C or a stop request.
@@ -1213,7 +1211,7 @@ struct Inbox<'a> {
     lifecycle: Option<&'a Lifecycle>,
     /// The ant's sense, which takes its sage's answers to the reviews of its dreams ([`Inbox::arrived`]); None when
     /// sense is not its provider.
-    sense: Option<&'a ants_sense::Sense>,
+    sense: Option<&'a crate::sense::Sense>,
 }
 
 impl Inbox<'_> {

@@ -43,19 +43,23 @@ pub(super) struct Served {
     refused: HashSet<String>,
 }
 
-impl Mcp {
-    pub(crate) fn workdirs(&self) -> std::sync::Arc<dyn ants_sense::Workdirs> {
-        struct Directories(std::sync::Weak<Hub>);
-        impl ants_sense::Workdirs for Directories {
-            fn workdir(&self, context: &CallContext) -> Option<std::path::PathBuf> {
-                let hub = self.0.upgrade()?;
-                if hub.ant != context.ant {
-                    return None;
-                }
-                hub.sessions.locked().dirs.get(&context.thread).cloned()
-            }
+/// The directories the sessions of the ant's threads work in, while its MCP server runs: where sense resolves the
+/// ant's file access ([`crate::sense`]).
+pub(crate) struct Directories(std::sync::Weak<Hub>);
+
+impl Directories {
+    pub(crate) fn workdir(&self, context: &CallContext) -> Option<std::path::PathBuf> {
+        let hub = self.0.upgrade()?;
+        if hub.ant != context.ant {
+            return None;
         }
-        std::sync::Arc::new(Directories(std::sync::Arc::downgrade(&self.hub)))
+        hub.sessions.locked().dirs.get(&context.thread).cloned()
+    }
+}
+
+impl Mcp {
+    pub(crate) fn workdirs(&self) -> Directories {
+        Directories(std::sync::Arc::downgrade(&self.hub))
     }
 
     /// Take `callers` for who the calls of the provider's tools and its brief requests are for; until then those calls

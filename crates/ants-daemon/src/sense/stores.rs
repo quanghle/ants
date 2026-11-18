@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::provider::BoxFuture;
@@ -24,7 +24,7 @@ use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use serde::{Deserialize, Serialize};
 
-use crate::sense_log::{AntSigner, DeviceRevocations, JetStreamLog};
+use super::log::{AntSigner, DeviceRevocations, JetStreamLog};
 
 /// The items of the ants a process serves, reached over its host connection.
 #[derive(Default)]
@@ -187,11 +187,6 @@ impl SenseStores {
         self.changed.notify_one();
     }
 
-    /// The ants whose homes this process serves, including while its host connection is down.
-    pub fn served(&self) -> Vec<UserId> {
-        self.state().ants.keys().cloned().collect()
-    }
-
     async fn retry_pending(&self) {
         let served: Vec<_> = self
             .state()
@@ -216,12 +211,6 @@ fn digest(file: &Path) -> Option<u64> {
     let mut hasher = std::hash::DefaultHasher::new();
     std::hash::Hash::hash(&std::fs::read(file).ok()?, &mut hasher);
     Some(std::hash::Hasher::finish(&hasher))
-}
-
-/// The stores of the daemon's process.
-pub fn stores() -> &'static Arc<SenseStores> {
-    static STORES: OnceLock<Arc<SenseStores>> = OnceLock::new();
-    STORES.get_or_init(SenseStores::new)
 }
 
 /// What [`SenseStores`] holds of an ant served.

@@ -40,7 +40,7 @@ pub mod profile;
 pub mod provider;
 pub mod records;
 pub mod secrets;
-pub mod sense_log;
+pub mod sense;
 pub mod stream;
 
 pub mod sync;

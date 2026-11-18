@@ -2,14 +2,13 @@
 //! names it ([`Setting`]): built-in sense unless the setting names an external provider of the config file or none.
 //! One provider serves all the ants of a process that name it, connected on first use; each call names its ant, and
 //! so does each wake request it makes of ants ([`wake`]). An external provider runs once for them all, supervised
-//! ([`Supervised`]).
+//! ([`Supervised`]). What any provider gets is here; what is built-in sense's alone is in [`crate::sense`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use ants_proto::UserId;
 use ants_proto::provider::{Capabilities, Connected, Info, InitializeParams, Provider};
-use ants_sense::Sense;
 use tokio::sync::OnceCell;
 
 pub mod brief;
@@ -21,11 +20,8 @@ mod link;
 mod mcp;
 pub mod origins;
 mod process;
-pub(crate) mod scheduler;
-pub mod sense;
 mod supervisor;
 pub mod wake;
-pub(crate) mod workdirs;
 
 pub use definition::{Definition, NONE, Protocol, SENSE, Setting, define};
 pub use supervisor::Supervised;
@@ -41,19 +37,6 @@ pub fn client() -> Info {
 }
 
 static SENSE_PROVIDER: OnceCell<Option<Connected>> = OnceCell::const_new();
-static BUILT_IN: LazyLock<Arc<Sense>> = LazyLock::new(|| {
-    Arc::new(Sense::with_stores(sense::stores().clone()).with_workdirs(Arc::new(workdirs::Directories)))
-});
-
-pub(crate) fn built_in() -> &'static Arc<Sense> {
-    &BUILT_IN
-}
-
-/// Built-in sense when it is the provider of `setting`.
-pub(crate) fn sense_of(setting: &Setting) -> Option<&'static Sense> {
-    matches!(setting, Setting::Sense).then(|| &**built_in())
-}
-
 static PROVIDERS: LazyLock<Providers> = LazyLock::new(Providers::default);
 
 /// The provider of `ant`, connected: none when its setting is [`NONE`] or when it cannot be connected, the ant then
@@ -125,7 +108,7 @@ impl Providers {
     async fn of(&self, ant: &UserId) -> Option<Connected> {
         let setting = self.0.locked().settings.get(ant).cloned().unwrap_or_default();
         match setting {
-            Setting::Sense => SENSE_PROVIDER.get_or_init(|| connect(built_in().clone())).await.clone(),
+            Setting::Sense => SENSE_PROVIDER.get_or_init(|| connect(crate::sense::built_in().provider())).await.clone(),
             Setting::None => None,
             Setting::External(definition) => {
                 let supervised = self.0.locked().run(&definition);
@@ -176,8 +159,8 @@ mod tests {
     #[tokio::test]
     async fn every_ant_gets_sense_with_its_tools_and_brief() {
         let provider = of(&"dev-a".parse().unwrap()).await.expect("sense connects");
-        assert_eq!(provider.name(), ants_sense::NAME);
-        assert_eq!(provider.capabilities(), ants_sense::CAPABILITIES);
+        assert_eq!(provider.name(), crate::sense::NAME);
+        assert_eq!(provider.capabilities(), crate::sense::CAPABILITIES);
         assert!(provider.has(Capability::Tools) && provider.has(Capability::Context));
         let other = of(&"dev-b".parse().unwrap()).await.unwrap();
         assert_eq!(other.agreed(), provider.agreed());
@@ -200,7 +183,7 @@ mod tests {
         providers.assign(&c, &external);
         assert_eq!(providers.of(&a).await.expect("connected while down").name(), "memo");
         assert!(providers.of(&b).await.is_none());
-        assert_eq!(providers.of(&"dev-d".parse().unwrap()).await.unwrap().name(), ants_sense::NAME);
+        assert_eq!(providers.of(&"dev-d".parse().unwrap()).await.unwrap().name(), crate::sense::NAME);
         assert_eq!(providers.0.locked().running.len(), 1, "one run for both ants");
 
         let moved = Setting::External(Arc::new(Definition { command: "/nonexistent/memo2".into(), ..(*memo).clone() }));
@@ -209,6 +192,6 @@ mod tests {
         assert_eq!(running.command, std::path::Path::new("/nonexistent/memo2"));
         providers.reconcile([]);
         assert!(providers.0.locked().running.is_empty());
-        assert_eq!(providers.of(&a).await.unwrap().name(), ants_sense::NAME, "unlisted, back to sense");
+        assert_eq!(providers.of(&a).await.unwrap().name(), crate::sense::NAME, "unlisted, back to sense");
     }
 }

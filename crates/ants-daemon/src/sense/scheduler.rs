@@ -60,11 +60,13 @@ impl Drop for Serving {
 }
 
 /// Start only after the ant holds its colony registration and its wake service is installed.
-pub(crate) fn serve(config: &crate::daemon::Config, machine: &str, dreaming: Arc<dyn Dreaming>) -> Option<Serving> {
-    if !matches!(config.provider, super::Setting::Sense) {
-        return None;
-    }
-    let host = super::wake::Ants::default();
+pub(super) fn serve(
+    sense: Arc<Sense>,
+    config: &crate::daemon::Config,
+    machine: &str,
+    dreaming: Arc<dyn Dreaming>,
+) -> Serving {
+    let host = crate::provider::wake::Ants::default();
     host.named(ants_sense::NAME);
     let settings = Settings {
         ant: config.ant.clone(),
@@ -74,7 +76,7 @@ pub(crate) fn serve(config: &crate::daemon::Config, machine: &str, dreaming: Arc
         allow: config.policy.allow.clone(),
         dreams: Some(dreams::Dreams::new(dreaming)),
     };
-    Some(start(super::built_in().clone(), Arc::new(host), settings))
+    start(sense, Arc::new(host), settings)
 }
 
 fn start(sense: Arc<Sense>, host: Arc<dyn Host>, settings: Settings) -> Serving {

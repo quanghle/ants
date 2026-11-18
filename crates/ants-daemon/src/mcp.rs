@@ -80,6 +80,7 @@ pub use assist::{HumanMessage, HumanSealing, HumanStore, jetstream_store};
 pub use attach::{FileAccess, jetstream_files};
 pub use channels::{ChannelAccess, jetstream_channels};
 pub use managers::{AntAsk, AntRequester, ManagerAsk, Requester, RetireAsk};
+pub(crate) use provider::Directories;
 pub use reactions::{ReactionAsker, local_reaction_asker, nats_reaction_asker};
 pub(crate) use routing::why_unserved;
 pub use routing::{Colony, ColonyLookup, jetstream_colony, jetstream_lookup};

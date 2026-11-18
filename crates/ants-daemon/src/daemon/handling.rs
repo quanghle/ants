@@ -304,14 +304,13 @@ impl Inbox<'_> {
     /// The message takes the tool rules its thread is narrowed to ([`Inbox::narrow`]).
     /// Returns whether to answer the message: a member's notice that it sent the ant's escalation higher is the
     /// daemon's alone ([`Escalator::took_climb`]), and so is the sage's answer to the review of a dream, unless its
-    /// findings prompt the ant ([`crate::provider::scheduler::review_answer`]).
+    /// findings prompt the ant ([`crate::sense::Sense::review_answer`]).
     async fn arrived(&self, incoming: &mut Incoming) -> Result<bool> {
         let sender = self.humans.sender_role(&incoming.envelope);
-        if let Some(sense) = self.sense.filter(|_| incoming.post.is_none() && sender == Role::Ant) {
-            let items = sense.items(self.ant).await?;
-            if let Some(prompt) = crate::provider::scheduler::review_answer(&*items, &mut incoming.envelope).await? {
-                return Ok(prompt);
-            }
+        if let Some(sense) = self.sense.filter(|_| incoming.post.is_none() && sender == Role::Ant)
+            && let Some(prompt) = sense.review_answer(self.ant, &mut incoming.envelope).await?
+        {
+            return Ok(prompt);
         }
         // Only a human asks for a summary.
         if !sender.is_human() {

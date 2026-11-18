@@ -125,7 +125,7 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
 
 #[tokio::test]
 async fn only_a_host_reaches_the_sense_event_logs() {
-    use ants_daemon::sense_log::{AntSigner, DeviceRevocations, JetStreamLog};
+    use ants_daemon::sense::log::{AntSigner, DeviceRevocations, JetStreamLog};
     use ants_sense::log::{AccountVerifier, AntLog, EventLog as _};
 
     let Some(server) = Server::start() else { return };

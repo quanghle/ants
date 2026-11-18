@@ -580,7 +580,7 @@ async fn import_with(nats: &crate::connection::Nats<'_>, args: ImportArgs, store
     let done = async {
         let harness_kept = listing.harness == export.settings.harness;
         let dropped = restore(&home, &export.files, harness_kept)?;
-        if !no_provider && export.provider.as_ref().is_some_and(|part| part.provider == ants_sense::NAME) {
+        if !no_provider && export.provider.as_ref().is_some_and(|part| part.provider == ants_daemon::sense::NAME) {
             ants_sense::export::expect_import(&home).context("marking the home as awaiting the sense data")?;
         }
         let mut arrived = vec![EventKind::AntMoved];
@@ -676,7 +676,7 @@ async fn import_provider(
         bail!(why);
     }
     let closed =
-        if part.provider == ants_sense::NAME { ", sense keeping the ant's data closed until then" } else { "" };
+        if part.provider == ants_daemon::sense::NAME { ", sense keeping the ant's data closed until then" } else { "" };
     eprintln!("warning: {why}; `ants ant import FILE --provider-only` tries again{closed}");
     Ok(())
 }

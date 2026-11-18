@@ -39,3 +39,9 @@ impl Drop for Serving {
         }
     }
 }
+
+impl Workdirs for crate::mcp::Directories {
+    fn workdir(&self, context: &CallContext) -> Option<PathBuf> {
+        crate::mcp::Directories::workdir(self, context)
+    }
+}

@@ -72,7 +72,7 @@ async fn names(client: &Client) -> Vec<String> {
 async fn sense_tools_are_served_with_its_prefix_and_the_json_argument() {
     let home = home("sense");
     let (mcp, _sent) = start(&home).await;
-    mcp.with_provider(crate::provider::connect(Arc::new(ants_sense::Sense::new())).await.unwrap());
+    mcp.with_provider(crate::provider::connect(crate::sense::keeping_none()).await.unwrap());
     mcp.with_callers(Callers::known(user("dev-a"), "m1", "id-1"));
     let current = from_human();
     let (url, token) = http_server(&mcp, &current.thread_id);

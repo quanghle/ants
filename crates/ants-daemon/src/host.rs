@@ -18,10 +18,10 @@ use anyhow::{Context as _, Result, bail};
 use tokio::sync::watch;
 
 use crate::profile::shared::{self, Shared};
-use crate::provider::sense::{Hosting, Link};
 use crate::records::direct_kv::DirectKv;
 use crate::secrets::creds::{self, Kind};
 use crate::secrets::keystore;
+use crate::sense::{Hosting, Link};
 use crate::{admin, bus, colony};
 
 const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -131,7 +131,7 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
 }
 
 /// [`run`], sense reaching the data of the process's ants over the connection once up, when `sense` is given
-/// ([`crate::provider::sense`]).
+/// ([`crate::sense`]).
 pub async fn run_keeping(host: Host, ants: watch::Receiver<Vec<UserId>>, sense: Option<Hosting>) -> Result<()> {
     let hostname = colony::machine().await;
     let otherwise = host.fallback.clone().unwrap_or_else(|| Machine::from_hostname(&hostname));

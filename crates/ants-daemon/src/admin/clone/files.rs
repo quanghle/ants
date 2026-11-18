@@ -11,8 +11,8 @@ use super::worktrees::{Tree, worktrees};
 use crate::clone::{Snapshot, ThreadCopy};
 
 /// What of a home a clone does not copy: its worktrees and history are made again, its answered and buried messages,
-/// its MCP endpoint, its lifecycle events ([`crate::provider::events`]) and its sense identity
-/// ([`ants_sense::identity`]) are its own.
+/// its MCP endpoint, its lifecycle events ([`crate::provider::events`]) and its sense identity ([`crate::sense::DIR`])
+/// are its own.
 const NOT_COPIED: [&str; 8] = [
     "worktrees",
     "history",
@@ -21,7 +21,7 @@ const NOT_COPIED: [&str; 8] = [
     "mcp.json",
     "mcp.sock",
     crate::provider::events::DIR,
-    ants_sense::log::SENSE_DIR,
+    crate::sense::DIR,
 ];
 
 /// Copy the home of the ant cloned to the clone's, with the history of each thread of `snapshot`, and add its
