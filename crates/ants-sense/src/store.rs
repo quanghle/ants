@@ -16,7 +16,7 @@ use crate::log::{
     APPEND_TRIES, AntLog, Break, Checked, EventLog, LogError, LogErrorKind, Position, Signer, Stored, Verifier,
 };
 use crate::thread::calls::Calls;
-use crate::thread::experience::Experience;
+use crate::thread::experience::{Experience, Threads};
 
 /// Why a store did not answer.
 #[derive(Debug, thiserror::Error)]
@@ -255,8 +255,9 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         own: &[UserId],
         since: Option<DateTime<Utc>>,
         top: usize,
+        threads: Threads,
     ) -> Result<Option<Experience>, StoreError> {
-        Ok(self.cache.experience(own, since, top)?)
+        Ok(self.cache.experience(own, since, top, threads)?)
     }
 
     /// [`Cache::review_tally`].
@@ -610,6 +611,7 @@ pub trait Items: Send + Sync {
         own: &'a [UserId],
         since: Option<DateTime<Utc>>,
         top: usize,
+        threads: Threads,
     ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>>;
     /// [`Store::review_tally`].
     fn review_tally(&self, top: usize) -> BoxFuture<'_, Result<Option<ReviewTally>, StoreError>>;
@@ -752,11 +754,12 @@ where
         own: &'a [UserId],
         since: Option<DateTime<Utc>>,
         top: usize,
+        threads: Threads,
     ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>> {
         Box::pin(async move {
             let mut store = self.lock().await;
             store.replay().await?;
-            store.experience(own, since, top)
+            store.experience(own, since, top, threads)
         })
     }
 
