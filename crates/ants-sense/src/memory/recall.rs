@@ -191,7 +191,7 @@ pub fn participants(context: &CallContext) -> Vec<Scope> {
     match &context.origin.by {
         Starter::Human { user } => vec![Scope::Human(user.clone())],
         Starter::Ant { user } | Starter::Review { user } => vec![Scope::Ant(user.clone())],
-        Starter::Webhook { .. } | Starter::Provider { .. } => Vec::new(),
+        Starter::Webhook { .. } | Starter::Provider { .. } | Starter::Unknown => Vec::new(),
     }
 }
 
@@ -506,6 +506,7 @@ fn starter(by: &Starter) -> String {
         Starter::Webhook { user } => format!("webhook {user}"),
         Starter::Review { user } => format!("ant {user}, asking a review"),
         Starter::Provider { name } => format!("provider {name}"),
+        Starter::Unknown => "someone of a kind not known".to_owned(),
     }
 }
 

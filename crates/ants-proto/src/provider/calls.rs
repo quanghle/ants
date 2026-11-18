@@ -130,9 +130,10 @@ pub struct Origin {
 
 impl Origin {
     /// Whether the thread's text comes from ants and humans of the bus: not from a webhook, which relays the outside,
-    /// nor from an ant asking a review, whose packet carries its threads, webhooks' among them.
+    /// nor from an ant asking a review, whose packet carries its threads, webhooks' among them, nor from a starter of a
+    /// kind not known.
     pub fn trusted(&self) -> bool {
-        !matches!(self.by, Starter::Webhook { .. } | Starter::Review { .. })
+        matches!(self.by, Starter::Human { .. } | Starter::Ant { .. } | Starter::Provider { .. })
     }
 }
 
@@ -158,6 +159,9 @@ pub enum Starter {
     Provider {
         name: String,
     },
+    /// A kind of a later version of ants, untrusted ([`Origin::trusted`]).
+    #[serde(other)]
+    Unknown,
 }
 
 /// The result of [`super::method::TOOLS_CALL`]: the answer the ant reads, in the format it asked for, and whether the
@@ -345,6 +349,14 @@ mod tests {
         assert!(!by(Starter::Review { user: user() }).trusted());
         let review = json!({"by": {"kind": "review", "user": "x"}});
         assert_eq!(serde_json::from_value::<Origin>(review).unwrap(), by(Starter::Review { user: user() }));
+    }
+
+    #[test]
+    fn a_starter_of_a_later_kind_reads_as_unknown_and_untrusted() {
+        let later = json!({"by": {"kind": "levitated", "user": "x", "height": 3}, "channel": "ops"});
+        let origin: Origin = serde_json::from_value(later).unwrap();
+        assert_eq!(origin.by, Starter::Unknown);
+        assert!(!origin.trusted());
     }
 
     #[test]

@@ -47,7 +47,8 @@ started it, the harness, model, machine and repository ([calls and events](archi
 sense stores records that writer. Every text an ant writes passes the sanitizer first: secrets are replaced with
 `[redacted:<kind>]`, the answer counting them, and characters that hide or reorder text are stripped
 (`ants_sense::sanitize`). A thread a webhook started is untrusted: what it writes is marked untrusted, and it may not
-vote or propose. So is a review an ant asks of its sage ([Dreams](#dreams)), whose sense tools are refused anyway.
+vote or propose. So is a review an ant asks of its sage ([Dreams](#dreams)), whose sense tools are refused anyway, and
+a thread whose origin is of a kind this version of sense does not know.
 
 ### What an operator sees and configures
 
