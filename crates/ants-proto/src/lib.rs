@@ -338,6 +338,24 @@ pub const WEBHOOK_ALLOW: [&str; 16] = [
     "other:complete",
     "other:ask_human",
 ];
+/// The tool rules the review thread of a dream is narrowed to on the sage's side (requirement ants-x39hk.12.4): reading
+/// files, searching, thinking, and the ants tools that only read; the ants MCP server refuses the others on it, and
+/// the sage answers with its reply alone. Running commands stays out: no rule tells a read-only command apart.
+pub const REVIEW_ALLOW: [&str; 8] = [
+    "read:*",
+    "search",
+    "think",
+    "other:list_ants",
+    "other:read_notes",
+    "other:read_attachment",
+    "other:list_reactions",
+    "other:suggest_thread_title",
+];
+
+/// Whether `allow` narrows a thread to a review ([`REVIEW_ALLOW`]).
+pub fn is_review(allow: Option<&[String]>) -> bool {
+    allow.is_some_and(|allow| allow.iter().map(String::as_str).eq(REVIEW_ALLOW))
+}
 /// Chain levels an escalation may climb before it goes to the thread's owner ([`Escalation::up`]).
 pub const DEFAULT_MAX_ESCALATION_HOPS: u32 = 3;
 

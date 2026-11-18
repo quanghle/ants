@@ -1,18 +1,21 @@
-//! Dreams (requirements ants-x39hk.12.3, ants-x39hk.12.6 and ants-x39hk.12.7): at most once a day, when the ant has had
-//! no prompt running for a while and activity since its last review, the daemon serving it begins a dream ([`begin`])
-//! and sends its review packet ([`packet`]): to the ant's sage when one serves it ([`Recipient::Sage`]), else, as when
-//! the sage did not answer within [`SAGE_TIMEOUT_HOURS`], to the ant itself on a new dream thread with the packet
-//! alone ([`Dream::wake_due`]).
+//! Dreams (requirements ants-x39hk.12.3 to ants-x39hk.12.7): at most once a day, when the ant has had no prompt running
+//! for a while and activity since its last review, the daemon serving it begins a dream ([`begin`]) and sends its
+//! review packet ([`packet`]): to the ant's sage when one serves it ([`Recipient::Sage`]), as a message from the ant on
+//! a review thread of its own ([`Review`]), else, as when the sage did not answer within [`SAGE_TIMEOUT_HOURS`] or
+//! answered with nothing readable, to the ant itself on a new dream thread with the packet alone
+//! ([`Dream::wake_due`]). The sage's findings prompt the ant on the review thread inside a marked block
+//! ([`answered`]); an answer without findings wakes nobody.
 //!
 //! sense runs no model: it only gathers what a review judges and records what the ant decides. Each dream is an item of
 //! kind [`DREAM`], numbered, the last one named by a record of kind [`DREAMS`], so a daemon taking over dreams no sooner.
-//! Its findings, each with an id the ant answers by (`<dream>.<n>`), are the sage's when it answered, and otherwise
-//! the packet's own: contradicting votes, memories needing review, near duplicates, episodes to distill and pending
-//! persona and skill proposals ([`proposals`]). The ant answers each with `sense_dream` ([`dream`]) as applied (naming
-//! the items it wrote), rejected or deferred, with a reason; the deferred and unanswered come again in the next dream
-//! while they still hold. Writes on the dream thread through the tools that change memories count toward
-//! [`MAX_DREAM_WRITES`] ([`counted`]). Finishing a dream, or beginning the next one, writes its diary: an episode
-//! memory summarizing its verdicts.
+//! Its findings, each with an id the ant answers by (`<dream>.<n>`), are the sage's when it answered with some, with
+//! those carried from earlier dreams, and otherwise the packet's own: contradicting votes, memories needing review,
+//! near duplicates, episodes to distill and pending persona and skill proposals ([`proposals`]). The ant answers each
+//! with `sense_dream` ([`dream`]) as applied (naming the items it wrote), rejected or deferred, with a reason; the
+//! deferred and unanswered come again in the next dream while they still hold. Writes on the dream thread through the
+//! tools that change memories count toward [`MAX_DREAM_WRITES`], and are untrusted while a finding resting on
+//! untrusted text is open ([`counted`], [`untrusted_on`]). Finishing a dream, or beginning the next one, writes its
+//! diary: an episode memory summarizing its verdicts.
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
@@ -30,9 +33,13 @@ use crate::store::{Items, StoreError, Write};
 use crate::tools::{Answer, Handler};
 
 mod packet;
+mod review;
 mod tool;
 
-pub use packet::{MIN_THREAD_BYTES, PACKET_BUDGET, Thread, compose, packet};
+pub use packet::{MIN_THREAD_BYTES, PACKET_BUDGET, Reader, Thread, compose, packet};
+pub use review::{
+    Advice, Evidence, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse, review_sent, untrusted_on,
+};
 pub use tool::{dream, schema};
 
 /// The kind of each dream's item ([`Dream`]).
@@ -45,7 +52,7 @@ pub const DREAM_EVERY_HOURS: i64 = 24;
 pub const IDLE_MINUTES: i64 = 30;
 /// The hours the sage has to answer a review before the ant is woken with the packet alone.
 pub const SAGE_TIMEOUT_HOURS: i64 = 6;
-/// The most findings a dream offers.
+/// The most findings a dream gathers, and the most a sage's answer gives.
 pub const MAX_FINDINGS: usize = 20;
 /// The most writes through sense's tools a dream thread makes ([`counted`]).
 pub const MAX_DREAM_WRITES: usize = 20;
@@ -72,7 +79,7 @@ pub enum Recipient {
 }
 
 /// Who reads the packet of a dream of an ant whose sage, if it names one, is `served`: the sage when served, else the
-/// ant (requirement ants-x39hk.12.7).
+/// ant (requirement ants-x39hk.12.7). An ant with no sage, as where reviews are off, dreams on the packet alone.
 pub fn recipient(served: Option<UserId>) -> Recipient {
     served.map_or(Recipient::Ant, Recipient::Sage)
 }
@@ -83,9 +90,10 @@ pub fn recipient(served: Option<UserId>) -> Recipient {
 pub enum State {
     /// Its packet went to the sage, whose findings are awaited.
     Sent,
-    /// The sage's findings came: the ant is woken with them.
+    /// The sage answered: its findings prompt the ant on the review thread; none wake nobody.
     Answered,
-    /// The ant is woken with the packet alone.
+    /// The ant is woken with the packet alone: it has no sage served, or the sage left the review unanswered or
+    /// answered with nothing readable.
     Fallback,
     /// Finished by the ant or closed by the next dream: its diary is written.
     Done,
@@ -134,7 +142,7 @@ pub enum FindingKind {
     Distill,
     /// A pending persona or skill proposal ([`proposals`]).
     Proposal,
-    /// A finding of the ant's sage.
+    /// A finding of the ant's sage ([`Advice`]).
     Sage,
 }
 
@@ -164,6 +172,9 @@ pub struct Finding {
     /// Whether it rests on untrusted text: an untrusted memory or thread.
     #[serde(default)]
     pub untrusted: bool,
+    /// A sage's finding: its own kind, its evidence and the action it suggests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advice: Option<Advice>,
 }
 
 impl Finding {
@@ -215,7 +226,10 @@ pub struct Dream {
     pub state: State,
     /// The sage its packet went to.
     pub sage: Option<UserId>,
-    /// The dream thread the ant was woken on.
+    /// Its review by the sage, when the packet went to one.
+    #[serde(default)]
+    pub review: Option<Review>,
+    /// The dream thread the ant was woken on: the review thread when the sage's findings prompted it.
     pub thread: Option<ThreadId>,
     #[serde(default)]
     pub threads: Vec<Covered>,
@@ -250,15 +264,34 @@ impl Dream {
             .map_err(|e| StoreError::Unavailable(format!("unreadable dream {}: {e}", item.id)))
     }
 
-    /// Whether the ant is to be woken on a new dream thread at `now`: with the sage's findings, with the packet alone,
-    /// or once the sage left its review unanswered for [`SAGE_TIMEOUT_HOURS`].
+    /// Whether the ant is to be woken on a new dream thread at `now` with the packet alone: at once without a sage,
+    /// else once the sage left its review unanswered for [`SAGE_TIMEOUT_HOURS`]. The sage's answer prompts the ant
+    /// itself, on the review thread.
     pub fn wake_due(&self, now: DateTime<Utc>) -> bool {
         self.thread.is_none()
             && match self.state {
-                State::Answered | State::Fallback => true,
+                State::Fallback => true,
                 State::Sent => now >= self.at + Duration::hours(SAGE_TIMEOUT_HOURS),
-                State::Done => false,
+                State::Answered | State::Done => false,
             }
+    }
+
+    /// The review packet still to send the sage at `now`: before its time to answer runs out.
+    pub fn review_due(&self, now: DateTime<Utc>) -> Option<&Review> {
+        self.review
+            .as_ref()
+            .filter(|review| !review.sent && self.state == State::Sent && self.deadline().is_some_and(|by| now < by))
+    }
+
+    /// The threads of the dream itself, which are no work for the next one to review: the thread the ant was woken
+    /// on and the review thread.
+    pub fn own_threads(&self) -> impl Iterator<Item = &ThreadId> {
+        self.thread.iter().chain(self.review.as_ref().map(|review| &review.thread))
+    }
+
+    /// Its open findings resting on untrusted text: unanswered or deferred.
+    pub fn untrusted_open(&self) -> impl Iterator<Item = &Finding> {
+        self.open().filter(|finding| finding.untrusted)
     }
 
     /// When the sage's time to answer runs out, while its findings are awaited.
@@ -349,9 +382,9 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
         {
             writes.extend(close(previous, revision, start.writer, start.at));
         }
-        let (state, sage) = match &start.recipient {
-            Recipient::Sage(sage) => (State::Sent, Some(sage.clone())),
-            Recipient::Ant => (State::Fallback, None),
+        let (state, sage, review) = match &start.recipient {
+            Recipient::Sage(sage) => (State::Sent, Some(sage.clone()), Some(Review::new())),
+            Recipient::Ant => (State::Fallback, None, None),
         };
         let dream = Dream {
             number,
@@ -359,6 +392,7 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
             since,
             state,
             sage,
+            review,
             thread: None,
             threads: start.threads.clone(),
             commits: start.commits.clone(),
@@ -512,7 +546,7 @@ async fn findings(
         }
         if !covered.contains(&(kind, ids.clone())) {
             n += 1;
-            found.push(Finding { id: format!("{number}.{n}"), kind, text, items: ids, untrusted });
+            found.push(Finding { id: format!("{number}.{n}"), kind, text, items: ids, untrusted, advice: None });
         }
     }
     found.truncate(MAX_FINDINGS);
@@ -584,7 +618,8 @@ fn diary(dream: &Dream, context: &CallContext) -> Memory {
 }
 
 /// Answer `call` of a tool writing memories with `handler`, counting it toward [`MAX_DREAM_WRITES`] when made on the
-/// last dream's thread, refused past them.
+/// last dream's thread, refused past them. A memory or record written there while a finding resting on untrusted text
+/// is open is stored as untrusted, as quoting outside content: the thread cannot tell which finding a write answers.
 pub(crate) async fn counted(sense: &Sense, handler: Handler, call: &ToolCall) -> Answer {
     let thread = &call.context.thread;
     let Ok(items) = sense.items(&call.context.ant).await else { return handler(sense, call).await };
@@ -606,7 +641,23 @@ pub(crate) async fn counted(sense: &Sense, handler: Handler, call: &ToolCall) ->
         );
         return Answer::error("dream_cap", message);
     }
-    let mut answer = handler(sense, call).await;
+    let untrusted: Vec<_> = dream.untrusted_open().map(|finding| finding.id.as_str()).collect();
+    let mut answer = if !untrusted.is_empty() && call.name == "remember" && !call.arguments.contains_key("quotes") {
+        let mut quoting = call.clone();
+        quoting.arguments.insert("quotes".into(), json!("external"));
+        let mut answer = handler(sense, &quoting).await;
+        if !answer.is_error {
+            let _ = write!(
+                answer.text,
+                "\nStored as untrusted: dream {} holds untrusted findings still open ({}).",
+                dream.number,
+                untrusted.join(", ")
+            );
+        }
+        answer
+    } else {
+        handler(sense, call).await
+    };
     if answer.is_error {
         return answer;
     }

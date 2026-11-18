@@ -380,7 +380,6 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     } = services(config, &client, &js, &humans, allow, &entry.machine).await?;
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(reading);
-    let webhooks = Webhooks::new(js.clone());
     let storage = storage_watcher(config, &js, &sessions_kv);
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
     let attempts_kv = bus::ensure_attempts(&js, config.connection.js_domain.as_ref(), &config.ant).await?;
@@ -421,7 +420,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         escalator: &escalator,
         notes: notes.as_ref(),
         threads: &threads,
-        webhooks: &webhooks,
+        webhooks: &Webhooks::new(js.clone()),
         colony: &colony,
         humans: &humans,
         behalf: Records::new(js.clone(), config.connection.js_domain.clone(), account()),
@@ -439,6 +438,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         identity: identity.as_ref(),
         home: &config.storage.home,
         lifecycle: lifecycle.as_ref(),
+        sense: crate::provider::sense_of(&config.provider),
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     forget_if_retired(&served, config, &js, retired_before).await;
@@ -956,6 +956,12 @@ where
         workload: inbox.workload.clone(),
         started: chrono::Utc::now(),
         workdir: config.harness.workdir.clone(),
+        sage: config.policy.sage.clone(),
+        lookup: crate::mcp::jetstream_lookup(inbox.js.clone()),
+        outbox: redacting_outbox(
+            crate::mcp::jetstream_outbox(inbox.js.clone()),
+            std::sync::Arc::new(inbox.redactor.clone()),
+        ),
     };
     let scheduler = crate::provider::scheduler::serve(config, inbox.machine, std::sync::Arc::new(dreaming));
     let (stopping, moving, mut asked) = (std::cell::Cell::new(false), std::cell::Cell::new(false), 0);
@@ -1198,6 +1204,9 @@ struct Inbox<'a> {
     home: &'a std::path::Path,
     /// Told of the threads the ant starts ([`Inbox::thread_started`]); None when its provider takes no events.
     lifecycle: Option<&'a Lifecycle>,
+    /// The ant's sense, which takes its sage's answers to the reviews of its dreams ([`Inbox::arrived`]); None when
+    /// sense is not its provider.
+    sense: Option<&'a ants_sense::Sense>,
 }
 
 impl Inbox<'_> {

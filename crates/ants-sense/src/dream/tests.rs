@@ -131,7 +131,7 @@ async fn findings_gather_what_needs_judging_and_the_open_ones_come_again() {
         "the deferred and unanswered come again first, the applied and rejected not, nor the diary to distill; the \
          untrusted memory still needs review"
     );
-    let packet = packet(&*items, &second, &[]).await.unwrap();
+    let packet = packet(&*items, &second, &Reader::Ant, &[]).await.unwrap();
     assert!(packet.contains("## Verdicts on dream 1"), "{packet}");
     assert!(packet.contains("- 1.4 (distill): unanswered"), "{packet}");
     assert!(packet.contains("- 1.2 (needs_review, offered again): Memory"), "{packet}");
@@ -212,7 +212,14 @@ async fn writes_on_a_dream_thread_are_counted_and_refused_past_the_cap() {
 
 fn finding(n: usize) -> Finding {
     let text = format!("Finding number {n}, about something worth a look.");
-    Finding { id: format!("1.{n}"), kind: FindingKind::NeedsReview, text, items: Vec::new(), untrusted: false }
+    Finding {
+        id: format!("1.{n}"),
+        kind: FindingKind::NeedsReview,
+        text,
+        items: Vec::new(),
+        untrusted: false,
+        advice: None,
+    }
 }
 
 fn thread(n: u8, bytes: usize, untrusted: bool) -> packet::Thread {
@@ -230,6 +237,7 @@ fn a_packet_over_its_budget_trims_threads_to_their_latest_then_leaves_out_thread
         since: now - Duration::hours(24),
         state: State::Fallback,
         sage: None,
+        review: None,
         thread: None,
         threads: (1..=3).map(|n| Covered { thread: on(n).thread, untrusted: n == 2 }).collect(),
         commits: vec![Commit { repo: "github.com/o/r".into(), commit: "abc123".into(), thread: Some(on(1).thread) }],
@@ -239,29 +247,31 @@ fn a_packet_over_its_budget_trims_threads_to_their_latest_then_leaves_out_thread
         diary: None,
     };
     let threads = [thread(1, 3_000, false), thread(2, 3_000, true), thread(3, 3_000, false)];
-    let whole = compose(&dream, None, &threads, PACKET_BUDGET);
+    let whole = compose(&dream, None, &Reader::Ant, &threads, PACKET_BUDGET);
     assert!(!whole.contains("left out"), "{whole}");
     assert!(whole.contains("github.com/o/r at abc123, in the worktree of thread"), "{whole}");
     assert!(whole.contains(&format!("### Thread {}, started by alice (untrusted", on(2).thread)), "{whole}");
 
     let budget = whole.len() - 2_000;
-    let trimmed = compose(&dream, None, &threads, budget);
+    let trimmed = compose(&dream, None, &Reader::Ant, &threads, budget);
     assert!(trimmed.len() <= budget && trimmed.len() > budget - 100, "{} of {budget}", trimmed.len());
     assert_eq!(trimmed.matches("earlier bytes left out for room]").count(), 3, "{trimmed}");
     assert!(trimmed.ends_with("message 3 of a thread\n"), "the latest kept");
 
     let budget = whole.len() - 6_400;
-    let dropped = compose(&dream, None, &threads, budget);
+    let dropped = compose(&dream, None, &Reader::Ant, &threads, budget);
     assert!(dropped.len() <= budget, "{} of {budget}", dropped.len());
     let left_out = format!("Left out for room, the least recently active: threads {}.", on(3).thread);
     assert!(dropped.contains(&left_out) && dropped.contains("message 2 of a thread"), "{dropped}");
 
-    let least = compose(&dream, None, &threads, 0);
+    let least = compose(&dream, None, &Reader::Ant, &threads, 0);
     assert!(least.contains("5 more findings left out") && !least.contains("message 1"), "{least}");
     let line = format!("{}\n", packet::finding_line(&finding(1), 1));
     let budget = least.len() + 3 * line.len() + 10;
-    let cut = compose(&dream, None, &threads, budget);
+    let cut = compose(&dream, None, &Reader::Ant, &threads, budget);
     assert!(cut.len() <= budget && !cut.contains("message 1"), "{cut}");
     assert!(cut.contains("Finding number 3") && !cut.contains("Finding number 4"), "{cut}");
     assert!(cut.contains("2 more findings left out for room: the next dream offers them again."), "{cut}");
 }
+
+mod review;

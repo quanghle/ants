@@ -49,6 +49,11 @@ pub(crate) fn built_in() -> &'static Arc<Sense> {
     &BUILT_IN
 }
 
+/// Built-in sense when it is the provider of `setting`.
+pub(crate) fn sense_of(setting: &Setting) -> Option<&'static Sense> {
+    matches!(setting, Setting::Sense).then(|| &**built_in())
+}
+
 static PROVIDERS: LazyLock<Providers> = LazyLock::new(Providers::default);
 
 /// The provider of `ant`, connected: none when its setting is [`NONE`] or when it cannot be connected, the ant then

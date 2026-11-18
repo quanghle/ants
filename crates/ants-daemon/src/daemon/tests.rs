@@ -279,6 +279,7 @@ impl Bus {
             identity: self.identity.as_ref(),
             home: &home,
             lifecycle: self.lifecycle.as_ref(),
+            sense: None,
         };
         let stop = || {
             let ctrl_c = ctrl_c.clone();

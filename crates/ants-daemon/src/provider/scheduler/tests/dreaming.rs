@@ -1,8 +1,8 @@
-use ants_proto::ThreadId;
-use ants_sense::dream::{self, Commit, Thread};
+use ants_proto::{Envelope, NoticeKind, ThreadId};
+use ants_sense::dream::{self, Commit, REVIEW_BEGIN, Review, Thread};
 use chrono::DateTime;
 
-use super::super::dreams::Dreams;
+use super::super::dreams::{Dreams, review_answer};
 use super::*;
 
 #[derive(Default)]
@@ -10,6 +10,10 @@ struct Fake {
     idle: Mutex<Option<DateTime<Utc>>>,
     threads: Mutex<Vec<Thread>>,
     reads: AtomicUsize,
+    /// The sage served, if any.
+    sage: Mutex<Option<UserId>>,
+    /// The review packets sent: to whom, as what, holding what.
+    reviews: Mutex<Vec<(UserId, Review, String)>>,
 }
 
 impl Dreaming for Fake {
@@ -26,6 +30,16 @@ impl Dreaming for Fake {
     fn commits<'a>(&'a self, _: &'a [ThreadId]) -> BoxFuture<'a, Vec<Commit>> {
         let commit = Commit { repo: "github.com/ants/dreams".into(), commit: "c0ffee".into(), thread: None };
         Box::pin(async move { vec![commit] })
+    }
+
+    fn sage(&self) -> BoxFuture<'_, Result<Option<UserId>>> {
+        let sage = self.sage.locked().clone();
+        Box::pin(async move { Ok(sage) })
+    }
+
+    fn review<'a>(&'a self, sage: &'a UserId, review: &'a Review, text: String) -> BoxFuture<'a, Result<()>> {
+        self.reviews.locked().push((sage.clone(), review.clone(), text));
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -145,4 +159,123 @@ async fn a_takeover_wakes_a_dream_begun_but_not_woken_and_begins_none_again() {
     *fake.idle.locked() = Some(now + chrono::Duration::hours(1));
     cycle(&Sense::new(), &*takeover, &host, &dreaming(&fake), hours_later).await.unwrap();
     assert_eq!(host.requests.locked().len(), 2, "no second dream within a day");
+}
+
+fn sage() -> UserId {
+    "sage".parse().unwrap()
+}
+
+/// The sage's reply to the review packet `review` holding `text`.
+fn reply(review: &Review, text: &str) -> Envelope {
+    let mut reply = Envelope::on_thread(review.thread.clone(), sage(), ant(), text);
+    reply.in_reply_to = Some(review.message);
+    reply.allow = Some(ants_proto::REVIEW_ALLOW.map(str::to_owned).to_vec());
+    reply
+}
+
+#[tokio::test]
+async fn a_served_sage_reviews_the_packet_on_a_thread_of_its_own_and_its_findings_prompt_the_ant() {
+    let items = open(SharedLog::default(), SenseId::new()).await;
+    let fake = Arc::new(Fake::default());
+    let settings = dreaming(&fake);
+    let host = Wakes::default();
+    let now = Utc::now();
+    *fake.sage.locked() = Some(sage());
+    fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false), ("hooked-thread", true)]);
+
+    let next = cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap().unwrap();
+    assert!(host.requests.locked().is_empty(), "the ant waits for its sage");
+    let begun = last(&*items).await.unwrap();
+    assert_eq!(next, begun.at + chrono::Duration::hours(dream::SAGE_TIMEOUT_HOURS));
+    let (to, review, text) = fake.reviews.locked()[0].clone();
+    assert_eq!(to, sage());
+    assert!(text.starts_with(&format!("# Review of dream 1 of {}", ant())), "{text}");
+    for part in ["messages no one", "```json", "the work of worked-thread", "### Thread hooked-thread", "c0ffee"] {
+        assert!(text.contains(part), "{part} in {text}");
+    }
+    cycle(&Sense::new(), &*items, &host, &settings, now + chrono::Duration::hours(1)).await.unwrap();
+    assert_eq!(fake.reviews.locked().len(), 1, "sent once");
+
+    let findings = json!({"findings": [
+        {"kind": "lesson", "finding": "Pin the toolchain", "evidence": {"threads": ["worked-thread"]}, "action": "Remember it"},
+        {"kind": "mistake", "finding": "Trusted the hook", "evidence": {"threads": ["hooked-thread"]}, "action": "Check"},
+    ]});
+    let mut answer = reply(&review, &format!("```json\n{findings}\n```"));
+    let mut stranger = Envelope { from: "mallory".parse().unwrap(), ..answer.clone() };
+    assert_eq!(review_answer(&*items, &mut stranger).await.unwrap(), None, "only the sage answers a review");
+    assert_eq!(review_answer(&*items, &mut answer).await.unwrap(), Some(true));
+    assert!(answer.text.starts_with("# Dream 1") && answer.text.contains(REVIEW_BEGIN), "{}", answer.text);
+    assert!(answer.text.contains("1.2 (sage: mistake, untrusted): Trusted the hook"), "{}", answer.text);
+    assert_eq!(answer.allow, None, "the ant answers its findings unnarrowed");
+
+    let timeout = now + chrono::Duration::hours(dream::SAGE_TIMEOUT_HOURS + 1);
+    *fake.idle.locked() = Some(timeout - chrono::Duration::hours(1));
+    cycle(&Sense::new(), &*items, &host, &settings, timeout).await.unwrap();
+    assert!(host.requests.locked().is_empty(), "the findings woke the ant already");
+
+    let day_later = now + chrono::Duration::hours(25);
+    fake.set(Some(day_later - chrono::Duration::hours(1)), &[(review.thread.as_str(), false)]);
+    cycle(&Sense::new(), &*items, &host, &settings, day_later).await.unwrap();
+    assert_eq!(last(&*items).await.unwrap().number, 1, "the review thread is no work to review");
+}
+
+#[tokio::test]
+async fn without_findings_nobody_wakes_and_without_an_answer_the_ant_dreams_on_the_packet_alone() {
+    let items = open(SharedLog::default(), SenseId::new()).await;
+    let fake = Arc::new(Fake::default());
+    let settings = dreaming(&fake);
+    let host = Wakes::default();
+    let now = Utc::now();
+    *fake.sage.locked() = Some(sage());
+    fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false)]);
+    cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap();
+    let review = fake.reviews.locked()[0].1.clone();
+    let mut waiting = Envelope { notice: Some(NoticeKind::Quota), ..reply(&review, "out of quota") };
+    assert_eq!(
+        review_answer(&*items, &mut waiting).await.unwrap(),
+        Some(false),
+        "a sage out of quota may answer later"
+    );
+    let mut empty = reply(&review, "Nothing worth a look.\n```json\n{\"findings\": []}\n```");
+    assert_eq!(review_answer(&*items, &mut empty).await.unwrap(), Some(false));
+    cycle(&Sense::new(), &*items, &host, &settings, now + chrono::Duration::hours(7)).await.unwrap();
+    assert!(host.requests.locked().is_empty(), "an answer without findings wakes nobody");
+
+    let items = open(SharedLog::default(), SenseId::new()).await;
+    cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap();
+    let review = fake.reviews.locked()[1].1.clone();
+    let timeout = last(&*items).await.unwrap().at + chrono::Duration::hours(dream::SAGE_TIMEOUT_HOURS);
+    cycle(&Sense::new(), &*items, &host, &settings, timeout - chrono::Duration::minutes(1)).await.unwrap();
+    assert!(host.requests.locked().is_empty());
+    cycle(&Sense::new(), &*items, &host, &settings, timeout).await.unwrap();
+    let requests = host.requests.locked().clone();
+    assert_eq!(requests.len(), 1, "six hours unanswered");
+    assert!(requests[0].text.starts_with("# Dream 1") && requests[0].text.contains("sense_remember"));
+    let mut late = reply(&review, "```json\n[{\"kind\": \"lesson\"}]\n```");
+    assert_eq!(review_answer(&*items, &mut late).await.unwrap(), Some(false), "a late answer wakes nobody");
+
+    let items = open(SharedLog::default(), SenseId::new()).await;
+    cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap();
+    let review = fake.reviews.locked()[2].1.clone();
+    let mut gave_up = Envelope { notice: Some(NoticeKind::GaveUp), ..reply(&review, "gave up") };
+    assert_eq!(review_answer(&*items, &mut gave_up).await.unwrap(), Some(false));
+    cycle(&Sense::new(), &*items, &host, &settings, now + chrono::Duration::minutes(1)).await.unwrap();
+    assert_eq!(host.requests.locked().len(), 2, "a sage giving up leaves the ant the packet at once");
+}
+
+#[tokio::test]
+async fn an_ant_without_a_sage_serving_it_or_its_own_sage_dreams_on_the_packet_alone() {
+    let now = Utc::now();
+    for sage in [None, Some(ant())] {
+        let items = open(SharedLog::default(), SenseId::new()).await;
+        let fake = Arc::new(Fake::default());
+        *fake.sage.locked() = sage;
+        fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false)]);
+        let host = Wakes::default();
+        cycle(&Sense::new(), &*items, &host, &dreaming(&fake), now).await.unwrap();
+        assert!(fake.reviews.locked().is_empty());
+        assert_eq!(host.requests.locked().len(), 1, "woken at once");
+        let begun = last(&*items).await.unwrap();
+        assert_eq!((begun.sage, begun.review, begun.state), (None, None, dream::State::Fallback));
+    }
 }
