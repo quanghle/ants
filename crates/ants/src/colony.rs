@@ -577,9 +577,11 @@ mod tests {
 
         let mut led = entry("dev-a", 0, 30, now);
         led.escalate_to = vec!["lead".parse().unwrap()];
+        (led.sage, led.profile) = (Some("sage".parse().unwrap()), Some("Good for NATS.".to_owned()));
         let json: serde_json::Value = serde_json::from_str(&super::json(&led, now, &Faces::plain()).unwrap()).unwrap();
         assert_eq!((json["ant"].as_str(), json["state"].as_str()), (Some("dev-a"), Some("stale")));
         assert_eq!(json["escalate_to"], serde_json::json!(["lead"]));
+        assert_eq!((json["sage"].as_str(), json["profile"].as_str()), (Some("sage"), Some("Good for NATS.")));
     }
 
     #[test]

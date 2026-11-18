@@ -265,6 +265,7 @@ fn colony() {
             agent: Some(HarnessAgent { name: "copilot".to_owned(), version: "1.2.3".to_owned() }),
             capabilities: vec!["rust".to_owned(), "frontend".to_owned()],
             whoami: Some("Backend developer".to_owned()),
+            profile: Some("Good for Rust services and their NATS wiring.".to_owned()),
             workdir: Some("/src/app".to_owned()),
             started_at: at(0),
             heartbeat_at: at(1),

@@ -1010,6 +1010,12 @@ where
         () = inbox.hear_restarts() => {}
         () = inbox.hear_clones() => {}
         () = inbox.hear_mcp() => {}
+        () = async {
+            match inbox.sense {
+                Some(sense) => sense.publish_profile(&config.ant, inbox.workload).await,
+                None => std::future::pending().await,
+            }
+        } => {}
         () = crate::secrets::creds::recheck(config.connection.creds.as_deref()) => {}
         () = storage.watch(crate::monitoring::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}

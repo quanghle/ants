@@ -91,6 +91,7 @@ pub fn live(ant: &UserId) -> ants_proto::ColonyEntry {
         agent: None,
         capabilities: Vec::new(),
         whoami: None,
+        profile: None,
         workdir: None,
         started_at: now,
         heartbeat_at: now,

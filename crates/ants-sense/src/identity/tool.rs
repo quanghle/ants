@@ -2,8 +2,9 @@
 //! to change it. Without arguments it shows the card with the experience, the persona with its pending proposal, the
 //! self-model, the relationship records by title and the skills by name ([`show`]). With `self_model`, or
 //! `relationship` and `who`, it replaces that record from the revision read, at once ([`records::replace`]); with
-//! persona fields and a reason, it proposes a persona change a later dream confirms ([`persona::propose`]); with
-//! `history`, it shows every version of the persona ([`persona::history`]).
+//! persona fields and a reason, it proposes a persona change a later dream confirms ([`persona::propose`]), the
+//! profile among them, which the colony reads once confirmed; with `history`, it shows every version of the persona
+//! ([`persona::history`]).
 
 use std::fmt::Write as _;
 
@@ -13,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::brief::{TOP_EXPERIENCE, identity_text};
 use crate::memory::{MAX_TITLE_CHARS, Quotes, Scope, framed};
-use crate::persona::{self, MAX_FIELD_BYTES};
+use crate::persona::{self, MAX_FIELD_BYTES, MAX_PROFILE_BYTES};
 use crate::records::{self, Change, MAX_RECORD_BYTES, RELATIONSHIP, RecordItem};
 use crate::store::{Items, StoreError};
 use crate::tools::{Answer, MAX_REASON_CHARS};
@@ -21,10 +22,9 @@ use crate::{Sense, skill, thread};
 
 /// The JSON Schema of `sense_identity`'s arguments.
 pub fn schema() -> Value {
-    let field = |what: &str| {
-        let description = format!(
-            "Persona: {what}, at most {MAX_FIELD_BYTES} bytes; empty clears it, none keeps it. Needs a reason."
-        );
+    let field = |what: &str, most: usize| {
+        let description =
+            format!("Persona: {what}, at most {most} bytes; empty clears it, none keeps it. Needs a reason.");
         json!({"type": "string", "description": description})
     };
     let record = |what: &str| {
@@ -34,10 +34,15 @@ pub fn schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "values": field("what the ant holds important"),
-            "voice": field("how it speaks"),
-            "boundaries": field("what it will not do"),
-            "working_style": field("how it works"),
+            "values": field("what the ant holds important", MAX_FIELD_BYTES),
+            "voice": field("how it speaks", MAX_FIELD_BYTES),
+            "boundaries": field("what it will not do", MAX_FIELD_BYTES),
+            "working_style": field("how it works", MAX_FIELD_BYTES),
+            "profile": field(
+                "what the ant is good for, in its own words; once confirmed, its colony entry shows it to other ants \
+                 and the messenger",
+                MAX_PROFILE_BYTES,
+            ),
             "reason": {
                 "type": "string",
                 "maxLength": MAX_REASON_CHARS,
@@ -74,6 +79,7 @@ struct Request {
     voice: Option<String>,
     boundaries: Option<String>,
     working_style: Option<String>,
+    profile: Option<String>,
     reason: Option<String>,
     finding: Option<String>,
     #[serde(default)]
@@ -100,6 +106,7 @@ async fn answer(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         request.voice.as_deref(),
         request.boundaries.as_deref(),
         request.working_style.as_deref(),
+        request.profile.as_deref(),
     ];
     let proposing = fields.iter().any(Option::is_some) || request.reason.is_some() || request.finding.is_some();
     let body = match (request.self_model.as_deref(), request.relationship.as_deref()) {
