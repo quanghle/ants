@@ -18,6 +18,10 @@ pub use run::{Progress, Run, RunError, RunState, Status};
 pub use runner::{GRACE, Worker, WorkerError, deadline};
 pub use trail::{Meta, SCRIPT_NAME, TrailError, check};
 
+/// The trail API and patterns in short, as tool descriptions serve them; contrib/skills/ants-trails/SKILL.md is the
+/// full guide.
+pub const GUIDE: &str = include_str!("guide.md");
+
 /// The global allocator of a binary serving [`worker::main`]: it counts live bytes, which Monty's memory limit
 /// reads, and ends a worker past its hard cap with [`monty_types::OOM_EXIT_CODE`].
 pub use monty_alloc::LimitedAllocator as Allocator;
