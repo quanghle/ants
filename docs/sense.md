@@ -61,11 +61,32 @@ vote or propose.
   `reviews/` (the checkouts of the reviews running).
 - **The memories view:** `ants ant memories` and the memories pane of the ant view in `ants chat` show, under
   `memories of provider sense`, who the ant has become, read from its cache without noting a session or writing
-  anything: its identity (card, experience and, for a sage, the tally of its reviews), its persona with its pending proposal, its self-model, each
-  relationship record, its skills by name and description, its last dream (the title of its diary, with its verdict
-  counts and the vital signs of its period), then its core memories and its top 10 memories of every scope as `sense_recall` ranks them without a
-  query. Each entry is keyed by its id, kind, scope and trust. Entries past the size cap of a memories read are left
-  out and counted; an ant with no sense data shows an empty section ([cli.md](cli.md)).
+  anything: its identity (card, experience and, for a sage, the tally of its reviews), its growth report, its persona
+  with its pending proposal, its self-model, each relationship record, its skills by name and description, its last
+  dream (the title of its diary, with its verdict counts and the vital signs of its period), then its core memories
+  and its top 10 memories of every scope as `sense_recall` ranks them without a query. Each entry is keyed by its id,
+  kind, scope and trust. Entries past the size cap of a memories read are left out and counted; an ant with no sense
+  data reads `no sense data` ([cli.md](cli.md)).
+- **The growth report:** the view's `growth report` entry counts, from the ant's sense data alone, how its identity
+  grew, to judge the thresholds of the identity findings of dreams and of the brief, which it names last:
+  - its threads: done, started again and expired, its active days, who started them (humans, other ants, itself,
+    webhooks, providers), the 10 repositories of the most, and the prompts it completed;
+  - by week, from Monday (UTC), over the last 8: the threads started and done, the active days, the calls of sense's
+    tools that wrote, by tool, and the verdicts given in dreams. Sense keeps no count of calls by tool: a call writing
+    nothing (`sense_brief`, a search, any other read, a call changing nothing) leaves none, `sense_recall` reading a
+    memory in full counts once a day a memory, and `sense_dream` counts as its verdicts;
+  - its memories by kind and status, with their votes and reads in full;
+  - its dreams by state, and their findings by kind, each by the last verdict given on it (applied, rejected,
+    deferred, or unanswered), with the rejected ones resting, then the vital signs of the periods of the last 5 dreams
+    keeping them, which count all calls of sense's tools;
+  - for a sage, the tally of the reviews it made (below): the reviews and ants, and their findings by what came of
+    them, in all, for the 10 kinds and the 10 ants of the most, then how many are left; no line for an ant that
+    reviewed nobody;
+  - its persona and self-model, with their revisions and the proposals, and the threads and active days since the
+    self-model was written;
+  - the people who started its threads, bucketed by how many, against its relationship records, the 10 of the most
+    named;
+  - its skills, with their revisions and proposals.
 - **`ants doctor`:** `sense chain` fails at a break in the ant's log, and `sense size` warns past 32 MiB
   ([cli.md](cli.md)); the ant's brief warns of both too. `sense data` fails when sense keeps none of the ants' data:
   no host credentials on a server with authentication. It names the fixes: `ants auth host MACHINE`, or

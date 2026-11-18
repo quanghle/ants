@@ -15,6 +15,7 @@ use crate::items::{Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revisio
 use crate::log::{
     APPEND_TRIES, AntLog, Break, Checked, EventLog, LogError, LogErrorKind, Position, Signer, Stored, Verifier,
 };
+use crate::thread::calls::Calls;
 use crate::thread::experience::Experience;
 
 /// Why a store did not answer.
@@ -243,6 +244,11 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     /// [`Cache::review_tally`].
     pub fn review_tally(&self, top: usize) -> Result<Option<ReviewTally>, StoreError> {
         Ok(self.cache.review_tally(top)?)
+    }
+
+    /// [`Cache::calls`].
+    pub fn calls(&self, since: DateTime<Utc>) -> Result<Vec<Calls>, StoreError> {
+        Ok(self.cache.calls(since)?)
     }
 
     /// The items matching `text` best ([`Cache::search`]).
@@ -589,6 +595,8 @@ pub trait Items: Send + Sync {
     ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>>;
     /// [`Store::review_tally`].
     fn review_tally(&self, top: usize) -> BoxFuture<'_, Result<Option<ReviewTally>, StoreError>>;
+    /// [`Store::calls`].
+    fn calls(&self, since: DateTime<Utc>) -> BoxFuture<'_, Result<Vec<Calls>, StoreError>>;
     /// [`Store::history`].
     /// Cached history, including pending revisions with sequence 0; never requires another network round trip.
     fn history<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Vec<Revision>, StoreError>>;
@@ -737,6 +745,14 @@ where
             let mut store = self.lock().await;
             store.replay().await?;
             store.review_tally(top)
+        })
+    }
+
+    fn calls(&self, since: DateTime<Utc>) -> BoxFuture<'_, Result<Vec<Calls>, StoreError>> {
+        Box::pin(async move {
+            let mut store = self.lock().await;
+            store.replay().await?;
+            store.calls(since)
         })
     }
 

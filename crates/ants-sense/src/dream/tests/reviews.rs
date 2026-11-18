@@ -30,12 +30,13 @@ fn told(finding: &str, verdict: FindingVerdict, holds: bool) -> FindingOutcome {
     FindingOutcome { finding: finding.into(), verdict, holds }
 }
 
-/// The sage's identity as `sense_identity`, the brief and the memories view show it.
-async fn shown(sense: &Sense) -> (Answer, String, String) {
+/// The sage's identity as `sense_identity`, the brief and the memories view show it, and the view's growth report.
+async fn shown(sense: &Sense) -> (Answer, String, String, String) {
     let identity = tool(sense, identity::identity, json!({}), context(human())).await;
     let brief = tool(sense, crate::brief::brief, json!({}), context(human())).await;
     let view = sense.memories(AntRef { ant: context(human()).ant, identity: "0f1e".into() }).await.unwrap();
-    (identity, brief.text, view.memories[0].content.clone())
+    let report = view.memories.iter().find(|entry| entry.key == crate::view::REPORT).unwrap().content.clone();
+    (identity, brief.text, view.memories[0].content.clone(), report)
 }
 
 #[tokio::test]
@@ -95,7 +96,7 @@ async fn the_sage_keeps_a_record_of_each_review_and_tallies_what_came_of_its_fin
     assert_eq!((tally.reviews, tally.ants, tally.by_ant[0].reviews), (2, 1, 2));
     let all = FindingTally { made: 3, applied: 1, holding: 1, rejected: 1, deferred: 0, unanswered: 1 };
     assert_eq!(tally.findings, all);
-    let (identity, brief, view) = shown(&sage_sense).await;
+    let (identity, brief, view, report) = shown(&sage_sense).await;
     let lines = [
         "Reviews of other ants: 2 reviews of 1 ant, the last ",
         "; findings 3 made, 1 applied (1 still holding), 1 rejected, 0 deferred, 1 unanswered.\nFindings by kind, the \
@@ -109,6 +110,15 @@ async fn the_sage_keeps_a_record_of_each_review_and_tallies_what_came_of_its_fin
         }
     }
     assert_eq!(identity.json["reviews"]["findings"]["made"], 3);
+    let lines = [
+        "Reviews as a sage: 2 of 1 ants, the last ",
+        "; findings 3 made, 1 applied (1 still holding), 1 rejected, 0 deferred, 1 unanswered.\n  lesson findings: 2 \
+         made, 1 applied (1 still holding), 0 rejected, 0 deferred, 1 unanswered.\n  mistake findings: 1 made, 0 \
+         applied (0 still holding), 1 rejected, 0 deferred, 0 unanswered.\n  dev-a: 2 reviews, the last ",
+    ];
+    for line in lines {
+        assert!(report.contains(line), "the growth report shows {line:?}: {report}");
+    }
 
     std::thread::sleep(Pause::from_millis(5));
     let voted = tool(&sense, memory::vote, json!({"id": linted, "vote": "wrong"}), on(2)).await;
@@ -122,9 +132,10 @@ async fn the_sage_keeps_a_record_of_each_review_and_tallies_what_came_of_its_fin
     assert_eq!((tally.reviews, tally.findings.applied, tally.findings.holding), (3, 1, 0));
 
     assert_eq!(review_tally(&*items, 3).await.unwrap(), None, "an ant that reviews nobody has no tally");
-    let (identity, brief, view) = shown(&sense).await;
+    let (identity, brief, view, report) = shown(&sense).await;
     for text in [&identity.text, &brief, &view] {
         assert!(!text.contains("Reviews of other ants"), "{text}");
     }
+    assert!(!report.contains("Reviews as a sage"), "{report}");
     assert!(identity.json["reviews"].is_null(), "{}", identity.json);
 }
