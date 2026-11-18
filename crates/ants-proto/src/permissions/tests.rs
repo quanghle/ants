@@ -1009,6 +1009,52 @@ fn each_ant_writes_only_its_own_identity_and_humans_read_all() {
 }
 
 #[test]
+fn humans_save_trails_every_user_reads_and_each_ant_writes_only_the_runs_it_conducts() {
+    let trails = |perms: &Permissions| -> Vec<String> {
+        perms.publish.iter().chain(&perms.subscribe).filter(|s| s.contains("ants_trail")).cloned().collect()
+    };
+    assert_eq!(
+        trails(&Permissions::for_user(&p("dev-a"), Role::Ant)),
+        [
+            "$JS.API.DIRECT.GET.KV_ants_trails",
+            "$JS.API.DIRECT.GET.KV_ants_trail_runs.$KV.ants_trail_runs.dev-a.>",
+            "$KV.ants_trail_runs.dev-a.>"
+        ]
+    );
+    assert_eq!(
+        trails(&Permissions::for_user(&p("alice"), Role::Human)),
+        [
+            "$JS.API.DIRECT.GET.KV_ants_trails",
+            "$JS.API.STREAM.CREATE.KV_ants_trails",
+            "$JS.API.STREAM.INFO.KV_ants_trails",
+            "$KV.ants_trails.*",
+            "$JS.API.STREAM.CREATE.KV_ants_trail_runs",
+            "$JS.API.STREAM.INFO.KV_ants_trail_runs",
+            "$JS.API.DIRECT.GET.KV_ants_trail_runs"
+        ]
+    );
+    let may = |perms: &Permissions, s: &str| perms.publish.iter().any(|have| covers(have, s));
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    let run: crate::RunId = "r1".parse().unwrap();
+    for denied in ["$KV.ants_trails.deploy", "$KV.ants_trail_runs.dev-b.r1", "$KV.ants_trail_runs.dev-a"] {
+        assert!(!may(&ant, denied), "an ant may publish {denied}");
+    }
+    assert!(!may(&ant, "$JS.API.DIRECT.GET.KV_ants_trail_runs.$KV.ants_trail_runs.dev-b.r1"));
+    for key in [crate::trail_run_key(&p("dev-a"), &run), crate::trail_call_key(&p("dev-a"), &run, 3)] {
+        assert!(may(&ant, &format!("$KV.ants_trail_runs.{key}")), "{key}");
+    }
+    // An assistant conducts trails as an ant does, and saves none, which would name its human as their author.
+    let assistant = Permissions::for_assistant(&p("pa"), &p("alice"));
+    assert!(!may(&assistant, "$KV.ants_trails.deploy"));
+    assert!(may(&assistant, "$KV.ants_trail_runs.pa.r1.session"));
+    let observer = Permissions::for_observer(&p("watcher"));
+    let webhook = Permissions::for_webhook(&p("hook"), &[Destination::Ant(p("dev-a"))]);
+    for none in [observer, webhook, Permissions::for_channel_manager(), Permissions::for_host(&"m1".parse().unwrap())] {
+        assert_eq!(trails(&none), Vec::<String>::new());
+    }
+}
+
+#[test]
 fn users_write_only_their_own_attachments_and_ants_read_those_of_the_messages_they_read() {
     let files = |perms: &Permissions| -> Vec<String> {
         perms.publish.iter().chain(&perms.subscribe).filter(|s| s.contains("ants_files")).cloned().collect()

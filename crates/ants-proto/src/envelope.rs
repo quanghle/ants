@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     Answer, ApprovalDecision, ApprovalRequest, Attachment, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans,
-    Questions, Role, Sealed, ThreadId, UserId, subject,
+    Questions, Role, Sealed, ThreadId, TrailStep, UserId, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -149,6 +149,12 @@ pub struct Envelope {
     /// or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_commits: Vec<ReviewCommit>,
+    /// The trail run and call the message is a step of, on the step's own thread: its recipient answers with an
+    /// ordinary reply, which the conductor knows by that thread ([`crate::PendingCall::answered_by`]). Only the
+    /// conductor's daemon sets it, with [`Envelope::as_step`]. Never copied by [`Envelope::reply`] or
+    /// [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail_step: Option<Box<TrailStep>>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -369,6 +375,7 @@ impl Envelope {
             sealed: None,
             notice: None,
             review_commits: Vec::new(),
+            trail_step: None,
             sent_at: Utc::now(),
         }
     }
@@ -377,6 +384,12 @@ impl Envelope {
     #[must_use]
     pub fn as_notice(self, kind: NoticeKind) -> Self {
         Self { notice: Some(kind), ..self }
+    }
+
+    /// The envelope as `step` of a trail run ([`Envelope::trail_step`]).
+    #[must_use]
+    pub fn as_step(self, step: TrailStep) -> Self {
+        Self { trail_step: Some(Box::new(step)), ..self }
     }
 
     /// The envelope with `owner` as the human who started its thread.
@@ -542,6 +555,7 @@ impl Envelope {
             sealed: None,
             notice: None,
             review_commits: Vec::new(),
+            trail_step: None,
             sent_at: Utc::now(),
         })
     }

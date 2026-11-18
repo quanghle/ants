@@ -139,6 +139,19 @@ expression: value
         "local": "/home/dev/app/.git"
       }
     ],
+    "trail_step": {
+      "run": "019a7d2f-0000-7000-8000-000000000001",
+      "call": 3,
+      "label": "review",
+      "schema": {
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    },
     "sent_at": "2025-01-01T12:00:00Z"
   },
   "payload": "{\"id\":"
