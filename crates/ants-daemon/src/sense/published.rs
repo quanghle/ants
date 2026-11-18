@@ -7,11 +7,11 @@ use ants_sense::Sense;
 use crate::colony::Workload;
 
 /// Keep `workload`'s profile, which `ant`'s colony entry shows, that of the ant's confirmed persona: read now and after
-/// each change `sense` makes, and a heartbeat after a read that failed, the profile last read staying meanwhile. Runs
-/// until dropped.
+/// each change a call to `sense` makes of the ant's items, and a heartbeat after a read that failed, the profile last
+/// read staying meanwhile. Runs until dropped.
 pub(super) async fn profile(sense: &Sense, ant: &UserId, workload: &Workload) {
     // Subscribe first: a persona confirmed during a read must wake the following wait.
-    let mut changes = sense.changes();
+    let mut changes = sense.changes(ant);
     loop {
         match async { ants_sense::persona::profile(&*sense.items(ant).await?).await }.await {
             Ok(profile) => workload.set_profile(profile),
@@ -64,7 +64,8 @@ mod tests {
         Arc::new(tokio::sync::Mutex::new(Store::open(log, Cache::in_memory().unwrap()).await.unwrap()))
     }
 
-    /// Confirm a persona holding `profile`, as a dream does, and tell `sense` so through a call that succeeds.
+    /// Confirm a persona holding `profile`, as a dream does, and tell `sense` so through a call that writes: the
+    /// register of a thread of its own.
     async fn confirm(sense: &Sense, items: &dyn Items, profile: Option<&str>) {
         let mut values = Values::new();
         values.insert("voice".into(), json!("Plain."));
@@ -74,7 +75,7 @@ mod tests {
         let context = CallContext {
             ant: ant(),
             identity: "0f1e".into(),
-            thread: "profile-thread".parse().unwrap(),
+            thread: format!("profile-{}", uuid::Uuid::new_v4().simple()).parse().unwrap(),
             origin: Origin { by: Starter::Human { user: "alice".parse().unwrap() }, channel: None },
             harness: "copilot".into(),
             model: None,
@@ -82,8 +83,10 @@ mod tests {
             repo: None,
             at: chrono::Utc::now(),
         };
-        let shown = ToolCall { name: "identity".into(), arguments: Default::default(), context, format: Format::Json };
-        assert!(!sense.call_tool(shown).await.unwrap().is_error);
+        let register = json!({"goal": format!("Publish the profile {profile:?}"), "next": "Watch the colony entry"});
+        let arguments = register.as_object().unwrap().clone();
+        let noted = ToolCall { name: "checkpoint".into(), arguments, context, format: Format::Json };
+        assert!(!sense.call_tool(noted).await.unwrap().is_error);
     }
 
     #[tokio::test]

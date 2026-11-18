@@ -98,9 +98,12 @@ of every item stays in the log: items are never deleted. A change made from an e
 item moved on, with the current item to merge and try again.
 
 The cache, `.sense/cache.db` in the ant's home (SQLite with full-text search), holds the items as the log left them, so
-reads read no log. It is never the source of truth: a cache missing, unreadable, of another schema, sense id or
-incarnation of the stream, or built from a message the log no longer holds unchanged, is built again from the log when
-the ant's items open. One that may hold writes not yet appended is never replaced.
+reads read no log: a call to sense (a tool call, a brief, an event) and a cycle of the ant's schedule catch the cache up
+with the log once, as they start, and a read reaches the log only to append writes still waiting for it. A log failing
+other than by being out of reach, as on a signature or a permission, fails the call. The cache is never the source of
+truth: a cache missing, unreadable, of another schema, sense id or incarnation of the stream, or built from a message
+the log no longer holds unchanged, is built again from the log when the ant's items open. One that may hold writes not
+yet appended is never replaced.
 
 While the machine's host connection is down:
 
@@ -450,9 +453,11 @@ or `{"kind":"condition","condition":{...}}` using a condition below. Empty argum
 occurrence. Weekdays are `mon` through `sun`; delays are 1 through 31,536,000 seconds.
 
 The active daemon fires reminders; a standby fires none until it takes the ant over, then goes on with the stored
-schedule and any firing pending. While the ant's identity is dormant nothing fires. A firing wakes the ant
-([Wake requests](architecture.md#wake-requests)) with the reminder's text and why it fired, on its source thread, or a
-new thread when no source thread remains.
+schedule and any firing pending. Between firings the schedule sleeps until the next is due or a call to sense changes
+the ant's items: a call only reading them, or changing another ant's, leaves it asleep. While the ant's identity is
+dormant nothing fires. A firing wakes the ant ([Wake requests](architecture.md#wake-requests)) with the reminder's text
+and why it fired, on its source thread, or a new thread when no source thread remains. A firing whose wake fails stays
+pending and is tried again a minute later, the firings after it with it, while memory maintenance and dreams go on.
 
 Condition triggers use the following objects:
 
