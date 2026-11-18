@@ -163,6 +163,24 @@ pub fn take_over(home: &Path, ant: &UserId) -> Result<Option<UserId>> {
     })
 }
 
+#[cfg(test)]
+impl Sense {
+    /// What the record of the review of dream `dream` of `ant` in the sense data of `sage` says its thread spent, none
+    /// when it says nothing. Panics when sense keeps no such record.
+    pub(crate) async fn review_spent(
+        &self,
+        sage: &UserId,
+        ant: &UserId,
+        dream: u64,
+    ) -> Option<crate::limits::caps::Spent> {
+        let items = self.kept(sage).await.unwrap().expect("sense keeps the sage's data");
+        let record = ants_sense::dream::review_record(&*items, ant, dream).await.unwrap().expect("the review's record");
+        assert!(record.answered.is_some(), "the review answered: {record:?}");
+        let spent = record.spent?;
+        Some(crate::limits::caps::Spent { tokens: spent.tokens, cost: spent.cost_micros as f64 / 1e6 })
+    }
+}
+
 /// Sense keeping no data, its tools that need some refusing.
 #[cfg(test)]
 pub(crate) fn keeping_none() -> Arc<dyn Provider> {

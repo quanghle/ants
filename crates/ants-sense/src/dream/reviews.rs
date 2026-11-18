@@ -6,8 +6,9 @@
 //! review message of the ant tells what is new in the verdicts and outcomes of the sage's earlier findings
 //! ([`ants_proto::ReviewOutcomes`]), which go to the records of the reviews that made them. With the answer the sage's
 //! daemon tells what the review thread spent, from its spend ledger ([`ReviewSpend`]). A record holds the kinds,
-//! verdicts, outcomes and spend alone: no text of the ant's threads, nor of the findings. Each message changes the
-//! records once and a repeat nothing.
+//! verdicts, outcomes and spend, and the ant's reason for each verdict, on one line, its secrets redacted and at most
+//! [`MAX_OUTCOME_REASON`] characters, the reviewed ant's text and so untrusted: no text of the ant's threads, nor of
+//! the findings. Each message changes the records once and a repeat nothing.
 //!
 //! The sage's tally is counted from the records by a query of the cache each time it is asked ([`review_tally`]): the
 //! findings made, applied, rejected, deferred and unanswered, and of the applied how many still hold, in all, by kind
@@ -18,17 +19,19 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use ants_proto::{FindingOutcome, FindingVerdict, ReviewOutcomes, ThreadId, UserId};
+use ants_proto::{FindingOutcome, FindingVerdict, MAX_OUTCOME_REASON, ReviewOutcomes, ThreadId, UserId};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, ToSql, named_params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::review::clean;
 use super::vitals::cost;
 use super::{Judgement, parse};
 use crate::cache::CacheError;
 use crate::identity::BY;
 use crate::items::{Item, ItemId, Values, values_of};
+use crate::sanitize::{Limit, sanitize_title};
 use crate::store::{Items, StoreError, Write, read_modify_write};
 
 /// The kind of a review's record.
@@ -78,6 +81,9 @@ pub struct ReviewedFinding {
     /// Applied, whether what the ant wrote for it still holds.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub holds: bool,
+    /// The ant's reason for its last verdict, as told with it ([`told_reason`]): the reviewed ant's text, untrusted.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
     /// When its verdict or outcome was last told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub told: Option<DateTime<Utc>>,
@@ -99,7 +105,7 @@ impl ReviewRecord {
         Self { ant: ant.clone(), dream, thread: thread.clone(), received: at, answered, findings, spent }
     }
 
-    /// Apply `told` at `at`: the ant's verdict on one of its findings, and whether it still holds.
+    /// Apply `told` at `at`: the ant's verdict on one of its findings, its reason, and whether it still holds.
     fn told(&mut self, told: &FindingOutcome, at: DateTime<Utc>) {
         let Some(finding) = self.findings.iter_mut().find(|finding| finding.id == told.finding) else { return };
         let verdict = Some(match told.verdict {
@@ -110,8 +116,16 @@ impl ReviewRecord {
         let holds = told.holds && told.verdict == FindingVerdict::Applied;
         if (finding.verdict, finding.holds) != (verdict, holds) {
             (finding.verdict, finding.holds, finding.told) = (verdict, holds, Some(at));
+            finding.reason = told_reason(&told.reason);
         }
     }
+}
+
+/// A verdict's `reason` as told and kept: on one line, its secrets redacted, then cut to at most
+/// [`MAX_OUTCOME_REASON`] characters, so no cut leaves part of a secret unredacted.
+pub(in crate::dream) fn told_reason(reason: &str) -> String {
+    let whole = sanitize_title(reason, Limit::Bytes(usize::MAX)).map_or_default(|sanitized| sanitized.text);
+    clean(&whole, MAX_OUTCOME_REASON - 1).unwrap_or_default()
 }
 
 /// The id of the record of the review of dream `dream` of `ant`.
@@ -202,6 +216,7 @@ pub async fn review_answered(
             kind: advice.kind,
             verdict: None,
             holds: false,
+            reason: String::new(),
             told: None,
         })
         .collect();

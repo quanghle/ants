@@ -5,7 +5,8 @@
 //! The sage keeps nothing between reviews: its record of an ant lives in the ant's dreams and comes back
 //! in each packet, holding the findings of that sage alone. It takes at most a share of the packet's budget
 //! ([`TRACK_RECORD_SHARE`]), the earlier reviews' findings left out first, and shrinks to its tally for room before the
-//! identity is cut to titles.
+//! identity is cut to titles. The verdicts and outcomes the ant's reviews tell the sage's records reach further back:
+//! [`OUTCOME_DAYS`] ([`outcomes`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -13,6 +14,7 @@ use std::fmt::Write as _;
 use ants_proto::{FindingOutcome, FindingVerdict, UserId};
 use chrono::{DateTime, Duration, Utc};
 
+use crate::dream::reviews::told_reason;
 use crate::dream::vitals::percent;
 use crate::dream::{Dream, Finding, FindingKind, FindingTally, Judgement, Signs, TREND, Verdict, get};
 use crate::items::ItemId;
@@ -23,6 +25,10 @@ use crate::store::{Items, StoreError};
 
 /// The days of the ant's active time, its dormancies not counted, a sage's earlier findings reach back over.
 pub const TRACK_RECORD_DAYS: i64 = 30;
+/// The days of the ant's active time, its dormancies not counted, over which the verdicts on a sage's findings, and
+/// whether an applied one still holds, are told to the sage's records (`review_outcomes`): further than the packet
+/// shows.
+pub const OUTCOME_DAYS: i64 = 90;
 /// The share of a packet's budget the sage's earlier findings take at most: one part in this many.
 pub const TRACK_RECORD_SHARE: usize = 8;
 
@@ -85,7 +91,7 @@ pub async fn track_record(
 ) -> Result<TrackRecord, StoreError> {
     let card = crate::identity::card(items).await?;
     let ages = memory::Ages::new(dream.at, card.iter().flat_map(|card| card.dormant(dream.at)));
-    let dreams = earlier(items, dream.number, &ages).await?;
+    let dreams = earlier(items, dream.number, &ages, TRACK_RECORD_DAYS).await?;
     let verdicts = last_verdicts(&dreams);
     let mut vitals = Vitals::new(items, dream, &dreams);
     let mut record = TrackRecord {
@@ -99,7 +105,7 @@ pub async fn track_record(
     };
     let mut tallies: BTreeMap<String, FindingTally> = BTreeMap::new();
     for earlier in dreams.iter().filter(|earlier| earlier.sage.as_ref() == Some(sage)) {
-        for (n, finding) in own(earlier).enumerate() {
+        for (n, (finding, _)) in own(earlier).enumerate() {
             let found = verdicts.get(finding.id.as_str()).copied();
             let verdict = found.map(|(_, verdict)| verdict);
             let (mut written, mut signs) = (Vec::new(), None);
@@ -136,13 +142,12 @@ pub async fn track_record(
     Ok(record)
 }
 
-/// The dreams before dream `number` that began within [`TRACK_RECORD_DAYS`] of the ant's active time, by `ages`, the
-/// latest first.
-async fn earlier(items: &dyn Items, number: u64, ages: &memory::Ages) -> Result<Vec<Dream>, StoreError> {
+/// The dreams before dream `number` that began within `days` of the ant's active time, by `ages`, the latest first.
+async fn earlier(items: &dyn Items, number: u64, ages: &memory::Ages, days: i64) -> Result<Vec<Dream>, StoreError> {
     let mut dreams = Vec::new();
     for number in (1..number).rev() {
         let Some((earlier, _)) = get(items, number).await? else { continue };
-        if ages.since(earlier.at) > Duration::days(TRACK_RECORD_DAYS) {
+        if ages.since(earlier.at) > Duration::days(days) {
             break;
         }
         dreams.push(earlier);
@@ -240,21 +245,36 @@ fn signs_line(before: &[(u64, Signs)], since: &[(u64, Signs)]) -> String {
     line
 }
 
-/// The findings the sage gave in the review of `dream`.
-fn own(dream: &Dream) -> impl Iterator<Item = &Finding> {
-    dream.findings.iter().filter(|finding| finding.kind == FindingKind::Sage && finding.dream() == dream.number)
+/// The findings the sage gave in the review of `dream`, each with its id in the sage's record of the review, numbered
+/// as the answer gave them: those of an answer in time, as the dream offered them, then those of a late one
+/// ([`Review::late`]).
+///
+/// [`Review::late`]: crate::dream::Review::late
+fn own(dream: &Dream) -> impl Iterator<Item = (&Finding, String)> {
+    let number = dream.number;
+    let in_time =
+        dream.findings.iter().filter(move |finding| finding.kind == FindingKind::Sage && finding.dream() == number);
+    let late = dream
+        .review
+        .iter()
+        .flat_map(|review| &review.late)
+        .zip(1..)
+        .map(move |(finding, n)| (finding, format!("{number}.{n}")));
+    in_time.map(|finding| (finding, finding.id.clone())).chain(late)
 }
 
 /// What the review of dream `number`, by `ages` of the ant's active time, tells `sage` of its earlier findings for the
-/// ant: those of the dreams [`track_record`] covers whose last verdict, or for one applied whether what was written
-/// for it still holds ([`outcome`]), is new since the ant's earlier reviews by `sage` told them, the oldest first.
+/// ant: those of the dreams begun within [`OUTCOME_DAYS`] before it whose last verdict, or for one applied whether what
+/// was written for it still holds ([`outcome`]), is new since the ant's earlier reviews by `sage` told them, the oldest
+/// first, each by its id in the sage's record of its review ([`own`]) and with the reason for the verdict
+/// ([`told_reason`]).
 pub(in crate::dream) async fn outcomes(
     items: &dyn Items,
     number: u64,
     ages: &memory::Ages,
     sage: &UserId,
 ) -> Result<Vec<FindingOutcome>, StoreError> {
-    let dreams = earlier(items, number, ages).await?;
+    let dreams = earlier(items, number, ages, OUTCOME_DAYS).await?;
     let verdicts = last_verdicts(&dreams);
     let by_sage: Vec<_> = dreams.iter().rev().filter(|earlier| earlier.sage.as_ref() == Some(sage)).collect();
     let mut told = HashMap::new();
@@ -264,7 +284,7 @@ pub(in crate::dream) async fn outcomes(
         }
     }
     let mut outcomes = Vec::new();
-    for finding in by_sage.into_iter().flat_map(own) {
+    for (finding, told_as) in by_sage.into_iter().flat_map(own) {
         let Some((_, verdict)) = verdicts.get(finding.id.as_str()) else { continue };
         let mut holds = verdict.verdict == Judgement::Applied;
         if holds {
@@ -275,13 +295,14 @@ pub(in crate::dream) async fn outcomes(
                 }
             }
         }
+        let reason = told_reason(&verdict.reason);
         let verdict = match verdict.verdict {
             Judgement::Applied => FindingVerdict::Applied,
             Judgement::Rejected => FindingVerdict::Rejected,
             Judgement::Deferred => FindingVerdict::Deferred,
         };
-        if told.get(finding.id.as_str()) != Some(&(verdict, holds)) {
-            outcomes.push(FindingOutcome { finding: finding.id.clone(), verdict, holds });
+        if told.get(told_as.as_str()) != Some(&(verdict, holds)) {
+            outcomes.push(FindingOutcome { finding: told_as, verdict, holds, reason });
         }
     }
     Ok(outcomes)

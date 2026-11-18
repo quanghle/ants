@@ -21,7 +21,7 @@ pub use identity::{Identity, identity};
 pub use reviewing::{REVIEWING_SHARE, Reviewing, reviewing};
 use track_record::TRACK_RECORD_SHARE;
 pub(super) use track_record::outcomes;
-pub use track_record::{TrackRecord, track_record};
+pub use track_record::{OUTCOME_DAYS, TRACK_RECORD_DAYS, TrackRecord, track_record};
 
 /// The most bytes of a review packet.
 pub const PACKET_BUDGET: usize = 64 * 1024;
