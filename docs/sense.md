@@ -31,7 +31,7 @@ scheduling reminders, maintenance and dreams, and making a review's checkouts.
   | `sense_task` | Keep personal tasks; claim one under a fenced lease. | [Work and reminders](#work-and-reminders) |
   | `sense_promise` | Record a commitment; keep, break, release or renegotiate it. | [Work and reminders](#work-and-reminders) |
   | `sense_remind` | Set a time or condition reminder; acknowledge, postpone, renew or drop it. | [Work and reminders](#work-and-reminders) |
-  | `sense_identity` | Show who the ant is; replace the self-model or a relationship record; propose a change of the persona. | [Identity](#identity), [Self-model and relationships](#self-model-and-relationships), [Persona and skills](#persona-and-skills) |
+  | `sense_identity` | Show who the ant is, and the versions of the persona and of each record; replace the self-model or a relationship record; propose a change of the persona. | [Identity](#identity), [Self-model and relationships](#self-model-and-relationships), [Persona and skills](#persona-and-skills) |
   | `sense_skill` | Read the skills; propose a new, changed or removed one. | [Persona and skills](#persona-and-skills) |
   | `sense_dream` | Answer a dream's findings and finish the dream. | [Dreams](#dreams) |
 
@@ -249,8 +249,8 @@ relationship record by its title; and `## Skills`, the skills by name. The recor
 memories. As JSON it answers `card`, `experience`, `reviews` (the tally, null for an ant that reviewed nobody), `persona`, `pending`, `self_model`, `relationships` (each record's
 `id`, `scope`, `title`, `revision` and `trust`) and `skills` (their names). The same tool replaces the self-model and
 the relationship records ([Self-model and relationships](#self-model-and-relationships)) and proposes persona changes
-([Persona and skills](#persona-and-skills)), one of the three a call: a call mixing them, or giving `who`, `title`,
-`revision` or `quotes` without a record, is refused with `invalid_arguments`.
+([Persona and skills](#persona-and-skills)), one of the three a call: a call mixing them, giving `title`, `revision`
+or `quotes` without a record, or `who` without a record or `history`, is refused with `invalid_arguments`.
 
 ## Memories
 
@@ -295,7 +295,7 @@ redacted.
 
 - With an `id`, one memory in full, whatever its status or scope, with its writer and the memories it supersedes and is
   superseded by; with `history` too, the chain it superseded. An `id` may also name the self-model or a relationship
-  record.
+  record, without `history`: `sense_identity` shows a record's revisions.
 - Otherwise the live memories of the thread's scopes, ranked, up to `limit` (10, at most 50); with a `query`, among
   its 200 best full-text matches. The thread's scopes are `self`; the repository the thread's session works in and
   the one `repo` names, as any git remote; the human or ant who started the thread (none for a webhook or a provider;
@@ -357,7 +357,12 @@ clone keeps the self-model and drops the relationship records.
 and optionally `quotes` (as for a memory): a record is replaced from the revision read, from the brief,
 `sense_identity` or `sense_recall`, none for the first. One written without a revision when it exists is refused with
 `revision_required`, from another revision with `conflict`, both carrying the current record, and one with a revision
-before it exists with `not_found`. Earlier revisions stay in the log. A record holding the whole block of recalled
+before it exists with `not_found`. Earlier revisions stay in the log: `sense_identity` with `history: true` and `who`
+(`self` for the self-model, `human:<name>` or `ant:<name>` for a relationship record) lists every revision of that
+record, the newest first, each with when, by whom and in which thread it was written, whether it is untrusted, its
+title and its body, inside the block of recalled memories; as JSON, `id`, `scope` and `versions` (each revision's
+values and `revision`). A `who` of a repository, or `history` with any other argument but `who`, is refused with
+`invalid_arguments`. A record holding the whole block of recalled
 memories is refused (`recalled_block`), and one is `untrusted` on the same grounds as a memory; the duplicate and core
 checks of memories do not apply. They take effect at once, with no dream to confirm them. The answer names the record,
 its revision, why it is untrusted and the secrets redacted. `sense_remember` refuses `kind` `self_model` and
@@ -389,7 +394,8 @@ profile. A skill follows the Agent Skills layout: a directory named after it hol
 - `sense_identity` proposes a persona change given any of `values`, `voice`, `boundaries`, `working_style` and
   `profile`, an empty text clearing that field and one left out keeping it, and a `reason` (at most 500 characters). Without
   arguments it shows the persona and its pending proposal with the rest of the identity ([Identity](#identity)), with
-  `history: true` every version of the persona, the newest first.
+  `history: true` every version of the persona, the newest first, and with `who` too a record's revisions instead
+  ([Self-model and relationships](#self-model-and-relationships)).
 - `sense_skill` takes a `name` (1 to 64 lowercase letters, digits and single hyphens inside) and `content` (the whole
   `SKILL.md`), `files` (paths within the skill, each mapped to its text or to null to remove it, files left out kept)
   or `remove: true`, with a `reason`. The front matter must name the skill and describe it on one line of at most

@@ -6,8 +6,9 @@
 //!
 //! The ant writes them with `sense_identity`, giving `self_model`, or `relationship` and `who` ([`replace`]); they
 //! take effect at once, with no dream to confirm them. `sense_identity` shows the self-model and the relationship
-//! records by title; the brief shows the self-model after the identity and the records of the thread's participants
-//! after the tasks; `sense_recall` lists those of the people it searches and reads one by id.
+//! records by title, and with `history` and `who` every revision of one ([`history`]); the brief shows the self-model
+//! after the identity and the records of the thread's participants after the tasks; `sense_recall` lists those of the
+//! people it searches and reads one by id.
 
 use std::fmt::Write as _;
 
@@ -19,7 +20,7 @@ use serde_json::{Value, json};
 
 use crate::items::{Item, ItemId};
 use crate::memory::{
-    MAX_TITLE_CHARS, Quotes, Scope, Trust, holds_recalled_block, holds_recalled_marker, redacted, sanitized,
+    MAX_TITLE_CHARS, Quotes, Scope, Trust, framed, holds_recalled_block, holds_recalled_marker, redacted, sanitized,
 };
 use crate::sanitize::{Limit, sanitize_body, sanitize_title};
 use crate::store::{Items, StoreError};
@@ -237,6 +238,52 @@ pub(crate) async fn replace(items: &dyn Items, context: &CallContext, change: Ch
     Ok(Answer { text, json, is_error: false })
 }
 
+/// Every revision of the record of `scope` kept in the log, the newest first, each with when, where and by whom it was
+/// written: what a `sense_identity` call with `history` and `who` shows.
+pub(crate) async fn history(items: &dyn Items, scope: &Scope) -> Result<Answer, Answer> {
+    let Some(id) = record_id(scope) else {
+        return Err(Answer::invalid(
+            "A record is of self, a human or an ant: who is self, human:<name> or ant:<name>.",
+        ));
+    };
+    let versions = crate::proposal::versions(items, &id).await?;
+    let records: Vec<(u64, Record)> = versions
+        .into_iter()
+        .filter_map(|(revision, _, values)| Some((revision, serde_json::from_value(Value::Object(values)).ok()?)))
+        .collect();
+    let (name, mut json) = (name(scope), Vec::new());
+    if records.is_empty() {
+        let text = format!("No revision of {name} yet.");
+        return Ok(Answer { text, json: json!({"id": id, "scope": scope, "versions": []}), is_error: false });
+    }
+    let mut lines = Vec::new();
+    for (revision, record) in records.iter().rev() {
+        let writer = &record.writer;
+        let untrusted = if record.trust == Trust::Untrusted { ", untrusted" } else { "" };
+        let mut line = format!(
+            "- Revision {revision}, {} by {} in thread {}{untrusted}: {}",
+            crate::proposal::time(writer.at),
+            writer.ant,
+            writer.thread,
+            record.title
+        );
+        if let Some(from) = &record.inherited {
+            let _ = write!(line, " (inherited from sense identity {from} on clone)");
+        }
+        let _ = write!(line, "\n  {}", record.body.replace('\n', "\n  "));
+        lines.push(line);
+        let mut version = serde_json::to_value(record).expect("a record is an object");
+        version["revision"] = json!(revision);
+        json.push(version);
+    }
+    let count = match records.len() {
+        1 => "1 revision".to_owned(),
+        n => format!("{n} revisions"),
+    };
+    let text = format!("{count} of {name}, the newest first:\n{}", framed(&lines.join("\n")));
+    Ok(Answer { text, json: json!({"id": id, "scope": scope, "versions": json}), is_error: false })
+}
+
 /// What the record of `scope` is called.
 fn name(scope: &Scope) -> String {
     match scope {
@@ -265,7 +312,7 @@ fn conflict(revision: Option<u64>, current: Item) -> Answer {
         ),
     };
     let mut answer = Answer::error(code, message);
-    answer.text = format!("{}\n{}", answer.text, crate::memory::framed(&current.text()));
+    answer.text = format!("{}\n{}", answer.text, framed(&current.text()));
     answer.json["record"] = current.json();
     answer
 }

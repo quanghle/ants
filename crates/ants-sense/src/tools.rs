@@ -175,7 +175,8 @@ pub const TOOLS: &[ToolSpec] = &[
              records and skills. With self_model, or relationship and who, replace that record from the revision \
              read. With persona fields and a reason, propose a persona change, which a dream at least ",
             crate::proposal::confirm_after_hours!(),
-            " hours later confirms or rejects; with history, show every persona version."
+            " hours later confirms or rejects. With history, show every persona version; with history and who, \
+             every revision of the self-model (who=self) or of that relationship record."
         ),
         schema: crate::identity::schema,
         handler: crate::identity::identity,
