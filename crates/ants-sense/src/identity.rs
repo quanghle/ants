@@ -32,6 +32,7 @@ use crate::store::{Items, StoreError, Write, read_modify_write};
 
 mod tool;
 
+pub(crate) use tool::relationships;
 pub use tool::{identity, schema};
 
 /// The file of [`SENSE_DIR`] holding the ant's sense id.
