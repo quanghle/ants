@@ -436,6 +436,45 @@ fn a_harness_running_its_tools_unasked_tells_which_gating_misses_them() {
     assert_eq!(asking.get("copilot").unwrap().unenforced(&rules(&["read"]), true), None);
 }
 
+#[test]
+fn reviews_run_on_a_variant_asking_before_running_tools() {
+    let reviewing = |harness: &Harness| harness.reviewing().map(|h| (h.args, h.mode));
+    let strings = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let copilot = builtin("copilot").reviewing().unwrap();
+    assert!(!copilot.bypasses_permissions());
+    assert_eq!(command_line(&copilot, &[], Some("default")).1, ["--acp", "--context", "default"]);
+    assert_eq!(reviewing(&builtin("claude")), Some((Vec::new(), Some("default".to_owned()))));
+    assert_eq!(reviewing(&builtin("codex")), Some((Vec::new(), Some("read-only".to_owned()))));
+    assert_eq!(reviewing(&builtin("antigravity")), None);
+    let unheld = builtin("antigravity").unheld_review().unwrap();
+    assert!(unheld.contains("harness antigravity runs its tools unasked and its definition sets no review"));
+    assert_eq!(builtin("copilot").unheld_review(), None);
+
+    let asking = custom("command = \"x\"\nargs = [\"--a\"]");
+    assert_eq!(reviewing(&asking), Some((strings(&["--a"]), None)), "itself");
+    assert_eq!(custom("command = \"x\"\nbypass_permissions = true").reviewing(), None);
+    let native = custom("command = \"x\"\nprotocol = \"codex\"\nreview = { mode = \"read-only\" }");
+    assert_eq!(reviewing(&native), Some((Vec::new(), Some("read-only".to_owned()))));
+
+    let define = |text: &str| parse_definitions(text).and_then(|defs| Harnesses::builtin().define(defs));
+    let err = |text: &str| format!("{:#}", define(text).unwrap_err());
+    assert!(err("[harnesses.custom]\ncommand = \"x\"\nreview = {}").contains("review must set args or mode"));
+    let blank = err("[harnesses.custom]\ncommand = \"x\"\nreview = { mode = \" \" }");
+    assert!(blank.contains("harness custom: review: harness custom: mode must not be blank"), "{blank}");
+    let replaced =
+        "[harnesses.copilot]\ncommand = \"copilot\"\nargs = [\"--acp\", \"--allow-all\"]\nbypass_permissions = true";
+    let replaced = define(replaced).unwrap();
+    assert_eq!(replaced.get("copilot").unwrap().reviewing(), None, "a definition replacing a built-in sets its own");
+}
+
+#[tokio::test]
+async fn a_review_session_rejects_tools_outside_the_review_unasked() {
+    let launch = codex(PermissionPolicy::allow_all()).for_review().unwrap();
+    let session = Session::start(&launch, None).await.unwrap();
+    assert_eq!(session.prompt("go").await.unwrap(), "cancel", "send_message is not read only");
+    session.close().await;
+}
+
 #[derive(Clone, Copy)]
 enum ConfigBehavior {
     Apply,
@@ -596,4 +635,55 @@ async fn claude_context_selects_only_an_advertised_model_variant() {
             assert!(calls.locked().is_empty());
         }
     }
+}
+
+#[tokio::test]
+async fn sessions_are_offered_the_ants_skills_once_one_is_confirmed() {
+    let metas = Arc::new(Mutex::new(Vec::new()));
+    let log = metas.clone();
+    let connect: Connector = Arc::new(move || {
+        let (new, load) = (log.clone(), log.clone());
+        DynConnectTo::new(
+            Agent
+                .v1()
+                .name("skilled")
+                .on_receive_request(
+                    async move |init: InitializeRequest, responder, _cx| {
+                        let capabilities = AgentCapabilities::new().load_session(true);
+                        responder
+                            .respond(InitializeResponse::new(init.protocol_version).agent_capabilities(capabilities))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: NewSessionRequest, responder, _cx| {
+                        new.locked().push(request.meta);
+                        responder.respond(NewSessionResponse::new("s1"))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: LoadSessionRequest, responder, _cx| {
+                        load.locked().push(request.meta);
+                        responder.respond(LoadSessionResponse::new())
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                ),
+        )
+    });
+    let home = ants_test_support::scratch_dir("harness-skills");
+    let dir = home.join(".sense/skills");
+    let launch = Launch::with_transport(connect, PathBuf::from("/"), Default::default()).with_skills(dir.clone());
+    Session::start(&launch, None).await.unwrap().close().await;
+    assert_eq!(metas.locked().pop(), Some(None), "no skill confirmed yet");
+
+    std::fs::create_dir_all(dir.join("deploy")).unwrap();
+    std::fs::write(dir.join("deploy/SKILL.md"), "---\nname: deploy\ndescription: Deploy.\n---\n").unwrap();
+    Session::start(&launch, None).await.unwrap().close().await;
+    Session::start(&launch, Some("s1".into())).await.unwrap().close().await;
+    let plugins = json!([{ "type": "local", "path": home.join(".sense"), "skipMcpDiscovery": true }]);
+    let offered = json!({ "ants/skills": dir, "claudeCode": { "options": { "plugins": plugins } } });
+    let offered = offered.as_object().cloned();
+    assert_eq!(*metas.locked(), [offered.clone(), offered], "to new and loaded sessions");
+    std::fs::remove_dir_all(&home).unwrap();
 }

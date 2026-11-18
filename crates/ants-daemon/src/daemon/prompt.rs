@@ -172,17 +172,17 @@ impl Inbox<'_> {
             // Durable before the harness can run anything.
             self.attempts.start(seq, envelope).await?;
         }
+        if let Some(why) = self.unheld_review(incoming) {
+            return self.decline_review(incoming, read, &why, msg, seq).await;
+        }
 
         tracing::info!(%thread, from = %envelope.from, cut_off, own, "prompting");
         status::state(self.client, self.ant, thread, State::Working);
 
         // A message joining a running prompt takes over the turn of the message it started with.
         let joining = incoming.steered == Steered::Joining;
-        let launch = self.pool.launch();
-        if !joining {
-            self.warn_unnarrowed(envelope, launch);
-        }
-        let _narrowed = (!joining).then(|| launch.policy().narrow(thread, envelope.allow.as_deref()));
+        self.warn_unnarrowed(incoming);
+        let _narrowed = (!joining).then(|| self.pool.launch().policy().narrow(thread, envelope.allow.as_deref()));
         let _turn = self.mcp.filter(|_| !joining).map(|mcp| begin_turn(mcp, incoming, msg));
         let _asking = self.approvals.filter(|_| !joining).map(|approvals| approvals.begin(envelope));
         let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off, own.then_some(spent)).await;
@@ -282,10 +282,40 @@ impl Inbox<'_> {
         (format!("{text}\n\n{}", prepared.note()), Some(prepared))
     }
 
-    /// Warn, once per sender, that the tool rules `envelope` narrows the thread to do not reach a harness running its
-    /// tools unasked.
-    fn warn_unnarrowed(&self, envelope: &Envelope, launch: &crate::harness::Launch) {
-        if envelope.allow.as_deref().is_some_and(|allow| !crate::harness::allows_all(allow))
+    /// Why `incoming` is a review ([`ants_proto::REVIEW_ALLOW`]) that nothing would hold to read-only tools, unless it
+    /// joins a prompt running.
+    fn unheld_review(&self, incoming: &Incoming) -> Option<String> {
+        let review = incoming.steered != Steered::Joining && ants_proto::is_review(incoming.envelope.allow.as_deref());
+        review.then(|| self.pool.launch().unheld_review()).flatten()
+    }
+
+    /// Answer a review that nothing would hold to read-only tools, `why`, with a notice declining it, unprompted: its
+    /// sender then goes on without the review.
+    async fn decline_review(
+        &self,
+        incoming: &Incoming,
+        read: Option<Context>,
+        why: &str,
+        msg: &jetstream::Message,
+        seq: u64,
+    ) -> Result<()> {
+        let envelope = &incoming.envelope;
+        tracing::warn!(thread = %envelope.thread_id, from = %envelope.from, why, "declining a review");
+        let text = format!("[ants] {} declines the review: {why}.", self.ant);
+        let Some(reply) = self.reply_for(incoming, read, text, None, msg, seq).await? else { return Ok(()) };
+        if let Err(e) = self.attempts.replied(seq, envelope, &reply).await {
+            tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "recording the reply");
+        }
+        self.deliver(incoming, &reply, msg, seq).await
+    }
+
+    /// Warn, once per sender, that the tool rules a message not joining a prompt narrows the thread to do not reach a
+    /// harness running its tools unasked. A review's do ([`crate::harness::Launch::for_review`]).
+    fn warn_unnarrowed(&self, incoming: &Incoming) {
+        let (envelope, launch) = (&incoming.envelope, self.pool.launch());
+        if incoming.steered != Steered::Joining
+            && envelope.allow.as_deref().is_some_and(|allow| !crate::harness::allows_all(allow))
+            && !ants_proto::is_review(envelope.allow.as_deref())
             && launch.bypasses_permissions()
             && self.unnarrowed.first(&envelope.from)
         {

@@ -17,6 +17,10 @@
 # without asking ants: `bypass_permissions` says so, and makes the daemon and `ants doctor` warn of allow rules and
 # tool narrowing that cannot reach those tools. A [harnesses.<name>] table redefining one with a gated mode (such as
 # `mode = "default"`) and without `bypass_permissions` sends its tool requests to ants again.
+#
+# `review` sets the `args` or `mode` a session reviewing for a sage starts with instead, so that it asks ants before
+# running a tool, which the daemon allows only within the review's read-only rules. A harness running its tools unasked
+# without `review` declines reviews; a [harnesses.<name>] table replacing a built-in sets its own.
 
 # GitHub Copilot CLI. A failed prompt ends as a reply, `Error: Failed to get response from the AI model; retried 5
 # times (...) Last error: 429 ...`. Its weekly rate limit lasts days, so it counts as a quota.
@@ -25,6 +29,7 @@
 command = "copilot"
 args = ["--acp", "--allow-all"]
 bypass_permissions = true
+review = { args = ["--acp"] }
 sign_in = "copilot login"
 quota_exhausted = [
     "premium request",
@@ -58,6 +63,7 @@ long_context = { args = ["--context", "long_context"] }
 command = "claude-agent-acp"
 mode = "bypassPermissions"
 bypass_permissions = true
+review = { mode = "default" }
 sign_in = "claude login"
 quota_exhausted = [
     "hit your",
@@ -87,11 +93,13 @@ default = {}
 command = "codex-acp"
 mode = "agent-full-access"
 bypass_permissions = true
+review = { mode = "read-only" }
 sign_in = "codex-acp login"
 memory_files = ["AGENTS.md", "AGENTS.override.md", "~/.codex/AGENTS.md", "~/.codex/AGENTS.override.md"]
 
 # Google Antigravity CLI. Sign-in: `agy` once (or `agy acp --login`), or a Gemini API key.
-# `--dangerously-skip-permissions` approves every tool request. No context selector: the model chooses the native
+# `--dangerously-skip-permissions` approves every tool request; without it, Antigravity still applies workspace reads
+# and edits per its own settings unasked, so it sets no review and declines reviews. No context selector: the model chooses the native
 # window. A failed prompt ends as a reply of `⚠ API error (attempt N): Error 429, Message:
 # ..., Status: RESOURCE_EXHAUSTED` lines and `⚠ Agent execution terminated due to error.`
 [harnesses.antigravity]

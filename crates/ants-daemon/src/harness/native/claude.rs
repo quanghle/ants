@@ -240,7 +240,7 @@ impl Claude {
         for (name, value) in ENV {
             cli.env.entry((*name).to_owned()).or_insert_with(|| (*value).to_owned());
         }
-        let mut process = cli.spawn(self.args(&how, &servers), Some(&open.cwd))?;
+        let mut process = cli.spawn(self.args(&how, &servers, open.skills.as_deref()), Some(&open.cwd))?;
         let (stdin, stdout) = process.take_io().ok_or_else(|| failed("no stdio"))?;
         let (events, received) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
@@ -279,8 +279,8 @@ impl Claude {
         Ok(session)
     }
 
-    /// The protocol's arguments for a session opened `how`, with MCP servers `servers`.
-    fn args(&self, how: &How, servers: &Value) -> Vec<String> {
+    /// The protocol's arguments for a session opened `how`, with MCP servers `servers` and the skills of `skills`.
+    fn args(&self, how: &How, servers: &Value, skills: Option<&Path>) -> Vec<String> {
         let mut args: Vec<String> = [
             "-p",
             "--input-format",
@@ -311,6 +311,10 @@ impl Claude {
             if let Some(value) = value {
                 args.extend([flag.to_owned(), value.to_owned()]);
             }
+        }
+        // The skills directory's parent loads as a plugin of its skills.
+        if let Some(plugin) = skills.and_then(Path::parent) {
+            args.extend(["--plugin-dir".to_owned(), plugin.display().to_string()]);
         }
         // Last, as the flag takes a list.
         for name in servers.as_object().into_iter().flat_map(serde_json::Map::keys) {

@@ -341,8 +341,9 @@ pub const WEBHOOK_ALLOW: [&str; 16] = [
     "other:ask_human",
 ];
 /// The tool rules the review thread of a dream is narrowed to on the sage's side (requirement ants-x39hk.12.4): reading
-/// files, searching, thinking, and the ants tools that only read; the ants MCP server refuses the others on it, and
-/// the sage answers with its reply alone. Running commands stays out: no rule tells a read-only command apart.
+/// files, searching, thinking, and the ants tools that only read; the ants MCP server refuses the others on it, the
+/// sage's daemon rejects its harness's requests for them unasked, and the sage answers with its reply alone. Running
+/// commands stays out: no rule tells a read-only command apart.
 pub const REVIEW_ALLOW: [&str; 8] = [
     "read:*",
     "search",

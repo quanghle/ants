@@ -245,7 +245,8 @@ impl Shared {
 }
 
 /// The settings every session opens with, whether new, resumed or forked: streamed replies, the session's working
-/// directory and MCP servers, the ant's model and reasoning effort, no session telemetry, and the permission handler.
+/// directory, MCP servers and skills, the ant's model and reasoning effort, no session telemetry, and the permission
+/// handler.
 macro_rules! settings {
     ($config:expr, $shared:expr, $open:expr) => {{
         let shared: &Shared = $shared;
@@ -269,6 +270,9 @@ macro_rules! settings {
         }
         if let Some(tools) = &shared.args.excluded {
             config = config.with_excluded_tools(tools.clone());
+        }
+        if let Some(dir) = open.skills {
+            config = config.with_skill_directories([dir]);
         }
         let mut servers = shared.mcp.clone();
         if let Value::Object(own) = mcp_servers_json(&open.mcp_servers) {

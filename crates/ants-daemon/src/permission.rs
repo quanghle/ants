@@ -201,8 +201,9 @@ pub trait Approver: Send + Sync {
 /// The verdicts a harness offers, with its names of those it names.
 pub type Offer = (Vec<Verdict>, BTreeMap<Verdict, String>);
 
-/// Threads being answered under narrowed tool rules ([`PermissionPolicy::narrow`]), with how many answers narrow each.
-type Narrowed = Arc<Mutex<HashMap<ThreadId, (Allowlist, usize)>>>;
+/// Threads being answered under narrowed tool rules ([`PermissionPolicy::narrow`]), whether the rules are a review's,
+/// and how many answers narrow each.
+type Narrowed = Arc<Mutex<HashMap<ThreadId, (Allowlist, bool, usize)>>>;
 
 /// What to answer when a harness asks permission to use a tool. The default rejects every request.
 #[derive(Clone, Default)]
@@ -214,6 +215,8 @@ pub struct PermissionPolicy {
     narrowed: Narrowed,
     /// What the request the approver gets hides.
     redactor: Arc<Redactor>,
+    /// A review's rules ([`PermissionPolicy::for_review`]): a request they do not allow is rejected, asking no one.
+    review: Option<Allowlist>,
 }
 
 /// Keeps a thread's tool rules narrowed while held ([`PermissionPolicy::narrow`]).
@@ -227,7 +230,7 @@ impl Drop for Narrowing {
     fn drop(&mut self) {
         let Some(thread) = self.thread.take() else { return };
         let mut narrowed = self.narrowed.locked();
-        if let Some((_, held)) = narrowed.get_mut(&thread) {
+        if let Some((_, _, held)) = narrowed.get_mut(&thread) {
             *held -= 1;
             if *held == 0 {
                 narrowed.remove(&thread);
@@ -238,27 +241,45 @@ impl Drop for Narrowing {
 
 impl PermissionPolicy {
     pub fn new(allow: Allowlist, approver: Option<Arc<dyn Approver>>) -> Self {
-        Self { allow, approver, narrowed: Narrowed::default(), redactor: Arc::default() }
+        Self { allow, approver, narrowed: Narrowed::default(), redactor: Arc::default(), review: None }
+    }
+
+    /// The same policy, for the sessions of a review ([`ants_proto::REVIEW_ALLOW`]): a request outside the review's
+    /// rules is rejected unasked, whatever the thread's narrowing; one inside them is decided as before, where the
+    /// allowlist allows everything when `unasked`, as the harness's own sessions run every tool unasked.
+    pub(crate) fn for_review(&self, unasked: bool) -> Self {
+        let review = Allowlist::parse(&ants_proto::REVIEW_ALLOW).unwrap_or_default();
+        let allow = if unasked { Allowlist::all() } else { self.allow.clone() };
+        Self { allow, review: Some(review), ..self.clone() }
     }
 
     /// Narrow the tool rules on `thread` to `rules`, if any, while the returned guard is held: a request is then
     /// allowed unasked only when both the allowlist and `rules` allow it. Rules that do not parse allow nothing.
     pub fn narrow(&self, thread: &ThreadId, rules: Option<&[String]>) -> Narrowing {
         let Some(rules) = rules else { return Narrowing { narrowed: self.narrowed.clone(), thread: None } };
+        let review = ants_proto::is_review(Some(rules));
         let rules = Allowlist::parse(rules).unwrap_or_else(|e| {
             tracing::warn!(%thread, error = %e, "the thread's tool rules do not parse, narrowing it to none");
             Allowlist::default()
         });
         let mut narrowed = self.narrowed.locked();
-        let held = narrowed.get(thread).map_or(0, |(_, held)| *held);
-        narrowed.insert(thread.clone(), (rules, held + 1));
+        let held = narrowed.get(thread).map_or(0, |(_, _, held)| *held);
+        narrowed.insert(thread.clone(), (rules, review, held + 1));
         Narrowing { narrowed: self.narrowed.clone(), thread: Some(thread.clone()) }
     }
 
-    /// Whether `tool` on `thread` falls outside the thread's narrowed tool rules.
-    fn narrowed_out(&self, tool: &Tool<'_>, thread: Option<&ThreadId>, workdir: &Path) -> bool {
+    /// Whether `tool` on `thread` falls outside the thread's narrowed tool rules: None when it does not, else whether
+    /// they are a review's.
+    fn narrowed_out(&self, tool: &Tool<'_>, thread: Option<&ThreadId>, workdir: &Path) -> Option<bool> {
         let narrowed = self.narrowed.locked();
-        thread.and_then(|t| narrowed.get(t)).is_some_and(|(rules, _)| !rules.allows(tool, workdir))
+        let (rules, review, _) = thread.and_then(|t| narrowed.get(t))?;
+        (!rules.allows(tool, workdir)).then_some(*review)
+    }
+
+    /// Whether `thread` is narrowed to a review ([`ants_proto::REVIEW_ALLOW`]), so its sessions are a review's
+    /// ([`crate::harness::Launch::for_review`]).
+    pub(crate) fn reviewing(&self, thread: &ThreadId) -> bool {
+        self.narrowed.locked().get(thread).is_some_and(|(_, review, _)| *review)
     }
 
     /// The same, redacting the tool requests the approver gets with `redactor`.
@@ -296,7 +317,7 @@ impl PermissionPolicy {
     }
 
     /// The allowlist's verdict on `fields`, unless the thread's narrowed rules leave it out, else the approver's among
-    /// `options`, else reject.
+    /// `options`, else reject. What a review's rules leave out is rejected, asking no one.
     async fn verdict(
         &self,
         fields: &ToolCallUpdateFields,
@@ -305,13 +326,24 @@ impl PermissionPolicy {
         workdir: &Path,
     ) -> Verdict {
         let tool = Tool { kind: kind_name(fields), fields };
-        let allowed = self.allow.allows(&tool, workdir);
-        if allowed && !self.narrowed_out(&tool, thread, workdir) {
-            tracing::info!(kind = %tool.kind, title = ?fields.title, "tool allowed by the allowlist");
-            return Verdict::AllowOnce;
+        if self.review.as_ref().is_some_and(|review| !review.allows(&tool, workdir)) {
+            tracing::info!(kind = %tool.kind, title = ?fields.title, "tool outside a review's rules rejected");
+            return Verdict::Reject;
         }
-        if allowed {
-            tracing::info!(kind = %tool.kind, title = ?fields.title, "tool outside the thread's narrowed rules");
+        let allowed = self.allow.allows(&tool, workdir);
+        match self.narrowed_out(&tool, thread, workdir) {
+            None if allowed => {
+                tracing::info!(kind = %tool.kind, title = ?fields.title, "tool allowed by the allowlist");
+                return Verdict::AllowOnce;
+            }
+            Some(true) => {
+                tracing::info!(kind = %tool.kind, title = ?fields.title, "tool outside a review's rules rejected");
+                return Verdict::Reject;
+            }
+            Some(false) if allowed => {
+                tracing::info!(kind = %tool.kind, title = ?fields.title, "tool outside the thread's narrowed rules");
+            }
+            _ => {}
         }
         match (&self.approver, thread) {
             (Some(approver), Some(thread)) => {
@@ -334,6 +366,7 @@ impl fmt::Debug for PermissionPolicy {
         f.debug_struct("PermissionPolicy")
             .field("allow", &self.allow)
             .field("escalates", &self.approver.is_some())
+            .field("review", &self.review.is_some())
             .finish()
     }
 }
@@ -743,6 +776,33 @@ mod tests {
         assert_eq!(chosen(&policy.answer(&read, Some(&thread), workdir).await), Some("no"), "unparsed allows none");
         let _none = policy.narrow(&other, None);
         assert_eq!(chosen(&policy.answer(&push, Some(&other), workdir).await), Some("yes"));
+    }
+
+    #[tokio::test]
+    async fn a_review_rejects_what_its_rules_leave_out_asking_no_one() {
+        let (thread, other): (ThreadId, ThreadId) = ("t1".parse().unwrap(), "t2".parse().unwrap());
+        let workdir = Path::new(WORKDIR);
+        let fake = Arc::new(Fake(Verdict::AllowOnce, Mutex::default()));
+        let policy = PermissionPolicy::new(Allowlist::parse(&["execute"]).unwrap(), Some(fake.clone()));
+        let (read, push) = (request(ToolKind::Read, "View", json!({ "path": "a" }), &[]), shell("git push"));
+        let review = ants_proto::REVIEW_ALLOW.map(str::to_owned);
+
+        let narrowed = policy.narrow(&thread, Some(&review));
+        assert!(policy.reviewing(&thread) && !policy.reviewing(&other));
+        assert_eq!(chosen(&policy.answer(&push, Some(&thread), workdir).await), Some("no"));
+        assert!(fake.1.locked().is_empty(), "rejected without asking");
+        assert_eq!(chosen(&policy.answer(&read, Some(&thread), workdir).await), Some("yes"), "asked, as unallowed");
+        assert_eq!(fake.1.locked().len(), 1);
+        drop(narrowed);
+        assert!(!policy.reviewing(&thread));
+
+        let reviewing = policy.for_review(false);
+        assert_eq!(chosen(&reviewing.answer(&push, Some(&thread), workdir).await), Some("no"), "after the narrowing");
+        assert_eq!(chosen(&reviewing.answer(&push, None, workdir).await), Some("no"));
+        assert_eq!(fake.1.locked().len(), 1, "rejected without asking");
+        let unasked = policy.for_review(true);
+        assert_eq!(chosen(&unasked.answer(&read, None, workdir).await), Some("yes"), "the ant's rules never applied");
+        assert_eq!(chosen(&unasked.answer(&push, None, workdir).await), Some("no"));
     }
 
     #[tokio::test]

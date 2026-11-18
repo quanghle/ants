@@ -13,7 +13,7 @@ use ants_proto::ThreadId;
 #[cfg(test)]
 use super::Protocol;
 use super::mcp_sign_in::Report;
-use super::{Harness, McpSignIns, ModelSettings};
+use super::{Harness, McpSignIns, ModelSettings, skills};
 use crate::permission::PermissionPolicy;
 
 /// Makes the transport to a fresh harness: a process, or an in-process agent in tests.
@@ -61,6 +61,8 @@ pub struct Launch {
     /// The environment the harness process gets over the daemon's, to find its executable; None for an in-process
     /// agent.
     pub(super) process_env: Option<Vec<(String, String)>>,
+    /// The directory of the ant's confirmed sense skills, offered to the harness once it holds one ([`skills`]).
+    pub(super) skills: Option<PathBuf>,
 }
 
 impl Launch {
@@ -72,7 +74,7 @@ impl Launch {
         policy: PermissionPolicy,
         settings: ModelSettings,
     ) -> Self {
-        let connect = connector(&harness, &settings, env.clone(), None);
+        let connect = connector(&harness, &settings, env.clone(), None, None);
         let process_env = Some(env);
         Self {
             harness,
@@ -85,6 +87,7 @@ impl Launch {
             mcp_sign_ins: None,
             instructions: String::new(),
             process_env,
+            skills: None,
         }
     }
 
@@ -92,7 +95,7 @@ impl Launch {
     #[must_use]
     pub fn with_fallback(&self, fallback: &crate::limits::fallback::Fallback) -> Self {
         let env = self.process_env.clone().unwrap_or_default();
-        let connect = connector(&fallback.harness, &fallback.settings, env, self.report());
+        let connect = connector(&fallback.harness, &fallback.settings, env, self.report(), self.skills.clone());
         Self { harness: fallback.harness.clone(), settings: fallback.settings.clone(), connect, ..self.clone() }
     }
 
@@ -104,6 +107,20 @@ impl Launch {
     /// Whether the harness it starts runs its tools without asking ([`Harness::bypasses_permissions`]).
     pub fn bypasses_permissions(&self) -> bool {
         self.harness.bypasses_permissions()
+    }
+
+    /// The same launch, for sessions reviewing for a sage: on the harness's review variant ([`Harness::reviewing`]),
+    /// answering permission requests held to [`ants_proto::REVIEW_ALLOW`] ([`PermissionPolicy::for_review`]). None
+    /// when the harness runs its tools unasked and sets no review.
+    pub fn for_review(&self) -> Option<Self> {
+        let harness = Arc::new(self.harness.reviewing()?);
+        let policy = self.policy.for_review(self.harness.bypasses_permissions());
+        Some(Self { harness, policy, ..self.clone() }.reporting())
+    }
+
+    /// Why a review is declined on the harness it starts ([`Harness::unheld_review`]).
+    pub fn unheld_review(&self) -> Option<String> {
+        self.harness.unheld_review()
     }
 
     /// The same launch, for sessions serving `thread`.
@@ -139,7 +156,18 @@ impl Launch {
     /// The same launch, its harness processes reporting the sign-ins to MCP servers of their sessions ([`Self::report`]).
     fn reporting(self) -> Self {
         let Some(env) = self.process_env.clone() else { return self };
-        Self { connect: connector(&self.harness, &self.settings, env, self.report()), ..self }
+        Self { connect: connector(&self.harness, &self.settings, env, self.report(), self.skills.clone()), ..self }
+    }
+
+    /// The same launch, offering its harness the skills `dir` holds through the harness's own skills mechanism.
+    #[must_use]
+    pub fn with_skills(self, dir: PathBuf) -> Self {
+        Self { skills: Some(dir), ..self }.reporting()
+    }
+
+    /// The directory of skills to offer a session opening now: None until it holds one.
+    pub(super) fn skills(&self) -> Option<&Path> {
+        skills::offered(self.skills.as_deref()?)
     }
 
     /// Prepend the ant's instructions to every prompt, including after session/load.
@@ -184,6 +212,7 @@ impl Launch {
             env: BTreeMap::new(),
             mode: None,
             bypass_permissions: false,
+            review: None,
             context: BTreeMap::new(),
             sign_in: None,
             entra_client_id: None,
@@ -206,6 +235,7 @@ impl Launch {
             mcp_sign_ins: None,
             instructions: String::new(),
             process_env: None,
+            skills: None,
         }
     }
 
@@ -234,13 +264,21 @@ impl fmt::Debug for Launch {
     }
 }
 
-/// A connector starting `harness` with the ant's `env` and `settings`, reporting sign-ins to MCP servers to `report`.
+/// A connector starting `harness` with the ant's `env` and `settings`, reporting sign-ins to MCP servers to `report`
+/// and offering the skills `skills` holds when it starts.
 fn connector(
     harness: &Arc<Harness>,
     settings: &ModelSettings,
     env: Vec<(String, String)>,
     report: Option<Report>,
+    skills: Option<PathBuf>,
 ) -> Connector {
     let (harness, settings) = (harness.clone(), settings.clone());
-    Arc::new(move || harness.agent(&env, &settings, report.clone()))
+    Arc::new(move || {
+        let offered = skills.as_deref().and_then(skills::offered);
+        match offered.and_then(|dir| skills::env(&harness, &env, dir)) {
+            Some(skills) => harness.agent(&[env.as_slice(), &[skills]].concat(), &settings, report.clone()),
+            None => harness.agent(&env, &settings, report.clone()),
+        }
+    })
 }

@@ -572,7 +572,10 @@ async fn services(
         mcp.with_callers(Callers::new(config.ant.clone(), machine.to_owned(), identity.clone()));
     }
     let mcp_sign_ins = mcp_sign_in::Untold::default();
-    let launch = launch(&config.harness, policy, &mcp).with_mcp_sign_ins(mcp_sign_ins.sink());
+    let mut launch = launch(&config.harness, policy, &mcp).with_mcp_sign_ins(mcp_sign_ins.sink());
+    if matches!(config.provider, crate::provider::Setting::Sense) {
+        launch = launch.with_skills(ants_sense::export::skills_dir(&config.storage.home));
+    }
     Ok(Services {
         redactor,
         approver,
