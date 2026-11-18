@@ -63,7 +63,7 @@ pub use identity_findings::{
 };
 pub use packet::{
     Action, Earlier, Identity, MIN_THREAD_BYTES, OUTCOME_DAYS, PACKET_BUDGET, REVIEWING_SHARE, Reader, Section,
-    TRACK_RECORD_DAYS, Thread, VERDICTS_SHARE, compose, packet, reviewing, track_record,
+    TRACK_RECORD_DAYS, Thread, VERDICTS_SHARE, compose, finding_line, packet, reviewing, track_record,
 };
 pub use practice_findings::{
     COSTLY_REVIEW_COST_MICROS, COSTLY_REVIEW_TOKENS, COSTLY_REVIEWS, JUDGED_FINDINGS, PRACTICE_DAYS, QUOTED_REASONS,
@@ -494,7 +494,7 @@ impl Dream {
     }
 
     /// The findings to offer again: those deferred or unanswered.
-    fn open(&self) -> impl Iterator<Item = &Finding> {
+    pub fn open(&self) -> impl Iterator<Item = &Finding> {
         self.findings
             .iter()
             .filter(|finding| self.verdict(&finding.id).is_none_or(|verdict| verdict.verdict == Judgement::Deferred))

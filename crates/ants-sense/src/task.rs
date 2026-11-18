@@ -216,7 +216,8 @@ pub(crate) async fn brief(items: &dyn Items, context: &CallContext) -> Result<[L
     ])
 }
 
-fn brief_line(found: &TaskItem) -> String {
+/// A task's line in the brief and the memories view.
+pub(crate) fn brief_line(found: &TaskItem) -> String {
     let mut line = format!("- {}", found.text());
     if let Some(reference) = &found.task.external_ref {
         let _ = write!(line, "; external {reference}");
