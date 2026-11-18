@@ -7,9 +7,9 @@ use std::str::FromStr;
 
 use ants_proto::provider::Starter;
 use ants_proto::{
-    CallAnswer, JournalEntry, PendingCall, QueuedCall, RunId, RunState, StepStage, TRAIL_RUNS_BUCKET, TRAIL_STEPS,
-    ThreadId, TrailFunction, TrailRun, TrailSession, TrailStepThread, UserId, Uuid, parse_trail_run_key, trail_run_key,
-    trail_session_key,
+    CallAnswer, JournalEntry, PendingCall, QueuedCall, RunId, RunState, StepStage, TRAIL_RUNS_BUCKET, ThreadId,
+    TrailFunction, TrailRun, TrailSession, TrailStepThread, UserId, Uuid, parse_trail_run_key, trail_run_key,
+    trail_session_key, trail_thread_steps_prefix,
 };
 use anyhow::{Result, bail};
 use async_nats::jetstream;
@@ -342,10 +342,11 @@ pub(crate) struct Step {
 pub(super) type Marked = (ThreadId, TrailStepThread, DateTime<Utc>);
 
 /// The steps of the runs `conductor` conducts reporting on `thread`, by when each started, as its records in
-/// [`TRAIL_RUNS_BUCKET`] tell them: the step threads it recorded, each just before its step went out ([`staged`]),
-/// with each run's header, journal and, while the run goes on, the calls its session waits on.
+/// [`TRAIL_RUNS_BUCKET`] tell them: the step threads it recorded under `thread`, each just before its step went out
+/// ([`staged`]), read alone ([`ants_proto::trail_thread_step_key`]), with each run's header, journal and, while the
+/// run goes on, the calls its session waits on.
 pub(crate) async fn steps_on(js: &jetstream::Context, conductor: &UserId, thread: &ThreadId) -> Result<Vec<Step>> {
-    let prefix = format!("{conductor}.{TRAIL_STEPS}.");
+    let prefix = trail_thread_steps_prefix(conductor, thread);
     let filter = format!("$KV.{TRAIL_RUNS_BUCKET}.{prefix}*");
     let mut marked: Vec<Marked> = Vec::new();
     for (key, value, at) in latest_timed_in(js, TRAIL_RUNS_BUCKET, &filter).await? {

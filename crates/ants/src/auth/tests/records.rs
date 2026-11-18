@@ -297,7 +297,10 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
 
 #[tokio::test]
 async fn humans_save_the_trails_ants_read_and_each_ant_keeps_only_the_runs_it_conducts() {
-    use ants_proto::{RunId, SavedTrail, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, trail_run_key, trail_session_key};
+    use ants_proto::{
+        RunId, SavedTrail, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, ThreadId, TrailStepThread, trail_run_key,
+        trail_session_key, trail_thread_step_key, trail_thread_steps_prefix,
+    };
     let Some(server) = Server::start() else { return };
     let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
     let (_a, a_js) = server.connect(&dev_a).await;
@@ -337,4 +340,20 @@ async fn humans_save_the_trails_ants_read_and_each_ant_keeps_only_the_runs_it_co
     let all = DirectKv::whole(&h_js, None, TRAIL_RUNS_BUCKET).await.unwrap();
     assert_eq!(all.get(trail_session_key(&dev_a, &run)).await.unwrap().as_deref(), Some(&b"{}"[..]));
     assert!(all.put(trail_session_key(&dev_a, &run), b"{}".to_vec()).await.is_err(), "a human writes no run");
+
+    let (thread, other, step) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+    let marker = |run_thread: &ThreadId| {
+        let marker = TrailStepThread { run: run.clone(), call: 1, to: dev_b.clone(), run_thread: run_thread.clone() };
+        serde_json::to_vec(&marker).unwrap()
+    };
+    let key = trail_thread_step_key(&dev_a, &thread, &step);
+    runs.put(&key, marker(&thread)).await.unwrap();
+    runs.put(trail_thread_step_key(&dev_a, &other, &ThreadId::generate()), marker(&other)).await.unwrap();
+    let foreign = trail_thread_step_key(&dev_b, &thread, &step);
+    assert!(runs.put(&foreign, marker(&thread)).await.is_err(), "dev-a keeps no step under dev-b's runs");
+    assert!(theirs.get(&key).await.is_err(), "dev-b reads none of dev-a's steps");
+    let filter = format!("$KV.{TRAIL_RUNS_BUCKET}.{}*", trail_thread_steps_prefix(&dev_a, &thread));
+    let read = crate::machines::latest_in(&h_js, TRAIL_RUNS_BUCKET, &filter).await.unwrap();
+    assert_eq!(read, [(key.clone(), marker(&thread))], "a human reads the steps on one thread alone");
+    assert!(all.put(&key, marker(&thread)).await.is_err(), "a human keeps no step");
 }

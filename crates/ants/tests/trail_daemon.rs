@@ -19,7 +19,8 @@ use ants_proto::{
     AdminOp, AdminOrder, AdminOutcome, AssistantGrant, ColonyEntry, DeviceId, Envelope, MACHINES_BUCKET, Machine,
     NotesPost, NoticeKind, OrderState, Pick, Role, RunId, RunLimit, RunState, StatusEvent, StatusUpdate, StepStage,
     TRAIL_RUNS_BUCKET, ThreadId, TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailRun,
-    TrailSession, TrailSource, TrailStart, UserId, WaitingStep, subject, trail_run_key, trail_session_key,
+    TrailSession, TrailSource, TrailStart, TrailStepThread, UserId, WaitingStep, subject, trail_run_key,
+    trail_session_key, trail_thread_step_key,
 };
 use ants_test_support::{NatsServer, eventually, eventually_within, scratch_dir};
 use futures::StreamExt as _;
@@ -576,6 +577,11 @@ async fn a_reply_after_the_run_ended_is_noted_on_its_thread_not_prompted() {
     let thread = ThreadId::generate();
     let run = lead.start_on(r#"await agent("a", ant="dev")"#, TrailLimits::default(), thread.clone()).await;
     let step = lead.step().await;
+    let runs = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    let marker = runs.get(trail_thread_step_key(&ant("lead"), &thread, &step.thread_id)).await.unwrap();
+    let marker: TrailStepThread = serde_json::from_slice(&marker.expect("kept under the run's thread")).unwrap();
+    let call = step.trail_step.as_ref().unwrap().call;
+    assert_eq!((marker.run, marker.call, marker.run_thread), (run.clone(), call, thread.clone()));
     assert!(lead.reply(&step, "A").await);
     lead.ended(&run).await;
     let late = |text: &str| step.reply(ant("dev"), text, Role::Ant).unwrap();

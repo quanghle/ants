@@ -18,6 +18,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::provider::Origin;
+#[cfg(doc)]
+use crate::trail_thread_step_key;
 use crate::{Envelope, Error, MAX_TITLE, RunId, ThreadId, TrailName, UserId, subject};
 #[cfg(doc)]
 use crate::{
@@ -421,7 +423,8 @@ pub struct TrailRunIndex {
 
 /// A step's thread, as its conductor keeps it in [`TRAIL_RUNS_BUCKET`] under [`trail_step_key`] from before the step is
 /// sent, so a message on it after the run ended, or after a restart, is still told to be the step's and reported on the
-/// run's thread rather than prompting the conductor.
+/// run's thread rather than prompting the conductor; and under [`trail_thread_step_key`], so a human reads the steps
+/// of the runs on one thread by its keys alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrailStepThread {
     pub run: RunId,

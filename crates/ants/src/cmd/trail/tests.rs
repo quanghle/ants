@@ -6,7 +6,7 @@ use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     CallAnswer, JournalEntry, PendingCall, QueuedCall, Role, RunId, RunState, StepStage, TRAIL_RUNS_BUCKET, ThreadId,
     TrailFunction, TrailLimits, TrailParent, TrailRun, TrailRunIndex, TrailSession, TrailStepThread, UserId, Uuid,
-    trail_call_key, trail_runs_index_key, trail_session_key, trail_step_key,
+    trail_call_key, trail_runs_index_key, trail_session_key, trail_thread_step_key,
 };
 use async_nats::jetstream;
 use chrono::{TimeDelta, Utc};
@@ -469,10 +469,10 @@ async fn humans_read_the_steps_a_conductor_recorded_on_the_thread_of_its_runs() 
         to: p(to),
         run_thread: run.thread.clone(),
     };
-    put(&lead_js, &trail_step_key(&lead, &answered), &mark(&running, 0, "dev-c")).await;
-    put(&lead_js, &trail_step_key(&lead, &waiting), &mark(&running, 1, "dev-b")).await;
-    put(&lead_js, &trail_step_key(&lead, &left), &mark(&done, 0, "dev-b")).await;
-    put(&lead_js, &trail_step_key(&lead, &other), &mark(&elsewhere, 0, "dev-b")).await;
+    put(&lead_js, &trail_thread_step_key(&lead, &running.thread, &answered), &mark(&running, 0, "dev-c")).await;
+    put(&lead_js, &trail_thread_step_key(&lead, &running.thread, &waiting), &mark(&running, 1, "dev-b")).await;
+    put(&lead_js, &trail_thread_step_key(&lead, &done.thread, &left), &mark(&done, 0, "dev-b")).await;
+    put(&lead_js, &trail_thread_step_key(&lead, &elsewhere.thread, &other), &mark(&elsewhere, 0, "dev-b")).await;
     put(&lead_js, &trail_call_key(&lead, &running.run, 0), &journal(0, "build", CallAnswer::Ok(json!("built")))).await;
     let session = TrailSession { session: "opaque".to_owned(), pending: vec![waited(1, &waiting)], queued: Vec::new() };
     put(&lead_js, &trail_session_key(&lead, &running.run), &session).await;
