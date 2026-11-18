@@ -356,8 +356,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
     if !unsealed(config, &js, stop).await {
         return Ok(Served::Stopped);
     }
-    let metrics = crate::monitoring::metrics::ant(&config.ant);
-    let workload = workload(config);
+    let (metrics, workload) = (crate::monitoring::metrics::ant(&config.ant), workload(config));
     let _connected = metrics.connected(client.clone(), workload.clone());
     let Some((entry, claimed)) = take_turn(config, &js, stop).await? else {
         return Ok(Served::Stopped);
@@ -392,7 +391,8 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
     let pool = harness_pool(config, launch, sessions, &workload).await.with_lifecycle(lifecycle.clone());
     let publisher = publisher(config, &js, &redactor, &pool).await;
     let (messages, channels) = inbox_messages(&js, &stream, config).await?;
-    let registration = enter_colony(&js, entry.clone(), claimed, &workload).await?;
+    let sense = providers.sense_of(&config.provider);
+    let registration = enter_colony(&js, entry.clone(), claimed, &workload, sense).await?;
     log_serving(config);
 
     let inbox = Inbox {
@@ -440,7 +440,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         identity: identity.as_ref(),
         home: &config.storage.home,
         lifecycle: lifecycle.as_ref(),
-        sense: providers.sense_of(&config.provider),
+        sense,
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     forget_if_retired(&served, config, &js, retired_before).await;
@@ -897,13 +897,18 @@ async fn open_messages(
     Ok(futures::stream::select(messages, futures::stream::iter(posts).flatten()))
 }
 
-/// Put the ant on the colony, holding its entry from the revision claimed, if any.
+/// Put the ant on the colony, holding its entry from the revision claimed, if any, its first entry showing the profile
+/// `sense`, its provider if sense, holds of it.
 async fn enter_colony(
     js: &jetstream::Context,
     entry: ants_proto::ColonyEntry,
     claimed: Option<u64>,
     workload: &std::sync::Arc<colony::Workload>,
+    sense: Option<&crate::sense::Sense>,
 ) -> Result<colony::Registration> {
+    if let Some(sense) = sense {
+        sense.first_profile(&entry.ant, workload).await;
+    }
     Ok(match claimed {
         Some(revision) => colony::hold(js, entry, revision, workload.clone()).await?,
         None => colony::register(js, entry, workload.clone()).await?,
@@ -978,7 +983,8 @@ where
     .await?
     .reading(inbox.reading);
     let _sense_workdirs = inbox.sense.zip(inbox.mcp).map(|(sense, mcp)| sense.workdirs(&config.ant, mcp.workdirs()));
-    let scheduler = inbox.sense.map(|sense| sense.schedule(config, inbox.machine, dreaming(inbox, config)));
+    let scheduler =
+        inbox.sense.map(|sense| sense.schedule(config, inbox.machine, dreaming(inbox, config), inbox.workload.clone()));
     let (stopping, moving, mut asked) = (std::cell::Cell::new(false), std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request, the hand-over or the move, after which the prompts in flight finish;
     // the second only Ctrl-C or a stop request.
