@@ -116,6 +116,9 @@ impl Schedule {
         if entry.name.is_human() {
             bail!("the default human is no schedule");
         }
+        if ants_proto::BuiltinAnt::from_id(entry.name.as_str()).is_some() {
+            bail!("{} is reserved for a built-in ant", entry.name);
+        }
         let when = match (entry.cron, entry.every) {
             (Some(cron), None) => {
                 let zone = match entry.timezone {

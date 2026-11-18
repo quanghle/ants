@@ -36,7 +36,10 @@ fn main() {
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
         ("channels_are_managed_posted_to_and_read", channels_are_managed_posted_to_and_read),
         ("files_are_attached_listed_and_saved", files_are_attached_listed_and_saved),
-        ("the_builtin_messenger_hands_over_to_a_listed_one", the_builtin_messenger_hands_over_to_a_listed_one),
+        (
+            "the_builtin_messenger_has_a_standby_and_the_short_name_is_ordinary",
+            the_builtin_messenger_has_a_standby_and_the_short_name_is_ordinary,
+        ),
         (
             "a_configured_adapter_serves_ants_the_messenger_and_the_cli",
             a_configured_adapter_serves_ants_the_messenger_and_the_cli,
@@ -340,12 +343,12 @@ fn channels_are_managed_posted_to_and_read() {
     assert_eq!(ok(&["channel", "remove", "ops", "dev-a"]).0, "#ops: members dev-b,dev-c; messenger triage\n");
     assert_eq!(
         ok(&["channel", "set", "ops", "--default-messenger"]).0,
-        "#ops: members dev-b,dev-c; messenger messenger (default)\n"
+        "#ops: members dev-b,dev-c; messenger system-messenger (default)\n"
     );
     assert!(!run(ants(&["channel", "add", "qa", "dev-a"])).status.success(), "no such channel");
     assert_eq!(
         ok(&["channel", "set", "ops", "--owner", "lead"]).0,
-        "#ops: members dev-b,dev-c; messenger messenger (default); owner lead\n"
+        "#ops: members dev-b,dev-c; messenger system-messenger (default); owner lead\n"
     );
     assert!(!run(ants(&["channel", "set", "ops", "--owner", "human"])).status.success(), "no human owner");
     let rows: Vec<Vec<String>> =
@@ -354,8 +357,8 @@ fn channels_are_managed_posted_to_and_read() {
         rows,
         [
             vec!["CHANNEL", "MEMBERS", "MESSENGER", "OWNER"],
-            vec!["#dev", "-", "messenger", "(default)", "-"],
-            vec!["#ops", "dev-b,dev-c", "messenger", "(default)", "lead"]
+            vec!["#dev", "-", "system-messenger", "(default)", "-"],
+            vec!["#ops", "dev-b,dev-c", "system-messenger", "(default)", "lead"]
         ]
     );
     // A human member of a channel sees its unread posts, its own counting as read.
@@ -364,7 +367,7 @@ fn channels_are_managed_posted_to_and_read() {
     let rows: Vec<Vec<String>> =
         ok(&["channel", "list"]).0.lines().map(|l| l.split_whitespace().map(str::to_owned).collect()).collect();
     assert_eq!(rows[0].last().map(String::as_str), Some("UNREAD"));
-    assert_eq!(rows[1], ["#dev", "human", "messenger", "(default)", "-", "0"]);
+    assert_eq!(rows[1], ["#dev", "human", "system-messenger", "(default)", "-", "0"]);
     assert_eq!(rows[2].last().map(String::as_str), Some("-"), "not a member of #ops");
 
     let (posted, warned) = ok(&["post", "#ops", "@dev-c", "and", "@dev-z,", "look"]);
@@ -431,7 +434,10 @@ fn channels_are_managed_posted_to_and_read() {
     asking.0.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
     assert_eq!(asking.0.wait().unwrap().code(), Some(1), "{stderr}");
     assert!(stderr.contains(&format!("no reply on thread {thread} within 3s")), "{stderr}");
-    assert!(stderr.contains("messenger is not in the colony: no daemon serves messenger now"), "{stderr}");
+    assert!(
+        stderr.contains("system-messenger is not in the colony: no daemon serves system-messenger now"),
+        "{stderr}"
+    );
     assert!(stderr.contains("--wait may not end until one does"), "{stderr}");
 
     assert_eq!(ok(&["channel", "delete", "dev"]).0, "deleted #dev; the posts to #dev stay in the stream\n");
@@ -518,8 +524,6 @@ fn files_are_attached_listed_and_saved() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A daemon serving the built-in messenger hands it over to a daemon started later with a listed messenger, on the same
-/// machine, and serves it again once that daemon stops.
 /// `cargo install` renames the new executable over the old one: the daemon stops as on SIGTERM and exits with status
 /// 75, which the service units restart on.
 fn a_daemon_exits_once_its_executable_was_replaced() {
@@ -572,7 +576,7 @@ fn a_daemon_exits_once_its_executable_was_replaced() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn the_builtin_messenger_hands_over_to_a_listed_one() {
+fn the_builtin_messenger_has_a_standby_and_the_short_name_is_ordinary() {
     let Some(server) = NatsServer::start() else { return };
     let dir = scratch_dir("handover");
     let bin = dir.join("bin");
@@ -585,7 +589,7 @@ fn the_builtin_messenger_hands_over_to_a_listed_one() {
     };
     assert!(run(ants(&["init"])).status.success());
     let log = |name: &str| std::fs::read_to_string(dir.join(format!("{name}.log"))).unwrap_or_default();
-    let logs = || format!("builtin log:\n{}\nlisted log:\n{}", log("builtin"), log("listed"));
+    let logs = || format!("primary log:\n{}\nstandby log:\n{}", log("primary"), log("standby"));
     let daemon = |name: &str, config: &str| {
         let (path, home) = (dir.join(format!("{name}.toml")), dir.join(name));
         std::fs::write(&path, config).unwrap();
@@ -604,32 +608,42 @@ fn the_builtin_messenger_hands_over_to_a_listed_one() {
     };
     let served_from = || {
         let colony = run(ants(&["colony", "--json"]));
-        let entry: serde_json::Value = serde_json::from_slice(&colony.stdout).unwrap();
-        assert_eq!(entry["ant"], "messenger");
+        let stdout = String::from_utf8_lossy(&colony.stdout);
+        let entry = stdout
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|entry| entry["ant"] == "system-messenger")
+            .unwrap_or_else(|| panic!("{stdout}\n{}", logs()));
         entry["workdir"].as_str().unwrap().to_owned()
     };
     let ask = |text: &str| {
         let ask = run(ants(&["ask", "--wait", text]));
         let stdout = String::from_utf8_lossy(&ask.stdout);
-        assert!(stdout.contains("messenger: stub:") && stdout.contains(text), "{stdout}\n{}", logs());
+        assert!(
+            stdout.contains("system-messenger: stub:")
+                && stdout.contains("[ants] Route this request")
+                && stdout.contains(text),
+            "{stdout}\n{}",
+            logs()
+        );
     };
 
-    let _builtin = daemon("builtin", "harness = \"copilot\"\n");
-    wait_for("builtin", "serving inbox", 1);
-    let listed = daemon(
-        "listed",
-        &format!("sage = \"none\"\n[[ant]]\nname = \"messenger\"\nworkdir = {dir:?}\nharness = \"copilot\"\n"),
+    let mut primary = daemon(
+        "primary",
+        &format!("harness = \"copilot\"\nsage = \"none\"\n[[ant]]\nname = \"messenger\"\nworkdir = {dir:?}\n"),
     );
-    wait_for("listed", "serving inbox", 1);
-    wait_for("builtin", "another daemon took over the ant", 1);
-    assert_eq!(served_from(), dir.canonicalize().unwrap().display().to_string(), "{}", logs());
+    wait_for("primary", "serving inbox", 2);
+    let _standby = daemon("standby", "harness = \"copilot\"\n");
+    assert!(served_from().ends_with("primary/.ants/agents/system-messenger"), "{}", logs());
     ask("first");
+    let ordinary = run(ants(&["ask", "--wait", "@messenger", "ordinary request"]));
+    let stdout = unbriefed(&String::from_utf8_lossy(&ordinary.stdout));
+    assert!(stdout.contains("messenger: stub: ordinary request") && !stdout.contains("[ants] Route"), "{stdout}");
 
-    let mut listed = listed;
-    assert!(Command::new("kill").arg("-TERM").arg(listed.0.id().to_string()).status().unwrap().success());
-    listed.0.wait().unwrap();
-    wait_for("builtin", "serving inbox", 2);
-    assert!(served_from().ends_with(".ants/agents/messenger"), "{}", logs());
+    assert!(Command::new("kill").arg("-TERM").arg(primary.0.id().to_string()).status().unwrap().success());
+    primary.0.wait().unwrap();
+    wait_for("standby", "serving inbox", 1);
+    assert!(served_from().ends_with("standby/.ants/agents/system-messenger"), "{}", logs());
     ask("second");
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
@@ -693,7 +707,7 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
         assert!(said.contains(expected), "{}{}\ndaemon log:\n{}", stdout(&ask), stderr(&ask), daemon_log());
     };
     ask(&["@dev-a", "hello"], "dev-a: stub: hello\nargs=--flag two words; OVERRIDDEN=ant");
-    ask(&["hello"], "messenger: stub: hello\nargs=--flag two words; OVERRIDDEN=definition");
+    ask(&["hello"], "system-messenger: stub: [ants] Route this request");
 
     let workdir = dir.to_str().unwrap();
     let add = |harness: &str| {
@@ -850,7 +864,7 @@ fn setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_thr
         String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect::<Vec<_>>()
     };
     assert_eq!(complete(&["ants", "post", "o"]), ["ops"]);
-    assert_eq!(complete(&["ants", "ask", "@"]), ["@dev", "@messenger", "@qa"]);
+    assert_eq!(complete(&["ants", "ask", "@"]), ["@dev", "@qa", "@system-messenger"]);
     assert_eq!(complete(&["ants", "thread", "show", &thread[..8]]), [thread.as_str()]);
     assert_eq!(complete(&["ants", "thread", "show", "la"]), ["last"]);
     assert_eq!(complete(&["ants", "react", &thread, "e"]), ["eyes"]);

@@ -672,7 +672,10 @@ fn only_the_owner_changes_members_and_messenger_and_never_the_owner() {
     assert_eq!(entry.owner, Some(p("lead")));
     assert!(entry.apply(&p("lead"), &ops[..1], &humans).unwrap().is_empty(), "nothing to change");
     let cleared = entry.apply(&p("lead"), &[ChannelOp::ClearMessenger], &humans).unwrap();
-    assert_eq!((cleared, entry.messenger.as_ref()), (vec!["messenger back to the default messenger".to_owned()], None));
+    assert_eq!(
+        (cleared, entry.messenger.as_ref()),
+        (vec!["messenger back to the default system-messenger".to_owned()], None)
+    );
     let json = serde_json::to_string(&entry).unwrap();
     assert!(json.contains(r#""owner":"lead""#), "{json}");
     assert!(!serde_json::to_string(&ChannelEntry::new(entry.channel.clone())).unwrap().contains("owner"));

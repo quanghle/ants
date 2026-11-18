@@ -168,7 +168,7 @@ fn prepare(
     }
     let roles = Roles::of(&fields)?;
     let names_sage = matches!(roles.sage, Some(Sage::Ant(_))) && start.get("sage") != fields.get("sage");
-    if names_sage && (listed.builtin || listed.is_sage) {
+    if names_sage && (listed.builtin.is_some() || listed.is_sage) {
         bail!("{ant} is built in or another ant's sage, and a sage has no sage of its own: set sage to \"none\"");
     }
     let creds = listed.creds.clone();

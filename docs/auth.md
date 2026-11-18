@@ -9,8 +9,8 @@ ants auth user alice --human --js-domain hub            # alice.creds (human rol
 ants auth user alice --human --admin --js-domain hub    # alice.creds (human role and admin role)
 ants auth user pa --assistant-of alice --js-domain hub  # pa.creds (ant role, assistant of alice)
 ants auth user dev-a --js-domain hub                    # dev-a.creds (ant role)
-ants auth user messenger --js-domain hub                # messenger.creds (the built-in messenger, served only where they are)
-ants auth user sage --js-domain hub                     # sage.creds (the built-in sage, served only where they are)
+ants auth builtin messenger --js-domain hub             # system-messenger.creds
+ants auth builtin sage --js-domain hub                  # system-sage.creds
 ants auth user github --webhook --to dev-a --js-domain hub
 ants auth user nightly --webhook --to dev-a --js-domain hub  # schedules use webhook credentials
 ants auth channel-manager --js-domain hub               # channel-manager.creds
@@ -21,7 +21,7 @@ ants auth user alice --human --store-key --js-domain hub  # seed stored in OS cr
 
 ## Issuing and revoking credentials
 
-Every key issued or signed (`user`, `enroll`, `bootstrap`, `channel-manager`, `host`, `leaf`, `enroll approve`, `enroll renew`, `signer`) is recorded in `issued.jsonl` (public key, name, kind, issue time, expiry, permissions version, plus device ID/label, GitHub binding and grant, `admin`, `assistant_of`, or leaf members). Credentials stay valid until expiry unless revoked:
+Every key issued or signed (`user`, `builtin`, `enroll`, `bootstrap`, `channel-manager`, `host`, `leaf`, `enroll approve`, `enroll renew`, `signer`) is recorded in `issued.jsonl` (public key, name, kind, issue time, expiry, permissions version, plus device ID/label, GitHub binding and grant, `admin`, `assistant_of`, or leaf members). Built-in credentials have the normal rights of an ant under the reserved service ID; `ants auth user` cannot issue them. Credentials stay valid until expiry unless revoked:
 
 ```sh
 ants auth revoke alice --nats wss://hub.example/nats        # every key issued to alice, all devices
@@ -255,7 +255,7 @@ A human designates at most one ant as its assistant, the ant that acts for it, b
 
 A record failing any check counts as no assistant: a refusal never keeps an earlier assistant. Against replay, only the human's credentials write `<human>.assistant` (a human puts only `ants_humans` entries, `<name>`, and its own `<human>.>` keys; ants, webhooks and the other kinds of credentials write none), a withdrawal is a newer signed record rather than a gap an older record could fill, and a reader drops a record issued before one it saw. `set` stores with a compare-and-set on the key's revision and issues its record after the one stored, so the human's devices with clocks apart still replace each other's.
 
-A human's text naming no one, `ants ask` without `@ant` and the `ants chat` command bar's text with no addressee (no thread open, no DM view, or nobody else on the open thread), goes to its assistant while the grant naming it verifies, else to the messenger; the CLI reads and verifies the grant at each such send, so a withdrawal holds from the next one, and names the recipient: `to pa (assistant of alice)` after `ants ask`'s message line, `sent to pa (assistant of alice) on thread …` under the bar.
+A human's text naming no one, `ants ask` without `@ant` and the `ants chat` command bar's text with no addressee (no thread open, no DM view, or nobody else on the open thread), goes to its assistant while the grant naming it verifies, else to `system-messenger`; the CLI reads and verifies the grant at each such send, so a withdrawal holds from the next one, and names the recipient: `to pa (assistant of alice)` after `ants ask`'s message line, `sent to pa (assistant of alice) on thread …` under the bar.
 
 Escalations, `ask_human` questions and tool requests that would reach the human go to its assistant first while the assistant can act, which settles what it can and passes the rest on, explicitly or after `escalate_after` ([architecture.md](architecture.md#escalations)); while the human is away, `ants webhook serve` relays to the human's stand-in only, never to the assistant ([webhooks.md](webhooks.md#stand-in)).
 
@@ -456,7 +456,7 @@ An approval stands for that GitHub user and name: the user's later devices of th
 A name registered with a GitHub sign-in belongs to that GitHub user's numeric ID for good, so a renamed GitHub account keeps its name:
 
 - The first registration signed for a free name binds it. The same GitHub user registering the name again adds a device; another GitHub user asking for it is refused, and so is a GitHub user already bound to another name.
-- `human`, the reserved names `bootstrap`, `channel-manager`, `revoked` and `signer`, and names any key other than a human's was issued to (an ant, webhook, leaf node, enrollment, ...) are refused.
+- `human`, the reserved names `bootstrap`, `channel-manager`, `revoked`, `signer`, `system-messenger` and `system-sage`, and names any key other than a human's was issued to (an ant, webhook, leaf node, enrollment, ...) are refused.
 - A name holding human credentials but no binding (issued with `ants auth user --human`) is refused until the operator binds it:
 
 ```sh

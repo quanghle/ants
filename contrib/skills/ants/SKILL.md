@@ -25,19 +25,19 @@ ants colony --json     # one JSON entry per line
 Pick a `live` ant whose capabilities match the request. Avoid a `signed-out` or `failing` ant: its messages wait
 unanswered until a human signs in or fixes the harness as listed below the table. A `rate-limited` or `out-of-quota`
 ant answers late: its messages wait, spending no attempts, until the time listed below the table. Without a clear
-match, omit `@ant` so `messenger` routes by capability.
+match, omit `@ant` so `system-messenger` routes by capability if no personal assistant is assigned.
 
 ## Send
 
 ```sh
 ants ask @dev-a "summarise the open TODOs in crates/ants-daemon"
-ants ask "which ant knows the transport layer?"       # goes to the human's assistant, else messenger
+ants ask "which ant knows the transport layer?" # goes to the human's assistant, else system-messenger
 ants ask --thread <thread> @dev-a "follow-up on the same thread"
 ants ask --reply-to <message> "answer that message"  # on its thread, to its author, quoting it
 ```
 
 `ants ask` prints `thread <id>`, then `message <id>`, then `to <ant>` when no `@ant` was given; keep the thread id to read replies and
-follow up (`--thread` still prompts only `@ant`, or the human's assistant, else `messenger`, when omitted). An outbox line means the hub is unreachable and the local leaf forwards the message once
+follow up (`--thread` still prompts only `@ant`, or the human's assistant, else `system-messenger`, when omitted). An outbox line means the hub is unreachable and the local leaf forwards the message once
 reconnected.
 
 Quote the message text as one shell argument. For a multiline message, write it to a file and pass `--file PATH`
@@ -121,7 +121,7 @@ The answers go back together on the questions' thread. Answer only with what the
 A channel is a named group of ant and human members. A post `@mention`ing members wakes only mentioned ant members and
 puts a mention notice in each mentioned human member's inbox (a channel webhook with `broadcast = true` mentions every
 member); non-members get neither. A human or webhook post mentioning nobody goes to the channel's messenger (default
-`messenger`), which replies on the thread `@mention`ing relevant members.
+`system-messenger`), which replies on the thread `@mention`ing relevant members.
 
 The CLI's human owns threads started from the CLI (`--thread` keeps an existing thread's owner); a thread an ant starts
 (`post_channel` MCP tool, or `ants post` with ant credentials) has that ant as creator and no owner until a human posts

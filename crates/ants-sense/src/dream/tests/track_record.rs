@@ -207,7 +207,7 @@ async fn a_finding_applied_three_dreams_ago_shows_the_signs_of_the_dreams_before
     assert!(read.contains("a few threads make weak evidence"), "the instructions say so: {read}");
 
     let early = dream(5, hours(36), None, Vec::new(), Vec::new());
-    let record = track_record(&*items, &early, &UserId::sage(), &user("dev-a")).await.unwrap();
+    let record = track_record(&*items, &early, &user("sage"), &user("dev-a")).await.unwrap();
     let text = record.text(record.entries.len());
     assert!(text.contains("before it was applied | none since: threads 2, 4, 1 | none;"), "{text}");
 }
@@ -235,7 +235,7 @@ async fn the_earlier_findings_reach_back_thirty_active_days_the_dormant_ones_not
     keep(&*items, &kept_one).await;
 
     let current = reviewed(3, now, "sage", Vec::new(), Vec::new());
-    let record = track_record(&*items, &current, &UserId::sage(), &user("dev-a")).await.unwrap();
+    let record = track_record(&*items, &current, &user("sage"), &user("dev-a")).await.unwrap();
     let text = record.text(record.entries.len());
     assert!(text.contains("Ten active days ago.") && !text.contains("Forty active days ago."), "{text}");
     assert!(text.contains("- lesson: 1 made, 0 applied (0 still holding), 0 rejected, 0 deferred, 1 unanswered."));
@@ -264,7 +264,7 @@ async fn the_outcomes_told_the_sage_reach_back_ninety_active_days_the_track_reco
     assert!(!voted.is_error, "{voted:?}");
 
     let ages = memory::Ages::new(now, std::iter::empty());
-    let told = packet::outcomes(&*items, 3, &ages, &UserId::sage()).await.unwrap();
+    let told = packet::outcomes(&*items, 3, &ages, &user("sage")).await.unwrap();
     let undone = FindingOutcome {
         finding: "2.1".into(),
         verdict: FindingVerdict::Applied,
@@ -273,13 +273,13 @@ async fn the_outcomes_told_the_sage_reach_back_ninety_active_days_the_track_reco
     };
     assert_eq!(told, [undone], "followed for {OUTCOME_DAYS} active days, the older not told");
     let current = reviewed(3, now, "sage", Vec::new(), Vec::new());
-    let record = track_record(&*items, &current, &UserId::sage(), &user("dev-a")).await.unwrap();
+    let record = track_record(&*items, &current, &user("sage"), &user("dev-a")).await.unwrap();
     assert!(record.is_empty(), "the packet shows {TRACK_RECORD_DAYS} active days: {record:?}");
 }
 
 #[test]
 fn over_its_budget_the_earlier_findings_shrink_to_their_tally_before_the_identity_is_cut() {
-    let dream = Dream { sage: Some(UserId::sage()), ..reviewing(3, 5) };
+    let dream = Dream { sage: Some(user("sage")), ..reviewing(3, 5) };
     let threads = [thread(1, 3_000, false), thread(2, 3_000, true), thread(3, 3_000, false)];
     let identity = Identity {
         whole: format!("\n### Persona\n\n{}\n", "Voice: plain.\n".repeat(300)),

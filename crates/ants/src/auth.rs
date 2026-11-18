@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ants_proto::{DEVICES_BUCKET, LeafRole, Permissions, REVOKED_DEVICES, Role, UserId};
+use ants_proto::{BuiltinAnt, DEVICES_BUCKET, LeafRole, Permissions, REVOKED_DEVICES, Role, UserId};
 use anyhow::{Context as _, Result, bail};
 use nkeys::KeyPair;
 use serde_json::json;
@@ -32,8 +32,8 @@ pub use self::files::{creds_jwt, read_creds, read_seed, replace_creds, write_cre
 pub(crate) use self::files::{replace_secret, seed, write_secret, xseed};
 pub(crate) use self::issuing::device_key;
 pub use self::issuing::{
-    NewDevice, issue_channel_manager, issue_device, issue_device_with, issue_host, sign_added, sign_channel_manager,
-    sign_device_with, sign_host, sign_ordered, sign_user, sign_with,
+    NewDevice, issue_builtin, issue_channel_manager, issue_device, issue_device_with, issue_host, sign_added,
+    sign_builtin, sign_channel_manager, sign_device_with, sign_host, sign_ordered, sign_user, sign_with,
 };
 #[cfg(test)]
 pub use self::issuing::{issue, issue_with, sign_device};
@@ -216,6 +216,9 @@ fn leaf_role<'a>(assistants: &'a BTreeMap<UserId, UserId>, member: &UserId, role
 /// [`ants_proto::BOOTSTRAP_USER`], the name of the public bootstrap credentials, which `ants auth revoke bootstrap`
 /// revokes.
 pub fn check_not_reserved(user: &UserId) -> Result<()> {
+    if let Some(builtin) = BuiltinAnt::from_id(user.as_str()) {
+        bail!("{user} is reserved for a built-in ant (`ants auth builtin {}`); choose another name", builtin.name());
+    }
     if *user == UserId::channel_manager() {
         bail!("{user} is reserved for the channel manager (`ants auth channel-manager`); choose another name");
     }

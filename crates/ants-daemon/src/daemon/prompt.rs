@@ -666,7 +666,28 @@ impl Inbox<'_> {
             _ => match (&envelope.summary, escalation::group_note(self.ant, envelope)) {
                 (Some(summary), _) => format!("{}\n\n{}", summary_note(summary), envelope.text),
                 (None, Some(note)) => format!("{note}\n\n{}", envelope.text),
-                (None, None) => channel::quoted(envelope.quote.as_ref(), &envelope.text),
+                (None, None) => {
+                    let text = channel::quoted(envelope.quote.as_ref(), &envelope.text);
+                    let note = if self.asks_review(incoming) {
+                        (incoming.steered != Steered::Joining).then_some(REVIEW_NOTE)
+                    } else if self.builtin == Some(ants_proto::BuiltinAnt::Messenger)
+                        && incoming.post.is_none()
+                        && incoming.resume.is_none()
+                        && !envelope.webhook
+                        && envelope.escalation.is_none()
+                        && envelope.provider.is_none()
+                        && envelope.trail_step.is_none()
+                        && own.is_none()
+                    {
+                        Some(DISPATCH_NOTE)
+                    } else {
+                        None
+                    };
+                    match note {
+                        Some(note) => format!("{note}\n\n{text}"),
+                        None => text,
+                    }
+                }
             },
         };
         let text = match &incoming.resume {
@@ -1001,6 +1022,19 @@ impl Inbox<'_> {
         Ok(())
     }
 }
+
+const DISPATCH_NOTE: &str = "[ants] Route this request: pick the capability it needs from list_ants, route it there \
+    and reply with the answer. Split a request needing several capabilities into one route per capability. When no \
+    ant has the needed capability, say so instead of answering directly. For a human's request starting a thread, \
+    suggest a short title with suggest_thread_title.";
+
+const REVIEW_NOTE: &str = "[ants] Review the work and identity in the packet from the ant under review. Check the \
+    evidence and answer with one reply holding findings in the JSON block the packet asks for: cite the evidence and \
+    suggest an action for each finding, or return an empty list if none is warranted. Judge work against identity \
+    and identity against work. For a persona, self_model or relationship finding, cite the ant's own threads and \
+    build on its existing identity. Check the earlier findings against the new work; for a finding that did not \
+    hold, return a follow_up naming its id in \"follows\". Only read and suggest: change nothing and message no one. \
+    Read code only in the review checkouts of the commits named in the packet.";
 
 /// Why a turn that ended sends no reply, if it sends none: the session called `complete`, or the message was another
 /// ant's reply to the ant's `own`.

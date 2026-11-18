@@ -618,6 +618,9 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
     let name = &issued.name;
     let domain = "[--js-domain DOMAIN]";
     vec![match issued.kind {
+        Kind::Ant if let Some(builtin) = ants_proto::BuiltinAnt::from_id(name) => {
+            format!("ants auth builtin {} {domain}", builtin.name())
+        }
         Kind::Ant => format!("ants auth user {name} {domain}"),
         Kind::Human if issued.admin => format!("ants auth user {name} --human --admin {domain}"),
         Kind::Human => format!("ants auth user {name} --human {domain}"),

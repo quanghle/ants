@@ -64,7 +64,7 @@ pub(super) fn settle_ant(
         ant.provider_setting = Setting::named(provider, providers)
             .with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
     }
-    if !ant.builtin {
+    if ant.builtin.is_none() {
         let abs = |dir: &Path| resolve(dir, base, home);
         ant.workdir = abs(&ant.workdir).canonicalize().with_context(|| {
             format!("config {}: ant {}: workdir {}", path.display(), ant.name, ant.workdir.display())

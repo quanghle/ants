@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ants_proto::{
-    Attachment, AttachmentHandle, ChannelEntry, ChannelId, ChannelPost, Envelope, JsDomain, Role, TIMELINE_EVERY,
-    ThreadId, UserId, subject,
+    Attachment, AttachmentHandle, BuiltinAnt, ChannelEntry, ChannelId, ChannelPost, Envelope, JsDomain, Role,
+    TIMELINE_EVERY, ThreadId, UserId, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -147,9 +147,8 @@ pub struct Presence {
     pub capabilities: Vec<String>,
     /// The machine the ant's colony entry and notices name; the host name when None.
     pub machine: Option<String>,
-    /// Serve the ant only while holding its colony entry, as the built-in messenger does: wait while another
-    /// daemon lists it, and hand over to a daemon that puts it later ([`colony::hold`]).
-    pub defer_to_others: bool,
+    /// Built-in ants serve only while holding their colony entry ([`colony::hold`]).
+    pub builtin: Option<BuiltinAnt>,
 }
 
 /// What the ant's harnesses run, where and with what.
@@ -234,7 +233,7 @@ pub struct Storage {
 
 /// Serve the ant's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
 /// the NATS server can be reached and its JetStream answers the daemon keeps trying ([`bus::connect_retrying`]). A daemon
-/// that defers to others ([`Presence::defer_to_others`]) and hands the ant over waits for its turn again.
+/// that serves a built-in ant and hands it over waits for its turn again.
 pub async fn run(config: Config) -> Result<()> {
     run_until(config, &Stop::default(), &Restarts::default(), &Providers::default()).await
 }
@@ -397,12 +396,11 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
     let (messages, channels) = inbox_messages(&js, &stream, config).await?;
     let sense = providers.sense_of(&config.provider);
     let registration = enter_colony(&js, entry.clone(), claimed, &workload, sense).await?;
-    log_serving(config);
-
     let inbox = Inbox {
         client: &client,
         js: &js,
         ant: &config.ant,
+        builtin: config.presence.builtin,
         reading,
         machine: &entry.machine,
         pool: &pool,
@@ -562,7 +560,7 @@ async fn take_turn(
     stop: &Stop,
 ) -> Result<Option<(ants_proto::ColonyEntry, Option<u64>)>> {
     let mut entry = colony::entry(config).await;
-    if !config.presence.defer_to_others {
+    if config.presence.builtin.is_none() {
         return Ok(Some((entry, None)));
     }
     let Some(revision) = wait_for_turn(js, &mut entry, stop).await? else {
@@ -1039,6 +1037,7 @@ where
     S: Stream<Item = Result<jetstream::Message, E>> + Unpin,
     E: Display,
 {
+    log_serving(config);
     let mut unserved = unserved::Watch::new(
         inbox.js,
         config.connection.js_domain.as_ref(),
@@ -1231,6 +1230,7 @@ struct Inbox<'a> {
     client: &'a async_nats::Client,
     js: &'a jetstream::Context,
     ant: &'a UserId,
+    builtin: Option<BuiltinAnt>,
     /// How the daemon reads through the ant's own readers ([`Reading::daemon`]).
     reading: Reading,
     /// The machine its notices name, as its colony entry does.

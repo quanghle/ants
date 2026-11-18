@@ -105,8 +105,8 @@ fn channel_entries_list_members_and_wake_those_mentioned() {
     let human = UserId::human();
     let untagged = ChannelPost::new(c.clone(), human.clone(), "anyone?");
     assert_eq!(entry.woken(&untagged, &humans), [UserId::messenger()], "the default messenger triages");
-    entry.messenger = Some(p("dev-c"));
-    assert_eq!(entry.woken(&untagged, &humans), [p("dev-c")], "the assigned one, member or not");
+    entry.messenger = Some(p("messenger"));
+    assert_eq!(entry.woken(&untagged, &humans), [p("messenger")], "the explicitly assigned ant, member or not");
     assert!(entry.woken(&ChannelPost::new(c.clone(), p("dev-a"), "anyone?"), &humans).is_empty(), "ants never fan out");
     let tagged = ChannelPost::new(c, p("dev-a"), "@dev-b @dev-c @dev-a @human look");
     assert_eq!(entry.woken(&tagged, &humans), [p("dev-b")], "members only, not the author or the human");

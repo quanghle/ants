@@ -95,7 +95,7 @@ pub use identity::{
     AntIdentity, Avatar, Cell, ClonedFrom, FACE_WIDTH, Frame, Grid, HEAD_COLUMNS, HEAD_ROWS, HUE_NAMES, Mood, Motion,
     MovedMark, Palette, Pixel, Rgb, SeedSource, Side, Stage, Theme, hue_named,
 };
-pub use ids::{ChannelId, JsDomain, Machine, Reaction, Role, RunId, ThreadId, TrailName, UserId};
+pub use ids::{BuiltinAnt, ChannelId, JsDomain, Machine, Reaction, Role, RunId, ThreadId, TrailName, UserId};
 pub use inbox::{ChannelNotify, ChannelReadMarkers, HeldNotices, NotifyPrefs, ReadMarker};
 pub use keys::{
     ANTS_VERSION, Feed, SERVING_EVERY, SPARE_READERS, Serving, TRAIL_RUNS_INDEX, TRAIL_STEPS, assisted_marks_key,

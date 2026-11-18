@@ -518,7 +518,8 @@ impl Dedicated {
             return Ok(None);
         }
         let loaded = config::load(path)?;
-        let Some(entry) = loaded.ants.iter().find(|a| a.name == *ant && !a.builtin && a.template.is_none()) else {
+        let Some(entry) = loaded.ants.iter().find(|a| a.name == *ant && a.builtin.is_none() && a.template.is_none())
+        else {
             return Ok(None);
         };
         let home = match &entry.home {

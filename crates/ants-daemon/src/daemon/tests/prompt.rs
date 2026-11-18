@@ -47,6 +47,31 @@ async fn a_review_nothing_holds_to_read_only_tools_is_declined_unprompted() {
 }
 
 #[tokio::test]
+async fn review_guidance_reaches_an_ordinary_ant_only_on_the_review_turn() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let requester: UserId = "dev-b".parse().unwrap();
+    let mut replies = bus.client.subscribe(subject::inbox_of(&requester)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let review = Envelope::on_thread(ThreadId::generate(), requester, bus.dev.clone(), "review packet")
+        .with_allow(Some(ants_proto::REVIEW_ALLOW.map(str::to_owned).to_vec()));
+    bus::publish_json(&bus.js, review.subject(), &review, None).await.unwrap();
+    bus.send(&ThreadId::generate(), "ordinary request").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let ordinary = next_envelope(&mut to_human).await.text;
+        assert!(ordinary.ends_with(": ordinary request") && !ordinary.contains("[ants] Review"), "{ordinary}");
+        let reply = next_envelope(&mut replies).await.text;
+        assert!(reply.contains("[ants] Review the work and identity") && reply.ends_with("review packet"), "{reply}");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().prompts.len(), 2);
+}
+
+#[tokio::test]
 async fn a_human_s_summary_request_is_prompted_as_one_and_the_reply_carries_it_with_its_tokens() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();

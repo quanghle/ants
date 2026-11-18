@@ -355,33 +355,35 @@ fn the_top_level_harness_is_the_default_one_and_runs_the_builtin_messenger() {
              [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nharness = \"antigravity\"",
     )
     .unwrap();
+    use ants_proto::BuiltinAnt::{Messenger, Sage};
+
     let harnesses: Vec<_> = ants.iter().map(|ant| (ant.name.as_str(), ant.harness.as_deref(), ant.builtin)).collect();
     assert_eq!(
         harnesses,
         [
-            ("dev-a", Some("claude"), false),
-            ("dev-b", Some("antigravity"), false),
-            ("messenger", Some("claude"), true),
-            ("sage", Some("claude"), true),
+            ("dev-a", Some("claude"), None),
+            ("dev-b", Some("antigravity"), None),
+            ("system-messenger", Some("claude"), Some(Messenger)),
+            ("system-sage", Some("claude"), Some(Sage)),
         ]
     );
     let root = manifest_dir().parent().unwrap().parent().unwrap().to_owned();
     let messenger = &ants[2];
-    let dir = root.join(".ants/agents/messenger");
+    let dir = root.join(".ants/agents/system-messenger");
     assert_eq!((&messenger.workdir, messenger.home.as_ref()), (&dir, Some(&dir)));
     assert_eq!(messenger.js_domain.as_ref().map(JsDomain::as_str), Some("hub"));
     let stock = Ant {
         harness: Some("claude".to_owned()),
         home: Some(dir.clone()),
         js_domain: messenger.js_domain.clone(),
-        builtin: true,
+        builtin: Some(Messenger),
         ..Ant::new(UserId::messenger(), dir)
     };
     assert_eq!(messenger, &stock, "harness defaults for model, reasoning effort and context; stock settings");
 
     let alone = parse_here("harness = \"antigravity\"").unwrap();
     assert_eq!(alone.len(), 1, "harness alone is a complete file");
-    assert_eq!((alone[0].name.as_str(), alone[0].builtin), ("messenger", true));
+    assert_eq!((alone[0].name.as_str(), alone[0].builtin), ("system-messenger", Some(Messenger)));
     assert_eq!(alone[0].harness.as_deref(), Some("antigravity"));
 }
 
@@ -389,26 +391,36 @@ fn the_top_level_harness_is_the_default_one_and_runs_the_builtin_messenger() {
 fn the_builtin_messenger_is_on_unless_turned_off() {
     let empty = parse_here("").unwrap();
     let only: Vec<_> = empty.iter().map(|ant| (ant.name.as_str(), ant.harness.as_deref(), ant.builtin)).collect();
-    assert_eq!(only, [("messenger", Some("copilot"), true)], "the file's harness");
+    assert_eq!(only, [("system-messenger", Some("copilot"), Some(ants_proto::BuiltinAnt::Messenger))]);
 
     let ants = parse_here("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
     let names: Vec<_> = ants.iter().map(|ant| ant.name.as_str()).collect();
-    assert_eq!(names, ["dev-a", "messenger", "sage"]);
+    assert_eq!(names, ["dev-a", "system-messenger", "system-sage"]);
 
     let ants = parse_here("messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
     let names: Vec<_> = ants.iter().map(|ant| ant.name.as_str()).collect();
-    assert_eq!(names, ["dev-a", "sage"]);
+    assert_eq!(names, ["dev-a", "system-sage"]);
 
     let err = format!("{:#}", parse_here("messenger = false\nharness = \"claude\"").unwrap_err());
     assert!(err.contains("nothing to serve"), "{err}");
 }
 
 #[test]
-fn a_listed_messenger_replaces_the_builtin_one() {
-    let ants = parse_here("harness = \"claude\"\n[[ant]]\nname = \"messenger\"\nworkdir = \".\"").unwrap();
-    assert_eq!((ants.len(), ants[1].name.as_str()), (2, "sage"), "the listed messenger names the sage");
-    assert_eq!((ants[0].harness.as_deref(), ants[0].builtin), (Some("claude"), false));
-    assert_eq!(ants[0].workdir, manifest_dir().canonicalize().unwrap());
+fn ordinary_ants_can_use_the_short_names_but_not_the_reserved_ids() {
+    let ants = parse_here("[[ant]]\nname = \"messenger\"\nworkdir = \".\"\n[[ant]]\nname = \"sage\"\nworkdir = \".\"")
+        .unwrap();
+    assert_eq!(
+        ants.iter().map(|ant| ant.name.as_str()).collect::<Vec<_>>(),
+        ["messenger", "sage", "system-messenger", "system-sage"]
+    );
+    for ordinary in &ants[..2] {
+        assert_eq!(ordinary.builtin, None);
+        assert_eq!(ordinary.reviewed_by(), Some(UserId::sage()), "even a regular ant named sage is reviewed");
+    }
+    for builtin in ants_proto::BuiltinAnt::ALL {
+        let err = parse_here(&format!("[[ant]]\nname = {:?}\nworkdir = \".\"", builtin.id().as_str())).unwrap_err();
+        assert!(format!("{err:#}").contains("reserved for a built-in ant"), "{err:#}");
+    }
 }
 
 #[test]
@@ -454,7 +466,7 @@ fn harnesses_defined_in_the_file_run_ants_and_the_builtin_messenger() {
     assert_eq!(harness("antigravity"), Harnesses::builtin().get("antigravity").unwrap());
 
     let named: Vec<_> = ants.iter().map(|ant| (ant.name.as_str(), ant.harness.as_deref())).collect();
-    let builtins = [("messenger", Some("my-agent")), ("sage", Some("my-agent"))];
+    let builtins = [("system-messenger", Some("my-agent")), ("system-sage", Some("my-agent"))];
     assert_eq!(named, [[("dev-a", Some("my-agent")), ("dev-b", Some("claude"))].as_slice(), &builtins].concat());
     let configs: Vec<_> = ants.into_iter().map(|ant| ant.into_config("nats://unused", &harnesses).unwrap()).collect();
     assert_eq!(configs[0].harness.harness, harness("my-agent"));
@@ -590,7 +602,7 @@ fn without_a_top_level_harness_each_ant_and_template_names_its_own() {
     let e = unset("messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"");
     assert!(e.contains(": ant dev-a: no harness set: add `harness = \"NAME\"`"), "{e}");
     assert!(e.contains("(antigravity, claude, codex, copilot)") && e.contains("`ants setup`"), "{e}");
-    assert!(unset("").contains(": ant messenger: no harness set"), "nor the built-in messenger");
+    assert!(unset("").contains(": ant system-messenger: no harness set"), "nor the built-in messenger");
     let template = "messenger = false\n[[ant_template]]\nname = \"worker\"\nmanagers = [\"lead\"]\nmax_ants = 1\n\
                     workdirs = [\".\"]\n[[ant]]\nname = \"lead\"\nworkdir = \".\"\nharness = \"codex\"";
     let e = unset(template);
@@ -602,7 +614,7 @@ fn without_a_top_level_harness_each_ant_and_template_names_its_own() {
     .unwrap()
     .ants;
     let codex = config(ants[0].clone()).unwrap();
-    assert_eq!((codex.harness.harness.name(), codex.presence.defer_to_others), ("codex", false));
+    assert_eq!((codex.harness.harness.name(), codex.presence.builtin), ("codex", None));
     let e = config(Ant::new("dev-a".parse().unwrap(), manifest_dir())).unwrap_err();
     assert!(harness::Unset::caused(&e), "{e:#}");
 }
@@ -613,12 +625,12 @@ fn the_builtin_messenger_finds_its_credentials_and_creates_its_workdir() {
     let auth = home.join(".config/ants/auth");
     assert_eq!(builtin_messenger(Some("copilot"), &home).creds, None, "no credentials issued");
     std::fs::create_dir_all(&auth).unwrap();
-    std::fs::write(auth.join("messenger.creds"), "").unwrap();
+    std::fs::write(auth.join("system-messenger.creds"), "").unwrap();
     let messenger = builtin_messenger(Some("copilot"), &home);
-    assert_eq!(messenger.creds, Some(auth.join("messenger.creds")));
+    assert_eq!(messenger.creds, Some(auth.join("system-messenger.creds")));
     let config = config(messenger).unwrap();
-    assert!(config.presence.defer_to_others);
-    assert_eq!(config.harness.workdir, home.join(".ants/agents/messenger").canonicalize().unwrap());
+    assert_eq!(config.presence.builtin, Some(ants_proto::BuiltinAnt::Messenger));
+    assert_eq!(config.harness.workdir, home.join(".ants/agents/system-messenger").canonicalize().unwrap());
     assert_eq!(config.harness.model_settings, ModelSettings::default());
     std::fs::remove_dir_all(&home).unwrap();
 }
@@ -771,8 +783,10 @@ fn schedules_take_the_top_level_server_and_unique_names() {
     let err = |text: &str| format!("{:#}", parse_all(text).unwrap_err());
     let one = "[[schedule]]\nname = \"nightly\"\ncron = \"@daily\"\nant = \"dev-a\"\ntext = \"t\"\n";
     assert!(err(&format!("{one}{one}")).contains("schedule nightly is listed twice"));
-    let ant = one.replace("nightly", "messenger");
-    assert!(err(&ant).contains("schedule messenger has the name of an ant"));
+    let ant = format!("[[ant]]\nname = \"nightly\"\nworkdir = \".\"\n{one}");
+    assert!(err(&ant).contains("schedule nightly has the name of an ant"));
+    let reserved = one.replace("nightly", "system-sage");
+    assert!(err(&reserved).contains("system-sage is reserved for a built-in ant"));
     let bad = err(&one.replace("@daily", "0 25 * * *"));
     assert!(bad.contains("config.toml: schedule nightly: cron \"0 25 * * *\": hour"), "{bad}");
     let bad = err(&format!("timezone = \"Mars/Olympus_Mons\"\n{one}"));
@@ -932,7 +946,7 @@ fn entries_read_back_as_written() {
     full.publish = Publish::DraftPr;
     let text = entry(&full).unwrap();
     assert!(text.contains("\nidle_timeout = \"1h30m\"\nprompt_timeout = \"0\"\n"), "{text}");
-    let read: Vec<_> = parse_here(&text).unwrap().into_iter().filter(|ant| !ant.builtin).collect();
+    let read: Vec<_> = parse_here(&text).unwrap().into_iter().filter(|ant| ant.builtin.is_none()).collect();
     assert_eq!(read, [full]);
 }
 
@@ -943,7 +957,7 @@ fn appending_keeps_the_file_as_it_was_and_checks_it() {
     let ant = |name: &str| Ant { harness: Some("copilot".to_owned()), ..Ant::new(name.parse().unwrap(), dir.clone()) };
     let add = |name: &str| append(&path, &entry(&ant(name)).unwrap());
     let err = format!("{:#}", add("dev-a").unwrap_err());
-    assert!(err.contains("ant messenger: no harness set"), "a new file needs a top-level harness: {err}");
+    assert!(err.contains("ant system-messenger: no harness set"), "a new file needs a top-level harness: {err}");
     assert!(!path.exists(), "nothing written");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
@@ -954,7 +968,7 @@ fn appending_keeps_the_file_as_it_was_and_checks_it() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.starts_with(&format!("{old}\n\n[[ant]]\nname = \"dev-b\"")), "{text}");
     let loaded = load(&path).unwrap().ants;
-    let names: Vec<_> = loaded.iter().filter(|ant| !ant.builtin).map(|ant| ant.name.as_str()).collect();
+    let names: Vec<_> = loaded.iter().filter(|ant| ant.builtin.is_none()).map(|ant| ant.name.as_str()).collect();
     assert_eq!(
         names,
         ["dev-a", "dev-b"],

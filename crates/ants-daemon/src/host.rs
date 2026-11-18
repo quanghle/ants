@@ -141,8 +141,8 @@ pub fn machine_of(machine: Option<&Machine>, creds: Option<&Path>, otherwise: Ma
 
 /// The record of `machine` serving `ants`, the built-in messenger and sage left out.
 pub fn record(machine: &Machine, hostname: &str, ants: &[UserId]) -> MachineRecord {
-    let builtin = [UserId::messenger(), UserId::sage()];
-    let mut ants: Vec<UserId> = ants.iter().filter(|ant| !builtin.contains(ant)).cloned().collect();
+    let mut ants: Vec<UserId> =
+        ants.iter().filter(|ant| ants_proto::BuiltinAnt::from_id(ant.as_str()).is_none()).cloned().collect();
     ants.sort();
     ants.dedup();
     MachineRecord {

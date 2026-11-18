@@ -102,12 +102,12 @@ impl UserId {
 
     /// The router ant that takes requests without an explicit recipient.
     pub fn messenger() -> Self {
-        Self("messenger".to_owned())
+        BuiltinAnt::Messenger.id()
     }
 
     /// The reviewing ant every ant names as its sage unless its config names another or none.
     pub fn sage() -> Self {
-        Self("sage".to_owned())
+        BuiltinAnt::Sage.id()
     }
 
     /// The channel manager (`ants channel serve`), which posts in a channel what it changed there. A reserved name:
@@ -126,6 +126,39 @@ impl UserId {
     /// ([`Humans`]).
     pub fn is_human(&self) -> bool {
         self.0 == "human"
+    }
+}
+
+/// An ant provisioned by ants itself, with an ID unavailable to ordinary users and ants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinAnt {
+    Messenger,
+    Sage,
+}
+
+impl BuiltinAnt {
+    pub const ALL: [Self; 2] = [Self::Messenger, Self::Sage];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Messenger => "messenger",
+            Self::Sage => "sage",
+        }
+    }
+
+    const fn address(self) -> &'static str {
+        match self {
+            Self::Messenger => "system-messenger",
+            Self::Sage => "system-sage",
+        }
+    }
+
+    pub fn id(self) -> UserId {
+        UserId(self.address().to_owned())
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|builtin| builtin.address() == id)
     }
 }
 

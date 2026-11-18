@@ -69,7 +69,7 @@ pub(super) fn plan(
         .iter()
         .find(|a| a.name == *src)
         .with_context(|| format!("config {} lists no ant {src}", path.display()))?;
-    if ant.builtin {
+    if ant.builtin.is_some() {
         bail!("{src} is built in: it is not cloned");
     }
     let (base, user_home) = (path.parent().unwrap_or(Path::new(".")), config::home_dir()?);

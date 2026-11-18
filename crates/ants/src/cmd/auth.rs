@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use ants_proto::{
-    ChannelId, DEVICES_BUCKET, Destination, DeviceKey, IDENTITIES_BUCKET, JsDomain, Machine, Permissions, UserId,
+    BuiltinAnt, ChannelId, DEVICES_BUCKET, Destination, DeviceKey, IDENTITIES_BUCKET, JsDomain, Machine, Permissions,
+    UserId,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
@@ -30,6 +31,23 @@ pub(crate) enum AuthCommand {
     /// events, or with --assistant-of for an ant assisting a human. `human` always gets a human's. Give the hub's
     /// --js-domain, if it has one, so they work with it.
     User(UserArgs),
+    /// Issue credentials for a reserved built-in ant. Give the hub's --js-domain if it has one.
+    Builtin {
+        #[arg(value_enum)]
+        service: BuiltinService,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+        /// Credentials file (default: <dir>/system-<service>.creds).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Sign for an existing user public NKey and write just the JWT (default: stdout).
+        #[arg(long, conflicts_with = "store_key")]
+        public_key: Option<String>,
+        /// Keep the NKey seed in the OS credential store, never in the credentials file.
+        #[arg(long)]
+        store_key: bool,
+    },
     /// Issue enrollment credentials for a new ant: they may only ask for the ant's credentials, with
     /// `ants add NAME --enroll FILE` on its machine, and hear the answer `ants enroll approve` or `reject`
     /// gives here. They expire after --ttl, or never with --ttl 0.
@@ -318,11 +336,29 @@ pub(crate) enum AdminCommand {
     },
 }
 
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub(crate) enum BuiltinService {
+    Messenger,
+    Sage,
+}
+
+impl From<BuiltinService> for BuiltinAnt {
+    fn from(service: BuiltinService) -> Self {
+        match service {
+            BuiltinService::Messenger => Self::Messenger,
+            BuiltinService::Sage => Self::Sage,
+        }
+    }
+}
+
 pub(crate) async fn run(conn: &Connection<'_>, command: AuthCommand) -> Result<()> {
     let domain = conn.js_domain;
     match command {
         AuthCommand::Init { dir } => init(dir),
         AuthCommand::User(args) => issue_user(args, conn).await,
+        AuthCommand::Builtin { service, dir, out, public_key, store_key } => {
+            builtin_creds(conn, service.into(), dir, out, public_key.as_deref(), store_key).await
+        }
         AuthCommand::Enroll { ant, ttl, dir, out } => enrollment(&ant, ttl, dir, out),
         AuthCommand::Bootstrap { ttl, dir, out } => bootstrap(ttl, dir, out),
         AuthCommand::ChannelManager { dir, out, store_key } => {
@@ -379,6 +415,38 @@ pub(crate) async fn run(conn: &Connection<'_>, command: AuthCommand) -> Result<(
     }
 }
 
+async fn builtin_creds(
+    conn: &Connection<'_>,
+    service: BuiltinAnt,
+    dir: Option<PathBuf>,
+    out: Option<PathBuf>,
+    public_key: Option<&str>,
+    store_key: bool,
+) -> Result<()> {
+    let dir = team_dir(dir)?;
+    let domain = conn.js_domain;
+    if let Some(key) = public_key {
+        let jwt = auth::sign_builtin(&dir, service, domain, key)?;
+        if let Some(out) = out {
+            std::fs::write(&out, format!("{jwt}\n")).with_context(|| format!("writing {}", out.display()))?;
+            println!("{}", out.display());
+        } else {
+            println!("{jwt}");
+        }
+        return Ok(());
+    }
+    let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", service.id())));
+    if store_key {
+        let key = nkeys::KeyPair::new_user();
+        let jwt = auth::sign_builtin(&dir, service, domain, &key.public_key())?;
+        keys::issue_stored(&out, &jwt, &key, None, conn.nats).await?;
+    } else {
+        auth::issue_builtin(&dir, service, domain, &out)?;
+    }
+    println!("{}", out.display());
+    Ok(())
+}
+
 /// `ants auth user`.
 async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
     let UserArgs {
@@ -400,6 +468,7 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
         assistant_of,
     } = args;
     let domain = conn.js_domain;
+    auth::check_not_reserved(&user)?;
     let dir = team_dir(dir)?;
     if admin && auth::role(&user, human) != ants_proto::Role::Human {
         bail!("only a human's credentials carry the admin role: add --human");

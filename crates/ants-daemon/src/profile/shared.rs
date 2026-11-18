@@ -233,7 +233,7 @@ impl Shared {
     /// Note the shared settings of `ants`, as the machine's config lists them, the built-in ants left out: those
     /// the host connection creates missing records with, and tells drift by.
     pub fn listed(&self, ants: &[Ant]) {
-        let ants = || ants.iter().filter(|ant| !ant.builtin);
+        let ants = || ants.iter().filter(|ant| ant.builtin.is_none());
         let local = ants().map(|ant| (ant.name.clone(), local_fields(ant))).collect();
         let creds = ants().filter_map(|ant| Some((ant.name.clone(), ant.creds.clone()?))).collect();
         let mut state = self.0.state.locked();

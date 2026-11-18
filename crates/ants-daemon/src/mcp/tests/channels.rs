@@ -53,7 +53,7 @@ async fn manage_channel_asks_the_channel_manager_for_the_owner_s_changes() {
     let (ok, text) = call(&client, "manage_channel", serde_json::json!({})).await;
     assert!(ok && text.contains("#ops") && !text.contains("#dev"), "{text}");
     let (ok, text) = call(&client, "manage_channel", serde_json::json!({"channel": "#dev"})).await;
-    assert_eq!((ok, text.as_str()), (true, "#dev: members none; messenger messenger (default); owner lead."));
+    assert_eq!((ok, text.as_str()), (true, "#dev: members none; messenger system-messenger (default); owner lead."));
     assert!(admin.requests.locked().is_empty(), "showing asks nothing");
 
     let args = serde_json::json!({"channel": "#ops", "add": ["@dev-b", "dev-c"], "messenger": "dev-b"});

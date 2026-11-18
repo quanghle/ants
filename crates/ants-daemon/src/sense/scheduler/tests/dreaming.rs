@@ -443,9 +443,9 @@ fn an_ant_a_live_ant_names_as_its_sage_sends_its_own_sage_no_review_packet() {
     };
     let (lead, sage) = ("lead".parse::<UserId>().unwrap(), UserId::sage());
     let serving = |entries: &[ColonyEntry]| serving_sage(&lead, sage.clone(), entries, now);
-    let (own, served) = (listed("lead", "m1", Some("sage"), now), listed("sage", "m1", None, now));
+    let (own, served) = (listed("lead", "m1", Some(sage.as_str()), now), listed(sage.as_str(), "m1", None, now));
     assert_eq!(serving(&[own.clone(), served.clone()]), Some(sage.clone()), "no other ant names lead");
-    let other = listed("dev-b", "m1", Some("sage"), now);
+    let other = listed("dev-b", "m1", Some(sage.as_str()), now);
     assert_eq!(serving(&[other, own.clone(), served.clone()]), Some(sage.clone()));
 
     let elsewhere = listed("dev-a", "m2", Some("lead"), now);

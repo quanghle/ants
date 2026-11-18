@@ -56,7 +56,7 @@ impl Served {
             return None;
         }
         let mut vias: Vec<Via> = Vec::new();
-        for config in self.configs.iter().filter(|c| c.ant != UserId::messenger()) {
+        for config in self.configs.iter().filter(|c| c.presence.builtin != Some(ants_proto::BuiltinAnt::Messenger)) {
             match vias
                 .iter_mut()
                 .find(|v| v.nats == config.connection.nats_url && v.js_domain == config.connection.js_domain)

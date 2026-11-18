@@ -62,7 +62,7 @@ pub(crate) struct Ants<C: Subcommand> {
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
     /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient; otherwise the
-    /// human's assistant gets it while its grant stands, else the messenger. With --wait or --follow, print the
+    /// human's assistant gets it while its grant stands, else system-messenger. With --wait or --follow, print the
     /// replies to the CLI's human on the thread and mark them read.
     Ask(send::AskArgs),
     /// Print the replies to the CLI's human not read yet, including those that arrived while no CLI was running, and
@@ -158,7 +158,7 @@ pub(crate) enum Command {
     /// literal `meta = {"name": ..., "description": ..., "phases": [...]}`.
     #[command(subcommand)]
     Trail(TrailCommand),
-    /// Ask the config file's `[cli]` `summary_ant` (by default the messenger) for a digest of the threads with entries
+    /// Ask the config file's `[cli]` `summary_ant` (default: system-messenger) for a digest of threads with entries
     /// within --since: what finished, what is stuck, and what waits on the human. Kept nowhere; the request opens a
     /// thread of its own, left out of `ants thread list`, `ants inbox` and `ants dash`. Needs a human's credentials.
     Digest {

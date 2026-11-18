@@ -218,6 +218,9 @@ impl Finding {
         let domain = self.js_domain.as_ref().map_or_default(|d| format!(" --js-domain {d}"));
         let flags = |flag: &str, ids: &[UserId]| ids.iter().map(|id| format!(" --{flag} {id}")).collect::<String>();
         match &self.kind {
+            Kind::Ant if let Some(builtin) = ants_proto::BuiltinAnt::from_id(&self.name) => {
+                vec![format!("ants auth builtin {}{domain}", builtin.name())]
+            }
             Kind::Ant => vec![format!("ants auth user {}{domain}", self.name)],
             Kind::Human => {
                 let admin = if self.admin { " --admin" } else { "" };

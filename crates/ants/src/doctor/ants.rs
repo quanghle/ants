@@ -95,6 +95,9 @@ pub(super) async fn check_ants(ants: &[Ant], harnesses: &Harnesses, setup: &Setu
 pub(super) fn issue(ant: &Ant) -> String {
     let name = &ant.name;
     let domain = ant.js_domain.as_ref().map_or_default(|d| format!(" --js-domain {d}"));
+    if let Some(builtin) = ant.builtin {
+        return format!("ants auth builtin {}{domain} on the machine holding the team keys", builtin.name());
+    }
     format!("ants auth user {name}{domain} on the machine holding the team keys, or ants add {name}")
 }
 

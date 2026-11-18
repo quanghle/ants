@@ -260,6 +260,7 @@ impl Bus {
             client: &self.client,
             js: &self.js,
             ant: &self.dev,
+            builtin: None,
             reading: crate::stream::reading::Reading::Consumer,
             machine: "test-machine",
             pool,

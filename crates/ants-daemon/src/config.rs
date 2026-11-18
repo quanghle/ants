@@ -3,7 +3,7 @@
 //! ```toml
 //! harness = "claude"                # harness of every ant naming none and of the built-in ants; no default
 //! messenger = true                  # serve the built-in messenger (the default)
-//! sage = "sage"                     # the ant reviewing every ant naming none: the built-in sage (the default),
+//! sage = "system-sage"              # the ant reviewing every ant naming none: the built-in sage (the default),
 //!                                   # another ant, or "none" (crate::config::Sage)
 //! nats = "wss://hub.example/nats"   # default server for every ant
 //! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per ant
@@ -23,7 +23,7 @@
 //! auto_archive = "14d"              # archive threads idle this long for the CLI's human (default 0: never)
 //! summaries = "on-demand"           # or "ahead": also ask for TL;DRs of the threads shown (needs the next key)
 //! summary_daily_tokens = 50000      # most tokens a human's summaries spend a UTC day ahead of time (default 0)
-//! summary_ant = "messenger"         # the ant asked for TL;DRs and digests (default: the messenger)
+//! summary_ant = "system-messenger"  # the ant asked for TL;DRs and digests (default: the built-in messenger)
 //! inline_images = true              # draw image attachments in `ants chat` (default false: their lines only)
 //! theme = "auto"                    # the avatars' colours: "auto" (ask the terminal, the default), "dark" or "light"
 //! animate = true                    # move the avatars in `ants chat` with their ants' states (the default)
@@ -112,9 +112,8 @@
 //! ones skipped, define harnesses too: each holds `[harnesses.<name>]` tables alone, as in this file, a relative
 //! command being relative to `harnesses.d`. A name is defined once across this file and those.
 //!
-//! A file also serves the built-in messenger ([`builtin_messenger`]) unless it sets `messenger = false` or lists an
-//! ant named `messenger`; an empty file is a complete one. It serves the built-in sage ([`builtin_sage`]) while one of
-//! its other ants names `sage` as its sage, as each does by default, and it lists no ant named `sage`. On a server
+//! A file also serves `system-messenger` ([`builtin_messenger`]) unless it sets `messenger = false`. It serves
+//! `system-sage` ([`builtin_sage`]) while one of its other ants names it as its sage, as each does by default. On a server
 //! taking credentials, a machine serves a built-in ant only where its own are, leaving it to another machine
 //! otherwise ([`Loaded::elsewhere`]).
 
@@ -205,7 +204,7 @@ struct File {
     /// External provider definitions, which provider settings name.
     #[serde(default)]
     providers: BTreeMap<String, crate::provider::Definition>,
-    /// Whether to serve the built-in messenger, unless an ant is named `messenger`.
+    /// Whether to serve the built-in messenger.
     #[serde(default = "yes")]
     messenger: bool,
     /// The ant reviewing each of the file's ants that names none ([`Sage`]): the built-in sage when absent.
@@ -338,8 +337,8 @@ pub fn load(path: &Path) -> Result<Loaded> {
 
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
 /// directory, apply the top-level `harness`, `nats`, `js_domain` and `human`, check that names are unique, workdirs
-/// exist and every harness named is defined, add the built-in messenger unless `messenger = false` or an ant is
-/// named `messenger`, settle each ant's sage and add the built-in sage while an ant names it ([`sage::settle`]), leave
+/// exist and every harness named is defined, add the built-in messenger unless `messenger = false`,
+/// settle each ant's sage and add the built-in sage while an ant names it ([`sage::settle`]), leave
 /// to another machine the built-in ants it doesn't serve ([`builtins`]), and
 /// check the schedules, each named once and after no ant, with the top-level `nats`,
 /// `js_domain` and `timezone` where they set none.
@@ -360,24 +359,24 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     if file.ants.is_empty() && !file.messenger {
         bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
     }
-    if file.messenger && !file.ants.iter().any(|ant| ant.name == UserId::messenger()) {
-        file.ants.push(builtin_messenger(file.harness.as_deref(), home));
-    }
     let templates = templates(std::mem::take(&mut file.ant_templates), &harnesses, file.harness.is_some(), base, home)
         .with_context(|| format!("config {}", path.display()))?;
     let tables = ant_tables(text)?;
     let mut names = BTreeSet::new();
-    let mut ants = Vec::with_capacity(file.ants.len());
+    let mut ants = Vec::with_capacity(file.ants.len() + 2);
     for (i, mut ant) in std::mem::take(&mut file.ants).into_iter().enumerate() {
         if !names.insert(ant.name.clone()) {
             bail!("config {}: ant {} is listed twice", path.display(), ant.name);
         }
-        if !ant.builtin {
-            let table = tables.get(i).context("the [[ant]] entries read differently twice")?;
-            ant = from_template(ant, table, &templates, base, home)
-                .with_context(|| format!("config {}", path.display()))?;
-        }
+        let table = tables.get(i).context("the [[ant]] entries read differently twice")?;
+        ant =
+            from_template(ant, table, &templates, base, home).with_context(|| format!("config {}", path.display()))?;
         ants.push(settle_ant(ant, &file, (&harnesses, &providers), base, home, path)?);
+    }
+    if file.messenger {
+        let messenger = builtin_messenger(file.harness.as_deref(), home);
+        names.insert(messenger.name.clone());
+        ants.push(settle_ant(messenger, &file, (&harnesses, &providers), base, home, path)?);
     }
     let timezone = file
         .timezone

@@ -58,8 +58,8 @@ impl fmt::Display for Sage {
 }
 
 /// Settle who reviews each of `ants`, the file's top-level `sage` being `default`: mark the sages, the ants the
-/// others name, and return whether one of the others names the built-in sage while no ant of the name is listed, so
-/// that the file serves it. Fails where an ant's own setting names the ant itself, or names another while the ant is
+/// others name, and return whether one of the others names the built-in sage, so that the file serves it. Fails where
+/// an ant's own setting names the ant itself, or names another while the ant is
 /// a sage, which has no sage of its own.
 pub(super) fn settle(ants: &mut [Ant], default: &Sage) -> Result<bool> {
     for ant in ants.iter_mut() {
@@ -68,7 +68,7 @@ pub(super) fn settle(ants: &mut [Ant], default: &Sage) -> Result<bool> {
             bail!("ant {}: sage names the ant itself", ant.name);
         }
     }
-    let reviewed = || ants.iter().filter(|ant| !ant.builtin);
+    let reviewed = || ants.iter().filter(|ant| ant.builtin.is_none());
     let mut sages: BTreeSet<UserId> = reviewed()
         .filter_map(|ant| match &ant.sage {
             Some(Sage::Ant(sage)) => Some(sage.clone()),
@@ -93,8 +93,7 @@ pub(super) fn settle(ants: &mut [Ant], default: &Sage) -> Result<bool> {
             );
         }
     }
-    let sage = UserId::sage();
-    Ok(sages.contains(&sage) && !ants.iter().any(|ant| ant.name == sage))
+    Ok(sages.contains(&UserId::sage()))
 }
 
 #[cfg(test)]
@@ -134,44 +133,55 @@ mod tests {
         let text = format!("{}{}", ant("dev-a", ""), ant("dev-b", ""));
         assert_eq!(
             reviewers(&text),
-            pairs(&[("dev-a", Some("sage")), ("dev-b", Some("sage")), ("messenger", None), ("sage", None)]),
+            pairs(&[
+                ("dev-a", Some("system-sage")),
+                ("dev-b", Some("system-sage")),
+                ("system-messenger", None),
+                ("system-sage", None)
+            ]),
             "the built-in ants have no sage"
         );
         let ants = load(&text).unwrap().ants;
         let sage = ants.iter().find(|ant| ant.name == UserId::sage()).unwrap();
-        assert!(sage.builtin && sage.is_sage);
+        assert_eq!(sage.builtin, Some(ants_proto::BuiltinAnt::Sage));
+        assert!(sage.is_sage);
         assert_eq!(sage.harness.as_deref(), Some("copilot"), "the file's top-level harness");
 
         let home = ants_test_support::scratch_dir("sage-home").canonicalize().unwrap();
         let config = builtin_sage(Some("copilot"), &home).into_config("nats://unused", &Harnesses::builtin()).unwrap();
-        assert!(config.presence.defer_to_others, "served only while holding the sage's colony entry");
-        assert_eq!(config.harness.workdir, home.join(".ants/agents/sage").canonicalize().unwrap());
+        assert_eq!(config.presence.builtin, Some(ants_proto::BuiltinAnt::Sage));
+        assert_eq!(config.harness.workdir, home.join(".ants/agents/system-sage").canonicalize().unwrap());
         assert_eq!(config.policy.sage, None);
         std::fs::remove_dir_all(&home).unwrap();
 
         let names: Vec<String> = load("").unwrap().ants.iter().map(|ant| ant.name.to_string()).collect();
-        assert_eq!(names, ["messenger"], "the built-in messenger names no sage");
+        assert_eq!(names, ["system-messenger"], "the built-in messenger names no sage");
     }
 
     #[test]
-    fn the_file_serves_no_builtin_sage_while_no_ant_names_it_or_it_lists_one() {
+    fn the_file_serves_the_builtin_sage_only_while_an_ant_names_it() {
         let off = format!("sage = \"none\"\n{}{}", ant("dev-a", ""), ant("dev-b", "sage = \"none\""));
-        assert_eq!(reviewers(&off), pairs(&[("dev-a", None), ("dev-b", None), ("messenger", None)]));
+        assert_eq!(reviewers(&off), pairs(&[("dev-a", None), ("dev-b", None), ("system-messenger", None)]));
 
         let each_off = format!("{}{}", ant("dev-a", "sage = \"none\""), ant("dev-b", "sage = \"none\""));
-        assert_eq!(reviewers(&each_off), pairs(&[("dev-a", None), ("dev-b", None), ("messenger", None)]));
+        assert_eq!(reviewers(&each_off), pairs(&[("dev-a", None), ("dev-b", None), ("system-messenger", None)]));
 
-        let one_on = format!("sage = \"none\"\n{}{}", ant("dev-a", ""), ant("dev-b", "sage = \"sage\""));
+        let one_on = format!("sage = \"none\"\n{}{}", ant("dev-a", ""), ant("dev-b", "sage = \"system-sage\""));
         assert_eq!(
             reviewers(&one_on),
-            pairs(&[("dev-a", None), ("dev-b", Some("sage")), ("messenger", None), ("sage", None)])
+            pairs(&[
+                ("dev-a", None),
+                ("dev-b", Some("system-sage")),
+                ("system-messenger", None),
+                ("system-sage", None)
+            ])
         );
 
-        let listed = format!("{}{}", ant("dev-a", ""), ant("sage", "harness = \"claude\""));
-        assert_eq!(reviewers(&listed), pairs(&[("dev-a", Some("sage")), ("sage", None), ("messenger", None)]));
+        let listed = format!("sage = \"sage\"\n{}{}", ant("dev-a", ""), ant("sage", "harness = \"claude\""));
+        assert_eq!(reviewers(&listed), pairs(&[("dev-a", Some("sage")), ("sage", None), ("system-messenger", None)]));
         let ants = load(&listed).unwrap().ants;
-        let sage = ants.iter().find(|ant| ant.name == UserId::sage()).unwrap();
-        assert_eq!((sage.builtin, sage.harness.as_deref()), (false, Some("claude")), "the listed sage, alone");
+        let sage = ants.iter().find(|ant| ant.name.as_str() == "sage").unwrap();
+        assert_eq!((sage.builtin, sage.harness.as_deref()), (None, Some("claude")), "an ordinary ant can be assigned");
     }
 
     #[test]
@@ -181,20 +191,20 @@ mod tests {
             reviewers(&other),
             pairs(&[
                 ("dev-a", Some("lead")),
-                ("dev-b", Some("sage")),
+                ("dev-b", Some("system-sage")),
                 ("lead", None),
-                ("messenger", None),
-                ("sage", None)
+                ("system-messenger", None),
+                ("system-sage", None)
             ])
         );
 
         let top = format!("sage = \"lead\"\n{}{}", ant("dev-a", ""), ant("lead", ""));
-        assert_eq!(reviewers(&top), pairs(&[("dev-a", Some("lead")), ("lead", None), ("messenger", None)]));
+        assert_eq!(reviewers(&top), pairs(&[("dev-a", Some("lead")), ("lead", None), ("system-messenger", None)]));
 
         let elsewhere = ant("dev-a", "sage = \"reviewer\"");
         assert_eq!(
             reviewers(&elsewhere),
-            pairs(&[("dev-a", Some("reviewer")), ("messenger", None)]),
+            pairs(&[("dev-a", Some("reviewer")), ("system-messenger", None)]),
             "a sage the file does not list may be served on another machine"
         );
 
@@ -204,11 +214,11 @@ mod tests {
         let crossed = format!("sage = \"lead\"\n{}{}", ant("dev-a", ""), ant("lead", "sage = \"dev-a\""));
         assert_eq!(
             reviewers(&crossed),
-            pairs(&[("dev-a", None), ("lead", Some("dev-a")), ("messenger", None)]),
+            pairs(&[("dev-a", None), ("lead", Some("dev-a")), ("system-messenger", None)]),
             "lead's own setting makes dev-a a sage, over the file's naming lead"
         );
         let off = format!("{}{}", ant("dev-a", "sage = \"lead\""), ant("lead", "sage = \"none\""));
-        assert_eq!(reviewers(&off), pairs(&[("dev-a", Some("lead")), ("lead", None), ("messenger", None)]));
+        assert_eq!(reviewers(&off), pairs(&[("dev-a", Some("lead")), ("lead", None), ("system-messenger", None)]));
     }
 
     #[test]

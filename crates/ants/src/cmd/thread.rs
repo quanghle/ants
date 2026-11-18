@@ -118,7 +118,7 @@ pub(crate) enum ThreadCommand {
         clear: bool,
     },
     /// Print a thread's TL;DR: the one kept for every human while no entry came after it, else one asked of the
-    /// config file's `[cli]` `summary_ant` (by default the messenger) and kept. The request opens a thread of its own,
+    /// config file's `[cli]` `summary_ant` (default: system-messenger) and kept. The request opens a thread of its own,
     /// left out of `ants thread list`, `ants inbox` and `ants dash`.
     Tldr {
         /// The thread: its id, a unique start of one, or `last`.

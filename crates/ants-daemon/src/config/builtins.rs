@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ants_proto::UserId;
+use ants_proto::{BuiltinAnt, UserId};
 use anyhow::{Result, bail};
 
 use super::ant::builtin_creds;
@@ -24,7 +24,7 @@ pub struct Elsewhere {
 /// Where the credentials of each built-in ant belong, which the machine serving it or not depends on.
 pub fn creds_files() -> Result<Vec<PathBuf>> {
     let home = home_dir()?;
-    Ok([UserId::messenger(), UserId::sage()].iter().map(|name| builtin_creds(name, &home)).collect())
+    Ok(BuiltinAnt::ALL.into_iter().map(|builtin| builtin_creds(&builtin.id(), &home)).collect())
 }
 
 /// Whether the server takes credentials, as the machine's `host` credentials or those of one of `ants` tell: only
@@ -40,7 +40,7 @@ pub(super) fn leave(ants: &mut Vec<Ant>, host: &HostSettings, home: &Path) -> Ve
     if !takes_credentials(ants, host) {
         return Vec::new();
     }
-    ants.extract_if(.., |ant| ant.builtin && ant.creds.is_none())
+    ants.extract_if(.., |ant| ant.builtin.is_some() && ant.creds.is_none())
         .map(|ant| Elsewhere { creds: builtin_creds(&ant.name, home), ant })
         .collect()
 }
@@ -62,7 +62,7 @@ impl Loaded {
             }
             return Ok(());
         }
-        let mut listed = self.ants.iter_mut().filter(|ant| !ant.builtin);
+        let mut listed = self.ants.iter_mut().filter(|ant| ant.builtin.is_none());
         match (listed.next(), listed.count()) {
             (Some(ant), 0) => {
                 if ant.creds.is_none() {
@@ -138,7 +138,7 @@ mod tests {
         let open = home.load(&bare);
         assert_eq!(
             names(&open.ants),
-            ["dev-b", "messenger", "sage"],
+            ["dev-b", "system-messenger", "system-sage"],
             "without credentials anywhere all connect as no one"
         );
         assert!(open.elsewhere.is_empty());
@@ -146,32 +146,32 @@ mod tests {
         let leaf = ant("dev-b", "creds = \"~/.config/ants/auth/dev-b.creds\"");
         let elsewhere = home.load(&leaf);
         assert_eq!(names(&elsewhere.ants), ["dev-b"], "dev-b's credentials tell the server takes some");
-        assert_eq!(left(&elsewhere), ["messenger", "sage"]);
+        assert_eq!(left(&elsewhere), ["system-messenger", "system-sage"]);
         let creds: Vec<&Path> = elsewhere.elsewhere.iter().map(|left| left.creds.as_path()).collect();
-        assert_eq!(creds, [home.auth.join("messenger.creds"), home.auth.join("sage.creds")]);
+        assert_eq!(creds, [home.auth.join("system-messenger.creds"), home.auth.join("system-sage.creds")]);
         assert_eq!(elsewhere.ants[0].reviewed_by(), Some(UserId::sage()), "dev-b names the sage served elsewhere");
         assert!(elsewhere.elsewhere[1].ant.is_sage, "the sage as the machine would serve it");
 
-        home.issue("messenger");
+        home.issue("system-messenger");
         let messenger = home.load(&bare);
-        assert_eq!(names(&messenger.ants), ["dev-b", "messenger"], "so do the built-in messenger's");
-        assert_eq!(messenger.ants[1].creds, Some(home.auth.join("messenger.creds")));
-        assert_eq!(left(&messenger), ["sage"]);
-        std::fs::remove_file(home.auth.join("messenger.creds")).unwrap();
+        assert_eq!(names(&messenger.ants), ["dev-b", "system-messenger"], "so do the built-in messenger's");
+        assert_eq!(messenger.ants[1].creds, Some(home.auth.join("system-messenger.creds")));
+        assert_eq!(left(&messenger), ["system-sage"]);
+        std::fs::remove_file(home.auth.join("system-messenger.creds")).unwrap();
         home.issue("host");
         assert_eq!(names(&home.load(&bare).ants), ["dev-b"], "and the machine's host credentials");
         let alone = home.load("");
-        assert_eq!((names(&alone.ants), left(&alone)), (vec![], vec!["messenger".to_owned()]), "nothing served here");
+        assert_eq!((names(&alone.ants), left(&alone)), (vec![], vec!["system-messenger".to_owned()]));
 
-        home.issue("sage");
+        home.issue("system-sage");
         let served = home.load(&leaf);
-        assert_eq!(names(&served.ants), ["dev-b", "sage"]);
-        assert_eq!(served.ants[1].creds, Some(home.auth.join("sage.creds")));
+        assert_eq!(names(&served.ants), ["dev-b", "system-sage"]);
+        assert_eq!(served.ants[1].creds, Some(home.auth.join("system-sage.creds")));
         let listed = home.load(&format!("{leaf}{}", ant("messenger", "")));
-        assert_eq!(names(&listed.ants), ["dev-b", "messenger", "sage"], "a listed messenger is no built-in one");
-        assert!(listed.elsewhere.is_empty());
+        assert_eq!(names(&listed.ants), ["dev-b", "messenger", "system-sage"], "a listed messenger is ordinary");
+        assert_eq!(left(&listed), ["system-messenger"]);
         let off = home.load(&format!("messenger = false\n{leaf}"));
-        assert_eq!((names(&off.ants), left(&off)), (vec!["dev-b".to_owned(), "sage".to_owned()], vec![]));
+        assert_eq!((names(&off.ants), left(&off)), (vec!["dev-b".to_owned(), "system-sage".to_owned()], vec![]));
     }
 
     #[test]
@@ -186,21 +186,24 @@ mod tests {
 
         let one = credited(&bare, None).unwrap();
         assert_eq!(names(&one.ants), ["dev-a"], "with them the server takes credentials, the built-in ants none here");
-        assert_eq!((one.ants[0].creds.as_deref(), left(&one)), (Some(creds), vec!["messenger".into(), "sage".into()]));
+        assert_eq!(
+            (one.ants[0].creds.as_deref(), left(&one)),
+            (Some(creds), vec!["system-messenger".into(), "system-sage".into()])
+        );
 
-        let named = credited(&bare, Some("sage")).unwrap();
+        let named = credited(&bare, Some("system-sage")).unwrap();
         let sage = named.ants.iter().find(|ant| ant.name == UserId::sage()).unwrap();
         assert_eq!(sage.creds.as_deref(), Some(creds), "the sage named");
         let leaf = ant("dev-a", "creds = \"~/.config/ants/auth/dev-a.creds\"");
-        let named = credited(&leaf, Some("sage")).unwrap();
-        assert_eq!(names(&named.ants), ["dev-a", "sage"]);
+        let named = credited(&leaf, Some("system-sage")).unwrap();
+        assert_eq!(names(&named.ants), ["dev-a", "system-sage"]);
         assert_eq!(named.ants[1].creds.as_deref(), Some(creds), "the sage left to another machine, served here");
-        assert_eq!(left(&named), ["messenger"]);
+        assert_eq!(left(&named), ["system-messenger"]);
         let own = credited(&leaf, None).unwrap();
         assert_eq!(own.ants[0].creds, Some(home.auth.join("dev-a.creds")), "the file's own come first");
         let named = credited(&two, Some("dev-b")).unwrap();
         assert_eq!((named.ants[0].creds.as_deref(), named.ants[1].creds.as_deref()), (None, Some(creds)));
-        let messenger = credited("", Some("messenger")).unwrap();
+        let messenger = credited("", Some("system-messenger")).unwrap();
         assert_eq!(messenger.ants[0].creds.as_deref(), Some(creds), "the messenger named");
 
         let e = format!("{:#}", credited(&two, None).unwrap_err());

@@ -27,7 +27,7 @@ fn no_user_device_or_enrollment_takes_a_reserved_name() {
     init(&team).unwrap();
     issue_bootstrap(&team, Duration::ZERO, &dir.join("bootstrap.creds")).unwrap();
     let key = KeyPair::new_user().public_key();
-    for name in ["bootstrap", "signer", "channel-manager", "revoked"] {
+    for name in ["bootstrap", "signer", "channel-manager", "revoked", "system-messenger", "system-sage"] {
         let (user, out) = (p(name), dir.join(format!("{name}.creds")));
         for role in [Role::Human, Role::Ant] {
             let err = issue(&team, &user, role, None, &out).unwrap_err().to_string();
@@ -42,6 +42,26 @@ fn no_user_device_or_enrollment_takes_a_reserved_name() {
     }
     let issued = revoke::issued(&team).unwrap();
     assert_eq!(issued.iter().map(|i| i.kind).collect::<Vec<_>>(), [Kind::Bootstrap], "only the bootstrap credentials");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn builtin_credentials_are_issued_as_ants_and_can_be_reissued_only_by_service_name() {
+    let dir = ants_test_support::scratch_dir("builtin-creds");
+    let team = dir.join("auth");
+    init(&team).unwrap();
+    let domain = "hub".parse().unwrap();
+    for builtin in ants_proto::BuiltinAnt::ALL {
+        let out = dir.join(format!("{}.creds", builtin.id()));
+        issue_builtin(&team, builtin, Some(&domain), &out).unwrap();
+        let finding = ants_daemon::secrets::creds::check(&out).unwrap();
+        assert_eq!(finding.name, builtin.id().as_str());
+        assert_eq!(finding.kind, ants_daemon::secrets::creds::Kind::Ant);
+        assert_eq!(finding.renew(), [format!("ants auth builtin {} --js-domain hub", builtin.name())]);
+    }
+    for name in ["messenger", "sage"] {
+        issue(&team, &p(name), Role::Ant, None, &dir.join(format!("{name}.creds"))).unwrap();
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }
 

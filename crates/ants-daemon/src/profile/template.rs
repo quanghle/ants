@@ -341,6 +341,9 @@ impl AntTemplate {
         canonical: impl Fn(&Path) -> Result<PathBuf>,
     ) -> Result<Ant> {
         let t = &self.name;
+        if ants_proto::BuiltinAnt::from_id(name.as_str()).is_some() {
+            bail!("{name} is reserved for a built-in ant");
+        }
         if !self.name_fits(manager, name) {
             bail!(
                 "name {name} does not fit name_pattern {:?} of template {t} for manager {manager}",
@@ -630,6 +633,9 @@ mod tests {
         assert!(!t.name_fits(&id("lead"), &id("other-rust")));
         assert!(!t.name_fits(&id("lead"), &id("leadx")));
         assert!(glob("a*b*c", "aXbYc") && glob("*", "") && !glob("a*b", "ab-") && glob("a**", "a"));
+        let all_names = AntTemplate { name_pattern: "*".to_owned(), ..t };
+        let err = all_names.resolve(&id("lead"), &UserId::messenger(), &Request::default()).unwrap_err();
+        assert!(err.to_string().contains("reserved for a built-in ant"), "{err:#}");
     }
 
     #[test]

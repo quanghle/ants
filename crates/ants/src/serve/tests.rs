@@ -56,17 +56,23 @@ fn the_file_names_the_machine_as_the_host_connection_would() {
     };
     let listed = |text: &str, line: &str| listing(text, line).unwrap();
     let top = "harness = \"copilot\"\nmachine = \"dev-vm1\"\n";
-    assert_eq!(listed(top, "--ant messenger").machine, Some("dev-vm1".parse().unwrap()));
+    assert_eq!(listed(top, "--ant system-messenger").machine, Some("dev-vm1".parse().unwrap()));
     assert_eq!(listed("harness = \"copilot\"\nmachine = \"Dev VM\"\n", "").machine, Some("gen-4f2a".parse().unwrap()));
     let team = dir.join("team");
     crate::auth::init(&team).unwrap();
     crate::auth::issue_host(&team, &"m1".parse().unwrap(), None, &dir.join("h.creds")).unwrap();
     let with_creds = format!("{top}[host]\ncreds = \"h.creds\"\n");
-    if !builtin_creds_here("messenger") {
+    if !builtin_creds_here("system-messenger") {
         let err = format!("{:#}", listing(&with_creds, "").unwrap_err());
-        assert!(err.contains("nothing to serve on this machine: no credentials of the built-in messenger at"), "{err}");
-        let err = format!("{:#}", listing(&with_creds, "--ant messenger").unwrap_err());
-        assert!(err.contains("`ants auth user messenger`") && err.contains("or serve the messenger where"), "{err}");
+        assert!(
+            err.contains("nothing to serve on this machine: no credentials of the built-in system-messenger at"),
+            "{err}"
+        );
+        let err = format!("{:#}", listing(&with_creds, "--ant system-messenger").unwrap_err());
+        assert!(
+            err.contains("`ants auth builtin messenger`") && err.contains("or serve the system-messenger where"),
+            "{err}"
+        );
     }
     let with_creds = format!("{with_creds}[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n");
     let whole = listed(&with_creds, "");
@@ -179,14 +185,14 @@ fn flags_override_the_picked_ant() {
     assert_eq!(pick(all.clone(), &[], &args(""), path).unwrap(), all);
     let err = pick(all.clone(), &[], &args("--ant dev-c"), path).unwrap_err().to_string();
     assert!(err.contains("ant dev-c is not in config.toml"), "{err}");
-    let err = pick(all.clone(), &[], &args("--ant sage"), path).unwrap_err().to_string();
-    assert!(err.contains("ant sage is not in config.toml"), "{err}");
-    let sage = Ant { builtin: true, is_sage: true, ..Ant::new(UserId::sage(), here()) };
-    let left = [Elsewhere { ant: sage, creds: PathBuf::from("auth/sage.creds") }];
-    let err = pick(all.clone(), &left, &args("--ant sage"), path).unwrap_err().to_string();
-    assert!(err.contains("no credentials of the built-in sage at auth/sage.creds"), "{err}");
+    let err = pick(all.clone(), &[], &args("--ant system-sage"), path).unwrap_err().to_string();
+    assert!(err.contains("ant system-sage is not in config.toml"), "{err}");
+    let sage = Ant { builtin: Some(ants_proto::BuiltinAnt::Sage), is_sage: true, ..Ant::new(UserId::sage(), here()) };
+    let left = [Elsewhere { ant: sage, creds: PathBuf::from("auth/system-sage.creds") }];
+    let err = pick(all.clone(), &left, &args("--ant system-sage"), path).unwrap_err().to_string();
+    assert!(err.contains("no credentials of the built-in system-sage at auth/system-sage.creds"), "{err}");
     assert!(
-        err.contains("`ants auth user sage`") && err.contains("pass them with --creds, or serve the sage"),
+        err.contains("`ants auth builtin sage`") && err.contains("pass them with --creds, or serve the system-sage"),
         "{err}"
     );
     assert_eq!(pick(all.clone(), &left, &args(""), path).unwrap(), all, "the others serve all the same");
@@ -233,7 +239,7 @@ fn creds_given_stand_for_the_one_ant_named_or_listed_never_a_builtin_ant_unnamed
     assert_eq!(creds(&lone)[0], ("dev-a".to_owned(), Some(cli.clone())), "the file's one ant, with the sage it names");
     let builtin_here = |name: &str| builtin_creds_here(name).then(|| name.to_owned());
     let served: Vec<String> = creds(&lone).into_iter().skip(1).map(|(name, _)| name).collect();
-    let expected: Vec<String> = ["messenger", "sage"].into_iter().filter_map(builtin_here).collect();
+    let expected: Vec<String> = ["system-messenger", "system-sage"].into_iter().filter_map(builtin_here).collect();
     assert_eq!(served, expected, "the built-in ants are left to another machine but where their own are");
 
     let two = format!("{}\n{}", dev("dev-a", ""), dev("dev-b", ""));
@@ -243,14 +249,20 @@ fn creds_given_stand_for_the_one_ant_named_or_listed_never_a_builtin_ant_unnamed
     assert_eq!(creds(&picked), [("dev-b".to_owned(), Some(cli.clone()))]);
     let own = listing(&dev("dev-a", "creds = \"own.creds\""), "--ant dev-a").unwrap();
     assert_eq!(creds(&own), [("dev-a".to_owned(), Some(dir.join("own.creds")))], "the file's own come first");
-    if !builtin_creds_here("sage") {
-        let sage = listing(&dev("dev-a", "creds = \"own.creds\""), "--ant sage").unwrap();
-        assert_eq!(creds(&sage), [("sage".to_owned(), Some(cli.clone()))], "the sage left elsewhere, served here");
+    if !builtin_creds_here("system-sage") {
+        let sage = listing(&dev("dev-a", "creds = \"own.creds\""), "--ant system-sage").unwrap();
+        assert_eq!(
+            creds(&sage),
+            [("system-sage".to_owned(), Some(cli.clone()))],
+            "the sage left elsewhere, served here"
+        );
     }
     let err = format!("{:#}", listing("", "").unwrap_err());
     assert!(err.contains("the file lists no [[ant]]"), "{err}");
     let flags = ants(&args("--ant dev-c"), &dir.join("none.toml"), "box", Some(&cli)).unwrap();
     assert_eq!(creds(&flags), [("dev-c".to_owned(), Some(cli.clone()))], "an ant described by flags");
+    let flags = ants(&args("--ant system-messenger"), &dir.join("none.toml"), "box", Some(&cli)).unwrap_err();
+    assert!(flags.to_string().contains("reserved for a built-in ant"), "{flags:#}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

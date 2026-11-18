@@ -47,7 +47,7 @@ pub(crate) enum ChannelCommand {
         /// Ant that triages the posts of humans that @mention nobody.
         #[arg(long, value_parser = channel::parse_ant, conflicts_with = "default_messenger", add = ArgValueCandidates::new(completions::ants))]
         messenger: Option<UserId>,
-        /// Hand the triage back to the default messenger, the ant `messenger` (triage stays on).
+        /// Hand triage back to `system-messenger` (triage stays on).
         #[arg(long)]
         default_messenger: bool,
         /// Ant that owns the channel: it changes the members and the messenger through `ants channel serve`.

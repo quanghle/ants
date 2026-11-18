@@ -232,29 +232,6 @@ fn instructions(ant: &UserId, hub: &Hub, assisting: Option<&UserId>, provider: O
              as it asked; the tools stop the moment {human} withdraws its grant."
         );
     }
-    if *ant == UserId::messenger() {
-        text.push_str(
-            " As the messenger, answer each request by routing it: pick the capability it needs from list_ants, \
-             route it there and reply with the answer. Split a request that needs several capabilities into one \
-             route per capability. When no ant has what it needs, say so instead of answering it yourself. When a \
-             human's request starts a thread, suggest a short title for it with suggest_thread_title.",
-        );
-    }
-    if *ant == UserId::sage() {
-        text.push_str(
-            " As the sage, review the ants that name it as their sage: a review arrives as a message from the ant \
-             reviewed, on a thread of its own, with the work since its last dream and the ant's identity. Check what \
-             it carries against its evidence and answer with one reply holding findings in the JSON block the review \
-             asks for, each citing that evidence and suggesting an action, for the ant to verify and act on; an empty \
-             list when nothing is worth its time. Judge the work against the identity and the identity against the \
-             work: a finding of kind persona, self_model or relationship cites the ant's own threads and builds on \
-             the persona the ant has, never on a house style. A review also shows the sage's earlier findings for \
-             the ant and what became of them: hold the new work against them, and answer one that did not hold with \
-             a finding of kind follow_up naming its id in \"follows\". Only read and suggest: change nothing and \
-             message no one, leaving the ant's memories to the ant, and read code only in the checkouts made for the \
-             review, of the commits it names.",
-        );
-    }
     text
 }
 

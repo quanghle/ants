@@ -166,7 +166,7 @@ fn unlist(path: &Path, host_creds: &Path, ant: &UserId) -> Result<Unlisted> {
         let key = key_of(&creds, ant)?;
         return Ok(Unlisted { listed: false, creds: Some(creds), key: Some(key), home: default_home()? });
     };
-    if entry.builtin {
+    if entry.builtin.is_some() {
         bail!("{ant} is built in: it is turned off in the config, not retired");
     }
     let key = entry.creds.as_deref().map(|creds| key_of(creds, ant)).transpose()?;

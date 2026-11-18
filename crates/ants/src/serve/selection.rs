@@ -291,6 +291,9 @@ pub struct Listed {
 pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str, creds: Option<&Path>) -> Result<Listed> {
     match source(args, default_path)? {
         Source::Flags(name) => {
+            if ants_proto::BuiltinAnt::from_id(name.as_str()).is_some() {
+                bail!("{name} is reserved for a built-in ant; give --config to select it from a config file");
+            }
             let mut ant = args.options.apply(Ant::new(name, std::env::current_dir()?));
             if ant.creds.is_none() {
                 ant.creds = creds.map(Path::to_path_buf);
@@ -378,9 +381,10 @@ fn tell_elsewhere(left: &[Elsewhere]) {
 
 /// Why the machine leaves the built-in ant `left` to another, and how to serve it here.
 fn elsewhere(left: &Elsewhere) -> String {
+    let service = left.ant.builtin.expect("only built-ins are left elsewhere").name();
     format!(
         "no credentials of the built-in {name} at {}, which the server's authentication needs; to serve it here, \
-         issue them with `ants auth user {name}` on the machine holding the team keys and copy them there",
+         issue them with `ants auth builtin {service}` on the machine holding the team keys and copy them there",
         left.creds.display(),
         name = left.ant.name,
     )

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_proto::{JsDomain, UserId};
+use ants_proto::{BuiltinAnt, JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
@@ -140,7 +140,7 @@ pub struct Ant {
     pub paused: bool,
     /// The built-in messenger or sage, served only while no other daemon lists an ant of its name in the colony.
     #[serde(skip)]
-    pub builtin: bool,
+    pub builtin: Option<BuiltinAnt>,
     /// The file's top-level `sage`.
     #[serde(skip)]
     pub file_sage: Sage,
@@ -254,7 +254,7 @@ impl Ant {
             publish: Publish::Off,
             sage: None,
             paused: false,
-            builtin: false,
+            builtin: None,
             file_sage: Sage::default(),
             is_sage: false,
             pool: None,
@@ -284,7 +284,7 @@ impl Ant {
         model_settings.validate(&harness).with_context(|| format!("ant {}", self.name))?;
         let fallbacks = fallbacks(self.template.is_some(), &self.fallback, &harness, &model_settings, harnesses)
             .with_context(|| format!("ant {}", self.name))?;
-        if self.builtin {
+        if self.builtin.is_some() {
             std::fs::create_dir_all(&self.workdir)
                 .with_context(|| format!("ant {}: creating workdir {}", self.name, self.workdir.display()))?;
         }
@@ -305,7 +305,7 @@ impl Ant {
                 whoami: self.whoami,
                 capabilities: self.capabilities,
                 machine: self.machine,
-                defer_to_others: self.builtin,
+                builtin: self.builtin,
             },
             harness: HarnessSettings {
                 harness,
@@ -362,6 +362,9 @@ impl Ant {
     /// The escalation chain names other ants, each once, the stand-in is not the ant, and the spend warning comes short
     /// of the caps.
     pub(super) fn validate(&self) -> Result<()> {
+        if BuiltinAnt::from_id(self.name.as_str()) != self.builtin {
+            bail!("ant {}: reserved for a built-in ant", self.name);
+        }
         if self.spend_warn_percent >= 100 {
             bail!("ant {}: spend_warn_percent must be below 100 (0 for no warning)", self.name);
         }
@@ -384,7 +387,7 @@ impl Ant {
     /// names the ant itself, and for a sage, which has none of its own: a built-in ant, or one another ant of the file
     /// names as its sage.
     pub fn reviewed_by(&self) -> Option<UserId> {
-        if self.builtin || self.is_sage {
+        if self.builtin.is_some() || self.is_sage {
             return None;
         }
         match self.sage.as_ref().unwrap_or(&self.file_sage) {
@@ -408,21 +411,20 @@ impl Ant {
     }
 }
 
-/// The ant a file serves unless it sets `messenger = false` or lists one named `messenger`: the file's `harness`, which
-/// it needs, with its default model, reasoning effort and context, and otherwise the settings of an ant that sets
-/// nothing. Its home and workdir are `~/.ants/agents/messenger`, created when it starts, and its credentials
-/// `~/.config/ants/auth/messenger.creds` (where `ants auth user messenger` writes them) if that file exists; on a
+/// The ant a file serves unless it sets `messenger = false`: the file's `harness`, with its default model, reasoning
+/// effort and context, and otherwise the settings of an ant that sets nothing. Its home and workdir are
+/// `~/.ants/agents/system-messenger`, created when it starts, and its credentials
+/// `~/.config/ants/auth/system-messenger.creds` (from `ants auth builtin messenger`) if that file exists; on a
 /// server taking credentials, a machine without that file leaves it to another ([`super::builtins`]).
 pub fn builtin_messenger(harness: Option<&str>, home: &Path) -> Ant {
-    builtin(UserId::messenger(), harness, home)
+    builtin(BuiltinAnt::Messenger, harness, home)
 }
 
-/// The ant a file serves while one of its ants names `sage` as its sage and it lists no ant of the name
-/// ([`super::sage::settle`]); set up, and left to another machine, as the built-in messenger is
-/// ([`builtin_messenger`]), in `~/.ants/agents/sage`, with `~/.config/ants/auth/sage.creds`. Its shared settings, such
-/// as its model and reasoning effort, change as any ant's.
+/// The ant a file serves while one of its ants names `system-sage` as its sage ([`super::sage::settle`]); set up,
+/// and left to another machine, as the built-in messenger is ([`builtin_messenger`]), with its own home and
+/// credentials. Its shared settings, such as its model and reasoning effort, change as any ant's.
 pub fn builtin_sage(harness: Option<&str>, home: &Path) -> Ant {
-    builtin(UserId::sage(), harness, home)
+    builtin(BuiltinAnt::Sage, harness, home)
 }
 
 /// Where the credentials of the built-in ant `name` belong: `~/.config/ants/auth/<name>.creds`, `home` standing for
@@ -431,14 +433,15 @@ pub(super) fn builtin_creds(name: &UserId, home: &Path) -> PathBuf {
     home.join(".config/ants/auth").join(format!("{name}.creds"))
 }
 
-fn builtin(name: UserId, harness: Option<&str>, home: &Path) -> Ant {
+fn builtin(kind: BuiltinAnt, harness: Option<&str>, home: &Path) -> Ant {
+    let name = kind.id();
     let dir = super::default_home(home, name.as_str());
     let creds = builtin_creds(&name, home);
     Ant {
         harness: harness.map(str::to_owned),
         home: Some(dir.clone()),
         creds: creds.is_file().then_some(creds),
-        builtin: true,
+        builtin: Some(kind),
         ..Ant::new(name, dir)
     }
 }

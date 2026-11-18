@@ -7,7 +7,8 @@ use std::path::Path;
 use ants_daemon::config::registration::{GithubAccount, Grant};
 use ants_daemon::secrets::creds::Kind as CredsKind;
 use ants_proto::{
-    ADMIN_TAG, AssistantOf, DeviceId, DeviceKey, JsDomain, Machine, Permissions, REGISTERED_TAG, Role, UserId,
+    ADMIN_TAG, AssistantOf, BuiltinAnt, DeviceId, DeviceKey, JsDomain, Machine, Permissions, REGISTERED_TAG, Role,
+    UserId,
 };
 use anyhow::{Context as _, Result, bail};
 use nkeys::{KeyPair, XKey};
@@ -175,6 +176,23 @@ pub fn webhook_permissions(dir: &Path, webhook: &UserId) -> Result<Permissions> 
         bail!("{} are no webhook's: issue them with `ants auth user {webhook} --webhook`", path.display());
     }
     Ok(permissions)
+}
+
+/// Issue ordinary ant rights for a reserved built-in ID.
+pub fn issue_builtin(dir: &Path, builtin: BuiltinAnt, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
+    let key = KeyPair::new_user();
+    let jwt = sign_builtin(dir, builtin, js_domain, &key.public_key())?;
+    write_secret(out, &creds(&jwt, &seed(&key)?))
+}
+
+pub fn sign_builtin(dir: &Path, builtin: BuiltinAnt, js_domain: Option<&JsDomain>, public_key: &str) -> Result<String> {
+    check_user_key(public_key)?;
+    let name = builtin.id();
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let permissions = Permissions::for_user(&name, Role::Ant).with_js_domain(js_domain);
+    let jwt = user_jwt(&account, public_key, name.as_str(), permissions, json!({}), None)?;
+    revoke::record(dir, &Issued::new(public_key, name.as_str(), Kind::Ant, None)?)?;
+    Ok(jwt)
 }
 
 /// Issue the credentials of the channel manager, `ants channel serve`, for the hub's JetStream domain if it has one,
