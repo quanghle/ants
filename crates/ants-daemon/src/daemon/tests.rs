@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ants_proto::{
-    ChannelEntry, ChannelId, DEFAULT_TURN_BUDGET, EscalationReason, Hold, Humans, LimitKind, Pick, QueueRequest,
-    QueuedMessage, Role, State, StatusEvent, StatusUpdate, Uuid, WEBHOOK_ALLOW,
+    ChannelEntry, ChannelId, DEFAULT_TURN_BUDGET, EscalationReason, Hold, Humans, LimitKind, Pick, PromptEnd,
+    QueueRequest, QueuedMessage, Role, State, StatusEvent, StatusUpdate, Uuid, WEBHOOK_ALLOW,
 };
 use ants_test_support::{NatsServer as Server, free_port};
 use async_nats::jetstream::consumer::PullConsumer;
@@ -479,23 +479,59 @@ async fn read_notes(bus: &Bus, thread: &ThreadId) -> Vec<ants_proto::NotesPost> 
         .posts
 }
 
-/// The `no_reply` entry of the last timeline record of dev-a on `thread`, and the message it is about, once stored.
+/// The `no_reply` entry of the last timeline record of dev-a on `thread` holding one, and the message it is about,
+/// once stored.
 async fn no_reply_on(bus: &Bus, thread: &ThreadId) -> (Uuid, ants_proto::TimelineEntry) {
+    let no_reply = |record: &ants_proto::Timeline| {
+        record.entries.iter().any(|entry| matches!(entry, ants_proto::TimelineEntry::NoReply { .. }))
+    };
+    let records = timeline_on(bus, thread, |records| records.iter().any(no_reply)).await;
+    let record = records.into_iter().rfind(no_reply).expect("a no_reply entry");
+    let [entry] = &record.entries[..] else { panic!("{record:?}") };
+    (record.message, entry.clone())
+}
+
+/// The timeline records stored on `thread`, oldest first, once there are as many as `whole` takes.
+async fn timeline_on(
+    bus: &Bus,
+    thread: &ThreadId,
+    whole: impl Fn(&[ants_proto::Timeline]) -> bool,
+) -> Vec<ants_proto::Timeline> {
     let subject = subject::timeline(thread, &bus.dev);
-    let msg = timeout(WAIT, async {
+    timeout(WAIT, async {
         loop {
-            if let Ok(msg) = bus.stream.direct_get_last_for_subject(&subject).await {
-                break msg;
+            let (mut records, mut next) = (Vec::new(), None);
+            while let Ok(msg) = bus.stream.direct_get_next_for_subject(subject.clone(), next).await {
+                let record: ants_proto::Timeline = serde_json::from_slice(&msg.payload).unwrap();
+                assert_eq!(record.check_subject(&msg.subject), Ok(()));
+                records.push(record);
+                next = Some(msg.sequence + 1);
+            }
+            if whole(&records) {
+                break records;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("no timeline record");
-    let record: ants_proto::Timeline = serde_json::from_slice(&msg.payload).unwrap();
-    assert_eq!(record.check_subject(&msg.subject), Ok(()));
-    let [entry] = &record.entries[..] else { panic!("{record:?}") };
-    (record.message, entry.clone())
+    .expect("not the timeline records awaited")
+}
+
+/// How the prompts on `thread` ended, as the first `n` ends noted in its timeline tell, with their messages.
+async fn ends_on(bus: &Bus, thread: &ThreadId, n: usize) -> Vec<(Uuid, ants_proto::TimelineEnd)> {
+    let ends = |records: &[ants_proto::Timeline]| -> Vec<(Uuid, ants_proto::TimelineEnd)> {
+        let ended = |record: &ants_proto::Timeline| -> Vec<_> {
+            let ends = record.entries.iter().filter_map(|entry| match entry {
+                ants_proto::TimelineEntry::Ended(end) => Some((record.message, end.clone())),
+                _ => None,
+            });
+            ends.collect()
+        };
+        records.iter().flat_map(ended).collect()
+    };
+    let mut ended = ends(&timeline_on(bus, thread, |records| ends(records).len() >= n).await);
+    ended.truncate(n);
+    ended
 }
 
 /// Call the tool `name` of `mcp` with `args`, as the session of `thread` does.
