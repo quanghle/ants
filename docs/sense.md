@@ -23,7 +23,7 @@ scheduling reminders, maintenance and dreams, and making a review's checkouts.
   | Tool | Use | Section |
   |---|---|---|
   | `sense_brief` | Show the thread's brief again. | [Brief](#brief) |
-  | `sense_remember` | Keep a memory; replace the self-model or a relationship record. | [Memories](#memories), [Self-model and relationships](#self-model-and-relationships) |
+  | `sense_remember` | Keep a memory. | [Memories](#memories) |
   | `sense_recall` | Search the memories; read one, the self-model or a relationship record in full. | [Memories](#memories) |
   | `sense_vote` | Say whether a memory helped, is stale or is wrong. | [Memories](#memories) |
   | `sense_checkpoint` | Replace the thread's resume register; without changes, read it and the unacknowledged handoffs. | [Resume registers and handoffs](#resume-registers-and-handoffs) |
@@ -31,7 +31,7 @@ scheduling reminders, maintenance and dreams, and making a review's checkouts.
   | `sense_task` | Keep personal tasks; claim one under a fenced lease. | [Work and reminders](#work-and-reminders) |
   | `sense_promise` | Record a commitment; keep, break, release or renegotiate it. | [Work and reminders](#work-and-reminders) |
   | `sense_remind` | Set a time or condition reminder; acknowledge, postpone, renew or drop it. | [Work and reminders](#work-and-reminders) |
-  | `sense_persona` | Propose a change of the persona. | [Persona and skills](#persona-and-skills) |
+  | `sense_identity` | Show who the ant is; replace the self-model or a relationship record; propose a change of the persona. | [Identity](#identity), [Self-model and relationships](#self-model-and-relationships), [Persona and skills](#persona-and-skills) |
   | `sense_skill` | Read the skills; propose a new, changed or removed one. | [Persona and skills](#persona-and-skills) |
   | `sense_dream` | Answer a dream's findings and finish the dream. | [Dreams](#dreams) |
 
@@ -59,6 +59,13 @@ vote or propose.
 - **The ant's home:** `.sense/id` (the sense id), `.sense/names` (earlier names), `.sense/cache.db` (the cache of its
   items), `.sense/chain.json` (the log as last verified), `.sense/skills/` (the confirmed skills), and, on a sage,
   `reviews/` (the checkouts of the reviews running).
+- **The memories view:** `ants ant memories` and the memories pane of the ant view in `ants chat` show, under
+  `memories of provider sense`, who the ant has become, read from its cache without noting a session or writing
+  anything: its identity (card and experience), its persona with its pending proposal, its self-model, each
+  relationship record, its skills by name and description, its last dream (the title of its diary, with its verdict
+  counts), then its core memories and its top 10 memories of every scope as `sense_recall` ranks them without a
+  query. Each entry is keyed by its id, kind, scope and trust. Entries past the size cap of a memories read are left
+  out and counted; an ant with no sense data shows an empty section ([cli.md](cli.md)).
 - **`ants doctor`:** `sense chain` fails at a break in the ant's log, and `sense size` warns past 32 MiB
   ([cli.md](cli.md)); the ant's brief warns of both too.
 - **Export and import:** `ants ant export` carries the log and skill files to another bus
@@ -124,9 +131,18 @@ code: these, and those each tool names below.
 
 ## Identity
 
-Each ant using sense has one sense identity, whose id, a ULID, is minted when the ant first uses sense, kept in its home
-(`.sense/id`) and on its identity card. The id stays the same across renames, harness and model changes, moves to other
-machines and buses, retirement and revival:
+Each ant using sense has one sense identity, whose id, a ULID, is kept in its home (`.sense/id`), on its identity card
+and in its identity record in `ants_identities` (`sense`), so its homes on every machine, as a standby daemon's, open
+the same one. A daemon opening the ant's sense data settles its home's id against the record: the home's id is written
+to a record naming none, by compare-and-set, the first writer winning; a home without one takes the record's, as after
+its `.sense/id` was removed; and an id is minted only when neither has one. A home and a record naming different ids are
+refused, sense keeping the ant's data closed and the error saying how to settle it: removing the home's `.sense/id`
+takes the record's, `ants auth revoke` and adding the ant again keeps the home's. A record naming no sense id yet, as
+one made again after `ants auth revoke` and adding the ant again with the same home, starts from the birth and the
+prompt count the card kept of the earlier record: the earlier birth, and those prompts added to its own, so the ant
+keeps its growth stage ([Avatars](config.md#avatars)). Until the daemon has read the record, as at start while another
+ant's event asks for this one's data, a home without an id opens nothing. The id stays the same across renames, harness
+and model changes, moves to other machines and buses, retirement and revival:
 
 - **Renames:** an import under another name (`ants ant import --as`) lists the old name in the home's `.sense/names`
   (one a line, the oldest first, carried by exports), so the renamed ant keeps its log and card. So does an ant added
@@ -137,12 +153,13 @@ machines and buses, retirement and revival:
   part of it carries the log and the skill files ([sense's part](config.md#senses-part)), which sense takes in under
   the same id, the card and memories read again from the log there. With `--no-provider` they stay behind, and sense
   starts a new card under the same id.
-- **Clones:** a clone leaves `.sense` out of the home it copies, so it mints its own id. When its `ant_cloned` reaches
-  sense and the same daemon keeps the source's data, sense forks the source's identity into the clone's: the clone
-  keeps a copy of the source's memories (with their links, writers and votes), self-model, persona and skills as they
-  were when it was cloned, each marked `inherited` with the source's sense id, and none of its tasks, commitments,
-  reminders, relationship records, resume registers, handoffs, thread records, votes, persona and skill proposals,
-  dreams or card. A record the clone writes anew is its own. The clone's first brief may come before the fork.
+- **Clones:** a clone leaves `.sense` out of the home it copies, and its new identity record names no sense id, so it
+  mints its own. When its `ant_cloned` reaches sense and the same daemon keeps the source's data, sense forks the
+  source's identity into the clone's: the clone keeps a copy of the source's memories (with their links, writers and
+  votes), self-model, persona and skills as they were when it was cloned, each marked `inherited` with the source's
+  sense id, and none of its tasks, commitments, reminders, relationship records, resume registers, handoffs, thread
+  records, votes, persona and skill proposals, dreams or card. A record the clone writes anew is its own. The clone's
+  first brief may come before the fork.
 - **Retirement:** a retired ant's identity is dormant and keeps all its data: its commitments stay open and its
   reminders paused, nothing firing and no maintenance or dream running, until a revival or an addition under another
   ants identity id, as after a revoke and re-add. That puts off the expiry of each reminder active at the retirement by
@@ -153,8 +170,9 @@ The identity card is written by sense alone, from the ant's lifecycle events
 ([Lifecycle events](architecture.md#lifecycle-events)) and the start of each session; no tool writes it, and its
 revisions are its history. It records the sense id, the ant's name and earlier names, its ants identity ids, its birth
 (its addition or cloning, else its first brief), the harnesses, models and machines its sessions ran under, the ant it
-was cloned from, whether it is active, when it retired, returned and moved, and its last 16 dormancies. The brief shows
-it first ([Brief](#brief)).
+was cloned from, whether it is active, when it retired, returned and moved, its last 16 dormancies, and the birth and
+the prompt count of its identity record, as the daemon told sense on opening its data and at each growth stage the ant
+reached (`growth`). The brief shows it first ([Brief](#brief)).
 
 Each thread of the ant has a record, written by sense alone, as the card is, from the thread's lifecycle events, never
 from what its messages say: who started it and from which channel, the repository of the ant's working directory, when
@@ -175,7 +193,19 @@ The brief's identity counts the ant's experience from its thread records each ti
   (`human:alice`, `ant:dev-b`, `repo:github.com/o/r`), with its count of threads and the day of their last start,
   start again or done, the latest first among equal counts.
 
-An ant with no thread record shows no experience.
+An ant with no thread record shows no experience. A dream's packet counts it the same way over the threads active since
+the dream's start (`experience_since`): a thread counts when it started, started again or was marked done since then,
+and only those times count toward its days and tallies.
+
+`sense_identity` without arguments shows who the ant is, whole: `## Identity`, the card and the experience as the brief
+shows them, without the return; `## Persona`, the persona and its pending proposal
+([Persona and skills](#persona-and-skills)); `## Self-model`, the self-model in full; `## Relationships`, every
+relationship record by its title; and `## Skills`, the skills by name. The records come inside the block of recalled
+memories. As JSON it answers `card`, `experience`, `persona`, `pending`, `self_model`, `relationships` (each record's
+`id`, `scope`, `title`, `revision` and `trust`) and `skills` (their names). The same tool replaces the self-model and
+the relationship records ([Self-model and relationships](#self-model-and-relationships)) and proposes persona changes
+([Persona and skills](#persona-and-skills)), one of the three a call: a call mixing them, or giving `who`, `title`,
+`revision` or `quotes` without a record, is refused with `invalid_arguments`.
 
 ## Memories
 
@@ -273,20 +303,24 @@ log. The next run is due 24 hours after the last, so a standby taking the ant ov
 
 The ant keeps a self-model, what it holds true of itself (strengths, habits, what to watch for), and one relationship
 record per human or ant it works with: how that person works with it, what they prefer and expect. Each is one record
-replaced whole, not a chain of memories, with a `title` (at most 200 characters) and a `body` (at most 2,000 bytes). A
+replaced whole, not a chain of memories, with a title (at most 200 characters) and a body (at most 2,000 bytes). A
 clone keeps the self-model and drops the relationship records.
 
-`sense_remember` writes them, with `kind` `self_model` (scope `self` or none) or `relationship` (scope
-`human:<name>` or `ant:<name>`), `title`, `body` and `revision`: a record is replaced from the revision read, from the
-brief or `sense_recall`, none for the first. One written without a revision when it exists is refused with
+`sense_identity` writes them, given `self_model`, the self-model's body (with `who` `self` or none), or
+`relationship`, a relationship record's body, and `who` (`human:<name>` or `ant:<name>`), with a `title`, `revision`
+and optionally `quotes` (as for a memory): a record is replaced from the revision read, from the brief,
+`sense_identity` or `sense_recall`, none for the first. One written without a revision when it exists is refused with
 `revision_required`, from another revision with `conflict`, both carrying the current record, and one with a revision
 before it exists with `not_found`. Earlier revisions stay in the log. A record holding the whole block of recalled
 memories is refused (`recalled_block`), and one is `untrusted` on the same grounds as a memory; the duplicate and core
 checks of memories do not apply. They take effect at once, with no dream to confirm them. The answer names the record,
-its revision, why it is untrusted and the secrets redacted.
+its revision, why it is untrusted and the secrets redacted. `sense_remember` refuses `kind` `self_model` and
+`relationship` with `invalid_arguments`, naming `sense_identity`.
 
 The brief shows the self-model after the persona and the records of the thread's participants after the tasks
-([Brief](#brief)); `sense_recall` reads one by id and lists those of the people it searches ([Memories](#memories)).
+([Brief](#brief)); `sense_identity` shows the self-model and every relationship record by title
+([Identity](#identity)); `sense_recall` reads one by id and lists those of the people it searches
+([Memories](#memories)).
 
 ## Persona and skills
 
@@ -295,9 +329,10 @@ through proposals the ant itself confirms in a later [dream](#dreams). Every con
 reason. A skill follows the Agent Skills layout: a directory named after it holding `SKILL.md`, whose front matter
 (between two lines `---`) gives its `name` and `description`, and the files it refers to.
 
-- `sense_persona` takes any of `values`, `voice`, `boundaries` and `working_style`, an empty text clearing that field
-  and one left out keeping it, and a `reason` (at most 500 characters). Without fields it shows the persona and its
-  pending proposal, with `history: true` every version, the newest first.
+- `sense_identity` proposes a persona change given any of `values`, `voice`, `boundaries` and `working_style`, an
+  empty text clearing that field and one left out keeping it, and a `reason` (at most 500 characters). Without
+  arguments it shows the persona and its pending proposal with the rest of the identity ([Identity](#identity)), with
+  `history: true` every version of the persona, the newest first.
 - `sense_skill` takes a `name` (1 to 64 lowercase letters, digits and single hyphens inside) and `content` (the whole
   `SKILL.md`), `files` (paths within the skill, each mapped to its text or to null to remove it, files left out kept)
   or `remove: true`, with a `reason`. The front matter must name the skill and describe it on one line of at most
@@ -306,7 +341,7 @@ reason. A skill follows the Agent Skills layout: a directory named after it hold
   with `path` one of its files and with `history: true` every version; `proposal: <id>`, with an optional `path`,
   shows a proposal in full.
 
-Neither changes anything at once: each writes a proposal, the whole version proposed with its reason. A target has at
+Neither proposal changes anything at once: each writes a proposal, the whole version proposed with its reason. A target has at
 most one pending proposal, a new one superseding it. A dream beginning 12 hours or more after a proposal offers it as
 a finding, which the ant decides with `sense_dream`: `applied` confirms it, `rejected` discards it, `deferred` leaves it
 for the next dream. Confirming is refused with `too_soon` less than 12 hours after the proposal or less than 24 hours
@@ -443,31 +478,47 @@ what the review reads and records what the ant decides. A dream begins when:
 
 A dormant identity begins no dream, and a standby taking the ant over begins none sooner.
 
-**Who reviews:** when the ant names a sage other than itself ([The sage](config.md#the-sage)) and a daemon serves it
+**Who reviews:** when the ant names a sage other than itself ([The sage](config.md#the-sage)), a daemon serves it
 (its colony entry live and not paused, and, unless a fallback answers for it, its harness neither signed out, nor
-failing to start, nor held by a provider limit past 6 hours), the review packet goes to the sage as a message from the
-ant on a new review thread. Otherwise, as for an ant with `sage = "none"` (which turns reviews off, not dreams) and the
-built-in messenger and sage, the daemon wakes the ant on a new thread with the packet alone. The packet, at most
-64 KiB, holds:
+failing to start, nor held by a provider limit past 6 hours) and no live colony entry of another ant names the ant as
+its `sage`, the review packet goes to the sage as a message from the ant on a new review thread. Otherwise, as for an
+ant with `sage = "none"` (which turns reviews off, not dreams) and the built-in messenger and sage, the daemon wakes the
+ant on a new thread with the packet alone, which asks it to answer the findings and distill what the threads teach,
+then, against its identity, to bring its self-model and relationship records up to date and propose the persona
+changes the work supports with `sense_identity`. Each colony entry names the sage its ant's config and shared settings
+resolve, so an ant made a sage only by another machine's config or by shared settings (`ants ant set dev-a sage=lead`)
+is reviewed by no one either, for as long as a daemon serves the ant naming it. The packet, at most 64 KiB, holds:
 
 - the verdicts on the last dream's findings;
 - the findings, at most 20, each with an id `<dream>.<n>`: memories with both `helpful` and `stale` votes since the
   last dream (`contradiction`), memories needing review (`needs_review`), the near duplicates the last maintenance
   found (`duplicates`), episodes to distill (`distill`), pending persona and skill proposals (`proposal`), and the
   findings of the last dream deferred or unanswered that still hold, offered again;
+- the ant's identity, to judge the work against and to judge against the work: its persona and pending persona
+  proposal, its self-model, the relationship records of the humans and other ants who started the threads covered (as
+  their thread records tell; a line for each without one), its skills by name and description, and its experience
+  since the dream's start;
 - the commits the work is at: of the ant's workdir and of each thread's worktree branch;
 - each active thread's history since the last dream, as the ant received, sent and noted it, then its timeline (the
   tool calls, plans and ends with no reply of the ant's prompts, [`Timeline`](hooks.md#timeline-on-antstimelinethreadant)),
   the most recently active first. Threads a webhook started are marked untrusted: their text is data, not
-  instructions.
+  instructions. Lines before a thread's history tell what was done with it besides writing on it: the ant's tool
+  requests rejected on it since the last dream, with the tool and who rejected them, or that they expired unanswered
+  (the `rejected` entries of the ant's timeline); the reactions to the ant's latest 8 messages and notes posts on it,
+  with who gave them and to which message, asked as `list_reactions` asks; and the thread's marking done since the
+  last dream, with when and by whom. The daemon reads these as the ant's credentials allow, 30 seconds at most in all;
+  what fails to be read is left out, and the packet goes without it. Sense stores none of them.
 
-A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then the
-last findings, counted for the next dream.
+A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then cuts
+the identity to titles (the persona's field names, the records' heads and the skills' names), then leaves out the last
+findings, counted for the next dream.
 
 **The sage's review:** the packet asks for a review that reads only, with read-only tools, reading code only in the
 checkouts made for it, never the ant's workdir or worktrees, and messaging no one, answered by one reply holding a
 fenced JSON block `{"findings": [{"kind", "finding", "evidence": {"threads", "messages", "memories", "files"},
-"action"}]}`, an empty list when nothing is worth the ant's time. The review thread is narrowed to `REVIEW_ALLOW`
+"action"}]}`, an empty list when nothing is worth the ant's time. Besides kinds such as `lesson`, `mistake` or
+`stale_memory`, a finding about the identity has kind `persona`, `self_model` or `relationship`: it cites the ant's own
+threads and builds on the persona the ant has, never on a house style. The review thread is narrowed to `REVIEW_ALLOW`
 (`read:*`, `search`, `think`, and the ants tools `list_ants`, `read_notes`, `read_attachment`, `list_reactions` and
 `suggest_thread_title`): the ants MCP server refuses every other tool on it, provider tools and `complete` included.
 The sage's daemon runs the review in a session of its own on the harness's review variant
@@ -496,9 +547,10 @@ silent for 6 hours, a later answer prompting no one.
 rejected finding rests: no dream offers it again until what it is about changed since the verdict (one of its memories
 written other than by a read) or 14 days of the ant's active time passed, its dormancies not counted; deferred and
 unanswered findings come again in the next dream while they hold. `done: true` finishes the dream; without arguments it
-shows the findings and verdicts. The dream thread makes at most 20 writes (`sense_remember` and `sense_vote`), past
-which writes are refused (`dream_cap`). While a finding marked untrusted is open, unanswered or deferred, what
-`sense_remember` writes on the dream thread is stored untrusted. Finishing the dream, or beginning the next one while it
+shows the findings and verdicts. The dream thread makes at most 20 writes (`sense_remember`, `sense_vote` and the
+records `sense_identity` replaces), past which writes are refused (`dream_cap`). While a finding marked untrusted is
+open, unanswered or deferred, what `sense_remember` and `sense_identity` write on the dream thread is stored
+untrusted. Finishing the dream, or beginning the next one while it
 is unfinished, writes its diary: an episode memory counting the findings applied, rejected, deferred and unanswered,
 with each verdict and reason. A verdict on a proposal decides it at once ([Persona and skills](#persona-and-skills)).
 Refusals: `no_dream`, `not_dream_thread`, `done` (the dream is finished), `not_found` (a finding or item), `too_soon`,
@@ -549,7 +601,7 @@ the rest:
 - `… more: sense_task action=list limit=100` or `sense_task action=ready limit=100`, for claimed or ready tasks;
 - `… more: sense_recall id=<id>`, for the self-model and relationship records;
 - `… more: sense_recall, or sense_recall id=<id> for one in full`, for memories;
-- `… more: sense_persona`, for the persona;
+- `… more: sense_identity`, for the persona;
 - `… more: sense_skill`, for skills.
 
 `sense_brief` answers the same brief again on demand, within 8000 bytes.

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
 use crate::IDENTITIES_BUCKET;
-use crate::{Error, UserId};
+use crate::{Error, SenseId, UserId};
 
 mod avatar;
 mod motion;
@@ -21,17 +21,20 @@ pub use palette::{Palette, Rgb, Theme};
 /// Its daemon creates it on start only when absent, so across machines the first creator wins and later ones keep it;
 /// the daemon serving the ant then adds each completed prompt by compare-and-set, keeping the other fields. Humans set
 /// and clear `avatar` and `color` (`ants ant avatar`), and `moved` (`ants ant export --move`, `ants ant unseal`), by
-/// compare-and-set too. `ants ant import` creates it on another bus from an export, by a KV create refused when a
-/// record holds its name or its id, so no bus holds two copies of one ant. `ants auth revoke NAME` of the ant deletes
-/// it, so a later ant of that name is born anew. Readers should treat unknown fields as additions, not errors.
+/// compare-and-set too. A daemon serving the ant with built-in sense names its sense identity in `sense` when the record
+/// names none, by compare-and-set, so the first writer wins and every machine opens the same sense identity.
+/// `ants ant import` creates it on another bus from an export, by a KV create refused when a record holds its name or
+/// its id, so no bus holds two copies of one ant. `ants auth revoke NAME` of the ant deletes it, so a later ant of that
+/// name gets a new record, which names the sense identity of the home again. Readers should treat unknown fields as
+/// additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AntIdentity {
     pub ant: UserId,
-    /// 128 random bits in lowercase hex, set at birth; the avatar's seed unless `avatar` sets one.
+    /// 128 random bits in lowercase hex, set at birth; the avatar's seed unless `avatar` or `sense` sets one.
     pub id: String,
     /// When the record was created.
     pub born: DateTime<Utc>,
-    /// The avatar's seed a human set, in place of `id`.
+    /// The avatar's seed a human set, in place of `sense` and `id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
     /// The avatar's colour a human set, one of [`HUE_NAMES`], in place of the seed's hue.
@@ -47,6 +50,10 @@ pub struct AntIdentity {
     /// The ant this one was cloned from, when it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloned_from: Option<ClonedFrom>,
+    /// The ant's sense identity, once a daemon serving it with built-in sense named it: the avatar's seed unless
+    /// `avatar` sets one, so the ant keeps its face across records of that identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sense: Option<SenseId>,
 }
 
 /// When and by whom an ant was moved off its bus ([`AntIdentity::moved`]).
@@ -67,7 +74,7 @@ pub struct ClonedFrom {
 impl AntIdentity {
     /// A record for `ant` born at `born` with `id`, before any prompt.
     pub fn new(ant: UserId, id: String, born: DateTime<Utc>) -> Self {
-        Self { ant, id, born, avatar: None, color: None, prompts: 0, moved: None, cloned_from: None }
+        Self { ant, id, born, avatar: None, color: None, prompts: 0, moved: None, cloned_from: None, sense: None }
     }
 
     pub fn key(&self) -> &str {
@@ -83,9 +90,9 @@ impl AntIdentity {
         Err(Error::ForeignUser { kind: "identity record", user: self.ant.clone(), at: format!("key {key}") })
     }
 
-    /// The avatar's seed: the one a human set, else the record's id.
+    /// The avatar's seed: the one a human set, else the sense id, else the record's id.
     pub fn seed(&self) -> &str {
-        self.avatar.as_deref().unwrap_or(&self.id)
+        self.avatar.as_deref().or(self.sense.as_ref().map(SenseId::as_str)).unwrap_or(&self.id)
     }
 
     pub fn stage(&self) -> Stage {

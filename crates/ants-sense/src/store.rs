@@ -11,7 +11,9 @@ use serde_json::Value;
 use crate::cache::{Cache, CacheError, Hit, Pending};
 use crate::export::SenseExport;
 use crate::items::{Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, Values};
-use crate::log::{APPEND_TRIES, AntLog, Break, Checked, EventLog, LogError, Position, Signer, Stored, Verifier};
+use crate::log::{
+    APPEND_TRIES, AntLog, Break, Checked, EventLog, LogError, LogErrorKind, Position, Signer, Stored, Verifier,
+};
 use crate::thread::experience::Experience;
 
 /// Why a store did not answer.
@@ -228,8 +230,13 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     }
 
     /// [`Cache::experience`].
-    pub fn experience(&self, own: &[UserId], top: usize) -> Result<Option<Experience>, StoreError> {
-        Ok(self.cache.experience(own, top)?)
+    pub fn experience(
+        &self,
+        own: &[UserId],
+        since: Option<DateTime<Utc>>,
+        top: usize,
+    ) -> Result<Option<Experience>, StoreError> {
+        Ok(self.cache.experience(own, since, top)?)
     }
 
     /// The items matching `text` best ([`Cache::search`]).
@@ -407,46 +414,9 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     }
 }
 
-/// Only connectivity failures permit accepting a local write. Other failures must remain visible.
+/// Only an unreachable store permits accepting a local write. Other failures must remain visible.
 pub fn is_offline(error: &LogError) -> bool {
-    let message = error.0.to_ascii_lowercase();
-    if [
-        "signing:",
-        "verifying:",
-        "permission",
-        "authorization",
-        "authentication",
-        "signature",
-        "credentials",
-        "revoked",
-        "incarnation",
-        "integrity",
-        "chain",
-        "keeping the",
-    ]
-    .iter()
-    .any(|reason| message.contains(reason))
-    {
-        return false;
-    }
-    [
-        "unavailable",
-        "offline",
-        "unreachable",
-        "disconnected",
-        "not connected",
-        "connection closed",
-        "connection reset",
-        "connection refused",
-        "broken pipe",
-        "connection aborted",
-        "timed out",
-        "timeout",
-        "no responders",
-        "no answer to a direct get",
-    ]
-    .iter()
-    .any(|reason| message.contains(reason))
+    error.kind == LogErrorKind::Unreachable
 }
 
 /// One change of a [`Store::write`].
@@ -605,8 +575,12 @@ pub trait Items: Send + Sync {
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<Hit>, StoreError>>;
     /// [`Store::experience`].
-    fn experience<'a>(&'a self, own: &'a [UserId], top: usize)
-    -> BoxFuture<'a, Result<Option<Experience>, StoreError>>;
+    fn experience<'a>(
+        &'a self,
+        own: &'a [UserId],
+        since: Option<DateTime<Utc>>,
+        top: usize,
+    ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>>;
     /// [`Store::history`].
     /// Cached history, including pending revisions with sequence 0; never requires another network round trip.
     fn history<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Vec<Revision>, StoreError>>;
@@ -740,12 +714,13 @@ where
     fn experience<'a>(
         &'a self,
         own: &'a [UserId],
+        since: Option<DateTime<Utc>>,
         top: usize,
     ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>> {
         Box::pin(async move {
             let mut store = self.lock().await;
             store.replay().await?;
-            store.experience(own, top)
+            store.experience(own, since, top)
         })
     }
 
@@ -789,13 +764,13 @@ pub trait Stores: Send + Sync {
     fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>>;
 
     /// The items of `ant` caught up with its log, as a provider call starts, so that the reads of the call serve the
-    /// cache; still the items when the hub cannot be reached or a write waiting for the log conflicts, which a read
-    /// meets as it appends the writes waiting.
+    /// cache; still the items when the hub cannot be reached or writes wait for the log, as the reads meet any failure
+    /// appending them.
     fn synced<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         Box::pin(async move {
             let items = self.items(ant).await?;
             match items.sync().await {
-                Err(StoreError::Log(error)) if is_offline(&error) => {}
+                Err(StoreError::Log(error)) if is_offline(&error) || items.pending().await? > 0 => {}
                 Err(StoreError::Unavailable(_)) => {}
                 result => result?,
             }

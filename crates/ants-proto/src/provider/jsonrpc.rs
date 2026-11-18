@@ -196,6 +196,8 @@ impl RpcError {
     pub const UNSUPPORTED_VERSION: i64 = -32_002;
     /// The provider is not up: starting, restarting or stopped.
     pub const UNAVAILABLE: i64 = -32_003;
+    /// The thread a wake request names is not one the ant has a session for.
+    pub const UNKNOWN_THREAD: i64 = -32_004;
 
     pub fn new(code: i64, message: impl Into<String>) -> Self {
         Self { code, message: message.into(), data: None }

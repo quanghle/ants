@@ -255,9 +255,7 @@ async fn only_an_unknown_source_thread_falls_back_to_a_new_thread_with_the_same_
     let (sense, stores) = setup().await;
     let id = create(&sense, json!({"kind":"at","at":Utc::now()})).await;
     let host = Wakes::default();
-    host.errors
-        .locked()
-        .push_back(RpcError::invalid_params("thread scheduler-thread is no thread of ant dev-scheduler"));
+    host.errors.locked().push_back(RpcError::new(RpcError::UNKNOWN_THREAD, "no session"));
     cycle(&sense, &*stores.items, &host, &settings(), Utc::now()).await.unwrap();
     let requests = host.requests.locked().clone();
     assert_eq!(requests.len(), 2);
@@ -266,7 +264,10 @@ async fn only_an_unknown_source_thread_falls_back_to_a_new_thread_with_the_same_
     assert_eq!(requests[1].id, format!("{id}:1"));
 
     let id = create(&sense, json!({"kind":"at","at":Utc::now()})).await;
-    host.errors.locked().push_back(RpcError::invalid_params("another invalid parameter"));
+    // An invalid parameter is no unknown thread, however worded.
+    host.errors
+        .locked()
+        .push_back(RpcError::invalid_params("thread scheduler-thread is no thread of ant dev-scheduler"));
     assert!(cycle(&sense, &*stores.items, &host, &settings(), Utc::now()).await.is_err());
     assert_eq!(host.requests.locked().len(), 3);
     assert_eq!(remind::pending_work(&*stores.items).await.unwrap()[0].id, format!("{id}:1"));

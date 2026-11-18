@@ -17,7 +17,9 @@ use agent_client_protocol::v1::schema::{
     SetSessionConfigOptionResponse, StopReason, TextContent,
 };
 use agent_client_protocol::{Agent, Stdio as AcpStdio};
+use ants_daemon::profile::identity::Identity;
 use ants_daemon::sync::MutexExt as _;
+use ants_proto::{SenseId, UserId};
 use ants_test_support::{NatsServer, free_port, scratch_dir};
 
 const ANTS: &str = env!("CARGO_BIN_EXE_ants");
@@ -156,6 +158,17 @@ fn exercise_daemon(custom_tools: bool) {
     } else {
         assert!(entry.get("whoami").is_none());
     }
+
+    // The identity record names the sense id the home keeps, none without built-in sense.
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let record = runtime.block_on(async {
+        let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "e2e").await.unwrap();
+        let dev_a = "dev-a".parse().unwrap();
+        Identity::new(&js, None, &dev_a).await.unwrap().read().await.unwrap().expect("the daemon created it")
+    });
+    let kept = std::fs::read_to_string(home.join(".sense/id")).ok();
+    assert_eq!(record.sense.as_ref().map(SenseId::as_str), kept.as_deref().map(str::trim), "{record:?}");
+    assert_eq!(kept.is_some(), custom_tools, "only the ant with built-in sense keeps a sense id");
 
     let shown = run(ants(&["ant", "show", "dev-a"]));
     let text = String::from_utf8_lossy(&shown.stdout);

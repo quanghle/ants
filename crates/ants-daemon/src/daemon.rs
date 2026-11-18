@@ -202,8 +202,8 @@ pub struct Policy {
     pub escalation: Chain,
     /// Redact secrets from what the ant publishes ([`crate::secrets::redact`]).
     pub redact: bool,
-    /// The ant reviewing this one, its sage ([`crate::config::Ant::reviewed_by`]); none for a sage, which has none of
-    /// its own, or where reviews are off.
+    /// The ant reviewing this one, its sage ([`crate::config::Ant::reviewed_by`]), published in its colony entry; none
+    /// for a sage, which has none of its own, or where reviews are off.
     pub sage: Option<UserId>,
 }
 
@@ -555,6 +555,7 @@ async fn services(
     let sense = providers.sense_of(&config.provider);
     if let Some(sense) = sense {
         sense.serve(&config.ant, &config.storage.home, config.connection.creds.clone());
+        sense.identify(&config.ant, identity.clone());
     }
     let lifecycle = match &identity_id {
         Some(id) => Lifecycle::open(providers.outbox(), &config.ant, id, &config.storage.home)
@@ -935,6 +936,7 @@ fn log_serving(config: &Config) {
 fn dreaming(inbox: &Inbox<'_>, config: &Config) -> std::sync::Arc<dyn crate::sense::Dreaming> {
     std::sync::Arc::new(crate::sense::Daemon {
         js: inbox.js.clone(),
+        js_domain: config.connection.js_domain.clone(),
         ant: config.ant.clone(),
         reading: inbox.reading,
         origins: inbox.mcp.and_then(crate::mcp::Mcp::origin_store).cloned(),
@@ -942,11 +944,12 @@ fn dreaming(inbox: &Inbox<'_>, config: &Config) -> std::sync::Arc<dyn crate::sen
         started: chrono::Utc::now(),
         workdir: config.harness.workdir.clone(),
         sage: config.policy.sage.clone(),
-        lookup: crate::mcp::jetstream_lookup(inbox.js.clone()),
+        colony: crate::mcp::jetstream_colony(inbox.js.clone()),
         outbox: redacting_outbox(
             crate::mcp::jetstream_outbox(inbox.js.clone()),
             std::sync::Arc::new(inbox.redactor.clone()),
         ),
+        reactions: inbox.mcp.and_then(crate::mcp::Mcp::reaction_asker),
     })
 }
 
@@ -1216,8 +1219,8 @@ struct Inbox<'a> {
     home: &'a std::path::Path,
     /// Told of the threads the ant starts ([`Inbox::thread_started`]); None when its provider takes no events.
     lifecycle: Option<&'a Lifecycle>,
-    /// The ant's sense, which takes its sage's answers to the reviews of its dreams ([`Inbox::arrived`]); None when
-    /// sense is not its provider.
+    /// The ant's sense, which takes its sage's answers to the reviews of its dreams ([`Inbox::arrived`]) and is told
+    /// of its growth ([`Inbox::count_prompt`]); None when sense is not its provider.
     sense: Option<&'a crate::sense::Sense>,
 }
 

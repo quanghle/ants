@@ -228,7 +228,7 @@ async fn deliver(items: &dyn Items, host: &dyn Host, ant: &UserId, firing: &Firi
         id: firing.id.clone(),
     };
     match host.wake(request.clone()).await {
-        Err(error) if request.thread.is_some() && unknown_thread(&error) => {
+        Err(error) if request.thread.is_some() && error.code == RpcError::UNKNOWN_THREAD => {
             // A source session may be absent after a restart. Keep the durable firing identity on the new thread.
             request.thread = None;
             host.wake(request).await?;
@@ -239,10 +239,6 @@ async fn deliver(items: &dyn Items, host: &dyn Host, ant: &UserId, firing: &Firi
     }
     remind::confirm_delivered(items, &firing.reminder, &firing.id, Utc::now()).await?;
     Ok(())
-}
-
-fn unknown_thread(error: &RpcError) -> bool {
-    error.code == RpcError::INVALID_PARAMS && error.message.contains(" is no thread of ant ")
 }
 
 async fn wait(changes: &mut watch::Receiver<()>, next: Option<DateTime<Utc>>) -> bool {

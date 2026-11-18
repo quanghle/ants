@@ -213,7 +213,7 @@ async fn only_the_ant_s_own_unrevoked_credentials_sign_its_events() {
     ant_log(&log, team.signer("dev-a"), team.verifier(), &sense, None).append("note", json!(1)).await.unwrap();
     let verifier = AccountVerifier::new(vec![team.account.public_key()], Revoked(None));
     let mut reader = ant_log(&log, Unsigned, verifier, &sense, None);
-    assert!(reader.catch_up().await.unwrap_err().0.contains("no answer"));
+    assert!(reader.catch_up().await.unwrap_err().message.contains("no answer"));
     assert_eq!((reader.chain().last_sequence(), reader.chain().broken()), (0, None));
     // Without accounts, on a server without authentication, every event holds.
     let mut open = ant_log(&log, Unsigned, AccountVerifier::new(vec![], NoRevocations), &sense, None);

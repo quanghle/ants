@@ -188,7 +188,10 @@ impl Waker {
     async fn check_thread(&self, thread: &ThreadId) -> Result<(), RpcError> {
         match self.sessions.get(thread).await {
             Ok(Some(_)) => Ok(()),
-            Ok(None) => Err(invalid(&format!("thread {thread} is no thread of ant {}", self.ant))),
+            Ok(None) => Err(RpcError::new(
+                RpcError::UNKNOWN_THREAD,
+                format!("thread {thread} is no thread of ant {}", self.ant),
+            )),
             Err(e) => Err(storing(e)),
         }
     }

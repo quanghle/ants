@@ -209,7 +209,7 @@ async fn a_call_writing_wakes_the_schedule_of_its_ant_alone_and_one_reading_none
 struct Counting {
     log: MemoryLog,
     reads: Arc<AtomicUsize>,
-    failure: Arc<std::sync::Mutex<Option<String>>>,
+    failure: Arc<std::sync::Mutex<Option<LogError>>>,
 }
 
 impl EventLog for Counting {
@@ -220,7 +220,7 @@ impl EventLog for Counting {
     async fn read_after(&self, sense: &SenseId, after: u64, limit: usize) -> Result<Vec<Stored>, LogError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         if let Some(failure) = self.failure.lock().unwrap().clone() {
-            return Err(LogError(failure));
+            return Err(failure);
         }
         self.log.read_after(sense, after, limit).await
     }
@@ -269,10 +269,10 @@ async fn a_log_failing_other_than_out_of_reach_fails_the_calls_reading_the_cache
         format: Format::Text,
     };
     let brief = || sense.brief(BriefRequest { context: context(THREAD), budget: 8_000, reason: BriefReason::Started });
-    *failure.lock().unwrap() = Some("hub timed out".into());
+    *failure.lock().unwrap() = Some(LogError::unreachable("hub timed out"));
     assert!(brief().await.unwrap().text.contains("Ship the parser"), "offline, the cache serves");
     assert!(!sense.call_tool(recall()).await.unwrap().is_error);
-    *failure.lock().unwrap() = Some("permission denied".into());
+    *failure.lock().unwrap() = Some(LogError::refused("permission denied"));
     let error = brief().await.unwrap_err();
     assert!(error.message.contains("permission denied"), "{error:?}");
     let answer = sense.call_tool(recall()).await.unwrap();

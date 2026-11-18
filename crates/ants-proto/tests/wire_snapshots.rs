@@ -272,6 +272,7 @@ fn colony() {
             handling: 1,
             harnesses: 2,
             escalate_to: vec![user("lead"), user("cto")],
+            sage: Some(user("sage")),
             version: "0.1.0".to_owned(),
             perms: PermissionsVersion(1),
             signed_out: Some(SignInNeeded { since: at(2), sign_in: Some("copilot login".to_owned()) }),
@@ -309,6 +310,26 @@ fn reminders() {
                 ),
             ]),
             snoozed: ThreadSnoozes(BTreeMap::from([(thread(), Snooze { at: at(2), until: at(50) })])),
+        },
+    );
+}
+
+#[test]
+fn ant_identity() {
+    snap(
+        "ant_identity",
+        &AntIdentity {
+            avatar: Some("lead".to_owned()),
+            color: Some("azure".to_owned()),
+            prompts: 42,
+            moved: Some(MovedMark { at: at(2), by: user("alice") }),
+            cloned_from: Some(ClonedFrom {
+                ant: user("dev-b"),
+                id: "fedcba9876543210fedcba9876543210".to_owned(),
+                at: at(1),
+            }),
+            sense: Some("01JD8X5G3T7Q9R2M4N6P8S0V1W".parse().unwrap()),
+            ..AntIdentity::new(user("dev-a"), "0123456789abcdef0123456789abcdef".to_owned(), at(0))
         },
     );
 }
@@ -1190,6 +1211,15 @@ fn provider_protocol() {
     let export = Export { provider: "sense".into(), data: json!({"memories": 1}) };
     snap("provider_export", &export);
     snap("provider_import_request", &ImportRequest { ant: ant.ant, identity: ant.identity, export });
+}
+
+#[test]
+fn provider_wake_refusals() {
+    use provider::Woken;
+    use provider::jsonrpc::{RequestId, Response, RpcError};
+
+    let unknown = RpcError::new(RpcError::UNKNOWN_THREAD, format!("thread {} is no thread of ant dev-a", thread()));
+    snap("provider_wake_unknown_thread", &Response::new(RequestId::Number(8), Err::<Woken, _>(unknown)));
 }
 
 #[test]

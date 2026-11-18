@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ants_proto::provider::Provider;
-use ants_proto::{Envelope, UserId};
+use ants_proto::{AntIdentity, Envelope, UserId};
 use anyhow::{Context as _, Result};
 
 pub mod log;
@@ -18,13 +18,14 @@ mod scheduler;
 mod stores;
 mod workdirs;
 
-pub use ants_sense::log::SENSE_DIR as DIR;
+pub use ants_sense::home::DIR;
 pub use ants_sense::memory::{normalize_remote, remote_url};
 pub use ants_sense::{CAPABILITIES, NAME};
 pub(crate) use scheduler::{Daemon, Dreaming, Serving};
 pub use stores::{Hosting, Link};
 
 use crate::daemon::Config;
+use crate::profile::identity::Identity;
 use crate::provider::wake::Wakers;
 use stores::SenseStores;
 
@@ -52,6 +53,19 @@ impl Sense {
         self.stores.serve(ant, home, creds);
     }
 
+    /// The daemon of `ant`, served, read its identity `record`, which names its sense id: None when it has none
+    /// ([`SenseStores::identify`]).
+    pub(crate) fn identify(&self, ant: &UserId, record: Option<Identity>) {
+        self.stores.identify(ant, record);
+    }
+
+    /// Note on the card of `ant` the birth and the prompt count its identity `record` holds, which a record made again
+    /// for it, as after a revoke and re-add, starts from: a call's context carries neither.
+    pub(crate) async fn grown(&self, ant: &UserId, record: &AntIdentity) -> Result<()> {
+        let items = self.provider.synced(ant).await?;
+        Ok(stores::note_growth(ant, &*items, record).await?)
+    }
+
     /// A host connection starts, over which sense reaches the logs of the ants served ([`Hosting`]).
     pub fn hosting(&self) -> Hosting {
         self.stores.hosting()
@@ -76,9 +90,11 @@ impl Sense {
         scheduler::review_answer(&*items, envelope).await
     }
 
-    /// The directory of the skills sense offers the harness of the ant whose home is `home`.
-    pub fn skills(&self, home: &Path) -> PathBuf {
-        ants_sense::export::skills_dir(home)
+    /// The skills sense offers the harness of the ant whose home is `home`: its skills directory, in the Claude Code
+    /// plugin of its sense files.
+    pub fn skills(&self, home: &Path) -> crate::harness::Skills {
+        let home = ants_sense::home::Home::new(home);
+        crate::harness::Skills { dir: home.skills(), plugin: home.dir().to_owned() }
     }
 
     /// Resolve the file access of `ant` through `dirs`, the workdirs of its threads, until the guard drops.
@@ -91,7 +107,7 @@ impl Sense {
 /// another, so the ant keeps those data: that name, if listed.
 pub fn take_over(home: &Path, ant: &UserId) -> Result<Option<UserId>> {
     ants_sense::identity::take_over(home, ant).with_context(|| {
-        format!("listing the earlier name of {ant} in {}", ants_sense::identity::names_file(home).display())
+        format!("listing the earlier name of {ant} in {}", ants_sense::home::Home::new(home).names().display())
     })
 }
 

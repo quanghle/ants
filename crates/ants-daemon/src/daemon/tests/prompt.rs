@@ -582,6 +582,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         handling: 0,
         harnesses: 0,
         escalate_to: Vec::new(),
+        sage: None,
         version: ants_proto::ANTS_VERSION.to_owned(),
         perms: ants_proto::PERMISSIONS_VERSION,
         signed_out: None,

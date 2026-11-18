@@ -1,9 +1,9 @@
-//! An ant's items as its log left them, kept in SQLite in the ant's home ([`CACHE_FILE`] of [`SENSE_DIR`]), with
-//! FTS5 over their titles and bodies ([`Cache::search`]), so reading them reads no log. The cache is never the source
-//! of truth: it holds what was built from the log of one sense identity in one incarnation of its store, up to a
-//! position ([`Built`]). An offline outbox also keeps accepted local writes durably until the log acknowledges them.
-//! Its pending projection is separate from the confirmed projection; a conflicting remote revision never discards
-//! a local write. A pending marker prevents replacing an unreadable cache that may hold unacknowledged writes.
+//! An ant's items as its log left them, kept in SQLite in the ant's home ([`Home::cache`]), with FTS5 over their
+//! titles and bodies ([`Cache::search`]), so reading them reads no log. The cache is never the source of truth: it
+//! holds what was built from the log of one sense identity in one incarnation of its store, up to a position
+//! ([`Built`]). An offline outbox also keeps accepted local writes durably until the log acknowledges them. Its pending
+//! projection is separate from the confirmed projection; a conflicting remote revision never discards a local write. A
+//! pending marker ([`Home::pending`]) prevents replacing an unreadable cache that may hold unacknowledged writes.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -13,12 +13,10 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 
+use crate::home::Home;
 use crate::items::{BODY, Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, TITLE, state_at};
-use crate::log::{Checked, Position, SENSE_DIR};
+use crate::log::{Checked, Position};
 use crate::thread::experience::{self, Experience};
-
-/// The file of [`SENSE_DIR`] holding the cache.
-pub const CACHE_FILE: &str = "cache.db";
 
 /// The schema's version, in `PRAGMA user_version`: a cache of another is built again.
 const SCHEMA_VERSION: i64 = 3;
@@ -90,26 +88,22 @@ pub struct Cache {
 mod outbox;
 pub(crate) use outbox::Pending;
 
-/// Where the cache of the ant whose home is `home` is kept.
-pub fn cache_file(home: &Path) -> PathBuf {
-    home.join(SENSE_DIR).join(CACHE_FILE)
-}
-
 impl Cache {
     /// The cache kept in `home`, created empty when missing. Unreadable caches are replaced only when no pending
     /// marker protects local writes; otherwise opening fails and leaves the files untouched.
     pub fn open(home: &Path) -> Result<Self, CacheError> {
-        let file = cache_file(home);
-        if !file.exists() && file.with_extension("pending").exists() {
+        let home = Home::new(home);
+        let file = home.cache();
+        if !file.exists() && home.has_pending_writes() {
             return Err(CacheError::Unusable("cache missing while pending sense writes may remain".into()));
         }
-        std::fs::create_dir_all(file.parent().expect("a file in a directory"))?;
+        std::fs::create_dir_all(home.dir())?;
         match Connection::open(&file).map_err(CacheError::from).and_then(Self::ready) {
             Ok(mut cache) => {
-                cache.pending_file = Some(file.with_extension("pending"));
+                cache.pending_file = Some(home.pending());
                 Ok(cache)
             }
-            Err(error) if file.with_extension("pending").exists() => Err(CacheError::Unusable(format!(
+            Err(error) if home.has_pending_writes() => Err(CacheError::Unusable(format!(
                 "{error}; pending sense writes may remain in {}; cache left untouched",
                 file.display()
             ))),
@@ -121,7 +115,7 @@ impl Cache {
                     }
                 }
                 let mut cache = Self::ready(Connection::open(&file)?)?;
-                cache.pending_file = Some(file.with_extension("pending"));
+                cache.pending_file = Some(home.pending());
                 Ok(cache)
             }
         }
@@ -276,9 +270,14 @@ impl Cache {
         rows.map(|item| Ok(serde_json::from_str(&item?)?)).collect()
     }
 
-    /// The experience of the ant whose names are `own` ([`crate::thread::experience`]).
-    pub fn experience(&self, own: &[UserId], top: usize) -> Result<Option<Experience>, CacheError> {
-        experience::count(&self.db, own, top)
+    /// The experience of the ant whose names are `own`, since `since` if given ([`crate::thread::experience`]).
+    pub fn experience(
+        &self,
+        own: &[UserId],
+        since: Option<DateTime<Utc>>,
+        top: usize,
+    ) -> Result<Option<Experience>, CacheError> {
+        experience::count(&self.db, own, since, top)
     }
 
     /// The items, of `kind` if given, whose title or body holds any word of `text`, the best matches first (BM25, a

@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use ants_proto::UserId;
 use ants_proto::provider::{
     Ack, AntRef, BoxFuture, Brief, BriefRequest, CallContext, Capabilities, Event, EventKind, Export, Host,
-    ImportRequest, Info, InitializeParams, InitializeResult, PROTOCOL_VERSION, Provider, RpcError, ToolCall, ToolList,
-    ToolResult,
+    ImportRequest, Info, InitializeParams, InitializeResult, MemoriesView, PROTOCOL_VERSION, Provider, RpcError,
+    ToolCall, ToolList, ToolResult,
 };
 
 pub mod brief;
@@ -20,6 +20,7 @@ pub mod cache;
 pub mod dream;
 pub mod export;
 pub mod fork;
+pub mod home;
 pub mod identity;
 pub mod items;
 pub mod log;
@@ -35,6 +36,7 @@ pub mod store;
 pub mod task;
 pub mod thread;
 mod tools;
+pub mod view;
 
 pub use tools::{Answer, MAX_TOOLS, TOOLS, ToolSpec};
 
@@ -46,10 +48,11 @@ pub const NAME: &str = "sense";
 /// The protocol versions sense speaks.
 pub const VERSIONS: &[u32] = &[PROTOCOL_VERSION];
 
-/// What sense implements: its tools, the brief, lifecycle events, which write each ant's card, and exports, which take
-/// each ant's log and skill files to another bus ([`export`]).
+/// What sense implements: its tools, the brief, lifecycle events, which write each ant's card, the memories view, which
+/// shows humans each ant's identity and memories ([`view`]), and exports, which take each ant's log and skill files to
+/// another bus ([`export`]).
 pub const CAPABILITIES: Capabilities =
-    Capabilities { tools: true, context: true, events: true, wake: true, export: true, ..Capabilities::NONE };
+    Capabilities { tools: true, context: true, events: true, wake: true, memories: true, export: true };
 
 /// The built-in provider. One serves every ant of a daemon, each call naming its ant.
 #[derive(Default)]
@@ -299,6 +302,10 @@ impl Provider for Sense {
         Box::pin(self.record_event(event))
     }
 
+    fn memories(&self, ant: AntRef) -> BoxFuture<'_, Result<MemoriesView, RpcError>> {
+        Box::pin(view::memories(self, ant))
+    }
+
     fn export(&self, ant: AntRef) -> BoxFuture<'_, Result<Export, RpcError>> {
         Box::pin(self.export_of(ant))
     }
@@ -363,7 +370,7 @@ mod tests {
         let sense = connect();
         assert_eq!(sense.name(), NAME);
         assert!(sense.has(Capability::Tools) && sense.has(Capability::Context) && sense.has(Capability::Events));
-        assert!(sense.has(Capability::Wake) && sense.has(Capability::Export));
+        assert!(sense.has(Capability::Wake) && sense.has(Capability::Memories) && sense.has(Capability::Export));
         let tools = ready(sense.list_tools()).unwrap().tools;
         let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(
@@ -378,7 +385,7 @@ mod tests {
                 "task",
                 "promise",
                 "remind",
-                "persona",
+                "identity",
                 "skill",
                 "dream"
             ]

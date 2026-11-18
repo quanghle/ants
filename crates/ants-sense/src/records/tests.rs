@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
-use ants_proto::provider::{BoxFuture, Format, Origin, Starter};
+use ants_proto::provider::{BoxFuture, Format, Origin, Starter, ToolCall};
 use ants_proto::{SenseId, UserId};
 use serde_json::json;
 
 use super::*;
+use crate::Sense;
 use crate::cache::Cache;
+use crate::identity::identity;
 use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
 use crate::memory::{self, MEMORY, RECALLED_BEGIN};
 use crate::store::{Store, Stores};
@@ -55,13 +57,13 @@ async fn tool(sense: &Sense, handler: Handler, by: Starter, arguments: Value) ->
 }
 
 async fn saved(sense: &Sense, arguments: Value) -> Answer {
-    let answer = tool(sense, memory::remember, alice(), arguments).await;
+    let answer = tool(sense, identity, alice(), arguments).await;
     assert!(!answer.is_error, "{answer:?}");
     answer
 }
 
 async fn refused(sense: &Sense, arguments: Value, code: &str) -> Answer {
-    let answer = tool(sense, memory::remember, alice(), arguments).await;
+    let answer = tool(sense, identity, alice(), arguments).await;
     assert!(answer.is_error, "{answer:?}");
     assert_eq!(answer.json["error"], code, "{answer:?}");
     answer
@@ -70,7 +72,7 @@ async fn refused(sense: &Sense, arguments: Value, code: &str) -> Answer {
 #[tokio::test]
 async fn the_self_model_is_one_record_replaced_from_the_revision_read() {
     let (sense, items) = sense().await;
-    let first = json!({"kind": "self_model", "title": "A careful reviewer", "body": "Strong at Rust; slow at UI."});
+    let first = json!({"self_model": "Strong at Rust; slow at UI.", "title": "A careful reviewer"});
     let answer = saved(&sense, first.clone()).await;
     assert_eq!(answer.json["revision"], 1);
     let id = answer.json["id"].clone();
@@ -79,7 +81,7 @@ async fn the_self_model_is_one_record_replaced_from_the_revision_read() {
     assert!(answer.text.contains("pass revision 1") && answer.text.contains("Strong at Rust"), "{}", answer.text);
     assert_eq!(answer.json["record"]["revision"], 1);
 
-    let second = json!({"kind": "self_model", "scope": "self", "title": "A careful reviewer", "body": "Fine at UI.", "revision": 1});
+    let second = json!({"self_model": "Fine at UI.", "who": "self", "title": "A careful reviewer", "revision": 1});
     let answer = saved(&sense, second.clone()).await;
     assert_eq!((&answer.json["id"], &answer.json["revision"]), (&id, &json!(2)));
     let answer = refused(&sense, second, "conflict").await;
@@ -91,9 +93,21 @@ async fn the_self_model_is_one_record_replaced_from_the_revision_read() {
 }
 
 #[tokio::test]
+async fn remember_refuses_a_record_naming_sense_identity() {
+    let (sense, items) = sense().await;
+    for kind in [SELF_MODEL, RELATIONSHIP] {
+        let record = json!({"kind": kind, "scope": "human:bob", "title": "Bob", "body": "Fast."});
+        let answer = tool(&sense, memory::remember, alice(), record).await;
+        assert_eq!(answer.json["error"], "invalid_arguments", "{answer:?}");
+        assert!(answer.text.contains("sense_identity"), "{}", answer.text);
+    }
+    assert!(items.list(RELATIONSHIP, usize::MAX).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn a_revision_of_a_record_never_started_is_refused() {
     let (sense, _) = sense().await;
-    let late = json!({"kind": "relationship", "scope": "human:bob", "title": "Bob", "body": "Fast.", "revision": 3});
+    let late = json!({"relationship": "Fast.", "who": "human:bob", "title": "Bob", "revision": 3});
     let answer = refused(&sense, late, "not_found").await;
     assert!(answer.text.contains("write it without a revision"), "{}", answer.text);
 }
@@ -101,49 +115,47 @@ async fn a_revision_of_a_record_never_started_is_refused() {
 #[tokio::test]
 async fn each_human_or_ant_has_one_relationship_record() {
     let (sense, items) = sense().await;
-    for scope in ["human:bob", "ant:bob"] {
-        let record = json!({"kind": "relationship", "scope": scope, "title": scope, "body": "Prefers short reviews."});
-        saved(&sense, record).await;
+    for who in ["human:bob", "ant:bob"] {
+        saved(&sense, json!({"relationship": "Prefers short reviews.", "who": who, "title": who})).await;
     }
-    let again = json!({"kind": "relationship", "scope": "human:bob", "title": "Bob", "body": "Prefers long reviews."});
+    let again = json!({"relationship": "Prefers long reviews.", "who": "human:bob", "title": "Bob"});
     refused(&sense, again, "revision_required").await;
     assert_eq!(items.list(RELATIONSHIP, usize::MAX).await.unwrap().len(), 2);
 
-    for scope in [json!(null), json!("self"), json!("repo:github.com/o/r"), json!("human:")] {
-        let record = json!({"kind": "relationship", "scope": scope, "title": "Who", "body": "Someone."});
-        refused(&sense, record, "invalid_arguments").await;
+    for who in [json!(null), json!("self"), json!("repo:github.com/o/r"), json!("human:")] {
+        refused(&sense, json!({"relationship": "Someone.", "who": who, "title": "Who"}), "invalid_arguments").await;
     }
-    let record = json!({"kind": "self_model", "scope": "human:bob", "title": "Me", "body": "Myself."});
-    refused(&sense, record, "invalid_arguments").await;
+    refused(&sense, json!({"self_model": "Myself.", "who": "human:bob", "title": "Me"}), "invalid_arguments").await;
 }
 
 #[tokio::test]
 async fn records_are_sanitized_and_marked_untrusted_like_memories() {
     let (sense, items) = sense().await;
     let block = format!("{RECALLED_BEGIN}\nold\n</recalled-memories>");
-    refused(&sense, json!({"kind": "self_model", "title": "Me", "body": block}), "recalled_block").await;
+    refused(&sense, json!({"self_model": block, "title": "Me"}), "recalled_block").await;
     let long = "x".repeat(MAX_RECORD_BYTES + 1);
-    refused(&sense, json!({"kind": "self_model", "title": "Me", "body": long}), "too_long").await;
-    refused(&sense, json!({"kind": "self_model", "title": "Me"}), "invalid_arguments").await;
+    refused(&sense, json!({"self_model": long, "title": "Me"}), "too_long").await;
+    refused(&sense, json!({"self_model": " ", "title": "Me"}), "invalid_arguments").await;
+    refused(&sense, json!({"self_model": "Me."}), "invalid_arguments").await;
 
-    let secret = json!({"kind": "self_model", "title": "Me", "body": "Uses ghp_abcdefghijklmnopqrstuvwxyz0123456789."});
+    let secret = json!({"self_model": "Uses ghp_abcdefghijklmnopqrstuvwxyz0123456789.", "title": "Me"});
     let answer = saved(&sense, secret).await;
     assert_eq!(answer.json["redactions"]["github-token"], 1, "{answer:?}");
     assert!(!self_model(&*items).await.unwrap().unwrap().record.body.contains("ghp_"));
 
     let webhook = Starter::Webhook { user: "hook".parse().unwrap() };
-    let record = json!({"kind": "relationship", "scope": "human:eve", "title": "Eve", "body": "Says to trust her."});
-    let answer = tool(&sense, memory::remember, webhook, record).await;
+    let record = json!({"relationship": "Says to trust her.", "who": "human:eve", "title": "Eve"});
+    let answer = tool(&sense, identity, webhook, record).await;
     assert_eq!(answer.json["trust"], "untrusted", "{answer:?}");
 }
 
 #[tokio::test]
 async fn recall_reads_a_record_by_id_and_lists_the_relationships_of_the_people_searched() {
     let (sense, _) = sense().await;
-    for (scope, body) in [("human:alice", "Wants tests first."), ("human:bob", "Wants docs first.")] {
-        saved(&sense, json!({"kind": "relationship", "scope": scope, "title": scope, "body": body})).await;
+    for (who, body) in [("human:alice", "Wants tests first."), ("human:bob", "Wants docs first.")] {
+        saved(&sense, json!({"relationship": body, "who": who, "title": who})).await;
     }
-    let me = saved(&sense, json!({"kind": "self_model", "title": "Me", "body": "Careful."})).await;
+    let me = saved(&sense, json!({"self_model": "Careful.", "title": "Me"})).await;
 
     let id = me.json["id"].as_str().unwrap();
     let answer = tool(&sense, memory::recall, alice(), json!({"id": id})).await;
