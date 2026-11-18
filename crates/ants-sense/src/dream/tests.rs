@@ -423,5 +423,6 @@ fn a_thread_shows_its_timeline_after_its_history_the_latest_of_both_kept_for_roo
     assert!(trimmed.ends_with("call 099 of thread 2\n"), "the latest kept: {trimmed}");
 }
 
+mod identity_findings;
 mod identity_section;
 mod review;

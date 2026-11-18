@@ -139,7 +139,9 @@ machines and buses, retirement and revival:
   keeps a copy of the source's memories (with their links, writers and votes), self-model, persona and skills as they
   were when it was cloned, each marked `inherited` with the source's sense id, and none of its tasks, commitments,
   reminders, relationship records, resume registers, handoffs, thread records, votes, persona and skill proposals,
-  dreams or card. A record the clone writes anew is its own. The clone's first brief may come before the fork.
+  dreams or card. A record the clone writes anew is its own. Once the clone has worked 5 threads, a dream asks it to
+  make each persona, self-model and skill still inherited its own, writing it anew or rejecting the finding to keep it
+  as it is ([Dreams](#dreams)). The clone's first brief may come before the fork.
 - **Retirement:** a retired ant's identity is dormant and keeps all its data: its commitments stay open and its
   reminders paused, nothing firing and no maintenance or dream running, until a revival or an addition under another
   ants identity id, as after a revoke and re-add. That puts off the expiry of each reminder active at the retirement by
@@ -294,7 +296,9 @@ before it exists with `not_found`. Earlier revisions stay in the log. A record h
 memories is refused (`recalled_block`), and one is `untrusted` on the same grounds as a memory; the duplicate and core
 checks of memories do not apply. They take effect at once, with no dream to confirm them. The answer names the record,
 its revision, why it is untrusted and the secrets redacted. `sense_remember` refuses `kind` `self_model` and
-`relationship` with `invalid_arguments`, naming `sense_identity`.
+`relationship` with `invalid_arguments`, naming `sense_identity`. A dream asks for a missing self-model or
+relationship record, and for a self-model the ant's work has outgrown, once its threads call for one
+([Dreams](#dreams)).
 
 The brief shows the self-model after the persona and the records of the thread's participants after the tasks
 ([Brief](#brief)); `sense_identity` shows the self-model and every relationship record by title
@@ -469,8 +473,9 @@ is reviewed by no one either, for as long as a daemon serves the ant naming it. 
 - the verdicts on the last dream's findings;
 - the findings, at most 20, each with an id `<dream>.<n>`: memories with both `helpful` and `stale` votes since the
   last dream (`contradiction`), memories needing review (`needs_review`), the near duplicates the last maintenance
-  found (`duplicates`), episodes to distill (`distill`), pending persona and skill proposals (`proposal`), and the
-  findings of the last dream deferred or unanswered that still hold, offered again;
+  found (`duplicates`), episodes to distill (`distill`), pending persona and skill proposals (`proposal`), what the
+  ant's identity lacks for its work (below), and the findings of the last dream deferred or unanswered that still
+  hold, offered again first;
 - the ant's identity, to judge the work against and to judge against the work: its persona and pending persona
   proposal, its self-model, the relationship records of the humans and other ants who started the threads covered (as
   their thread records tell; a line for each without one), its skills by name and description, and its experience
@@ -484,6 +489,26 @@ is reviewed by no one either, for as long as a daemon serves the ant naming it. 
 A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then cuts
 the identity to titles (the persona's field names, the records' heads and the skills' names), then leaves out the last
 findings, counted for the next dream.
+
+**Identity findings** come from the ant's sense data and thread records alone, never thread text, so none is
+untrusted. Each names the `sense_identity` or `sense_skill` call answering it, and they come after the other findings,
+cut first by the limit of 20:
+
+- `no_persona`: no persona after 5 threads, and none proposed;
+- `no_self_model`: no self-model after 5 threads;
+- `no_relationship`: no relationship record of a human or ant who started 3 of the ant's threads or more, one finding
+  each, the most threads first;
+- `stale_self_model`: a self-model unchanged over 30 active days or more in which the ant worked with a human, ant or
+  repository its threads had not before the self-model last changed, naming at most 5 of them;
+- `inherited`: a persona, self-model or skill a clone still holds as inherited ([Identity](#identity)), after 5 threads
+  of its own and with no change of it proposed: to write anew as the ant's own, or to keep as it is by rejecting the
+  finding.
+
+The threads and active days are the experience's ([Identity](#identity)), dream threads among them. A finding offered
+again takes the text gathered now and goes once its ground is gone: the record written, the persona or skill change
+proposed. Each rests on a count stepped coarsely, its threads (or, for a stale self-model, the people and repositories
+new) rounded down to the threshold doubled any number of times (5, 10, 20 and on), so a rejected one comes again when
+that count doubles, not at each thread. The numbers are first guesses, to tune on real threads.
 
 **The sage's review:** the packet asks for a review that reads only, with read-only tools, reading code only in the
 checkouts made for it, never the ant's workdir or worktrees, and messaging no one, answered by one reply holding a
@@ -514,10 +539,11 @@ sage's daemon gave up on the review or had it withdrawn, wakes the ant with the 
 silent for 6 hours, a later answer prompting no one.
 
 **On the dream thread,** `sense_dream` answers findings: `verdicts`, a list of `{finding, verdict, reason, items?}`,
-`verdict` being `applied` (naming in `items` the memories written or voted on; none for a proposal, which it confirms),
-`rejected` or `deferred`, the reason at most 500 characters; a later verdict on a finding replaces the earlier one. A
-rejected finding rests: no dream offers it again until what it is about changed since the verdict (one of its memories
-written other than by a read) or 14 days of the ant's active time passed, its dormancies not counted; deferred and
+`verdict` being `applied` (naming in `items` the memories or records written or voted on, or the proposal made; none
+for a `proposal` finding, which it confirms), `rejected` or `deferred`, the reason at most 500 characters; a later
+verdict on a finding replaces the earlier one. A rejected finding rests: no dream offers it again until what it is about
+changed since the verdict (one of its items written other than by a read, or the count it rests on) or 14 days of the
+ant's active time passed, its dormancies not counted; deferred and
 unanswered findings come again in the next dream while they hold. `done: true` finishes the dream; without arguments it
 shows the findings and verdicts. The dream thread makes at most 20 writes (`sense_remember`, `sense_vote` and the
 records `sense_identity` replaces), past which writes are refused (`dream_cap`). While a finding marked untrusted is
