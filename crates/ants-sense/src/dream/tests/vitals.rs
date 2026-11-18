@@ -160,7 +160,13 @@ fn each_vital_finding_is_gathered_when_its_ground_holds_and_not_otherwise() {
     let fewer = Signs { calls: calls(&[("execute", FAILED_MIN_CALLS - 1, 10)]), ..Signs::default() };
     assert!(!share(&[(one.clone(), fewer)], &trend), "too few calls");
     assert!(!share(&[(one.clone(), over(5))], &trend[2..]), "no dream before with calls");
-    assert!(!share(&[(one, over(5))], &[]), "no dream before");
+    assert!(!share(&[(one.clone(), over(5))], &[]), "no dream before");
+
+    let clean = [(1, Signs { calls: calls(&[("execute", 20, 0)]), ..Signs::default() })];
+    let failing = |failed| Signs { calls: calls(&[("execute", 20, failed)]), ..Signs::default() };
+    assert!(!share(&[(one.clone(), failing(1))], &clean), "5% is under the floor, though the mean before is zero");
+    let floor = (FAILED_SHARE_FLOOR * 20.0).ceil() as u32;
+    assert!(share(&[(one, failing(floor))], &clean), "the floor makes a finding over a mean of zero");
 }
 
 #[tokio::test]

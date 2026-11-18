@@ -4,7 +4,7 @@
 //! before ([`trend`]), with a line per thread ([`section`]), and a sign turning sharply for the worse is a finding
 //! ([`gather`]): [`CANCELLED_FINDING`] prompts cancelled by a human, [`CAPPED_FINDING`] cut by a cap,
 //! [`REJECTED_FINDING`] tool requests rejected, or a share of failed tool calls at least [`FAILED_SHARE_FACTOR`] times
-//! the mean of the dreams before over [`FAILED_MIN_CALLS`] calls or more.
+//! the mean of the dreams before, and at least [`FAILED_SHARE_FLOOR`], over [`FAILED_MIN_CALLS`] calls or more.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -25,6 +25,10 @@ pub const CAPPED_FINDING: u32 = 2;
 pub const REJECTED_FINDING: u32 = 3;
 /// How many times the mean share of failed tool calls of the dreams before a period's share makes a finding.
 pub const FAILED_SHARE_FACTOR: f64 = 2.0;
+/// The least share of failed tool calls in a dream's period that makes a finding, however low the mean of the dreams
+/// before: after dreams with no failed call, the mean is zero, and any failure would be twice it. A first guess, to tune
+/// on the signs of real ants.
+pub const FAILED_SHARE_FLOOR: f64 = 0.1;
 /// The fewest tool calls in a dream's period whose failed share makes a finding.
 pub const FAILED_MIN_CALLS: u32 = 20;
 /// The most dreams before whose signs a packet shows and a period's failed share is compared with.
@@ -250,7 +254,7 @@ pub(super) fn gather(threads: &[(ThreadId, Signs)], trend: &[(u64, Signs)]) -> V
         && !shares.is_empty()
     {
         let mean = shares.iter().sum::<f64>() / shares.len() as f64;
-        if share >= FAILED_SHARE_FACTOR * mean {
+        if share >= FAILED_SHARE_FLOOR && share >= FAILED_SHARE_FACTOR * mean {
             let text = format!(
                 "{} of {} tool calls failed, {}, against {} in the {} dreams before ({}): find what the failed calls \
                  had in common and remember how to avoid it with sense_remember.",

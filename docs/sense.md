@@ -652,8 +652,9 @@ the issues escalated (a reason, or tool request, once a thread, tool requests an
 prompts run in a session rebuilt; and the calls of sense's own tools. A dream offers a `vitals` finding, naming the
 threads it counts, when a sign turned sharply for the worse in its period: 3 prompts cancelled by a human, 2 cut by a
 cap, 3 tool requests rejected, or, over 20 tool calls or more, a share of them failed at least twice the mean of the
-dreams before among the last 5 that made calls. These come last among the findings; rejected, one rests 14 days of
-the ant's active time.
+dreams before among the last 5 that made calls and at least 10%, so a failure or two after dreams with none makes no
+finding. These come last among the findings; rejected, one rests 14 days of the ant's active time. The thresholds are
+first guesses, to tune on the signs of real ants.
 
 **The sage's review:** the packet asks for a review that reads only, with read-only tools, reading code only in the
 checkouts made for it, never the ant's workdir or worktrees, and messaging no one, answered by one reply holding a
