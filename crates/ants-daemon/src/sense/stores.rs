@@ -233,10 +233,9 @@ impl SenseStores {
         let (items, home, creds) = (served.items.clone(), served.home.clone(), served.creds.clone());
         Ok(Of { items, home, creds, link, route: state.route.clone() })
     }
-}
 
-impl Stores for SenseStores {
-    fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
+    /// The items of `ant`, caught up with its log as they open, and again when `sync` says so.
+    fn opened<'a>(&'a self, ant: &'a UserId, sync: bool) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         Box::pin(async move {
             let Of { items, home, creds, link, route } = self.of(ant)?;
             if export::importing(&home) {
@@ -248,6 +247,9 @@ impl Stores for SenseStores {
             }
             let mut opened = items.lock().await;
             if let Some(current) = opened.as_ref() {
+                if !sync {
+                    return Ok(current.clone());
+                }
                 match current.sync().await {
                     Err(StoreError::Log(error))
                         if error.0.contains("stream incarnation changed") && current.pending().await? == 0 =>
@@ -255,7 +257,10 @@ impl Stores for SenseStores {
                         *opened = None;
                     }
                     // The items remain readable, including when a conflict requires explicit reconciliation.
-                    Ok(()) | Err(StoreError::Log(_)) | Err(StoreError::Unavailable(_)) => return Ok(current.clone()),
+                    Ok(()) | Err(StoreError::Unavailable(_)) => return Ok(current.clone()),
+                    Err(StoreError::Log(error)) if is_offline(&error) => {
+                        return Ok(current.clone());
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -271,6 +276,16 @@ impl Stores for SenseStores {
             *opened = Some(items.clone());
             Ok(items)
         })
+    }
+}
+
+impl Stores for SenseStores {
+    fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
+        self.opened(ant, false)
+    }
+
+    fn synced<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
+        self.opened(ant, true)
     }
 
     fn home(&self, ant: &UserId) -> Option<PathBuf> {

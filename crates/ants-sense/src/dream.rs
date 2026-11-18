@@ -823,8 +823,9 @@ pub(crate) async fn counted(sense: &Sense, handler: Handler, call: &ToolCall) ->
     if !matches!(last(&*items).await, Ok(Some((dream, _))) if on_thread(&dream)) {
         return handler(sense, call).await;
     }
-    // One write of a dream thread at a time, so concurrent calls cannot pass the cap together.
-    let _turn = sense.dream_writes.lock().await;
+    // One write of a dream thread of the ant at a time, so concurrent calls cannot pass the cap together.
+    let ant = sense.ant(&call.context.ant);
+    let _turn = ant.dream_writes.lock().await;
     let dream = match last(&*items).await {
         Ok(Some((dream, _))) if on_thread(&dream) => dream,
         _ => return handler(sense, call).await,

@@ -82,11 +82,11 @@ pub(super) fn serve(
 
 fn start(sense: Arc<Sense>, host: Arc<dyn Host>, settings: Settings) -> Serving {
     Serving(Mutex::new(Some(tokio::spawn(async move {
-        // Subscribe first: a successful tool call during a schedule read must wake the following sleep.
-        let mut changes = sense.changes();
+        // Subscribe first: a call changing the ant's items during a schedule read must wake the following sleep.
+        let mut changes = sense.changes(&settings.ant);
         loop {
             let result = async {
-                let items = sense.items(&settings.ant).await?;
+                let items = sense.synced(&settings.ant).await?;
                 cycle(&sense, &*items, &*host, &settings, Utc::now()).await
             }
             .await;

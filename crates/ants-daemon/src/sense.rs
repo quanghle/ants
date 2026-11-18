@@ -72,7 +72,7 @@ impl Sense {
     /// Take `envelope`, a message from an ant to `ant`, if it is its sage's answer to the review of a dream: whether
     /// the ant is to answer it, none when it is no such answer ([`scheduler::review_answer`]).
     pub(crate) async fn review_answer(&self, ant: &UserId, envelope: &mut Envelope) -> Result<Option<bool>> {
-        let items = self.provider.items(ant).await?;
+        let items = self.provider.synced(ant).await?;
         scheduler::review_answer(&*items, envelope).await
     }
 
