@@ -395,8 +395,8 @@ impl Page {
     }
 }
 
-/// Where and how the ant runs, its labels lined up, in lines of at most `width` characters: the whoami wrapped, under
-/// its label, the other values cut.
+/// Where and how the ant runs, its labels lined up, in lines of at most `width` characters: the whoami and profile
+/// wrapped, under their labels, the other values cut.
 fn about(entry: Option<&ColonyEntry>, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
     let Some(entry) = entry else {
         return wrapped(vec![Line::styled("not in the colony: no daemon serves it now", style::dim())], width);
@@ -406,7 +406,7 @@ fn about(entry: Option<&ColonyEntry>, now: DateTime<Utc>, width: usize) -> Vec<L
     let room = width.saturating_sub(label + 1);
     let mut lines = Vec::new();
     for (name, value) in rows {
-        let parts = if name == "whoami" {
+        let parts = if name == "whoami" || name == "profile" {
             value.lines().flat_map(|line| markdown::wrap(&[Span::raw(line.to_owned())], room.max(1))).collect()
         } else {
             vec![vec![Span::raw(crate::text::excerpt(&value, room))]]
@@ -659,14 +659,17 @@ mod tests {
         m.focus = crate::tui::model::Focus::View;
         let tabs = |shown: &str| shown.lines().position(|l| l.contains("threads (0)")).unwrap();
         let shown = screen(&m, at(3));
-        assert_eq!(tabs(&shown), 13, "the box keeps the 10 rows of the about column: {shown}");
+        assert_eq!(tabs(&shown), 15, "the box keeps the 12 rows of the about column: {shown}");
         assert!(shown.contains("whoami       word01") && !shown.contains("word40"), "{shown}");
-        assert!(shown.contains("[ ] 5 more lines") && shown.contains("[ ] 6 more lines"), "{shown}");
+        assert!(shown.contains("[ ] 5 more lines") && shown.contains("[ ] 4 more lines"), "{shown}");
 
         m.key(Key::Char(']'), at(3));
         let shown = screen(&m, at(3));
         assert!(!shown.contains("machine      m1") && shown.contains("[ ] 4 more lines"), "{shown}");
-        assert!(shown.contains("nothing holds dev-a back") && shown.contains("[ ] 6 more lines"), "{shown}");
+        assert!(
+            shown.contains("nothing holds dev-a back") && shown.matches("[ ] 4 more lines").count() == 2,
+            "{shown}"
+        );
         (0..10).for_each(|_| _ = m.key(Key::Char(']'), at(3)));
         let shown = screen(&m, at(3));
         assert!(shown.contains("word40") && shown.contains("[ ] 5 lines above"), "kept within: {shown}");
@@ -676,14 +679,14 @@ mod tests {
         m.key(Key::Char('\\'), at(3));
         m.key(Key::Char(']'), at(3));
         let shown = screen(&m, at(3));
-        assert!(!shown.contains("nothing holds dev-a back") && shown.contains("[ ] 5 more lines"), "{shown}");
+        assert!(!shown.contains("nothing holds dev-a back") && shown.contains("[ ] 3 more lines"), "{shown}");
         assert!(shown.contains("[ ] 1 more line "), "the about column stays: {shown}");
-        assert_eq!(tabs(&shown), 13);
+        assert_eq!(tabs(&shown), 15);
 
         m.select(nav::Item::Ant(user("dev-b")));
         m.select(nav::Item::Ant(user("dev-a")));
         let shown = screen(&m, at(3));
-        assert!(shown.contains("[ ] 5 more lines") && shown.contains("[ ] 6 more lines"), "scrolled back: {shown}");
+        assert!(shown.contains("[ ] 5 more lines") && shown.contains("[ ] 4 more lines"), "scrolled back: {shown}");
     }
 
     fn restart(now: bool) -> Job {

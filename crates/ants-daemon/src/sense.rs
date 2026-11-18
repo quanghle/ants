@@ -2,9 +2,9 @@
 //! gets, sense gets through [`crate::provider`] like the others: its tools, briefs, events, wake requests and export.
 //! The rest is sense's alone, behind [`Sense`]: the data it keeps of the ants a process serves ([`stores`]), over their
 //! event logs in the hub's stream ([`log`]); each ant's schedule of reminders, memory maintenance and dreams
-//! ([`scheduler`]); its sage's answers to the reviews of its dreams; the skills it offers the ant's harness; and the
-//! workdirs of the ant's threads, through which it reaches the ant's files ([`workdirs`]). A home an ant takes over
-//! keeps the sense data in it ([`take_over`]).
+//! ([`scheduler`]); its sage's answers to the reviews of its dreams; the skills it offers the ant's harness; the
+//! workdirs of the ant's threads, through which it reaches the ant's files ([`workdirs`]); and the profile the ant
+//! publishes in its colony entry ([`published`]). A home an ant takes over keeps the sense data in it ([`take_over`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
@@ -14,6 +14,7 @@ use ants_proto::{AntIdentity, Envelope, UserId};
 use anyhow::{Context as _, Result};
 
 pub mod log;
+mod published;
 mod scheduler;
 mod stores;
 mod workdirs;
@@ -83,6 +84,12 @@ impl Sense {
     pub(crate) async fn review_answer(&self, ant: &UserId, envelope: &mut Envelope) -> Result<Option<bool>> {
         let items = self.provider.items(ant).await?;
         scheduler::review_answer(&*items, envelope).await
+    }
+
+    /// Keep the profile `workload` puts in `ant`'s colony entry that of the ant's confirmed persona, until dropped
+    /// ([`published::profile`]).
+    pub(crate) async fn publish_profile(&self, ant: &UserId, workload: &crate::colony::Workload) {
+        published::profile(&self.provider, ant, workload).await;
     }
 
     /// The skills sense offers the harness of the ant whose home is `home`: its skills directory, in the Claude Code

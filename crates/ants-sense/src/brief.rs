@@ -57,7 +57,8 @@ const CORE_LOOP: &[(&str, &str)] = &[
     (
         "identity",
         "show who the ant is; replace the self-model or a relationship record from the revision shown; propose a \
-         change of values, voice, boundaries or working style, which a later dream confirms",
+         change of values, voice, boundaries, working style or the profile the colony reads, which a later dream \
+         confirms",
     ),
     ("skill", "read a skill; propose a new, changed or removed one, which a later dream confirms"),
     ("handoff", "hand the work over as the thread's last write"),
@@ -327,7 +328,8 @@ fn persona_section(found: Option<&Item>) -> Section {
             ..Section::cut_with("## Persona", persona::text(&found.values), "sense_identity")
         },
         None => {
-            let body = "No persona yet: propose values, voice, boundaries or working style with sense_identity.";
+            let body = "No persona yet: propose values, voice, boundaries, working style or a profile for the colony \
+                        with sense_identity.";
             Section::whole("## Persona".to_owned(), body.to_owned())
         }
     }

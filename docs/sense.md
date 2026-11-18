@@ -71,6 +71,8 @@ vote or propose.
 - **Export and import:** `ants ant export` carries the log and skill files to another bus
   ([sense's part](config.md#senses-part)).
 - **Reviews:** a dream sent to the sage is a message from the ant on a review thread of its own.
+- **The colony:** the profile of the ant's confirmed persona shows in its colony entry, the one part of its sense data
+  other ants see ([Persona and skills](#persona-and-skills)).
 
 ### Limits
 
@@ -81,7 +83,7 @@ vote or propose.
 | Experience | the 3 people and 3 repositories of the most threads, in the brief's identity ([Identity](#identity)) |
 | Memory | title 200 characters, body 4 KiB; the live core memories 2,000 bytes in all |
 | Self-model, relationship record | title 200 characters, body 2,000 bytes |
-| Persona | 500 bytes a field |
+| Persona | 500 bytes a field, 300 the profile |
 | Skills | 50, proposed ones counted; 32 KiB a skill, 16 KiB a file, 8 files besides `SKILL.md` |
 | Resume register, handoff | 2,000 characters a value or entry, 500 the branch and each file, 50 entries a list |
 | Triggers | 50 active; ordinary reminders expire after 30 days unless renewed |
@@ -195,7 +197,7 @@ the dream's start (`experience_since`): a thread counts when it started, started
 and only those times count toward its days and tallies.
 
 `sense_identity` without arguments shows who the ant is, whole: `## Identity`, the card and the experience as the brief
-shows them, without the return; `## Persona`, the persona and its pending proposal
+shows them, without the return; `## Persona`, the persona, its profile among its fields, and its pending proposal
 ([Persona and skills](#persona-and-skills)); `## Self-model`, the self-model in full; `## Relationships`, every
 relationship record by its title; and `## Skills`, the skills by name. The records come inside the block of recalled
 memories. As JSON it answers `card`, `experience`, `persona`, `pending`, `self_model`, `relationships` (each record's
@@ -321,13 +323,22 @@ The brief shows the self-model after the persona and the records of the thread's
 
 ## Persona and skills
 
-The ant's persona, its values, voice, boundaries and working style (each at most 500 bytes), and its skills change only
-through proposals the ant itself confirms in a later [dream](#dreams). Every confirmed version stays in the log with its
-reason. A skill follows the Agent Skills layout: a directory named after it holding `SKILL.md`, whose front matter
+The ant's persona, its values, voice, boundaries and working style (each at most 500 bytes) and its profile (at most 300
+bytes), and its skills change only through proposals the ant itself confirms in a later [dream](#dreams). Every
+confirmed version stays in the log with its reason.
+
+The profile is where the ant tells the colony what it is good for, in its own words, beside the `whoami` its humans
+write. The daemon serving the ant publishes the confirmed profile as `profile` in the ant's colony entry
+([Colony, identity and memory](architecture.md#colony-identity-and-memory)), reading it when it starts serving the ant
+and again after each change sense makes, so a confirmed profile shows within a heartbeat, and goes when a confirmed
+version drops it. `list_ants` and the messenger's triage show it after the `whoami`, marked as the ant's own words and,
+like the `whoami`, no instructions; `ants colony --json` and `ants ant show` show it too. `route` keeps matching
+capabilities. A proposal changing the profile says so in the dream finding offering it. An ant without sense has no
+profile. A skill follows the Agent Skills layout: a directory named after it holding `SKILL.md`, whose front matter
 (between two lines `---`) gives its `name` and `description`, and the files it refers to.
 
-- `sense_identity` proposes a persona change given any of `values`, `voice`, `boundaries` and `working_style`, an
-  empty text clearing that field and one left out keeping it, and a `reason` (at most 500 characters). Without
+- `sense_identity` proposes a persona change given any of `values`, `voice`, `boundaries`, `working_style` and
+  `profile`, an empty text clearing that field and one left out keeping it, and a `reason` (at most 500 characters). Without
   arguments it shows the persona and its pending proposal with the rest of the identity ([Identity](#identity)), with
   `history: true` every version of the persona, the newest first.
 - `sense_skill` takes a `name` (1 to 64 lowercase letters, digits and single hyphens inside) and `content` (the whole
