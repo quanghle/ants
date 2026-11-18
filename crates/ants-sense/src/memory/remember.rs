@@ -4,16 +4,17 @@
 use std::fmt::Write as _;
 
 use ants_proto::provider::{BoxFuture, ToolCall};
-use serde_json::{Map, Value, json};
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use super::{
-    CORE_BUDGET, Citation, DEFAULT_IMPORTANCE, DIGEST, MAX_BODY_BYTES, MAX_CITATIONS, MAX_TITLE_CHARS, MEMORY, Memory,
-    MemoryItem, MemoryKind, NEAR_DUPLICATE, Scope, Status, Trust, core, digest, holds_recalled_block,
+    CORE_BUDGET, Citation, DEFAULT_IMPORTANCE, DIGEST, MAX_BODY_BYTES, MAX_CITATIONS, MAX_IMPORTANCE, MAX_TITLE_CHARS,
+    MEMORY, Memory, MemoryItem, MemoryKind, NEAR_DUPLICATE, Scope, Status, Trust, core, digest, holds_recalled_block,
     holds_recalled_marker, normalize_remote, similarity,
 };
 use crate::items::{ItemId, Values};
 use crate::sanitize::{Limit, Redaction, Refused, Sanitized, sanitize_body, sanitize_title};
-use crate::store::{Items, StoreError, Write};
+use crate::store::{Items, Write};
 use crate::tools::Answer;
 use crate::{Sense, records};
 
@@ -30,15 +31,16 @@ pub fn remember<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answe
 }
 
 async fn remember_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
-    if let Some(kind) = call.arguments.get("kind").and_then(Value::as_str).filter(|kind| records::is_record(kind)) {
-        return records::remember(sense, call, kind).await;
+    let given: Given = crate::tools::arguments(call)?;
+    if given.kind.as_deref().is_some_and(records::is_record) {
+        return records::remember(sense, call, given).await;
     }
-    let request = Request::parse(&call.arguments)?;
+    let request = Request::parse(given)?;
     if holds_recalled_block(&request.title.text) || holds_recalled_block(&request.body.text) {
         let message = "Recalled memories are not stored again: write what was learned in new words.";
         return Err(Answer::error("recalled_block", message.into()));
     }
-    let items = sense.items(&call.context.ant).await.map_err(unavailable)?;
+    let items = sense.items(&call.context.ant).await?;
     let items = items.as_ref();
     let old = match &request.supersedes {
         Some(id) => Some(superseded(items, id).await?),
@@ -92,12 +94,7 @@ async fn remember_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         values.insert("superseded_by".into(), json!(id));
         writes.push(Write::Change { id: old.id().clone(), values, expected: Some(old.item.revision) });
     }
-    let written = items.write(&writes, context.thread.as_str()).await.map_err(|e| match e {
-        StoreError::Conflict { current, .. } => {
-            Answer::error("conflict", format!("Memory {} changed meanwhile: try again.", current.id))
-        }
-        e => unavailable(e),
-    })?;
+    let written = items.write(&writes, context.thread.as_str()).await?;
     Ok(remembered(&written[0].id, written[0].revision, &memory, untrusted, &request.redactions))
 }
 
@@ -113,13 +110,13 @@ async fn check(
 ) -> Result<(), Answer> {
     let rival =
         |found: &MemoryItem| found.memory.status.live() && found.memory.scope == *scope && Some(found.id()) != old;
-    let same = items.list_by(MEMORY, DIGEST, Some(&json!(digest)), usize::MAX).await.map_err(unavailable)?;
+    let same = items.list_by(MEMORY, DIGEST, Some(&json!(digest)), usize::MAX).await?;
     if let Some(same) = same.into_iter().filter_map(MemoryItem::of).find(rival) {
         return Err(duplicate(&same));
     }
     if !request.force {
         let text = format!("{}\n{}", request.title.text, request.body.text);
-        let hits = items.search(&text, Some(MEMORY), CANDIDATES).await.map_err(unavailable)?;
+        let hits = items.search(&text, Some(MEMORY), CANDIDATES).await?;
         let near: Vec<_> = hits
             .into_iter()
             .filter_map(|hit| MemoryItem::of(hit.item).filter(rival))
@@ -135,7 +132,7 @@ async fn check(
         }
     }
     if request.core {
-        let core = core(items).await.map_err(unavailable)?;
+        let core = core(items).await?;
         let core: Vec<_> = core.into_iter().filter(|found| Some(found.id()) != old).collect();
         let total = core.iter().map(|found| found.memory.core_bytes()).sum::<usize>()
             + request.title.text.len()
@@ -145,6 +142,45 @@ async fn check(
         }
     }
     Ok(())
+}
+
+/// The arguments of a `sense_remember` call, of a memory or a record ([`records::remember`]); others, such as a writer
+/// or a trust, are ignored.
+#[derive(Deserialize)]
+pub(crate) struct Given {
+    pub kind: Option<String>,
+    pub scope: Option<Scope>,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    /// For a record: the revision replaced.
+    pub revision: Option<u64>,
+    pub importance: Option<u64>,
+    #[serde(default)]
+    pub citations: Vec<Value>,
+    #[serde(default)]
+    pub core: bool,
+    pub supersedes: Option<String>,
+    pub quotes: Option<Quotes>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// What a text given to remember says it quotes, stored as untrusted.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Quotes {
+    Recalled,
+    External,
+}
+
+impl Quotes {
+    /// Why a text quoting this is not the ant's own.
+    pub(crate) fn why(self) -> &'static str {
+        match self {
+            Self::Recalled => "it quotes recalled memories",
+            Self::External => "it quotes outside content",
+        }
+    }
 }
 
 /// What a call asks to remember, sanitized.
@@ -164,69 +200,48 @@ struct Request {
 }
 
 impl Request {
-    /// The request of `arguments`; arguments it does not know, such as a writer or a trust, are ignored.
-    fn parse(arguments: &Map<String, Value>) -> Result<Self, Answer> {
-        let text = |name: &str| -> Result<Option<&str>, Answer> {
-            match arguments.get(name) {
-                None | Some(Value::Null) => Ok(None),
-                Some(Value::String(text)) => Ok(Some(text)),
-                Some(_) => Err(invalid(format!("{name} must be a string."))),
-            }
-        };
-        let flag = |name: &str| -> Result<bool, Answer> {
-            match arguments.get(name) {
-                None | Some(Value::Null) => Ok(false),
-                Some(Value::Bool(flag)) => Ok(*flag),
-                Some(_) => Err(invalid(format!("{name} must be true or false."))),
-            }
-        };
-        let kind = text("kind")?.ok_or_else(|| invalid(kinds("kind is missing")))?;
-        let kind = kind.parse().map_err(|_| invalid(kinds(&format!("No kind of memory {kind:?}"))))?;
-        let scope = text("scope")?.map(str::parse).transpose().map_err(invalid)?;
-        let title = text("title")?;
+    /// The memory `given` asks to remember.
+    fn parse(given: Given) -> Result<Self, Answer> {
+        let kind = given.kind.ok_or_else(|| Answer::invalid(kinds("kind is missing")))?;
+        let kind = kind.parse().map_err(|_| Answer::invalid(kinds(&format!("No kind of memory {kind:?}"))))?;
+        let title = given.title.as_deref();
         let title =
             sanitized("title", title, sanitize_title(title.unwrap_or_default().trim(), Limit::Chars(MAX_TITLE_CHARS)))?;
-        let body = text("body")?;
+        let body = given.body.as_deref();
         let body =
             sanitized("body", body, sanitize_body(body.unwrap_or_default().trim(), Limit::Bytes(MAX_BODY_BYTES)))?;
-        let importance = match arguments.get("importance") {
-            None | Some(Value::Null) => DEFAULT_IMPORTANCE,
-            Some(value) => value
-                .as_u64()
-                .filter(|importance| (1..=5).contains(importance))
-                .map(|importance| importance as u8)
-                .ok_or_else(|| invalid("importance must be from 1 to 5.".into()))?,
+        let importance = match given.importance {
+            None => DEFAULT_IMPORTANCE,
+            Some(importance) => u8::try_from(importance)
+                .ok()
+                .filter(|importance| (1..=MAX_IMPORTANCE).contains(importance))
+                .ok_or_else(|| Answer::invalid(format!("importance must be from 1 to {MAX_IMPORTANCE}.")))?,
         };
-        let supersedes = text("supersedes")?
-            .map(|id| id.trim().parse::<ItemId>().map_err(|_| invalid(format!("No memory id: {id:?}."))))
+        let supersedes = given
+            .supersedes
+            .map(|id| id.trim().parse::<ItemId>().map_err(|_| Answer::invalid(format!("No memory id: {id:?}."))))
             .transpose()?;
-        let quotes = match text("quotes")? {
-            None => None,
-            Some("recalled") => Some("it quotes recalled memories"),
-            Some("external") => Some("it quotes outside content"),
-            Some(other) => return Err(invalid(format!("quotes must be recalled or external, not {other:?}."))),
-        };
         let mut redactions = title.redactions.clone();
         redactions.extend(body.redactions.iter().copied());
-        let citations = match arguments.get("citations") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(given)) if given.len() <= MAX_CITATIONS => {
-                given.iter().map(|citation| parse_citation(citation, &mut redactions)).collect::<Result<_, _>>()?
-            }
-            Some(Value::Array(_)) => return Err(invalid(format!("At most {MAX_CITATIONS} citations."))),
-            Some(_) => return Err(invalid("citations must be a list.".into())),
-        };
+        if given.citations.len() > MAX_CITATIONS {
+            return Err(Answer::invalid(format!("At most {MAX_CITATIONS} citations.")));
+        }
+        let citations = given
+            .citations
+            .iter()
+            .map(|citation| parse_citation(citation, &mut redactions))
+            .collect::<Result<_, _>>()?;
         Ok(Self {
             kind,
-            scope,
+            scope: given.scope,
             title,
             body,
             importance,
             citations,
-            core: flag("core")?,
+            core: given.core,
             supersedes,
-            force: flag("force")?,
-            quotes,
+            force: given.force,
+            quotes: given.quotes.map(Quotes::why),
             redactions,
         })
     }
@@ -246,7 +261,7 @@ pub(crate) fn sanitized(
 ) -> Result<Sanitized, Answer> {
     match sanitized {
         Ok(sanitized) if given.is_some() && !sanitized.text.trim().is_empty() => Ok(sanitized),
-        Ok(_) => Err(invalid(format!("{name} is missing."))),
+        Ok(_) => Err(Answer::invalid(format!("{name} is missing."))),
         Err(refused) => {
             let unit = match refused.limit {
                 Limit::Chars(_) => "characters",
@@ -260,7 +275,7 @@ pub(crate) fn sanitized(
 
 /// A citation as given: `path`, `path:start` or `path:start-end`, or `{path, start, end, remote, hash}`.
 fn parse_citation(given: &Value, redactions: &mut Vec<Redaction>) -> Result<Citation, Answer> {
-    let bad = |why: &str| invalid(format!("Citation {given}: {why}."));
+    let bad = |why: &str| Answer::invalid(format!("Citation {given}: {why}."));
     let mut citation = match given {
         Value::String(text) => {
             let (path, lines) = match text.rsplit_once(':') {
@@ -310,7 +325,7 @@ fn parse_citation(given: &Value, redactions: &mut Vec<Redaction>) -> Result<Cita
 
 /// Memory `id`, which a new one is to supersede: live.
 async fn superseded(items: &dyn Items, id: &ItemId) -> Result<MemoryItem, Answer> {
-    let found = items.get(id).await.map_err(unavailable)?.and_then(MemoryItem::of);
+    let found = items.get(id).await?.and_then(MemoryItem::of);
     let found = found.ok_or_else(|| Answer::error("not_found", format!("No memory {id}.")))?;
     if !found.memory.status.live() {
         let by = found.memory.superseded_by.as_ref().map_or_else(String::new, |by| format!(" by {by}"));
@@ -319,14 +334,6 @@ async fn superseded(items: &dyn Items, id: &ItemId) -> Result<MemoryItem, Answer
         return Err(Answer::error("conflict", message));
     }
     Ok(found)
-}
-
-pub(crate) fn invalid(message: String) -> Answer {
-    Answer::error("invalid", message)
-}
-
-pub(crate) fn unavailable(e: StoreError) -> Answer {
-    Answer::error("unavailable", format!("Memories are not available: {e}."))
 }
 
 fn duplicate(same: &MemoryItem) -> Answer {

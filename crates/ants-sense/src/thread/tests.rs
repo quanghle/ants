@@ -167,7 +167,7 @@ async fn handoffs_show_until_a_checkpoint_on_their_thread_or_naming_them_acknowl
     }
     assert_eq!(register(&*items, &thread("t4")).await.unwrap(), None, "nothing written");
     let invalid = checkpointed(&sense, "t4", json!({"acknowledges": ["nope"]})).await;
-    assert_eq!(invalid.json["error"], "invalid");
+    assert_eq!(invalid.json["error"], "invalid_arguments");
 
     let naming = checkpointed(&sense, "t4", json!({"goal": "review", "acknowledges": [ids[1], ids[0]]})).await;
     assert_eq!(naming.json["acknowledged"], json!([ids[1]]), "t1's already acknowledged");
@@ -228,9 +228,9 @@ async fn texts_pass_the_sanitizer_and_their_limits() {
     let many = handed_over(&sense, "t2", json!({"done": vec!["x"; ENTRIES_MAX + 1]})).await;
     assert_eq!(many.json["error"], "too_long");
     let typed = handed_over(&sense, "t2", json!({"done": "x"})).await;
-    assert_eq!(typed.json["error"], "invalid");
+    assert_eq!(typed.json["error"], "invalid_arguments");
     let numbered = checkpointed(&sense, "t2", json!({"revision": "1"})).await;
-    assert_eq!(numbered.json["error"], "invalid");
+    assert_eq!(numbered.json["error"], "invalid_arguments");
 
     let handed = handed_over(&sense, "t2", json!({"done": [format!("pushed with {token}")]})).await;
     assert!(handed.text.starts_with("Handoff ") && handed.text.ends_with("Redacted 1 secret."), "{}", handed.text);

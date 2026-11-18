@@ -6,11 +6,12 @@
 use std::fmt::Write as _;
 
 use ants_proto::provider::{BoxFuture, ToolCall};
-use serde_json::{Map, Value, json};
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::Sense;
 use crate::items::{Item, ItemId, Values};
-use crate::memory::{holds_recalled_marker, invalid, redacted, sanitized};
+use crate::memory::{holds_recalled_marker, redacted, sanitized};
 use crate::proposal::{self, Proposal, ProposalItem, Status, time};
 use crate::sanitize::{Limit, Redaction, sanitize_body};
 use crate::store::{Items, StoreError};
@@ -56,31 +57,47 @@ pub fn persona<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer
     Box::pin(async move { answer(sense, call).await.unwrap_or_else(|refused| refused) })
 }
 
+/// The arguments of a `sense_persona` call.
+#[derive(Deserialize)]
+struct Request {
+    values: Option<String>,
+    voice: Option<String>,
+    boundaries: Option<String>,
+    working_style: Option<String>,
+    reason: Option<String>,
+    finding: Option<String>,
+    #[serde(default)]
+    history: bool,
+}
+
 async fn answer(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
-    let arguments = &call.arguments;
+    let request: Request = crate::tools::arguments(call)?;
     let context = &call.context;
-    let items = sense.items(&context.ant).await.map_err(proposal::unavailable)?;
-    let history = match arguments.get("history") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(history)) => *history,
-        Some(_) => return Err(invalid("history must be true or false.".into())),
-    };
+    let items = sense.items(&context.ant).await?;
     let mut redactions = Vec::new();
-    let fields = fields(arguments, &mut redactions)?;
+    let fields = fields(
+        [
+            request.values.as_deref(),
+            request.voice.as_deref(),
+            request.boundaries.as_deref(),
+            request.working_style.as_deref(),
+        ],
+        &mut redactions,
+    )?;
     if fields.is_empty() {
-        if arguments.contains_key("reason") {
-            return Err(invalid("Name the fields to change: values, voice, boundaries or working_style.".into()));
+        if request.reason.is_some() {
+            return Err(Answer::invalid("Name the fields to change: values, voice, boundaries or working_style."));
         }
-        return if history { show_history(&*items).await } else { show(&*items).await };
+        return if request.history { show_history(&*items).await } else { show(&*items).await };
     }
-    if history {
-        return Err(invalid("history shows the versions: pass it without fields.".into()));
+    if request.history {
+        return Err(Answer::invalid("history shows the versions: pass it without fields."));
     }
-    let reason = proposal::reason(arguments)?;
-    let finding = proposal::finding(arguments)?;
+    let reason = proposal::reason(request.reason.as_deref())?;
+    let finding = proposal::finding(request.finding.as_deref())?;
     proposal::refuse_untrusted(&*items, context, finding.as_deref()).await?;
 
-    let current = current(&*items).await.map_err(proposal::unavailable)?;
+    let current = current(&*items).await?;
     let mut version = current.as_ref().map_or_else(Values::new, |current| proposal::content(&current.values));
     for (field, value) in fields {
         match value {
@@ -89,7 +106,7 @@ async fn answer(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         };
     }
     if version.is_empty() {
-        return Err(invalid("A persona holds at least one of values, voice, boundaries and working_style.".into()));
+        return Err(Answer::invalid("A persona holds at least one of values, voice, boundaries and working_style."));
     }
     if current.as_ref().is_some_and(|current| proposal::content(&current.values) == version) {
         return Err(Answer::error("unchanged", "The persona is that already: nothing to propose.".into()));
@@ -117,7 +134,7 @@ async fn answer(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         superseded_by: None,
         decided: None,
     };
-    let (made, superseded) = proposal::propose(&*items, made).await.map_err(proposal::unavailable)?;
+    let (made, superseded) = proposal::propose(&*items, made).await?;
     let mut text = format!(
         "Proposed persona change {}: a dream from {} offers it, applied confirming it.",
         made.id(),
@@ -132,18 +149,14 @@ async fn answer(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     Ok(Answer { text, json, is_error: false })
 }
 
-/// The fields `arguments` give, sanitized: an empty text clearing its field.
+/// The fields `given`, in the order of [`FIELDS`], sanitized: an empty text clearing its field.
 fn fields(
-    arguments: &Map<String, Value>,
+    given: [Option<&str>; FIELDS.len()],
     redactions: &mut Vec<Redaction>,
 ) -> Result<Vec<(&'static str, Option<String>)>, Answer> {
     let mut fields = Vec::new();
-    for (field, _) in FIELDS {
-        let given = match arguments.get(*field) {
-            None | Some(Value::Null) => continue,
-            Some(Value::String(text)) => text.trim(),
-            Some(_) => return Err(invalid(format!("{field} must be a string."))),
-        };
+    for ((field, _), given) in FIELDS.iter().zip(given) {
+        let Some(given) = given.map(str::trim) else { continue };
         if given.is_empty() {
             fields.push((*field, None));
             continue;
@@ -161,8 +174,8 @@ fn fields(
 
 /// The persona, its revision and the reason of its last change, then its pending proposal.
 async fn show(items: &dyn Items) -> Result<Answer, Answer> {
-    let current = current(items).await.map_err(proposal::unavailable)?;
-    let pending = proposal::pending_for(items, &persona_id()).await.map_err(proposal::unavailable)?;
+    let current = current(items).await?;
+    let pending = proposal::pending_for(items, &persona_id()).await?;
     let mut text = match &current {
         Some(current) => format!(
             "Persona, revision {}, confirmed {}: {}\n{}",
@@ -187,7 +200,7 @@ async fn show(items: &dyn Items) -> Result<Answer, Answer> {
 
 /// Every version of the persona, the newest first, each with the reason it was confirmed for.
 async fn show_history(items: &dyn Items) -> Result<Answer, Answer> {
-    let versions = proposal::versions(items, &persona_id()).await.map_err(proposal::unavailable)?;
+    let versions = proposal::versions(items, &persona_id()).await?;
     if versions.is_empty() {
         return Ok(Answer { text: "No persona yet.".into(), json: json!({"versions": []}), is_error: false });
     }
@@ -229,12 +242,12 @@ mod tests {
         let shown = call(json!({})).await;
         assert!(shown.text.starts_with("No persona yet"), "{}", shown.text);
         let refusals = [
-            (json!({"voice": "Plain."}), "invalid"),
-            (json!({"reason": "Why."}), "invalid"),
-            (json!({"voice": 1, "reason": "Why."}), "invalid"),
+            (json!({"voice": "Plain."}), "invalid_arguments"),
+            (json!({"reason": "Why."}), "invalid_arguments"),
+            (json!({"voice": 1, "reason": "Why."}), "invalid_arguments"),
             (json!({"voice": "x".repeat(MAX_FIELD_BYTES + 1), "reason": "Why."}), "too_long"),
-            (json!({"voice": "", "reason": "Why."}), "invalid"),
-            (json!({"voice": "Plain.", "reason": "Why.", "history": true}), "invalid"),
+            (json!({"voice": "", "reason": "Why."}), "invalid_arguments"),
+            (json!({"voice": "Plain.", "reason": "Why.", "history": true}), "invalid_arguments"),
         ];
         for (arguments, code) in refusals {
             assert_eq!(error(&call(arguments.clone()).await), code, "{arguments}");

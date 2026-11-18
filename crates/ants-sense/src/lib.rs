@@ -363,7 +363,7 @@ mod tests {
         let text = ready(sense.call_tool(call("brief", Format::Text))).unwrap();
         assert!(text.is_error);
         let Output::Text(text) = text.output else { panic!("asked for text") };
-        assert!(text.starts_with("The brief is not available: sense keeps no data here"), "{text}");
+        assert!(text.starts_with("sense keeps no data here"), "{text}");
         let json = ready(sense.call_tool(call("brief", Format::Json))).unwrap();
         assert!(json.is_error);
         let Output::Json(json) = json.output else { panic!("asked for JSON") };

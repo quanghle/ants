@@ -17,8 +17,7 @@ use uuid::Uuid;
 use crate::cache::CacheError;
 use crate::identity::BY;
 use crate::items::{Item, ItemId, Values};
-use crate::log::APPEND_TRIES;
-use crate::store::{Items, StoreError};
+use crate::store::{Items, StoreError, read_modify_write};
 
 /// The kind of a thread's record.
 pub const KIND: &str = "thread";
@@ -114,7 +113,7 @@ pub async fn records(items: &dyn Items, limit: usize) -> Result<Vec<Record>, Sto
 pub async fn record_event(items: &dyn Items, event: &Event) -> Result<Option<Record>, StoreError> {
     let Some(thread) = event.thread.as_ref().filter(|_| touches_record(&event.kind)) else { return Ok(None) };
     let id = ItemId::named(KIND, thread.as_str());
-    for _ in 0..APPEND_TRIES {
+    read_modify_write(|| async {
         let item = items.get(&id).await?;
         let current = item.as_ref().map(Record::of).transpose()?;
         let record = match (&current, &event.kind) {
@@ -130,13 +129,9 @@ pub async fn record_event(items: &dyn Items, event: &Event) -> Result<Option<Rec
             (None, _) => return Ok(None),
         };
         let expected = item.map_or(0, |item| item.revision);
-        match items.put(&id, KIND, record.values(), Some(expected), BY).await {
-            Ok(item) => return Record::of(&item).map(Some),
-            Err(StoreError::Conflict { .. }) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Err(StoreError::Unavailable(format!("other writers kept changing the record of thread {thread}")))
+        Record::of(&items.put(&id, KIND, record.values(), Some(expected), BY).await?).map(Some)
+    })
+    .await
 }
 
 #[cfg(test)]

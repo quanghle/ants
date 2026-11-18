@@ -1,12 +1,32 @@
 //! sense's tools: one [`ToolSpec`] each, in [`TOOLS`].
 
 use ants_proto::provider::{BoxFuture, Format, Output, Tool, ToolCall, ToolResult};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::Sense;
+use crate::memory::{
+    CORE_BUDGET, DEFAULT_IMPORTANCE, DEFAULT_LIMIT, MAX_BODY_BYTES, MAX_CITATIONS, MAX_IMPORTANCE, MAX_LIMIT,
+    MAX_TITLE_CHARS, MAX_WITH,
+};
+use crate::persona::MAX_FIELD_BYTES;
+use crate::records::MAX_RECORD_BYTES;
+use crate::store::StoreError;
+
+mod arguments;
 
 /// The most tools sense may serve: each costs every session of every ant the room its schema takes.
 pub const MAX_TOOLS: usize = 12;
+
+/// The most characters of the reason a call gives for a vote, a proposal or a dream's verdict.
+pub const MAX_REASON_CHARS: usize = 500;
+
+/// The arguments of `call` as a tool's request `T`, an argument given as null taken as not given; refused as invalid
+/// arguments naming the argument at fault.
+pub(crate) fn arguments<'a, T: Deserialize<'a>>(call: &'a ToolCall) -> Result<T, Answer> {
+    T::deserialize(arguments::Arguments(&call.arguments))
+        .map_err(|e| Answer::invalid(format!("Invalid arguments: {e}.")))
+}
 
 /// A tool of sense: its name without the `sense_` prefix, what the ant reads of it, and what answers its calls.
 #[derive(Debug, Clone, Copy)]
@@ -42,12 +62,43 @@ impl Answer {
         Self { json: json!({"error": code, "message": message}), text: message, is_error: true }
     }
 
+    /// The refusal of arguments missing, malformed or out of their bounds.
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self::error("invalid_arguments", message.into())
+    }
+
     pub fn render(self, format: Format) -> ToolResult {
         let output = match format {
             Format::Text => Output::Text(self.text),
             Format::Json => Output::Json(self.json),
         };
         ToolResult { output, is_error: self.is_error }
+    }
+}
+
+/// The refusal of a call its store failed: an item missing, at another revision than expected or changing under
+/// every try, or the data not available.
+impl From<StoreError> for Answer {
+    fn from(error: StoreError) -> Self {
+        match error {
+            StoreError::NotFound(id) => Self::error("not_found", format!("No item {id}.")),
+            StoreError::Conflict { expected, current } => {
+                let message = format!(
+                    "Item {} is at revision {}, not {expected}: read it again before retrying.",
+                    current.id, current.revision
+                );
+                let mut answer = Self::error("conflict", message);
+                answer.json["current"] = json!(current);
+                answer
+            }
+            StoreError::Contended(id) => {
+                Self::error("conflict", format!("Item {id} kept changing meanwhile: try again."))
+            }
+            error @ (StoreError::Unavailable(_) | StoreError::NotKept(_)) => {
+                Self::error("unavailable", format!("{error}."))
+            }
+            error => Self::error("unavailable", format!("sense's data is not available: {error}.")),
+        }
     }
 }
 
@@ -81,7 +132,7 @@ pub const TOOLS: &[ToolSpec] = &[
             let mut schema = object(&json!({
                 "id": {"type": "string"},
                 "vote": {"enum": ["helpful", "stale", "wrong"]},
-                "reason": {"type": "string", "maxLength": 500},
+                "reason": {"type": "string", "maxLength": MAX_REASON_CHARS},
             }));
             schema["required"] = json!(["id", "vote"]);
             schema
@@ -178,20 +229,33 @@ fn remember() -> Value {
             "description": "Whom it is about: self (default), repo:<git remote>, human:<name> or ant:<name>; \
                             human:<name> or ant:<name> for a relationship.",
         },
-        "title": {"type": "string", "maxLength": 200},
-        "body": {"type": "string", "description": "At most 4 KiB; 2,000 bytes for a self-model or relationship."},
+        "title": {"type": "string", "maxLength": MAX_TITLE_CHARS},
+        "body": {
+            "type": "string",
+            "description": format!(
+                "At most {MAX_BODY_BYTES} bytes; {MAX_RECORD_BYTES} for a self-model or relationship."
+            ),
+        },
         "revision": {
             "type": "integer",
             "minimum": 0,
             "description": "For a self-model or relationship: the revision replaced, none for the first.",
         },
-        "importance": {"type": "integer", "minimum": 1, "maximum": 5, "description": "3 by default."},
+        "importance": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": MAX_IMPORTANCE,
+            "description": format!("{DEFAULT_IMPORTANCE} by default."),
+        },
         "citations": {
             "type": "array",
-            "maxItems": 20,
+            "maxItems": MAX_CITATIONS,
             "items": {"anyOf": [{"type": "string", "description": "path, path:line or path:start-end"}, citation]},
         },
-        "core": {"type": "boolean", "description": "Part of the identity, in every brief (2,000 bytes for all)."},
+        "core": {
+            "type": "boolean",
+            "description": format!("Part of the identity, in every brief ({CORE_BUDGET} bytes for all)."),
+        },
         "supersedes": {"type": "string", "description": "The id of the memory this one replaces."},
         "quotes": {
             "enum": ["recalled", "external"],
@@ -212,21 +276,29 @@ fn recall() -> Value {
         "with": {
             "type": "array",
             "items": {"type": "string"},
-            "maxItems": 20,
+            "maxItems": MAX_WITH,
             "description": "More people of the thread, to include their memories: name, human:<name> or ant:<name>.",
         },
-        "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "10 by default."},
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": MAX_LIMIT,
+            "description": format!("{DEFAULT_LIMIT} by default."),
+        },
     }))
 }
 
 fn persona() -> Value {
-    let field = |what: &str| json!({"type": "string", "description": format!("{what}, at most 500 bytes; empty clears it, none keeps it.")});
+    let field = |what: &str| {
+        let description = format!("{what}, at most {MAX_FIELD_BYTES} bytes; empty clears it, none keeps it.");
+        json!({"type": "string", "description": description})
+    };
     object(&json!({
         "values": field("What the ant holds important"),
         "voice": field("How it speaks"),
         "boundaries": field("What it will not do"),
         "working_style": field("How it works"),
-        "reason": {"type": "string", "maxLength": 500, "description": "Why: kept with the version."},
+        "reason": {"type": "string", "maxLength": MAX_REASON_CHARS, "description": "Why: kept with the version."},
         "finding": {"type": "string", "description": "The dream finding this answers, such as 3.1."},
         "history": {"type": "boolean", "description": "Show every version and its reason."},
     }))
@@ -245,7 +317,7 @@ fn skill() -> Value {
             "description": "Other files by relative path, null removing one; files not named are kept.",
         },
         "remove": {"type": "boolean", "description": "Propose removing the skill."},
-        "reason": {"type": "string", "maxLength": 500, "description": "Why: kept with the version."},
+        "reason": {"type": "string", "maxLength": MAX_REASON_CHARS, "description": "Why: kept with the version."},
         "finding": {"type": "string", "description": "The dream finding this answers, such as 3.1."},
         "path": {"type": "string", "description": "With name or proposal: read this file."},
         "proposal": {"type": "string", "description": "Show this proposal in full."},

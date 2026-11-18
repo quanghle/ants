@@ -602,7 +602,7 @@ pub fn brief<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> 
         };
         match composed.await {
             Ok(text) => Answer { json: json!({"brief": text}), text, is_error: false },
-            Err(e) => Answer::error("unavailable", format!("The brief is not available: {e}.")),
+            Err(e) => e.into(),
         }
     })
 }

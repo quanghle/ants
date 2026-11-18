@@ -33,7 +33,7 @@ use crate::Sense;
 use crate::items::{ItemId, Values};
 use crate::memory::{self, MAX_BODY_BYTES, MAX_TITLE_CHARS, MEMORY, Memory, MemoryItem, MemoryKind, Scope, Status};
 use crate::proposal;
-use crate::store::{Items, StoreError, Write};
+use crate::store::{Items, StoreError, Write, read_modify_write};
 use crate::tools::{Answer, Handler};
 
 mod packet;
@@ -62,15 +62,11 @@ pub const MAX_FINDINGS: usize = 20;
 pub const MAX_DREAM_WRITES: usize = 20;
 /// The tools whose writes on a dream thread count toward [`MAX_DREAM_WRITES`]: those writing memories.
 pub const COUNTED: &[&str] = &["remember", "vote"];
-/// The most characters of a verdict's reason.
-pub const MAX_REASON_CHARS: usize = 500;
 
 /// Who sense changes dream items for ([`crate::items::Stamp::by`]).
 pub(crate) const BY: &str = "sense:dream";
 /// The name of the record of the last dream ([`ItemId::named`]).
 const RECORD: &str = "last";
-/// How many times a write of a dream is tried again on items changed meanwhile.
-const TRIES: usize = 3;
 
 /// Who reads a new dream's packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,7 +364,8 @@ pub struct Start<'a> {
 /// last dream closed with its diary if the ant left it unfinished, in one write. Returns the new dream; none when one
 /// began meanwhile.
 pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>, StoreError> {
-    for _ in 0..TRIES {
+    let start = &start;
+    read_modify_write(|| async move {
         let record = record(items).await?;
         let previous = match record {
             Some((number, _)) => get(items, number).await?,
@@ -416,19 +413,16 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
         values.insert("number".into(), json!(number));
         let expected = Some(record.map_or(0, |(_, revision)| revision));
         writes.push(Write::Put { id: record_id(), kind: DREAMS.into(), values, expected });
-        match items.write(&writes, BY).await {
-            Ok(_) => return Ok(Some(dream)),
-            Err(StoreError::Conflict { .. }) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Err(StoreError::Unavailable("the dreams kept changing meanwhile".into()))
+        items.write(&writes, BY).await?;
+        Ok(Some(dream))
+    })
+    .await
 }
 
 /// Note that the ant was woken on `thread` for dream `number`: past the sage's time, its dream falls back to the
 /// packet alone.
 pub async fn woken(items: &dyn Items, number: u64, thread: &ThreadId) -> Result<Dream, StoreError> {
-    for _ in 0..TRIES {
+    read_modify_write(|| async move {
         let (mut dream, revision) = get(items, number).await?.ok_or_else(|| StoreError::NotFound(Dream::id(number)))?;
         if dream.thread.is_some() {
             return Ok(dream);
@@ -440,13 +434,10 @@ pub async fn woken(items: &dyn Items, number: u64, thread: &ThreadId) -> Result<
         let mut values = Values::new();
         values.insert("thread".into(), json!(dream.thread));
         values.insert("state".into(), json!(dream.state));
-        match items.change(&Dream::id(number), values, Some(revision), BY).await {
-            Ok(_) => return Ok(dream),
-            Err(StoreError::Conflict { .. }) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Err(StoreError::Unavailable(format!("dream {number} kept changing meanwhile")))
+        items.change(&Dream::id(number), values, Some(revision), BY).await?;
+        Ok(dream)
+    })
+    .await
 }
 
 /// A persona or skill proposal awaiting the ant's verdict.
@@ -732,18 +723,16 @@ pub(crate) async fn counted(sense: &Sense, handler: Handler, call: &ToolCall) ->
 
 /// Count a write of `id` on the thread of dream `number`; returns the writes counted.
 async fn count_write(items: &dyn Items, number: u64, id: ItemId) -> Result<usize, StoreError> {
-    for _ in 0..TRIES {
+    let id = &id;
+    read_modify_write(|| async move {
         let (mut dream, revision) = get(items, number).await?.ok_or_else(|| StoreError::NotFound(Dream::id(number)))?;
         dream.writes.push(id.clone());
         let mut values = Values::new();
         values.insert("writes".into(), json!(dream.writes));
-        match items.change(&Dream::id(number), values, Some(revision), BY).await {
-            Ok(_) => return Ok(dream.writes.len()),
-            Err(StoreError::Conflict { .. }) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Err(StoreError::Unavailable(format!("dream {number} kept changing meanwhile")))
+        items.change(&Dream::id(number), values, Some(revision), BY).await?;
+        Ok(dream.writes.len())
+    })
+    .await
 }
 
 #[cfg(test)]

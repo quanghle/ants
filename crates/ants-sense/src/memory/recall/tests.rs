@@ -277,14 +277,14 @@ async fn recall_refuses_what_it_cannot_read() {
     let (sense, _store) = sense().await;
     let id = ok(&sense, lesson("Port", "Deploy uses 8080")).await;
     let cases = [
-        (json!({"query": "port", "id": id}), "invalid"),
-        (json!({"history": true}), "invalid"),
-        (json!({"id": "nope"}), "invalid"),
-        (json!({"limit": 0}), "invalid"),
-        (json!({"limit": 51}), "invalid"),
-        (json!({"repo": "github.com"}), "invalid"),
-        (json!({"with": ["team:x"]}), "invalid"),
-        (json!({"with": "alice"}), "invalid"),
+        (json!({"query": "port", "id": id}), "invalid_arguments"),
+        (json!({"history": true}), "invalid_arguments"),
+        (json!({"id": "nope"}), "invalid_arguments"),
+        (json!({"limit": 0}), "invalid_arguments"),
+        (json!({"limit": 51}), "invalid_arguments"),
+        (json!({"repo": "github.com"}), "invalid_arguments"),
+        (json!({"with": ["team:x"]}), "invalid_arguments"),
+        (json!({"with": "alice"}), "invalid_arguments"),
         (json!({"id": ItemId::new()}), "not_found"),
         (json!({"id": ItemId::new(), "history": true}), "not_found"),
     ];

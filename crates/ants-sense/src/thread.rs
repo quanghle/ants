@@ -24,7 +24,7 @@ use ants_proto::ThreadId;
 use ants_proto::provider::{BoxFuture, CallContext, ToolCall};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::items::{Item, ItemId, Stamp, Values};
 use crate::memory::{MAX_BODY_BYTES, MAX_TITLE_CHARS, Memory, MemoryKind, Scope, WRITER, writer};
@@ -124,7 +124,8 @@ pub struct Handoff {
 
 /// The work handed over: what was done, is in flight and comes next, the promises made, the decisions taken and the
 /// files touched.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Work {
     pub done: Vec<String>,
     pub in_flight: Vec<String>,
@@ -223,20 +224,36 @@ pub fn checkpoint<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Ans
     Box::pin(async move { checkpoint_call(sense, call).await.unwrap_or_else(|refusal| refusal) })
 }
 
+/// The arguments of a `sense_checkpoint` call.
+#[derive(Deserialize)]
+struct Checkpoint {
+    goal: Option<String>,
+    step: Option<String>,
+    next: Option<String>,
+    #[serde(default)]
+    blockers: Vec<String>,
+    branch: Option<String>,
+    #[serde(default)]
+    questions: Vec<String>,
+    revision: Option<u64>,
+    #[serde(default)]
+    acknowledges: Vec<ItemId>,
+}
+
 async fn checkpoint_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
-    let mut args = Arguments { map: &call.arguments, redacted: 0 };
+    let request: Checkpoint = crate::tools::arguments(call)?;
+    let mut args = Sanitized::default();
     let mut values = Values::new();
-    for name in ["goal", "step", "next"] {
-        values.insert(name.into(), args.text(name, Lines::Multi, TEXT_MAX)?.into());
+    for (name, given) in [("goal", &request.goal), ("step", &request.step), ("next", &request.next)] {
+        values.insert(name.into(), args.text(name, given.as_deref(), Lines::Multi, TEXT_MAX)?.into());
     }
-    values.insert("blockers".into(), listed(args.texts("blockers", Lines::Multi, TEXT_MAX)?));
-    values.insert("branch".into(), args.text("branch", Lines::Single, LINE_MAX)?.into());
-    values.insert("questions".into(), listed(args.texts("questions", Lines::Multi, TEXT_MAX)?));
-    let revision = match call.arguments.get("revision") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(value.as_u64().ok_or_else(|| invalid("revision", "a revision number"))?),
-    };
-    let named = args.ids("acknowledges")?;
+    values.insert("blockers".into(), listed(args.texts("blockers", &request.blockers, Lines::Multi, TEXT_MAX)?));
+    values.insert("branch".into(), args.text("branch", request.branch.as_deref(), Lines::Single, LINE_MAX)?.into());
+    values.insert("questions".into(), listed(args.texts("questions", &request.questions, Lines::Multi, TEXT_MAX)?));
+    let (revision, named) = (request.revision, request.acknowledges);
+    if named.len() > ENTRIES_MAX {
+        return Err(Answer::invalid(format!("acknowledges must be a list of at most {ENTRIES_MAX} ids.")));
+    }
     let context = &call.context;
     if named.is_empty() && values.values().all(Value::is_null) {
         return read(sense, context).await;
@@ -244,10 +261,10 @@ async fn checkpoint_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answe
     values.insert(THREAD.into(), context.thread.as_str().into());
     values.insert(WRITER.into(), writer(context));
 
-    let items = sense.items(&context.ant).await.map_err(refused)?;
+    let items = sense.items(&context.ant).await?;
     let mut acknowledge = Vec::new();
     for id in &named {
-        let handoff = items.get(id).await.map_err(refused)?.filter(|item| item.kind == HANDOFF);
+        let handoff = items.get(id).await?.filter(|item| item.kind == HANDOFF);
         let handoff = handoff.ok_or_else(|| Answer::error("not_found", format!("No handoff {id}.")))?;
         acknowledge.push(handoff);
     }
@@ -261,11 +278,11 @@ async fn checkpoint_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answe
             let message = "This thread has no resume register: checkpoint without a revision to start one.";
             return Err(Answer::error("not_found", message.into()));
         }
-        Err(e) => return Err(refused(e)),
+        Err(e) => return Err(e.into()),
     };
-    let register = Register::of(&item).ok_or_else(|| refused(StoreError::Unavailable("unreadable register".into())))?;
+    let register = Register::of(&item).ok_or_else(|| StoreError::Unavailable("unreadable register".into()))?;
 
-    acknowledge.extend(items.list_by(HANDOFF, THREAD, Some(&Value::from(by)), usize::MAX).await.map_err(refused)?);
+    acknowledge.extend(items.list_by(HANDOFF, THREAD, Some(&Value::from(by)), usize::MAX).await?);
     acknowledge.retain(|handoff| !handoff.values.contains_key(ACKNOWLEDGED));
     acknowledge.sort_by(|a, b| a.id.cmp(&b.id));
     acknowledge.dedup_by(|a, b| a.id == b.id);
@@ -296,9 +313,9 @@ async fn checkpoint_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answe
 /// The answer of a checkpoint changing nothing: the thread's resume register and every unacknowledged handoff, the
 /// last first.
 async fn read(sense: &Sense, context: &CallContext) -> Result<Answer, Answer> {
-    let items = sense.items(&context.ant).await.map_err(refused)?;
-    let register = register(&*items, &context.thread).await.map_err(refused)?;
-    let handoffs = unacknowledged(&*items, usize::MAX).await.map_err(refused)?;
+    let items = sense.items(&context.ant).await?;
+    let register = register(&*items, &context.thread).await?;
+    let handoffs = unacknowledged(&*items, usize::MAX).await?;
     let mut text = match &register {
         Some(register) => register.text(),
         None => "This thread has no resume register yet: checkpoint without a revision to start one.\n".to_owned(),
@@ -354,19 +371,20 @@ pub fn handoff<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer
 }
 
 async fn handoff_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
-    let mut args = Arguments { map: &call.arguments, redacted: 0 };
+    let given: Work = crate::tools::arguments(call)?;
+    let mut args = Sanitized::default();
     let context = &call.context;
     let mut work = Work::default();
-    for (name, list) in Work::NAMES.into_iter().zip(work.lists_mut()) {
+    for ((name, given), list) in Work::NAMES.into_iter().zip(given.lists()).zip(work.lists_mut()) {
         let (lines, max) = if name == "files" { (Lines::Single, LINE_MAX) } else { (Lines::Multi, TEXT_MAX) };
-        *list = args.texts(name, lines, max)?;
+        *list = args.texts(name, given, lines, max)?;
     }
     if work.lists().iter().all(|list| list.is_empty()) {
         let message = "A handoff needs an entry: done, in flight, next, promises, decisions or files.";
         return Err(Answer::error("empty", message.into()));
     }
 
-    let items = sense.items(&context.ant).await.map_err(refused)?;
+    let items = sense.items(&context.ant).await?;
     let by = context.thread.as_str();
     let episode = ItemId::new();
     let mut values = Values::new();
@@ -380,8 +398,8 @@ async fn handoff_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> 
         episode_memory(context, &work).create(episode.clone()),
         Write::Create { id: ItemId::new(), kind: HANDOFF.into(), values },
     ];
-    let item = items.write(&writes, by).await.map_err(refused)?.remove(1);
-    let handoff = Handoff::of(&item).ok_or_else(|| refused(StoreError::Unavailable("unreadable handoff".into())))?;
+    let item = items.write(&writes, by).await?.remove(1);
+    let handoff = Handoff::of(&item).ok_or_else(|| StoreError::Unavailable("unreadable handoff".into()))?;
 
     let mut text = format!(
         "Handoff {} recorded, with episode memory {}. Every brief shows the handoff until a checkpoint on this \
@@ -409,50 +427,29 @@ fn episode_memory(context: &CallContext, work: &Work) -> Memory {
     Memory::new(MemoryKind::Episode, Scope::Own, title, body, context)
 }
 
-/// A tool's arguments as sanitized texts, counting the secrets redacted.
-struct Arguments<'a> {
-    map: &'a Map<String, Value>,
+/// The texts of a call's arguments, sanitized, counting the secrets redacted.
+#[derive(Default)]
+struct Sanitized {
     redacted: usize,
 }
 
-impl Arguments<'_> {
-    /// The text `name`, sanitized; none when missing, null or blank.
-    fn text(&mut self, name: &str, lines: Lines, max: usize) -> Result<Option<String>, Answer> {
-        match self.map.get(name) {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::String(text)) => self.clean(name, text, lines, max),
-            Some(_) => Err(invalid(name, "a text")),
-        }
+impl Sanitized {
+    /// The text given for argument `name`, sanitized; none when not given or blank.
+    fn text(&mut self, name: &str, given: Option<&str>, lines: Lines, max: usize) -> Result<Option<String>, Answer> {
+        given.map_or(Ok(None), |text| self.clean(name, text, lines, max))
     }
 
-    /// The list of texts `name`, each sanitized, the blank ones left out.
-    fn texts(&mut self, name: &str, lines: Lines, max: usize) -> Result<Vec<String>, Answer> {
-        let entries = match self.map.get(name) {
-            None | Some(Value::Null) => return Ok(Vec::new()),
-            Some(Value::Array(entries)) => entries,
-            Some(_) => return Err(invalid(name, "a list of texts")),
-        };
-        if entries.len() > ENTRIES_MAX {
-            let message = format!("{name} has {} entries, more than {ENTRIES_MAX}.", entries.len());
+    /// The texts given for argument `name`, each sanitized, the blank ones left out.
+    fn texts(&mut self, name: &str, given: &[String], lines: Lines, max: usize) -> Result<Vec<String>, Answer> {
+        if given.len() > ENTRIES_MAX {
+            let message = format!("{name} has {} entries, more than {ENTRIES_MAX}.", given.len());
             return Err(Answer::error("too_long", message));
         }
         let mut texts = Vec::new();
-        for entry in entries {
-            let entry = entry.as_str().ok_or_else(|| invalid(name, "a list of texts"))?;
+        for entry in given {
             texts.extend(self.clean(name, entry, lines, max)?);
         }
         Ok(texts)
-    }
-
-    /// The list of item ids `name`.
-    fn ids(&self, name: &str) -> Result<Vec<ItemId>, Answer> {
-        let entries = match self.map.get(name) {
-            None | Some(Value::Null) => return Ok(Vec::new()),
-            Some(Value::Array(entries)) if entries.len() <= ENTRIES_MAX => entries,
-            Some(_) => return Err(invalid(name, &format!("a list of at most {ENTRIES_MAX} ids"))),
-        };
-        let id = |entry: &Value| entry.as_str().and_then(|id| id.parse().ok());
-        entries.iter().map(|entry| id(entry).ok_or_else(|| invalid(name, "a list of ids"))).collect()
     }
 
     fn clean(&mut self, name: &str, text: &str, lines: Lines, max: usize) -> Result<Option<String>, Answer> {
@@ -469,19 +466,6 @@ impl Arguments<'_> {
             1 => "\nRedacted 1 secret.".into(),
             n => format!("\nRedacted {n} secrets."),
         }
-    }
-}
-
-fn invalid(name: &str, expected: &str) -> Answer {
-    Answer::error("invalid", format!("{name} must be {expected}."))
-}
-
-/// The refusal of a call that found no item, or no data.
-fn refused(e: StoreError) -> Answer {
-    match e {
-        StoreError::NotFound(id) => Answer::error("not_found", format!("No item {id}.")),
-        e @ StoreError::Unavailable(_) => Answer::error("unavailable", format!("{e}.")),
-        e => Answer::error("unavailable", format!("sense's data is not available: {e}.")),
     }
 }
 
