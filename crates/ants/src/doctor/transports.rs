@@ -1,12 +1,12 @@
-//! The Dev Tunnel and HTTPS bridge services installed: the tunnel's login and token, and whether the bridge forwards
-//! to the server.
+//! The Dev Tunnel and HTTPS bridge services installed: the tunnel's login and token, and whether the bridge answers and
+//! carries a connection to the hub's leafnode port.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::services::private_file;
 use super::{Check, NETWORK_TIMEOUT, Status};
-use crate::node::bridge::{self, Probe};
+use crate::node::bridge::{self, Carried, Probe};
 use crate::service::{Action, Service, Services, State, Unit};
 
 /// A Dev Tunnel or HTTPS bridge service installed, read before any check waits.
@@ -37,7 +37,8 @@ pub(super) const TOKEN_WARN: Duration = Duration::from_hours(6);
 pub(super) const TOKEN_LIFE: Duration = Duration::from_hours(24);
 
 /// The Dev Tunnel and HTTPS bridge services `transports`: whether each runs, the Dev Tunnel login or connect token,
-/// and whether each bridge answers and takes its token. Nothing without such services.
+/// and whether each bridge answers, takes its token and carries a connection to the hub's leafnode port. Nothing
+/// without such services.
 pub(super) async fn check_transports(transports: Vec<Transport>, now: u64) -> Vec<Check> {
     let mut checks = Vec::new();
     let mut login = None;
@@ -187,12 +188,15 @@ pub(super) fn left(seconds: u64) -> String {
     }
 }
 
-/// The bridge of `service`, `ants bridge connect` or `ants bridge serve` run as `unit`: its token file, and whether
-/// the bridge answers as one taking it.
+/// The bridge of `service`, `ants bridge connect` or `ants bridge serve` run as `unit`: its token file, whether the
+/// bridge answers as one taking it, and whether it carries a connection to the hub's leafnode port ([`check_pipe`]).
 pub(super) async fn check_bridge(service: Service, unit: &Unit, restart: &str) -> Vec<Check> {
     let serving = service == Service::BridgeServe;
-    let (token_check, url_check) =
-        if serving { ("bridge serve token", "bridge serve url") } else { ("bridge token", "bridge url") };
+    let (token_check, url_check, pipe_check) = if serving {
+        ("bridge serve token", "bridge serve url", "bridge serve pipe")
+    } else {
+        ("bridge token", "bridge url", "bridge pipe")
+    };
     let mut checks = Vec::new();
     let token = match unit.flag("--token-file") {
         Some(file) => {
@@ -233,20 +237,23 @@ pub(super) async fn check_bridge(service: Service, unit: &Unit, restart: &str) -
             }
         }
     };
-    let remote = bridge::Remote::new(&url, token.as_deref(), &[], unit.flag("--proxy"));
+    let headers: Vec<String> =
+        unit.args.windows(2).filter(|pair| pair[0] == "--header").map(|pair| pair[1].clone()).collect();
+    let remote = bridge::Remote::new(&url, token.as_deref(), &headers, unit.flag("--proxy"));
     let remote = match (remote, unit.env("SSL_CERT_FILE")) {
         (Ok(remote), Some(ca)) => remote.trusting(Path::new(ca)),
         (remote, _) => remote,
     };
-    let probed = match remote {
+    let probed = match &remote {
         Ok(remote) => remote.probe(NETWORK_TIMEOUT).await,
-        Err(e) => Err(e),
+        Err(e) => Err(anyhow::anyhow!("{e:#}")),
     };
     let unreachable = if serving {
         restart.to_owned()
     } else {
         format!("check that the hub's `ants bridge serve` runs and is reached at {url}, through the proxy if any")
     };
+    let answers = matches!(probed, Ok(Probe::Answers));
     checks.push(match probed {
         Ok(Probe::Answers) => Check::ok(url_check, format!("{url} answers as a bridge taking the token")),
         Ok(Probe::Refused(answer)) => {
@@ -265,7 +272,137 @@ pub(super) async fn check_bridge(service: Service, unit: &Unit, restart: &str) -
         ),
         Err(e) => Check::fail(url_check, format!("{url}: {e:#}"), vec![unreachable]),
     });
+    checks.push(match remote {
+        Ok(remote) if answers => {
+            let end = if serving {
+                End::Serve { upstream: unit.flag("--upstream").unwrap_or(bridge::DEFAULT_UPSTREAM) }
+            } else {
+                End::Connect { listen: unit.flag("--listen").unwrap_or(bridge::DEFAULT_CONNECT_LISTEN) }
+            };
+            check_pipe(pipe_check, &remote, &url, end, restart).await
+        }
+        _ => Check::skip(pipe_check, "the bridge does not answer as one taking the token"),
+    });
     checks
+}
+
+/// Which end of the bridge [`check_pipe`] checks, with what it connects.
+pub(super) enum End<'a> {
+    /// `ants bridge connect`, listening on `listen` for the leaf node's uplink.
+    Connect { listen: &'a str },
+    /// `ants bridge serve`, carrying each session to `upstream`.
+    Serve { upstream: &'a str },
+}
+
+/// Whether the bridge of `remote` at `url` carries a connection to the hub's leafnode port, as a leaf node's uplink
+/// takes it: the INFO that port sends first comes down a session of the doctor's own and, at `ants bridge connect`,
+/// down a connection to its listen address, as the leaf node's own uplink does. Neither sends anything up, so the hub
+/// sees each connection come and go unauthenticated, and the leaf node's uplink is left alone: `ants bridge connect`
+/// carries each local connection in a session of its own.
+pub(super) async fn check_pipe(check: &str, remote: &bridge::Remote, url: &str, end: End<'_>, restart: &str) -> Check {
+    let carried = match remote.first_line(NETWORK_TIMEOUT).await {
+        Ok(carried) => carried,
+        Err(e) => return Check::fail(check, format!("{url}: {e:#}"), vec![restart.to_owned()]),
+    };
+    let (unopened, elsewhere) = match end {
+        End::Serve { upstream } => (
+            format!(
+                "start the hub's nats-server, whose leafnodes listen on {upstream}, or give `ants bridge serve` the \
+                 --upstream of its leafnode port, then {restart}"
+            ),
+            format!("give `ants bridge serve` the --upstream of the hub's leafnode port, then {restart}"),
+        ),
+        End::Connect { .. } => (
+            "on the hub, start nats-server, whose leafnodes listen where `ants bridge serve --upstream` points \
+             (127.0.0.1:7422 by default); `ants doctor` there checks the bridge serve pipe"
+                .to_owned(),
+            "on the hub, give `ants bridge serve` the --upstream of its nats-server's leafnode port".to_owned(),
+        ),
+    };
+    let server = match carried {
+        Carried::Unopened(status, said) => {
+            let detail = format!("{url} answers but opens no connection to the hub's leafnode port: {status} {said}");
+            return Check::fail(check, detail, vec![unopened]);
+        }
+        Carried::Lost(status, said) => {
+            let detail = format!("{url} loses the session it opened at the next request: {status} {said}");
+            return Check::fail(
+                check,
+                detail,
+                vec![format!("route every request under {url} to one `ants bridge serve`")],
+            );
+        }
+        Carried::Line(line) => match leafnode_info(&line) {
+            Ok(server) => server,
+            Err(what) => {
+                let detail = format!("{url} answers but carries {what}, not the INFO of the hub's leafnode port");
+                return Check::fail(check, detail, vec![elsewhere]);
+            }
+        },
+    };
+    let listen = match end {
+        End::Serve { upstream } => {
+            return Check::ok(check, format!("{url} carries a session to the leafnode port of {server} at {upstream}"));
+        }
+        End::Connect { listen } => listen,
+    };
+    let detail = match first_line_at(listen, NETWORK_TIMEOUT).await.map(|line| leafnode_info(&line)) {
+        Ok(Ok(_)) => {
+            let detail =
+                format!("{listen} carries the leaf node's uplink through {url} to the leafnode port of {server}");
+            return Check::ok(check, detail);
+        }
+        Ok(Err(what)) => format!(
+            "{listen} carries {what}, though {url} carries the hub's INFO: the running `ants bridge connect` took \
+             another token, URL or proxy at its start"
+        ),
+        Err(e) => format!("nothing carries the leaf node's uplink at {listen}: {e}"),
+    };
+    Check::fail(check, detail, vec![restart.to_owned()])
+}
+
+/// The server whose leafnode port sent `line`, its first line, as a leaf node takes one: an INFO with a client id,
+/// and leafnode URLs or `info_on_connect`. Else what `line` is.
+pub(super) fn leafnode_info(line: &str) -> Result<String, String> {
+    if line.trim().is_empty() {
+        return Err("nothing".to_owned());
+    }
+    let info = line.strip_prefix("INFO ").and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+    let Some(info) = info else { return Err(format!("{:?}", crate::text::one_line(line, 80))) };
+    let named = |key: &str| info.get(key).and_then(serde_json::Value::as_str).unwrap_or("?").to_owned();
+    let server = format!("nats-server {} ({})", named("version"), named("server_name"));
+    let client = info.get("client_id").and_then(serde_json::Value::as_u64).is_some_and(|id| id != 0);
+    let leafnodes = info.get("leafnode_urls").is_some_and(serde_json::Value::is_array)
+        || info.get("info_on_connect").and_then(serde_json::Value::as_bool) == Some(true);
+    if client && leafnodes {
+        Ok(server)
+    } else {
+        Err(format!("the INFO of {server} from another port than its leafnode port"))
+    }
+}
+
+/// The first line, without its line end, that a connection to `addr` carries within `wait`, sending nothing: as much
+/// of it as came when the connection ended or the wait passed first.
+async fn first_line_at(addr: &str, wait: Duration) -> std::io::Result<String> {
+    use tokio::io::AsyncReadExt as _;
+    let connected = tokio::time::timeout(wait, tokio::net::TcpStream::connect(addr)).await;
+    let mut stream =
+        connected.map_err(|_| std::io::Error::other(format!("no connection within {}s", wait.as_secs())))??;
+    let (mut line, mut buf) = (Vec::new(), [0; 4096]);
+    let read = async {
+        while !line.contains(&b'\n') && line.len() < 64 * 1024 {
+            match stream.read(&mut buf).await? {
+                0 => break,
+                n => line.extend_from_slice(&buf[..n]),
+            }
+        }
+        std::io::Result::Ok(())
+    };
+    if let Ok(read) = tokio::time::timeout(wait, read).await {
+        read?;
+    }
+    let end = line.iter().position(|b| *b == b'\n').unwrap_or(line.len());
+    Ok(String::from_utf8_lossy(&line[..end]).trim_end().to_owned())
 }
 
 /// The URL `ants bridge connect` runs with, among its arguments `args`.
