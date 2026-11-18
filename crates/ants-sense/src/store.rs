@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::cache::{Cache, CacheError, Hit, Pending};
+use crate::dream::ReviewTally;
 use crate::export::SenseExport;
 use crate::items::{Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, Values};
 use crate::log::{
@@ -237,6 +238,11 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         top: usize,
     ) -> Result<Option<Experience>, StoreError> {
         Ok(self.cache.experience(own, since, top)?)
+    }
+
+    /// [`Cache::review_tally`].
+    pub fn review_tally(&self, top: usize) -> Result<Option<ReviewTally>, StoreError> {
+        Ok(self.cache.review_tally(top)?)
     }
 
     /// The items matching `text` best ([`Cache::search`]).
@@ -581,6 +587,8 @@ pub trait Items: Send + Sync {
         since: Option<DateTime<Utc>>,
         top: usize,
     ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>>;
+    /// [`Store::review_tally`].
+    fn review_tally(&self, top: usize) -> BoxFuture<'_, Result<Option<ReviewTally>, StoreError>>;
     /// [`Store::history`].
     /// Cached history, including pending revisions with sequence 0; never requires another network round trip.
     fn history<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Vec<Revision>, StoreError>>;
@@ -721,6 +729,14 @@ where
             let mut store = self.lock().await;
             store.replay().await?;
             store.experience(own, since, top)
+        })
+    }
+
+    fn review_tally(&self, top: usize) -> BoxFuture<'_, Result<Option<ReviewTally>, StoreError>> {
+        Box::pin(async move {
+            let mut store = self.lock().await;
+            store.replay().await?;
+            store.review_tally(top)
         })
     }
 

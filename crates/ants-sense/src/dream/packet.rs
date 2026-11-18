@@ -16,6 +16,7 @@ mod track_record;
 
 pub use identity::{Identity, identity};
 use track_record::TRACK_RECORD_SHARE;
+pub(super) use track_record::outcomes;
 pub use track_record::{TrackRecord, track_record};
 
 /// The most bytes of a review packet.

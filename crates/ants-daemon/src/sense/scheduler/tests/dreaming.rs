@@ -1,9 +1,9 @@
 use ants_proto::{ColonyEntry, Envelope, NoticeKind, ThreadId};
-use ants_sense::dream::{self, Commit, REVIEW_BEGIN, Review, Thread};
+use ants_sense::dream::{self, Commit, Dream, REVIEW_BEGIN, Review, Thread};
 use ants_sense::proposal;
 use chrono::DateTime;
 
-use super::super::dreams::{Dreams, review_answer, serving_sage};
+use super::super::dreams::{Dreams, review_answer, review_given, review_received, serving_sage};
 use super::*;
 
 #[derive(Default)]
@@ -38,14 +38,8 @@ impl Dreaming for Fake {
         Box::pin(async move { Ok(sage) })
     }
 
-    fn review<'a>(
-        &'a self,
-        sage: &'a UserId,
-        review: &'a Review,
-        _: &'a [Commit],
-        text: String,
-    ) -> BoxFuture<'a, Result<()>> {
-        self.reviews.locked().push((sage.clone(), review.clone(), text));
+    fn review<'a>(&'a self, sage: &'a UserId, dream: &'a Dream, text: String) -> BoxFuture<'a, Result<()>> {
+        self.reviews.locked().push((sage.clone(), dream.review.clone().unwrap(), text));
         Box::pin(async { Ok(()) })
     }
 }
@@ -243,6 +237,17 @@ async fn a_served_sage_reviews_the_packet_on_a_thread_of_its_own_and_its_finding
     assert!(answer.text.starts_with("# Dream 1") && answer.text.contains(REVIEW_BEGIN), "{}", answer.text);
     assert!(answer.text.contains("1.2 (sage: mistake, untrusted): Trusted the hook"), "{}", answer.text);
     assert_eq!(answer.allow, None, "the ant answers its findings unnarrowed");
+
+    let sage_items = open(SharedLog::default(), SenseId::new()).await;
+    let mut asked = Envelope::on_thread(review.thread.clone(), ant(), sage(), text.clone());
+    review_received(&*sage_items, &asked).await.unwrap();
+    assert!(dream::review_records(&*sage_items, 10).await.unwrap().is_empty(), "a message telling no dream");
+    asked.review_outcomes = begun.review_outcomes();
+    review_received(&*sage_items, &asked).await.unwrap();
+    review_given(&*sage_items, &asked, &format!("```json\n{findings}\n```")).await.unwrap();
+    let record = dream::review_record(&*sage_items, &ant(), 1).await.unwrap().unwrap();
+    let kinds: Vec<_> = record.findings.iter().map(|finding| finding.kind.as_str()).collect();
+    assert_eq!((&record.thread, kinds.as_slice()), (&review.thread, ["lesson", "mistake"].as_slice()));
 
     let timeout = now + chrono::Duration::hours(dream::SAGE_TIMEOUT_HOURS + 1);
     *fake.idle.locked() = Some(timeout - chrono::Duration::hours(1));

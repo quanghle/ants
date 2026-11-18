@@ -91,6 +91,19 @@ impl Sense {
         scheduler::review_answer(&*items, envelope).await
     }
 
+    /// Note in the sense data of `sage` the review message `envelope` that arrived for it from an ant
+    /// ([`scheduler::review_received`]).
+    pub(crate) async fn review_received(&self, sage: &UserId, envelope: &Envelope) -> Result<()> {
+        let items = self.provider.synced(sage).await?;
+        scheduler::review_received(&*items, envelope).await
+    }
+
+    /// Note in the sense data of `sage` its answer `text` to the review message `request` ([`scheduler::review_given`]).
+    pub(crate) async fn review_given(&self, sage: &UserId, request: &Envelope, text: &str) -> Result<()> {
+        let items = self.provider.synced(sage).await?;
+        scheduler::review_given(&*items, request, text).await
+    }
+
     /// Keep the profile `workload` puts in `ant`'s colony entry that of the ant's confirmed persona, until dropped
     /// ([`published::profile`]).
     pub(crate) async fn publish_profile(&self, ant: &UserId, workload: &crate::colony::Workload) {

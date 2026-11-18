@@ -17,6 +17,7 @@ use ants_proto::UserId;
 use ants_proto::provider::{BRIEF_BUDGET, BoxFuture, CallContext, ToolCall};
 use serde_json::json;
 
+use crate::dream::{self, ReviewTally};
 use crate::identity::{self, Card};
 use crate::items::{Item, ItemId};
 use crate::log::{Break, SIZE_LIMIT, mib};
@@ -221,7 +222,8 @@ async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>)
     sections.extend(items.broken().await.as_ref().map(warning));
     sections.extend(size_warning(items.log_bytes().await));
     let experience = thread::experience::experience(items, &context.ant, TOP_EXPERIENCE).await?;
-    sections.push(identity_section(card, context, experience.as_ref()));
+    let reviews = dream::review_tally(items, TOP_EXPERIENCE).await?;
+    sections.push(identity_section(card, context, experience.as_ref(), reviews.as_ref()));
     sections.push(persona_section(persona::current(items).await?.as_ref()));
     sections.push(self_model_section(records::self_model(items).await?.as_ref()));
     sections.push(register_section(thread::register(items, &context.thread).await?.as_ref()));
@@ -269,8 +271,13 @@ fn size_warning(bytes: u64) -> Option<Section> {
     Some(Section::whole(line, String::new()))
 }
 
-fn identity_section(card: Option<&Card>, context: &CallContext, experience: Option<&Experience>) -> Section {
-    let mut body = identity_text(card, &context.ant, experience);
+fn identity_section(
+    card: Option<&Card>,
+    context: &CallContext,
+    experience: Option<&Experience>,
+    reviews: Option<&ReviewTally>,
+) -> Section {
+    let mut body = identity_text(card, &context.ant, experience, reviews);
     if let Some(card) = card
         && let Some(at) = card.returned_at
     {
@@ -288,10 +295,19 @@ fn identity_section(card: Option<&Card>, context: &CallContext, experience: Opti
     Section::whole("## Identity".to_owned(), body)
 }
 
-/// The ant's `card`, or the name of `ant` while it has none, with the lines of `experience` and whether it is
-/// dormant: the identity the brief and `sense_identity` show.
-pub(crate) fn identity_text(card: Option<&Card>, ant: &UserId, experience: Option<&Experience>) -> String {
-    let experience = experience.map_or_default(|experience| format!("\n{}", experience_lines(experience)));
+/// The ant's `card`, or the name of `ant` while it has none, with the lines of `experience`, those of the tally of the
+/// `reviews` it made of other ants as their sage ([`dream::tally_lines`]) and whether it is dormant: the identity the
+/// brief and `sense_identity` show.
+pub(crate) fn identity_text(
+    card: Option<&Card>,
+    ant: &UserId,
+    experience: Option<&Experience>,
+    reviews: Option<&ReviewTally>,
+) -> String {
+    let mut experience = experience.map_or_default(|experience| format!("\n{}", experience_lines(experience)));
+    if let Some(reviews) = reviews {
+        let _ = write!(experience, "\n{}", dream::tally_lines(reviews));
+    }
     let Some(card) = card else {
         return format!("{ant}, with no sense card yet.{experience}");
     };

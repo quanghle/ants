@@ -1,7 +1,7 @@
 //! The memories view of sense ([`ants_proto::provider::method::MEMORIES`]): what `ants ant memories` and the memories
 //! pane of the ant view show humans of who an ant has become. In order:
 //!
-//! 1. its identity: its card and experience;
+//! 1. its identity: its card and experience, and the tally of the reviews it made as a sage;
 //! 2. its persona, with its pending proposal;
 //! 3. its self-model;
 //! 4. each relationship record;
@@ -70,16 +70,17 @@ async fn entries(items: &dyn Items, ant: &UserId, now: DateTime<Utc>) -> Result<
     Ok(entries)
 }
 
-/// The card and experience of `ant`, under its sense id; none before either.
+/// The card and experience of `ant`, and the tally of its reviews, under its sense id; none before any.
 async fn identity_entry(items: &dyn Items, ant: &UserId) -> Result<Option<MemoryEntry>, StoreError> {
     let card = card(items).await?;
     let experience = experience(items, ant, TOP_EXPERIENCE).await?;
-    if card.is_none() && experience.is_none() {
+    let reviews = dream::review_tally(items, TOP_EXPERIENCE).await?;
+    if card.is_none() && experience.is_none() && reviews.is_none() {
         return Ok(None);
     }
     Ok(Some(MemoryEntry {
         key: format!("{} (identity, self), trust self", items.sense().await),
-        content: identity_text(card.as_ref(), ant, experience.as_ref()),
+        content: identity_text(card.as_ref(), ant, experience.as_ref(), reviews.as_ref()),
     }))
 }
 

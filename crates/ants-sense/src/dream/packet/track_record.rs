@@ -9,10 +9,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
-use ants_proto::UserId;
+use ants_proto::{FindingOutcome, FindingVerdict, UserId};
 use chrono::{DateTime, Duration, Utc};
 
-use crate::dream::{Dream, Finding, FindingKind, Judgement, Verdict, get};
+use crate::dream::{Dream, Finding, FindingKind, FindingTally, Judgement, Verdict, get};
 use crate::items::ItemId;
 use crate::memory::{self, Memory, Scope, Status};
 use crate::proposal::{self, ProposalItem};
@@ -83,20 +83,8 @@ pub async fn track_record(
 ) -> Result<TrackRecord, StoreError> {
     let card = crate::identity::card(items).await?;
     let ages = memory::Ages::new(dream.at, card.iter().flat_map(|card| card.dormant(dream.at)));
-    let mut dreams = Vec::new();
-    for number in (1..dream.number).rev() {
-        let Some((earlier, _)) = get(items, number).await? else { continue };
-        if ages.since(earlier.at) > Duration::days(TRACK_RECORD_DAYS) {
-            break;
-        }
-        dreams.push(earlier);
-    }
-    let mut verdicts: HashMap<&str, &Verdict> = HashMap::new();
-    for earlier in dreams.iter().rev() {
-        for verdict in &earlier.verdicts {
-            verdicts.insert(&verdict.finding, verdict);
-        }
-    }
+    let dreams = earlier(items, dream.number, &ages).await?;
+    let verdicts = last_verdicts(&dreams);
     let mut record = TrackRecord {
         head: format!(
             "\n## Earlier findings of {sage}\n\nWhat {sage} found in the work of {ant} over its last \
@@ -105,10 +93,9 @@ pub async fn track_record(
         ),
         ..TrackRecord::default()
     };
-    let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut tallies: BTreeMap<String, FindingTally> = BTreeMap::new();
     for earlier in dreams.iter().filter(|earlier| earlier.sage.as_ref() == Some(sage)) {
-        let own = earlier.findings.iter().filter(|f| f.kind == FindingKind::Sage && f.dream() == earlier.number);
-        for (n, finding) in own.enumerate() {
+        for (n, finding) in own(earlier).enumerate() {
             let verdict = verdicts.get(finding.id.as_str()).copied();
             let mut written = Vec::new();
             if let Some(applied) = verdict.filter(|verdict| verdict.verdict == Judgement::Applied) {
@@ -134,13 +121,86 @@ pub async fn track_record(
     }
     let _ = write!(record.tally, "\n### Tally of the last {TRACK_RECORD_DAYS} active days\n\n");
     for (kind, tally) in &tallies {
-        record.tally.push_str(&tally.line(kind));
+        let _ = writeln!(record.tally, "- {kind}: {}.", tally.counts());
     }
     if tallies.len() > 1 {
-        let all = tallies.values().fold(Tally::default(), Tally::plus);
-        record.tally.push_str(&all.line("all"));
+        let all = tallies.values().fold(FindingTally::default(), FindingTally::plus);
+        let _ = writeln!(record.tally, "- all: {}.", all.counts());
     }
     Ok(record)
+}
+
+/// The dreams before dream `number` that began within [`TRACK_RECORD_DAYS`] of the ant's active time, by `ages`, the
+/// latest first.
+async fn earlier(items: &dyn Items, number: u64, ages: &memory::Ages) -> Result<Vec<Dream>, StoreError> {
+    let mut dreams = Vec::new();
+    for number in (1..number).rev() {
+        let Some((earlier, _)) = get(items, number).await? else { continue };
+        if ages.since(earlier.at) > Duration::days(TRACK_RECORD_DAYS) {
+            break;
+        }
+        dreams.push(earlier);
+    }
+    Ok(dreams)
+}
+
+/// The last verdict on each finding of `dreams`, the latest first, in the dream that offered it or one offering it
+/// again.
+fn last_verdicts(dreams: &[Dream]) -> HashMap<&str, &Verdict> {
+    let mut verdicts = HashMap::new();
+    for earlier in dreams.iter().rev() {
+        for verdict in &earlier.verdicts {
+            verdicts.insert(verdict.finding.as_str(), verdict);
+        }
+    }
+    verdicts
+}
+
+/// The findings the sage gave in the review of `dream`.
+fn own(dream: &Dream) -> impl Iterator<Item = &Finding> {
+    dream.findings.iter().filter(|finding| finding.kind == FindingKind::Sage && finding.dream() == dream.number)
+}
+
+/// What the review of dream `number`, by `ages` of the ant's active time, tells `sage` of its earlier findings for the
+/// ant: those of the dreams [`track_record`] covers whose last verdict, or for one applied whether what was written
+/// for it still holds ([`outcome`]), is new since the ant's earlier reviews by `sage` told them, the oldest first.
+pub(in crate::dream) async fn outcomes(
+    items: &dyn Items,
+    number: u64,
+    ages: &memory::Ages,
+    sage: &UserId,
+) -> Result<Vec<FindingOutcome>, StoreError> {
+    let dreams = earlier(items, number, ages).await?;
+    let verdicts = last_verdicts(&dreams);
+    let by_sage: Vec<_> = dreams.iter().rev().filter(|earlier| earlier.sage.as_ref() == Some(sage)).collect();
+    let mut told = HashMap::new();
+    for review in by_sage.iter().filter_map(|earlier| earlier.review.as_ref()).filter(|review| review.sent) {
+        for outcome in &review.outcomes {
+            told.insert(outcome.finding.as_str(), (outcome.verdict, outcome.holds));
+        }
+    }
+    let mut outcomes = Vec::new();
+    for finding in by_sage.into_iter().flat_map(own) {
+        let Some(verdict) = verdicts.get(finding.id.as_str()) else { continue };
+        let mut holds = verdict.verdict == Judgement::Applied;
+        if holds {
+            for id in &verdict.items {
+                if !outcome(items, id, verdict.at).await?.1 {
+                    holds = false;
+                    break;
+                }
+            }
+        }
+        let verdict = match verdict.verdict {
+            Judgement::Applied => FindingVerdict::Applied,
+            Judgement::Rejected => FindingVerdict::Rejected,
+            Judgement::Deferred => FindingVerdict::Deferred,
+        };
+        if told.get(finding.id.as_str()) != Some(&(verdict, holds)) {
+            outcomes.push(FindingOutcome { finding: finding.id.clone(), verdict, holds });
+        }
+    }
+    Ok(outcomes)
 }
 
 /// `finding` as the section shows it, with the last `verdict` on it and what became of the items `written` for it;
@@ -221,50 +281,4 @@ async fn outcome(items: &dyn Items, id: &ItemId, at: DateTime<Utc>) -> Result<(S
         None => format!("{kind} {id}: {since}"),
     };
     Ok((line, true))
-}
-
-/// The findings of one kind and what the ant made of them.
-#[derive(Debug, Clone, Copy, Default)]
-struct Tally {
-    made: usize,
-    applied: usize,
-    /// The applied that still hold ([`outcome`]).
-    holding: usize,
-    rejected: usize,
-    deferred: usize,
-    unanswered: usize,
-}
-
-impl Tally {
-    /// Count a finding, with the last `verdict` on it, applied with what still `holds`.
-    fn add(&mut self, verdict: Option<Judgement>, holds: bool) {
-        self.made += 1;
-        match verdict {
-            Some(Judgement::Applied) => {
-                self.applied += 1;
-                self.holding += usize::from(holds);
-            }
-            Some(Judgement::Rejected) => self.rejected += 1,
-            Some(Judgement::Deferred) => self.deferred += 1,
-            None => self.unanswered += 1,
-        }
-    }
-
-    fn plus(self, other: &Self) -> Self {
-        Self {
-            made: self.made + other.made,
-            applied: self.applied + other.applied,
-            holding: self.holding + other.holding,
-            rejected: self.rejected + other.rejected,
-            deferred: self.deferred + other.deferred,
-            unanswered: self.unanswered + other.unanswered,
-        }
-    }
-
-    fn line(&self, kind: &str) -> String {
-        format!(
-            "- {kind}: {} made, {} applied ({} still holding), {} rejected, {} deferred, {} unanswered.\n",
-            self.made, self.applied, self.holding, self.rejected, self.deferred, self.unanswered
-        )
-    }
 }

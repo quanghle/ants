@@ -8,7 +8,7 @@
 
 use std::fmt::Write as _;
 
-use ants_proto::{ThreadId, UserId};
+use ants_proto::{FindingOutcome, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
@@ -53,11 +53,15 @@ pub struct Review {
     /// The findings of the answer left out: past [`MAX_FINDINGS`], or unreadable.
     #[serde(default)]
     pub left_out: usize,
+    /// What is new in the verdicts and outcomes of the sage's earlier findings since the ant's last review by it, as
+    /// the message tells the sage ([`Dream::review_outcomes`]): set when the dream began, the same on every try.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outcomes: Vec<FindingOutcome>,
 }
 
 impl Review {
-    pub(super) fn new() -> Self {
-        Self { thread: ThreadId::generate(), message: Uuid::now_v7(), sent: false, answer: None, left_out: 0 }
+    pub(super) fn new(outcomes: Vec<FindingOutcome>) -> Self {
+        Self { thread: ThreadId::generate(), message: Uuid::now_v7(), sent: false, answer: None, left_out: 0, outcomes }
     }
 }
 

@@ -61,7 +61,7 @@ vote or propose.
   `reviews/` (the checkouts of the reviews running).
 - **The memories view:** `ants ant memories` and the memories pane of the ant view in `ants chat` show, under
   `memories of provider sense`, who the ant has become, read from its cache without noting a session or writing
-  anything: its identity (card and experience), its persona with its pending proposal, its self-model, each
+  anything: its identity (card, experience and, for a sage, the tally of its reviews), its persona with its pending proposal, its self-model, each
   relationship record, its skills by name and description, its last dream (the title of its diary, with its verdict
   counts), then its core memories and its top 10 memories of every scope as `sense_recall` ranks them without a
   query. Each entry is keyed by its id, kind, scope and trust. Entries past the size cap of a memories read are left
@@ -70,7 +70,8 @@ vote or propose.
   ([cli.md](cli.md)); the ant's brief warns of both too.
 - **Export and import:** `ants ant export` carries the log and skill files to another bus
   ([sense's part](config.md#senses-part)).
-- **Reviews:** a dream sent to the sage is a message from the ant on a review thread of its own.
+- **Reviews:** a dream sent to the sage is a message from the ant on a review thread of its own. The sage's sense data
+  keeps a record of each review it made and what came of its findings, never their text ([Dreams](#dreams)).
 - **The colony:** the profile of the ant's confirmed persona shows in its colony entry, the one part of its sense data
   other ants see ([Persona and skills](#persona-and-skills)).
 
@@ -201,11 +202,17 @@ An ant with no thread record shows no experience. A dream's packet counts it the
 the dream's start (`experience_since`): a thread counts when it started, started again or was marked done since then,
 and only those times count toward its days and tallies.
 
+A sage's identity adds, after the experience, the tally of the reviews it made of other ants, counted from its review
+records each time it is shown ([Dreams](#dreams)): its reviews, the ants reviewed and the day of the last review, and
+the findings made, applied (and how many of those still hold), rejected, deferred and unanswered; then the same counts
+for the 3 kinds of the most findings, and for the 3 ants of the most reviews with their reviews and the day of the last.
+An ant that reviewed nobody shows no tally.
+
 `sense_identity` without arguments shows who the ant is, whole: `## Identity`, the card and the experience as the brief
-shows them, without the return; `## Persona`, the persona, its profile among its fields, and its pending proposal
+shows them, with the tally of a sage's reviews, without the return; `## Persona`, the persona, its profile among its fields, and its pending proposal
 ([Persona and skills](#persona-and-skills)); `## Self-model`, the self-model in full; `## Relationships`, every
 relationship record by its title; and `## Skills`, the skills by name. The records come inside the block of recalled
-memories. As JSON it answers `card`, `experience`, `persona`, `pending`, `self_model`, `relationships` (each record's
+memories. As JSON it answers `card`, `experience`, `reviews` (the tally, null for an ant that reviewed nobody), `persona`, `pending`, `self_model`, `relationships` (each record's
 `id`, `scope`, `title`, `revision` and `trust`) and `skills` (their names). The same tool replaces the self-model and
 the relationship records ([Self-model and relationships](#self-model-and-relationships)) and proposes persona changes
 ([Persona and skills](#persona-and-skills)), one of the three a call: a call mixing them, or giving `who`, `title`,
@@ -592,6 +599,21 @@ commits; the answer goes to no one. An empty list wakes nobody. A reply with no 
 sage's daemon gave up on the review or had it withdrawn, wakes the ant with the packet alone at once; so does a sage
 silent for 6 hours, a later answer prompting no one.
 
+**The sage's records:** the review message carries, besides the commits it names, the dream's number and what is new
+in the verdicts and outcomes of the sage's earlier findings since the ant's last review by the sage
+(`review_outcomes`): each finding's last verdict and, for one applied, whether it still holds, as the earlier findings
+judge them, only where that differs from what the ant's earlier review messages told. The message takes the same
+outcomes on every try. The sage's daemon tells the sage's sense of each review: the message makes the review's record,
+an item of kind `review` named after the ant and its dream, and applies the verdicts and outcomes it carries to the
+records of the earlier reviews; the sage's answer gives the record its findings by kind, read and numbered as the ant's
+daemon reads them, the first answer kept. Sense alone writes the records, as it does the thread records, from the
+ant, the dream, the review thread, when the message arrived and was answered, and each finding's id, kind, verdict,
+whether it holds and when that was last told: no text of the ant's threads nor of the findings. A message or answer
+delivered again changes nothing. A finding's verdict and outcome reach the records only while its dream is within the
+30 active days the earlier findings cover, and the findings of an answer arriving after the ant went on with the packet
+alone stay unanswered. The tally of the sage's identity is counted from these records ([Identity](#identity)). A clone
+inherits no review record.
+
 **On the dream thread,** `sense_dream` answers findings: `verdicts`, a list of `{finding, verdict, reason, items?}`,
 `verdict` being `applied` (naming in `items` the memories or records written or voted on, or the proposal made; none
 for a `proposal` finding, which it confirms), `rejected` or `deferred`, the reason at most 500 characters; a later
@@ -616,8 +638,8 @@ Sense's brief ([Briefs](architecture.md#briefs)) holds, in order, the sections i
    write less, as nothing trims it (`ants doctor` reports both);
 2. `## Identity`: the card's name, sense id and birth, earlier names, the ant it was cloned from, its harnesses, models
    and machines; the ant's experience, from its thread records: its threads, those done and its active days, then
-   the people and the repositories of the most threads ([Identity](#identity)); while dormant, since when; after a
-   return, once, when it returned and why, with the ant's last handoff, when acknowledged, in a `## Last handoff`
+   the people and the repositories of the most threads, and for a sage the tally of its reviews ([Identity](#identity));
+   while dormant, since when; after a return, once, when it returned and why, with the ant's last handoff, when acknowledged, in a `## Last handoff`
    section after the unacknowledged handoffs;
 3. `## Persona`: the persona's fields, or how to propose one;
 4. `## Self-model`: the self-model, its id and revision, inside the block of recalled memories, or how to start one;

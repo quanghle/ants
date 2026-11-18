@@ -4,7 +4,7 @@ use ants_proto::provider::{CallContext, Event, EventKind, Format, Output, Provid
 use serde_json::json;
 
 use super::*;
-use crate::memory::tests::{Kept, context, human, memory, sense, tool};
+use crate::memory::tests::{Kept, context, events, human, memory, sense, tool};
 use crate::memory::{Memory, Votes};
 
 fn on(thread: u8) -> CallContext {
@@ -458,4 +458,5 @@ fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
 mod identity_findings;
 mod identity_section;
 mod review;
+mod reviews;
 mod track_record;

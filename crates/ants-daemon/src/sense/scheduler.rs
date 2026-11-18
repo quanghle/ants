@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 mod conditions;
 mod dreams;
 
-pub(crate) use dreams::{Daemon, Dreaming, review_answer};
+pub(crate) use dreams::{Daemon, Dreaming, review_answer, review_given, review_received};
 
 const RETRY: Duration = Duration::from_secs(60);
 

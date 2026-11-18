@@ -149,7 +149,44 @@ pub struct Envelope {
     /// or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_commits: Vec<ReviewCommit>,
+    /// On a message from an ant narrowed to [`REVIEW_ALLOW`], the dream whose review it asks for and what is new
+    /// since the sender's last review in the verdicts and outcomes of the recipient's earlier findings for it: the
+    /// recipient's daemon tells the recipient's sense, which keeps a record of each review. Never copied by
+    /// [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_outcomes: Option<ReviewOutcomes>,
     pub sent_at: DateTime<Utc>,
+}
+
+/// The dream a review message asks a review of and what is new in the outcomes of the reviewer's earlier findings
+/// ([`Envelope::review_outcomes`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewOutcomes {
+    /// The number of the sender's dream under review.
+    pub dream: u64,
+    /// The earlier findings whose verdict or outcome changed since the sender's last review, each once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<FindingOutcome>,
+}
+
+/// Where one of a reviewer's earlier findings stands with the ant it reviewed ([`ReviewOutcomes::findings`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingOutcome {
+    /// The finding's id, `<dream>.<n>`: the n-th finding of the reviewer's answer to the review of that dream.
+    pub finding: String,
+    pub verdict: FindingVerdict,
+    /// Whether the change applying it still holds; only for an applied finding.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub holds: bool,
+}
+
+/// An ant's verdict on a reviewer's finding ([`FindingOutcome::verdict`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingVerdict {
+    Applied,
+    Rejected,
+    Deferred,
 }
 
 /// A commit a dream's review packet names ([`Envelope::review_commits`]).
@@ -369,6 +406,7 @@ impl Envelope {
             sealed: None,
             notice: None,
             review_commits: Vec::new(),
+            review_outcomes: None,
             sent_at: Utc::now(),
         }
     }
@@ -542,6 +580,7 @@ impl Envelope {
             sealed: None,
             notice: None,
             review_commits: Vec::new(),
+            review_outcomes: None,
             sent_at: Utc::now(),
         })
     }

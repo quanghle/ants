@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
 
 use ants_proto::provider::{CallContext, ToolCall};
-use ants_proto::{ThreadId, UserId};
+use ants_proto::{ReviewOutcomes, ThreadId, UserId};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -42,6 +42,7 @@ use crate::tools::{Answer, Handler};
 mod identity_findings;
 mod packet;
 mod review;
+pub(crate) mod reviews;
 mod tool;
 
 pub use identity_findings::{
@@ -53,6 +54,10 @@ pub use packet::{
 };
 pub use review::{
     Advice, Evidence, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse, review_sent, untrusted_on,
+};
+pub use reviews::{
+    AntTally, FindingTally, KindTally, REVIEW, ReviewRecord, ReviewTally, ReviewedFinding, review_answered, review_id,
+    review_received, review_record, review_records, review_tally, tally_lines,
 };
 pub use tool::{dream, schema};
 
@@ -321,6 +326,13 @@ impl Dream {
         ItemId::named(DREAM, &number.to_string())
     }
 
+    /// What its review message tells the sage beside the packet ([`ants_proto::Envelope::review_outcomes`]): the dream
+    /// and what is new in the verdicts and outcomes of the sage's earlier findings; none without a review.
+    pub fn review_outcomes(&self) -> Option<ReviewOutcomes> {
+        let review = self.review.as_ref()?;
+        Some(ReviewOutcomes { dream: self.number, findings: review.outcomes.clone() })
+    }
+
     fn values(&self) -> Values {
         match serde_json::to_value(self) {
             Ok(Value::Object(values)) => values,
@@ -497,7 +509,10 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
             writes.extend(close(previous, revision, start.writer, start.at));
         }
         let (state, sage, review) = match &start.recipient {
-            Recipient::Sage(sage) => (State::Sent, Some(sage.clone()), Some(Review::new())),
+            Recipient::Sage(sage) => {
+                let outcomes = packet::outcomes(items, number, ages, sage).await?;
+                (State::Sent, Some(sage.clone()), Some(Review::new(outcomes)))
+            }
             Recipient::Ant => (State::Fallback, None, None),
         };
         let dream = Dream {

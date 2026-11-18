@@ -14,8 +14,7 @@ use std::time::SystemTime;
 use ants_proto::provider::{BoxFuture, CallContext, Host, Origin, Starter, WakeRequest};
 use ants_proto::{ColonyEntry, Envelope, JsDomain, NoticeKind, REVIEW_ALLOW, ReviewCommit, ThreadId, UserId};
 use ants_sense::dream::{
-    self, Commit, Covered, Dream, IDLE_MINUTES, PACKET_BUDGET, Reader, Review, Reviewed, SAGE_TIMEOUT_HOURS, Start,
-    Thread,
+    self, Commit, Covered, Dream, IDLE_MINUTES, PACKET_BUDGET, Reader, Reviewed, SAGE_TIMEOUT_HOURS, Start, Thread,
 };
 use ants_sense::store::Items;
 use anyhow::Result;
@@ -45,15 +44,10 @@ pub(crate) trait Dreaming: Send + Sync {
     fn commits<'a>(&'a self, threads: &'a [ThreadId]) -> BoxFuture<'a, Vec<Commit>>;
     /// The ant's sage, when it has one, a daemon serves it now and no live ant names the ant as its own sage.
     fn sage(&self) -> BoxFuture<'_, Result<Option<UserId>>>;
-    /// Send the review packet `text` to `sage` as `review`'s message on its thread, naming `commits` for the sage's
-    /// daemon to check out.
-    fn review<'a>(
-        &'a self,
-        sage: &'a UserId,
-        review: &'a Review,
-        commits: &'a [Commit],
-        text: String,
-    ) -> BoxFuture<'a, Result<()>>;
+    /// Send the review packet `text` of `dream` to `sage` as its review's message on its thread, naming the dream's
+    /// commits for the sage's daemon to check out and telling what is new in the verdicts and outcomes of the sage's
+    /// earlier findings ([`Dream::review_outcomes`]).
+    fn review<'a>(&'a self, sage: &'a UserId, dream: &'a Dream, text: String) -> BoxFuture<'a, Result<()>>;
 }
 
 pub(super) struct Dreams {
@@ -147,7 +141,7 @@ async fn covered(dreams: &Dreams, dream: &Dream) -> Result<Vec<Thread>> {
 async fn review(items: &dyn Items, dreams: &Dreams, ant: &UserId, dream: &Dream, threads: &[Thread]) -> Result<()> {
     let (Some(sage), Some(review)) = (&dream.sage, &dream.review) else { return Ok(()) };
     let text = dream::packet(items, dream, &Reader::Sage(ant.clone()), threads).await?;
-    dreams.daemon.review(sage, review, &dream.commits, text).await?;
+    dreams.daemon.review(sage, dream, text).await?;
     dream::review_sent(items, dream.number).await?;
     tracing::info!(%ant, %sage, dream = dream.number, thread = %review.thread, "sense dream review sent to the sage");
     Ok(())
@@ -189,6 +183,30 @@ pub(crate) async fn review_answer(items: &dyn Items, envelope: &mut Envelope) ->
             Ok(Some(false))
         }
     }
+}
+
+/// Note in `items`, a sage's sense data, the review message `envelope` that arrived from an ant ([`dream::review_received`]):
+/// the review's record made, and what is new in the verdicts and outcomes of the sage's earlier findings applied to
+/// the records of the reviews that made them. Nothing when the message tells no dream; nothing new when it arrives again.
+pub(crate) async fn review_received(items: &dyn Items, envelope: &Envelope) -> Result<()> {
+    let Some(told) = &envelope.review_outcomes else { return Ok(()) };
+    let (ant, thread) = (&envelope.from, &envelope.thread_id);
+    if dream::review_received(items, ant, thread, told, Utc::now()).await? {
+        tracing::info!(%ant, dream = told.dream, outcomes = told.findings.len(), "sense noted a review asked of the sage");
+    }
+    Ok(())
+}
+
+/// Note in `items`, a sage's sense data, its answer `text` to the review message `request` asked
+/// ([`dream::review_answered`]): the findings it gives, by kind. Nothing when the message tells no dream; once
+/// answered, a review keeps its first answer.
+pub(crate) async fn review_given(items: &dyn Items, request: &Envelope, text: &str) -> Result<()> {
+    let Some(told) = &request.review_outcomes else { return Ok(()) };
+    let (ant, thread) = (&request.from, &request.thread_id);
+    if dream::review_answered(items, ant, thread, told.dream, text, Utc::now()).await? {
+        tracing::info!(%ant, dream = told.dream, "sense noted the sage's answer to a review");
+    }
+    Ok(())
 }
 
 /// Wake `ant` on a new thread with the packet of `dream`, covering `threads`, and note the thread.
@@ -304,18 +322,14 @@ impl Dreaming for Daemon {
         })
     }
 
-    fn review<'a>(
-        &'a self,
-        sage: &'a UserId,
-        review: &'a Review,
-        commits: &'a [Commit],
-        text: String,
-    ) -> BoxFuture<'a, Result<()>> {
+    fn review<'a>(&'a self, sage: &'a UserId, dream: &'a Dream, text: String) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            let Some(review) = &dream.review else { return Ok(()) };
             let mut envelope = Envelope::on_thread(review.thread.clone(), self.ant.clone(), sage.clone(), text)
                 .with_allow(Some(REVIEW_ALLOW.map(str::to_owned).to_vec()));
             envelope.id = review.message;
-            envelope.review_commits = review_commits(&self.workdir, commits).await;
+            envelope.review_commits = review_commits(&self.workdir, &dream.commits).await;
+            envelope.review_outcomes = dream.review_outcomes();
             (self.outbox)(envelope).await
         })
     }

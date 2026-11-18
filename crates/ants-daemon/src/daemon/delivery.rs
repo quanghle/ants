@@ -250,7 +250,8 @@ impl Inbox<'_> {
     /// the machine's outbox, then ack the message and forget its marker. The message id, from the request's, makes
     /// JetStream drop a copy an earlier attempt stored within the stream's duplicate window. When the ack fails, the
     /// note in `answered` has the redelivery acked without answering again, even by a restarted daemon. Of a channel
-    /// post it also notes that the posts on its thread up to it were shown.
+    /// post it also notes that the posts on its thread up to it were shown, and of an answer to a review an ant asked,
+    /// the findings it gives in the ant's sense ([`crate::sense::Sense::review_given`]).
     pub(super) async fn deliver(
         &self,
         incoming: &Incoming,
@@ -263,6 +264,14 @@ impl Inbox<'_> {
         // notes is in the notes already.
         if !matches!(reply, Reply::Notes(_)) {
             bus::store(self.js, reply.subject(), reply, &reply_id(self.ant, request)).await?;
+        }
+        // After the store, so that a redelivery, sending the stored reply again, notes the answer it holds.
+        if let (Some(sense), Reply::Message(answer)) = (self.sense, reply)
+            && answer.notice.is_none()
+            && self.asks_review(incoming)
+            && let Err(e) = sense.review_given(self.ant, request, &answer.text).await
+        {
+            tracing::warn!(thread = %request.thread_id, error = format!("{e:#}"), "noting the answer to a review");
         }
         if incoming.post.is_some()
             && let Err(e) = self.threads.seen(&request.thread_id, seq).await
