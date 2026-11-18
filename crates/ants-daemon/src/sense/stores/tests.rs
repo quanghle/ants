@@ -68,6 +68,12 @@ fn new_credentials_open_the_items_again() {
     std::fs::remove_dir_all(&home).unwrap();
 }
 
+/// Whether dev-a's items are open, awaiting the slot the worker retrying pending writes takes a moment each tick.
+async fn opened(stores: &SenseStores) -> bool {
+    let items = stores.state().ants[&dev_a()].items.clone();
+    items.lock().await.is_some()
+}
+
 #[tokio::test]
 async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
     let Some(server) = NatsServer::start() else { return };
@@ -88,8 +94,7 @@ async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
     assert!(Arc::ptr_eq(&first, &stores.items(&dev_a()).await.unwrap()), "opened once");
 
     let again = stores.hosting();
-    let opened = |stores: &SenseStores| stores.state().ants[&dev_a()].items.try_lock().unwrap().is_some();
-    assert!(opened(&stores), "cached items survive the next connection starting");
+    assert!(opened(&stores).await, "cached items survive the next connection starting");
     assert!(
         Arc::ptr_eq(&first, &stores.items(&dev_a()).await.unwrap()),
         "cached items remain reachable while connecting"
@@ -100,9 +105,9 @@ async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
         "the existing store follows the new connection"
     );
     drop((hosting, first));
-    assert!(opened(&stores), "the next connection's items are kept");
+    assert!(opened(&stores).await, "the next connection's items are kept");
     drop(again);
-    assert!(opened(&stores), "cached items remain available without a host link");
+    assert!(opened(&stores).await, "cached items remain available without a host link");
 
     std::fs::remove_file(home.join(".sense/cache.db")).unwrap();
     let elsewhere = SenseStores::new();
