@@ -464,6 +464,12 @@ impl Inbox<'_> {
         }
         let spend = std::mem::replace(&mut ran.spend, tokio::sync::mpsc::unbounded_channel().1);
         self.record_ended(&incoming.envelope, spend, &mut ran.reached, &mut ran.measured).await;
+        // The review request gets only a steering notice; record the actual answer before handing it on.
+        if let Ok(answer) = &ran.reply
+            && self.asks_review(incoming)
+        {
+            self.note_review(&incoming.envelope, &self.redactor.redact(&answer.text)).await;
+        }
         let last = joined.pop().expect("a message joined");
         let mut by = (last.envelope.from.clone(), last.envelope.id);
         for join in joined.into_iter().rev() {

@@ -360,7 +360,7 @@ async fn renewal_preserves_a_time_triggers_original_deadline_and_trusted_workdir
 }
 
 #[tokio::test]
-async fn schemas_reject_bad_timezones_conditions_and_webhook_commands() {
+async fn bad_triggers_are_refused_with_one_terminal_period() {
     let (sense, _) = setup().await;
     for trigger in [
         json!({"kind":"daily","time":"25:00","timezone":"UTC"}),
@@ -372,13 +372,51 @@ async fn schemas_reject_bad_timezones_conditions_and_webhook_commands() {
     ] {
         let answer = remind(&sense, &call(now(), json!({"title":"bad","trigger":trigger}))).await;
         assert!(answer.is_error, "{answer:?}");
+        assert_eq!(answer.json["error"], "invalid_arguments", "{answer:?}");
+        assert!(answer.text.ends_with('.') && !answer.text.ends_with(".."), "{answer:?}");
     }
-    let mut untrusted = call(
-        now(),
-        json!({"title":"command","trigger":{"kind":"condition","condition":{"kind":"command","command":"true"}}}),
-    );
-    untrusted.context.origin.by = Starter::Webhook { user: "hook".parse().unwrap() };
-    assert_eq!(remind(&sense, &untrusted).await.json["error"], "untrusted");
+}
+
+#[tokio::test]
+async fn only_trusted_origins_can_create_or_change_command_triggers() {
+    let (sense, _) = setup().await;
+    let command = json!({"kind":"condition","condition":{"kind":"command","command":"true"}});
+    let file = json!({"kind":"condition","condition":{"kind":"file","path":"result","event":"appeared"}});
+    let command_id = create(&sense, command.clone()).await;
+    let file_id = create(&sense, file.clone()).await;
+    let user: UserId = "alice".parse().unwrap();
+    for (by, trusted) in [
+        (Starter::Human { user: user.clone() }, true),
+        (Starter::Ant { user: user.clone() }, true),
+        (Starter::Provider { name: "test".into() }, true),
+        (Starter::Webhook { user: user.clone() }, false),
+        (Starter::Review { user }, false),
+        (Starter::Unknown, false),
+    ] {
+        let from_origin = |arguments| {
+            let mut request = call(now(), arguments);
+            request.context.origin.by = by.clone();
+            request
+        };
+        for arguments in [
+            json!({"title":"command","trigger":command}),
+            json!({"action":"postpone","id":command_id,"after_seconds":60}),
+        ] {
+            let answer = remind(&sense, &from_origin(arguments)).await;
+            assert_ne!(answer.is_error, trusted, "{by:?}: {answer:?}");
+            if !trusted {
+                assert_eq!(answer.json["error"], "untrusted", "{by:?}: {answer:?}");
+            }
+        }
+        for arguments in [
+            json!({"action":"show","id":command_id}),
+            json!({"title":"file","trigger":file}),
+            json!({"action":"postpone","id":file_id,"after_seconds":60}),
+        ] {
+            let answer = remind(&sense, &from_origin(arguments)).await;
+            assert!(!answer.is_error, "{by:?}: {answer:?}");
+        }
+    }
 }
 
 #[tokio::test]

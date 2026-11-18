@@ -289,6 +289,21 @@ pub struct Listed {
 /// refused for a file listing several or none. A daemon serving the whole file says once why it leaves a built-in ant
 /// to another machine ([`config::Loaded::elsewhere`]), and fails where that leaves nothing to serve.
 pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str, creds: Option<&Path>) -> Result<Listed> {
+    select(args, default_path, hostname, creds, false)
+}
+
+/// Reload like [`ants`], but allow a valid file to leave no ants to serve when no `--ant` is set.
+pub fn ants_on_reload(args: &DaemonArgs, default_path: &Path, hostname: &str, creds: Option<&Path>) -> Result<Listed> {
+    select(args, default_path, hostname, creds, true)
+}
+
+fn select(
+    args: &DaemonArgs,
+    default_path: &Path,
+    hostname: &str,
+    creds: Option<&Path>,
+    allow_empty: bool,
+) -> Result<Listed> {
     match source(args, default_path)? {
         Source::Flags(name) => {
             if ants_proto::BuiltinAnt::from_id(name.as_str()).is_some() {
@@ -327,8 +342,8 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str, creds: Optio
             }
             let whole = args.ant.is_none();
             if whole {
-                tell_elsewhere(&loaded.elsewhere);
-                if loaded.ants.is_empty() {
+                tell_elsewhere(&loaded.elsewhere, !loaded.ants.is_empty());
+                if loaded.ants.is_empty() && !allow_empty {
                     let why = loaded.elsewhere.iter().map(elsewhere).collect::<Vec<_>>().join("; ");
                     bail!("config {}: nothing to serve on this machine: {why}", path.display());
                 }
@@ -368,14 +383,15 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str, creds: Optio
 /// only of those it newly leaves.
 static ELSEWHERE_TOLD: Mutex<BTreeSet<UserId>> = Mutex::new(BTreeSet::new());
 
-/// Say why the machine leaves each of `left` to another, unless said already.
-fn tell_elsewhere(left: &[Elsewhere]) {
+/// Say why the machine leaves each of `left` to another, unless said already. With no local ants, the daemon exits.
+fn tell_elsewhere(left: &[Elsewhere], has_ants: bool) {
     let now: BTreeSet<UserId> = left.iter().map(|left| left.ant.name.clone()).collect();
     let told = std::mem::replace(&mut *ELSEWHERE_TOLD.lock().unwrap_or_else(PoisonError::into_inner), now);
     for left in left.iter().filter(|left| !told.contains(&left.ant.name)) {
         let also = if left.ant.is_sage { ", the ants here naming it all the same" } else { "" };
+        let resumes = if has_ants { ", the daemon serving it once there" } else { "" };
         let (name, why) = (&left.ant.name, elsewhere(left));
-        tracing::info!("the built-in {name} is left to another machine{also}: {why}, the daemon serving it once there");
+        tracing::info!("the built-in {name} is left to another machine{also}: {why}{resumes}");
     }
 }
 

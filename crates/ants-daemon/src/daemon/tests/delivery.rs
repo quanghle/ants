@@ -511,7 +511,72 @@ async fn a_review_s_record_keeps_all_its_thread_spent_though_a_human_s_message_s
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(log.locked().prompted, 3);
-    let spent = bus.sense.as_ref().unwrap().review_spent(&bus.dev, &dev_b, 1).await;
-    let whole = crate::limits::caps::Spent { tokens: 550, cost: 0.75 };
-    assert_eq!(spent, Some(whole), "the whole thread's spend");
+    let record = bus.sense.as_ref().unwrap().review_record(&bus.dev, &dev_b, 1).await;
+    assert!(record.answered.is_some(), "the review was answered");
+    assert_eq!(record.spent.map(|spent| (spent.tokens, spent.cost_micros)), Some((550, 750_000)));
+}
+
+#[tokio::test]
+async fn a_human_joining_a_running_review_gets_the_answer_and_the_sage_records_it_once() {
+    let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+    let _hosting = bus.keep_sense();
+    let (launch, log, gate) = fake::launch();
+    log.locked().steers = true;
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let thread = ThreadId::generate();
+    bus.send_from(dev_b.clone(), &thread, "tokens 300 cost 0.25").await;
+
+    let sense = bus.sense.as_ref().unwrap();
+    let review = |text| {
+        let envelope = Envelope::on_thread(thread.clone(), dev_b.clone(), bus.dev.clone(), text)
+            .with_allow(Some(ants_proto::REVIEW_ALLOW.map(str::to_owned).to_vec()));
+        let told = ants_proto::ReviewOutcomes { dream: 1, findings: Vec::new(), earlier_findings: Vec::new() };
+        Envelope { review_outcomes: Some(told), ..envelope }
+    };
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        next_envelope(&mut to_dev_b).await;
+        let asked = review("hold: review the dream");
+        bus::publish_json(&bus.js, asked.subject(), &asked, None).await.unwrap();
+        until("the review prompt to run", || log.locked().prompted == 2).await;
+        let findings = serde_json::json!({"findings": [{
+            "kind": "lesson", "finding": "Pin the toolchain", "evidence": {"threads": ["worked-thread"]},
+            "action": "Use the pinned version"
+        }]});
+        let steer = format!("tokens 200 cost 0.75\n\n```json\n{findings}\n```");
+        let (human, seq) = bus.send(&thread, &steer).await;
+        until("the human's message to join the review", || log.locked().steered.len() == 1).await;
+        gate.add_permits(1);
+
+        let notice = next_envelope(&mut to_dev_b).await;
+        assert_eq!(notice.in_reply_to, Some(asked.id));
+        assert_eq!(notice.notice, Some(ants_proto::NoticeKind::Steered));
+        assert!(!notice.text.contains("Pin the toolchain"));
+        let answer = next_envelope(&mut to_human).await;
+        assert_eq!(answer.in_reply_to, Some(human.id));
+        assert_eq!(answer.notice, None);
+        assert!(answer.text.contains("Pin the toolchain"));
+        bus.until_acked(seq).await;
+
+        let record = sense.review_record(&bus.dev, &dev_b, 1).await;
+        assert_eq!(record.thread, thread);
+        assert!(record.answered.is_some(), "the review was answered");
+        let findings =
+            record.findings.iter().map(|finding| (finding.id.as_str(), finding.kind.as_str())).collect::<Vec<_>>();
+        assert_eq!(findings, [("1.1", "lesson")]);
+        assert_eq!(record.spent.map(|spent| (spent.tokens, spent.cost_micros)), Some((500, 750_000)));
+
+        let repeated = review("tokens 50 cost 1\n\n```json\n{\"findings\": []}\n```");
+        let seq = bus::publish_json(&bus.js, repeated.subject(), &repeated, None).await.unwrap();
+        assert_eq!(next_envelope(&mut to_dev_b).await.in_reply_to, Some(repeated.id));
+        bus.until_acked(seq).await;
+        assert_eq!(sense.review_record(&bus.dev, &dev_b, 1).await, record, "the first answer and spend are kept");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let log = log.locked();
+    assert_eq!((log.prompted, log.cancelled), (3, 0), "the steer joined rather than starting a new prompt");
 }

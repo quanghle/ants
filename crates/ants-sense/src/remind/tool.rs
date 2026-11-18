@@ -86,7 +86,7 @@ pub(super) async fn handle(sense: &Sense, call: &ToolCall) -> Result<Answer, Ans
     if action == Action::Show {
         return answer(item);
     }
-    deny_webhook_command(call, &reminder.trigger)?;
+    deny_untrusted_command(call, &reminder.trigger)?;
     if action == Action::Ack && reminder.status == Status::Acknowledged {
         return answer(item);
     }
@@ -105,8 +105,8 @@ async fn create(sense: &Sense, items: &dyn Items, call: &ToolCall, request: Requ
         return Err(Answer::invalid("title must be nonempty."));
     }
     let trigger = request.trigger.ok_or_else(|| Answer::invalid("trigger is required."))?;
-    trigger.validate().map_err(|error| Answer::invalid(format!("trigger: {error}.")))?;
-    deny_webhook_command(call, &trigger)?;
+    trigger.validate().map_err(|error| Answer::invalid(format!("trigger: {}.", error.trim_end_matches('.'))))?;
+    deny_untrusted_command(call, &trigger)?;
     let at = trigger.first(now).map_err(refused)?;
     let expires = add(now, Duration::days(CONDITION_DAYS)).map_err(refused)?;
     let workdir = sense.workdir(&call.context);
@@ -195,11 +195,9 @@ fn answer(item: Item) -> Result<Answer, Answer> {
     Ok(Answer { text, json: json!({"reminder":item}), is_error: false })
 }
 
-fn deny_webhook_command(call: &ToolCall, trigger: &Trigger) -> Result<(), Answer> {
-    if matches!(trigger.condition(), Some(Condition::Command { .. }))
-        && matches!(call.context.origin.by, ants_proto::provider::Starter::Webhook { .. })
-    {
-        return Err(Answer::error("untrusted", "Webhook threads cannot change command triggers.".into()));
+fn deny_untrusted_command(call: &ToolCall, trigger: &Trigger) -> Result<(), Answer> {
+    if matches!(trigger.condition(), Some(Condition::Command { .. })) && !call.context.origin.trusted() {
+        return Err(Answer::error("untrusted", "Untrusted threads cannot create or change command triggers.".into()));
     }
     Ok(())
 }

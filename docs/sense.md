@@ -543,8 +543,9 @@ interval to thirty minutes. An ant holds at most fifty active triggers, includin
 Ordinary reminders expire after thirty days unless renewed; automatic commitment reminders remain valid until thirty
 days after the later of creation or renewal and the commitment's due time, so a distant due date cannot expire before
 firing. Command conditions run only under the ant's tool allow rules, in its workdir and environment, with a
-thirty-second timeout; stdout and stderr are discarded, and no approval request is raised for a disallowed one. Webhook
-threads cannot create or change command triggers. Outside checks use only `gh`, `bd` and `git`.
+thirty-second timeout; stdout and stderr are discarded, and no approval request is raised for a disallowed one.
+Untrusted threads (webhooks, sage reviews and unknown origins) cannot create or change command triggers. Outside checks
+use only `gh`, `bd` and `git`.
 
 ## Dreams
 

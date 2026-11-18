@@ -155,9 +155,10 @@ fn a_follower_prints_each_change_of_a_run_once() {
 
 /// Answer each request on `ant`'s control subject with what `answer` makes of it, as `ant`'s daemon does.
 async fn conductor(server: &Server, ant: &UserId, answer: fn(&TrailRequest) -> TrailOutcome) {
-    let (client, _) = server.connect(ant).await;
+    let (client, js) = server.connect(ant).await;
     let mut requests = client.subscribe(subject::trail(ant)).await.unwrap();
-    client.flush().await.unwrap();
+    // A flush only writes to the socket. A round trip on the same connection confirms the server processed the SUB.
+    js.query_account().await.expect("confirming the conductor's subscription");
     tokio::spawn(async move {
         while let Some(message) = requests.next().await {
             let request: TrailRequest = serde_json::from_slice(&message.payload).unwrap();
@@ -237,9 +238,10 @@ async fn humans_stop_and_resume_runs_by_a_unique_start_of_their_id() {
 
     let error = control::stop(&client, &alice, &done).await.unwrap_err().to_string();
     assert_eq!(error, format!("run {} has ended: done", done.run));
+    let offline = p("offline");
     let unanswered =
-        control::ask(&client, &lead, &alice, TrailAction::Stop { run: waiting.run.clone() }, Duration::ZERO);
-    assert_eq!(unanswered.await.unwrap_err().to_string(), "no daemon serving lead answered within 0s");
+        control::ask(&client, &offline, &alice, TrailAction::Stop { run: waiting.run.clone() }, Duration::ZERO);
+    assert_eq!(unanswered.await.unwrap_err().to_string(), "no daemon serving offline answered within 0s");
     conductor(&server, &lead, |request| match &request.action {
         TrailAction::Stop { run } => TrailOutcome::Stopped {
             run: run.clone(),

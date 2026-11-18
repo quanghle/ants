@@ -24,7 +24,7 @@ use crate::reload::Triggers;
 use crate::scheduler;
 
 pub(crate) use self::running::creds_snapshot;
-pub use self::selection::{AntOptions, DaemonArgs, ants, config_file, configs};
+pub use self::selection::{AntOptions, DaemonArgs, Listed, ants, ants_on_reload, config_file, configs};
 
 mod running;
 mod selection;
@@ -160,9 +160,10 @@ pub enum Ended {
 /// the schedules alongside, each over its own as well. An ant that fails is reported and the others keep running; it is
 /// an error only when none is left. On SIGHUP, once the config file changed and settled, or at once after an admin
 /// order edited it (`triggers`), `reload` lists the ants and schedules again and the daemon serves those
-/// ([`reconcile`], [`Schedules::reconcile`]); a list it cannot read is reported and what runs stays as it is. Health
-/// and metrics are served on `served.metrics`, if given, until the daemon stops; a reload does not move them. Once
-/// `replaced` the ants stop as on SIGTERM, finishing their prompts in flight, and the schedules at once.
+/// ([`reconcile`], [`Schedules::reconcile`]); an empty list leaves no ants running once they drain, and a list it
+/// cannot read is reported and what runs stays as it is. Health and metrics are served on `served.metrics`, if given,
+/// until the daemon stops; a reload does not move them. Once `replaced` the ants stop as on SIGTERM, finishing their
+/// prompts in flight, and the schedules at once.
 pub async fn run(
     served: Served,
     reload: impl Fn() -> Result<Served>,

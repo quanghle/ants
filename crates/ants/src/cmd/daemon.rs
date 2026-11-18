@@ -20,12 +20,12 @@ pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Resul
     triggers.watch_shared(edited.shared.subscribe());
     triggers.watch_creds(ants_daemon::config::builtins::creds_files()?);
     let hostname = ants_daemon::colony::machine().await;
-    let listed = serve::ants(args, &default_path, &hostname, conn.creds)?;
+    let startup = || serve::ants(args, &default_path, &hostname, conn.creds);
+    let listed = startup()?;
     // The ants connect to the file's top-level nats, where it sets one: the address the managed server must answer.
     let local_url = listed.host.as_ref().and_then(|host| host.nats.clone()).unwrap_or_else(|| conn.nats.to_owned());
     let nats_server = listed.nats_server;
-    let served = || {
-        let listed = serve::ants(args, &default_path, &hostname, conn.creds)?;
+    let served = |listed: serve::Listed| {
         if listed.nats_server != nats_server {
             tracing::warn!("the [nats_server] table changed; it takes effect on a restart");
         }
@@ -68,7 +68,8 @@ pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Resul
             () = Box::pin(update::auto(auto_update, every)) => {}
         }
     };
-    let serving = async { serve::run(served()?, served, triggers, replaced, stop).await };
+    let reload = || serve::ants_on_reload(args, &default_path, &hostname, conn.creds).and_then(&served);
+    let serving = async { serve::run(served(startup()?)?, reload, triggers, replaced, stop).await };
     let ended = match managed {
         Some(managed) => natsd::run_serving(managed, serving).await?,
         None => serving.await?,

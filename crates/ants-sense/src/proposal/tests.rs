@@ -105,6 +105,8 @@ async fn the_persona_changes_at_most_once_a_day_and_keeps_every_version_with_its
     propose(&sense, at(0), json!({"values": "Care.", "voice": "Warm.", "reason": "First."})).await;
     let dream = dream_on(&*items, at(12), 1, Vec::new()).await;
     assert!(!judge(&sense, 1, &offered(&dream)[0].id, "applied").await.is_error);
+    let history = propose(&sense, at(1), json!({"history": true})).await;
+    assert!(history.text.starts_with("1 version of the persona"), "{}", history.text);
 
     let second = proposal_id(&propose(&sense, at(1), json!({"voice": "", "reason": "Second."})).await);
     let dream = dream_on(&*items, Utc::now(), 2, Vec::new()).await;
@@ -117,6 +119,7 @@ async fn the_persona_changes_at_most_once_a_day_and_keeps_every_version_with_its
     assert_eq!(persona::text(&current.values), "Values: Care.", "an empty field is cleared");
 
     let history = propose(&sense, at(2), json!({"history": true})).await;
+    assert!(history.text.starts_with("2 versions of the persona, the newest first:\n"), "{}", history.text);
     let versions = history.json["versions"].as_array().unwrap();
     assert_eq!(versions.len(), 2, "{history:?}");
     assert_eq!((versions[0]["reason"].as_str(), versions[0]["voice"].as_str()), (Some("Second."), None));

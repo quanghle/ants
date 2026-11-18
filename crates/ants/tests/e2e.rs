@@ -30,7 +30,7 @@ fn main() {
     if Path::new(&me).file_stem().is_some_and(|name| name == "copilot" || name == "stub-adapter") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 9] = [
+    let tests: [(&str, fn()); 10] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
         ("a_daemon_exits_once_its_executable_was_replaced", a_daemon_exits_once_its_executable_was_replaced),
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
@@ -39,6 +39,10 @@ fn main() {
         (
             "the_builtin_messenger_has_a_standby_and_the_short_name_is_ordinary",
             the_builtin_messenger_has_a_standby_and_the_short_name_is_ordinary,
+        ),
+        (
+            "the_last_messenger_drains_when_its_credentials_are_removed",
+            the_last_messenger_drains_when_its_credentials_are_removed,
         ),
         (
             "a_configured_adapter_serves_ants_the_messenger_and_the_cli",
@@ -649,6 +653,99 @@ fn the_builtin_messenger_has_a_standby_and_the_short_name_is_ordinary() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn the_last_messenger_drains_when_its_credentials_are_removed() {
+    let ants = |home: &Path, args: &[&str]| {
+        let mut command = Command::new(ANTS);
+        command.args(args).env("HOME", home);
+        for var in ["ANTS_ANT", "ANTS_AUTH_DIR", "ANTS_CONFIG", "ANTS_CREDS", "ANTS_JS_DOMAIN", "ANTS_NATS_URL"] {
+            command.env_remove(var);
+        }
+        command
+    };
+    let ok = |command| {
+        let output = run(command);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    let Some(server) = NatsServer::start_with(|dir| {
+        ok(ants(dir, &["auth", "init"]));
+        "include \".config/ants/auth/server.conf\"".to_owned()
+    }) else {
+        return;
+    };
+    let home = server.dir();
+    let auth = home.join(".config/ants/auth");
+    ok(ants(home, &["auth", "builtin", "messenger"]));
+    ok(ants(home, &["auth", "host", "reload"]));
+    ok(ants(home, &["auth", "user", "human", "--human"]));
+    let human = auth.join("human.creds");
+    let human_on_bus = |args: &[&str]| {
+        let mut command = ants(home, &["--nats", &server.url, "--creds", human.to_str().unwrap()]);
+        command.args(args);
+        command
+    };
+    ok(human_on_bus(&["init"]));
+
+    link_self(home, "stub-adapter");
+    let (config, gate) = (home.join("config.toml"), home.join("prompt.started"));
+    std::fs::write(
+        &config,
+        format!(
+            "harness = \"stubby\"\n[host]\ncreds = \"~/.config/ants/auth/host-reload.creds\"\n\
+             [harnesses.stubby]\ncommand = \"./stub-adapter\"\nenv = {{ ANTS_TEST_PROMPT_GATE = {gate:?} }}\n"
+        ),
+    )
+    .unwrap();
+    let daemon = || ants(home, &["--nats", &server.url, "daemon", "--config", config.to_str().unwrap()]);
+    let log_path = home.join("daemon.log");
+    let log = || std::fs::read_to_string(&log_path).unwrap_or_default();
+    let wait_for = |what: &str, done: &mut dyn FnMut() -> bool| {
+        let start = Instant::now();
+        while !done() {
+            assert!(start.elapsed() < WAIT, "{what}\ndaemon log:\n{}", log());
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let mut serving = Killed(
+        daemon()
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log_path).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for("messenger did not start", &mut || log().contains("serving inbox"));
+    let ask = human_on_bus(&["ask", "--wait", "finish this request"]);
+    let reply = std::thread::spawn(move || run(ask));
+    wait_for("prompt is not in flight", &mut || gate.is_file());
+
+    std::fs::remove_file(auth.join("system-messenger.creds")).unwrap();
+    wait_for("messenger did not start draining after credentials removal", &mut || {
+        let log = log();
+        log.contains("the credentials of a built-in ant changed") && log.contains("stopping the ant no longer listed")
+    });
+    assert!(serving.0.try_wait().unwrap().is_none(), "exited with a prompt still in flight:\n{}", log());
+    std::fs::write(gate.with_extension("release"), "").unwrap();
+
+    let mut status = None;
+    wait_for("daemon did not exit after the last ant drained", &mut || {
+        status = serving.0.try_wait().unwrap();
+        status.is_some()
+    });
+    assert!(status.unwrap().success(), "{}", log());
+    let reply = reply.join().unwrap();
+    let stdout = String::from_utf8_lossy(&reply.stdout);
+    assert!(
+        reply.status.success() && stdout.contains("system-messenger: stub:") && stdout.contains("finish this request"),
+        "{stdout}\n{}\ndaemon log:\n{}",
+        String::from_utf8_lossy(&reply.stderr),
+        log()
+    );
+
+    let startup = run(daemon());
+    let stderr = String::from_utf8_lossy(&startup.stderr);
+    assert!(!startup.status.success() && stderr.contains("nothing to serve on this machine"), "{stderr}");
+}
+
 #[expect(clippy::too_many_lines, reason = "one scenario against one server, each step building on the ones before")]
 fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     let Some(server) = NatsServer::start() else { return };
@@ -1070,6 +1167,16 @@ fn stub_harness() {
             )
             .on_receive_request(
                 async move |prompt: PromptRequest, responder, cx| {
+                    if let Some(gate) = std::env::var_os("ANTS_TEST_PROMPT_GATE") {
+                        let gate = Path::new(&gate);
+                        std::fs::write(gate, "").unwrap();
+                        let release = gate.with_extension("release");
+                        let start = Instant::now();
+                        while !release.is_file() {
+                            assert!(start.elapsed() < WAIT, "the prompt was not released");
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
                     let text: String = prompt
                         .prompt
                         .iter()

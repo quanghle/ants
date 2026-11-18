@@ -244,19 +244,15 @@ pub(crate) fn calls_own_tool(title: &str) -> bool {
 
 #[cfg(test)]
 impl Sense {
-    /// What the record of the review of dream `dream` of `ant` in the sense data of `sage` says its thread spent, none
-    /// when it says nothing. Panics when sense keeps no such record.
-    pub(crate) async fn review_spent(
+    /// The record of the review of dream `dream` of `ant` in the sense data of `sage`.
+    pub(crate) async fn review_record(
         &self,
         sage: &UserId,
         ant: &UserId,
         dream: u64,
-    ) -> Option<crate::limits::caps::Spent> {
+    ) -> ants_sense::dream::ReviewRecord {
         let items = self.kept(sage).await.unwrap().expect("sense keeps the sage's data");
-        let record = ants_sense::dream::review_record(&*items, ant, dream).await.unwrap().expect("the review's record");
-        assert!(record.answered.is_some(), "the review answered: {record:?}");
-        let spent = record.spent?;
-        Some(crate::limits::caps::Spent { tokens: spent.tokens, cost: spent.cost_micros as f64 / 1e6 })
+        ants_sense::dream::review_record(&*items, ant, dream).await.unwrap().expect("the review's record")
     }
 }
 

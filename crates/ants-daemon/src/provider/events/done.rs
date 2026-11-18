@@ -119,33 +119,35 @@ mod tests {
     use crate::provider::events::tests::{Recording, outbox_to};
     use crate::sync::MutexExt as _;
 
-    /// Wait until `provider` took `n` events.
-    async fn took(provider: &Recording, n: usize) {
-        ants_test_support::eventually("the events", async || provider.got.locked().len() >= n).await;
-    }
-
     #[tokio::test]
     async fn a_thread_marked_done_is_told_to_the_provider_of_an_ant_holding_its_session_once() {
         let Some(server) = NatsServer::start() else { return };
         let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-        js.create_stream(crate::hub::threads_config()).await.unwrap();
+        let stream = js.create_stream(crate::hub::threads_config()).await.unwrap();
         let threads = js.get_key_value(THREADS_BUCKET).await.unwrap();
         let ant: UserId = "dev-a".parse().unwrap();
         let (held, other, later) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
         let provider = Recording::taking_events();
         let outbox = outbox_to(provider.clone()).await;
-        let home = ants_test_support::scratch_dir("lifecycle-done");
+        let home = server.dir().join("lifecycle");
         let lifecycle = Lifecycle::open(&outbox, &ant, "id-1", &home).await.unwrap();
         let has_session = async |thread: &ThreadId| *thread != other;
         let mark = async |thread: &ThreadId| {
             let done = ThreadDone::new(thread.clone(), UserId::human(), 7);
-            threads.put(done_key(thread), serde_json::to_vec(&done).unwrap().into()).await.unwrap();
-            done
+            let seq = threads.put(done_key(thread), serde_json::to_vec(&done).unwrap().into()).await.unwrap();
+            (done, seq)
         };
-        let stream = js.get_stream(format!("KV_{THREADS_BUCKET}")).await.unwrap();
-        let settled = async || {
-            let info = stream.consumer_info(done_reader(&ant)).await.unwrap();
-            info.num_pending == 0 && info.num_ack_pending == 0
+        let acked = async |what: &str, seq| {
+            ants_test_support::eventually(what, async || {
+                stream.consumer_info(done_reader(&ant)).await.unwrap().ack_floor.stream_sequence >= seq
+            })
+            .await;
+        };
+        let drained = async || {
+            ants_test_support::eventually("the provider outbox drained", async || {
+                outbox.pending(&ant).await.is_empty()
+            })
+            .await;
         };
         let thread_done = |thread: &ThreadId, done: &ThreadDone, told: &Event| {
             assert_eq!(told.kind, EventKind::ThreadDone);
@@ -161,23 +163,31 @@ mod tests {
                 })
                 .await;
                 mark(&other).await;
-                let marked = mark(&held).await;
-                threads.delete(done_key(&held)).await.unwrap();
-                took(&provider, 2).await;
-                ants_test_support::eventually("every done state acked", settled).await;
+                let (marked, seq) = mark(&held).await;
+                // The bucket keeps only one revision per key: deleting before the ack can replace an unread mark.
+                acked("the held thread's done mark acked", seq).await;
+                let key = done_key(&held);
+                threads.delete(&key).await.unwrap();
+                let deleted = threads.entry(&key).await.unwrap().unwrap();
+                assert_eq!(deleted.operation, jetstream::kv::Operation::Delete);
+                acked("the done mark's tombstone acked", deleted.revision).await;
                 marked
             } => marked,
         };
+        drained().await;
         let got = provider.got.locked().clone();
         assert_eq!(got.len(), 2, "the ant told added, then of the one thread it holds a session of: {got:?}");
+        assert_eq!(got[0].kind, EventKind::AntAdded);
         thread_done(&held, &marked, &got[1]);
 
-        let marked = mark(&later).await;
+        let (marked, seq) = mark(&later).await;
         tokio::select! {
             () = hear(&js, &ant, Some(&lifecycle), has_session) => unreachable!(),
-            () = took(&provider, 3) => {}
+            () = acked("the done mark put while the reader was stopped acked", seq) => {}
         }
-        thread_done(&later, &marked, &provider.got.locked()[2]);
-        drop(server);
+        drained().await;
+        let got = provider.got.locked();
+        assert_eq!(got.len(), 3, "only the new mark told after the reader resumed: {got:?}");
+        thread_done(&later, &marked, &got[2]);
     }
 }

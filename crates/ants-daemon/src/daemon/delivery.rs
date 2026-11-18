@@ -250,6 +250,20 @@ impl Inbox<'_> {
         }
     }
 
+    /// Note the findings of the sage's answer to `request` and what the review thread spent in all. A fresh human
+    /// message renews only its allowance, not this total. Sense keeps only the first answer to a review.
+    pub(super) async fn note_review(&self, request: &Envelope, text: &str) {
+        let Some(sense) = self.sense.filter(|_| request.review_outcomes.is_some()) else { return };
+        let thread = &request.thread_id;
+        let spent = self.ledger.thread_total(thread).await.inspect_err(|e| {
+            tracing::warn!(%thread, error = format!("{e:#}"), "reading what the review thread spent");
+        });
+        let spent = spent.ok().filter(|spent| spent.tokens > 0 || spent.cost > 0.0);
+        if let Err(e) = sense.review_given(self.ant, request, text, spent).await {
+            tracing::warn!(%thread, error = format!("{e:#}"), "noting the answer to a review");
+        }
+    }
+
     /// Store `reply` to `request`, the message at stream sequence `seq`, in the hub's stream or, out of its reach, in
     /// the machine's outbox, then ack the message and forget its marker. The message id, from the request's, makes
     /// JetStream drop a copy an earlier attempt stored within the stream's duplicate window. When the ack fails, the
@@ -271,20 +285,11 @@ impl Inbox<'_> {
             bus::store(self.js, reply.subject(), reply, &reply_id(self.ant, request)).await?;
         }
         // After the store, so that a redelivery, sending the stored reply again, notes the answer it holds.
-        if let (Some(sense), Reply::Message(answer)) = (self.sense, reply)
+        if let Reply::Message(answer) = reply
             && answer.notice.is_none()
             && self.asks_review(incoming)
         {
-            let thread = &request.thread_id;
-            // All the review thread spent, every attempt and across restarts, as a human's message on it starts over
-            // its allowance alone; nothing reported, or unread, is unknown.
-            let spent = self.ledger.thread_total(thread).await.inspect_err(|e| {
-                tracing::warn!(%thread, error = format!("{e:#}"), "reading what the review thread spent");
-            });
-            let spent = spent.ok().filter(|spent| spent.tokens > 0 || spent.cost > 0.0);
-            if let Err(e) = sense.review_given(self.ant, request, &answer.text, spent).await {
-                tracing::warn!(%thread, error = format!("{e:#}"), "noting the answer to a review");
-            }
+            self.note_review(request, &answer.text).await;
         }
         if incoming.post.is_some()
             && let Err(e) = self.threads.seen(&request.thread_id, seq).await

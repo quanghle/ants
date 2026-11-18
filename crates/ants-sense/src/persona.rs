@@ -209,7 +209,9 @@ pub(crate) async fn history(items: &dyn Items) -> Result<Answer, Answer> {
     if versions.is_empty() {
         return Ok(Answer { text: "No persona yet.".into(), json: json!({"versions": []}), is_error: false });
     }
-    let mut text = format!("{} versions of the persona, the newest first:", versions.len());
+    let count = versions.len();
+    let noun = if count == 1 { "version" } else { "versions" };
+    let mut text = format!("{count} {noun} of the persona, the newest first:");
     let mut json = Vec::new();
     for (revision, at, values) in versions.iter().rev() {
         let reason = Confirmation::of(values).reason;
