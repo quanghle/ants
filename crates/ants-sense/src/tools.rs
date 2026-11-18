@@ -9,8 +9,6 @@ use crate::memory::{
     CORE_BUDGET, DEFAULT_IMPORTANCE, DEFAULT_LIMIT, MAX_BODY_BYTES, MAX_CITATIONS, MAX_IMPORTANCE, MAX_LIMIT,
     MAX_TITLE_CHARS, MAX_WITH,
 };
-use crate::persona::MAX_FIELD_BYTES;
-use crate::records::MAX_RECORD_BYTES;
 use crate::store::StoreError;
 
 mod arguments;
@@ -111,9 +109,7 @@ pub const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "remember",
-        description: "Store a memory: a fact, lesson, decision, preference, gotcha or episode, with citations. Or, \
-                      with kind self_model or relationship, replace the self-model or the relationship record of a \
-                      human or ant from the revision read.",
+        description: "Store a memory: a fact, lesson, decision, preference, gotcha or episode, with citations.",
         schema: remember,
         handler: crate::memory::remember,
     },
@@ -173,12 +169,13 @@ pub const TOOLS: &[ToolSpec] = &[
         handler: crate::remind::remind,
     },
     ToolSpec {
-        name: "persona",
-        description: "Propose a change of the persona (values, voice, boundaries, working style) with its reason: a \
-                      dream at least 12 hours later confirms or rejects it. Without fields, show the persona and its \
-                      pending proposal; with history, every version and its reason.",
-        schema: persona,
-        handler: crate::persona::persona,
+        name: "identity",
+        description: "Show who the ant is: card, experience, persona and its pending proposal, self-model, \
+                      relationship records and skills. With self_model, or relationship and who, replace that record \
+                      from the revision read. With persona fields and a reason, propose a persona change, which a \
+                      dream at least 12 hours later confirms or rejects; with history, show every persona version.",
+        schema: crate::identity::schema,
+        handler: crate::identity::identity,
     },
     ToolSpec {
         name: "skill",
@@ -221,26 +218,13 @@ fn remember() -> Value {
         "required": ["path"],
     });
     let mut schema = object(&json!({
-        "kind": {
-            "enum": ["fact", "lesson", "decision", "preference", "gotcha", "episode", "self_model", "relationship"],
-        },
+        "kind": {"enum": ["fact", "lesson", "decision", "preference", "gotcha", "episode"]},
         "scope": {
             "type": "string",
-            "description": "Whom it is about: self (default), repo:<git remote>, human:<name> or ant:<name>; \
-                            human:<name> or ant:<name> for a relationship.",
+            "description": "Whom it is about: self (default), repo:<git remote>, human:<name> or ant:<name>.",
         },
         "title": {"type": "string", "maxLength": MAX_TITLE_CHARS},
-        "body": {
-            "type": "string",
-            "description": format!(
-                "At most {MAX_BODY_BYTES} bytes; {MAX_RECORD_BYTES} for a self-model or relationship."
-            ),
-        },
-        "revision": {
-            "type": "integer",
-            "minimum": 0,
-            "description": "For a self-model or relationship: the revision replaced, none for the first.",
-        },
+        "body": {"type": "string", "description": format!("At most {MAX_BODY_BYTES} bytes.")},
         "importance": {
             "type": "integer",
             "minimum": 1,
@@ -285,22 +269,6 @@ fn recall() -> Value {
             "maximum": MAX_LIMIT,
             "description": format!("{DEFAULT_LIMIT} by default."),
         },
-    }))
-}
-
-fn persona() -> Value {
-    let field = |what: &str| {
-        let description = format!("{what}, at most {MAX_FIELD_BYTES} bytes; empty clears it, none keeps it.");
-        json!({"type": "string", "description": description})
-    };
-    object(&json!({
-        "values": field("What the ant holds important"),
-        "voice": field("How it speaks"),
-        "boundaries": field("What it will not do"),
-        "working_style": field("How it works"),
-        "reason": {"type": "string", "maxLength": MAX_REASON_CHARS, "description": "Why: kept with the version."},
-        "finding": {"type": "string", "description": "The dream finding this answers, such as 3.1."},
-        "history": {"type": "boolean", "description": "Show every version and its reason."},
     }))
 }
 
