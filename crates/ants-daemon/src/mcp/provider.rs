@@ -144,7 +144,7 @@ impl Hub {
     }
 
     /// Where `thread` came from: as kept, else as stored, then kept.
-    async fn origin_of(&self, thread: &ThreadId) -> Result<Option<Origin>> {
+    pub(super) async fn origin_of(&self, thread: &ThreadId) -> Result<Option<Origin>> {
         if let Some(origin) = self.sessions.locked().origins.get(thread) {
             return Ok(Some(origin.clone()));
         }

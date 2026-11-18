@@ -183,6 +183,7 @@ dependencies = [
  "ratatui",
  "ratatui-image",
  "ring",
+ "rmcp",
  "rustls-native-certs",
  "scrypt",
  "serde",

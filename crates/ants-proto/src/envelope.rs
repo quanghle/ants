@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     Answer, ApprovalDecision, ApprovalRequest, Attachment, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans,
-    Questions, Role, Sealed, ThreadId, TrailStep, UserId, subject,
+    Questions, Role, Sealed, ThreadId, TrailStart, TrailStep, UserId, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -155,6 +155,11 @@ pub struct Envelope {
     /// [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail_step: Option<Box<TrailStep>>,
+    /// The trail run a schedule asks its recipient to start, the message's thread the run's: the recipient's daemon
+    /// starts it, without a prompt, only from a webhook's message ([`Envelope::webhook`]). Never copied by
+    /// [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail_start: Option<Box<TrailStart>>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -376,6 +381,7 @@ impl Envelope {
             notice: None,
             review_commits: Vec::new(),
             trail_step: None,
+            trail_start: None,
             sent_at: Utc::now(),
         }
     }
@@ -390,6 +396,12 @@ impl Envelope {
     #[must_use]
     pub fn as_step(self, step: TrailStep) -> Self {
         Self { trail_step: Some(Box::new(step)), ..self }
+    }
+
+    /// The envelope as asking its recipient to start `start` ([`Envelope::trail_start`]).
+    #[must_use]
+    pub fn starting(self, start: Option<TrailStart>) -> Self {
+        Self { trail_start: start.map(Box::new), ..self }
     }
 
     /// The envelope with `owner` as the human who started its thread.
@@ -556,6 +568,7 @@ impl Envelope {
             notice: None,
             review_commits: Vec::new(),
             trail_step: None,
+            trail_start: None,
             sent_at: Utc::now(),
         })
     }

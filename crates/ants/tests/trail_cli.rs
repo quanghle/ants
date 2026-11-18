@@ -67,6 +67,7 @@ impl Conductor {
             colony,
             outbox,
             attempts,
+            workers: ants_daemon::trail::DEFAULT_WORKERS,
         };
         let trails = Trails::new(conducting).await.unwrap();
         trails.restore().await;

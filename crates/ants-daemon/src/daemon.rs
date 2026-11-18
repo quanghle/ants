@@ -175,6 +175,8 @@ pub struct Pooling {
     pub idle_timeout: Duration,
     /// When memory is low, and the harnesses run at most while it is ([`crate::limits::pressure`]).
     pub memory_pressure: crate::limits::pressure::Settings,
+    /// Trail workers computing at once across the process's runs ([`crate::trail::Conducting::workers`]).
+    pub trail_workers: usize,
 }
 
 /// Whether each thread works in its own git worktree, and what becomes of its branch.
@@ -441,7 +443,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         home: &config.storage.home,
         lifecycle: lifecycle.as_ref(),
         sense: providers.sense_of(&config.provider),
-        trails: trails(config, &client, &js, &humans, &colony, outbox, attempts_kv).await,
+        trails: trails(config, &client, &js, &humans, &mcp, outbox, attempts_kv).await,
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     forget_if_retired(&served, config, &js, retired_before).await;
@@ -449,14 +451,14 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
     Ok(served)
 }
 
-/// The trails the ant conducts, their runs continued from their records; None, with a warning, when the bus keeps no
-/// runs.
+/// The trails the ant conducts, their runs continued from their records and `mcp` serving `run_trail` for them; None,
+/// with a warning, when the bus keeps no runs.
 async fn trails(
     config: &Config,
     client: &async_nats::Client,
     js: &async_nats::jetstream::Context,
     humans: &Registry,
-    colony: &Colony,
+    mcp: &Mcp,
     outbox: crate::mcp::Outbox,
     attempts: crate::records::direct_kv::DirectKv,
 ) -> Option<Trails> {
@@ -468,13 +470,15 @@ async fn trails(
         worker: std::env::current_exe().ok()?,
         trails_dir: crate::config::home_dir().ok().map(|home| home.join(".ants").join("trails")),
         humans: humans.clone(),
-        colony: colony.clone(),
+        colony: crate::mcp::jetstream_colony(js.clone()),
         outbox,
         attempts,
+        workers: config.pooling.trail_workers,
     };
     match Trails::new(conducting).await {
         Ok(trails) => {
             trails.restore().await;
+            mcp.with_trails(trails.clone());
             Some(trails)
         }
         Err(e) => {

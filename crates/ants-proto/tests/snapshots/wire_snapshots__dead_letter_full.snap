@@ -152,6 +152,12 @@ expression: value
         "type": "object"
       }
     },
+    "trail_start": {
+      "trail": "nightly-audit",
+      "args": {
+        "repo": "app"
+      }
+    },
     "sent_at": "2025-01-01T12:00:00Z"
   },
   "payload": "{\"id\":"

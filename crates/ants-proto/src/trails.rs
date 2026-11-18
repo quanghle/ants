@@ -397,6 +397,15 @@ pub enum TrailAction {
     },
 }
 
+/// The run a schedule's message asks its recipient to start, as the run's conductor ([`Envelope::trail_start`]): the
+/// saved trail `trail` with `args`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrailStart {
+    pub trail: TrailName,
+    #[serde(default)]
+    pub args: Value,
+}
+
 /// The script a run starts: a saved trail's, by name, or one given inline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
