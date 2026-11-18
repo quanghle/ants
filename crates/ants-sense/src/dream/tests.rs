@@ -260,14 +260,15 @@ async fn verdicts_are_taken_on_the_dream_thread_checked_and_replaced() {
     assert_eq!(error(&answer(&sense, 1, json!({})).await), "done");
 }
 
+/// A call of tool `name` on thread `thread` with `arguments`.
+fn called(name: &str, thread: u8, arguments: &serde_json::Value) -> ToolCall {
+    let arguments = arguments.as_object().unwrap().clone();
+    ToolCall { name: name.into(), arguments, context: on(thread), format: Format::Json }
+}
+
 fn remember(thread: u8, n: usize) -> ToolCall {
     let arguments = json!({"kind": "fact", "title": format!("Fact {n}"), "body": format!("Body {n}."), "force": true});
-    ToolCall {
-        name: "remember".into(),
-        arguments: arguments.as_object().unwrap().clone(),
-        context: on(thread),
-        format: Format::Json,
-    }
+    called("remember", thread, &arguments)
 }
 
 #[tokio::test]
@@ -282,13 +283,22 @@ async fn writes_on_a_dream_thread_are_counted_and_refused_past_the_cap() {
     };
     let mut written = Vec::new();
     for n in 0..MAX_DREAM_WRITES {
-        let (answer, refused) = json(sense.call_tool(remember(1, n)).await.unwrap());
+        let call = match n {
+            0 => called("identity", 1, &json!({"self_model": "Careful.", "title": "Me"})),
+            n => remember(1, n),
+        };
+        let (answer, refused) = json(sense.call_tool(call).await.unwrap());
         assert!(!refused, "{answer}");
         assert_eq!(answer["dream_writes"], n + 1);
         written.push(answer["id"].as_str().unwrap().parse::<ItemId>().unwrap());
     }
     let (answer, refused) = json(sense.call_tool(remember(1, MAX_DREAM_WRITES)).await.unwrap());
     assert!(refused && answer["error"] == "dream_cap", "{answer}");
+    let record = called("identity", 1, &json!({"self_model": "Bolder.", "title": "Me", "revision": 1}));
+    let (answer, refused) = json(sense.call_tool(record).await.unwrap());
+    assert!(refused && answer["error"] == "dream_cap", "a record is a write: {answer}");
+    let (answer, refused) = json(sense.call_tool(called("identity", 1, &json!({}))).await.unwrap());
+    assert!(!refused && answer["self_model"]["body"] == "Careful.", "showing the identity writes nothing: {answer}");
     let (answer, refused) = json(sense.call_tool(remember(2, MAX_DREAM_WRITES)).await.unwrap());
     assert!(!refused && answer.get("dream_writes").is_none(), "other threads write freely: {answer}");
     assert_eq!(get(&*items, 1).await.unwrap().unwrap().0.writes, written);

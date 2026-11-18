@@ -1,16 +1,18 @@
 //! The daemon's part of the ant's dreams ([`ants_sense::dream`]): when one is due, the ant has had no prompt running
 //! for [`IDLE_MINUTES`] and its threads were active since the last dream, it gathers them, with the timeline the ant
 //! stored on them, and the commits they left, and begins the dream. It sends the packet to the ant's sage when one
-//! serves it, as a message from the ant on a new thread narrowed to a review ([`ants_proto::REVIEW_ALLOW`]) naming the
-//! commits for the sage's daemon to check out ([`crate::checkouts`]), and takes the sage's answer there as it arrives ([`review_answer`]); without a sage, or once the sage leaves the review
-//! unanswered or answers with nothing readable, it wakes the ant on a new thread with the packet alone.
+//! serves it and the ant is no live ant's sage ([`serving_sage`]), as a message from the ant on a new thread narrowed
+//! to a review ([`ants_proto::REVIEW_ALLOW`]) naming the commits for the sage's daemon to check out
+//! ([`crate::checkouts`]), and takes the sage's answer there as it arrives ([`review_answer`]); without a sage, or once
+//! the sage leaves the review unanswered or answers with nothing readable, it wakes the ant on a new thread with the
+//! packet alone.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use ants_proto::provider::{BoxFuture, CallContext, Host, Origin, Starter, WakeRequest};
-use ants_proto::{Envelope, NoticeKind, REVIEW_ALLOW, ReviewCommit, ThreadId, UserId};
+use ants_proto::{ColonyEntry, Envelope, NoticeKind, REVIEW_ALLOW, ReviewCommit, ThreadId, UserId};
 use ants_sense::dream::{
     self, Commit, Covered, Dream, IDLE_MINUTES, PACKET_BUDGET, Reader, Review, Reviewed, SAGE_TIMEOUT_HOURS, Start,
     Thread,
@@ -22,7 +24,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use super::Settings;
 use crate::colony::Workload;
-use crate::mcp::{ColonyLookup, Outbox};
+use crate::mcp::{Colony, Outbox};
 use crate::provider::origins::OriginStore;
 use crate::stream::history;
 use crate::stream::reading::Reading;
@@ -39,7 +41,7 @@ pub(crate) trait Dreaming: Send + Sync {
     fn threads(&self, since: DateTime<Utc>, until: DateTime<Utc>) -> BoxFuture<'_, Result<Vec<Thread>>>;
     /// The commits the ant's workdir and the branches of `threads` are at.
     fn commits<'a>(&'a self, threads: &'a [ThreadId]) -> BoxFuture<'a, Vec<Commit>>;
-    /// The ant's sage, when it has one and a daemon serves it now.
+    /// The ant's sage, when it has one, a daemon serves it now and no live ant names the ant as its own sage.
     fn sage(&self) -> BoxFuture<'_, Result<Option<UserId>>>;
     /// Send the review packet `text` to `sage` as `review`'s message on its thread, naming `commits` for the sage's
     /// daemon to check out.
@@ -231,7 +233,8 @@ pub(crate) struct Daemon {
     pub workdir: PathBuf,
     /// The ant reviewing this one ([`crate::daemon::Config::policy`]).
     pub sage: Option<UserId>,
-    pub lookup: ColonyLookup,
+    /// Reads the colony: the sage's entry, and the entries naming this ant as their sage.
+    pub colony: Colony,
     /// Sends the review packets, redacted.
     pub outbox: Outbox,
 }
@@ -287,15 +290,8 @@ impl Dreaming for Daemon {
     fn sage(&self) -> BoxFuture<'_, Result<Option<UserId>>> {
         Box::pin(async move {
             let Some(sage) = self.sage.clone() else { return Ok(None) };
-            let entry = (self.lookup)(sage.clone()).await?;
-            let wait = std::time::Duration::from_secs(SAGE_TIMEOUT_HOURS.unsigned_abs() * 3600);
-            match crate::mcp::why_unserved(&sage, entry.as_ref(), Utc::now(), wait) {
-                None => Ok(Some(sage)),
-                Some(why) => {
-                    tracing::info!(ant = %self.ant, %sage, why, "the ant dreams without its sage");
-                    Ok(None)
-                }
-            }
+            let entries = (self.colony)().await?;
+            Ok(serving_sage(&self.ant, sage, &entries, Utc::now()))
         })
     }
 
@@ -313,6 +309,31 @@ impl Dreaming for Daemon {
             envelope.review_commits = review_commits(&self.workdir, commits).await;
             (self.outbox)(envelope).await
         })
+    }
+}
+
+/// `sage`, the sage `ant` names, if `ant` sends it its review packets, given the colony's `entries` at `now`: not while
+/// a live entry of another ant names `ant` as its sage, as a sage is reviewed by no one, whichever machine's config or
+/// shared settings made it one, nor while no daemon serves `sage` ([`crate::mcp::why_unserved`]).
+pub(super) fn serving_sage(ant: &UserId, sage: UserId, entries: &[ColonyEntry], now: DateTime<Utc>) -> Option<UserId> {
+    let names_ant = |entry: &&ColonyEntry| {
+        entry.ant != *ant && entry.sage.as_ref() == Some(ant) && crate::colony::is_live(entry, now)
+    };
+    if let Some(reviewed) = entries.iter().find(names_ant) {
+        tracing::debug!(
+            %ant, %sage, reviewed = %reviewed.ant,
+            "the ant dreams without its sage: a live ant names it as its sage, and a sage is reviewed by no one"
+        );
+        return None;
+    }
+    let entry = entries.iter().find(|entry| entry.ant == sage);
+    let wait = std::time::Duration::from_secs(SAGE_TIMEOUT_HOURS.unsigned_abs() * 3600);
+    match crate::mcp::why_unserved(&sage, entry, now, wait) {
+        None => Some(sage),
+        Some(why) => {
+            tracing::info!(%ant, %sage, why, "the ant dreams without its sage");
+            None
+        }
     }
 }
 

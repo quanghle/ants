@@ -2,8 +2,7 @@ use ants_proto::provider::{Origin, Starter};
 use uuid::Uuid;
 
 use super::*;
-use crate::memory::remember;
-use crate::persona::{PERSONA, persona, persona_id};
+use crate::persona::{PERSONA, persona_id};
 use crate::skill::{SKILL, skill_id};
 use crate::thread::record::record_event;
 
@@ -55,7 +54,7 @@ async fn the_identity_shows_the_persona_and_its_proposal_or_that_there_is_none()
     );
 
     let change = json!({"voice": "Plain and brief.", "reason": "The threads ask for less."});
-    let proposed = tool(&sense, persona, change, context(human())).await;
+    let proposed = tool(&sense, crate::identity::identity, change, context(human())).await;
     assert!(!proposed.is_error, "{proposed:?}");
     let sage = Reader::Sage(user("dev-a"));
     let reviewed = packet(&*items, &dream, &sage, &[]).await.unwrap();
@@ -83,12 +82,12 @@ async fn both_readers_see_the_records_of_the_threads_starters_the_skills_and_the
     for (n, by) in (1..).zip(starters) {
         started(&*items, n, by, u32::from(n)).await;
     }
-    let remembered = [
-        json!({"kind": "self_model", "title": "Careful", "body": "Tests first."}),
-        json!({"kind": "relationship", "scope": "human:alice", "title": "Alice", "body": "Reviews fast."}),
+    let records = [
+        json!({"self_model": "Tests first.", "title": "Careful"}),
+        json!({"relationship": "Reviews fast.", "who": "human:alice", "title": "Alice"}),
     ];
-    for arguments in remembered {
-        let answer = tool(&sense, remember, arguments, context(human())).await;
+    for arguments in records {
+        let answer = tool(&sense, crate::identity::identity, arguments, context(human())).await;
         assert!(!answer.is_error, "{answer:?}");
     }
     let mut values = Values::new();

@@ -200,8 +200,8 @@ pub struct Policy {
     pub escalation: Chain,
     /// Redact secrets from what the ant publishes ([`crate::secrets::redact`]).
     pub redact: bool,
-    /// The ant reviewing this one, its sage ([`crate::config::Ant::reviewed_by`]); none for a sage, which has none of
-    /// its own, or where reviews are off.
+    /// The ant reviewing this one, its sage ([`crate::config::Ant::reviewed_by`]), published in its colony entry; none
+    /// for a sage, which has none of its own, or where reviews are off.
     pub sage: Option<UserId>,
 }
 
@@ -937,7 +937,7 @@ fn dreaming(inbox: &Inbox<'_>, config: &Config) -> std::sync::Arc<dyn crate::sen
         started: chrono::Utc::now(),
         workdir: config.harness.workdir.clone(),
         sage: config.policy.sage.clone(),
-        lookup: crate::mcp::jetstream_lookup(inbox.js.clone()),
+        colony: crate::mcp::jetstream_colony(inbox.js.clone()),
         outbox: redacting_outbox(
             crate::mcp::jetstream_outbox(inbox.js.clone()),
             std::sync::Arc::new(inbox.redactor.clone()),
