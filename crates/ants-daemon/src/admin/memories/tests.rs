@@ -40,7 +40,7 @@ impl Fake {
 
     pub async fn connect(self) -> (Arc<Self>, Connected) {
         let fake = Arc::new(self);
-        let connected = crate::provider::connect(fake.clone()).await.expect("the fake connects");
+        let connected = crate::provider::connect(fake.clone(), &Default::default()).await.expect("the fake connects");
         (fake, connected)
     }
 
@@ -305,6 +305,7 @@ async fn a_read_is_answered_from_the_config_only_while_fresh() {
         accounts: vec![],
         config: Some(config),
         restarts: Restarts::default(),
+        providers: Default::default(),
         creds: None,
         js_domain: None,
         leaf: None,

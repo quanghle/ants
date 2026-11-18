@@ -83,6 +83,8 @@ pub struct Orders {
     pub js_domain: Option<JsDomain>,
     /// The ants the process serves, which restart their harnesses on an order.
     pub restarts: restart::Restarts,
+    /// The providers of the process's ants, which export, import and read their memories on an order.
+    pub providers: crate::provider::Providers,
     /// The machine's leaf node, whose uplink an added ant needs to reach the hub; none on a machine without one.
     pub leaf: Option<LeafNode>,
     /// The humans' consent to their assistants' orders ([`held`]).

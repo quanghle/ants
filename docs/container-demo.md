@@ -60,8 +60,8 @@ scripts/demo-containers.sh up
 scripts/demo-containers.sh smoke
 ```
 
-The release profile's fat LTO link needs about 5 GiB of memory: Apple container's build VM gets four CPUs and 8 GiB;
-under Docker, Podman or wslc, give the engine's VM or WSL at least that much. The first build downloads dependencies and compiles a Linux release
+Apple container's build VM gets four CPUs and 8 GiB for the release build;
+under Docker, Podman or wslc, give the engine's VM or WSL comparable resources. The first build downloads dependencies and compiles a Linux release
 binary. `up` also builds when the image is absent; rerun `build` after source changes. The smoke check verifies all four
 live Copilot-backed ants, the assistant's grant and their MCP sockets, pauses and resumes each ant by admin order from the hub, checks that `hub-ant`'s bd database reads (`ants ant memories`),
 then sends notes

@@ -10,6 +10,7 @@ use ants_daemon::admin::{ConfigFile, LeafNode};
 use ants_daemon::config::HostSettings;
 use ants_daemon::host::Host;
 use ants_daemon::profile::shared::{Shared, Via};
+use ants_daemon::provider::Providers;
 use ants_daemon::schedule::Schedule;
 use ants_daemon::{Config, Stop};
 use ants_proto::{JsDomain, Machine, UserId};
@@ -116,7 +117,7 @@ pub fn sense_link(
     js_domain: Option<&JsDomain>,
     hostname: &str,
 ) -> Option<SenseLink> {
-    if host.is_some() || !configs.iter().any(|c| ants_daemon::sense::of(&c.provider).is_some()) {
+    if host.is_some() || !configs.iter().any(|c| matches!(c.provider, ants_daemon::provider::Setting::Sense)) {
         return None;
     }
     let settings = settings.unwrap_or_default();
@@ -172,14 +173,14 @@ pub async fn run(
     let metrics = served.metrics;
     let _metrics = serve_metrics(metrics, Arc::new(ants_daemon::monitoring::metrics::Daemon)).await?;
     let mut running = HashMap::new();
-    // The ants served, which the host connection's admin orders restart.
-    let restarts = Restarts::default();
-    let serve = |ant| serve(ant, restarts.clone());
-    let mut links = Links::default();
-    links.reconcile(with_restarts(served.host.clone(), &restarts), Some(&served));
-    let served = after_first_read(served, &reload, &mut links, &restarts).await;
-    ants_daemon::provider::reconcile(served.configs.iter().map(|c| (&c.ant, &c.provider)));
-    serve_sense(&served.configs);
+    // The ants served, which the host connection's admin orders restart, and their providers, which they reach.
+    let (restarts, providers) = (Restarts::default(), Providers::default());
+    let serve = |ant| serve(ant, restarts.clone(), providers.clone());
+    let mut links = Links::new(providers.clone());
+    links.reconcile(hosted(served.host.clone(), &restarts, &providers), Some(&served));
+    let served = after_first_read(served, &reload, &mut links, &restarts, &providers).await;
+    providers.reconcile(served.configs.iter().map(|c| (&c.ant, &c.provider)));
+    serve_sense(&providers, &served.configs);
     let mut tasks: FuturesUnordered<_> = reconcile(&mut running, served.configs).into_iter().map(serve).collect();
     let mut schedules = Schedules::default();
     schedules.reconcile(served.schedules, run_schedule);
@@ -222,9 +223,9 @@ pub async fn run(
                     if served.metrics != metrics {
                         tracing::warn!("the metrics address changed; it takes effect on a restart");
                     }
-                    links.reconcile(with_restarts(served.host.clone(), &restarts), Some(&served));
-                    ants_daemon::provider::reconcile(served.configs.iter().map(|c| (&c.ant, &c.provider)));
-                    serve_sense(&served.configs);
+                    links.reconcile(hosted(served.host.clone(), &restarts, &providers), Some(&served));
+                    providers.reconcile(served.configs.iter().map(|c| (&c.ant, &c.provider)));
+                    serve_sense(&providers, &served.configs);
                     tasks.extend(reconcile(&mut running, served.configs).into_iter().map(serve));
                     schedules.reconcile(served.schedules, run_schedule);
                 }
@@ -239,20 +240,26 @@ pub async fn run(
     outcome(ended, served, errors)
 }
 
-/// Serve the sense data of every ant of `configs` using sense before any of them starts, so an event of one ant about
-/// another, such as a clone's about its source, finds the other's data however their starts interleave: an ant sense
-/// is not serving then is one whose data this process keeps not at all, and its events are acked unread.
-fn serve_sense(configs: &[Config]) {
+/// Serve the sense data of every ant of `configs` using sense among `providers` before any of them starts, so an event
+/// of one ant about another, such as a clone's about its source, finds the other's data however their starts
+/// interleave: an ant sense is not serving then is one whose data this process keeps not at all, and its events are
+/// acked unread.
+fn serve_sense(providers: &Providers, configs: &[Config]) {
     for config in configs {
-        if let Some(sense) = ants_daemon::sense::of(&config.provider) {
+        if let Some(sense) = providers.sense_of(&config.provider) {
             sense.serve(&config.ant, &config.storage.home, config.connection.creds.clone());
         }
     }
 }
 
-/// `wanted`, with its host connection restarting the ants on the admin orders `restarts` passes on.
-fn with_restarts(wanted: Option<(Host, Vec<UserId>)>, restarts: &Restarts) -> Option<(Host, Vec<UserId>)> {
-    wanted.map(|(host, ants)| (Host { restarts: restarts.clone(), ..host }, ants))
+/// `wanted`, with its host connection restarting the ants on the admin orders `restarts` passes on and reaching their
+/// `providers`.
+fn hosted(
+    wanted: Option<(Host, Vec<UserId>)>,
+    restarts: &Restarts,
+    providers: &Providers,
+) -> Option<(Host, Vec<UserId>)> {
+    wanted.map(|(host, ants)| (Host { restarts: restarts.clone(), providers: providers.clone(), ..host }, ants))
 }
 
 /// What [`run`] serves at start: what `reload` lists once the shared settings were first read, within
@@ -263,6 +270,7 @@ async fn after_first_read(
     reload: &impl Fn() -> Result<Served>,
     links: &mut Links,
     restarts: &Restarts,
+    providers: &Providers,
 ) -> Served {
     let Some(shared) = served.shared.clone() else {
         return served;
@@ -273,7 +281,7 @@ async fn after_first_read(
     }
     match reload() {
         Ok(again) => {
-            links.reconcile(with_restarts(again.host.clone(), restarts), Some(&again));
+            links.reconcile(hosted(again.host.clone(), restarts, providers), Some(&again));
             again
         }
         Err(e) => {
@@ -302,11 +310,16 @@ fn outcome(ended: Ended, served: usize, mut errors: Vec<anyhow::Error>) -> Resul
     }
 }
 
-/// Serve one ant until it stops, reporting which, restarting its harnesses on the admin orders `restarts` passes on.
-fn serve((config, stop): (Config, Stop), restarts: Restarts) -> impl Future<Output = (UserId, Result<()>)> {
+/// Serve one ant until it stops, reporting which, restarting its harnesses on the admin orders `restarts` passes on,
+/// with its provider among `providers`.
+fn serve(
+    (config, stop): (Config, Stop),
+    restarts: Restarts,
+    providers: Providers,
+) -> impl Future<Output = (UserId, Result<()>)> {
     let ant = config.ant.clone();
     let span = tracing::info_span!("ant", name = %ant);
-    async move { (ant, ants_daemon::run_until(config, &stop, &restarts).await) }.instrument(span)
+    async move { (ant, ants_daemon::run_until(config, &stop, &restarts, &providers).await) }.instrument(span)
 }
 
 /// Run `schedule` in a task of its own until aborted.

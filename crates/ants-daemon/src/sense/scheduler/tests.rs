@@ -163,7 +163,8 @@ async fn an_empty_schedule_sleeps_until_maintenance_or_a_tool_changes_it() {
     let reads = stores.reads.load(Ordering::SeqCst);
     create(&sense, json!({"kind":"at","at":Utc::now()})).await;
     settle().await;
-    assert_eq!(stores.reads.load(Ordering::SeqCst), reads + 1, "stopped scheduler no longer reads");
+    // The call's own: as it starts, caught up with the log, and as it writes.
+    assert_eq!(stores.reads.load(Ordering::SeqCst), reads + 2, "stopped scheduler no longer reads");
     assert_eq!(host.requests.locked().len(), 1);
 }
 

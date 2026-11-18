@@ -171,6 +171,32 @@ async fn a_takeover_wakes_a_dream_begun_but_not_woken_and_begins_none_again() {
     assert_eq!(host.requests.locked().len(), 2, "no second dream within a day");
 }
 
+#[tokio::test]
+async fn a_refused_wake_holds_back_neither_maintenance_nor_the_dream() {
+    let (sense, stores) = setup().await;
+    let id = create(&sense, json!({"kind":"at","at":Utc::now()})).await;
+    let fake = Arc::new(Fake::default());
+    let now = Utc::now();
+    fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false)]);
+    let host = Wakes::default();
+    let refused = RpcError::unavailable("ant dev-scheduler was woken 60 times within the hour");
+    host.errors.locked().extend(std::iter::repeat_n(refused, 10));
+
+    let error = cycle(&sense, &*stores.items, &host, &dreaming(&fake), now).await.unwrap_err();
+    assert!(format!("{error:#}").contains("60 times within the hour"), "{error:#}");
+    assert!(memory::last_maintenance(&*stores.items).await.unwrap().is_some(), "maintenance ran");
+    assert!(last(&*stores.items).await.unwrap().thread.is_none(), "the dream began, its wake refused");
+    assert_eq!(host.requests.locked().len(), 2, "the reminder's wake, then the dream's");
+    assert_eq!(remind::pending_work(&*stores.items).await.unwrap()[0].id, format!("{id}:1"));
+
+    host.errors.locked().clear();
+    cycle(&sense, &*stores.items, &host, &dreaming(&fake), now + chrono::Duration::minutes(1)).await.unwrap();
+    assert_eq!(host.requests.locked()[2].id, format!("{id}:1"));
+    assert!(remind::pending_work(&*stores.items).await.unwrap().is_empty());
+    assert!(stores.items.get(&id).await.unwrap().unwrap().values.contains_key("delivered"));
+    assert!(last(&*stores.items).await.unwrap().thread.is_some(), "the dream woken too");
+}
+
 fn sage() -> UserId {
     "sage".parse().unwrap()
 }

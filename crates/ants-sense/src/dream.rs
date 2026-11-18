@@ -11,7 +11,8 @@
 //! Its findings, each with an id the ant answers by (`<dream>.<n>`), are the sage's when it answered with some, with
 //! those carried from earlier dreams, and otherwise the packet's own: contradicting votes, memories needing review,
 //! near duplicates, episodes to distill and pending persona and skill proposals made
-//! [`proposal::CONFIRM_AFTER_HOURS`] or more before ([`proposals`], [`crate::proposal`]). The ant answers each with
+//! [`proposal::CONFIRM_AFTER_HOURS`] or more before ([`proposals`], [`crate::proposal`]), then what the ant's identity
+//! lacks for the work it did, from sense data alone ([`identity_findings`]). The ant answers each with
 //! `sense_dream` ([`dream`]) as applied (naming the items it wrote), rejected or deferred, with a reason, applied
 //! confirming a proposal and rejected discarding it; the deferred and unanswered come again in the next dream while
 //! they still hold. A rejected finding rests ([`Rested`]): no dream gathers it again until what it is about changed
@@ -38,11 +39,18 @@ use crate::proposal;
 use crate::store::{Items, StoreError, Write, read_modify_write};
 use crate::tools::{Answer, Handler};
 
+mod identity_findings;
 mod packet;
 mod review;
 mod tool;
 
-pub use packet::{Action, Identity, MIN_THREAD_BYTES, PACKET_BUDGET, Reader, Thread, compose, packet};
+pub use identity_findings::{
+    OWN_AFTER_THREADS, PERSONA_AFTER_THREADS, RELATIONSHIP_AFTER_THREADS, SELF_MODEL_AFTER_THREADS, STALE_ACTIVE_DAYS,
+};
+pub use packet::{
+    Action, Earlier, Identity, MIN_THREAD_BYTES, PACKET_BUDGET, Reader, Thread, TrackRecord, compose, packet,
+    track_record,
+};
 pub use review::{
     Advice, Evidence, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse, review_sent, untrusted_on,
 };
@@ -149,6 +157,26 @@ pub enum FindingKind {
     Proposal,
     /// A finding of the ant's sage ([`Advice`]).
     Sage,
+    /// No persona after some threads ([`identity_findings`]).
+    NoPersona,
+    /// No self-model after some threads.
+    NoSelfModel,
+    /// No relationship record of a human or ant who started some threads.
+    NoRelationship,
+    /// A self-model unchanged for many active days, in which the ant worked with someone or somewhere new.
+    StaleSelfModel,
+    /// A persona, self-model or skill still as a clone inherited it.
+    Inherited,
+}
+
+impl FindingKind {
+    /// Whether it is about the ant's identity, gathered by [`identity_findings`].
+    fn identity(self) -> bool {
+        matches!(
+            self,
+            Self::NoPersona | Self::NoSelfModel | Self::NoRelationship | Self::StaleSelfModel | Self::Inherited
+        )
+    }
 }
 
 impl fmt::Display for FindingKind {
@@ -160,6 +188,11 @@ impl fmt::Display for FindingKind {
             Self::Distill => "distill",
             Self::Proposal => "proposal",
             Self::Sage => "sage",
+            Self::NoPersona => "no_persona",
+            Self::NoSelfModel => "no_self_model",
+            Self::NoRelationship => "no_relationship",
+            Self::StaleSelfModel => "stale_self_model",
+            Self::Inherited => "inherited",
         })
     }
 }
@@ -171,7 +204,7 @@ pub struct Finding {
     pub id: String,
     pub kind: FindingKind,
     pub text: String,
-    /// The memories or proposals it is about.
+    /// The items it is about: memories, proposals, or the persona, self-model or a skill.
     #[serde(default)]
     pub items: Vec<ItemId>,
     /// Whether it rests on untrusted text: an untrusted memory or thread.
@@ -456,7 +489,7 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
             rested.retain(|rested| rested.key != rejected.key);
             rested.push(rejected);
         }
-        let findings = findings(items, last, number, since, start.at, &mut rested, ages).await?;
+        let findings = findings(items, last, number, since, start, &mut rested, ages).await?;
         let mut writes = Vec::new();
         if let Some((previous, revision)) = previous
             && previous.state != State::Done
@@ -641,38 +674,50 @@ impl Gathered {
     }
 }
 
-/// The findings of dream `number`, beginning at `at` and reviewing from `since`: the open findings of `previous` that
-/// still hold, then the packet's own on what they do not cover yet, up to [`MAX_FINDINGS`]. One of the `rested`
-/// stays out while what it is about is unchanged and the ant was active less than [`REST_DAYS`] since the verdict,
-/// as `ages` counts; `rested` keeps those resting on.
+/// The findings of dream `number`, beginning as `start` says and reviewing from `since`: the open findings of
+/// `previous` that still hold, then the packet's own on what they do not cover yet, those on memories and proposals
+/// first, then those on the identity of the ant ([`identity_findings`]), up to [`MAX_FINDINGS`]. An open finding on the
+/// identity holds while its ground does, taking the text and count gathered now. One of the `rested` stays out while
+/// what it is about is unchanged and the ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts;
+/// `rested` keeps those resting on.
 async fn findings(
     items: &dyn Items,
     previous: Option<&Dream>,
     number: u64,
     since: DateTime<Utc>,
-    at: DateTime<Utc>,
+    start: &Start<'_>,
     rested: &mut Vec<Rested>,
     ages: &memory::Ages,
 ) -> Result<Vec<Finding>, StoreError> {
-    let proposals = proposals(items, at).await?;
+    let proposals = proposals(items, start.at).await?;
     let memories: Vec<_> = items.list(MEMORY, usize::MAX).await?.into_iter().filter_map(MemoryItem::of).collect();
     let live = |id: &ItemId| memories.iter().find(|found| found.id() == id).filter(|f| f.memory.status.live());
+    let identity_found = identity_findings::gather(items, &start.writer.ant).await?;
     let mut found: Vec<Finding> = Vec::new();
     for open in previous.into_iter().flat_map(Dream::open) {
+        let mut open = open.clone();
         let holds = match open.kind {
             FindingKind::Sage => true,
             FindingKind::Proposal => open.items.iter().all(|id| proposals.iter().any(|proposal| &proposal.id == id)),
             FindingKind::NeedsReview => {
                 open.items.iter().all(|id| live(id).is_some_and(|f| f.memory.status == Status::NeedsReview))
             }
+            kind if kind.identity() => {
+                let now = identity_found.iter().find(|gathered| open.key.as_ref() == Some(&gathered.key()));
+                if let Some(now) = now {
+                    (open.text, open.items, open.count) = (now.text.clone(), now.items.clone(), now.count);
+                }
+                now.is_some()
+            }
             _ => open.items.iter().all(|id| live(id).is_some()),
         };
         if holds {
-            found.push(open.clone());
+            found.push(open);
         }
     }
     let diary = previous.and_then(|previous| previous.diary.as_ref());
-    let fresh = gather(items, &memories, since, diary, proposals).await?;
+    let mut fresh = gather(items, &memories, since, diary, proposals).await?;
+    fresh.extend(identity_found);
     let covered: BTreeSet<_> = found.iter().filter_map(|finding| finding.key.clone()).collect();
     let resting = |at| ages.since(at) < Duration::days(REST_DAYS);
     let mut n = 0;
@@ -844,8 +889,9 @@ pub(crate) async fn counted(sense: &Sense, handler: Handler, call: &ToolCall) ->
     if !matches!(last(&*items).await, Ok(Some((dream, _))) if on_thread(&dream)) {
         return handler(sense, call).await;
     }
-    // One write of a dream thread at a time, so concurrent calls cannot pass the cap together.
-    let _turn = sense.dream_writes.lock().await;
+    // One write of a dream thread of the ant at a time, so concurrent calls cannot pass the cap together.
+    let ant = sense.ant(&call.context.ant);
+    let _turn = ant.dream_writes.lock().await;
     let dream = match last(&*items).await {
         Ok(Some((dream, _))) if on_thread(&dream) => dream,
         _ => return handler(sense, call).await,

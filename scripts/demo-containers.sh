@@ -98,7 +98,7 @@ build() (
     path=$context
     # A Windows CLI run from WSL reads the build context through its Windows path.
     case "$runtime" in *.exe) path=$(wslpath -w "$context") ;; esac
-    # Apple's build VM needs room for the release profile's fat LTO link.
+    # Give Apple's build VM headroom for the release build.
     if [ -n "$apple" ]; then limits=(--cpus 4 --memory 8g); fi
     rt build ${limits[@]+"${limits[@]}"} --tag "$image" --file "$path/contrib/container-demo/Containerfile" \
         --build-arg "COPILOT_VERSION=${ANTS_DEMO_COPILOT_VERSION:-1.0.112}" \

@@ -6,6 +6,7 @@ use std::path::Path;
 
 use ants_daemon::host::{self, Host};
 use ants_daemon::profile::shared::{self, Shared, Via};
+use ants_daemon::provider::Providers;
 use ants_daemon::schedule::Schedule;
 use ants_daemon::{Config, Stop};
 use ants_proto::{Machine, UserId};
@@ -65,14 +66,19 @@ impl Drop for Schedules {
 
 /// The machine's links to the bus besides its ants' own: its host connection, or else sense's link of its own and the
 /// reading of the shared settings without one.
-#[derive(Default)]
 pub(super) struct Links {
     host: HostRun,
     sense: SenseRun,
     follower: Follower,
+    /// The providers of the process's ants, whose sense the links reach their data for.
+    providers: Providers,
 }
 
 impl Links {
+    pub(super) fn new(providers: Providers) -> Self {
+        Self { host: HostRun::default(), sense: SenseRun::default(), follower: Follower::default(), providers }
+    }
+
     /// Run the host connection `host`, and sense's link of its own and the reading of the shared settings `served`
     /// lists; with neither, all stop. Sense is told first why it keeps none of its ants' data where `served` says so,
     /// for each of its ants to say so as it starts.
@@ -82,11 +88,11 @@ impl Links {
                 Some(SenseLink::Off(why)) => Some(why.clone()),
                 _ => None,
             };
-            ants_daemon::sense::built_in().unkept(off);
+            self.providers.sense().unkept(off);
         }
         self.host.reconcile(host);
         self.sense.reconcile(match served.and_then(|s| s.sense.as_ref()) {
-            Some(SenseLink::Own(host)) => Some(Host::clone(host)),
+            Some(SenseLink::Own(host)) => Some(Host { providers: self.providers.clone(), ..Host::clone(host) }),
             _ => None,
         });
         let machine = served.and_then(|s| s.machine.clone());
@@ -123,13 +129,13 @@ impl HostRun {
             return;
         }
         let (sender, receiver) = watch::channel(ants);
-        let started = wanted.clone();
-        let sense = ants_daemon::sense::built_in().hosting();
+        let (started, providers) = (wanted.clone(), wanted.providers.clone());
+        let sense = providers.sense().hosting();
         let task = tokio::spawn(
             async move {
                 if let Err(e) = Box::pin(host::run_keeping(started, receiver, Some(sense))).await {
                     tracing::error!(error = format!("{e:#}"), "host connection stopped");
-                    ants_daemon::sense::built_in().unkept(Some(format!("the host connection stopped: {e:#}")));
+                    providers.sense().unkept(Some(format!("the host connection stopped: {e:#}")));
                 }
             }
             .instrument(tracing::info_span!("host")),
@@ -168,13 +174,14 @@ impl SenseRun {
         if self.0.as_ref().is_some_and(|r| same(r) && r.creds == creds && !r.task.is_finished()) {
             return;
         }
-        let (started, sense) = (wanted.clone(), ants_daemon::sense::built_in().hosting());
+        let (started, providers) = (wanted.clone(), wanted.providers.clone());
+        let sense = providers.sense().hosting();
         let task = tokio::spawn(
             async move {
                 if let Err(e) = Box::pin(host::run_sense(started, sense)).await {
                     tracing::error!(error = format!("{e:#}"), "sense's link stopped");
                     let why = format!("sense's link with the host credentials stopped: {e:#}");
-                    ants_daemon::sense::built_in().unkept(Some(why));
+                    providers.sense().unkept(Some(why));
                 }
             }
             .instrument(tracing::info_span!("sense")),

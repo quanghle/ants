@@ -73,7 +73,7 @@ pub(super) async fn apply(
     let ant = file.shared.overlaid(ant).map_or_else(|| ant.clone(), |(overlaid, _)| overlaid);
     let harness = ant.harness.as_deref().and_then(|name| loaded.harnesses.get(name).ok());
     let Some(env) = Env::current() else { return refused(order, "no home directory") };
-    let provider = crate::provider::of(&order.ant).await;
+    let provider = orders.providers.of(&order.ant).await;
     let provider = provider.as_ref().map(|connected| Of { connected, identity });
     let memories = read(&ant, harness.as_deref(), &env, provider).await;
     match serde_json::to_value(&memories) {

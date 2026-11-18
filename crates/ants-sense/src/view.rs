@@ -42,7 +42,7 @@ const RESERVE: usize = 1024;
 /// The memories view of `ant`.
 pub async fn memories(sense: &Sense, ant: AntRef) -> Result<MemoriesView, RpcError> {
     let read = async {
-        let items = sense.items(&ant.ant).await?;
+        let items = sense.synced(&ant.ant).await?;
         entries(&*items, &ant.ant, Utc::now()).await
     };
     match read.await {

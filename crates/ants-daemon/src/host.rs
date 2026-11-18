@@ -20,6 +20,7 @@ use anyhow::{Context as _, Result, bail};
 use tokio::sync::watch;
 
 use crate::profile::shared::{self, Shared};
+use crate::provider::Providers;
 use crate::records::direct_kv::DirectKv;
 use crate::secrets::creds::{self, Kind};
 use crate::secrets::keystore;
@@ -47,6 +48,9 @@ pub struct Host {
     pub config: Option<admin::ConfigFile>,
     /// The ants the process serves, which restart their harnesses on an admin order.
     pub restarts: admin::restart::Restarts,
+    /// The providers of the process's ants, which admin orders reach, and whose sense reaches its data over the
+    /// connection ([`run_keeping`]).
+    pub providers: Providers,
     /// The machine's leaf node, whose uplink an add order renews to carry the ant added.
     pub leaf: Option<admin::LeafNode>,
 }
@@ -97,6 +101,7 @@ impl Host {
             remote_admin: true,
             config: None,
             restarts: admin::restart::Restarts::default(),
+            providers: Providers::default(),
             leaf: None,
         })
     }
@@ -173,6 +178,7 @@ pub async fn run_keeping(host: Host, ants: watch::Receiver<Vec<UserId>>, sense: 
         creds: host.creds.clone(),
         js_domain: host.js_domain.clone(),
         restarts: host.restarts.clone(),
+        providers: host.providers.clone(),
         leaf: host.leaf.clone(),
         hold: admin::held::Hold::new(humans),
     };

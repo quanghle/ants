@@ -4,7 +4,7 @@
 # release build and the idle footprint check, all with lint warnings fatal.
 #
 #   scripts/check.sh               # every check but the release build and footprint; stops at the first failure
-#   scripts/check.sh --footprint   # also `cargo build --release` (fat LTO, slow) and scripts/footprint.sh
+#   scripts/check.sh --footprint   # also `cargo build --release` and scripts/footprint.sh
 #
 # Without nats-server on PATH, the tests needing it skip instead of failing (no ANTS_REQUIRE_TOOLS=1). Without
 # cargo-deny (`cargo install --locked cargo-deny`), the dependency check is skipped. With --footprint, the footprint
