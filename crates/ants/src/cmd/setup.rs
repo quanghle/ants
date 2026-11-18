@@ -232,6 +232,7 @@ async fn doctor_checks(
         harnesses: false,
         team: auth::default_dir()?,
         webhooks,
+        worker: doctor::trail_worker(Some(home.clone())),
         home: Some(home),
     };
     let checks = Box::pin(doctor::run(&setup)).await;

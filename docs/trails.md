@@ -228,3 +228,9 @@ workers = 4
 ```
 
 A worker failing with the run unchanged is retried, after 1 s and up to 1 min apart.
+
+`ants doctor` starts the worker of the daemon service's `ants`, else its own, as a daemon does, with a request it
+refuses before running anything. With a human's credentials it lists the runs stuck: those stopped or failed on a
+limit that `ants trail resume` may still continue, naming the limits to raise; those whose steps went to ants not in
+the colony, naming `ants trail stop`; and those whose conductor is not in the colony
+([cli.md](cli.md#identity-setup-completions-and-doctor)).

@@ -54,6 +54,7 @@ pub(crate) async fn run(conn: &Connection<'_>, args: DoctorArgs) -> Result<()> {
             None => webhook::default_path()?,
         },
         home: std::env::home_dir(),
+        worker: doctor::trail_worker(std::env::home_dir()),
     };
     let checks = Box::pin(doctor::run(&setup)).await;
     for check in &checks {

@@ -20,7 +20,7 @@ use crate::machines::latest_in;
 use crate::text::excerpt;
 
 /// The runs `conductor` keeps, else those of every conductor, oldest first.
-pub(super) async fn list(js: &jetstream::Context, conductor: Option<&UserId>) -> Result<Vec<TrailRun>> {
+pub(crate) async fn list(js: &jetstream::Context, conductor: Option<&UserId>) -> Result<Vec<TrailRun>> {
     let filter = match conductor {
         Some(conductor) => format!("$KV.{TRAIL_RUNS_BUCKET}.{conductor}.*"),
         None => format!("$KV.{TRAIL_RUNS_BUCKET}.*.*"),
@@ -114,16 +114,19 @@ pub(super) async fn pick(js: &jetstream::Context, pick: &Pick) -> Result<TrailRu
 /// The run `run` with the calls it waits on and its journal.
 pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detail> {
     let header = find(js, run).await?;
-    let conductor = &header.conductor;
-    let session = format!("$KV.{TRAIL_RUNS_BUCKET}.{}", trail_session_key(conductor, run));
-    let session: Option<TrailSession> =
-        latest_in(js, TRAIL_RUNS_BUCKET, &session).await?.iter().find_map(|(k, v)| parse(k, v));
-    let calls = format!("$KV.{TRAIL_RUNS_BUCKET}.{}.call.*", trail_run_key(conductor, run));
+    let session = session(js, &header).await?;
+    let calls = format!("$KV.{TRAIL_RUNS_BUCKET}.{}.call.*", trail_run_key(&header.conductor, run));
     let mut journal: Vec<JournalEntry> =
         latest_in(js, TRAIL_RUNS_BUCKET, &calls).await?.iter().filter_map(|(k, v)| parse(k, v)).collect();
     journal.sort_by_key(|entry| entry.call);
     let (pending, queued) = session.map_or_default(|s| (s.pending, s.queued));
     Ok(Detail { run: header, pending, queued, journal })
+}
+
+/// The session the conductor of `run` keeps: the calls the run waits on and those queued. None before its first.
+pub(crate) async fn session(js: &jetstream::Context, run: &TrailRun) -> Result<Option<TrailSession>> {
+    let session = format!("$KV.{TRAIL_RUNS_BUCKET}.{}", trail_session_key(&run.conductor, &run.run));
+    Ok(latest_in(js, TRAIL_RUNS_BUCKET, &session).await?.iter().find_map(|(k, v)| parse(k, v)))
 }
 
 /// The run's state in a word.

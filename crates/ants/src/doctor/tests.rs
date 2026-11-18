@@ -1,3 +1,5 @@
+mod trails;
+
 use ants_daemon::config::Ant;
 use ants_daemon::monitoring::storage;
 use ants_daemon::monitoring::storage::Usage;
@@ -34,6 +36,7 @@ fn setup(server: &Server, creds: Option<PathBuf>) -> Setup {
         team: server.dir().join("no-team"),
         webhooks: server.dir().join("no-webhooks.toml"),
         home: None,
+        worker: None,
     }
 }
 
@@ -284,6 +287,7 @@ async fn a_missing_harness_fails_with_its_fix() {
         team: dir.join("no-team"),
         webhooks: dir.join("no-webhooks.toml"),
         home: None,
+        worker: None,
     };
     let checks = check_ants(&loaded.ants, &loaded.harnesses, &setup, 0).await;
     let harness = named(&checks, "ant dev-a harness")[0];
@@ -480,6 +484,7 @@ async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
         team: dir.clone(),
         webhooks: dir.join("no-webhooks.toml"),
         home: None,
+        worker: None,
     };
 
     let checks = check_leaf(&setup, Leaf::read(&leaf_config), &loaded.ants, None, None, None, 0).await;
@@ -520,6 +525,7 @@ async fn the_hub_resolver_check_warns_of_a_hub_keeping_pushed_accounts_in_memory
             team: hub.dir().join("auth"),
             webhooks: hub.dir().join("no-webhooks.toml"),
             home: None,
+            worker: None,
         };
         let check = check_resolver(&setup, false).await;
         if full {
@@ -1054,6 +1060,7 @@ fn the_hub_service_of_ants_setup_must_be_installed_and_running() {
         team: home.join("no-team"),
         webhooks: home.join("no-webhooks.toml"),
         home: Some(home.clone()),
+        worker: None,
     };
     let stopped = || {
         Services::answering(&home, |command| {
@@ -1117,6 +1124,7 @@ fn a_nats_server_run_by_the_daemon_has_the_daemon_service_as_its_one_owner() {
         team: home.join("no-team"),
         webhooks: home.join("no-webhooks.toml"),
         home: Some(home.clone()),
+        worker: None,
     };
     let managed = Some(leaf.as_path());
     let run_by = format!("{} is run by `ants daemon` ([nats_server] of {})", leaf.display(), config.display());

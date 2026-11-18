@@ -67,7 +67,7 @@ pub(super) async fn reach(
     checks.push(check_harness_versions(&colony));
     checks.extend(check_avatars(&js, identity).await);
     checks.push(check_drift(&js, identity).await);
-    (checks, Some(Connected { js, rights: identity.rights.clone(), colony: colony.unwrap_or_default() }))
+    (checks, Some(Connected { js, rights: identity.rights.clone(), colony }))
 }
 
 /// The oldest nats-server, major and minor version, ants runs on.
