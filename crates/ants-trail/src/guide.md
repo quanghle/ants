@@ -12,8 +12,9 @@ the last expression (JSON) is the run's result.
 - `await pipeline(items, *stages)`: each item through the async stages on its own, no barrier; results in item order.
 - A failed step raises RuntimeError where awaited; an uncaught exception fails the run with its traceback.
 - No files, environment, network or sleep; the clock and random are fixed per run; no type checking.
-- Limits: 50 steps (500 at most; the call past it raises), 4 at once (16; the rest wait), a turn budget, 24 h of
-  wall time, 10 s of compute per resume and a 768 KiB stored session; past one the run fails, naming it.
+- Limits: 50 steps (500 at most; the call past it raises), 4 at once (16; the rest wait), 200 turns (2000), 24 h of
+  wall time (7 d), 10 s of compute per resume and a 768 KiB stored session; past one the run fails, naming it. A
+  run's start sets the first four (run_trail's `limits`: `steps`, `at_once`, `turns`, `wall`).
 Patterns: pipeline by default, parallel only when a stage needs every result; verify each finding with a skeptic step
 on another ant than its author; repeat discovery until a round finds nothing new, under a round cap; log whatever is
 skipped or capped; schema= for every reply whose fields are read; self-contained prompts; try/except RuntimeError

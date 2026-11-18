@@ -36,7 +36,10 @@ use uuid::Uuid;
 
 #[cfg(doc)]
 use crate::{ADMIN_TAG, MACHINES_BUCKET, Memories, admin_consumer};
-use crate::{JwtError, Machine, UserId, VerifiedUser, subject, verified_jwt, verify_admin, verify_assistant_of};
+use crate::{
+    JwtError, Machine, RunId, TrailLimits, UserId, VerifiedUser, subject, verified_jwt, verify_admin,
+    verify_assistant_of,
+};
 
 mod payload;
 pub use payload::{ADMIN_PAYLOADS, AdminPayload, MAX_ADMIN_PAYLOAD, ProviderExport};
@@ -145,6 +148,19 @@ pub enum AdminOp {
         #[serde(default, skip_serializing_if = "Map::is_empty")]
         settings: Map<String, Value>,
     },
+    /// Stop the trail run `run` the ant conducts, as a human's request to the conductor does
+    /// ([`crate::TrailAction::Stop`]); the outcome's `result` carries the conductor's answer
+    /// ([`crate::TrailOutcome::Stopped`]), naming the steps left in other ants' queues.
+    StopTrail {
+        run: RunId,
+    },
+    /// Resume the trail run `run` the ant conducts, stopped or failed on a limit, under `limits` when given, as a
+    /// human's request to the conductor does ([`crate::TrailAction::Resume`]).
+    ResumeTrail {
+        run: RunId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limits: Option<TrailLimits>,
+    },
 }
 
 impl AdminOp {
@@ -164,12 +180,14 @@ impl AdminOp {
             Self::ReadMcp => "read_mcp",
             Self::McpSignIn { .. } => "mcp_sign_in",
             Self::Clone { .. } => "clone",
+            Self::StopTrail { .. } => "stop_trail",
+            Self::ResumeTrail { .. } => "resume_trail",
         }
     }
 
     /// Whether an assistant may order it for its human: anything but adding, retiring or cloning an ant, reading or
-    /// signing in its MCP servers, which `ants signer` signs for an admin's own order only, or exporting or importing
-    /// what its provider holds of it.
+    /// signing in its MCP servers, which `ants signer` signs for an admin's own order only, exporting or importing
+    /// what its provider holds of it, or stopping or resuming a trail run it conducts.
     pub fn for_assistant(&self) -> bool {
         !matches!(
             self,
@@ -180,6 +198,8 @@ impl AdminOp {
                 | Self::McpSignIn { .. }
                 | Self::ExportProvider { .. }
                 | Self::ImportProvider { .. }
+                | Self::StopTrail { .. }
+                | Self::ResumeTrail { .. }
         )
     }
 
@@ -207,6 +227,9 @@ impl AdminOp {
             Self::McpSignIn { server, callback: None } => format!("sign in to MCP server {server}"),
             Self::McpSignIn { server, callback: Some(_) } => format!("complete the sign-in to MCP server {server}"),
             Self::Clone { new, .. } => format!("clone as {new}"),
+            Self::StopTrail { run } => format!("stop trail run {run}"),
+            Self::ResumeTrail { run, limits: None } => format!("resume trail run {run}"),
+            Self::ResumeTrail { run, limits: Some(limits) } => format!("resume trail run {run} under {limits}"),
         }
     }
 }

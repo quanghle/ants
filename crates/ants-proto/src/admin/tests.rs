@@ -205,6 +205,8 @@ fn an_order_rule_covers_an_op_of_its_kind() {
             identity: "1f".to_owned(),
             payload: AdminPayload { id: Uuid::now_v7(), machine: m("box"), size: 2, sha256: "ab".to_owned() },
         },
+        AdminOp::StopTrail { run: RunId::generate() },
+        AdminOp::ResumeTrail { run: RunId::generate(), limits: None },
     ];
     for op in ops {
         assert_eq!(op.for_assistant(), ASSISTANT_ORDER_KINDS.contains(&op.kind()), "{}", op.kind());

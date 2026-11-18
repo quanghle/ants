@@ -61,6 +61,8 @@ struct Entry {
     cloning: Option<mpsc::UnboundedSender<crate::clone::Request>>,
     /// Where it hears the orders about its MCP servers ([`crate::admin::mcp`]).
     mcp: Option<mpsc::UnboundedSender<super::mcp::Request>>,
+    /// The trail runs it conducts while it serves the ant's inbox, which orders stop and resume ([`super::trail`]).
+    trails: Option<crate::trail::Trails>,
 }
 
 impl std::fmt::Debug for Restarts {
@@ -169,6 +171,36 @@ impl Restarts {
             Some(Entry { served: 1.., mcp: Some(tx), .. }) => Some(tx.send(request).is_ok()),
             Some(Entry { served: 1.., .. }) => Some(false),
             _ => None,
+        }
+    }
+}
+
+impl Restarts {
+    /// Have the orders about the trail runs of `ant` reach them through `trails` until the guard drops.
+    #[must_use]
+    pub fn conduct(&self, ant: &UserId, trails: &crate::trail::Trails) -> super::trail::Conducted {
+        self.0.locked().entry(ant.clone()).or_default().trails = Some(trails.clone());
+        super::trail::Conducted { restarts: self.clone(), ant: ant.clone(), trails: trails.clone() }
+    }
+
+    /// How the process stands with the trail runs of `ant`.
+    pub(super) fn conductor(&self, ant: &UserId) -> super::trail::Conductor {
+        use super::trail::Conductor;
+        match self.0.locked().get(ant) {
+            Some(Entry { served: 1.., trails: Some(trails), .. }) => Conductor::Ready(trails.clone()),
+            Some(Entry { served: 1.., listening: Some(_), .. }) => Conductor::NoTrails,
+            Some(Entry { served: 1.., .. }) => Conductor::Starting,
+            _ => Conductor::Unserved,
+        }
+    }
+}
+
+impl Drop for super::trail::Conducted {
+    fn drop(&mut self) {
+        if let Some(entry) = self.restarts.0.locked().get_mut(&self.ant)
+            && entry.trails.as_ref().is_some_and(|trails| trails.same(&self.trails))
+        {
+            entry.trails = None;
         }
     }
 }

@@ -299,8 +299,11 @@ mod tests {
         let to = Destination::Ant(p("dev-a"));
         let creds = creds(&server, &weekly, to.clone());
         let mut schedule = schedule("weekly", Some(creds.clone()), to);
-        let start =
-            ants_proto::TrailStart { trail: "review".parse().unwrap(), args: serde_json::json!({"repo": "app"}) };
+        let start = ants_proto::TrailStart {
+            trail: "review".parse().unwrap(),
+            args: serde_json::json!({"repo": "app"}),
+            limits: ants_proto::TrailLimits::DEFAULT,
+        };
         schedule.trail = Some(start.clone());
         schedule.owner = Some(p("alice"));
         let bus = Bus::connect(&weekly, Some(&creds), &server.url, None, "test").await.unwrap();

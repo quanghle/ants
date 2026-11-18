@@ -264,7 +264,7 @@ impl Mcp {
         let _ = self.hub.provider.set(provider);
     }
 
-    /// Start the ant's trail runs through `trails` for `run_trail`; without them the tool is refused.
+    /// Reach the ant's trail runs through `trails` for `run_trail`, `trail_status` and `stop_trail`, offered only then.
     pub fn with_trails(&self, trails: crate::trail::Trails) {
         let _ = self.hub.trails.set(trails);
     }

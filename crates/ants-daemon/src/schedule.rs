@@ -25,6 +25,7 @@
 //! ant = "lead"                      # the conductor of the runs
 //! trail = "review-open-prs"         # instead of text: start this saved trail ([crate::trail])
 //! args = { repo = "acme/app" }      # optional: the run's JSON input
+//! limits = { steps = 100, wall = "2d" }  # optional: what each run may spend (steps, at_once, turns, wall)
 //! ```
 //!
 //! A firing time depends only on the schedule and the clock, never on when a daemon started, so every daemon serving
@@ -70,6 +71,7 @@ pub struct Entry {
     text: Option<String>,
     trail: Option<TrailName>,
     args: Option<serde_json::Map<String, Value>>,
+    limits: Option<crate::trail::AskedLimits>,
     #[serde(default)]
     catch_up: bool,
     allow: Option<Vec<String>>,
@@ -101,7 +103,8 @@ pub struct Schedule {
     pub owner: Option<UserId>,
     /// The prompt; for a trail schedule, the line its message shows.
     pub text: String,
-    /// The saved trail a firing starts, with the ant as its conductor, rather than prompting the ant.
+    /// The saved trail a firing starts, with the ant as its conductor and under the limits the entry gives, rather
+    /// than prompting the ant.
     pub trail: Option<TrailStart>,
     /// Send the latest firing missed while no daemon could, late, rather than skip it.
     pub catch_up: bool,
@@ -151,6 +154,7 @@ impl Schedule {
         };
         let (text, trail) = match (entry.text, entry.trail) {
             (Some(text), None) if entry.args.is_some() => bail!("args go with trail only, not text: {text:?}"),
+            (Some(text), None) if entry.limits.is_some() => bail!("limits go with trail only, not text: {text:?}"),
             (Some(text), None) if text.trim().is_empty() => bail!("empty text"),
             (Some(text), None) => (text, None),
             (None, Some(_)) if !matches!(destination, Destination::Ant(_)) => {
@@ -161,7 +165,8 @@ impl Schedule {
             }
             (None, Some(trail)) => {
                 let args = entry.args.map_or(Value::Null, Value::Object);
-                (format!("Scheduled run of trail {trail}."), Some(TrailStart { trail, args }))
+                let limits = entry.limits.unwrap_or_default().limits().map_err(|e| anyhow::anyhow!("limits: {e}"))?;
+                (format!("Scheduled run of trail {trail}."), Some(TrailStart { trail, args, limits }))
             }
             _ => bail!("give exactly one of text and trail"),
         };
@@ -622,8 +627,17 @@ mod tests {
         assert_eq!(trail.trail.as_str(), "review");
         assert_eq!(trail.args, serde_json::json!({"repo": "app", "depth": 2}));
         assert!(s.text.contains("review"), "{}", s.text);
+        assert_eq!(trail.limits, ants_proto::TrailLimits::DEFAULT, "no limits: the defaults");
         let s = entry(&format!("{base}trail = \"review\"\n")).unwrap();
         assert_eq!(s.trail.unwrap().args, serde_json::Value::Null, "no args");
+        let s = entry(&format!("{base}trail = \"review\"\nlimits = {{ steps = 100, at_once = 8, wall = \"2d\" }}\n"));
+        let asked = ants_proto::TrailLimits {
+            steps: 100,
+            concurrency: 8,
+            wall_secs: 2 * 86_400,
+            ..ants_proto::TrailLimits::DEFAULT
+        };
+        assert_eq!(s.unwrap().trail.unwrap().limits, asked, "the limits given, the others their defaults");
 
         for (extra, why) in [
             ("", "exactly one of text and trail"),
@@ -631,6 +645,11 @@ mod tests {
             ("text = \"t\"\nargs = { a = 1 }", "args go with trail only"),
             ("trail = \"Review!\"", "trail"),
             ("trail = \"review\"\nallow = [\"read\"]", "allow"),
+            ("text = \"t\"\nlimits = { steps = 9 }", "limits go with trail only"),
+            ("trail = \"review\"\nlimits = { steps = 501 }", "limits: steps is over the most a run may take, 500"),
+            ("trail = \"review\"\nlimits = { wall = \"8d\" }", "limits: wall is over the most a run may take, 7d"),
+            ("trail = \"review\"\nlimits = { at_once = 0 }", "limits: at_once must be more than 0"),
+            ("trail = \"review\"\nlimits = { stepz = 9 }", "unknown field `stepz`"),
         ] {
             let e = format!("{:#}", entry(&format!("{base}{extra}\n")).unwrap_err());
             assert!(e.contains(why), "{extra}: {e}");

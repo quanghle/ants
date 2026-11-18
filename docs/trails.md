@@ -98,17 +98,20 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   ants trail run ./draft.py --ant dev-a --thread last --yes
   ```
 
-- **`run_trail`**, an MCP tool of ants ([architecture.md](architecture.md#mcp-tools)): the calling ant conducts a run
-  of a saved trail (`name`) or of a script of its own (`script`), with `args`, on the current thread, owned by the
-  thread's owner. It returns the run's id at once, or with `wait: true` the run's result or error, waiting up to
-  `timeout` (default `5m`, at most `30m`), else the run's id while the run goes on. Runs started by ants take the
-  default limits. The tool is offered only while the bus keeps trail runs.
+- **`run_trail`**, an MCP tool of ants ([architecture.md](architecture.md#mcp-tools)): the calling ant conducts a run of
+  a saved trail (`name`) or of a script of its own (`script`), with `args`, on the current thread, owned by the thread's
+  owner, under `limits` (`{"steps", "at_once", "turns", "wall"}`, as [Limits](#limits) names them; each left out takes
+  its default). It returns the run's id at once, or with `wait: true` the run's result or error, waiting up to `timeout`
+  (default `5m`, at most `30m`), else the run's id while the run goes on. `trail_status` tells the ant how a run it
+  conducts stands, or lists those not ended, and `stop_trail` stops one ([Restarts, stops and
+  resumes](#restarts-stops-and-resumes)). The tools are offered only while the bus keeps trail runs.
 - **A schedule** with `trail = "NAME"` in place of `text` ([config.md](config.md#schedules)): each firing sends `ant`,
   the conductor, a message `Scheduled run of trail NAME.` carrying the trail and `args` (a TOML table); its daemon
-  starts the saved trail on the firing's new thread instead of prompting the ant, owned by the schedule's `owner`,
-  under the message's id as run id, so a redelivered firing starts no second run. A run that cannot start, such as for
-  an unknown trail, is told to the thread's owner there. Such a run takes the default limits, and is untrusted
-  ([Trust](#trust)).
+  starts the saved trail on the firing's new thread instead of prompting the ant, owned by the schedule's `owner`, under
+  the message's id as run id, so a redelivered firing starts no second run. A run that cannot start, such as for an
+  unknown trail, is told to the thread's owner there. The entry's `limits` table (`steps`, `at_once`, `turns`, `wall`)
+  sets what each run may spend, the firing carrying them; a limit left out takes its default, and one of 0 or over its
+  maximum fails config loading. Such a run is untrusted ([Trust](#trust)).
 
   ```toml
   [[schedule]]
@@ -119,6 +122,7 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   owner = "alice"
   trail = "review"
   args = { repo = "/src/app", files = ["src/main.rs"] }
+  limits = { steps = 100, wall = "2d" }
   ```
 
 The conductor refuses limits over the maxima, a script over 256 KiB and args over 64 KiB; a run's id is a UUID.
@@ -147,15 +151,15 @@ follows it as `ants trail run --follow` does. These need human credentials.
 
 ## Limits
 
-A run's limits are set when it starts (`ants trail run`'s flags; `run_trail` and schedules take the defaults) and may be
-raised on resume:
+A run's limits are set when it starts, by `ants trail run`'s flags, `run_trail`'s `limits` or a schedule's `limits`
+table (the key of each, a duration such as `2d` for `wall`), and kept in its record; they may be raised on resume:
 
-| Limit | Default | Maximum | Flag | Past it |
+| Limit | Default | Maximum | Flag, key | Past it |
 |---|---|---|---|---|
-| Steps, `agent()` and `human()` calls (re-asks not counted) | 50 | 500 | `--steps` | the call raises `RuntimeError: the run reached its limit of N steps` |
-| Steps outstanding at once | 4 | 16 | `--at-once` | later steps wait in the run; nothing raises |
-| Turns the steps spend, as ant messages spend them | 200 | 2000 | `--turns` | the run fails |
-| Wall time from start, stopped time included | 24h | 7d | `--wall` | the run fails, waiting or not |
+| Steps, `agent()` and `human()` calls (re-asks not counted) | 50 | 500 | `--steps`, `steps` | the call raises `RuntimeError: the run reached its limit of N steps` |
+| Steps outstanding at once | 4 | 16 | `--at-once`, `at_once` | later steps wait in the run; nothing raises |
+| Turns the steps spend, as ant messages spend them | 200 | 2000 | `--turns`, `turns` | the run fails |
+| Wall time from start, stopped time included | 24h | 7d | `--wall`, `wall` | the run fails, waiting or not |
 | Compute of one resume of the script | 10 s | 10 s | none | `TimeoutError`, the run fails; the worker is killed 5 s later |
 | Dumped session, the script's suspended state | 768 KiB | 768 KiB | none | the run fails, naming its size |
 | Memory of the script | 64 MiB | 64 MiB | none | `MemoryError`, the run fails |
@@ -178,10 +182,12 @@ A run takes the trust of the thread it started on (its origin):
   runs only saved trails`), and each step's thread is narrowed to the read-only tool rules webhook threads get by
   default ([config.md](config.md#tool-permissions)). A schedule starting a trail sets no `allow` of its own.
 
-Only humans start, stop and resume runs by request (`ants.trail.<ant>`, answered by the conductor's daemon), save and
-remove trails, and read every run's records; an ant reads and writes only the runs it conducts, and starts runs only
-with `run_trail` ([auth.md](auth.md)). A `human()` step goes to the run's owner, and a step's thread keeps that
-owner, so replies and escalations of the step's recipient reach the human who owns the run.
+Only humans start, stop and resume runs by request (`ants.trail.<ant>`, answered by the conductor's daemon while up),
+admins stop and resume them by [admin order](auth.md#admin-orders) as well, save and remove trails, and read every run's
+records; an ant reads and writes only the runs it conducts, starts runs only with `run_trail`, reads and stops those it
+conducts with `trail_status` and `stop_trail`, and resumes none ([auth.md](auth.md)). A `human()` step goes to the run's
+owner, and a step's thread keeps that owner, so replies and escalations of the step's recipient reach the human who owns
+the run.
 
 ## Storage
 
@@ -203,11 +209,17 @@ finished run stays at least 30 days. The full layout is in [architecture.md](arc
   journal: the script starts again with the run's clock and seed, its steps answered from the journal in order. A
   script whose steps no longer match the journal fails the run, naming the first call that differs.
 - **Stop:** `ants trail stop RUN` stops a run: no further step goes out and the replies of the steps waited on answer
-  nothing. The conductor withdraws the steps sent to itself; the command lists those still in other ants' queues,
-  each with the `ants withdraw ANT MESSAGE` withdrawing it. Wall time keeps running while stopped.
+  nothing. The conductor withdraws the steps sent to itself; the command lists those still in other ants' queues, each
+  with the `ants withdraw ANT MESSAGE` withdrawing it. The conductor stops a run it conducts the same way with
+  `stop_trail`, the run then stopped by the conductor, and the tool lists the steps in other ants' queues for a human to
+  withdraw. An admin's `ants ant stop-trail ANT RUN` has the conductor's daemon stop it by [admin
+  order](auth.md#admin-orders): unlike the request, which only a daemon up answers, the order waits for the machine's
+  daemon while it is away and is recorded with the admin and time (`ants ant orders ANT`), its result listing the steps
+  in other ants' queues. Wall time keeps running while stopped.
 - **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose error names a limit, from its last stored
   session; the steps waited on go out anew, on new threads. Limit flags replace the run's limits they name, within the
-  maxima. A run done, failed otherwise, running or waiting is refused.
+  maxima. A run done, failed otherwise, running or waiting is refused. An admin's `ants ant resume-trail ANT RUN`
+  resumes it by admin order the same way, limit flags included.
 
 ```sh
 ants trail runs

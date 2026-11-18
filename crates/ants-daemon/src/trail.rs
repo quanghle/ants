@@ -8,6 +8,7 @@
 
 mod control;
 mod driver;
+mod limits;
 mod load;
 mod report;
 mod saved;
@@ -41,6 +42,8 @@ use report::Stray;
 use saved::Saved;
 use steps::Taken;
 use store::Store;
+
+pub use limits::AskedLimits;
 
 /// How to write a trail, in brief, for the tool starting runs to teach.
 pub const GUIDE: &str = ants_trail::GUIDE;
@@ -93,6 +96,38 @@ pub struct StartRun {
     /// The thread the run reports on.
     pub thread: ThreadId,
     pub limits: TrailLimits,
+}
+
+/// How a run stands ([`Trails::status`]).
+#[derive(Debug, Clone)]
+pub struct RunStatus {
+    pub header: TrailRun,
+    /// The steps it waits on: none once it is not in memory, as after it ended.
+    pub waiting: Vec<Waited>,
+    /// The calls of its script waiting for room to go out as steps.
+    pub queued: usize,
+}
+
+/// A step a run waits on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Waited {
+    pub call: u32,
+    pub function: TrailFunction,
+    /// The ant, or human, the step went to.
+    pub to: UserId,
+    /// What the script named the step.
+    pub label: Option<String>,
+    /// Whether its message went out: a stopped run's steps go out anew on resuming.
+    pub sent: bool,
+}
+
+impl Waited {
+    fn of(call: &PendingCall) -> Self {
+        let label = (call.function == TrailFunction::Agent)
+            .then(|| steps::AgentArgs::of(&call.args).ok().and_then(|args| args.label))
+            .flatten();
+        Self { call: call.call, function: call.function, to: call.to.clone(), label, sent: call.sent }
+    }
 }
 
 /// The runs of a conductor. Cheap to clone.
@@ -226,13 +261,19 @@ impl Trails {
         &self.inner.ant
     }
 
+    /// Whether `other` is a clone of these trails.
+    pub fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Start a run: its records are stored and its first pass is due when this returns.
     pub async fn start(&self, start: StartRun) -> Result<RunId, String> {
         self.start_as(RunId::generate(), start).await
     }
 
     /// Start the run of the saved trail `start` that `firing`, a schedule's message to the conductor, asks for: on the
-    /// firing's thread, answering to its owner. The run takes the firing's id, so a firing delivered again starts none.
+    /// firing's thread, answering to its owner, under the limits it asks for. The run takes the firing's id, so a firing
+    /// delivered again starts none.
     pub async fn start_fired(&self, firing: &Envelope, start: &TrailStart) -> Result<RunId, String> {
         let run =
             firing.id.to_string().parse::<RunId>().map_err(|e| format!("the firing's id makes no run id: {e}"))?;
@@ -245,7 +286,7 @@ impl Trails {
             owner: firing.owner.clone(),
             origin: crate::provider::context::origin(firing, None, &self.inner.humans.humans()),
             thread: firing.thread_id.clone(),
-            limits: TrailLimits::default(),
+            limits: start.limits,
         };
         self.start_as(run, start).await
     }
@@ -257,6 +298,30 @@ impl Trails {
             Some(header) => Ok(Some(header)),
             None => self.inner.store.header(run).await.map_err(|e| format!("reading the run: {e:#}")),
         }
+    }
+
+    /// How run `run` stands: refused when the conductor has no such run, as a run of another conductor is kept under
+    /// that conductor's keys.
+    pub async fn status(&self, run: &RunId) -> Result<RunStatus, String> {
+        let held = locked(&self.inner.runs).get(run).cloned();
+        if let Some(slot) = held {
+            let book = slot.book();
+            let waiting = book.pending.iter().map(Waited::of).collect();
+            return Ok(RunStatus { header: book.header.clone(), waiting, queued: book.queued.len() });
+        }
+        match self.inner.store.header(run).await {
+            Ok(Some(header)) => Ok(RunStatus { header, waiting: Vec::new(), queued: 0 }),
+            Ok(None) => Err(format!("{} conducts no run {run}", self.inner.ant)),
+            Err(e) => Err(format!("reading the run: {e:#}")),
+        }
+    }
+
+    /// The runs not finished, running, waiting or stopped, oldest first.
+    pub fn unfinished(&self) -> Vec<TrailRun> {
+        let slots: Vec<Arc<Slot>> = locked(&self.inner.runs).values().cloned().collect();
+        let mut runs: Vec<TrailRun> = slots.iter().map(|slot| slot.header()).collect();
+        runs.sort_by(|a, b| (a.started_at, a.run.as_str()).cmp(&(b.started_at, b.run.as_str())));
+        runs
     }
 
     async fn start_as(&self, run: RunId, start: StartRun) -> Result<RunId, String> {

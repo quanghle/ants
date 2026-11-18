@@ -1091,7 +1091,10 @@ where
         () = inbox.hear_mcp() => {}
         () = async {
             match &inbox.trails {
-                Some(trails) => trails.serve().await,
+                Some(trails) => {
+                    let _conducted = inbox.restarts.conduct(inbox.ant, trails);
+                    trails.serve().await;
+                }
                 None => std::future::pending().await,
             }
         } => {}

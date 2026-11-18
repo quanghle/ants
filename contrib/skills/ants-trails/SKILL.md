@@ -432,7 +432,11 @@ A human starts a run with `ants trail run`, which shows what the run may spend b
 flags `--steps`, `--at-once`, `--turns` and `--wall`; an ant starts one with the `run_trail` MCP tool, from a saved
 trail's `name` or a `script` of its own, on its current thread, getting the run's id at once or, with `wait`, its
 result; a `[[schedule]]` entry with `trail =` (and `args =`, a table) starts a saved trail on its `ant` at each firing.
-Runs of `run_trail` and schedules take the default limits. Saved trails are colony-wide, put and removed only by
-humans; a conductor's daemon also reads `~/.ants/trails/<name>.py` on its machine, the colony's trail winning a name
-both have. A run started on a thread a webhook or schedule started runs only a saved trail, its steps narrowed to
-read-only tools. `ants trail runs`, `show`, `stop` and `resume` manage runs; see the repository's `docs/trails.md`.
+`run_trail`'s `limits` (`{"steps", "at_once", "turns", "wall"}`) and a schedule's `limits` table set the same limits as
+those flags. `trail_status` tells how a run the ant conducts stands (state, steps and turns spent of its limits, the
+steps it waits on, the result), and `stop_trail` stops one, which only a human resumes. Saved trails are colony-wide,
+put and removed only by humans; a conductor's daemon also reads `~/.ants/trails/<name>.py` on its machine, the colony's
+trail winning a name both have. A run started on a thread a webhook or schedule started runs only a saved trail, its
+steps narrowed to read-only tools. `ants trail runs`, `show`, `stop` and `resume` manage runs, and an admin's `ants ant
+stop-trail` and `resume-trail` stop and resume one by admin order, which waits for a conductor's daemon while it is
+away; see the repository's `docs/trails.md`.

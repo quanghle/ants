@@ -196,6 +196,14 @@ impl Default for TrailLimits {
     }
 }
 
+/// The limits a run's start sets, in a line: `50 steps, 4 at once, 200 turns, 1d of wall time`.
+impl std::fmt::Display for TrailLimits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let wall = crate::duration::format(self.wall_time());
+        write!(f, "{} steps, {} at once, {} turns, {wall} of wall time", self.steps, self.concurrency, self.turns)
+    }
+}
+
 /// A run's header in [`TRAIL_RUNS_BUCKET`], under [`trail_run_key`]: what it runs, for whom and where, and how far it
 /// got. Its conductor's daemon puts it at the start and whenever its state or counters change; humans read it.
 /// Readers should treat unknown fields as additions, not errors.
@@ -255,7 +263,7 @@ pub enum RunState {
     Running,
     /// The script waits only for steps humans answer.
     Waiting,
-    /// A human stopped it: it sends no step until resumed, while its wall time runs on.
+    /// A human, or its conductor, stopped it: it sends no step until a human resumes it, while its wall time runs on.
     Stopped { by: UserId },
     /// The script returned `result`.
     Done { result: Value },
@@ -426,12 +434,14 @@ pub enum TrailAction {
 }
 
 /// The run a schedule's message asks its recipient to start, as the run's conductor ([`Envelope::trail_start`]): the
-/// saved trail `trail` with `args`.
+/// saved trail `trail` with `args`, under `limits`, which the conductor refuses over [`TrailLimits::MAX`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrailStart {
     pub trail: TrailName,
     #[serde(default)]
     pub args: Value,
+    #[serde(default)]
+    pub limits: TrailLimits,
 }
 
 /// The script a run starts: a saved trail's, by name, or one given inline.
