@@ -26,10 +26,11 @@ pub const TIMELINE_EVERY: Duration = Duration::from_secs(30);
 
 /// Part of the tool-call timeline of `ant` on a thread: the calls of the prompt that handled `message` that changed
 /// since the last record, the prompt's plan as last reported, its tool requests rejected, whether it ended with no
-/// reply sent, and how it ended ([`TimelineEntry::Ended`]), stored on [`subject::timeline`]. A record holds 1 to [`MAX_TIMELINE_ENTRIES`] entries, never a tool's input or output, message
-/// text or thoughts, but for the final text of a prompt that ended with no reply sent ([`TimelineEntry::NoReply`]),
-/// which no message carries. Calls are merged by message and call id, later records replacing earlier ones
-/// ([`Timelines`]). Readers ignore unknown entry kinds and fields.
+/// reply sent, and how it ended ([`TimelineEntry::Ended`]), stored on [`subject::timeline`]. A record holds 1 to
+/// [`MAX_TIMELINE_ENTRIES`] entries, never a tool's input or output, message text or thoughts, but for the final text
+/// of a prompt that ended with no reply sent ([`TimelineEntry::NoReply`]), which no message carries. Calls are merged
+/// by message and call id, later records replacing earlier ones ([`Timelines`]). Readers ignore unknown entry kinds
+/// and fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Timeline {
     pub ant: UserId,

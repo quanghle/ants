@@ -1,11 +1,12 @@
 //! The daemon's part of the ant's dreams ([`ants_sense::dream`]): when one is due, the ant has had no prompt running
 //! for [`IDLE_MINUTES`] and its threads were active since the last dream, it gathers them, with the timeline the ant
-//! stored on them, what was done with them besides writing on them ([`actions`]) and the vital signs of the work on them
-//! ([`vitals`]), and the commits they left, and begins the dream. It sends the packet to the ant's sage when one serves it and the ant is no live ant's sage
-//! ([`serving_sage`]), as a message from the ant on a new thread narrowed to a review ([`ants_proto::REVIEW_ALLOW`])
-//! naming the commits for the sage's daemon to check out ([`crate::checkouts`]), and takes the sage's answer there as it
-//! arrives ([`review_answer`]); without a sage, or once the sage leaves the review unanswered or answers with nothing
-//! readable, it wakes the ant on a new thread with the packet alone.
+//! stored on them, what was done with them besides writing on them ([`actions`]) and the vital signs of the work on
+//! them ([`vitals`]), and the commits they left, and begins the dream. It sends the packet to the ant's sage when one
+//! serves it and the ant is no live ant's sage ([`serving_sage`]), as a message from the ant on a new thread narrowed
+//! to a review ([`ants_proto::REVIEW_ALLOW`]) naming the commits for the sage's daemon to check out
+//! ([`crate::checkouts`]), and takes the sage's answer there as it arrives ([`review_answer`]); without a sage, or once
+//! the sage leaves the review unanswered or answers with nothing readable, it wakes the ant on a new thread with the
+//! packet alone.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
