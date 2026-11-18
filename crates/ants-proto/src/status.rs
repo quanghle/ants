@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 #[cfg(doc)]
 use crate::ToolCall;
-use crate::{Error, Escalation, Questions, ThreadId, UserId, Verdict, subject};
+use crate::{Error, Escalation, Questions, RunId, ThreadId, UserId, Verdict, subject};
 
 /// The most paths a tool call carries, in [`StatusUpdate::Tool`] and in timeline records.
 pub const MAX_TOOL_PATHS: usize = 8;
@@ -59,6 +59,31 @@ impl DecidedBy {
             Self::Human => "human",
             Self::Chain => "chain",
             Self::Expiry => "expiry",
+        }
+    }
+}
+
+/// Where a trail run's step stands ([`StatusUpdate::Step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStage {
+    /// The step's message is stored: the step started.
+    Started,
+    /// A reply answered the step's call.
+    Answered,
+    /// The step's call raised in the script: its replies never matched its schema, or its message was withdrawn.
+    Failed,
+    /// The run no longer waits on the step: the script gave it up, or the run ended or stopped first.
+    Dropped,
+}
+
+impl StepStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Answered => "answered",
+            Self::Failed => "failed",
+            Self::Dropped => "dropped",
         }
     }
 }
@@ -147,6 +172,17 @@ pub enum StatusUpdate {
         /// effect as the human's once it confirmed it or a pre-allow rule it signed covered it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via: Option<UserId>,
+    },
+    /// A step of the trail run `run`, which the ant conducts and which reports on the thread, started or ended: its
+    /// script's call `call`, labelled `label` by the script, to `to` on the step's own thread `step_thread`.
+    Step {
+        run: RunId,
+        call: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        to: UserId,
+        step_thread: ThreadId,
+        stage: StepStage,
     },
 }
 

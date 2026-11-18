@@ -4,7 +4,7 @@
 
 #[cfg(doc)]
 use crate::subject;
-use crate::{ChannelId, MAX_CHANNEL_DESCRIPTION, MAX_TITLE, ThreadId, UserId};
+use crate::{ChannelId, MAX_CHANNEL_DESCRIPTION, MAX_TITLE, ThreadId, TrailName, UserId};
 
 /// Errors from parsing ants identifiers and building replies.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -51,4 +51,11 @@ pub enum Error {
     InvalidAttachmentHandle(String),
     #[error("invalid sense id {0:?}: use a ULID, 26 of uppercase Crockford base32 starting with 0-7")]
     InvalidSenseId(String),
+    /// A saved trail found under another key than its name.
+    #[error("trail {name} found at {at}")]
+    ForeignTrail { name: TrailName, at: String },
+    #[error("invalid trail {name}: {why}")]
+    InvalidTrail { name: TrailName, why: String },
+    #[error("trail limit {limit} of {value} is out of range: use 1-{max}")]
+    TrailLimit { limit: &'static str, value: u64, max: u64 },
 }

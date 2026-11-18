@@ -4,21 +4,21 @@
 use super::human::{
     device_directory_rights, human_notify_rights, human_reaction_rights, human_store_rights, identity_rights,
     machine_record_rights, notify_prefs_rights, outbox_setup_rights, presence_rights, read_marker_rights,
-    thread_rights,
+    thread_rights, trail_rights,
 };
 use super::{Permissions, ack_subjects, kv_stream, ordered_consumer_subjects};
 use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM,
     HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, READ_BUCKET, Role, SESSIONS_BUCKET,
-    STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId, WEBHOOK_MARKER, WEBHOOKS_BUCKET, chan_consumer,
-    chan_reader, dead_reader, done_reader, inbox_consumer, inbox_prefix, notes_consumer, sent_reader, spare_readers,
-    subject,
+    STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, UserId, WEBHOOK_MARKER,
+    WEBHOOKS_BUCKET, chan_consumer, chan_reader, dead_reader, done_reader, inbox_consumer, inbox_prefix,
+    notes_consumer, sent_reader, spare_readers, subject, trail_runs_subject,
 };
 #[cfg(doc)]
 use crate::{
     AttachmentHandle, HeldNotices, NotifyPrefs, PRESENCE_BUCKET, QueueRequest, REACTIONS_BUCKET, ReadMarker,
-    channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key,
-    thread_spend_key, unserved_key,
+    TrailRequest, channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox,
+    storage_warning_key, thread_spend_key, unserved_key,
 };
 
 /// What a user's credentials need for attachments ([`FILES_BUCKET`]): writing the chunks of those of the messages it
@@ -113,6 +113,12 @@ impl Permissions {
     /// and reads every ant's, which say nothing secret; a human reads every ant's and sets their avatars and colours
     /// ([`identity_rights`]).
     ///
+    /// Every ant and human reads the saved trails ([`TRAILS_BUCKET`]) by direct gets naming no subject, which only a
+    /// human puts and deletes. An ant gets, puts and deletes only the records of the trail runs it conducts
+    /// ([`trail_runs_subject`]); a human reads every run's and writes none ([`trail_rights`]), but asks an ant's daemon to
+    /// start, stop or resume the runs it conducts ([`TrailRequest`], on [`subject::trail`], which the ant alone hears
+    /// and answers on [`subject::trailed`]).
+    ///
     /// Each inbox, notes and channel subject an ant may publish, and its own dead letter and timeline subjects, it may
     /// also publish in its outbox form ([`subject::outbox`]), which only a leaf node's outbox keeps, and so the links it passes on
     /// ([`link_outbox`]). Only a human sets up leaf outboxes, the hub's intake and the buckets' sources from it: a
@@ -199,6 +205,8 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{owners}.>"),
             // And the webhooks' markers, not the events they delivered.
             format!("$JS.API.DIRECT.GET.{webhooks}.$KV.{WEBHOOKS_BUCKET}.*.{WEBHOOK_MARKER}"),
+            // And the saved trails, by direct gets naming no subject, which list them too.
+            format!("$JS.API.DIRECT.GET.{}", kv_stream(TRAILS_BUCKET)),
         ]);
         publish.extend(attachment_rights(user, role));
         publish
@@ -217,6 +225,7 @@ impl Permissions {
         publish.extend(notify_prefs_rights(user));
         publish.extend(human_reaction_rights(user));
         publish.extend(device_directory_rights(user));
+        publish.extend(trail_rights());
         subscribe.extend([subject::ALL.to_owned(), subject::max_deliveries_advisories()]);
     }
 
@@ -229,6 +238,7 @@ impl Permissions {
         let attempts = kv_stream(ATTEMPTS_BUCKET);
         let own_keys = format!("$KV.{SESSIONS_BUCKET}.{user}.>");
         let own_attempts = format!("$KV.{ATTEMPTS_BUCKET}.{user}.>");
+        let own_runs = trail_runs_subject(user);
         let dead_read = dead_reader(user);
         let sent_read = sent_reader(user);
         publish.extend([
@@ -244,6 +254,9 @@ impl Permissions {
             // Get, put and delete of the markers of its own attempts.
             format!("$JS.API.DIRECT.GET.{attempts}.{own_attempts}"),
             own_attempts,
+            // Get, put and delete of the records of the trails it conducts.
+            format!("$JS.API.DIRECT.GET.{}.{own_runs}", kv_stream(TRAIL_RUNS_BUCKET)),
+            own_runs,
             // Exactly its requests subject: an ant cannot answer its own requests one level below.
             subject::approvals(user),
             // Reading the decision stored on one of its requests: a direct get naming the subject in its own
@@ -270,6 +283,7 @@ impl Permissions {
             subject::status_of(user),
             subject::cancelled_of(user),
             subject::queued(user),
+            subject::trailed(user),
             subject::chanadm_from(user),
             // Put and delete of its own colony entry, and of its own escalation chain.
             subject::colony(user),
@@ -337,6 +351,8 @@ impl Permissions {
             subject::all_cancels_of(user),
             subject::queue(user),
             subject::queues_by_of(user),
+            // A human's requests to start, stop and resume the trail runs it conducts.
+            subject::trail(user),
             // Live replies to its ask_ant calls, which the inbox consumer holds back while the asking prompt runs.
             subject::inbox_of(user),
             subject::renew_reply(user.as_str()),

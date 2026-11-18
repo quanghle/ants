@@ -45,6 +45,7 @@ use crate::records::webhooks::Webhooks;
 use crate::secrets::redact::Redactor;
 use crate::stream::notes::{self, NotesStore};
 use crate::stream::reading::Reading;
+use crate::trail::Trails;
 use crate::worktrees::{Branch, Worktrees};
 use crate::{bus, colony, pause};
 
@@ -174,6 +175,8 @@ pub struct Pooling {
     pub idle_timeout: Duration,
     /// When memory is low, and the harnesses run at most while it is ([`crate::limits::pressure`]).
     pub memory_pressure: crate::limits::pressure::Settings,
+    /// Trail workers computing at once across the process's runs ([`crate::trail::Conducting::workers`]).
+    pub trail_workers: usize,
 }
 
 /// Whether each thread works in its own git worktree, and what becomes of its branch.
@@ -384,9 +387,8 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
     let storage = storage_watcher(config, &js, &sessions_kv);
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
     let attempts_kv = bus::ensure_attempts(&js, config.connection.js_domain.as_ref(), &config.ant).await?;
-    let attempts = Attempts::new(attempts_kv.clone(), config.ant.clone());
     let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
-    let _waking = wake::serve(providers, &config.ant, &js, outbox, sessions.clone(), attempts_kv).await;
+    let _waking = wake::serve(providers, &config.ant, &js, outbox.clone(), sessions.clone(), attempts_kv.clone()).await;
     let (answered, buried) = delivery_marks(&config.storage.home).await;
     let pool = harness_pool(config, launch, sessions, &workload).await.with_lifecycle(lifecycle.clone());
     let publisher = publisher(config, &js, &redactor, &pool).await;
@@ -406,7 +408,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         steers: steering::Steers::default(),
         unnarrowed: Unnarrowed::default(),
         restarts,
-        attempts: &attempts,
+        attempts: &Attempts::new(attempts_kv.clone(), config.ant.clone()),
         answered: &answered,
         buried: &buried,
         mcp: Some(&mcp),
@@ -441,11 +443,52 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         home: &config.storage.home,
         lifecycle: lifecycle.as_ref(),
         sense,
+        trails: trails(config, &client, &js, &humans, &mcp, outbox, attempts_kv, notes.clone()).await,
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     forget_if_retired(&served, config, &js, retired_before).await;
     wind_down(&served, registration, pool, lifecycle.as_ref()).await;
     Ok(served)
+}
+
+/// The trails the ant conducts, their runs continued from their records and `mcp` serving `run_trail` for them; None,
+/// with a warning, when the bus keeps no runs.
+#[expect(clippy::too_many_arguments, reason = "the services a conductor writes through, each built by serve")]
+async fn trails(
+    config: &Config,
+    client: &async_nats::Client,
+    js: &async_nats::jetstream::Context,
+    humans: &Registry,
+    mcp: &Mcp,
+    outbox: crate::mcp::Outbox,
+    attempts: crate::records::direct_kv::DirectKv,
+    notes: std::sync::Arc<dyn NotesStore>,
+) -> Option<Trails> {
+    let conducting = crate::trail::Conducting {
+        js: js.clone(),
+        js_domain: config.connection.js_domain.clone(),
+        client: client.clone(),
+        ant: config.ant.clone(),
+        worker: std::env::current_exe().ok()?,
+        trails_dir: crate::config::home_dir().ok().map(|home| home.join(".ants").join("trails")),
+        humans: humans.clone(),
+        colony: crate::mcp::jetstream_colony(js.clone()),
+        outbox,
+        attempts,
+        workers: config.pooling.trail_workers,
+        notes,
+    };
+    match Trails::new(conducting).await {
+        Ok(trails) => {
+            trails.restore().await;
+            mcp.with_trails(trails.clone());
+            Some(trails)
+        }
+        Err(e) => {
+            tracing::warn!(error = format!("{e:#}"), "conducting no trails");
+            None
+        }
+    }
 }
 
 /// The ant's workload, paused and drifting as the config says at start.
@@ -1025,6 +1068,12 @@ where
         () = inbox.hear_clones() => {}
         () = inbox.hear_mcp() => {}
         () = async {
+            match &inbox.trails {
+                Some(trails) => trails.serve().await,
+                None => std::future::pending().await,
+            }
+        } => {}
+        () = async {
             match inbox.sense {
                 Some(sense) => sense.publish(&config.ant, inbox.workload).await,
                 None => std::future::pending().await,
@@ -1234,6 +1283,9 @@ struct Inbox<'a> {
     /// The ant's sense, which takes its sage's answers to the reviews of its dreams ([`Inbox::arrived`]) and is told
     /// of its growth ([`Inbox::count_prompt`]); None when sense is not its provider.
     sense: Option<&'a crate::sense::Sense>,
+    /// The trails the ant conducts, which take the replies to their steps ([`Inbox::arrived`]); None when the bus
+    /// keeps no runs.
+    trails: Option<Trails>,
 }
 
 impl Inbox<'_> {

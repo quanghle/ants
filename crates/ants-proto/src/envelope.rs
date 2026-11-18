@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     Answer, ApprovalDecision, ApprovalRequest, Attachment, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans,
-    Questions, Role, Sealed, ThreadId, UserId, subject,
+    Questions, Role, Sealed, ThreadId, TrailStart, TrailStep, UserId, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -149,6 +149,17 @@ pub struct Envelope {
     /// or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_commits: Vec<ReviewCommit>,
+    /// The trail run and call the message is a step of, on the step's own thread: its recipient answers with an
+    /// ordinary reply, which the conductor knows by that thread ([`crate::PendingCall::answered_by`]). Only the
+    /// conductor's daemon sets it, with [`Envelope::as_step`]. Never copied by [`Envelope::reply`] or
+    /// [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail_step: Option<Box<TrailStep>>,
+    /// The trail run a schedule asks its recipient to start, the message's thread the run's: the recipient's daemon
+    /// starts it, without a prompt, only from a webhook's message ([`Envelope::webhook`]). Never copied by
+    /// [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail_start: Option<Box<TrailStart>>,
     /// On a message from an ant narrowed to [`REVIEW_ALLOW`], the dream whose review it asks for and what is new
     /// since the sender's last review in the verdicts and outcomes of the recipient's earlier findings for it: the
     /// recipient's daemon tells the recipient's sense, which keeps a record of each review. Never copied by
@@ -412,6 +423,8 @@ impl Envelope {
             sealed: None,
             notice: None,
             review_commits: Vec::new(),
+            trail_step: None,
+            trail_start: None,
             review_outcomes: None,
             sent_at: Utc::now(),
         }
@@ -421,6 +434,18 @@ impl Envelope {
     #[must_use]
     pub fn as_notice(self, kind: NoticeKind) -> Self {
         Self { notice: Some(kind), ..self }
+    }
+
+    /// The envelope as `step` of a trail run ([`Envelope::trail_step`]).
+    #[must_use]
+    pub fn as_step(self, step: TrailStep) -> Self {
+        Self { trail_step: Some(Box::new(step)), ..self }
+    }
+
+    /// The envelope as asking its recipient to start `start` ([`Envelope::trail_start`]).
+    #[must_use]
+    pub fn starting(self, start: Option<TrailStart>) -> Self {
+        Self { trail_start: start.map(Box::new), ..self }
     }
 
     /// The envelope with `owner` as the human who started its thread.
@@ -586,6 +611,8 @@ impl Envelope {
             sealed: None,
             notice: None,
             review_commits: Vec::new(),
+            trail_step: None,
+            trail_start: None,
             review_outcomes: None,
             sent_at: Utc::now(),
         })

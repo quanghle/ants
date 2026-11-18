@@ -1,7 +1,7 @@
 //! Handling one message its thread's turn came for: taking it up unless withdrawn, answering it, and settling a
 //! failed attempt as a retry, a hold or a dead letter.
 
-use ants_proto::{Envelope, Hold, Role, State, ThreadId, UserId, WEBHOOK_ALLOW};
+use ants_proto::{Envelope, Hold, Role, State, ThreadId, TrailStart, UserId, WEBHOOK_ALLOW};
 use anyhow::Result;
 use async_nats::jetstream;
 
@@ -305,8 +305,22 @@ impl Inbox<'_> {
     /// its sage, goes to the ant's sense ([`crate::sense::Sense::review_received`]).
     /// Returns whether to answer the message: a member's notice that it sent the ant's escalation higher is the
     /// daemon's alone ([`Escalator::took_climb`]), and so is the sage's answer to the review of a dream, unless its
-    /// findings prompt the ant ([`crate::sense::Sense::review_answer`]).
+    /// findings prompt the ant ([`crate::sense::Sense::review_answer`]), and so is a schedule's firing that starts a
+    /// trail run ([`Self::start_scheduled`]).
     async fn arrived(&self, incoming: &mut Incoming) -> Result<bool> {
+        if let Some(trails) = &self.trails
+            && incoming.post.is_none()
+            && trails.take(&incoming.envelope).await?
+        {
+            return Ok(false);
+        }
+        if incoming.post.is_none()
+            && incoming.envelope.webhook
+            && let Some(start) = &incoming.envelope.trail_start
+        {
+            self.start_scheduled(&incoming.envelope, start).await?;
+            return Ok(false);
+        }
         let sender = self.humans.sender_role(&incoming.envelope);
         if let Some(sense) = self.sense.filter(|_| incoming.post.is_none() && sender == Role::Ant)
             && let Some(prompt) = sense.review_answer(self.ant, &mut incoming.envelope).await?
@@ -331,6 +345,31 @@ impl Inbox<'_> {
             incoming.resume = pending.and_then(|p| p.channel);
         }
         Ok(true)
+    }
+
+    /// Start the run a schedule's firing, `envelope`, asks for ([`crate::trail::Trails::start_fired`]). A run that cannot start is
+    /// told to the thread's owner, as is a firing reaching an ant that conducts no trails.
+    async fn start_scheduled(&self, envelope: &Envelope, start: &TrailStart) -> Result<()> {
+        let thread = &envelope.thread_id;
+        let started = match &self.trails {
+            Some(trails) => trails.start_fired(envelope, start).await,
+            None => Err("the bus keeps no trail runs".to_owned()),
+        };
+        let error = match started {
+            Ok(run) => {
+                tracing::info!(%thread, %run, trail = %start.trail, "trail run started by a schedule");
+                return Ok(());
+            }
+            Err(error) => error,
+        };
+        tracing::warn!(%thread, trail = %start.trail, %error, "starting a scheduled trail run");
+        let ant = self.ant;
+        let text =
+            format!("[ants] {ant} could not start a run of trail {} for {}: {error}", start.trail, envelope.from);
+        let mut told = envelope.follow_up(ant.clone(), self.humans.owner_of(envelope), text);
+        told.in_reply_to = Some(envelope.id);
+        bus::store(self.js, told.subject(), &told, &reply_id(ant, envelope)).await?;
+        Ok(())
     }
 
     /// Set the tool rules of the message, and of its post, to those its thread is narrowed to: a human's message lifts

@@ -736,6 +736,19 @@ fn the_memory_pressure_table_reaches_every_ant() {
 }
 
 #[test]
+fn the_trails_table_caps_the_workers_of_every_ant() {
+    let loaded = parse_all("[trails]\nworkers = 2\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+    assert!(loaded.ants.iter().all(|ant| ant.trail_workers == 2));
+    assert_eq!(config(loaded.ants[0].clone()).unwrap().pooling.trail_workers, 2);
+    let default = parse_all("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+    assert_eq!(default.ants[0].trail_workers, crate::trail::DEFAULT_WORKERS);
+    let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
+    assert!(err("[trails]\nworkers = 0").contains("[trails] workers is 0; it takes 1 to 16"));
+    assert!(err("[trails]\nworkers = 17").contains("[trails] workers is 17; it takes 1 to 16"));
+    assert!(err("[trails]\nthreads = 2").contains("unknown field `threads`"));
+}
+
+#[test]
 fn schedules_take_the_top_level_server_and_unique_names() {
     let loaded = parse_all(
         "nats = \"wss://hub.example/nats\"\njs_domain = \"hub\"\n\

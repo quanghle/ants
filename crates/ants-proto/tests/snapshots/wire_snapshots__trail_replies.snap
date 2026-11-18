@@ -1,0 +1,36 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  {
+    "request_id": "019a7d2e-0000-7000-8000-000000000001",
+    "ant": "planner",
+    "outcome": "started",
+    "run": "019a7d2f-0000-7000-8000-000000000001"
+  },
+  {
+    "request_id": "019a7d2e-0000-7000-8000-000000000001",
+    "ant": "planner",
+    "outcome": "stopped",
+    "run": "019a7d2f-0000-7000-8000-000000000001",
+    "waiting": [
+      {
+        "to": "dev-a",
+        "message": "019a7d2e-0000-7000-8000-000000000005"
+      }
+    ]
+  },
+  {
+    "request_id": "019a7d2e-0000-7000-8000-000000000001",
+    "ant": "planner",
+    "outcome": "resumed",
+    "run": "019a7d2f-0000-7000-8000-000000000001"
+  },
+  {
+    "request_id": "019a7d2e-0000-7000-8000-000000000001",
+    "ant": "planner",
+    "outcome": "refused",
+    "error": "no saved trail release"
+  }
+]
