@@ -293,7 +293,10 @@ async fn a_finding_on_the_practice_applied_names_what_it_asks_and_rests_while_it
     let found: Vec<_> = first.findings.iter().map(|f| (f.id.as_str(), f.kind)).collect();
     assert_eq!(found, [("1.1", FindingKind::UnansweredReviews), ("1.2", FindingKind::NoReviewedRelationship)]);
     woken(&*items, 1, &on(91).thread).await.unwrap();
-    let applied = |finding: &str, item: &serde_json::Value| json!({"verdicts": [{"finding": finding, "verdict": "applied", "reason": "Kept.", "items": [item]}]});
+    let applied = |finding: &str, item: &serde_json::Value| {
+        let verdict = json!({"finding": finding, "verdict": "applied", "reason": "Kept.", "items": [item]});
+        json!({"verdicts": [verdict]})
+    };
     let refused = tool(&sense, dream, applied("1.2", &json!(lesson)), on(91)).await;
     assert_eq!(error(&refused), "invalid_arguments");
     assert_eq!(

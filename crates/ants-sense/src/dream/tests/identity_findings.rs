@@ -229,7 +229,10 @@ async fn what_a_clone_inherited_is_found_after_five_threads_of_its_own_until_mad
     begin(&*items, start(Utc::now(), &on(9))).await.unwrap().unwrap();
     woken(&*items, 1, &on(1).thread).await.unwrap();
     let model = record_id(&Scope::Own).unwrap();
-    let applied = |finding: &str| json!({"verdicts": [{"finding": finding, "verdict": "applied", "reason": "Mine.", "items": [model]}]});
+    let applied = |finding: &str| {
+        let verdict = json!({"finding": finding, "verdict": "applied", "reason": "Mine.", "items": [model]});
+        json!({"verdicts": [verdict]})
+    };
     let refused = answer(&sense, 1, applied("1.3")).await;
     assert!(refused.text.starts_with("Finding 1.3 (inherited): applied names the skill proposal made;"), "{refused:?}");
     assert!(!answer(&sense, 1, applied("1.2")).await.is_error, "the self-model answers its own");
@@ -315,7 +318,10 @@ async fn an_identity_finding_applied_names_the_item_of_the_kind_it_asks_for() {
         [("1.1", FindingKind::NoPersona), ("1.2", FindingKind::NoSelfModel), ("1.3", FindingKind::NoRelationship)];
     assert_eq!(kinds, asked);
     woken(&*items, 1, &on(1).thread).await.unwrap();
-    let applied = |finding: &str, item: &serde_json::Value| json!({"verdicts": [{"finding": finding, "verdict": "applied", "reason": "Written.", "items": [item]}]});
+    let applied = |finding: &str, item: &serde_json::Value| {
+        let verdict = json!({"finding": finding, "verdict": "applied", "reason": "Written.", "items": [item]});
+        json!({"verdicts": [verdict]})
+    };
     let lesson = json!(store(&kept, &lesson("Alice asks for tests")).await);
     let bob = json!({"relationship": "Terse.", "who": "human:bob", "title": "Bob"});
     let bob = identity(&sense, bob).await.json["id"].clone();
