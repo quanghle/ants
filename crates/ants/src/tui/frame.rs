@@ -108,7 +108,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
 const HELP: &[(&str, &str)] = &[
     ("Tab", "move between the nav and the view"),
     ("↑↓ j k", "move the selection, or scroll a thread"),
-    ("PgUp PgDn Home End", "move further"),
+    ("PgUp PgDn Home End", "move further; in a thread: scroll half a view, first, latest"),
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
     ("w ←→ a", "on an ant: its threads in work, pane, ask; in a channel: ←→ its state tab"),
@@ -122,7 +122,7 @@ const HELP: &[(&str, &str)] = &[
     ("1-9 Enter", "on a question: answer by number, or focus its card: ↑↓ ←→ Space Enter Esc"),
     ("g r f x d z s c o", "on home: grant, reply, forward, cancel, done, snooze, digest, credentials, held orders"),
     ("i > t S", "in a thread: reply, quote the selected, delegation tree, TL;DR"),
-    ("+ f u b T", "in a thread: react, forward, unread from, remind; tool calls"),
+    ("+ f u b T v", "in a thread: react, forward, unread from, remind; tool calls; pager"),
     ("o ]", "in a thread or channel: open the marked attachment, mark the next"),
     ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),
     ("W E", "in a thread: withdraw a waiting message or post, or to edit it"),

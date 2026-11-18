@@ -84,6 +84,8 @@ pub enum Action {
     Decide(Box<ApprovalRequest>, Verdict),
     /// Edit the command bar's text in the editor.
     Edit(String),
+    /// Show the text in the pager, else in the editor.
+    Page(String),
     /// React to the message so, or with true take the reaction back, as `ants react` does.
     React(Uuid, Reaction, bool),
     /// Find the messages matching the search, replacing any search running.
