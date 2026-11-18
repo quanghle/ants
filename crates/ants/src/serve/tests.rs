@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use ants_daemon::config::Ant;
+use ants_daemon::config::builtins::Elsewhere;
 use ants_daemon::{Harnesses, config};
 use clap::Parser;
 
@@ -29,6 +30,11 @@ fn ant(name: &str) -> Ant {
     p
 }
 
+/// Whether this machine holds the credentials of the built-in ant `name`, which the config files of tests read.
+fn builtin_creds_here(name: &str) -> bool {
+    std::env::home_dir().is_some_and(|home| home.join(format!(".config/ants/auth/{name}.creds")).is_file())
+}
+
 #[test]
 fn picks_the_source() {
     let existing = here().join("Cargo.toml");
@@ -44,10 +50,11 @@ fn picks_the_source() {
 fn the_file_names_the_machine_as_the_host_connection_would() {
     let dir = ants_test_support::scratch_dir("serve-machine").canonicalize().unwrap();
     let config = dir.join("config.toml");
-    let listed = |text: &str, line: &str| {
+    let listing = |text: &str, line: &str| {
         std::fs::write(&config, text).unwrap();
-        ants(&args(&format!("--config {} {line}", config.display())), &config, "gen-4f2a.internal").unwrap()
+        ants(&args(&format!("--config {} {line}", config.display())), &config, "gen-4f2a.internal")
     };
+    let listed = |text: &str, line: &str| listing(text, line).unwrap();
     let top = "harness = \"copilot\"\nmachine = \"dev-vm1\"\n";
     assert_eq!(listed(top, "--ant messenger").machine, Some("dev-vm1".parse().unwrap()));
     assert_eq!(listed("harness = \"copilot\"\nmachine = \"Dev VM\"\n", "").machine, Some("gen-4f2a".parse().unwrap()));
@@ -55,8 +62,17 @@ fn the_file_names_the_machine_as_the_host_connection_would() {
     crate::auth::init(&team).unwrap();
     crate::auth::issue_host(&team, &"m1".parse().unwrap(), None, &dir.join("h.creds")).unwrap();
     let with_creds = format!("{top}[host]\ncreds = \"h.creds\"\n");
-    assert_eq!(listed(&with_creds, "").machine, Some("m1".parse().unwrap()), "the credentials' machine comes first");
-    let one = listed(&with_creds, "--ant messenger");
+    if !builtin_creds_here("messenger") {
+        let err = format!("{:#}", listing(&with_creds, "").unwrap_err());
+        assert!(err.contains("nothing to serve on this machine: no credentials of the built-in messenger at"), "{err}");
+        let err = format!("{:#}", listing(&with_creds, "--ant messenger").unwrap_err());
+        assert!(err.contains("`ants auth user messenger`") && err.contains("or serve the messenger where"), "{err}");
+    }
+    let with_creds = format!("{with_creds}[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n");
+    let whole = listed(&with_creds, "");
+    assert_eq!(whole.machine, Some("m1".parse().unwrap()), "the credentials' machine comes first");
+    assert_eq!(whole.ants[0].name.as_str(), "dev-a");
+    let one = listed(&with_creds, "--ant dev-a");
     assert_eq!(one.host, None, "one ant served makes no host connection");
     assert_eq!(
         one.sense_link.and_then(|s| s.creds),
@@ -103,7 +119,7 @@ fn flags_override_the_picked_ant() {
     let path = Path::new("config.toml");
     let picked = pick(
         all.clone(),
-        None,
+        &[],
         &args(
             "--ant dev-b --max-harnesses 1 --allow-tools --allow read --capability rust,nats --capability acp \
              --max-tool-calls 20 --max-daily-cost 7.5",
@@ -121,24 +137,26 @@ fn flags_override_the_picked_ant() {
     assert_eq!(picked[0].prompt_timeout, config::DEFAULT_PROMPT_TIMEOUT);
     assert_eq!(picked[0].worktrees, None, "unset unless a flag sets it");
     let worktrees =
-        |flag: &str| pick(all.clone(), None, &args(&format!("--ant dev-a {flag}")), path).unwrap()[0].worktrees;
+        |flag: &str| pick(all.clone(), &[], &args(&format!("--ant dev-a {flag}")), path).unwrap()[0].worktrees;
     assert_eq!((worktrees("--worktrees"), worktrees("--no-worktrees")), (Some(true), Some(false)));
 
-    assert_eq!(pick(all.clone(), None, &args(""), path).unwrap(), all);
-    let err = pick(all.clone(), None, &args("--ant dev-c"), path).unwrap_err().to_string();
+    assert_eq!(pick(all.clone(), &[], &args(""), path).unwrap(), all);
+    let err = pick(all.clone(), &[], &args("--ant dev-c"), path).unwrap_err().to_string();
     assert!(err.contains("ant dev-c is not in config.toml"), "{err}");
-    let err = pick(all.clone(), None, &args("--ant sage"), path).unwrap_err().to_string();
+    let err = pick(all.clone(), &[], &args("--ant sage"), path).unwrap_err().to_string();
     assert!(err.contains("ant sage is not in config.toml"), "{err}");
-    let creds = Path::new("auth/sage.creds");
-    let err = pick(all.clone(), Some(creds), &args("--ant sage"), path).unwrap_err().to_string();
-    assert!(err.contains("the built-in sage has no credentials at auth/sage.creds"), "{err}");
-    assert_eq!(pick(all.clone(), Some(creds), &args(""), path).unwrap(), all, "the others serve all the same");
-    let err = pick(all, None, &args("--workdir ."), path).unwrap_err().to_string();
+    let sage = Ant { builtin: true, is_sage: true, ..Ant::new(UserId::sage(), here()) };
+    let left = [Elsewhere { ant: sage, creds: PathBuf::from("auth/sage.creds") }];
+    let err = pick(all.clone(), &left, &args("--ant sage"), path).unwrap_err().to_string();
+    assert!(err.contains("no credentials of the built-in sage at auth/sage.creds"), "{err}");
+    assert!(err.contains("`ants auth user sage`") && err.contains("or serve the sage where they are"), "{err}");
+    assert_eq!(pick(all.clone(), &left, &args(""), path).unwrap(), all, "the others serve all the same");
+    let err = pick(all, &[], &args("--workdir ."), path).unwrap_err().to_string();
     assert!(err.contains("add --ant"), "{err}");
 
     let added = vec![Ant { template: Some("worker".to_owned()), ..ant("lead-a") }];
-    assert_eq!(pick(added.clone(), None, &args("--ant lead-a"), path).unwrap(), added);
-    let err = pick(added, None, &args("--ant lead-a --max-daily-cost 99"), path).unwrap_err().to_string();
+    assert_eq!(pick(added.clone(), &[], &args("--ant lead-a"), path).unwrap(), added);
+    let err = pick(added, &[], &args("--ant lead-a --max-daily-cost 99"), path).unwrap_err().to_string();
     assert!(err.contains("ant lead-a was added from template worker"), "{err}");
 }
 
@@ -360,7 +378,7 @@ fn model_flags_override_only_the_selected_ant() {
     p.context = Some("default".to_owned());
     let picked = pick(
         vec![p.clone(), ant("dev-b")],
-        None,
+        &[],
         &args("--ant dev-a --model smart --reasoning-effort high --context long_context"),
         Path::new("config.toml"),
     )
@@ -372,7 +390,7 @@ fn model_flags_override_only_the_selected_ant() {
     assert_eq!(only_model.reasoning_effort.as_deref(), Some("low"));
     assert_eq!(only_model.context.as_deref(), Some("default"));
     for line in ["--model smart", "--reasoning-effort high", "--context long_context"] {
-        assert!(pick(vec![ant("dev-a")], None, &args(line), Path::new("config.toml")).is_err());
+        assert!(pick(vec![ant("dev-a")], &[], &args(line), Path::new("config.toml")).is_err());
     }
 }
 
@@ -386,7 +404,7 @@ fn tool_flags_override_only_the_selected_settings() {
     p.env.insert("KEEP".to_owned(), "keep".to_owned());
     let picked = pick(
         vec![p],
-        None,
+        &[],
         &args("--ant dev-a --whoami custom-role --memory custom-memory --env TASK_DB=cli.db --env EXTRA=a=b"),
         Path::new("config.toml"),
     )
@@ -407,6 +425,6 @@ fn tool_flags_override_only_the_selected_settings() {
     assert!(Cmd::try_parse_from(["daemon", "--env", "=value"]).is_err());
     assert!(Cmd::try_parse_from(["daemon", "--env", "NAME"]).is_err());
     for line in ["--whoami role", "--memory notes", "--tasks tickets", "--env NAME=value"] {
-        assert!(pick(vec![ant("dev-a")], None, &args(line), Path::new("config.toml")).is_err());
+        assert!(pick(vec![ant("dev-a")], &[], &args(line), Path::new("config.toml")).is_err());
     }
 }

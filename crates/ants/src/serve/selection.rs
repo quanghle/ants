@@ -1,11 +1,13 @@
 //! Which ants `ants daemon` serves: its flags, the ants they pick from the config file or describe on the command
 //! line, and their configs.
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use ants_daemon::config::builtins::Elsewhere;
 use ants_daemon::config::{self, Ant, HostSettings, Summary};
 use ants_daemon::profile::shared::{Drift, Shared};
 use ants_daemon::schedule::Schedule;
@@ -282,8 +284,8 @@ pub struct Listed {
 /// described by flags the harnesses and host settings of the file at `default_path` if it exists, and its top-level
 /// `harness` unless the flags name one. The schedules run only when the daemon serves the whole file, not one ant
 /// picked with `--ant`. `hostname` names the machine where the file does
-/// not. A daemon serving the whole file says once why it leaves the built-in sage to another machine
-/// ([`config::Loaded::sage_elsewhere`]).
+/// not. A daemon serving the whole file says once why it leaves a built-in ant to another machine
+/// ([`config::Loaded::elsewhere`]), and fails where that leaves nothing to serve.
 pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Listed> {
     match source(args, default_path)? {
         Source::Flags(name) => {
@@ -313,10 +315,12 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Li
         Source::File(path) => {
             let loaded = config::load(&path)?;
             let whole = args.ant.is_none();
-            if let Some(creds) = loaded.sage_elsewhere.as_deref().filter(|_| whole)
-                && !SAGE_ELSEWHERE_TOLD.swap(true, Ordering::Relaxed)
-            {
-                tracing::info!("{}", sage_elsewhere(creds));
+            if whole {
+                tell_elsewhere(&loaded.elsewhere);
+                if loaded.ants.is_empty() {
+                    let why = loaded.elsewhere.iter().map(elsewhere).collect::<Vec<_>>().join("; ");
+                    bail!("config {}: nothing to serve on this machine: {why}", path.display());
+                }
             }
             let schedules = if whole { loaded.schedules } else { Vec::new() };
             let metrics = args.metrics.or(loaded.metrics);
@@ -331,7 +335,7 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Li
             let (host, sense_link) = if whole { (Some(loaded.host), None) } else { (None, Some(loaded.host)) };
             let nats_server = loaded.nats_server.filter(|_| whole);
             let auto_update = if whole { loaded.auto_update } else { config::AutoUpdate::Off };
-            let ants = pick(loaded.ants, loaded.sage_elsewhere.as_deref(), args, &path)?;
+            let ants = pick(loaded.ants, &loaded.elsewhere, args, &path)?;
             let harnesses = loaded.harnesses;
             Ok(Listed {
                 ants,
@@ -349,33 +353,40 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Li
     }
 }
 
-/// Whether a daemon said already why it leaves the built-in sage to another machine.
-static SAGE_ELSEWHERE_TOLD: AtomicBool = AtomicBool::new(false);
+/// The built-in ants a daemon serving the whole file said it leaves to another machine, so that each reload says so
+/// only of those it newly leaves.
+static ELSEWHERE_TOLD: Mutex<BTreeSet<UserId>> = Mutex::new(BTreeSet::new());
 
-/// Why the machine leaves the built-in sage to another, its credentials belonging at `creds`, and how to serve it here.
-fn sage_elsewhere(creds: &Path) -> String {
+/// Say why the machine leaves each of `left` to another, unless said already.
+fn tell_elsewhere(left: &[Elsewhere]) {
+    let now: BTreeSet<UserId> = left.iter().map(|left| left.ant.name.clone()).collect();
+    let told = std::mem::replace(&mut *ELSEWHERE_TOLD.lock().unwrap_or_else(PoisonError::into_inner), now);
+    for left in left.iter().filter(|left| !told.contains(&left.ant.name)) {
+        let also = if left.ant.is_sage { ", the ants here naming it all the same" } else { "" };
+        tracing::info!("the built-in {} is left to another machine{also}: {}", left.ant.name, elsewhere(left));
+    }
+}
+
+/// Why the machine leaves the built-in ant `left` to another, and how to serve it here.
+fn elsewhere(left: &Elsewhere) -> String {
     format!(
-        "no credentials of the built-in sage at {}, which the server's authentication needs: the sage is left to \
-         another machine, the ants here naming it all the same; to serve it here, issue them with `ants auth user \
-         sage` on the machine holding the team keys, copy them there and reload the daemon",
-        creds.display()
+        "no credentials of the built-in {name} at {}, which the server's authentication needs; to serve it here, \
+         issue them with `ants auth user {name}` on the machine holding the team keys and copy them there",
+        left.creds.display(),
+        name = left.ant.name,
     )
 }
 
 /// The ants of the file at `path` that `args` pick: the one `--ant` names, with the ant flags applied, else all of
-/// them. `sage_elsewhere` is where the built-in sage's credentials belong when the file leaves it to another machine,
-/// for which `--ant sage` fails.
-pub(super) fn pick(all: Vec<Ant>, sage_elsewhere: Option<&Path>, args: &DaemonArgs, path: &Path) -> Result<Vec<Ant>> {
+/// them. `elsewhere` are the built-in ants the file leaves to another machine, for which `--ant` fails.
+pub(super) fn pick(all: Vec<Ant>, elsewhere: &[Elsewhere], args: &DaemonArgs, path: &Path) -> Result<Vec<Ant>> {
     match &args.ant {
         Some(name) => {
-            let p = all.into_iter().find(|p| &p.name == name).with_context(|| match sage_elsewhere {
-                Some(creds) if *name == UserId::sage() => format!(
-                    "the built-in sage has no credentials at {}, which the server's authentication needs: issue them \
-                     with `ants auth user sage` on the machine holding the team keys and copy them there, or serve the \
-                     sage where they are",
-                    creds.display()
-                ),
-                _ => format!("ant {name} is not in {}", path.display()),
+            let p = all.into_iter().find(|p| &p.name == name).with_context(|| {
+                match elsewhere.iter().find(|left| left.ant.name == *name) {
+                    Some(left) => format!("{}, or serve the {name} where they are", self::elsewhere(left)),
+                    None => format!("ant {name} is not in {}", path.display()),
+                }
             })?;
             if let Some(template) = p.template.as_ref().filter(|_| args.options.sets_any()) {
                 bail!(

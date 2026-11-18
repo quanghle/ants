@@ -1154,6 +1154,32 @@ fn ants_whose_harness_runs_tools_unasked_are_warned_of_rules_that_miss_them() {
 }
 
 #[test]
+fn a_config_leaving_every_ant_to_another_machine_fails_naming_the_builtin_ones() {
+    let auth = std::env::home_dir().unwrap().join(".config/ants/auth");
+    if ["messenger", "sage"].iter().any(|name| auth.join(format!("{name}.creds")).is_file()) {
+        return;
+    }
+    let dir = ants_test_support::scratch_dir("doctor-elsewhere");
+    let config = dir.join("ants.toml");
+    let check = |text: &str| {
+        std::fs::write(&config, format!("harness = \"copilot\"\n[host]\ncreds = \"h.creds\"\n{text}")).unwrap();
+        let mut checks = Vec::new();
+        assert!(check_config(&config, &mut checks).is_some());
+        checks.remove(0)
+    };
+    let nothing = check("");
+    assert_eq!(nothing.status, Status::Fail, "{nothing}");
+    let messenger =
+        format!("the built-in messenger, without credentials at {} here", auth.join("messenger.creds").display());
+    assert!(nothing.detail.contains(&messenger) && nothing.detail.ends_with("nothing to serve here"), "{nothing}");
+    let some = check("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n");
+    assert_eq!(some.status, Status::Ok, "{some}");
+    assert!(some.detail.contains(" lists dev-a; the built-in messenger, without credentials at"), "{some}");
+    assert!(some.detail.ends_with("sage.creds here, is left to another machine"), "{some}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn a_sage_on_a_harness_that_cannot_hold_reviews_is_warned_of_declining_them() {
     let dir = ants_test_support::scratch_dir("doctor-unheld-reviews");
     let config = dir.join("ants.toml");

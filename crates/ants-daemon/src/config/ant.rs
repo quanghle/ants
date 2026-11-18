@@ -406,15 +406,15 @@ impl Ant {
 /// The ant a file serves unless it sets `messenger = false` or lists one named `messenger`: the file's `harness`, which
 /// it needs, with its default model, reasoning effort and context, and otherwise the settings of an ant that sets
 /// nothing. Its home and workdir are `~/.ants/messenger`, created when it starts, and its credentials
-/// `~/.config/ants/auth/messenger.creds` (where `ants auth user messenger` writes them) if that file exists.
+/// `~/.config/ants/auth/messenger.creds` (where `ants auth user messenger` writes them) if that file exists; on a
+/// server taking credentials, a machine without that file leaves it to another ([`super::builtins`]).
 pub fn builtin_messenger(harness: Option<&str>, home: &Path) -> Ant {
     builtin(UserId::messenger(), harness, home)
 }
 
 /// The ant a file serves while one of its ants names `sage` as its sage and it lists no ant of the name
-/// ([`super::sage::settle`]), unless the server takes credentials and the sage has none on the machine
-/// ([`super::sage::served_here`]); set up as the built-in messenger is ([`builtin_messenger`]), in `~/.ants/sage`,
-/// with `~/.config/ants/auth/sage.creds`. Its shared settings, such as its model and reasoning effort, change as any
+/// ([`super::sage::settle`]); set up, and left to another machine, as the built-in messenger is ([`builtin_messenger`]),
+/// in `~/.ants/sage`, with `~/.config/ants/auth/sage.creds`. Its shared settings, such as its model and reasoning effort, change as any
 /// ant's.
 pub fn builtin_sage(harness: Option<&str>, home: &Path) -> Ant {
     builtin(UserId::sage(), harness, home)
