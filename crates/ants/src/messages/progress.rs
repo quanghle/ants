@@ -233,7 +233,8 @@ impl Status {
             | StatusUpdate::Queued { .. }
             | StatusUpdate::Escalated { .. }
             | StatusUpdate::Asked { .. }
-            | StatusUpdate::Decided { .. } => return,
+            | StatusUpdate::Decided { .. }
+            | StatusUpdate::Step { .. } => return,
         };
         view.stand = stand;
     }

@@ -56,6 +56,7 @@ impl Conductor {
             })
         });
         let colony: ants_daemon::mcp::Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+        let notes = Arc::new(ants_daemon::stream::notes::JetStreamNotes::new(js.clone(), lead.clone()));
         let conducting = Conducting {
             js,
             js_domain: None,
@@ -68,6 +69,7 @@ impl Conductor {
             outbox,
             attempts,
             workers: ants_daemon::trail::DEFAULT_WORKERS,
+            notes,
         };
         let trails = Trails::new(conducting).await.unwrap();
         trails.restore().await;
@@ -78,9 +80,14 @@ impl Conductor {
         Self { trails, sent, serving }
     }
 
-    /// The next step the conductor sends.
+    /// The next step the conductor sends, past the messages it tells the run's owner.
     async fn step(&mut self) -> Envelope {
-        tokio::time::timeout(Duration::from_secs(30), self.sent.recv()).await.expect("a step").unwrap()
+        loop {
+            let sent = tokio::time::timeout(Duration::from_secs(30), self.sent.recv()).await.expect("a step").unwrap();
+            if sent.trail_step.is_some() {
+                return sent;
+            }
+        }
     }
 
     /// `step`'s recipient replying `text`.

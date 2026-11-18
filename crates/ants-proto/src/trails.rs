@@ -1,7 +1,7 @@
 //! Trails: scripts an ant, the conductor, runs to conduct other ants and humans, one step at a time. A step is a
 //! message carrying its [`TrailStep`]; a saved trail is a [`SavedTrail`] in [`TRAILS_BUCKET`]; a run is kept in
 //! [`TRAIL_RUNS_BUCKET`] under its conductor's keys: its [`TrailRun`], its [`TrailSession`], one [`JournalEntry`] per
-//! answered call and the conductor's [`TrailRunIndex`].
+//! answered call, the conductor's [`TrailRunIndex`] and a [`TrailStepThread`] per step's thread.
 //!
 //! A step goes on a thread of its own, which the conductor's [`TrailSession`] maps to the call
 //! ([`PendingCall::thread`]). The reply resolving the call carries nothing of the step: the first message on that
@@ -22,7 +22,7 @@ use crate::{Envelope, Error, MAX_TITLE, RunId, ThreadId, TrailName, UserId, subj
 #[cfg(doc)]
 use crate::{
     NoticeKind, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, trail_call_key, trail_run_key, trail_runs_index_key,
-    trail_session_key,
+    trail_session_key, trail_step_key,
 };
 
 /// Most bytes a trail's script has: a saved trail's and a run's.
@@ -358,6 +358,19 @@ pub enum CallAnswer {
 pub struct TrailRunIndex {
     #[serde(default)]
     pub runs: Vec<RunId>,
+}
+
+/// A step's thread, as its conductor keeps it in [`TRAIL_RUNS_BUCKET`] under [`trail_step_key`] from before the step is
+/// sent, so a message on it after the run ended, or after a restart, is still told to be the step's and reported on the
+/// run's thread rather than prompting the conductor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrailStepThread {
+    pub run: RunId,
+    pub call: u32,
+    /// The step's recipient ([`PendingCall::to`]).
+    pub to: UserId,
+    /// The run's thread ([`TrailRun::thread`]).
+    pub run_thread: ThreadId,
 }
 
 /// A human asking `ant`'s daemon, the conductor of the run, to start, stop or resume one, on [`subject::trail`] with core

@@ -23,8 +23,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
-    Envelope, JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, PendingCall, QueuedCall, Role, RunId, RunState, ThreadId,
-    TrailFunction, TrailLimits, TrailRun, TrailSession, TrailSource, TrailStart, UserId, WaitingStep,
+    Envelope, JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, NoticeKind, PendingCall, QueuedCall, Role, RunId, RunState,
+    StepStage, ThreadId, TrailFunction, TrailLimits, TrailRun, TrailSession, TrailSource, TrailStart, UserId,
+    WaitingStep,
 };
 use ants_trail::{Answer, JournalEntry, Limits, Run, Worker};
 use anyhow::Result;
@@ -35,6 +36,8 @@ use tokio::sync::{Semaphore, mpsc};
 use crate::mcp::{Colony, Outbox};
 use crate::people::humans::Registry;
 use crate::records::direct_kv::DirectKv;
+use crate::stream::notes::NotesStore;
+use report::Stray;
 use saved::Saved;
 use steps::Taken;
 use store::Store;
@@ -72,6 +75,8 @@ pub struct Conducting {
     pub attempts: DirectKv,
     /// Workers computing at once across the process's runs, 1 to [`MAX_WORKERS`]: the first conductor's count holds.
     pub workers: usize,
+    /// The thread notes, where a run reports on its thread.
+    pub notes: Arc<dyn NotesStore>,
 }
 
 /// A run to start: what the MCP tool, a schedule and a human's [`ants_proto::TrailRequest`] ask for.
@@ -106,10 +111,12 @@ struct Inner {
     colony: Colony,
     outbox: Outbox,
     attempts: DirectKv,
+    notes: Arc<dyn NotesStore>,
     /// The runs not finished: running, waiting or stopped.
     runs: Mutex<HashMap<RunId, Arc<Slot>>>,
     /// The threads of steps, to the run waiting on them; or, once answered or given up, to the step's recipient, so
-    /// a further reply of it is ignored rather than prompted.
+    /// a further reply of it is reported on the run's thread rather than prompted. A run's threads are forgotten as it
+    /// ends: its [`ants_proto::TrailStepThread`]s tell its steps' threads from then on.
     threads: Mutex<HashMap<ThreadId, Step>>,
     wake: mpsc::UnboundedSender<RunId>,
     woken: tokio::sync::Mutex<mpsc::UnboundedReceiver<RunId>>,
@@ -178,8 +185,20 @@ fn engine_limits(limits: &TrailLimits) -> Limits {
 
 impl Trails {
     pub async fn new(conducting: Conducting) -> Result<Self> {
-        let Conducting { js, js_domain, client, ant, worker, trails_dir, humans, colony, outbox, attempts, workers } =
-            conducting;
+        let Conducting {
+            js,
+            js_domain,
+            client,
+            ant,
+            worker,
+            trails_dir,
+            humans,
+            colony,
+            outbox,
+            attempts,
+            workers,
+            notes,
+        } = conducting;
         COMPUTING.get_or_init(|| Semaphore::new(workers.clamp(1, MAX_WORKERS)));
         let store = Store::new(&js, js_domain.as_ref(), ant.clone()).await?;
         let saved = Saved::new(&js, js_domain.as_ref(), trails_dir).await;
@@ -194,6 +213,7 @@ impl Trails {
             colony,
             outbox,
             attempts,
+            notes,
             runs: Mutex::default(),
             threads: Mutex::default(),
             wake,
@@ -260,6 +280,7 @@ impl Trails {
             return Err(format!("the arguments have {size} bytes of JSON; a run takes at most {MAX_TRAIL_ARGS}"));
         }
         let engine = Run::new(&script, args.clone(), engine_limits(&limits)).map_err(|e| e.to_string())?;
+        let meta = engine.state().meta().clone();
         let session = serde_json::to_string(engine.state()).map_err(|e| e.to_string())?;
         let now = Utc::now();
         let header = TrailRun {
@@ -281,6 +302,7 @@ impl Trails {
             ended_at: None,
         };
         let run = header.run.clone();
+        let started = header.clone();
         let book = Book { header, session, pending: Vec::new(), queued: Vec::new(), answers: Vec::new(), late: false };
         let slot = Slot::new(engine, book);
         let stored = async {
@@ -289,6 +311,7 @@ impl Trails {
             self.inner.store.list(&run, true).await
         };
         stored.await.map_err(|e| format!("storing the run: {e:#}"))?;
+        self.report_start(&started, &meta).await;
         locked(&self.inner.runs).insert(run.clone(), slot);
         self.wake(&run);
         tracing::info!(run = %run, "trail run started");
@@ -328,9 +351,13 @@ impl Trails {
             }
             pending
         };
+        let header = slot.header();
         let mut waiting = Vec::new();
         for call in &pending {
             self.retire(run, call);
+            if call.sent {
+                self.report_step(&header, call, StepStage::Dropped);
+            }
             if !call.sent || call.function == TrailFunction::Human {
                 continue;
             }
@@ -349,6 +376,7 @@ impl Trails {
             self.save_header(&slot).await
         };
         stored.await.map_err(|e| format!("storing the run: {e:#}"))?;
+        self.report_end(&slot.header()).await;
         tracing::info!(run = %run, by = %by, "trail run stopped");
         Ok(waiting)
     }
@@ -390,35 +418,47 @@ impl Trails {
             self.inner.store.list(run, true).await
         };
         saved.await.map_err(|e| format!("storing the run: {e:#}"))?;
+        self.report_resumed(&slot.header(), by).await;
         locked(&self.inner.runs).insert(run.clone(), slot);
         self.wake(run);
         tracing::info!(run = %run, by = %by, "trail run resumed");
         Ok(())
     }
 
-    /// Take `message` when it answers a step of a run, or is a further reply to a step answered or given up: true
-    /// when taken, to be acked without prompting the harness, once this returns.
+    /// Take `message` when it arrived on a step's thread: the reply answering the step's call, resolving it; a
+    /// notice or escalation, or a further reply of the step's recipient once the run no longer waits on the step,
+    /// reported on the run's thread. True when taken, to be acked without prompting the harness, once this returns.
     pub async fn take(&self, message: &Envelope) -> Result<bool> {
         let step = locked(&self.inner.threads).get(&message.thread_id).cloned();
         let answerer = self.answerer(message);
         let run = match step {
-            None => return Ok(false),
-            Some(Step::Retired { to, .. }) => {
-                let reply = *answerer == to
-                    && message.trail_step.is_none()
-                    && message.notice.is_none()
-                    && message.escalation.is_none();
-                return Ok(reply);
-            }
+            None => return self.take_late(message, answerer).await,
+            Some(Step::Retired { run, to }) => return Ok(self.take_retired(&run, &to, message, answerer).await),
             Some(Step::Live(run)) => run,
         };
         let Some(slot) = locked(&self.inner.runs).get(&run).cloned() else { return Ok(false) };
         let (header, pending) = {
             let book = slot.book();
-            let pending = book.pending.iter().find(|call| call.answered_by(message, answerer)).cloned();
+            let pending = book.pending.iter().find(|call| call.thread == message.thread_id).cloned();
             (book.header.clone(), pending)
         };
         let Some(pending) = pending else { return Ok(false) };
+        if !pending.answered_by(message, answerer) {
+            if message.notice.is_none() && message.escalation.is_none() {
+                return Ok(false);
+            }
+            let call = Some(pending.call);
+            let stray = Stray { run: &run, run_thread: &header.thread, call, to: &pending.to, waited: true };
+            self.report_stray(stray, message).await;
+            let withdrawn = message.notice == Some(NoticeKind::Withdrawn)
+                && message.from == pending.to
+                && message.in_reply_to == Some(pending.message);
+            if withdrawn {
+                let error = format!("{} never answered: the step's message was withdrawn from its queue", pending.to);
+                self.resolve(&slot, &header, &pending, Answer::Error(error), 0).await?;
+            }
+            return Ok(true);
+        }
         let spent = match pending.function {
             TrailFunction::Agent => pending.turn_budget.saturating_sub(message.turn_budget),
             TrailFunction::Human => 0,
@@ -430,22 +470,74 @@ impl Trails {
                 Some(answer) => answer,
             },
         };
+        self.resolve(&slot, &header, &pending, answer, spent).await?;
+        Ok(true)
+    }
+
+    /// Answer `pending`, a call of the run of `slot`, with `answer`, its step's thread having spent `spent` turns: its
+    /// journal entry is stored when this returns, and the run woken to hand it to the script.
+    async fn resolve(
+        &self,
+        slot: &Slot,
+        header: &TrailRun,
+        pending: &PendingCall,
+        answer: Answer,
+        spent: u32,
+    ) -> Result<()> {
+        let run = &header.run;
         let entry = JournalEntry {
             call: pending.call,
             function: steps::engine_function(pending.function),
             args: pending.args.clone(),
             answer,
         };
-        self.inner.store.put_entry(&run, &entry).await?;
+        self.inner.store.put_entry(run, &entry).await?;
         {
             let mut book = slot.book();
             book.pending.retain(|call| call.call != pending.call);
             book.header.turns = book.header.turns.saturating_add(spent);
             book.answers.push((entry.call, entry.answer.clone()));
         }
-        self.retire(&run, &pending);
-        report::answered(&header, &pending, &entry.answer);
-        self.wake(&run);
+        self.retire(run, pending);
+        self.report_answered(header, pending, &entry.answer);
+        self.wake(run);
+        Ok(())
+    }
+
+    /// Take `message`, on the thread of a step to `to` the run `run` no longer waits on, when it is a notice, an
+    /// escalation or a further reply of `to`, reporting it on the run's thread.
+    async fn take_retired(&self, run: &RunId, to: &UserId, message: &Envelope, answerer: &UserId) -> bool {
+        let reply = answerer == to && message.trail_step.is_none();
+        if !reply && message.notice.is_none() && message.escalation.is_none() {
+            return false;
+        }
+        let run_thread = locked(&self.inner.runs).get(run).map(|slot| slot.header().thread);
+        if let Some(run_thread) = &run_thread {
+            let step = self.inner.store.step(&message.thread_id).await;
+            let call = step.ok().flatten().map(|step| step.call);
+            let stray = Stray { run, run_thread, call, to, waited: false };
+            self.report_stray(stray, message).await;
+        }
+        true
+    }
+
+    /// Take `message`, on a thread the conductor knows of no run in memory, when the thread is a step's, as its
+    /// [`ants_proto::TrailStepThread`] tells, and the message a notice, an escalation, or a reply of the step's
+    /// recipient: one arriving after the run ended, or after a restart, reported on the run's thread. Only a message
+    /// that may be one, replying or answering, is looked up.
+    async fn take_late(&self, message: &Envelope, answerer: &UserId) -> Result<bool> {
+        let (notice, escalation) = (message.notice.is_some(), message.escalation.is_some());
+        let replying = message.in_reply_to.is_some() || message.answer.is_some();
+        if message.trail_step.is_some() || !(replying || notice || escalation) {
+            return Ok(false);
+        }
+        let Some(step) = self.inner.store.step(&message.thread_id).await? else { return Ok(false) };
+        if *answerer != step.to && !notice && !escalation {
+            return Ok(false);
+        }
+        let stray =
+            Stray { run: &step.run, run_thread: &step.run_thread, call: Some(step.call), to: &step.to, waited: false };
+        self.report_stray(stray, message).await;
         Ok(true)
     }
 
