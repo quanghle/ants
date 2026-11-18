@@ -23,6 +23,8 @@ pub(super) struct Trail {
     pub(super) name: TrailName,
     pub(super) description: String,
     pub(super) phases: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) waypoints: Vec<String>,
     #[serde(flatten)]
     pub(super) source: Source,
     #[serde(skip)]
@@ -45,6 +47,7 @@ impl From<SavedTrail> for Trail {
             name: saved.name,
             description: saved.description,
             phases: saved.phases,
+            waypoints: saved.waypoints,
             source: Source::Colony { saved_by: saved.saved_by, saved_at: saved.saved_at },
             script: saved.script,
         }
@@ -72,6 +75,7 @@ pub(super) fn read(path: &Path, name: Option<TrailName>, by: &UserId, now: DateT
         name,
         description: meta.description,
         phases: meta.phases,
+        waypoints: meta.waypoints,
         script,
         saved_by: by.clone(),
         saved_at: now,
@@ -184,6 +188,7 @@ fn read_local(path: &Path) -> Result<Trail> {
         name,
         description: meta.description,
         phases: meta.phases,
+        waypoints: meta.waypoints,
         source: Source::Local { path: path.to_owned() },
         script,
     })
@@ -207,9 +212,10 @@ pub(super) fn listing(colony: Vec<SavedTrail>, local: Vec<Trail>) -> Vec<Listed>
     colony.chain(local).collect()
 }
 
+/// The listed trails in columns, their waypoints in a column of their own when one has any.
 pub(super) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
-    let header = ["NAME", "SOURCE", "SAVED BY", "SAVED", "PHASES", "DESCRIPTION"].map(str::to_owned);
-    let rows: Vec<[String; 6]> = std::iter::once(header)
+    let header = ["NAME", "SOURCE", "SAVED BY", "SAVED", "PHASES", "WAYPOINTS", "DESCRIPTION"].map(str::to_owned);
+    let rows: Vec<[String; 7]> = std::iter::once(header)
         .chain(listed.iter().map(|Listed { trail, shadowed }| {
             let (source, by, at) = match &trail.source {
                 Source::Colony { saved_by, saved_at } => {
@@ -220,11 +226,19 @@ pub(super) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
                     (format!("{}{shadowed}", path.display()), "-".to_owned(), "-".to_owned())
                 }
             };
-            let phases = if trail.phases.is_empty() { "-".to_owned() } else { excerpt(&trail.phases.join(", "), 40) };
+            let list =
+                |items: &[String]| if items.is_empty() { "-".to_owned() } else { excerpt(&items.join(", "), 40) };
             let description =
                 if trail.description.is_empty() { "-".to_owned() } else { excerpt(&trail.description, 60) };
-            [trail.name.to_string(), source, by, at, phases, description]
+            [trail.name.to_string(), source, by, at, list(&trail.phases), list(&trail.waypoints), description]
         }))
+        .collect();
+    if listed.iter().any(|l| !l.trail.waypoints.is_empty()) {
+        return super::columns(&rows);
+    }
+    let rows: Vec<[String; 6]> = rows
+        .into_iter()
+        .map(|[name, source, by, at, phases, _, description]| [name, source, by, at, phases, description])
         .collect();
     super::columns(&rows)
 }
@@ -292,6 +306,9 @@ pub(super) fn render(found: &Found, now: DateTime<Utc>) -> String {
     }
     if !trail.phases.is_empty() {
         let _ = writeln!(out, "phases: {}", trail.phases.join(", "));
+    }
+    if !trail.waypoints.is_empty() {
+        let _ = writeln!(out, "waypoints: {}", trail.waypoints.join(", "));
     }
     out.push('\n');
     out.push_str(&trail.script);

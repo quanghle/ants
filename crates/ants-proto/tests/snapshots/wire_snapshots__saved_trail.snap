@@ -9,6 +9,10 @@ expression: value
     "build",
     "review"
   ],
+  "waypoints": [
+    "build",
+    "review"
+  ],
   "script": "agent('dev-a', 'build it')",
   "saved_by": "alice",
   "saved_at": "2025-01-01T12:00:00Z"

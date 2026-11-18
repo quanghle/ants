@@ -12,7 +12,7 @@ fn worker() -> Worker {
 }
 
 fn run(script: &str, args: Value, limits: Limits) -> Run {
-    Run::with_clock(&format!("{META}{script}"), args, limits, 1_700_000_000, 7).unwrap()
+    Run::with_clock(&format!("{META}{script}"), None, args, limits, 1_700_000_000, 7).unwrap()
 }
 
 fn prompts(calls: &[Call]) -> Vec<&str> {
@@ -264,10 +264,10 @@ async fn the_clock_is_the_runs_and_the_environment_empty() {
 
 #[tokio::test]
 async fn a_script_without_its_literal_meta_is_refused() {
-    let refused = Run::new("x = 1\n", json!(null), Limits::default());
+    let refused = Run::new("x = 1\n", None, json!(null), Limits::default());
     assert!(matches!(refused, Err(RunError::Trail(ants_trail::TrailError::Meta(_)))));
     let limits = Limits { concurrency: 17, ..Limits::default() };
-    assert!(matches!(Run::new(&format!("{META}x = 1\n"), json!(null), limits), Err(RunError::Limits(_))));
+    assert!(matches!(Run::new(&format!("{META}x = 1\n"), None, json!(null), limits), Err(RunError::Limits(_))));
 }
 
 /// A run of [`FAN_OUT`] over a and b, with a's first step answered and both b's steps answered.
@@ -317,4 +317,54 @@ async fn a_replay_names_the_call_that_diverges_from_the_journal() {
         panic!("a call never made diverges");
     };
     assert_eq!(error, "the script no longer makes call 99 human({})");
+}
+
+const WAYPOINTS: &str = r#"meta = {"name": "fix", "description": "", "phases": [], "waypoints": ["triage", "patch"]}
+
+async def triage(state):
+    return await agent(f"triage {state}")
+
+async def patch(state):
+    plan = await agent(f"plan {state['bug']}")
+    return await agent(f"patch {plan}")
+"#;
+
+fn entered(entry: Option<&str>, state: Value) -> Run {
+    Run::with_clock(WAYPOINTS, entry, state, Limits::default(), 1_700_000_000, 7).unwrap()
+}
+
+#[tokio::test]
+async fn a_trail_with_waypoints_starts_at_its_first() {
+    let worker = worker();
+    let mut run = entered(None, json!("a crash"));
+    assert_eq!(run.state().entry(), Some("triage"));
+    let calls = run.start(&worker).await.unwrap().calls;
+    assert_eq!(prompts(&calls), ["triage a crash"]);
+    run.resolve(&worker, calls[0].call, Answer::Ok(json!("a bug"))).await.unwrap();
+    assert_eq!(*done(&run), json!("a bug"));
+}
+
+#[tokio::test]
+async fn a_run_entered_at_a_waypoint_replays_from_its_journal() {
+    let worker = worker();
+    let mut run = entered(Some("patch"), json!({"bug": 7}));
+    let calls = run.start(&worker).await.unwrap().calls;
+    assert_eq!(prompts(&calls), ["plan 7"]);
+    let then = answer(&mut run, &worker, &calls, "plan 7", json!("swap")).await.calls;
+    assert_eq!(prompts(&then), ["patch swap"]);
+
+    let stored: RunState = serde_json::from_str(&serde_json::to_string(run.state()).unwrap()).unwrap();
+    let (mut replayed, progress) = Run::replay(stored, run.journal().to_vec(), &worker).await.unwrap();
+    assert_eq!(progress, Progress::default());
+    assert_eq!(replayed.outstanding(), then.as_slice());
+    replayed.resolve(&worker, then[0].call, Answer::Ok(json!("patched"))).await.unwrap();
+    assert_eq!(*done(&replayed), json!("patched"));
+}
+
+#[test]
+fn a_run_entering_its_trail_at_no_waypoint_of_it_is_refused() {
+    let refused = Run::new(WAYPOINTS, Some("review"), json!(null), Limits::default());
+    assert!(matches!(&refused, Err(RunError::Entry(why)) if why.contains("no waypoint \"review\"")), "{refused:?}");
+    let refused = Run::new(&format!("{META}x = 1\n"), Some("x"), json!(null), Limits::default());
+    assert!(matches!(&refused, Err(RunError::Entry(why)) if why.contains("no waypoints")), "{refused:?}");
 }

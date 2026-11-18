@@ -32,7 +32,7 @@ async fn kill_the_worker() {
 #[tokio::test]
 async fn a_run_whose_worker_was_killed_resumes_from_its_last_snapshot() {
     let worker = Worker::new(env!("CARGO_BIN_EXE_ants"));
-    let mut run = Run::new(SCRIPT, json!(null), Limits::default()).unwrap();
+    let mut run = Run::new(SCRIPT, None, json!(null), Limits::default()).unwrap();
     let call = run.start(&worker).await.unwrap().calls[0].call;
     run.answer(call, Answer::Ok(json!("went"))).unwrap();
     let before = serde_json::to_string(run.state()).unwrap();

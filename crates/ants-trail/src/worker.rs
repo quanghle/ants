@@ -61,10 +61,17 @@ pub(crate) fn serve(input: &str) -> Response {
         Err(e) => return Response::Refused { error: format!("unreadable request: {e}") },
     };
     match request {
-        Request::Start { script, args, limits, clock, seed } => {
+        Request::Start { script, entry, args, limits, clock, seed } => {
             if let Err(error) = limits.check() {
                 return Response::Refused { error };
             }
+            let script = match entry {
+                Some(entry) => match trail::enter(&script, &entry) {
+                    Ok(program) => program,
+                    Err(error) => return Response::Refused { error },
+                },
+                None => script,
+            };
             arm(&limits);
             start(&script, &args, limits, clock, seed)
         }

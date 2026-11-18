@@ -181,7 +181,8 @@ fn prepare(header: &TrailRun) -> Result<(Run, String), String> {
     if size > MAX_TRAIL_ARGS {
         return Err(format!("the arguments have {size} bytes of JSON; a run takes at most {MAX_TRAIL_ARGS}"));
     }
-    let engine = Run::new(script, header.args.clone(), engine_limits(&header.limits)).map_err(|e| e.to_string())?;
+    let engine =
+        Run::new(script, None, header.args.clone(), engine_limits(&header.limits)).map_err(|e| e.to_string())?;
     let session = serde_json::to_string(engine.state()).map_err(|e| e.to_string())?;
     Ok((engine, session))
 }

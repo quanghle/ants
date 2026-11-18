@@ -127,6 +127,7 @@ pub(crate) mod tests {
     fn request() -> Request {
         Request::Start {
             script: String::new(),
+            entry: None,
             args: serde_json::Value::Null,
             limits: crate::Limits::default(),
             clock: 0,

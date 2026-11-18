@@ -1357,6 +1357,7 @@ fn trails() {
             name: "release".parse().unwrap(),
             description: "Cut a release".to_owned(),
             phases: vec!["build".to_owned(), "review".to_owned()],
+            waypoints: vec!["build".to_owned(), "review".to_owned()],
             script: "agent('dev-a', 'build it')".to_owned(),
             saved_by: user("alice"),
             saved_at: at(0),

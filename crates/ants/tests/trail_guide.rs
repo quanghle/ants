@@ -166,7 +166,7 @@ async fn every_example_of_the_guide_runs_to_its_end() {
     for (script, args) in examples {
         let meta = ants_trail::check(&script).unwrap_or_else(|e| panic!("{script}\n{e}"));
         let name = meta.name.as_str();
-        let mut run = Run::with_clock(&script, args.clone(), Limits::default(), 1_700_000_000, 7).unwrap();
+        let mut run = Run::with_clock(&script, None, args.clone(), Limits::default(), 1_700_000_000, 7).unwrap();
         let (steps, events) = drive(&worker, &mut run, name, None).await;
         let Status::Done { result } = run.status() else { panic!("{name}: {:?}\nevents: {events:?}", run.status()) };
         assert!(steps > 0 && !result.is_null(), "{name}: {steps} steps, result {result}");
@@ -179,7 +179,7 @@ async fn every_example_of_the_guide_runs_to_its_end() {
         // With failing steps, an example either handles them or fails on one it lets raise, never on a bug of its
         // own in the code handling them.
         for seed in 1..=4 {
-            let mut run = Run::with_clock(&script, args.clone(), Limits::default(), 1_700_000_000, 7).unwrap();
+            let mut run = Run::with_clock(&script, None, args.clone(), Limits::default(), 1_700_000_000, 7).unwrap();
             let (_, events) = drive(&worker, &mut run, name, Some(seed)).await;
             match run.status() {
                 Status::Done { .. } => {}

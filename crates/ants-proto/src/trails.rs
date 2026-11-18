@@ -33,6 +33,8 @@ pub const MAX_TRAIL_ARGS: usize = 64 * 1024;
 pub const MAX_TRAIL_DESCRIPTION: usize = 1000;
 /// Most phases a saved trail names.
 pub const MAX_TRAIL_PHASES: usize = 32;
+/// Most waypoints a saved trail names.
+pub const MAX_TRAIL_WAYPOINTS: usize = 32;
 /// How long [`TRAIL_RUNS_BUCKET`] keeps a finished run, at least.
 pub const TRAIL_RUN_RETENTION: Duration = Duration::from_hours(30 * 24);
 
@@ -62,6 +64,10 @@ pub struct SavedTrail {
     /// The phases the script reports, in order, for showing a run's progress.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phases: Vec<String>,
+    /// The top-level async defs a run enters the trail at, the first its start; none for a trail entered only at its
+    /// start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waypoints: Vec<String>,
     /// The script's source text.
     pub script: String,
     /// The human who saved it.
@@ -84,8 +90,9 @@ impl SavedTrail {
     }
 
     /// Check the trail's bounds: a script of 1 to [`MAX_TRAIL_SCRIPT`] bytes, a description of at most
-    /// [`MAX_TRAIL_DESCRIPTION`] characters, and at most [`MAX_TRAIL_PHASES`] phases, each one line of 1 to
-    /// [`MAX_TITLE`] characters.
+    /// [`MAX_TRAIL_DESCRIPTION`] characters, at most [`MAX_TRAIL_PHASES`] phases, each one line of 1 to
+    /// [`MAX_TITLE`] characters, and at most [`MAX_TRAIL_WAYPOINTS`] waypoints, each a name of 1 to [`MAX_TITLE`]
+    /// letters, digits and `_`.
     pub fn check(&self) -> Result<(), Error> {
         let invalid = |why: String| Err(Error::InvalidTrail { name: self.name.clone(), why });
         if self.script.trim().is_empty() || self.script.len() > MAX_TRAIL_SCRIPT {
@@ -100,6 +107,14 @@ impl SavedTrail {
         let bad_phase = |p: &str| p.trim().is_empty() || p.contains(['\n', '\r']) || p.chars().count() > MAX_TITLE;
         if self.phases.iter().any(|p| bad_phase(p)) {
             return invalid(format!("a phase is one line of 1-{MAX_TITLE} characters"));
+        }
+        if self.waypoints.len() > MAX_TRAIL_WAYPOINTS {
+            return invalid(format!("a trail has at most {MAX_TRAIL_WAYPOINTS} waypoints"));
+        }
+        let bad_waypoint =
+            |w: &str| w.is_empty() || w.len() > MAX_TITLE || !w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if self.waypoints.iter().any(|w| bad_waypoint(w)) {
+            return invalid(format!("a waypoint is a name of 1-{MAX_TITLE} letters, digits and '_'"));
         }
         Ok(())
     }
@@ -540,6 +555,7 @@ mod tests {
             name: "release".parse().unwrap(),
             description: String::new(),
             phases: vec!["build".to_owned()],
+            waypoints: Vec::new(),
             script: "agent('dev-a', 'build')".to_owned(),
             saved_by: p("alice"),
             saved_at: Utc::now(),
@@ -690,6 +706,8 @@ mod tests {
             SavedTrail { description: "x".repeat(MAX_TRAIL_DESCRIPTION + 1), ..saved() },
             SavedTrail { phases: vec!["a\nb".to_owned()], ..saved() },
             SavedTrail { phases: vec!["p".to_owned(); MAX_TRAIL_PHASES + 1], ..saved() },
+            SavedTrail { waypoints: vec!["a b".to_owned()], ..saved() },
+            SavedTrail { waypoints: vec!["w".to_owned(); MAX_TRAIL_WAYPOINTS + 1], ..saved() },
         ];
         for trail in bad {
             assert!(matches!(trail.check(), Err(Error::InvalidTrail { .. })), "{trail:?}");

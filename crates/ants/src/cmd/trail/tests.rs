@@ -120,6 +120,7 @@ fn local_trails_are_named_by_their_files_skipping_bad_ones_and_the_colonys_shado
     let table = saved::table(&listed, now);
     let lines: Vec<&str> = table.lines().collect();
     assert!(lines[0].starts_with("NAME") && lines[0].contains("SOURCE"), "{table}");
+    assert!(!lines[0].contains("WAYPOINTS"), "{table}");
     assert!(lines[1].contains("colony") && lines[1].contains("alice") && lines[1].contains("2h ago"), "{table}");
     assert!(lines[3].contains("review.py (the colony's runs)"), "{table}");
     assert!(lines[2].contains("build, test") && lines[2].contains("Ship deploy"), "{table}");
@@ -127,6 +128,34 @@ fn local_trails_are_named_by_their_files_skipping_bad_ones_and_the_colonys_shado
     assert_eq!(json["source"], "local");
     assert_eq!(json["shadowed"], true);
     assert!(json.get("script").is_none(), "{json}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_trails_waypoints_are_saved_listed_and_shown() {
+    let dir = ants_test_support::scratch_dir("trail-waypoints");
+    let text = r#"meta = {"name": "fix", "description": "Fix it", "phases": [], "waypoints": ["triage", "patch"]}
+async def triage(state):
+    return await agent("triage")
+async def patch(state):
+    return await agent("patch")
+"#;
+    let now = Utc::now();
+    let trail = saved::read(&write(&dir, "fix.py", text), None, &p("alice"), now).unwrap();
+    assert_eq!(trail.waypoints, ["triage", "patch"]);
+    let listed = saved::listing(vec![trail], Vec::new());
+    let table = saved::table(&listed, now);
+    let lines: Vec<&str> = table.lines().collect();
+    assert!(lines[0].contains("PHASES") && lines[0].contains("WAYPOINTS"), "{table}");
+    assert!(lines[1].contains("triage, patch"), "{table}");
+    let found = saved::Found { trail: listed[0].trail.clone(), shadows: None };
+    let text = saved::render(&found, now);
+    assert!(text.contains("description: Fix it\nwaypoints: triage, patch\n"), "{text}");
+
+    let stepping = format!("{}await triage(args)\n", found.trail.script);
+    let error = saved::read(&write(&dir, "stepping.py", &stepping), None, &p("alice"), now).unwrap_err();
+    let error = format!("{error:#}");
+    assert!(error.contains("stepping.py: line 6: a trail with waypoints holds only"), "{error}");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
