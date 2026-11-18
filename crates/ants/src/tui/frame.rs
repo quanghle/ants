@@ -196,12 +196,13 @@ mod tests {
         let shown = screen(&m, at(2));
         assert!(shown.contains(" ants · alice@hub:4222 · home · ● connected"), "{shown}");
         assert!(shown.contains("Work 1"), "{shown}");
-        assert!(shown.contains("waiting on ant 1"), "{shown}");
+        assert!(!shown.contains("waiting on ant 1"), "the states fold off work: {shown}");
         assert!(shown.contains("● {.~.} dev-a") && shown.contains("PEOPLE") && shown.contains("bob"), "{shown}");
         assert!(shown.contains("nothing waits on a human"), "{shown}");
         assert!(shown.contains(" Esc back · ↑↓ select · s digest · c creds · o held · Tab nav/view"), "{shown}");
 
         m.select(nav::Item::Work(None));
+        assert!(screen(&m, at(2)).contains("waiting on ant 1"), "and show on it");
         m.key(Key::Enter, at(2));
         let shown = screen(&m, at(2));
         assert!(shown.contains(" · deploy the site · ● connected"), "the header names the thread: {shown}");

@@ -785,7 +785,7 @@ mod tests {
         assert_eq!(m.data.counts().values().sum::<usize>(), 1);
         assert!(super::super::home::items(&m.data, at(2)).iter().all(|i| i.thread == work));
         assert_eq!(Page::new(Filter::default()).rows(&m.data).len(), 1, "out of the work list");
-        let items = nav::items(&m.data, at(2));
+        let items = nav::items(&m.data, &nav::Item::Home, at(2));
         assert_eq!(items[..3], [nav::Item::Home, nav::Item::Activity, nav::Item::Work(None)]);
         m.select(nav::Item::Activity);
         let View::Work(page) = m.page() else { panic!("not the work view") };

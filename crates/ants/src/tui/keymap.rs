@@ -218,7 +218,7 @@ pub const GLOBAL: &[Entry] = &[
         &[Key::Ctrl('k'), Key::Char('/')],
         "Ctrl-K /",
         "commands",
-        "the palette: the /commands and the view's keys, narrowed as typed, those that cannot act here dim with the reason",
+        "the palette: the /commands, the view's keys and the places (channels, ants, people, threads), narrowed as typed, those that cannot act here dim with the reason",
         45,
         always,
     ),
@@ -229,6 +229,14 @@ pub const GLOBAL: &[Entry] = &[
         "the bar on /search, as in: /search deploy from:dev-a",
         50,
         no_thread_open,
+    ),
+    Entry::new(
+        &[Key::Ctrl('t')],
+        "Ctrl-T",
+        "next unread",
+        "the next channel, person or thread with something unread (the bar focused too)",
+        55,
+        always,
     ),
     Entry::new(
         &[Key::Ctrl('o')],

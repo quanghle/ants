@@ -1,8 +1,10 @@
 //! The palette: `/` starting the bar's text, as `/` or Ctrl-K from a view puts it, lists what can be done in the view
 //! on screen, the slash commands with their arguments ([`COMMANDS`]) and the view's keys as the key table has them
-//! ([`keymap`]), narrowed by the text after the `/` up to the cursor; what cannot act here shows dim with the reason.
-//! Up and Down pick, Enter runs the entry picked (a command needing an argument is completed for it), Tab completes a
-//! command and Esc closes the list.
+//! ([`keymap`]), then the places ([`places`]), narrowed by the text after the `/` up to the cursor; what cannot act here
+//! shows dim with the reason. Up and Down pick, Enter runs the entry picked (a command needing an argument is completed
+//! for it) or goes to the place, Tab completes a command and Esc closes the list.
+
+mod places;
 
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -16,6 +18,7 @@ use super::complete::narrow;
 use super::keymap;
 use super::model::{Action, Key, Model};
 use super::style;
+pub use places::Place;
 
 /// Most entries shown at once.
 const ROWS: usize = 10;
@@ -36,17 +39,19 @@ pub struct Entry {
 }
 
 /// What Enter on an entry does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Act {
     /// Run the slash command when `run`, it needing no argument, else complete it for its arguments.
     Command { name: &'static str, run: bool },
     /// Leave the bar and press the key.
     Key(Key),
+    /// Leave the bar and show the place.
+    Go(Place),
 }
 
 impl Model {
-    /// The palette's entries narrowed by the text after the `/` starting the focused bar, the command typed whole
-    /// first, then those that can act here; none when the bar's text does not start with `/` up to the cursor or Esc closed the list.
+    /// The palette's entries narrowed by the text after the `/` starting the focused bar, the command or place typed
+    /// whole first, then those that can act here, a key matched only by its description last; none when the bar's text does not start with `/` up to the cursor or Esc closed the list.
     pub fn palette(&self, now: DateTime<Utc>) -> Vec<Entry> {
         let Some(typed) = self.palette_typed() else {
             return Vec::new();
@@ -59,8 +64,9 @@ impl Model {
                 why: self.unfit(name, now),
                 act: Act::Command { name, run },
             };
-            (name.to_owned(), entry)
+            (name.to_owned(), (entry, false))
         });
+        let lower = typed.to_lowercase();
         let views = keymap::views(self);
         let keys = views.into_iter().flat_map(keymap::entries).chain(keymap::GLOBAL);
         let keys = keys.filter(|e| !e.keys.contains(&Key::Ctrl('k'))).map(|e| {
@@ -70,12 +76,17 @@ impl Model {
                 why: e.applies(self, now).err().map(str::to_owned),
                 act: Act::Key(e.keys[0]),
             };
-            (format!("{} {}", e.short, e.long), entry)
+            let weak = !e.short.to_lowercase().contains(&lower);
+            (format!("{} {}", e.short, e.long), (entry, weak))
         });
-        let mut entries: Vec<Entry> = narrow(&typed, commands.chain(keys)).into_iter().map(|(_, e)| e).collect();
-        let exact = format!("/{typed}");
-        entries.sort_by_key(|e| (e.word != exact, e.why.is_some()));
-        entries
+        let places = self.places(now).into_iter().map(|s| {
+            let entry = Entry { word: s.word, detail: s.detail, why: None, act: Act::Go(s.place) };
+            (s.name, (entry, false))
+        });
+        let mut entries = narrow(&typed, commands.chain(keys).chain(places));
+        // A key matched by its description alone comes after the commands and places matched by name.
+        entries.sort_by_key(|(name, (e, weak))| (!name.eq_ignore_ascii_case(&typed), e.why.is_some(), *weak));
+        entries.into_iter().map(|(_, (e, _))| e).collect()
     }
 
     /// The text after the `/` starting the focused bar, up to the cursor, while the palette shows.
@@ -123,6 +134,11 @@ impl Model {
                 self.bar.set_text("");
                 self.bar.focused = false;
                 return self.key(key, now);
+            }
+            Act::Go(place) => {
+                self.bar.set_text("");
+                self.bar.focused = false;
+                return self.visit(place);
             }
         }
         None
@@ -266,5 +282,57 @@ mod tests {
         assert!(!m.bar.focused && m.bar.is_empty(), "Esc empties and leaves the bar the palette opened");
         assert_eq!(m.key(Key::Ctrl('f'), at(2)), None);
         assert!(!m.bar.focused, "Ctrl-F finds in a thread");
+    }
+
+    fn with_channels() -> Model {
+        use ants_proto::{ChannelEntry, Humans};
+
+        use crate::tui::reads::Read;
+        let mut m = model();
+        let channels = ["dev", "ops"]
+            .map(|c| ChannelEntry {
+                members: vec![crate::test_support::live::user("alice")],
+                ..ChannelEntry::new(c.parse().unwrap())
+            })
+            .to_vec();
+        m.read(Read::Directory(Ok((channels, Humans::default()))), at(0));
+        m.focus = Focus::View;
+        m
+    }
+
+    #[test]
+    fn from_home_a_few_letters_of_a_place_and_enter_show_it() {
+        let mut m = with_channels();
+        let thread = ThreadId::generate();
+        m.stored(vec![message(1, &thread, "dev-a", "alice", "the ops deploy is done")], at(1));
+        m.key(Key::Ctrl('k'), at(1));
+        typed(&mut m, "ops");
+        let words: Vec<String> = m.palette(at(1)).into_iter().map(|e| e.word).collect();
+        assert_eq!(words[0], "#ops", "{words:?}");
+        assert!(words.contains(&"the ops deploy is done".to_owned()), "threads by title: {words:?}");
+        m.key(Key::Enter, at(1));
+        assert_eq!((m.page().name(), &m.nav), ("channel", &crate::tui::nav::Item::Channel("ops".parse().unwrap())));
+        assert!(!m.bar.focused && m.bar.is_empty());
+
+        m.key(Key::Char('/'), at(2));
+        typed(&mut m, "deploy");
+        assert_eq!(m.palette(at(2))[0].word, "the ops deploy is done", "unread first");
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Open(thread)));
+    }
+
+    #[test]
+    fn ctrl_t_goes_to_the_next_conversation_with_something_unread() {
+        let mut m = with_channels();
+        let (first, second) = (ThreadId::generate(), ThreadId::generate());
+        m.stored(
+            vec![message(1, &first, "dev-a", "alice", "one"), message(2, &second, "dev-a", "alice", "two")],
+            at(2),
+        );
+        let Some(Action::Open(to)) = m.key(Key::Ctrl('t'), at(3)) else { panic!("no thread opened") };
+        let then = if to == first { second } else { first };
+        assert_eq!(m.key(Key::Ctrl('t'), at(3)), Some(Action::Open(then)), "the next one");
+        m.data.marker.as_mut().unwrap().mark(2);
+        assert_eq!(m.key(Key::Ctrl('t'), at(4)), None);
+        assert_eq!(m.notice.as_ref().unwrap().text, "nothing unread elsewhere");
     }
 }

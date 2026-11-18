@@ -59,6 +59,9 @@ impl Model {
         if let Some(action) = self.fold_key(key, now) {
             return Some(action);
         }
+        if key == Key::Ctrl('t') {
+            return self.next_unread(now);
+        }
         if let Some(action) = self.typed_key(key, now) {
             return action;
         }
@@ -358,7 +361,7 @@ impl Model {
             Key::End => isize::MAX,
             _ => return None,
         };
-        let items = nav::items(&self.data, now);
+        let items = nav::items(&self.data, &self.nav, now);
         let at = items.iter().position(|i| *i == self.nav).unwrap_or(0);
         let to = items.get(at.saturating_add_signed(by).min(items.len().saturating_sub(1)))?.clone();
         if to == self.nav {
