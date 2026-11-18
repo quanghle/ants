@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ants_daemon::config::{self, Ant, HostSettings, Summary};
@@ -277,7 +278,8 @@ pub struct Listed {
 /// described by flags the harnesses of the file at `default_path` if it exists, and its top-level `harness` unless
 /// the flags name one. The schedules run only when the
 /// daemon serves the whole file, not one ant picked with `--ant`. `hostname` names the machine where the file does
-/// not.
+/// not. A daemon serving the whole file says once why it leaves the built-in sage to another machine
+/// ([`config::Loaded::sage_elsewhere`]).
 pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Listed> {
     match source(args, default_path)? {
         Source::Flags(name) => {
@@ -305,6 +307,11 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Li
         Source::File(path) => {
             let loaded = config::load(&path)?;
             let whole = args.ant.is_none();
+            if let Some(creds) = loaded.sage_elsewhere.as_deref().filter(|_| whole)
+                && !SAGE_ELSEWHERE_TOLD.swap(true, Ordering::Relaxed)
+            {
+                tracing::info!("{}", sage_elsewhere(creds));
+            }
             let schedules = if whole { loaded.schedules } else { Vec::new() };
             let metrics = args.metrics.or(loaded.metrics);
             let managers = loaded
@@ -318,20 +325,41 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Li
             let host = whole.then_some(loaded.host);
             let nats_server = loaded.nats_server.filter(|_| whole);
             let auto_update = if whole { loaded.auto_update } else { config::AutoUpdate::Off };
-            let ants = pick(loaded.ants, args, &path)?;
+            let ants = pick(loaded.ants, loaded.sage_elsewhere.as_deref(), args, &path)?;
             let harnesses = loaded.harnesses;
             Ok(Listed { ants, harnesses, schedules, metrics, managers, host, machine, nats_server, auto_update })
         }
     }
 }
 
-pub(super) fn pick(all: Vec<Ant>, args: &DaemonArgs, path: &Path) -> Result<Vec<Ant>> {
+/// Whether a daemon said already why it leaves the built-in sage to another machine.
+static SAGE_ELSEWHERE_TOLD: AtomicBool = AtomicBool::new(false);
+
+/// Why the machine leaves the built-in sage to another, its credentials belonging at `creds`, and how to serve it here.
+fn sage_elsewhere(creds: &Path) -> String {
+    format!(
+        "no credentials of the built-in sage at {}, which the server's authentication needs: the sage is left to \
+         another machine, the ants here naming it all the same; to serve it here, issue them with `ants auth user \
+         sage` on the machine holding the team keys, copy them there and reload the daemon",
+        creds.display()
+    )
+}
+
+/// The ants of the file at `path` that `args` pick: the one `--ant` names, with the ant flags applied, else all of
+/// them. `sage_elsewhere` is where the built-in sage's credentials belong when the file leaves it to another machine,
+/// for which `--ant sage` fails.
+pub(super) fn pick(all: Vec<Ant>, sage_elsewhere: Option<&Path>, args: &DaemonArgs, path: &Path) -> Result<Vec<Ant>> {
     match &args.ant {
         Some(name) => {
-            let p = all
-                .into_iter()
-                .find(|p| &p.name == name)
-                .with_context(|| format!("ant {name} is not in {}", path.display()))?;
+            let p = all.into_iter().find(|p| &p.name == name).with_context(|| match sage_elsewhere {
+                Some(creds) if *name == UserId::sage() => format!(
+                    "the built-in sage has no credentials at {}, which the server's authentication needs: issue them \
+                     with `ants auth user sage` on the machine holding the team keys and copy them there, or serve the \
+                     sage where they are",
+                    creds.display()
+                ),
+                _ => format!("ant {name} is not in {}", path.display()),
+            })?;
             if let Some(template) = p.template.as_ref().filter(|_| args.options.sets_any()) {
                 bail!(
                     "ant {name} was added from template {template}, which bounds its settings: change its entry in {} \

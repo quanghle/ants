@@ -553,7 +553,9 @@ async fn services(
         crate::provider::sense::stores().serve(&config.ant, &config.storage.home, config.connection.creds.clone());
     }
     let lifecycle = match &identity_id {
-        Some(id) => Lifecycle::open(events::outbox(), &config.ant, id, &config.storage.home).await,
+        Some(id) => Lifecycle::open(events::outbox(), &config.ant, id, &config.storage.home)
+            .await
+            .map(|lifecycle| lifecycle.with_workdir(config.harness.workdir.clone())),
         None => None,
     };
     let mut mcp = Mcp::start(

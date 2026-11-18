@@ -67,6 +67,7 @@ fn flags_override_the_picked_ant() {
     let path = Path::new("config.toml");
     let picked = pick(
         all.clone(),
+        None,
         &args(
             "--ant dev-b --max-harnesses 1 --allow-tools --allow read --capability rust,nats --capability acp \
              --max-tool-calls 20 --max-daily-cost 7.5",
@@ -83,18 +84,25 @@ fn flags_override_the_picked_ant() {
     assert_eq!((picked[0].max_tool_calls, picked[0].max_daily_cost), (20, Some(7.5)));
     assert_eq!(picked[0].prompt_timeout, config::DEFAULT_PROMPT_TIMEOUT);
     assert_eq!(picked[0].worktrees, None, "unset unless a flag sets it");
-    let worktrees = |flag: &str| pick(all.clone(), &args(&format!("--ant dev-a {flag}")), path).unwrap()[0].worktrees;
+    let worktrees =
+        |flag: &str| pick(all.clone(), None, &args(&format!("--ant dev-a {flag}")), path).unwrap()[0].worktrees;
     assert_eq!((worktrees("--worktrees"), worktrees("--no-worktrees")), (Some(true), Some(false)));
 
-    assert_eq!(pick(all.clone(), &args(""), path).unwrap(), all);
-    let err = pick(all.clone(), &args("--ant dev-c"), path).unwrap_err().to_string();
+    assert_eq!(pick(all.clone(), None, &args(""), path).unwrap(), all);
+    let err = pick(all.clone(), None, &args("--ant dev-c"), path).unwrap_err().to_string();
     assert!(err.contains("ant dev-c is not in config.toml"), "{err}");
-    let err = pick(all, &args("--workdir ."), path).unwrap_err().to_string();
+    let err = pick(all.clone(), None, &args("--ant sage"), path).unwrap_err().to_string();
+    assert!(err.contains("ant sage is not in config.toml"), "{err}");
+    let creds = Path::new("auth/sage.creds");
+    let err = pick(all.clone(), Some(creds), &args("--ant sage"), path).unwrap_err().to_string();
+    assert!(err.contains("the built-in sage has no credentials at auth/sage.creds"), "{err}");
+    assert_eq!(pick(all.clone(), Some(creds), &args(""), path).unwrap(), all, "the others serve all the same");
+    let err = pick(all, None, &args("--workdir ."), path).unwrap_err().to_string();
     assert!(err.contains("add --ant"), "{err}");
 
     let added = vec![Ant { template: Some("worker".to_owned()), ..ant("lead-a") }];
-    assert_eq!(pick(added.clone(), &args("--ant lead-a"), path).unwrap(), added);
-    let err = pick(added, &args("--ant lead-a --max-daily-cost 99"), path).unwrap_err().to_string();
+    assert_eq!(pick(added.clone(), None, &args("--ant lead-a"), path).unwrap(), added);
+    let err = pick(added, None, &args("--ant lead-a --max-daily-cost 99"), path).unwrap_err().to_string();
     assert!(err.contains("ant lead-a was added from template worker"), "{err}");
 }
 
@@ -316,6 +324,7 @@ fn model_flags_override_only_the_selected_ant() {
     p.context = Some("default".to_owned());
     let picked = pick(
         vec![p.clone(), ant("dev-b")],
+        None,
         &args("--ant dev-a --model smart --reasoning-effort high --context long_context"),
         Path::new("config.toml"),
     )
@@ -327,7 +336,7 @@ fn model_flags_override_only_the_selected_ant() {
     assert_eq!(only_model.reasoning_effort.as_deref(), Some("low"));
     assert_eq!(only_model.context.as_deref(), Some("default"));
     for line in ["--model smart", "--reasoning-effort high", "--context long_context"] {
-        assert!(pick(vec![ant("dev-a")], &args(line), Path::new("config.toml")).is_err());
+        assert!(pick(vec![ant("dev-a")], None, &args(line), Path::new("config.toml")).is_err());
     }
 }
 
@@ -341,6 +350,7 @@ fn tool_flags_override_only_the_selected_settings() {
     p.env.insert("KEEP".to_owned(), "keep".to_owned());
     let picked = pick(
         vec![p],
+        None,
         &args("--ant dev-a --whoami custom-role --memory custom-memory --env TASK_DB=cli.db --env EXTRA=a=b"),
         Path::new("config.toml"),
     )
@@ -361,6 +371,6 @@ fn tool_flags_override_only_the_selected_settings() {
     assert!(Cmd::try_parse_from(["daemon", "--env", "=value"]).is_err());
     assert!(Cmd::try_parse_from(["daemon", "--env", "NAME"]).is_err());
     for line in ["--whoami role", "--memory notes", "--tasks tickets", "--env NAME=value"] {
-        assert!(pick(vec![ant("dev-a")], &args(line), Path::new("config.toml")).is_err());
+        assert!(pick(vec![ant("dev-a")], None, &args(line), Path::new("config.toml")).is_err());
     }
 }

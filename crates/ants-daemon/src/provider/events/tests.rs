@@ -228,8 +228,13 @@ async fn an_ant_is_told_added_once_retired_once_stopped_and_revived_once_served_
 async fn a_stop_waits_a_bounded_time_for_the_retirement_to_be_acked() {
     let dir = ants_test_support::scratch_dir("events-retired-wait");
     let ant = p("dev-a");
-    let lifecycle =
-        Lifecycle { ant: ant.clone(), identity: "ida".to_owned(), home: dir.clone(), outbox: outbox_to_none() };
+    let lifecycle = Lifecycle {
+        ant: ant.clone(),
+        identity: "ida".to_owned(),
+        home: dir.clone(),
+        outbox: outbox_to_none(),
+        workdir: None,
+    };
     mark_retired(&dir).unwrap();
     let started = Instant::now();
     lifecycle.stopped(Duration::from_millis(50)).await;
