@@ -198,7 +198,7 @@ async fn show(items: &dyn Items, context: &CallContext) -> Result<Answer, Answer
 }
 
 /// Every relationship record, by whom it is of.
-async fn relationships(items: &dyn Items) -> Result<Vec<RecordItem>, StoreError> {
+pub(crate) async fn relationships(items: &dyn Items) -> Result<Vec<RecordItem>, StoreError> {
     let mut found: Vec<_> =
         items.list(RELATIONSHIP, usize::MAX).await?.into_iter().filter_map(RecordItem::of).collect();
     found.sort_by_key(|found| found.record.scope.to_string());
