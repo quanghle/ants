@@ -58,7 +58,11 @@ fn an_answer_is_read_from_its_last_json_block_at_most_twenty_findings() {
 #[test]
 fn a_follow_up_names_the_finding_it_follows_by_its_id() {
     let cited = json!({"files": ["src/lib.rs:12"]});
-    let follow = |kind: &str, follows: serde_json::Value| json!({"kind": kind, "follows": follows, "finding": "Still so.", "evidence": cited, "action": "Act."});
+    let follow = |kind: &str, follows: serde_json::Value| {
+        json!({
+            "kind": kind, "follows": follows, "finding": "Still so.", "evidence": cited, "action": "Act."
+        })
+    };
     let given = [
         follow("Follow Up", json!(" 03.2 ")),
         follow("follow_up", json!("the first one")),
@@ -88,7 +92,11 @@ async fn a_follow_up_is_linked_to_the_earlier_finding_it_follows_and_one_naming_
     let (dream, _) = get(&*items, 1).await.unwrap().unwrap();
     let second = begin(&*items, to_sage(dream.next())).await.unwrap().unwrap();
     review_sent(&*items, 2).await.unwrap();
-    let follow = |follows: &str, text: &str| json!({"kind": "follow_up", "follows": follows, "finding": text, "evidence": cited, "action": "Look again."});
+    let follow = |follows: &str, text: &str| {
+        json!({
+            "kind": "follow_up", "follows": follows, "finding": text, "evidence": cited, "action": "Look again."
+        })
+    };
     let answer = fenced(&[
         follow("1.2", "Retries still hide failures"),
         follow("1.9", "Names no such finding"),

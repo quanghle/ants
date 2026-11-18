@@ -201,8 +201,8 @@ pub async fn review_received(
 }
 
 /// Note in `items`, a sage's, its answer `text` at `at` to the review of dream `dream` of `ant` on `thread`, which
-/// `spent` what its daemon knew: its findings, as the ant's daemon reads them ([`parse`]), by kind, a follow-up with the
-/// earlier finding it follows when the record of an earlier review of `ant` holds it; none when it holds none
+/// `spent` what its daemon knew: its findings, as the ant's daemon reads them ([`parse`]), by kind, a follow-up with
+/// the earlier finding it follows when the record of an earlier review of `ant` holds it; none when it holds none
 /// readable. Whether it changed the record: once answered, a review keeps its first answer.
 pub async fn review_answered(
     items: &dyn Items,
@@ -250,7 +250,8 @@ pub async fn review_answered(
     .await
 }
 
-/// Finding `named` when it is one of the sage's for `ant` before dream `dream`, as the records of its reviews hold them.
+/// Finding `named` when it is one of the sage's for `ant` before dream `dream`, as the records of its reviews hold
+/// them.
 async fn earlier_finding(
     items: &dyn Items,
     ant: &UserId,

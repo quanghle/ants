@@ -1,8 +1,8 @@
 //! Sage reviews (requirements ants-x39hk.12.3 to ants-x39hk.12.5): the review of a dream its daemon sends the ant's
 //! sage ([`Review`]), and the sage's answer ([`answered`]): at most [`MAX_FINDINGS`] findings in a JSON block
-//! ([`parse`]), each with its kind, evidence and suggested action ([`Advice`]), a [`FOLLOW_UP`] with the earlier finding
-//! it follows ([`FollowUp`]), linked when it is one of the sage's earlier findings for the ant. They become the dream's
-//! findings, with
+//! ([`parse`]), each with its kind, evidence and suggested action ([`Advice`]), a [`FOLLOW_UP`] with the earlier
+//! finding it follows ([`FollowUp`]), linked when it is one of the sage's earlier findings for the ant. They become the
+//! dream's findings, with
 //! the packet's on the identity and those carried from earlier dreams, which stay whatever the sage answers ([`kept`]),
 //! and prompt the ant on the review thread inside a marked block ([`REVIEW_BEGIN`]) as another ant's suggestions to
 //! verify against their evidence, not instructions. A finding resting on a thread of untrusted origin, or on an

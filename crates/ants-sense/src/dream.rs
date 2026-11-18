@@ -28,8 +28,8 @@
 //! signs of the work it reviews, measured by the daemon as it begins ([`Signs`]).
 //!
 //! A sage's own dream covers the reviews it was asked as threads too ([`Covered::review`]), but its packet lists them by
-//! their records ([`reviewing()`]), leaving out their text, the packets of other ants' work: so they make nothing of the
-//! dream untrusted, but for a finding on its practice quoting the reasons the ants reviewed gave for rejecting its
+//! their records ([`reviewing()`]), leaving out their text, the packets of other ants' work: so they make nothing of
+//! the dream untrusted, but for a finding on its practice quoting the reasons the ants reviewed gave for rejecting its
 //! findings ([`practice_findings`]). Each record keeps what its review thread spent ([`ReviewSpend`]), which the sage's
 //! tally shows a review and a finding still holding ([`ReviewCost`]).
 
