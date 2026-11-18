@@ -113,10 +113,14 @@ impl Permissions {
     /// allow, to say in [`DEVICES_BUCKET`] which keys of humans' credentials are revoked: creating the bucket, reading
     /// and putting the revocation records ([`subject::revoked_devices`]) and nothing else of it, with the replies of
     /// its JetStream requests under [`ENROLL_INBOX`]. No other credentials put a revocation record. They also delete
-    /// the identity record and shared settings of an ant revoked whole ([`IDENTITIES_BUCKET`]), ending the ant.
+    /// the identity record and shared settings of an ant revoked whole ([`IDENTITIES_BUCKET`]), first reading the
+    /// identity record and preserving its growth by sense id.
     pub fn for_device_revoker() -> Self {
         let devices = kv_stream(DEVICES_BUCKET);
         let revoked = subject::revoked_devices();
+        let identities = kv_stream(IDENTITIES_BUCKET);
+        let records = format!("$KV.{IDENTITIES_BUCKET}.*");
+        let growth = subject::all_revoked_growth();
         Self {
             publish: vec![
                 "$JS.API.INFO".to_owned(),
@@ -124,7 +128,10 @@ impl Permissions {
                 format!("$JS.API.STREAM.CREATE.{devices}"),
                 format!("$JS.API.DIRECT.GET.{devices}.{revoked}"),
                 revoked,
-                format!("$KV.{IDENTITIES_BUCKET}.*"),
+                format!("$JS.API.DIRECT.GET.{identities}.{records}"),
+                format!("$JS.API.DIRECT.GET.{identities}.{growth}"),
+                records,
+                growth,
                 subject::all_shared_settings(),
             ],
             subscribe: vec![format!("{ENROLL_INBOX}.>")],

@@ -1,13 +1,13 @@
 //! What was done with the ant's threads besides writing on them, for its review packets ([`Action`]): a thread's
-//! marking done, from its done state ([`ThreadDone`]) read by direct get as the ant's credentials allow, and the first
-//! message, note or channel post read back on it after ([`history::Active::reopenings`]), which reopened it; the ant's
+//! marking done or explicitly undone, read by direct get as the ant's credentials allow, and the first message, note
+//! or channel post stored after it was marked done ([`history::Active::reopenings`]), which reopened it; the ant's
 //! tool requests rejected, from the timeline it reads back ([`history::Active::rejections`]); and the reactions to its
 //! messages and channel posts, asked as `list_reactions` asks them ([`ReactionAsker`]). Each is read within [`TIMEOUT`]
 //! in all, and left out when it fails.
 
 use ants_proto::{
-    DecidedBy, JsDomain, MergedRejection, ReactionsOutcome, ReactionsRequest, THREADS_BUCKET, ThreadDone, ThreadId,
-    UserId, done_key,
+    DecidedBy, JsDomain, MergedRejection, ReactionsOutcome, ReactionsRequest, THREAD_UNDONE, THREADS_BUCKET,
+    ThreadDone, ThreadId, UserId, done_key,
 };
 use ants_sense::dream::Action;
 use anyhow::Result;
@@ -65,11 +65,18 @@ impl<'a> Actions<'a> {
         let between = |at: &DateTime<Utc>| (since..=until).contains(at);
         let mut actions: Vec<Action> = rejections.iter().filter(|r| between(&r.at)).map(rejected).collect();
         actions.extend(self.reactions(sent).await);
-        if let Some(done) = self.done(id).await.filter(|done| between(&done.at)) {
-            actions.push(done_by(&done));
-            if let Some(reopening) = reopenings.iter().find(|reopening| !done.holds(reopening.seq)) {
-                let by = format!("a {} from {}", reopening.kind, reopening.from);
-                actions.push(Action::Reopened { at: reopening.at.into(), by });
+        if let Some(mark) = self.done(id).await {
+            match mark {
+                Mark::Done(done) if between(&done.at) => {
+                    actions.push(done_by(&done));
+                    if let Some(reopening) = reopenings.iter().find(|reopening| !done.holds(reopening.seq)) {
+                        let article = if reopening.kind.starts_with("unreadable ") { "an" } else { "a" };
+                        let by = format!("{article} {} from {}", reopening.kind, reopening.from);
+                        actions.push(Action::Reopened { at: reopening.at.into(), by });
+                    }
+                }
+                Mark::Undone(at) if between(&at) => actions.push(Action::Undone { at }),
+                _ => {}
             }
         }
         actions
@@ -107,14 +114,14 @@ impl<'a> Actions<'a> {
         actions
     }
 
-    /// The done state of thread `id`, if it has one.
-    async fn done(&mut self, id: &ThreadId) -> Option<ThreadDone> {
+    /// The latest done or explicit undo mark of thread `id`, if it has one.
+    async fn done(&mut self, id: &ThreadId) -> Option<Mark> {
         let kv = self.done.as_ref()?;
-        match within(self.deadline, kv.lookup(done_key(id))).await {
-            Ok(Lookup::Value(value)) => {
-                serde_json::from_slice::<ThreadDone>(&value).ok().filter(|d| d.thread_id == *id)
+        match within(self.deadline, kv.lookup_marked(done_key(id), THREAD_UNDONE)).await {
+            Ok((Lookup::Value(value), _)) => {
+                serde_json::from_slice::<ThreadDone>(&value).ok().filter(|d| d.thread_id == *id).map(Mark::Done)
             }
-            Ok(Lookup::NoValue | Lookup::NoBucket) => None,
+            Ok((Lookup::NoValue | Lookup::NoBucket, undone)) => undone.map(|at| Mark::Undone(at.into())),
             Err(error) => {
                 tracing::warn!(thread = %id, error, "reading when a thread was marked done: none in its review packet");
                 self.done = None;
@@ -122,6 +129,11 @@ impl<'a> Actions<'a> {
             }
         }
     }
+}
+
+enum Mark {
+    Done(ThreadDone),
+    Undone(DateTime<Utc>),
 }
 
 /// What `read` comes to by `deadline`, its error or lateness as a reason.
@@ -165,12 +177,16 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ants_proto::{Reacted, TimelineRejection, Uuid};
+    use ants_proto::provider::{Origin, Starter};
+    use ants_proto::{ChannelPost, Envelope, Reacted, SESSIONS_BUCKET, TimelineRejection, Uuid, subject};
     use ants_test_support::NatsServer;
     use chrono::TimeDelta;
 
     use super::*;
     use crate::bus;
+    use crate::provider::origins::OriginStore;
+    use crate::stream::history::{self, ReviewRecords};
+    use crate::stream::reading::Reading;
 
     fn p(s: &str) -> UserId {
         s.parse().unwrap()
@@ -285,5 +301,112 @@ mod tests {
         let got = actions.of(&done, &[], &[], &reopened, period).await;
         let by = "a channel post from bob".to_owned();
         assert_eq!(got, [marked_done, Action::Reopened { at: marked.at + TimeDelta::minutes(3), by }]);
+    }
+
+    #[tokio::test]
+    async fn review_distinguishes_explicit_undo_from_an_absent_or_pruned_done_mark() {
+        let Some(server) = NatsServer::start() else { return };
+        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        js.create_stream(crate::hub::threads_config()).await.unwrap();
+        let kv = DirectKv::new(&js, None, THREADS_BUCKET).await.unwrap();
+        let (ant, undone, pruned, never) =
+            (p("dev-a"), ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let since = Utc::now();
+        for id in [&undone, &pruned] {
+            let key = done_key(id);
+            let marked = ThreadDone::new(id.clone(), p("alice"), 7);
+            kv.put(&key, serde_json::to_vec(&marked).unwrap()).await.unwrap();
+            let (_, last) = kv.lookup_last(&key).await.unwrap();
+            let deleted = if *id == undone {
+                kv.delete_with_marker(&key, last, Some(bus::RETENTION), THREAD_UNDONE).await.unwrap()
+            } else {
+                kv.delete_expecting(&key, last, Some(Duration::from_secs(1))).await.unwrap()
+            };
+            assert!(deleted);
+        }
+        let mut actions = Actions::new(&js, None, &ant, None).await;
+        let period = (since, Utc::now() + TimeDelta::seconds(1));
+        let got = actions.of(&undone, &[], &[], &[], period).await;
+        assert!(matches!(got.as_slice(), [Action::Undone { at }] if (period.0..=period.1).contains(at)));
+        for id in [&pruned, &never] {
+            assert_eq!(actions.of(id, &[], &[], &[], period).await, []);
+        }
+        assert_eq!(actions.of(&undone, &[], &[], &[], (since - TimeDelta::hours(1), since)).await, []);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_entry_reopens_a_thread_only_with_matching_metadata() {
+        let Some(server) = NatsServer::start() else { return };
+        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        js.create_stream(crate::hub::stream_config()).await.unwrap();
+        js.create_stream(crate::hub::threads_config()).await.unwrap();
+        js.create_key_value(crate::hub::kept_config(SESSIONS_BUCKET)).await.unwrap();
+        let (ant, alice, bob) = (p("dev-a"), p("alice"), p("bob"));
+        let note_thread = Envelope::new(alice.clone(), ant.clone(), "initial inbox message for notes");
+        let inbox = Envelope::new(alice.clone(), ant.clone(), "the original message before the review period");
+        let channel = ChannelPost::new("ops".parse().unwrap(), ant.clone(), "initial channel post");
+        let kv = DirectKv::new(&js, None, THREADS_BUCKET).await.unwrap();
+        let put = async |subject, payload: Vec<u8>| {
+            js.publish(subject, payload.into()).await.unwrap().await.unwrap().sequence
+        };
+        let origin = Origin { by: Starter::Human { user: alice.clone() }, channel: None };
+        let origins = OriginStore::kv(DirectKv::new(&js, None, SESSIONS_BUCKET).await.unwrap(), ant.clone());
+        origins.put(&inbox.thread_id, &origin).await.unwrap();
+        let prior = put(inbox.subject(), serde_json::to_vec(&inbox).unwrap()).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let since = Utc::now();
+        for (thread, seq) in [
+            (&note_thread.thread_id, put(note_thread.subject(), serde_json::to_vec(&note_thread).unwrap()).await),
+            (&inbox.thread_id, prior),
+            (&channel.thread_id, put(channel.subject(), serde_json::to_vec(&channel).unwrap()).await),
+        ] {
+            let done = ThreadDone::new(thread.clone(), alice.clone(), seq);
+            kv.put(done_key(thread), serde_json::to_vec(&done).unwrap()).await.unwrap();
+        }
+        put(inbox.subject(), b"opaque inbox bytes".to_vec()).await;
+        put(channel.subject(), b"opaque channel bytes".to_vec()).await;
+        let note_seq = put(subject::notes(&note_thread.thread_id, &bob), b"opaque note bytes".to_vec()).await;
+        let inbox_meta = |from: &UserId, to: &UserId| {
+            serde_json::to_vec(&serde_json::json!({"thread_id": inbox.thread_id, "from": from, "to": to})).unwrap()
+        };
+        put(inbox.subject(), inbox_meta(&bob, &ant)).await;
+        put(inbox.subject(), inbox_meta(&alice, &bob)).await;
+        let unknown = serde_json::json!({"thread_id": ThreadId::generate(), "from": alice, "to": ant});
+        put(inbox.subject(), serde_json::to_vec(&unknown).unwrap()).await;
+        let inbox_seq = put(inbox.subject(), inbox_meta(&alice, &ant)).await;
+        let channel_meta = |from: &UserId, room: &str| {
+            serde_json::to_vec(&serde_json::json!({"thread_id": channel.thread_id, "channel": room, "from": from}))
+                .unwrap()
+        };
+        put(channel.subject(), channel_meta(&bob, "ops")).await;
+        put(channel.subject(), channel_meta(&ant, "wrong-room")).await;
+        let channel_seq = put(subject::chan(&channel.channel, &bob), channel_meta(&bob, "ops")).await;
+        let until = Utc::now();
+        let active = history::active(
+            &js,
+            &ant,
+            Reading::Consumer,
+            ReviewRecords { origins: Some(&origins), ..ReviewRecords::default() },
+            (since.into(), until.into()),
+            4_096,
+        )
+        .await
+        .unwrap();
+        assert_eq!(active.len(), 3);
+        let mut actions = Actions::new(&js, None, &ant, None).await;
+        for (id, seq, expected) in [
+            (&note_thread.thread_id, note_seq, "an unreadable thread note from bob"),
+            (&inbox.thread_id, inbox_seq, "an unreadable message from alice"),
+            (&channel.thread_id, channel_seq, "an unreadable channel post from bob"),
+        ] {
+            let thread = active.iter().find(|t| t.thread == *id).unwrap();
+            assert!(!thread.history.contains("opaque"));
+            let got = actions.of(id, &[], &[], &thread.reopenings, (since, until)).await;
+            let [Action::Done { .. }, Action::Reopened { at, by }] = got.as_slice() else { panic!("{got:?}") };
+            assert_eq!(by, expected);
+            assert_eq!(*at, DateTime::<Utc>::from(thread.reopenings.iter().find(|r| r.seq == seq).unwrap().at));
+            let count = if *id == inbox.thread_id { 1 } else { 2 };
+            assert_eq!(thread.reopenings.len(), count, "only the attributed unreadable entry: {:?}", thread.reopenings);
+        }
     }
 }

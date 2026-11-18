@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use ants_proto::provider::{
     AntRef, BriefReason, BriefRequest, CallContext, Event, EventKind, Export, ImportRequest, Origin, Provider, Starter,
 };
@@ -280,7 +282,7 @@ async fn an_ant_added_again_keeps_its_birth_and_its_growth() {
     assert_eq!(card.growth, Some(Growth { born, prompts: 100 }), "told of the record naming its sense id alone");
     drop(items);
 
-    record.delete().await.unwrap();
+    crate::profile::identity::forget(&js, None, &dev_a()).await.unwrap();
     let again = record.ensure().await.unwrap().unwrap();
     assert_eq!((again.prompts, again.stage()), (0, Stage::Callow), "added again, a new record");
     record.count_prompt().await.unwrap();
@@ -344,57 +346,175 @@ async fn an_ant_added_again_after_its_daemon_stopped_keeps_every_prompt() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
-/// A card that cannot be read, as one of a later schema, holds up no record naming the home's sense id already, which
-/// needs none of its growth; a record naming none waits for the card, settled on a later call once it reads.
+#[tokio::test]
+async fn revoking_a_live_or_crashed_ant_restores_growth_not_yet_on_its_card() {
+    let Some(server) = NatsServer::start() else { return };
+    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    crate::hub::create_identities(&js).await.unwrap();
+    let ant = dev_a();
+    let record = Identity::new(&js, None, &ant).await.unwrap();
+    let serving = async |home: &Path, id: &str| {
+        let stores = SenseStores::new();
+        stores.serve(&ant, home, None);
+        let hosting = stores.hosting();
+        hosting.up(link(&server).await);
+        stores.identify(&ant, Some(Identity::new(&js, None, &ant).await.unwrap()));
+        Sense::with_stores(stores.clone()).event(added(id)).await.unwrap();
+        let items = stores.items(&ant).await.unwrap();
+        (stores, hosting, items)
+    };
+
+    for crashed in [false, true] {
+        let home = scratch_dir("sense-growth-revoke");
+        let born = "2025-01-01T00:00:00Z".parse().unwrap();
+        let earlier = AntIdentity { prompts: 42, ..AntIdentity::new(ant.clone(), "original".into(), born) };
+        record.replace(&earlier).await.unwrap();
+        let (stores, hosting, items) = serving(&home, &earlier.id).await;
+        let sense = items.sense().await;
+        for _ in 0..7 {
+            record.count_prompt().await.unwrap();
+        }
+        let card = identity::card(&*items).await.unwrap().unwrap();
+        assert_eq!(card.growth, Some(Growth { born, prompts: 42 }), "no stage change");
+        let running = if crashed {
+            drop((stores, hosting, items));
+            std::fs::remove_file(Home::new(&home).cache()).unwrap();
+            None
+        } else {
+            Some((stores, hosting, items))
+        };
+        crate::profile::identity::forget(&js, None, &ant).await.unwrap();
+        assert!(record.read().await.unwrap().is_none());
+        drop(running);
+
+        let new_home = scratch_dir("sense-growth-fresh");
+        let fresh = record.ensure().await.unwrap().unwrap();
+        let fresh_running = serving(&new_home, &fresh.id).await;
+        assert_eq!(record.read().await.unwrap().unwrap().prompts, 0, "a different sense identity starts fresh");
+        drop(fresh_running);
+        crate::profile::identity::forget(&js, None, &ant).await.unwrap();
+        std::fs::remove_dir_all(new_home).unwrap();
+
+        let again = record.ensure().await.unwrap().unwrap();
+        assert_ne!(again.id, earlier.id);
+        record.count_prompt().await.unwrap();
+        let (_stores, _hosting, items) = serving(&home, &again.id).await;
+        let restored = record.read().await.unwrap().unwrap();
+        assert_eq!((restored.id.as_str(), restored.born, restored.prompts), (again.id.as_str(), born, 50));
+        assert_eq!(restored.sense, Some(sense));
+        assert_eq!(identity::card(&*items).await.unwrap().unwrap().growth, Some(Growth { born, prompts: 50 }));
+        drop((_stores, _hosting, items));
+        crate::profile::identity::forget(&js, None, &ant).await.unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
+struct NamingWarnings(Arc<AtomicUsize>);
+
+impl tracing::Subscriber for NamingWarnings {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() == tracing::Level::WARN
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        event.record(&mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+            if field.name() == "message"
+                && format!("{value:?}") == "naming the sense identity in the ant's identity record"
+            {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// A card that cannot be read holds up only a record naming no sense id, warns once per ant per daemon run, and
+/// settles the record on a later call once it reads.
 #[tokio::test]
 async fn an_unreadable_card_holds_up_only_a_record_naming_no_sense_id() {
     let Some(server) = NatsServer::start() else { return };
     let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
     crate::hub::create_identities(&js).await.unwrap();
-    let home = scratch_dir("sense-card-unread");
-    let record = Identity::new(&js, None, &dev_a()).await.unwrap();
+    let ants = [dev_a(), "dev-b".parse::<UserId>().unwrap()];
+    let homes = ants.each_ref().map(|_| scratch_dir("sense-card-unread"));
+    let records =
+        [Identity::new(&js, None, &ants[0]).await.unwrap(), Identity::new(&js, None, &ants[1]).await.unwrap()];
     let born = "2025-01-01T00:00:00Z".parse().unwrap();
-    record.replace(&AntIdentity { prompts: 42, ..AntIdentity::new(dev_a(), "id1".into(), born) }).await.unwrap();
+    for (ant, record) in ants.iter().zip(&records) {
+        record
+            .replace(&AntIdentity { prompts: 42, ..AntIdentity::new(ant.clone(), "id1".into(), born) })
+            .await
+            .unwrap();
+    }
     let serving = async || {
         let stores = SenseStores::new();
-        stores.serve(&dev_a(), &home, None);
         let hosting = stores.hosting();
         hosting.up(link(&server).await);
-        stores.identify(&dev_a(), Some(Identity::new(&js, None, &dev_a()).await.unwrap()));
+        for (ant, home) in ants.iter().zip(&homes) {
+            stores.serve(ant, home, None);
+            stores.identify(ant, Some(Identity::new(&js, None, ant).await.unwrap()));
+        }
         (stores, hosting)
     };
-    let settled = |stores: &SenseStores| matches!(stores.state().ants[&dev_a()].named, Named::Settled);
-    let card_born = async |stores: &SenseStores, at: &str| {
-        let items = stores.items(&dev_a()).await.unwrap();
+    let settled = |stores: &SenseStores, ant: &UserId| matches!(stores.state().ants[ant].named, Named::Settled);
+    let card_born = async |stores: &SenseStores, ant: &UserId, at: &str| {
+        let items = stores.items(ant).await.unwrap();
         let card = items.list(identity::CARD, 1).await.unwrap().pop().unwrap();
         let values = serde_json::from_value(json!({ "born": at })).unwrap();
         items.write(&[Write::Change { id: card.id, values, expected: None }], identity::BY).await.unwrap();
     };
 
-    let (stores, _hosting) = serving().await;
-    Sense::with_stores(stores.clone()).event(added("id1")).await.unwrap();
-    assert!(settled(&stores));
-    let sense = record.read().await.unwrap().unwrap().sense;
-    card_born(&stores, "not a time").await;
-    assert!(identity::card(&*stores.items(&dev_a()).await.unwrap()).await.is_err(), "the card cannot be read");
-    drop(stores);
+    let (stores, hosting) = serving().await;
+    for ant in &ants {
+        Sense::with_stores(stores.clone()).event(Event { ant: ant.clone(), ..added("id1") }).await.unwrap();
+        assert!(settled(&stores, ant));
+        card_born(&stores, ant, "not a time").await;
+        assert!(identity::card(&*stores.items(ant).await.unwrap()).await.is_err(), "the card cannot be read");
+    }
+    drop(hosting);
 
-    let (stores, _hosting) = serving().await;
-    stores.items(&dev_a()).await.unwrap();
-    assert!(settled(&stores), "a record naming the home's sense id needs no growth of the card");
+    let warnings = Arc::new(AtomicUsize::new(0));
+    let _logged = tracing::subscriber::set_default(NamingWarnings(warnings.clone()));
+    let warned = || warnings.load(Ordering::Relaxed);
+    let (stores, hosting) = serving().await;
+    stores.items(&ants[0]).await.unwrap();
+    assert!(settled(&stores, &ants[0]), "a record naming the home's sense id needs no growth of the card");
+    assert_eq!(warned(), 0);
+    drop(hosting);
 
-    record.delete().await.unwrap();
-    record.ensure().await.unwrap().unwrap();
-    let (stores, _hosting) = serving().await;
-    stores.items(&dev_a()).await.unwrap();
-    assert!(!settled(&stores), "a record naming no sense id waits for the card's growth");
-    assert_eq!(record.read().await.unwrap().unwrap().sense, None);
-    card_born(&stores, "2025-01-01T00:00:00Z").await;
-    stores.items(&dev_a()).await.unwrap();
-    assert!(settled(&stores), "settled on a later call");
-    let restored = record.read().await.unwrap().unwrap();
+    let sense = records[0].read().await.unwrap().unwrap().sense;
+    for record in &records {
+        record.delete().await.unwrap();
+        record.ensure().await.unwrap().unwrap();
+    }
+    let (stores, hosting) = serving().await;
+    for (i, (ant, record)) in ants.iter().zip(&records).enumerate() {
+        for _ in 0..3 {
+            stores.items(ant).await.unwrap();
+            assert!(!settled(&stores, ant), "a record naming no sense id waits for the card's growth");
+            assert_eq!(warned(), i + 1, "{ant} warns only on its first failed attempt");
+        }
+        assert_eq!(record.read().await.unwrap().unwrap().sense, None);
+    }
+    card_born(&stores, &ants[0], "2025-01-01T00:00:00Z").await;
+    stores.items(&ants[0]).await.unwrap();
+    assert!(settled(&stores, &ants[0]), "settled on a later call");
+    assert_eq!(warned(), 2);
+    let restored = records[0].read().await.unwrap().unwrap();
     assert_eq!((restored.born, restored.prompts, restored.sense), (born, 42, sense));
-    std::fs::remove_dir_all(home).unwrap();
+    drop(hosting);
+
+    let (stores, _hosting) = serving().await;
+    stores.items(&ants[1]).await.unwrap();
+    assert_eq!(warned(), 3, "a new daemon run warns again");
+    for home in homes {
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }
 
 /// An ant imported under another name on the same bus, its home holding its sense id and listing its old name, keeps

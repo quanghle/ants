@@ -20,13 +20,15 @@ use crate::stream::reading::{self, Reading};
 #[derive(Debug, Default)]
 pub(super) struct Thread {
     timelines: Timelines,
+    /// When the stream last recorded a prompt on the thread, not just a rejection.
+    pub(super) worked: Option<SystemTime>,
     /// The messages whose prompts the records cover, in the order of their first record, with its time: but those
     /// covered only by tool requests rejected, which [`Thread::show`] leaves to [`Thread::rejections`], and by ends it
     /// shows no line for.
     prompts: Vec<(Uuid, DateTime<Utc>)>,
 }
 
-/// The timeline `ant` stored from `start` up to `until` on each thread `wanted` takes, read as its daemon reads
+/// The timeline `ant` stored from `start` up to `until`, read as its daemon reads
 /// ([`Reading::daemon`]), one read through the ant's sent reader at a time ([`SENT_READS`](super::SENT_READS)).
 pub(super) async fn read(
     js: &jetstream::Context,
@@ -34,17 +36,16 @@ pub(super) async fn read(
     reading: Reading,
     start: consumer::DeliverPolicy,
     until: SystemTime,
-    wanted: impl Fn(&ThreadId) -> bool,
 ) -> Result<BTreeMap<ThreadId, Thread>> {
     let mut threads: BTreeMap<ThreadId, Thread> = BTreeMap::new();
     let _one = if reading == Reading::Consumer { Some(super::SENT_READS.lock().await) } else { None };
     let (reader, filter) = (sent_reader(ant), subject::timeline_from(ant));
-    reading::read_back(js, &reader, reading, &filter, start, |_, at, subject, payload| {
-        if at > until {
+    reading::read_back(js, &reader, reading, &filter, start, |_, stored, subject, payload| {
+        if stored > until {
             return ControlFlow::Break(());
         }
-        if let Some((thread, _)) = subject::parse_timeline(subject)
-            && wanted(&thread)
+        if let Some((thread, from)) = subject::parse_timeline(subject)
+            && from == *ant
             && let Ok(record) = serde_json::from_slice::<Timeline>(payload)
         {
             let (message, at) = (record.message, record.at);
@@ -53,9 +54,18 @@ pub(super) async fn read(
                 TimelineEntry::Ended(end) => end_text(end.how).is_some(),
                 _ => true,
             });
+            let worked = record
+                .entries
+                .iter()
+                .any(|entry| !matches!(entry, TimelineEntry::Rejected(_) | TimelineEntry::Unknown));
             let thread = threads.entry(thread).or_default();
-            if thread.timelines.add(subject, record) && shown && !thread.prompts.iter().any(|(m, _)| *m == message) {
-                thread.prompts.push((message, at));
+            if thread.timelines.add(subject, record) {
+                if worked {
+                    thread.worked = Some(stored);
+                }
+                if shown && !thread.prompts.iter().any(|(m, _)| *m == message) {
+                    thread.prompts.push((message, at));
+                }
             }
         }
         ControlFlow::Continue(())

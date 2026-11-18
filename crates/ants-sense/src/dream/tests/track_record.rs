@@ -13,7 +13,8 @@ fn user(name: &str) -> UserId {
 /// A finding of a sage, of `kind`, first offered as `id`.
 fn advised(id: &str, kind: &str, text: &str) -> Finding {
     let action = format!("Act on {id}.");
-    let advice = Advice { kind: kind.into(), evidence: Evidence::default(), action, follows: None };
+    let advice =
+        Advice { kind: kind.into(), evidence: Evidence::default(), action, follows: None, follows_missing: false };
     Finding { id: id.into(), kind: FindingKind::Sage, text: text.into(), advice: Some(advice), ..finding(1) }
 }
 
@@ -240,6 +241,11 @@ async fn the_earlier_findings_reach_back_thirty_active_days_the_dormant_ones_not
     assert!(text.contains("Ten active days ago.") && !text.contains("Forty active days ago."), "{text}");
     assert!(text.contains("- lesson: 1 made, 0 applied (0 still holding), 0 rejected, 0 deferred, 1 unanswered."));
 
+    let card = identity::card(&*items).await.unwrap().unwrap();
+    let ages = memory::Ages::new(now, card.dormant(now));
+    let (_, targets) = packet::review_history(&*items, 3, &ages, &user("sage")).await.unwrap();
+    assert_eq!(targets, BTreeMap::from([("2.1".into(), "2.1".into())]));
+
     let none = track_record(&*items, &current, &user("elder"), &user("dev-a")).await.unwrap();
     assert!(none.is_empty(), "{none:?}");
     assert_eq!(none.tally, "\nNo findings of elder in the last 30 active days of dev-a.\n");
@@ -264,7 +270,8 @@ async fn the_outcomes_told_the_sage_reach_back_ninety_active_days_the_track_reco
     assert!(!voted.is_error, "{voted:?}");
 
     let ages = memory::Ages::new(now, std::iter::empty());
-    let told = packet::outcomes(&*items, 3, &ages, &user("sage")).await.unwrap();
+    let (told, targets) = packet::review_history(&*items, 3, &ages, &user("sage")).await.unwrap();
+    assert!(targets.is_empty(), "reporting a verdict beyond the window does not grant a follow-up link");
     let undone = FindingOutcome {
         finding: "2.1".into(),
         verdict: FindingVerdict::Applied,

@@ -6,7 +6,7 @@
 //! in each packet, holding the findings of that sage alone. It takes at most a share of the packet's budget
 //! ([`TRACK_RECORD_SHARE`]), the earlier reviews' findings left out first, and shrinks to its tally for room before the
 //! identity is cut to titles. The verdicts and outcomes the ant's reviews tell the sage's records reach further back:
-//! [`OUTCOME_DAYS`] ([`outcomes`]).
+//! [`OUTCOME_DAYS`] ([`review_history`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -108,18 +108,6 @@ pub async fn track_record(
         let _ = writeln!(record.tally, "- all: {}.", all.counts());
     }
     Ok(record)
-}
-
-/// The findings `sage` gave the ant in the dreams the earlier findings section of the packet of `dream` covers
-/// ([`track_record`]), each by its id in the sage's record of its review ([`own`]) to its id among the ant's.
-pub(in crate::dream) async fn earlier_findings(
-    items: &dyn Items,
-    dream: &Dream,
-    sage: &UserId,
-) -> Result<HashMap<String, String>, StoreError> {
-    let dreams = covered(items, dream).await?;
-    let by_sage = dreams.iter().filter(|earlier| earlier.sage.as_ref() == Some(sage));
-    Ok(by_sage.flat_map(own).map(|(finding, told_as)| (told_as, finding.id.clone())).collect())
 }
 
 /// The dreams the earlier findings section of the packet of `dream` covers: those before it that began within
@@ -252,16 +240,14 @@ fn own(dream: &Dream) -> impl Iterator<Item = (&Finding, String)> {
 }
 
 /// What the review of dream `number`, by `ages` of the ant's active time, tells `sage` of its earlier findings for the
-/// ant: those of the dreams begun within [`OUTCOME_DAYS`] before it whose last verdict, or for one applied whether what
-/// was written for it still holds ([`outcome`]), is new since the ant's earlier reviews by `sage` told them, the oldest
-/// first, each by its id in the sage's record of its review ([`own`]) and with the reason for the verdict
-/// ([`told_reason`]).
-pub(in crate::dream) async fn outcomes(
+/// ant: changed outcomes over [`OUTCOME_DAYS`] (oldest first), and follow-up targets over [`TRACK_RECORD_DAYS`],
+/// the same window as the packet's earlier findings. Both use the sage's numbering ([`own`]).
+pub(in crate::dream) async fn review_history(
     items: &dyn Items,
     number: u64,
     ages: &memory::Ages,
     sage: &UserId,
-) -> Result<Vec<FindingOutcome>, StoreError> {
+) -> Result<(Vec<FindingOutcome>, BTreeMap<String, String>), StoreError> {
     let dreams = earlier(items, number, ages, OUTCOME_DAYS).await?;
     let verdicts = last_verdicts(&dreams);
     let by_sage: Vec<_> = dreams.iter().rev().filter(|earlier| earlier.sage.as_ref() == Some(sage)).collect();
@@ -271,29 +257,35 @@ pub(in crate::dream) async fn outcomes(
             told.insert(outcome.finding.as_str(), (outcome.verdict, outcome.holds));
         }
     }
-    let mut outcomes = Vec::new();
-    for (finding, told_as) in by_sage.into_iter().flat_map(own) {
-        let Some((_, verdict)) = verdicts.get(finding.id.as_str()) else { continue };
-        let mut holds = verdict.verdict == Judgement::Applied;
-        if holds {
-            for id in &verdict.items {
-                if !outcome(items, id, verdict.at).await?.1 {
-                    holds = false;
-                    break;
+    let (mut outcomes, mut targets) = (Vec::new(), BTreeMap::new());
+    for earlier in by_sage {
+        let eligible = ages.since(earlier.at) <= Duration::days(TRACK_RECORD_DAYS);
+        for (finding, told_as) in own(earlier) {
+            if eligible {
+                targets.insert(told_as.clone(), finding.id.clone());
+            }
+            let Some((_, verdict)) = verdicts.get(finding.id.as_str()) else { continue };
+            let mut holds = verdict.verdict == Judgement::Applied;
+            if holds {
+                for id in &verdict.items {
+                    if !outcome(items, id, verdict.at).await?.1 {
+                        holds = false;
+                        break;
+                    }
                 }
             }
-        }
-        let reason = told_reason(&verdict.reason);
-        let verdict = match verdict.verdict {
-            Judgement::Applied => FindingVerdict::Applied,
-            Judgement::Rejected => FindingVerdict::Rejected,
-            Judgement::Deferred => FindingVerdict::Deferred,
-        };
-        if told.get(told_as.as_str()) != Some(&(verdict, holds)) {
-            outcomes.push(FindingOutcome { finding: told_as, verdict, holds, reason });
+            let reason = told_reason(&verdict.reason);
+            let verdict = match verdict.verdict {
+                Judgement::Applied => FindingVerdict::Applied,
+                Judgement::Rejected => FindingVerdict::Rejected,
+                Judgement::Deferred => FindingVerdict::Deferred,
+            };
+            if told.get(told_as.as_str()) != Some(&(verdict, holds)) {
+                outcomes.push(FindingOutcome { finding: told_as, verdict, holds, reason });
+            }
         }
     }
-    Ok(outcomes)
+    Ok((outcomes, targets))
 }
 
 /// `finding` as the section shows it, by the id it was `told_as` in the sage's record of its review, with the last

@@ -1,4 +1,5 @@
 use ants_daemon::people::devices::verify;
+use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{DeviceKey, Permissions, Role};
 use data_encoding::BASE64URL_NOPAD;
 use nkeys::KeyPair;
@@ -211,15 +212,15 @@ async fn a_directory_without_its_bucket_is_empty() {
     assert_eq!(directory.device(&alice, &DeviceId::generate()).await.unwrap(), Lookup::Missing);
 }
 
-/// Revoking an ant by name deletes its identity, so an ant later given the name is born afresh; a bucket not created
-/// yet holds nothing to delete.
+/// Revoking an ant by name deletes its identity, so an ant later given the name is born afresh. Its sense identity can
+/// recover its growth from the hub.
 #[tokio::test]
 async fn revoking_an_ant_by_name_deletes_its_identity() {
     let Some(server) = Server::start() else { return };
     let team = server.dir().join("auth");
     let (dev_a, dev_b) = (p("dev-a"), p("dev-b"));
     issue(&team, &dev_a, Role::Ant);
-    forget_identity(&server.url, None, &team, "dev-a").await.unwrap();
+    forget_identity(&server.url, None, &team, &dev_a).await.unwrap();
 
     let (_, js) = server.connect_as(&p("alice"), Role::Human).await;
     ants_daemon::hub::create_identities(&js).await.unwrap();
@@ -228,6 +229,11 @@ async fn revoking_an_ant_by_name_deletes_its_identity() {
         let record = ants_proto::AntIdentity::new(ant.clone(), format!("{ant}-id"), chrono::Utc::now());
         kv.put(ant.as_str(), serde_json::to_vec(&record).unwrap()).await.unwrap();
     }
+    let (_, ant_js) = server.connect_as(&dev_a, Role::Ant).await;
+    let active = identity::Identity::new(&ant_js, None, &dev_a).await.unwrap();
+    let sense = ants_proto::SenseId::new();
+    active.name_sense(&sense, None).await.unwrap();
+    let counted = active.count_prompt().await.unwrap().unwrap();
     crate::cmd::auth::revoke_credentials(
         Some("dev-a".to_owned()),
         vec![],
@@ -241,4 +247,7 @@ async fn revoking_an_ant_by_name_deletes_its_identity() {
     let read = DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();
     assert!(read.get("dev-a").await.unwrap().is_none(), "dev-a's identity is left");
     assert!(read.get("dev-b").await.unwrap().is_some(), "dev-b's identity is gone");
+    let checkpoint = read.get(ants_proto::subject::revoked_growth_key(&sense)).await.unwrap().unwrap();
+    let checkpoint: Value = serde_json::from_slice(&checkpoint).unwrap();
+    assert_eq!(checkpoint, serde_json::json!({ "born": counted.born, "prompts": counted.prompts }));
 }

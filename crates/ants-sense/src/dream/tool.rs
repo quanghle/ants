@@ -242,7 +242,7 @@ fn asked(finding: &Finding) -> Option<Asked> {
             (Vec::new(), vec![persona_id()], false, "the persona proposal made".to_owned())
         }
         FindingKind::Inherited => (Vec::new(), finding.items.clone(), false, "the skill proposal made".to_owned()),
-        FindingKind::RejectedKind | FindingKind::UndoneFindings => {
+        FindingKind::RejectedKind | FindingKind::UndoneFindings | FindingKind::UnlinkedFollowUps => {
             (vec![self_model], Vec::new(), true, lessons.to_owned())
         }
         FindingKind::UnansweredReviews | FindingKind::CostlyReviews => match relationship() {

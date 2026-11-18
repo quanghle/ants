@@ -91,17 +91,35 @@ impl DirectKv {
 
     /// [`DirectKv::lookup_last`], with when the key's last message was stored (None for none).
     pub async fn lookup_stored(&self, key: impl AsRef<str>) -> Result<(Lookup, u64, Option<SystemTime>)> {
+        let (found, last, at, _) = self.lookup_with_marker(key, &[]).await?;
+        Ok((found, last, at))
+    }
+
+    /// As [`DirectKv::lookup`], also telling when a delete with the given marker was stored.
+    pub async fn lookup_marked(&self, key: impl AsRef<str>, marker: &[u8]) -> Result<(Lookup, Option<SystemTime>)> {
+        let (found, _, at, marked) = self.lookup_with_marker(key, marker).await?;
+        Ok((found, at.filter(|_| marked)))
+    }
+
+    async fn lookup_with_marker(
+        &self,
+        key: impl AsRef<str>,
+        marker: &[u8],
+    ) -> Result<(Lookup, u64, Option<SystemTime>, bool)> {
         let key = key.as_ref();
         let msg = match self.last(key).await {
             Ok(msg) => msg,
-            Err(e) if e.kind() == DirectGetErrorKind::NotFound => return Ok((Lookup::NoValue, 0, None)),
+            Err(e) if e.kind() == DirectGetErrorKind::NotFound => return Ok((Lookup::NoValue, 0, None, false)),
             Err(e) if matches!(e.kind(), DirectGetErrorKind::ErrorResponse(StatusCode::NO_RESPONDERS, _)) => {
-                return Ok((Lookup::NoBucket, 0, None));
+                return Ok((Lookup::NoBucket, 0, None, false));
             }
             Err(e) => return Err(e).with_context(|| format!("reading {key}")),
         };
+        let marked = !marker.is_empty()
+            && msg.headers.get(KV_OPERATION).is_some_and(|op| op.as_str() == DELETED[0])
+            && msg.payload.as_ref() == marker;
         let found = if is_deleted(&msg.headers) { Lookup::NoValue } else { Lookup::Value(msg.payload.to_vec()) };
-        Ok((found, msg.sequence, Some(msg.time.into())))
+        Ok((found, msg.sequence, Some(msg.time.into()), marked))
     }
 
     /// The last message of `key`, by a direct get naming it in its subject, or in its request for [`DirectKv::whole`].
@@ -246,6 +264,17 @@ impl DirectKv {
     /// second), leaving the key no message, if it allows per-message TTLs, and refuses the delete otherwise. Whether
     /// it deleted the key: false when the key changed meanwhile.
     pub async fn delete_expecting(&self, key: impl AsRef<str>, last: u64, ttl: Option<Duration>) -> Result<bool> {
+        self.delete_with_marker(key, last, ttl, &[]).await
+    }
+
+    /// As [`DirectKv::delete_expecting`], with an opaque marker as the delete's payload rather than a value.
+    pub async fn delete_with_marker(
+        &self,
+        key: impl AsRef<str>,
+        last: u64,
+        ttl: Option<Duration>,
+        marker: &[u8],
+    ) -> Result<bool> {
         let key = key.as_ref();
         let mut headers = HeaderMap::new();
         headers.insert(KV_OPERATION, DELETED[0]);
@@ -254,7 +283,7 @@ impl DirectKv {
             headers.insert(TTL, ttl.as_secs().max(1).to_string().as_str());
         }
         let deleted =
-            async { self.js.publish_with_headers(self.put_subject(key), headers, Vec::new().into()).await?.await };
+            async { self.js.publish_with_headers(self.put_subject(key), headers, marker.to_vec().into()).await?.await };
         match deleted.await {
             Ok(_) => Ok(true),
             Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => Ok(false),

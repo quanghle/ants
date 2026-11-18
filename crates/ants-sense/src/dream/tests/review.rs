@@ -82,10 +82,17 @@ async fn a_follow_up_is_linked_to_the_earlier_finding_it_follows_and_one_naming_
     let (writer, ant) = (on(9), context(human()).ant);
     let thread = sent(&*items).await;
     let cited = json!({"threads": [on(1).thread.to_string()]});
-    let first =
-        fenced(&[finding("lesson", "Pin the toolchain", cited.clone()), finding("mistake", "Retries", cited.clone())]);
+    let first = fenced(&[
+        finding("lesson", "Pin the toolchain", cited.clone()),
+        finding("mistake", "Retries", cited.clone()),
+        finding("follow_up", "An older follow-up", cited.clone()),
+    ]);
     let reviewed = answered(&*items, &sage(), &thread, uuid::Uuid::now_v7(), Some(&first)).await.unwrap();
     assert!(matches!(reviewed, Some(Reviewed::Prompt(_))), "{reviewed:?}");
+    let (first, revision) = get(&*items, 1).await.unwrap().unwrap();
+    let mut legacy = first.clone();
+    legacy.findings[2].advice.as_mut().unwrap().follows_missing = false;
+    items.write(&[first.change(&legacy, revision)], "test").await.unwrap();
 
     let covered = vec![Covered { thread: on(1).thread, untrusted: false, review: false }];
     let to_sage = |at| Start { recipient: Recipient::Sage(sage()), threads: covered.clone(), ..start(at, &writer) };
@@ -133,6 +140,7 @@ async fn a_follow_up_is_linked_to_the_earlier_finding_it_follows_and_one_naming_
         "- 1.1 (lesson): Pin the toolchain\n  Suggested action: Act on Pin the toolchain\n  Verdict: unanswered \
          (offered again below)\n- 1.2 (mistake): Retries\n",
         "  Followed up by 2.1.\n",
+        "- 1.3 (follow_up): An older follow-up\n",
         "### Tally",
     ];
     let at: Vec<_> = shown.iter().map(|line| text.find(line).unwrap_or_else(|| panic!("{line:?} in {text}"))).collect();
@@ -300,7 +308,8 @@ async fn a_late_answer_is_offered_in_the_next_dream_and_its_verdicts_reach_the_s
     ];
     given.extend((3..=MAX_FINDINGS + 1).map(|n| finding("lesson", &format!("Finding {n}"), json!({"threads": [one]}))));
     let text = fenced(&given);
-    assert!(review_answered(&*sage_items, &ant, &thread, 1, &text, None, first.at).await.unwrap());
+    let asked = first.review_outcomes().unwrap();
+    assert!(review_answered(&*sage_items, &ant, &thread, &asked, &text, None, first.at).await.unwrap());
     let message = uuid::Uuid::now_v7();
 
     let late = answered(&*items, &sage(), &thread, message, Some(&text)).await.unwrap();
@@ -356,4 +365,19 @@ async fn a_late_answer_is_offered_in_the_next_dream_and_its_verdicts_reach_the_s
         ),
         "{text}"
     );
+    assert!(told.earlier_findings.contains(&"1.1".into()), "the first late finding uses the sage's numbering");
+    let answer = fenced(&[json!({
+        "kind": "follow_up", "follows": "1.1", "finding": "It still holds.", "action": "Look again.",
+        "evidence": {"files": ["src/lib.rs:1"]}
+    })]);
+    assert!(review_answered(&*sage_items, &ant, &third_thread, &told, &answer, None, third.at).await.unwrap());
+    woken(&*items, 3, &on(5).thread).await.unwrap();
+    let reviewed = answered(&*items, &sage(), &third_thread, uuid::Uuid::now_v7(), Some(&answer)).await.unwrap();
+    assert_eq!(reviewed, Some(Reviewed::Late(1)));
+    let (third, _) = get(&*items, 3).await.unwrap().unwrap();
+    let late = &third.review.as_ref().unwrap().late[0];
+    let ant_link = late.advice.as_ref().unwrap().follows.as_ref().unwrap();
+    let sage_record = review_record(&*sage_items, &ant, 3).await.unwrap().unwrap();
+    assert_eq!(sage_record.findings[0].follows.as_deref(), Some(ant_link.named.as_str()));
+    assert_eq!(ant_link.finding.as_deref(), Some("1.2"), "the ant's id of the late finding");
 }

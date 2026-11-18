@@ -21,6 +21,10 @@ fn start(at: DateTime<Utc>, writer: &CallContext) -> Start<'_> {
     Start { at, recipient: Recipient::Ant, threads: Vec::new(), commits: Vec::new(), writer, vitals: Vec::new() }
 }
 
+fn review_request(dream: u64) -> ReviewOutcomes {
+    ReviewOutcomes { dream, findings: Vec::new(), earlier_findings: Vec::new() }
+}
+
 async fn store(kept: &Arc<Kept>, memory: &Memory) -> ItemId {
     let id = ItemId::new();
     let items: Arc<dyn Items> = kept.clone();
@@ -505,7 +509,10 @@ fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
         Action::Done { at: at(30), by: "alice via asst".into() },
         Action::Reopened { at: at(40), by: "a channel post from bob".into() },
     ];
-    let threads = [packet::Thread { actions, ..thread(1, 200, false) }];
+    let threads = [
+        packet::Thread { actions, ..thread(1, 200, false) },
+        packet::Thread { actions: vec![Action::Undone { at: at(45) }], ..thread(2, 200, false) },
+    ];
     for reader in [ant(), Reader::Sage(on(1).ant)] {
         let packet = compose(&dream, Earlier::Last(None), &[], &reader, &Identity::default(), &threads, PACKET_BUDGET);
         let lines = format!(
@@ -519,6 +526,7 @@ fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
             on(1).thread
         );
         assert!(packet.contains(&lines), "{packet}");
+        assert!(packet.contains("- Explicitly marked undone at 2026-11-14 09:45 UTC."), "{packet}");
     }
     let bare = compose(
         &dream,
@@ -530,6 +538,7 @@ fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
         PACKET_BUDGET,
     );
     assert!(bare.contains("started by alice\n\nmessage 1 of a thread\n"), "no lines without actions: {bare}");
+    assert!(!bare.contains("marked undone"), "{bare}");
 }
 
 mod identity_findings;

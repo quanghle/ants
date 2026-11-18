@@ -9,10 +9,10 @@
 //! open the same sense identity: the id of a home is written to a record naming none, the first writer winning, a home
 //! without one takes the record's, an id is minted only when neither has one, and a home and a record naming different
 //! ones are refused ([`SenseStores::identify`]). The card keeps the birth and the prompt count the record holds, noted
-//! on opening, at each growth stage and when the daemon stops serving the ant, which a record made again for the ant,
-//! as after a revoke and re-add, starts from ([`note_growth`]).
+//! on opening, at each growth stage and when the daemon stops serving the ant ([`note_growth`]). When the record is
+//! made again, sense also takes into account the growth the hub saved when a revoke deleted the earlier record.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -51,6 +51,7 @@ struct State {
     generation: u64,
     ants: HashMap<UserId, Served>,
     route: Route,
+    warned_unreadable_cards: HashSet<SenseId>,
 }
 
 #[derive(Default)]
@@ -354,7 +355,7 @@ impl SenseStores {
                 && link
                     .is_some_and(|link| link.js.client().connection_state() == async_nats::connection::State::Connected)
             {
-                match settle(ant, &home, record, &*items).await {
+                match settle(self, ant, &home, record, &*items).await {
                     Ok(true) => self.settled(ant, &slot),
                     // Settled on a later call, the record or the card unread meanwhile.
                     Ok(false) => {}
@@ -464,28 +465,38 @@ async fn take_named(ant: &UserId, home: &Path, record: &Identity) -> Result<(), 
 }
 
 /// Settle the sense id of `items`, those of `ant` whose home is `home`, against its identity `record`, naming it there
-/// when the record names none, the record then starting from the growth the card kept of an earlier one, as after a
-/// revoke and re-add, and noting the record's on the card: whether it is settled, false when the record cannot be read,
-/// or the card when the record names no sense id, so that a later call settles it; refused when the record names
-/// another sense id, with how to settle that.
-async fn settle(ant: &UserId, home: &Path, record: &Identity, items: &dyn Items) -> Result<bool, StoreError> {
+/// when the record names none, the record then starting from the growth the card and the hub kept of an earlier one,
+/// as after a revoke and re-add, and noting the record's on the card: whether it is settled, false when the record
+/// cannot be read, or the card when the record names no sense id, so that a later call settles it; refused when the
+/// record names another sense id, with how to settle that.
+async fn settle(
+    stores: &SenseStores,
+    ant: &UserId,
+    home: &Path,
+    record: &Identity,
+    items: &dyn Items,
+) -> Result<bool, StoreError> {
     let sense = items.sense().await;
     let unsettled = |e: &dyn std::fmt::Display| {
         tracing::warn!(%ant, error = format!("{e:#}"), "naming the sense identity in the ant's identity record");
         Ok(false)
     };
-    let earlier = match identity::card(items).await {
-        Ok(card) => card.and_then(|card| card.growth).map(|growth| (growth.born, growth.prompts)),
+    let stored = match identity::card(items).await {
+        Ok(card) => {
+            let earlier = card.and_then(|card| card.growth).map(|growth| (growth.born, growth.prompts));
+            match record.resume_sense(&sense, earlier).await {
+                Ok(stored) => stored,
+                Err(e) => return unsettled(&e),
+            }
+        }
         // Only a record naming no sense id yet starts from the card's growth.
         Err(e) => match record.read().await {
-            Ok(Some(stored)) if stored.sense.is_some() => None,
-            Ok(_) => return unsettled(&e),
+            Ok(Some(stored)) if stored.sense.is_some() => Some(stored),
+            Ok(_) => {
+                return if stores.state().warned_unreadable_cards.insert(sense) { unsettled(&e) } else { Ok(false) };
+            }
             Err(e) => return unsettled(&e),
         },
-    };
-    let stored = match record.name_sense(&sense, earlier).await {
-        Ok(stored) => stored,
-        Err(e) => return unsettled(&e),
     };
     match stored.as_ref().and_then(|stored| stored.sense.as_ref()) {
         Some(named) if *named != sense => Err(StoreError::Unavailable(format!(

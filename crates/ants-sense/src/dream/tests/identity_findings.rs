@@ -89,7 +89,7 @@ async fn the_threads_of_dreams_and_reviews_count_toward_no_identity_finding() {
     woken(&*items, 3, &on(30).thread).await.unwrap();
     started(&*items, 30..31, &Starter::Provider { name: "sense".into() }, repo, now).await;
     started(&*items, 31..32, &Starter::Review { user: user("dev-b") }, repo, now).await;
-    let told = ReviewOutcomes { dream: 1, findings: Vec::new() };
+    let told = review_request(1);
     assert!(review_received(&*items, &user("dev-c"), &on(32).thread, &told, now).await.unwrap());
     started(&*items, 32..33, &Starter::Ant { user: user("dev-c") }, repo, now).await;
     assert_eq!(experience::experience(&*items, &user("dev-a"), 3).await.unwrap().unwrap().threads, 10);

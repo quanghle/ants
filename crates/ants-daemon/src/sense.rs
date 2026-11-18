@@ -123,7 +123,7 @@ impl Sense {
     /// ([`scheduler::review_answer`]).
     pub(crate) async fn review_answer(&self, ant: &UserId, envelope: &mut Envelope) -> Result<Option<bool>> {
         let Some(items) = self.kept(ant).await? else { return Ok(None) };
-        scheduler::review_answer(&*items, envelope).await
+        scheduler::review_answer(&self.provider, &*items, envelope).await
     }
 
     /// Note in the sense data of `sage` the review message `envelope` that arrived for it from an ant, if sense keeps

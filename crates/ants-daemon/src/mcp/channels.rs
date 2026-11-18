@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ants_proto::{
     CHANADM_WAIT, CHANNELS_BUCKET, ChannelAdminOutcome, ChannelAdminRequest, ChannelEntry, ChannelId, ChannelOp,
-    ChannelPost, ThreadId, UserId,
+    ChannelPost, JsDomain, SESSIONS_BUCKET, ThreadId, UserId,
 };
 use anyhow::{Context as _, Result};
 use futures::future::BoxFuture;
@@ -19,6 +19,7 @@ use super::Hub;
 use super::messages::no_turns;
 use super::tools::{Tools, text};
 use crate::bus;
+use crate::records::direct_kv::DirectKv;
 use crate::sync::MutexExt as _;
 
 /// What `post_channel` needs: a channel's entry, None when there is no such channel, and a store for posts, which
@@ -26,11 +27,14 @@ use crate::sync::MutexExt as _;
 #[derive(Clone)]
 pub struct ChannelAccess {
     pub entry: Arc<dyn Fn(ChannelId) -> BoxFuture<'static, Result<Option<ChannelEntry>>> + Send + Sync>,
-    pub post: Arc<dyn Fn(ChannelPost) -> BoxFuture<'static, Result<()>> + Send + Sync>,
+    pub post: ChannelWriter,
 }
 
+/// Store a channel post, with the originating inbox thread as private review evidence when given.
+pub type ChannelWriter = Arc<dyn Fn(ChannelPost, Option<ThreadId>) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+
 /// Reads the channels bucket and posts through JetStream.
-pub fn jetstream_channels(js: async_nats::jetstream::Context) -> ChannelAccess {
+pub fn jetstream_channels(js: async_nats::jetstream::Context, domain: Option<JsDomain>) -> ChannelAccess {
     let reader = js.clone();
     ChannelAccess {
         entry: Arc::new(move |channel| {
@@ -45,9 +49,17 @@ pub fn jetstream_channels(js: async_nats::jetstream::Context) -> ChannelAccess {
                 Ok(Some(entry))
             })
         }),
-        post: Arc::new(move |post| {
+        post: Arc::new(move |post, source| {
             let js = js.clone();
-            Box::pin(async move { bus::store(&js, post.subject(), &post, &post.id.to_string()).await.map(drop) })
+            let domain = domain.clone();
+            Box::pin(async move {
+                if let Some(thread) = source {
+                    let sessions = DirectKv::new(&js, domain.as_ref(), SESSIONS_BUCKET).await?;
+                    let key = crate::channel::review_source_key(&post.from, post.id);
+                    sessions.put(key, thread.to_string()).await.context("storing the post's review evidence link")?;
+                }
+                bus::store(&js, post.subject(), &post, &post.id.to_string()).await.map(drop)
+            })
         }),
     }
 }
@@ -94,7 +106,12 @@ impl Hub {
         text: String,
         attach: &[String],
     ) -> Result<String, String> {
-        let current = self.sessions.locked().current.get(thread).cloned();
+        let (current, source) = {
+            let sessions = self.sessions.locked();
+            let current = sessions.current.get(thread).cloned();
+            let channel = sessions.origins.get(thread).is_some_and(|origin| origin.channel.is_some());
+            (current, (!channel).then(|| thread.clone()))
+        };
         let current = current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
         let channel: ChannelId = channel.trim().trim_start_matches('#').parse().map_err(|e| format!("{e}"))?;
         let access = self.channels.get().ok_or("channels are not served here; post_channel is unavailable")?;
@@ -120,7 +137,7 @@ impl Hub {
         post.turn_budget = left;
         let attachments = self.store(loaded, |id| post.attachment_handle(id)).await?;
         post.attachments = attachments;
-        (access.post)(post.clone()).await.map_err(|e| format!("not posted: {e:#}"))?;
+        (access.post)(post.clone(), source).await.map_err(|e| format!("not posted: {e:#}"))?;
         let humans = self.humans.humans();
         let names = |users: Vec<UserId>| users.iter().map(UserId::as_str).collect::<Vec<_>>().join(", ");
         let (woken, notified) = (entry.woken(&post, &humans), entry.notified(&post, &humans));

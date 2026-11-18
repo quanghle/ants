@@ -178,6 +178,10 @@ pub struct ReviewOutcomes {
     /// The earlier findings whose verdict or outcome changed since the sender's last review, each once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<FindingOutcome>,
+    /// The sage's finding ids in the sender's earlier-findings window, before the packet's display limit.
+    /// Only these ids are eligible targets of a follow-up; an absent list grants no links.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier_findings: Vec<String>,
 }
 
 /// Where one of a reviewer's earlier findings stands with the ant it reviewed ([`ReviewOutcomes::findings`]).

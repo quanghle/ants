@@ -352,9 +352,8 @@ impl Inbox<'_> {
         review.then(|| self.pool.launch().unheld_review()).flatten()
     }
 
-    /// Answer a review that nothing would hold to read-only tools, `why`, with a notice declining it, unprompted: its
-    /// sender then goes on without the review.
-    async fn decline_review(
+    /// Answer a review with a decline explaining `why`, unprompted: its sender then goes on without the review.
+    pub(super) async fn decline_review(
         &self,
         incoming: &Incoming,
         read: Option<Context>,

@@ -189,7 +189,7 @@ fn channels(entries: Vec<ChannelEntry>, posted: Arc<StdMutex<Vec<ChannelPost>>>)
             let entry = entries.iter().find(|e| e.channel == channel).cloned();
             Box::pin(async move { Ok(entry) })
         }),
-        post: Arc::new(move |post| {
+        post: Arc::new(move |post, _| {
             posted.locked().push(post);
             Box::pin(async { Ok(()) })
         }),

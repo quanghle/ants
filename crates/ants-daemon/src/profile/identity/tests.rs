@@ -64,6 +64,27 @@ async fn prompts_are_counted_across_a_standby_takeover() {
     assert_eq!(record.prompts, 14);
 }
 
+#[tokio::test]
+async fn forgetting_an_identity_does_not_drop_a_prompt_counted_after_the_read() {
+    let Some(server) = NatsServer::start() else { return };
+    let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    crate::hub::create_identities(&js).await.unwrap();
+    let ant = p("dev-a");
+    let sense = SenseId::new();
+    let identity = Identity::new(&js, None, &ant).await.unwrap();
+    let record = identity.name_sense(&sense, None).await.unwrap().unwrap();
+    let kv = &identity.kv;
+    let (_, last) = kv.lookup_last(ant.as_str()).await.unwrap();
+    assert_eq!(identity.count_prompt().await.unwrap().unwrap().prompts, 1);
+
+    assert!(!forget_at(kv, &record, last).await.unwrap(), "the stale deletion must lose the race");
+    assert_eq!(identity.read().await.unwrap().unwrap().prompts, 1);
+    forget(&js, None, &ant).await.unwrap();
+    assert!(identity.read().await.unwrap().is_none());
+    let restored = identity.resume_sense(&sense, None).await.unwrap().unwrap();
+    assert_eq!((restored.born, restored.prompts), (record.born, 1));
+}
+
 /// A record marked moved stops the daemon serving the ant and keeps a daemon starting it waiting, until the mark goes;
 /// counting prompts keeps the mark.
 #[tokio::test]

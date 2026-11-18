@@ -49,6 +49,12 @@ pub(super) enum Handled {
     Requeued(Box<InHand>),
 }
 
+enum Arrival {
+    Prompt,
+    Quiet,
+    DeclineReview,
+}
+
 impl Inbox<'_> {
     /// Answer one message. A failed attempt is redelivered after a delay, and the last one becomes a dead letter; one
     /// the harness failed for want of signing in, or for a provider limit, is no attempt, and is handed back to wait.
@@ -191,11 +197,16 @@ impl Inbox<'_> {
             }
             return Ok(());
         }
-        if self.arrived(incoming).await? {
-            self.thread_started(incoming).await;
-            Box::pin(self.answer(incoming, msg, seq, marker)).await?;
-        } else {
-            self.done(msg, seq).await?;
+        match self.arrived(incoming).await? {
+            Arrival::Prompt => {
+                self.thread_started(incoming).await;
+                Box::pin(self.answer(incoming, msg, seq, marker)).await?;
+            }
+            Arrival::Quiet => self.done(msg, seq).await?,
+            Arrival::DeclineReview => match marker {
+                Some(Marker::Replied(reply)) => self.deliver(incoming, &reply, msg, seq).await?,
+                _ => self.decline_review(incoming, None, "a sage is reviewed by no one", msg, seq).await?,
+            },
         }
         self.attempts.finish(&incoming.envelope).await;
         Ok(())
@@ -303,48 +314,49 @@ impl Inbox<'_> {
     /// stuck on in a channel is answered in that channel, with the fresh budget: the thread's turns come from its posts.
     /// The message takes the tool rules its thread is narrowed to ([`Inbox::narrow`]). A review an ant asks of the ant,
     /// its sage, goes to the ant's sense ([`crate::sense::Sense::review_received`]), unless a live ant names the asking
-    /// ant as its own sage: a sage is reviewed by no one, so the review is acked unanswered.
-    /// Returns whether to answer the message: a member's notice that it sent the ant's escalation higher is the
+    /// ant as its own sage: a sage is reviewed by no one, so the daemon answers with a decline.
+    /// Returns how to handle the message: a member's notice that it sent the ant's escalation higher is the
     /// daemon's alone ([`Escalator::took_climb`]), and so is the sage's answer to the review of a dream, unless its
     /// findings prompt the ant ([`crate::sense::Sense::review_answer`]), and so is a schedule's firing that starts a
     /// trail run ([`Self::start_scheduled`]).
-    async fn arrived(&self, incoming: &mut Incoming) -> Result<bool> {
+    async fn arrived(&self, incoming: &mut Incoming) -> Result<Arrival> {
         if let Some(trails) = &self.trails
             && incoming.post.is_none()
             && trails.take(&incoming.envelope).await?
         {
-            return Ok(false);
+            return Ok(Arrival::Quiet);
         }
         if incoming.post.is_none()
             && incoming.envelope.webhook
             && let Some(start) = &incoming.envelope.trail_start
         {
             self.start_scheduled(&incoming.envelope, start).await?;
-            return Ok(false);
+            return Ok(Arrival::Quiet);
         }
         let sender = self.humans.sender_role(&incoming.envelope);
         if let Some(sense) = self.sense.filter(|_| incoming.post.is_none() && sender == Role::Ant)
             && let Some(prompt) = sense.review_answer(self.ant, &mut incoming.envelope).await?
         {
-            return Ok(prompt);
+            return Ok(if prompt { Arrival::Prompt } else { Arrival::Quiet });
         }
         // Only a human asks for a summary.
         if !sender.is_human() {
             incoming.envelope.summary = None;
         }
         if incoming.post.is_none() && !sender.is_human() && self.escalator.took_climb(&incoming.envelope).await? {
-            return Ok(false);
+            return Ok(Arrival::Quiet);
         }
         let renewed = self.escalator.arrived(&mut incoming.envelope, sender).await?;
         self.narrow(incoming, sender).await?;
         if self.asks_review(incoming) {
             if let Some(reviewed) = self.sage_named(&incoming.envelope.from).await {
                 let (thread, from) = (&incoming.envelope.thread_id, &incoming.envelope.from);
-                tracing::warn!(
-                    %thread, %from, %reviewed,
-                    "refusing a review asked by a sage, as a sage is reviewed by no one"
-                );
-                return Ok(false);
+                tracing::debug!(%thread, %from, %reviewed, "a live ant names the review requester as its sage");
+                return Ok(if incoming.envelope.in_reply_to.is_some() {
+                    Arrival::Quiet
+                } else {
+                    Arrival::DeclineReview
+                });
             }
             if let Some(sense) = self.sense {
                 sense.review_received(self.ant, &incoming.envelope).await?;
@@ -355,7 +367,7 @@ impl Inbox<'_> {
             let pending = self.escalator.ledger().pending(&incoming.envelope.thread_id).await?;
             incoming.resume = pending.and_then(|p| p.channel);
         }
-        Ok(true)
+        Ok(Arrival::Prompt)
     }
 
     /// Start the run a schedule's firing, `envelope`, asks for ([`crate::trail::Trails::start_fired`]). A run that cannot start is

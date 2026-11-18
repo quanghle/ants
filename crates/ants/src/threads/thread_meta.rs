@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
-    JsDomain, Mark, Reminders, STREAM, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes, ThreadSummary,
-    ThreadTitle, UserId, assisted_marks_key, assisted_reminders_key, done_key, marks_key, reminders_key, summary_key,
-    title_key,
+    JsDomain, Mark, Reminders, STREAM, THREAD_UNDONE, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes,
+    ThreadSummary, ThreadTitle, UserId, assisted_marks_key, assisted_reminders_key, done_key, marks_key, reminders_key,
+    summary_key, title_key,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -36,8 +36,7 @@ const CONCURRENT: usize = 16;
 /// How long a title or mark stays at least, even on a thread with no message in the stream: a message may reach the
 /// stream that late, out of a leaf's outbox, and a title or mark may come before it.
 pub const KEPT: Duration = ants_daemon::bus::RETENTION;
-/// How long the delete marker of a pruned title or a cleared done state lasts: the shortest per-message TTL the stream
-/// takes, as nothing needs it.
+/// How long a pruning delete marker lasts: the shortest per-message TTL the stream takes, as no reader needs it.
 const PRUNED_MARKER: Duration = Duration::from_secs(1);
 
 /// The direct get subject of every key naming `human` second, which only `human`'s credentials may publish.
@@ -473,8 +472,8 @@ impl Meta {
         Ok(true)
     }
 
-    /// Clear the done state of `thread`, leaving a delete marker lasting [`PRUNED_MARKER`], as no reader needs it: a
-    /// state set again meanwhile stays. The state it had, if any, whether or not it still held.
+    /// Clear the done state of `thread`, leaving a marker for review packets for [`KEPT`]: a state set again
+    /// meanwhile stays. The state it had, if any, whether or not it still held.
     pub async fn clear_done(&self, thread: &ThreadId) -> Result<Option<ThreadDone>> {
         let key = done_key(thread);
         let (found, last) = self.kv.lookup_last(&key).await.context("reading the done state")?;
@@ -483,7 +482,14 @@ impl Meta {
             Lookup::NoValue => return Ok(None),
             Lookup::Value(value) => value,
         };
-        self.kv.delete_expecting(&key, last, Some(PRUNED_MARKER)).await.context("clearing the done state")?;
+        let cleared = self
+            .kv
+            .delete_with_marker(&key, last, Some(KEPT), THREAD_UNDONE)
+            .await
+            .context("clearing the done state")?;
+        if !cleared {
+            return Ok(None);
+        }
         Ok(serde_json::from_slice::<ThreadDone>(&value).ok().filter(|d| d.thread_id == *thread))
     }
 

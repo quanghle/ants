@@ -194,6 +194,7 @@ fn envelope() -> Envelope {
                     reason: "Not borne out by the threads cited.".to_owned(),
                 },
             ],
+            earlier_findings: vec!["5.1".to_owned(), "5.2".to_owned()],
         }),
         sent_at: at(0),
     }

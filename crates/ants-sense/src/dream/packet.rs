@@ -22,8 +22,8 @@ pub use identity::{Identity, identity};
 pub use reviewing::{REVIEWING_SHARE, reviewing};
 pub use section::Section;
 use track_record::TRACK_RECORD_SHARE;
+pub(super) use track_record::review_history;
 pub use track_record::{OUTCOME_DAYS, TRACK_RECORD_DAYS, track_record};
-pub(super) use track_record::{earlier_findings, outcomes};
 
 /// The most bytes of a review packet.
 pub const PACKET_BUDGET: usize = 64 * 1024;
@@ -61,6 +61,8 @@ pub struct Thread {
 pub enum Action {
     /// Marked done at `at` by `by`.
     Done { at: DateTime<Utc>, by: String },
+    /// Explicitly marked undone at `at`, as opposed to never having been marked done.
+    Undone { at: DateTime<Utc> },
     /// Reopened at `at`, after it was marked done, by `by`, a message, note or channel post stored on it.
     Reopened { at: DateTime<Utc>, by: String },
     /// A tool request of the ant for `tool` rejected at `at`: by `by`, or, with none, as it expired unanswered.
@@ -75,6 +77,7 @@ impl Action {
         let minute = |at: &DateTime<Utc>| at.format("%Y-%m-%d %H:%M").to_string();
         match self {
             Self::Done { at, by } => format!("- Marked done by {by} at {} UTC.", minute(at)),
+            Self::Undone { at } => format!("- Explicitly marked undone at {} UTC.", minute(at)),
             Self::Reopened { at, by } => format!("- Reopened by {by} at {} UTC, so no longer done.", minute(at)),
             Self::Rejected { at, tool, by: Some(by) } => {
                 format!("- A tool request rejected by {by} at {} UTC: {tool}.", minute(at))
@@ -329,9 +332,9 @@ fn render(
                 Earlier::Sage(_) => {
                     " Hold the threads against the earlier findings below and what became of them, and answer an \
                      earlier finding that did not hold with a finding of kind follow_up naming its id, as listed \
-                     there, in \"follows\": {\"kind\": \"follow_up\", \"follows\": \"3.2\", ...}; one naming none \
-                     of them stands unlinked. The vital signs beside an applied finding are numbers side by side, not \
-                     its effect: a few threads make weak evidence."
+                     there, in \"follows\": {\"kind\": \"follow_up\", \"follows\": \"3.2\", ...}; one without an \
+                     eligible id from the earlier-findings window stands unlinked. The vital signs beside an applied \
+                     finding are numbers side by side, not its effect: a few threads make weak evidence."
                 }
                 Earlier::Last(_) | Earlier::Reviewing(..) => "",
             },

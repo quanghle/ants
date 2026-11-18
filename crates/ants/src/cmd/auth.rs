@@ -741,7 +741,7 @@ pub(crate) async fn revoke_credentials(
     }
     push(url, domain, &dir).await?;
     if let Some(ant) = ant {
-        devices::forget_identity(url, domain, &dir, &ant).await?;
+        devices::forget_identity(url, domain, &dir, &ant.parse()?).await?;
         println!("{ant}'s identity deleted from {IDENTITIES_BUCKET}");
     }
     Ok(())

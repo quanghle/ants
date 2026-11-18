@@ -992,6 +992,11 @@ pub fn thread_start(thread: &ThreadId) -> Option<SystemTime> {
     uuid_start(Uuid::parse_str(thread.as_str()).ok()?)
 }
 
+/// The inbox thread a top-level MCP post came from, in the author's own sessions keys, not in the channel post.
+pub(crate) fn review_source_key(ant: &UserId, post: Uuid) -> String {
+    format!("{ant}.{post}.review_source")
+}
+
 /// The time in `id`, a little early, if it is a time-ordered UUID.
 fn uuid_start(id: Uuid) -> Option<SystemTime> {
     let (secs, nanos) = id.get_timestamp()?.to_unix();

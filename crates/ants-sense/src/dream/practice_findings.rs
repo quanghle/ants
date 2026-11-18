@@ -7,6 +7,8 @@
 //!   reasons of up to [`QUOTED_REASONS`] of the latest rejected, the reviewed ants' text: untrusted when it quotes any;
 //! - [`UNDONE_FINDINGS`] applied findings or more undone since, as told over the same days: a memory written for one
 //!   voted wrong or stale, a proposal rejected;
+//! - at least [`UNLINKED_FINDINGS`] in every [`FOLLOW_UP_FINDINGS`] classifiable follow-ups unlinked over those
+//!   days;
 //! - an ant reviewed within those days that left [`UNANSWERED_PERCENT`] percent or more of the findings of its last
 //!   [`UNANSWERED_REVIEWS`] reviews with findings unanswered, its latest review left out, as the verdicts on it come
 //!   with the next; one finding each;
@@ -28,7 +30,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use super::identity_findings::{step, subject};
 use super::vitals::cost;
-use super::{FindingKind, Gathered, Judgement, ReviewRecord, ReviewedFinding};
+use super::{FOLLOW_UP, FindingKind, Gathered, Judgement, ReviewRecord, ReviewedFinding};
 use crate::memory::{self, Scope};
 use crate::records;
 use crate::store::{Items, StoreError};
@@ -41,6 +43,10 @@ pub const JUDGED_FINDINGS: u32 = 10;
 pub const REJECTED_FINDINGS: u32 = 7;
 /// The applied findings undone over [`PRACTICE_DAYS`] that make a finding.
 pub const UNDONE_FINDINGS: u32 = 3;
+/// The fewest classifiable follow-ups over [`PRACTICE_DAYS`] before their unlinked share counts.
+const FOLLOW_UP_FINDINGS: u32 = 10;
+/// The follow-ups in every [`FOLLOW_UP_FINDINGS`] that, unlinked, make a practice finding.
+const UNLINKED_FINDINGS: u32 = 7;
 /// The reviews of an ant whose findings' verdicts came over which its unanswered share counts.
 pub const UNANSWERED_REVIEWS: usize = 3;
 /// The percent of the findings of [`UNANSWERED_REVIEWS`] reviews an ant leaves unanswered that makes a finding.
@@ -74,6 +80,7 @@ pub(super) async fn gather(
     let recent = |at: Option<DateTime<Utc>>| at.is_some_and(|at| ages.since(at) < Duration::days(PRACTICE_DAYS));
     let mut found = rejected_kinds(reviews, &recent);
     found.extend(undone(reviews, &recent));
+    found.extend(unlinked_follow_ups(reviews, &recent));
     found.extend(unanswered(reviews, &recent));
     found.extend(relationships(items, reviews).await?);
     found.extend(costly(reviews, &recent));
@@ -160,6 +167,28 @@ fn undone(reviews: &[ReviewRecord], recent: &dyn Fn(Option<DateTime<Utc>>) -> bo
         named.join(", ")
     );
     Some(subject(FindingKind::UndoneFindings, "applied", step(n, UNDONE_FINDINGS), text))
+}
+
+fn unlinked_follow_ups(reviews: &[ReviewRecord], recent: &dyn Fn(Option<DateTime<Utc>>) -> bool) -> Option<Gathered> {
+    let (mut made, mut unlinked) = (0, 0);
+    for review in reviews.iter().filter(|review| recent(review.answered)) {
+        for finding in review.findings.iter().filter(|finding| finding.kind == FOLLOW_UP) {
+            if finding.unlinked || finding.follows.is_some() {
+                made += 1;
+                unlinked += u32::from(finding.unlinked);
+            }
+        }
+    }
+    if made < FOLLOW_UP_FINDINGS || unlinked * FOLLOW_UP_FINDINGS < UNLINKED_FINDINGS * made {
+        return None;
+    }
+    let text = format!(
+        "Of the {made} follow-ups with a known link status given over the last {PRACTICE_DAYS} active days, \
+         {unlinked} did not name an eligible earlier finding. Use the sage's finding id from the earlier findings \
+         when following up on one, and another kind when no earlier finding is eligible. Keep what that teaches \
+         about following up, as {ANSWERS}."
+    );
+    Some(subject(FindingKind::UnlinkedFollowUps, "follow_up", step(unlinked, UNLINKED_FINDINGS), text))
 }
 
 fn unanswered(reviews: &[ReviewRecord], recent: &dyn Fn(Option<DateTime<Utc>>) -> bool) -> Vec<Gathered> {

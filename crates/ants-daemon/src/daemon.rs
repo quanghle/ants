@@ -797,7 +797,8 @@ async fn connect_mcp(
     providers: &Providers,
 ) -> Result<()> {
     mcp.listen(bus::live_inbox(client, &config.ant).await?);
-    mcp.with_channels(redacting_posts(crate::mcp::jetstream_channels(js.clone()), redactor.clone()));
+    let channels = crate::mcp::jetstream_channels(js.clone(), config.connection.js_domain.clone());
+    mcp.with_channels(redacting_posts(channels, redactor.clone()));
     mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
     mcp.with_files(crate::mcp::jetstream_files(js.clone()), config.harness.workdir.clone());
     mcp.with_redactor(redactor.clone());
@@ -1415,9 +1416,9 @@ fn redacting_posts(
 ) -> crate::mcp::ChannelAccess {
     let post = channels.post;
     crate::mcp::ChannelAccess {
-        post: std::sync::Arc::new(move |mut posted: ChannelPost| {
+        post: std::sync::Arc::new(move |mut posted: ChannelPost, source| {
             redactor.redact_string(&mut posted.text);
-            post(posted)
+            post(posted, source)
         }),
         ..channels
     }

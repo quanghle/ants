@@ -10,12 +10,13 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ants_proto::{AntIdentity, IDENTITIES_BUCKET, JsDomain, SenseId, UserId};
+use ants_proto::{AntIdentity, IDENTITIES_BUCKET, JsDomain, SenseId, SharedSettings, UserId, subject};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 use data_encoding::HEXLOWER;
 use ring::rand::{SecureRandom as _, SystemRandom};
+use serde::{Deserialize, Serialize};
 
 use crate::records::direct_kv::{DirectKv, Lookup};
 use crate::sync::MutexExt as _;
@@ -31,6 +32,79 @@ pub const MOVED_EVERY: Duration = Duration::from_secs(30);
 pub async fn id_of(js: &jetstream::Context, js_domain: Option<&JsDomain>, ant: &UserId) -> Option<String> {
     let identity = Identity::new(js, js_domain, ant).await.ok()?;
     identity.read().await.ok()?.map(|record| record.id)
+}
+
+/// Forget an ant revoked by name, keeping the final birth and count of its sense identity on the hub.
+pub async fn forget(js: &jetstream::Context, js_domain: Option<&JsDomain>, ant: &UserId) -> Result<()> {
+    let kv = DirectKv::new(js, js_domain, IDENTITIES_BUCKET).await?;
+    let mut expected = None;
+    for _ in 0..ATTEMPTS {
+        let (found, last) = kv.lookup_last(ant.as_str()).await?;
+        match found {
+            Lookup::NoBucket => return Ok(()),
+            Lookup::NoValue => return kv.delete(SharedSettings::key_of(ant)).await,
+            Lookup::Value(value) => {
+                let record = parse(ant.as_str(), &value)?;
+                if expected.as_ref().is_some_and(|id| id != &record.id) {
+                    bail!("the identity record of {ant} was replaced while being revoked");
+                }
+                if forget_at(&kv, &record, last).await? {
+                    return kv.delete(SharedSettings::key_of(ant)).await;
+                }
+                expected = Some(record.id);
+            }
+        }
+    }
+    bail!("the identity of {ant} kept changing while being revoked")
+}
+
+/// Persist growth before a compare-and-delete; a count written in between makes the caller retry with the new count.
+async fn forget_at(kv: &DirectKv, record: &AntIdentity, last: u64) -> Result<bool> {
+    if let Some(sense) = &record.sense {
+        let key = subject::revoked_growth_key(sense);
+        let growth = Growth { born: record.born, prompts: record.prompts };
+        let mut saved = false;
+        for _ in 0..ATTEMPTS {
+            let (found, last) = kv.lookup_last(&key).await?;
+            let previous = Growth::from_lookup(found)?;
+            let latest = previous.map_or(growth, |previous| previous.merge(growth));
+            if previous == Some(latest) || kv.update(&key, serde_json::to_vec(&latest)?, last).await? {
+                saved = true;
+                break;
+            }
+        }
+        if !saved {
+            bail!("the saved growth of {sense} kept changing while being revoked");
+        }
+    }
+    kv.delete_expecting(record.key(), last, None).await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct Growth {
+    born: DateTime<Utc>,
+    prompts: u64,
+}
+
+impl Growth {
+    fn from_lookup(found: Lookup) -> Result<Option<Self>> {
+        match found {
+            Lookup::Value(value) => Ok(Some(serde_json::from_slice(&value).context("reading revoked sense growth")?)),
+            Lookup::NoValue => Ok(None),
+            Lookup::NoBucket => bail!("the {IDENTITIES_BUCKET} bucket is missing"),
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        Self { born: self.born.min(other.born), prompts: self.prompts.max(other.prompts) }
+    }
+}
+
+fn parse(key: &str, value: &[u8]) -> Result<AntIdentity> {
+    let record: AntIdentity =
+        serde_json::from_slice(value).with_context(|| format!("reading the identity of {key}"))?;
+    record.check_key(key)?;
+    Ok(record)
 }
 
 /// One ant's identity record, read and written by the credentials of the ant, which read every ant's record by direct
@@ -62,13 +136,13 @@ impl Identity {
 
     /// The ant's record, created first when absent: None when the bucket is missing (`ants init` creates it).
     pub async fn ensure(&self) -> Result<Option<AntIdentity>> {
-        self.change(|_| {}).await
+        self.change(None, |_, _| {}).await
     }
 
     /// Add a completed prompt to the record, creating it first when absent: the record as stored, None when the bucket
     /// is missing.
     pub async fn count_prompt(&self) -> Result<Option<AntIdentity>> {
-        self.change(|record| record.prompts += 1).await
+        self.change(None, |record, _| record.prompts += 1).await
     }
 
     /// Name `sense` as the ant's sense identity in the record, creating the record first when absent, unless it names
@@ -81,12 +155,35 @@ impl Identity {
         sense: &SenseId,
         earlier: Option<(DateTime<Utc>, u64)>,
     ) -> Result<Option<AntIdentity>> {
-        self.change(|record| {
+        self.name_sense_from(sense, earlier, false).await
+    }
+
+    /// Name the sense id after reading its card, also using any newer growth kept by a revoke. Read that growth for
+    /// the record about to be named on each compare-and-set attempt, including if the record was replaced meanwhile.
+    pub(crate) async fn resume_sense(
+        &self,
+        sense: &SenseId,
+        earlier: Option<(DateTime<Utc>, u64)>,
+    ) -> Result<Option<AntIdentity>> {
+        self.name_sense_from(sense, earlier, true).await
+    }
+
+    async fn name_sense_from(
+        &self,
+        sense: &SenseId,
+        earlier: Option<(DateTime<Utc>, u64)>,
+        resume: bool,
+    ) -> Result<Option<AntIdentity>> {
+        self.change(resume.then_some(sense), |record, saved| {
             if record.sense.is_some() {
                 return;
             }
+            let mut growth = earlier.map(|(born, prompts)| Growth { born, prompts });
+            if let Some(saved) = saved {
+                growth = Some(growth.map_or(saved, |card| card.merge(saved)));
+            }
             record.sense = Some(sense.clone());
-            if let Some((born, prompts)) = earlier {
+            if let Some(Growth { born, prompts }) = growth {
                 (record.born, record.prompts) = (record.born.min(born), record.prompts + prompts);
             }
         })
@@ -118,14 +215,9 @@ impl Identity {
     /// The record as stored, without creating it: None when absent or when the bucket is missing.
     pub async fn read(&self) -> Result<Option<AntIdentity>> {
         let key = self.ant.as_str();
-        match self.kv.lookup_last(key).await?.0 {
+        match self.kv.lookup(key).await? {
             Lookup::NoBucket | Lookup::NoValue => Ok(None),
-            Lookup::Value(value) => {
-                let record: AntIdentity =
-                    serde_json::from_slice(&value).with_context(|| format!("reading the identity of {key}"))?;
-                record.check_key(key)?;
-                Ok(Some(record))
-            }
+            Lookup::Value(value) => parse(key, &value).map(Some),
         }
     }
 
@@ -170,29 +262,32 @@ impl Identity {
 
     /// Store the record as `change` makes it, by compare-and-set on the one read, a new one when absent; unchanged, a
     /// record found is not stored again.
-    async fn change(&self, change: impl Fn(&mut AntIdentity)) -> Result<Option<AntIdentity>> {
+    async fn change(
+        &self,
+        resume: Option<&SenseId>,
+        change: impl Fn(&mut AntIdentity, Option<Growth>),
+    ) -> Result<Option<AntIdentity>> {
         let key = self.ant.as_str();
         for _ in 0..ATTEMPTS {
             let (found, last) = self.kv.lookup_last(key).await?;
             let (mut record, existed) = match found {
                 Lookup::NoBucket => return Ok(None),
                 Lookup::NoValue => (born(&self.ant)?, false),
-                Lookup::Value(value) => {
-                    let record: AntIdentity =
-                        serde_json::from_slice(&value).with_context(|| format!("reading the identity of {key}"))?;
-                    record.check_key(key)?;
-                    (record, true)
+                Lookup::Value(value) => (parse(key, &value)?, true),
+            };
+            let saved = match resume {
+                Some(sense) if record.sense.is_none() => {
+                    Growth::from_lookup(self.kv.lookup(subject::revoked_growth_key(sense)).await?)?
                 }
+                _ => None,
             };
             let before = record.clone();
-            change(&mut record);
+            change(&mut record, saved);
             if existed && record == before {
                 return Ok(Some(record));
             }
             let value = serde_json::to_vec(&record)?;
-            let stored =
-                if existed { self.kv.update(key, value, last).await? } else { self.kv.create(key, value).await? };
-            if stored {
+            if self.kv.update(key, value, last).await? {
                 return Ok(Some(record));
             }
         }

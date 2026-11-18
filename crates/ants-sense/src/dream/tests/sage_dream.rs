@@ -37,9 +37,9 @@ async fn review_spending(
             reason: String::new(),
         })
         .collect();
-    let message = ReviewOutcomes { dream, findings };
+    let message = ReviewOutcomes { findings, ..review_request(dream) };
     assert!(review_received(items, &ant, &thread, &message, at).await.unwrap());
-    assert!(review_answered(items, &ant, &thread, dream, &answer_of(kinds), spent, at).await.unwrap());
+    assert!(review_answered(items, &ant, &thread, &message, &answer_of(kinds), spent, at).await.unwrap());
 }
 
 /// Verdicts on findings `dream`.1 on, one per outcome.
@@ -93,6 +93,56 @@ async fn a_kind_of_finding_the_ants_reject_seven_times_in_ten_over_fourteen_acti
     assert!(judged(&kinds, &verdicts(rejected), long_ago, "rejected_kind").await.is_empty(), "told 14 days ago");
 }
 
+#[tokio::test]
+async fn recurring_unlinked_follow_ups_gather_a_trusted_practice_finding_that_rests() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let (ant, now) = ("dev-b".parse::<UserId>().unwrap(), Utc::now());
+    let field = "unlinked_follow_ups";
+    let said = now - Duration::hours(48);
+    let legacy = answer_of(&["follow_up"; 10]);
+    let first = review_request(1);
+    assert!(review_answered(&*items, &ant, &on(1).thread, &first, &legacy, None, said).await.unwrap());
+    let mut old = review_record(&*items, &ant, 1).await.unwrap().unwrap();
+    for finding in &mut old.findings {
+        finding.unlinked = false;
+    }
+    items.put(&review_id(&ant, 1), REVIEW, old.values(), None, "test").await.unwrap();
+
+    let make = |follows: Option<&str>| {
+        json!({"kind": "follow_up", "follows": follows, "finding": "Check.", "action": "Act.",
+               "evidence": {"files": ["src/lib.rs:1"]}})
+    };
+    let request = ReviewOutcomes { earlier_findings: vec!["1.1".into()], ..review_request(2) };
+    let findings: Vec<_> = (0..6).map(|_| make(None)).chain((0..3).map(|_| make(Some("1.1")))).collect();
+    let answer_text = json!(findings).to_string();
+    assert!(review_answered(&*items, &ant, &on(2).thread, &request, &answer_text, None, said).await.unwrap());
+    assert!(found(&*items, field, now).await.is_empty(), "legacy follow-ups don't supply a tenth classified finding");
+
+    let answer_text = json!([make(Some("1.9"))]).to_string();
+    let request = ReviewOutcomes { dream: 3, ..request };
+    assert!(review_answered(&*items, &ant, &on(3).thread, &request, &answer_text, None, said).await.unwrap());
+    assert_eq!(found(&*items, field, now).await, keyed(&[("unlinked_follow_ups:follow_up", 7)]));
+    assert!(found(&*items, field, said + Duration::days(PRACTICE_DAYS)).await.is_empty(), "outside the window");
+
+    let dream = begin(&*items, start(now - Duration::hours(24), &on(9))).await.unwrap().unwrap();
+    let practice = dream.findings.iter().find(|f| f.kind == FindingKind::UnlinkedFollowUps).unwrap();
+    assert!(!practice.untrusted && practice.text.contains("eligible earlier finding"), "{practice:?}");
+    woken(&*items, dream.number, &on(9).thread).await.unwrap();
+    let judged = answer(
+        &sense,
+        9,
+        json!({"verdicts": [{"finding": practice.id, "verdict": "rejected", "reason": "The strategy is noted."}]}),
+    )
+    .await;
+    assert!(!judged.is_error, "{judged:?}");
+    let next = begin(&*items, start(now, &on(9))).await.unwrap().unwrap();
+    assert!(
+        !next.findings.iter().any(|f| f.kind == FindingKind::UnlinkedFollowUps),
+        "it rests until its ground changes"
+    );
+}
+
 /// Tell the sage in `items` at `at`, with the review message of dream `dream` of `ant` on thread `thread`, that the ant
 /// rejected `rejected`, each finding with its reason.
 async fn rejecting(
@@ -110,7 +160,7 @@ async fn rejecting(
             reason: (*reason).to_owned(),
         })
         .collect();
-    let message = ReviewOutcomes { dream, findings };
+    let message = ReviewOutcomes { findings, ..review_request(dream) };
     assert!(review_received(items, &ant.parse().unwrap(), &on(thread).thread, &message, at).await.unwrap());
 }
 
@@ -362,7 +412,7 @@ async fn a_sage_s_dream_lists_its_reviews_by_their_records_and_holds_none_of_the
     let spent = Some(ReviewSpend { tokens: 40_000, cost_micros: 250_000 });
     review_spending(&*items, ("dev-b", 2, 2), &undone, &["persona"], spent, now - Duration::hours(2)).await;
     review(&*items, ("dev-c", 1, 3), &[], &[], now - Duration::hours(1)).await;
-    let (dev_c, asked) = ("dev-c".parse().unwrap(), ReviewOutcomes { dream: 2, findings: Vec::new() });
+    let (dev_c, asked) = ("dev-c".parse().unwrap(), review_request(2));
     assert!(review_received(&*items, &dev_c, &on(5).thread, &asked, now - Duration::minutes(30)).await.unwrap());
     let covered = |n: u8, untrusted: bool, review: bool| Covered { thread: on(n).thread, untrusted, review };
     let writer = on(9);

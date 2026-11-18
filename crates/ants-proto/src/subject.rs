@@ -472,6 +472,18 @@ pub fn identity(ant: &UserId) -> String {
     format!("$KV.{}.{ant}", super::IDENTITIES_BUCKET)
 }
 
+const REVOKED_GROWTH_PREFIX: &str = "growth.";
+
+/// The retained growth of a revoked ant's sense identity in [`super::IDENTITIES_BUCKET`].
+pub fn revoked_growth_key(sense: &super::SenseId) -> String {
+    format!("{REVOKED_GROWTH_PREFIX}{sense}")
+}
+
+/// The subjects on which the revoker preserves the growth of revoked sense identities.
+pub fn all_revoked_growth() -> String {
+    format!("$KV.{}.{REVOKED_GROWTH_PREFIX}*", super::IDENTITIES_BUCKET)
+}
+
 /// Every ant's shared settings in [`super::IDENTITIES_BUCKET`]: the subjects host credentials put
 /// [`super::SharedSettings`] on ([`super::SharedSettings::key_of`]).
 pub fn all_shared_settings() -> String {

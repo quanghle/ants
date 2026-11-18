@@ -9,8 +9,10 @@
 //!
 //! [`Covered::review`]: crate::dream::Covered::review
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use ants_proto::UserId;
 use chrono::{DateTime, Utc};
 
 use super::Section;
@@ -26,19 +28,19 @@ pub const REVIEWING_SHARE: usize = 8;
 /// with a verdict told within the dream's period; empty when there are none.
 pub async fn reviewing(items: &dyn Items, dream: &Dream) -> Result<Section, StoreError> {
     let within = |at: Option<DateTime<Utc>>| at.is_some_and(|at| dream.since <= at && at < dream.at);
-    let mut reviews: Vec<_> = review_records(items, usize::MAX)
-        .await?
-        .into_iter()
+    let reviews = review_records(items, usize::MAX).await?;
+    let mut listed: Vec<_> = reviews
+        .iter()
         .filter(|review| {
             within(Some(review.received))
                 || within(review.answered)
                 || review.findings.iter().any(|finding| within(finding.told))
         })
         .collect();
-    if reviews.is_empty() {
+    if listed.is_empty() {
         return Ok(Section::default());
     }
-    reviews.sort_by(|a, b| b.received.cmp(&a.received).then_with(|| a.ant.cmp(&b.ant)));
+    listed.sort_by(|a, b| b.received.cmp(&a.received).then_with(|| a.ant.cmp(&b.ant)));
     let head = format!(
         "\n## Reviews of other ants\n\nThe reviews made of other ants since {} UTC, by their records, the latest asked \
          first: the ant and dream reviewed, when asked and answered, what the review thread spent by the answer, and \
@@ -49,11 +51,24 @@ pub async fn reviewing(items: &dyn Items, dream: &Dream) -> Result<Section, Stor
     );
     let tally =
         review_tally(items, TOP_EXPERIENCE).await?.map_or_default(|tally| format!("\n{}\n", tally_lines(&tally)));
-    Ok(Section { head, entries: reviews.iter().map(review).collect(), tally, noun: "earlier review" })
+    let mut followed = Followed::new();
+    for (ant, finding) in reviews
+        .iter()
+        .filter(|review| review.answered.is_some_and(|at| at < dream.at))
+        .flat_map(|review| review.findings.iter().map(|finding| (&review.ant, finding)))
+    {
+        if let Some(target) = &finding.follows {
+            followed.entry((ant, target)).or_default().push(&finding.id);
+        }
+    }
+    let entries = listed.into_iter().map(|record| review(record, &followed)).collect();
+    Ok(Section { head, entries, tally, noun: "earlier review" })
 }
 
+type Followed<'a> = BTreeMap<(&'a UserId, &'a str), Vec<&'a str>>;
+
 /// `review` as the section shows it.
-fn review(review: &ReviewRecord) -> String {
+fn review(review: &ReviewRecord, followed: &Followed<'_>) -> String {
     let minute = |at: &DateTime<Utc>| at.format("%Y-%m-%d %H:%M").to_string();
     let mut text = format!("\n### Dream {} of {}, asked {} UTC", review.dream, review.ant, minute(&review.received));
     match &review.answered {
@@ -76,8 +91,13 @@ fn review(review: &ReviewRecord) -> String {
         let _ = write!(text, "- {} {}", finding.id, finding.kind);
         if let Some(follows) = &finding.follows {
             let _ = write!(text, " of {follows}");
+        } else if finding.unlinked {
+            text.push_str(", unlinked");
         }
         let _ = writeln!(text, ": {}", came_of(finding));
+        if let Some(follow_ups) = followed.get(&(&review.ant, finding.id.as_str())) {
+            let _ = writeln!(text, "  Followed up by {}.", follow_ups.join(", "));
+        }
     }
     text
 }

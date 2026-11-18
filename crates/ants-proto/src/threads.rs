@@ -107,6 +107,9 @@ pub struct ThreadDone {
     pub on_behalf_of: Option<UserId>,
 }
 
+/// Payload of the KV delete marker left at a thread's done key by an explicit undo, not by pruning.
+pub const THREAD_UNDONE: &[u8] = b"undone";
+
 impl ThreadDone {
     /// `thread_id` marked done by `by` now, as of sequence `after`.
     pub fn new(thread_id: ThreadId, by: UserId, after: u64) -> Self {

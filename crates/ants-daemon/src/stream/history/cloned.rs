@@ -57,7 +57,7 @@ impl Thread {
             let place = match entry.place {
                 Place::Inbox(to) => Where::Inbox { to },
                 Place::Notes => Where::Notes,
-                Place::Channel(channel) => Where::Channel { channel },
+                Place::Channel(channel) | Place::ChannelLink(channel, _) => Where::Channel { channel },
             };
             let line =
                 Line { from: entry.from, place, text: entry.text, attachments: entry.attachments, at: entry.at.into() };

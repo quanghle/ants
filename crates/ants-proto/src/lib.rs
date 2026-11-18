@@ -150,8 +150,8 @@ pub use shared::{
 };
 pub use status::{DecidedBy, MAX_TOOL_PATHS, PlanStep, State, StatusEvent, StatusUpdate, StepStage};
 pub use threads::{
-    Archived, Mark, Reminder, Reminders, SNOOZE_MAX, SealedTitle, Snooze, ThreadDone, ThreadMarks, ThreadSnoozes,
-    ThreadSummary, ThreadTitle,
+    Archived, Mark, Reminder, Reminders, SNOOZE_MAX, SealedTitle, Snooze, THREAD_UNDONE, ThreadDone, ThreadMarks,
+    ThreadSnoozes, ThreadSummary, ThreadTitle,
 };
 pub use timeline::{
     CallCount, MAX_TIMELINE_CALLS, MAX_TIMELINE_ENTRIES, MAX_TIMELINE_PATH, MAX_TIMELINE_STEPS, MAX_TIMELINE_TITLE,

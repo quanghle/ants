@@ -3,7 +3,7 @@
 //! does the thread records ([`crate::thread::record`]). The review message makes it ([`review_received`]): the ant, its
 //! dream and the thread. The sage's answer gives its findings by kind ([`review_answered`]), read as the ant's daemon
 //! reads it ([`super::parse`]) and numbered as the ant numbers them, `<dream>.<n>`, a [`super::FOLLOW_UP`] with the
-//! earlier finding it follows when the records of the ant's earlier reviews hold it; the first answer stays. Each later
+//! earlier finding it follows when the request names it as eligible; the first answer stays. Each later
 //! review message of the ant tells what is new in the verdicts and outcomes of the sage's earlier findings
 //! ([`ants_proto::ReviewOutcomes`]), which go to the records of the reviews that made them. With the answer the sage's
 //! daemon tells what the review thread spent, from its spend ledger ([`ReviewSpend`]). A record holds the kinds,
@@ -12,8 +12,8 @@
 //! the findings. Each message changes the records once and a repeat nothing.
 //!
 //! The sage's tally is counted from the records by a query of the cache each time it is asked ([`review_tally`]): the
-//! findings made, applied, rejected, deferred and unanswered, and of the applied how many still hold, in all, by kind
-//! and by ant, with the tokens and cost of a review and of a finding still holding, over the reviews whose spend is
+//! findings made, applied, rejected, deferred and unanswered, how many applied still hold and how many follow-ups
+//! were linked or unlinked, in all, by kind and by ant, with the tokens and cost over the reviews whose spend is
 //! known ([`ReviewCost`]). The sage's identity shows it: the brief, `sense_identity` and the memories view. An ant that
 //! reviewed nobody has none. A clone inherits no record ([`crate::fork::KEPT`]).
 
@@ -77,9 +77,12 @@ pub struct ReviewedFinding {
     /// Its kind, in the sage's words.
     pub kind: String,
     /// Of a [`super::FOLLOW_UP`], the id of the earlier finding it follows, as the sage named it ([`super::FollowUp`]):
-    /// none when no record of an earlier review of the ant holds it.
+    /// none when the request does not name it as eligible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follows: Option<String>,
+    /// A follow-up whose target was missing or ineligible. An older record may have neither a link nor this mark.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlinked: bool,
     /// The ant's last verdict on it, once told; none while unanswered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<Judgement>,
@@ -200,36 +203,19 @@ pub async fn review_received(
     .await
 }
 
-/// Note in `items`, a sage's, its answer `text` at `at` to the review of dream `dream` of `ant` on `thread`, which
-/// `spent` what its daemon knew: its findings, as the ant's daemon reads them ([`parse`]), by kind, a follow-up with
-/// the earlier finding it follows when the record of an earlier review of `ant` holds it; none when it holds none
-/// readable. Whether it changed the record: once answered, a review keeps its first answer.
+/// Note in `items`, a sage's, its answer `text` at `at` to the review of `ant` on `thread`, which `spent` what its
+/// daemon knew: its findings, as the ant's daemon reads them ([`parse`]), by kind, a follow-up linked only to a target
+/// eligible in the request `asked`. Whether it changed the record: once answered, a review keeps its first answer.
 pub async fn review_answered(
     items: &dyn Items,
     ant: &UserId,
     thread: &ThreadId,
-    dream: u64,
+    asked: &ReviewOutcomes,
     text: &str,
     spent: Option<ReviewSpend>,
     at: DateTime<Utc>,
 ) -> Result<bool, StoreError> {
-    let mut findings = Vec::new();
-    for ((_, advice), n) in parse(text).map_or_default(|parsed| parsed.findings).into_iter().zip(1..) {
-        let follows = match advice.follows {
-            Some(follows) => earlier_finding(items, ant, dream, follows.named).await?,
-            None => None,
-        };
-        findings.push(ReviewedFinding {
-            id: format!("{dream}.{n}"),
-            kind: advice.kind,
-            follows,
-            verdict: None,
-            holds: false,
-            reason: String::new(),
-            told: None,
-        });
-    }
-    let findings = &findings;
+    let dream = asked.dream;
     let id = &review_id(ant, dream);
     read_modify_write(|| async move {
         let item = items.get(id).await?;
@@ -241,29 +227,34 @@ pub async fn review_answered(
             return Ok(false);
         }
         record.answered = Some(at);
-        record.findings.clone_from(findings);
+        record.findings = parse(text)
+            .map_or_default(|parsed| parsed.findings)
+            .into_iter()
+            .zip(1..)
+            .map(|((_, advice), n)| {
+                let follows = advice.follows.map(|follows| follows.named).filter(|named| {
+                    let earlier = named.split_once('.').and_then(|(number, _)| number.parse::<u64>().ok());
+                    earlier.is_some_and(|earlier| earlier < dream) && asked.earlier_findings.contains(named)
+                });
+                let unlinked = advice.kind == super::FOLLOW_UP && follows.is_none();
+                ReviewedFinding {
+                    id: format!("{dream}.{n}"),
+                    kind: advice.kind,
+                    follows,
+                    unlinked,
+                    verdict: None,
+                    holds: false,
+                    reason: String::new(),
+                    told: None,
+                }
+            })
+            .collect();
         record.spent = spent;
         let expected = item.map_or(0, |item| item.revision);
         items.put(id, REVIEW, record.values(), Some(expected), BY).await?;
         Ok(true)
     })
     .await
-}
-
-/// Finding `named` when it is one of the sage's for `ant` before dream `dream`, as the records of its reviews hold
-/// them.
-async fn earlier_finding(
-    items: &dyn Items,
-    ant: &UserId,
-    dream: u64,
-    named: String,
-) -> Result<Option<String>, StoreError> {
-    let Some(earlier) = named.split_once('.').and_then(|(earlier, _)| earlier.parse().ok()) else { return Ok(None) };
-    if earlier >= dream {
-        return Ok(None);
-    }
-    let record = review_record(items, ant, earlier).await?;
-    Ok(record.filter(|record| record.findings.iter().any(|finding| finding.id == named)).map(|_| named))
 }
 
 /// The findings of a sage, or of one kind or for one ant, and what the ants made of them.
@@ -276,6 +267,8 @@ pub struct FindingTally {
     pub rejected: u32,
     pub deferred: u32,
     pub unanswered: u32,
+    pub follow_ups_linked: u32,
+    pub follow_ups_unlinked: u32,
 }
 
 impl FindingTally {
@@ -301,15 +294,25 @@ impl FindingTally {
             rejected: self.rejected + other.rejected,
             deferred: self.deferred + other.deferred,
             unanswered: self.unanswered + other.unanswered,
+            follow_ups_linked: self.follow_ups_linked + other.follow_ups_linked,
+            follow_ups_unlinked: self.follow_ups_unlinked + other.follow_ups_unlinked,
         }
     }
 
     /// The counts, on one line.
     pub fn counts(&self) -> String {
-        format!(
+        let mut counts = format!(
             "{} made, {} applied ({} still holding), {} rejected, {} deferred, {} unanswered",
             self.made, self.applied, self.holding, self.rejected, self.deferred, self.unanswered
-        )
+        );
+        if self.follow_ups_linked > 0 || self.follow_ups_unlinked > 0 {
+            let _ = write!(
+                counts,
+                ", follow-ups: {} linked, {} unlinked",
+                self.follow_ups_linked, self.follow_ups_unlinked
+            );
+        }
+        counts
     }
 }
 
@@ -416,19 +419,24 @@ findings AS (
         reviews.ant AS ant,
         reviews.spent AS spent,
         json_extract(finding.value, '$.kind') AS kind,
+        json_extract(finding.value, '$.follows') IS NOT NULL AS linked,
+        ifnull(json_extract(finding.value, '$.unlinked'), 0) AS unlinked,
         json_extract(finding.value, '$.verdict') AS verdict,
         ifnull(json_extract(finding.value, '$.holds'), 0) AS holds
     FROM reviews, json_each(ifnull(reviews.findings, '[]')) AS finding
 )";
 
-/// The [`FindingTally`] of the rows of `findings` a query groups, as six columns.
+/// The [`FindingTally`] of the rows of `findings` a query groups, as eight columns.
+const TALLY_COLUMNS: usize = 8;
 const TALLY: &str = "
     count(findings.kind),
     ifnull(sum(findings.verdict = 'applied'), 0),
     ifnull(sum(findings.verdict = 'applied' AND findings.holds), 0),
     ifnull(sum(findings.verdict = 'rejected'), 0),
     ifnull(sum(findings.verdict = 'deferred'), 0),
-    count(findings.kind) - count(findings.verdict)";
+    count(findings.kind) - count(findings.verdict),
+    ifnull(sum(findings.kind = 'follow_up' AND findings.linked), 0),
+    ifnull(sum(findings.kind = 'follow_up' AND findings.unlinked), 0)";
 
 /// The findings of the rows of `findings` a query groups applied and still holding of reviews whose spend is known:
 /// the last of the four columns of a [`ReviewCost`].
@@ -461,7 +469,7 @@ FROM (
 LEFT JOIN findings ON findings.ant = reviewed.ant
 GROUP BY reviewed.ant ORDER BY reviewed.reviews DESC, reviewed.last DESC, reviewed.ant LIMIT :top";
 
-/// The [`FindingTally`] in the six columns of `row` from `at`.
+/// The [`FindingTally`] in the eight columns of `row` from `at`.
 fn tally_at(row: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<FindingTally> {
     Ok(FindingTally {
         made: row.get(at)?,
@@ -470,6 +478,8 @@ fn tally_at(row: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<FindingTally
         rejected: row.get(at + 3)?,
         deferred: row.get(at + 4)?,
         unanswered: row.get(at + 5)?,
+        follow_ups_linked: row.get(at + 6)?,
+        follow_ups_unlinked: row.get(at + 7)?,
     })
 }
 
@@ -486,7 +496,7 @@ pub(crate) fn count(db: &Connection, top: usize) -> Result<Option<ReviewTally>, 
     let query = |sql: &str| format!("{RECORDS}{}", sql.replace("{tally}", TALLY).replace("{holding}", HOLDING));
     let totals = |row: &rusqlite::Row<'_>| {
         let (reviews, ants, last) = (row.get::<_, u32>(0)?, row.get::<_, u32>(1)?, row.get::<_, Option<String>>(2)?);
-        Ok((reviews, ants, last, tally_at(row, 3)?, cost_at(row, 9)?))
+        Ok((reviews, ants, last, tally_at(row, 3)?, cost_at(row, 3 + TALLY_COLUMNS)?))
     };
     let (reviews, ants, last, findings, cost) =
         db.query_row(&query(TOTALS), named_params! {":kind": REVIEW}, totals)?;
@@ -501,7 +511,13 @@ pub(crate) fn count(db: &Connection, top: usize) -> Result<Option<ReviewTally>, 
     let mut by_ant = Vec::new();
     let mut ants_query = db.prepare(&query(BY_ANT))?;
     let rows = ants_query.query_map(params, |row| {
-        Ok((row.get::<_, String>(0)?, row.get(1)?, row.get::<_, String>(2)?, tally_at(row, 3)?, cost_at(row, 9)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get(1)?,
+            row.get::<_, String>(2)?,
+            tally_at(row, 3)?,
+            cost_at(row, 3 + TALLY_COLUMNS)?,
+        ))
     })?;
     for row in rows {
         let (ant, reviews, last, findings, cost) = row?;

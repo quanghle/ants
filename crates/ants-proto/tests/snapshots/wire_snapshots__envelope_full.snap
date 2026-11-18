@@ -165,6 +165,10 @@ expression: value
         "verdict": "rejected",
         "reason": "Not borne out by the threads cited."
       }
+    ],
+    "earlier_findings": [
+      "5.1",
+      "5.2"
     ]
   },
   "sent_at": "2025-01-01T12:00:00Z"

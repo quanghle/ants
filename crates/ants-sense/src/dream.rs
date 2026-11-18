@@ -212,6 +212,8 @@ pub enum FindingKind {
     RejectedKind,
     /// Findings a sage gave other ants, applied and later undone.
     UndoneFindings,
+    /// A sage's follow-ups often did not name an eligible earlier finding.
+    UnlinkedFollowUps,
     /// An ant that left most of a sage's findings unanswered.
     UnansweredReviews,
     /// No relationship record of an ant a sage reviewed some times.
@@ -235,6 +237,7 @@ impl FindingKind {
             self,
             Self::RejectedKind
                 | Self::UndoneFindings
+                | Self::UnlinkedFollowUps
                 | Self::UnansweredReviews
                 | Self::NoReviewedRelationship
                 | Self::CostlyReviews
@@ -259,6 +262,7 @@ impl fmt::Display for FindingKind {
             Self::Vitals => "vitals",
             Self::RejectedKind => "rejected_kind",
             Self::UndoneFindings => "undone_findings",
+            Self::UnlinkedFollowUps => "unlinked_follow_ups",
             Self::UnansweredReviews => "unanswered_reviews",
             Self::NoReviewedRelationship => "no_reviewed_relationship",
             Self::CostlyReviews => "costly_reviews",
@@ -400,10 +404,15 @@ impl Dream {
     }
 
     /// What its review message tells the sage beside the packet ([`ants_proto::Envelope::review_outcomes`]): the dream
-    /// and what is new in the verdicts and outcomes of the sage's earlier findings; none without a review.
+    /// and what is new in the verdicts and outcomes of the sage's earlier findings, with the ids eligible for
+    /// follow-ups; none without a review.
     pub fn review_outcomes(&self) -> Option<ReviewOutcomes> {
         let review = self.review.as_ref()?;
-        Some(ReviewOutcomes { dream: self.number, findings: review.outcomes.clone() })
+        Some(ReviewOutcomes {
+            dream: self.number,
+            findings: review.outcomes.clone(),
+            earlier_findings: review.earlier_findings.keys().cloned().collect(),
+        })
     }
 
     fn values(&self) -> Values {
@@ -594,8 +603,8 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
         }
         let (state, sage, review) = match &start.recipient {
             Recipient::Sage(sage) => {
-                let outcomes = packet::outcomes(items, number, ages, sage).await?;
-                (State::Sent, Some(sage.clone()), Some(Review::new(outcomes)))
+                let (outcomes, earlier) = packet::review_history(items, number, ages, sage).await?;
+                (State::Sent, Some(sage.clone()), Some(Review::new(outcomes, earlier)))
             }
             Recipient::Ant => (State::Fallback, None, None),
         };

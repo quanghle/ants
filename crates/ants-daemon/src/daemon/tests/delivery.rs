@@ -502,7 +502,7 @@ async fn a_review_s_record_keeps_all_its_thread_spent_though_a_human_s_message_s
         // The session's cost is a running total: the review adds 0.5.
         let review = Envelope::on_thread(thread.clone(), dev_b.clone(), bus.dev.clone(), "tokens 200 cost 0.75")
             .with_allow(Some(ants_proto::REVIEW_ALLOW.map(str::to_owned).to_vec()));
-        let told = ants_proto::ReviewOutcomes { dream: 1, findings: Vec::new() };
+        let told = ants_proto::ReviewOutcomes { dream: 1, findings: Vec::new(), earlier_findings: Vec::new() };
         let review = Envelope { review_outcomes: Some(told), ..review };
         let seq = bus::publish_json(&bus.js, review.subject(), &review, None).await.unwrap();
         assert_eq!(next_envelope(&mut to_dev_b).await.thread_id, thread);

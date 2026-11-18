@@ -106,7 +106,17 @@ async fn post_channel_starts_a_thread_the_ant_created_where_it_may_post() {
     let mut triage = ChannelEntry::new("triage".parse().unwrap());
     triage.messenger = Some(user("dev-a"));
     let posted = Arc::new(StdMutex::new(Vec::new()));
-    mcp.with_channels(channels(vec![ops, dev, triage], posted.clone()));
+    let sources = Arc::new(StdMutex::new(Vec::new()));
+    let mut access = channels(vec![ops, dev, triage], posted.clone());
+    let store = access.post;
+    access.post = Arc::new({
+        let sources = sources.clone();
+        move |posted, source| {
+            sources.locked().push(source.clone());
+            store(posted, source)
+        }
+    });
+    mcp.with_channels(access);
 
     let (ok, text) = call(&client, "post_channel", post("#ops", "@dev-b @human check the build")).await;
     assert!(ok && text.contains("that dev-a created (8 turns left); it wakes dev-b and notifies human."), "{text}");
@@ -115,9 +125,13 @@ async fn post_channel_starts_a_thread_the_ant_created_where_it_may_post() {
     assert_eq!((&got.creator, &got.owner), (&Some(user("dev-a")), &None));
     assert_eq!(got.turn_budget, ants_proto::DEFAULT_TURN_BUDGET, "a human's message spends no turn");
     assert!(text.contains(&format!("starting thread {}", got.thread_id)) && got.thread_id != current.thread_id);
+    assert_eq!(*sources.locked(), [Some(current.thread_id.clone())]);
 
+    let room = "ops".parse().unwrap();
+    mcp.settle_origin(&current, Some(&room)).await.unwrap();
     let (ok, text) = call(&client, "post_channel", post("triage", "noted")).await;
     assert!(ok && text.contains("it wakes nobody"), "the messenger posts: {text}");
+    assert_eq!(sources.locked()[1], None, "a post during channel work does not link to an inbox");
     let (ok, text) = call(&client, "post_channel", post("dev", "hi")).await;
     assert!(!ok && text.contains("dev-a is neither a member nor the messenger of #dev"), "{text}");
     let (ok, text) = call(&client, "post_channel", post("qa", "hi")).await;

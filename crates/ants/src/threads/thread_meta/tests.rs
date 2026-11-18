@@ -98,6 +98,11 @@ async fn a_thread_done_for_every_human_reopens_once_a_message_is_stored_on_it() 
     assert_eq!(meta.done(thread).await.unwrap(), None, "the stale state is gone though");
     assert!(mark_done(&bob_meta, thread, true, later).await.unwrap());
     assert!(mark_done(&meta, thread, false, later).await.unwrap(), "alice clears bob's");
+    let (entry, cleared) = meta.kv.lookup_marked(done_key(thread), THREAD_UNDONE).await.unwrap();
+    assert!(matches!(entry, Lookup::NoValue) && cleared.is_some(), "undone is still a KV deletion");
+    assert!(mark_done(&bob_meta, thread, true, later).await.unwrap(), "a new mark replaces the undo");
+    let (entry, cleared) = meta.kv.lookup_marked(done_key(thread), THREAD_UNDONE).await.unwrap();
+    assert!(matches!(entry, Lookup::Value(_)) && cleared.is_none(), "no stale undo after marking done again");
 }
 
 #[tokio::test]

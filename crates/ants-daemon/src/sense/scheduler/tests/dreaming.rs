@@ -11,14 +11,13 @@ struct Fake {
     idle: Mutex<Option<DateTime<Utc>>>,
     threads: Mutex<Vec<Thread>>,
     reads: AtomicUsize,
-    /// The sage served, if any.
+    /// The configured sage, if any.
     sage: Mutex<Option<UserId>>,
+    colony: Mutex<Vec<ColonyEntry>>,
     /// The review packets sent: to whom, as what, holding what.
     reviews: Mutex<Vec<(UserId, Review, String)>>,
     /// Whether sending a review packet fails.
     unsent: std::sync::atomic::AtomicBool,
-    /// The live ant naming the ant as its own sage, if any.
-    named: Mutex<Option<UserId>>,
 }
 
 impl Dreaming for Fake {
@@ -37,14 +36,13 @@ impl Dreaming for Fake {
         Box::pin(async move { vec![commit] })
     }
 
-    fn sage(&self) -> BoxFuture<'_, Result<Option<UserId>>> {
-        let sage = self.sage.locked().clone();
-        Box::pin(async move { Ok(sage) })
+    fn sage(&self) -> Option<UserId> {
+        self.sage.locked().clone()
     }
 
-    fn named_sage(&self) -> BoxFuture<'_, Result<Option<UserId>>> {
-        let named = self.named.locked().clone();
-        Box::pin(async move { Ok(named) })
+    fn colony(&self) -> BoxFuture<'_, Result<Vec<ColonyEntry>>> {
+        let entries = self.colony.locked().clone();
+        Box::pin(async move { Ok(entries) })
     }
 
     fn review<'a>(&'a self, sage: &'a UserId, dream: &'a Dream, text: String) -> BoxFuture<'a, Result<()>> {
@@ -57,6 +55,11 @@ impl Dreaming for Fake {
 }
 
 impl Fake {
+    fn serve_sage(&self, now: DateTime<Utc>) {
+        *self.sage.locked() = Some(sage());
+        self.colony.locked().push(listed(sage().as_str(), "m1", None, now));
+    }
+
     fn set(&self, idle: Option<DateTime<Utc>>, threads: &[(&str, bool)]) {
         *self.idle.locked() = idle;
         *self.threads.locked() = threads
@@ -250,6 +253,15 @@ fn sage() -> UserId {
     "sage".parse().unwrap()
 }
 
+fn listed(ant: &str, machine: &str, sage: Option<&str>, beat: DateTime<Utc>) -> ColonyEntry {
+    serde_json::from_value(json!({
+        "ant": ant, "machine": machine, "instance": "run-1", "harness": "copilot", "capabilities": [],
+        "started_at": beat, "heartbeat_at": beat, "activity": "idle", "handling": 0, "harnesses": 0,
+        "version": "0.1.0", "perms": 1, "sage": sage,
+    }))
+    .unwrap()
+}
+
 /// The sage's reply to the review packet `review` holding `text`.
 fn reply(review: &Review, text: &str) -> Envelope {
     let mut reply = Envelope::on_thread(review.thread.clone(), sage(), ant(), text);
@@ -261,11 +273,12 @@ fn reply(review: &Review, text: &str) -> Envelope {
 #[tokio::test]
 async fn a_served_sage_reviews_the_packet_on_a_thread_of_its_own_and_its_findings_prompt_the_ant() {
     let items = open(SharedLog::default(), SenseId::new()).await;
+    let sense = Sense::new();
     let fake = Arc::new(Fake::default());
     let settings = dreaming(&fake);
     let host = Wakes::default();
     let now = Utc::now();
-    *fake.sage.locked() = Some(sage());
+    fake.serve_sage(now);
     fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false), ("hooked-thread", true)]);
 
     let next = cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap().unwrap();
@@ -287,8 +300,8 @@ async fn a_served_sage_reviews_the_packet_on_a_thread_of_its_own_and_its_finding
     ]});
     let mut answer = reply(&review, &format!("```json\n{findings}\n```"));
     let mut stranger = Envelope { from: "mallory".parse().unwrap(), ..answer.clone() };
-    assert_eq!(review_answer(&*items, &mut stranger).await.unwrap(), None, "only the sage answers a review");
-    assert_eq!(review_answer(&*items, &mut answer).await.unwrap(), Some(true));
+    assert_eq!(review_answer(&sense, &*items, &mut stranger).await.unwrap(), None, "only the sage answers a review");
+    assert_eq!(review_answer(&sense, &*items, &mut answer).await.unwrap(), Some(true));
     assert!(answer.text.starts_with("# Dream 1") && answer.text.contains(REVIEW_BEGIN), "{}", answer.text);
     assert!(answer.text.contains("1.2 (sage: mistake, untrusted): Trusted the hook"), "{}", answer.text);
     assert_eq!(answer.allow, None, "the ant answers its findings unnarrowed");
@@ -320,22 +333,23 @@ async fn a_served_sage_reviews_the_packet_on_a_thread_of_its_own_and_its_finding
 #[tokio::test]
 async fn without_findings_nobody_wakes_and_without_an_answer_the_ant_dreams_on_the_packet_alone() {
     let items = open(SharedLog::default(), SenseId::new()).await;
+    let sense = Sense::new();
     let fake = Arc::new(Fake::default());
     let settings = dreaming(&fake);
     let host = Wakes::default();
     let now = Utc::now();
-    *fake.sage.locked() = Some(sage());
+    fake.serve_sage(now);
     fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false)]);
     cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap();
     let review = fake.reviews.locked()[0].1.clone();
     let mut waiting = Envelope { notice: Some(NoticeKind::Quota), ..reply(&review, "out of quota") };
     assert_eq!(
-        review_answer(&*items, &mut waiting).await.unwrap(),
+        review_answer(&sense, &*items, &mut waiting).await.unwrap(),
         Some(false),
         "a sage out of quota may answer later"
     );
     let mut empty = reply(&review, "Nothing worth a look.\n```json\n{\"findings\": []}\n```");
-    assert_eq!(review_answer(&*items, &mut empty).await.unwrap(), Some(false));
+    assert_eq!(review_answer(&sense, &*items, &mut empty).await.unwrap(), Some(false));
     cycle(&Sense::new(), &*items, &host, &settings, now + chrono::Duration::hours(7)).await.unwrap();
     assert!(host.requests.locked().is_empty(), "an answer without findings wakes nobody");
 
@@ -353,25 +367,56 @@ async fn without_findings_nobody_wakes_and_without_an_answer_the_ant_dreams_on_t
         {"kind": "lesson", "finding": "Pin the toolchain", "evidence": {"threads": ["worked-thread"]}, "action": "Pin it"},
     ]);
     let mut late = reply(&review, &format!("```json\n{pinned}\n```"));
-    assert_eq!(review_answer(&*items, &mut late).await.unwrap(), Some(false), "a late answer wakes nobody");
+    assert_eq!(review_answer(&sense, &*items, &mut late).await.unwrap(), Some(false), "a late answer wakes nobody");
     assert_eq!(last(&*items).await.unwrap().review.unwrap().late.len(), 1, "kept for the next dream");
     let day_later = now + chrono::Duration::hours(25);
+    fake.colony.locked()[0].heartbeat_at = day_later;
     fake.set(Some(day_later - chrono::Duration::hours(1)), &[("next-thread", false)]);
     cycle(&Sense::new(), &*items, &host, &settings, day_later).await.unwrap();
     let next = last(&*items).await.unwrap();
     assert_eq!(next.number, 2);
     assert!(next.findings.iter().any(|finding| finding.text == "Pin the toolchain"), "{:?}", next.findings);
     let mut older = reply(&review, &format!("```json\n{pinned}\n```"));
-    assert_eq!(review_answer(&*items, &mut older).await.unwrap(), Some(false), "dropped after the next dream began");
+    assert_eq!(
+        review_answer(&sense, &*items, &mut older).await.unwrap(),
+        Some(false),
+        "dropped after the next dream began"
+    );
 
     let items = open(SharedLog::default(), SenseId::new()).await;
     fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false)]);
     cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap();
     let review = fake.reviews.locked().last().unwrap().1.clone();
     let mut gave_up = Envelope { notice: Some(NoticeKind::GaveUp), ..reply(&review, "gave up") };
-    assert_eq!(review_answer(&*items, &mut gave_up).await.unwrap(), Some(false));
+    assert_eq!(review_answer(&sense, &*items, &mut gave_up).await.unwrap(), Some(false));
     cycle(&Sense::new(), &*items, &host, &settings, now + chrono::Duration::minutes(1)).await.unwrap();
     assert_eq!(host.requests.locked().len(), 2, "a sage giving up leaves the ant the packet at once");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sage_s_decline_wakes_the_dreamer_on_the_packet_alone() {
+    let now = Utc::now();
+    let (sense, stores) = setup().await;
+    let fake = Arc::new(Fake::default());
+    let host = Arc::new(Wakes::default());
+    fake.serve_sage(now);
+    fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false)]);
+    let running = start(sense.clone(), host.clone(), dreaming(&fake));
+    settle().await;
+    let review = fake.reviews.locked()[0].1.clone();
+    assert!(host.requests.locked().is_empty(), "the ant waits for the review");
+
+    let mut decline = reply(&review, "[ants] sage declines the review: a sage is reviewed by no one.");
+    assert_eq!(
+        review_answer(&sense, &*stores.items, &mut decline).await.unwrap(),
+        Some(false),
+        "no prompt on the review thread"
+    );
+    settle().await;
+    running.stop().await;
+    let requests = host.requests.locked();
+    assert_eq!(requests.len(), 1, "woken before the review deadline");
+    assert!(requests[0].thread.is_none() && requests[0].text.contains("the work of worked-thread"));
 }
 
 #[tokio::test]
@@ -391,17 +436,15 @@ async fn an_ant_without_a_sage_serving_it_or_its_own_sage_dreams_on_the_packet_a
     }
 }
 
-/// A review packet sent again, its first sending failed, goes to the sage while the ant is no sage; once a live ant
-/// names the ant as its own sage, none goes and the ant is woken with the packet alone.
 #[tokio::test]
-async fn a_review_sent_again_looks_again_whether_the_ant_became_a_sage() {
+async fn a_review_sent_again_rechecks_who_is_a_sage_and_whether_the_recipient_is_served() {
     let now = Utc::now();
-    for named in [None, Some("dev-b".parse::<UserId>().unwrap())] {
+    for (named, served) in [(false, true), (true, true), (false, false)] {
         let items = open(SharedLog::default(), SenseId::new()).await;
         let fake = Arc::new(Fake::default());
         let settings = dreaming(&fake);
         let host = Wakes::default();
-        *fake.sage.locked() = Some(sage());
+        fake.serve_sage(now);
         fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false)]);
         fake.unsent.store(true, Ordering::SeqCst);
         cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap();
@@ -410,19 +453,28 @@ async fn a_review_sent_again_looks_again_whether_the_ant_became_a_sage() {
         assert!(!begun.review.unwrap().sent);
 
         fake.unsent.store(false, Ordering::SeqCst);
-        *fake.named.locked() = named.clone();
         let again = now + chrono::Duration::minutes(1);
+        {
+            let mut entries = fake.colony.locked();
+            entries[0].heartbeat_at = again;
+            if !served {
+                entries[0].paused = Some(ants_proto::Paused { since: again, by: None });
+            }
+            if named {
+                entries.push(listed("dev-b", "m2", Some(ant().as_str()), again));
+            }
+        }
         cycle(&Sense::new(), &*items, &host, &settings, again).await.unwrap();
         cycle(&Sense::new(), &*items, &host, &settings, again + chrono::Duration::minutes(1)).await.unwrap();
         let looked = last(&*items).await.unwrap();
         let requests = host.requests.locked().clone();
-        if named.is_none() {
+        if !named && served {
             assert_eq!(fake.reviews.locked().len(), 1, "sent again, once");
             assert!(requests.is_empty(), "the ant waits for its sage");
             assert!(looked.review.unwrap().sent);
             continue;
         }
-        assert!(fake.reviews.locked().is_empty(), "a sage sends no review packet");
+        assert!(fake.reviews.locked().is_empty(), "no review packet for named={named}, served={served}");
         assert_eq!(requests.len(), 1, "woken at once, once");
         assert!(requests[0].text.starts_with("# Dream 1"), "{}", requests[0].text);
         assert_eq!(looked.state, dream::State::Fallback);
@@ -433,30 +485,21 @@ async fn a_review_sent_again_looks_again_whether_the_ant_became_a_sage() {
 #[test]
 fn an_ant_a_live_ant_names_as_its_sage_sends_its_own_sage_no_review_packet() {
     let now = Utc::now();
-    let listed = |ant: &str, machine: &str, sage: Option<&str>, beat: DateTime<Utc>| -> ColonyEntry {
-        serde_json::from_value(json!({
-            "ant": ant, "machine": machine, "instance": "run-1", "harness": "copilot", "capabilities": [],
-            "started_at": beat, "heartbeat_at": beat, "activity": "idle", "handling": 0, "harnesses": 0,
-            "version": "0.1.0", "perms": 1, "sage": sage,
-        }))
-        .unwrap()
-    };
     let (lead, sage) = ("lead".parse::<UserId>().unwrap(), UserId::sage());
-    let serving = |entries: &[ColonyEntry]| serving_sage(&lead, sage.clone(), entries, now);
+    let serving = |entries: &[ColonyEntry]| serving_sage(&lead, &sage, entries, now);
     let (own, served) = (listed("lead", "m1", Some(sage.as_str()), now), listed(sage.as_str(), "m1", None, now));
-    assert_eq!(serving(&[own.clone(), served.clone()]), Some(sage.clone()), "no other ant names lead");
+    assert!(serving(&[own.clone(), served.clone()]), "no other ant names lead");
     let other = listed("dev-b", "m1", Some(sage.as_str()), now);
-    assert_eq!(serving(&[other, own.clone(), served.clone()]), Some(sage.clone()));
+    assert!(serving(&[other, own.clone(), served.clone()]));
 
     let elsewhere = listed("dev-a", "m2", Some("lead"), now);
-    assert_eq!(
-        serving(&[elsewhere, own.clone(), served.clone()]),
-        None,
+    assert!(
+        !serving(&[elsewhere, own.clone(), served.clone()]),
         "dev-a, whose config on another machine or shared settings name lead, makes lead a sage"
     );
     let stale = listed("dev-a", "m2", Some("lead"), now - chrono::Duration::minutes(5));
-    assert_eq!(serving(&[stale, own.clone(), served]), Some(sage.clone()), "an ant no daemon serves now makes none");
-    assert_eq!(serving(&[own]), None, "no daemon serves the sage");
+    assert!(serving(&[stale, own.clone(), served]), "an ant no daemon serves now makes none");
+    assert!(!serving(&[own]), "no daemon serves the sage");
 }
 
 #[tokio::test]

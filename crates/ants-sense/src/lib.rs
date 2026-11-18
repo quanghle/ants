@@ -106,13 +106,14 @@ impl Sense {
         self.ants.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(ant.clone()).or_default().clone()
     }
 
-    /// The changes of the items of `ant` made by its calls. Subscribe before reading triggers, so a change during the
+    /// The changes of the items of `ant`. Subscribe before reading triggers, so a change during the
     /// read cannot be missed.
     pub fn changes(&self, ant: &UserId) -> tokio::sync::watch::Receiver<()> {
         self.ant(ant).changed.subscribe()
     }
 
-    fn changed(&self, ant: &UserId) {
+    /// Notify the ant's schedule of writes, including those made outside provider calls.
+    pub fn changed(&self, ant: &UserId) {
         self.ant(ant).changed.send_replace(());
     }
 

@@ -323,7 +323,7 @@ impl Hub {
         .with_owner(Some(human.clone()))
         .on_behalf(Some(human.clone()));
         let excerpt = behalf::excerpt(&post.text);
-        (access.post)(post.clone()).await.map_err(|e| format!("not posted: {e:#}"))?;
+        (access.post)(post.clone(), None).await.map_err(|e| format!("not posted: {e:#}"))?;
         let thread = &post.thread_id;
         let told = self.tell(&human, format!("posted to #{channel} on thread {thread} for {human}: {excerpt}")).await;
         Ok(format!("Posted to #{channel} on thread {thread} for {human}.{told}"))
