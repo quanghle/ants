@@ -17,7 +17,7 @@ use crate::tui::{attach, complete, style};
 /// The most lines of text the bar shows at once.
 const MAX_LINES: usize = 6;
 /// What the empty bar shows.
-const HINT: &str = "Ctrl-K commands · @ ant · # channel";
+const HINT: &str = "Ctrl-K commands · @ ant · # channel · Ctrl-J new line";
 /// A paste of more characters than this, or of more lines than `PASTE_LINES`, shows as a placeholder.
 const PASTE_CHARS: usize = 800;
 const PASTE_LINES: usize = 3;
@@ -234,6 +234,8 @@ impl Bar {
             }
             Key::Ctrl('k') => self.list = !self.list,
             Key::Ctrl('e') => return Edited::Editor(self.text()),
+            // A backslash before Enter makes it a new line, as in a shell.
+            Key::Enter if self.cursor > 0 && self.chars[self.cursor - 1] == '\\' => self.chars[self.cursor - 1] = '\n',
             Key::Enter if !self.text().trim().is_empty() => return Edited::Submit(self.text()),
             Key::Esc => {
                 self.focused = false;
@@ -397,6 +399,22 @@ mod tests {
         assert_eq!(bar.key(Key::Ctrl('e')), Edited::Editor("say Xi\n!".into()));
         bar.key(Key::Ctrl('u'));
         assert_eq!(bar.key(Key::Enter), Edited::Done, "nothing to send");
+    }
+
+    #[test]
+    fn a_backslash_before_enter_makes_it_a_new_line() {
+        let mut bar = Bar::default();
+        bar.set_text("one\\");
+        assert_eq!(bar.key(Key::Enter), Edited::Done);
+        bar.insert('2');
+        assert_eq!(bar.text(), "one\n2");
+        bar.set_text("a\\b");
+        bar.key(Key::Left);
+        bar.key(Key::Enter);
+        bar.key(Key::End);
+        assert_eq!(bar.key(Key::Enter), Edited::Submit("a\nb".into()), "the backslash before the cursor");
+        bar.set_text("a\\ b");
+        assert_eq!(bar.key(Key::Enter), Edited::Submit("a\\ b".into()), "sent when not right before it");
     }
 
     #[test]

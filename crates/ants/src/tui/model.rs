@@ -46,7 +46,7 @@ pub enum Key {
     Delete,
     Left,
     Right,
-    /// Alt-Enter: a new line in the command bar.
+    /// Ctrl-J, Shift-Enter or Alt-Enter: a new line in the command bar.
     Newline,
     /// Ctrl-C.
     Interrupt,

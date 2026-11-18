@@ -217,7 +217,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     let looks = faces::Io::new(js.clone());
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
-        let mut screen = Screen::open()?;
+        let mut screen = Screen::open_telling_keys_apart()?;
         let images = inline_images.then(|| images::Io::new(images::picker(), js.clone(), feed.keyring()));
         let exec = Exec::new(ctx);
         let chat = Chat {
@@ -260,6 +260,10 @@ fn key_of(key: KeyEvent) -> Option<Key> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') => Some(Key::Interrupt),
+            // Ctrl-J sends a line feed, which a terminal in raw mode tells from Enter's carriage return.
+            KeyCode::Char('j') => Some(Key::Newline),
+            // As a terminal without the kitty keyboard protocol sends it.
+            KeyCode::Enter => Some(Key::Enter),
             KeyCode::Char(c) => Some(Key::Ctrl(c)),
             _ => None,
         };
@@ -636,12 +640,14 @@ async fn next_image(
 
 /// Edit `text` in the editor, as `ants ask --edit` does, the terminal handed over to it meanwhile.
 async fn edit(terminal: &mut DefaultTerminal, text: String) -> Result<String> {
+    live::keyboard(false);
     live::bracket_pastes(false);
     ratatui::restore();
     let edited = tokio::task::spawn_blocking(move || compose::edit_text(&text)).await;
     terminal::enable_raw_mode().context("setting up the terminal")?;
     execute!(std::io::stdout(), terminal::EnterAlternateScreen).context("setting up the terminal")?;
     live::bracket_pastes(true);
+    live::keyboard(true);
     terminal.clear().context("drawing")?;
     edited.context("running the editor")?
 }
@@ -693,6 +699,9 @@ mod tests {
         assert_eq!(key(KeyCode::BackTab, KeyModifiers::SHIFT), Some(Key::Tab));
         assert_eq!(key(KeyCode::F(1), KeyModifiers::NONE), None);
         assert_eq!(key(KeyCode::Enter, KeyModifiers::ALT), Some(Key::Newline));
+        assert_eq!(key(KeyCode::Enter, KeyModifiers::SHIFT), Some(Key::Newline));
+        assert_eq!(key(KeyCode::Char('j'), KeyModifiers::CONTROL), Some(Key::Newline), "a line feed");
+        assert_eq!(key(KeyCode::Enter, KeyModifiers::CONTROL), Some(Key::Enter));
         assert_eq!(key(KeyCode::Enter, KeyModifiers::NONE), Some(Key::Enter));
         assert_eq!(key(KeyCode::Backspace, KeyModifiers::NONE), Some(Key::Backspace));
     }

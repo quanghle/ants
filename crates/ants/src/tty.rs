@@ -19,13 +19,28 @@ const ATTRIBUTES: &[u8] = b"\x1b[c";
 static TYPED: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 /// The terminal's answers to `question`, when standard input and output are terminals and it answers within 200ms:
-/// the OSC strings and the CSI sequences with a `?` it sent, the answer to the attributes query that follows
-/// `question` among them. What else is read was typed meanwhile, and is kept for [`typed_keys`].
-pub fn ask(question: &[u8]) -> Option<Vec<u8>> {
-    let read = unix::exchange(question)?;
+/// each OSC string and CSI sequence with a `?` it sent, the answer to the attributes query that follows `question`
+/// among them. What else is read was typed meanwhile, and is kept for [`typed_keys`].
+pub fn ask(question: &[u8]) -> Vec<Vec<u8>> {
+    let Some(read) = unix::exchange(question) else { return Vec::new() };
     let read = split(&read);
     TYPED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend_from_slice(&read.typed);
-    (!read.answers.is_empty()).then_some(read.answers)
+    read.answers
+}
+
+/// Whether the terminal takes the kitty keyboard protocol: it answers the query of the protocol's flags.
+pub fn kitty_keyboard() -> bool {
+    takes_kitty_keyboard(&ask(b"\x1b[?u"))
+}
+
+/// Whether `answers` hold one to the query of the kitty keyboard protocol's flags, such as `ESC [ ? 0 u`.
+fn takes_kitty_keyboard(answers: &[Vec<u8>]) -> bool {
+    answers.iter().any(|answer| {
+        answer
+            .strip_prefix(b"\x1b[?")
+            .and_then(|rest| rest.strip_suffix(b"u"))
+            .is_some_and(|flags| flags.iter().all(u8::is_ascii_digit))
+    })
 }
 
 /// The keys typed while the terminal was asked, as crossterm would have read them, taken once.
@@ -36,8 +51,8 @@ pub fn typed_keys() -> Vec<KeyEvent> {
 /// What was read from the terminal while asking it.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Read {
-    /// The terminal's answers, one after the other.
-    answers: Vec<u8>,
+    /// The terminal's answers.
+    answers: Vec<Vec<u8>>,
     /// The rest, typed meanwhile.
     typed: Vec<u8>,
     /// Whether the answer to the attributes query, the last to come, is in.
@@ -64,7 +79,7 @@ fn split(read: &[u8]) -> Read {
         };
         let Some(end) = end else { break };
         out.done |= rest[..end].ends_with(b"c") && rest.starts_with(b"\x1b[?");
-        out.answers.extend_from_slice(&rest[..end]);
+        out.answers.push(rest[..end].to_vec());
         at += end;
     }
     out
@@ -211,11 +226,14 @@ mod tests {
     #[test]
     fn answers_are_told_from_what_was_typed() {
         let read = split(b"hi\x1b]11;rgb:ffff/ffff/ffff\x07\r\x1b[?1u\x1b[A\x1b[?62;22c");
-        assert_eq!(read.answers, b"\x1b]11;rgb:ffff/ffff/ffff\x07\x1b[?1u\x1b[?62;22c");
+        assert_eq!(read.answers, [&b"\x1b]11;rgb:ffff/ffff/ffff\x07"[..], b"\x1b[?1u", b"\x1b[?62;22c"]);
         assert_eq!(read.typed, b"hi\r\x1b[A");
         assert!(read.done);
+        assert!(takes_kitty_keyboard(&read.answers));
+        assert!(!takes_kitty_keyboard(&split(b"\x1b[?62;22c").answers), "the attributes alone");
         let unfinished = split(b"q\x1b]11;rgb:ff");
-        assert_eq!((unfinished.answers, unfinished.typed, unfinished.done), (vec![], b"q".to_vec(), false));
+        assert_eq!(unfinished, Read { answers: vec![], typed: b"q".to_vec(), done: false });
+        assert_eq!(split(b"\x1b]11;rgb:0/0/0\x1b\\").answers, [b"\x1b]11;rgb:0/0/0\x1b\\"]);
     }
 
     #[test]
@@ -286,6 +304,6 @@ mod tests {
         let started = Instant::now();
         let read = unix::read_answers(fd, &mut slave, b"\x1b]11;?\x07");
         assert!(started.elapsed() < WAIT, "the attributes' answer ends the wait");
-        assert_eq!(split(&read).answers, b"\x1b]11;rgb:0/0/0\x07\x1b[?62c");
+        assert_eq!(split(&read).answers, [&b"\x1b]11;rgb:0/0/0\x07"[..], b"\x1b[?62c"]);
     }
 }

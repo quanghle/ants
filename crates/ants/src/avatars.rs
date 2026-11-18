@@ -210,7 +210,7 @@ pub fn theme() -> Theme {
 /// The theme suiting the terminal's background: the colour the terminal answers an OSC 11 query with within 200ms,
 /// light when its luminance is above a half; else light when `COLORFGBG` ends in 7 or 15; else dark.
 pub fn detect() -> Theme {
-    let background = crate::tty::ask(b"\x1b]11;?\x07").and_then(|answers| parse_background(&answers));
+    let background = crate::tty::ask(b"\x1b]11;?\x07").iter().find_map(|answer| parse_background(answer));
     if let Some(theme) = background.map(|rgb| luminance_theme(rgb.0, rgb.1, rgb.2)) {
         return theme;
     }
@@ -228,10 +228,9 @@ fn colorfgbg_theme(colorfgbg: Option<&str>) -> Theme {
     }
 }
 
-/// The colour of an OSC 11 answer such as `ESC ] 11 ; rgb:ffff/ffff/ffff BEL` among the terminal's `answers`, each
-/// channel 0 to 1.
-fn parse_background(answers: &[u8]) -> Option<(f64, f64, f64)> {
-    let text = std::str::from_utf8(answers).ok()?;
+/// The colour of an OSC 11 answer such as `ESC ] 11 ; rgb:ffff/ffff/ffff BEL`, each channel 0 to 1.
+fn parse_background(reply: &[u8]) -> Option<(f64, f64, f64)> {
+    let text = std::str::from_utf8(reply).ok()?;
     let rgb = text.split_once("\x1b]11;rgb:")?.1;
     let rgb = rgb.split(['\x07', '\x1b']).next()?;
     let mut channels = rgb.split('/').map(|hex| {

@@ -1,11 +1,19 @@
 //! The terminal a live view draws on full screen, and the log lines held meanwhile.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::{Context as _, Result};
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use ratatui::crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use ratatui::crossterm::execute;
 
 use crate::messages::progress;
+
+/// Whether the screen asked the terminal for the kitty keyboard protocol ([`Screen::open_telling_keys_apart`]).
+static KEYBOARD: AtomicBool = AtomicBool::new(false);
 
 /// The terminal, drawn on full screen while this lives; log lines are kept meanwhile and written once it is restored.
 pub struct Screen {
@@ -27,10 +35,28 @@ impl Screen {
             }
         }
     }
+
+    /// [`Screen::open`], the terminal asked to tell keys with modifiers from those without, such as Shift-Enter and
+    /// Alt-Enter from Enter, by the kitty keyboard protocol where it answers the query for it, until the screen is
+    /// dropped or the process panics.
+    pub fn open_telling_keys_apart() -> Result<Self> {
+        let supported = crate::tty::kitty_keyboard();
+        let screen = Self::open()?;
+        if supported && !KEYBOARD.swap(true, Ordering::Relaxed) {
+            let hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                stop_telling_keys_apart();
+                hook(info);
+            }));
+            keyboard(true);
+        }
+        Ok(screen)
+    }
 }
 
 impl Drop for Screen {
     fn drop(&mut self) {
+        stop_telling_keys_apart();
         bracket_pastes(false);
         ratatui::restore();
         release_logs();
@@ -52,6 +78,28 @@ pub fn bracket_pastes(on: bool) {
     if let Err(e) = set {
         tracing::debug!("bracketed paste: {e}");
     }
+}
+
+/// Push the kitty keyboard protocol's disambiguation, or pop it, when the screen asked for it; on the alternate screen,
+/// whose flags the terminal keeps apart from the main screen's.
+pub fn keyboard(on: bool) {
+    if !KEYBOARD.load(Ordering::Relaxed) {
+        return;
+    }
+    let set = if on {
+        execute!(std::io::stdout(), PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))
+    } else {
+        execute!(std::io::stdout(), PopKeyboardEnhancementFlags)
+    };
+    if let Err(e) = set {
+        tracing::debug!("kitty keyboard protocol: {e}");
+    }
+}
+
+/// Pop the kitty keyboard protocol's disambiguation for good, once.
+fn stop_telling_keys_apart() {
+    keyboard(false);
+    KEYBOARD.store(false, Ordering::Relaxed);
 }
 
 fn release_logs() {

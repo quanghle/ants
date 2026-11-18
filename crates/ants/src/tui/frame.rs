@@ -80,7 +80,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         return Line::styled(" ↑↓ select · Tab/Enter complete · Esc close the list", dim());
     }
     if model.bar.focused {
-        return Line::styled(" Enter send · Alt-Enter new line · Ctrl-E editor · Ctrl-K commands · Esc leave", dim());
+        return Line::styled(" Enter send · Ctrl-J new line · Ctrl-E editor · Ctrl-K commands · Esc leave", dim());
     }
     let card = match model.page() {
         Page::Home(page) => page.card(&model.data, now).map(|(cursor, _)| cursor),
@@ -115,7 +115,7 @@ const HELP: &[(&str, &str)] = &[
     ("[ ] \\", "on an ant: scroll its about or now column up, down; switch between the two"),
     ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
     ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),
-    ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
+    ("Ctrl-J Ctrl-E", "in the bar: a new line (or \\ Enter, Shift-Enter), the text in the editor"),
     ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
     ("y p m e d z", "in a thread: copy, pin, mute, archive, done, snooze (again to undo)"),
     ("a A r n", "on a tool request: allow once, always, reject at once, or reject with a note to the ant"),
@@ -241,7 +241,7 @@ mod tests {
         let shown = screen(&m, at(0));
         assert!(shown.contains("@dev-a"), "{shown}");
         assert!(shown.contains("nothing to send to @dev-a"), "{shown}");
-        assert!(shown.contains("Enter send · Alt-Enter new line"), "{shown}");
+        assert!(shown.contains("Enter send · Ctrl-J new line"), "{shown}");
         m.key(Key::Ctrl('k'), at(0));
         let shown = screen(&m, at(0));
         assert!(shown.contains("/approve   [ID] [--always]   ") && shown.contains("/reject"), "{shown}");
