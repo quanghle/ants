@@ -178,10 +178,10 @@ fn end_text(run: &TrailRun) -> Option<String> {
     Some(match &run.state {
         RunState::Running | RunState::Waiting => return None,
         RunState::Stopped { by } => format!("{name} was stopped by {by} ({spent}); {resume}."),
-        RunState::Failed { error } if error.contains("limit") => {
+        RunState::Failed { error, limit: Some(_) } => {
             format!("{name} failed ({spent}): {error}\n{resume}, under raised limits.")
         }
-        RunState::Failed { error } => format!("{name} failed ({spent}): {error}"),
+        RunState::Failed { error, limit: None } => format!("{name} failed ({spent}): {error}"),
         RunState::Done { result } => {
             let (text, fence) = match result {
                 serde_json::Value::Null => return Some(format!("{name} is done ({spent}).")),

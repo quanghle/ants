@@ -274,6 +274,20 @@ fn a_child_run_shows_the_call_it_answers_and_a_trail_call_its_child() {
     assert!(text.contains(&row) && !text.contains("child run answering"), "{text}");
 }
 
+#[test]
+fn a_run_failed_on_a_limit_shows_which() {
+    let now = Utc::now();
+    let shown = |state| {
+        let run = record(&p("dev-a"), Some("release"), state, now);
+        runs::render(&runs::Detail { run, pending: Vec::new(), queued: Vec::new(), journal: Vec::new() }, now)
+    };
+    let error = "the run reached its limit of 200 turns".to_owned();
+    let text = shown(RunState::Failed { error: error.clone(), limit: Some(ants_proto::RunLimit::Turns) });
+    assert!(text.contains(&format!("\nstate: failed on its turns limit: {error}\n")), "{text}");
+    let text = shown(RunState::Failed { error: error.clone(), limit: None });
+    assert!(text.contains(&format!("\nstate: failed: {error}\n")), "{text}");
+}
+
 /// Put `value` under `key` of [`TRAIL_RUNS_BUCKET`], as the conductor owning the key does.
 async fn put(js: &jetstream::Context, key: &str, value: &impl serde::Serialize) {
     let payload = serde_json::to_vec(value).unwrap();

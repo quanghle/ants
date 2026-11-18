@@ -183,7 +183,7 @@ async fn every_example_of_the_guide_runs_to_its_end() {
             let (_, events) = drive(&worker, &mut run, name, Some(seed)).await;
             match run.status() {
                 Status::Done { .. } => {}
-                Status::Failed { error } if error.ends_with(&format!("RuntimeError: {FAILED}")) => {}
+                Status::Failed { error, .. } if error.ends_with(&format!("RuntimeError: {FAILED}")) => {}
                 other => panic!("{name} with failing steps ({seed}): {other:?}\nevents: {events:?}"),
             }
         }

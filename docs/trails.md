@@ -176,6 +176,11 @@ table (the key of each, a duration such as `2d` for `wall`), and kept in its rec
 | Memory of the script | 64 MiB | 64 MiB | none | `MemoryError`, the run fails |
 | Python call depth | 200 | 200 | none | `RecursionError` in the script |
 
+A run failed on a limit keeps which in its record's `limit`: `steps` (a call past them raised and the script then
+failed), `turns`, `wall`, `compute`, `session` or `memory`; a run failing as its child run failed on one keeps the
+child's. `ants trail show RUN` names it (`state: failed on its turns limit: …`), and a failed run resumes only with one
+([Restarts, stops and resumes](#restarts-stops-and-resumes)).
+
 Each `agent()` step reserves up to 8 of the run's turns as its message's turn budget; the turns its reply spent, and
 one per re-ask, count against the run's turns, and a run that cannot reserve one fails on its turn limit. Each step
 also counts against the spending caps of the ant answering it. Keep the script's own work small: only the compute
@@ -227,8 +232,8 @@ finished run stays at least 30 days. The full layout is in [architecture.md](arc
   order](auth.md#admin-orders): unlike the request, which only a daemon up answers, the order waits for the machine's
   daemon while it is away and is recorded with the admin and time (`ants ant orders ANT`), its result listing the steps
   in other ants' queues. Wall time keeps running while stopped.
-- **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose error names a limit, from its last stored
-  session; the steps waited on go out anew, on new threads. Limit flags replace the run's limits they name, within the
+- **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose record names the limit it failed on, from
+  its last stored session; the steps waited on go out anew, on new threads. Limit flags replace the run's limits they name, within the
   maxima. A run done, failed otherwise, running or waiting is refused. An admin's `ants ant resume-trail ANT RUN`
   resumes it by admin order the same way, limit flags included.
 
@@ -256,7 +261,7 @@ workers = 4
 A worker failing with the run unchanged is retried, after 1 s and up to 1 min apart.
 
 `ants doctor` starts the worker of the daemon service's `ants`, else its own, as a daemon does, with a request it
-refuses before running anything. With a human's credentials it lists the runs stuck: those stopped or failed on a
-limit that `ants trail resume` may still continue, naming the limits to raise; those whose steps went to ants not in
-the colony, naming `ants trail stop`; and those whose conductor is not in the colony
-([cli.md](cli.md#identity-setup-completions-and-doctor)).
+refuses before running anything. With a human's credentials it lists the runs stuck: those stopped or failed on a limit
+(steps, turns or wall time, as their records say) that `ants trail resume` may still continue, naming the limits to
+raise; those whose steps went to ants not in the colony, naming `ants trail stop`; and those whose conductor is not in
+the colony ([cli.md](cli.md#identity-setup-completions-and-doctor)).

@@ -1,7 +1,7 @@
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
-    ColonyEntry, PendingCall, Role, RunId, RunState, TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLimits, TrailRun,
-    TrailSession, UserId, Uuid, trail_session_key,
+    ColonyEntry, PendingCall, Role, RunId, RunLimit, RunState, TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLimits,
+    TrailRun, TrailSession, UserId, Uuid, trail_session_key,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
@@ -38,8 +38,8 @@ fn record(conductor: &str, state: RunState, hours: i64, now: DateTime<Utc>) -> T
     }
 }
 
-fn failed(error: &str) -> RunState {
-    RunState::Failed { error: error.to_owned() }
+fn failed(error: &str, limit: Option<RunLimit>) -> RunState {
+    RunState::Failed { error: error.to_owned(), limit }
 }
 
 /// A step a run sent to `to`, waiting on its answer.
@@ -76,15 +76,16 @@ fn runs_moving_on_or_over_for_good_are_not_stuck() {
     let running = record("dev-a", RunState::Running, 1, now);
     let waiting_on_humans = record("dev-a", RunState::Waiting, 1, now);
     let done = record("dev-b", RunState::Done { result: json!("shipped") }, 2, now);
-    let raised = record("dev-a", failed("Traceback:\nValueError: no branch"), 2, now);
-    let mut at_most = record("dev-a", failed("RuntimeError: the run reached its limit of 500 steps"), 2, now);
+    let raised = record("dev-a", failed("Traceback:\nValueError: the run reached its limit of 50 steps", None), 2, now);
+    let mut at_most = record("dev-a", failed("the run reached its limit of 500 steps", Some(RunLimit::Steps)), 2, now);
     at_most.limits.steps = TrailLimits::MAX.steps;
+    let no_flag = record("dev-a", failed("TimeoutError: turn time limit exceeded", Some(RunLimit::Compute)), 2, now);
     let past_any_wall = record("dev-a", RunState::Stopped { by: p("alice") }, 8 * 24, now);
-    let listed = [running.clone(), waiting_on_humans, done, raised, at_most, past_any_wall];
+    let listed = [running.clone(), waiting_on_humans, done, raised, at_most, no_flag, past_any_wall];
     let pending = [(running.run, vec![step("dev-b"), step("dev-a")])];
 
     let checks = stuck(&listed, &pending, &colony(&["dev-a", "dev-b"], now), now);
-    assert_eq!(shown(&checks), [(Status::Ok, "no run stuck: 6 kept, 3 unfinished".to_owned(), vec![])]);
+    assert_eq!(shown(&checks), [(Status::Ok, "no run stuck: 7 kept, 3 unfinished".to_owned(), vec![])]);
     assert_eq!(shown(&stuck(&[], &[], &[], now)), [(Status::Ok, "no runs of trails".to_owned(), vec![])]);
 }
 
@@ -92,11 +93,11 @@ fn runs_moving_on_or_over_for_good_are_not_stuck() {
 fn stuck_runs_name_the_command_resuming_or_stopping_each() {
     let now = Utc::now();
     let stopped = record("dev-a", RunState::Stopped { by: p("alice") }, 2, now);
-    let turns = record("dev-a", failed("the run reached its limit of 200 turns"), 3, now);
+    let turns = record("dev-a", failed("the run reached its limit of 200 turns", Some(RunLimit::Turns)), 3, now);
     let traceback = "Traceback:\n  agent('build')\nRuntimeError: the run reached its limit of 50 steps\n";
-    let mut steps = record("dev-a", failed(traceback), 30, now);
+    let mut steps = record("dev-a", failed(traceback, Some(RunLimit::Steps)), 30, now);
     steps.ended_at = Some(now - TimeDelta::hours(1));
-    let wall = record("dev-a", failed("the run ran past its wall time limit of 1d"), 25, now);
+    let wall = record("dev-a", failed("the run ran past its wall time limit of 1d", Some(RunLimit::Wall)), 25, now);
     let orphaned = record("dev-a", RunState::Running, 1, now);
     let unconducted = record("dev-gone", RunState::Waiting, 1, now);
     let stopped_unconducted = record("dev-gone", RunState::Stopped { by: p("bob") }, 1, now);

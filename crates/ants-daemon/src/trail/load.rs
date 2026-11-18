@@ -48,7 +48,8 @@ impl Trails {
         }
         let queued = queued(&engine);
         let session = stored.session;
-        let book = Book { header, session, pending, queued, answers: Vec::new(), late: false, starved: false };
+        let book =
+            Book { header, session, pending, queued, answers: Vec::new(), broke: None, late: false, starved: false };
         Ok(Slot::new(engine, book))
     }
 

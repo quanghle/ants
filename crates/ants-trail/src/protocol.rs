@@ -76,6 +76,20 @@ impl Default for Limits {
     }
 }
 
+/// The limit of [`Limits`] a failed run broke ([`Response::Failed`], [`Status::Failed`](crate::Status::Failed)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Limit {
+    /// A call past [`Limits::steps`] raised, and the script failed in the same request.
+    Steps,
+    /// The script computed past [`Limits::compute_ms`] between two suspensions.
+    Compute,
+    /// The dumped session passed [`Limits::dump_bytes`].
+    Session,
+    /// The script's heap passed [`Limits::memory_bytes`].
+    Memory,
+}
+
 /// A host function a step calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -196,6 +210,9 @@ pub enum Response {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         calls: Vec<Call>,
         events: Vec<Event>,
+        /// The limit the script broke, failing on it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<Limit>,
     },
     /// The request could not be served: unreadable, or under limits the worker does not take.
     Refused { error: String },

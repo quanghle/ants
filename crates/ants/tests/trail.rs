@@ -1,7 +1,7 @@
 //! Trail runs driven through real `ants subprocess` workers.
 
 use ants_trail::{
-    Answer, Call, Event, Function, JournalEntry, Limits, Progress, Run, RunError, RunState, Status, Worker,
+    Answer, Call, Event, Function, JournalEntry, Limit, Limits, Progress, Run, RunError, RunState, Status, Worker,
 };
 use serde_json::{Value, json};
 
@@ -31,8 +31,13 @@ fn done(run: &Run) -> &Value {
 }
 
 fn failed(run: &Run) -> &str {
+    failed_on(run).0
+}
+
+/// The error of a failed run, and the limit it failed on.
+fn failed_on(run: &Run) -> (&str, Option<Limit>) {
     match run.status() {
-        Status::Failed { error } => error,
+        Status::Failed { error, limit } => (error, *limit),
         other => panic!("not failed: {other:?}"),
     }
 }
@@ -205,6 +210,7 @@ async fn the_step_limit_raises_on_the_call_past_it() {
     let call = run.outstanding()[0].call;
     run.resolve(&worker, call, Answer::Ok(json!(0))).await.unwrap();
     assert!(failed(&run).ends_with("RuntimeError: the run reached its limit of 2 steps"), "{}", failed(&run));
+    assert_eq!(failed_on(&run).1, Some(Limit::Steps));
 }
 
 #[tokio::test]
@@ -237,20 +243,28 @@ async fn compute_dump_memory_and_recursion_limits_fail_the_run() {
             "while True:\n    pass\n",
             Limits { compute_ms: 300, ..Limits::default() },
             "TimeoutError: turn time limit exceeded",
+            Some(Limit::Compute),
         ),
-        ("x = await agent('a')\n", Limits { dump_bytes: 1024, ..Limits::default() }, "passes the limit of 1024 bytes"),
-        ("def f(n):\n    return f(n + 1)\nf(0)\n", Limits::default(), "RecursionError"),
+        (
+            "x = await agent('a')\n",
+            Limits { dump_bytes: 1024, ..Limits::default() },
+            "passes the limit of 1024 bytes",
+            Some(Limit::Session),
+        ),
+        ("def f(n):\n    return f(n + 1)\nf(0)\n", Limits::default(), "RecursionError", None),
     ];
-    for (script, limits, error) in cases {
+    for (script, limits, error, limit) in cases {
         let mut run = run(script, json!(null), limits);
         run.start(&worker).await.unwrap();
         assert!(failed(&run).contains(error), "{script}: {}", failed(&run));
+        assert_eq!(failed_on(&run).1, limit, "{script}");
     }
 
     let script = "x = []\nfor i in range(1000):\n    x.append('a' * 100000)\n";
     let mut run = run(script, json!(null), Limits { memory_bytes: 8 << 20, ..Limits::default() });
     run.start(&worker).await.unwrap();
     assert!(failed(&run).starts_with("MemoryError: memory limit exceeded"), "{}", failed(&run));
+    assert_eq!(failed_on(&run).1, Some(Limit::Memory));
 }
 
 #[tokio::test]

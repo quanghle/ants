@@ -245,7 +245,8 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
     let _ = match &r.state {
         RunState::Stopped { by } => writeln!(out, "state: stopped by {by}"),
         RunState::Done { result } => writeln!(out, "state: done, result: {result}"),
-        RunState::Failed { error } => writeln!(out, "state: failed: {error}"),
+        RunState::Failed { error, limit: Some(limit) } => writeln!(out, "state: failed on its {limit} limit: {error}"),
+        RunState::Failed { error, limit: None } => writeln!(out, "state: failed: {error}"),
         other => writeln!(out, "state: {}", state(other)),
     };
     if let Some(phase) = &r.phase {
