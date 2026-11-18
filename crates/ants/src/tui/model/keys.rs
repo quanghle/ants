@@ -14,8 +14,19 @@ use crate::tui::{channel, credentials, held, nav, notices, thread, work};
 
 impl Model {
     pub fn key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
+        if key == Key::Ctrl('z') {
+            return Some(Action::Suspend);
+        }
+        let choosing_copy = self.copying.is_some();
         let action = self.dispatch(key, now);
         self.settle();
+        if !choosing_copy
+            && let Some(Action::Copy(text)) = &action
+            && let Some(picker) = crate::tui::clipboard::Picker::new(text)
+        {
+            self.copying = Some(picker);
+            return None;
+        }
         action
     }
 
@@ -47,23 +58,19 @@ impl Model {
         if self.snoozing.is_some() {
             return self.snooze_key(key, now);
         }
-        if let Some(picker) = &mut self.picking {
-            return match picker.key(key) {
-                Pick::Typing => None,
-                Pick::Close => {
-                    self.picking = None;
-                    None
-                }
-                Pick::React(message, reaction) => {
-                    self.picking = None;
-                    let reacted = self.data.reactions.get(&message).map_or(&[][..], Vec::as_slice);
-                    let remove = react::reacted(reacted, self.data.me(), &reaction);
-                    Some(Action::React(message, reaction, remove))
-                }
-            };
+        if self.picking.is_some() {
+            return self.reaction_key(key);
         }
         if let Some(action) = self.fold_key(key, now) {
             return Some(action);
+        }
+        if key == Key::Ctrl('l')
+            && let Some(Page::Thread(page)) = self.pages.last_mut()
+        {
+            page.toggle_waiting();
+            self.focus = Focus::View;
+            self.bar.focused = false;
+            return None;
         }
         if key == Key::Ctrl('t') {
             return self.next_unread(now);
@@ -122,6 +129,22 @@ impl Model {
         }
     }
 
+    fn reaction_key(&mut self, key: Key) -> Option<Action> {
+        match self.picking.as_mut()?.key(key) {
+            Pick::Typing => None,
+            Pick::Close => {
+                self.picking = None;
+                None
+            }
+            Pick::React(message, reaction) => {
+                self.picking = None;
+                let reacted = self.data.reactions.get(&message).map_or(&[][..], Vec::as_slice);
+                let remove = react::reacted(reacted, self.data.me(), &reaction);
+                Some(Action::React(message, reaction, remove))
+            }
+        }
+    }
+
     /// Take `key` if it is typed into what the view on screen holds: the text found in a thread, an ant's prompt
     /// or a channel's editor.
     fn typed_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
@@ -149,6 +172,17 @@ impl Model {
 
     /// Take `key` in the help, the notices or the digest, if one is shown.
     fn overlay_key(&mut self, key: Key) -> Option<Option<Action>> {
+        if let Some(copying) = &mut self.copying {
+            if matches!(key, Key::Esc | Key::Char('q')) {
+                self.copying = None;
+                return Some(None);
+            }
+            let action = copying.key(key);
+            if action.is_some() {
+                self.copying = None;
+            }
+            return Some(action);
+        }
         if let Some(help) = &mut self.help {
             if !help.key(key) {
                 self.help = None;
@@ -167,9 +201,11 @@ impl Model {
     /// Whether the help, the notices, the digest or a tool request in full covers the view.
     fn overlaid(&self) -> bool {
         self.help.is_some()
+            || self.copying.is_some()
             || self.log.is_some()
             || self.catchup.shown()
             || self.asking.as_ref().is_some_and(Asking::takes_keys)
+            || matches!(self.page(), Page::Thread(page) if page.listing())
     }
 
     /// q: quit, unless the bar holds text or q closed an overlay within [`QUIT_WITHIN`], which a q coming that soon
@@ -206,7 +242,7 @@ impl Model {
     /// Close what is open, the topmost first: the help or the notices, the digest, a tool request in full, a prompt, the
     /// bar's list or the palette, or what the view asks, finds or has being written. Whether anything was.
     fn close(&mut self, now: DateTime<Utc>) -> bool {
-        if self.help.take().is_some() || self.log.take().is_some() {
+        if self.copying.take().is_some() || self.help.take().is_some() || self.log.take().is_some() {
             return true;
         }
         if let Some(digest) = self.catchup.digest.as_mut().filter(|d| d.shown) {
@@ -226,6 +262,13 @@ impl Model {
         }
         if !self.palette(now).is_empty() {
             self.close_palette();
+            return true;
+        }
+        if let Some(Page::Thread(page)) = self.pages.last_mut()
+            && page.listing()
+        {
+            page.toggle_waiting();
+            self.bar.focused = false;
             return true;
         }
         if self.bar.focused || self.focus != Focus::View {
@@ -253,9 +296,11 @@ impl Model {
         if text.is_empty()
             || self.compact
             || self.help.is_some()
+            || self.copying.is_some()
             || self.catchup.shown()
             || self.interrupting.is_some()
             || self.asking.as_ref().is_some_and(Asking::takes_keys)
+            || (!self.bar.focused && matches!(self.page(), Page::Thread(page) if page.listing()))
         {
             return;
         }
