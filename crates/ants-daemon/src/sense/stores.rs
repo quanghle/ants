@@ -8,9 +8,9 @@
 //! The ant's identity record names its sense id ([`ants_proto::AntIdentity::sense`]), so its homes on every machine
 //! open the same sense identity: the id of a home is written to a record naming none, the first writer winning, a home
 //! without one takes the record's, an id is minted only when neither has one, and a home and a record naming different
-//! ones are refused ([`SenseStores::identify`]). The card keeps the birth and the prompt count the record holds, noted on
-//! opening, at each growth stage and when the daemon stops serving the ant, which a record made again for the ant, as
-//! after a revoke and re-add, starts from ([`note_growth`]).
+//! ones are refused ([`SenseStores::identify`]). The card keeps the birth and the prompt count the record holds, noted
+//! on opening, at each growth stage and when the daemon stops serving the ant, which a record made again for the ant,
+//! as after a revoke and re-add, starts from ([`note_growth`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

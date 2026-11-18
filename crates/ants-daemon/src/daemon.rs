@@ -453,8 +453,8 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
     Ok(served)
 }
 
-/// Note on the sense card of the ant the prompts its identity record counts, so a record made again after a revoke starts
-/// from all of them ([`crate::sense::Sense::stopping`]); a failure only warns.
+/// Note on the sense card of the ant the prompts its identity record counts, so a record made again after a revoke
+/// starts from all of them ([`crate::sense::Sense::stopping`]); a failure only warns.
 async fn growth(config: &Config, identity: Option<&Identity>, providers: &Providers) {
     let (Some(identity), Some(sense)) = (identity, providers.sense_of(&config.provider)) else { return };
     let error = match tokio::time::timeout(GROWN_WAIT, sense.stopping(&config.ant, identity)).await {

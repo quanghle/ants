@@ -106,9 +106,10 @@ pub(crate) enum AntCommand {
         #[arg(long)]
         no_wait: bool,
     },
-    /// Print ANT's avatar: its pixel-art head, one-line face, parts and colour, when it was born, its sense id and where
-    /// the avatar's seed comes from, and how it grew with the prompts it completed. --seed or --reset and --color or --auto-color change it in the ant's identity record
-    /// by compare-and-set, the same for every machine and viewer. Needs a human's credentials.
+    /// Print ANT's avatar: its pixel-art head, one-line face, parts and colour, when it was born, its sense id and
+    /// where the avatar's seed comes from, and how it grew with the prompts it completed. --seed or --reset and --color
+    /// or --auto-color change it in the ant's identity record by compare-and-set, the same for every machine and
+    /// viewer. Needs a human's credentials.
     Avatar {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,

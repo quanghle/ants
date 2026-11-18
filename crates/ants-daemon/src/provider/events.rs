@@ -271,8 +271,9 @@ impl Inner {
 }
 
 impl Queue {
-    /// The queue of `ant` in `home`, its events queued under an earlier name of the ant ([`crate::sense::earlier_names`])
-    /// told as its own, as the name they carry is no longer served: written again when any was.
+    /// The queue of `ant` in `home`, its events queued under an earlier name of the ant
+    /// ([`crate::sense::earlier_names`]) told as its own, as the name they carry is no longer served: written again
+    /// when any was.
     async fn read(home: &Path, ant: &UserId, backoff: Duration) -> Self {
         let file = queue_file(home);
         let mut events: VecDeque<Event> = VecDeque::new();
@@ -334,7 +335,11 @@ fn rename(home: &Path, ant: &UserId, events: &mut VecDeque<Event>) -> bool {
     let earlier = match crate::sense::earlier_names(home) {
         Ok(earlier) => earlier,
         Err(e) => {
-            tracing::warn!(%ant, error = format!("{e:#}"), "reading the earlier names of an ant for its lifecycle events");
+            tracing::warn!(
+                %ant,
+                error = format!("{e:#}"),
+                "reading the earlier names of an ant for its lifecycle events"
+            );
             return false;
         }
     };
