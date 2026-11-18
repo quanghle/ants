@@ -60,6 +60,32 @@ async fn an_ant_whose_sense_keeps_no_data_answers_other_ants_and_their_reviews()
     assert_eq!(bus.unacked().await, 0);
 }
 
+/// A review asked by an ant that a live ant names as its own sage is acked unanswered, as a sage is reviewed by no one.
+#[tokio::test]
+async fn a_review_asked_by_a_sage_is_acked_unanswered() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    bus.put_colony_with(&"dev-c".parse().unwrap(), |entry| entry.sage = Some(dev_b.clone())).await;
+    let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let review = Envelope::on_thread(ThreadId::generate(), dev_b, bus.dev.clone(), "review this")
+        .with_allow(Some(ants_proto::REVIEW_ALLOW.map(str::to_owned).to_vec()));
+    let last = bus::publish_json(&bus.js, review.subject(), &review, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        bus.until_acked(last).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().prompted, 0);
+    let answer = tokio::time::timeout(Duration::from_millis(200), to_dev_b.next()).await;
+    assert!(answer.is_err(), "answered: {answer:?}");
+    assert_eq!(bus.unacked().await, 0);
+}
+
 #[tokio::test]
 async fn a_thread_is_told_started_in_the_repository_of_the_workdir_by_its_first_message_only() {
     use ants_proto::provider::{EventKind, Origin, Starter};

@@ -302,7 +302,8 @@ impl Inbox<'_> {
     /// allowance once per level ([`Escalator::arrived`]). The leader's reply that does so on a thread the ant got
     /// stuck on in a channel is answered in that channel, with the fresh budget: the thread's turns come from its posts.
     /// The message takes the tool rules its thread is narrowed to ([`Inbox::narrow`]). A review an ant asks of the ant,
-    /// its sage, goes to the ant's sense ([`crate::sense::Sense::review_received`]).
+    /// its sage, goes to the ant's sense ([`crate::sense::Sense::review_received`]), unless a live ant names the asking
+    /// ant as its own sage: a sage is reviewed by no one, so the review is acked unanswered.
     /// Returns whether to answer the message: a member's notice that it sent the ant's escalation higher is the
     /// daemon's alone ([`Escalator::took_climb`]), and so is the sage's answer to the review of a dream, unless its
     /// findings prompt the ant ([`crate::sense::Sense::review_answer`]).
@@ -322,8 +323,18 @@ impl Inbox<'_> {
         }
         let renewed = self.escalator.arrived(&mut incoming.envelope, sender).await?;
         self.narrow(incoming, sender).await?;
-        if let Some(sense) = self.sense.filter(|_| self.asks_review(incoming)) {
-            sense.review_received(self.ant, &incoming.envelope).await?;
+        if self.asks_review(incoming) {
+            if let Some(reviewed) = self.sage_named(&incoming.envelope.from).await {
+                let (thread, from) = (&incoming.envelope.thread_id, &incoming.envelope.from);
+                tracing::warn!(
+                    %thread, %from, %reviewed,
+                    "refusing a review asked by a sage, as a sage is reviewed by no one"
+                );
+                return Ok(false);
+            }
+            if let Some(sense) = self.sense {
+                sense.review_received(self.ant, &incoming.envelope).await?;
+            }
         }
         // Not a message from ask_ant or send_message: an ask_ant call waits for the answer in the leader's inbox.
         if renewed && incoming.post.is_none() && incoming.envelope.in_reply_to.is_some() {

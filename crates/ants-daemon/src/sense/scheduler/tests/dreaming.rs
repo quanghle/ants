@@ -15,6 +15,10 @@ struct Fake {
     sage: Mutex<Option<UserId>>,
     /// The review packets sent: to whom, as what, holding what.
     reviews: Mutex<Vec<(UserId, Review, String)>>,
+    /// Whether sending a review packet fails.
+    unsent: std::sync::atomic::AtomicBool,
+    /// The live ant naming the ant as its own sage, if any.
+    named: Mutex<Option<UserId>>,
 }
 
 impl Dreaming for Fake {
@@ -38,7 +42,15 @@ impl Dreaming for Fake {
         Box::pin(async move { Ok(sage) })
     }
 
+    fn named_sage(&self) -> BoxFuture<'_, Result<Option<UserId>>> {
+        let named = self.named.locked().clone();
+        Box::pin(async move { Ok(named) })
+    }
+
     fn review<'a>(&'a self, sage: &'a UserId, dream: &'a Dream, text: String) -> BoxFuture<'a, Result<()>> {
+        if self.unsent.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(anyhow::anyhow!("the review packet was not sent")) });
+        }
         self.reviews.locked().push((sage.clone(), dream.review.clone().unwrap(), text));
         Box::pin(async { Ok(()) })
     }
@@ -376,6 +388,45 @@ async fn an_ant_without_a_sage_serving_it_or_its_own_sage_dreams_on_the_packet_a
         assert_eq!(host.requests.locked().len(), 1, "woken at once");
         let begun = last(&*items).await.unwrap();
         assert_eq!((begun.sage, begun.review, begun.state), (None, None, dream::State::Fallback));
+    }
+}
+
+/// A review packet sent again, its first sending failed, goes to the sage while the ant is no sage; once a live ant
+/// names the ant as its own sage, none goes and the ant is woken with the packet alone.
+#[tokio::test]
+async fn a_review_sent_again_looks_again_whether_the_ant_became_a_sage() {
+    let now = Utc::now();
+    for named in [None, Some("dev-b".parse::<UserId>().unwrap())] {
+        let items = open(SharedLog::default(), SenseId::new()).await;
+        let fake = Arc::new(Fake::default());
+        let settings = dreaming(&fake);
+        let host = Wakes::default();
+        *fake.sage.locked() = Some(sage());
+        fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false)]);
+        fake.unsent.store(true, Ordering::SeqCst);
+        cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap();
+        let begun = last(&*items).await.unwrap();
+        assert_eq!(begun.state, dream::State::Sent);
+        assert!(!begun.review.unwrap().sent);
+
+        fake.unsent.store(false, Ordering::SeqCst);
+        *fake.named.locked() = named.clone();
+        let again = now + chrono::Duration::minutes(1);
+        cycle(&Sense::new(), &*items, &host, &settings, again).await.unwrap();
+        cycle(&Sense::new(), &*items, &host, &settings, again + chrono::Duration::minutes(1)).await.unwrap();
+        let looked = last(&*items).await.unwrap();
+        let requests = host.requests.locked().clone();
+        if named.is_none() {
+            assert_eq!(fake.reviews.locked().len(), 1, "sent again, once");
+            assert!(requests.is_empty(), "the ant waits for its sage");
+            assert!(looked.review.unwrap().sent);
+            continue;
+        }
+        assert!(fake.reviews.locked().is_empty(), "a sage sends no review packet");
+        assert_eq!(requests.len(), 1, "woken at once, once");
+        assert!(requests[0].text.starts_with("# Dream 1"), "{}", requests[0].text);
+        assert_eq!(looked.state, dream::State::Fallback);
+        assert!(looked.thread.is_some());
     }
 }
 

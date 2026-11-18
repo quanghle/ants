@@ -318,6 +318,15 @@ impl Inbox<'_> {
             && ants_proto::is_review(envelope.allow.as_deref())
     }
 
+    /// The live ant naming `ant` as its sage, if any: `ant` is a sage then. None when the colony cannot be read.
+    pub(super) async fn sage_named(&self, ant: &UserId) -> Option<UserId> {
+        let entries = (self.colony)()
+            .await
+            .inspect_err(|e| tracing::warn!(error = format!("{e:#}"), "reading the colony; the review goes on"))
+            .ok()?;
+        crate::colony::naming_as_sage(ant, &entries, chrono::Utc::now()).map(|entry| entry.ant.clone())
+    }
+
     /// Why `incoming` is a review ([`ants_proto::REVIEW_ALLOW`]) that nothing would hold to read-only tools, unless it
     /// joins a prompt running.
     fn unheld_review(&self, incoming: &Incoming) -> Option<String> {

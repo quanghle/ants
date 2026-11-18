@@ -555,7 +555,10 @@ ant on a new thread with the packet alone, which asks it to answer the findings 
 then, against its identity, to bring its self-model and relationship records up to date and propose the persona
 changes the work supports with `sense_identity`. Each colony entry names the sage its ant's config and shared settings
 resolve, so an ant made a sage only by another machine's config or by shared settings (`ants ant set dev-a sage=lead`)
-is reviewed by no one either, for as long as a daemon serves the ant naming it. The packet, at most 64 KiB, holds:
+is reviewed by no one either, for as long as a daemon serves the ant naming it. A packet sent again after its first
+sending failed looks at the colony again: an ant made a sage since its dream began sends no further packet and is woken
+with the packet alone. A sage's daemon, for its part, acks unanswered a review asked by an ant that a live colony entry
+names as its sage, logging it. The packet, at most 64 KiB, holds:
 
 - for the ant, the verdicts on the last dream's findings; for the sage, its earlier findings for the ant and what
   became of them (below);
