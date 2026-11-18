@@ -202,7 +202,7 @@ Calls and events:
   - `ant_added`, `ant_moved`, `ant_retired`, `ant_revived`;
   - `ant_renamed` (`from`);
   - `ant_cloned` (`from`, `from_identity`);
-  - `thread_started` (`origin`);
+  - `thread_started` (`origin`; `repo`, the repository of the ant's working directory, named and left out as the context's `repo`);
   - `thread_done`, `thread_expired`;
   - `session_lost`;
   - `session_rebuilt` (`reason`: `lost` or `overflow`).
@@ -246,7 +246,7 @@ The message.
 
 ### Lifecycle events
 
-ants sends an ant's provider its lifecycle events only when both declared `events` at initialize, as sense does: it writes them on the ant's card ([sense.md](sense.md#identity)). Each event carries the ant, the id of its identity record, the thread when there is one and the time, never a message, prompt or reply.
+ants sends an ant's provider its lifecycle events only when both declared `events` at initialize, as sense does: it writes them on the ant's card and the thread's record ([sense.md](sense.md#identity)). Each event carries the ant, the id of its identity record, the thread when there is one and the time, never a message, prompt or reply.
 
 | Kind | Sent when |
 |---|---|
@@ -255,7 +255,7 @@ ants sends an ant's provider its lifecycle events only when both declared `event
 | `ant_revived` | A daemon serves an ant whose home is marked retired. |
 | `ant_cloned` | A clone order queues it in the clone's home, with the source ant and its identity id; the clone gets no `ant_added`. sense forks the source's identity on it ([sense.md](sense.md#identity)). |
 | `ant_moved`, `ant_renamed` | `ants ant import` queues `ant_moved`, then `ant_renamed` under `--as`, in the new home; the ant gets no `ant_added`. No other rename exists, and a daemon of the same bus taking an ant over is not a move. |
-| `thread_started` | A message comes on a thread the ant holds no session of, with the message's `origin`. |
+| `thread_started` | A message comes on a thread the ant holds no session of, with the message's `origin` and the repository of the ant's working directory (`repo`). |
 | `thread_expired` | A thread's worktree goes because its session expired (threads in worktrees only). |
 | `session_lost`, `session_rebuilt` | A stored session fails to resume and a new one starts (`lost`); the harness moves to a new session on a full context window (`overflow`). |
 | `thread_done` | A thread the ant holds a session of is marked done (`ants thread done`, an assistant's `done_for_human`), at the time it was marked. The daemon hears each done state put in `ants_threads` through the ant's durable consumer `done-<ant>`, filtered on `done.*`, one at a time, and acks it once the event is queued, so a thread marked done while no daemon served the ant is told once one does, unless the ant was retired meanwhile; a repeat carries the same id. A done state cleared (`ants thread undone`) tells nothing. |

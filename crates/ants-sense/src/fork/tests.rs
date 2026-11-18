@@ -16,7 +16,7 @@ use crate::memory::{Memory, VOTE};
 use crate::records::RELATIONSHIP;
 use crate::store::{Store, Stores};
 use crate::thread::{CHECKPOINT, HANDOFF};
-use crate::{promise, remind, task};
+use crate::{promise, remind, task, thread};
 
 const SOURCE: &str = "dev-a";
 const CLONE: &str = "dev-b";
@@ -112,6 +112,10 @@ async fn a_clone_keeps_memories_and_the_self_model_marked_inherited_and_drops_th
     call(&sense, "task", json!({"action": "create", "title": "Parser"})).await;
     call(&sense, "promise", json!({"title": "Notes", "promisee": "alice", "due": "2099-01-01T00:00:00Z"})).await;
     call(&sense, "remind", json!({"title": "Check", "trigger": {"kind": "after", "seconds": 3600}})).await;
+    let context = context(SOURCE);
+    let kind = EventKind::ThreadStarted { origin: context.origin, repo: None };
+    let (id, ant, at) = (Uuid::now_v7(), SOURCE.parse().unwrap(), Utc::now());
+    sense.event(Event { id, ant, identity: "0f1e".into(), thread: Some(context.thread), at, kind }).await.unwrap();
 
     sense.event(cloned(SOURCE, Utc::now())).await.unwrap();
 
@@ -130,7 +134,8 @@ async fn a_clone_keeps_memories_and_the_self_model_marked_inherited_and_drops_th
     assert_eq!((new.supersedes, new.votes.helpful), (Some(old), 1), "links and counts hold");
     let model = crate::records::self_model(&*clone).await.unwrap().unwrap();
     assert_eq!((model.record.body.as_str(), model.record.inherited.as_ref()), ("Careful.", Some(&from)));
-    for kind in [RELATIONSHIP, CHECKPOINT, HANDOFF, task::TASK, promise::KIND, remind::KIND, VOTE] {
+    for kind in [RELATIONSHIP, CHECKPOINT, HANDOFF, task::TASK, promise::KIND, remind::KIND, VOTE, thread::record::KIND]
+    {
         assert!(count(&*source, kind).await > 0, "{kind}");
         assert_eq!(count(&*clone, kind).await, 0, "{kind}");
     }

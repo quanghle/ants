@@ -102,7 +102,10 @@ While the machine's host connection is down:
 
 While the host connection is first being made and no cache exists, events wait in the ant's queue and briefs fail. A
 daemon without a host connection, as `ants daemon --ant` runs, and no cache keeps no data: events are acked with no
-effect, briefs are empty and `sense_brief` answers `unavailable`.
+effect, briefs are empty and `sense_brief` answers `unavailable`. A daemon serves the sense data of all its ants using
+sense before starting any of them, so an event of one ant about another, as a clone's about its source, finds the
+other's data whichever starts first; an event of an ant the daemon serves no sense data of, as one queued under a name
+the ant has left, is acked with no effect.
 
 ## Identity
 
@@ -123,8 +126,8 @@ machines and buses, retirement and revival:
   sense and the same daemon keeps the source's data, sense forks the source's identity into the clone's: the clone
   keeps a copy of the source's memories (with their links, writers and votes), self-model, persona and skills as they
   were when it was cloned, each marked `inherited` with the source's sense id, and none of its tasks, commitments,
-  reminders, relationship records, resume registers, handoffs, votes, persona and skill proposals, dreams or card. A
-  record the clone writes anew is its own. The clone's first brief may come before the fork.
+  reminders, relationship records, resume registers, handoffs, thread records, votes, persona and skill proposals,
+  dreams or card. A record the clone writes anew is its own. The clone's first brief may come before the fork.
 - **Retirement:** a retired ant's identity is dormant and keeps all its data: its commitments stay open and its
   reminders paused, nothing firing and no maintenance or dream running, until a revival or an addition under another
   ants identity id, as after a revoke and re-add. That puts off the expiry of each reminder active at the retirement by
@@ -137,6 +140,13 @@ revisions are its history. It records the sense id, the ant's name and earlier n
 (its addition or cloning, else its first brief), the harnesses, models and machines its sessions ran under, the ant it
 was cloned from, whether it is active, when it retired, returned and moved, and its last 16 dormancies. The brief shows
 it first ([Brief](#brief)).
+
+Each thread of the ant has a record, written by sense alone, as the card is, from the thread's lifecycle events, never
+from what its messages say: who started it and from which channel, the repository of the ant's working directory, when
+it first started and when it last started again, its session gone, and when it was last marked done and its session
+last expired. Each event changes the record once and a repeat nothing, so a thread takes about two changes of the log,
+its start and its end, none per prompt. An end of a thread sense never saw start records nothing. A clone inherits no
+thread record; an export carries them with the log.
 
 ## Memories
 
