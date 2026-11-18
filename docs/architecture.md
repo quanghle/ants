@@ -131,7 +131,7 @@ Each daemon publishes a `ColonyEntry` at `<ant>` in `ants_colony` every 10 s (an
 
 Per-ant prompt instructions and state isolation:
 
-- `whoami` (`--whoami TEXT`): role description prepended to every prompt and published in `ants_colony` (keep secrets out; `route` matches `capabilities`, not `whoami` or `profile`).
+- `whoami` (`--whoami TEXT`): role description prepended to every prompt and published in `ants_colony` (keep secrets out; `route` matches `capabilities`, not `whoami`, and weighs a `profile` only to break a tie).
 - `memory` and `tasks` (`--memory`, `--tasks`): private instructions prepended to every prompt.
 - The provider's brief: in the first prompt of a session, after these instructions ([Briefs](#briefs)).
 - `env` (`--env NAME=VALUE`): literal environment overrides passed to the harness and tool subprocesses (e.g. `BD_DB = "/srv/ants/dev-a/.bd/bd.db"`).
@@ -304,7 +304,7 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 | `react(reaction, message_id?, remove?)` | Add or remove the ant's reaction on a message it reads (default: active message), made by `ants signer`; 0 turns, wakes nobody. |
 | `list_reactions(message_id?)` | List reactions and reactors on a message the ant reads (default: active message), answered by `ants signer` or `ants webhook serve` with a `[[human]]` entry. |
 | `list_ants(capability?)` | List peer ants from `ants_colony` with capabilities, `agent`, activity, hold states, the advertised `whoami`, and the `profile`, marked as the ant's own words; the session's instructions call both roles, not instructions. |
-| `route(capability, text, wait?, timeout?, attach?)` | Route to the best peer advertising `capability` (not paused > paused, healthy > on a fallback > held, `live` > `stale`, `idle` > `working`, fewest messages); waits unless `wait: false`. |
+| `route(capability, text, wait?, timeout?, attach?)` | Route to the best peer advertising `capability` (not paused > paused, healthy > on a fallback > held, `live` > `stale`, `idle` > `working`, fewest messages, then the `profile` sharing the most words with `text`, then by name); waits unless `wait: false`. A profile, the ant's own untrusted words, only breaks a tie of all the rest: words are runs of letters and digits of 3 or more, compared lowercased, without a trailing `s` and without common English words (`the`, `for`, `with`…), each counted once; the reply names the ant, never its profile. |
 | `post_notes(text, attach?)` / `read_notes(thread?)` | Append to (1 turn) or read (up to 50 posts, 0 turns) passive thread notes; wakes nobody. |
 | `read_attachment(handle)` | Read a file attached to a message the ant reads, by the handle listed with it (`<from>.<inbox\|notes\|chan>.<target>.<id>`): PNG, JPEG, GIF, or WebP as image content, text or JSON up to 128 KiB as text, any other saved into the working directory under its name (`name-2`… beside a different file) and its path returned; 0 turns. |
 | `attach_to_reply(attach)` | Attach files from the working directory to the turn's final answer (message, channel post, or thread notes post sent when the turn ends), as `attach` does for `send_message`; a later call in the same turn replaces them, `[]` attaches none. Checked when called and read again as the answer is sent: a file that cannot be attached leaves them all out and appends an `[ants]` line saying why; 0 turns. |
