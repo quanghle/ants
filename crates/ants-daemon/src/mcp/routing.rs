@@ -127,7 +127,8 @@ impl Hub {
 #[tool_router(router = routing_router, vis = "pub(super)")]
 impl Tools {
     #[tool(description = "List the other ants being served, from the colony, with each ant's advertised \
-        whoami field, capabilities (such as `rust` or `billing`), harness, machine and whether it is idle or working, \
+        whoami field, profile (what the ant says it is good for, in its own words), capabilities (such as `rust` or \
+        `billing`), harness, machine and whether it is idle or working, \
         or signed out or paused: messages to an ant whose harness is signed out wait unanswered until a human signs \
         it in, and to a paused ant until a human resumes it. \
         `capability` keeps only those advertising it. Pick whom to send_message or ask_ant by these capabilities.")]
@@ -257,6 +258,11 @@ pub(super) fn describe(entries: &[&ColonyEntry]) -> String {
                 && !whoami.trim().is_empty()
             {
                 let _ = write!(text, "\n  whoami (advertised):\n{whoami}");
+            }
+            if let Some(profile) = &e.profile
+                && !profile.trim().is_empty()
+            {
+                let _ = write!(text, "\n  profile (the ant's own words):\n{profile}");
             }
             text
         })

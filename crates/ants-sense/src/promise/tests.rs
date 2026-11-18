@@ -64,8 +64,8 @@ async fn open_commitments_are_overdue_first_and_resolution_is_terminal() {
     let overdue = create(&sense, "overdue", "2025-01-01T00:00:00Z").await;
     let now = call(json!({})).context.at;
     let listed = open(&*items, now).await.unwrap();
-    assert_eq!(listed.iter().map(|item| &item.id).collect::<Vec<_>>(), [&overdue, &future]);
-    assert_eq!(listed[0].text("source_thread"), "t1");
+    assert_eq!(listed.iter().map(|(item, _)| &item.id).collect::<Vec<_>>(), [&overdue, &future]);
+    assert_eq!(listed[0].1.source_thread.as_str(), "t1");
     for (action, state) in [("keep", "kept"), ("break", "broken"), ("release", "released")] {
         let id = create(&sense, action, "2025-01-03T00:00:00Z").await;
         let result = promise(&sense, &call(json!({"action":action,"id":id}))).await;
@@ -146,10 +146,11 @@ async fn automatic_reminders_remain_schedulable_until_a_commitment_due_in_forty_
     let now = call(json!({})).context.at;
     let due = now + chrono::Duration::days(40);
     let id = create(&sense, "long commitment", &due.to_rfc3339()).await;
-    let commitment = items.get(&id).await.unwrap().unwrap();
-    let reminder: ItemId = commitment.text("reminder").parse().unwrap();
+    let commitment = Promise::of(&items.get(&id).await.unwrap().unwrap()).unwrap();
+    let reminder = commitment.reminder.unwrap();
     let expiry = due + chrono::Duration::days(30);
-    assert_eq!(items.get(&reminder).await.unwrap().unwrap().values["expires"], json!(expiry));
+    let item = items.get(&reminder).await.unwrap().unwrap();
+    assert_eq!(crate::remind::Reminder::of(&item).unwrap().expires, Some(expiry));
 
     let mut renew = call(json!({"action":"renew","id":reminder}));
     renew.context.at = now + chrono::Duration::days(1);

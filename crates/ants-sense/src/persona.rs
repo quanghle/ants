@@ -1,17 +1,18 @@
-//! The ant's persona (requirement ants-x39hk.6.5): its values, voice, boundaries and working style, one item of kind
-//! [`PERSONA`]. Only `sense_identity` changes it ([`propose`]), and only through a proposal ([`crate::proposal`]) the
-//! ant confirms in a dream [`crate::proposal::CONFIRM_AFTER_HOURS`] or more later, at most once in
-//! [`PERSONA_EVERY_HOURS`]; each revision keeps the reason of its proposal. The brief shows it after the identity, and
-//! so does `sense_identity` without arguments.
+//! The ant's persona (requirement ants-x39hk.6.5): its values, voice, boundaries and working style, and the profile
+//! in which it tells the colony what it is good for, one item of kind [`PERSONA`]. Only `sense_identity` changes it
+//! ([`propose`]), and only through a proposal ([`crate::proposal`]) the ant confirms in a dream
+//! [`crate::proposal::CONFIRM_AFTER_HOURS`] or more later, at most once in [`PERSONA_EVERY_HOURS`]; each revision keeps
+//! the reason of its proposal. The brief shows it after the identity, and so does `sense_identity` without arguments;
+//! the daemon serving the ant publishes the confirmed profile in its colony entry ([`profile`]).
 
 use std::fmt::Write as _;
 
 use ants_proto::provider::CallContext;
 use serde_json::{Value, json};
 
-use crate::items::{Item, ItemId, Values};
+use crate::items::{Item, ItemId, Values, stamp};
 use crate::memory::{holds_recalled_marker, redacted, sanitized};
-use crate::proposal::{self, Proposal, ProposalItem, Status, time};
+use crate::proposal::{self, Confirmation, Proposal, ProposalItem, Status, time};
 use crate::sanitize::{Limit, Redaction, sanitize_body};
 use crate::store::{Items, StoreError};
 use crate::tools::Answer;
@@ -23,8 +24,18 @@ pub const PERSONA_EVERY_HOURS: i64 = 24;
 /// The most bytes of each field of the persona: all of them show in every brief.
 pub const MAX_FIELD_BYTES: usize = 500;
 /// The persona's fields, in the order shown, with their headings.
-pub const FIELDS: &[(&str, &str)] =
-    &[("values", "Values"), ("voice", "Voice"), ("boundaries", "Boundaries"), ("working_style", "Working style")];
+pub const FIELDS: &[(&str, &str)] = &[
+    ("values", "Values"),
+    ("voice", "Voice"),
+    ("boundaries", "Boundaries"),
+    ("working_style", "Working style"),
+    (PROFILE, "Profile"),
+];
+/// The field in which the ant tells the colony what it is good for: other ants and the messenger read it, as confirmed,
+/// in the ant's colony entry.
+pub const PROFILE: &str = "profile";
+/// The most bytes of the profile, which every listing of the colony shows.
+pub const MAX_PROFILE_BYTES: usize = 300;
 
 /// The id of the persona's item.
 pub fn persona_id() -> ItemId {
@@ -34,6 +45,17 @@ pub fn persona_id() -> ItemId {
 /// The persona in `items`; none before the ant confirmed one.
 pub async fn current(items: &dyn Items) -> Result<Option<Item>, StoreError> {
     items.get(&persona_id()).await
+}
+
+/// The profile of the confirmed persona in `items`: what the ant published to the colony; none without one.
+pub async fn profile(items: &dyn Items) -> Result<Option<String>, StoreError> {
+    Ok(current(items).await?.and_then(|persona| Some(persona.values.get(PROFILE)?.as_str()?.to_owned())))
+}
+
+/// The headings of the fields the persona `values` holds, in the order shown.
+pub fn headings(values: &Values) -> Vec<&'static str> {
+    let held = FIELDS.iter().filter(|(field, _)| values.get(*field).is_some_and(|value| !value.is_null()));
+    held.map(|(_, heading)| *heading).collect()
 }
 
 /// The fields of the persona `values` holds, one paragraph each under its heading.
@@ -62,7 +84,7 @@ pub(crate) async fn propose(
     let mut redactions = Vec::new();
     let fields = fields(given, &mut redactions)?;
     if fields.is_empty() {
-        return Err(Answer::invalid("Name the fields to change: values, voice, boundaries or working_style."));
+        return Err(Answer::invalid("Name the fields to change: values, voice, boundaries, working_style or profile."));
     }
     let reason = proposal::reason(reason)?;
     let finding = proposal::finding(finding)?;
@@ -77,7 +99,9 @@ pub(crate) async fn propose(
         };
     }
     if version.is_empty() {
-        return Err(Answer::invalid("A persona holds at least one of values, voice, boundaries and working_style."));
+        return Err(Answer::invalid(
+            "A persona holds at least one of values, voice, boundaries, working_style and profile.",
+        ));
     }
     if current.as_ref().is_some_and(|current| proposal::content(&current.values) == version) {
         return Err(Answer::error("unchanged", "The persona is that already: nothing to propose.".into()));
@@ -87,11 +111,17 @@ pub(crate) async fn propose(
         .filter(|(field, _)| current.as_ref().and_then(|current| current.values.get(*field)) != version.get(*field))
         .map(|(field, _)| *field)
         .collect();
-    let summary = format!("Persona change ({}), proposed in full:\n{}\n", changed.join(", "), text(&version));
+    let mut summary = format!("Persona change ({}), proposed in full:\n{}\n", changed.join(", "), text(&version));
+    if changed.contains(&PROFILE) {
+        summary.push_str(if version.contains_key(PROFILE) {
+            "Once confirmed, the profile shows in the ant's colony entry, to other ants and the messenger.\n"
+        } else {
+            "Once confirmed, the profile leaves the ant's colony entry.\n"
+        });
+    }
     for (field, _) in FIELDS {
         version.entry((*field).to_owned()).or_insert(Value::Null);
     }
-    version.insert("reason".into(), json!(reason));
     let made = Proposal {
         target: persona_id(),
         kind: PERSONA.into(),
@@ -132,7 +162,8 @@ fn fields(
             fields.push((*field, None));
             continue;
         }
-        let text = sanitized(field, Some(given), sanitize_body(given, Limit::Bytes(MAX_FIELD_BYTES)))?;
+        let most = if *field == PROFILE { MAX_PROFILE_BYTES } else { MAX_FIELD_BYTES };
+        let text = sanitized(field, Some(given), sanitize_body(given, Limit::Bytes(most)))?;
         if holds_recalled_marker(&text.text) {
             let message = format!("The {field} quotes recalled memories: write the persona in new words.");
             return Err(Answer::error("recalled_block", message));
@@ -148,15 +179,18 @@ pub(crate) async fn show(items: &dyn Items) -> Result<Answer, Answer> {
     let current = current(items).await?;
     let pending = proposal::pending_for(items, &persona_id()).await?;
     let mut text = match &current {
-        Some(current) => format!(
-            "Persona, revision {}, confirmed {}: {}\n{}",
-            current.revision,
-            current.text("confirmed"),
-            current.text("reason"),
-            self::text(&current.values)
-        ),
-        None => "No persona yet: propose one with sense_identity, giving values, voice, boundaries or working_style \
-                 and a reason."
+        Some(current) => {
+            let confirmation = Confirmation::of(&current.values);
+            let confirmed = confirmation.confirmed.map_or_default(stamp);
+            let reason = confirmation.reason;
+            format!(
+                "Persona, revision {}, confirmed {confirmed}: {reason}\n{}",
+                current.revision,
+                self::text(&current.values)
+            )
+        }
+        None => "No persona yet: propose one with sense_identity, giving values, voice, boundaries, working_style or \
+                 profile and a reason."
             .to_owned(),
     };
     if let Some(pending) = &pending {
@@ -178,7 +212,7 @@ pub(crate) async fn history(items: &dyn Items) -> Result<Answer, Answer> {
     let mut text = format!("{} versions of the persona, the newest first:", versions.len());
     let mut json = Vec::new();
     for (revision, at, values) in versions.iter().rev() {
-        let reason = values.get("reason").and_then(Value::as_str).unwrap_or_default();
+        let reason = Confirmation::of(values).reason;
         let _ = write!(
             text,
             "\n- Revision {revision}, {}: {reason}\n  {}",
@@ -218,6 +252,7 @@ mod tests {
             (json!({"reason": "Why."}), "invalid_arguments"),
             (json!({"voice": 1, "reason": "Why."}), "invalid_arguments"),
             (json!({"voice": "x".repeat(MAX_FIELD_BYTES + 1), "reason": "Why."}), "too_long"),
+            (json!({"profile": "x".repeat(MAX_PROFILE_BYTES + 1), "reason": "Why."}), "too_long"),
             (json!({"voice": "", "reason": "Why."}), "invalid_arguments"),
             (json!({"voice": "Plain.", "reason": "Why.", "history": true}), "invalid_arguments"),
         ];

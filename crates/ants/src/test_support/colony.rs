@@ -13,6 +13,7 @@ pub(crate) fn entry(ant: &str, started: i64, beat: i64, now: DateTime<Utc>) -> C
         agent: None,
         capabilities: vec!["rust".to_owned(), "review".to_owned()],
         whoami: None,
+        profile: None,
         workdir: Some("/src/app".to_owned()),
         started_at: now - chrono::Duration::seconds(started),
         heartbeat_at: now - chrono::Duration::seconds(beat),

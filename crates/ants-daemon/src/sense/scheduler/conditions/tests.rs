@@ -4,6 +4,10 @@ use ants_sense::store::Store;
 
 use super::*;
 
+fn parse(condition: Value) -> Condition {
+    serde_json::from_value(condition).unwrap()
+}
+
 async fn items() -> impl Items {
     let log = AntLog::new(
         MemoryLog::default(),
@@ -43,7 +47,7 @@ async fn changed_files_need_a_baseline_and_disappearance_counts_as_a_change() {
     let items = items().await;
     let env = BTreeMap::new();
     let context = Context { workdir: &root, env: &env, allow: &[], items: &items, now: Utc::now() };
-    let condition = json!({"kind":"file","path":"flag","event":"changed"});
+    let condition = parse(json!({"kind":"file","path":"flag","event":"changed"}));
     let first = evaluate(&condition, None, &context).await.unwrap();
     assert!(!first.fired);
     std::fs::write(root.join("flag"), "ready").unwrap();
@@ -62,7 +66,7 @@ async fn command_checks_obey_allow_rules_and_use_the_workdir_and_environment() {
     let items = items().await;
     let env = BTreeMap::from([("SENSE_TEST_FLAG".into(), "ready".into())]);
     let mut context = Context { workdir: &root, env: &env, allow: &[], items: &items, now: Utc::now() };
-    let command = json!({"kind":"command","command":"test \"$SENSE_TEST_FLAG\" = ready"});
+    let command = parse(json!({"kind":"command","command":"test \"$SENSE_TEST_FLAG\" = ready"}));
     assert!(evaluate(&command, None, &context).await.is_err());
     let allow = vec!["execute:test *".into()];
     context.allow = &allow;
@@ -70,9 +74,11 @@ async fn command_checks_obey_allow_rules_and_use_the_workdir_and_environment() {
     assert!(result.fired);
     assert_eq!(result.value, json!(true), "command output is never kept");
     std::fs::write(root.join("flag"), "ready").unwrap();
-    assert!(evaluate(&json!({"kind":"command","command":"test -f flag"}), None, &context).await.unwrap().fired);
+    assert!(evaluate(&parse(json!({"kind":"command","command":"test -f flag"})), None, &context).await.unwrap().fired);
     assert!(
-        evaluate(&json!({"kind":"command","command":"test -f flag; touch forbidden"}), None, &context).await.is_err()
+        evaluate(&parse(json!({"kind":"command","command":"test -f flag; touch forbidden"})), None, &context)
+            .await
+            .is_err()
     );
     assert!(!root.join("forbidden").exists());
     std::fs::remove_dir_all(root).unwrap();
@@ -87,7 +93,7 @@ async fn a_command_timeout_does_not_leave_the_check_running() {
     let allow = vec!["execute:sleep *".into()];
     let context = Context { workdir: &root, env: &env, allow: &allow, items: &items, now: Utc::now() };
     let before = tokio::time::Instant::now();
-    assert!(evaluate(&json!({"kind":"command","command":"sleep 300"}), None, &context).await.is_err());
+    assert!(evaluate(&parse(json!({"kind":"command","command":"sleep 300"})), None, &context).await.is_err());
     assert_eq!(before.elapsed(), TIMEOUT);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -111,21 +117,21 @@ async fn github_and_bd_checks_interpret_structured_results_without_saving_output
         r#"printf '%s' '{"state":"MERGED","mergedAt":"2025-01-01T00:00:00Z","reviews":[{"state":"APPROVED"}]}'"#,
     );
     for state in ["merged", "closed", "reviewed"] {
-        let condition = json!({"kind":"gh_pr","repo":"o/r","number":42,"state":state});
+        let condition = parse(json!({"kind":"gh_pr","repo":"o/r","number":42,"state":state}));
         let result = evaluate(&condition, None, &context).await.unwrap();
         assert!(result.fired);
         assert_eq!(result.value, json!(true));
     }
     stub("gh", r#"printf '%s' '{"status":"completed"}'"#);
-    assert!(evaluate(&json!({"kind":"gh_workflow","repo":"o/r","run":4}), None, &context).await.unwrap().fired);
+    assert!(evaluate(&parse(json!({"kind":"gh_workflow","repo":"o/r","run":4})), None, &context).await.unwrap().fired);
     stub("bd", r#"printf '%s' '{"id":"work-1","status":"closed"}'"#);
-    assert!(evaluate(&json!({"kind":"bd","id":"work-1","state":"closed"}), None, &context).await.unwrap().fired);
+    assert!(evaluate(&parse(json!({"kind":"bd","id":"work-1","state":"closed"})), None, &context).await.unwrap().fired);
     stub("bd", r#"printf '%s' '[{"id":"work-1","status":"open"}]'"#);
-    assert!(evaluate(&json!({"kind":"bd","id":"work-1","state":"ready"}), None, &context).await.unwrap().fired);
-    assert!(!evaluate(&json!({"kind":"bd","id":"work-2","state":"ready"}), None, &context).await.unwrap().fired);
+    assert!(evaluate(&parse(json!({"kind":"bd","id":"work-1","state":"ready"})), None, &context).await.unwrap().fired);
+    assert!(!evaluate(&parse(json!({"kind":"bd","id":"work-2","state":"ready"})), None, &context).await.unwrap().fired);
     stub("gh", "/bin/cat response");
     std::fs::write(root.join("response"), "x".repeat(65 * 1024)).unwrap();
-    assert!(evaluate(&json!({"kind":"gh_workflow","repo":"o/r","run":4}), None, &context).await.is_err());
+    assert!(evaluate(&parse(json!({"kind":"gh_workflow","repo":"o/r","run":4})), None, &context).await.is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -152,10 +158,12 @@ async fn git_checks_wait_until_the_commit_reaches_the_named_reference() {
     let items = items().await;
     let env = BTreeMap::new();
     let context = Context { workdir: &root, env: &env, allow: &[], items: &items, now: Utc::now() };
-    let condition = json!({"kind":"git","commit":commit,"reference":"waiting"});
+    let condition = parse(json!({"kind":"git","commit":commit,"reference":"waiting"}));
     assert!(!evaluate(&condition, None, &context).await.unwrap().fired);
     git(&["branch", "--force", "waiting", "HEAD"]);
     assert!(evaluate(&condition, None, &context).await.unwrap().fired);
-    assert!(evaluate(&json!({"kind":"git","commit":"--help","reference":"HEAD"}), None, &context).await.is_err());
+    assert!(
+        evaluate(&parse(json!({"kind":"git","commit":"--help","reference":"HEAD"})), None, &context).await.is_err()
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

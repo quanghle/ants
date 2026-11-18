@@ -107,6 +107,10 @@ fn call(arguments: Value) -> ToolCall {
     }
 }
 
+async fn reminder(items: &dyn Items, id: &ItemId) -> remind::Reminder {
+    remind::Reminder::of(&items.get(id).await.unwrap().unwrap()).unwrap()
+}
+
 async fn create(sense: &Sense, trigger: Value) -> ItemId {
     let result = sense.call_tool(call(json!({"title":"scheduled work","trigger":trigger}))).await.unwrap();
     assert!(!result.is_error, "{result:?}");
@@ -206,9 +210,9 @@ async fn failed_and_throttled_deliveries_retry_without_advancing_or_spinning() {
         .extend([RpcError::unavailable("disconnected"), RpcError::unavailable("woken 60 times within the hour")]);
     let scheduler = start(sense.clone(), host.clone(), settings());
     settle().await;
-    let item = stores.items.get(&id).await.unwrap().unwrap();
-    assert_eq!(item.values["number"], 1);
-    assert!(!item.values.contains_key("delivered"));
+    let fired = reminder(&*stores.items, &id).await;
+    assert_eq!(fired.number, 1);
+    assert!(fired.delivered.is_none());
     assert_eq!(remind::pending_work(&*stores.items).await.unwrap()[0].id, format!("{id}:1"));
     create(&sense, json!({"kind":"after","seconds":3600})).await;
     settle().await;
@@ -222,7 +226,7 @@ async fn failed_and_throttled_deliveries_retry_without_advancing_or_spinning() {
     assert_eq!(requests.len(), 3);
     assert!(requests.iter().all(|request| request.id == format!("{id}:1")));
     assert!(remind::pending_work(&*stores.items).await.unwrap().is_empty());
-    assert!(stores.items.get(&id).await.unwrap().unwrap().values.contains_key("delivered"));
+    assert!(reminder(&*stores.items, &id).await.delivered.is_some());
     scheduler.stop().await;
 }
 
@@ -296,13 +300,14 @@ async fn a_reminder_without_a_source_thread_wakes_on_a_new_thread() {
 
 #[tokio::test(start_paused = true)]
 async fn maintenance_rechecks_citations_on_start_then_daily_without_trigger_polling() {
-    use ants_sense::memory::{Citation, Memory, MemoryKind, Scope};
+    use ants_sense::memory::{Citation, Memory, MemoryKind, Scope, Status};
 
     let root = ants_test_support::scratch_dir("scheduler-maintenance");
     std::fs::create_dir(root.join(".git")).unwrap();
     std::fs::write(root.join(".git/config"), "[remote \"origin\"]\nurl = https://github.com/ants/citations\n").unwrap();
     std::fs::write(root.join("source"), "changed").unwrap();
     let (sense, stores) = setup().await;
+    let status = async |id: &ItemId| Memory::of(&stores.items.get(id).await.unwrap().unwrap()).unwrap().status;
     let mut memory = Memory::new(
         MemoryKind::Fact,
         Scope::Ant(ant()),
@@ -322,12 +327,12 @@ async fn maintenance_rechecks_citations_on_start_then_daily_without_trigger_poll
     let settings = || Settings { workdir: root.clone(), ..settings() };
     let scheduler = start(sense.clone(), Arc::new(Wakes::default()), settings());
     for _ in 0..100 {
-        if stores.items.get(&first).await.unwrap().unwrap().text("status") == "needs_review" {
+        if status(&first).await == Status::NeedsReview {
             break;
         }
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    assert_eq!(stores.items.get(&first).await.unwrap().unwrap().text("status"), "needs_review");
+    assert_eq!(status(&first).await, Status::NeedsReview);
     let run = memory::last_maintenance(&*stores.items).await.unwrap().unwrap();
     assert_eq!((run.citations_checked, run.citations_marked), (1, 1));
     let second = ItemId::new();
@@ -336,11 +341,11 @@ async fn maintenance_rechecks_citations_on_start_then_daily_without_trigger_poll
     tokio::time::advance(DAY - Duration::from_secs(1)).await;
     settle().await;
     assert_eq!(stores.reads.load(Ordering::SeqCst), reads, "no minute polling");
-    assert_eq!(stores.items.get(&second).await.unwrap().unwrap().text("status"), "active");
+    assert_eq!(status(&second).await, Status::Active);
     scheduler.stop().await;
     let day_later = run.ran + chrono::Duration::hours(24);
     cycle(&sense, &*stores.items, &Wakes::default(), &settings(), day_later).await.unwrap();
-    assert_eq!(stores.items.get(&second).await.unwrap().unwrap().text("status"), "needs_review");
+    assert_eq!(status(&second).await, Status::NeedsReview);
     std::fs::remove_dir_all(root).unwrap();
 }
 

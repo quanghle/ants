@@ -295,6 +295,12 @@ impl Dream {
         }
     }
 
+    /// The write changing it, at `revision`, into `after`.
+    pub(crate) fn change(&self, after: &Self, revision: u64) -> Write {
+        let values = crate::items::changed(&self.values(), after.values());
+        Write::Change { id: Self::id(after.number), values, expected: Some(revision) }
+    }
+
     fn of(item: &crate::items::Item) -> Result<Self, StoreError> {
         serde_json::from_value(Value::Object(item.values.clone()))
             .map_err(|e| StoreError::Unavailable(format!("unreadable dream {}: {e}", item.id)))
@@ -482,10 +488,8 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
             values: dream.values(),
             expected: Some(0),
         });
-        let mut values = Values::new();
-        values.insert("number".into(), json!(number));
-        values.insert("rested".into(), json!(rested));
         let expected = Some(record.map_or(0, |(_, revision)| revision));
+        let values = crate::items::values_of(&Record { number, rested });
         writes.push(Write::Put { id: record_id(), kind: DREAMS.into(), values, expected });
         items.write(&writes, BY).await?;
         Ok(Some(dream))
