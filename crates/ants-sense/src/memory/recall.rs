@@ -131,7 +131,14 @@ pub async fn top(
     now: DateTime<Utc>,
 ) -> Result<Vec<Ranked>, StoreError> {
     let found = items.list(MEMORY, usize::MAX).await?;
-    Ok(rank(found.into_iter().map(|item| (item, 1.0)), scopes, limit, now))
+    Ok(rank(found.into_iter().map(|item| (item, 1.0)), Some(scopes), limit, now))
+}
+
+/// The live memories of every scope, the best first ([`score`] without a query), up to `limit`: what the memories
+/// view shows humans after the core ones ([`crate::view`]).
+pub async fn top_of_all(items: &dyn Items, limit: usize, now: DateTime<Utc>) -> Result<Vec<Ranked>, StoreError> {
+    let found = items.list(MEMORY, usize::MAX).await?;
+    Ok(rank(found.into_iter().map(|item| (item, 1.0)), None, limit, now))
 }
 
 /// The live memories of `scopes` matching words of `text`, the best first ([`score`]), up to `limit`: among the
@@ -144,15 +151,21 @@ pub async fn search(
     now: DateTime<Utc>,
 ) -> Result<Vec<Ranked>, StoreError> {
     let hits = items.search(text, Some(MEMORY), CANDIDATES).await?;
-    Ok(rank(hits.into_iter().map(|hit| (hit.item, hit.score)), scopes, limit, now))
+    Ok(rank(hits.into_iter().map(|hit| (hit.item, hit.score)), Some(scopes), limit, now))
 }
 
-fn rank(found: impl Iterator<Item = (Item, f64)>, scopes: &[Scope], limit: usize, now: DateTime<Utc>) -> Vec<Ranked> {
+/// The live memories `found`, of `scopes` or of every scope, ranked ([`score`]) up to `limit`.
+fn rank(
+    found: impl Iterator<Item = (Item, f64)>,
+    scopes: Option<&[Scope]>,
+    limit: usize,
+    now: DateTime<Utc>,
+) -> Vec<Ranked> {
     let mut ranked: Vec<_> = found
         .filter_map(|(item, relevance)| {
             let found = MemoryItem::of(item)?;
             let memory = &found.memory;
-            if !memory.status.live() || !scopes.contains(&memory.scope) {
+            if !memory.status.live() || scopes.is_some_and(|scopes| !scopes.contains(&memory.scope)) {
                 return None;
             }
             Some(Ranked { score: score(memory, relevance, now), found })
@@ -364,7 +377,7 @@ async fn read(items: &dyn Items, id: &ItemId, history: bool, context: &CallConte
     let (found, older) = chain.split_first().expect("a chain starts with its memory");
     let read = record_access(items, found, context).await;
     let found = read.as_ref().unwrap_or(found);
-    let mut text = full(found);
+    let mut text = found.full();
     let mut json = json!({"note": NOTE, "memory": full_json(found)});
     if history {
         if older.is_empty() {
@@ -416,55 +429,57 @@ async fn record_access(items: &dyn Items, found: &MemoryItem, context: &CallCont
     MemoryItem::of(item)
 }
 
-/// `found` in full: what it is, its text, citations, provenance, links and votes.
-fn full(found: &MemoryItem) -> String {
-    let memory = &found.memory;
-    let core = if memory.core { ", core" } else { "" };
-    let mut text = format!(
-        "{} ({}, {}, importance {}{core}), {}, trust {}, revision {}\n{}\n{}",
-        found.id(),
-        memory.kind,
-        memory.scope,
-        memory.importance,
-        memory.status.name(),
-        memory.trust.name(),
-        found.item.revision,
-        memory.title,
-        memory.body
-    );
-    if !memory.citations.is_empty() {
-        let citations: Vec<_> = memory.citations.iter().map(ToString::to_string).collect();
-        let _ = write!(text, "\nCitations: {}.", citations.join(", "));
+impl MemoryItem {
+    /// It in full: what it is, its text, citations, provenance, links and votes, as `sense_recall` reads it by id.
+    pub fn full(&self) -> String {
+        let memory = &self.memory;
+        let core = if memory.core { ", core" } else { "" };
+        let mut text = format!(
+            "{} ({}, {}, importance {}{core}), {}, trust {}, revision {}\n{}\n{}",
+            self.id(),
+            memory.kind,
+            memory.scope,
+            memory.importance,
+            memory.status.name(),
+            memory.trust.name(),
+            self.item.revision,
+            memory.title,
+            memory.body
+        );
+        if !memory.citations.is_empty() {
+            let citations: Vec<_> = memory.citations.iter().map(ToString::to_string).collect();
+            let _ = write!(text, "\nCitations: {}.", citations.join(", "));
+        }
+        warnings(&mut text, memory);
+        let writer = &memory.writer;
+        let model = writer.model.as_ref().map_or_else(String::new, |model| format!(", model {model}"));
+        let repo = writer.repo.as_ref().map_or_else(String::new, |repo| format!(", in repository {repo}"));
+        let _ = write!(
+            text,
+            "\nWritten {} by {} (identity {}) in thread {}, started by {}, with {}{model}, on {}{repo}.",
+            writer.at.to_rfc3339_opts(SecondsFormat::Secs, true),
+            writer.ant,
+            writer.identity,
+            writer.thread,
+            starter(&writer.origin.by),
+            writer.harness,
+            writer.machine
+        );
+        if let Some(old) = &memory.supersedes {
+            let _ = write!(text, "\nSupersedes {old}.");
+        }
+        if let Some(new) = &memory.superseded_by {
+            let _ = write!(text, "\nSuperseded by {new}.");
+        }
+        let votes = &memory.votes;
+        if !votes.is_empty() {
+            let _ = write!(text, "\nVotes: {} helpful, {} stale, {} wrong.", votes.helpful, votes.stale, votes.wrong);
+        }
+        if let Some(from) = &memory.inherited {
+            let _ = write!(text, "\nInherited from sense identity {from} on clone.");
+        }
+        text
     }
-    warnings(&mut text, memory);
-    let writer = &memory.writer;
-    let model = writer.model.as_ref().map_or_else(String::new, |model| format!(", model {model}"));
-    let repo = writer.repo.as_ref().map_or_else(String::new, |repo| format!(", in repository {repo}"));
-    let _ = write!(
-        text,
-        "\nWritten {} by {} (identity {}) in thread {}, started by {}, with {}{model}, on {}{repo}.",
-        writer.at.to_rfc3339_opts(SecondsFormat::Secs, true),
-        writer.ant,
-        writer.identity,
-        writer.thread,
-        starter(&writer.origin.by),
-        writer.harness,
-        writer.machine
-    );
-    if let Some(old) = &memory.supersedes {
-        let _ = write!(text, "\nSupersedes {old}.");
-    }
-    if let Some(new) = &memory.superseded_by {
-        let _ = write!(text, "\nSuperseded by {new}.");
-    }
-    let votes = &memory.votes;
-    if !votes.is_empty() {
-        let _ = write!(text, "\nVotes: {} helpful, {} stale, {} wrong.", votes.helpful, votes.stale, votes.wrong);
-    }
-    if let Some(from) = &memory.inherited {
-        let _ = write!(text, "\nInherited from sense identity {from} on clone.");
-    }
-    text
 }
 
 fn warnings(text: &mut String, memory: &Memory) {
