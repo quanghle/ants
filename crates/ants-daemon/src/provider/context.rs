@@ -120,14 +120,22 @@ pub fn repository(dir: &Path) -> Option<String> {
 /// it is the message, in this order:
 /// - a provider's wake request ([`Envelope::wake_provider`]): the provider's, as a thread the wake starts is; a wake on
 ///   an existing thread leaves it the origin [`settled`] kept;
-/// - a webhook's or schedule's message, or one on a thread narrowed to tool rules ([`Envelope::allow`]), which only
-///   those start and only ants carry on: the webhook's, the sender standing for a webhook it passes on;
+/// - an ant's message, not a post, narrowed to a review ([`ants_proto::REVIEW_ALLOW`]): the review of the sender, the ant
+///   under review;
+/// - a webhook's or schedule's message, or one on a thread narrowed to other tool rules ([`Envelope::allow`]), which
+///   only those start and only ants carry on: the webhook's, the sender standing for a webhook it passes on;
 /// - the ant that started the thread with a channel post (its creator);
 /// - the human who started it (its owner), or the human an assistant acts for;
 /// - else the message's sender, a human or an ant.
 pub fn origin(envelope: &Envelope, channel: Option<ChannelId>, humans: &Humans) -> Origin {
     let by = if let Some(name) = envelope.wake_provider() {
         Starter::Provider { name: name.to_owned() }
+    } else if channel.is_none()
+        && !envelope.webhook
+        && ants_proto::is_review(envelope.allow.as_deref())
+        && !envelope.sender_role(humans).is_human()
+    {
+        Starter::Review { user: envelope.from.clone() }
     } else if envelope.webhook || envelope.allow.is_some() {
         Starter::Webhook { user: envelope.from.clone() }
     } else if let Some(creator) = &envelope.creator {
@@ -172,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn the_origin_is_the_provider_then_the_webhook_then_the_creator_then_the_owner_then_the_sender() {
+    fn the_origin_is_the_provider_then_the_review_then_the_webhook_then_the_creator_then_the_owner_then_the_sender() {
         let wake = Envelope { owner: Some(UserId::human()), ..message("dev-a").woken_by("sense") };
         assert_eq!(by(&wake), Starter::Provider { name: "sense".to_owned() });
         assert_eq!(by(&message("dev-b").woken_by("sense")), Starter::Ant { user: user("dev-b") }, "no wake");
@@ -189,7 +197,14 @@ mod tests {
         assert_eq!(by(&message("dev-b")), Starter::Ant { user: user("dev-b") });
         let narrowed = message("dev-b").with_allow(Some(vec!["read:*".to_owned()]));
         assert_eq!(by(&narrowed), Starter::Webhook { user: user("dev-b") }, "carrying on a webhook's thread");
+        let review = message("dev-b").with_allow(Some(ants_proto::REVIEW_ALLOW.map(str::to_owned).to_vec()));
+        assert_eq!(by(&review), Starter::Review { user: user("dev-b") }, "the ant under review");
+        assert!(!origin(&review, None, &Humans::default()).trusted());
         let channel: ChannelId = "ops".parse().unwrap();
+        let posted = origin(&review, Some(channel.clone()), &Humans::default());
+        assert_eq!(posted.by, Starter::Webhook { user: user("dev-b") }, "a post asks no review");
+        let relayed = Envelope { owner: Some(UserId::human()), ..review.from_webhook() };
+        assert_eq!(by(&relayed), Starter::Webhook { user: user("dev-b") }, "a webhook asks no review");
         assert_eq!(origin(&message("dev-b"), Some(channel.clone()), &Humans::default()).channel, Some(channel));
     }
 

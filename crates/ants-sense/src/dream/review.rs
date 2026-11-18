@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use super::packet::{commits, finding_line};
-use super::{BY, Dream, Finding, FindingKind, MAX_DREAM_WRITES, MAX_FINDINGS, State, last};
+use super::{BY, Covered, Dream, Finding, FindingKind, MAX_DREAM_WRITES, MAX_FINDINGS, State, last};
 use crate::items::{ItemId, Values};
 use crate::memory::{Memory, Trust};
 use crate::sanitize::{Limit, sanitize_title};
@@ -280,8 +280,8 @@ pub async fn answered(
 }
 
 /// The sage's `given` findings as findings of `dream`, numbered from 1: untrusted when one cites a thread of untrusted
-/// origin, or one the packet did not cover, or an untrusted memory, or, citing no thread, rests on a packet covering
-/// an untrusted thread.
+/// origin, or one the packet did not cover, or an untrusted memory, or, citing no thread, rests on a packet holding the
+/// text of an untrusted thread ([`Covered::untrusted_text`]).
 async fn sage_findings(
     items: &dyn Items,
     dream: &Dream,
@@ -294,7 +294,7 @@ async fn sage_findings(
     for (n, (text, advice)) in given.iter().enumerate() {
         let cited = &advice.evidence;
         let mut untrusted_text = if cited.threads.is_empty() {
-            dream.threads.iter().any(|covered| covered.untrusted)
+            dream.threads.iter().any(Covered::untrusted_text)
         } else {
             cited.threads.iter().any(untrusted_thread)
         };

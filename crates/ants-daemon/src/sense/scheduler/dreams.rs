@@ -111,7 +111,11 @@ pub(super) async fn step(
     }
     let ids: Vec<_> = threads.iter().map(|thread| thread.id.clone()).collect();
     let commits = dreams.daemon.commits(&ids).await;
-    let covered = threads.iter().map(|thread| Covered { thread: thread.id.clone(), untrusted: thread.untrusted });
+    let covered = threads.iter().map(|thread| Covered {
+        thread: thread.id.clone(),
+        untrusted: thread.untrusted,
+        review: thread.review,
+    });
     let writer = writer(items, settings, last.as_ref(), now).await?;
     // A sage reviews others, never itself.
     let sage = dreams.daemon.sage().await?.filter(|sage| *sage != settings.ant);
@@ -289,10 +293,11 @@ impl Dreaming for Daemon {
                     None => None,
                 };
                 let untrusted = origin.as_ref().is_some_and(|origin| !origin.trusted());
+                let review = origin.as_ref().is_some_and(|origin| matches!(origin.by, Starter::Review { .. }));
                 let started_by = origin.map_or_else(|| "someone not known".to_owned(), |origin| starter(&origin.by));
                 let actions = actions.of(&id, &sent, &rejections, (since, until)).await;
                 let signs = vitals::signs(&calls, &ends, escalations, &actions);
-                threads.push(Thread { id, untrusted, started_by, text, timeline, actions, signs });
+                threads.push(Thread { id, untrusted, review, started_by, text, timeline, actions, signs });
             }
             Ok(threads)
         })
@@ -392,6 +397,7 @@ fn starter(by: &Starter) -> String {
         Starter::Human { user } => format!("human {user}"),
         Starter::Ant { user } => format!("ant {user}"),
         Starter::Webhook { user } => format!("webhook {user}"),
+        Starter::Review { user } => format!("ant {user}, asking a review"),
         Starter::Provider { name } => format!("provider {name}"),
     }
 }

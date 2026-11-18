@@ -346,3 +346,42 @@ async fn a_review_only_reads_and_messages_no_one() {
     let (ok, text) = call(&client, "list_ants", json!({})).await;
     assert!(ok, "the ants tools that only read stay: {text}");
 }
+
+#[tokio::test]
+async fn a_review_comes_from_the_ant_under_review_and_refuses_every_tool_of_sense() {
+    let home = home("review-sense");
+    let (mcp, _sent) = start(&home).await;
+    mcp.with_provider(crate::provider::connect(crate::sense::keeping_none(), &Default::default()).await.unwrap());
+    mcp.with_callers(Callers::known(user("dev-a"), "m1", "id-1"));
+    let review = Envelope::new(user("dev-b"), user("dev-a"), "# Review of dream 1 of dev-b")
+        .with_allow(Some(ants_proto::REVIEW_ALLOW.map(str::to_owned).to_vec()));
+    let (url, token) = http_server(&mcp, &review.thread_id);
+    let client = http_client(&url, &token).await;
+    mcp.settle_origin(&review, None).await.unwrap();
+    let _turn = mcp.begin(&review);
+
+    let origin = mcp.origin(&review.thread_id).expect("settled");
+    assert_eq!(origin.by, Starter::Review { user: user("dev-b") });
+    assert!(!origin.trusted());
+    let served: Vec<_> = names(&client).await.into_iter().filter(|name| name.starts_with("sense_")).collect();
+    let sense = [
+        "sense_brief",
+        "sense_remember",
+        "sense_recall",
+        "sense_vote",
+        "sense_checkpoint",
+        "sense_handoff",
+        "sense_task",
+        "sense_promise",
+        "sense_remind",
+        "sense_identity",
+        "sense_skill",
+        "sense_dream",
+    ];
+    assert_eq!(served.len(), sense.len(), "{served:?}");
+    for tool in sense {
+        assert!(served.iter().any(|name| name == tool), "{tool} is served: {served:?}");
+        let (ok, text) = call(&client, tool, json!({})).await;
+        assert!(!ok && text.starts_with(&format!("{tool} is not for a review")), "{text}");
+    }
+}

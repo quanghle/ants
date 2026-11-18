@@ -52,6 +52,7 @@ impl Fake {
             .map(|(id, untrusted)| Thread {
                 id: id.parse().unwrap(),
                 untrusted: *untrusted,
+                review: false,
                 started_by: "human alice".into(),
                 text: format!("the work of {id}"),
                 timeline: format!("the calls of {id}"),

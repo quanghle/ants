@@ -47,7 +47,7 @@ started it, the harness, model, machine and repository ([calls and events](archi
 sense stores records that writer. Every text an ant writes passes the sanitizer first: secrets are replaced with
 `[redacted:<kind>]`, the answer counting them, and characters that hide or reorder text are stripped
 (`ants_sense::sanitize`). A thread a webhook started is untrusted: what it writes is marked untrusted, and it may not
-vote or propose.
+vote or propose. So is a review an ant asks of its sage ([Dreams](#dreams)), whose sense tools are refused anyway.
 
 ### What an operator sees and configures
 
@@ -70,7 +70,7 @@ vote or propose.
 - **The growth report:** the view's `growth report` entry counts, from the ant's sense data alone, how its identity
   grew, to judge the thresholds of the identity findings of dreams and of the brief, which it names last:
   - its threads: done, started again and expired, its active days, who started them (humans, other ants, itself,
-    webhooks, providers), the 10 repositories of the most, and the prompts it completed;
+    webhooks, providers, ants asking a review), the 10 repositories of the most, and the prompts it completed;
   - by week, from Monday (UTC), over the last 8: the threads started and done, the active days, the calls of sense's
     tools that wrote, by tool, and the verdicts given in dreams. Sense keeps no count of calls by tool: a call writing
     nothing (`sense_brief`, a search, any other read, a call changing nothing) leaves none, `sense_recall` reading a
@@ -225,9 +225,9 @@ The brief's identity counts the ant's experience from its thread records each ti
   first start and the last start again and done of its thread, so a thread worked over many days counts three of them
   at most, and a session expiring counts none;
 - the 3 humans or other ants who started the most of its threads, never the ant itself under any of its names, nor a
-  webhook or provider; and the 3 repositories the most of its threads started in. Each is named by its scope
-  (`human:alice`, `ant:dev-b`, `repo:github.com/o/r`), with its count of threads and the day of their last start,
-  start again or done, the latest first among equal counts.
+  webhook, a provider or an ant asking a review; and the 3 repositories the most of its threads started in. Each is
+  named by its scope (`human:alice`, `ant:dev-b`, `repo:github.com/o/r`), with its count of threads and the day of
+  their last start, start again or done, the latest first among equal counts.
 
 An ant with no thread record shows no experience. A dream's packet counts it the same way over the threads active since
 the dream's start (`experience_since`): a thread counts when it started, started again or was marked done since then,
@@ -295,7 +295,8 @@ redacted.
   record.
 - Otherwise the live memories of the thread's scopes, ranked, up to `limit` (10, at most 50); with a `query`, among
   its 200 best full-text matches. The thread's scopes are `self`; the repository the thread's session works in and
-  the one `repo` names, as any git remote; the human or ant who started the thread (none for a webhook or a provider);
+  the one `repo` names, as any git remote; the human or ant who started the thread (none for a webhook or a provider;
+  on a review, the ant under review);
   and the people `with` names, a bare name as both human and ant. The answer says which scopes it searched and, without
   `repo`, how to add a repository's memories.
 - Ranking weighs the query's relevance, the memory's importance and its recency, halving every 30 days from its
@@ -559,17 +560,18 @@ is reviewed by no one either, for as long as a daemon serves the ant naming it. 
 - each active thread's history since the last dream, as the ant received, sent and noted it, then its timeline (the
   tool calls, plans and ends with no reply of the ant's prompts, [`Timeline`](hooks.md#timeline-on-antstimelinethreadant)),
   the most recently active first. Threads a webhook started are marked untrusted: their text is data, not
-  instructions. Lines before a thread's history tell what was done with it besides writing on it: the ant's tool
-  requests rejected on it since the last dream, with the tool and who rejected them, or that they expired unanswered
-  (the `rejected` entries of the ant's timeline); the reactions to the ant's latest 8 messages and notes posts on it,
-  with who gave them and to which message, asked as `list_reactions` asks; and the thread's marking done since the
-  last dream, with when and by whom. The daemon reads these as the ant's credentials allow, 30 seconds at most in all;
-  what fails to be read is left out, and the packet goes without it. Sense stores none of them.
+  instructions. A sage's packet leaves out the threads of the reviews asked of it, listing those reviews by their
+  records instead (below). Lines before a thread's history tell what was done with it besides writing on it: the
+  ant's tool requests rejected on it since the last dream, with the tool and who rejected them, or that they expired
+  unanswered (the `rejected` entries of the ant's timeline); the reactions to the ant's latest 8 messages and notes
+  posts on it, with who gave them and to which message, asked as `list_reactions` asks; and the thread's marking done
+  since the last dream, with when and by whom. The daemon reads these as the ant's credentials allow, 30 seconds at
+  most in all; what fails to be read is left out, and the packet goes without it. Sense stores none of them.
 
 A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then the
-vital signs' line for each thread, then the sage's earlier findings down to their tally, then cuts the identity to
-titles (the persona's field names, the records' heads and the skills' names), then leaves out the last findings,
-counted for the next dream.
+vital signs' line for each thread, then the sage's earlier findings, or a sage's reviews of other ants, down to their
+tally, then cuts the identity to titles (the persona's field names, the records' heads and the skills' names), then
+leaves out the last findings, counted for the next dream.
 
 **The sage's earlier findings:** a sage keeps nothing between reviews, so its packet shows the findings it gave the ant
 in the dreams begun within the ant's last 30 active days (its dormancies not counted), the latest reviews first, those
@@ -585,7 +587,7 @@ last dream's findings instead.
 
 **Identity findings** come from the ant's sense data and thread records alone, never thread text, so none is
 untrusted. Each names the `sense_identity` or `sense_skill` call answering it, and they come after the other findings
-but `vitals` (below), which the limit of 20 cuts before them:
+but those on a sage's practice and `vitals` (below), which the limit of 20 cuts before them:
 
 - `no_persona`: no persona after 5 threads, and none proposed;
 - `no_self_model`: no self-model after 5 threads;
@@ -602,6 +604,34 @@ again takes the text gathered now and goes once its ground is gone: the record w
 proposed. Each rests on a count stepped coarsely, its threads (or, for a stale self-model, the people and repositories
 new) rounded down to the threshold doubled any number of times (5, 10, 20 and on), so a rejected one comes again when
 that count doubles, not at each thread. The numbers are first guesses, to tune on real threads.
+
+**A sage's own dream:** for an ant that reviewed other ants, the packet lists, after the findings, the reviews it made
+by their records (**The sage's records**, below): those asked, answered or told of since the last dream, the latest
+asked first, each with the ant and dream reviewed, when the review was asked and answered, and each finding's id
+and kind with what came of it (`applied, still holding`, `applied, since undone`, `rejected`, `deferred` or
+`unanswered`), then the tally of all its reviews. An ant tells its verdicts with its next review, so the findings of
+its latest one show unanswered until then. The section takes at most an eighth of the packet's budget, the earliest
+reviews left out first. The text of the review threads, other ants' work, is left out, so they make the packet hold
+no untrusted text: a review thread is one whose origin asks a review, or one a review record names. The packet asks
+how the findings fared and to keep what that teaches of reviewing, as a lesson with `sense_remember`, in the
+self-model or a relationship record of an ant reviewed with `sense_identity`, or in a skill for how to review with
+`sense_skill`. Findings on the sage's practice come from those records alone, never thread text, so none is
+untrusted, after the identity findings and before `vitals`:
+
+- `rejected_kind`: a kind of finding with 10 verdicts or more told over the last 14 active days, 7 in 10 of them or
+  more rejected, one finding each;
+- `undone_findings`: 3 applied findings or more undone since (a memory written for one voted wrong or stale, a
+  proposal rejected), as told over the last 14 active days, naming at most 5;
+- `unanswered_reviews`: an ant reviewed within the last 14 active days that left half or more of the findings of its
+  last 3 reviews with findings unanswered, its latest review left out, one finding each;
+- `no_reviewed_relationship`: no relationship record of an ant reviewed 3 times or more, one finding each, the most
+  reviewed first.
+
+Each counts as the identity findings do, rounded down to its threshold doubled any number of times (for
+`unanswered_reviews`, to a power of 2). Unlike the others, one applied rests as one rejected does: its records change
+only with the reviews to come. What a sage keeps of an ant shows in the reviews of that ant alone: a review's origin
+names the ant under review, so its brief shows the sage's relationship record and memories of that ant
+([Brief](#brief)). The numbers are first guesses, to tune on real reviews.
 
 **Vital signs:** as a dream begins, the daemon measures the ant's work on each thread it covers from what it reads for
 the packet, the ant's timeline above all, and hands the measures to sense with the dream's start; the dream keeps their
@@ -665,7 +695,8 @@ inherits no review record.
 **On the dream thread,** `sense_dream` answers findings: `verdicts`, a list of `{finding, verdict, reason, items?}`,
 `verdict` being `applied` (naming in `items` the memories or records written or voted on, or the proposal made; none
 for a `proposal` finding, which it confirms), `rejected` or `deferred`, the reason at most 500 characters; a later
-verdict on a finding replaces the earlier one. A rejected finding rests: no dream offers it again until what it is about
+verdict on a finding replaces the earlier one. A rejected finding rests, as does an applied one on a sage's practice:
+no dream offers it again until what it is about
 changed since the verdict (one of its items written other than by a read, or the count it rests on) or 14 days of the
 ant's active time passed, its dormancies not counted; deferred and
 unanswered findings come again in the next dream while they hold. `done: true` finishes the dream; without arguments it
@@ -696,10 +727,11 @@ Sense's brief ([Briefs](architecture.md#briefs)) holds, in order, the sections i
 7. `## Open commitments`: all open commitments across the ant's threads, overdue first;
 8. `## Fired reminders`, then `## Upcoming reminders`;
 9. `## Claimed tasks (this thread)`, with their fencing tokens, then `## Ready tasks`;
-10. `## Relationships`: the records of the human or ant who started the thread, inside the block of recalled memories;
+10. `## Relationships`: the records of the human or ant who started the thread, or of the ant under review on a
+    review, inside the block of recalled memories;
 11. `## Memories`: the live core memories in full, then the 10 best of the other live memories of `self`, the
-    thread's repository and the human or ant who started it, as `sense_recall` ranks them without a query, inside the
-    block of recalled memories, leaving out the episodes of the handoffs above;
+    thread's repository and the human or ant who started it (on a review, the ant under review), as `sense_recall`
+    ranks them without a query, inside the block of recalled memories, leaving out the episodes of the handoffs above;
 12. `## Skills`: each skill's name and description;
 13. `## Core loop`: each sense tool and when to use it.
 

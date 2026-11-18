@@ -16,8 +16,10 @@ fn fenced(findings: &[serde_json::Value]) -> String {
 /// Begin dream 1 for the sage covering thread 1, trusted, and thread 2, untrusted; returns its review thread.
 async fn sent(items: &dyn Items) -> ThreadId {
     let writer = on(9);
-    let threads =
-        vec![Covered { thread: on(1).thread, untrusted: false }, Covered { thread: on(2).thread, untrusted: true }];
+    let threads = vec![
+        Covered { thread: on(1).thread, untrusted: false, review: false },
+        Covered { thread: on(2).thread, untrusted: true, review: false },
+    ];
     let start = Start { recipient: Recipient::Sage(sage()), threads, ..start(Utc::now(), &writer) };
     let begun = begin(items, start).await.unwrap().unwrap();
     let review = begun.review.clone().unwrap();

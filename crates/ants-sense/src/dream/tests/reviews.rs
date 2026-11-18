@@ -14,7 +14,7 @@ fn to_sage(at: DateTime<Utc>, writer: &CallContext) -> Start<'_> {
 }
 
 /// A sage's answer giving a finding of each of `kinds`.
-fn findings(kinds: &[&str]) -> String {
+pub(super) fn findings(kinds: &[&str]) -> String {
     let findings: Vec<_> = kinds
         .iter()
         .enumerate()

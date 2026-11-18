@@ -199,6 +199,7 @@ fn threads(text: &mut String, data: &Data) {
             ("by other ants", started(&|by| matches!(by, Starter::Ant { .. }) && !own(by))),
             ("by itself", started(&own)),
             ("by webhooks", started(&|by| matches!(by, Starter::Webhook { .. }))),
+            ("by ants asking a review", started(&|by| matches!(by, Starter::Review { .. }))),
             ("by providers", started(&|by| matches!(by, Starter::Provider { .. }))),
         ]);
         let _ = writeln!(text, "  Started {by}.");
