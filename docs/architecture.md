@@ -175,12 +175,16 @@ after reconnect, also reopening pending caches after process restart without wai
 An existing cache remains available before the host connects, including after process restart. Without a host connection
 and without an existing cache, sense keeps no data: events are acked with no effect, briefs are empty and `sense_brief`
 answers `unavailable`. During the initial connection without a cache, events wait in the queue and briefs fail.
+A daemon serves the sense data of each of its ants using sense before starting any of them, so an event of one ant
+about another, such as a clone's about its source, finds the other's data however their starts interleave; an event
+of an ant the process serves no sense data of, such as one queued under a name the ant has left, is acked with no
+effect.
 
 ### Sense identity
 
 Each ant's sense identity has an id, a ULID minted when the ant first uses sense, kept in its home (`.sense/id`, written whole) and on its card. The id stays the same across renames, harness and model changes, moves to other machines and buses (an export carries `.sense/id`, though not the cache or `.sense/chain.json`), retirement and revival. An import under another name (`ants ant import --as`) lists the old name among the ant's earlier names in its home (`.sense/names`, one a line, the oldest first, carried by exports too), so its events in its log under those names stay its own ([Stores and subjects](#stores-and-subjects)): on the same bus, the renamed ant keeps its log and card. So does an ant added under a new name with the home of an earlier one (`ants add NAME --home DIR`, or an add order whose settings give `home`): when the home holds a sense id and its `.sense/chain.json` names another ant as the one its log's events were last of, the add lists that name in `.sense/names` before listing the ant. On another bus, sense's part of the export carries the log and the skill files ([config.md](config.md#senses-part)), and sense takes them in under the same id, the card and memories read again from the log there; with `--no-provider` they stay behind, and sense starts a new card under the same id, its earlier names the ones `.sense/names` lists. A clone leaves `.sense` out of the home it copies, so the clone mints its own id.
 
-When the clone's `ant_cloned` reaches sense, before the card notes it, sense forks the source's identity into the clone's: when the same daemon keeps the source's data, the clone's log takes a copy of the source's memories, with their links, writers and vote counts, self-model ([Sense self-model and relationships](#sense-self-model-and-relationships)), persona and skills ([Sense persona and skills](#sense-persona-and-skills)) as they were at the event's time, each under its own id and marked `inherited` with the source's sense id, in events of at most 100 items. It drops the source's tasks, commitments, reminders, relationship records, resume registers, handoffs, votes, persona and skill proposals, dreams and card. Items the clone already holds, copied by an earlier try of an event delivered again or written by the clone since, stay as they are; once its card lists the event, the event forks nothing. A record the clone writes anew is no longer `inherited`. The clone's first brief may come before the fork.
+When the clone's `ant_cloned` reaches sense, before the card notes it, sense forks the source's identity into the clone's: when the same daemon keeps the source's data, the clone's log takes a copy of the source's memories, with their links, writers and vote counts, self-model ([Sense self-model and relationships](#sense-self-model-and-relationships)), persona and skills ([Sense persona and skills](#sense-persona-and-skills)) as they were at the event's time, each under its own id and marked `inherited` with the source's sense id, in events of at most 100 items. It drops the source's tasks, commitments, reminders, relationship records, resume registers, handoffs, thread records, votes, persona and skill proposals, dreams and card. Items the clone already holds, copied by an earlier try of an event delivered again or written by the clone since, stay as they are; once its card lists the event, the event forks nothing. A record the clone writes anew is no longer `inherited`. The clone's first brief may come before the fork.
 
 The identity card is the ant's item of kind `card`, written by sense alone (stamped `sense`); no tool writes it. Its revisions are its history. It holds:
 
@@ -196,7 +200,7 @@ The identity card is the ant's item of kind `card`, written by sense alone (stam
 - `events`, the ids of the last 16 lifecycle events applied, so a repeat changes nothing;
 - `dormancies`, the last 16 dormancies ended (`{from, to}`, from the retirement to the event ending it), kept after the brief tells the ant of its return, so [maintenance](#sense-memory-maintenance) counts only active time.
 
-Thread and session events change nothing on the card; sense acks them at once.
+Thread and session events change nothing on the card. Each thread of the ant has a record instead: an item of kind `thread` named after the thread, written by sense alone (stamped `sense`), as the card is, from the thread's lifecycle events, never from what its messages say. `thread_started` makes it, with `thread`, `origin` (who started the thread, from which channel), `repo` (the repository of the ant's working directory, left out outside a git repository with a remote) and `started`; a later `thread_started`, the thread's session gone, sets only `restarted`, `thread_done` sets `done` and `thread_expired` `expired`, each the time of the last such event. `events` lists the ids of the last 8 events applied, so a repeat changes nothing; an end of a thread sense never saw start records nothing. A thread so takes about two changes of the log, its start and its end, none per prompt. A clone inherits no thread record; an export carries them with the log. Session events change nothing; sense acks them at once.
 
 ### Sense memories
 
@@ -431,7 +435,7 @@ Calls and events:
   - `ant_added`, `ant_moved`, `ant_retired`, `ant_revived`;
   - `ant_renamed` (`from`);
   - `ant_cloned` (`from`, `from_identity`);
-  - `thread_started` (`origin`);
+  - `thread_started` (`origin`; `repo`, the repository of the ant's working directory, named and left out as the context's `repo`);
   - `thread_done`, `thread_expired`;
   - `session_lost`;
   - `session_rebuilt` (`reason`: `lost` or `overflow`).
@@ -475,7 +479,7 @@ The message.
 
 ### Lifecycle events
 
-ants sends an ant's provider its lifecycle events only when both declared `events` at initialize, as sense does: it writes them on the ant's card ([Sense identity](#sense-identity)). Each event carries the ant, the id of its identity record, the thread when there is one and the time, never a message, prompt or reply.
+ants sends an ant's provider its lifecycle events only when both declared `events` at initialize, as sense does: it writes them on the ant's card and the thread's record ([Sense identity](#sense-identity)). Each event carries the ant, the id of its identity record, the thread when there is one and the time, never a message, prompt or reply.
 
 | Kind | Sent when |
 |---|---|
@@ -484,7 +488,7 @@ ants sends an ant's provider its lifecycle events only when both declared `event
 | `ant_revived` | A daemon serves an ant whose home is marked retired. |
 | `ant_cloned` | A clone order queues it in the clone's home, with the source ant and its identity id; the clone gets no `ant_added`. sense forks the source's identity on it ([Sense identity](#sense-identity)). |
 | `ant_moved`, `ant_renamed` | `ants ant import` queues `ant_moved`, then `ant_renamed` under `--as`, in the new home; the ant gets no `ant_added`. No other rename exists, and a daemon of the same bus taking an ant over is not a move. |
-| `thread_started` | A message comes on a thread the ant holds no session of, with the message's `origin`. |
+| `thread_started` | A message comes on a thread the ant holds no session of, with the message's `origin` and the repository of the ant's working directory (`repo`). |
 | `thread_expired` | A thread's worktree goes because its session expired (threads in worktrees only). |
 | `session_lost`, `session_rebuilt` | A stored session fails to resume and a new one starts (`lost`); the harness moves to a new session on a full context window (`overflow`). |
 | `thread_done` | A thread the ant holds a session of is marked done (`ants thread done`, an assistant's `done_for_human`), at the time it was marked. The daemon hears each done state put in `ants_threads` through the ant's durable consumer `done-<ant>`, filtered on `done.*`, one at a time, and acks it once the event is queued, so a thread marked done while no daemon served the ant is told once one does, unless the ant was retired meanwhile; a repeat carries the same id. A done state cleared (`ants thread undone`) tells nothing. |

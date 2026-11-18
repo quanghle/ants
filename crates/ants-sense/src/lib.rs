@@ -120,22 +120,27 @@ impl Sense {
     }
 
     async fn record_event(&self, event: Event) -> Result<Ack, RpcError> {
-        if !identity::touches_card(&event.kind) {
+        let (card, thread) = (identity::touches_card(&event.kind), thread::record::touches_record(&event.kind));
+        if !card && !thread {
             return Ok(Ack {});
         }
         let recorded = async {
             let items = self.items(&event.ant).await?;
+            if thread {
+                return thread::record::record_event(&*items, &event).await.map(drop);
+            }
             if let EventKind::AntCloned { from, .. } = &event.kind {
                 self.fork(&*items, from, &event).await?;
             }
-            identity::record_event(&*items, &event).await.map(drop)
+            identity::record_event(&*items, &event).await?;
+            // A dormancy starting or ending pauses or resumes the ant's reminders.
+            self.changed.send_replace(());
+            Ok(())
         };
         match recorded.await {
-            Ok(()) => {
-                // A dormancy starting or ending pauses or resumes the ant's reminders.
-                self.changed.send_replace(());
-                Ok(Ack {})
-            }
+            Ok(()) => Ok(Ack {}),
+            // Sense keeps no data of the ant here at all. Data only not open yet is unavailable instead: the event is
+            // told again.
             Err(StoreError::NotKept(_)) => Ok(Ack {}),
             Err(e) => Err(RpcError::unavailable(&e.to_string())),
         }

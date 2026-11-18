@@ -140,6 +140,7 @@ pub async fn run(
     links.reconcile(with_restarts(served.host.clone(), &restarts), Some(&served));
     let served = after_first_read(served, &reload, &mut links, &restarts).await;
     ants_daemon::provider::reconcile(served.configs.iter().map(|c| (&c.ant, &c.provider)));
+    serve_sense(&served.configs);
     let mut tasks: FuturesUnordered<_> = reconcile(&mut running, served.configs).into_iter().map(serve).collect();
     let mut schedules = Schedules::default();
     schedules.reconcile(served.schedules, run_schedule);
@@ -184,6 +185,7 @@ pub async fn run(
                     }
                     links.reconcile(with_restarts(served.host.clone(), &restarts), Some(&served));
                     ants_daemon::provider::reconcile(served.configs.iter().map(|c| (&c.ant, &c.provider)));
+                    serve_sense(&served.configs);
                     tasks.extend(reconcile(&mut running, served.configs).into_iter().map(serve));
                     schedules.reconcile(served.schedules, run_schedule);
                 }
@@ -196,6 +198,19 @@ pub async fn run(
         }
     }
     outcome(ended, served, errors)
+}
+
+/// Serve the sense data of every ant of `configs` using sense before any of them starts, so an event of one ant about
+/// another, such as a clone's about its source, finds the other's data however their starts interleave: an ant sense
+/// is not serving then is one whose data this process keeps not at all, and its events are acked unread.
+fn serve_sense(configs: &[Config]) {
+    for config in configs.iter().filter(|c| matches!(c.provider, ants_daemon::provider::Setting::Sense)) {
+        ants_daemon::provider::sense::stores().serve(
+            &config.ant,
+            &config.storage.home,
+            config.connection.creds.clone(),
+        );
+    }
 }
 
 /// `wanted`, with its host connection restarting the ants on the admin orders `restarts` passes on.
