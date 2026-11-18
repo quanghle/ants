@@ -583,7 +583,16 @@ pub fn chain(data: &Data, thread: &ThreadId) -> Vec<Vec<UserId>> {
 /// The line under the title of an open thread: its state, and why.
 pub fn why(data: &Data, thread: &ThreadId) -> Line<'static> {
     let state = data.state(thread);
-    let why = match state {
+    let mut text = state.label().to_owned();
+    if let Some(why) = reason(data, thread) {
+        text = format!("{text}: {}", crate::text::excerpt(&why, 100));
+    }
+    Line::styled(text, Style::new().fg(state.color()))
+}
+
+/// Why a thread is in its state, where something tells.
+pub fn reason(data: &Data, thread: &ThreadId) -> Option<String> {
+    match data.state(thread) {
         ThreadState::Stuck => data.stuck(thread).map(|a| crate::text::excerpt(&a.text, 80)),
         ThreadState::WaitingOnMe if data.live.approvals.iter().any(|r| r.thread_id == *thread) => {
             Some("a tool request waits for a decision".to_owned())
@@ -592,12 +601,7 @@ pub fn why(data: &Data, thread: &ThreadId) -> Line<'static> {
         ThreadState::Done => data.done(thread).map(|d| format!("by {}", data.cards.done_by(d))),
         ThreadState::WaitingOnMe => data.unread_on(thread).last().map(|i| format!("{}: {}", i.from, i.text)),
         _ => None,
-    };
-    let mut text = state.label().to_owned();
-    if let Some(why) = why {
-        text = format!("{text}: {}", crate::text::excerpt(&why, 100));
     }
-    Line::styled(text, Style::new().fg(state.color()))
 }
 
 #[cfg(test)]

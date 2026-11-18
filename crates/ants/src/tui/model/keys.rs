@@ -50,6 +50,9 @@ impl Model {
                 }
             };
         }
+        if let Some(action) = self.fold_key(key, now) {
+            return Some(action);
+        }
         if !self.bar.focused
             && self.focus == Focus::View
             && let Some(Page::Dm(page)) = self.pages.last_mut()
@@ -228,7 +231,7 @@ impl Model {
 
     fn nav_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         let by = match key {
-            Key::Enter => {
+            Key::Enter | Key::Esc => {
                 self.focus = Focus::View;
                 return None;
             }

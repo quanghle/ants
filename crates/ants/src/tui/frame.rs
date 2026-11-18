@@ -1,6 +1,6 @@
-//! The frame around the views: a header with the human, the server and the connection, the nav beside the shown view
-//! with the command bar under it, a footer with the view's keys, the latest notice or the command bar's keys, and the
-//! help over it all.
+//! The frame around the views: a header with the human, the server, the place shown and the connection, the nav beside
+//! the shown view (over it when folded and focused, [`super::fold`]) with the command bar under it, a footer with the
+//! view's keys, the latest notice or the command bar's keys, and the help over it all.
 
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -23,8 +23,16 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let [header, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
     frame.render_widget(Paragraph::new(header_line(model, now)), header);
-    let [left, right] = Layout::horizontal([Constraint::Length(NAV_WIDTH), Constraint::Min(20)]).areas(body);
-    nav::draw(frame, left, &model.data, &model.nav, now, model.focus == Focus::Nav && !model.bar.focused);
+    let width = frame.area().width;
+    model.fold.drawn(width);
+    let nav_focused = model.focus == Focus::Nav && !model.bar.focused;
+    let right = if model.fold.nav(width) {
+        let [left, right] = Layout::horizontal([Constraint::Length(NAV_WIDTH), Constraint::Min(20)]).areas(body);
+        nav::draw(frame, left, &model.data, &model.nav, now, nav_focused);
+        right
+    } else {
+        body
+    };
     let [view, bar] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(model.bar.height(right.width))]).areas(right);
     let focused = model.focus == Focus::View && !model.bar.focused;
@@ -42,6 +50,11 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Held(page) => page.draw(frame, view, data, now, focused),
     }
     model.bar.draw(frame, bar, &model.completions());
+    if nav_focused && !model.fold.nav(width) {
+        let over = Rect { width: NAV_WIDTH.min(view.width), ..view };
+        frame.render_widget(Clear, over);
+        nav::draw(frame, over, &model.data, &model.nav, now, true);
+    }
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
     if let Some(asking) = model.asking.as_ref().filter(|a| a.full) {
         approvals::draw_full(frame, asking, now);
@@ -52,12 +65,16 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     }
 }
 
-/// Who the UI runs as, on which server, the view shown, and the connection.
+/// Who the UI runs as, on which server, the place shown, and the connection.
 fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     let data = &model.data;
+    let place = match model.page() {
+        Page::Thread(page) => page.place(data),
+        page => page.name().to_owned(),
+    };
     let mut spans = vec![
         Span::styled(format!(" ants · {}@{}", data.me(), data.server), Style::new().bold()),
-        Span::styled(format!(" · {} · ", model.page().name()), dim()),
+        Span::styled(format!(" · {place} · "), dim()),
     ];
     spans.push(style::link(data.live.link, now, ""));
     Line::from(spans)
@@ -111,6 +128,7 @@ const HELP: &[(&str, &str)] = &[
     ("PgUp PgDn Home End", "move further"),
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
+    ("Ctrl-B Ctrl-\\", "fold or show the nav; a thread's side panel (again: as the width has it)"),
     ("w ←→ a", "on an ant: its threads in work, pane, ask; in a channel: ←→ its state tab"),
     ("[ ] \\", "on an ant: scroll its about or now column up, down; switch between the two"),
     ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
@@ -159,7 +177,8 @@ mod tests {
     use super::*;
     use crate::test_support::colony::entry;
     use crate::test_support::live::{at, message, user};
-    use crate::tui::model::Key;
+    use crate::tui::fold;
+    use crate::tui::model::{Action, Key};
     use crate::tui::people;
     use crate::tui::test_support::model;
 
@@ -194,7 +213,7 @@ mod tests {
         m.select(nav::Item::Work(None));
         m.key(Key::Enter, at(2));
         let shown = screen(&m, at(2));
-        assert!(shown.contains("· thread ·"), "{shown}");
+        assert!(shown.contains(" · deploy the site · ● connected"), "the header names the thread: {shown}");
         assert!(shown.contains("waiting on ant") && shown.contains("reading the thread…"), "{shown}");
 
         m.data.live.link(false, at(3));
@@ -202,6 +221,49 @@ mod tests {
         let shown = screen(&m, at(30));
         assert!(shown.contains("○ disconnected 27s, reconnecting"), "{shown}");
         assert!(shown.contains("any key closes this help"), "{shown}");
+    }
+
+    /// How wide the open thread's conversation is on a screen `width` columns wide.
+    fn conversation(m: &Model, width: u16) -> (usize, String) {
+        let shown = crate::test_support::render::rendered(width, 24, |f| draw(f, m, at(2)));
+        let row: Vec<char> = shown.lines().find(|l| l.contains("reading the thread…")).unwrap().chars().collect();
+        let borders: Vec<usize> = row.iter().enumerate().filter(|(_, c)| **c == '│').map(|(at, _)| at).collect();
+        let (left, right) = (borders[borders.len() - 2], borders[borders.len() - 1]);
+        let left = if row[right - 1] == '│' { borders[borders.len() - 3] } else { left };
+        (right - left - 1, shown)
+    }
+
+    #[test]
+    fn the_conversation_takes_the_width_and_the_nav_and_the_side_panel_fold() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
+        m.select(nav::Item::Work(None));
+        screen(&m, at(2));
+        m.key(Key::Enter, at(2));
+        let (wide, shown) = conversation(&m, 80);
+        assert_eq!(wide, 78, "{shown}");
+        assert!(!shown.contains("Work 1"), "the nav folds: {shown}");
+        assert!(shown.contains("│waiting on ant · dev-a"), "the panel's state and ants on a line: {shown}");
+        assert!(conversation(&m, 120).0 >= 94);
+        let (_, shown) = conversation(&m, 140);
+        assert!(shown.contains("STATE") && shown.contains("OWNER"), "the panel from 140 columns: {shown}");
+
+        m.key(Key::Tab, at(2));
+        let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(2)));
+        assert!(shown.contains("│Work 1") && !shown.contains("reading the thread…"), "the nav over the view: {shown}");
+        m.key(Key::Tab, at(2));
+
+        let folds = |nav, panel| Some(Action::KeepFolds(fold::Folds { nav, panel }));
+        assert_eq!(m.key(Key::Ctrl('b'), at(2)), folds(Some(true), None));
+        let (wide, shown) = conversation(&m, 80);
+        assert!(shown.contains("Work 1") && wide == 54, "{shown}");
+        conversation(&m, 120);
+        assert_eq!(m.key(Key::Ctrl('\\'), at(2)), folds(Some(true), Some(true)));
+        let (_, shown) = conversation(&m, 120);
+        assert!(shown.contains("STATE"), "the panel shown by key: {shown}");
+        conversation(&m, 80);
+        assert_eq!(m.key(Key::Ctrl('b'), at(2)), folds(None, Some(true)), "again: as the width has it");
     }
 
     #[test]

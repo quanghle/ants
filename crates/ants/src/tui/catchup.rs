@@ -40,7 +40,7 @@ use crate::threads::summary;
 use crate::threads::thread_meta::Meta;
 
 /// The file beside the config file that keeps when the last `ants chat` on the device ended, how its thread view
-/// shows tool calls, and the tab chosen in each channel's view.
+/// shows tool calls, the tab chosen in each channel's view, and whether the nav and the side panel show.
 pub const STATE_FILE: &str = "chat-state.json";
 /// How far back home's first line counts when no `ants chat` ended on the device before.
 const BEFORE: TimeDelta = TimeDelta::hours(24);
@@ -58,6 +58,9 @@ pub struct ChatState {
     pub tools: Tools,
     #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "super::channel::kept_tabs")]
     pub channel_tabs: HashMap<ChannelId, super::channel::Tab>,
+    /// Whether the nav and the thread's side panel show, as last chosen by key.
+    #[serde(default)]
+    pub folds: super::fold::Folds,
 }
 
 /// [`STATE_FILE`] beside the config file.

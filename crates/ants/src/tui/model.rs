@@ -21,7 +21,7 @@ use super::react::{self, Picker};
 use super::reads::{Levels, Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
-    ant, cards, catchup, channel, credentials, dm, faces, held, home, images, mcp, memories, nav, people, search,
+    ant, cards, catchup, channel, credentials, dm, faces, fold, held, home, images, mcp, memories, nav, people, search,
     settings, snooze, thread, timeline, tree, work,
 };
 use crate::live::{self, State};
@@ -102,6 +102,8 @@ pub enum Action {
     KeepTools(timeline::Tools),
     /// Keep on the device the tab chosen in the channel's view.
     KeepChannelTab(ChannelId, channel::Tab),
+    /// Keep on the device whether the nav and the side panel show.
+    KeepFolds(fold::Folds),
     Quit,
 }
 
@@ -336,6 +338,8 @@ pub struct Model {
     pub catchup: catchup::Catchup,
     /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
     pub compact: bool,
+    /// Whether the nav and the thread's side panel show.
+    pub fold: fold::Fold,
 }
 
 impl Model {
@@ -380,6 +384,7 @@ impl Model {
             snoozing: None,
             catchup: catchup::Catchup::default(),
             compact: false,
+            fold: fold::Fold::default(),
         }
     }
 
