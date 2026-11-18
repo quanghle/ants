@@ -146,9 +146,10 @@ pub(crate) enum AntCommand {
     /// Show ANT's memories, which an admin order asks the daemon of its machine to read while online: its core
     /// memories (whoami, memory, tasks), which a set order edits, the memories view of its provider when it serves one
     /// (sense's: the ant's identity, a growth report counting how it grew, persona, self-model, relationships, skills,
-    /// last dream and core and top memories; `no sense data` for an ant sense keeps none of), and its harness's memory
-    /// files (the `memory_files` globs of its harness) and bd memories (with BD_DB in its environment), read-only and
-    /// size-capped. Needs a human device's admin credentials.
+    /// last dream, the open findings of that dream, open commitments, active reminders and open tasks, and core and
+    /// top memories; `no sense data` for an ant sense keeps none of), and its harness's memory files (the
+    /// `memory_files` globs of its harness) and bd memories (with BD_DB in its environment), read-only and size-capped.
+    /// Needs a human device's admin credentials.
     Memories {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,

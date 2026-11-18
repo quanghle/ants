@@ -455,7 +455,7 @@ pub(super) fn commits(dream: &Dream, text: &mut String) {
 }
 
 /// A finding as a packet lists it.
-pub(super) fn finding_line(finding: &Finding, number: u64) -> String {
+pub fn finding_line(finding: &Finding, number: u64) -> String {
     let mut marks = finding.kind.to_string();
     if let Some(advice) = &finding.advice {
         let _ = write!(marks, ": {}{}", advice.kind, advice.follows_marks(|follows| follows.finding.as_deref()));

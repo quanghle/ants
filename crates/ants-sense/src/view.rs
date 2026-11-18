@@ -9,11 +9,13 @@
 //! 6. its skills, by name and description;
 //! 7. its last dream: the title of its diary, with its verdict counts and the vital signs of its period, each with its
 //!    change against the mean of the dreams before ([`dream::changes`]);
-//! 8. its core memories, then its top [`DEFAULT_LIMIT`] memories of every scope, as `sense_recall` ranks them without
+//! 8. its open work ([`work`]): the findings of its last dream unanswered or deferred, its sage's among them, and those
+//!    its sage gave late; its open commitments; its active reminders; its tasks not closed;
+//! 9. its core memories, then its top [`DEFAULT_LIMIT`] memories of every scope, as `sense_recall` ranks them without
 //!    a query.
 //!
-//! Each entry's key names its id, kind, scope and trust. The view is read from the ant's cache and writes nothing: it
-//! notes no session on the card. Its entries fit [`MEMORIES_CAP`], the ones left out counted by a last entry; an ant
+//! Each entry's key names its id, kind, scope and trust, or, for the growth report and each list of open work, what it
+//! holds. The view is read from the ant's cache and writes nothing: it notes no session on the card. Its entries fit [`MEMORIES_CAP`], the ones left out counted by a last entry; an ant
 //! sense keeps no data of shows one entry reading [`NO_DATA`].
 
 use std::fmt::Write as _;
@@ -36,8 +38,10 @@ use crate::store::{Items, StoreError};
 use crate::thread::experience::experience;
 
 mod report;
+mod work;
 
 pub use report::{KEY as REPORT, NO_DATA};
+pub use work::{COMMITMENTS, FINDINGS, LISTED, REMINDERS, TASKS};
 
 /// The key of the entry counting the entries left out.
 pub const LEFT_OUT: &str = "left out";
@@ -71,6 +75,7 @@ async fn entries(items: &dyn Items, ant: &UserId, now: DateTime<Utc>) -> Result<
         content: format!("{}: {}", skill.name, skill.description),
     }));
     entries.extend(dream_entry(items).await?);
+    entries.extend(work::entries(items, now).await?);
     let core = memory::core(items).await?;
     let top = memory::top_of_all(items, DEFAULT_LIMIT + core.len(), now).await?;
     let top = top.into_iter().map(|ranked| ranked.found).filter(|found| !found.memory.core).take(DEFAULT_LIMIT);
@@ -261,6 +266,7 @@ mod tests {
             "(relationship, human:alice), trust self, revision 1".to_owned(),
             format!("{} (skill, self), trust self, revision 1", skill_id("release")),
             format!("{} (dream, self), trust self, revision 1", Dream::id(1)),
+            FINDINGS.to_owned(),
             format!("{core} (lesson, self, importance 3, core), active, trust self, revision 1"),
             format!("{top} (lesson, self, importance 3), active, trust self, revision 1"),
         ];
@@ -281,7 +287,8 @@ mod tests {
             content(6)
         );
         assert!(content(6).ends_with(".\nVital signs: 2 prompts (2 replied)."), "{}", content(6));
-        assert!(content(7).starts_with("Always rebase\nMerges hide history."), "{}", content(7));
+        assert!(content(7).starts_with("Dream 1 (fallback): 1 of 1 findings unanswered or deferred"), "{}", content(7));
+        assert!(content(8).starts_with("Always rebase\nMerges hide history."), "{}", content(8));
     }
 
     #[tokio::test]

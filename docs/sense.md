@@ -66,9 +66,21 @@ a thread whose origin is of a kind this version of sense does not know.
   with its pending proposal, its self-model, each relationship record, its skills by name and description, its last
   dream (the title of its diary, with its verdict counts and the vital signs of its period, each with its change
   against the mean of up to 5 dreams before, as `prompts replied 3 (mean 1.5, +100%)`, a share of failed tool calls
-  in points), then its core memories and its top 10 memories of every scope as `sense_recall` ranks them without a
-  query. Each entry is keyed by its id, kind, scope and trust. Entries past the size cap of a memories read are left
-  out and counted; an ant with no sense data reads `no sense data` ([cli.md](cli.md)).
+  in points), its open work, then its core memories and its top 10 memories of every scope as `sense_recall` ranks
+  them without a query. Each entry is keyed by its id, kind, scope and trust, the growth report and each list of open
+  work by its name. Entries past the size cap of a memories read are left out and counted; an ant with no sense data
+  reads `no sense data` ([cli.md](cli.md)).
+- **The open work in the memories view,** only shown: the ant answers its findings and keeps its work with its own
+  tools, and nothing in the view asks the human reading it to act. One entry a list, none for an empty one, each at
+  most 20 items within 32 KiB, those left out counted, the items as the brief and the ant's tools show them:
+  - `open findings`: the findings of the last dream unanswered or deferred, the sage's among them with their evidence
+    and suggested action, a deferral with its reason, then those of a sage's answer given late, which the next dream
+    offers ([Dreams](#dreams)), after a line naming the dream, where it stands and how many it has;
+  - `open commitments`: overdue first, each with its promisee, due time and source thread;
+  - `active reminders`: the fired ones with their last firing, then the upcoming ones with their trigger, each with
+    its next time, thread and commitment;
+  - `open tasks`: those not closed, by priority then age, each with its status, lease and external reference
+    ([Work and reminders](#work-and-reminders)).
 - **The growth report:** the view's `growth report` entry counts, from the ant's sense data alone, how its identity
   grew, to judge the thresholds of the identity findings of dreams and of the brief, which it names last:
   - its threads: done, started again and expired, its active days, who started them (humans, other ants, itself,
