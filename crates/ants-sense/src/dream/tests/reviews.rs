@@ -2,7 +2,7 @@ use std::time::Duration as Pause;
 
 use ants_proto::FindingVerdict::{Applied, Rejected};
 use ants_proto::provider::AntRef;
-use ants_proto::{FindingOutcome, FindingVerdict, MAX_OUTCOME_REASON};
+use ants_proto::{FindingOutcome, FindingVerdict, MAX_OUTCOME_REASON, MAX_REVIEW_FINDINGS_BYTES};
 
 use super::*;
 
@@ -162,6 +162,65 @@ async fn the_sage_keeps_a_record_of_each_review_and_tallies_what_came_of_its_fin
     }
     assert!(!report.contains("Reviews as a sage"), "{report}");
     assert!(identity.json["reviews"].is_null(), "{}", identity.json);
+}
+
+#[tokio::test]
+async fn review_batches_keep_unsent_outcomes_eligible_and_drain_overflow_after_acknowledgement() {
+    let (sense, kept) = sense().await;
+    let items = &*kept;
+    let writer = on(9);
+    let now = Utc::now();
+    let day = |n| now + Duration::days(n);
+    let reason = "🤔🤔\"\\".repeat(MAX_OUTCOME_REASON / 4 - 1);
+    let answer = findings(&["lesson"; MAX_FINDINGS]);
+    let mut expected = Vec::new();
+    for n in 1..=6 {
+        let historical = begin(items, to_sage(day(n), &writer)).await.unwrap().unwrap();
+        let thread = historical.review.unwrap().thread;
+        // The answers arrived, but none of the outgoing outcome batches has a recorded publish ack yet.
+        assert!(matches!(
+            answered(items, &sage(), &thread, uuid::Uuid::now_v7(), Some(&answer)).await.unwrap(),
+            Some(Reviewed::Prompt(_))
+        ));
+        let mut verdicts = Vec::new();
+        for finding in 1..=MAX_FINDINGS {
+            let id = format!("{n}.{finding}");
+            expected.push(told(&id, Rejected, false, &reason));
+            verdicts.push(json!({"finding": id, "verdict": "rejected", "reason": reason}));
+        }
+        let context = CallContext { thread, ..context(human()) };
+        let judged = tool(&sense, dream, json!({"verdicts": verdicts}), context).await;
+        assert!(!judged.is_error, "{judged:?}");
+    }
+
+    let attempted = begin(items, to_sage(day(7), &writer)).await.unwrap().unwrap();
+    let first = attempted.review_outcomes().unwrap();
+    let (kept, _) = get(items, attempted.number).await.unwrap().unwrap();
+    assert_eq!(kept.review_outcomes().unwrap(), first, "a retry reads the same persisted batch");
+    assert_eq!(kept.review.unwrap().message, attempted.review.unwrap().message);
+    let split = first.findings.len();
+    assert!(split > 0 && split < expected.len(), "the large batch overflows");
+    assert_eq!(first.findings, expected[..split], "oldest finding ids first");
+    assert!(serde_json::to_vec(&first.findings).unwrap().len() <= MAX_REVIEW_FINDINGS_BYTES);
+    assert!(serde_json::to_vec(&expected[..=split]).unwrap().len() > MAX_REVIEW_FINDINGS_BYTES);
+    assert_eq!(first.earlier_findings.len(), expected.len(), "overflow leaves the follow-up targets intact");
+
+    let retry = begin(items, to_sage(day(8), &writer)).await.unwrap().unwrap();
+    assert_eq!(retry.review_outcomes().unwrap().findings, first.findings, "no ack, so no outcomes were retired");
+    woken(items, retry.number, &on(8).thread).await.unwrap();
+    let review = retry.review.as_ref().unwrap();
+    let late = answered(items, &sage(), &review.thread, uuid::Uuid::now_v7(), Some(&findings(&["mistake"]))).await;
+    assert_eq!(late.unwrap(), Some(Reviewed::Late(1)));
+    review_sent(items, retry.number).await.unwrap();
+
+    let next = begin(items, to_sage(day(9), &writer)).await.unwrap().unwrap();
+    let overflow = next.review_outcomes().unwrap();
+    assert_eq!(overflow.findings, expected[split..], "only the acknowledged batch is left out of the next message");
+    assert!(overflow.earlier_findings.iter().any(|id| id == "8.1"), "noting the ack preserves the late answer");
+    assert_eq!(next.findings[0].dream(), retry.number, "the late finding is offered for a verdict");
+    review_sent(items, next.number).await.unwrap();
+    let drained = begin(items, to_sage(day(10), &writer)).await.unwrap().unwrap();
+    assert!(drained.review_outcomes().unwrap().findings.is_empty(), "both acknowledged batches have drained");
 }
 
 #[tokio::test]

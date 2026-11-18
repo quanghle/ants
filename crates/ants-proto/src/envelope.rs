@@ -175,7 +175,8 @@ pub struct Envelope {
 pub struct ReviewOutcomes {
     /// The number of the sender's dream under review.
     pub dream: u64,
-    /// The earlier findings whose verdict or outcome changed since the sender's last review, each once.
+    /// A batch of earlier findings whose verdict or outcome changed since the sender last told it, oldest first,
+    /// each once, up to [`MAX_REVIEW_FINDINGS_BYTES`] bytes as a compact JSON array.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<FindingOutcome>,
     /// The sage's finding ids in the sender's earlier-findings window, before the packet's display limit.
@@ -200,6 +201,9 @@ pub struct FindingOutcome {
 
 /// The most characters of a verdict's reason ([`FindingOutcome::reason`]) a sender tells and a receiver keeps.
 pub const MAX_OUTCOME_REASON: usize = 200;
+
+/// The most bytes of the compact JSON `review_outcomes.findings` array sent on one review.
+pub const MAX_REVIEW_FINDINGS_BYTES: usize = 64 * 1024;
 
 /// An ant's verdict on a reviewer's finding ([`FindingOutcome::verdict`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

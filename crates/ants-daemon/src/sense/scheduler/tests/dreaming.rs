@@ -1,9 +1,11 @@
-use ants_proto::{ColonyEntry, Envelope, NoticeKind, ThreadId};
+use ants_proto::{
+    ColonyEntry, Envelope, FindingOutcome, FindingVerdict, NoticeKind, ReviewCommit, ReviewOutcomes, ThreadId,
+};
 use ants_sense::dream::{self, Commit, Dream, REVIEW_BEGIN, Review, Signs, Tally, Thread};
 use ants_sense::proposal;
 use chrono::DateTime;
 
-use super::super::dreams::{Dreams, review_answer, review_given, review_received, serving_sage};
+use super::super::dreams::{Dreams, fit_review, review_answer, review_given, review_received, serving_sage};
 use super::*;
 
 #[derive(Default)]
@@ -268,6 +270,37 @@ fn reply(review: &Review, text: &str) -> Envelope {
     reply.in_reply_to = Some(review.message);
     reply.allow = Some(ants_proto::REVIEW_ALLOW.map(str::to_owned).to_vec());
     reply
+}
+
+#[test]
+fn a_review_fits_the_bus_even_when_the_non_outcome_fields_encode_large() {
+    let text = "\u{1}🤔\"\\".repeat(90_000);
+    let mut envelope = Envelope::on_thread(ThreadId::generate(), ant(), sage(), text.clone());
+    let outcomes = ReviewOutcomes {
+        dream: 2,
+        findings: vec![FindingOutcome {
+            finding: "1.1".into(),
+            verdict: FindingVerdict::Applied,
+            holds: true,
+            reason: "🤔 \"kept\"".into(),
+        }],
+        earlier_findings: vec!["1.1".into()],
+    };
+    envelope.review_outcomes = Some(outcomes.clone());
+    fit_review(&mut envelope).unwrap();
+    assert!(serde_json::to_vec(&envelope).unwrap().len() <= 1024 * 1024 - 8 * 1024);
+    assert!(text.starts_with(&envelope.text) && !envelope.text.is_empty() && envelope.text.len() < text.len());
+    assert_eq!(envelope.review_outcomes, Some(outcomes.clone()));
+    let text_after = envelope.text.clone();
+
+    let commit =
+        ReviewCommit { repo: "github.com/ants/dreams".into(), commit: "c0ffee".into(), thread: None, local: None };
+    envelope.review_commits = vec![commit.clone(), ReviewCommit { local: Some(text), ..commit.clone() }];
+    fit_review(&mut envelope).unwrap();
+    assert!(serde_json::to_vec(&envelope).unwrap().len() <= 1024 * 1024 - 8 * 1024);
+    assert_eq!(envelope.review_commits, [commit]);
+    assert_eq!(envelope.text, text_after);
+    assert_eq!(envelope.review_outcomes, Some(outcomes));
 }
 
 #[tokio::test]

@@ -1016,10 +1016,8 @@ fn dreaming(inbox: &Inbox<'_>, config: &Config) -> std::sync::Arc<dyn crate::sen
         workdir: config.harness.workdir.clone(),
         sage: config.policy.sage.clone(),
         colony: crate::mcp::jetstream_colony(inbox.js.clone()),
-        outbox: redacting_outbox(
-            crate::mcp::jetstream_outbox(inbox.js.clone()),
-            std::sync::Arc::new(inbox.redactor.clone()),
-        ),
+        outbox: crate::mcp::jetstream_outbox(inbox.js.clone()),
+        redactor: inbox.redactor.clone(),
         reactions: inbox.mcp.and_then(crate::mcp::Mcp::reaction_asker),
     })
 }

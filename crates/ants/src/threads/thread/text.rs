@@ -3,12 +3,12 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ants_proto::{Answered, NoReplyWhy, Pick, UserId};
+use ants_proto::{Answered, DecidedBy, NoReplyWhy, Pick, UserId};
 use chrono::{DateTime, Utc};
 
 use super::entry::{Entry, Kind};
 use super::summaries::Summary;
-use super::{NoReply, ToolCall};
+use super::{NoReply, ToolCall, ToolRejection};
 use crate::messages::attachments;
 
 pub(crate) fn time(at: DateTime<Utc>) -> String {
@@ -80,11 +80,10 @@ pub(super) fn state(thread: &Summary) -> Option<&'static str> {
 }
 
 /// The entries of a thread as `ants thread show` prints them: each message a block, its heading ([`heading`]) then
-/// its text, attachments and the reactions to it indented under it, a blank line between blocks; the tool calls and
-/// the prompts ended with no reply sent after a message as compact lines under it, the first joined to it by `⎿`:
-/// time, of day only on the day of the line before, ant, the call as `Name(args)` and how it ended, or why no reply
-/// was sent. A question shows its options numbered, whether a typed answer is taken, and the answers to it among
-/// `entries` or how to answer it; an answer, the question and the option it picks.
+/// its text, attachments and the reactions to it indented under it, a blank line between blocks. Tool calls, rejected
+/// tool requests and prompts ended with no reply sent are compact lines under it, the first joined to it by `⎿`. A
+/// question shows its options numbered, whether a typed answer is taken, and the answers to it among `entries` or
+/// how to answer it; an answer, the question and the option it picks.
 pub fn render(entries: &[Entry]) -> String {
     let mut out = String::new();
     let (mut under, mut day) = (false, None);
@@ -104,6 +103,11 @@ pub fn render(entries: &[Entry]) -> String {
             let (name, args) = call_label(tool.tool_kind.as_deref(), first);
             let args = args.map_or_default(|args| format!("({args})"));
             let _ = writeln!(out, "{lead}{at} {ant}  {name}{args}{}", ended(tool));
+            continue;
+        }
+        if let Some(rejected) = &e.rejected {
+            under = true;
+            let _ = writeln!(out, "{lead}{at} {ant}  {}", rejection(rejected, first));
             continue;
         }
         if e.no_reply.is_some() {
@@ -126,6 +130,26 @@ pub fn render(entries: &[Entry]) -> String {
         out.push_str(&crate::messages::inbox::render_reactions(&e.reactions, "  "));
     }
     out
+}
+
+fn rejection(rejected: &ToolRejection, title: &str) -> String {
+    let kind = (!rejected.tool_kind.is_empty()).then_some(rejected.tool_kind.as_str());
+    let (name, args) = call_label(kind, title);
+    let name = if name.is_empty() { kind.unwrap_or("tool") } else { &name };
+    let args = args.map_or_default(|args| format!("({args})"));
+    let how = match rejected.by {
+        DecidedBy::Expiry => "expired".to_owned(),
+        DecidedBy::Human => {
+            let decider = rejected.decider.as_ref().map_or("a human", UserId::as_str);
+            let via = rejected.via.as_ref().map_or_default(|via| format!(" via {via}"));
+            format!("rejected by {decider}{via}")
+        }
+        DecidedBy::Chain => rejected.decider.as_ref().map_or_else(
+            || "rejected by an ant in the approval chain".to_owned(),
+            |decider| format!("rejected by {decider} (approval chain)"),
+        ),
+    };
+    format!("{name}{args} · request {} {how}", rejected.request)
 }
 
 /// How a tool call ended after its label: ` · 35ms`, ` · failed after 4.0s`, ` · in progress`.

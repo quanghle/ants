@@ -763,13 +763,17 @@ there as any offered again (the limit of 20 holds); an answer arriving after the
 
 **The sage's records:** the review message carries, besides the commits it names, the dream's number, the eligible
 `earlier_findings` ids from the 30-active-day window before display truncation, and what is new in the verdicts and
-outcomes since the ant's last review by the sage (`review_outcomes`). Each changed outcome carries the last verdict,
+outcomes last told to that sage (`review_outcomes`). Each changed outcome carries the last verdict,
 the ant's reason for it (`reason`, at most 200 characters, on one line, its secrets redacted, the ant's text and
 untrusted) and, for one applied, whether it still holds, as the earlier findings judge them, over the dreams begun
-within the ant's last 90 active days. The message takes the same outcomes and eligible ids on every try. The sage's daemon
-tells the sage's sense of each review: the message makes the review's record, an item of kind `review` named after the
-ant and its dream, and applies the verdicts and outcomes it carries to the records of the earlier reviews; the sage's
-answer gives the record its findings by kind, read and numbered as the ant's daemon reads them, the first answer kept.
+within the ant's last 90 active days. The `findings` array takes at most 64 KiB of compact JSON, oldest findings first.
+The same batch and eligible ids go on every try; only a batch acknowledged by JetStream (at the hub or the leaf
+outbox) counts as sent. Later reviews include still-eligible changes not yet sent, with their current verdicts and
+outcomes. If needed, checkout metadata or packet text is shortened to fit the bus without changing the batch or ids.
+The sage's daemon tells the sage's sense of each review: the message makes the review's record, an item of kind `review`
+named after the ant and its dream, and applies the verdicts and outcomes it carries to the records of the earlier
+reviews; the sage's answer gives the record its findings by kind, read and numbered as the ant's daemon reads them,
+the first answer kept.
 The ant and sage use the same earlier findings for follow-up links.
 Sense alone writes the records, as it does the thread records, from the ant, the dream, the review thread, when the
 message arrived and was answered, and each finding's id, kind, the finding it follows, verdict, whether it holds and

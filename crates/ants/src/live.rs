@@ -376,7 +376,7 @@ impl Feed {
         let (js, parser) = (self.js.clone(), Parser::opening(self.keyring.clone()).checking(self.behalf.clone()));
         self.history = Some(
             async move {
-                let activity = if tools { thread::Activity::All } else { thread::Activity::None };
+                let activity = if tools { thread::Activity::Calls } else { thread::Activity::None };
                 let read = thread::history_with(&js, &thread, None, activity, parser).await;
                 (thread, read)
             }

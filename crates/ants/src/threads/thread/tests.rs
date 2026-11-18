@@ -865,6 +865,78 @@ async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
     assert!(!<Kind as clap::ValueEnum>::value_variants().contains(&Kind::Tool), "tool calls are not searched");
 }
 
+#[tokio::test]
+async fn a_thread_shows_rejected_and_expired_tool_requests_once() {
+    use ants_proto::TimelineRejection;
+
+    let Some(server) = crate::test_support::Server::start() else { return };
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+    let (_, ant_js) = server.connect_as(&dev_a, ants_proto::Role::Ant).await;
+    ants_daemon::bus::ensure_stream(&js).await.unwrap();
+    let ask = Envelope::new(alice.clone(), dev_a.clone(), "build it");
+    js.publish(ask.subject(), json(&ask).into()).await.unwrap().await.unwrap();
+    let store = async |message, entries| {
+        let record = Timeline::new(dev_a.clone(), ask.thread_id.clone(), message, entries, 0);
+        ant_js.publish(record.subject(), json(&record).into()).await.unwrap().await.unwrap().sequence
+    };
+    let rejected = TimelineRejection {
+        request: Uuid::now_v7(),
+        kind: "execute".into(),
+        title: "Run `cargo build`".into(),
+        by: DecidedBy::Human,
+        decider: Some(alice),
+        via: Some(p("alice-assistant")),
+    };
+    let earlier = TimelineRejection { title: "old title".into(), ..rejected.clone() };
+    store(Uuid::nil(), vec![TimelineEntry::Rejected(earlier)]).await;
+    let seq = store(ask.id, vec![TimelineEntry::Rejected(rejected.clone())]).await;
+    let chained = TimelineRejection {
+        request: Uuid::now_v7(),
+        kind: "read".into(),
+        title: "Read src/main.rs".into(),
+        by: DecidedBy::Chain,
+        decider: Some(p("dev-b")),
+        via: None,
+    };
+    let expired =
+        TimelineRejection { request: Uuid::now_v7(), by: DecidedBy::Expiry, decider: None, ..chained.clone() };
+    store(ask.id, vec![TimelineEntry::Rejected(chained.clone()), TimelineEntry::Rejected(expired.clone())]).await;
+
+    let shown = history(&js, &ask.thread_id, None, Activity::All, None).await.unwrap();
+    let kinds: Vec<_> = shown.iter().map(|e| e.kind).collect();
+    assert_eq!(kinds, [Kind::Message, Kind::Rejected, Kind::Rejected, Kind::Rejected]);
+    let text = render(&shown);
+    assert!(text.contains("\n  build it\n  ⎿ "), "{text}");
+    for (label, request, outcome) in [
+        ("Run(cargo build)", rejected.request, "rejected by alice via alice-assistant"),
+        ("Read(src/main.rs)", chained.request, "rejected by dev-b (approval chain)"),
+        ("Read(src/main.rs)", expired.request, "expired"),
+    ] {
+        assert!(text.contains(&format!("dev-a  {label} · request {request} {outcome}\n")), "{text}");
+    }
+
+    let line = serde_json::to_value(&shown[1]).unwrap();
+    assert_eq!(line["kind"], "rejected");
+    assert_eq!(line["seq"], seq);
+    assert_eq!(line["text"], rejected.title);
+    assert_eq!(
+        line["rejected"],
+        serde_json::json!({
+            "message": ask.id, "request": rejected.request, "tool_kind": "execute",
+            "by": "human", "decider": "alice", "via": "alice-assistant"
+        })
+    );
+    let line = serde_json::to_value(&shown[3]).unwrap();
+    assert_eq!(
+        line["rejected"],
+        serde_json::json!({"message": ask.id, "request": expired.request, "tool_kind": "read", "by": "expiry"})
+    );
+    let without = history(&js, &ask.thread_id, None, Activity::NoReplies, None).await.unwrap();
+    assert_eq!(without.len(), 1, "--no-tools omits rejections: {without:?}");
+    assert!(!<Kind as clap::ValueEnum>::value_variants().contains(&Kind::Rejected));
+}
+
 #[test]
 fn a_prompt_ended_with_no_reply_shows_why_and_its_final_text() {
     use ants_proto::NoReplyWhy::{Completed, ReplyToOwn};

@@ -54,8 +54,8 @@ pub(crate) enum ThreadCommand {
         json: bool,
     },
     /// Show a thread's whole history in the order the stream stored it: a `●` line per message with its sender and
-    /// recipient, kind, time and id, its text indented under it. The tool calls its ants made show under the message
-    /// before them by when each started, as `⎿` lines: time, ant, the call as Name(args), and how it ended.
+    /// recipient, kind, time and id, its text indented under it. Tool calls and rejected or expired tool requests show
+    /// under the message before them as `⎿` lines: time, ant, the tool as Name(args), and the outcome.
     Show {
         /// The thread: its id, a unique start of one, or `last`.
         #[arg(add = ArgValueCandidates::new(completions::threads))]
@@ -67,7 +67,7 @@ pub(crate) enum ThreadCommand {
         /// One JSON entry per line.
         #[arg(long)]
         json: bool,
-        /// Leave out the tool calls the thread's ants made.
+        /// Leave out the tool calls and rejected or expired requests from the timeline.
         #[arg(long)]
         no_tools: bool,
     },

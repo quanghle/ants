@@ -3,6 +3,7 @@ use ants_proto::provider::Starter;
 
 use super::identity_findings::started;
 use super::*;
+use crate::dream::review::clean;
 
 fn sage() -> UserId {
     "sage".parse().unwrap()
@@ -32,6 +33,19 @@ async fn sent(items: &dyn Items) -> ThreadId {
     let (sent, _) = get(items, 1).await.unwrap().unwrap();
     assert!(sent.review_due(sent.at).is_none(), "sent once");
     review.thread
+}
+
+#[test]
+fn review_text_redacts_a_token_that_straddles_the_character_limit() {
+    let text = format!("Note: ghp_{}", "FAKE".repeat(10));
+    assert_eq!(clean(&text, 29).as_deref(), Some("Note: [redacted:github-token]"));
+}
+
+#[test]
+fn review_text_truncates_at_a_character_boundary_and_appends_an_ellipsis() {
+    let text = "  Été\n文  ";
+    assert_eq!(clean(text, 4).as_deref(), Some("Été …"));
+    assert_eq!(clean(text, 5).as_deref(), Some("Été 文"));
 }
 
 #[test]

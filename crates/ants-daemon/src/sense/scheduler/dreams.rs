@@ -28,6 +28,7 @@ use super::Settings;
 use crate::colony::Workload;
 use crate::mcp::{Colony, Outbox, ReactionAsker};
 use crate::provider::origins::OriginStore;
+use crate::secrets::redact::Redactor;
 use crate::stream::history;
 use crate::stream::reading::Reading;
 use crate::sync::MutexExt as _;
@@ -37,6 +38,8 @@ mod vitals;
 
 /// How long a git command naming a commit may take.
 const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// NATS's 1 MiB payload, less room for headers in the hub and the outbox.
+const MAX_REVIEW_ENVELOPE_BYTES: usize = 1024 * 1024 - 8 * 1024;
 
 /// What a dream needs of the daemon serving the ant.
 pub(crate) trait Dreaming: Send + Sync {
@@ -302,8 +305,10 @@ pub(crate) struct Daemon {
     pub sage: Option<UserId>,
     /// Reads the colony: the sage's entry, and the entries naming this ant as their sage.
     pub colony: Colony,
-    /// Sends the review packets, redacted.
+    /// Sends the review packets.
     pub outbox: Outbox,
+    /// Redacts the review packet before its encoded size is checked.
+    pub redactor: Redactor,
     /// Asks for the reactions to the ant's messages, as `list_reactions` does.
     pub reactions: Option<ReactionAsker>,
 }
@@ -382,9 +387,26 @@ impl Dreaming for Daemon {
             envelope.id = review.message;
             envelope.review_commits = review_commits(&self.workdir, &dream.commits).await;
             envelope.review_outcomes = dream.review_outcomes();
+            self.redactor.redact_string(&mut envelope.text);
+            fit_review(&mut envelope)?;
             (self.outbox)(envelope).await
         })
     }
+}
+
+/// Keep the persisted batch and eligible ids intact. The packet's text budget is not a JSON budget, and the
+/// checkout metadata may be large.
+pub(super) fn fit_review(envelope: &mut Envelope) -> Result<()> {
+    while serde_json::to_vec(&*envelope)?.len() > MAX_REVIEW_ENVELOPE_BYTES {
+        if !envelope.review_commits.is_empty() {
+            envelope.review_commits.truncate(envelope.review_commits.len() / 2);
+        } else {
+            anyhow::ensure!(!envelope.text.is_empty(), "review outcomes exceed the bus payload budget");
+            let end = envelope.text.floor_char_boundary(envelope.text.len() / 2);
+            envelope.text.truncate(end);
+        }
+    }
+    Ok(())
 }
 
 /// Whether `ant` sends `sage` its review packets, given the colony's `entries` at `now`: never to itself or while

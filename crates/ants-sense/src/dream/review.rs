@@ -266,15 +266,14 @@ fn evidence_of(object: &Map<String, Value>) -> Evidence {
     }
 }
 
-/// `text` on one line, its secrets redacted, at most `max` characters, the markers of the block it is shown in made
-/// plain brackets; none when blank.
+/// `text` on one line, its secrets redacted before cutting to `max` characters plus an ellipsis if cut. The markers
+/// of the block it is shown in are made plain brackets; none when blank.
 pub(in crate::dream) fn clean(text: &str, max: usize) -> Option<String> {
-    let text = text.trim();
-    let text = match text.char_indices().nth(max) {
-        Some((at, _)) => format!("{}…", &text[..at]),
-        None => text.to_owned(),
-    };
-    let mut text = sanitize_title(&text, Limit::Chars(max + 1)).ok()?.text;
+    let mut text = sanitize_title(text.trim(), Limit::Bytes(usize::MAX)).ok()?.text;
+    if let Some((at, _)) = text.char_indices().nth(max) {
+        text.truncate(at);
+        text.push('…');
+    }
     for (marker, plain) in [(REVIEW_BEGIN, "[sage-review]"), (REVIEW_END, "[/sage-review]")] {
         while let Some(at) = text.to_ascii_lowercase().find(marker) {
             text.replace_range(at..at + marker.len(), plain);

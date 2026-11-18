@@ -404,7 +404,7 @@ impl Dream {
     }
 
     /// What its review message tells the sage beside the packet ([`ants_proto::Envelope::review_outcomes`]): the dream
-    /// and what is new in the verdicts and outcomes of the sage's earlier findings, with the ids eligible for
+    /// and a fixed batch of changed verdicts and outcomes of the sage's earlier findings, with the ids eligible for
     /// follow-ups; none without a review.
     pub fn review_outcomes(&self) -> Option<ReviewOutcomes> {
         let review = self.review.as_ref()?;

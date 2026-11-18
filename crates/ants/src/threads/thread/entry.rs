@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use super::text::took;
-use super::{NoReply, ToolCall};
+use super::{NoReply, ToolCall, ToolRejection};
 use crate::messages::attachments;
 use crate::people::sealed;
 
@@ -39,6 +39,9 @@ pub enum Kind {
     /// A prompt an ant ended with no reply sent, from its timeline records: not a message, so not searched.
     #[value(skip)]
     NoReply,
+    /// A rejected or expired tool request from an ant's timeline records: not a message, so not searched.
+    #[value(skip)]
+    Rejected,
 }
 
 impl Kind {
@@ -54,12 +57,13 @@ impl Kind {
             Self::Dead => "dead",
             Self::Tool => "tool",
             Self::NoReply => "no reply",
+            Self::Rejected => "rejected",
         }
     }
 
     /// Whether an entry of the kind comes from an ant's timeline records rather than a stored message.
     pub fn on_timeline(self) -> bool {
-        matches!(self, Self::Tool | Self::NoReply)
+        matches!(self, Self::Tool | Self::NoReply | Self::Rejected)
     }
 
     /// Whether an entry of the kind is a message, channel post or note, which reopens a thread marked done
@@ -163,6 +167,9 @@ pub struct Entry {
     /// Why a prompt ended with no reply sent, its ant the sender and its final text the text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_reply: Option<NoReply>,
+    /// A rejected or expired tool request, its title the text and the requesting ant the sender.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejected: Option<Box<ToolRejection>>,
     /// The ant-to-ant turns an inbox message, channel post or notes post leaves on its thread.
     #[serde(skip)]
     pub turns: Option<u32>,
@@ -225,6 +232,7 @@ impl Entry {
             answer: None,
             tool: None,
             no_reply: None,
+            rejected: None,
             turns: None,
             webhook: false,
             provider: None,
@@ -269,6 +277,25 @@ impl Entry {
             text: merged.text.clone(),
             no_reply: Some(end),
             ..Self::new(seq, merged.at, Kind::NoReply, merged.thread_id.clone())
+        }
+    }
+
+    /// The entry of a rejected tool request merged from timeline records, the last of them stored at `seq`.
+    pub(super) fn rejected(seq: u64, merged: &ants_proto::MergedRejection) -> Self {
+        let rejection = &merged.rejection;
+        let rejected = ToolRejection {
+            message: merged.message,
+            request: rejection.request,
+            tool_kind: rejection.kind.clone(),
+            by: rejection.by,
+            decider: rejection.decider.clone(),
+            via: rejection.via.clone(),
+        };
+        Self {
+            from: Some(merged.ant.clone()),
+            text: rejection.title.clone(),
+            rejected: Some(Box::new(rejected)),
+            ..Self::new(seq, merged.at, Kind::Rejected, merged.thread_id.clone())
         }
     }
 

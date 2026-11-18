@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
-use ants_proto::{FindingOutcome, FindingVerdict, UserId};
+use ants_proto::{FindingOutcome, FindingVerdict, MAX_REVIEW_FINDINGS_BYTES, UserId};
 use chrono::{DateTime, Duration, Utc};
 
 use super::Section;
@@ -240,8 +240,8 @@ fn own(dream: &Dream) -> impl Iterator<Item = (&Finding, String)> {
 }
 
 /// What the review of dream `number`, by `ages` of the ant's active time, tells `sage` of its earlier findings for the
-/// ant: changed outcomes over [`OUTCOME_DAYS`] (oldest first), and follow-up targets over [`TRACK_RECORD_DAYS`],
-/// the same window as the packet's earlier findings. Both use the sage's numbering ([`own`]).
+/// ant: a bounded batch of changed outcomes over [`OUTCOME_DAYS`] (oldest first), and follow-up targets over
+/// [`TRACK_RECORD_DAYS`], the same window as the packet's earlier findings. Both use the sage's numbering ([`own`]).
 pub(in crate::dream) async fn review_history(
     items: &dyn Items,
     number: u64,
@@ -252,18 +252,21 @@ pub(in crate::dream) async fn review_history(
     let verdicts = last_verdicts(&dreams);
     let by_sage: Vec<_> = dreams.iter().rev().filter(|earlier| earlier.sage.as_ref() == Some(sage)).collect();
     let mut told = HashMap::new();
+    // The original findings and their latest verdicts are the backlog; only acknowledged batches subtract from it.
     for review in by_sage.iter().filter_map(|earlier| earlier.review.as_ref()).filter(|review| review.sent) {
         for outcome in &review.outcomes {
             told.insert(outcome.finding.as_str(), (outcome.verdict, outcome.holds));
         }
     }
     let (mut outcomes, mut targets) = (Vec::new(), BTreeMap::new());
+    let mut budget = Some(MAX_REVIEW_FINDINGS_BYTES - "[]".len());
     for earlier in by_sage {
         let eligible = ages.since(earlier.at) <= Duration::days(TRACK_RECORD_DAYS);
         for (finding, told_as) in own(earlier) {
             if eligible {
                 targets.insert(told_as.clone(), finding.id.clone());
             }
+            let Some(left) = budget else { continue };
             let Some((_, verdict)) = verdicts.get(finding.id.as_str()) else { continue };
             let mut holds = verdict.verdict == Judgement::Applied;
             if holds {
@@ -274,14 +277,21 @@ pub(in crate::dream) async fn review_history(
                     }
                 }
             }
-            let reason = told_reason(&verdict.reason);
-            let verdict = match verdict.verdict {
+            let judgement = match verdict.verdict {
                 Judgement::Applied => FindingVerdict::Applied,
                 Judgement::Rejected => FindingVerdict::Rejected,
                 Judgement::Deferred => FindingVerdict::Deferred,
             };
-            if told.get(told_as.as_str()) != Some(&(verdict, holds)) {
-                outcomes.push(FindingOutcome { finding: told_as, verdict, holds, reason });
+            if told.get(told_as.as_str()) == Some(&(judgement, holds)) {
+                continue;
+            }
+            let finding =
+                FindingOutcome { finding: told_as, verdict: judgement, holds, reason: told_reason(&verdict.reason) };
+            let bytes = serde_json::to_vec(&finding).expect("a finding outcome is JSON").len()
+                + usize::from(!outcomes.is_empty());
+            budget = left.checked_sub(bytes);
+            if budget.is_some() {
+                outcomes.push(finding);
             }
         }
     }
