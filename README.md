@@ -90,6 +90,7 @@ ants inbox                                          # unread replies across devi
 ants colony                                         # active ants and harness status
 ants channel create ops --member dev-a
 ants post --wait '#ops' "@dev-a check the failing build"
+ants trail save deploy.py                           # a trail: a Python script orchestrating ants
 ants                                                # full-screen terminal chat UI (also: ants chat)
 ```
 

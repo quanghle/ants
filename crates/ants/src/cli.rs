@@ -14,7 +14,7 @@ use crate::cmd::{
     bridge::BridgeCommand, channel::ChannelCommand, dead::DeadCommand, doctor, enroll::EnrollCommand,
     harness::HarnessCommand, hook::HookCommand, inbox, keys::KeysCommand, leaf::LeafCommand, login,
     notify::NotifyCommand, remind::RemindCommand, send, setup, signer, spend::SpendArgs, thread::ThreadCommand,
-    tools::ToolsCommand, webhook::WebhookCommand,
+    tools::ToolsCommand, trail::TrailCommand, webhook::WebhookCommand,
 };
 use crate::credentials::renew;
 use crate::messages::{attachments, progress};
@@ -152,6 +152,11 @@ pub(crate) enum Command {
     /// Nothing is consumed or marked read. Needs a human's credentials.
     #[command(subcommand)]
     Thread(ThreadCommand),
+    /// Trails, Python scripts that orchestrate ants: save one for the colony, list, show or remove the saved ones, and
+    /// list and show the runs conductors keep. A trail's file starts with a literal `meta = {"name": ..., "description":
+    /// ..., "phases": [...]}`.
+    #[command(subcommand)]
+    Trail(TrailCommand),
     /// Ask the config file's `[cli]` `summary_ant` (by default the messenger) for a digest of the threads with entries
     /// within --since: what finished, what is stuck, and what waits on the human. Kept nowhere; the request opens a
     /// thread of its own, left out of `ants thread list`, `ants inbox` and `ants dash`. Needs a human's credentials.
