@@ -1,3 +1,5 @@
+mod trails;
+
 use ants_daemon::config::Ant;
 use ants_daemon::monitoring::storage;
 use ants_daemon::monitoring::storage::Usage;
@@ -10,6 +12,7 @@ use ants_proto::{Machine, PERMISSIONS_VERSION, Role, STREAM, UserId};
 use super::colony::{avatars, drift, harness_versions};
 use super::credentials::{check_key, check_xkey};
 use super::server::{consumer_limit, consumers, storage_check, supported_server};
+use super::transports::leafnode_info;
 use super::*;
 use crate::avatars::{Depth, Faces};
 use crate::credentials::{backup, revoke};
@@ -34,6 +37,7 @@ fn setup(server: &Server, creds: Option<PathBuf>) -> Setup {
         team: server.dir().join("no-team"),
         webhooks: server.dir().join("no-webhooks.toml"),
         home: None,
+        worker: None,
     }
 }
 
@@ -284,6 +288,7 @@ async fn a_missing_harness_fails_with_its_fix() {
         team: dir.join("no-team"),
         webhooks: dir.join("no-webhooks.toml"),
         home: None,
+        worker: None,
     };
     let checks = check_ants(&loaded.ants, &loaded.harnesses, &setup, 0).await;
     let harness = named(&checks, "ant dev-a harness")[0];
@@ -480,6 +485,7 @@ async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
         team: dir.clone(),
         webhooks: dir.join("no-webhooks.toml"),
         home: None,
+        worker: None,
     };
 
     let checks = check_leaf(&setup, Leaf::read(&leaf_config), &loaded.ants, None, None, None, 0).await;
@@ -520,6 +526,7 @@ async fn the_hub_resolver_check_warns_of_a_hub_keeping_pushed_accounts_in_memory
             team: hub.dir().join("auth"),
             webhooks: hub.dir().join("no-webhooks.toml"),
             home: None,
+            worker: None,
         };
         let check = check_resolver(&setup, false).await;
         if full {
@@ -894,6 +901,29 @@ async fn a_dev_tunnel_needs_a_login_or_a_connect_token_far_from_expiring() {
 }
 
 #[cfg(unix)]
+/// The `ants bridge serve` unit, with `serve`, else the `ants bridge connect` one, installed under `home`, run with
+/// `flags` after its subcommand, as an edit of the unit by hand does: the first of a flag given twice is the one read.
+fn bridge_flags(home: &Path, serve: bool, flags: &[&str]) {
+    let sub = if serve { "serve" } else { "connect" };
+    let (unit, from, to) = match std::env::consts::OS {
+        "macos" => {
+            let flags: String = flags.iter().map(|flag| format!("<string>{flag}</string>")).collect();
+            let label = if serve { "ants.bridge-serve" } else { "ants.bridge" };
+            let unit = home.join(format!("Library/LaunchAgents/{label}.plist"));
+            (unit, format!("<string>{sub}</string>"), format!("<string>{sub}</string>{flags}"))
+        }
+        _ => {
+            let name = if serve { "ants-bridge-serve" } else { "ants-bridge" };
+            let unit = home.join(format!(".config/systemd/user/{name}.service"));
+            (unit, format!("\" bridge {sub} "), format!("\" bridge {sub} {} ", flags.join(" ")))
+        }
+    };
+    let text = std::fs::read_to_string(&unit).unwrap();
+    assert!(text.contains(&from), "{text}");
+    std::fs::write(&unit, text.replacen(&from, &to, 1)).unwrap();
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn a_bridge_must_answer_and_take_the_token_of_its_file() {
     let home = ants_test_support::scratch_dir("doctor-bridge").canonicalize().unwrap();
@@ -909,21 +939,8 @@ async fn a_bridge_must_answer_and_take_the_token_of_its_file() {
         return;
     }
     // The bridge this test serves, not the default port.
-    let (serve, from, to) = match std::env::consts::OS {
-        "macos" => (
-            home.join("Library/LaunchAgents/ants.bridge-serve.plist"),
-            "<string>serve</string>".to_owned(),
-            format!("<string>serve</string><string>--listen</string><string>127.0.0.1:{port}</string>"),
-        ),
-        _ => (
-            home.join(".config/systemd/user/ants-bridge-serve.service"),
-            "bridge serve --token-file".to_owned(),
-            format!("bridge serve --listen 127.0.0.1:{port} --token-file"),
-        ),
-    };
-    let text = std::fs::read_to_string(&serve).unwrap();
-    assert!(text.contains(&from), "{text}");
-    std::fs::write(&serve, text.replace(&from, &to)).unwrap();
+    bridge_flags(&home, true, &["--listen", &format!("127.0.0.1:{port}")]);
+    let restart = running(&home).by_hand(Service::BridgeServe, Action::Restart).unwrap();
 
     let checks = transports(&home).await;
     for check in ["bridge service", "bridge token", "bridge serve service", "bridge serve token"] {
@@ -932,6 +949,21 @@ async fn a_bridge_must_answer_and_take_the_token_of_its_file() {
     assert_eq!(one(&checks, "bridge url").detail, format!("{url} answers as a bridge taking the token"));
     let serving = one(&checks, "bridge serve url");
     assert_eq!(serving.detail, format!("http://127.0.0.1:{port} answers as a bridge taking the token"));
+    // The bridge answers, but its upstream is no hub's leafnode port.
+    let pipe = one(&checks, "bridge pipe");
+    let unopened =
+        format!("{url} answers but opens no connection to the hub's leafnode port: 502 Bad Gateway upstream");
+    assert!(pipe.status == Status::Fail && pipe.detail.starts_with(&unopened), "{pipe}");
+    let hub = "on the hub, start nats-server, whose leafnodes listen where `ants bridge serve --upstream` points \
+               (127.0.0.1:7422 by default); `ants doctor` there checks the bridge serve pipe";
+    assert_eq!(pipe.fix, [hub]);
+    let pipe = one(&checks, "bridge serve pipe");
+    assert_eq!(pipe.status, Status::Fail, "{pipe}");
+    let start = format!(
+        "start the hub's nats-server, whose leafnodes listen on 127.0.0.1:7422, or give `ants bridge serve` the \
+         --upstream of its leafnode port, then {restart}"
+    );
+    assert_eq!(pipe.fix, [start]);
 
     private(&token, "guess\n");
     let checks = transports(&home).await;
@@ -940,6 +972,7 @@ async fn a_bridge_must_answer_and_take_the_token_of_its_file() {
         (refused.status, refused.detail.as_str()),
         (Status::Fail, &*format!("{url} refuses the token: missing or wrong bridge token"))
     );
+    assert_eq!(one(&checks, "bridge pipe").status, Status::Skip, "{checks:#?}");
     chmod(&token, 0o644);
     let exposed = one(&transports(&home).await, "bridge token").clone();
     assert_eq!((exposed.status, exposed.fix), (Status::Warn, vec![format!("chmod 600 {file}")]));
@@ -948,6 +981,91 @@ async fn a_bridge_must_answer_and_take_the_token_of_its_file() {
     assert_eq!(one(&checks, "bridge token").status, Status::Fail, "{checks:#?}");
     assert_eq!(one(&checks, "bridge url").status, Status::Fail, "{checks:#?}");
     std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_bridge_must_carry_the_leaf_node_s_uplink_to_the_hub_s_leafnode_port() {
+    let leaf_port = ants_test_support::free_port();
+    let Some(hub) = ants_test_support::NatsServer::spawn_with(|_| {
+        format!("leafnodes {{ listen: \"127.0.0.1:{leaf_port}\", no_advertise: true }}\n")
+    }) else {
+        return;
+    };
+    let home = ants_test_support::scratch_dir("doctor-bridge-pipe").canonicalize().unwrap();
+    let local = async || {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    };
+    let (serve, serve_port) = local().await;
+    let upstream = format!("127.0.0.1:{leaf_port}");
+    tokio::spawn(bridge::Server::new(upstream.clone(), Some("s3cret".to_owned())).run(serve));
+    let url = format!("http://127.0.0.1:{serve_port}/bridge");
+    // `ants bridge connect` as the unit runs it, and one started before the token it holds was replaced.
+    let (connect, connect_port) = local().await;
+    tokio::spawn(bridge::Remote::new(&url, Some("s3cret"), &[], None).unwrap().run(connect));
+    let (stale, stale_port) = local().await;
+    tokio::spawn(bridge::Remote::new(&url, Some("old"), &[], None).unwrap().run(stale));
+    let token = home.join("bridge-token");
+    private(&token, "s3cret\n");
+    let args = ["--ants", "/bin/sh", "--bridge", &url, "--bridge-token", token.to_str().unwrap(), "--bridge-serve"];
+    if !install_units(&home, &args) {
+        return;
+    }
+    bridge_flags(&home, true, &["--listen", &format!("127.0.0.1:{serve_port}"), "--upstream", &upstream]);
+    bridge_flags(&home, false, &["--listen", &format!("127.0.0.1:{connect_port}")]);
+    let restart = running(&home).by_hand(Service::Bridge, Action::Restart).unwrap();
+
+    let checks = transports(&home).await;
+    let pipe = one(&checks, "bridge pipe");
+    let carried = format!("127.0.0.1:{connect_port} carries the leaf node's uplink through {url} to the leafnode port");
+    assert!(pipe.status == Status::Ok && pipe.detail.starts_with(&carried), "{pipe}");
+    let pipe = one(&checks, "bridge serve pipe");
+    let carried = format!("http://127.0.0.1:{serve_port} carries a session to the leafnode port of nats-server");
+    assert!(pipe.status == Status::Ok && pipe.detail.starts_with(&carried), "{pipe}");
+    assert!(pipe.detail.ends_with(&format!(" at {upstream}")), "{pipe}");
+
+    bridge_flags(&home, false, &["--listen", &format!("127.0.0.1:{stale_port}")]);
+    let pipe = one(&transports(&home).await, "bridge pipe").clone();
+    let detail = format!(
+        "127.0.0.1:{stale_port} carries nothing, though {url} carries the hub's INFO: the running `ants bridge \
+         connect` took another token, URL or proxy at its start"
+    );
+    assert_eq!((pipe.status, pipe.detail, pipe.fix), (Status::Fail, detail, vec![restart.clone()]));
+    let closed = ants_test_support::free_port();
+    bridge_flags(&home, false, &["--listen", &format!("127.0.0.1:{closed}")]);
+    let pipe = one(&transports(&home).await, "bridge pipe").clone();
+    let nothing = format!("nothing carries the leaf node's uplink at 127.0.0.1:{closed}: ");
+    assert!(pipe.status == Status::Fail && pipe.detail.starts_with(&nothing), "{pipe}");
+    assert_eq!(pipe.fix, [restart]);
+
+    // `ants bridge serve` whose upstream is the hub's client port.
+    let (wrong, wrong_port) = local().await;
+    let client = hub.url.trim_start_matches("nats://").to_owned();
+    tokio::spawn(bridge::Server::new(client.clone(), Some("s3cret".to_owned())).run(wrong));
+    bridge_flags(&home, true, &["--listen", &format!("127.0.0.1:{wrong_port}"), "--upstream", &client]);
+    let pipe = one(&transports(&home).await, "bridge serve pipe").clone();
+    let detail = format!("http://127.0.0.1:{wrong_port} answers but carries the INFO of nats-server ");
+    assert!(pipe.status == Status::Fail && pipe.detail.starts_with(&detail), "{pipe}");
+    assert!(
+        pipe.detail.ends_with("from another port than its leafnode port, not the INFO of the hub's leafnode port"),
+        "{pipe}"
+    );
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
+fn only_a_leafnode_port_s_info_is_taken_as_the_hub_s() {
+    let leaf = r#"INFO {"server_id":"N1","server_name":"hub","version":"2.15.3","proto":3,"auth_required":true,"client_id":6,"nonce":"x","info_on_connect":true} "#;
+    assert_eq!(leafnode_info(leaf), Ok("nats-server 2.15.3 (hub)".to_owned()));
+    let routed = r#"INFO {"server_name":"hub","version":"2.16.0","client_id":3,"leafnode_urls":["10.0.0.1:7422"]}"#;
+    assert_eq!(leafnode_info(routed), Ok("nats-server 2.16.0 (hub)".to_owned()));
+    let client = r#"INFO {"server_id":"N1","server_name":"hub","version":"2.15.3","proto":1,"client_id":5,"client_ip":"127.0.0.1"} "#;
+    let other = "the INFO of nats-server 2.15.3 (hub) from another port than its leafnode port".to_owned();
+    assert_eq!(leafnode_info(client), Err(other));
+    assert_eq!(leafnode_info(""), Err("nothing".to_owned()));
+    assert_eq!(leafnode_info("HTTP/1.1 400 Bad Request"), Err("\"HTTP/1.1 400 Bad Request\"".to_owned()));
 }
 
 #[cfg(unix)]
@@ -1054,6 +1172,7 @@ fn the_hub_service_of_ants_setup_must_be_installed_and_running() {
         team: home.join("no-team"),
         webhooks: home.join("no-webhooks.toml"),
         home: Some(home.clone()),
+        worker: None,
     };
     let stopped = || {
         Services::answering(&home, |command| {
@@ -1117,6 +1236,7 @@ fn a_nats_server_run_by_the_daemon_has_the_daemon_service_as_its_one_owner() {
         team: home.join("no-team"),
         webhooks: home.join("no-webhooks.toml"),
         home: Some(home.clone()),
+        worker: None,
     };
     let managed = Some(leaf.as_path());
     let run_by = format!("{} is run by `ants daemon` ([nats_server] of {})", leaf.display(), config.display());

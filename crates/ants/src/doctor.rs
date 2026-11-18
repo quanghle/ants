@@ -25,6 +25,8 @@ use self::credentials::{check_backup, check_cli_creds};
 use self::leaf_node::{Leaf, check_leaf};
 use self::server::{check_resolver, check_storage, reach};
 use self::services::{check_services, check_webhooks};
+pub use self::trails::trail_worker;
+use self::trails::{check_runs, check_worker};
 use self::transports::{check_transports, installed_transports, same_address};
 use crate::auth;
 use crate::people::humans::{Me, Rights};
@@ -38,6 +40,7 @@ mod credentials;
 mod leaf_node;
 mod server;
 mod services;
+mod trails;
 mod transports;
 
 /// How long a network check may take.
@@ -122,12 +125,16 @@ pub struct Setup {
     pub webhooks: PathBuf,
     /// The home directory whose installed services are checked; None for none.
     pub home: Option<PathBuf>,
+    /// The `ants` a daemon here starts as its trail worker, `ants subprocess` ([`trail_worker`]); None leaves it
+    /// unchecked.
+    pub worker: Option<PathBuf>,
 }
 
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
 /// buckets, the versions of ants running across the team, the JetStream storage, each ant's credentials, harness,
-/// workdir and reactions responder, the hub's account resolver, the team keys' backup, the leaf node and outbox, the installed services, the
-/// webhooks' config file and notification sinks, and the Dev Tunnel and HTTPS bridge services installed.
+/// workdir and reactions responder, the trail worker and the runs of trails stuck, the hub's account resolver, the
+/// team keys' backup, the leaf node and outbox, the installed services, the webhooks' config file and notification
+/// sinks, and the Dev Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
     let mut checks = Vec::new();
@@ -149,8 +156,15 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let resolver = check_resolver(setup, through_leaf);
     let reactions = check_reactions(ants, setup, NETWORK_TIMEOUT);
     let update = check_update(loaded.as_ref().map_or_default(|l| l.auto_update));
-    let ((reached, connected), ants_checked, resolver, reactions, update) =
-        tokio::join!(reach, ants_checked, resolver, reactions, update);
+    let worker = async {
+        match (&loaded, &setup.worker) {
+            (None, _) => Check::skip("trail worker", "no config file read: no daemon here conducts runs"),
+            (Some(_), None) => Check::skip("trail worker", "no ants executable found to start as the worker"),
+            (Some(_), Some(program)) => check_worker(program).await,
+        }
+    };
+    let ((reached, connected), ants_checked, resolver, reactions, update, worker) =
+        tokio::join!(reach, ants_checked, resolver, reactions, update, worker);
     checks.extend(update);
     checks.extend(reached);
     let settings = loaded.as_ref().map_or_default(|l| l.storage);
@@ -159,7 +173,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let hostname = ants_daemon::colony::machine().await;
     let host = loaded.as_ref().map(|l| &l.host);
     checks.extend(host.map(|host| check_host(host, ants, &hostname, now)));
-    let colony = connected.as_ref().map_or_default(|c| c.colony.as_slice());
+    let colony = connected.as_ref().and_then(|c| c.colony.as_ref().ok()).map_or_default(Vec::as_slice);
     let unset = config::HostSettings::default();
     checks.extend(check_sense_kept(host.unwrap_or(&unset), ants, &hostname, colony, chrono::Utc::now()));
     checks.extend(host.and_then(|host| check_machine_name(host, &hostname)));
@@ -170,6 +184,8 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
         let webhooks = setup.webhooks.exists().then(|| webhook::Config::read(&setup.webhooks).ok()).flatten();
         checks.extend(check_bypassed(loaded, webhooks.as_ref().map_or_default(|c| c.webhooks.as_slice())));
     }
+    checks.push(worker);
+    checks.extend(check_runs(connected.as_ref(), chrono::Utc::now()).await);
     checks.push(resolver);
     checks.extend(check_backup(&setup.team));
     let human = identity.as_ref().map(|i| &i.me).filter(|me| me.role.is_human() && !me.id.is_human());
@@ -204,8 +220,8 @@ struct Identity {
 struct Connected {
     js: jetstream::Context,
     rights: Rights,
-    /// The colony's entries; none where unread.
-    colony: Vec<ColonyEntry>,
+    /// The colony's entries, else why they are unread.
+    colony: Result<Vec<ColonyEntry>, String>,
 }
 
 fn check_config(path: &Path, checks: &mut Vec<Check>) -> Option<config::Loaded> {

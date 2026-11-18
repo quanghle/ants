@@ -503,12 +503,45 @@ impl Remote {
     /// Whether the bridge answers, within `wait`, and takes the token: asks for a session that does not exist.
     pub async fn probe(&self, wait: Duration) -> Result<Probe> {
         let (status, body) = Http::new(self).once(&Method::GET, "/s/0?off=0", &Bytes::new(), wait).await?;
-        let body = String::from_utf8_lossy(&body[..body.len().min(200)]).trim().to_owned();
+        let body = said(&body);
         Ok(match status {
             StatusCode::NOT_FOUND if body == "no such session" => Probe::Answers,
             StatusCode::UNAUTHORIZED => Probe::Refused(body),
             _ => Probe::Other(status, body),
         })
+    }
+
+    /// Open a session, take the first line its upstream sends down within `wait`, sending nothing up, and close it: a
+    /// NATS server's port sends its INFO first, which is all this takes, so the hub sees a connection come and go
+    /// unauthenticated.
+    pub async fn first_line(&self, wait: Duration) -> Result<Carried> {
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut http = Http::new(self);
+        let (status, id) = http.once(&Method::POST, "/open", &Bytes::new(), wait).await?;
+        if status != StatusCode::OK || id.is_empty() || !id.iter().all(u8::is_ascii_hexdigit) {
+            return Ok(Carried::Unopened(status, said(&id)));
+        }
+        let path = format!("/s/{}", String::from_utf8_lossy(&id));
+        let mut line = Vec::new();
+        let read = async {
+            while !line.contains(&b'\n') && line.len() < CHUNK {
+                let off = format!("{path}?off={}", line.len());
+                match http.once(&Method::GET, &off, &Bytes::new(), POLL + REQUEST).await? {
+                    (StatusCode::OK, bytes) => line.extend_from_slice(&bytes),
+                    (StatusCode::GONE, _) => break,
+                    (status, body) => return Ok(Some(Carried::Lost(status, said(&body)))),
+                }
+            }
+            anyhow::Ok(None)
+        };
+        let lost = match tokio::time::timeout_at(deadline, read).await {
+            Ok(read) => read?,
+            Err(_) => None,
+        };
+        // A session not closed here expires once idle.
+        let _ = Http::new(self).once(&Method::DELETE, &path, &Bytes::new(), Duration::from_secs(5)).await;
+        let end = line.iter().position(|b| *b == b'\n').unwrap_or(line.len());
+        Ok(lost.unwrap_or_else(|| Carried::Line(String::from_utf8_lossy(&line[..end]).trim_end().to_owned())))
     }
 
     /// What the bridge carries, as it goes.
@@ -570,6 +603,23 @@ pub enum Probe {
     Refused(String),
     /// Not as a bridge does: this status and answer.
     Other(StatusCode, String),
+}
+
+/// What a session of [`Remote::first_line`] carried down from the bridge's upstream.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Carried {
+    /// The upstream's first line, without its line end; what came of it when it ended or the wait passed first,
+    /// empty for nothing.
+    Line(String),
+    /// The bridge opened no session, answering this status and text: its upstream unreachable, as a rule.
+    Unopened(StatusCode, String),
+    /// The session opened was not found by the request reading it, answering this status and text.
+    Lost(StatusCode, String),
+}
+
+/// The start of an answer's body, as text.
+fn said(body: &[u8]) -> String {
+    String::from_utf8_lossy(&body[..body.len().min(200)]).trim().to_owned()
 }
 
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}

@@ -8,7 +8,7 @@
 
 mod control;
 mod follow;
-mod runs;
+pub(crate) mod runs;
 mod saved;
 mod start;
 #[cfg(test)]
