@@ -353,6 +353,12 @@ impl Chat {
         let mut ticks = tokio::time::interval(TICK);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let (mut dirty, mut drawn, mut logged, started) = (true, Instant::now(), None, Instant::now());
+        // Keys typed while the terminal was asked of its background.
+        for key in crate::tty::typed_keys() {
+            if self.key(key).is_break() {
+                return Ok(());
+            }
+        }
         loop {
             if let Some(action) = self.model.link(self.feed.connected(), Utc::now())
                 && self.act(action).is_break()
@@ -510,9 +516,7 @@ impl Chat {
             match event::read().context("reading the terminal")? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     *dirty = true;
-                    if let Some(action) = key_of(key).and_then(|key| self.model.key(key, Utc::now()))
-                        && self.act(action).is_break()
-                    {
+                    if self.key(key).is_break() {
                         return Ok(ControlFlow::Break(()));
                     }
                 }
@@ -525,6 +529,14 @@ impl Chat {
             }
         }
         Ok(ControlFlow::Continue(()))
+    }
+
+    /// Act on `key` pressed; breaks on quitting.
+    fn key(&mut self, key: KeyEvent) -> ControlFlow<()> {
+        match key_of(key).and_then(|key| self.model.key(key, Utc::now())) {
+            Some(action) => self.act(action),
+            None => ControlFlow::Continue(()),
+        }
     }
 
     fn act(&mut self, action: Action) -> ControlFlow<()> {

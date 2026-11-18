@@ -65,6 +65,8 @@ fn colours_follow_the_terminal() {
     assert_eq!(luminance_theme(white.0, white.1, white.2), Theme::Light);
     let black = parse_background(b"\x1b]11;rgb:00/00/00\x1b\\").unwrap();
     assert_eq!(luminance_theme(black.0, black.1, black.2), Theme::Dark);
+    let before_attributes = parse_background(b"\x1b]11;rgb:ffff/ffff/ffff\x07\x1b[?62;22c").unwrap();
+    assert_eq!(before_attributes, (1.0, 1.0, 1.0));
     assert_eq!(parse_background(b"garbage"), None);
     assert_eq!(colorfgbg_theme(Some("0;15")), Theme::Light);
     assert_eq!(colorfgbg_theme(Some("15;0")), Theme::Dark);

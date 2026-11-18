@@ -210,7 +210,8 @@ pub fn theme() -> Theme {
 /// The theme suiting the terminal's background: the colour the terminal answers an OSC 11 query with within 200ms,
 /// light when its luminance is above a half; else light when `COLORFGBG` ends in 7 or 15; else dark.
 pub fn detect() -> Theme {
-    if let Some(theme) = query::background().map(|rgb| luminance_theme(rgb.0, rgb.1, rgb.2)) {
+    let background = crate::tty::ask(b"\x1b]11;?\x07").and_then(|answers| parse_background(&answers));
+    if let Some(theme) = background.map(|rgb| luminance_theme(rgb.0, rgb.1, rgb.2)) {
         return theme;
     }
     colorfgbg_theme(std::env::var("COLORFGBG").ok().as_deref())
@@ -227,85 +228,18 @@ fn colorfgbg_theme(colorfgbg: Option<&str>) -> Theme {
     }
 }
 
-/// The colour of an OSC 11 answer such as `ESC ] 11 ; rgb:ffff/ffff/ffff BEL`, each channel 0 to 1.
-#[cfg(any(unix, test))]
-fn parse_background(reply: &[u8]) -> Option<(f64, f64, f64)> {
-    let text = std::str::from_utf8(reply).ok()?;
-    let rgb = text.split_once("rgb:")?.1.trim_end_matches(['\x07', '\x1b', '\\']);
+/// The colour of an OSC 11 answer such as `ESC ] 11 ; rgb:ffff/ffff/ffff BEL` among the terminal's `answers`, each
+/// channel 0 to 1.
+fn parse_background(answers: &[u8]) -> Option<(f64, f64, f64)> {
+    let text = std::str::from_utf8(answers).ok()?;
+    let rgb = text.split_once("\x1b]11;rgb:")?.1;
+    let rgb = rgb.split(['\x07', '\x1b']).next()?;
     let mut channels = rgb.split('/').map(|hex| {
         let hex = hex.get(..hex.len().min(4))?;
         let max = 16f64.powi(i32::try_from(hex.len()).ok()?) - 1.0;
         Some(f64::from(u16::from_str_radix(hex, 16).ok()?) / max)
     });
     Some((channels.next()??, channels.next()??, channels.next()??))
-}
-
-#[cfg(unix)]
-mod query {
-    use std::io::{IsTerminal as _, Read as _, Write as _};
-    use std::os::fd::AsRawFd as _;
-    use std::time::{Duration, Instant};
-
-    /// How long the terminal has to answer.
-    const WAIT: Duration = Duration::from_millis(200);
-
-    /// The terminal's background colour, asked of it with OSC 11 when both standard input and output are terminals.
-    pub(super) fn background() -> Option<(f64, f64, f64)> {
-        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-            return None;
-        }
-        let mut tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
-        let fd = tty.as_raw_fd();
-        // SAFETY: termios is plain data, filled by tcgetattr before use.
-        let mut saved: libc::termios = unsafe { std::mem::zeroed() };
-        // SAFETY: fd is the open terminal and saved a valid termios.
-        if unsafe { libc::tcgetattr(fd, &raw mut saved) } != 0 {
-            return None;
-        }
-        let mut raw = saved;
-        // SAFETY: raw is a valid termios, copied from the terminal's.
-        unsafe { libc::cfmakeraw(&raw mut raw) };
-        // SAFETY: as above.
-        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw const raw) } != 0 {
-            return None;
-        }
-        let reply = ask(&mut tty);
-        // SAFETY: restores the settings read above.
-        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw const saved) };
-        super::parse_background(&reply?)
-    }
-
-    fn ask(tty: &mut std::fs::File) -> Option<Vec<u8>> {
-        tty.write_all(b"\x1b]11;?\x07").ok()?;
-        tty.flush().ok()?;
-        let deadline = Instant::now() + WAIT;
-        let mut reply = Vec::new();
-        let mut buf = [0; 64];
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            let mut poll = libc::pollfd { fd: tty.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-            let ms = libc::c_int::try_from(left.as_millis()).unwrap_or(0);
-            // SAFETY: poll is one valid pollfd.
-            if ms == 0 || unsafe { libc::poll(&raw mut poll, 1, ms) } <= 0 {
-                return None;
-            }
-            let n = tty.read(&mut buf).ok()?;
-            if n == 0 {
-                return None;
-            }
-            reply.extend_from_slice(&buf[..n]);
-            if reply.ends_with(b"\x07") || reply.ends_with(b"\x1b\\") {
-                return Some(reply);
-            }
-        }
-    }
-}
-
-#[cfg(not(unix))]
-mod query {
-    pub(super) fn background() -> Option<(f64, f64, f64)> {
-        None
-    }
 }
 
 /// Set or clear the avatar seed and colour of `ant`'s identity record by compare-and-set, with a human's credentials:
