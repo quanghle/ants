@@ -350,10 +350,11 @@ impl Trails {
     /// when taken, to be acked without prompting the harness, once this returns.
     pub async fn take(&self, message: &Envelope) -> Result<bool> {
         let step = locked(&self.inner.threads).get(&message.thread_id).cloned();
+        let answerer = self.answerer(message);
         let run = match step {
             None => return Ok(false),
             Some(Step::Retired { to, .. }) => {
-                let reply = message.from == to
+                let reply = *answerer == to
                     && message.trail_step.is_none()
                     && message.notice.is_none()
                     && message.escalation.is_none();
@@ -364,7 +365,7 @@ impl Trails {
         let Some(slot) = locked(&self.inner.runs).get(&run).cloned() else { return Ok(false) };
         let (header, pending) = {
             let book = slot.book();
-            let pending = book.pending.iter().find(|call| call.answered_by(message)).cloned();
+            let pending = book.pending.iter().find(|call| call.answered_by(message, answerer)).cloned();
             (book.header.clone(), pending)
         };
         let Some(pending) = pending else { return Ok(false) };
@@ -396,6 +397,17 @@ impl Trails {
         report::answered(&header, &pending, &entry.answer);
         self.wake(&run);
         Ok(true)
+    }
+
+    /// Who answers with `message`: the human its `on_behalf_of` names while the human's grant names the sender as its
+    /// assistant, as an answer to ask_human counts for the human, else its sender. The inbox already cleared a claim
+    /// the assistant's own credentials do not back ([`crate::people::behalf::Records::acting`]), so the claim stands
+    /// for them here; the grant is checked again as it stands now.
+    fn answerer<'a>(&self, message: &'a Envelope) -> &'a UserId {
+        match &message.on_behalf_of {
+            Some(human) if self.inner.humans.honours_assistant(human, &message.from, Some(human)) => human,
+            _ => &message.from,
+        }
     }
 
     /// Ask `pending`'s recipient again for a reply matching the step's schema, on the step's thread; None once asked,
