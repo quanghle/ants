@@ -5,16 +5,15 @@ use std::fmt::Write as _;
 
 use ants_proto::provider::{BoxFuture, ToolCall};
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{
-    BY, Dream, FindingKind, Judgement, MAX_DREAM_WRITES, MAX_FINDINGS, MAX_REASON_CHARS, State, Verdict, close, get,
-};
+use super::{BY, Dream, FindingKind, Judgement, MAX_DREAM_WRITES, MAX_FINDINGS, State, Verdict, close, get};
 use crate::items::{ItemId, Values};
 use crate::proposal::{self, Status};
 use crate::sanitize::{Limit, sanitize_title};
 use crate::store::{Items, StoreError, Write, read_modify_write};
-use crate::tools::Answer;
+use crate::tools::{Answer, MAX_REASON_CHARS};
 use crate::{Sense, skill};
 
 /// The JSON Schema of `sense_dream`'s arguments.
@@ -46,6 +45,24 @@ pub fn schema() -> Value {
     })
 }
 
+/// The arguments of a `sense_dream` call.
+#[derive(Deserialize)]
+struct Request {
+    #[serde(default)]
+    verdicts: Vec<GivenVerdict>,
+    #[serde(default)]
+    done: bool,
+}
+
+/// A verdict as a call gives it.
+#[derive(Deserialize)]
+struct GivenVerdict {
+    finding: Option<String>,
+    verdict: Option<Judgement>,
+    reason: Option<String>,
+    items: Option<Vec<String>>,
+}
+
 /// Answers a `sense_dream` call.
 pub fn dream<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
     Box::pin(async move { dream_in(sense, call).await.unwrap_or_else(|refused| refused) })
@@ -53,8 +70,8 @@ pub fn dream<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> 
 
 async fn dream_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     let context = &call.context;
-    let items = sense.items(&context.ant).await.map_err(unavailable)?;
-    let (dream, _) = super::last(&*items).await.map_err(unavailable)?.ok_or_else(|| {
+    let items = sense.items(&context.ant).await?;
+    let (dream, _) = super::last(&*items).await?.ok_or_else(|| {
         Answer::error("no_dream", "No dream yet: sense begins one once the ant has been idle a while.".into())
     })?;
     if dream.thread.as_ref() != Some(&context.thread) {
@@ -67,12 +84,8 @@ async fn dream_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     if dream.state == State::Done {
         return Err(finished(&dream));
     }
-    let verdicts = verdicts(&*items, &dream, &call.arguments).await?;
-    let done = match call.arguments.get("done") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(done)) => *done,
-        Some(_) => return Err(invalid("done must be true or false.".into())),
-    };
+    let Request { verdicts, done } = crate::tools::arguments(call)?;
+    let verdicts = self::verdicts(&*items, &dream, verdicts).await?;
     if verdicts.is_empty() && !done {
         return Ok(show(&dream));
     }
@@ -91,7 +104,7 @@ async fn dream_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         let _ = write!(warning, "\nWarning: the skill files were not written, the next brief tries again: {e}.");
     }
     let (items, dream, verdicts, decided, warning) = (&*items, &dream, &verdicts, &decided, &warning);
-    let answer = read_modify_write(|| async move {
+    read_modify_write(|| async move {
         let gone = || StoreError::NotFound(Dream::id(dream.number));
         let (mut current, revision) = get(items, dream.number).await?.ok_or_else(gone)?;
         if current.state == State::Done {
@@ -120,45 +133,38 @@ async fn dream_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         answer.text.push_str(warning);
         Ok(Ok(answer))
     })
-    .await;
-    answer.map_err(unavailable)?
+    .await?
 }
 
-/// The verdicts `arguments` give on findings of `dream`, checked.
-async fn verdicts(
-    items: &dyn Items,
-    dream: &Dream,
-    arguments: &serde_json::Map<String, Value>,
-) -> Result<Vec<Verdict>, Answer> {
-    let given = match arguments.get("verdicts") {
-        None | Some(Value::Null) => return Ok(Vec::new()),
-        Some(Value::Array(given)) if given.len() <= MAX_FINDINGS => given,
-        Some(Value::Array(_)) => return Err(invalid(format!("At most {MAX_FINDINGS} verdicts at a time."))),
-        Some(_) => return Err(invalid("verdicts must be a list.".into())),
-    };
+/// The verdicts `given` on findings of `dream`, checked.
+async fn verdicts(items: &dyn Items, dream: &Dream, given: Vec<GivenVerdict>) -> Result<Vec<Verdict>, Answer> {
+    if given.len() > MAX_FINDINGS {
+        return Err(Answer::invalid(format!("At most {MAX_FINDINGS} verdicts at a time.")));
+    }
     let at = Utc::now();
     let mut verdicts: Vec<Verdict> = Vec::new();
     for given in given {
-        let text = |name: &str| given.get(name).and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty());
-        let finding = text("finding").ok_or_else(|| invalid("Each verdict names its finding.".into()))?;
+        let text = |given: Option<String>| given.map(|text| text.trim().to_owned()).filter(|text| !text.is_empty());
+        let finding = text(given.finding).ok_or_else(|| Answer::invalid("Each verdict names its finding."))?;
+        let finding = finding.as_str();
         if !dream.findings.iter().any(|known| known.id == finding) {
             return Err(Answer::error("not_found", format!("Dream {} has no finding {finding:?}.", dream.number)));
         }
-        let verdict = match text("verdict") {
-            Some("applied") => Judgement::Applied,
-            Some("rejected") => Judgement::Rejected,
-            Some("deferred") => Judgement::Deferred,
-            _ => return Err(invalid(format!("Finding {finding}: the verdict is applied, rejected or deferred."))),
-        };
-        let reason = text("reason").ok_or_else(|| invalid(format!("Finding {finding}: the reason is missing.")))?;
-        let reason = sanitize_title(reason, Limit::Chars(MAX_REASON_CHARS))
+        let verdict = given.verdict.ok_or_else(|| {
+            Answer::invalid(format!("Finding {finding}: the verdict is applied, rejected or deferred."))
+        })?;
+        let reason =
+            text(given.reason).ok_or_else(|| Answer::invalid(format!("Finding {finding}: the reason is missing.")))?;
+        let reason = sanitize_title(&reason, Limit::Chars(MAX_REASON_CHARS))
             .map_err(|refused| Answer::error("too_long", format!("Finding {finding}: the reason is {refused}.")))?
             .text;
         let mut written = Vec::new();
-        for id in given.get("items").and_then(Value::as_array).into_iter().flatten() {
-            let id = id.as_str().and_then(|id| id.trim().parse::<ItemId>().ok());
-            let id = id.ok_or_else(|| invalid(format!("Finding {finding}: items are item ids.")))?;
-            if items.get(&id).await.map_err(unavailable)?.is_none() {
+        for id in given.items.iter().flatten() {
+            let id = id
+                .trim()
+                .parse::<ItemId>()
+                .map_err(|_| Answer::invalid(format!("Finding {finding}: items are item ids.")))?;
+            if items.get(&id).await?.is_none() {
                 return Err(Answer::error("not_found", format!("Finding {finding}: no item {id}.")));
             }
             written.push(id);
@@ -167,7 +173,7 @@ async fn verdicts(
         if known.is_some_and(|known| known.kind == FindingKind::Proposal) {
             written = known.map_or_else(Vec::new, |known| known.items.clone());
         } else if verdict == Judgement::Applied && written.is_empty() {
-            return Err(invalid(format!("Finding {finding}: applied names the items written or voted on.")));
+            return Err(Answer::invalid(format!("Finding {finding}: applied names the items written or voted on.")));
         }
         verdicts.retain(|earlier| earlier.finding != finding);
         verdicts.push(Verdict { finding: finding.to_owned(), verdict, reason, items: written, at });
@@ -223,12 +229,4 @@ fn json(dream: &Dream) -> Value {
 
 fn finished(dream: &Dream) -> Answer {
     Answer::error("done", format!("Dream {} is done: its diary is written.", dream.number))
-}
-
-fn invalid(message: String) -> Answer {
-    Answer::error("invalid", message)
-}
-
-fn unavailable(e: StoreError) -> Answer {
-    Answer::error("unavailable", format!("Dreams are not available: {e}."))
 }

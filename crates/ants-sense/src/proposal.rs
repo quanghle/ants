@@ -19,16 +19,13 @@ use serde_json::{Value, json};
 
 use crate::dream::{self, Dream, Finding, Judgement, State, Verdict};
 use crate::items::{Item, ItemId, Values};
-use crate::memory::invalid;
 use crate::store::{Items, StoreError, Write, read_modify_write};
-use crate::tools::Answer;
+use crate::tools::{Answer, MAX_REASON_CHARS};
 
 /// The kind of a proposal's item.
 pub const PROPOSAL: &str = "proposal";
 /// The hours from a proposal to the dream that may confirm it, at least.
 pub const CONFIRM_AFTER_HOURS: i64 = 12;
-/// The most characters of a proposal's reason.
-pub const MAX_REASON_CHARS: usize = 500;
 
 /// Where a proposal stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,11 +192,11 @@ pub(crate) async fn refuse_untrusted(
     finding: Option<&str>,
 ) -> Result<(), Answer> {
     if let Some(finding) = finding
-        && dream::finding(items, finding).await.map_err(unavailable)?.is_none()
+        && dream::finding(items, finding).await?.is_none()
     {
         return Err(Answer::error("not_found", format!("No dream has a finding {finding:?}.")));
     }
-    match dream::untrusted(items, context, finding).await.map_err(unavailable)? {
+    match dream::untrusted(items, context, finding).await? {
         Some(why) => Err(Answer::error(
             "untrusted",
             format!("Refused: {why}; persona and skills change only on trusted ground."),
@@ -302,8 +299,7 @@ pub(crate) async fn decide(
         let item = items.write(&writes, dream::BY).await?.pop().ok_or_else(gone)?;
         Ok(Ok(ProposalItem::of(item).ok_or_else(gone)?))
     })
-    .await
-    .map_err(unavailable)?
+    .await?
 }
 
 /// Refuse confirming `found` at `now` when it is not ripe, its target changed since it was made, or it would change
@@ -318,7 +314,7 @@ async fn check(items: &dyn Items, found: &ProposalItem, now: DateTime<Utc>) -> R
         );
         return Err(Answer::error("too_soon", message));
     }
-    let target = items.get(&proposal.target).await.map_err(unavailable)?;
+    let target = items.get(&proposal.target).await?;
     let at = target.as_ref().map_or(0, |target| target.revision);
     if at != proposal.base {
         let message = format!(
@@ -371,28 +367,20 @@ pub async fn versions(items: &dyn Items, target: &ItemId) -> Result<Vec<(u64, Da
     Ok(versions)
 }
 
-pub(crate) fn unavailable(e: StoreError) -> Answer {
-    Answer::error("unavailable", format!("Proposals are not available: {e}."))
-}
-
-/// The reason given in `arguments`, sanitized; refused when missing.
-pub(crate) fn reason(arguments: &serde_json::Map<String, Value>) -> Result<String, Answer> {
-    let given = match arguments.get("reason") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(text)) => Some(text.trim()),
-        Some(_) => return Err(invalid("reason must be a string.".into())),
-    };
+/// The reason `given`, sanitized; refused when missing.
+pub(crate) fn reason(given: Option<&str>) -> Result<String, Answer> {
+    let given = given.map(str::trim);
     let sanitized =
         crate::sanitize::sanitize_title(given.unwrap_or_default(), crate::sanitize::Limit::Chars(MAX_REASON_CHARS));
     Ok(crate::memory::sanitized("reason", given, sanitized)?.text)
 }
 
-/// The finding named in `arguments`, if any.
-pub(crate) fn finding(arguments: &serde_json::Map<String, Value>) -> Result<Option<String>, Answer> {
-    match arguments.get("finding") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) if !text.trim().is_empty() => Ok(Some(text.trim().to_owned())),
-        Some(_) => Err(invalid("finding must be a finding's id, such as 3.1.".into())),
+/// The finding `given`, if any.
+pub(crate) fn finding(given: Option<&str>) -> Result<Option<String>, Answer> {
+    match given.map(str::trim) {
+        None => Ok(None),
+        Some("") => Err(Answer::invalid("finding must be a finding's id, such as 3.1.")),
+        Some(finding) => Ok(Some(finding.to_owned())),
     }
 }
 

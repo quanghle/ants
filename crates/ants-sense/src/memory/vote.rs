@@ -15,19 +15,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::remember::{invalid, unavailable};
 use super::{MemoryItem, Status, WRITER, writer};
 use crate::Sense;
 use crate::items::{ItemId, Values};
 use crate::sanitize::{Limit, sanitize_title};
-use crate::store::{StoreError, Write, read_modify_write};
-use crate::tools::Answer;
+use crate::store::{Write, read_modify_write};
+use crate::tools::{Answer, MAX_REASON_CHARS};
 
 /// The kind of the items holding votes.
 pub const VOTE: &str = "vote";
-
-/// The most characters of a vote's reason.
-const MAX_REASON_CHARS: usize = 500;
 
 /// A thread's feedback on a memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -100,20 +96,19 @@ pub fn vote<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
     Box::pin(async move { vote_in(sense, call).await.unwrap_or_else(|refused| refused) })
 }
 
+/// The arguments of a `sense_vote` call.
+#[derive(Deserialize)]
+struct Request {
+    id: ItemId,
+    vote: Vote,
+    reason: Option<String>,
+}
+
 async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
-    let arguments = &call.arguments;
-    let text = |name: &str| match arguments.get(name) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(text.trim())),
-        Some(_) => Err(invalid(format!("{name} must be a string."))),
-    };
-    let id = text("id")?.ok_or_else(|| invalid("id is missing.".into()))?;
-    let id: ItemId = id.parse().map_err(|_| invalid(format!("No memory id: {id:?}.")))?;
-    let vote = text("vote")?.ok_or_else(|| invalid("vote is missing: helpful, stale or wrong.".into()))?;
-    let vote: Vote = vote.parse().map_err(|_| invalid(format!("No vote {vote:?}: helpful, stale or wrong.")))?;
-    let reason = match text("reason")? {
+    let Request { id, vote, reason } = crate::tools::arguments(call)?;
+    let reason = match reason {
         Some(reason) => {
-            sanitize_title(reason, Limit::Chars(MAX_REASON_CHARS))
+            sanitize_title(reason.trim(), Limit::Chars(MAX_REASON_CHARS))
                 .map_err(|refused| Answer::error("too_long", format!("The reason is too long: {refused}.")))?
                 .text
         }
@@ -124,10 +119,10 @@ async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         let message = "Votes are not taken in a thread a webhook started: outside content may steer them.";
         return Err(Answer::error("untrusted", message.into()));
     }
-    let items = sense.items(&context.ant).await.map_err(unavailable)?;
+    let items = sense.items(&context.ant).await?;
     let (items, id, reason) = (&*items, &id, &reason);
     let ballot = &ItemId::named(VOTE, &format!("{id}/{}", context.thread));
-    let answer = read_modify_write(|| async move {
+    read_modify_write(|| async move {
         let Some(found) = items.get(id).await?.and_then(MemoryItem::of) else {
             return Ok(Err(Answer::error("not_found", format!("No memory {id}."))));
         };
@@ -174,13 +169,7 @@ async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         let written = items.write(&writes, context.thread.as_str()).await?;
         Ok(Ok(voted(&found, vote, previous, status, &votes, written[1].revision)))
     })
-    .await;
-    match answer {
-        Err(StoreError::Contended(_)) => {
-            Err(Answer::error("conflict", format!("Memory {id} kept changing meanwhile: try again.")))
-        }
-        answer => answer.map_err(unavailable)?,
-    }
+    .await?
 }
 
 fn voted(

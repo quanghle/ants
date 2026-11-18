@@ -31,11 +31,11 @@ pub use maintain::{
     last_maintenance, maintain, needs_review, next_maintenance, salience,
 };
 pub use recall::{
-    HALF_LIFE_DAYS, HELPFUL_WEIGHT, MAX_HELPFUL, NEEDS_REVIEW_WEIGHT, NOTE, Ranked, STALE_WEIGHT, framed, participants,
-    recall, score, search, snippet, thread_repo, top,
+    DEFAULT_LIMIT, HALF_LIFE_DAYS, HELPFUL_WEIGHT, MAX_HELPFUL, MAX_LIMIT, MAX_WITH, NEEDS_REVIEW_WEIGHT, NOTE, Ranked,
+    STALE_WEIGHT, framed, participants, recall, score, search, snippet, thread_repo, top,
 };
 pub use remember::remember;
-pub(crate) use remember::{invalid, redacted, sanitized, unavailable};
+pub(crate) use remember::{Given, redacted, sanitized};
 pub use vote::{VOTE, Vote, Votes, vote};
 
 /// The kind of the items holding memories.
@@ -55,6 +55,8 @@ pub const MAX_BODY_BYTES: usize = 4 * 1024;
 pub const CORE_BUDGET: usize = 2_000;
 /// The importance of a memory given none.
 pub const DEFAULT_IMPORTANCE: u8 = 3;
+/// The highest importance of a memory, from 1.
+pub const MAX_IMPORTANCE: u8 = 5;
 /// The most citations a memory holds.
 pub const MAX_CITATIONS: usize = 20;
 /// The word similarity ([`similarity`]) from which a memory of the same scope is a near duplicate.
@@ -187,6 +189,31 @@ pub fn normalize_remote(remote: &str) -> Option<String> {
     let valid = |part: &str| !part.is_empty() && !part.contains(|c: char| c.is_whitespace() || c.is_control());
     (valid(host) && valid(path) && !host.contains(['/', '@', ':']))
         .then(|| format!("{}/{path}", host.to_ascii_lowercase()))
+}
+
+/// The URL of remote `origin` in `config`, a git config file, else of the first remote with one; includes and
+/// `insteadOf` rewrites are not followed.
+pub fn remote_url(config: &str) -> Option<&str> {
+    let (mut remote, mut first) = (None, None);
+    for line in config.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[') {
+            remote = header.split_once(']').and_then(|(header, _)| {
+                let (section, name) = header.split_once(char::is_whitespace)?;
+                section.eq_ignore_ascii_case("remote").then(|| name.trim().trim_matches('"'))
+            });
+            continue;
+        }
+        let (Some(name), Some((key, value))) = (remote, line.split_once('=')) else { continue };
+        let Some(url) = value.split_whitespace().next().map(|url| url.trim_matches('"')) else { continue };
+        if !key.trim().eq_ignore_ascii_case("url") || url.is_empty() {
+            continue;
+        }
+        if name == "origin" {
+            return Some(url);
+        }
+        first.get_or_insert(url);
+    }
+    first
 }
 
 /// Whether a memory's text is the ant's own.

@@ -62,8 +62,6 @@ pub const MAX_FINDINGS: usize = 20;
 pub const MAX_DREAM_WRITES: usize = 20;
 /// The tools whose writes on a dream thread count toward [`MAX_DREAM_WRITES`]: those writing memories.
 pub const COUNTED: &[&str] = &["remember", "vote"];
-/// The most characters of a verdict's reason.
-pub const MAX_REASON_CHARS: usize = 500;
 
 /// Who sense changes dream items for ([`crate::items::Stamp::by`]).
 pub(crate) const BY: &str = "sense:dream";

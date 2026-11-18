@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use super::{Citation, MEMORY, MemoryItem, Status, normalize_remote};
+use super::{Citation, MEMORY, MemoryItem, Status, normalize_remote, remote_url};
 use crate::items::{ItemId, Values};
 use crate::store::{Items, StoreError, read_modify_write};
 
@@ -298,30 +298,6 @@ async fn git_metadata(path: &Path) -> Option<String> {
     let mut text = String::new();
     file.take(MAX_GIT_METADATA_BYTES + 1).read_to_string(&mut text).await.ok()?;
     (text.len() as u64 <= MAX_GIT_METADATA_BYTES).then_some(text)
-}
-
-// Match the daemon's repository context: origin, else the first URL, without includes or insteadOf rewrites.
-fn remote_url(config: &str) -> Option<&str> {
-    let (mut remote, mut first) = (None, None);
-    for line in config.lines().map(str::trim) {
-        if let Some(header) = line.strip_prefix('[') {
-            remote = header.split_once(']').and_then(|(header, _)| {
-                let (section, name) = header.split_once(char::is_whitespace)?;
-                section.eq_ignore_ascii_case("remote").then(|| name.trim().trim_matches('"'))
-            });
-            continue;
-        }
-        let (Some(name), Some((key, value))) = (remote, line.split_once('=')) else { continue };
-        let Some(url) = value.split_whitespace().next().map(|url| url.trim_matches('"')) else { continue };
-        if !key.trim().eq_ignore_ascii_case("url") || url.is_empty() {
-            continue;
-        }
-        if name == "origin" {
-            return Some(url);
-        }
-        first.get_or_insert(url);
-    }
-    first
 }
 
 fn file_error(error: std::io::Error) -> CitationProblem {

@@ -17,9 +17,9 @@ use std::fmt::Write as _;
 use ants_proto::UserId;
 use ants_proto::provider::{BoxFuture, CallContext, Starter, ToolCall};
 use chrono::{DateTime, SecondsFormat, Utc};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use super::remember::{invalid, unavailable};
 use super::{
     Access, DEFAULT_IMPORTANCE, MEMORY, Memory, MemoryItem, RECALLED_BEGIN, RECALLED_END, Scope, Status, chain,
     normalize_remote,
@@ -45,14 +45,16 @@ pub const NEEDS_REVIEW_WEIGHT: f64 = 0.5;
 
 /// The best full-text matches ranked.
 const CANDIDATES: usize = 200;
-const DEFAULT_LIMIT: usize = 10;
-const MAX_LIMIT: usize = 50;
+/// The memories a search shows given no limit.
+pub const DEFAULT_LIMIT: usize = 10;
+/// The most memories a search shows.
+pub const MAX_LIMIT: usize = 50;
 /// The most characters of a snippet.
 const SNIPPET_CHARS: usize = 100;
 /// The characters a snippet shows before the first word of the query it holds.
 const SNIPPET_LEAD: usize = 20;
 /// The most names `with` adds.
-const MAX_WITH: usize = 20;
+pub const MAX_WITH: usize = 20;
 
 /// A memory as ranked, with its score: higher is better.
 #[derive(Debug, Clone, PartialEq)]
@@ -235,11 +237,11 @@ pub fn recall<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer>
 }
 
 async fn recall_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
-    let request = Request::parse(&call.arguments)?;
-    let items = sense.items(&call.context.ant).await.map_err(unavailable)?;
+    let request = Request::parse(crate::tools::arguments(call)?)?;
+    let items = sense.items(&call.context.ant).await?;
     let items = items.as_ref();
     if let Some(workdir) = sense.workdir(&call.context) {
-        super::recheck_citations(items, &workdir).await.map_err(unavailable)?;
+        super::recheck_citations(items, &workdir).await?;
     }
     if let Some(id) = &request.id {
         return read(items, id, request.history, &call.context).await;
@@ -256,10 +258,23 @@ async fn recall_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         Some(query) => search(items, query, &scopes, request.limit, now).await,
         None => top(items, &scopes, request.limit, now).await,
     };
-    let ranked = ranked.map_err(unavailable)?;
-    let relationships = records::relationships(items, &scopes).await.map_err(unavailable)?;
+    let ranked = ranked?;
+    let relationships = records::relationships(items, &scopes).await?;
     let repo = scopes.iter().any(|scope| matches!(scope, Scope::Repo(_)));
     Ok(listed(&ranked, &relationships, request.query.as_deref(), &scopes, repo))
+}
+
+/// The arguments of a `sense_recall` call.
+#[derive(Deserialize)]
+struct Given {
+    query: Option<String>,
+    id: Option<String>,
+    #[serde(default)]
+    history: bool,
+    limit: Option<usize>,
+    repo: Option<String>,
+    #[serde(default)]
+    with: Vec<String>,
 }
 
 /// What a call asks to recall.
@@ -273,54 +288,36 @@ struct Request {
 }
 
 impl Request {
-    fn parse(arguments: &Map<String, Value>) -> Result<Self, Answer> {
-        let text = |name: &str| -> Result<Option<&str>, Answer> {
-            match arguments.get(name) {
-                None | Some(Value::Null) => Ok(None),
-                Some(Value::String(text)) => Ok(Some(text.trim()).filter(|text| !text.is_empty())),
-                Some(_) => Err(invalid(format!("{name} must be a string."))),
-            }
-        };
-        let query = text("query")?.map(str::to_owned);
-        let id = text("id")?.map(|id| id.parse::<ItemId>().map_err(|_| invalid(format!("No memory id: {id:?}."))));
-        let id = id.transpose()?;
-        let history = match arguments.get("history") {
-            None | Some(Value::Null) => false,
-            Some(Value::Bool(history)) => *history,
-            Some(_) => return Err(invalid("history must be true or false.".into())),
-        };
+    fn parse(given: Given) -> Result<Self, Answer> {
+        let text = |given: Option<String>| given.map(|text| text.trim().to_owned()).filter(|text| !text.is_empty());
+        let query = text(given.query);
+        let id = text(given.id)
+            .map(|id| id.parse::<ItemId>().map_err(|_| Answer::invalid(format!("No memory id: {id:?}."))))
+            .transpose()?;
+        let history = given.history;
         if query.is_some() && id.is_some() {
-            return Err(invalid("Pass either a query or an id.".into()));
+            return Err(Answer::invalid("Pass either a query or an id."));
         }
         if history && id.is_none() {
-            return Err(invalid("history needs the id of a memory.".into()));
+            return Err(Answer::invalid("history needs the id of a memory."));
         }
-        let limit = match arguments.get("limit") {
-            None | Some(Value::Null) => DEFAULT_LIMIT,
-            Some(value) => value
-                .as_u64()
-                .and_then(|limit| usize::try_from(limit).ok())
-                .filter(|limit| (1..=MAX_LIMIT).contains(limit))
-                .ok_or_else(|| invalid(format!("limit must be from 1 to {MAX_LIMIT}.")))?,
-        };
-        let repo = text("repo")?
+        let limit = given.limit.unwrap_or(DEFAULT_LIMIT);
+        if !(1..=MAX_LIMIT).contains(&limit) {
+            return Err(Answer::invalid(format!("limit must be from 1 to {MAX_LIMIT}.")));
+        }
+        let repo = text(given.repo)
             .map(|repo| {
-                let remote = repo.strip_prefix("repo:").unwrap_or(repo);
-                normalize_remote(remote).ok_or_else(|| invalid(format!("Not a git remote: {repo:?}.")))
+                let remote = repo.strip_prefix("repo:").unwrap_or(&repo);
+                normalize_remote(remote).ok_or_else(|| Answer::invalid(format!("Not a git remote: {repo:?}.")))
             })
             .transpose()?;
-        let with = match arguments.get("with") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(names)) if names.len() <= MAX_WITH => {
-                let mut with = Vec::new();
-                for name in names {
-                    with.extend(people(name.as_str().unwrap_or_default())?);
-                }
-                with
-            }
-            Some(Value::Array(_)) => return Err(invalid(format!("At most {MAX_WITH} names in with."))),
-            Some(_) => return Err(invalid("with must be a list of names.".into())),
-        };
+        if given.with.len() > MAX_WITH {
+            return Err(Answer::invalid(format!("At most {MAX_WITH} names in with.")));
+        }
+        let mut with = Vec::new();
+        for name in &given.with {
+            with.extend(people(name)?);
+        }
         Ok(Self { query, id, history, limit, repo, with })
     }
 }
@@ -328,7 +325,7 @@ impl Request {
 /// The scopes of `name`: `human:<name>` or `ant:<name>` as written, both for a bare name.
 fn people(name: &str) -> Result<Vec<Scope>, Answer> {
     let name = name.trim();
-    let refused = || invalid(format!("Not a name: {name:?} (a name, human:<name> or ant:<name>)."));
+    let refused = || Answer::invalid(format!("Not a name: {name:?} (a name, human:<name> or ant:<name>)."));
     match name.split_once(':') {
         Some(("human" | "ant", _)) => match name.parse() {
             Ok(scope @ (Scope::Human(_) | Scope::Ant(_))) => Ok(vec![scope]),
@@ -346,9 +343,11 @@ fn people(name: &str) -> Result<Vec<Scope>, Answer> {
 /// ([`record_access`]); or record `id` in full.
 async fn read(items: &dyn Items, id: &ItemId, history: bool, context: &CallContext) -> Result<Answer, Answer> {
     let not_found = || Answer::error("not_found", format!("No memory {id}."));
-    if let Some(found) = items.get(id).await.map_err(unavailable)?.and_then(RecordItem::of) {
+    if let Some(found) = items.get(id).await?.and_then(RecordItem::of) {
         if history {
-            return Err(invalid(format!("{id} is a record, replaced in place: history needs the id of a memory.")));
+            return Err(Answer::invalid(format!(
+                "{id} is a record, replaced in place: history needs the id of a memory."
+            )));
         }
         let json = json!({"note": NOTE, "record": found.json()});
         return Ok(Answer { text: framed(&found.full()), json, is_error: false });
@@ -356,10 +355,10 @@ async fn read(items: &dyn Items, id: &ItemId, history: bool, context: &CallConte
     let chain = if history {
         chain(items, id).await.map_err(|e| match e {
             StoreError::NotFound(_) => not_found(),
-            e => unavailable(e),
+            e => e.into(),
         })?
     } else {
-        let found = items.get(id).await.map_err(unavailable)?.and_then(MemoryItem::of);
+        let found = items.get(id).await?.and_then(MemoryItem::of);
         vec![found.ok_or_else(not_found)?]
     };
     let (found, older) = chain.split_first().expect("a chain starts with its memory");

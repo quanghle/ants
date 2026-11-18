@@ -38,7 +38,7 @@ pub async fn fencing_token(items: &dyn Items, task: &TaskItem) -> Result<Option<
 }
 
 pub(super) async fn shown(items: &dyn Items, task: TaskItem) -> Result<Answer, Answer> {
-    let token = fencing_token(items, &task).await.map_err(store_error)?;
+    let token = fencing_token(items, &task).await.map_err(refused)?;
     let mut answer = super::shown(task);
     if let Some(token) = token {
         answer.json["token"] = json!(token);
@@ -82,14 +82,18 @@ pub(super) async fn claim(
     next.lease = Some(Lease {
         thread: call.context.thread.clone(),
         expires_at: expiry(now)?,
-        claim_revision: current.item.revision.checked_add(1).ok_or_else(|| invalid("Task revision overflow."))?,
+        claim_revision: current
+            .item
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| Answer::invalid("Task revision overflow."))?,
     });
     let writes = graph.writes(Write::Change {
         id: current.id().clone(),
         values: next.values(),
         expected: Some(current.item.revision),
     });
-    let item = items.write_confirmed(&writes, call.context.thread.as_str()).await.map_err(store_error)?.remove(0);
+    let item = items.write_confirmed(&writes, call.context.thread.as_str()).await.map_err(refused)?.remove(0);
     shown(items, TaskItem::of(item).expect("claimed task")).await
 }
 
@@ -104,7 +108,7 @@ pub(super) async fn authorize(
         Answer::error("invalid_token", format!("No matching claim token for task {} and this thread.", current.id()))
     };
     let lease = current.task.lease.as_ref().ok_or_else(invalid)?;
-    if lease.thread != call.context.thread || fencing_token(items, current).await.map_err(store_error)? != Some(token) {
+    if lease.thread != call.context.thread || fencing_token(items, current).await.map_err(refused)? != Some(token) {
         return Err(invalid());
     }
     if call.context.at >= lease.expires_at {
@@ -141,10 +145,10 @@ pub(super) async fn change(
     }
     let writes =
         [Write::Change { id: current.id().clone(), values: next.values(), expected: Some(current.item.revision) }];
-    let item = items.write_confirmed(&writes, call.context.thread.as_str()).await.map_err(store_error)?.remove(0);
+    let item = items.write_confirmed(&writes, call.context.thread.as_str()).await.map_err(refused)?.remove(0);
     shown(items, TaskItem::of(item).expect("lease change")).await
 }
 
 fn expiry(now: DateTime<Utc>) -> Result<DateTime<Utc>, Answer> {
-    now.checked_add_signed(Duration::minutes(LEASE_MINUTES)).ok_or_else(|| invalid("Lease time overflow."))
+    now.checked_add_signed(Duration::minutes(LEASE_MINUTES)).ok_or_else(|| Answer::invalid("Lease time overflow."))
 }
