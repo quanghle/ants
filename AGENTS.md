@@ -13,6 +13,9 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - Link every piece of work to the requirement it serves (`bd spec link <id> <requirement>`) or mark it
   `bd spec none <id> -r "<why>"`. `bd spec drift` must report 0 problems.
 - A behaviour change that contradicts a requirement goes through `bd spec change`, not a silent edit.
+- A spec for a new feature says, for each surface (CLI, `ants chat`, MCP tools, admin orders, `ants doctor`, docs,
+  `contrib/skills/`), what the feature offers there or why nothing: a feature lands with its surfaces, or with issues
+  for the ones still missing.
 - The database is local; refresh the committed snapshot with `bd export -o .bd/issues.jsonl` in each commit that
   changes issues or specs. Release notes (`scripts/release-notes.sh`) are built from that snapshot, so the commit a
   release tag points at must carry an up-to-date export.
