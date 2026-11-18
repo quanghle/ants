@@ -447,19 +447,13 @@ impl Page {
             (area, None)
         };
         let snoozed = super::home::snoozed(data, now);
-        let table: Vec<Row> =
-            rows.iter().map(|(thread, state)| row(data, thread, *state, snoozed.contains_key(thread), now)).collect();
-        let widths = [
-            Constraint::Length(14),
-            Constraint::Fill(3),
-            Constraint::Fill(1),
-            Constraint::Length(8),
-            Constraint::Length(5),
-            Constraint::Length(7),
-            Constraint::Length(8),
-            Constraint::Fill(2),
-        ];
-        let header = Row::new(["STATE", "THREAD", "ANTS", "OWNER", "TURNS", "SPEND", "AGE", "NOW"]).style(style::dim());
+        let columns = columns(list.width.saturating_sub(2));
+        let table: Vec<Row> = rows
+            .iter()
+            .map(|(thread, state)| row(data, thread, *state, snoozed.contains_key(thread), now, &columns))
+            .collect();
+        let widths = columns.iter().map(|(_, width)| Constraint::Length(*width));
+        let header = Row::new(columns.iter().map(|(column, _)| column.name())).style(style::dim());
         let table =
             Table::new(table, widths).header(header).block(block).row_highlight_style(style::highlight(focused));
         let mut state = TableState::default().with_selected(Some(at));
@@ -485,8 +479,86 @@ pub fn dollars(cost: f64) -> String {
     format!("${cost:.2}")
 }
 
-/// The thread's row in the work view, marked when a snooze holds it off home.
-fn row(data: &Data, thread: &ThreadId, state: ThreadState, snoozed: bool, now: DateTime<Utc>) -> Row<'static> {
+/// A column of the work view's table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Column {
+    State,
+    Thread,
+    Ants,
+    Owner,
+    Turns,
+    Spend,
+    Age,
+    Now,
+}
+
+impl Column {
+    /// The columns, left to right.
+    const ALL: [Self; 8] =
+        [Self::State, Self::Thread, Self::Ants, Self::Owner, Self::Turns, Self::Spend, Self::Age, Self::Now];
+    /// The columns that give way as the view narrows, the first first.
+    const GIVING_WAY: [Self; 5] = [Self::Now, Self::Spend, Self::Turns, Self::Owner, Self::Ants];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::State => "STATE",
+            Self::Thread => "THREAD",
+            Self::Ants => "ANTS",
+            Self::Owner => "OWNER",
+            Self::Turns => "TURNS",
+            Self::Spend => "SPEND",
+            Self::Age => "AGE",
+            Self::Now => "NOW",
+        }
+    }
+
+    /// The least width of the column, and its share of the width left over.
+    fn width(self) -> (u16, u16) {
+        match self {
+            Self::State => (14, 0),
+            Self::Thread => (30, 3),
+            Self::Ants => (10, 1),
+            Self::Owner => (8, 0),
+            Self::Turns => (5, 0),
+            Self::Spend => (7, 0),
+            Self::Age => (8, 0),
+            Self::Now => (12, 2),
+        }
+    }
+}
+
+/// The columns of the work view's table that fit in `width`, each with its width: those of
+/// [`Column::GIVING_WAY`] go in turn until the others fit, the title keeping 30 columns at least.
+fn columns(width: u16) -> Vec<(Column, u16)> {
+    let gaps = |n: usize| u16::try_from(n.saturating_sub(1)).unwrap_or(u16::MAX);
+    let need = |shown: &[Column]| shown.iter().map(|c| c.width().0).sum::<u16>() + gaps(shown.len());
+    let mut shown = Column::ALL.to_vec();
+    for gone in Column::GIVING_WAY {
+        if need(&shown) <= width {
+            break;
+        }
+        shown.retain(|c| *c != gone);
+    }
+    let extra = width.saturating_sub(need(&shown));
+    let shares: u16 = shown.iter().map(|c| c.width().1).sum();
+    let mut columns: Vec<(Column, u16)> =
+        shown.iter().map(|c| (*c, c.width().0 + extra * c.width().1 / shares.max(1))).collect();
+    let given = columns.iter().map(|(_, w)| w).sum::<u16>() + gaps(columns.len());
+    if let Some((_, title)) = columns.iter_mut().find(|(c, _)| *c == Column::Thread) {
+        *title += width.saturating_sub(given);
+    }
+    columns
+}
+
+/// The thread's row in the work view, marked when a snooze holds it off home, in `columns`.
+fn row(
+    data: &Data,
+    thread: &ThreadId,
+    state: ThreadState,
+    snoozed: bool,
+    now: DateTime<Utc>,
+    columns: &[(Column, u16)],
+) -> Row<'static> {
     let me = data.me();
     let summary = data.live.summary(thread);
     let ants: Vec<&str> =
@@ -499,16 +571,19 @@ fn row(data: &Data, thread: &ThreadId, state: ThreadState, snoozed: bool, now: D
     if snoozed {
         title.push(Span::styled(" · snoozed", style::dim()));
     }
-    Row::new(vec![
-        Cell::from(state.label()).style(Style::new().fg(state.color())),
-        Cell::from(Line::from(title)),
-        Cell::from(ants.join(",")),
-        Cell::from(owner.to_owned()),
-        Cell::from(turns),
-        Cell::from(spend),
-        Cell::from(age),
-        Cell::from(doing(data, thread, 60)),
-    ])
+    Row::new(columns.iter().map(|(column, width)| {
+        let width = usize::from(*width);
+        match column {
+            Column::State => Cell::from(state.label()).style(Style::new().fg(state.color())),
+            Column::Thread => Cell::from(style::clip(Line::from(title.clone()), width)),
+            Column::Ants => Cell::from(style::fit(&ants.join(","), width)),
+            Column::Owner => Cell::from(style::fit(owner, width)),
+            Column::Turns => Cell::from(style::fit(&turns, width)),
+            Column::Spend => Cell::from(style::fit(&spend, width)),
+            Column::Age => Cell::from(style::fit(&age, width)),
+            Column::Now => Cell::from(style::fit(&doing(data, thread, 60), width)),
+        }
+    }))
 }
 
 /// What happens on the thread now, in at most `width` characters: a tool request or a question waiting for the
@@ -854,6 +929,32 @@ mod tests {
         assert!(shown.contains("me       5     $0.42   1m ago"), "{shown}");
         assert!(shown.contains("TL;DR  The migration lacks a default. (messenger, 1m ago, stale)"), "{shown}");
         assert!(shown.contains("Chain  alice → dev-a $0.38 → dev-b $0.04"), "{shown}");
+    }
+
+    #[test]
+    fn the_title_keeps_30_columns_as_now_spend_turns_owner_and_ants_give_way() {
+        let names = |width| columns(width).into_iter().map(|(c, _)| c.name()).collect::<Vec<_>>().join(" ");
+        assert_eq!(names(118), "STATE THREAD ANTS OWNER TURNS SPEND AGE NOW");
+        assert_eq!(names(100), "STATE THREAD ANTS OWNER TURNS SPEND AGE");
+        assert_eq!(names(86), "STATE THREAD ANTS OWNER TURNS AGE");
+        assert_eq!(names(78), "STATE THREAD ANTS OWNER AGE");
+        assert_eq!(names(65), "STATE THREAD ANTS AGE");
+        assert_eq!(names(64), "STATE THREAD AGE");
+        for width in 54..240 {
+            let columns = columns(width);
+            let title = columns.iter().find(|(c, _)| *c == Column::Thread).map_or(0, |(_, w)| *w);
+            let used = columns.iter().map(|(_, w)| w).sum::<u16>() + u16::try_from(columns.len()).unwrap() - 1;
+            assert!(title >= 30 && used == width, "{width}: {columns:?}");
+        }
+
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let title = "deploy the site to production then update the docs";
+        m.stored(vec![message(1, &thread, "alice", "dev-a", title)], at(1));
+        let page = Page::new(Filter::default());
+        let shown = crate::test_support::render::rendered(80, 24, |f| page.draw(f, f.area(), &m.data, at(2), true));
+        let row = shown.lines().find(|l| l.contains(&title[..30])).unwrap_or_default();
+        assert!(row.contains("deploy the site to production th…") && row.contains("dev-a"), "{shown}");
     }
 
     #[test]

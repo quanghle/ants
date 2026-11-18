@@ -128,7 +128,10 @@ pub fn lines(card: Card, asking: Option<&Asking>, keyed: bool, now: DateTime<Utc
             let left = format!("expires in {}", tools::left(request.expires_at, now));
             if keyed {
                 Line::from(vec![
-                    Span::styled(keys(request), Style::new().fg(style::PENDING)),
+                    Span::styled(
+                        style::hints(&keys(request), width.saturating_sub(left.chars().count() + 3)),
+                        Style::new().fg(style::PENDING),
+                    ),
                     Span::styled(format!(" · {left}"), style::dim()),
                 ])
             } else {
@@ -364,12 +367,14 @@ mod tests {
         assert_eq!(cards(&m.data, Some(&push.thread_id), at(10)).len(), 1);
         assert_eq!(cards(&m.data, None, at(200)).len(), 1, "a settled card goes after a while");
 
-        let pending = text(&lines(shown[0], None, true, at(10), 60));
+        let pending = text(&lines(shown[0], None, true, at(10), 80));
         assert_eq!(pending[0], "execute: git push");
         assert!(
             pending[1].starts_with("a allow · r reject · n reject with a note · Enter details · expires in "),
             "{pending:?}"
         );
+        let narrow = text(&lines(shown[0], None, true, at(10), 60));
+        assert_eq!(narrow[1], "a allow · r reject · n reject with a note · expires in 0s", "the last hints go whole");
         let settled = text(&lines(shown[1], None, false, at(10), 60));
         assert!(settled[1].starts_with("rejected by bob at "), "{settled:?}");
         let asking = Asking::decide(push, Verdict::AllowOnce).unwrap();

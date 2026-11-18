@@ -8,6 +8,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use super::model::{Focus, Level, Model, Page};
 use super::style::{self, block, dim};
@@ -22,7 +23,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     }
     let [header, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
-    frame.render_widget(Paragraph::new(header_line(model, now)), header);
+    frame.render_widget(Paragraph::new(header_line(model, now, header.width)), header);
     let width = frame.area().width;
     model.fold.drawn(width);
     let nav_focused = model.focus == Focus::Nav && !model.bar.focused;
@@ -66,18 +67,22 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
 }
 
 /// Who the UI runs as, on which server, the place shown, and the connection.
-fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
+/// The header, its place cut first so the connection's state stays on screen.
+fn header_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
     let data = &model.data;
     let place = match model.page() {
         Page::Thread(page) => page.place(data),
         page => page.name().to_owned(),
     };
-    let mut spans = vec![
-        Span::styled(format!(" ants · {}@{}", data.me(), data.server), Style::new().bold()),
-        Span::styled(format!(" · {place} · "), dim()),
+    let who = format!(" ants · {}@{}", data.me(), data.server);
+    let link = style::link(data.live.link, now, "");
+    let room = usize::from(width).saturating_sub(who.width() + link.width() + 6);
+    let spans = vec![
+        Span::styled(who, Style::new().bold()),
+        Span::styled(format!(" · {} · ", style::fit(&place, room.max(1))), dim()),
+        link,
     ];
-    spans.push(style::link(data.live.link, now, ""));
-    Line::from(spans)
+    style::clip(Line::from(spans), usize::from(width))
 }
 
 fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
@@ -264,6 +269,39 @@ mod tests {
         assert!(shown.contains("STATE"), "the panel shown by key: {shown}");
         conversation(&m, 80);
         assert_eq!(m.key(Key::Ctrl('b'), at(2)), folds(None, Some(true)), "again: as the width has it");
+    }
+
+    #[test]
+    fn no_text_ends_mid_word_at_the_edge_without_an_ellipsis() {
+        let ops: ants_proto::ChannelId = "ops".parse().unwrap();
+        let long = "deploy the site to production then update the docs and tell the whole team about it today";
+        let opening = ants_proto::ChannelPost::new(ops.clone(), user("alice"), long);
+        let thread = opening.thread_id.clone();
+        let mut m = model();
+        let asked = message(2, &thread, "dev-a", "alice", &format!("which region? {long}"));
+        let mut first = crate::tui::test_support::post(1, &opening);
+        first.owner = Some(user("alice"));
+        m.stored(vec![first, asked], at(1));
+        let cut = |shown: &str| {
+            assert!(shown.lines().next().is_some_and(|l| l.ends_with("● connected")), "{shown}");
+            let long = shown.lines().skip(1).filter(|l| l.contains("deploy") || l.contains("which"));
+            long.map(|l| l.chars().collect::<Vec<_>>())
+                .any(|row| row.len() >= 80 && if row[79] == '│' { row[78] } else { row[79] }.is_alphanumeric())
+        };
+        for item in [nav::Item::Home, nav::Item::Work(None), nav::Item::Channel(ops)] {
+            m.select(item);
+            let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(2)));
+            assert!(!cut(&shown) && shown.contains('…'), "{shown}");
+        }
+        m.select(nav::Item::Work(None));
+        screen(&m, at(2));
+        m.key(Key::Enter, at(2));
+        let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(2)));
+        assert!(
+            !cut(&shown)
+                && shown.contains("┌ deploy the site to production then update the docs and tell the whol… · #ops ┐"),
+            "{shown}"
+        );
     }
 
     #[test]

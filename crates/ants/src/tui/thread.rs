@@ -324,11 +324,10 @@ impl Page {
         let data = &model.data;
         let thread = &self.history.thread;
         let summary = data.live.summary(thread);
-        let mut title = format!(" {} ", data.title(thread));
-        if let Some(s) = summary.filter(|s| !s.channels.is_empty()) {
+        let channels = summary.filter(|s| !s.channels.is_empty()).map_or_else(String::new, |s| {
             let channels: Vec<String> = s.channels.iter().map(|c| format!("#{c}")).collect();
-            title = format!("{title}· {} ", channels.join(" "));
-        }
+            format!(" · {}", channels.join(" "))
+        });
         let (area, panel) = if model.fold.panel(frame.area().width) {
             let [left, right] = Layout::horizontal([Constraint::Min(20), Constraint::Length(PANEL_WIDTH)]).areas(area);
             (left, Some(right))
@@ -337,7 +336,10 @@ impl Page {
         };
         let cursor = self.card(data, now);
         let area = draw_cards(frame, area, model, thread, &self.history.entries, cursor, now);
-        let block = style::block(title, focused);
+        let room = usize::from(area.width.saturating_sub(4));
+        let title = style::fit(&data.title(thread), room.saturating_sub(channels.chars().count()).max(10));
+        let title = style::fit(&format!("{title}{channels}"), room);
+        let block = style::block(format!(" {title} "), focused);
         let mut inner = block.inner(area);
         frame.render_widget(block, area);
         if panel.is_none() {
@@ -349,7 +351,7 @@ impl Page {
         let width = usize::from(area.width);
         let mut lines = Vec::new();
         if panel.is_some() || work::reason(data, thread).is_some() {
-            lines.push(work::why(data, thread));
+            lines.push(style::clip(work::why(data, thread), width));
         }
         if let Some((line, at)) = data.live.progress_of(thread, width.saturating_sub(16)) {
             lines.push(Line::styled(format!("▶ {line} ({})", ago(at, now)), Style::new().fg(Color::Green)));
