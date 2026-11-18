@@ -31,13 +31,24 @@ async fn records_shorten_to_their_titles_and_cut_naming_the_record_to_read() {
     record(&sense, "self_model", "self", &"careful ".repeat(200)).await;
     record(&sense, "relationship", "human:alice", &"patient ".repeat(200)).await;
     let full = session_brief(&sense, 8_000).await;
-    let brief = session_brief(&sense, u32::try_from(full.len()).unwrap() - 1).await;
-    assert!(!brief.contains("careful") && !brief.contains("patient"), "{brief}");
-    position(&brief, "(self, revision 1): self\n");
+    let first_without = async |text: &str| {
+        for budget in (0..full.len()).rev().step_by(16) {
+            let brief = session_brief(&sense, u32::try_from(budget).unwrap()).await;
+            if !brief.contains(text) {
+                return brief;
+            }
+        }
+        panic!("{text:?} is never cut");
+    };
+    let brief = first_without("patient").await;
+    position(&brief, "careful");
     position(&brief, "(human:alice, revision 1): human:alice\n");
+    position(&brief, &format!("{MORE}sense_recall id=<id>"));
+    let brief = first_without("careful").await;
+    position(&brief, "(self, revision 1): self\n");
     let id = crate::records::self_model(&*items_of(&sense).await).await.unwrap().unwrap().item.id;
     position(&brief, &format!("{MORE}sense_recall id={id}"));
-    position(&brief, &format!("{MORE}sense_recall id=<id>"));
+    position(&brief, &format!("## Relationships\n{MORE}sense_recall id=<id>"));
 }
 
 async fn items_of(sense: &Sense) -> Arc<dyn Items> {
