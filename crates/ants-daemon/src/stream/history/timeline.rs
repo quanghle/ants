@@ -6,7 +6,10 @@ use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::time::SystemTime;
 
-use ants_proto::{NoReplyWhy, ThreadId, Timeline, TimelineCall, Timelines, UserId, Uuid, sent_reader, subject};
+use ants_proto::{
+    MergedRejection, NoReplyWhy, ThreadId, Timeline, TimelineCall, TimelineEntry, Timelines, UserId, Uuid, sent_reader,
+    subject,
+};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
@@ -17,7 +20,8 @@ use crate::stream::reading::{self, Reading};
 #[derive(Debug, Default)]
 pub(super) struct Thread {
     timelines: Timelines,
-    /// The messages whose prompts the records cover, in the order of their first record, with its time.
+    /// The messages whose prompts the records cover, in the order of their first record, with its time: but those
+    /// covered only by tool requests rejected, which [`Thread::show`] leaves to [`Thread::rejections`].
     prompts: Vec<(Uuid, DateTime<Utc>)>,
 }
 
@@ -43,8 +47,9 @@ pub(super) async fn read(
             && let Ok(record) = serde_json::from_slice::<Timeline>(payload)
         {
             let (message, at) = (record.message, record.at);
+            let shown = record.entries.iter().any(|entry| !matches!(entry, TimelineEntry::Rejected(_)));
             let thread = threads.entry(thread).or_default();
-            if thread.timelines.add(subject, record) && !thread.prompts.iter().any(|(m, _)| *m == message) {
+            if thread.timelines.add(subject, record) && shown && !thread.prompts.iter().any(|(m, _)| *m == message) {
                 thread.prompts.push((message, at));
             }
         }
@@ -56,6 +61,11 @@ pub(super) async fn read(
 }
 
 impl Thread {
+    /// The ant's tool requests rejected, in the order first stored.
+    pub(super) fn rejections(&self) -> &[MergedRejection] {
+        self.timelines.rejections()
+    }
+
     /// The timeline of `ant`, oldest prompt first: a line naming each prompt's message, then a line for each of its
     /// tool calls, its plan, the calls left out and its end with no reply, whose final text is cut to `most` bytes.
     pub(super) fn show(&self, ant: &UserId, most: usize) -> String {
