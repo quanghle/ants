@@ -412,15 +412,23 @@ pub fn builtin_messenger(harness: Option<&str>, home: &Path) -> Ant {
 }
 
 /// The ant a file serves while one of its ants names `sage` as its sage and it lists no ant of the name
-/// ([`super::sage::settle`]), set up as the built-in messenger is ([`builtin_messenger`]), in `~/.ants/sage`, with
-/// `~/.config/ants/auth/sage.creds`. Its shared settings, such as its model and reasoning effort, change as any ant's.
+/// ([`super::sage::settle`]), unless the server takes credentials and the sage has none on the machine
+/// ([`super::sage::served_here`]); set up as the built-in messenger is ([`builtin_messenger`]), in `~/.ants/sage`,
+/// with `~/.config/ants/auth/sage.creds`. Its shared settings, such as its model and reasoning effort, change as any
+/// ant's.
 pub fn builtin_sage(harness: Option<&str>, home: &Path) -> Ant {
     builtin(UserId::sage(), harness, home)
 }
 
+/// Where the credentials of the built-in ant `name` belong: `~/.config/ants/auth/<name>.creds`, `home` standing for
+/// `~`.
+pub(super) fn builtin_creds(name: &UserId, home: &Path) -> PathBuf {
+    home.join(".config/ants/auth").join(format!("{name}.creds"))
+}
+
 fn builtin(name: UserId, harness: Option<&str>, home: &Path) -> Ant {
     let dir = home.join(".ants").join(name.as_str());
-    let creds = home.join(".config/ants/auth").join(format!("{name}.creds"));
+    let creds = builtin_creds(&name, home);
     Ant {
         harness: harness.map(str::to_owned),
         home: Some(dir.clone()),
