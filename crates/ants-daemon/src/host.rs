@@ -7,7 +7,8 @@
 //! ants ([`crate::profile::shared`]), creating those still missing from the machine's config. Without host credentials,
 //! where the ants have their own, the connection stays off and the daemon serves its ants as before, sense keeping none
 //! of their data ([`uncredentialed`]). A daemon serving one ant (`ants daemon --ant`) makes no host connection, but
-//! sense a link of its own with the host credentials, carrying its logs alone ([`run_sense`]).
+//! sense a link of its own with the host credentials, carrying its logs alone ([`run_sense`]), tried again with backoff
+//! after it fails ([`keep_sense`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +30,8 @@ use crate::{admin, bus, colony};
 
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(30);
+/// The longest wait of sense's link of its own between tries after it failed ([`keep_sense`]).
+const SENSE_RETRY_MAX: Duration = Duration::from_mins(5);
 
 /// What a host connection connects with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +201,23 @@ pub async fn run_sense(host: Host, sense: Hosting) -> Result<()> {
     let Some((js, _, machine, accounts)) = link(&host).await? else { return Ok(()) };
     sense.up(Link::new(js, host.js_domain.clone(), accounts, machine));
     std::future::pending().await
+}
+
+/// Keep sense's link of its own as `host` ([`run_sense`]) until dropped. Once it fails, sense keeps none of its ants'
+/// data, saying why ([`crate::sense::Sense::unkept`]) until the link is up again: it is tried again after 1 s, the wait
+/// doubling up to 5 min, and at once when `again` is notified, as on a reload.
+pub async fn keep_sense(host: Host, again: &tokio::sync::Notify) {
+    let mut delay = RETRY_FIRST;
+    loop {
+        let hosting = host.providers.sense().hosting();
+        let Err(e) = Box::pin(run_sense(host.clone(), hosting)).await else { return };
+        tracing::warn!(error = format!("{e:#}"), retry_in = ?delay, "sense's link stopped");
+        host.providers.sense().unkept(Some(format!("sense's link with the host credentials stopped: {e:#}")));
+        tokio::select! {
+            () = tokio::time::sleep(delay) => delay = (delay * 2).min(SENSE_RETRY_MAX),
+            () = again.notified() => delay = RETRY_FIRST,
+        }
+    }
 }
 
 /// The connection as `host` ([`connect`]), with the machine's host name, the machine it stands for ([`machine_of`])

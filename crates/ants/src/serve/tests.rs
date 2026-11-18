@@ -97,6 +97,42 @@ fn without_a_host_connection_sense_links_with_the_host_credentials_where_the_ant
     assert_eq!(carried, None, "the host connection carries sense");
 }
 
+#[tokio::test]
+async fn sense_s_own_link_comes_back_after_failing_without_a_reload() {
+    let Some(server) = crate::test_support::Server::start() else { return };
+    let (creds, machine) = (server.dir().join("host.creds"), "m1".parse::<Machine>().unwrap());
+    let nats = server.url.clone();
+    let host = Host::quietly(Some(machine.clone()), None, nats, Some(creds.clone()), None, [true].into_iter()).unwrap();
+    let served = Served {
+        configs: vec![],
+        schedules: vec![],
+        metrics: None,
+        host: None,
+        sense: Some(SenseLink::Own(Box::new(host))),
+        shared: None,
+        machine: None,
+    };
+    let providers = Providers::default();
+    let mut unkept = providers.sense().why_unkept();
+    let failed = async |links: &mut Links, unkept: &mut tokio::sync::watch::Receiver<Option<String>>| {
+        links.reconcile(None, Some(&served));
+        let failed = tokio::time::timeout(Duration::from_secs(30), unkept.wait_for(Option::is_some));
+        failed.await.expect("the link fails without its credentials").unwrap().clone().unwrap()
+    };
+    let mut links = Links::new(providers.clone());
+    let why = failed(&mut links, &mut unkept).await;
+    assert!(why.contains("sense's link with the host credentials stopped"), "{why}");
+    links.reconcile(None, Some(&served));
+    assert_eq!(unkept.borrow().as_ref(), Some(&why), "a reload keeps saying why while the link is down");
+    drop(links);
+
+    let mut links = Links::new(providers.clone());
+    failed(&mut links, &mut unkept).await;
+    crate::auth::issue_host(&server.dir().join("auth"), &machine, None, &creds).unwrap();
+    let up = tokio::time::timeout(Duration::from_secs(30), unkept.wait_for(Option::is_none));
+    up.await.expect("the link comes back without a reload").unwrap();
+}
+
 #[test]
 fn flags_override_the_picked_ant() {
     let all = vec![ant("dev-a"), ant("dev-b")];
