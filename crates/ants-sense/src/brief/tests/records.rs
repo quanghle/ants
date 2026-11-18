@@ -1,7 +1,7 @@
 use super::*;
 
-async fn record(sense: &Sense, kind: &str, scope: &str, body: &str) {
-    call(sense, memory::remember, THREAD, json!({"kind": kind, "scope": scope, "title": scope, "body": body})).await;
+async fn record(sense: &Sense, kind: &str, who: &str, body: &str) {
+    call(sense, identity::identity, THREAD, json!({kind: body, "who": who, "title": who})).await;
 }
 
 #[tokio::test]

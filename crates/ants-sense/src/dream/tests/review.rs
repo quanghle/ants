@@ -101,7 +101,12 @@ async fn the_sages_findings_prompt_the_ant_marked_untrusted_where_they_rest_on_u
     let Output::Json(written) = written.output else { panic!("json") };
     let id: ItemId = written["id"].as_str().unwrap().parse().unwrap();
     assert_eq!(memory(&kept, &id).await.trust, memory::Trust::Untrusted, "written in answer to untrusted findings");
-    assert_eq!(get(&*items, 1).await.unwrap().unwrap().0.writes, [id]);
+    let mut call = called("identity", 1, &json!({"self_model": "Bold.", "title": "Me"}));
+    call.context.thread = thread.clone();
+    let Output::Json(record) = sense.call_tool(call).await.unwrap().output else { panic!("json") };
+    assert_eq!(record["trust"], "untrusted", "a record too: {record}");
+    let record: ItemId = record["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(get(&*items, 1).await.unwrap().unwrap().0.writes, [id, record]);
 }
 
 #[tokio::test]

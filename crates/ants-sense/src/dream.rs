@@ -16,8 +16,8 @@
 //! confirming a proposal and rejected discarding it; the deferred and unanswered come again in the next dream while
 //! they still hold. A rejected finding rests ([`Rested`]): no dream gathers it again until what it is about changed
 //! since the verdict or [`REST_DAYS`] of the ant's active time passed. A ripe proposal no dream offered makes a dream
-//! due ([`proposal_due`]). Writes on the dream thread through the tools that change memories count toward
-//! [`MAX_DREAM_WRITES`], and are untrusted while a finding resting on untrusted text is open ([`counted`],
+//! due ([`proposal_due`]). Writes on the dream thread through the tools that change memories or records count
+//! toward [`MAX_DREAM_WRITES`], and are untrusted while a finding resting on untrusted text is open ([`counted`],
 //! [`untrusted_on`]); persona and skill proposals are refused on untrusted ground ([`untrusted`]). Finishing a dream,
 //! or beginning the next one, writes its diary: an episode memory summarizing its verdicts.
 
@@ -42,7 +42,7 @@ mod packet;
 mod review;
 mod tool;
 
-pub use packet::{MIN_THREAD_BYTES, PACKET_BUDGET, Reader, Thread, compose, packet};
+pub use packet::{Identity, MIN_THREAD_BYTES, PACKET_BUDGET, Reader, Thread, compose, packet};
 pub use review::{
     Advice, Evidence, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse, review_sent, untrusted_on,
 };
@@ -62,8 +62,9 @@ pub const SAGE_TIMEOUT_HOURS: i64 = 6;
 pub const MAX_FINDINGS: usize = 20;
 /// The most writes through sense's tools a dream thread makes ([`counted`]).
 pub const MAX_DREAM_WRITES: usize = 20;
-/// The tools whose writes on a dream thread count toward [`MAX_DREAM_WRITES`]: those writing memories.
-pub const COUNTED: &[&str] = &["remember", "vote"];
+/// The tools whose writes on a dream thread count toward [`MAX_DREAM_WRITES`]: those writing memories, and
+/// `sense_identity` when it replaces a record ([`writes`]).
+pub const COUNTED: &[&str] = &["remember", "vote", "identity"];
 /// The days of the ant's active time a rejected finding rests unless what it is about changes ([`Rested`]).
 pub const REST_DAYS: i64 = 14;
 
@@ -813,10 +814,21 @@ fn diary(dream: &Dream, context: &CallContext) -> Memory {
     Memory::new(MemoryKind::Episode, Scope::Own, title, body, context)
 }
 
-/// Answer `call` of a tool writing memories with `handler`, counting it toward [`MAX_DREAM_WRITES`] when made on the
-/// last dream's thread, refused past them. A memory or record written there while a finding resting on untrusted text
-/// is open is stored as untrusted, as quoting outside content: the thread cannot tell which finding a write answers.
+/// Whether `call`, of a tool of [`COUNTED`], writes a memory or a record: a `sense_identity` call writes one only
+/// with `self_model` or `relationship`.
+fn writes(call: &ToolCall) -> bool {
+    call.name != "identity"
+        || ["self_model", "relationship"].iter().any(|record| call.arguments.get(*record).is_some_and(|v| !v.is_null()))
+}
+
+/// Answer `call` of a tool writing memories or records with `handler`, counting it toward [`MAX_DREAM_WRITES`] when
+/// made on the last dream's thread, refused past them. A memory or record written there while a finding resting on
+/// untrusted text is open is stored as untrusted, as quoting outside content: the thread cannot tell which finding a
+/// write answers.
 pub(crate) async fn counted(sense: &Sense, handler: Handler, call: &ToolCall) -> Answer {
+    if !writes(call) {
+        return handler(sense, call).await;
+    }
     let thread = &call.context.thread;
     let Ok(items) = sense.items(&call.context.ant).await else { return handler(sense, call).await };
     let on_thread = |dream: &Dream| dream.thread.as_ref() == Some(thread);
@@ -838,7 +850,8 @@ pub(crate) async fn counted(sense: &Sense, handler: Handler, call: &ToolCall) ->
         return Answer::error("dream_cap", message);
     }
     let untrusted: Vec<_> = dream.untrusted_open().map(|finding| finding.id.as_str()).collect();
-    let mut answer = if !untrusted.is_empty() && call.name == "remember" && !call.arguments.contains_key("quotes") {
+    let quotable = matches!(call.name.as_str(), "remember" | "identity");
+    let mut answer = if !untrusted.is_empty() && quotable && !call.arguments.contains_key("quotes") {
         let mut quoting = call.clone();
         quoting.arguments.insert("quotes".into(), json!("external"));
         let mut answer = handler(sense, &quoting).await;

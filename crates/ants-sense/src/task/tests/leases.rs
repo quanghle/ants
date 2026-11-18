@@ -201,7 +201,7 @@ struct SwitchLog {
 impl EventLog for SwitchLog {
     async fn append(&self, sense: &SenseId, payload: Vec<u8>, last: u64) -> Result<u64, AppendError> {
         if !self.online.load(Ordering::SeqCst) {
-            return Err(LogError("hub unavailable".into()).into());
+            return Err(LogError::unreachable("hub unavailable").into());
         }
         let result = self.log.append(sense, payload, last).await;
         if self.drop_after_append.swap(false, Ordering::SeqCst) {
@@ -212,14 +212,14 @@ impl EventLog for SwitchLog {
 
     async fn read_after(&self, sense: &SenseId, after: u64, limit: usize) -> Result<Vec<Stored>, LogError> {
         if !self.online.load(Ordering::SeqCst) {
-            return Err(LogError("hub unavailable".into()));
+            return Err(LogError::unreachable("hub unavailable"));
         }
         self.log.read_after(sense, after, limit).await
     }
 
     async fn last_sequence(&self, sense: &SenseId) -> Result<u64, LogError> {
         if !self.online.load(Ordering::SeqCst) {
-            return Err(LogError("hub unavailable".into()));
+            return Err(LogError::unreachable("hub unavailable"));
         }
         self.log.last_sequence(sense).await
     }

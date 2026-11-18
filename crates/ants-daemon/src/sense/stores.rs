@@ -20,10 +20,11 @@ use ants_proto::provider::BoxFuture;
 use ants_proto::{AntIdentity, JsDomain, Machine, SenseId, UserId};
 use ants_sense::cache::Cache;
 use ants_sense::export::{self, SenseExport};
+use ants_sense::home::Home;
 use ants_sense::identity::{self, Growth};
 use ants_sense::log::{
-    AccountVerifier, AntLog, AppendError, Event, EventLog, LogError, Revocations, Signature, Signer, Stored, Verifier,
-    VerifyError,
+    AccountVerifier, AntLog, AppendError, Event, EventLog, LogError, LogErrorKind, Revocations, Signature, Signer,
+    Stored, Verifier, VerifyError,
 };
 use ants_sense::store::{Items, Store, StoreError, Stores, is_offline};
 use anyhow::{Context as _, Result};
@@ -242,7 +243,7 @@ impl SenseStores {
                 if items.pending().await.is_ok_and(|count| count > 0) {
                     let _ = tokio::time::timeout(Duration::from_secs(15), items.sync()).await;
                 }
-            } else if ants_sense::cache::cache_file(&home).with_extension("pending").exists() {
+            } else if Home::new(&home).has_pending_writes() {
                 let _ = tokio::time::timeout(Duration::from_secs(15), self.items(&ant)).await;
             }
         }
@@ -282,11 +283,12 @@ impl Stores for SenseStores {
     fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         Box::pin(async move {
             let Of { items: slot, home, creds, link, route, named } = self.of(ant)?;
-            if export::importing(&home) {
+            let files = Home::new(&home);
+            if files.awaits_import() {
                 return Err(StoreError::Unavailable(format!(
                     "the sense data of {ant} await their import: `ants ant import FILE --provider-only` imports them, \
                      removing {} starts afresh",
-                    export::importing_file(&home).display()
+                    files.importing().display()
                 )));
             }
             let mut opened = slot.lock().await;
@@ -294,7 +296,7 @@ impl Stores for SenseStores {
             if let Some(items) = &current {
                 match items.sync().await {
                     Err(StoreError::Log(error))
-                        if error.0.contains("stream incarnation changed") && items.pending().await? == 0 =>
+                        if error.kind == LogErrorKind::Incarnation && items.pending().await? == 0 =>
                     {
                         *opened = None;
                         current = None;
@@ -307,7 +309,7 @@ impl Stores for SenseStores {
             let items = match current {
                 Some(items) => items,
                 None => {
-                    if link.is_none() && !ants_sense::cache::cache_file(&home).exists() {
+                    if link.is_none() && !files.cache().exists() {
                         return Err(match self.state().host {
                             Host::Connecting => StoreError::Unavailable("the host connection is not up yet".into()),
                             _ => StoreError::NotKept("no host connection".into()),
@@ -392,11 +394,11 @@ async fn import(
         Some(_) => {}
         None => identity::keep_id(home, sense).map_err(|e| unavailable(e.into()))?,
     }
-    if ants_sense::cache::cache_file(home).with_extension("pending").exists() {
+    if Home::new(home).has_pending_writes() {
         return Err(StoreError::Unavailable(format!("changes of {ant} wait to be appended to its log here")));
     }
     let earlier = identity::earlier_names(home).map_err(|e| unavailable(e.into()))?;
-    let log = link.log.get_or_try_init(|| JetStreamLog::open(&link.js)).await.map_err(unavailable)?;
+    let log = link.log.get_or_try_init(|| JetStreamLog::open(&link.js)).await.map_err(|e| unavailable(e.into()))?;
     let signer = HostSigner {
         signer: AntSigner::load(ant, creds, &link.accounts).map_err(unavailable)?,
         ant: ant.clone(),
@@ -418,7 +420,7 @@ async fn import(
 /// settles against the record once opened.
 async fn take_named(ant: &UserId, home: &Path, record: &Identity) -> Result<(), StoreError> {
     let unavailable = |e: anyhow::Error| StoreError::Unavailable(format!("naming the sense identity of {ant}: {e:#}"));
-    if identity::read_id(home).map_err(|e| unavailable(e.into()))?.is_some() || pending(home) {
+    if identity::read_id(home).map_err(|e| unavailable(e.into()))?.is_some() || Home::new(home).has_pending_writes() {
         return Ok(());
     }
     let minted = SenseId::new();
@@ -449,7 +451,7 @@ async fn settle(ant: &UserId, home: &Path, record: &Identity, items: &dyn Items)
         Some(named) if *named != sense => Err(StoreError::Unavailable(format!(
             "the home of {ant} keeps sense identity {sense} and its identity record names {named}: removing {} takes \
              the record's, `ants auth revoke {ant}` and adding it again keeps the home's",
-            identity::id_file(home).display()
+            Home::new(home).id().display()
         ))),
         _ => {
             if let Some(stored) = &stored
@@ -471,11 +473,6 @@ pub(super) async fn note_growth(ant: &UserId, items: &dyn Items, record: &AntIde
     identity::record_growth(items, ant, Growth { born: record.born, prompts: record.prompts }).await.map(drop)
 }
 
-/// Whether changes of the ant whose home is `home` wait to be appended to its log.
-fn pending(home: &Path) -> bool {
-    ants_sense::cache::cache_file(home).with_extension("pending").exists()
-}
-
 /// The items of `ant`, whose home is `home`, under the sense id it keeps, minted there first if it has none when
 /// `mint`, signed with its credentials at `creds`, over `link`; its events under the earlier names its home lists are
 /// its own.
@@ -489,21 +486,21 @@ async fn open(
 ) -> Result<Arc<dyn Items>> {
     let sense = match identity::read_id(home)? {
         Some(sense) => sense,
-        None if pending(home) => {
+        None if Home::new(home).has_pending_writes() => {
             anyhow::bail!("sense identity missing while pending writes remain; cache left untouched");
         }
         None if mint => identity::sense_id(home)?,
         None => anyhow::bail!("waiting for the daemon of {ant} to read its identity record, which names its sense id"),
     };
     let earlier =
-        identity::earlier_names(home).with_context(|| format!("reading {}", identity::names_file(home).display()))?;
+        identity::earlier_names(home).with_context(|| format!("reading {}", Home::new(home).names().display()))?;
     let cache = Cache::open(home)?;
     let remote = match link {
         Some(link) if link.js.client().connection_state() == async_nats::connection::State::Connected => {
             match link.log.get_or_try_init(|| JetStreamLog::open(&link.js)).await {
                 Ok(log) => Some(log.incarnation().to_owned()),
-                Err(error) if is_offline(&LogError(format!("{error:#}"))) => None,
-                Err(error) => return Err(error),
+                Err(error) if is_offline(&error) => None,
+                Err(error) => return Err(error.into()),
             }
         }
         _ => None,
@@ -541,9 +538,9 @@ fn route(route: &Route) -> std::sync::MutexGuard<'_, Option<Arc<Link>>> {
 }
 
 fn connected(route_: &Route) -> Result<Arc<Link>, LogError> {
-    let link = route(route_).clone().ok_or_else(|| LogError("hub unavailable: no host connection".into()))?;
+    let link = route(route_).clone().ok_or_else(|| LogError::unreachable("hub unavailable: no host connection"))?;
     if link.js.client().connection_state() != async_nats::connection::State::Connected {
-        return Err(LogError("hub unavailable: host disconnected".into()));
+        return Err(LogError::unreachable("hub unavailable: host disconnected"));
     }
     Ok(link)
 }
@@ -558,15 +555,11 @@ impl HostLog {
     async fn log(&self) -> Result<JetStreamLog, LogError> {
         let link = connected(&self.route)?;
         if link.accounts != self.accounts {
-            return Err(LogError("host authentication accounts changed; cached sense writes retained".into()));
+            return Err(LogError::refused("host authentication accounts changed; cached sense writes retained"));
         }
-        let log = link
-            .log
-            .get_or_try_init(|| JetStreamLog::open(&link.js))
-            .await
-            .map_err(|error| LogError(format!("{error:#}")))?;
+        let log = link.log.get_or_try_init(|| JetStreamLog::open(&link.js)).await?;
         if log.incarnation() != self.incarnation {
-            return Err(LogError("sense stream incarnation changed; cached sense writes retained".into()));
+            return Err(LogError::incarnation("sense stream incarnation changed; cached sense writes retained"));
         }
         Ok(log.clone())
     }

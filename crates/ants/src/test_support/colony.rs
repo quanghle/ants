@@ -20,6 +20,7 @@ pub(crate) fn entry(ant: &str, started: i64, beat: i64, now: DateTime<Utc>) -> C
         handling: 0,
         harnesses: 0,
         escalate_to: Vec::new(),
+        sage: None,
         version: ants_proto::ANTS_VERSION.to_owned(),
         perms: ants_proto::PERMISSIONS_VERSION,
         signed_out: None,

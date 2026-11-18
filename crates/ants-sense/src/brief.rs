@@ -13,6 +13,7 @@
 
 use std::fmt::Write as _;
 
+use ants_proto::UserId;
 use ants_proto::provider::{BRIEF_BUDGET, BoxFuture, CallContext, ToolCall};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -52,13 +53,13 @@ const CORE_LOOP: &[(&str, &str)] = &[
     ("promise", "record commitments with promisees and due times; keep, break, release or renegotiate commitments"),
     ("remind", "set, acknowledge, postpone or drop time and condition reminders"),
     ("recall", "before deciding, search the memories; with an id, read one in full"),
-    (
-        "remember",
-        "keep a fact, lesson, decision, preference or gotcha worth knowing later; replace the self-model or a \
-         relationship record from the revision shown",
-    ),
+    ("remember", "keep a fact, lesson, decision, preference or gotcha worth knowing later"),
     ("vote", "say whether a recalled memory helped, is stale or is wrong"),
-    ("persona", "propose a change of values, voice, boundaries or working style, which a later dream confirms"),
+    (
+        "identity",
+        "show who the ant is; replace the self-model or a relationship record from the revision shown; propose a \
+         change of values, voice, boundaries or working style, which a later dream confirms",
+    ),
     ("skill", "read a skill; propose a new, changed or removed one, which a later dream confirms"),
     ("handoff", "hand the work over as the thread's last write"),
     ("brief", "show this brief again"),
@@ -265,10 +266,30 @@ fn size_warning(bytes: u64) -> Option<Section> {
 }
 
 fn identity_section(card: Option<&Card>, context: &CallContext, experience: Option<&Experience>) -> Section {
-    let heading = "## Identity".to_owned();
+    let mut body = identity_text(card, &context.ant, experience);
+    if let Some(card) = card
+        && let Some(at) = card.returned_at
+    {
+        let how = match card.retired_at {
+            Some(since) => format!(", dormant since {}: back after a retirement", since.format("%Y-%m-%d")),
+            None => ": added again under a new ants identity, as after a revoke and re-add".to_owned(),
+        };
+        let _ = write!(
+            body,
+            "\n{RETURNED}{}{how}. The register, the last handoff and the open commitments below, overdue ones marked, \
+             tell where the work stood.",
+            at.format("%Y-%m-%d")
+        );
+    }
+    Section::whole("## Identity".to_owned(), body)
+}
+
+/// The ant's `card`, or the name of `ant` while it has none, with the lines of `experience` and whether it is
+/// dormant: the identity the brief and `sense_identity` show.
+pub(crate) fn identity_text(card: Option<&Card>, ant: &UserId, experience: Option<&Experience>) -> String {
     let experience = experience.map_or_default(|experience| format!("\n{}", experience_lines(experience)));
     let Some(card) = card else {
-        return Section::whole(heading, format!("{}, with no sense card yet.{experience}", context.ant));
+        return format!("{ant}, with no sense card yet.{experience}");
     };
     let mut body = format!("{} (sense identity {}), born {}.", card.name, card.sense, card.born.format("%Y-%m-%d"));
     if !card.earlier_names.is_empty() {
@@ -293,29 +314,17 @@ fn identity_section(card: Option<&Card>, context: &CallContext, experience: Opti
             at.format("%Y-%m-%d")
         );
     }
-    if let Some(at) = card.returned_at {
-        let how = match card.retired_at {
-            Some(since) => format!(", dormant since {}: back after a retirement", since.format("%Y-%m-%d")),
-            None => ": added again under a new ants identity, as after a revoke and re-add".to_owned(),
-        };
-        let _ = write!(
-            body,
-            "\n{RETURNED}{}{how}. The register, the last handoff and the open commitments below, overdue ones marked, \
-             tell where the work stood.",
-            at.format("%Y-%m-%d")
-        );
-    }
-    Section::whole(heading, body)
+    body
 }
 
 fn persona_section(found: Option<&Item>) -> Section {
     match found {
         Some(found) => Section {
             order: Order::Persona,
-            ..Section::cut_with("## Persona", persona::text(&found.values), "sense_persona")
+            ..Section::cut_with("## Persona", persona::text(&found.values), "sense_identity")
         },
         None => {
-            let body = "No persona yet: propose values, voice, boundaries or working style with sense_persona.";
+            let body = "No persona yet: propose values, voice, boundaries or working style with sense_identity.";
             Section::whole("## Persona".to_owned(), body.to_owned())
         }
     }
@@ -336,7 +345,8 @@ fn skills_section(skills: &[Skill]) -> Option<Section> {
 
 fn self_model_section(found: Option<&RecordItem>) -> Section {
     let Some(found) = found else {
-        let body = "No self-model yet: write one with sense_remember, kind self_model, without a revision.";
+        let body =
+            "No self-model yet: write one with sense_identity, giving self_model and a title, without a revision.";
         return Section::whole("## Self-model".to_owned(), body.to_owned());
     };
     let more = format!("sense_recall id={}", found.id());
@@ -346,7 +356,7 @@ fn self_model_section(found: Option<&RecordItem>) -> Section {
 }
 
 /// The lines of `experience`: the threads and their days, then the people and the repositories of the most threads.
-fn experience_lines(experience: &Experience) -> String {
+pub(crate) fn experience_lines(experience: &Experience) -> String {
     let plural = |count: u32, noun: &str| if count == 1 { format!("1 {noun}") } else { format!("{count} {noun}s") };
     let mut lines = format!(
         "Experience: {}, {} done, on {}.",

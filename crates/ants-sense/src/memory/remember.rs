@@ -32,8 +32,10 @@ pub fn remember<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answe
 
 async fn remember_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     let given: Given = crate::tools::arguments(call)?;
-    if given.kind.as_deref().is_some_and(records::is_record) {
-        return records::remember(sense, call, given).await;
+    if let Some(kind @ (records::SELF_MODEL | records::RELATIONSHIP)) = given.kind.as_deref() {
+        let message =
+            format!("Kind {kind} is no memory: sense_identity replaces the self-model and the relationship records.");
+        return Err(Answer::invalid(message));
     }
     let request = Request::parse(given)?;
     if holds_recalled_block(&request.title.text) || holds_recalled_block(&request.body.text) {
@@ -144,28 +146,25 @@ async fn check(
     Ok(())
 }
 
-/// The arguments of a `sense_remember` call, of a memory or a record ([`records::remember`]); others, such as a writer
-/// or a trust, are ignored.
+/// The arguments of a `sense_remember` call; others, such as a writer or a trust, are ignored.
 #[derive(Deserialize)]
-pub(crate) struct Given {
-    pub kind: Option<String>,
-    pub scope: Option<Scope>,
-    pub title: Option<String>,
-    pub body: Option<String>,
-    /// For a record: the revision replaced.
-    pub revision: Option<u64>,
-    pub importance: Option<u64>,
+struct Given {
+    kind: Option<String>,
+    scope: Option<Scope>,
+    title: Option<String>,
+    body: Option<String>,
+    importance: Option<u64>,
     #[serde(default)]
-    pub citations: Vec<Value>,
+    citations: Vec<Value>,
     #[serde(default)]
-    pub core: bool,
-    pub supersedes: Option<String>,
-    pub quotes: Option<Quotes>,
+    core: bool,
+    supersedes: Option<String>,
+    quotes: Option<Quotes>,
     #[serde(default)]
-    pub force: bool,
+    force: bool,
 }
 
-/// What a text given to remember says it quotes, stored as untrusted.
+/// What a text given to remember or to replace a record says it quotes, stored as untrusted.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Quotes {
@@ -248,8 +247,7 @@ impl Request {
 }
 
 fn kinds(start: &str) -> String {
-    let mut all: Vec<_> = MemoryKind::ALL.iter().map(|kind| kind.name()).collect();
-    all.extend([records::SELF_MODEL, records::RELATIONSHIP]);
+    let all: Vec<_> = MemoryKind::ALL.iter().map(|kind| kind.name()).collect();
     format!("{start}: one of {}.", all.join(", "))
 }
 

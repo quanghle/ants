@@ -12,6 +12,11 @@ fn on(thread: u8) -> CallContext {
     CallContext { thread, ..context(human()) }
 }
 
+/// The ant of the tests, reading its packet alone.
+fn ant() -> Reader {
+    Reader::Ant(context(human()).ant)
+}
+
 fn start(at: DateTime<Utc>, writer: &CallContext) -> Start<'_> {
     Start { at, recipient: Recipient::Ant, threads: Vec::new(), commits: Vec::new(), writer }
 }
@@ -109,7 +114,7 @@ async fn findings_gather_what_needs_judging_and_the_open_ones_come_again() {
             ("1.4", FindingKind::Distill, episode.clone(), false),
         ]
     );
-    let shown = packet(&*items, &first, &Reader::Ant, &[]).await.unwrap();
+    let shown = packet(&*items, &first, &ant(), &[]).await.unwrap();
     assert!(shown.contains("- 1.3 (needs_review, untrusted): Memory"), "{shown}");
     woken(&*items, 1, &on(1).thread).await.unwrap();
     let verdicts = json!({"verdicts": [
@@ -132,7 +137,7 @@ async fn findings_gather_what_needs_judging_and_the_open_ones_come_again() {
         [("1.2", FindingKind::NeedsReview), ("1.4", FindingKind::Distill)],
         "the deferred and unanswered come again, the applied and rejected not, nor the diary to distill"
     );
-    let packet = packet(&*items, &second, &Reader::Ant, &[]).await.unwrap();
+    let packet = packet(&*items, &second, &ant(), &[]).await.unwrap();
     assert!(packet.contains("## Verdicts on dream 1"), "{packet}");
     assert!(packet.contains("- 1.4 (distill): unanswered"), "{packet}");
     assert!(packet.contains("- 1.2 (needs_review, offered again): Memory"), "{packet}");
@@ -255,14 +260,15 @@ async fn verdicts_are_taken_on_the_dream_thread_checked_and_replaced() {
     assert_eq!(error(&answer(&sense, 1, json!({})).await), "done");
 }
 
+/// A call of tool `name` on thread `thread` with `arguments`.
+fn called(name: &str, thread: u8, arguments: &serde_json::Value) -> ToolCall {
+    let arguments = arguments.as_object().unwrap().clone();
+    ToolCall { name: name.into(), arguments, context: on(thread), format: Format::Json }
+}
+
 fn remember(thread: u8, n: usize) -> ToolCall {
     let arguments = json!({"kind": "fact", "title": format!("Fact {n}"), "body": format!("Body {n}."), "force": true});
-    ToolCall {
-        name: "remember".into(),
-        arguments: arguments.as_object().unwrap().clone(),
-        context: on(thread),
-        format: Format::Json,
-    }
+    called("remember", thread, &arguments)
 }
 
 #[tokio::test]
@@ -277,13 +283,22 @@ async fn writes_on_a_dream_thread_are_counted_and_refused_past_the_cap() {
     };
     let mut written = Vec::new();
     for n in 0..MAX_DREAM_WRITES {
-        let (answer, refused) = json(sense.call_tool(remember(1, n)).await.unwrap());
+        let call = match n {
+            0 => called("identity", 1, &json!({"self_model": "Careful.", "title": "Me"})),
+            n => remember(1, n),
+        };
+        let (answer, refused) = json(sense.call_tool(call).await.unwrap());
         assert!(!refused, "{answer}");
         assert_eq!(answer["dream_writes"], n + 1);
         written.push(answer["id"].as_str().unwrap().parse::<ItemId>().unwrap());
     }
     let (answer, refused) = json(sense.call_tool(remember(1, MAX_DREAM_WRITES)).await.unwrap());
     assert!(refused && answer["error"] == "dream_cap", "{answer}");
+    let record = called("identity", 1, &json!({"self_model": "Bolder.", "title": "Me", "revision": 1}));
+    let (answer, refused) = json(sense.call_tool(record).await.unwrap());
+    assert!(refused && answer["error"] == "dream_cap", "a record is a write: {answer}");
+    let (answer, refused) = json(sense.call_tool(called("identity", 1, &json!({}))).await.unwrap());
+    assert!(!refused && answer["self_model"]["body"] == "Careful.", "showing the identity writes nothing: {answer}");
     let (answer, refused) = json(sense.call_tool(remember(2, MAX_DREAM_WRITES)).await.unwrap());
     assert!(!refused && answer.get("dream_writes").is_none(), "other threads write freely: {answer}");
     assert_eq!(get(&*items, 1).await.unwrap().unwrap().0.writes, written);
@@ -333,28 +348,28 @@ fn reviewing(threads: u8, findings: usize) -> Dream {
 fn a_packet_over_its_budget_trims_threads_to_their_latest_then_leaves_out_threads_then_findings() {
     let dream = reviewing(3, 5);
     let threads = [thread(1, 3_000, false), thread(2, 3_000, true), thread(3, 3_000, false)];
-    let whole = compose(&dream, None, &Reader::Ant, &threads, PACKET_BUDGET);
+    let whole = compose(&dream, None, &ant(), &Identity::default(), &threads, PACKET_BUDGET);
     assert!(!whole.contains("left out"), "{whole}");
     assert!(whole.contains("github.com/o/r at abc123, in the worktree of thread"), "{whole}");
     assert!(whole.contains(&format!("### Thread {}, started by alice (untrusted", on(2).thread)), "{whole}");
 
     let budget = whole.len() - 2_000;
-    let trimmed = compose(&dream, None, &Reader::Ant, &threads, budget);
+    let trimmed = compose(&dream, None, &ant(), &Identity::default(), &threads, budget);
     assert!(trimmed.len() <= budget && trimmed.len() > budget - 100, "{} of {budget}", trimmed.len());
     assert_eq!(trimmed.matches("earlier bytes left out for room]").count(), 3, "{trimmed}");
     assert!(trimmed.ends_with("message 3 of a thread\n"), "the latest kept");
 
     let budget = whole.len() - 6_400;
-    let dropped = compose(&dream, None, &Reader::Ant, &threads, budget);
+    let dropped = compose(&dream, None, &ant(), &Identity::default(), &threads, budget);
     assert!(dropped.len() <= budget, "{} of {budget}", dropped.len());
     let left_out = format!("Left out for room, the least recently active: threads {}.", on(3).thread);
     assert!(dropped.contains(&left_out) && dropped.contains("message 2 of a thread"), "{dropped}");
 
-    let least = compose(&dream, None, &Reader::Ant, &threads, 0);
+    let least = compose(&dream, None, &ant(), &Identity::default(), &threads, 0);
     assert!(least.contains("5 more findings left out") && !least.contains("message 1"), "{least}");
     let line = format!("{}\n", packet::finding_line(&finding(1), 1));
     let budget = least.len() + 3 * line.len() + 10;
-    let cut = compose(&dream, None, &Reader::Ant, &threads, budget);
+    let cut = compose(&dream, None, &ant(), &Identity::default(), &threads, budget);
     assert!(cut.len() <= budget && !cut.contains("message 1"), "{cut}");
     assert!(cut.contains("Finding number 3") && !cut.contains("Finding number 4"), "{cut}");
     assert!(cut.contains("2 more findings left out for room: the next dream offers them again."), "{cut}");
@@ -372,7 +387,7 @@ fn a_thread_shows_its_timeline_after_its_history_the_latest_of_both_kept_for_roo
             ..thread(n, 0, n == 2)
         })
         .collect();
-    let long = compose(&dream, None, &Reader::Ant, &threads, PACKET_BUDGET);
+    let long = compose(&dream, None, &ant(), &Identity::default(), &threads, PACKET_BUDGET);
     assert!(!long.contains("left out"), "{long}");
     let untrusted = format!("### Thread {}, started by alice (untrusted", on(2).thread);
     let (first, second) = long.split_once(&untrusted).unwrap();
@@ -384,23 +399,23 @@ fn a_thread_shows_its_timeline_after_its_history_the_latest_of_both_kept_for_roo
     }
     let bare = packet::Thread { timeline: String::new(), ..threads[0].clone() };
     assert!(
-        !compose(&dream, None, &Reader::Ant, &[bare], PACKET_BUDGET).contains("#### Timeline"),
+        !compose(&dream, None, &ant(), &Identity::default(), &[bare], PACKET_BUDGET).contains("#### Timeline"),
         "no section without one"
     );
 
     // A shorter timeline stays whole while the history gives way.
     let short: Vec<_> =
         threads.iter().map(|t| packet::Thread { timeline: lines("call", 0, 30), ..t.clone() }).collect();
-    let whole = compose(&dream, None, &Reader::Ant, &short, PACKET_BUDGET);
+    let whole = compose(&dream, None, &ant(), &Identity::default(), &short, PACKET_BUDGET);
     let budget = whole.len() - 2_000;
-    let trimmed = compose(&dream, None, &Reader::Ant, &short, budget);
+    let trimmed = compose(&dream, None, &ant(), &Identity::default(), &short, budget);
     assert!(trimmed.len() <= budget, "{} of {budget}", trimmed.len());
     assert_eq!(trimmed.matches("earlier bytes left out for room]\nmessage").count(), 2, "{trimmed}");
     assert_eq!(trimmed.matches("call 000 of thread 0").count(), 2, "{trimmed}");
 
     // Both long, each keeps its latest half.
     let budget = long.len() - 6_000;
-    let trimmed = compose(&dream, None, &Reader::Ant, &threads, budget);
+    let trimmed = compose(&dream, None, &ant(), &Identity::default(), &threads, budget);
     assert!(trimmed.len() <= budget, "{} of {budget}", trimmed.len());
     assert_eq!(trimmed.matches("earlier bytes left out for room]").count(), 4, "{trimmed}");
     assert!(!trimmed.contains("call 000 of thread 1") && !trimmed.contains("message 000 of thread 1"), "{trimmed}");
@@ -408,4 +423,5 @@ fn a_thread_shows_its_timeline_after_its_history_the_latest_of_both_kept_for_roo
     assert!(trimmed.ends_with("call 099 of thread 2\n"), "the latest kept: {trimmed}");
 }
 
+mod identity_section;
 mod review;
