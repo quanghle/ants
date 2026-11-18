@@ -310,9 +310,9 @@ pub fn waiting(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
     items(data, now).into_iter().filter(|i| i.request.as_ref().is_none_or(|(_, settled)| settled.is_none())).collect()
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Page {
-    /// The selected item, kept on it as items arrive and leave.
+    /// The selected item: the top one until a key moves it, then kept on it as items arrive and leave.
     selected: Selection<Id>,
     /// The groups of tool requests listed one by one, by ant and thread.
     expanded: HashSet<(UserId, ThreadId)>,
@@ -320,6 +320,12 @@ pub struct Page {
     answering: Option<question::Cursor>,
     /// How wide the cards were drawn last, which tells whether a tool request shows whole on its card.
     width: Cell<Option<usize>>,
+}
+
+impl Default for Page {
+    fn default() -> Self {
+        Self { selected: Selection::on_top(), expanded: HashSet::new(), answering: None, width: Cell::new(None) }
+    }
 }
 
 impl Page {
@@ -499,7 +505,7 @@ impl Page {
             frame.render_widget(Paragraph::new(text), area);
             return;
         }
-        let selected = self.at(&items);
+        let selected = self.selected.drawn(&items.iter().map(Item::id).collect::<Vec<_>>());
         let width = usize::from(area.width.saturating_sub(9));
         self.width.set(Some(width));
         let cursor = self.card(data, now).map(|(cursor, _)| cursor);
@@ -960,6 +966,39 @@ mod tests {
         m.data.marker.as_mut().unwrap().unmark(2);
         let whys: Vec<Why> = items(&m.data, at(3)).into_iter().map(|i| i.why).collect();
         assert_eq!(whys, [Why::Finished], "marked unread, it is back");
+    }
+
+    #[test]
+    fn home_opens_on_its_top_item_until_a_key_moves_the_selection() {
+        let (done, asked) = (ThreadId::generate(), ThreadId::generate());
+        let selected = |m: &crate::tui::model::Model| {
+            let crate::tui::model::Page::Home(home) = m.page() else { panic!("home") };
+            home.thread(&m.data)
+        };
+        let finished = || {
+            let mut m = model();
+            let mut opening = message(1, &done, "alice", "dev-a", "deploy");
+            opening.owner = Some(user("alice"));
+            m.stored(vec![opening, message(2, &done, "dev-a", "alice", "deployed")], at(2));
+            shown(&m, at(3));
+            assert_eq!(selected(&m), Some(done.clone()), "the finished thread on top");
+            m
+        };
+        let push =
+            ApprovalRequest { thread_id: asked.clone(), ..request("dev-a", "git push", vec![Verdict::AllowOnce]) };
+
+        let mut m = finished();
+        m.data.live.approval(&Update::Pending(push.clone()));
+        let screen = shown(&m, at(3));
+        assert!(screen.find("│approve ") < screen.find("│finished "), "{screen}");
+        assert_eq!(selected(&m), Some(asked), "the request listed after the first draw selected on top");
+        assert_eq!(m.key(Key::Char('a'), at(3)), Some(Action::Decide(Box::new(push.clone()), Verdict::AllowOnce)));
+
+        let mut m = finished();
+        m.key(Key::Home, at(3));
+        m.data.live.approval(&Update::Pending(push));
+        shown(&m, at(3));
+        assert_eq!(selected(&m), Some(done), "moved by a key, it stays with its item");
     }
 
     #[test]
