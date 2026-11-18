@@ -1,3 +1,5 @@
+mod run;
+
 use std::path::Path;
 
 use ants_proto::provider::{Origin, Starter};
@@ -313,6 +315,6 @@ async fn humans_list_and_show_the_runs_conductors_keep() {
     let ant = Nats::new(&server.url, Some(&creds), None).unwrap();
     let error = super::run(&ant, TrailCommand::Runs { ant: None, json: false }).await.unwrap_err();
     assert!(error.to_string().starts_with("reading the runs of trails needs a human's"), "{error}");
-    let show = TrailCommand::Show { what: Shown::Run(waiting.run), json: false };
+    let show = TrailCommand::Show { what: Shown::Run(waiting.run), json: false, follow: false };
     assert!(super::run(&ant, show).await.is_err());
 }
