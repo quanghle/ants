@@ -91,6 +91,7 @@ ants colony                                         # active ants and harness st
 ants channel create ops --member dev-a
 ants post --wait '#ops' "@dev-a check the failing build"
 ants trail save deploy.py                           # a trail: a Python script orchestrating ants
+ants trail run deploy --follow                      # start and follow a run, its spending limits shown first
 ants                                                # full-screen terminal chat UI (also: ants chat)
 ```
 

@@ -2,11 +2,12 @@
 //! batched direct gets.
 
 use std::fmt::Write as _;
+use std::str::FromStr;
 
 use ants_proto::provider::Starter;
 use ants_proto::{
     CallAnswer, JournalEntry, PendingCall, QueuedCall, RunId, RunState, TRAIL_RUNS_BUCKET, TrailFunction, TrailRun,
-    TrailSession, UserId, parse_trail_run_key, trail_run_key, trail_session_key,
+    TrailSession, UserId, Uuid, parse_trail_run_key, trail_run_key, trail_session_key,
 };
 use anyhow::{Result, bail};
 use async_nats::jetstream;
@@ -35,7 +36,7 @@ async fn headers(js: &jetstream::Context, filter: &str) -> Result<Vec<TrailRun>>
     Ok(found.iter().filter(|(key, _)| parse_trail_run_key(key).is_some()).filter_map(|(k, v)| parse(k, v)).collect())
 }
 
-fn parse<T: serde::de::DeserializeOwned>(key: &str, payload: &[u8]) -> Option<T> {
+pub(super) fn parse<T: serde::de::DeserializeOwned>(key: &str, payload: &[u8]) -> Option<T> {
     serde_json::from_slice(payload).inspect_err(|e| tracing::warn!(key, "skipping a malformed run entry: {e}")).ok()
 }
 
@@ -70,6 +71,46 @@ pub(super) async fn find(js: &jetstream::Context, run: &RunId) -> Result<TrailRu
     }
 }
 
+/// A run as a human names it: by its id, or a unique start of one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Pick(String);
+
+impl FromStr for Pick {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.to_ascii_lowercase();
+        if s.is_empty() || s.len() > 36 || !s.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            return Err("a run's id, or a unique start of one, is hex digits and '-'".to_owned());
+        }
+        Ok(Self(s))
+    }
+}
+
+impl std::fmt::Display for Pick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The run `pick` names, of whichever conductor keeps it: the one of that id, else the one run whose id starts so.
+pub(super) async fn pick(js: &jetstream::Context, pick: &Pick) -> Result<TrailRun> {
+    if Uuid::try_parse(&pick.0).is_ok() {
+        return find(js, &pick.0.parse()?).await;
+    }
+    let mut found: Vec<TrailRun> =
+        list(js, None).await?.into_iter().filter(|r| r.run.as_str().starts_with(&pick.0)).collect();
+    match found.len() {
+        0 => bail!("no run's id starts with {pick}: `ants trail runs` lists the runs kept"),
+        1 => Ok(found.remove(0)),
+        n => {
+            let ids: Vec<&str> = found.iter().take(5).map(|r| r.run.as_str()).collect();
+            let more = if n > ids.len() { ", …" } else { "" };
+            bail!("{n} runs' ids start with {pick} ({}{more}): give more of the id", ids.join(", "))
+        }
+    }
+}
+
 /// The run `run` with the calls it waits on and its journal.
 pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detail> {
     let header = find(js, run).await?;
@@ -86,7 +127,7 @@ pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detai
 }
 
 /// The run's state in a word.
-fn state(state: &RunState) -> &'static str {
+pub(super) fn state(state: &RunState) -> &'static str {
     match state {
         RunState::Running => "running",
         RunState::Waiting => "waiting",
@@ -96,7 +137,7 @@ fn state(state: &RunState) -> &'static str {
     }
 }
 
-fn function(function: TrailFunction) -> &'static str {
+pub(super) fn function(function: TrailFunction) -> &'static str {
     match function {
         TrailFunction::Agent => "agent",
         TrailFunction::Human => "human",
@@ -134,7 +175,7 @@ pub(super) fn table(runs: &[TrailRun], now: DateTime<Utc>) -> String {
 }
 
 /// What a call asks, in short: its label, else its prompt or questions.
-fn gist(args: &Value) -> String {
+pub(super) fn gist(args: &Value) -> String {
     let text = ["label", "prompt", "questions"]
         .iter()
         .find_map(|key| args.get(key))

@@ -60,10 +60,7 @@ pub(super) fn local_dir() -> Result<PathBuf> {
 /// does not compile, lacks its literal meta first, or breaks the bounds of [`SavedTrail::check`].
 pub(super) fn read(path: &Path, name: Option<TrailName>, by: &UserId, now: DateTime<Utc>) -> Result<SavedTrail> {
     let script = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let meta = ants_trail::check(&script).map_err(|e| match e {
-        ants_trail::TrailError::Syntax(traceback) => anyhow!("{} does not compile:\n{traceback}", path.display()),
-        ants_trail::TrailError::Meta(why) => anyhow!("{}: {why}", path.display()),
-    })?;
+    let meta = checked(path, &script)?;
     let name = match name {
         Some(name) => name,
         None => meta.name.parse().map_err(|_| {
@@ -81,6 +78,14 @@ pub(super) fn read(path: &Path, name: Option<TrailName>, by: &UserId, now: DateT
     };
     trail.check()?;
     Ok(trail)
+}
+
+/// The meta of `script`, the file `path`: refused when the file does not compile or lacks its literal meta first.
+pub(super) fn checked(path: &Path, script: &str) -> Result<ants_trail::Meta> {
+    ants_trail::check(script).map_err(|e| match e {
+        ants_trail::TrailError::Syntax(traceback) => anyhow!("{} does not compile:\n{traceback}", path.display()),
+        ants_trail::TrailError::Meta(why) => anyhow!("{}: {why}", path.display()),
+    })
 }
 
 /// Refuse a name reading as a run's id, which `ants trail show` takes for a run.

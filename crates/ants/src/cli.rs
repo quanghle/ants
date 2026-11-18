@@ -152,9 +152,9 @@ pub(crate) enum Command {
     /// Nothing is consumed or marked read. Needs a human's credentials.
     #[command(subcommand)]
     Thread(ThreadCommand),
-    /// Trails, Python scripts that orchestrate ants: save one for the colony, list, show or remove the saved ones, and
-    /// list and show the runs conductors keep. A trail's file starts with a literal `meta = {"name": ..., "description":
-    /// ..., "phases": [...]}`.
+    /// Trails, Python scripts that orchestrate ants: save one for the colony, list, show or remove the saved ones; start
+    /// a run, follow, stop or resume it, and list and show the runs conductors keep. A trail's file starts with a
+    /// literal `meta = {"name": ..., "description": ..., "phases": [...]}`.
     #[command(subcommand)]
     Trail(TrailCommand),
     /// Ask the config file's `[cli]` `summary_ant` (by default the messenger) for a digest of the threads with entries
