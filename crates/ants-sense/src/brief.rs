@@ -3,7 +3,8 @@
 //! broken or over its size limit ([`SIZE_LIMIT`]), the identity with the experience counted from the ant's thread
 //! records ([`thread::experience`]), the persona, the self-model, the thread's resume register, the unacknowledged
 //! handoffs, open commitments, fired and upcoming reminders, claimed and ready tasks, the relationship records of the
-//! thread's participants, the core and top memories, the skills index, and the core loop of tools.
+//! thread's participants, the core and top memories (on a review, [`REVIEWED_MEMORIES`] of them kept for memories of
+//! the ant under review), the skills index, and the core loop of tools.
 //!
 //! The brief stays within its byte budget ([`fit`]), cutting what other calls show before the ant's identity
 //! ([`Order`]): memories and skills are shortened to their titles first, then the work sections, memories and skills
@@ -14,7 +15,7 @@
 use std::fmt::Write as _;
 
 use ants_proto::UserId;
-use ants_proto::provider::{BRIEF_BUDGET, BoxFuture, CallContext, ToolCall};
+use ants_proto::provider::{BRIEF_BUDGET, BoxFuture, CallContext, Starter, ToolCall};
 use serde_json::json;
 
 use crate::dream::{self, ReviewTally};
@@ -33,6 +34,9 @@ use crate::{Answer, Sense, persona, promise, remind, task};
 pub const MAX_HANDOFFS: usize = 5;
 /// The most memories past the core ones a brief shows.
 pub const TOP_MEMORIES: usize = 10;
+/// The top memories a review's brief keeps for memories of the ant under review, when it has them, however the sage's
+/// own rank.
+pub const REVIEWED_MEMORIES: usize = 2;
 /// What the line ending a cut section starts with, the tool call showing the rest after it.
 pub const MORE: &str = "… more: ";
 /// What the line telling the ant of its return starts with.
@@ -457,7 +461,8 @@ async fn work_sections(items: &dyn Items, context: &CallContext) -> Result<Vec<S
     .collect())
 }
 
-/// The core memories, then the top memories of the thread's scopes but the `episodes` of the handoffs shown.
+/// The core memories, then the top memories of the thread's scopes but the `episodes` of the handoffs shown, a
+/// review's keeping room for those of the ant under review ([`top_memories`]).
 async fn memories_section(
     items: &dyn Items,
     context: &CallContext,
@@ -467,9 +472,14 @@ async fn memories_section(
     let mut scopes = vec![Scope::Own];
     scopes.extend(thread_repo(context));
     scopes.extend(participants(context));
-    let top = memory::top(items, &scopes, TOP_MEMORIES + core.len() + episodes.len(), context.at).await?;
     let shown = |ranked: &Ranked| ranked.found.memory.core || episodes.contains(ranked.found.id());
-    let top: Vec<Ranked> = top.into_iter().filter(|ranked| !shown(ranked)).take(TOP_MEMORIES).collect();
+    let mut ranked = memory::top(items, &scopes, usize::MAX, context.at).await?;
+    ranked.retain(|ranked| !shown(ranked));
+    let reviewed = match &context.origin.by {
+        Starter::Review { user } => Some(Scope::Ant(user.clone())),
+        _ => None,
+    };
+    let top = top_memories(ranked, reviewed.as_ref());
     if core.is_empty() && top.is_empty() {
         return Ok(None);
     }
@@ -495,6 +505,23 @@ async fn memories_section(
         Section::cut_with("## Memories", body.join("\n"), "sense_recall, or sense_recall id=<id> for one in full");
     (section.framed, section.titles) = (true, Some(titles.join("\n")));
     Ok(Some(section))
+}
+
+/// The best [`TOP_MEMORIES`] of `ranked`, the best first, holding the best [`REVIEWED_MEMORIES`] of scope `reviewed`
+/// however the others rank.
+fn top_memories(ranked: Vec<Ranked>, reviewed: Option<&Scope>) -> Vec<Ranked> {
+    let of_reviewed = |ranked: &Ranked| reviewed == Some(&ranked.found.memory.scope);
+    let mut held = ranked.iter().filter(|ranked| of_reviewed(ranked)).take(REVIEWED_MEMORIES).count();
+    let mut others = TOP_MEMORIES - held;
+    let mut top = Vec::new();
+    for ranked in ranked {
+        let room = if held > 0 && of_reviewed(&ranked) { &mut held } else { &mut others };
+        if *room > 0 {
+            *room -= 1;
+            top.push(ranked);
+        }
+    }
+    top
 }
 
 /// A memory's id, kind, scope, importance and what to mind, then its title.
