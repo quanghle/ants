@@ -38,6 +38,7 @@ mod model;
 mod mouse;
 mod nav;
 mod notices;
+mod notify;
 mod palette;
 #[cfg(test)]
 mod parity;

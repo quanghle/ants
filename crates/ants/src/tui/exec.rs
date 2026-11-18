@@ -1,7 +1,7 @@
 //! What the command bar's sends and slash commands do over the CLI's connection, in the background while the UI goes
 //! on: the same library code as `ants ask`, `ants post`, `ants answer`, `ants react`, `ants cancel`, `ants thread
-//! done|title|pin|mute...`, `ants remind list` ([`super::remind`]) and `ants trail` ([`super::trail`]) run, each
-//! returning the line those print and the warnings they log.
+//! done|title|pin|mute...`, `ants notify` ([`super::notify`]), `ants remind list` ([`super::remind`]) and `ants trail`
+//! ([`super::trail`]) run, each returning the line those print and the warnings they log.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -19,7 +19,7 @@ use futures::future::LocalBoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 
-use super::{attach, remind, trail};
+use super::{attach, notify, remind, trail};
 use crate::admin::orders;
 use crate::admin::pause;
 use crate::cmd::{cancel, send};
@@ -145,6 +145,12 @@ pub enum Job {
         channel: ChannelId,
         level: ChannelNotify,
     },
+    /// Hold back the human's push notifications on every device this long, as `ants notify snooze` does.
+    NotifySnooze(Duration),
+    /// End the snooze, as `ants notify resume` does.
+    NotifyResume,
+    /// Show what holds the human's push notifications back, as `ants notify status` does.
+    NotifyStatus,
     /// List the human's reminders, as `ants remind list` does.
     Reminders,
     Title {
@@ -361,6 +367,9 @@ impl Job {
             Self::ChannelNotify { channel, level } => {
                 Ok(Done::line(quiet::channel_notify(&ctx.js, me, &channel, level).await?))
             }
+            Self::NotifySnooze(hold) => Ok(Done::line(quiet::snoozed(&ctx.js, me, hold).await?)),
+            Self::NotifyResume => Ok(Done::line(quiet::resumed(&ctx.js, me).await?)),
+            Self::NotifyStatus => notify::status(ctx).await,
             Self::Reminders => remind::listed(ctx).await,
             Self::Title { thread, text } => {
                 Ok(Done::line(thread_meta::retitle(&ctx.js, ctx.meta()?, &ctx.sealing, &thread, &text, false).await?))

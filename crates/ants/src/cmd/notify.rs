@@ -1,4 +1,5 @@
-//! `ants notify`: snooze, resume and show the notifications `ants webhook serve` pushes to the CLI's human.
+//! `ants notify`: snooze, resume and show the notifications `ants webhook serve` pushes to the CLI's human, as
+//! `/notify snooze|resume|status` in `ants chat` does.
 
 use std::time::Duration;
 

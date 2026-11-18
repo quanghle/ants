@@ -28,8 +28,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("unmute", "", "notify of the thread again"),
     (
         "notify",
-        "all|humans|mentions",
-        "which unread posts of the channel count: all, by humans and @mentions, @mentions",
+        "all|humans|mentions | snooze DURATION | resume | status",
+        "which unread posts of the channel count; snooze or resume push notifications, or show what holds them",
     ),
     ("snooze", "[DURATION]", "keep the thread off home, 1h unless given"),
     ("unsnooze", "", "bring the thread back on home"),
@@ -96,8 +96,7 @@ pub enum Slash {
     Mark(Marking),
     Mute(Option<Duration>),
     Unmute,
-    /// Set the notify level of the channel on view.
-    Notify(ChannelNotify),
+    Notify(Notify),
     /// Keep the thread off home this long.
     Snooze(TimeDelta),
     Unsnooze,
@@ -127,6 +126,17 @@ pub enum Slash {
     Retire(UserId),
     Trail(Trail),
     Quit,
+}
+
+/// What `/notify` asks: the notify level of the channel on view, as `ants channel notify` sets it, or of the human's
+/// push notifications, as `ants notify` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notify {
+    Level(ChannelNotify),
+    /// Hold them back on every device this long.
+    Snooze(Duration),
+    Resume,
+    Status,
 }
 
 /// What `/trail` asks of the runs of trails, as `ants trail` does.
@@ -252,7 +262,7 @@ fn slash(text: &str) -> Result<Slash, String> {
         "mute" if args.is_empty() => Ok(Slash::Mute(None)),
         "mute" => ants_proto::duration::parse(args).map(|hold| Slash::Mute(Some(hold))).map_err(|e| e.to_string()),
         "unmute" => bare(Slash::Unmute),
-        "notify" => text()?.parse().map(Slash::Notify),
+        "notify" => notify(args).map(Slash::Notify).map_err(|why| why.unwrap_or_else(usage)),
         "snooze" => snooze::duration(args).map(Slash::Snooze),
         "unsnooze" => bare(Slash::Unsnooze),
         "remind" => text().map(Slash::Remind),
@@ -281,6 +291,18 @@ fn slash(text: &str) -> Result<Slash, String> {
         "quit" => bare(Slash::Quit),
         _ if COMMANDS.iter().any(|(n, ..)| *n == name) => Err(usage()),
         _ => Err(format!("no command /{name}: the palette lists them")),
+    }
+}
+
+/// What `/notify`'s `args` ask, or why not: None for its usage.
+fn notify(args: &str) -> Result<Notify, Option<String>> {
+    match first_word(args) {
+        ("", _) | ("snooze", "") => Err(None),
+        ("snooze", hold) => ants_proto::duration::parse(hold).map(Notify::Snooze).map_err(|e| Some(e.to_string())),
+        ("resume", "") => Ok(Notify::Resume),
+        ("status", "") => Ok(Notify::Status),
+        ("resume" | "status", _) => Err(None),
+        _ => args.parse().map(Notify::Level).map_err(Some),
     }
 }
 
@@ -368,8 +390,15 @@ mod tests {
         assert_eq!(ok("/grant"), Slash::Grant(None));
         assert_eq!(ok("/answer ship it"), Slash::Answer("ship it".into()));
         assert_eq!(ok("/mute 2h"), Slash::Mute(Some(Duration::from_hours(2))));
-        assert_eq!(ok("/notify mentions"), Slash::Notify(ChannelNotify::Mentions));
-        assert!(parse("/notify").unwrap_err().starts_with("usage: /notify all|humans|mentions"));
+        assert_eq!(ok("/notify mentions"), Slash::Notify(Notify::Level(ChannelNotify::Mentions)));
+        assert_eq!(ok("/notify snooze 90m"), Slash::Notify(Notify::Snooze(Duration::from_mins(90))));
+        assert_eq!(ok("/NOTIFY resume"), Slash::Notify(Notify::Resume));
+        assert_eq!(ok("/notify status"), Slash::Notify(Notify::Status));
+        let usage = "usage: /notify all|humans|mentions | snooze DURATION | resume | status";
+        for refused in ["/notify", "/notify snooze", "/notify resume now", "/notify status --json"] {
+            assert_eq!(parse(refused).unwrap_err(), usage, "{refused}");
+        }
+        assert!(parse("/notify snooze soon").is_err());
         assert!(parse("/notify some").unwrap_err().starts_with("unknown notify level"));
         assert_eq!(ok("/react eyes"), Slash::React("eyes".parse().unwrap()));
         assert_eq!(ok("/goto #ops"), Slash::Goto(Goto::Channel("ops".parse().unwrap())));

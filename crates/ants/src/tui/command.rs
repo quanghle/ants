@@ -28,7 +28,7 @@ mod route;
 pub use bar::{Bar, Draft, Edited, Note, Tone};
 pub use drafts::{Conversation, Drafts};
 pub use history::{FILE as HISTORY_FILE, History};
-pub use parse::{COMMANDS, Command, Goto, Slash, Trail, parse};
+pub use parse::{COMMANDS, Command, Goto, Notify, Slash, Trail, parse};
 pub use route::Route;
 
 /// A paste of more bytes than this is staged as a text file rather than put in the bar.
@@ -241,11 +241,14 @@ impl Model {
             Slash::Mark(marking) => run(Job::Mark { thread: self.target()?, marking }),
             Slash::Mute(hold) => run(Job::Mute { thread: self.target()?, hold: hold.unwrap_or(quiet::MUTE_FOR) }),
             Slash::Unmute => run(Job::Unmute { thread: self.target()? }),
-            Slash::Notify(level) => {
+            Slash::Notify(Notify::Level(level)) => {
                 let (channel, _) =
                     self.channel_on_view().ok_or("/notify sets a channel's notify level: show the channel first")?;
                 Ok(Some(self.set_level(channel, level)))
             }
+            Slash::Notify(Notify::Snooze(hold)) => run(Job::NotifySnooze(hold)),
+            Slash::Notify(Notify::Resume) => run(Job::NotifyResume),
+            Slash::Notify(Notify::Status) => run(Job::NotifyStatus),
             Slash::Snooze(duration) => Ok(Some(self.set_snooze(self.target()?, Some(now + duration), now))),
             Slash::Unsnooze => Ok(Some(self.set_snooze(self.target()?, None, now))),
             Slash::Remind(text) => {
@@ -454,7 +457,6 @@ impl Model {
             },
             "later" => (!matches!(self.page(), Page::Thread(_))).then(|| "no thread open".to_owned()),
             "answer" => self.question(now).err(),
-            "notify" => self.channel_on_view().is_none().then(|| "no channel shown".to_owned()),
             "forward" if matches!(self.page(), Page::Thread(page) if page.chosen().is_some()) => None,
             "save" => self.attachment().is_none().then(|| "no attachment on the selected message".to_owned()),
             "grant" | "done" | "undone" | "pin" | "unpin" | "mute" | "unmute" | "snooze" | "unsnooze" | "remind"
