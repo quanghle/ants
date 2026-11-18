@@ -361,7 +361,7 @@ ants enroll approve dev-c --js-domain hub                         # or: ants enr
 
 On the machine holding the account key, `ants chat` lists the pending requests too, on home and on the credentials page (`c`), where `a` then `y` approves one and `r` then `y` rejects it. Elsewhere, home and the credentials page name the machine holding the key, as `ants signer` there records it (`ants machines` prints it too): each time it connects, at start and every 5 minutes, the signer puts the `_account` key of `ants_machines` (`AccountHolder`: `machine`, from the `[host]` table of its config file, else its top-level `machine` when that is a machine name, else the first label of the host name, `hostname`, `version`, `updated_at`). Only credentials signed with the account key write that key (no machine name starts with `_`, so no host credentials do); humans read it with the rest of the bucket. Without a signer, the page says the key is where `ants auth init` ran.
 
-With `--home` naming the home of an earlier ant of another name, as after `ants auth revoke`, the new ant keeps that ant's sense data: `ants add` lists the earlier name in the home's `.sense/names` ([architecture.md](architecture.md#sense-identity)).
+With `--home` naming the home of an earlier ant of another name, as after `ants auth revoke`, the new ant keeps that ant's sense data: `ants add` lists the earlier name in the home's `.sense/names` ([sense.md](sense.md#identity)).
 
 `ants add --enroll` repeats its request every 5 s and stops with an error at a rejection, when the enrollment credentials expire, or when the server refuses them (revoked), even while the server is unreachable.
 
