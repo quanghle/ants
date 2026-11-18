@@ -20,6 +20,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, tool_handler};
 
 use super::serve::Caller;
 use super::{Hub, SERVER_NAME};
+use crate::sync::MutexExt as _;
 
 /// The tools, served to one MCP connection. Over HTTP the caller's thread comes with each request instead.
 #[derive(Clone)]
@@ -56,6 +57,25 @@ impl Tools {
                 parts.extensions.get::<Caller>().map(|c| c.0.clone())
             })
             .ok_or_else(|| ErrorData::invalid_request("no ants session behind this connection", None))
+    }
+
+    /// The refusal of tool `name` on a thread narrowed to a review ([`ants_proto::REVIEW_ALLOW`]): a review only reads
+    /// and answers with its reply (requirement ants-x39hk.12.4).
+    fn refused_in_review(&self, name: &str, cx: &RequestContext<RoleServer>) -> Option<CallToolResult> {
+        let thread = self.thread(cx).ok()?;
+        let allow = self.hub.sessions.locked().current.get(&thread)?.allow.clone();
+        if !ants_proto::is_review(allow.as_deref()) {
+            return None;
+        }
+        let read_only = ants_proto::REVIEW_ALLOW.iter().filter_map(|rule| rule.strip_prefix("other:"));
+        (!read_only.clone().any(|tool| tool == name)).then(|| {
+            let tools: Vec<_> = read_only.collect();
+            text(Err(format!(
+                "{name} is not for a review: a review changes nothing and messages no one, answering with its reply \
+                 alone. Tools of ants it may use: {}.",
+                tools.join(", ")
+            )))
+        })
     }
 }
 
@@ -105,6 +125,9 @@ impl ServerHandler for Tools {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if let Some(refused) = self.refused_in_review(&request.name, &context) {
+            return Ok(refused.into());
+        }
         if let Some((provider, tool)) = self.provider_of(&request.name) {
             let thread = self.thread(&context)?;
             let arguments = request.arguments.unwrap_or_default();
@@ -199,9 +222,11 @@ fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>, provide
     if *ant == UserId::sage() {
         text.push_str(
             " As the sage, review the ants that name it as their sage: a review arrives as a message from the ant \
-             reviewed. Check what it carries against its evidence and answer with findings, each citing that \
-             evidence and suggesting an action, for the ant to verify and act on. Only suggest: change nothing, \
-             leaving the ant's memories to the ant.",
+             reviewed, on a thread of its own, with the work since its last dream. Check what it carries against its \
+             evidence and answer with one reply holding findings in the JSON block the review asks for, each citing \
+             that evidence and suggesting an action, for the ant to verify and act on; an empty list when nothing is \
+             worth its time. Only read and suggest: change nothing and message no one, leaving the ant's memories to \
+             the ant, and read code only in a checkout of its own at the commits the review names.",
         );
     }
     text

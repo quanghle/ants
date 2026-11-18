@@ -290,3 +290,29 @@ async fn calls_carry_the_repository_the_thread_s_last_session_works_in() {
     drop(mcp);
     assert_eq!(directories.workdir(&other_thread), None);
 }
+
+#[tokio::test]
+async fn a_review_only_reads_and_messages_no_one() {
+    let home = home("review");
+    let (mcp, mut sent) = start(&home).await;
+    let fake = with_fake(&mcp).await;
+    mcp.with_callers(Callers::known(user("dev-a"), "m1", "id-1"));
+    let review = Envelope::new(user("dev-b"), user("dev-a"), "# Review of dream 1 of dev-b")
+        .with_allow(Some(ants_proto::REVIEW_ALLOW.map(str::to_owned).to_vec()));
+    let (url, token) = http_server(&mcp, &review.thread_id);
+    let client = http_client(&url, &token).await;
+    mcp.settle_origin(&review, None).await.unwrap();
+    let _turn = mcp.begin(&review);
+
+    for (tool, args) in [
+        ("send_message", json!({"to": "dev-b", "text": "hi"})),
+        ("complete", json!({})),
+        ("send_note", json!({"x": 1})),
+    ] {
+        let (ok, text) = call(&client, tool, args).await;
+        assert!(!ok && text.starts_with(&format!("{tool} is not for a review")), "{text}");
+    }
+    assert!(sent.try_recv().is_err() && fake.calls.locked().is_empty(), "nothing went out");
+    let (ok, text) = call(&client, "list_ants", json!({})).await;
+    assert!(ok, "the ants tools that only read stay: {text}");
+}
