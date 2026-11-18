@@ -3,8 +3,9 @@
 //!
 //! The timeline interleaves, in the order stored, the thread's messages, posts, notes, escalations and tool requests
 //! with the tool calls of its ants: those running now as their status updates tell ([`timeline::Calls::status`]), and
-//! those stored on their timelines ([`timeline::Calls::stored`]), each placed before the first message stored after it
-//! started. Messages between a human and an ant, and posts, are the top level; a message from one ant to another nests
+//! those stored on their timelines ([`timeline::Calls::stored`]); and with the steps of the trail runs reporting on it
+//! ([`super::steps`]), each placed before the first message stored after it started. The keys select a step as they
+//! select a message, and Enter opens the step's thread. Messages between a human and an ant, and posts, are the top level; a message from one ant to another nests
 //! a level under the sender, and the receiver's calls and reply nest under that message, unless the receiver nests the
 //! sender already (a reply). Messages, posts and notes render as markdown, their attachments listed under them, images
 //! drawn under their lines when on ([`images`]). Opened from a search, the view selects the message found and holds it
@@ -40,7 +41,7 @@ mod find;
 mod pending;
 
 pub use conversation::SPIN_MS;
-use conversation::{Item, Shown, busy, cut, glyphs, hm, rows, started, withdrawn_from, woken};
+use conversation::{Item, Shown, Timed, busy, cut, glyphs, hm, rows, started, withdrawn_from, woken};
 
 /// How wide the side panel is, shown as [`super::fold`] has it.
 const PANEL_WIDTH: u16 = 34;
@@ -57,6 +58,17 @@ enum Scroll {
     Reveal { up: bool },
 }
 
+/// A row the keys select: a message, by its stream sequence, or a step of a trail run reporting on the thread, by the
+/// step's own thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Picked {
+    Message(u64),
+    Step(ThreadId),
+}
+
+/// A message or step, with the lines it takes in the conversation, from its first to past its last.
+type Spot = (Picked, usize, usize);
+
 /// What the conversation drawn last laid out, for the keys that scroll it.
 #[derive(Debug, Default)]
 struct Laid {
@@ -64,8 +76,8 @@ struct Laid {
     height: usize,
     /// How many lines the conversation takes.
     lines: usize,
-    /// Each message's sequence and the lines it takes, from its first to past its last.
-    messages: Vec<(u64, usize, usize)>,
+    /// Each message and step, in order, with the lines it takes.
+    rows: Vec<Spot>,
     /// The line of each match of the text found, in order.
     found: Vec<usize>,
 }
@@ -73,8 +85,8 @@ struct Laid {
 #[derive(Debug)]
 pub struct Page {
     pub history: History,
-    /// The selected message's stream sequence; None follows the latest.
-    selected: Option<u64>,
+    /// The selected message, or step; None follows the latest.
+    selected: Option<Picked>,
     /// The first line of the conversation drawn last, so that the selection moves within it.
     top: Cell<usize>,
     /// Where the conversation stands.
@@ -145,18 +157,35 @@ impl Page {
         self.messages().filter_map(|e| e.id).collect()
     }
 
+    /// The sequence of the message selected, else of the one the thread was opened at; none while a step is selected.
+    fn picked(&self) -> Option<u64> {
+        match &self.selected {
+            Some(Picked::Message(seq)) => Some(*seq),
+            Some(Picked::Step(_)) => None,
+            None => self.held(),
+        }
+    }
+
     /// The message selected, or the one the thread was opened at; none while the view follows the latest.
     pub fn chosen(&self) -> Option<&Entry> {
-        let seq = self.selected.or_else(|| self.held())?;
+        let seq = self.picked()?;
         self.messages().find(|e| e.seq == seq)
     }
 
-    /// The selected message, else the latest.
+    /// The selected message, else the latest; none while a step is selected.
     pub fn selection(&self) -> Option<&Entry> {
-        let mut messages = self.messages();
-        match self.selected.or_else(|| self.held()) {
-            Some(seq) => messages.find(|e| e.seq == seq),
-            None => messages.last(),
+        match (self.picked(), &self.selected) {
+            (Some(seq), _) => self.messages().find(|e| e.seq == seq),
+            (None, Some(Picked::Step(_))) => None,
+            (None, _) => self.messages().last(),
+        }
+    }
+
+    /// The thread of the selected step of a trail run, which Enter opens.
+    pub fn step_selected(&self) -> Option<&ThreadId> {
+        match &self.selected {
+            Some(Picked::Step(thread)) => Some(thread),
+            _ => None,
         }
     }
 
@@ -213,9 +242,9 @@ impl Page {
 
     /// The message whose attachments `o` opens: the selected one, else the latest carrying any.
     pub fn attached(&self) -> Option<&Entry> {
-        match self.selected.or_else(|| self.held()) {
-            Some(_) => self.selection(),
-            None => self.messages().rev().find(|e| !e.attachments.is_empty()),
+        match (&self.selected, self.held()) {
+            (None, None) => self.messages().rev().find(|e| !e.attachments.is_empty()),
+            _ => self.selection(),
         }
     }
 
@@ -231,16 +260,25 @@ impl Page {
         pending.min_by_key(|r| r.requested_at)
     }
 
-    /// Move the selection `by` messages, down for a positive one, bringing it into view; past the latest it follows
-    /// the latest again.
+    /// Move the selection `by` messages or steps, down for a positive one, bringing it into view; past the latest it
+    /// follows the latest again.
     fn step(&mut self, by: isize) {
-        let seqs: Vec<u64> = self.messages().map(|e| e.seq).collect();
-        let at = self.selected.and_then(|s| seqs.iter().position(|seq| *seq == s)).unwrap_or(seqs.len());
-        self.selected = seqs.get(at.saturating_add_signed(by).min(seqs.len())).copied();
+        let rows = self.order();
+        let at = self.selected.as_ref().and_then(|s| rows.iter().position(|row| row == s)).unwrap_or(rows.len());
+        self.selected = rows.get(at.saturating_add_signed(by).min(rows.len())).cloned();
         self.scroll.set(match self.selected {
             None => Scroll::Latest,
             Some(_) => Scroll::Reveal { up: by < 0 },
         });
+    }
+
+    /// The messages and steps the keys select, in order: as drawn last when that showed steps, else the messages.
+    fn order(&self) -> Vec<Picked> {
+        let laid = self.laid.borrow();
+        if laid.rows.iter().any(|(row, ..)| matches!(row, Picked::Step(_))) {
+            return laid.rows.iter().map(|(row, ..)| row.clone()).collect();
+        }
+        self.messages().map(|e| Picked::Message(e.seq)).collect()
     }
 
     /// Scroll the conversation `by` lines, down for a positive one; at the bottom with nothing selected it follows the
@@ -260,8 +298,17 @@ impl Page {
     }
 
     pub fn mouse_select(&mut self, seq: u64) {
+        self.mouse_pick(Picked::Message(seq));
+    }
+
+    /// Select the step of a trail run on its own thread `thread`, as a click on its line does.
+    pub fn mouse_select_step(&mut self, thread: ThreadId) {
+        self.mouse_pick(Picked::Step(thread));
+    }
+
+    fn mouse_pick(&mut self, picked: Picked) {
         if !self.listing() {
-            self.selected = Some(seq);
+            self.selected = Some(picked);
             self.at = None;
             self.answering = None;
         }
@@ -293,17 +340,17 @@ impl Page {
     /// up: Up from typing.
     pub fn select(&mut self) {
         if let Some(held) = self.held() {
-            self.selected.get_or_insert(held);
+            self.selected.get_or_insert(Picked::Message(held));
         } else if self.selected.is_none() {
             if self.scroll.get() == Scroll::Latest {
-                self.selected = self.messages().last().map(|e| e.seq);
+                self.selected = self.messages().last().map(|e| Picked::Message(e.seq));
             } else {
                 self.line(false);
             }
         }
     }
 
-    /// Whether a message is selected rather than the latest followed.
+    /// Whether a message or step is selected rather than the latest followed.
     pub fn selecting(&self) -> bool {
         self.selected.is_some()
     }
@@ -320,24 +367,25 @@ impl Page {
     }
 
     /// Up, or with `down` Down: scroll inside the selected message while it goes on past the view that way, else
-    /// select the next message that way; with the selection out of view, select the message in view nearest that way.
+    /// select the next message or step that way; with the selection out of view, select the one in view nearest that
+    /// way.
     fn line(&mut self, down: bool) {
         let laid = self.laid.borrow();
         let (top, height) = (self.top.get(), laid.height);
-        let selected = self.selected.and_then(|seq| laid.messages.iter().find(|m| m.0 == seq).copied());
-        let shown = |&(_, start, end): &(u64, usize, usize)| start < top + height && end > top;
-        let within =
-            |m @ (_, start, end): (u64, usize, usize)| shown(&m) && if down { end > top + height } else { start < top };
-        if selected.is_some_and(within) {
+        let selected = self.selected.as_ref().and_then(|picked| laid.rows.iter().find(|m| m.0 == *picked));
+        let shown = |m: &&Spot| m.1 < top + height && m.2 > top;
+        let within = |m: &&Spot| shown(m) && if down { m.2 > top + height } else { m.1 < top };
+        if selected.is_some_and(|m| within(&m)) {
             drop(laid);
             return self.scroll_by(if down { 1 } else { -1 });
         }
         if selected.is_none_or(|m| !shown(&m)) && self.scroll.get() != Scroll::Latest {
-            let mut in_view = laid.messages.iter().filter(|m| shown(m));
+            let mut in_view = laid.rows.iter().filter(shown);
             let nearest = if down { in_view.next() } else { in_view.next_back() };
-            if let Some(&(seq, ..)) = nearest {
+            if let Some((picked, ..)) = nearest {
+                let picked = picked.clone();
                 drop(laid);
-                self.selected = Some(seq);
+                self.selected = Some(picked);
                 self.scroll.set(Scroll::Reveal { up: !down });
                 return;
             }
@@ -501,7 +549,7 @@ impl Page {
         let change = |change| Some(To::Do(Action::Change(thread, change, last)));
         let flags = self.flags(data, now);
         if let Some(held) = self.held() {
-            self.selected.get_or_insert(held);
+            self.selected.get_or_insert(Picked::Message(held));
         }
         if matches!(
             key,
@@ -525,7 +573,7 @@ impl Page {
             Key::PageUp => self.scroll_by(-half),
             Key::PageDown => self.scroll_by(half),
             Key::Home => {
-                let first = self.messages().next().map(|e| e.seq);
+                let first = self.messages().next().map(|e| Picked::Message(e.seq));
                 self.selected = first;
                 self.scroll.set(Scroll::Reveal { up: false });
             }
@@ -541,6 +589,7 @@ impl Page {
             Key::Char('v') => return self.selection().map(|e| To::Do(Action::Page(e.text.clone()))),
             Key::Char('+') => return self.selection().and_then(|e| e.id).map(To::React),
             Key::Char('>') => return self.quote(data),
+            Key::Enter if let Some(thread) = self.step_selected() => return Some(To::Thread(thread.clone())),
             Key::Char('p') => return change(Change::Pin(!flags.pinned)),
             Key::Char('m') => return change(Change::Mute(!flags.muted)),
             Key::Char('e') => return change(Change::Archive(!flags.archived)),
@@ -653,25 +702,10 @@ impl Page {
         };
         let calls = data.calls.get(thread).map_or(&[][..], |c| c.calls());
         let ends = data.calls.get(thread).map_or(&[][..], |c| c.ends());
-        let rows = rows(&self.history.entries, calls, ends, data.tools, busy, |u| data.is_human(u));
+        let timed = Timed { calls, ends, steps: data.steps.of(thread) };
+        let rows = rows(&self.history.entries, timed, data.tools, busy, |u| data.is_human(u));
         let held = self.held();
-        let selected = self.selected.or(held).and_then(|_| self.selection()).map(|e| e.seq);
-        let mut range = None;
-        let mut messages = Vec::new();
-        for (at, (row, (first, rest))) in rows.iter().zip(glyphs(&rows)).enumerate() {
-            if at > 0 && row.depth == 0 {
-                lines.push(Line::raw(""));
-            }
-            let start = lines.len();
-            shown.row(&mut lines, row, &self.history.entries, &first, &rest);
-            if let Item::Message(e) = row.item {
-                messages.push((e.seq, start, lines.len()));
-                if Some(e.seq) == selected {
-                    lines[start].style = lines[start].style.add_modifier(Modifier::BOLD);
-                    range = Some((start, lines.len()));
-                }
-            }
-        }
+        let (picks, range) = self.lay(&mut lines, &shown, &rows);
         let height = usize::from(area.height);
         let found = match &self.find {
             Some(find) => find::mark(&mut lines, &find.text, find.at),
@@ -679,9 +713,10 @@ impl Page {
         };
         let top = self.scrolled(range, held.is_some(), lines.len(), height);
         self.spinning.set(shown.spun.get());
-        let newer = messages.iter().filter(|(_, start, _)| *start >= top + height).count();
-        message_hits(data, &messages, area, top, height);
-        *self.laid.borrow_mut() = Laid { height, lines: lines.len(), messages, found };
+        let below = |(picked, start, _): &&Spot| matches!(picked, Picked::Message(_)) && *start >= top + height;
+        let newer = picks.iter().filter(below).count();
+        message_hits(data, &picks, area, top, height);
+        *self.laid.borrow_mut() = Laid { height, lines: lines.len(), rows: picks, found };
         let block = match newer {
             0 => block,
             n => block.title_bottom(
@@ -701,6 +736,39 @@ impl Page {
             let lines = self.panel(data, calls, now, usize::from(PANEL_WIDTH.saturating_sub(4)));
             frame.render_widget(Paragraph::new(lines).block(style::block(String::new(), false)), panel);
         }
+    }
+
+    /// Add the lines of `rows`, drawn with `shown`, the first line of the selected one bold: the messages and steps
+    /// among them with the lines each takes, and those the selected one takes.
+    fn lay(
+        &self,
+        lines: &mut Vec<Line<'static>>,
+        shown: &Shown,
+        rows: &[conversation::Row],
+    ) -> (Vec<Spot>, Option<(usize, usize)>) {
+        let selected = match &self.selected {
+            Some(step @ Picked::Step(_)) => Some(step.clone()),
+            _ => self.picked().and_then(|_| self.selection()).map(|e| Picked::Message(e.seq)),
+        };
+        let (mut picks, mut range) = (Vec::new(), None);
+        for (at, (row, (first, rest))) in rows.iter().zip(glyphs(rows)).enumerate() {
+            if at > 0 && row.depth == 0 {
+                lines.push(Line::raw(""));
+            }
+            let start = lines.len();
+            shown.row(lines, row, &self.history.entries, &first, &rest);
+            let picked = match &row.item {
+                Item::Message(e) => Picked::Message(e.seq),
+                Item::Step(step) => Picked::Step(step.thread.clone()),
+                Item::Call(_) | Item::End(_) | Item::Turn(_) => continue,
+            };
+            if Some(&picked) == selected.as_ref() {
+                lines[start].style = lines[start].style.add_modifier(Modifier::BOLD);
+                range = Some((start, lines.len()));
+            }
+            picks.push((picked, start, lines.len()));
+        }
+        (picks, range)
     }
 
     /// The conversation's border title in `room` columns: the thread's title, cut to leave room for its channels.
@@ -981,15 +1049,16 @@ fn folded([requests, questions, settled]: [usize; 3], width: usize) -> Option<St
     Some(text)
 }
 
-fn message_hits(data: &Data, messages: &[(u64, usize, usize)], area: Rect, top: usize, height: usize) {
-    for &(seq, start, end) in messages {
-        let from = start.max(top);
-        let to = end.min(top + height);
+fn message_hits(data: &Data, rows: &[Spot], area: Rect, top: usize, height: usize) {
+    for (picked, start, end) in rows {
+        let from = (*start).max(top);
+        let to = (*end).min(top + height);
         if from < to {
-            data.mouse.add(
-                Rect { y: area.y + (from - top) as u16, height: (to - from) as u16, ..area },
-                super::mouse::Target::Message(seq),
-            );
+            let target = match picked {
+                Picked::Message(seq) => super::mouse::Target::Message(*seq),
+                Picked::Step(thread) => super::mouse::Target::Step(thread.clone()),
+            };
+            data.mouse.add(Rect { y: area.y + (from - top) as u16, height: (to - from) as u16, ..area }, target);
         }
     }
 }
@@ -1120,7 +1189,8 @@ mod tests {
         let (entries, calls) = delegated(&thread);
         calls.iter().for_each(|c| m.data.calls.status(c));
         let calls = m.data.calls.get(&thread).unwrap().calls();
-        let rows = rows(&entries, calls, &[], Tools::All, false, |u| m.data.is_human(u));
+        let with = Timed { calls, ends: &[], steps: &[] };
+        let rows = rows(&entries, with, Tools::All, false, |u| m.data.is_human(u));
         let shown: Vec<(String, usize)> = rows
             .iter()
             .map(|r| match &r.item {
@@ -1128,6 +1198,7 @@ mod tests {
                 Item::Call(c) => (c.title.clone(), r.depth),
                 Item::End(e) => (e.ant.to_string(), r.depth),
                 Item::Turn(t) => (t.ant.to_string(), r.depth),
+                Item::Step(s) => (s.thread.to_string(), r.depth),
             })
             .collect();
         let expected = [
@@ -1428,6 +1499,83 @@ mod tests {
         }
         assert!(shown.contains("FILES") && shown.contains("src/c3.rs"), "{shown}");
         assert!(!screen(&page, &m, 80, at(47)).contains("STATE"), "no panel on a narrow view");
+    }
+
+    /// What lead tells of step `call` of a run reporting on `thread`, to `to` on `step_thread`, at second `secs`.
+    fn step(
+        thread: &ThreadId,
+        step_thread: &ThreadId,
+        call: u32,
+        to: &str,
+        stage: ants_proto::StepStage,
+        secs: i64,
+    ) -> ants_proto::StatusEvent {
+        let update = ants_proto::StatusUpdate::Step {
+            run: "0198c4ab-0000-7000-8000-000000000000".parse().unwrap(),
+            call,
+            label: Some(format!("review  part\n{call}")),
+            to: crate::test_support::live::user(to),
+            step_thread: step_thread.clone(),
+            stage,
+        };
+        let lead = crate::test_support::live::user("lead");
+        ants_proto::StatusEvent { at: at(secs), ..ants_proto::StatusEvent::new(lead, thread.clone(), update) }
+    }
+
+    #[test]
+    fn a_runs_steps_show_where_they_started_and_enter_opens_the_thread_of_the_one_selected() {
+        use ants_proto::StepStage;
+        let (thread, first, second) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let mut m = model();
+        let entries = vec![
+            message(1, &thread, "lead", "alice", "Run 0198c4ab started"),
+            message(9, &thread, "lead", "alice", "Run 0198c4ab is done"),
+        ];
+        m.stored(entries.clone(), at(9));
+        for event in [
+            step(&thread, &first, 1, "dev-b", StepStage::Started, 3),
+            step(&thread, &second, 2, "dev-c", StepStage::Started, 4),
+            step(&thread, &first, 1, "dev-b", StepStage::Answered, 6),
+            step(&thread, &second, 2, "dev-c", StepStage::Failed, 7),
+        ] {
+            m.take(crate::live::Event::Status(event), at(7));
+        }
+        assert_eq!(m.data.live.progress_of(&thread, 80), None, "a step tells nothing of where its conductor stands");
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let shown = screen(&page, &m, 110, at(10));
+        let lines: Vec<&str> = shown.lines().collect();
+        let row = |text: &str| lines.iter().position(|l| l.contains(text)).unwrap_or_else(|| panic!("{text}: {shown}"));
+        let answered = format!("◆ step 1 review part 1 → dev-b · answered · thread {first}");
+        let failed = format!("◆ step 2 review part 2 → dev-c · failed · thread {second}");
+        assert!(row("│   Run 0198c4ab started") < row(&answered) && row(&answered) < row(&failed), "{shown}");
+        assert!(row(&failed) < row("│   Run 0198c4ab is done"), "each before the next message stored: {shown}");
+        m.data.tools = Tools::None;
+        assert!(screen(&page, &m, 110, at(10)).contains(&failed), "steps are no tool calls");
+
+        assert_eq!(page.key(Key::Up, &m.data, at(10)), None);
+        assert_eq!(page.selection().map(|e| e.seq), Some(9));
+        screen(&page, &m, 110, at(10));
+        page.key(Key::Up, &m.data, at(10));
+        assert_eq!((page.selection(), page.step_selected()), (None, Some(&second)), "a step, as a message is");
+        let shown = screen(&page, &m, 110, at(10));
+        assert!(shown.contains("│▌    ◆ step 2"), "the step selected marked: {shown}");
+        assert_eq!(page.key(Key::Enter, &m.data, at(10)), Some(To::Thread(second.clone())));
+        assert_eq!(page.key(Key::Char('y'), &m.data, at(10)), None, "no message to copy");
+        page.key(Key::Up, &m.data, at(10));
+        assert_eq!(page.key(Key::Enter, &m.data, at(10)), Some(To::Thread(first)));
+        page.key(Key::Up, &m.data, at(10));
+        assert_eq!(page.selection().map(|e| e.seq), Some(1));
+        page.mouse_select_step(second.clone());
+        assert_eq!(page.step_selected(), Some(&second));
+
+        m.pages.push(super::super::model::Page::Thread(page));
+        m.focus = super::super::model::Focus::View;
+        m.selecting = Some(m.conversation());
+        let footer = crate::tui::keymap::footer(&m, at(10), 200).to_string();
+        assert!(footer.contains("Enter step thread"), "{footer}");
+        let (open, ants) = m.steps_wanted().unwrap();
+        assert_eq!((open, ants), (thread, vec![crate::test_support::live::user("lead")]));
     }
 
     #[test]

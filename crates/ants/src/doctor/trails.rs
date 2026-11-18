@@ -31,6 +31,7 @@ pub(super) async fn check_worker(program: &Path) -> Check {
     let shown = program.display();
     let probe = Request::Start {
         script: String::new(),
+        entry: None,
         args: serde_json::Value::Null,
         limits: Limits { steps: 0, ..Limits::default() },
         clock: 0,

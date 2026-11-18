@@ -7,9 +7,11 @@ use std::str::FromStr;
 
 use ants_daemon::records::owners;
 use ants_proto::{
-    MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, ThreadId, TrailAction, TrailLimits, TrailName, TrailOutcome, TrailSource, UserId,
+    JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, RunId, ThreadId, TrailAction, TrailLimits, TrailName, TrailOutcome,
+    TrailSource, UserId,
 };
 use anyhow::{Context as _, Result, bail};
+use async_nats::jetstream;
 use chrono::Utc;
 use serde_json::{Value, json};
 
@@ -43,15 +45,66 @@ pub(crate) fn json_args(s: &str) -> Result<Value, String> {
     serde_json::from_str(s).map_err(|e| format!("not JSON: {e}"))
 }
 
+/// `args`, else null, refused over [`MAX_TRAIL_ARGS`] bytes of JSON, as `what` names them.
+pub(crate) fn sized(args: Option<Value>, what: &str) -> Result<Value> {
+    let args = args.unwrap_or(Value::Null);
+    let size = serde_json::to_vec(&args)?.len();
+    if size > MAX_TRAIL_ARGS {
+        bail!("{what} has {size} bytes of JSON; a run takes at most {MAX_TRAIL_ARGS}");
+    }
+    Ok(args)
+}
+
 /// What a run is to run, as [`summary`] shows it.
-#[derive(Debug)]
-pub(super) struct Plan {
-    pub(super) name: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Plan {
+    pub(crate) name: String,
     /// Where the trail comes from, in words.
-    pub(super) from: String,
-    pub(super) description: String,
-    pub(super) phases: Vec<String>,
-    pub(super) source: TrailSource,
+    pub(crate) from: String,
+    pub(crate) description: String,
+    pub(crate) phases: Vec<String>,
+    pub(crate) source: TrailSource,
+}
+
+/// The plan of the saved trail `name`: the colony's, else a local one ([`found_plan`]).
+pub(crate) async fn saved_plan(js: &jetstream::Context, name: &TrailName) -> Result<Plan> {
+    Ok(found_plan(saved::find(js, &saved::local_dir()?, name).await?, Utc::now()))
+}
+
+/// A run to ask its conductor for: what it runs and with what, the thread it reports on and what it may spend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Start {
+    pub(crate) source: TrailSource,
+    pub(crate) args: Value,
+    pub(crate) conductor: UserId,
+    pub(crate) thread: ThreadId,
+    pub(crate) limits: TrailLimits,
+}
+
+impl Start {
+    /// Ask the conductor, as human `me`, to start the run, which `me` owns: the owner record of the run's thread
+    /// names `me` before the request goes, so that the recipients of its steps trust the owner they carry.
+    pub(crate) async fn ask(
+        &self,
+        client: &async_nats::Client,
+        js: &jetstream::Context,
+        domain: Option<&JsDomain>,
+        me: &UserId,
+    ) -> Result<RunId> {
+        let Self { source, args, conductor, thread, limits } = self;
+        owners::recording(js, domain, thread, conductor, me).await;
+        let action =
+            TrailAction::Start { trail: source.clone(), args: args.clone(), thread: thread.clone(), limits: *limits };
+        match control::ask(client, conductor, me, action, control::ANSWER_WAIT).await? {
+            TrailOutcome::Started { run } => Ok(run),
+            other => bail!("{conductor} answered {other:?}"),
+        }
+    }
+
+    /// What `ants trail run` prints once the conductor started the run `run`.
+    pub(crate) fn started(&self, run: &RunId) -> String {
+        format!("started run {run} on {}, reporting on thread {}", self.conductor, self.thread)
+    }
 }
 
 /// The plan of the script of the file `path`, checked here and sent inline.
@@ -87,7 +140,7 @@ pub(super) fn found_plan(found: saved::Found, now: chrono::DateTime<Utc>) -> Pla
 }
 
 /// The limits in a line.
-pub(super) fn limits_line(limits: &TrailLimits) -> String {
+pub(crate) fn limits_line(limits: &TrailLimits) -> String {
     format!(
         "{} steps, {} at once, {} turns, {} of wall time",
         limits.steps,
@@ -98,7 +151,7 @@ pub(super) fn limits_line(limits: &TrailLimits) -> String {
 }
 
 /// What `ants trail run` shows before the run starts: the trail, its conductor and thread, and what the run may spend.
-pub(super) fn summary(plan: &Plan, conductor: &UserId, thread: Option<&ThreadId>, limits: &TrailLimits) -> String {
+pub(crate) fn summary(plan: &Plan, conductor: &UserId, thread: Option<&ThreadId>, limits: &TrailLimits) -> String {
     let mut out = format!("trail {}, {}\n", plan.name, plan.from);
     if !plan.description.is_empty() {
         let _ = writeln!(out, "  {}", plan.description);
@@ -148,11 +201,7 @@ pub(super) async fn run(
     let RunArgs { trail, args, ant, thread, limits, yes, follow, json } = args;
     super::human(nats, "starting a run")?;
     let limits = limits.over(TrailLimits::DEFAULT)?;
-    let args = args.unwrap_or(Value::Null);
-    let size = serde_json::to_vec(&args)?.len();
-    if size > MAX_TRAIL_ARGS {
-        bail!("--args has {size} bytes of JSON; a run takes at most {MAX_TRAIL_ARGS}");
-    }
+    let args = sized(args, "--args")?;
     let plan = match trail {
         Trail::File(path) => Ok(file_plan(&path)?),
         Trail::Saved(name) => Err(name),
@@ -160,7 +209,7 @@ pub(super) async fn run(
     let (client, js) = nats.connect("ants-cli").await?;
     let plan = match plan {
         Ok(plan) => plan,
-        Err(name) => found_plan(saved::find(&js, &saved::local_dir()?, &name).await?, Utc::now()),
+        Err(name) => saved_plan(&js, &name).await?,
     };
     let conductor = match ant {
         Some(ant) => ant,
@@ -184,16 +233,13 @@ pub(super) async fn run(
         }
     }
     let thread = thread.unwrap_or_else(ThreadId::generate);
-    owners::recording(&js, nats.domain, &thread, &conductor, &nats.me.id).await;
-    let action = TrailAction::Start { trail: plan.source, args, thread: thread.clone(), limits };
-    let run = match control::ask(&client, &conductor, &nats.me.id, action, control::ANSWER_WAIT).await? {
-        TrailOutcome::Started { run } => run,
-        other => bail!("{conductor} answered {other:?}"),
-    };
+    let start = Start { source: plan.source, args, conductor, thread, limits };
+    let run = start.ask(&client, &js, nats.domain, &nats.me.id).await?;
+    let Start { conductor, thread, .. } = &start;
     if json {
         println!("{}", json!({ "run": run, "conductor": conductor, "thread": thread }));
     } else {
-        println!("started run {run} on {conductor}, reporting on thread {thread}");
+        println!("{}", start.started(&run));
         if !follow {
             println!("`ants trail show {run} --follow` follows it, `ants trail stop {run}` stops it");
         }

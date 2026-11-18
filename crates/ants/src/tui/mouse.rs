@@ -20,7 +20,12 @@ pub enum Target {
     Nav(nav::Item),
     Row(usize),
     Message(u64),
-    Completion { at: usize, palette: bool },
+    /// A step of a trail run in the thread view, by the step's own thread.
+    Step(ants_proto::ThreadId),
+    Completion {
+        at: usize,
+        palette: bool,
+    },
     ChannelTab(channel::Tab),
     Copy(usize),
     Question(ants_proto::Uuid, usize),
@@ -229,6 +234,15 @@ impl Mouse {
                     page.mouse_select(seq);
                 }
                 if again { model.view_key(Key::Char('v'), now) } else { None }
+            }
+            Target::Step(thread) => {
+                model.bar.focused = false;
+                model.focus = Focus::View;
+                model.selecting = Some(model.conversation());
+                if let Some(Page::Thread(page)) = model.pages.last_mut() {
+                    page.mouse_select_step(thread);
+                }
+                if again { model.view_key(Key::Enter, now) } else { None }
             }
             Target::Row(at) => {
                 model.bar.focused = false;

@@ -1,12 +1,12 @@
-//! The conversation of an open thread, row by row: its messages, its ants' tool calls and the prompts they ended with
-//! no reply in the order stored, how deep each nests, the indent and `⎿` drawn before them and the lines each row
-//! draws as.
+//! The conversation of an open thread, row by row: its messages, its ants' tool calls, the prompts they ended with no
+//! reply and the steps of the trail runs reporting on it in the order stored, how deep each nests, the indent and `⎿`
+//! drawn before them and the lines each row draws as.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use ants_proto::{NoticeKind, UserId, Uuid};
+use ants_proto::{NoticeKind, StepStage, UserId, Uuid};
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -15,6 +15,7 @@ use unicode_width::UnicodeWidthChar as _;
 use crate::people::sealed;
 use crate::threads::thread::{Entry, Kind};
 use crate::tui::model::Data;
+use crate::tui::steps::Step;
 use crate::tui::timeline::{Call, End, Tools};
 use crate::tui::{attach, images, markdown, react, style};
 
@@ -25,6 +26,8 @@ pub(super) const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴"
 pub const SPIN_MS: i64 = 125;
 /// Before a message, a turn or a tool call.
 const BULLET: &str = "●";
+/// Before a step of a trail run.
+const STEP: &str = "◆";
 /// Before a human's message at the top level.
 const PROMPT: &str = "❯";
 /// Joins the first of rows nested deeper to the row above them.
@@ -44,6 +47,8 @@ pub(super) enum Item<'a> {
     End(&'a End),
     /// An ant's tool calls and ends with no reply between two messages, on one line.
     Turn(Turn<'a>),
+    /// A step of a trail run reporting on the thread, where its conductor's calls go.
+    Step(&'a Step),
 }
 
 /// An ant's turn collapsed: its tool calls and the prompts it ended with no reply between two messages.
@@ -78,23 +83,33 @@ pub(super) struct Row<'a> {
     pub(super) depth: usize,
 }
 
-/// The conversation of `entries`, in the order stored, with `calls`, by when they started, and `ends`, by when they
-/// ended, each before the first message stored after it, shown as `tools` has them; `busy` tells whether an ant runs
-/// a prompt on the thread, the turns after the last message then running, and `human` tells the humans.
+/// What the thread's conversation interleaves with its messages: its ants' tool calls, by when they started, the
+/// prompts they ended with no reply, by when they ended, and the steps of the trail runs reporting on it, by when they
+/// started.
+pub(super) struct Timed<'a> {
+    pub(super) calls: &'a [Call],
+    pub(super) ends: &'a [End],
+    pub(super) steps: &'a [Step],
+}
+
+/// The conversation of `entries`, in the order stored, `with` what is timed, each before the first message stored
+/// after it, the calls and ends shown as `tools` has them; `busy` tells whether an ant runs a prompt on the thread,
+/// the turns after the last message then running, and `human` tells the humans.
 pub(super) fn rows<'a>(
     entries: &'a [Entry],
-    calls: &'a [Call],
-    ends: &'a [End],
+    with: Timed<'a>,
     tools: Tools,
     busy: bool,
     human: impl Fn(&UserId) -> bool,
 ) -> Vec<Row<'a>> {
+    let Timed { calls, ends, steps } = with;
     let mut levels: HashMap<&UserId, usize> = HashMap::new();
     let mut timeline: Vec<(DateTime<Utc>, &UserId, Item)> = Vec::new();
     if tools != Tools::None {
         timeline.extend(calls.iter().map(|c| (c.started, &c.ant, Item::Call(c))));
         timeline.extend(ends.iter().map(|e| (e.at, &e.ant, Item::End(e))));
     }
+    timeline.extend(steps.iter().map(|s| (s.at, &s.conductor, Item::Step(s))));
     timeline.sort_by_key(|(at, ..)| *at);
     let mut timeline = timeline.into_iter().peekable();
     let mut rows = Vec::new();
@@ -134,8 +149,9 @@ fn level(levels: &HashMap<&UserId, usize>, user: &UserId) -> usize {
     levels.get(user).copied().unwrap_or(1)
 }
 
-/// Add the rows of the calls and ends of `stretch`, between two messages: each on its own, or with `collapse` one
-/// [`Turn`] for each ant, where its first one was, `running` when the stretch is the last one and an ant is busy.
+/// Add the rows of the calls, ends and steps of `stretch`, between two messages: each on its own, or with `collapse`
+/// the calls and ends in one [`Turn`] for each ant, where its first one was, `running` when the stretch is the last
+/// one and an ant is busy; a step always on its own.
 fn timed<'a>(
     rows: &mut Vec<Row<'a>>,
     levels: &HashMap<&UserId, usize>,
@@ -147,21 +163,33 @@ fn timed<'a>(
         rows.extend(stretch.into_iter().map(|(ant, item)| Row { item, depth: level(levels, ant) }));
         return;
     }
+    // Each ant's turn where its first call or end was, each step where it was.
+    let mut order: Vec<Result<usize, (&UserId, Item)>> = Vec::new();
     let mut turns: Vec<Turn> = Vec::new();
     for (ant, item) in stretch {
+        if let Item::Step(_) = item {
+            order.push(Err((ant, item)));
+            continue;
+        }
         let at = turns.iter().position(|t| t.ant == ant).unwrap_or_else(|| {
             turns.push(Turn { ant, calls: Vec::new(), ends: Vec::new(), running: false });
+            order.push(Ok(turns.len() - 1));
             turns.len() - 1
         });
         match item {
             Item::Call(call) => turns[at].calls.push(call),
             Item::End(end) => turns[at].ends.push(end),
-            Item::Message(_) | Item::Turn(_) => {}
+            Item::Message(_) | Item::Turn(_) | Item::Step(_) => {}
         }
     }
-    rows.extend(turns.into_iter().map(|mut turn| {
-        turn.running = running && turn.ends.is_empty();
-        Row { depth: level(levels, turn.ant), item: Item::Turn(turn) }
+    let mut turns: Vec<Option<Turn>> = turns.into_iter().map(Some).collect();
+    rows.extend(order.into_iter().filter_map(|row| match row {
+        Ok(at) => {
+            let mut turn = turns[at].take()?;
+            turn.running = running && turn.ends.is_empty();
+            Some(Row { depth: level(levels, turn.ant), item: Item::Turn(turn) })
+        }
+        Err((ant, item)) => Some(Row { depth: level(levels, ant), item }),
     }));
 }
 
@@ -259,6 +287,11 @@ impl Shown<'_> {
                 let why = end.why.as_ref().map_or_default(|why| format!(": {why}"));
                 let said = format!("{first}{BULLET} {}  ended without a reply{why}", end.ant);
                 lines.push(self.stamped(Line::from(Span::styled(said, style::dim())), end.at));
+            }
+            Item::Step(step) => {
+                let mut line = Line::raw(first.to_owned());
+                line.spans.extend(self.step(step));
+                lines.push(self.stamped(line, step.at));
             }
             Item::Message(e) if e.notice.is_some() => self.notice(lines, e, first, rest),
             Item::Message(e) if self.carded == Some(e.seq) => self.carded(lines, e, entries, first, row.depth == 0),
@@ -484,6 +517,27 @@ impl Shown<'_> {
             let style = if call.status.as_deref() == Some("completed") { style::dim() } else { tone };
             spans.push(Span::styled(format!(" · {status}"), style));
         }
+        spans
+    }
+
+    /// A step of a trail run: its call and label, the ant it went to, its stage in its colour, and its own thread.
+    fn step(&self, step: &Step) -> Vec<Span<'static>> {
+        let tone = match step.stage {
+            StepStage::Started => Style::new().fg(Color::Cyan),
+            StepStage::Answered => Style::new().fg(style::CONNECTED),
+            StepStage::Failed => Style::new().fg(style::ERROR),
+            StepStage::Dropped => style::dim(),
+        };
+        let mut spans = vec![
+            Span::styled(format!("{STEP} "), tone),
+            Span::styled(format!("step {}", step.call), Style::new().bold()),
+        ];
+        if let Some(label) = &step.label {
+            spans.push(Span::raw(format!(" {}", label.split_whitespace().collect::<Vec<_>>().join(" "))));
+        }
+        spans.push(Span::styled(format!(" → {}", step.to), Style::new().fg(Color::Magenta)));
+        spans.push(Span::styled(format!(" · {}", step.stage.as_str()), tone));
+        spans.push(Span::styled(format!(" · thread {}", step.thread), style::dim()));
         spans
     }
 

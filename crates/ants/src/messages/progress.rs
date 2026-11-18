@@ -179,6 +179,10 @@ impl Status {
     }
 
     pub fn apply(&mut self, event: &StatusEvent) {
+        // A step of a trail run tells nothing of where its conductor stands: `ants chat`'s thread view lists it.
+        if let StatusUpdate::Step { .. } = event.update {
+            return;
+        }
         let at = match self.ants.iter().position(|v| v.ant == event.ant) {
             Some(at) => at,
             None => {
