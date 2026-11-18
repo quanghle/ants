@@ -257,6 +257,7 @@ impl Model {
             }
             Slash::Unremind => Ok(Some(self.set_reminder(self.target()?, None))),
             Slash::Title(text) => run(Job::Title { thread: self.target()?, text }),
+            Slash::Notes(text) => run(Job::Notes { thread: self.target()?, text }),
             Slash::React(reaction) => {
                 let message = match self.page() {
                     Page::Channel(page) => page.post(&self.data).map(|p| p.id),
@@ -457,7 +458,9 @@ impl Model {
             "forward" if matches!(self.page(), Page::Thread(page) if page.chosen().is_some()) => None,
             "save" => self.attachment().is_none().then(|| "no attachment on the selected message".to_owned()),
             "grant" | "done" | "undone" | "pin" | "unpin" | "mute" | "unmute" | "snooze" | "unsnooze" | "remind"
-            | "unremind" | "archive" | "unarchive" | "title" | "react" | "tldr" | "tree" | "forward" => target.err(),
+            | "unremind" | "archive" | "unarchive" | "title" | "notes" | "react" | "tldr" | "tree" | "forward" => {
+                target.err()
+            }
             _ => None,
         }
     }
@@ -1184,6 +1187,31 @@ mod tests {
         m.key(Key::Enter, at(0));
         assert_eq!(m.bar.status.as_ref().unwrap().text, "dropped the file attached");
         assert!(m.bar.staged.names().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notes_posts_to_the_notes_of_the_thread_with_the_files_attached() {
+        let dir = ants_test_support::scratch_dir("bar-notes");
+        std::fs::write(dir.join("plan.md"), b"# plan").unwrap();
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let run = |m: &mut Model, text: &str| {
+            m.follow_drafts();
+            m.bar.focused = true;
+            m.bar.set_text(text);
+            m.key(Key::Enter, at(0))
+        };
+        assert_eq!(run(&mut m, "/notes split the work"), None);
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "no thread open or selected");
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        let notes = Job::Notes { thread: thread.clone(), text: "split the work".into() };
+        assert_eq!(run(&mut m, "/notes split the work"), Some(Action::Run(notes, "/notes split the work".into())));
+        assert!(!m.bar.focused, "a slash command leaves the bar");
+        run(&mut m, &format!("/attach {}/plan.md", dir.display()));
+        let Some(Action::Run(Job::Attached { job, files }, _)) = run(&mut m, "/notes the plan") else { panic!() };
+        assert_eq!((*job, files.len()), (Job::Notes { thread, text: "the plan".into() }, 1));
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "sending with 1 file…");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

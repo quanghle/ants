@@ -1,7 +1,7 @@
 //! What the command bar's sends and slash commands do over the CLI's connection, in the background while the UI goes
-//! on: the same library code as `ants ask`, `ants post`, `ants answer`, `ants react`, `ants cancel`, `ants thread
-//! done|title|pin|mute...` and `ants trail` ([`super::trail`]) run, each returning the line those print and the warnings
-//! they log.
+//! on: the same library code as `ants ask`, `ants post`, `ants notes`, `ants answer`, `ants react`, `ants cancel`,
+//! `ants thread done|title|pin|mute...` and `ants trail` ([`super::trail`]) run, each returning the line those print
+//! and the warnings they log.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -149,6 +149,11 @@ pub enum Job {
         thread: ThreadId,
         text: String,
     },
+    /// Post `text` to the notes of `thread` as `ants notes THREAD TEXT` does.
+    Notes {
+        thread: ThreadId,
+        text: String,
+    },
     /// React to `message`, else to the latest message on `thread` not from the human ([`latest`]).
     React {
         thread: ThreadId,
@@ -170,7 +175,8 @@ pub enum Job {
         ant: UserId,
         paused: bool,
     },
-    /// Send as `job`, an [`Job::Ask`], [`Job::Post`], [`Job::Reply`] or [`Job::Grant`], does, with `files` attached.
+    /// Send as `job`, an [`Job::Ask`], [`Job::Post`], [`Job::Reply`], [`Job::Grant`] or [`Job::Notes`], does, with
+    /// `files` attached.
     Attached {
         job: Box<Job>,
         files: Rc<[File]>,
@@ -291,6 +297,7 @@ impl Job {
                 | Self::Post { .. }
                 | Self::Reply { .. }
                 | Self::Grant { .. }
+                | Self::Notes { .. }
                 | Self::Later(_)
                 | Self::Forward { .. }
         )
@@ -361,6 +368,10 @@ impl Job {
             }
             Self::Title { thread, text } => {
                 Ok(Done::line(thread_meta::retitle(&ctx.js, ctx.meta()?, &ctx.sealing, &thread, &text, false).await?))
+            }
+            Self::Notes { thread, text } => {
+                let post = send::post_notes(&ctx.js, me, thread, text, &files).await?;
+                Ok(Done::line(format!("{}{}", send::notes_posted(&post), with(&files))))
             }
             Self::React { thread, message, reaction } => {
                 let message = match message {
@@ -718,7 +729,8 @@ mod tests {
     }
 
     /// What the bar sends to another human, a reply on their thread with a file attached and its title are sealed for
-    /// both; a reply to an ant quoting a sealed message carries no excerpt of it.
+    /// both; a reply to an ant quoting a sealed message carries no excerpt of it, and notes posted there go in the
+    /// clear with their files, as `ants notes` posts them.
     #[tokio::test]
     async fn the_bar_seals_messages_to_a_human_their_files_and_titles_on_their_thread() {
         use ants_proto::Role;
@@ -744,11 +756,14 @@ mod tests {
         let thread = Box::pin(ask.run(&ctx)).await.unwrap().open.unwrap();
         let quote = Quoted { id: Uuid::now_v7(), quote: Quote::new(alice.clone(), "lunch?"), sealed: true };
         let reply = Job::Reply { thread: thread.clone(), to: None, text: "at noon".into(), quote: Some(quote.clone()) };
-        let reply = Job::Attached { job: Box::new(reply), files };
+        let reply = Job::Attached { job: Box::new(reply), files: Rc::clone(&files) };
         let line = Box::pin(reply.run(&ctx)).await.unwrap().line;
         assert_eq!(line, format!("sent to bob on thread {thread} with 1 file"));
         let title = Job::Title { thread: thread.clone(), text: "Team lunch".into() };
         Box::pin(title.run(&ctx)).await.unwrap();
+        let notes = Job::Notes { thread: thread.clone(), text: "the menu".into() };
+        let line = Box::pin(Job::Attached { job: Box::new(notes), files }.run(&ctx)).await.unwrap().line;
+        assert_eq!(line, format!("posted to the notes of thread {thread} (8 turns left) with 1 file"));
         let to_ant = Job::Ask {
             to: user("dev-a"),
             thread: Some(thread.clone()),
@@ -774,6 +789,13 @@ mod tests {
         assert_eq!(entries[1].quote, Some(quote.quote.clone()), "the quote is sealed with the text");
         let to_ant = entries.iter().find(|e| e.to == Some(user("dev-a"))).unwrap();
         assert_eq!((to_ant.sealed, &to_ant.quote), (None, &Some(quote.quote.withheld())), "no excerpt in the clear");
+        let note = entries.iter().find(|e| e.kind == Kind::Note).unwrap();
+        assert_eq!(
+            (&note.from, note.text.as_str(), note.sealed, note.turns),
+            (&Some(alice), "the menu", None, Some(8))
+        );
+        let [noted] = &note.attachments[..] else { panic!("{note:?}") };
+        assert!(noted.attachment.sealed.is_none(), "{noted:?}");
         let [listed] = &entries[1].attachments[..] else { panic!("{entries:?}") };
         assert!(listed.attachment.sealed.is_some(), "{listed:?}");
         assert_eq!((listed.attachment.name.as_str(), listed.size()), ("menu.txt", 4));

@@ -38,6 +38,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("archive", "", "archive the thread"),
     ("unarchive", "", "unarchive the thread"),
     ("title", "TEXT", "title the thread"),
+    ("notes", "TEXT", "post to the thread's notes: wakes nobody, renews their turn budget"),
     ("react", "NAME", "react to the latest message"),
     ("goto", "THREAD|#channel|@user", "show a thread, channel or user"),
     ("search", "QUERY", "search the threads"),
@@ -104,6 +105,8 @@ pub enum Slash {
     Remind(String),
     Unremind,
     Title(String),
+    /// Post the text to the thread's notes.
+    Notes(String),
     React(Reaction),
     Goto(Goto),
     Search(String),
@@ -255,6 +258,7 @@ fn slash(text: &str) -> Result<Slash, String> {
         "remind" => text().map(Slash::Remind),
         "unremind" => bare(Slash::Unremind),
         "title" => text().map(Slash::Title),
+        "notes" => text().map(Slash::Notes),
         "react" => text()?.parse().map(Slash::React).map_err(|e| e.to_string()),
         "goto" => goto(&text()?).map(Slash::Goto),
         "search" => text().map(Slash::Search),
@@ -368,6 +372,8 @@ mod tests {
         assert!(parse("/notify").unwrap_err().starts_with("usage: /notify all|humans|mentions"));
         assert!(parse("/notify some").unwrap_err().starts_with("unknown notify level"));
         assert_eq!(ok("/react eyes"), Slash::React("eyes".parse().unwrap()));
+        assert_eq!(ok("/notes split  the work"), Slash::Notes("split  the work".into()));
+        assert_eq!(parse("/notes").unwrap_err(), "usage: /notes TEXT");
         assert_eq!(ok("/goto #ops"), Slash::Goto(Goto::Channel("ops".parse().unwrap())));
         assert_eq!(ok("/goto @bob"), Slash::Goto(Goto::User(user("bob"))));
         assert_eq!(ok("/retire @dev-a"), Slash::Retire(user("dev-a")));

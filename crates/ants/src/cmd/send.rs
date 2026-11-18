@@ -673,11 +673,8 @@ pub(crate) async fn notes(
     let (_, js) = nats.connect("ants-cli").await?;
     let thread = thread.resolve(nats, &js).await?;
     if !text.is_empty() {
-        let mut post = NotesPost::new(thread, nats.me.id.clone(), text.join(" "));
-        post.attachments = attachments::references(&files);
-        attachments::store(&js, &files, |id| post.attachment_handle(id)).await?;
-        notes::publish(&js, &post, None).await?;
-        println!("posted to the notes of thread {} ({} turns left)", post.thread_id, post.turn_budget);
+        let post = post_notes(&js, &nats.me.id, thread, text.join(" "), &files).await?;
+        println!("{}", notes_posted(&post));
         print_attached(&files, |id| post.attachment_handle(id));
         return Ok(());
     }
@@ -693,6 +690,27 @@ pub(crate) async fn notes(
         print!("{}", attachments::render(&attachments::listed_on(&post.subject(), &post.attachments), "  "));
     }
     Ok(())
+}
+
+/// Post `text` from `me` to the notes of `thread` with `files` attached, stored before it, as `ants notes THREAD TEXT`
+/// does: in the clear, waking nobody, with a fresh turn budget.
+pub(crate) async fn post_notes(
+    js: &jetstream::Context,
+    me: &UserId,
+    thread: ThreadId,
+    text: String,
+    files: &[attachments::File],
+) -> Result<NotesPost> {
+    let mut post = NotesPost::new(thread, me.clone(), text);
+    post.attachments = attachments::references(files);
+    attachments::store(js, files, |id| post.attachment_handle(id)).await?;
+    notes::publish(js, &post, None).await?;
+    Ok(post)
+}
+
+/// What `ants notes` prints once it posted `post`.
+pub(crate) fn notes_posted(post: &NotesPost) -> String {
+    format!("posted to the notes of thread {} ({} turns left)", post.thread_id, post.turn_budget)
 }
 
 /// Print the handle of each file attached to the message sent, as `attachment <handle>`.
