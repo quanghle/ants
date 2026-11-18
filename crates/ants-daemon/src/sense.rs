@@ -22,7 +22,6 @@ mod stores;
 mod workdirs;
 
 pub use ants_sense::home::DIR;
-pub use ants_sense::memory::{normalize_remote, remote_url};
 pub use ants_sense::{CAPABILITIES, NAME};
 pub(crate) use scheduler::{Daemon, Dreaming, Serving};
 pub use stores::{Hosting, Link};
@@ -171,6 +170,24 @@ pub(crate) fn calls_own_tool(title: &str) -> bool {
     let tool = first.rsplit(['/', '.', ':']).find(|part| !part.is_empty()).unwrap_or_default();
     let tool = tool.rsplit("__").next().unwrap_or_default();
     tool.strip_prefix(NAME).and_then(|rest| rest.strip_prefix('_')).is_some_and(|rest| !rest.is_empty())
+}
+
+#[cfg(test)]
+impl Sense {
+    /// What the record of the review of dream `dream` of `ant` in the sense data of `sage` says its thread spent, none
+    /// when it says nothing. Panics when sense keeps no such record.
+    pub(crate) async fn review_spent(
+        &self,
+        sage: &UserId,
+        ant: &UserId,
+        dream: u64,
+    ) -> Option<crate::limits::caps::Spent> {
+        let items = self.kept(sage).await.unwrap().expect("sense keeps the sage's data");
+        let record = ants_sense::dream::review_record(&*items, ant, dream).await.unwrap().expect("the review's record");
+        assert!(record.answered.is_some(), "the review answered: {record:?}");
+        let spent = record.spent?;
+        Some(crate::limits::caps::Spent { tokens: spent.tokens, cost: spent.cost_micros as f64 / 1e6 })
+    }
 }
 
 /// Sense keeping no data, its tools that need some refusing.

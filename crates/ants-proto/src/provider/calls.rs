@@ -55,7 +55,7 @@ pub struct CallContext {
     /// The machine serving the ant, as its colony entry names it.
     pub machine: String,
     /// The thread's repository: the remote of the git repository its session works in (`origin`, else the first
-    /// with a URL), as `host/path`, without scheme, user, port or `.git`. None outside a git repository with a remote.
+    /// with a URL, [`remote_url`]), as `host/path` ([`normalize_remote`]). None outside a git repository with a remote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
     pub at: DateTime<Utc>,
@@ -69,6 +69,56 @@ impl CallContext {
     }
 }
 
+/// `remote`, a git remote in any form git takes (`https://user@Host:443/owner/repo.git`,
+/// `git@host:owner/repo.git`, `ssh://…`, `host/owner/repo`), as `host/path`: without scheme, user, port, `.git` or
+/// slashes around, the host in lower case. None when it names no host and path.
+pub fn normalize_remote(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    let (authority, path) = match remote.split_once("://") {
+        Some((_, rest)) => rest.split_once('/')?,
+        // scp-like: `[user@]host:path`, a colon before any slash.
+        None => match (remote.find(':'), remote.find('/')) {
+            (Some(colon), slash) if slash.is_none_or(|slash| colon < slash) => (&remote[..colon], &remote[colon + 1..]),
+            _ => remote.split_once('/')?,
+        },
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = match host.rsplit_once(':') {
+        Some((host, port)) if port.bytes().all(|b| b.is_ascii_digit()) => host,
+        _ => host,
+    };
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/');
+    let valid = |part: &str| !part.is_empty() && !part.contains(|c: char| c.is_whitespace() || c.is_control());
+    (valid(host) && valid(path) && !host.contains(['/', '@', ':']))
+        .then(|| format!("{}/{path}", host.to_ascii_lowercase()))
+}
+
+/// The URL of remote `origin` in `config`, the text of a git config file, else of the first remote with one; includes
+/// and `insteadOf` rewrites are not followed.
+pub fn remote_url(config: &str) -> Option<&str> {
+    let (mut remote, mut first) = (None, None);
+    for line in config.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[') {
+            remote = header.split_once(']').and_then(|(header, _)| {
+                let (section, name) = header.split_once(char::is_whitespace)?;
+                section.eq_ignore_ascii_case("remote").then(|| name.trim().trim_matches('"'))
+            });
+            continue;
+        }
+        let (Some(name), Some((key, value))) = (remote, line.split_once('=')) else { continue };
+        let Some(url) = value.split_whitespace().next().map(|url| url.trim_matches('"')) else { continue };
+        if !key.trim().eq_ignore_ascii_case("url") || url.is_empty() {
+            continue;
+        }
+        if name == "origin" {
+            return Some(url);
+        }
+        first.get_or_insert(url);
+    }
+    first
+}
+
 /// Where a thread came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Origin {
@@ -80,9 +130,10 @@ pub struct Origin {
 
 impl Origin {
     /// Whether the thread's text comes from ants and humans of the bus: not from a webhook, which relays the outside,
-    /// nor from an ant asking a review, whose packet carries its threads, webhooks' among them.
+    /// nor from an ant asking a review, whose packet carries its threads, webhooks' among them, nor from a starter of a
+    /// kind not known.
     pub fn trusted(&self) -> bool {
-        !matches!(self.by, Starter::Webhook { .. } | Starter::Review { .. })
+        matches!(self.by, Starter::Human { .. } | Starter::Ant { .. } | Starter::Provider { .. })
     }
 }
 
@@ -108,6 +159,9 @@ pub enum Starter {
     Provider {
         name: String,
     },
+    /// A kind of a later version of ants, untrusted ([`Origin::trusted`]).
+    #[serde(other)]
+    Unknown,
 }
 
 /// The result of [`super::method::TOOLS_CALL`]: the answer the ant reads, in the format it asked for, and whether the
@@ -295,6 +349,42 @@ mod tests {
         assert!(!by(Starter::Review { user: user() }).trusted());
         let review = json!({"by": {"kind": "review", "user": "x"}});
         assert_eq!(serde_json::from_value::<Origin>(review).unwrap(), by(Starter::Review { user: user() }));
+    }
+
+    #[test]
+    fn a_starter_of_a_later_kind_reads_as_unknown_and_untrusted() {
+        let later = json!({"by": {"kind": "levitated", "user": "x", "height": 3}, "channel": "ops"});
+        let origin: Origin = serde_json::from_value(later).unwrap();
+        assert_eq!(origin.by, Starter::Unknown);
+        assert!(!origin.trusted());
+    }
+
+    #[test]
+    fn remotes_normalize_to_host_and_path() {
+        for remote in [
+            "https://github.com/Owner/Repo.git",
+            "https://user:pw@GitHub.com:443/Owner/Repo/",
+            "git@github.com:Owner/Repo.git",
+            "ssh://git@github.com:22/Owner/Repo",
+            "github.com/Owner/Repo",
+        ] {
+            assert_eq!(normalize_remote(remote).as_deref(), Some("github.com/Owner/Repo"), "{remote}");
+        }
+        for remote in ["", "github.com", "https://github.com/", "a b/c"] {
+            assert_eq!(normalize_remote(remote), None, "{remote}");
+        }
+    }
+
+    #[test]
+    fn the_remote_of_a_git_config_is_origin_else_the_first() {
+        let config = "[core]\n\tbare = false\n[remote \"upstream\"]\n\turl = https://github.com/up/repo.git\n\
+                      [Remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n\tURL = \"git@GitHub.com:o/r.git\"\n";
+        assert_eq!(remote_url(config), Some("git@GitHub.com:o/r.git"));
+        assert_eq!(
+            remote_url("[remote \"fork\"]\nurl = ssh://git@host:22/f/r # mine\n"),
+            Some("ssh://git@host:22/f/r")
+        );
+        assert_eq!(remote_url("[core]\n\turl = https://h/o/r\n[branch \"main\"]\n\tremote = origin\n"), None);
     }
 
     #[test]

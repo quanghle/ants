@@ -157,13 +157,26 @@ async fn review(items: &dyn Items, dreams: &Dreams, ant: &UserId, dream: &Dream,
 
 /// Take the message `envelope` that arrived for the ant, whose sense data `items` holds, when it is its sage's answer
 /// to the review of its last dream: none when it is not; true to prompt the ant with it, as it was made the sage's
-/// findings in their marked block; false to ack it unprompted, as an answer without findings, a late one or one that
-/// leaves the ant to be woken with the packet alone. A notice that the sage gave up on the review or had it withdrawn
-/// leaves the ant to the packet alone; any other one waits for the answer.
+/// findings in their marked block; false to ack it unprompted, as an answer without findings, a late one, whose
+/// findings the next dream offers, or one that leaves the ant to be woken with the packet alone. A notice that the
+/// sage gave up on the review or had it withdrawn leaves the ant to the packet alone; any other one waits for the
+/// answer. A reply of the sage to the review of the dream before the last, come after the next dream began, is dropped:
+/// acked unprompted.
 pub(crate) async fn review_answer(items: &dyn Items, envelope: &mut Envelope) -> Result<Option<bool>> {
     let Some((last, _)) = dream::last(items).await? else { return Ok(None) };
-    let reviewing = last.review.as_ref().is_some_and(|review| review.thread == envelope.thread_id);
-    if !reviewing || last.sage.as_ref() != Some(&envelope.from) {
+    let reviewing = |dream: &Dream| {
+        dream.sage.as_ref() == Some(&envelope.from)
+            && dream.review.as_ref().is_some_and(|review| review.thread == envelope.thread_id)
+    };
+    if !reviewing(&last) {
+        let before = match last.number - 1 {
+            number if number > 0 && envelope.in_reply_to.is_some() => dream::get(items, number).await?,
+            _ => None,
+        };
+        if let Some((before, _)) = before.filter(|(before, _)| reviewing(before)) {
+            tracing::info!(sage = %envelope.from, dream = before.number, "the sage's answer came after the next dream began: dropped");
+            return Ok(Some(false));
+        }
         return Ok(None);
     }
     let text = match envelope.notice {
@@ -184,6 +197,10 @@ pub(crate) async fn review_answer(items: &dyn Items, envelope: &mut Envelope) ->
         }
         Reviewed::Quiet => {
             tracing::info!(%sage, dream, "the sage's answer brings no findings: nobody woken");
+            Ok(Some(false))
+        }
+        Reviewed::Late(findings) => {
+            tracing::info!(%sage, dream, findings, "the sage's answer came after the ant dreamed on the packet alone: the next dream offers its findings");
             Ok(Some(false))
         }
         Reviewed::Fallback => {
@@ -403,5 +420,6 @@ fn starter(by: &Starter) -> String {
         Starter::Webhook { user } => format!("webhook {user}"),
         Starter::Review { user } => format!("ant {user}, asking a review"),
         Starter::Provider { name } => format!("provider {name}"),
+        Starter::Unknown => "someone of a kind not known".to_owned(),
     }
 }

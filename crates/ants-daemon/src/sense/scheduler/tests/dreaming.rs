@@ -337,12 +337,25 @@ async fn without_findings_nobody_wakes_and_without_an_answer_the_ant_dreams_on_t
     let requests = host.requests.locked().clone();
     assert_eq!(requests.len(), 1, "six hours unanswered");
     assert!(requests[0].text.starts_with("# Dream 1") && requests[0].text.contains("sense_remember"));
-    let mut late = reply(&review, "```json\n[{\"kind\": \"lesson\"}]\n```");
+    let pinned = json!([
+        {"kind": "lesson", "finding": "Pin the toolchain", "evidence": {"threads": ["worked-thread"]}, "action": "Pin it"},
+    ]);
+    let mut late = reply(&review, &format!("```json\n{pinned}\n```"));
     assert_eq!(review_answer(&*items, &mut late).await.unwrap(), Some(false), "a late answer wakes nobody");
+    assert_eq!(last(&*items).await.unwrap().review.unwrap().late.len(), 1, "kept for the next dream");
+    let day_later = now + chrono::Duration::hours(25);
+    fake.set(Some(day_later - chrono::Duration::hours(1)), &[("next-thread", false)]);
+    cycle(&Sense::new(), &*items, &host, &settings, day_later).await.unwrap();
+    let next = last(&*items).await.unwrap();
+    assert_eq!(next.number, 2);
+    assert!(next.findings.iter().any(|finding| finding.text == "Pin the toolchain"), "{:?}", next.findings);
+    let mut older = reply(&review, &format!("```json\n{pinned}\n```"));
+    assert_eq!(review_answer(&*items, &mut older).await.unwrap(), Some(false), "dropped after the next dream began");
 
     let items = open(SharedLog::default(), SenseId::new()).await;
+    fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false)]);
     cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap();
-    let review = fake.reviews.locked()[2].1.clone();
+    let review = fake.reviews.locked().last().unwrap().1.clone();
     let mut gave_up = Envelope { notice: Some(NoticeKind::GaveUp), ..reply(&review, "gave up") };
     assert_eq!(review_answer(&*items, &mut gave_up).await.unwrap(), Some(false));
     cycle(&Sense::new(), &*items, &host, &settings, now + chrono::Duration::minutes(1)).await.unwrap();

@@ -176,8 +176,18 @@ fn envelope() -> Envelope {
         review_outcomes: Some(ReviewOutcomes {
             dream: 7,
             findings: vec![
-                FindingOutcome { finding: "5.1".to_owned(), verdict: FindingVerdict::Applied, holds: true },
-                FindingOutcome { finding: "5.2".to_owned(), verdict: FindingVerdict::Rejected, holds: false },
+                FindingOutcome {
+                    finding: "5.1".to_owned(),
+                    verdict: FindingVerdict::Applied,
+                    holds: true,
+                    reason: String::new(),
+                },
+                FindingOutcome {
+                    finding: "5.2".to_owned(),
+                    verdict: FindingVerdict::Rejected,
+                    holds: false,
+                    reason: "Not borne out by the threads cited.".to_owned(),
+                },
             ],
         }),
         sent_at: at(0),

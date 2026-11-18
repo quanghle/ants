@@ -4,7 +4,8 @@
 //! a review thread of its own ([`Review`]), else, as when the sage did not answer within [`SAGE_TIMEOUT_HOURS`] or
 //! answered with nothing readable, to the ant itself on a new dream thread with the packet alone
 //! ([`Dream::wake_due`]). The sage's findings prompt the ant on the review thread inside a marked block
-//! ([`answered`]); an answer without findings wakes nobody.
+//! ([`answered`]); an answer without findings wakes nobody, and the findings of one come after the ant was woken with
+//! the packet alone are offered in the next dream ([`Review::late`]).
 //!
 //! sense runs no model: it only gathers what a review judges and records what the ant decides. Each dream is an item of
 //! kind [`DREAM`], numbered, the last one named by a record of kind [`DREAMS`], so a daemon taking over dreams no sooner.
@@ -28,8 +29,9 @@
 //!
 //! A sage's own dream covers the reviews it was asked as threads too ([`Covered::review`]), but its packet lists them by
 //! their records ([`Reviewing`]), leaving out their text, the packets of other ants' work: so they make nothing of the
-//! dream untrusted. Each record keeps what its review thread spent ([`ReviewSpend`]), which the sage's tally shows a
-//! review and a finding still holding ([`ReviewCost`]).
+//! dream untrusted, but for a finding on its practice quoting the reasons the ants reviewed gave for rejecting its
+//! findings ([`practice_findings`]). Each record keeps what its review thread spent ([`ReviewSpend`]), which the sage's
+//! tally shows a review and a finding still holding ([`ReviewCost`]).
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
@@ -60,12 +62,12 @@ pub use identity_findings::{
     OWN_AFTER_THREADS, PERSONA_AFTER_THREADS, RELATIONSHIP_AFTER_THREADS, SELF_MODEL_AFTER_THREADS, STALE_ACTIVE_DAYS,
 };
 pub use packet::{
-    Action, Earlier, Identity, MIN_THREAD_BYTES, PACKET_BUDGET, REVIEWING_SHARE, Reader, Reviewing, Thread,
-    TrackRecord, compose, packet, reviewing, track_record,
+    Action, Earlier, Identity, MIN_THREAD_BYTES, OUTCOME_DAYS, PACKET_BUDGET, REVIEWING_SHARE, Reader, Reviewing,
+    TRACK_RECORD_DAYS, Thread, TrackRecord, compose, packet, reviewing, track_record,
 };
 pub use practice_findings::{
-    COSTLY_REVIEW_COST_MICROS, COSTLY_REVIEW_TOKENS, COSTLY_REVIEWS, JUDGED_FINDINGS, PRACTICE_DAYS, REJECTED_FINDINGS,
-    RELATIONSHIP_AFTER_REVIEWS, UNANSWERED_PERCENT, UNANSWERED_REVIEWS, UNDONE_FINDINGS,
+    COSTLY_REVIEW_COST_MICROS, COSTLY_REVIEW_TOKENS, COSTLY_REVIEWS, JUDGED_FINDINGS, PRACTICE_DAYS, QUOTED_REASONS,
+    REJECTED_FINDINGS, RELATIONSHIP_AFTER_REVIEWS, UNANSWERED_PERCENT, UNANSWERED_REVIEWS, UNDONE_FINDINGS,
 };
 pub use review::{
     Advice, Evidence, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse, review_sent, untrusted_on,
@@ -170,7 +172,7 @@ impl Covered {
 /// A commit a packet names, so its reader checks the code out as the threads left it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Commit {
-    /// The repository's normalized git remote ([`memory::normalize_remote`]).
+    /// The repository's normalized git remote ([`ants_proto::provider::normalize_remote`]).
     pub repo: String,
     pub commit: String,
     /// The thread whose worktree is at it; none for the ant's workdir.
@@ -677,11 +679,13 @@ pub async fn proposal_due(items: &dyn Items, last: Option<&Dream>, now: DateTime
     Ok(proposal::pending(items).await?.iter().any(|found| found.proposal.ripe() <= now && !offered(found.id())))
 }
 
-/// Finding `id` (`<dream>.<n>`) of the dream that offered it; none when no dream has it.
+/// Finding `id` (`<dream>.<n>`) of the dream that offered it, or whose sage's answer gave it late ([`Review::late`]);
+/// none when no dream has it.
 pub async fn finding(items: &dyn Items, id: &str) -> Result<Option<Finding>, StoreError> {
     let Some(number) = id.split_once('.').and_then(|(number, _)| number.parse().ok()) else { return Ok(None) };
     let Some((dream, _)) = get(items, number).await? else { return Ok(None) };
-    Ok(dream.findings.into_iter().find(|finding| finding.id == id))
+    let late = dream.review.into_iter().flat_map(|review| review.late);
+    Ok(dream.findings.into_iter().chain(late).find(|finding| finding.id == id))
 }
 
 /// Why a persona or skill proposal made in `context`, in answer to `finding` if it names one, rests on untrusted text;
@@ -774,13 +778,14 @@ impl Gathered {
     }
 }
 
-/// The findings of dream `number`, beginning as `start` says after `previous`: the open findings of
+/// The findings of dream `number`, beginning as `start` says after `previous`: the findings of the sage's answer to
+/// the review of `previous` come after the ant was woken with the packet alone ([`Review::late`]), the open findings of
 /// `previous` that still hold, then the packet's own on what they do not cover yet, those on memories and proposals
 /// first, then those on the identity of the ant ([`identity_findings`]), then those on its practice as a sage from the
 /// records of the `reviews` it made ([`practice_findings`]), then those on the vital signs of the work ([`vitals`]), up
 /// to [`MAX_FINDINGS`]. An open finding on the identity, the practice or the vital signs holds while its ground does,
-/// taking the text and count gathered now. One of the `rested` stays out while what it is about is unchanged and the
-/// ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts; `rested` keeps those resting on.
+/// taking the text, count and trust gathered now. One of the `rested` stays out while what it is about is unchanged and
+/// the ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts; `rested` keeps those resting on.
 async fn findings(
     items: &dyn Items,
     previous: Option<&Dream>,
@@ -796,7 +801,8 @@ async fn findings(
     let identity_found = identity_findings::gather(items, &start.writer.ant).await?;
     let practice = practice_findings::gather(items, reviews, ages).await?;
     let vital = vitals::gather(&start.vitals, &vitals::trend(items, number).await?);
-    let mut found: Vec<Finding> = Vec::new();
+    let late = previous.and_then(|previous| previous.review.as_ref()).map(|review| review.late.iter());
+    let mut found: Vec<Finding> = late.into_iter().flatten().cloned().collect();
     for open in previous.into_iter().flat_map(Dream::open) {
         let mut open = open.clone();
         let holds = match open.kind {
@@ -810,6 +816,7 @@ async fn findings(
                 let now = regathered.find(|gathered| open.key.as_ref() == Some(&gathered.key()));
                 if let Some(now) = now {
                     (open.text, open.items, open.count) = (now.text.clone(), now.items.clone(), now.count);
+                    open.untrusted = now.untrusted;
                 }
                 now.is_some()
             }
