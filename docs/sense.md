@@ -612,8 +612,9 @@ that count doubles, not at each thread. The numbers are first guesses, to tune o
 
 **A sage's own dream:** for an ant that reviewed other ants, the packet lists, after the findings, the reviews it made
 by their records (**The sage's records**, below): those asked, answered or told of since the last dream, the latest
-asked first, each with the ant and dream reviewed, when the review was asked and answered, and each finding's id
-and kind with what came of it (`applied, still holding`, `applied, since undone`, `rejected`, `deferred` or
+asked first, each with the ant and dream reviewed, when the review was asked and answered, what an answered one's
+thread spent (`spent N tokens and cost C`, or `spend unknown` when nothing was reported), and each finding's id and
+kind with what came of it (`applied, still holding`, `applied, since undone`, `rejected`, `deferred` or
 `unanswered`), then the tally of all its reviews. An ant tells its verdicts with its next review, so the findings of
 its latest one show unanswered until then. The section takes at most an eighth of the packet's budget, the earliest
 reviews left out first. The text of the review threads, other ants' work, is left out, so they make the packet hold

@@ -244,8 +244,11 @@ async fn a_sage_s_dream_lists_its_reviews_by_their_records_and_holds_none_of_the
     let now = Utc::now();
     review(&*items, ("dev-b", 1, 1), &[], &["lesson", "mistake"], now - Duration::hours(30)).await;
     let undone = told(1, &[(Applied, false), (Rejected, false)]);
-    review(&*items, ("dev-b", 2, 2), &undone, &["persona"], now - Duration::hours(2)).await;
+    let spent = Some(ReviewSpend { tokens: 40_000, cost_micros: 250_000 });
+    review_spending(&*items, ("dev-b", 2, 2), &undone, &["persona"], spent, now - Duration::hours(2)).await;
     review(&*items, ("dev-c", 1, 3), &[], &[], now - Duration::hours(1)).await;
+    let (dev_c, asked) = ("dev-c".parse().unwrap(), ReviewOutcomes { dream: 2, findings: Vec::new() });
+    assert!(review_received(&*items, &dev_c, &on(5).thread, &asked, now - Duration::minutes(30)).await.unwrap());
     let covered = |n: u8, untrusted: bool, review: bool| Covered { thread: on(n).thread, untrusted, review };
     let writer = on(9);
     let threads = vec![covered(2, true, false), covered(3, true, true), covered(4, false, false)];
@@ -259,13 +262,16 @@ async fn a_sage_s_dream_lists_its_reviews_by_their_records_and_holds_none_of_the
     assert!(text.contains("Ask how the findings of those reviews fared"), "{text}");
     let shown = [
         "## Reviews of other ants",
+        "what the review thread spent by the answer",
+        "### Dream 2 of dev-c, asked",
+        " UTC, not answered\n\n",
         "### Dream 1 of dev-c, asked",
-        "No findings.\n",
+        " UTC, spend unknown\n\nNo findings.\n",
         "### Dream 2 of dev-b, asked",
-        "- 2.1 persona: unanswered\n",
+        " UTC, spent 40000 tokens and cost 0.25\n\n- 2.1 persona: unanswered\n",
         "### Dream 1 of dev-b, asked",
-        "- 1.1 lesson: applied, since undone\n- 1.2 mistake: rejected\n",
-        "Reviews of other ants: 3 reviews of 2 ants",
+        " UTC, spend unknown\n\n- 1.1 lesson: applied, since undone\n- 1.2 mistake: rejected\n",
+        "Reviews of other ants: 4 reviews of 2 ants",
     ];
     let at: Vec<_> = shown.iter().map(|line| text.find(line).unwrap_or_else(|| panic!("{line}: {text}"))).collect();
     assert!(at.is_sorted(), "{text}");

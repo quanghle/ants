@@ -1,7 +1,8 @@
 //! The reviews section of a sage's own dream packet: the reviews it made of other ants since its last dream, by their
 //! records alone ([`ReviewRecord`]), never the text of their threads, which the packet leaves out ([`Covered::review`]):
 //! those asked, answered or told of within the dream's period, the latest asked first, each with the ant and dream
-//! reviewed, when asked and answered, and each finding's kind and what came of it; then the tally of all its reviews
+//! reviewed, when asked and answered, what an answered one spent ([`ReviewRecord::spent`]) or that its spend is unknown,
+//! and each finding's kind and what came of it; then the tally of all its reviews
 //! ([`tally_lines`]). It takes at most a share of the packet's budget ([`REVIEWING_SHARE`]), the earliest reviews left
 //! out first, and shrinks to its heading and tally for room before the identity is cut to titles.
 //!
@@ -12,6 +13,7 @@ use std::fmt::Write as _;
 use chrono::{DateTime, Utc};
 
 use crate::brief::TOP_EXPERIENCE;
+use crate::dream::vitals::cost;
 use crate::dream::{Dream, Judgement, ReviewRecord, ReviewedFinding, review_records, review_tally, tally_lines};
 use crate::store::{Items, StoreError};
 
@@ -88,9 +90,9 @@ pub async fn reviewing(items: &dyn Items, dream: &Dream) -> Result<Reviewing, St
     reviews.sort_by(|a, b| b.received.cmp(&a.received).then_with(|| a.ant.cmp(&b.ant)));
     let head = format!(
         "\n## Reviews of other ants\n\nThe reviews made of other ants since {} UTC, by their records, the latest asked \
-         first: the ant and dream reviewed, when asked and answered, and what came of each finding, as the ant told \
-         it. An ant tells its verdicts with its next review, so the findings of its latest one show unanswered until \
-         then. The text of the review threads, the work of other ants, is left out.\n",
+         first: the ant and dream reviewed, when asked and answered, what the review thread spent by the answer, and \
+         what came of each finding, as the ant told it. An ant tells its verdicts with its next review, so the \
+         findings of its latest one show unanswered until then. The text of the review threads, the work of other ants, is left out.\n",
         dream.since.format("%Y-%m-%d %H:%M")
     );
     let tally =
@@ -105,6 +107,12 @@ fn review(review: &ReviewRecord) -> String {
     match &review.answered {
         Some(at) => {
             let _ = write!(text, ", answered {} UTC", minute(at));
+            match review.spent {
+                Some(spent) => {
+                    let _ = write!(text, ", spent {} tokens and cost {}", spent.tokens, cost(spent.cost_micros));
+                }
+                None => text.push_str(", spend unknown"),
+            }
         }
         None => text.push_str(", not answered"),
     }
