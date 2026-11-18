@@ -50,9 +50,13 @@ pub enum RunError {
     Ended,
     #[error("the run waits on no call {0}")]
     UnknownCall(u32),
-    /// The worker refused the request: its snapshot is not one this build restores.
+    /// The worker refused the request: unreadable to it, or under limits it does not take.
     #[error("the worker refused the run: {0}")]
     Refused(String),
+    /// The run's session is not one this build restores: dumped by another Monty version, or missing. The run is
+    /// unchanged; [`Run::replay`] rebuilds the session from the journal.
+    #[error("the run's session cannot be restored: {0}")]
+    Unrestorable(String),
     /// Replaying the journal, the script made other calls than the journal holds.
     #[error("the replay diverges from the journal: {0}")]
     Diverged(String),
@@ -186,12 +190,11 @@ impl Run {
             clock: state.clock,
             seed: state.seed,
         };
-        let mut made = Vec::new();
         let mut response = worker.call(&start, runner::deadline(state.limits.compute(), 0)).await?;
+        let mut made = response.calls().to_vec();
         if let Response::Suspended { snapshot, calls, .. } = &response
             && !run.journal.is_empty()
         {
-            made.extend(calls.iter().cloned());
             let steps = u32::try_from(calls.len()).unwrap_or(u32::MAX);
             let resume = Request::Resume {
                 snapshot: snapshot.clone(),
@@ -201,9 +204,7 @@ impl Run {
                 steps,
             };
             response = worker.call(&resume, runner::deadline(state.limits.compute(), run.journal.len())).await?;
-        }
-        if let Response::Suspended { calls, .. } = &response {
-            made.extend(calls.iter().cloned());
+            made.extend(response.calls().iter().cloned());
         }
         run.diverged(&made, &response)?;
 
@@ -266,10 +267,13 @@ impl Run {
         let state = &self.state;
         let answers: Vec<(u32, Answer)> =
             self.journal[state.sent..].iter().map(|e| (e.call, e.answer.clone())).collect();
-        let Some(snapshot) = state.snapshot.clone().filter(|_| !answers.is_empty()) else {
+        if answers.is_empty() {
             let mut progress = Progress::default();
             self.dispatch(&mut progress);
             return Ok(progress);
+        }
+        let Some(snapshot) = state.snapshot.clone() else {
+            return Err(RunError::Unrestorable("the run has no stored session".to_owned()));
         };
         let deadline = runner::deadline(state.limits.compute(), answers.len());
         let request = Request::Resume { snapshot, answers, limits: state.limits, seed: state.seed, steps: state.steps };
@@ -320,13 +324,16 @@ impl Run {
         &self.state.queued
     }
 
+    /// Whether the script ran: a run that made steps has, even with its session lost.
     fn started(&self) -> bool {
-        self.state.snapshot.is_some() || self.state.status != Status::Running
+        self.state.snapshot.is_some() || self.state.status != Status::Running || self.state.steps > 0
     }
 
     fn respond(&mut self, response: Result<Response, WorkerError>) -> Result<Progress, RunError> {
         let mut progress = Progress::default();
         match response {
+            Ok(Response::Refused { error }) => return Err(RunError::Refused(error)),
+            Ok(Response::Unrestorable { error }) => return Err(RunError::Unrestorable(error)),
             Ok(response) => {
                 self.state.sent = self.state.answered.len();
                 if let Response::Suspended { calls, .. } = &response {
@@ -370,15 +377,16 @@ impl Run {
                 state.queued.retain(|call| waiting.contains(&call.call));
                 self.dispatch(&mut progress);
             }
-            Response::Done { result, events } => {
+            Response::Done { result, events, .. } => {
                 progress.events = events;
                 self.end(Status::Done { result }, &mut progress);
             }
-            Response::Failed { error, events } => {
+            Response::Failed { error, events, .. } => {
                 progress.events = events;
                 self.end(Status::Failed { error }, &mut progress);
             }
             Response::Refused { error } => return Err(RunError::Refused(error)),
+            Response::Unrestorable { error } => return Err(RunError::Unrestorable(error)),
         }
         Ok(progress)
     }
@@ -407,6 +415,7 @@ impl Run {
         let pending: &[u32] = match response {
             Response::Suspended { pending, .. } => pending,
             Response::Refused { error } => return Err(RunError::Refused(error.clone())),
+            Response::Unrestorable { error } => return Err(RunError::Unrestorable(error.clone())),
             _ => &[],
         };
         let expected = self.journal.iter().map(|e| Call { call: e.call, function: e.function, args: e.args.clone() });

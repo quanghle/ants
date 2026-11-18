@@ -11,8 +11,9 @@ use ants_daemon::records::direct_kv::DirectKv;
 use ants_daemon::trail::{Conducting, StartRun, Trails};
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
-    ColonyEntry, Envelope, Pick, Role, RunId, RunState, TRAIL_RUNS_BUCKET, ThreadId, TrailAction, TrailLimits,
-    TrailOutcome, TrailReply, TrailRequest, TrailRun, TrailSource, UserId, subject, trail_run_key,
+    AssistantGrant, ColonyEntry, DeviceId, Envelope, Pick, Role, RunId, RunState, TRAIL_RUNS_BUCKET, ThreadId,
+    TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailRun, TrailSession, TrailSource, UserId,
+    subject, trail_run_key, trail_session_key,
 };
 use ants_test_support::{NatsServer, eventually, eventually_within, scratch_dir};
 use futures::StreamExt as _;
@@ -51,6 +52,11 @@ async fn init(server: &NatsServer) {
 
 /// The conductor `lead`'s daemon, its runs continued, with `worker` as the `ants` binary and `colony` as the colony.
 async fn conductor(server: &NatsServer, worker: &Path, colony: Vec<ColonyEntry>) -> Conductor {
+    conductor_with(server, worker, colony, Registry::new(UserId::human())).await
+}
+
+/// [`conductor`], knowing the humans and their assistants' grants from `humans`.
+async fn conductor_with(server: &NatsServer, worker: &Path, colony: Vec<ColonyEntry>, humans: Registry) -> Conductor {
     let lead = ant("lead");
     let (client, js) = ants_daemon::bus::connect(&server.url, None, None, &lead, "conductor").await.unwrap();
     let attempts = ants_daemon::bus::ensure_attempts(&js, None, &lead).await.unwrap();
@@ -74,7 +80,7 @@ async fn conductor(server: &NatsServer, worker: &Path, colony: Vec<ColonyEntry>)
         ant: lead,
         worker: worker.to_owned(),
         trails_dir: None,
-        humans: Registry::new(UserId::human()),
+        humans,
         colony,
         outbox,
         attempts,
@@ -348,4 +354,124 @@ async fn a_run_past_its_wall_time_fails() {
     .await;
     let RunState::Failed { error } = state else { panic!("not failed: {state:?}") };
     assert!(error.contains("wall time"), "{error}");
+}
+
+impl Conductor {
+    /// The stored session of `run`, ants_trail's run state, as JSON.
+    async fn session(&self, run: &RunId) -> (TrailSession, Value) {
+        let runs = DirectKv::new(&self.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+        let stored = runs.get(trail_session_key(&ant("lead"), run)).await.unwrap().unwrap();
+        let stored: TrailSession = serde_json::from_slice(&stored).unwrap();
+        let state = serde_json::from_str(&stored.session).unwrap();
+        (stored, state)
+    }
+
+    /// Store `state` as the session of `run`, as a daemon stopped since would find it.
+    async fn put_session(&self, run: &RunId, mut stored: TrailSession, state: &Value) {
+        stored.session = state.to_string();
+        let runs = DirectKv::new(&self.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+        runs.put(trail_session_key(&ant("lead"), run), serde_json::to_vec(&stored).unwrap()).await.unwrap();
+    }
+}
+
+/// Starts `script` with `lead`, answers its first step "A", and stops the daemon once the second, to ops, is stored
+/// sent: the second step is returned.
+async fn second_step_stored(lead: &mut Conductor, script: &str) -> (RunId, Envelope) {
+    let run = lead.start(script, TrailLimits::default()).await;
+    let a = lead.step().await;
+    assert!(lead.reply(&a, "A").await);
+    let b = lead.step().await;
+    assert_eq!(b.to, ant("ops"));
+    eventually("the second step is stored sent", async || {
+        lead.session(&run).await.0.pending.iter().any(|call| call.message == b.id && call.sent)
+    })
+    .await;
+    lead.serving.abort();
+    (run, b)
+}
+
+const TWO_STEPS: &str = "a = await agent(\"a\", ant=\"dev\")\nb = await agent(\"b\", ant=\"ops\")\na + b\n";
+
+#[tokio::test]
+async fn a_run_whose_session_the_worker_cannot_restore_is_replayed_from_its_journal() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    // A dump of another Monty version, which this one cannot read, and a session lost altogether.
+    for snapshot in [json!({"ResolveFutures": {"dump_version": 99}}), Value::Null] {
+        let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+        let (run, b) = second_step_stored(&mut lead, TWO_STEPS).await;
+        let (stored, mut state) = lead.session(&run).await;
+        assert!(!state["snapshot"].is_null());
+        state["snapshot"] = snapshot.clone();
+        lead.put_session(&run, stored, &state).await;
+        drop(lead);
+
+        let mut again = conductor(&server, &ants_binary(), Vec::new()).await;
+        assert!(again.reply(&b, "B").await);
+        assert_eq!(again.ended(&run).await, RunState::Done { result: json!("AB") }, "with {snapshot}");
+        assert!(again.sent.try_recv().is_err(), "the replay sends no step again");
+    }
+}
+
+#[tokio::test]
+async fn a_replay_of_a_changed_script_fails_the_run_naming_the_call_that_differs() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let (run, b) = second_step_stored(&mut lead, TWO_STEPS).await;
+    let (stored, mut state) = lead.session(&run).await;
+    let script = state["script"].as_str().unwrap().replace(r#"agent("a""#, r#"agent("z""#);
+    state["script"] = json!(script);
+    state["snapshot"] = json!({"ResolveFutures": {"dump_version": 99}});
+    lead.put_session(&run, stored, &state).await;
+    drop(lead);
+
+    let again = conductor(&server, &ants_binary(), Vec::new()).await;
+    assert!(again.reply(&b, "B").await);
+    let RunState::Failed { error } = again.ended(&run).await else { panic!("not failed") };
+    assert!(error.contains("diverges from the journal: call "), "{error}");
+    assert!(error.contains(r#""prompt":"z""#) && error.contains(r#""prompt":"a""#), "{error}");
+}
+
+/// A user JWT for `name`, tagged `tag`, signed by `account` for the key `key`.
+fn user_jwt(account: &nkeys::KeyPair, key: &nkeys::KeyPair, name: &UserId, tag: &str) -> String {
+    use data_encoding::BASE64URL_NOPAD;
+    let header = BASE64URL_NOPAD.encode(br#"{"typ":"JWT","alg":"ed25519-nkey"}"#);
+    let claims = json!({
+        "sub": key.public_key(), "iss": account.public_key(), "name": name,
+        "nats": { "type": "user", "tags": [tag] },
+    });
+    let body = BASE64URL_NOPAD.encode(claims.to_string().as_bytes());
+    let signature = BASE64URL_NOPAD.encode(&account.sign(format!("{header}.{body}").as_bytes()).unwrap());
+    format!("{header}.{body}.{signature}")
+}
+
+#[tokio::test]
+async fn the_owners_assistant_answers_a_human_step_while_the_grant_names_it() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let (human, pa) = (UserId::human(), ant("pa"));
+    let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &human, "grant").await.unwrap();
+    let bucket = js.create_key_value(ants_daemon::hub::humans_config()).await.unwrap();
+    let (account, device) = (nkeys::KeyPair::new_account(), nkeys::KeyPair::new_user());
+    let jwt = user_jwt(&account, &device, &human, &DeviceId::generate().tag());
+    let mut grant = AssistantGrant::new(human.clone(), Some(pa.clone()), chrono::Utc::now(), jwt);
+    grant.signature = data_encoding::BASE64URL_NOPAD.encode(&device.sign(&grant.signed()).unwrap());
+    bucket.put(grant.key(), serde_json::to_vec(&grant).unwrap().into()).await.unwrap();
+    let humans = Registry::new(human.clone()).verifying_grants(Some(account.public_key()));
+    let _watching = humans.watch(js, Duration::from_secs(1));
+    eventually("the grant is read", async || humans.assistant(&human).as_ref() == Some(&pa)).await;
+
+    let mut lead = conductor_with(&server, &ants_binary(), Vec::new(), humans).await;
+    let run =
+        lead.start(r#"await human([{"question": "Ship it?", "options": ["yes", "no"]}])"#, TrailLimits::default());
+    let run = run.await;
+    let asked = lead.step().await;
+    assert_eq!(asked.to, human);
+    let answer = |by: &str, pick: u32| {
+        Envelope::answering(&asked, ant(by), vec![Pick::option(pick)]).unwrap().on_behalf(Some(human.clone()))
+    };
+    assert!(!lead.trails.take(&answer("dev", 2)).await.unwrap(), "the grant names no other ant");
+    assert!(lead.trails.take(&answer("pa", 1)).await.unwrap(), "the assistant answers for its human");
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("yes") });
 }

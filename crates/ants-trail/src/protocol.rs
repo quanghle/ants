@@ -158,7 +158,8 @@ pub enum Request {
     },
 }
 
-/// The one response of a worker: `{"suspended": {…}}`, `{"done": {…}}`, `{"failed": {…}}` or `{"refused": {…}}`.
+/// The one response of a worker: `{"suspended": {…}}`, `{"done": {…}}`, `{"failed": {…}}`, `{"refused": {…}}` or
+/// `{"unrestorable": {…}}`.
 // Externally tagged: a snapshot, a raw JSON value, cannot be read through an internally tagged enum.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -174,9 +175,35 @@ pub enum Response {
         events: Vec<Event>,
     },
     /// The script ended; `result` is its last expression's value.
-    Done { result: Value, events: Vec<Event> },
+    Done {
+        result: Value,
+        /// The steps called during this request, in call order, which a replay checks against the journal.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        calls: Vec<Call>,
+        events: Vec<Event>,
+    },
     /// The script raised, or exceeded a limit: `error` is the Python traceback.
-    Failed { error: String, events: Vec<Event> },
-    /// The request could not be served: unreadable, or a snapshot this Monty refuses.
+    Failed {
+        error: String,
+        /// As for [`Response::Done`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        calls: Vec<Call>,
+        events: Vec<Event>,
+    },
+    /// The request could not be served: unreadable, or under limits the worker does not take.
     Refused { error: String },
+    /// The snapshot of a resume is not a suspended session this build of Monty restores, as one another Monty
+    /// version dumped: the session can be rebuilt only by replaying the run's journal.
+    Unrestorable { error: String },
+}
+
+impl Response {
+    /// The steps called during the request.
+    #[must_use]
+    pub fn calls(&self) -> &[Call] {
+        match self {
+            Self::Suspended { calls, .. } | Self::Done { calls, .. } | Self::Failed { calls, .. } => calls,
+            Self::Refused { .. } | Self::Unrestorable { .. } => &[],
+        }
+    }
 }

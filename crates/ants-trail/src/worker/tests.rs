@@ -78,7 +78,7 @@ fn call_ids_do_not_depend_on_how_answers_are_batched() {
 #[test]
 fn phase_log_and_print_are_events_in_order() {
     let script = "phase('scan')\nprint('a', 1)\nlog('b')\nprint('partial', end='')\n'end'\n";
-    let Response::Done { result, events } = start(script, Limits::default()) else { panic!() };
+    let Response::Done { result, events, .. } = start(script, Limits::default()) else { panic!() };
     assert_eq!(result, json!("end"));
     let logs = ["a 1", "b", "partial"].map(|s| Event::Log(s.to_owned()));
     assert_eq!(events[0], Event::Phase("scan".to_owned()));
@@ -149,10 +149,12 @@ fn a_session_dumped_past_its_limit_fails() {
 }
 
 #[test]
-fn bad_requests_are_refused() {
+fn bad_requests_are_refused_and_foreign_snapshots_unrestorable() {
     assert!(matches!(serve("{"), Response::Refused { .. }));
     let started = start("await agent('x')\n", Limits::default());
     assert!(matches!(started, Response::Suspended { .. }));
-    let request = json!({"resume": {"snapshot": {"nope": 1}, "answers": [], "limits": {}, "seed": 7, "steps": 0}});
-    assert!(matches!(serve(&request.to_string()), Response::Refused { .. }));
+    let limits = Limits::default();
+    let request = json!({"resume": {"snapshot": {"nope": 1}, "answers": [], "limits": limits, "seed": 7, "steps": 0}});
+    let response = serve(&request.to_string());
+    assert!(matches!(&response, Response::Unrestorable { error } if error.starts_with("unreadable snapshot")));
 }

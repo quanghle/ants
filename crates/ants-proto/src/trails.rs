@@ -5,8 +5,8 @@
 //!
 //! A step goes on a thread of its own, which the conductor's [`TrailSession`] maps to the call
 //! ([`PendingCall::thread`]). The reply resolving the call carries nothing of the step: the first message on that
-//! thread from the step's recipient ([`PendingCall::to`]) to the conductor that carries no [`TrailStep`], no notice and
-//! no escalation answers it ([`PendingCall::answered_by`]). Only the conductor's own records say which threads are
+//! thread from the step's recipient ([`PendingCall::to`]), or from the assistant of a human recipient answering for it,
+//! to the conductor that carries no [`TrailStep`], no notice and no escalation answers it ([`PendingCall::answered_by`]). Only the conductor's own records say which threads are
 //! steps, so no other user can answer a call by naming it. A step the conductor sends itself tells its reply apart the
 //! same way: the step carries its [`TrailStep`], the reply none.
 
@@ -278,9 +278,9 @@ pub struct TrailSession {
 }
 
 impl TrailSession {
-    /// The pending call `message` answers, if any ([`PendingCall::answered_by`]).
-    pub fn answered_by(&self, message: &Envelope) -> Option<&PendingCall> {
-        self.pending.iter().find(|call| call.answered_by(message))
+    /// The pending call `message`, by `answerer`, answers, if any ([`PendingCall::answered_by`]).
+    pub fn answered_by(&self, message: &Envelope, answerer: &UserId) -> Option<&PendingCall> {
+        self.pending.iter().find(|call| call.answered_by(message, answerer))
     }
 }
 
@@ -312,11 +312,13 @@ pub struct PendingCall {
 }
 
 impl PendingCall {
-    /// Whether `message`, which passed [`Envelope::check_subject`], answers the call: it is from the step's recipient to
-    /// the conductor on the step's thread, and neither a step, a notice ([`NoticeKind`]) nor an escalation.
-    pub fn answered_by(&self, message: &Envelope) -> bool {
+    /// Whether `message`, which passed [`Envelope::check_subject`], answers the call: `answerer` is the step's
+    /// recipient, the message is on the step's thread, and it is neither a step, a notice ([`NoticeKind`]) nor an
+    /// escalation. `answerer` is the message's sender, or the human its [`Envelope::on_behalf_of`] names once the
+    /// conductor honours the sender as that human's assistant, as for an answer to ask_human.
+    pub fn answered_by(&self, message: &Envelope, answerer: &UserId) -> bool {
         message.thread_id == self.thread
-            && message.from == self.to
+            && *answerer == self.to
             && message.trail_step.is_none()
             && message.notice.is_none()
             && message.escalation.is_none()
@@ -535,13 +537,13 @@ mod tests {
         };
         let session = TrailSession { session: "{}".to_owned(), pending: vec![call], queued: Vec::new() };
         let reply = step.reply(p("dev-a"), "built", crate::Role::Ant).unwrap();
-        assert_eq!(session.answered_by(&reply).map(|c| c.call), Some(1));
+        assert_eq!(session.answered_by(&reply, &reply.from).map(|c| c.call), Some(1));
         let by_another = step.follow_up(p("dev-b"), p("planner"), "built too");
         let elsewhere = Envelope::new(p("dev-a"), p("planner"), "built");
         let notice = reply.clone().as_notice(crate::NoticeKind::SignedOut);
         let forged = reply.as_step(*step.trail_step.unwrap());
         for other in [by_another, elsewhere, notice, forged] {
-            assert!(session.answered_by(&other).is_none(), "{other:?}");
+            assert!(session.answered_by(&other, &other.from).is_none(), "{other:?}");
         }
     }
 
@@ -565,8 +567,9 @@ mod tests {
             turn_budget: step.turn_budget,
             retries: 0,
         };
-        assert!(!call.answered_by(&step), "the step itself answers nothing");
-        assert!(call.answered_by(&step.reply(p("planner"), "thought", crate::Role::Ant).unwrap()));
+        assert!(!call.answered_by(&step, &step.from), "the step itself answers nothing");
+        let reply = step.reply(p("planner"), "thought", crate::Role::Ant).unwrap();
+        assert!(call.answered_by(&reply, &reply.from));
     }
 
     #[test]

@@ -112,8 +112,8 @@ fn resume(snapshot: &RawValue, answers: Vec<(u32, Answer)>, limits: Limits, seed
     let mut session = Session::new(limits, seed, steps);
     let mut waiting = match serde_json::from_str(snapshot.get()) {
         Ok(RunProgress::ResolveFutures(waiting)) => waiting,
-        Ok(_) => return Response::Refused { error: "the snapshot is not a suspended session".to_owned() },
-        Err(e) => return Response::Refused { error: format!("unreadable snapshot: {e}") },
+        Ok(_) => return Response::Unrestorable { error: "the snapshot is not a suspended session".to_owned() },
+        Err(e) => return Response::Unrestorable { error: format!("unreadable snapshot: {e}") },
     };
     for (call, answer) in answers {
         // A call of a coroutine that ended, as a gather sibling of a step that raised, waits no more.
@@ -156,27 +156,30 @@ enum Outcome {
 impl Outcome {
     fn respond(self, mut session: Session) -> Response {
         session.flush(true);
-        let events = session.events;
+        let Session { events, calls, limits, .. } = session;
         match self {
-            Self::Done(result) => Response::Done { result, events },
-            Self::Failed(error) => Response::Failed { error, events },
+            Self::Done(result) => Response::Done { result, calls, events },
+            Self::Failed(error) => Response::Failed { error, calls, events },
             Self::Waiting(waiting) => {
                 let pending = waiting.pending_call_ids().to_vec();
                 let snapshot = match serde_json::to_string(&RunProgress::ResolveFutures(*waiting)) {
                     Ok(snapshot) => snapshot,
-                    Err(e) => return Response::Failed { error: format!("cannot dump the session: {e}"), events },
+                    Err(e) => {
+                        return Response::Failed { error: format!("cannot dump the session: {e}"), calls, events };
+                    }
                 };
-                let limit = session.limits.dump_bytes;
+                let limit = limits.dump_bytes;
                 if snapshot.len() > limit {
                     let size = snapshot.len();
                     return Response::Failed {
                         error: format!("the dumped session of {size} bytes passes the limit of {limit} bytes"),
+                        calls,
                         events,
                     };
                 }
                 match RawValue::from_string(snapshot) {
-                    Ok(snapshot) => Response::Suspended { snapshot, calls: session.calls, pending, events },
-                    Err(e) => Response::Failed { error: format!("cannot dump the session: {e}"), events },
+                    Ok(snapshot) => Response::Suspended { snapshot, calls, pending, events },
+                    Err(e) => Response::Failed { error: format!("cannot dump the session: {e}"), calls, events },
                 }
             }
         }
@@ -200,7 +203,8 @@ impl Session {
 
     fn failed(&mut self, exception: MontyException) -> Response {
         self.flush(true);
-        Response::Failed { error: trail::render(exception), events: std::mem::take(&mut self.events) }
+        let (calls, events) = (std::mem::take(&mut self.calls), std::mem::take(&mut self.events));
+        Response::Failed { error: trail::render(exception), calls, events }
     }
 
     /// Runs the script until it waits on its steps, ends or raises.

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use ants_proto::{DEFAULT_TURN_BUDGET, PendingCall, RunId, RunState, ThreadId, TrailFunction, TrailRun};
-use ants_trail::{Call, Event, Function, JournalEntry, Progress, Run, RunError, Status};
+use ants_trail::{Call, Event, Function, JournalEntry, Progress, Run, RunError, Status, WorkerError};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
@@ -154,13 +154,33 @@ impl Trails {
     }
 
     /// Let the script compute in a worker, once one of the daemon's is free: an error leaving the run unchanged is
-    /// returned, for the pass to be tried again; any other fails the run.
+    /// returned, for the pass to be tried again; any other fails the run. A session the worker cannot restore, as
+    /// one another Monty version dumped, is rebuilt from the run's journal ([`Run::replay`]).
     async fn compute(&self, engine: &mut Run) -> Result<Progress> {
         let _computing = COMPUTING.acquire().await?;
         match engine.resume(&self.inner.worker).await {
             Ok(progress) => Ok(progress),
             Err(RunError::Worker(e)) => Err(anyhow!(e).context("running the trail's worker")),
-            // A session the worker refuses (RunError::Refused) is one this build cannot restore.
+            Err(RunError::Unrestorable(why)) => self.replay(engine, &why).await,
+            Err(e) => Ok(engine.fail(e.to_string())),
+        }
+    }
+
+    /// Rebuild `engine`'s session by running its script again from its start, with the run's clock and seed, and
+    /// answering its calls from its journal, which holds every answered call of the run; a script making a call
+    /// otherwise than its journal entry fails the run, naming the call.
+    async fn replay(&self, engine: &mut Run, why: &str) -> Result<Progress> {
+        tracing::info!(why, "replaying a trail run's journal to rebuild its session");
+        let replayed = Run::replay(engine.state().clone(), engine.journal().to_vec(), &self.inner.worker).await;
+        match replayed {
+            Ok((replayed, progress)) => {
+                *engine = replayed;
+                Ok(progress)
+            }
+            Err(RunError::Worker(e @ (WorkerError::ComputeLimit(_) | WorkerError::OutOfMemory))) => {
+                Ok(engine.fail(format!("replaying the run's journal: {e}")))
+            }
+            Err(RunError::Worker(e)) => Err(anyhow!(e).context("replaying the trail's journal")),
             Err(e) => Ok(engine.fail(e.to_string())),
         }
     }
