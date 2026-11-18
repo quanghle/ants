@@ -10,9 +10,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::Sense;
-use crate::items::{Item, ItemId, Values};
+use crate::items::{Item, ItemId, Values, stamp};
 use crate::memory::{holds_recalled_marker, redacted, sanitized};
-use crate::proposal::{self, Proposal, ProposalItem, Status, time};
+use crate::proposal::{self, Confirmation, Proposal, ProposalItem, Status, time};
 use crate::sanitize::{Limit, Redaction, sanitize_body};
 use crate::store::{Items, StoreError};
 use crate::tools::Answer;
@@ -120,7 +120,6 @@ async fn answer(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     for (field, _) in FIELDS {
         version.entry((*field).to_owned()).or_insert(Value::Null);
     }
-    version.insert("reason".into(), json!(reason));
     let made = Proposal {
         target: persona_id(),
         kind: PERSONA.into(),
@@ -177,13 +176,16 @@ async fn show(items: &dyn Items) -> Result<Answer, Answer> {
     let current = current(items).await?;
     let pending = proposal::pending_for(items, &persona_id()).await?;
     let mut text = match &current {
-        Some(current) => format!(
-            "Persona, revision {}, confirmed {}: {}\n{}",
-            current.revision,
-            current.text("confirmed"),
-            current.text("reason"),
-            self::text(&current.values)
-        ),
+        Some(current) => {
+            let confirmation = Confirmation::of(&current.values);
+            let confirmed = confirmation.confirmed.map_or_default(stamp);
+            let reason = confirmation.reason;
+            format!(
+                "Persona, revision {}, confirmed {confirmed}: {reason}\n{}",
+                current.revision,
+                self::text(&current.values)
+            )
+        }
         None => "No persona yet: propose one with sense_persona, giving values, voice, boundaries or working_style \
                  and a reason."
             .to_owned(),
@@ -207,7 +209,7 @@ async fn show_history(items: &dyn Items) -> Result<Answer, Answer> {
     let mut text = format!("{} versions of the persona, the newest first:", versions.len());
     let mut json = Vec::new();
     for (revision, at, values) in versions.iter().rev() {
-        let reason = values.get("reason").and_then(Value::as_str).unwrap_or_default();
+        let reason = Confirmation::of(values).reason;
         let _ = write!(
             text,
             "\n- Revision {revision}, {}: {reason}\n  {}",

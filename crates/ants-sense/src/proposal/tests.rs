@@ -86,7 +86,8 @@ async fn a_persona_proposal_is_offered_after_twelve_hours_and_takes_effect_once_
     assert!(confirmed.text.contains(&format!("Proposal {id} (confirmed")), "{}", confirmed.text);
     let current = persona::current(&*items).await.unwrap().unwrap();
     assert_eq!(persona::text(&current.values), "Voice: Plain and brief.");
-    assert_eq!((current.text("reason"), current.text("proposal")), ("Users skim.", id.to_string().as_str()));
+    let confirmation = Confirmation::of(&current.values);
+    assert_eq!((confirmation.reason.as_str(), confirmation.proposal.as_ref()), ("Users skim.", Some(&id)));
     assert_eq!(status(&*items, &id).await, Status::Confirmed);
     let (dream, _) = dream::get(&*items, dream.number).await.unwrap().unwrap();
     assert_eq!(dream.verdicts[0].items, std::slice::from_ref(&id), "the verdict names the proposal");

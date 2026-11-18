@@ -154,16 +154,29 @@ async fn renames_clones_moves_retirements_and_revivals_are_written_on_the_card()
 #[tokio::test]
 async fn a_revival_puts_off_the_expiry_of_the_reminders_paused() {
     let items = fresh().await;
-    let reminder = |status: &str, expires: &str| {
-        let values = serde_json::json!({"title": "check", "status": status, "expires": at(expires)});
-        Write::Create { id: ItemId::new(), kind: remind::KIND.into(), values: remind::values(values) }
+    let reminder = |status: remind::Status, expires: &str| {
+        let writer = context("id1", "claude", None, "laptop");
+        let trigger = remind::Trigger::At { at: at("09:00:00") };
+        let mut reminder = remind::Reminder::new(
+            "check".into(),
+            writer.thread.clone(),
+            trigger,
+            at("09:00:00"),
+            at(expires),
+            &writer,
+            None,
+        );
+        reminder.status = status;
+        Write::Create { id: ItemId::new(), kind: remind::KIND.into(), values: reminder.values() }
     };
-    let writes = [reminder("active", "12:00:00"), reminder("active", "10:30:00"), reminder("done", "12:00:00")];
+    let (active, dropped) = (remind::Status::Active, remind::Status::Dropped);
+    let writes = [reminder(active, "12:00:00"), reminder(active, "10:30:00"), reminder(dropped, "12:00:00")];
     items.write(&writes, "test").await.unwrap();
     let expires = async || {
         let mut all = Vec::new();
         for write in &writes {
-            all.push(remind::date(&items.get(write.id()).await.unwrap().unwrap(), "expires").unwrap());
+            let item = items.get(write.id()).await.unwrap().unwrap();
+            all.push(remind::Reminder::of(&item).unwrap().expires.unwrap());
         }
         all
     };

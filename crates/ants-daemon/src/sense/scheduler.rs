@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_proto::UserId;
-use ants_proto::provider::{CallContext, Host, RpcError, WakeRequest};
+use ants_proto::provider::{Host, RpcError, WakeRequest};
 use ants_sense::Sense;
 use ants_sense::memory;
 use ants_sense::remind::{self, ConditionCheck, Firing};
@@ -167,20 +167,14 @@ async fn probe(
     settings: &Settings,
     check: &ConditionCheck,
 ) -> Result<Option<Firing>> {
-    let Some(item) = items.get(&check.id).await?.filter(|item| item.revision == check.revision) else {
+    if items.get(&check.id).await?.is_none_or(|item| item.revision != check.revision) {
         return Ok(None);
-    };
-    let source = item
-        .values
-        .get("source_context")
-        .or_else(|| item.values.get(ants_sense::memory::WRITER))
-        .and_then(|value| serde_json::from_value::<CallContext>(value.clone()).ok())
-        .and_then(|mut context| {
-            context.ant = settings.ant.clone();
-            context.thread = item.text("thread").parse().ok()?;
-            context.machine.clone_from(&settings.machine);
-            Some(context)
-        });
+    }
+    let source = check.source.clone().map(|mut context| {
+        context.ant = settings.ant.clone();
+        context.machine.clone_from(&settings.machine);
+        context
+    });
     let workdir = source
         .as_ref()
         .and_then(|context| sense.workdir(context))
@@ -188,7 +182,9 @@ async fn probe(
             check
                 .workdir
                 .as_ref()
-                .filter(|workdir| workdir.is_absolute() && item.text("workdir_machine") == settings.machine)
+                .filter(|workdir| {
+                    workdir.is_absolute() && check.workdir_machine.as_deref() == Some(settings.machine.as_str())
+                })
                 .cloned()
         })
         .unwrap_or_else(|| settings.workdir.clone());

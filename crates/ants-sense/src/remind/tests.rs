@@ -166,7 +166,7 @@ async fn condition_reservations_fence_probes_and_persist_backoff_and_expiry() {
     let (sense, items) = setup().await;
     let id = create(&sense, json!({"kind":"condition","condition":{"kind":"bd","id":"bd-1","state":"closed"}})).await;
     let check = reserve_condition(&*items, &id, now()).await.unwrap().unwrap();
-    assert_eq!(check.condition["kind"], "bd");
+    assert!(matches!(check.condition, Condition::Bd { .. }));
     assert!(reserve_condition(&*items, &id, now()).await.unwrap().is_none());
     assert_eq!(next_due(&*items, now()).await.unwrap(), Some(now() + Duration::minutes(5)));
     complete_condition(&*items, &check, now(), false, "still open", None).await.unwrap();

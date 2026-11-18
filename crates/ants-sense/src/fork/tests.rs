@@ -223,7 +223,10 @@ async fn a_clone_keeps_the_persona_and_the_skills_but_not_their_proposals() {
 
     let from = source.sense().await;
     let persona = crate::persona::current(&*clone).await.unwrap().unwrap();
-    assert_eq!((persona.text("voice"), &persona.values[INHERITED]), ("Plain.", &json!(from)));
+    assert_eq!(
+        (crate::persona::text(&persona.values).as_str(), &persona.values[INHERITED]),
+        ("Voice: Plain.", &json!(from))
+    );
     let skills = crate::skill::skills(&*clone).await.unwrap();
     assert_eq!(skills.iter().map(|skill| skill.name.as_str()).collect::<Vec<_>>(), ["release"]);
     assert_eq!(count(&*source, crate::proposal::PROPOSAL).await, 1);

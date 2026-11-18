@@ -26,8 +26,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::items::{Item, ItemId, Stamp, Values};
-use crate::memory::{MAX_BODY_BYTES, MAX_TITLE_CHARS, Memory, MemoryKind, Scope, WRITER, writer};
+use crate::items::{Item, ItemId, Stamp, Values, values_of};
+use crate::memory::{MAX_BODY_BYTES, MAX_TITLE_CHARS, Memory, MemoryKind, Scope};
 use crate::sanitize::{Limit, Lines, sanitize};
 use crate::store::{Items, StoreError, Write};
 use crate::{Answer, Sense};
@@ -73,20 +73,37 @@ pub struct Register {
     pub updated: Stamp,
 }
 
+/// A register as its item holds it, its lists null when empty.
+#[derive(Serialize, Deserialize)]
+struct Checkpointed {
+    thread: ThreadId,
+    goal: Option<String>,
+    step: Option<String>,
+    next: Option<String>,
+    #[serde(default, with = "listed")]
+    blockers: Vec<String>,
+    branch: Option<String>,
+    #[serde(default, with = "listed")]
+    questions: Vec<String>,
+    writer: CallContext,
+}
+
 impl Register {
     /// The register `item` holds; none for an item of another kind.
     pub fn of(item: &Item) -> Option<Self> {
         (item.kind == CHECKPOINT).then_some(())?;
+        let Checkpointed { thread, goal, step, next, blockers, branch, questions, .. } =
+            serde_json::from_value(Value::Object(item.values.clone())).ok()?;
         Some(Self {
             id: item.id.clone(),
             revision: item.revision,
-            thread: item.text(THREAD).parse().ok()?,
-            goal: text(item, "goal"),
-            step: text(item, "step"),
-            next: text(item, "next"),
-            blockers: texts(item, "blockers"),
-            branch: text(item, "branch"),
-            questions: texts(item, "questions"),
+            thread,
+            goal,
+            step,
+            next,
+            blockers,
+            branch,
+            questions,
             updated: item.updated.clone(),
         })
     }
@@ -147,14 +164,6 @@ impl Work {
         [&mut self.done, &mut self.in_flight, &mut self.next, &mut self.promises, &mut self.decisions, &mut self.files]
     }
 
-    fn of(item: &Item) -> Self {
-        let mut work = Self::default();
-        for (name, list) in Self::NAMES.into_iter().zip(work.lists_mut()) {
-            *list = texts(item, name);
-        }
-        work
-    }
-
     /// The work as brief text, a list under its label each, the empty ones left out.
     pub fn text(&self) -> String {
         let mut out = String::new();
@@ -172,16 +181,39 @@ pub struct Acknowledgement {
     pub at: DateTime<Utc>,
 }
 
+/// A handoff as its item holds it, its lists null when empty.
+#[derive(Serialize, Deserialize)]
+struct Handed {
+    thread: ThreadId,
+    #[serde(default, with = "listed")]
+    done: Vec<String>,
+    #[serde(default, with = "listed")]
+    in_flight: Vec<String>,
+    #[serde(default, with = "listed")]
+    next: Vec<String>,
+    #[serde(default, with = "listed")]
+    promises: Vec<String>,
+    #[serde(default, with = "listed")]
+    decisions: Vec<String>,
+    #[serde(default, with = "listed")]
+    files: Vec<String>,
+    episode: Option<ItemId>,
+    acknowledged: Option<Acknowledgement>,
+    writer: CallContext,
+}
+
 impl Handoff {
     /// The handoff `item` holds; none for an item of another kind.
     pub fn of(item: &Item) -> Option<Self> {
         (item.kind == HANDOFF).then_some(())?;
+        let Handed { thread, done, in_flight, next, promises, decisions, files, episode, acknowledged, .. } =
+            serde_json::from_value(Value::Object(item.values.clone())).ok()?;
         Some(Self {
             id: item.id.clone(),
-            thread: item.text(THREAD).parse().ok()?,
-            work: Work::of(item),
-            episode: item.text(EPISODE).parse().ok(),
-            acknowledged: item.values.get(ACKNOWLEDGED).cloned().and_then(|value| serde_json::from_value(value).ok()),
+            thread,
+            work: Work { done, in_flight, next, promises, decisions, files },
+            episode,
+            acknowledged,
             created: item.created.clone(),
         })
     }
@@ -243,23 +275,30 @@ struct Checkpoint {
 async fn checkpoint_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     let request: Checkpoint = crate::tools::arguments(call)?;
     let mut args = Sanitized::default();
-    let mut values = Values::new();
-    for (name, given) in [("goal", &request.goal), ("step", &request.step), ("next", &request.next)] {
-        values.insert(name.into(), args.text(name, given.as_deref(), Lines::Multi, TEXT_MAX)?.into());
-    }
-    values.insert("blockers".into(), listed(args.texts("blockers", &request.blockers, Lines::Multi, TEXT_MAX)?));
-    values.insert("branch".into(), args.text("branch", request.branch.as_deref(), Lines::Single, LINE_MAX)?.into());
-    values.insert("questions".into(), listed(args.texts("questions", &request.questions, Lines::Multi, TEXT_MAX)?));
+    let context = &call.context;
+    let register = Checkpointed {
+        thread: context.thread.clone(),
+        goal: args.text("goal", request.goal.as_deref(), Lines::Multi, TEXT_MAX)?,
+        step: args.text("step", request.step.as_deref(), Lines::Multi, TEXT_MAX)?,
+        next: args.text("next", request.next.as_deref(), Lines::Multi, TEXT_MAX)?,
+        blockers: args.texts("blockers", &request.blockers, Lines::Multi, TEXT_MAX)?,
+        branch: args.text("branch", request.branch.as_deref(), Lines::Single, LINE_MAX)?,
+        questions: args.texts("questions", &request.questions, Lines::Multi, TEXT_MAX)?,
+        writer: context.clone(),
+    };
     let (revision, named) = (request.revision, request.acknowledges);
     if named.len() > ENTRIES_MAX {
         return Err(Answer::invalid(format!("acknowledges must be a list of at most {ENTRIES_MAX} ids.")));
     }
-    let context = &call.context;
-    if named.is_empty() && values.values().all(Value::is_null) {
+    let Checkpointed { goal, step, next, blockers, branch, questions, .. } = &register;
+    if named.is_empty()
+        && [goal, step, next, branch].iter().all(|text| text.is_none())
+        && blockers.is_empty()
+        && questions.is_empty()
+    {
         return read(sense, context).await;
     }
-    values.insert(THREAD.into(), context.thread.as_str().into());
-    values.insert(WRITER.into(), writer(context));
+    let values = values_of(&register);
 
     let items = sense.items(&context.ant).await?;
     let mut acknowledge = Vec::new();
@@ -286,7 +325,7 @@ async fn checkpoint_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answe
     acknowledge.retain(|handoff| !handoff.values.contains_key(ACKNOWLEDGED));
     acknowledge.sort_by(|a, b| a.id.cmp(&b.id));
     acknowledge.dedup_by(|a, b| a.id == b.id);
-    let acknowledged = json!({"thread": context.thread, "at": context.at});
+    let acknowledged = json!(Acknowledgement { thread: context.thread.clone(), at: context.at });
     let mut ids = Vec::new();
     for handoff in acknowledge {
         let values = Values::from_iter([(ACKNOWLEDGED.to_owned(), acknowledged.clone())]);
@@ -387,16 +426,23 @@ async fn handoff_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> 
     let items = sense.items(&context.ant).await?;
     let by = context.thread.as_str();
     let episode = ItemId::new();
-    let mut values = Values::new();
-    for (name, entries) in Work::NAMES.into_iter().zip(work.lists()) {
-        values.insert(name.into(), listed(entries.clone()));
-    }
-    values.insert(THREAD.into(), by.into());
-    values.insert(EPISODE.into(), episode.as_str().into());
-    values.insert(WRITER.into(), writer(context));
+    let memory = episode_memory(context, &work);
+    let Work { done, in_flight, next, promises, decisions, files } = work;
+    let handed = Handed {
+        thread: context.thread.clone(),
+        done,
+        in_flight,
+        next,
+        promises,
+        decisions,
+        files,
+        episode: Some(episode.clone()),
+        acknowledged: None,
+        writer: context.clone(),
+    };
     let writes = [
-        episode_memory(context, &work).create(episode.clone()),
-        Write::Create { id: ItemId::new(), kind: HANDOFF.into(), values },
+        memory.create(episode.clone()),
+        Write::Create { id: ItemId::new(), kind: HANDOFF.into(), values: values_of(&handed) },
     ];
     let item = items.write(&writes, by).await?.remove(1);
     let handoff = Handoff::of(&item).ok_or_else(|| StoreError::Unavailable("unreadable handoff".into()))?;
@@ -469,18 +515,17 @@ impl Sanitized {
     }
 }
 
-/// `entries` as a value: none when empty.
-fn listed(entries: Vec<String>) -> Value {
-    if entries.is_empty() { Value::Null } else { entries.into() }
-}
+/// A list as values keep it: null when empty.
+mod listed {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-fn text(item: &Item, name: &str) -> Option<String> {
-    item.values.get(name).and_then(Value::as_str).map(str::to_owned)
-}
+    pub(super) fn serialize<S: Serializer>(entries: &[String], serializer: S) -> Result<S::Ok, S::Error> {
+        if entries.is_empty() { serializer.serialize_none() } else { entries.serialize(serializer) }
+    }
 
-fn texts(item: &Item, name: &str) -> Vec<String> {
-    let entries = item.values.get(name).and_then(Value::as_array).into_iter().flatten();
-    entries.filter_map(|entry| entry.as_str().map(str::to_owned)).collect()
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+        Option::<Vec<String>>::deserialize(deserializer).map(Option::unwrap_or_default)
+    }
 }
 
 /// Add `entries` to `out` under `label`, one a line, unless there are none.
