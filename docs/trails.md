@@ -71,8 +71,8 @@ needing `--name` then). A saved trail's script holds at most 256 KiB, its descri
 phases of one line of 1–120 characters each. Only humans save and remove trails; ants and humans read them.
 
 A conductor's daemon also finds trails in `~/.ants/trails/<name>.py` on its machine, and the CLI lists and runs the
-`.py` files of the CLI machine's `~/.ants/trails` by their meta's name. On a name both have, the colony's trail runs,
-so every conductor runs the same trail by that name.
+`.py` files of the CLI machine's `~/.ants/trails` by the same name, the file's, whatever its meta's `name`. On a name
+both have, the colony's trail runs, so every conductor runs the same trail by that name.
 
 ```sh
 ants trail save review.py               # check and save for the colony; replaces a trail of that name

@@ -94,10 +94,10 @@ fn a_file_without_meta_or_compiling_or_a_usable_name_saves_nothing() {
 }
 
 #[test]
-fn local_trails_skip_bad_files_and_repeated_names_and_the_colonys_shadow_them() {
+fn local_trails_are_named_by_their_files_skipping_bad_ones_and_the_colonys_shadow_them() {
     let dir = ants_test_support::scratch_dir("trail-local");
-    write(&dir, "a-deploy.py", &script("deploy"));
-    write(&dir, "b-deploy.py", &script("deploy"));
+    write(&dir, "deploy.py", &script("deploy-v2"));
+    write(&dir, "Deploy_It.py", &script("deploy"));
     write(&dir, "bare.py", "agent('x')\n");
     write(&dir, "notes.txt", &script("notes"));
     write(&dir, "review.py", &script("review"));
@@ -106,7 +106,7 @@ fn local_trails_skip_bad_files_and_repeated_names_and_the_colonys_shadow_them() 
     assert_eq!(
         names,
         [
-            ("deploy", &Source::Local { path: dir.join("a-deploy.py") }),
+            ("deploy", &Source::Local { path: dir.join("deploy.py") }),
             ("review", &Source::Local { path: dir.join("review.py") })
         ]
     );

@@ -146,8 +146,8 @@ pub(super) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailNa
     Ok(())
 }
 
-/// This machine's trails, the `.py` files of `dir` that pass [`ants_trail::check`], by name; the others are skipped with
-/// a warning, as is a file naming a trail an earlier file named.
+/// This machine's trails, the `.py` files of `dir` that pass [`ants_trail::check`], each named by its file's stem as a
+/// conductor's daemon finds it; the others, and those whose stem is no trail name, are skipped with a warning.
 pub(super) fn local(dir: &Path) -> Vec<Trail> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -165,13 +165,6 @@ pub(super) fn local(dir: &Path) -> Vec<Trail> {
     let mut trails: Vec<Trail> = Vec::new();
     for path in paths {
         match read_local(&path) {
-            Ok(trail) if trails.iter().any(|t| t.name == trail.name) => {
-                tracing::warn!(
-                    "skipping the local trail {}: an earlier file names trail {} too",
-                    path.display(),
-                    trail.name
-                );
-            }
             Ok(trail) => trails.push(trail),
             Err(e) => tracing::warn!("skipping the local trail {}: {e:#}", path.display()),
         }
@@ -181,11 +174,12 @@ pub(super) fn local(dir: &Path) -> Vec<Trail> {
 }
 
 fn read_local(path: &Path) -> Result<Trail> {
+    let stem = path.file_stem().map_or_default(|s| s.to_string_lossy());
+    let name: TrailName =
+        stem.parse().map_err(|_| anyhow!("the file's name {stem:?} is no trail name: {NAMES}, then `.py`"))?;
+    usable(&name)?;
     let script = std::fs::read_to_string(path)?;
     let meta = ants_trail::check(&script)?;
-    let name: TrailName =
-        meta.name.parse().map_err(|_| anyhow!("meta's name {:?} is no trail name: {NAMES}", meta.name))?;
-    usable(&name)?;
     Ok(Trail {
         name,
         description: meta.description,
