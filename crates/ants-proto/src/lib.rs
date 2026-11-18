@@ -161,7 +161,7 @@ pub use timeline::{
 pub use trails::{
     CallAnswer, JournalEntry, MAX_TRAIL_ARGS, MAX_TRAIL_DESCRIPTION, MAX_TRAIL_PHASES, MAX_TRAIL_SCRIPT, PendingCall,
     QueuedCall, RunState, SavedTrail, TRAIL_RUN_RETENTION, TrailAction, TrailFunction, TrailLimits, TrailOutcome,
-    TrailReply, TrailRequest, TrailRun, TrailRunIndex, TrailSession, TrailSource, TrailStart, TrailStep,
+    TrailParent, TrailReply, TrailRequest, TrailRun, TrailRunIndex, TrailSession, TrailSource, TrailStart, TrailStep,
     TrailStepThread, WaitingStep,
 };
 

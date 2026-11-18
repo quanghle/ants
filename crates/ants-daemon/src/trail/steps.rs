@@ -30,10 +30,25 @@ impl AgentArgs {
     }
 }
 
+/// The arguments of a trail() call, as the engine hands them out.
+#[derive(Deserialize)]
+pub(super) struct TrailArgs {
+    pub(super) name: String,
+    #[serde(default)]
+    pub(super) args: Value,
+}
+
+impl TrailArgs {
+    pub(super) fn of(args: &Value) -> Result<Self, String> {
+        serde_json::from_value(args.clone()).map_err(|e| format!("trail() takes a name: {e}"))
+    }
+}
+
 pub(super) fn function(function: Function) -> TrailFunction {
     match function {
         Function::Agent => TrailFunction::Agent,
         Function::Human => TrailFunction::Human,
+        Function::Trail => TrailFunction::Trail,
     }
 }
 
@@ -41,6 +56,7 @@ pub(super) fn engine_function(function: TrailFunction) -> Function {
     match function {
         TrailFunction::Agent => Function::Agent,
         TrailFunction::Human => Function::Human,
+        TrailFunction::Trail => Function::Trail,
     }
 }
 
@@ -70,19 +86,22 @@ pub(super) fn step(run: &TrailRun, pending: &PendingCall) -> TrailStep {
 }
 
 /// The message of `pending`, a call of `run`, as first sent: the same each time it is made, so a repeat of it is a
-/// duplicate the stream drops. Its thread keeps the run's owner, links to the run's thread and, on a run an untrusted
-/// thread started, is narrowed as a webhook's thread is, so it is as trusted as the run.
+/// duplicate the stream drops. Its thread keeps the run's owner, links to the run's thread (a child run's to its root
+/// run's) and, on a run an untrusted thread started, is narrowed as a webhook's thread is, so it is as trusted as the
+/// run. A trail() call has none: a child run answers it.
 pub(super) fn envelope(run: &TrailRun, pending: &PendingCall) -> Result<Envelope, String> {
     let (thread, from, to) = (pending.thread.clone(), run.conductor.clone(), pending.to.clone());
     let message = match pending.function {
         TrailFunction::Agent => Envelope::on_thread(thread, from, to, prompt(&AgentArgs::of(&pending.args)?)),
         TrailFunction::Human => Envelope::asking(thread, from, to, crate::mcp::asked_questions(pending.args.clone())?),
+        TrailFunction::Trail => return Err("a trail() call sends no message".to_owned()),
     };
     let allow = (!run.origin.trusted()).then(|| WEBHOOK_ALLOW.map(str::to_owned).to_vec());
+    let origin_thread = run.parent.as_ref().map_or(&run.thread, |parent| &parent.origin_thread);
     let message =
         Envelope { id: pending.message, sent_at: pending.sent_at, turn_budget: pending.turn_budget, ..message }
             .with_owner(run.owner.clone())
-            .with_origin_thread(Some(run.thread.clone()))
+            .with_origin_thread(Some(origin_thread.clone()))
             .with_allow(allow);
     Ok(message.as_step(step(run, pending)))
 }

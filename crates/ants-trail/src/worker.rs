@@ -101,6 +101,7 @@ fn start(script: &str, args: &serde_json::Value, limits: Limits, clock: i64, see
         to_monty(args),
         MontyObject::function("__ants_agent", None),
         MontyObject::function("__ants_human", None),
+        MontyObject::function("__ants_trail", None),
         MontyObject::function("__ants_phase", None),
         MontyObject::function("__ants_log", None),
     ];
@@ -233,6 +234,7 @@ impl Session {
         let function = match call.function_name.as_str() {
             "__ants_agent" => Some(Function::Agent),
             "__ants_human" => Some(Function::Human),
+            "__ants_trail" => Some(Function::Trail),
             "__ants_phase" | "__ants_log" => {
                 let text = call.args.arg(0).and_then(|a| a.as_str()).unwrap_or_default().to_owned();
                 self.flush(false);

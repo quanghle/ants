@@ -6,6 +6,7 @@
 //!
 //! This module alone names [`ants_trail`] in the daemon.
 
+mod children;
 mod control;
 mod driver;
 mod load;
@@ -148,6 +149,8 @@ struct Book {
     answers: Vec<(u32, Answer)>,
     /// Whether the wall time passed with the run woken for it.
     late: bool,
+    /// Whether a call waits for turns the steps of other runs of its tree hold.
+    starved: bool,
 }
 
 impl Slot {
@@ -166,6 +169,21 @@ impl Slot {
     fn header(&self) -> TrailRun {
         self.book().header.clone()
     }
+}
+
+/// The run of `header`'s script, checked to fit, and its session as JSON.
+fn prepare(header: &TrailRun) -> Result<(Run, String), String> {
+    let script = &header.script;
+    if script.len() > MAX_TRAIL_SCRIPT {
+        return Err(format!("the script has {} bytes; a trail takes at most {MAX_TRAIL_SCRIPT}", script.len()));
+    }
+    let size = serde_json::to_vec(&header.args).map_or(usize::MAX, |args| args.len());
+    if size > MAX_TRAIL_ARGS {
+        return Err(format!("the arguments have {size} bytes of JSON; a run takes at most {MAX_TRAIL_ARGS}"));
+    }
+    let engine = Run::new(script, header.args.clone(), engine_limits(&header.limits)).map_err(|e| e.to_string())?;
+    let session = serde_json::to_string(engine.state()).map_err(|e| e.to_string())?;
+    Ok((engine, session))
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -272,16 +290,6 @@ impl Trails {
             }
             TrailSource::Script(script) => (None, script),
         };
-        if script.len() > MAX_TRAIL_SCRIPT {
-            return Err(format!("the script has {} bytes; a trail takes at most {MAX_TRAIL_SCRIPT}", script.len()));
-        }
-        let size = serde_json::to_vec(&args).map_or(usize::MAX, |args| args.len());
-        if size > MAX_TRAIL_ARGS {
-            return Err(format!("the arguments have {size} bytes of JSON; a run takes at most {MAX_TRAIL_ARGS}"));
-        }
-        let engine = Run::new(&script, args.clone(), engine_limits(&limits)).map_err(|e| e.to_string())?;
-        let meta = engine.state().meta().clone();
-        let session = serde_json::to_string(engine.state()).map_err(|e| e.to_string())?;
         let now = Utc::now();
         let header = TrailRun {
             run,
@@ -291,6 +299,7 @@ impl Trails {
             args,
             owner,
             thread,
+            parent: None,
             origin,
             limits,
             state: RunState::Running,
@@ -301,21 +310,35 @@ impl Trails {
             updated_at: now,
             ended_at: None,
         };
+        let (engine, session) = prepare(&header)?;
+        let run = header.run.clone();
+        self.launch(header, engine, session).await.map_err(|e| format!("storing the run: {e:#}"))?;
+        Ok(run)
+    }
+
+    /// Store the run of `header` and `engine`, its session `session`, and let its first pass come.
+    async fn launch(&self, header: TrailRun, engine: Run, session: String) -> Result<()> {
         let run = header.run.clone();
         let started = header.clone();
-        let book = Book { header, session, pending: Vec::new(), queued: Vec::new(), answers: Vec::new(), late: false };
-        let slot = Slot::new(engine, book);
-        let stored = async {
-            self.save_session(&slot).await?;
-            self.save_header(&slot).await?;
-            self.inner.store.list(&run, true).await
+        let meta = engine.state().meta().clone();
+        let book = Book {
+            header,
+            session,
+            pending: Vec::new(),
+            queued: Vec::new(),
+            answers: Vec::new(),
+            late: false,
+            starved: false,
         };
-        stored.await.map_err(|e| format!("storing the run: {e:#}"))?;
+        let slot = Slot::new(engine, book);
+        self.save_session(&slot).await?;
+        self.save_header(&slot).await?;
+        self.inner.store.list(&run, true).await?;
         self.report_start(&started, &meta).await;
         locked(&self.inner.runs).insert(run.clone(), slot);
         self.wake(&run);
-        tracing::info!(run = %run, "trail run started");
-        Ok(run)
+        tracing::info!(run = %run, parent = ?started.parent.map(|parent| parent.run), "trail run started");
+        Ok(())
     }
 
     /// Start a run a human asks for on `thread`, which the human owns.
@@ -335,7 +358,8 @@ impl Trails {
     }
 
     /// Stop a run for `by`: it sends no further step, ignores the replies of the steps it waited on and withdraws
-    /// those it sent itself. Returns the steps to other ants it waited on, for `by` to withdraw.
+    /// those it sent itself, and its child runs stop too. Returns the steps to other ants they waited on, for `by` to
+    /// withdraw.
     pub async fn stop(&self, run: &RunId, by: &UserId) -> Result<Vec<WaitingStep>, String> {
         let slot = self.running(run).await?;
         let pending = {
@@ -346,14 +370,14 @@ impl Trails {
             book.header.state = RunState::Stopped { by: by.clone() };
             book.header.updated_at = Utc::now();
             let pending = book.pending.clone();
-            for call in &mut book.pending {
+            for call in book.pending.iter_mut().filter(|call| call.function != TrailFunction::Trail) {
                 call.sent = false;
             }
             pending
         };
         let header = slot.header();
-        let mut waiting = Vec::new();
-        for call in &pending {
+        let mut waiting = self.stop_children(&pending, by).await;
+        for call in pending.iter().filter(|call| call.function != TrailFunction::Trail) {
             self.retire(run, call);
             if call.sent {
                 self.report_step(&header, call, StepStage::Dropped);
@@ -382,7 +406,7 @@ impl Trails {
     }
 
     /// Resume a stopped run, or one failed on a limit, under `limits` when given: from its stored records, with the
-    /// steps it waited on sent anew.
+    /// steps it waited on sent anew and its stopped child runs resumed.
     pub async fn resume(&self, run: &RunId, by: &UserId, limits: Option<TrailLimits>) -> Result<(), String> {
         let stored = |e: anyhow::Error| format!("reading the run: {e:#}");
         let held = locked(&self.inner.runs).get(run).cloned();
@@ -419,9 +443,14 @@ impl Trails {
         };
         saved.await.map_err(|e| format!("storing the run: {e:#}"))?;
         self.report_resumed(&slot.header(), by).await;
-        locked(&self.inner.runs).insert(run.clone(), slot);
+        locked(&self.inner.runs).insert(run.clone(), slot.clone());
         self.wake(run);
         tracing::info!(run = %run, by = %by, "trail run resumed");
+        let (header, calls) = {
+            let book = slot.book();
+            (book.header.clone(), book.pending.clone())
+        };
+        self.resume_children(&header, &calls, by).await;
         Ok(())
     }
 
@@ -461,7 +490,7 @@ impl Trails {
         }
         let spent = match pending.function {
             TrailFunction::Agent => pending.turn_budget.saturating_sub(message.turn_budget),
-            TrailFunction::Human => 0,
+            TrailFunction::Human | TrailFunction::Trail => 0,
         };
         let answer = match steps::taken(&pending, message) {
             Taken::Answer(answer) => answer,
@@ -498,9 +527,11 @@ impl Trails {
             book.header.turns = book.header.turns.saturating_add(spent);
             book.answers.push((entry.call, entry.answer.clone()));
         }
+        self.charge(header, 0, spent);
         self.retire(run, pending);
         self.report_answered(header, pending, &entry.answer);
         self.wake(run);
+        self.wake_starved(header);
         Ok(())
     }
 
@@ -585,9 +616,11 @@ impl Trails {
             }
         };
         update(false);
+        self.charge(header, 0, spent + 1);
         self.save_session(slot).await?;
         (self.inner.outbox)(again.clone()).await?;
         update(true);
+        self.save_ancestors(header).await?;
         self.save_session(slot).await?;
         self.save_header(slot).await?;
         tracing::info!(run = %header.run, call = pending.call, why, "trail step asked again");
@@ -621,8 +654,11 @@ impl Trails {
         let _ = self.inner.wake.send(run.clone());
     }
 
-    /// Ignore further replies on `call`'s thread.
+    /// Ignore further replies on `call`'s thread; a trail() call's is its child run's own.
     fn retire(&self, run: &RunId, call: &PendingCall) {
+        if call.function == TrailFunction::Trail {
+            return;
+        }
         let retired = Step::Retired { run: run.clone(), to: call.to.clone() };
         locked(&self.inner.threads).insert(call.thread.clone(), retired);
     }

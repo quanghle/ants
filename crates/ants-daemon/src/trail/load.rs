@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use ants_proto::{QueuedCall, RunId, RunState, TrailRun};
+use ants_proto::{PendingCall, QueuedCall, RunId, RunState, TrailFunction, TrailRun};
 use ants_trail::{Run, RunState as Session};
 use anyhow::{Context as _, Result};
 
@@ -11,8 +11,8 @@ use super::{Book, Slot, Step, Trails, engine_limits, locked, steps};
 
 impl Trails {
     /// The run of `header` as its records hold it: its stored session, given the answers its journal holds beyond it.
-    /// When `resumed`, under the header's limits and without the steps it waited on, which go out anew; else waiting
-    /// on those steps again.
+    /// When `resumed`, under the header's limits and without the steps it waited on, which go out anew, but for its
+    /// child runs, which resume with it; else waiting on those steps again.
     pub(super) async fn load(&self, header: TrailRun, resumed: bool) -> Result<Arc<Slot>> {
         let store = &self.inner.store;
         let run = header.run.clone();
@@ -28,14 +28,16 @@ impl Trails {
             journal.extend(store.entry(&run, call).await?);
         }
         let engine = Run::restore(session, journal);
-        let outstanding = |call: u32| !resumed && engine.outstanding().iter().any(|c| c.call == call);
-        let (pending, dropped): (Vec<_>, Vec<_>) =
-            stored.pending.into_iter().partition(|pending| outstanding(pending.call));
+        let outstanding = |pending: &PendingCall| {
+            (!resumed || pending.function == TrailFunction::Trail)
+                && engine.outstanding().iter().any(|c| c.call == pending.call)
+        };
+        let (pending, dropped): (Vec<_>, Vec<_>) = stored.pending.into_iter().partition(outstanding);
         let live = !matches!(header.state, RunState::Stopped { .. });
         {
             let mut threads = locked(&self.inner.threads);
-            for (call, live) in pending.iter().map(|call| (call, live)).chain(dropped.iter().map(|call| (call, false)))
-            {
+            let calls = pending.iter().map(|call| (call, live)).chain(dropped.iter().map(|call| (call, false)));
+            for (call, live) in calls.filter(|(call, _)| call.function != TrailFunction::Trail) {
                 let step = if live {
                     Step::Live(run.clone())
                 } else {
@@ -45,7 +47,8 @@ impl Trails {
             }
         }
         let queued = queued(&engine);
-        let book = Book { header, session: stored.session, pending, queued, answers: Vec::new(), late: false };
+        let session = stored.session;
+        let book = Book { header, session, pending, queued, answers: Vec::new(), late: false, starved: false };
         Ok(Slot::new(engine, book))
     }
 
@@ -64,9 +67,10 @@ impl Trails {
                 tracing::warn!(run = %run, error = format!("{e:#}"), "continuing a trail run");
             }
         }
+        self.reconcile().await;
     }
 
-    async fn restore_run(&self, run: &RunId) -> Result<()> {
+    pub(super) async fn restore_run(&self, run: &RunId) -> Result<()> {
         let store = &self.inner.store;
         let header = store.header(run).await?;
         let Some(header) = header.filter(|header| !header.finished()) else {

@@ -96,6 +96,10 @@ fn sent(call: &PendingCall) -> String {
     match call.function {
         TrailFunction::Agent => format!("step {} sent to {}: {}", call.call, call.to, gist(&call.args)),
         TrailFunction::Human => format!("step {} asks {}: {}", call.call, call.to, gist(&call.args)),
+        TrailFunction::Trail => match call.child() {
+            Some(child) => format!("step {} runs {} as run {child}", call.call, gist(&call.args)),
+            None => format!("step {} runs {}", call.call, gist(&call.args)),
+        },
     }
 }
 

@@ -1,0 +1,21 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "call": 2,
+  "function": "trail",
+  "args": {
+    "args": {
+      "pr": 7
+    },
+    "name": "review"
+  },
+  "to": "planner",
+  "thread": "019a7d2c-0000-7000-8000-000000000002",
+  "message": "019a7d2e-0000-7000-8000-000000000007",
+  "sent_at": "2025-01-01T12:04:00Z",
+  "sent": true,
+  "turn_budget": 0,
+  "retries": 0
+}

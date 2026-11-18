@@ -124,6 +124,13 @@ fn answer(example: &str, call: &Call) -> Answer {
                 lines => lines.iter().map(|(title, label)| format!("{title}: {label}")).collect::<Vec<_>>().join("\n"),
             }))
         }
+        Function::Trail => {
+            for key in args.keys() {
+                assert!(["name", "args"].contains(&key.as_str()), "{example}: {key}");
+            }
+            let name = args["name"].as_str().unwrap_or_else(|| panic!("{example}: name {}", call.args));
+            Answer::Ok(json!(format!("result of trail {name}")))
+        }
     }
 }
 

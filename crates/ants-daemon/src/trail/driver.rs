@@ -144,6 +144,7 @@ impl Trails {
                     book.header.state = waiting_or_running(&book.pending, &engine);
                 }
             }
+            self.save_ancestors(&header).await?;
             self.save_session(slot).await?;
             self.save_header(slot).await?;
             return self.publish(slot).await;
@@ -197,6 +198,7 @@ impl Trails {
             (book.header.clone(), cancelled)
         };
         self.report_events(&header, &progress.events).await;
+        self.stop_children(&cancelled, &self.inner.ant).await;
         for call in &cancelled {
             self.retire(&header.run, call);
             if call.sent {
@@ -218,8 +220,14 @@ impl Trails {
         }
     }
 
-    /// Store the end of a run, and forget it.
+    /// Store the end of a run, and forget it: its child runs stop, and a child's end answers its parent's call first.
     async fn end(&self, slot: &Slot, state: RunState) -> Result<()> {
+        let (ended, calls) = {
+            let book = slot.book();
+            (TrailRun { state: state.clone(), ..book.header.clone() }, book.pending.clone())
+        };
+        self.stop_children(&calls, &self.inner.ant).await;
+        self.answer_parent(&ended).await?;
         let pending = {
             let mut book = slot.book();
             book.header.state = state;
@@ -230,6 +238,7 @@ impl Trails {
         for call in &pending {
             self.withdraw_own(&header, call).await;
         }
+        self.save_ancestors(&header).await?;
         self.save_header(slot).await?;
         self.inner.store.list(&header.run, false).await?;
         locked(&self.inner.runs).remove(&header.run);
@@ -238,18 +247,16 @@ impl Trails {
             self.report_step(&header, call, StepStage::Dropped);
         }
         self.report_end(&slot.header()).await;
+        self.wake_starved(&header);
         Ok(())
     }
 
     /// Make a step of each call handed out that has none yet: a pending call, unsent, or, for a call no step can
-    /// serve, its answer raising in the script, stored.
+    /// serve, its answer raising in the script, stored. Steps and turns count against the run's tree's budget.
     async fn issue(&self, slot: &Slot, engine: &Run) -> Result<Issued> {
-        let (header, mut turns) = {
-            let book = slot.book();
-            let reserved: u32 = book.pending.iter().map(reserved).sum();
-            let left = book.header.limits.turns.saturating_sub(book.header.turns).saturating_sub(reserved);
-            (book.header.clone(), left)
-        };
+        let header = slot.header();
+        let budget = self.budget(&header);
+        let (mut steps, mut turns) = (budget.steps, budget.turns);
         let mut issued = Issued::default();
         let mut colony = None;
         // A call answered while the script computed is outstanding in the engine until the next pass hands it in.
@@ -259,7 +266,20 @@ impl Trails {
                 || book.answers.iter().any(|(answered, _)| *answered == call.call)
         };
         for call in engine.outstanding().iter().filter(|call| !has_step(call)) {
-            let to = match self.recipient(&header, call, &mut colony).await? {
+            if steps >= budget.limits.steps {
+                let error = format!("the run reached its limit of {} steps", budget.limits.steps);
+                issued.answers.push(self.raise(&header.run, call, error).await?);
+                continue;
+            }
+            let to = if call.function == Function::Trail {
+                match self.refuse_trail(&header, call) {
+                    None => Ok(self.inner.ant.clone()),
+                    Some(error) => Err(error),
+                }
+            } else {
+                self.recipient(&header, call, &mut colony).await?
+            };
+            let to = match to {
                 Ok(to) => to,
                 Err(error) => {
                     issued.answers.push(self.raise(&header.run, call, error).await?);
@@ -269,9 +289,14 @@ impl Trails {
             let turn_budget = match call.function {
                 Function::Agent => DEFAULT_TURN_BUDGET.min(turns),
                 Function::Human => DEFAULT_TURN_BUDGET,
+                Function::Trail => 0,
             };
-            if turn_budget == 0 {
-                issued.out_of_turns = !slot.book().pending.iter().any(|pending| reserved(pending) > 0);
+            if turn_budget == 0 && call.function == Function::Agent {
+                if self.holds_turns(&header) {
+                    slot.book().starved = true;
+                } else {
+                    issued.out_of_turns = true;
+                }
                 continue;
             }
             if call.function == Function::Agent {
@@ -289,14 +314,20 @@ impl Trails {
                 turn_budget,
                 retries: 0,
             };
-            if let Err(error) = steps::envelope(&header, &pending) {
-                issued.answers.push(self.raise(&header.run, call, error).await?);
-                continue;
+            if call.function != Function::Trail {
+                if let Err(error) = steps::envelope(&header, &pending) {
+                    issued.answers.push(self.raise(&header.run, call, error).await?);
+                    continue;
+                }
+                locked(&self.inner.threads).insert(pending.thread.clone(), Step::Live(header.run.clone()));
             }
-            locked(&self.inner.threads).insert(pending.thread.clone(), Step::Live(header.run.clone()));
-            let mut book = slot.book();
-            book.header.steps += 1;
-            book.pending.push(pending);
+            steps += 1;
+            {
+                let mut book = slot.book();
+                book.header.steps += 1;
+                book.pending.push(pending);
+            }
+            self.charge(&header, 1, 0);
         }
         Ok(issued)
     }
@@ -360,6 +391,10 @@ impl Trails {
             return Ok(());
         }
         for call in &unsent {
+            if call.function == TrailFunction::Trail {
+                self.publish_child(slot, &header, call).await?;
+                continue;
+            }
             let message = steps::envelope(&header, call).map_err(|e| anyhow!(e))?;
             let thread = TrailStepThread {
                 run: header.run.clone(),
@@ -378,6 +413,25 @@ impl Trails {
     }
 }
 
+impl Trails {
+    /// Start the child run of `call`, a trail() call of the run of `slot`, then mark the call sent; a child that cannot
+    /// start answers the call with why.
+    async fn publish_child(&self, slot: &Slot, header: &TrailRun, call: &PendingCall) -> Result<()> {
+        if let Err(error) = self.start_child(header, call).await? {
+            return self.resolve(slot, header, call, Answer::Error(error), 0).await;
+        }
+        let sent = {
+            let mut book = slot.book();
+            let pending = book.pending.iter_mut().find(|pending| pending.call == call.call && !pending.sent);
+            pending.map(|pending| pending.sent = true).is_some()
+        };
+        if sent {
+            self.report_step(header, call, StepStage::Started);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct Issued {
     /// Answers to calls no step can serve.
@@ -387,10 +441,10 @@ struct Issued {
 }
 
 /// The turns a pending step may still spend.
-fn reserved(call: &PendingCall) -> u32 {
+pub(super) fn reserved(call: &PendingCall) -> u32 {
     match call.function {
         TrailFunction::Agent => call.turn_budget,
-        TrailFunction::Human => 0,
+        TrailFunction::Human | TrailFunction::Trail => 0,
     }
 }
 

@@ -1,0 +1,40 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "run": "019a7d2e-0000-7000-8000-000000000007",
+  "conductor": "planner",
+  "trail": "review",
+  "script": "await agent('review it', ant='dev-a')",
+  "args": {
+    "pr": 7
+  },
+  "owner": "alice",
+  "thread": "019a7d2c-0000-7000-8000-000000000002",
+  "parent": {
+    "run": "019a7d2f-0000-7000-8000-000000000001",
+    "call": 2,
+    "origin_thread": "019a7d2c-0000-7000-8000-000000000001"
+  },
+  "origin": {
+    "by": {
+      "kind": "human",
+      "user": "alice"
+    },
+    "channel": "backend"
+  },
+  "limits": {
+    "steps": 20,
+    "concurrency": 4,
+    "turns": 200,
+    "wall_secs": 86400,
+    "compute_ms": 10000,
+    "session_bytes": 786432
+  },
+  "state": "running",
+  "steps": 1,
+  "turns": 1,
+  "started_at": "2025-01-01T12:04:00Z",
+  "updated_at": "2025-01-01T12:05:00Z"
+}

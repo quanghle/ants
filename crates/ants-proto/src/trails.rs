@@ -199,8 +199,12 @@ pub struct TrailRun {
     /// that thread had none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<UserId>,
-    /// The thread the run reports on, where its start was asked and its result goes.
+    /// The thread the run reports on, where its start was asked and its result goes; a child run's, a thread of its
+    /// own spun off its parent's.
     pub thread: ThreadId,
+    /// The run whose trail() call the run answers, as a child run of it: none for a run started otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<TrailParent>,
     /// Where that thread came from, as the conductor's daemon settled it: a run from a webhook's thread is untrusted.
     pub origin: Origin,
     pub limits: TrailLimits,
@@ -209,10 +213,10 @@ pub struct TrailRun {
     /// The phase the script reported last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
-    /// Steps sent so far, re-asks not counted.
+    /// Steps sent so far, re-asks not counted, its child runs' included.
     #[serde(default)]
     pub steps: u32,
-    /// Turns the steps spent so far.
+    /// Turns the steps spent so far, its child runs' included.
     #[serde(default)]
     pub turns: u32,
     pub started_at: DateTime<Utc>,
@@ -230,6 +234,17 @@ impl TrailRun {
     pub fn finished(&self) -> bool {
         self.state.finished()
     }
+}
+
+/// The run a child run answers a trail() call of ([`TrailRun::parent`]). A child run has its parent's conductor, owner
+/// and origin; its steps and turns count against its root run's limits, and it ends within its root's wall time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrailParent {
+    pub run: RunId,
+    /// The parent's call the child's result answers.
+    pub call: u32,
+    /// The thread the child's thread was spun off, its root run's: its steps' threads link to it for the owner.
+    pub origin_thread: ThreadId,
 }
 
 /// How far a run got ([`TrailRun::state`]), with its result or error once over.
@@ -254,12 +269,14 @@ impl RunState {
     }
 }
 
-/// Who answers a call of the script: an ant, by a step sent to it, or a human, by a question on a step.
+/// Who answers a call of the script: an ant, by a step sent to it, a human, by a question on a step, or a child run of
+/// a saved trail ([`TrailParent`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrailFunction {
     Agent,
     Human,
+    Trail,
 }
 
 /// A run's suspended session in [`TRAIL_RUNS_BUCKET`], under [`trail_session_key`]: the interpreter's dumped state and
@@ -290,11 +307,12 @@ pub struct PendingCall {
     pub call: u32,
     pub function: TrailFunction,
     pub args: Value,
-    /// The ant, or human, the step went to.
+    /// The ant, or human, the step went to; for a trail() call, the conductor.
     pub to: UserId,
-    /// The step's own thread.
+    /// The step's own thread; for a trail() call, the child run's thread.
     pub thread: ThreadId,
-    /// The step's last message on that thread: the step, or its last re-ask.
+    /// The step's last message on that thread: the step, or its last re-ask; for a trail() call, the child run's id
+    /// ([`PendingCall::child`]).
     pub message: Uuid,
     pub sent_at: DateTime<Utc>,
     /// Whether that message is published: the conductor's daemon puts the call before publishing its message, under the
@@ -312,6 +330,11 @@ pub struct PendingCall {
 }
 
 impl PendingCall {
+    /// The child run answering the call, a trail() call.
+    pub fn child(&self) -> Option<RunId> {
+        (self.function == TrailFunction::Trail).then(|| self.message.to_string().parse().ok()).flatten()
+    }
+
     /// Whether `message`, which passed [`Envelope::check_subject`], answers the call: `answerer` is the step's
     /// recipient, the message is on the step's thread, and it is neither a step, a notice ([`NoticeKind`]) nor an
     /// escalation. `answerer` is the message's sender, or the human its [`Envelope::on_behalf_of`] names once the
