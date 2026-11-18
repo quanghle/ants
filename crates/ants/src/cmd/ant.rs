@@ -112,10 +112,11 @@ pub(crate) enum AntCommand {
     Avatar {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,
-        /// Draw the avatar from this seed instead of the ant's id, such as when two ants look alike.
+        /// Draw the avatar from this seed instead of the ant's sense id (else its record's id), such as when two ants
+        /// look alike.
         #[arg(long, conflicts_with = "reset")]
         seed: Option<String>,
-        /// Draw the avatar from the ant's id again.
+        /// Draw the avatar from the ant's sense id (else its record's id) again.
         #[arg(long)]
         reset: bool,
         /// Colour the avatar in this hue: red, orange, yellow, lime, green, mint, cyan, azure, blue, violet, magenta or

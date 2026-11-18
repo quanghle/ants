@@ -10,7 +10,8 @@ use std::pin::Pin;
 use std::time::SystemTime;
 
 use ants_proto::{
-    ChannelId, Envelope, NotesPost, ThreadId, UserId, inbox_consumer, notes_consumer, sent_reader, subject,
+    ChannelId, Envelope, MergedRejection, NotesPost, ThreadId, UserId, Uuid, inbox_consumer, notes_consumer,
+    sent_reader, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
@@ -259,11 +260,39 @@ pub(crate) struct Active {
     pub history: String,
     /// The tool-call timeline the ant stored on it, oldest first: empty when it stored none, or it could not be read.
     pub timeline: String,
+    /// The ant's messages and notes posts on it, oldest first.
+    pub sent: Vec<Sent>,
+    /// The ant's tool requests rejected on it, as its timeline keeps them: empty when it could not be read.
+    pub rejections: Vec<MergedRejection>,
+}
+
+/// A message the ant sent on a thread, or posted to its notes, as [`active`] read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Sent {
+    pub id: Uuid,
+    /// The start of its text, on one line, at most [`OPENING_BYTES`] bytes.
+    pub opening: String,
+}
+
+/// The most bytes of a message's text [`Sent::opening`] keeps.
+const OPENING_BYTES: usize = 80;
+
+impl Sent {
+    fn new(id: Uuid, text: &str) -> Self {
+        let line = text.trim().replace(['\n', '\r'], " ");
+        let opening = if line.len() <= OPENING_BYTES {
+            line
+        } else {
+            format!("{}…", &line[..line.floor_char_boundary(OPENING_BYTES)])
+        };
+        Self { id, opening }
+    }
 }
 
 /// The threads of `ant` active from `since` to `until`, the most recently active first, each with what the ant received
-/// and sent on it and its notes from `since` on, as a prompt shows a history within `budget` bytes, and the timeline it
-/// stored on it meanwhile. Read as its daemon reads ([`Reading::daemon`]).
+/// and sent on it and its notes from `since` on, as a prompt shows a history within `budget` bytes, the messages and
+/// notes posts of the ant among them, and the timeline it stored on it meanwhile. Read as its daemon reads
+/// ([`Reading::daemon`]).
 pub(crate) async fn active(
     js: &jetstream::Context,
     ant: &UserId,
@@ -274,6 +303,8 @@ pub(crate) async fn active(
 ) -> Result<Vec<Active>> {
     let start = || consumer::DeliverPolicy::ByStartTime { start_time: since.into() };
     let mut threads: BTreeMap<ThreadId, BTreeMap<u64, Entry>> = BTreeMap::new();
+    // The ids of the ant's own messages and notes posts on each thread, by stream sequence.
+    let mut own: BTreeMap<ThreadId, BTreeMap<u64, Uuid>> = BTreeMap::new();
     let mut take = |seq, at, subject: &str, payload: &[u8]| {
         if at > until {
             return ControlFlow::Break(());
@@ -281,6 +312,9 @@ pub(crate) async fn active(
         if let Ok(envelope) = serde_json::from_slice::<Envelope>(payload)
             && envelope.check_subject(subject).is_ok()
         {
+            if envelope.from == *ant {
+                own.entry(envelope.thread_id.clone()).or_default().insert(seq, envelope.id);
+            }
             let attachments = earlier_lines(&envelope.attachments, |id| envelope.attachment_handle(id));
             let entry =
                 Entry { from: envelope.from, place: Place::Inbox(envelope.to), text: envelope.text, attachments, at };
@@ -309,6 +343,9 @@ pub(crate) async fn active(
             if let Ok(post) = serde_json::from_slice::<NotesPost>(payload)
                 && post.check_subject(subject).is_ok()
             {
+                if post.from == *ant {
+                    own.entry(thread.clone()).or_default().insert(seq, post.id);
+                }
                 let attachments = earlier_lines(&post.attachments, |id| post.attachment_handle(id));
                 entries.insert(seq, Entry { from: post.from, place: Place::Notes, text: post.text, attachments, at });
             }
@@ -327,8 +364,12 @@ pub(crate) async fn active(
     let mut threads: Vec<_> = threads.into_iter().collect();
     threads.sort_by_key(|(_, entries)| std::cmp::Reverse(entries.values().map(|entry| entry.at).max()));
     let active = threads.into_iter().map(|(thread, entries)| {
-        let timeline = timelines.remove(&thread).map_or_default(|timeline| timeline.show(ant, budget / ENTRY_SHARE));
-        Active { history: format(entries.into_values().collect(), budget), timeline, thread }
+        let stored = timelines.remove(&thread);
+        let timeline = stored.as_ref().map_or_default(|stored| stored.show(ant, budget / ENTRY_SHARE));
+        let rejections = stored.map_or_default(|stored| stored.rejections().to_vec());
+        let own = own.remove(&thread).unwrap_or_default().into_iter();
+        let sent = own.filter_map(|(seq, id)| entries.get(&seq).map(|entry| Sent::new(id, &entry.text))).collect();
+        Active { history: format(entries.into_values().collect(), budget), timeline, sent, rejections, thread }
     });
     Ok(active.collect())
 }
@@ -542,6 +583,17 @@ mod tests {
             publish(record.subject(), serde_json::to_vec(&record).unwrap()).await;
         };
         record(&one, "dev-a", "cargo build").await;
+        let rejection = ants_proto::TimelineRejection {
+            request: ants_proto::Uuid::from_u128(9),
+            kind: "execute".to_owned(),
+            title: "rm -rf target".to_owned(),
+            by: ants_proto::DecidedBy::Expiry,
+            decider: None,
+            via: None,
+        };
+        let rejected = vec![ants_proto::TimelineEntry::Rejected(rejection)];
+        let alone = ants_proto::Timeline::new(p("dev-a"), one.clone(), ants_proto::Uuid::from_u128(8), rejected, 0);
+        publish(alone.subject(), serde_json::to_vec(&alone).unwrap()).await;
         record(&one, "bob", "not dev-a's").await;
         record(&"t3".parse().unwrap(), "dev-a", "no thread active").await;
         let until = SystemTime::now();
@@ -558,6 +610,28 @@ mod tests {
         assert!(!first.contains("long ago") && !first.contains("not to dev-a"), "{first}");
         let timeline = &threads[1].timeline;
         assert!(timeline.contains("execute: cargo build (completed)\n") && !timeline.contains("dev-a's"), "{timeline}");
+        assert_eq!(
+            timeline.matches("the prompt of message").count(),
+            1,
+            "a rejection alone shows no prompt: {timeline}"
+        );
+        let rejected: Vec<_> = threads[1].rejections.iter().map(|r| r.rejection.title.as_str()).collect();
+        assert_eq!(rejected, ["rm -rf target"]);
+        assert!(threads[0].rejections.is_empty());
+        let sent = |active: &Active| active.sent.iter().map(|sent| sent.opening.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            (sent(&threads[0]), sent(&threads[1])),
+            (vec!["a question".to_owned()], vec!["the plan".to_owned()])
+        );
+        assert_eq!(threads[1].sent[0].id, note.id);
+    }
+
+    #[test]
+    fn the_opening_of_a_message_sent_is_one_short_line() {
+        let id = ants_proto::Uuid::nil();
+        assert_eq!(Sent::new(id, "  fixed\nthe build \n").opening, "fixed the build");
+        let long = format!("{}é and more", "x".repeat(OPENING_BYTES - 1));
+        assert_eq!(Sent::new(id, &long).opening, format!("{}…", "x".repeat(OPENING_BYTES - 1)));
     }
 
     #[test]

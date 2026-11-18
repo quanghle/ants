@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use ants_proto::provider::Provider;
-use ants_proto::{Envelope, UserId};
+use ants_proto::{AntIdentity, Envelope, UserId};
 use anyhow::{Context as _, Result};
 
 pub mod log;
@@ -26,6 +26,7 @@ pub(crate) use scheduler::{Daemon, Dreaming, Serving};
 pub use stores::{Hosting, Link};
 
 use crate::daemon::Config;
+use crate::profile::identity::Identity;
 use crate::provider::Setting;
 use stores::SenseStores;
 
@@ -46,6 +47,19 @@ impl Sense {
     /// ([`SenseStores::serve`]).
     pub fn serve(&self, ant: &UserId, home: &Path, creds: Option<PathBuf>) {
         self.stores.serve(ant, home, creds);
+    }
+
+    /// The daemon of `ant`, served, read its identity `record`, which names its sense id: None when it has none
+    /// ([`SenseStores::identify`]).
+    pub(crate) fn identify(&self, ant: &UserId, record: Option<Identity>) {
+        self.stores.identify(ant, record);
+    }
+
+    /// Note on the card of `ant` the birth and the prompt count its identity `record` holds, which a record made again
+    /// for it, as after a revoke and re-add, starts from: a call's context carries neither.
+    pub(crate) async fn grown(&self, ant: &UserId, record: &AntIdentity) -> Result<()> {
+        let items = self.provider.items(ant).await?;
+        Ok(stores::note_growth(ant, &*items, record).await?)
     }
 
     /// A host connection starts, over which sense reaches the logs of the ants served ([`Hosting`]).

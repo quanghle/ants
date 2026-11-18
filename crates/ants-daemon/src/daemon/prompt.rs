@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use ants_proto::{
-    Envelope, Error as ProtoError, EscalationReason, Hold, Humans, NoReplyWhy, NoticeKind, State, StatusUpdate,
+    Envelope, Error as ProtoError, EscalationReason, Hold, Humans, NoReplyWhy, NoticeKind, Stage, State, StatusUpdate,
     SummaryOf, SummaryRequest, UserId, Uuid,
 };
 use anyhow::Result;
@@ -125,12 +125,23 @@ impl Inbox<'_> {
         [branch_notice, publish_notice]
     }
 
-    /// Add the prompt just completed to the ant's identity record; a failure only warns.
+    /// Add the prompt just completed to the ant's identity record, telling the ant's sense of the record when the ant
+    /// reached its next stage; a failure only warns.
     async fn count_prompt(&self) {
-        if let Some(identity) = self.identity
-            && let Err(e) = identity.count_prompt().await
+        let Some(identity) = self.identity else { return };
+        let record = match identity.count_prompt().await {
+            Ok(Some(record)) => record,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(error = format!("{e:#}"), "counting the prompt in the ant's identity");
+                return;
+            }
+        };
+        if let Some(sense) = self.sense
+            && Stage::of(record.prompts.saturating_sub(1)) != record.stage()
+            && let Err(e) = sense.grown(self.ant, &record).await
         {
-            tracing::warn!(error = format!("{e:#}"), "counting the prompt in the ant's identity");
+            tracing::warn!(error = format!("{e:#}"), "noting the ant's growth in its sense data");
         }
     }
 
