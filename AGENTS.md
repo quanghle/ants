@@ -20,8 +20,9 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 ## Code
 
 - Rust 2024, one workspace: `ants-proto` (wire contract, no I/O), `ants-sense` (built-in identity, memory and work
-  provider, no daemon dependency), `ants-daemon` (NATS + ACP), `ants` (binary), `ants-test-support` (dev-only test
-  helpers: tools on PATH, throwaway nats-server).
+  provider, no daemon dependency), `ants-trail` (trails: Monty runs, the one-shot `ants subprocess` worker and its
+  runner, no NATS), `ants-daemon` (NATS + ACP), `ants` (binary), `ants-test-support` (dev-only test helpers: tools on
+  PATH, throwaway nats-server).
 - The daemon reaches `ants-sense` only through its `sense` module (`crates/ants-daemon/src/sense.rs`), the `ants`
   crate through that module and, for the files of an ant's home, the few files `sense/tests.rs` lists.
 - Keep the footprint small: tokio current-thread, minimal features, no per-session helper processes.
