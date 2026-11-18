@@ -275,6 +275,16 @@ Proposals resting on untrusted text are refused (`untrusted`): those on a thread
 
 The confirmed skills are also files in the ant's home, `.sense/skills/<name>/`, which an export carries ([config.md](config.md#senses-part)): sense makes them match the skills in the log, removing anything else there, when a skill is confirmed, at each brief and before an export. Harnesses learn of them from the brief, which lists them by name and description, and read them with `sense_skill`. The brief shows the persona after the identity ([Sense brief](#sense-brief)).
 
+An ant whose provider is sense also offers those files to its harness through the harness's own Agent Skills mechanism, once `.sense/skills` holds a skill, checked as each harness process starts and each session opens; nothing is written into the ant's workdir or repositories:
+
+- an ACP harness process gets `COPILOT_SKILLS_DIRS` with `.sense/skills` added after the directories already named in the ant's `env`, the definition's or the daemon's environment, which Copilot CLI (`copilot --acp`) reads as extra skill directories;
+- session/new and session/load carry `_meta` with `ants/skills`, the directory, and `claudeCode.options.plugins`, which has the Claude Agent ACP adapter load `.sense` as a local plugin whose skills are those of `.sense/skills` (named `.sense:<name>`);
+- protocol `copilot-sdk` opens sessions with `.sense/skills` among their skill directories;
+- protocol `claude` starts Claude Code with `--plugin-dir` on `.sense`, as the adapter does;
+- protocol `codex` sets the app server's extra skill roots (`skills/extraRoots/set`) to `.sense/skills` before it opens a thread.
+
+`codex-acp` and Antigravity, whose skill directories lie only in the workspace or in configuration shared by every ant, keep to the brief's list and `sense_skill`.
+
 ### Sense resume registers and handoffs
 
 Each thread has one resume register: an item of kind `checkpoint` with values `goal`, `step` (the current step), `next` (the next action), `blockers`, `branch`, `questions` (the open questions), `thread` and `writer`. Its id is derived from the thread's id, so writers starting it at once start the same item. `sense_checkpoint` replaces the whole register, a value left out being cleared, by compare-and-set on its `revision`: the call passes the revision read (from the brief or the last checkpoint), none for the thread's first. A checkpoint without a revision on an existing register is refused with `revision_required`, one from another revision with `conflict`, one with a revision on a thread without a register with `not_found`; the refusals carry the current register (`register` in JSON), to merge what still holds and checkpoint again. A call changing nothing (none of `goal`, `step`, `next`, `blockers`, `branch`, `questions` or `acknowledges`, whatever its `revision`) writes and acknowledges nothing: it answers the thread's whole register and every unacknowledged handoff of the ant, newest first, each with its episode memory's id; as JSON, `{register, handoffs}`, `register` null for a thread without one.

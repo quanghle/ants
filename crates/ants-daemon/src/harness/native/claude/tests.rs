@@ -399,6 +399,25 @@ async fn claude_sessions_resume_and_fork_counting_only_their_own_cost() {
 }
 
 #[tokio::test]
+async fn claude_sessions_load_the_ants_skills_as_a_plugin_once_one_is_confirmed() {
+    let native = Fixture::new("claude-skills", "");
+    let skills = native.dir.join(".sense/skills");
+    let launch = native.launch(ModelSettings::default()).with_skills(skills.clone());
+    native.script(None, &[]);
+    native.script(Some(2), &[vec![signed_in()]]);
+    native.script(Some(4), &[vec![signed_in()]]);
+
+    Session::start(&launch, Some(SessionId::new("p1"))).await.unwrap().close().await;
+    assert!(!native.cli.args(2).contains(&"--plugin-dir".to_owned()), "no skill confirmed yet");
+    std::fs::create_dir_all(skills.join("deploy")).unwrap();
+    std::fs::write(skills.join("deploy/SKILL.md"), "---\nname: deploy\ndescription: Deploy.\n---\n").unwrap();
+    Session::start(&launch, Some(SessionId::new("p1"))).await.unwrap().close().await;
+    let args = native.cli.args(4);
+    let plugin = native.dir.join(".sense").display().to_string();
+    assert!(args.windows(2).any(|pair| pair == ["--plugin-dir", plugin.as_str()]), "{args:?}");
+}
+
+#[tokio::test]
 async fn a_cancelled_claude_turn_is_interrupted_and_the_session_goes_on() {
     let native = Fixture::new("claude-cancel", "");
     let marker = json!([{ "type": "text", "text": "[Request interrupted by user]" }]);

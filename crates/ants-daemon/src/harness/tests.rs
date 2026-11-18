@@ -597,3 +597,54 @@ async fn claude_context_selects_only_an_advertised_model_variant() {
         }
     }
 }
+
+#[tokio::test]
+async fn sessions_are_offered_the_ants_skills_once_one_is_confirmed() {
+    let metas = Arc::new(Mutex::new(Vec::new()));
+    let log = metas.clone();
+    let connect: Connector = Arc::new(move || {
+        let (new, load) = (log.clone(), log.clone());
+        DynConnectTo::new(
+            Agent
+                .v1()
+                .name("skilled")
+                .on_receive_request(
+                    async move |init: InitializeRequest, responder, _cx| {
+                        let capabilities = AgentCapabilities::new().load_session(true);
+                        responder
+                            .respond(InitializeResponse::new(init.protocol_version).agent_capabilities(capabilities))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: NewSessionRequest, responder, _cx| {
+                        new.locked().push(request.meta);
+                        responder.respond(NewSessionResponse::new("s1"))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: LoadSessionRequest, responder, _cx| {
+                        load.locked().push(request.meta);
+                        responder.respond(LoadSessionResponse::new())
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                ),
+        )
+    });
+    let home = ants_test_support::scratch_dir("harness-skills");
+    let dir = home.join(".sense/skills");
+    let launch = Launch::with_transport(connect, PathBuf::from("/"), Default::default()).with_skills(dir.clone());
+    Session::start(&launch, None).await.unwrap().close().await;
+    assert_eq!(metas.locked().pop(), Some(None), "no skill confirmed yet");
+
+    std::fs::create_dir_all(dir.join("deploy")).unwrap();
+    std::fs::write(dir.join("deploy/SKILL.md"), "---\nname: deploy\ndescription: Deploy.\n---\n").unwrap();
+    Session::start(&launch, None).await.unwrap().close().await;
+    Session::start(&launch, Some("s1".into())).await.unwrap().close().await;
+    let plugins = json!([{ "type": "local", "path": home.join(".sense"), "skipMcpDiscovery": true }]);
+    let offered = json!({ "ants/skills": dir, "claudeCode": { "options": { "plugins": plugins } } });
+    let offered = offered.as_object().cloned();
+    assert_eq!(*metas.locked(), [offered.clone(), offered], "to new and loaded sessions");
+    std::fs::remove_dir_all(&home).unwrap();
+}

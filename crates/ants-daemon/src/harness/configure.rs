@@ -9,7 +9,7 @@ use agent_client_protocol::v1::schema::{
     SetSessionConfigOptionRequest, SetSessionModeRequest,
 };
 
-use super::Launch;
+use super::{Launch, skills};
 
 pub(super) async fn open(
     cx: &ConnectionTo<Agent>,
@@ -23,6 +23,7 @@ pub(super) async fn open(
             tracing::warn!(session = %id, "{} cannot load sessions; starting a new one", launch.harness);
         } else {
             let load = LoadSessionRequest::new(id.clone(), launch.cwd.clone()).mcp_servers(mcp.clone());
+            let load = load.meta(launch.skills().map(skills::meta));
             match cx.send_request(load).block_task().await {
                 Ok(loaded) => {
                     configure(cx, launch, &id, loaded.modes, loaded.config_options.unwrap_or_default()).await?;
@@ -40,7 +41,8 @@ pub(super) async fn new_session(
     launch: &Launch,
     mcp: Vec<McpServer>,
 ) -> Result<SessionId, agent_client_protocol::Error> {
-    let new = cx.send_request(NewSessionRequest::new(launch.cwd.clone()).mcp_servers(mcp)).block_task().await?;
+    let new = NewSessionRequest::new(launch.cwd.clone()).mcp_servers(mcp).meta(launch.skills().map(skills::meta));
+    let new = cx.send_request(new).block_task().await?;
     configure(cx, launch, &new.session_id, new.modes, new.config_options.unwrap_or_default()).await?;
     Ok(new.session_id)
 }

@@ -12,6 +12,7 @@ mod observe;
 mod process;
 mod session;
 mod sign_in;
+mod skills;
 mod steer;
 
 pub use catalog::{BUILTIN_HARNESSES, Harnesses, Unset, parse_definitions};

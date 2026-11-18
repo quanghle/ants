@@ -7,7 +7,8 @@
 //! The confirmed skills are also files, `<home>/.sense/skills/<name>/`, which the ant's export carries
 //! ([`crate::export`]): [`materialize`] makes them match the skills in the log on confirmation, at each brief and
 //! before an export. Harnesses see the skills through the brief, which lists them by name and description, and read
-//! one with `sense_skill`.
+//! one with `sense_skill`; the daemon also offers the directory to harnesses with an Agent Skills mechanism of their
+//! own.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;

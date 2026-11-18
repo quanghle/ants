@@ -43,8 +43,9 @@ const MODES: [(&str, &str, &str); 3] = [
 ];
 
 /// Notifications the translator reads nothing of, which the server is asked not to send.
-const UNREAD: [&str; 6] = [
+const UNREAD: [&str; 7] = [
     "remoteControl/status/changed",
+    "skills/changed",
     "thread/started",
     "item/commandExecution/outputDelta",
     "item/fileChange/patchUpdated",
@@ -283,16 +284,19 @@ impl Native for Codex {
     }
 
     async fn new_session(&self, open: Open) -> Result<CodexSession, Error> {
+        self.offer_skills(&open).await?;
         let started = self.shared.request("thread/start", self.thread(&open, None)).await?;
         self.session(&started)
     }
 
     async fn load_session(&self, id: &str, open: Open) -> Result<CodexSession, Error> {
+        self.offer_skills(&open).await?;
         let resumed = self.shared.request("thread/resume", self.thread(&open, Some(id))).await?;
         self.session(&resumed)
     }
 
     async fn fork_session(&self, id: &str, open: Open) -> Result<CodexSession, Error> {
+        self.offer_skills(&open).await?;
         let forked = self.shared.request("thread/fork", self.thread(&open, Some(id))).await?;
         self.session(&forked)
     }
@@ -323,6 +327,14 @@ impl Codex {
             return Err(signed_out("codex has no account signed in"));
         }
         Ok((version, hello["codexHome"].as_str().map(PathBuf::from)))
+    }
+
+    /// Make the skills `open` offers the server's extra skill roots, for the threads it opens from then on.
+    async fn offer_skills(&self, open: &Open) -> Result<(), Error> {
+        if let Some(dir) = &open.skills {
+            self.shared.request("skills/extraRoots/set", json!({ "extraRoots": [dir] })).await?;
+        }
+        Ok(())
     }
 
     /// The params opening a thread (`thread/start`), or resuming or forking thread `id`, with the definition's
