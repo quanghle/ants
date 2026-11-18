@@ -9,7 +9,7 @@
 pub(crate) mod control;
 mod follow;
 pub(crate) mod runs;
-mod saved;
+pub(crate) mod saved;
 pub(crate) mod start;
 #[cfg(test)]
 mod tests;
@@ -19,6 +19,7 @@ use std::str::FromStr;
 
 use ants_proto::{RunId, TrailLimits, TrailName, UserId, Uuid};
 use anyhow::{Result, bail};
+use async_nats::jetstream;
 use chrono::Utc;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
@@ -213,7 +214,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
         }
         TrailCommand::List { json } => {
             let (_, js) = nats.connect("ants-cli").await?;
-            let listed = saved::listing(saved::colony(&js).await?, saved::local(&saved::local_dir()?));
+            let listed = saved_trails(&js).await?;
             if json {
                 for entry in &listed {
                     println!("{}", serde_json::to_string(entry)?);
@@ -224,30 +225,17 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
                 println!("{}", saved::table(&listed, Utc::now()));
             }
         }
-        TrailCommand::Show { what: Shown::Trail(name), json, follow } => {
-            let (_, js) = nats.connect("ants-cli").await?;
-            let found = match saved::find(&js, &saved::local_dir()?, &name).await {
-                Ok(found) if !follow => found,
-                Ok(_) => bail!("--follow follows a run; {name} is a trail"),
-                Err(e) => {
-                    let Some(pick) = name.as_str().parse::<runs::Pick>().ok().filter(|_| nats.me.role.is_human())
-                    else {
-                        return Err(e);
-                    };
-                    let Ok(run) = runs::pick(&js, &pick).await else { return Err(e) };
-                    return show_run(nats, &js, run.run, json, follow).await;
-                }
-            };
-            if json {
-                println!("{}", serde_json::to_string(&saved::Shown::from(&found))?);
-            } else {
-                print!("{}", saved::render(&found, Utc::now()));
+        TrailCommand::Show { what, json, follow } => {
+            if matches!(what, Shown::Run(_)) {
+                human(nats, "reading a trail's runs")?;
             }
-        }
-        TrailCommand::Show { what: Shown::Run(run), json, follow } => {
-            human(nats, "reading a trail's runs")?;
             let (_, js) = nats.connect("ants-cli").await?;
-            show_run(nats, &js, run, json, follow).await?;
+            match find(&js, what, nats.me.role.is_human()).await? {
+                Found::Trail(found) if follow => bail!("--follow follows a run; {} is a trail", found.trail.name),
+                Found::Trail(found) if json => println!("{}", serde_json::to_string(&saved::Shown::from(&found))?),
+                Found::Trail(found) => print!("{}", saved::render(&found, Utc::now())),
+                Found::Run(run) => show_run(nats, &js, run, json, follow).await?,
+            }
         }
         TrailCommand::Run(args) => start::run(nats, args, start::ask_terminal).await?,
         TrailCommand::Stop { run } => {
@@ -294,24 +282,49 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
 }
 
 /// Show the run `run`, or with `follow` follow it.
-async fn show_run(
-    nats: &Nats<'_>,
-    js: &async_nats::jetstream::Context,
-    run: RunId,
-    json: bool,
-    follow: bool,
-) -> Result<()> {
+async fn show_run(nats: &Nats<'_>, js: &jetstream::Context, run: RunId, json: bool, follow: bool) -> Result<()> {
     human(nats, "reading a trail's runs")?;
     if follow {
         return follow::follow(js, runs::find(js, &run).await?, json).await;
     }
-    let detail = runs::detail(js, &run).await?;
     if json {
-        println!("{}", serde_json::to_string(&detail)?);
+        println!("{}", serde_json::to_string(&runs::detail(js, &run).await?)?);
     } else {
-        print!("{}", runs::render(&detail, Utc::now()));
+        print!("{}", run_shown(js, &run, Utc::now()).await?);
     }
     Ok(())
+}
+
+/// The saved trails `ants trail list` lists: the colony's, then this machine's.
+pub(crate) async fn saved_trails(js: &jetstream::Context) -> Result<Vec<saved::Listed>> {
+    Ok(saved::listing(saved::colony(js).await?, saved::local(&saved::local_dir()?)))
+}
+
+/// What `ants trail show` found.
+pub(crate) enum Found {
+    Trail(saved::Found),
+    Run(RunId),
+}
+
+/// What `what` names: a run, by its id; else the saved trail of that name, the colony's before a local one; else, for
+/// a `human`, the one run whose id starts so.
+pub(crate) async fn find(js: &jetstream::Context, what: Shown, human: bool) -> Result<Found> {
+    let name = match what {
+        Shown::Run(run) => return Ok(Found::Run(run)),
+        Shown::Trail(name) => name,
+    };
+    let e = match saved::find(js, &saved::local_dir()?, &name).await {
+        Ok(found) => return Ok(Found::Trail(found)),
+        Err(e) => e,
+    };
+    let Some(pick) = name.as_str().parse::<runs::Pick>().ok().filter(|_| human) else { return Err(e) };
+    let Ok(run) = runs::pick(js, &pick).await else { return Err(e) };
+    Ok(Found::Run(run.run))
+}
+
+/// The run `run` as `ants trail show RUN` prints it at `now`.
+pub(crate) async fn run_shown(js: &jetstream::Context, run: &RunId, now: chrono::DateTime<Utc>) -> Result<String> {
+    Ok(runs::render(&runs::detail(js, run).await?, now))
 }
 
 /// Refuse the credentials of an ant for `what`, which the server allows only a human.

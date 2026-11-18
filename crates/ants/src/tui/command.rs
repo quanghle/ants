@@ -297,6 +297,8 @@ impl Model {
             }
             Slash::Retire(ant) => run(Job::Retire { ant }),
             Slash::Trail(trail) => run(match trail {
+                Trail::List => Job::TrailList,
+                Trail::Show(what) => Job::TrailShow(what),
                 Trail::Runs => Job::TrailRuns,
                 Trail::Run { trail, conductor, args } => Job::TrailPlan { trail, conductor, args },
                 Trail::Stop(run) => Job::TrailStop(run),

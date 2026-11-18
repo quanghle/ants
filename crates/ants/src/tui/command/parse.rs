@@ -8,6 +8,7 @@ use chrono::TimeDelta;
 use serde_json::Value;
 
 use super::snooze;
+use crate::cmd::trail::Shown;
 use crate::cmd::trail::runs::Pick;
 use crate::threads::thread_meta::Marking;
 
@@ -51,8 +52,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("retire", "ANT", "retire the ant by admin order, its home kept"),
     (
         "trail",
-        "runs | run NAME [@ANT] [ARGS] | stop RUN | resume RUN",
-        "list the runs of trails, start a run of a saved trail once y confirms its limits, stop or resume a run",
+        "list | show NAME|RUN | runs | run NAME [@ANT] [ARGS] | stop RUN | resume RUN",
+        "list or show saved trails and runs, start a run of a saved trail once y confirms it, stop or resume a run",
     ),
     ("quit", "", "leave ants chat"),
 ];
@@ -126,9 +127,12 @@ pub enum Slash {
     Quit,
 }
 
-/// What `/trail` asks of the runs of trails, as `ants trail` does.
+/// What `/trail` asks of the saved trails and the runs of trails, as `ants trail` does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trail {
+    List,
+    /// Show the saved trail, else the run, named.
+    Show(Shown),
     Runs,
     /// Start a run of the saved trail `trail` with `args`, a JSON value, on `conductor`, else whom a message naming no
     /// one goes to, once confirmed.
@@ -284,6 +288,10 @@ fn slash(text: &str) -> Result<Slash, String> {
 fn trail(args: &str) -> Result<Trail, Option<String>> {
     let error = |e: &dyn std::fmt::Display| Some(e.to_string());
     match first_word(args) {
+        ("list", "") => Ok(Trail::List),
+        ("show", what) if !what.is_empty() && !what.contains(char::is_whitespace) => {
+            what.to_ascii_lowercase().parse().map(Trail::Show).map_err(|e| error(&e))
+        }
         ("runs", "") => Ok(Trail::Runs),
         ("run", rest) if !rest.is_empty() => {
             let (name, rest) = first_word(rest);
@@ -391,11 +399,16 @@ mod tests {
     }
 
     #[test]
-    fn trail_lists_starts_stops_and_resumes_runs() {
+    fn trail_lists_and_shows_trails_and_lists_starts_stops_and_resumes_runs() {
         let trail = |text: &str| match parse(text) {
             Ok(Command::Slash(Slash::Trail(trail))) => trail,
             other => panic!("{text}: {other:?}"),
         };
+        assert_eq!(trail("/trail list"), Trail::List);
+        assert_eq!(trail("/trail show review"), Trail::Show(Shown::Trail("review".parse().unwrap())));
+        assert_eq!(trail("/trail show 0190AB"), Trail::Show(Shown::Trail("0190ab".parse().unwrap())));
+        let run = "0190aaaa-0000-7000-8000-000000000001";
+        assert_eq!(trail(&format!("/trail show {run}")), Trail::Show(Shown::Run(run.parse().unwrap())));
         assert_eq!(trail("/trail runs"), Trail::Runs);
         let run = |conductor: Option<&str>, args| Trail::Run {
             trail: "review".parse().unwrap(),
@@ -409,10 +422,20 @@ mod tests {
         assert_eq!(trail(r#"/trail run review {"files": ["a.rs", "b.rs"]}"#), run(None, args));
         assert_eq!(trail("/trail stop 0190AB"), Trail::Stop("0190ab".parse().unwrap()));
         assert_eq!(trail("/trail resume 0190ab"), Trail::Resume("0190ab".parse().unwrap()));
-        let usage = "usage: /trail runs | run NAME [@ANT] [ARGS] | stop RUN | resume RUN";
-        for refused in ["/trail", "/trail runs all", "/trail run", "/trail stop", "/trail stop a b", "/trail list"] {
+        let usage = "usage: /trail list | show NAME|RUN | runs | run NAME [@ANT] [ARGS] | stop RUN | resume RUN";
+        for refused in [
+            "/trail",
+            "/trail runs all",
+            "/trail run",
+            "/trail stop",
+            "/trail stop a b",
+            "/trail list all",
+            "/trail show",
+        ] {
             assert_eq!(parse(refused).unwrap_err(), usage, "{refused}");
         }
+        assert_eq!(parse("/trail show a b").unwrap_err(), usage);
+        assert!(parse("/trail show Not_A_Name").unwrap_err().contains("trail name"));
         assert!(parse("/trail run Not_A_Name").unwrap_err().contains("trail name"));
         assert!(parse("/trail run review {files").unwrap_err().starts_with("ARGS not JSON"));
         assert!(parse("/trail run review @Lead").is_err());

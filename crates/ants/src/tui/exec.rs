@@ -195,6 +195,10 @@ pub enum Job {
         source: forward::Source,
         note: String,
     },
+    /// List the saved trails, as `ants trail list` does.
+    TrailList,
+    /// Show the saved trail, else the run, named, as `ants trail show` does.
+    TrailShow(crate::cmd::trail::Shown),
     /// List the runs of trails, as `ants trail runs` does.
     TrailRuns,
     /// Plan a run of the saved trail `trail` with `args` on `conductor`, as `ants trail run` sums it up before asking to
@@ -386,6 +390,8 @@ impl Job {
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
             Self::Later(_) => Err(anyhow!("a message waits its turn once")),
             Self::Withdraw { ants, message, edit } => withdraw(ctx, &ants, message, edit.map(|e| *e)).await,
+            Self::TrailList => trail::trails(ctx).await,
+            Self::TrailShow(what) => trail::shown(ctx, what).await,
             Self::TrailRuns => trail::listed(ctx).await,
             Self::TrailPlan { trail, conductor, args } => trail::planned(ctx, &trail, conductor, args).await,
             Self::TrailStart(start) => trail::started(ctx, &start).await,

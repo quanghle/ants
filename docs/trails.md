@@ -81,6 +81,9 @@ ants trail show review                  # meta, source and script
 ants trail rm review                    # the colony's only: a local file stays until deleted
 ```
 
+In `ants chat`, `/trail list` and `/trail show NAME` show what `ants trail list` and `ants trail show` print, in the
+pager.
+
 ## Starting a run
 
 A run is started three ways; each names a conductor, an owner and a thread to report on:
@@ -158,7 +161,7 @@ A run reports on the thread it started with, as its conductor:
 `ants trail runs` lists the runs of every conductor, or `--ant CONDUCTOR`'s; `ants trail show RUN` prints a run (its
 id or a unique start of one): state, phase, spending, args, the calls waiting and queued, and its journal; `--follow`
 follows it as `ants trail run --follow` does. These need human credentials. In `ants chat`, `/trail runs` shows the
-same list in the pager.
+same list in the pager, and `/trail show RUN` the run as `ants trail show RUN` prints it.
 
 ## Limits
 
