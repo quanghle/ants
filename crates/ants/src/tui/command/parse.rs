@@ -51,6 +51,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("save", "[PATH]", "save the marked attachment"),
     ("retire", "ANT", "retire the ant by admin order, its home kept"),
     (
+        "dead",
+        "replay [SEQ] | drop [SEQ]",
+        "send a dead letter (the one selected, else the thread's latest) to its ant again, or drop it once y confirms",
+    ),
+    (
         "trail",
         "runs | run NAME [@ANT] [ARGS] | stop RUN | resume RUN",
         "list the runs of trails, start a run of a saved trail once y confirms its limits, stop or resume a run",
@@ -125,6 +130,7 @@ pub enum Slash {
     Save(Option<String>),
     /// Retire the ant by admin order.
     Retire(UserId),
+    Dead(Dead),
     Trail(Trail),
     Quit,
 }
@@ -142,6 +148,15 @@ pub enum Trail {
     },
     Stop(Pick),
     Resume(Pick),
+}
+
+/// What `/dead` does with a dead letter, as `ants dead replay|drop` does: the one at the stream sequence given, else
+/// the one selected or the thread's latest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dead {
+    Replay(Option<u64>),
+    /// Drop it unreplayed, once `y` confirms.
+    Drop(Option<u64>),
 }
 
 /// Where `/goto` leads.
@@ -277,10 +292,25 @@ fn slash(text: &str) -> Result<Slash, String> {
             let ant = text()?;
             ant.strip_prefix('@').unwrap_or(&ant).parse().map(Slash::Retire).map_err(|e| format!("{e}"))
         }
+        "dead" => dead(args).map(Slash::Dead).map_err(|why| why.unwrap_or_else(usage)),
         "trail" => trail(args).map(Slash::Trail).map_err(|why| why.unwrap_or_else(usage)),
         "quit" => bare(Slash::Quit),
         _ if COMMANDS.iter().any(|(n, ..)| *n == name) => Err(usage()),
         _ => Err(format!("no command /{name}: the palette lists them")),
+    }
+}
+
+/// What `/dead`'s `args` ask, or why not: None for its usage.
+fn dead(args: &str) -> Result<Dead, Option<String>> {
+    let (verb, seq) = first_word(args);
+    let dead = match verb {
+        "replay" => Dead::Replay,
+        "drop" => Dead::Drop,
+        _ => return Err(None),
+    };
+    match seq {
+        "" => Ok(dead(None)),
+        seq => seq.parse().map(|seq| dead(Some(seq))).map_err(|_| Some(format!("SEQ not a number: {seq}"))),
     }
 }
 
@@ -425,10 +455,27 @@ mod tests {
         assert!(parse("/trail stop review").unwrap_err().contains("hex digits"));
     }
 
+    #[test]
+    fn dead_replays_or_drops_a_dead_letter() {
+        let dead = |text: &str| match parse(text) {
+            Ok(Command::Slash(Slash::Dead(dead))) => dead,
+            other => panic!("{text}: {other:?}"),
+        };
+        assert_eq!(dead("/dead replay"), Dead::Replay(None));
+        assert_eq!(dead("/DEAD drop  12"), Dead::Drop(Some(12)));
+        let usage = "usage: /dead replay [SEQ] | drop [SEQ]";
+        for refused in ["/dead", "/dead list", "/dead 12"] {
+            assert_eq!(parse(refused).unwrap_err(), usage, "{refused}");
+        }
+        assert_eq!(parse("/dead drop 12 13").unwrap_err(), "SEQ not a number: 12 13");
+        assert_eq!(parse("/dead replay -1").unwrap_err(), "SEQ not a number: -1");
+    }
+
     /// A sample of an argument [`COMMANDS`] names; a new placeholder needs one here.
     fn sample(arg: &str) -> &str {
         match arg {
             "ID" | "THREAD" | "RUN" => "019a",
+            "SEQ" => "12",
             "TEXT" | "NOTE" | "QUERY" => "ship it",
             "N" => "2",
             "PICK..." => "2 'after lunch'",

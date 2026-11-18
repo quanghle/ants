@@ -1,7 +1,7 @@
 //! What the command bar's sends and slash commands do over the CLI's connection, in the background while the UI goes
 //! on: the same library code as `ants ask`, `ants post`, `ants notes`, `ants answer`, `ants react`, `ants cancel`,
-//! `ants thread done|title|pin|mute...` and `ants trail` ([`super::trail`]) run, each returning the line those print
-//! and the warnings they log.
+//! `ants thread done|title|pin|mute...`, `ants dead replay|drop` and `ants trail` ([`super::trail`]) run, each returning
+//! the line those print and the warnings they log.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -22,7 +22,7 @@ use futures::{FutureExt as _, StreamExt as _};
 use super::{attach, trail};
 use crate::admin::orders;
 use crate::admin::pause;
-use crate::cmd::{cancel, send};
+use crate::cmd::{cancel, dead, send};
 use crate::messages::attachments::{self, File, Listed};
 use crate::messages::forward;
 use crate::people::sealed::{Keyring, Sealing};
@@ -185,6 +185,11 @@ pub enum Job {
     Retire {
         ant: UserId,
     },
+    /// Send the message of the dead letter at this stream sequence to its ant again and remove the letter, as `ants
+    /// dead replay` does.
+    DeadReplay(u64),
+    /// Remove the dead letter at this stream sequence unreplayed, as `ants dead drop` does.
+    DeadDrop(u64),
     /// Send as `job`, a [`Job::Reply`] or a [`Job::Post`] on a thread, does, waiting behind the prompt running there
     /// rather than interrupting it, as `ants ask --queue` does.
     Later(Box<Job>),
@@ -244,6 +249,8 @@ pub struct Done {
     pub page: Option<String>,
     /// The run of a trail planned, to start once confirmed.
     pub planned: Option<Box<trail::Planned>>,
+    /// The dead letter it replayed or dropped, by stream sequence.
+    pub dead: Option<u64>,
 }
 
 impl Done {
@@ -389,6 +396,12 @@ impl Job {
                 Ok(Done::line(attach::save(&ctx.js, ctx.keyring.as_deref(), &listed, to.as_deref()).await?))
             }
             Self::Retire { ant } => retire(ctx, &ant).await,
+            Self::DeadReplay(seq) => {
+                Ok(Done { line: dead::replayed(&ctx.js, seq).await?, dead: Some(seq), ..Done::default() })
+            }
+            Self::DeadDrop(seq) => {
+                Ok(Done { line: dead::dropped(&ctx.js, seq).await?, dead: Some(seq), ..Done::default() })
+            }
             Self::Forward { to, source, note } => forward(ctx, to, &source, &note, &files).await,
             Self::Pause { ant, paused } => {
                 let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
@@ -911,6 +924,42 @@ mod tests {
         let (_, bytes) =
             attachments::fetch(&js, &listed.handle, Some(&listed.attachment), listed.stored).await.unwrap();
         assert_eq!(bytes, b"# plan");
+    }
+
+    /// The bar replays a dead letter to its ant, or drops it, as `ants dead replay|drop` do: once gone, it is no more.
+    #[tokio::test]
+    async fn a_dead_letter_is_replayed_or_dropped_as_ants_dead_does() {
+        use ants_proto::{DeadLetter, Envelope};
+
+        let Some(server) = crate::test_support::Server::start() else { return };
+        let (alice, dev_a) = (user("alice"), user("dev-a"));
+        let creds = server.creds_as(&alice, ants_proto::Role::Human);
+        let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+        let (client, js) = nats.connect("test").await.unwrap();
+        let _ = js.create_stream(ants_daemon::hub::stream_config()).await;
+        let (_, ant_js) = server.connect(&dev_a).await;
+        let ask = Envelope::new(alice, dev_a.clone(), "build it");
+        let bury = async || {
+            let dead = DeadLetter::of_envelope(dev_a.clone(), 1, 5, "harness crashed", ask.clone());
+            bus::publish_json(&ant_js, dead.subject(), &dead, None).await.unwrap()
+        };
+        let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
+        let (meta, admin) = (Err("unused".into()), Err("unused".into()));
+        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin };
+
+        let seq = bury().await;
+        let done = Job::DeadReplay(seq).run(&ctx).await.unwrap();
+        assert_eq!((done.line, done.dead), (format!("replayed to dev-a on thread {}", ask.thread_id), Some(seq)));
+        let stream = js.get_stream(ants_proto::STREAM).await.unwrap();
+        let replayed = stream.get_last_raw_message_by_subject(&ask.subject()).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Envelope>(&replayed.payload).unwrap(), ask, "sent again as it was");
+        let gone = format!("{:#}", Job::DeadReplay(seq).run(&ctx).await.unwrap_err());
+        assert!(gone.contains(&format!("reading message {seq}")), "{gone}");
+
+        let seq = bury().await;
+        let done = Job::DeadDrop(seq).run(&ctx).await.unwrap();
+        assert_eq!((done.line, done.dead), (format!("dropped dead letter {seq}"), Some(seq)));
+        assert!(ants_daemon::delivery::dead::list(&stream).await.unwrap().is_empty());
     }
 
     /// The members editor's writes change the channel's entry as `ants channel add|remove|set` does, refused as it

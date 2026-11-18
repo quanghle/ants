@@ -23,8 +23,8 @@ use super::react::{self, Picker};
 use super::reads::{Levels, Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
-    ant, cards, catchup, channel, credentials, dm, faces, fold, held, home, images, mcp, memories, nav, people, search,
-    settings, snooze, steps, thread, timeline, trail, tree, work,
+    ant, cards, catchup, channel, credentials, dead, dm, faces, fold, held, home, images, mcp, memories, nav, people,
+    search, settings, snooze, steps, thread, timeline, trail, tree, work,
 };
 use crate::live::{self, State};
 use crate::text::excerpt;
@@ -194,6 +194,8 @@ pub struct Data {
     pub looks: faces::Looks,
     /// The messages the human withdrew here, marked before the ant's notice of each comes.
     pub withdrawn: HashSet<Uuid>,
+    /// The dead letters replayed or dropped here, by stream sequence: read, though the stream holds them no more.
+    pub dead_cleared: HashSet<u64>,
     /// The drafts of the conversations, the bar holding that of the one shown.
     pub drafts: command::Drafts,
     /// The texts sent from the bar, which it recalls.
@@ -367,6 +369,8 @@ pub struct Model {
     pub copying: Option<super::clipboard::Picker>,
     /// The cancel waiting for y while an ant runs a tool call.
     pub interrupting: Option<Confirm>,
+    /// The dead letter `/dead drop` picked, waiting for y.
+    pub dropping: Option<dead::Letter>,
     /// The run of a trail `/trail run` planned, waiting for y to start.
     pub starting: Option<trail::Planned>,
     /// How long to snooze a thread from home, or when to be reminded of it, being asked.
@@ -412,6 +416,7 @@ impl Model {
             cards: cards::Cards::default(),
             images: images::Images::default(),
             withdrawn: HashSet::new(),
+            dead_cleared: HashSet::new(),
             credentials: credentials::Heard::default(),
             held: held::Orders::default(),
             looks: faces::Looks::default(),
@@ -433,6 +438,7 @@ impl Model {
             picking: None,
             copying: None,
             interrupting: None,
+            dropping: None,
             starting: None,
             snoozing: None,
             catchup: catchup::Catchup::default(),

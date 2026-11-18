@@ -37,7 +37,6 @@ const MACHINE: &str = "sets up or checks the machine running it";
 const MOVING: &str = "moves an ant between machines: files, config file and provider data of the machine running it";
 const ADD_ANT: &str = "ants-rjatj.13";
 const ASSISTANT: &str = "ants-waemb";
-const DEAD: &str = "ants-rjatj.18";
 const SEND: &str = "the command bar: `@user TEXT` starts a thread, a text alone replies on the open one";
 const POST: &str = "the command bar: `#channel TEXT` posts to a channel";
 
@@ -132,8 +131,8 @@ const CLI: &[(&str, Chat)] = &[
     ("tools approve", Slash("approve")),
     ("tools reject", Slash("reject")),
     ("dead list", Shown("the thread view's `gave up` lines and home's stuck threads")),
-    ("dead replay", Missing(DEAD)),
-    ("dead drop", Missing(DEAD)),
+    ("dead replay", Slash("dead")),
+    ("dead drop", Slash("dead")),
     ("dead watch", Exempt(SERVICE)),
     ("daemon", Exempt(SERVICE)),
     ("add", Exempt("run on the ant's machine, where its config file and key stay")),

@@ -28,7 +28,7 @@ mod route;
 pub use bar::{Bar, Draft, Edited, Note, Tone};
 pub use drafts::{Conversation, Drafts};
 pub use history::{FILE as HISTORY_FILE, History};
-pub use parse::{COMMANDS, Command, Goto, Slash, Trail, parse};
+pub use parse::{COMMANDS, Command, Dead, Goto, Slash, Trail, parse};
 pub use route::Route;
 
 /// A paste of more bytes than this is staged as a text file rather than put in the bar.
@@ -297,6 +297,7 @@ impl Model {
                 run(Job::Save(Box::new(listed), to.map(|to| attach::expand(&to))))
             }
             Slash::Retire(ant) => run(Job::Retire { ant }),
+            Slash::Dead(dead) => self.dead(dead),
             Slash::Trail(trail) => run(match trail {
                 Trail::Runs => Job::TrailRuns,
                 Trail::Run { trail, conductor, args } => Job::TrailPlan { trail, conductor, args },
@@ -457,6 +458,7 @@ impl Model {
             "notify" => self.channel_on_view().is_none().then(|| "no channel shown".to_owned()),
             "forward" if matches!(self.page(), Page::Thread(page) if page.chosen().is_some()) => None,
             "save" => self.attachment().is_none().then(|| "no attachment on the selected message".to_owned()),
+            "dead" => self.letter(None).err(),
             "grant" | "done" | "undone" | "pin" | "unpin" | "mute" | "unmute" | "snooze" | "unsnooze" | "remind"
             | "unremind" | "archive" | "unarchive" | "title" | "notes" | "react" | "tldr" | "tree" | "forward" => {
                 target.err()
@@ -536,9 +538,9 @@ impl Model {
     }
 
     /// Take how a job the bar ran went: its line and warnings on the status line, opening the thread it started, the
-    /// text and files of a message withdrawn to edit into the bar, the run of a trail planned to confirm, and what it
-    /// shows in the pager; on failure, the error, and its text and quote back as the draft of the conversation it was
-    /// typed in if that holds none.
+    /// text and files of a message withdrawn to edit into the bar, the run of a trail planned to confirm, the dead
+    /// letter it replayed or dropped, and what it shows in the pager; on failure, the error, and its text and quote
+    /// back as the draft of the conversation it was typed in if that holds none.
     pub fn outcome(&mut self, outcome: Outcome) -> Option<Action> {
         self.follow_drafts();
         self.bar.staged.sent(&outcome.text, outcome.result.is_err());
@@ -547,6 +549,7 @@ impl Model {
         match outcome.result {
             Ok(mut done) => {
                 self.data.withdrawn.extend(done.withdrew);
+                self.data.dead_cleared.extend(done.dead);
                 if let Some((text, files)) = done.edit.take() {
                     self.bar.set_text(&text);
                     for path in files {

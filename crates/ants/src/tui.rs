@@ -18,6 +18,7 @@ mod command;
 mod compact;
 mod complete;
 mod credentials;
+mod dead;
 mod dm;
 mod exec;
 mod faces;
