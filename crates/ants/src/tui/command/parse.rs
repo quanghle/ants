@@ -251,7 +251,7 @@ fn slash(text: &str) -> Result<Slash, String> {
         }
         "quit" => bare(Slash::Quit),
         _ if COMMANDS.iter().any(|(n, ..)| *n == name) => Err(usage()),
-        _ => Err(format!("no command /{name}")),
+        _ => Err(format!("no command /{name}: the palette lists them")),
     }
 }
 
@@ -331,7 +331,7 @@ mod tests {
         assert!(parse("/steer left").unwrap_err().starts_with("no command"));
         assert_eq!(parse("/done now").unwrap_err(), "usage: /done");
         assert_eq!(parse("/approve a b").unwrap_err(), "usage: /approve [ID] [--always]");
-        assert_eq!(parse("/frobnicate").unwrap_err(), "no command /frobnicate");
+        assert_eq!(parse("/frobnicate").unwrap_err(), "no command /frobnicate: the palette lists them");
         assert!(parse("/mute forever").is_err());
         assert!(parse("/react Thumbs Up").is_err());
     }

@@ -102,6 +102,19 @@ pub fn edit_text(initial: &str) -> Result<String> {
     edit(&editor(std::env::var("VISUAL").ok(), std::env::var("EDITOR").ok()), initial)
 }
 
+/// Show `text` in the pager `PAGER` names, else in the editor, on a file removed once it exits.
+pub fn page_text(text: &str) -> Result<()> {
+    let pager = std::env::var("PAGER").ok().filter(|p| !p.trim().is_empty());
+    let pager = pager.unwrap_or_else(|| editor(std::env::var("VISUAL").ok(), std::env::var("EDITOR").ok()));
+    let draft = Draft::create()?;
+    std::fs::write(&draft.0, text).with_context(|| format!("writing {}", draft.0.display()))?;
+    let status = shell(&pager, &draft.0).status().with_context(|| format!("running `{pager}`"))?;
+    if !status.success() {
+        bail!("`{pager}` failed ({status}): set PAGER to a pager's command line");
+    }
+    Ok(())
+}
+
 /// Run the `editor` command line on a new file holding `initial` and return what it saved there.
 fn edit(editor: &str, initial: &str) -> Result<String> {
     let draft = Draft::create()?;

@@ -92,10 +92,11 @@ pub enum Job {
         text: String,
         quote: Option<Quoted>,
     },
-    /// Reply `text` on `thread` to the ant that last messaged the human there ([`reply_to`]), else to the other human
-    /// ([`dm_with`]), else as [`Job::Unaddressed`] does; quoting the message it replies to if any.
+    /// Reply `text` on `thread` to `to`, else to the ant that last messaged the human there ([`reply_to`]), else to the
+    /// other human ([`dm_with`]), else as [`Job::Unaddressed`] does; quoting the message it replies to if any.
     Reply {
         thread: ThreadId,
+        to: Option<UserId>,
         text: String,
         quote: Option<Quoted>,
     },
@@ -301,7 +302,7 @@ impl Job {
                 ask(ctx, to, None, text, None, false, &files).await
             }
             Self::Post { channel, thread, text, quote } => post(ctx, channel, thread, text, quote, queue, &files).await,
-            Self::Reply { thread, text, quote } => reply(ctx, thread, text, quote, queue, &files).await,
+            Self::Reply { thread, to, text, quote } => reply(ctx, thread, to, text, quote, queue, &files).await,
             Self::Grant { thread, text } => {
                 let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
                 let ant = stuck(&entries).ok_or_else(|| anyhow!("no ant is stuck on thread {thread}"))?;
@@ -411,15 +412,19 @@ fn changed_line(channel: &ChannelId, change: &crate::channel::Change, changed: &
     }
 }
 
-/// Reply on `thread` to whoever the human talks with there, or as an unaddressed message.
+/// Reply on `thread` to `to`, else to whoever the human talks with there, else as an unaddressed message.
 async fn reply(
     ctx: &Ctx,
     thread: ThreadId,
+    to: Option<UserId>,
     text: String,
     quote: Option<Quoted>,
     queue: bool,
     files: &[File],
 ) -> Result<Done> {
+    if let Some(to) = to {
+        return ask(ctx, to.into(), Some(thread), text, quote, queue, files).await;
+    }
     let me = &ctx.me.id;
     let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
     let humans = humans::load(&ctx.js, &ctx.me).await;
@@ -711,7 +716,7 @@ mod tests {
         let ask = Job::Ask { to: bob.clone(), thread: None, text: "lunch?".into(), quote: None };
         let thread = Box::pin(ask.run(&ctx)).await.unwrap().open.unwrap();
         let quote = Quoted { id: Uuid::now_v7(), quote: Quote::new(alice.clone(), "lunch?"), sealed: true };
-        let reply = Job::Reply { thread: thread.clone(), text: "at noon".into(), quote: Some(quote.clone()) };
+        let reply = Job::Reply { thread: thread.clone(), to: None, text: "at noon".into(), quote: Some(quote.clone()) };
         let reply = Job::Attached { job: Box::new(reply), files };
         let line = Box::pin(reply.run(&ctx)).await.unwrap().line;
         assert_eq!(line, format!("sent to bob on thread {thread} with 1 file"));

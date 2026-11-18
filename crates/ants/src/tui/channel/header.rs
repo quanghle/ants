@@ -35,7 +35,8 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data, channel: &ChannelId, now
     let entry = data.channels.iter().find(|c| c.channel == *channel);
     let level = data.level(channel);
     let Some([info, members, activity]) = panes(area) else {
-        frame.render_widget(Paragraph::new(summary(entry, channel, data, now)), area);
+        let line = style::clip(summary(entry, channel, data, now), usize::from(area.width));
+        frame.render_widget(Paragraph::new(line), area);
         return;
     };
     let inner = |r: Rect| (usize::from(r.width.saturating_sub(2)), usize::from(r.height.saturating_sub(2)));
@@ -52,8 +53,9 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data, channel: &ChannelId, now
         None => (" members ".to_owned(), vec![Line::styled("reading the channels…", style::dim())]),
     };
     frame.render_widget(Paragraph::new(lines).block(style::block(title, false)), members);
-    let (_, rows) = inner(activity);
-    let mut lines: Vec<Line> = data.activity.of(channel).take(rows).map(|e| told(e, data, now)).collect();
+    let (width, rows) = inner(activity);
+    let mut lines: Vec<Line> =
+        data.activity.of(channel).take(rows).map(|e| style::clip(told(e, data, now), width)).collect();
     if lines.is_empty() {
         lines.push(Line::styled("nothing yet", style::dim()));
     }

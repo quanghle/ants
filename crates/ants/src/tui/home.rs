@@ -4,6 +4,7 @@
 //! grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`]), remind ([`super::remind`]) or open. A
 //! snoozed thread's items stay off home until the snooze ends or an item for the human arrives on it.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
@@ -12,12 +13,12 @@ use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{ListState, Paragraph};
 
 use super::acts::Change;
 use super::approvals;
-use super::command::GRANT;
+use super::command::{Conversation, GRANT};
 use super::exec::Job;
 use super::model::{Action, Data, Key, Model, To};
 use super::select::Selection;
@@ -144,6 +145,11 @@ impl Item {
         }
     }
 
+    /// The pending tool request its keys answer: none on the head of a group listed one by one.
+    pub fn pending(&self) -> Option<&ApprovalRequest> {
+        self.request.as_ref().filter(|(_, settled)| settled.is_none() && !self.expanded).map(|(r, _)| r)
+    }
+
     /// Whether it stands for a pending tool request of the same ant on the same thread as `other`'s.
     fn groups(&self, other: &Item) -> bool {
         fn pending(i: &Item) -> Option<&ApprovalRequest> {
@@ -190,7 +196,20 @@ fn grouped(reasons: Vec<Item>) -> Vec<Item> {
 /// What an ant asks to run with `request`, and what assistants decided on it for their humans, which waits for the
 /// humans' consent.
 fn asks(data: &Data, request: &ApprovalRequest) -> String {
-    let mut text = format!("{} asks to run {}: {}", request.ant, request.tool.kind, request.tool.title);
+    let text = format!("{} asks to run {}: {}", request.ant, request.tool.kind, request.tool.title);
+    decided(data, request, text)
+}
+
+/// Who asks on `item`, the card the keys answer showing what `request`, its oldest, asks.
+fn asker(data: &Data, item: &Item, request: &ApprovalRequest) -> String {
+    match item.requests.len() {
+        0 | 1 => decided(data, request, format!("{} asks to run:", request.ant)),
+        n => format!("{} asks to run {n} tools, the oldest:", request.ant),
+    }
+}
+
+/// `text`, then what assistants decided on `request` for their humans.
+fn decided(data: &Data, request: &ApprovalRequest, mut text: String) -> String {
     for held in data.live.held.get(&(request.ant.clone(), request.id)).into_iter().flatten() {
         let (assistant, human, verdict) = (&held.assistant, &held.human, crate::tools::spelling(held.verdict));
         let id = crate::tools::qualified(request);
@@ -296,20 +315,34 @@ pub fn waiting(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
     items(data, now).into_iter().filter(|i| i.request.as_ref().is_none_or(|(_, settled)| settled.is_none())).collect()
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Page {
-    /// The selected item, kept on it as items arrive and leave.
+    /// The selected item: the top one until a key moves it, then kept on it as items arrive and leave.
     selected: Selection<Id>,
     /// The groups of tool requests listed one by one, by ant and thread.
     expanded: HashSet<(UserId, ThreadId)>,
     /// The cursor on the selected question item's card, while Enter has focused it.
     answering: Option<question::Cursor>,
+    /// How wide the card the keys answer was drawn last and over how many lines what its request asks, which tells
+    /// whether the request shows whole on screen; none on the compact pane.
+    room: Cell<Option<(usize, usize)>>,
+    /// The request of the card the keys answer, as last drawn.
+    carded: Cell<Option<Uuid>>,
+}
+
+impl Default for Page {
+    fn default() -> Self {
+        Self {
+            selected: Selection::on_top(),
+            expanded: HashSet::new(),
+            answering: None,
+            room: Cell::new(None),
+            carded: Cell::new(None),
+        }
+    }
 }
 
 impl Page {
-    pub const KEYS: &str =
-        "j/k move · Enter open · f forward · d done · z snooze · u unread · b remind · t tree · s digest · c creds";
-
     /// The selected item's thread.
     pub fn thread(&self, data: &Data) -> Option<ThreadId> {
         let items = self.rows(data, Utc::now());
@@ -344,6 +377,13 @@ impl Page {
         rows
     }
 
+    /// The selected item at `now`, if any.
+    pub fn selected(&self, data: &Data, now: DateTime<Utc>) -> Option<Item> {
+        let items = self.rows(data, now);
+        let at = self.at(&items);
+        items.into_iter().nth(at)
+    }
+
     /// Where the selected item is among `items`.
     fn at(&self, items: &[Item]) -> usize {
         self.selected.at(&items.iter().map(Item::id).collect::<Vec<_>>())
@@ -372,15 +412,16 @@ impl Page {
         self.card(data, now).is_some() && self.answering.as_mut().is_some_and(|c| c.paste(text))
     }
 
+    /// Forget the cards' width: the compact pane shows the top request on one line.
+    pub fn compacted(&self) {
+        self.room.set(None);
+    }
+
     pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
         let items = self.rows(data, now);
         let at = self.at(&items);
         let selected = items.get(at);
-        let pending = selected
-            .filter(|i| !i.expanded)
-            .and_then(|i| i.request.as_ref())
-            .filter(|(_, s)| s.is_none())
-            .map(|(r, _)| r.clone());
+        let pending = selected.and_then(Item::pending).cloned();
         let verdict = match key {
             Key::Char('a') => Some(Verdict::AllowOnce),
             Key::Char('A') => Some(Verdict::AllowAlways),
@@ -413,8 +454,14 @@ impl Page {
             }
             Key::Char('d') if reminder.is_some() => return reminder.map(To::Unremind),
             Key::Char('b') => return thread().map(|t| To::Remind(t, reminded)),
-            Key::Char('a' | 'A') => return pending.map(|request| To::Ask(request, verdict)),
-            Key::Char('r') if pending.is_some() => return pending.map(|request| To::Ask(request, verdict)),
+            Key::Char('a' | 'A' | 'r') if let Some(request) = pending => {
+                // A request its card does not show whole opens in full, where the keys answer it.
+                let drawn = self.carded.get() == Some(request.id);
+                let room = self.room.get().map(|(width, rows)| (width, if drawn { rows } else { 0 }));
+                let verdict = verdict.filter(|_| approvals::fits(&request, room));
+                return Some(To::Ask(request, verdict));
+            }
+            Key::Char('a' | 'A') => return None,
             Key::Char('n') => return pending.map(To::Note),
             Key::Char('1'..='9') if selected.is_some_and(|i| i.question.is_some()) => {
                 let item = selected?;
@@ -467,37 +514,42 @@ impl Page {
         first.extend(data.held.line());
         let tall = u16::try_from(first.len() + 1).unwrap_or(u16::MAX);
         let [top, area] = Layout::vertical([Constraint::Length(tall), Constraint::Min(0)]).areas(inner);
+        let mut first: Vec<Line> = first.into_iter().map(|l| style::clip(l, usize::from(top.width))).collect();
         first.push(Line::styled("─".repeat(usize::from(top.width)), style::dim()));
         frame.render_widget(Paragraph::new(first), top);
         if items.is_empty() {
-            let text = if data.live.stored_at.is_some() { "nothing waits on a human" } else { "reading the stream…" };
+            let text = match data.live.stored_at {
+                None => vec![Line::raw("reading the stream…")],
+                Some(_) if data.live.order.is_empty() => what_to_type(),
+                Some(_) => vec![Line::raw("nothing waits on a human")],
+            };
             frame.render_widget(Paragraph::new(text), area);
             return;
         }
-        let selected = self.at(&items);
-        let width = usize::from(area.width.saturating_sub(9));
+        let selected = self.selected.drawn(&items.iter().map(Item::id).collect::<Vec<_>>());
+        // The selection's bar takes the first column.
+        let (full, width) = (usize::from(area.width.saturating_sub(1)), usize::from(area.width.saturating_sub(10)));
+        let (mut room, mut carded) = ((width, 0), None);
         let cursor = self.card(data, now).map(|(cursor, _)| cursor);
-        let rows: Vec<ListItem> = items
+        let rows: Vec<Text> = items
             .iter()
             .enumerate()
             .map(|(at, i)| {
-                let mut first = vec![
-                    Span::styled(format!("{:<9}", i.why.label()), Style::new().fg(i.why.color())),
-                    Span::raw(data.title(&i.thread)),
-                ];
-                for (why, n) in &i.also {
-                    first.push(Span::styled(" · ", style::dim()));
-                    first.push(Span::styled(why.badge(*n), Style::new().fg(why.color())));
-                }
-                first.push(Span::styled(format!("  {}", ago(i.at, now)), style::dim()));
+                // The card the keys answer shows what its request asks, under who asks.
+                let keyed =
+                    i.request.as_ref().filter(|(_, settled)| at == selected && settled.is_none() && !i.expanded);
+                let text = keyed.map_or_else(|| i.text.clone(), |(request, _)| asker(data, i, request));
                 let mut lines = vec![
-                    Line::from(first),
-                    Line::from(
-                        [Span::raw("         ")]
-                            .into_iter()
-                            .chain(i.who.as_ref().and_then(|who| data.face(who)).into_iter().flatten())
-                            .chain([Span::styled(excerpt(&i.text, 160), style::dim())])
-                            .collect::<Vec<_>>(),
+                    style::clip(heading(data, i, width, now), full),
+                    style::clip(
+                        Line::from(
+                            [Span::raw("         ")]
+                                .into_iter()
+                                .chain(i.who.as_ref().and_then(|who| data.face(who)).into_iter().flatten())
+                                .chain([Span::styled(excerpt(&text, 160), style::dim())])
+                                .collect::<Vec<_>>(),
+                        ),
+                        full,
                     ),
                 ];
                 let cursor = cursor.filter(|_| at == selected);
@@ -506,37 +558,87 @@ impl Page {
                         let rows = question::body(question, *id, cursor, width);
                         lines.extend(rows.into_iter().map(|l| Line::styled(format!("         {l}"), l.style)));
                     } else {
-                        lines.push(Line::raw(format!("         {}", excerpt(&question::summary(question), 160))));
+                        let summary = format!("         {}", excerpt(&question::summary(question), 160));
+                        lines.push(Line::raw(style::fit(&summary, full)));
                     }
                 }
                 if let Some(cursor) = cursor {
-                    lines.push(Line::styled(format!("         {}", cursor.keys()), style::dim()));
+                    lines.push(Line::styled(format!("         {}", style::hints(cursor.keys(), width)), style::dim()));
                 } else if i.expanded {
                     lines.push(Line::styled("         Enter collapses", style::dim()));
                 } else if let Some((request, settled)) = &i.request {
                     let card = approvals::Card { request, settled: settled.as_ref() };
-                    let card = approvals::lines(card, model.asking.as_ref(), at == selected, now, width);
+                    let card = |rows| {
+                        approvals::lines(card, model.asking.as_ref(), (at == selected, false), now, (width, rows))
+                    };
+                    // The card the keys answer gives what its request asks the lines left on screen by its others,
+                    // none when even those do not show.
+                    let rows = if keyed.is_some() {
+                        let height = usize::from(area.height);
+                        let fit = (0..=approvals::CARD_LINES).rev().find(|r| lines.len() + card(*r).len() <= height);
+                        (room, carded) = ((width, fit.unwrap_or(0)), Some(request.id));
+                        room.1
+                    } else {
+                        approvals::CARD_LINES
+                    };
+                    let card = card(rows);
                     let enter = format!("Enter lists all {}", i.requests.len());
-                    // The tool shows on the line before.
-                    lines.extend(card.into_iter().skip(1).map(|line| {
+                    // Off the card the keys answer, the tool shows on the line before.
+                    lines.extend(card.into_iter().skip(usize::from(keyed.is_none())).map(|line| {
                         let mut spans = vec![Span::raw("         ")];
                         spans.extend(line.spans.into_iter().map(|mut span| {
                             if i.requests.len() > 1 {
                                 span.content = span.content.replace("Enter details", &enter).into();
+                                span.content = span.content.replace("Enter shows them", "a, A or r shows them").into();
                             }
                             span
                         }));
                         Line::from(spans).style(line.style)
                     }));
                 } else {
-                    lines.push(Line::styled(format!("         {} · {}", i.why.keys(), i.why.enter()), style::dim()));
+                    let keys = format!("{} · {}", i.why.keys(), i.why.enter());
+                    lines.push(Line::styled(format!("         {}", style::hints(&keys, width)), style::dim()));
                 }
-                ListItem::new(lines)
+                Text::from(lines)
             })
             .collect();
-        let list = List::new(rows).highlight_style(style::highlight(focused));
+        self.room.set(Some(room));
+        self.carded.set(carded);
+        let list = style::list(rows, Some(selected), focused);
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
     }
+}
+
+/// The first line of item `i`'s row: its reason, its thread's title cut to leave `width` columns to the draft's
+/// mark, the other reasons' badges and its age.
+fn heading(data: &Data, i: &Item, width: usize, now: DateTime<Utc>) -> Line<'static> {
+    let mut after: Vec<Span> = data.drafts.mark(&Conversation::Thread(i.thread.clone())).into_iter().collect();
+    for (why, n) in &i.also {
+        after.push(Span::styled(" · ", style::dim()));
+        after.push(Span::styled(why.badge(*n), Style::new().fg(why.color())));
+    }
+    after.push(Span::styled(format!("  {}", ago(i.at, now)), style::dim()));
+    let room = width.saturating_sub(after.iter().map(Span::width).sum());
+    let mut first = vec![
+        Span::styled(format!("{:<9}", i.why.label()), Style::new().fg(i.why.color())),
+        Span::raw(style::fit(&data.title(&i.thread), room.max(10))),
+    ];
+    first.extend(after);
+    Line::from(first)
+}
+
+/// What home says with no thread read: what can be typed.
+fn what_to_type() -> Vec<Line<'static>> {
+    let row = |keys: &str, does: &str| {
+        Line::from(vec![Span::styled(format!("  {keys:<21}"), Style::new().bold()), Span::raw(does.to_owned())])
+    };
+    vec![
+        Line::raw("No thread read yet. Type:"),
+        row("@ant and a text", "to ask an ant"),
+        row("#channel and a text", "to post in a channel"),
+        row("Ctrl-K and a text", "for the assistant or the messenger"),
+        row("?", "for the keys"),
+    ]
 }
 
 #[cfg(test)]
@@ -604,7 +706,8 @@ mod tests {
         );
         assert_eq!(waiting(&m.data, at(4)).len(), 3);
         let screen = shown(&m, at(4));
-        assert!(screen.contains("dev-a asks to run 2 tools, the oldest execute: git push"), "{screen}");
+        assert!(screen.contains("dev-a asks to run 2 tools, the oldest:"), "{screen}");
+        assert!(screen.contains("         execute: git push"), "{screen}");
         assert!(screen.contains("a allow · r reject · n reject with a note · Enter lists all 2"), "{screen}");
 
         assert_eq!(m.key(Key::Enter, at(4)), None);
@@ -629,9 +732,13 @@ mod tests {
 
         m.key(Key::Down, at(4));
         m.key(Key::Down, at(4));
+        assert_eq!(m.key(Key::Char('r'), at(4)), None, "a card not drawn yet shows its request in full");
+        m.key(Key::Esc, at(4));
+        shown(&m, at(4));
         assert_eq!(m.key(Key::Char('r'), at(4)), Some(Action::Decide(Box::new(second.clone()), Verdict::Reject)));
         assert!(shown(&m, at(4)).contains("storing the decision…"), "the card says so until stored");
         m.key(Key::Up, at(4));
+        shown(&m, at(4));
         assert_eq!(m.key(Key::Char('a'), at(4)), None, "one decision stored at a time");
         assert!(m.notice_at(at(4)).is_some_and(|n| n.text.contains("answer again once it is stored")));
         m.take(Event::Decided(Ok("rejected".to_owned())), at(5));
@@ -663,6 +770,59 @@ mod tests {
         };
         let payload = serde_json::to_vec(&envelope).unwrap();
         Parser::default().entry(seq, at(seq.cast_signed()), &subject::inbox(&user(to), &user(from)), &payload).unwrap()
+    }
+
+    /// A request to run `command`, its input as the daemon sends it: cut at 2,000 characters.
+    fn running(command: &str) -> ApprovalRequest {
+        let mut push = request("dev-a", "git push", vec![Verdict::AllowOnce, Verdict::Reject]);
+        let input = serde_json::json!({ "command": command }).to_string();
+        push.tool.input = Some(if input.len() > 2000 { format!("{}…", &input[..2000]) } else { input });
+        push
+    }
+
+    #[test]
+    fn the_card_the_keys_answer_shows_its_whole_command_else_its_keys_show_it_in_full() {
+        let words: Vec<String> = (0..42).map(|n| format!("w{n:03}")).collect();
+        let command = format!("echo {} x", words.join(" "));
+        assert_eq!(command.len(), 216);
+        let mut m = model();
+        let push = running(&command);
+        m.data.live.approvals = vec![push.clone()];
+        let screen = crate::test_support::render::rendered(100, 30, |f| crate::tui::frame::draw(f, &m, at(0)));
+        assert!(screen.contains("dev-a asks to run:"), "{screen}");
+        assert!(words.iter().all(|w| screen.matches(w.as_str()).count() == 1), "the command shown once: {screen}");
+        assert!(!screen.contains("more line"), "{screen}");
+        assert_eq!(m.key(Key::Char('a'), at(0)), Some(Action::Decide(Box::new(push), Verdict::AllowOnce)));
+
+        let words: Vec<String> = (0..500).map(|n| format!("w{n:03}")).collect();
+        let mut m = model();
+        let long = running(&format!("echo {}", words.join(" ")));
+        m.data.live.approvals = vec![long.clone()];
+        let screen = crate::test_support::render::rendered(100, 30, |f| crate::tui::frame::draw(f, &m, at(0)));
+        assert!(screen.contains("more lines: Enter shows them"), "{screen}");
+        assert_eq!(m.key(Key::Char('a'), at(0)), None);
+        assert!(m.asking.as_ref().is_some_and(|a| a.full), "a shows the request in full");
+        assert_eq!(m.key(Key::Char('a'), at(0)), Some(Action::Decide(Box::new(long), Verdict::AllowOnce)));
+    }
+
+    #[test]
+    fn a_request_its_card_does_not_show_whole_on_a_short_screen_opens_in_full_on_its_keys() {
+        let words: Vec<String> = (0..60).map(|n| format!("w{n:03}")).collect();
+        let command = format!("echo {}", words.join(" "));
+        let push = running(&command);
+        let mut m = model();
+        m.data.live.approvals = vec![push.clone()];
+        let screen = crate::test_support::render::rendered(100, 30, |f| crate::tui::frame::draw(f, &m, at(0)));
+        assert!(words.iter().all(|w| screen.contains(w.as_str())), "whole on a tall screen: {screen}");
+        assert_eq!(m.key(Key::Char('a'), at(0)), Some(Action::Decide(Box::new(push.clone()), Verdict::AllowOnce)));
+        for height in [16, 9, 6] {
+            let mut m = model();
+            m.data.live.approvals = vec![push.clone()];
+            let screen = crate::test_support::render::rendered(100, height, |f| crate::tui::frame::draw(f, &m, at(0)));
+            assert!(!screen.contains("w059"), "{screen}");
+            assert_eq!(m.key(Key::Char('a'), at(0)), None, "{screen}");
+            assert!(m.asking.as_ref().is_some_and(|a| a.full), "a shows the request in full: {screen}");
+        }
     }
 
     fn shown(m: &crate::tui::model::Model, now: DateTime<Utc>) -> String {
@@ -895,6 +1055,40 @@ mod tests {
         m.data.marker.as_mut().unwrap().unmark(2);
         let whys: Vec<Why> = items(&m.data, at(3)).into_iter().map(|i| i.why).collect();
         assert_eq!(whys, [Why::Finished], "marked unread, it is back");
+    }
+
+    #[test]
+    fn home_opens_on_its_top_item_until_a_key_moves_the_selection() {
+        let (done, asked) = (ThreadId::generate(), ThreadId::generate());
+        let selected = |m: &crate::tui::model::Model| {
+            let crate::tui::model::Page::Home(home) = m.page() else { panic!("home") };
+            home.thread(&m.data)
+        };
+        let finished = || {
+            let mut m = model();
+            let mut opening = message(1, &done, "alice", "dev-a", "deploy");
+            opening.owner = Some(user("alice"));
+            m.stored(vec![opening, message(2, &done, "dev-a", "alice", "deployed")], at(2));
+            shown(&m, at(3));
+            assert_eq!(selected(&m), Some(done.clone()), "the finished thread on top");
+            m
+        };
+        let push =
+            ApprovalRequest { thread_id: asked.clone(), ..request("dev-a", "git push", vec![Verdict::AllowOnce]) };
+
+        let mut m = finished();
+        m.data.live.approval(&Update::Pending(push.clone()));
+        let screen = shown(&m, at(3));
+        let (approve, below) = (screen.find("│▌approve "), screen.find("│ finished "));
+        assert!(approve.zip(below).is_some_and(|(a, f)| a < f), "{screen}");
+        assert_eq!(selected(&m), Some(asked), "the request listed after the first draw selected on top");
+        assert_eq!(m.key(Key::Char('a'), at(3)), Some(Action::Decide(Box::new(push.clone()), Verdict::AllowOnce)));
+
+        let mut m = finished();
+        m.key(Key::Home, at(3));
+        m.data.live.approval(&Update::Pending(push));
+        shown(&m, at(3));
+        assert_eq!(selected(&m), Some(done), "moved by a key, it stays with its item");
     }
 
     #[test]

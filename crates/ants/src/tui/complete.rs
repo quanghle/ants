@@ -1,5 +1,5 @@
-//! Completion in the command bar: `@` lists users, `#` channels and `/` at the start the slash commands, narrowed by
-//! what follows them up to the cursor; after `/attach`, the paths of the directory typed.
+//! Completion in the command bar: `@` lists users and `#` channels, narrowed by what follows them up to the cursor;
+//! after `/attach`, the paths of the directory typed. `/` at the start lists the palette ([`super::palette`]).
 
 use std::collections::BTreeSet;
 
@@ -10,7 +10,6 @@ use ratatui::style::{Style, Stylize as _};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
-use super::command::COMMANDS;
 use super::model::{Model, Page};
 use super::style;
 
@@ -38,18 +37,15 @@ pub struct Pick {
 pub enum Word<'a> {
     User(&'a str),
     Channel(&'a str),
-    Command(&'a str),
 }
 
 impl<'a> Word<'a> {
-    /// The completable word in `typed`, the text from the start of the word at the cursor to the cursor, `first`
-    /// when that word starts the text.
-    pub fn of(typed: &'a str, first: bool) -> Option<Self> {
+    /// The completable word in `typed`, the text from the start of the word at the cursor to the cursor.
+    pub fn of(typed: &'a str) -> Option<Self> {
         let mut chars = typed.chars();
         let word = match chars.next()? {
             '@' => Word::User(chars.as_str()),
             '#' => Word::Channel(chars.as_str()),
-            '/' if first => Word::Command(chars.as_str()),
             _ => return None,
         };
         Some(word)
@@ -83,7 +79,7 @@ impl Model {
         if self.bar.raw().chars().take(start).eq("/attach ".chars()) {
             return super::attach::paths(&typed);
         }
-        let Some(word) = Word::of(&typed, start == 0) else {
+        let Some(word) = Word::of(&typed) else {
             return Vec::new();
         };
         match word {
@@ -96,15 +92,6 @@ impl Model {
                 narrow(typed, channels)
                     .into_iter()
                     .map(|(name, members)| Candidate { word: format!("#{name}"), detail: format!("{members} members") })
-                    .collect()
-            }
-            Word::Command(typed) => {
-                narrow(typed, COMMANDS.iter().map(|(name, args, what)| ((*name).to_owned(), (args, what))))
-                    .into_iter()
-                    .map(|(name, (args, what))| Candidate {
-                        word: format!("/{name}"),
-                        detail: format!("{args:<24}{what}"),
-                    })
                     .collect()
             }
         }
@@ -167,6 +154,7 @@ pub fn draw(frame: &mut Frame, bar: Rect, candidates: &[Candidate], selected: us
     let selected = selected.min(candidates.len().saturating_sub(1));
     let top = (selected + 1).saturating_sub(ROWS);
     let width = candidates.iter().map(|c| c.word.chars().count()).max().unwrap_or(0).max(12);
+    let inner = usize::from(bar.width.min(84).saturating_sub(2));
     let lines: Vec<Line> = candidates
         .iter()
         .enumerate()
@@ -177,6 +165,7 @@ pub fn draw(frame: &mut Frame, bar: Rect, candidates: &[Candidate], selected: us
                 Span::styled(format!("{:<width$}  ", c.word), Style::new().bold()),
                 Span::styled(c.detail.clone(), style::dim()),
             ]);
+            let line = style::clip(line, inner);
             if at == selected { line.reversed() } else { line }
         })
         .collect();
@@ -227,13 +216,12 @@ mod tests {
     }
 
     #[test]
-    fn the_word_completed_is_a_user_a_channel_or_a_command_at_the_start() {
-        assert_eq!(Word::of("@de", false), Some(Word::User("de")));
-        assert_eq!(Word::of("#", false), Some(Word::Channel("")));
-        assert_eq!(Word::of("/ap", true), Some(Word::Command("ap")));
-        assert_eq!(Word::of("/ap", false), None);
-        assert_eq!(Word::of("plain", true), None);
-        assert_eq!(Word::of("", true), None);
+    fn the_word_completed_is_a_user_or_a_channel() {
+        assert_eq!(Word::of("@de"), Some(Word::User("de")));
+        assert_eq!(Word::of("#"), Some(Word::Channel("")));
+        assert_eq!(Word::of("/ap"), None, "the palette lists commands");
+        assert_eq!(Word::of("plain"), None);
+        assert_eq!(Word::of(""), None);
     }
 
     #[test]
@@ -257,24 +245,14 @@ mod tests {
         assert_eq!(words(&m), ["@carol", "@dev-b"]);
         m.bar.set_text("hi #");
         assert_eq!(words(&m), ["#devops", "#ops"]);
-        m.bar.set_text("/");
-        assert_eq!(words(&m).len(), COMMANDS.len());
         m.bar.set_text("/mu");
-        assert_eq!(
-            m.completions()[0],
-            Candidate {
-                word: "/mute".into(),
-                detail: format!("{:<24}{}", "[DURATION]", "hold back the thread's notifications")
-            }
-        );
-        m.bar.set_text("say /mu");
-        assert!(m.completions().is_empty(), "a command only starts the text");
+        assert!(m.completions().is_empty(), "the palette lists the commands");
     }
 
     #[test]
     fn up_down_select_tab_or_enter_complete_and_esc_closes() {
         let mut m = team();
-        m.key(Key::Ctrl('k'), at(0));
+        m.bar.focused = true;
         typed(&mut m, "ask @d please");
         for _ in 0.."please".len() + 1 {
             m.key(Key::Left, at(0));
@@ -286,13 +264,6 @@ mod tests {
         assert_eq!(m.key(Key::Tab, at(0)), None);
         assert_eq!(m.bar.text(), "ask @dev-b please", "the space after the word is kept");
         assert!(m.completions().is_empty());
-        m.bar.set_text("/don");
-        assert_eq!(m.key(Key::Enter, at(0)), None);
-        assert_eq!(m.bar.text(), "/done ");
-        m.bar.set_text("/done");
-        assert_eq!(m.key(Key::Enter, at(0)), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "no thread open or selected", "Enter on a whole word sends it");
-        m.bar.focused = true;
         m.bar.set_text("#o");
         m.key(Key::Esc, at(0));
         assert!(m.completions().is_empty() && m.bar.focused, "Esc closes the list, not the bar");

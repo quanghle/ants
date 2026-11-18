@@ -101,8 +101,8 @@ pub struct Page {
     pub memories: memories::Page,
     pub mcp: Box<mcp::Page>,
     pub settings: settings::Pane,
-    /// Whether `r` asked to restart the ant's harnesses, which the next key confirms.
-    armed: bool,
+    /// What `r` or `p` asked for, which a `y` next confirms.
+    armed: Option<Armed>,
     /// The column of the box atop `[` and `]` scroll.
     column: Column,
     /// How far each column of the box is scrolled, about first, kept within what was last drawn.
@@ -111,13 +111,20 @@ pub struct Page {
     scrollable: std::cell::Cell<[usize; 2]>,
 }
 
+/// What a key on the ant view asked for, which `y` confirms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Armed {
+    /// Restarting its harnesses, `r`; `!` confirms it too, at once.
+    Restart,
+    /// Pausing it, `p`: true to pause, false to resume.
+    Pause(bool),
+}
+
 impl Page {
-    pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · x cancel · z snooze · S TL;DR · ←→ pane · \
-         [ ] \\ scroll about/now · a ask · w work · r restart · p (un)pause · X retire · Esc back";
-    pub const QUEUE_KEYS: &str = "↑↓ message · Enter open its thread · ←→ pane · [ ] \\ scroll about/now · a ask · \
-         w work · r restart · p (un)pause · X retire · Esc back";
     pub const ARMED_KEYS: &str = "y restart the ant's harnesses after their prompts · ! restart now, \
          cancelling the prompts · any other key keeps them";
+    const PAUSE_KEYS: &str = "y pause the ant · any other key keeps it working";
+    const RESUME_KEYS: &str = "y resume the ant · any other key keeps it paused";
 
     pub fn new(ant: UserId) -> Self {
         let threads = work::Page::new(Filter { user: Some(ant.clone()), ..Filter::default() });
@@ -133,22 +140,41 @@ impl Page {
             memories,
             mcp,
             settings,
-            armed: false,
+            armed: None,
             column: Column::About,
             scrolled: std::cell::Cell::new([0; 2]),
             scrollable: std::cell::Cell::new([0; 2]),
         }
     }
 
-    pub fn keys(&self) -> &'static str {
+    /// Drop the confirmation asked for, if any: whether there was one.
+    pub fn disarm(&mut self) -> bool {
+        self.armed.take().is_some()
+    }
+
+    /// The keys of the restart `r` or the pause `p` asked to confirm, while it waits, else of what is being written
+    /// in the pane.
+    pub fn prompt(&self) -> Option<&'static str> {
         match self.pane {
-            _ if self.armed => Self::ARMED_KEYS,
-            Pane::Threads => Self::THREADS_KEYS,
-            Pane::Queue => Self::QUEUE_KEYS,
-            Pane::Memories => memories::Page::KEYS,
-            Pane::Mcp => self.mcp.keys(),
-            Pane::Settings => self.settings.keys(),
+            _ if self.armed == Some(Armed::Restart) => Some(Self::ARMED_KEYS),
+            _ if self.armed == Some(Armed::Pause(true)) => Some(Self::PAUSE_KEYS),
+            _ if self.armed == Some(Armed::Pause(false)) => Some(Self::RESUME_KEYS),
+            Pane::Mcp => self.mcp.prompt(),
+            Pane::Settings => self.settings.prompt(),
+            Pane::Threads | Pane::Queue | Pane::Memories => None,
         }
+    }
+
+    /// What `r` or `p` asked for, which `y` then confirms.
+    pub fn armed(&self) -> Option<Armed> {
+        self.armed
+    }
+
+    /// Read again the memories, MCP servers and settings read so far: what `R` does besides reading everything else.
+    pub fn reread(&mut self) {
+        self.memories.reread();
+        self.mcp.reread();
+        self.settings.reading = None;
     }
 
     /// Take `key` into the change of a setting, or the MCP sign-in address, being written, if one is.
@@ -181,16 +207,28 @@ impl Page {
     }
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
-        let armed = std::mem::take(&mut self.armed);
-        match key {
-            Key::Char('r') => {
-                self.armed = true;
+        match (key, self.armed.take()) {
+            (Key::Char('r'), _) => {
+                self.armed = Some(Armed::Restart);
                 return None;
             }
-            Key::Char(c @ ('y' | '!')) if armed => {
+            (Key::Char('p'), _) => {
+                let paused = data.live.colony.iter().any(|e| e.ant == self.ant && e.paused.is_some());
+                self.armed = Some(Armed::Pause(!paused));
+                return None;
+            }
+            (Key::Char(c @ ('y' | '!')), Some(Armed::Restart)) => {
                 let job = Job::Restart { ant: self.ant.clone(), now: c == '!' };
                 return Some(To::Do(Action::Run(job, String::new())));
             }
+            (Key::Char('y'), Some(Armed::Pause(paused))) => {
+                let (ant, verb) = (self.ant.clone(), if paused { "pause" } else { "resume" });
+                let job = Job::Pause { ant, paused };
+                return Some(To::Do(Action::Run(job, format!("{verb} {}", self.ant))));
+            }
+            _ => {}
+        }
+        match key {
             Key::Left | Key::Right => {
                 self.pane = self.pane.moved(&self.panes(data), if key == Key::Left { -1 } else { 1 });
                 match self.pane {
@@ -218,17 +256,14 @@ impl Page {
             Key::Char('a') => return Some(To::Bar(format!("@{} ", self.ant))),
             Key::Char('c') => return Some(To::Credentials),
             Key::Char('X') => return Some(To::Bar(format!("/retire {}", self.ant))),
-            Key::Char('p') => {
-                let paused = data.live.colony.iter().any(|e| e.ant == self.ant && e.paused.is_some());
-                let (ant, verb) = (self.ant.clone(), if paused { "resume" } else { "pause" });
-                let job = Job::Pause { ant, paused: !paused };
-                return Some(To::Do(Action::Run(job, format!("{verb} {}", self.ant))));
-            }
             _ => {}
         }
         match self.pane {
             Pane::Threads => return self.threads.key(key, data),
-            Pane::Settings => return self.settings.key(key, &self.ant),
+            Pane::Settings => {
+                self.settings.key(key);
+                return None;
+            }
             Pane::Memories => {
                 self.memories.key(key);
                 return None;
@@ -555,6 +590,7 @@ mod tests {
     use super::*;
     use crate::test_support::colony::entry;
     use crate::test_support::live::{at, message, user};
+    use crate::tui::input::{Typed, exercise};
     use crate::tui::model::{Action, Model};
     use crate::tui::nav;
     use crate::tui::test_support::model;
@@ -614,7 +650,7 @@ mod tests {
         assert!(shown.contains("running cargo test on deploy the site"), "{shown}");
         assert!(shown.contains("spent today $0.42 · 1234 tokens"), "{shown}");
         assert!(shown.contains("threads (1)") && shown.contains("queue (?)"), "{shown}");
-        assert!(shown.contains(Page::THREADS_KEYS), "{shown}");
+        assert!(shown.contains("Enter open · Esc back · ↑↓ thread · x cancel"), "{shown}");
         assert!(!shown.contains("other"), "only the ant's threads: {shown}");
 
         m.focus = crate::tui::model::Focus::View;
@@ -694,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn p_pauses_the_ant_or_resumes_it_when_paused() {
+    fn p_pauses_the_ant_or_resumes_it_when_paused_once_y_confirms() {
         let mut m = model();
         let mut dev = entry("dev-a", 60, 2, at(2));
         m.data.live.colony(vec![dev.clone()], at(2));
@@ -705,10 +741,17 @@ mod tests {
             Some(Action::Run(job, _)) => Some(Action::Run(job, String::new())),
             other => other,
         };
-        assert_eq!(sent(m.key(Key::Char('p'), at(3))), pause(true));
+        assert_eq!(m.key(Key::Char('p'), at(3)), None, "p asks first");
+        assert!(screen(&m, at(3)).contains("y pause the ant · any other key keeps it working"));
+        assert_eq!(m.key(Key::Char('j'), at(3)), None);
+        assert_eq!(m.key(Key::Char('y'), at(3)), None, "any other key kept it working");
+        m.key(Key::Char('p'), at(3));
+        assert_eq!(sent(m.key(Key::Char('y'), at(3))), pause(true));
         dev.paused = Some(ants_proto::Paused { since: at(3), by: None });
         m.data.live.colony(vec![dev], at(3));
-        assert_eq!(sent(m.key(Key::Char('p'), at(4))), pause(false));
+        m.key(Key::Char('p'), at(4));
+        assert!(screen(&m, at(4)).contains("y resume the ant · any other key keeps it paused"));
+        assert_eq!(sent(m.key(Key::Char('y'), at(4))), pause(false));
         assert!(screen(&m, at(4)).contains("paused"), "{}", screen(&m, at(4)));
     }
 
@@ -730,13 +773,13 @@ mod tests {
         let shown = screen(&m, at(3));
         assert!(shown.contains("queue (5)") && shown.contains("and 3 more in the stream"), "{shown}");
         assert!(shown.contains("next") && shown.contains("1 ahead"), "{shown}");
-        assert!(shown.contains(Page::QUEUE_KEYS), "{shown}");
+        assert!(shown.contains("Enter open · Esc back · ↑↓ message · ←→ pane"), "{shown}");
         m.key(Key::Down, at(3));
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(thread)));
     }
 
     #[test]
-    fn the_memories_pane_reads_them_once_shown_and_again_on_u() {
+    fn the_memories_pane_reads_them_once_shown_and_again_on_r() {
         let mut m = model();
         m.data.live.colony(vec![entry("dev-a", 60, 2, at(2))], at(2));
         m.select(nav::Item::Ant(user("dev-a")));
@@ -762,10 +805,12 @@ mod tests {
         let shown = screen(&m, at(3));
         assert!(shown.contains("memories (1)") && shown.contains("memories of dev-a · read-only"), "{shown}");
         assert!(shown.contains("A tester.") && shown.contains("── AGENTS.md (9 B)"), "{shown}");
-        assert!(shown.contains(memories::Page::KEYS), "{shown}");
+        assert!(shown.contains("Esc back · ↑↓ scroll · ←→ pane"), "{shown}");
 
         m.focus = crate::tui::model::Focus::View;
-        m.key(Key::Char('u'), at(3));
+        assert_eq!(m.key(Key::Char('u'), at(3)), None, "u reads nothing again");
+        assert_eq!(m.memories_wanted(), Some((user("dev-a"), 1)));
+        assert_eq!(m.key(Key::Char('R'), at(3)), Some(Action::Refresh));
         assert_eq!(m.memories_wanted(), Some((user("dev-a"), 2)));
         m.memories_event(memories::Event(user("dev-a"), 1, Err("late".to_owned())));
         assert!(screen(&m, at(3)).contains("asking the daemon"), "an earlier asking's answer is dropped");
@@ -820,6 +865,13 @@ mod tests {
         assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Copy(url)));
 
         m.key(Key::Char('v'), at(3));
+        let want = exercise(|typed| match typed {
+            Typed::Key(key) => _ = m.key(key, at(3)),
+            Typed::Paste(text) => m.paste(text, at(3)),
+        });
+        assert!(screen(&m, at(3)).contains(&format!("address: X▏{}", &want[1..])), "the address edits as the bar does");
+        m.key(Key::End, at(3));
+        m.key(Key::Ctrl('u'), at(3));
         let callback = "http://127.0.0.1:4100/callback?code=abc&state=r";
         for c in callback.chars() {
             m.key(Key::Char(c), at(3));

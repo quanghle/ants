@@ -16,12 +16,14 @@ use super::acts::{Acted, Change};
 use super::approvals::{self, Asking};
 use super::command::{self, Bar, Tone};
 use super::exec::{Job, Quoted};
+use super::help::Help;
 use super::interrupt::Confirm;
+use super::notices;
 use super::react::{self, Picker};
 use super::reads::{Levels, Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
-    ant, cards, catchup, channel, credentials, dm, faces, held, home, images, mcp, memories, nav, people, search,
+    ant, cards, catchup, channel, credentials, dm, faces, fold, held, home, images, mcp, memories, nav, people, search,
     settings, snooze, thread, timeline, tree, work,
 };
 use crate::live::{self, State};
@@ -30,6 +32,7 @@ use crate::threads::thread::Entry;
 use crate::tools::Update;
 
 mod keys;
+mod typing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -46,12 +49,24 @@ pub enum Key {
     Delete,
     Left,
     Right,
-    /// Alt-Enter: a new line in the command bar.
+    /// Ctrl-J, Shift-Enter or Alt-Enter: a new line in the command bar.
     Newline,
     /// Ctrl-C.
     Interrupt,
     /// Ctrl and another key, for the views to come (Ctrl-K, Ctrl-X).
     Ctrl(char),
+    /// Alt and a character: Alt-B, Alt-F and Alt-D in the command bar.
+    Alt(char),
+    /// Alt-Backspace: delete the word before the cursor in the command bar.
+    AltBackspace,
+    /// Ctrl-Left or Alt-Left: a word back in the command bar.
+    WordLeft,
+    /// Ctrl-Right or Alt-Right: a word on in the command bar.
+    WordRight,
+    /// Ctrl-Home: the thread's first message, the bar focused too.
+    CtrlHome,
+    /// Ctrl-End: the thread's latest message, the bar focused too.
+    CtrlEnd,
     Char(char),
 }
 
@@ -74,8 +89,6 @@ pub enum Action {
     Change(ThreadId, Change, u64),
     /// Copy the text to the terminal's clipboard.
     Copy(String),
-    /// Send a message to another human on a new thread, as `ants ask @human` does.
-    Send(dm::Draft),
     /// Read again what may have missed changes.
     Refresh,
     /// Run the command bar's job, for the bar's text.
@@ -84,6 +97,8 @@ pub enum Action {
     Decide(Box<ApprovalRequest>, Verdict),
     /// Edit the command bar's text in the editor.
     Edit(String),
+    /// Show the text in the pager, else in the editor.
+    Page(String),
     /// React to the message so, or with true take the reaction back, as `ants react` does.
     React(Uuid, Reaction, bool),
     /// Find the messages matching the search, replacing any search running.
@@ -102,6 +117,8 @@ pub enum Action {
     KeepTools(timeline::Tools),
     /// Keep on the device the tab chosen in the channel's view.
     KeepChannelTab(ChannelId, channel::Tab),
+    /// Keep on the device whether the nav and the side panel show.
+    KeepFolds(fold::Folds),
     Quit,
 }
 
@@ -121,6 +138,8 @@ pub enum Level {
 
 /// How long a notice shows.
 const NOTICE_FOR: TimeDelta = TimeDelta::seconds(15);
+/// How soon a second Ctrl-C quits, and a q after one closing an overlay does nothing.
+const QUIT_WITHIN: TimeDelta = TimeDelta::seconds(1);
 
 /// Everything read of the ants that the views show: what the live feed reads, what the UI reads besides, and what is
 /// worked out of the messages read.
@@ -170,6 +189,10 @@ pub struct Data {
     pub looks: faces::Looks,
     /// The messages the human withdrew here, marked before the ant's notice of each comes.
     pub withdrawn: HashSet<Uuid>,
+    /// The drafts of the conversations, the bar holding that of the one shown.
+    pub drafts: command::Drafts,
+    /// The texts sent from the bar, which it recalls.
+    pub history: command::History,
 }
 
 impl Data {
@@ -298,6 +321,8 @@ pub enum To {
     Unread(ThreadId, Option<u64>),
     /// The command bar, open on this text.
     Bar(String),
+    /// The command bar, focused on its draft for the view shown.
+    Write,
     /// Ask for a new TL;DR of the thread.
     Tldr(ThreadId),
     /// The digest of what changed since the last `ants chat` on the device ended.
@@ -321,8 +346,14 @@ pub struct Model {
     pub focus: Focus,
     /// The nav's view, then those opened from it, the shown one last; never empty.
     pub pages: Vec<Page>,
-    pub help: bool,
+    /// The help, while shown.
+    pub help: Option<Help>,
+    /// The latest notice: an error until a key is pressed, else for [`NOTICE_FOR`].
     pub notice: Option<Notice>,
+    /// The notices of the run, the earliest first, [`notices::KEPT`] at most.
+    pub notices: Vec<Notice>,
+    /// The notices listed over the view, `N`.
+    pub log: Option<notices::Log>,
     pub bar: Bar,
     /// The tool request being answered.
     pub asking: Option<Asking>,
@@ -336,6 +367,16 @@ pub struct Model {
     pub catchup: catchup::Catchup,
     /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
     pub compact: bool,
+    /// Whether the nav and the thread's side panel show.
+    pub fold: fold::Fold,
+    /// When Ctrl-C, nothing being open and the bar empty, asked for a second one to quit.
+    pub quitting: Option<DateTime<Utc>>,
+    /// The conversation whose message or post Up selected, the view's single keys acting on it; else, in a thread, a
+    /// channel's feed or a DM, a printable key is written in the bar ([`Model::typing`]).
+    pub selecting: Option<command::Conversation>,
+    /// When q last closed the help, the notices, the digest or a tool request, or came again soon after: a q that soon
+    /// never quits.
+    closed_by_q: Option<DateTime<Utc>>,
 }
 
 impl Model {
@@ -364,6 +405,8 @@ impl Model {
             credentials: credentials::Heard::default(),
             held: held::Orders::default(),
             looks: faces::Looks::default(),
+            drafts: command::Drafts::default(),
+            history: command::History::default(),
         };
         let nav = nav::Item::Home;
         Self {
@@ -371,8 +414,10 @@ impl Model {
             pages: vec![Page::of(&nav)],
             nav,
             focus: Focus::View,
-            help: false,
+            help: None,
             notice: None,
+            notices: Vec::new(),
+            log: None,
             bar: Bar::default(),
             asking: None,
             picking: None,
@@ -380,6 +425,10 @@ impl Model {
             snoozing: None,
             catchup: catchup::Catchup::default(),
             compact: false,
+            fold: fold::Fold::default(),
+            quitting: None,
+            selecting: None,
+            closed_by_q: None,
         }
     }
 
@@ -387,13 +436,26 @@ impl Model {
         self.pages.last().expect("a view")
     }
 
+    /// Show a notice, unless an error waits for a key and it is none, and keep it with the notices of the run.
     pub fn notify(&mut self, text: impl Into<String>, level: Level, now: DateTime<Utc>) {
-        self.notice = Some(Notice { text: text.into(), at: now, level });
+        let notice = Notice { text: text.into(), at: now, level };
+        if self.notices.len() == notices::KEPT {
+            self.notices.remove(0);
+        }
+        self.notices.push(notice.clone());
+        if level == Level::Error || self.notice.as_ref().is_none_or(|n| n.level != Level::Error) {
+            self.notice = Some(notice);
+        }
+    }
+
+    /// Whether a Ctrl-C at `now` quits, the one before having asked for it.
+    pub fn quitting_at(&self, now: DateTime<Utc>) -> bool {
+        self.quitting.is_some_and(|at| now - at < QUIT_WITHIN)
     }
 
     /// The notice to show at `now`, if one is recent.
     pub fn notice_at(&self, now: DateTime<Utc>) -> Option<&Notice> {
-        self.notice.as_ref().filter(|n| now - n.at < NOTICE_FOR)
+        self.notice.as_ref().filter(|n| n.level == Level::Error || now - n.at < NOTICE_FOR)
     }
 
     /// Take in what the live feed read or heard.
@@ -650,18 +712,11 @@ impl Model {
         }
     }
 
-    /// Take what was read of the other humans, or done for them.
+    /// Take what was read of the other humans.
     pub fn people(&mut self, event: people::Event, now: DateTime<Utc>) {
-        match event {
-            people::Event::Online(read) => {
-                if let Some(text) = self.data.people.read(read) {
-                    self.notify(text, Level::Error, now);
-                }
-            }
-            people::Event::Sent(sent) => {
-                let (text, level) = sent.notice();
-                self.notify(text, level, now);
-            }
+        let people::Event::Online(read) = event;
+        if let Some(text) = self.data.people.read(read) {
+            self.notify(text, Level::Error, now);
         }
     }
 
@@ -762,6 +817,11 @@ impl Model {
     }
 
     /// The ant shown, for its queue to be read.
+    /// Whether the view drawn last shows a spinner that moves, so that the screen is drawn at its frame rate.
+    pub fn spinning(&self) -> bool {
+        self.data.looks.animates() && matches!(self.page(), Page::Thread(page) if page.spinning.get())
+    }
+
     pub fn ant_shown(&self) -> Option<UserId> {
         let Page::Ant(page) = self.page() else { return None };
         Some(page.ant.clone())
@@ -907,15 +967,42 @@ mod tests {
     }
 
     #[test]
-    fn help_shows_until_a_key_and_q_or_ctrl_c_quit() {
+    fn q_closes_the_help_without_quitting_however_fast_it_comes_again() {
         let mut m = model();
         assert_eq!(m.key(Key::Char('?'), at(0)), None);
-        assert!(m.help);
-        assert_eq!(m.key(Key::Char('q'), at(0)), None, "a key closes the help first");
-        assert!(!m.help);
-        assert_eq!(m.key(Key::Char('q'), at(0)), Some(Action::Quit));
+        assert!(m.help.is_some());
+        assert_eq!(m.key(Key::Char('q'), at(0)), None, "q closes the help first");
+        assert!(m.help.is_none());
+        let soon = at(0) + TimeDelta::milliseconds(600);
+        assert_eq!(m.key(Key::Char('q'), soon), None, "a q right after does nothing");
+        assert_eq!(m.key(Key::Char('q'), soon + TimeDelta::milliseconds(600)), None, "nor one right after that");
+        assert_eq!(m.key(Key::Char('q'), at(3)), Some(Action::Quit));
+    }
+
+    #[test]
+    fn ctrl_c_closes_then_empties_the_bar_then_quits_on_a_second_within_a_second() {
+        let mut m = model();
         m.key(Key::Char('?'), at(0));
-        assert_eq!(m.key(Key::Interrupt, at(0)), Some(Action::Quit));
+        assert_eq!(m.key(Key::Interrupt, at(0)), None, "Ctrl-C closes the help");
+        assert!(m.help.is_none());
+        m.bar.set_text("draft");
+        assert_eq!(m.key(Key::Char('q'), at(2)), None, "q quits with an empty bar only");
+        assert_eq!(m.bar.text(), "draft");
+        assert_eq!(m.key(Key::Interrupt, at(3)), None);
+        assert_eq!(m.bar.text(), "", "the first Ctrl-C empties the bar");
+        assert_eq!(m.key(Key::Interrupt, at(3) + TimeDelta::milliseconds(500)), None, "the second asks for a third");
+        assert!(m.quitting_at(at(4)));
+        assert!(!m.quitting_at(at(5)), "for a second");
+        assert_eq!(m.key(Key::Interrupt, at(5)), None, "too late: it asks again");
+        assert_eq!(m.key(Key::Interrupt, at(5) + TimeDelta::milliseconds(900)), Some(Action::Quit));
+    }
+
+    #[test]
+    fn a_key_between_two_ctrl_c_keeps_the_ui_open() {
+        let mut m = model();
+        assert_eq!(m.key(Key::Interrupt, at(0)), None);
+        m.key(Key::Down, at(0));
+        assert_eq!(m.key(Key::Interrupt, at(0)), None);
     }
 
     #[test]
@@ -998,11 +1085,43 @@ mod tests {
     }
 
     #[test]
-    fn slash_searches_and_a_match_opens_its_thread_at_it() {
+    fn ctrl_f_finds_in_the_open_thread_and_elsewhere_opens_the_bar_on_search() {
         let thread = ThreadId::generate();
         let mut m = model();
         m.key(Key::Tab, at(0));
-        assert_eq!(m.key(Key::Char('/'), at(0)), None);
+        assert_eq!(m.key(Key::Ctrl('f'), at(0)), None);
+        assert_eq!((m.bar.focused, m.bar.text()), (true, "/search ".to_owned()));
+        m.key(Key::Esc, at(0));
+        let messages =
+            vec![message(1, &thread, "alice", "dev-a", "deploy"), message(2, &thread, "dev-a", "alice", "deployed")];
+        m.stored(messages.clone(), at(1));
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        m.take(live::Event::History(thread, Ok(messages)), at(1));
+        m.focus = Focus::View;
+        let footer = |m: &Model| {
+            let shown = crate::test_support::render::rendered(100, 20, |f| super::super::frame::draw(f, m, at(2)));
+            shown.lines().last().unwrap_or_default().to_owned()
+        };
+        m.key(Key::Ctrl('f'), at(2));
+        m.paste("depl", at(2));
+        for c in "oy".chars() {
+            assert_eq!(m.key(Key::Char(c), at(2)), None);
+        }
+        assert!(!m.bar.focused, "the footer takes the text");
+        assert!(footer(&m).starts_with(" find: deploy_ · 3 found"), "with the title: {}", footer(&m));
+        m.key(Key::Enter, at(2));
+        assert!(footer(&m).contains(" of 3"), "{}", footer(&m));
+        m.key(Key::Esc, at(2));
+        assert_eq!((m.page().name(), m.bar.focused), ("thread", false), "Esc ends the find, the thread stays");
+        assert!(!footer(&m).starts_with(" find"), "{}", footer(&m));
+    }
+
+    #[test]
+    fn ctrl_f_searches_and_a_match_opens_its_thread_at_it() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.key(Key::Tab, at(0));
+        assert_eq!(m.key(Key::Ctrl('f'), at(0)), None);
         for c in "deploy since:soon".chars() {
             assert_eq!(m.key(Key::Char(c), at(0)), None, "keys go to the command bar");
         }
@@ -1015,7 +1134,7 @@ mod tests {
         assert_eq!(search.grep.as_deref(), Some("deploy"));
         assert_eq!((m.bar.focused, m.page().name(), m.focus), (false, "search", Focus::View));
 
-        m.key(Key::Char('/'), at(1));
+        m.key(Key::Ctrl('f'), at(1));
         m.key(Key::Char('d'), at(1));
         assert!(matches!(m.key(Key::Enter, at(1)), Some(Action::Search(_))));
         let Page::Search(earlier) = &m.pages[1] else { panic!("not a search") };
@@ -1026,13 +1145,13 @@ mod tests {
         assert_eq!(m.page().name(), "thread");
         m.key(Key::Esc, at(3));
         assert_eq!(m.page().name(), "search", "Esc goes back to the matches");
-        m.key(Key::Char('/'), at(4));
+        m.key(Key::Ctrl('f'), at(4));
         m.key(Key::Esc, at(4));
         assert!(!m.bar.focused, "Esc leaves the bar");
-        m.key(Key::Char('/'), at(4));
+        m.key(Key::Ctrl('f'), at(4));
         assert_eq!((m.bar.focused, m.bar.text()), (true, "/search ".to_owned()), "a draft in the bar stays");
         m.key(Key::Esc, at(4));
-        assert_eq!(m.key(Key::Char('q'), at(4)), Some(Action::Quit));
+        assert_eq!(m.key(Key::Char('q'), at(4)), None, "q keeps the draft");
     }
 
     #[test]

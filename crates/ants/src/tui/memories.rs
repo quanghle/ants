@@ -35,9 +35,6 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "↑↓ scroll · u read again · ←→ pane · [ ] \\ scroll about/now · a ask · w work · \
-         r restart · p (un)pause · X retire · Esc back";
-
     pub fn new() -> Self {
         Self { state: State::Unasked, asked: 0, scroll: 0 }
     }
@@ -46,6 +43,14 @@ impl Page {
     pub fn shown(&mut self) {
         if self.state == State::Unasked {
             self.ask();
+        }
+    }
+
+    /// Ask again, if asked before.
+    pub fn reread(&mut self) {
+        if self.state != State::Unasked {
+            self.ask();
+            self.scroll = 0;
         }
     }
 
@@ -85,10 +90,6 @@ impl Page {
             _ => 0,
         };
         self.scroll = match key {
-            Key::Char('u') => {
-                self.ask();
-                0
-            }
             Key::Up | Key::Char('k') => self.scroll.saturating_sub(1),
             Key::Down | Key::Char('j') => self.scroll + 1,
             Key::PageUp => self.scroll.saturating_sub(10),
