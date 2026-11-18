@@ -565,7 +565,7 @@ mod tests {
         assert_eq!(m.bar.text(), "q\nnow    please\ndone");
         m.key(Key::Home, at(0));
         m.paste("so\n", at(0));
-        assert_eq!(m.bar.text(), "so\nq\nnow    please\ndone", "pasted at the cursor");
+        assert_eq!(m.bar.text(), "q\nnow    please\nso\ndone", "pasted at the cursor, Home going to its line's start");
         m.key(Key::Esc, at(0));
         m.help = true;
         m.paste("q", at(0));

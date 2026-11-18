@@ -217,7 +217,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     let looks = faces::Io::new(js.clone());
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
-        let mut screen = Screen::open()?;
+        let mut screen = Screen::open_telling_keys_apart()?;
         let images = inline_images.then(|| images::Io::new(images::picker(), js.clone(), feed.keyring()));
         let exec = Exec::new(ctx);
         let chat = Chat {
@@ -257,12 +257,36 @@ fn key_of(key: KeyEvent) -> Option<Key> {
     if key.code == KeyCode::Enter && key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) {
         return Some(Key::Newline);
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
+    let (ctrl, alt) = (key.modifiers.contains(KeyModifiers::CONTROL), key.modifiers.contains(KeyModifiers::ALT));
+    // AltGr, which the Windows console reports as Ctrl with Alt, types its character.
+    if let KeyCode::Char(c) = key.code
+        && ctrl
+        && alt
+        && !c.is_ascii_alphabetic()
+    {
+        return Some(Key::Char(c));
+    }
+    if ctrl {
         return match key.code {
             KeyCode::Char('c') => Some(Key::Interrupt),
+            // Ctrl-J sends a line feed, which a terminal in raw mode tells from Enter's carriage return.
+            KeyCode::Char('j') => Some(Key::Newline),
+            // As a terminal without the kitty keyboard protocol sends it.
+            KeyCode::Enter => Some(Key::Enter),
+            KeyCode::Left => Some(Key::WordLeft),
+            KeyCode::Right => Some(Key::WordRight),
             KeyCode::Char(c) => Some(Key::Ctrl(c)),
             _ => None,
         };
+    }
+    if alt {
+        match key.code {
+            KeyCode::Char(c) => return Some(Key::Alt(c)),
+            KeyCode::Backspace => return Some(Key::AltBackspace),
+            KeyCode::Left => return Some(Key::WordLeft),
+            KeyCode::Right => return Some(Key::WordRight),
+            _ => {}
+        }
     }
     Some(match key.code {
         KeyCode::Up => Key::Up,
@@ -353,6 +377,12 @@ impl Chat {
         let mut ticks = tokio::time::interval(TICK);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let (mut dirty, mut drawn, mut logged, started) = (true, Instant::now(), None, Instant::now());
+        // Keys typed while the terminal was asked of its background.
+        for key in crate::tty::typed_keys() {
+            if self.key(key).is_break() {
+                return Ok(());
+            }
+        }
         loop {
             if let Some(action) = self.model.link(self.feed.connected(), Utc::now())
                 && self.act(action).is_break()
@@ -510,9 +540,7 @@ impl Chat {
             match event::read().context("reading the terminal")? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     *dirty = true;
-                    if let Some(action) = key_of(key).and_then(|key| self.model.key(key, Utc::now()))
-                        && self.act(action).is_break()
-                    {
+                    if self.key(key).is_break() {
                         return Ok(ControlFlow::Break(()));
                     }
                 }
@@ -525,6 +553,14 @@ impl Chat {
             }
         }
         Ok(ControlFlow::Continue(()))
+    }
+
+    /// Act on `key` pressed; breaks on quitting.
+    fn key(&mut self, key: KeyEvent) -> ControlFlow<()> {
+        match key_of(key).and_then(|key| self.model.key(key, Utc::now())) {
+            Some(action) => self.act(action),
+            None => ControlFlow::Continue(()),
+        }
     }
 
     fn act(&mut self, action: Action) -> ControlFlow<()> {
@@ -624,12 +660,14 @@ async fn next_image(
 
 /// Edit `text` in the editor, as `ants ask --edit` does, the terminal handed over to it meanwhile.
 async fn edit(terminal: &mut DefaultTerminal, text: String) -> Result<String> {
+    live::keyboard(false);
     live::bracket_pastes(false);
     ratatui::restore();
     let edited = tokio::task::spawn_blocking(move || compose::edit_text(&text)).await;
     terminal::enable_raw_mode().context("setting up the terminal")?;
     execute!(std::io::stdout(), terminal::EnterAlternateScreen).context("setting up the terminal")?;
     live::bracket_pastes(true);
+    live::keyboard(true);
     terminal.clear().context("drawing")?;
     edited.context("running the editor")?
 }
@@ -681,6 +719,16 @@ mod tests {
         assert_eq!(key(KeyCode::BackTab, KeyModifiers::SHIFT), Some(Key::Tab));
         assert_eq!(key(KeyCode::F(1), KeyModifiers::NONE), None);
         assert_eq!(key(KeyCode::Enter, KeyModifiers::ALT), Some(Key::Newline));
+        assert_eq!(key(KeyCode::Enter, KeyModifiers::SHIFT), Some(Key::Newline));
+        assert_eq!(key(KeyCode::Char('j'), KeyModifiers::CONTROL), Some(Key::Newline), "a line feed");
+        assert_eq!(key(KeyCode::Enter, KeyModifiers::CONTROL), Some(Key::Enter));
+        assert_eq!(key(KeyCode::Char('b'), KeyModifiers::ALT), Some(Key::Alt('b')), "not typed");
+        assert_eq!(key(KeyCode::Backspace, KeyModifiers::ALT), Some(Key::AltBackspace));
+        assert_eq!(key(KeyCode::Left, KeyModifiers::CONTROL), Some(Key::WordLeft));
+        assert_eq!(key(KeyCode::Right, KeyModifiers::ALT), Some(Key::WordRight));
+        let alt_gr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert_eq!(key(KeyCode::Char('@'), alt_gr), Some(Key::Char('@')), "AltGr on Windows types");
+        assert_eq!(key(KeyCode::Char('€'), alt_gr), Some(Key::Char('€')));
         assert_eq!(key(KeyCode::Enter, KeyModifiers::NONE), Some(Key::Enter));
         assert_eq!(key(KeyCode::Backspace, KeyModifiers::NONE), Some(Key::Backspace));
     }
