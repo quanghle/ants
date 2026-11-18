@@ -35,7 +35,7 @@ pub use recall::{
     STALE_WEIGHT, framed, participants, recall, score, search, snippet, thread_repo, top,
 };
 pub use remember::remember;
-pub(crate) use remember::{Given, redacted, sanitized};
+pub(crate) use remember::{Quotes, redacted, sanitized};
 pub use vote::{VOTE, Vote, Votes, vote};
 
 /// The kind of the items holding memories.

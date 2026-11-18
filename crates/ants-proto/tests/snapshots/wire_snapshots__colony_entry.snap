@@ -26,6 +26,7 @@ expression: value
     "lead",
     "cto"
   ],
+  "sage": "sage",
   "version": "0.1.0",
   "perms": 1,
   "signed_out": {
