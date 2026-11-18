@@ -22,7 +22,6 @@ mod stores;
 mod workdirs;
 
 pub use ants_sense::home::DIR;
-pub use ants_sense::memory::{normalize_remote, remote_url};
 pub use ants_sense::{CAPABILITIES, NAME};
 pub(crate) use scheduler::{Daemon, Dreaming, Serving};
 pub use stores::{Hosting, Link};
