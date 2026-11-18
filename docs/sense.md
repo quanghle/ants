@@ -231,7 +231,8 @@ The brief's identity counts the ant's experience from its thread records each ti
 
 An ant with no thread record shows no experience. A dream's packet counts it the same way over the threads active since
 the dream's start (`experience_since`): a thread counts when it started, started again or was marked done since then,
-and only those times count toward its days and tallies.
+and only those times count toward its days and tallies. A dream's findings on the identity count it over the threads
+of work alone, those of dreams and reviews left out (`work`, [Dreams](#dreams)).
 
 A sage's identity adds, after the experience, the tally of the reviews it made of other ants, counted from its review
 records each time it is shown ([Dreams](#dreams)): its reviews, the ants reviewed and the day of the last review, and
@@ -604,11 +605,14 @@ but those on a sage's practice and `vitals` (below), which the limit of 20 cuts 
   of its own and with no change of it proposed: to write anew as the ant's own, or to keep as it is by rejecting the
   finding.
 
-The threads and active days are the experience's ([Identity](#identity)), dream threads among them. A finding offered
-again takes the text gathered now and goes once its ground is gone: the record written, the persona or skill change
-proposed. Each rests on a count stepped coarsely, its threads (or, for a stale self-model, the people and repositories
-new) rounded down to the threshold doubled any number of times (5, 10, 20 and on), so a rejected one comes again when
-that count doubles, not at each thread. The numbers are first guesses, to tune on real threads.
+The threads and active days are the experience's ([Identity](#identity)) over the threads of work alone: neither the
+threads a dream names (its own, and the review thread its sage answered on) nor those of reviews asked of the ant as a
+sage (started by an ant asking a review, or named by a review record) count, so a sage's answers make no
+`no_relationship` finding. A finding offered again takes the text gathered now and goes once its ground is gone: the
+record written, the persona or skill change proposed. Each rests on a count stepped coarsely, its threads (or, for a
+stale self-model, the people and repositories new) rounded down to the threshold doubled any number of times (5, 10, 20
+and on), so a rejected one comes again when that count doubles, not at each thread. The numbers are first guesses, to
+tune on real threads.
 
 **A sage's own dream:** for an ant that reviewed other ants, the packet lists, after the findings, the reviews it made
 by their records (**The sage's records**, below): those asked, answered or told of since the last dream, the latest

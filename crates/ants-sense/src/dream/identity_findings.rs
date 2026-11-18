@@ -1,5 +1,6 @@
 //! The findings of a dream on the ant's identity ([`super`]): what it lacks for the work it did, gathered from its
-//! sense data and thread records alone, never thread text, so never untrusted. Once the ant worked enough threads:
+//! sense data and thread records alone, never thread text, so never untrusted. The threads counted are those of work
+//! ([`experience::work`]), never those of its dreams nor of reviews. Once the ant worked enough threads:
 //!
 //! - no persona after [`PERSONA_AFTER_THREADS`] threads, and none proposed;
 //! - no self-model after [`SELF_MODEL_AFTER_THREADS`] threads;
@@ -46,7 +47,7 @@ const MAX_NAMED: usize = 5;
 /// The findings on the identity of `ant` in `items`: the persona's, then the self-model's, then the relationships',
 /// the most threads first, then the skills', by name.
 pub(super) async fn gather(items: &dyn Items, ant: &UserId) -> Result<Vec<Gathered>, StoreError> {
-    let Some(worked) = experience::experience(items, ant, usize::MAX).await? else { return Ok(Vec::new()) };
+    let Some(worked) = experience::work(items, ant, None, usize::MAX).await? else { return Ok(Vec::new()) };
     let proposed = proposal::pending(items).await?.into_iter().map(|found| found.proposal.target).collect();
     let from = identity::card(items).await?.and_then(|card| card.cloned_from);
     let source = from.map_or_else(|| "its source".into(), |from| from.ant.to_string());
@@ -120,7 +121,7 @@ async fn self_model(items: &dyn Items, ant: &UserId, ground: &Ground) -> Result<
         return Ok(ground.inherited("self", "self-model", item, &call(Some(revision))));
     }
     let since = item.updated.at;
-    let Some(lately) = experience::experience_since(items, ant, since, usize::MAX).await? else { return Ok(None) };
+    let Some(lately) = experience::work(items, ant, Some(since), usize::MAX).await? else { return Ok(None) };
     if lately.active_days < STALE_ACTIVE_DAYS {
         return Ok(None);
     }

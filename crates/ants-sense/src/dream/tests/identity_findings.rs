@@ -9,6 +9,7 @@ use crate::fork::INHERITED;
 use crate::persona::{PERSONA, persona_id};
 use crate::records::{Record, SELF_MODEL, record_id};
 use crate::skill::{SKILL, skill_id};
+use crate::thread::experience;
 use crate::thread::record::record_event;
 
 fn user(name: &str) -> UserId {
@@ -22,12 +23,17 @@ fn webhook() -> Starter {
 /// Note threads `threads` started by `by` in repository `repo`, one a day from `from`.
 async fn started(items: &dyn Items, threads: Range<u8>, by: &Starter, repo: &str, from: DateTime<Utc>) {
     for n in threads.clone() {
-        let origin = Origin { by: by.clone(), channel: None };
-        let kind = EventKind::ThreadStarted { origin, repo: Some(repo.into()) };
-        let (thread, at) = (Some(on(n).thread), from + Duration::days(i64::from(n - threads.start)));
-        let event = Event { id: Uuid::now_v7(), ant: user("dev-a"), identity: "0f1e".into(), thread, at, kind };
-        record_event(items, &event).await.unwrap().unwrap();
+        thread_started(items, &on(n).thread, by, repo, from + Duration::days(i64::from(n - threads.start))).await;
     }
+}
+
+/// Note `thread` started by `by` in repository `repo` at `at`.
+async fn thread_started(items: &dyn Items, thread: &ThreadId, by: &Starter, repo: &str, at: DateTime<Utc>) {
+    let origin = Origin { by: by.clone(), channel: None };
+    let kind = EventKind::ThreadStarted { origin, repo: Some(repo.into()) };
+    let thread = Some(thread.clone());
+    let event = Event { id: Uuid::now_v7(), ant: user("dev-a"), identity: "0f1e".into(), thread, at, kind };
+    record_event(items, &event).await.unwrap().unwrap();
 }
 
 /// The identity findings gathered now whose key starts with `kind`, by key with their counts.
@@ -66,6 +72,31 @@ async fn no_persona_and_no_self_model_are_found_after_five_threads_until_propose
     assert_eq!(found(&*items, "").await, keyed(&[("no_self_model:self", 10)]), "a persona is proposed");
     identity(&sense, json!({"self_model": "Careful.", "title": "Me"})).await;
     assert!(found(&*items, "").await.is_empty());
+}
+
+#[tokio::test]
+async fn the_threads_of_dreams_and_reviews_count_toward_no_identity_finding() {
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let (now, repo) = (Utc::now(), "github.com/o/r");
+    let (sage, writer) = (Starter::Ant { user: user("sage") }, on(9));
+    started(&*items, 20..24, &webhook(), repo, now - Duration::days(30)).await;
+    for n in 0..3 {
+        let start = Start { recipient: Recipient::Sage(user("sage")), ..start(now + Duration::days(n), &writer) };
+        let review = begin(&*items, start).await.unwrap().unwrap().review.unwrap().thread;
+        thread_started(&*items, &review, &sage, repo, now + Duration::days(n)).await;
+    }
+    woken(&*items, 3, &on(30).thread).await.unwrap();
+    started(&*items, 30..31, &Starter::Provider { name: "sense".into() }, repo, now).await;
+    started(&*items, 31..32, &Starter::Review { user: user("dev-b") }, repo, now).await;
+    let told = ReviewOutcomes { dream: 1, findings: Vec::new() };
+    assert!(review_received(&*items, &user("dev-c"), &on(32).thread, &told, now).await.unwrap());
+    started(&*items, 32..33, &Starter::Ant { user: user("dev-c") }, repo, now).await;
+    assert_eq!(experience::experience(&*items, &user("dev-a"), 3).await.unwrap().unwrap().threads, 10);
+    assert!(found(&*items, "").await.is_empty(), "4 threads of work, the sage started none of them");
+
+    started(&*items, 24..25, &webhook(), repo, now).await;
+    assert_eq!(found(&*items, "").await, keyed(&[("no_persona:persona", 5), ("no_self_model:self", 5)]));
 }
 
 #[tokio::test]
