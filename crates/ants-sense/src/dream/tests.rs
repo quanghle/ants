@@ -453,5 +453,6 @@ fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
     assert!(bare.contains("started by alice\n\nmessage 1 of a thread\n"), "no lines without actions: {bare}");
 }
 
+mod identity_findings;
 mod identity_section;
 mod review;
