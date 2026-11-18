@@ -268,6 +268,7 @@ mod tests {
             name: name.clone(),
             description: "Reviews".to_owned(),
             phases: Vec::new(),
+            waypoints: Vec::new(),
             script: script.to_owned(),
             saved_by: alice.clone(),
             saved_at: Utc::now(),
