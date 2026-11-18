@@ -55,7 +55,9 @@ async fn requests_are_routed_by_colony_capabilities() {
     let until = "2026-01-01T00:10:00Z".parse().unwrap();
     limited.limited = Some(ants_proto::HarnessLimit { kind: ants_proto::LimitKind::Quota, since, until });
     limited.memory_low = Some(ants_proto::MemoryLow { since, available: 512 << 20, max_harnesses: 1 });
-    let colony = vec![listed("dev-a", &["rust"]), billing, out, busy, docs, limited];
+    let mut flaky = listed("dev-d", &["rust"]);
+    flaky.profile = Some("Good for flaky tests.".to_owned());
+    let colony = vec![listed("dev-a", &["rust"]), billing, out, busy, docs, limited, flaky];
     let home = home("route");
     let (mcp, mut sent) = start_with_colony(&home, colony).await;
     let current = from_human();
@@ -97,6 +99,11 @@ async fn requests_are_routed_by_colony_capabilities() {
     assert!(ok && text.starts_with("Routed to dev-c for RUST."), "{text}");
     let out = sent.recv().await.unwrap();
     assert_eq!((&out.to, out.text.as_str(), &out.thread_id), (&user("dev-c"), "fix it", &current.thread_id));
+    // dev-d's profile shares words with the request, which breaks its tie with dev-c, and is not echoed.
+    let request = serde_json::json!({"capability": "rust", "text": "The tests are flaky.", "wait": false});
+    let (ok, text) = call(&client, "route", request).await;
+    assert!(ok && text.starts_with("Routed to dev-d for rust.") && !text.contains("Good for"), "{text}");
+    assert_eq!(sent.recv().await.unwrap().to, user("dev-d"));
 
     let asking = tokio::spawn(async move {
         call(&client, "route", serde_json::json!({"capability": "billing", "text": "invoice?"})).await
