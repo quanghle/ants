@@ -173,6 +173,11 @@ fn envelope() -> Envelope {
             thread: Some(other_thread()),
             local: Some("/home/dev/app/.git".to_owned()),
         }],
+        trail_step: Some(Box::new(trail_step())),
+        trail_start: Some(Box::new(TrailStart {
+            trail: "nightly-audit".parse().unwrap(),
+            args: serde_json::json!({"repo": "app"}),
+        })),
         review_outcomes: Some(ReviewOutcomes {
             dream: 7,
             findings: vec![
@@ -218,8 +223,23 @@ fn plain_envelope() -> Envelope {
         sealed: None,
         notice: None,
         review_commits: Vec::new(),
+        trail_step: None,
+        trail_start: None,
         review_outcomes: None,
         ..envelope()
+    }
+}
+
+fn run() -> RunId {
+    "019a7d2f-0000-7000-8000-000000000001".parse().unwrap()
+}
+
+fn trail_step() -> TrailStep {
+    TrailStep {
+        run: run(),
+        call: 3,
+        label: Some("review".to_owned()),
+        schema: Some(serde_json::json!({"properties": {"ok": {"type": "boolean"}}, "type": "object"})),
     }
 }
 
@@ -983,6 +1003,7 @@ fn timeline() {
         },
     ];
     snap("timeline_no_reply", &Timeline { entries: ends, omitted: 0, ..record.clone() });
+    let calls = [("execute", CallCount { calls: 240, failed: 12 }), ("other", CallCount { calls: 3, failed: 0 })];
     let ended = TimelineEnd {
         how: PromptEnd::Capped,
         duration_ms: 95_000,
@@ -990,10 +1011,20 @@ fn timeline() {
         cost: 0.37,
         asked: 2,
         rebuilt: true,
+        calls: calls.map(|(kind, count)| (kind.to_owned(), count)).into(),
+        sense_calls: 2,
     };
     snap("timeline_ended", &Timeline { entries: vec![TimelineEntry::Ended(ended)], omitted: 0, ..record.clone() });
-    let replied =
-        TimelineEnd { how: PromptEnd::Replied, duration_ms: 800, tokens: 0, cost: 0.0, asked: 0, rebuilt: false };
+    let replied = TimelineEnd {
+        how: PromptEnd::Replied,
+        duration_ms: 800,
+        tokens: 0,
+        cost: 0.0,
+        asked: 0,
+        rebuilt: false,
+        calls: std::collections::BTreeMap::new(),
+        sense_calls: 0,
+    };
     snap("timeline_ended_bare", &Timeline { entries: vec![TimelineEntry::Ended(replied)], omitted: 0, ..record });
 }
 
@@ -1273,4 +1304,128 @@ fn admin_orders_of_providers() {
         ..Memories::default()
     };
     snap("admin_memories_of_a_provider", &memories);
+}
+
+#[test]
+fn trails() {
+    snap(
+        "envelope_step",
+        &Envelope { from: user("planner"), to: user("dev-a"), ..plain_envelope().as_step(trail_step()) },
+    );
+    snap(
+        "saved_trail",
+        &SavedTrail {
+            name: "release".parse().unwrap(),
+            description: "Cut a release".to_owned(),
+            phases: vec!["build".to_owned(), "review".to_owned()],
+            script: "agent('dev-a', 'build it')".to_owned(),
+            saved_by: user("alice"),
+            saved_at: at(0),
+        },
+    );
+    let header = TrailRun {
+        run: run(),
+        conductor: user("planner"),
+        trail: Some("release".parse().unwrap()),
+        script: "agent('dev-a', 'build it')".to_owned(),
+        args: serde_json::json!({"version": "1.2.0"}),
+        owner: Some(user("alice")),
+        thread: thread(),
+        origin: provider::Origin { by: provider::Starter::Human { user: user("alice") }, channel: Some(channel()) },
+        limits: TrailLimits { steps: 20, ..TrailLimits::DEFAULT },
+        state: RunState::Done { result: serde_json::json!({"tag": "v1.2.0"}) },
+        phase: Some("review".to_owned()),
+        steps: 3,
+        turns: 5,
+        started_at: at(0),
+        updated_at: at(9),
+        ended_at: Some(at(9)),
+    };
+    snap("trail_run", &header);
+    let mut newer = serde_json::to_value(&header).unwrap();
+    newer["paused_at"] = serde_json::json!("2025-01-01T12:05:00Z");
+    assert_eq!(serde_json::from_value::<TrailRun>(newer).unwrap(), header, "unknown fields are additions");
+    let states = [
+        RunState::Running,
+        RunState::Waiting,
+        RunState::Stopped { by: user("alice") },
+        RunState::Failed { error: "steps limit of 20 reached".to_owned() },
+    ];
+    let runs: Vec<_> = states.into_iter().map(|state| TrailRun { state, ended_at: None, ..header.clone() }).collect();
+    snap("trail_run_states", &runs);
+    snap(
+        "trail_session",
+        &TrailSession {
+            session: r#"{"monty":"dump"}"#.to_owned(),
+            pending: vec![PendingCall {
+                call: 3,
+                function: TrailFunction::Agent,
+                args: serde_json::json!(["dev-a", "review it"]),
+                to: user("dev-a"),
+                thread: other_thread(),
+                message: id(5),
+                sent_at: at(4),
+                sent: true,
+                turn_budget: 4,
+                retries: 1,
+            }],
+            queued: vec![QueuedCall { call: 4, function: TrailFunction::Human, args: serde_json::json!(["ship it?"]) }],
+        },
+    );
+    let answer = |call, answer| JournalEntry {
+        call,
+        function: TrailFunction::Agent,
+        args: serde_json::json!(["dev-a", "build it"]),
+        answer,
+    };
+    snap(
+        "journal_entries",
+        &[
+            answer(1, CallAnswer::Ok(serde_json::json!({"ok": true}))),
+            answer(2, CallAnswer::Error("dev-a is not an ant".to_owned())),
+        ],
+    );
+    snap("trail_run_index", &TrailRunIndex { runs: vec![run()] });
+    let limits: TrailLimits = parse(r#"{"steps": 10}"#);
+    assert_eq!(limits, TrailLimits { steps: 10, ..TrailLimits::DEFAULT }, "missing limits take their defaults");
+}
+
+#[test]
+fn trail_control() {
+    let request = |action| TrailRequest { id: id(1), ant: user("planner"), by: user("alice"), sent_at: at(0), action };
+    snap(
+        "trail_requests",
+        &[
+            request(TrailAction::Start {
+                trail: TrailSource::Saved("release".parse().unwrap()),
+                args: serde_json::json!({"version": "1.2.0"}),
+                thread: thread(),
+                limits: TrailLimits { steps: 20, ..TrailLimits::DEFAULT },
+            }),
+            request(TrailAction::Start {
+                trail: TrailSource::Script("agent('dev-a', 'build it')".to_owned()),
+                args: serde_json::Value::Null,
+                thread: thread(),
+                limits: TrailLimits::DEFAULT,
+            }),
+            request(TrailAction::Stop { run: run() }),
+            request(TrailAction::Resume {
+                run: run(),
+                limits: Some(TrailLimits { steps: 40, ..TrailLimits::DEFAULT }),
+            }),
+        ],
+    );
+    let reply = |outcome| TrailReply { request_id: id(1), ant: user("planner"), outcome };
+    snap(
+        "trail_replies",
+        &[
+            reply(TrailOutcome::Started { run: run() }),
+            reply(TrailOutcome::Stopped {
+                run: run(),
+                waiting: vec![WaitingStep { to: user("dev-a"), message: id(5) }],
+            }),
+            reply(TrailOutcome::Resumed { run: run() }),
+            reply(TrailOutcome::Refused { error: "no saved trail release".to_owned() }),
+        ],
+    );
 }

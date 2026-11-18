@@ -64,10 +64,11 @@ a thread whose origin is of a kind this version of sense does not know.
   `memories of provider sense`, who the ant has become, read from its cache without noting a session or writing
   anything: its identity (card, experience and, for a sage, the tally of its reviews), its growth report, its persona
   with its pending proposal, its self-model, each relationship record, its skills by name and description, its last
-  dream (the title of its diary, with its verdict counts and the vital signs of its period), then its core memories
-  and its top 10 memories of every scope as `sense_recall` ranks them without a query. Each entry is keyed by its id,
-  kind, scope and trust. Entries past the size cap of a memories read are left out and counted; an ant with no sense
-  data reads `no sense data` ([cli.md](cli.md)).
+  dream (the title of its diary, with its verdict counts and the vital signs of its period, each with its change
+  against the mean of up to 5 dreams before, as `prompts replied 3 (mean 1.5, +100%)`, a share of failed tool calls
+  in points), then its core memories and its top 10 memories of every scope as `sense_recall` ranks them without a
+  query. Each entry is keyed by its id, kind, scope and trust. Entries past the size cap of a memories read are left
+  out and counted; an ant with no sense data reads `no sense data` ([cli.md](cli.md)).
 - **The growth report:** the view's `growth report` entry counts, from the ant's sense data alone, how its identity
   grew, to judge the thresholds of the identity findings of dreams and of the brief, which it names last:
   - its threads: done, started again and expired, its active days, who started them (humans, other ants, itself,
@@ -79,7 +80,8 @@ a thread whose origin is of a kind this version of sense does not know.
   - its memories by kind and status, with their votes and reads in full;
   - its dreams by state, and their findings by kind, each by the last verdict given on it (applied, rejected,
     deferred, or unanswered), with the rejected ones resting, then the vital signs of the periods of the last 5 dreams
-    keeping them, which count all calls of sense's tools;
+    keeping them, which count all calls of sense's tools, and the change of the last one's against their mean in the
+    dreams before, as the memories view shows it;
   - for a sage, the tally of the reviews it made (below): the reviews and ants, and their findings by what came of
     them, and what the reviews spent, in all, for the 10 kinds and the 10 ants of the most (the ants with their
     spend), then how many are left; no line for an ant that reviewed nobody;
@@ -91,11 +93,13 @@ a thread whose origin is of a kind this version of sense does not know.
 - **`ants doctor`:** `sense chain` fails at a break in the ant's log, and `sense size` warns past 32 MiB
   ([cli.md](cli.md)); the ant's brief warns of both too. `sense data` fails when sense keeps none of the ants' data:
   no host credentials on a server with authentication. It names the fixes: `ants auth host MACHINE`, or
-  `provider = "none"` for an ant meant to go without.
+  `provider = "none"` for an ant meant to go without. It fails too for each ant whose live colony entry on the machine
+  says why sense keeps none of its data (`sense_unkept`), as one `ants daemon --ant` serves from flags, with no config
+  file.
 - **Sense keeping none of the ant's data:** the daemon warns once per ant as it starts, and the ant's colony entry
-  carries why (`sense_unkept`), which `ants colony` and `ants ant show` show; the ant is still served, without
-  memories, tasks or brief, as one whose external provider is down is. It still answers other ants, and as a sage
-  their reviews, keeping no record of them.
+  carries why (`sense_unkept`) until sense keeps the data again, which `ants colony` and `ants ant show` show; the ant
+  is still served, without memories, tasks or brief, as one whose external provider is down is. It still answers other
+  ants, and as a sage their reviews, keeping no record of them.
 - **Export and import:** `ants ant export` carries the log and skill files to another bus
   ([sense's part](config.md#senses-part)).
 - **Reviews:** a dream sent to the sage is a message from the ant on a review thread of its own. The sage's sense data
@@ -145,14 +149,15 @@ While the machine's host connection is down:
 
 While the host connection is first being made and no cache exists, events wait in the ant's queue and briefs fail.
 Sense writes the logs with the machine's host credentials (`ants auth host`), over the host connection, or, in a daemon
-serving one ant (`ants daemon --ant`), which makes none, over a link of its own carrying the logs alone. A daemon with
-neither, as one without host credentials on a server with authentication, and no cache keeps no data: events are
-acked with no effect, briefs are empty and the sense tools answer `unavailable`, naming why. The ant is still served,
-and `ants doctor`, the daemon's log and the ant's colony entry say so ([What an operator sees and
-configures](#what-an-operator-sees-and-configures)). A daemon serves the sense data of all its ants using
-sense before starting any of them, so an event of one ant about another, as a clone's about its source, finds the
-other's data whichever starts first; an event of an ant the daemon serves no sense data of, as one queued under a name
-the ant has left, is acked with no effect.
+serving one ant (`ants daemon --ant`), which makes none, over a link of its own carrying the logs alone. That link,
+when it fails, as with credentials the server refuses, is tried again after 1 second, the wait doubling up to 5
+minutes, and at once on a reload. A daemon with neither up, as one without host credentials on a server with
+authentication, and no cache keeps no data: events are acked with no effect, briefs are empty and the sense tools
+answer `unavailable`, naming why. The ant is still served, and `ants doctor`, the daemon's log and the ant's colony
+entry say so ([What an operator sees and configures](#what-an-operator-sees-and-configures)). A daemon serves the
+sense data of all its ants using sense before starting any of them, so an event of one ant about another, as a clone's
+about its source, finds the other's data whichever starts first; an event of an ant the daemon serves no sense data
+of, as one queued under a name the ant has left, is acked with no effect.
 
 ## Arguments and refusals
 
@@ -681,14 +686,17 @@ the packet, the ant's timeline above all, and hands the measures to sense with t
 sum, one record a day, so sense holds the trend for as long as the log lives and it moves with the ant, with nothing
 written between dreams. They count the threads worked and marked done; the prompts by how they ended (replied, with
 no reply, cancelled by a human, cut by a cap, failed: the `ended` entries of the
-[`Timeline`](hooks.md#timeline-on-antstimelinethreadant)); the tool calls by kind and those failed; the time in
-prompts; the tokens and cost the harness reported; the tool requests asked of humans or the chain, rejected and expired;
-the issues escalated (a reason, or tool request, once a thread, tool requests and questions to humans aside); the
-prompts run in a session rebuilt; and the calls of sense's own tools. A dream offers a `vitals` finding, naming the
+[`Timeline`](hooks.md#timeline-on-antstimelinethreadant)); the tool calls by kind and those failed, as the `ended`
+entries count them, calls past the 200 a timeline keeps of a prompt included; the time in prompts, from when each got
+its thread's harness, a wait for a free one left out; the tokens and cost the harness reported; the tool requests asked
+of humans or the chain, rejected and expired; the issues escalated (a reason, or tool request, once a thread, tool
+requests and questions to humans aside); the prompts run in a session rebuilt; and the calls of sense's own tools. A
+prompt cut off by a crash of its daemon stores no `ended` entry, and counts in none of these. A dream offers a `vitals` finding, naming the
 threads it counts, when a sign turned sharply for the worse in its period: 3 prompts cancelled by a human, 2 cut by a
 cap, 3 tool requests rejected, or, over 20 tool calls or more, a share of them failed at least twice the mean of the
-dreams before among the last 5 that made calls. These come last among the findings; rejected, one rests 14 days of
-the ant's active time.
+dreams before among the last 5 that made calls and at least 10%, so a failure or two after dreams with none makes no
+finding. These come last among the findings; rejected, one rests 14 days of the ant's active time. The thresholds are
+first guesses, to tune on the signs of real ants.
 
 **The sage's review:** the packet asks for a review that reads only, with read-only tools, reading code only in the
 checkouts made for it, never the ant's workdir or worktrees, and messaging no one, answered by one reply holding a

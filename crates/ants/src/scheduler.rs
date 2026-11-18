@@ -1,5 +1,6 @@
 //! Schedules of `ants daemon`: the `[[schedule]]` entries of its config file ([`Schedule`]), each sending its text on
-//! its timetable as a new thread, to an ant or a channel.
+//! its timetable as a new thread, to an ant or a channel, or asking an ant to start a saved trail on one
+//! ([`ants_proto::Envelope::trail_start`]).
 //!
 //! A schedule sends as a NATS user of its own, with credentials from `ants auth user NAME --webhook --to ANT` or
 //! `--channel CHANNEL`, exactly as a webhook does ([`crate::webhook`]): its messages are a webhook's, delivered once
@@ -143,6 +144,7 @@ async fn fire(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>, late: bool) ->
         key: webhook_seen_key(&schedule.name, &at),
         message_id: format!("schedule.{}.{at}", schedule.name),
         text,
+        trail: schedule.trail.as_ref(),
     })
     .await
 }
@@ -175,6 +177,7 @@ mod tests {
             mentions: Mentions::Nobody,
             owner: None,
             text: "check the nightly build".to_owned(),
+            trail: None,
             catch_up: false,
             allow: None,
         }
@@ -287,6 +290,27 @@ mod tests {
             seen.get(webhook_marker_key(&nightly)).await.unwrap().expect("daemons take its messages as a webhook's");
         let marker: ants_proto::Serving = serde_json::from_slice(&marker).unwrap();
         assert_eq!(marker.version, ants_proto::ANTS_VERSION, "it publishes its version");
+    }
+
+    #[tokio::test]
+    async fn a_trail_schedule_s_firing_asks_its_ant_for_a_run() {
+        let Some((server, js, _)) = hub().await else { return };
+        let weekly = p("weekly");
+        let to = Destination::Ant(p("dev-a"));
+        let creds = creds(&server, &weekly, to.clone());
+        let mut schedule = schedule("weekly", Some(creds.clone()), to);
+        let start =
+            ants_proto::TrailStart { trail: "review".parse().unwrap(), args: serde_json::json!({"repo": "app"}) };
+        schedule.trail = Some(start.clone());
+        schedule.owner = Some(p("alice"));
+        let bus = Bus::connect(&weekly, Some(&creds), &server.url, None, "test").await.unwrap();
+        let due = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        assert!(!fire(&bus, &schedule, due, false).await.unwrap().duplicate);
+        assert!(fire(&bus, &schedule, due, false).await.unwrap().duplicate, "a firing starts one run");
+        let messages: Vec<Envelope> = stored(&js, &subject::inbox(&p("dev-a"), &weekly)).await;
+        let [message] = &messages[..] else { panic!("one message: {messages:?}") };
+        assert_eq!((message.trail_start.as_deref(), message.webhook), (Some(&start), true));
+        assert_eq!(message.owner.as_ref(), Some(&p("alice")));
     }
 
     #[tokio::test]

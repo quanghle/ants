@@ -89,6 +89,8 @@ pub enum Action {
     Change(ThreadId, Change, u64),
     /// Copy the text to the terminal's clipboard.
     Copy(String),
+    /// Hand the terminal back to the shell until job control resumes the process.
+    Suspend,
     /// Read again what may have missed changes.
     Refresh,
     /// Run the command bar's job, for the bar's text.
@@ -144,6 +146,7 @@ const QUIT_WITHIN: TimeDelta = TimeDelta::seconds(1);
 /// Everything read of the ants that the views show: what the live feed reads, what the UI reads besides, and what is
 /// worked out of the messages read.
 pub struct Data {
+    pub mouse: super::mouse::Regions,
     pub live: State,
     /// The server, as the header names it.
     pub server: String,
@@ -359,6 +362,7 @@ pub struct Model {
     pub asking: Option<Asking>,
     /// The reaction being picked.
     pub picking: Option<Picker>,
+    pub copying: Option<super::clipboard::Picker>,
     /// The cancel waiting for y while an ant runs a tool call.
     pub interrupting: Option<Confirm>,
     /// How long to snooze a thread from home, or when to be reminded of it, being asked.
@@ -382,6 +386,7 @@ pub struct Model {
 impl Model {
     pub fn new(live: State, server: String) -> Self {
         let data = Data {
+            mouse: super::mouse::Regions::default(),
             live,
             server,
             facts: Facts::default(),
@@ -421,6 +426,7 @@ impl Model {
             bar: Bar::default(),
             asking: None,
             picking: None,
+            copying: None,
             interrupting: None,
             snoozing: None,
             catchup: catchup::Catchup::default(),

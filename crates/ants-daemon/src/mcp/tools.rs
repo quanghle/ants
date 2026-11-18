@@ -46,6 +46,9 @@ impl Tools {
         if hub.assisting.get().is_some() {
             tool_router.merge(Self::assist_router());
         }
+        if hub.trails.get().is_some() {
+            tool_router.merge(Self::trails_router());
+        }
         Self { hub, caller, tool_router }
     }
 
@@ -91,7 +94,8 @@ pub(crate) fn own_names() -> &'static HashSet<String> {
             + Tools::channels_router()
             + Tools::escalation_router()
             + Tools::managers_router()
-            + Tools::assist_router();
+            + Tools::assist_router()
+            + Tools::trails_router();
         all.list_all().into_iter().map(|tool| tool.name.into_owned()).collect()
     });
     &NAMES
@@ -117,7 +121,7 @@ impl ServerHandler for Tools {
         let ant = &self.hub.ant;
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))
-            .with_instructions(instructions(ant, self.hub.requester.get().is_some(), assisting.as_ref(), provider))
+            .with_instructions(instructions(ant, &self.hub, assisting.as_ref(), provider))
     }
 
     async fn call_tool(
@@ -160,7 +164,7 @@ impl ServerHandler for Tools {
     }
 }
 
-fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>, provider: Option<&str>) -> String {
+fn instructions(ant: &UserId, hub: &Hub, assisting: Option<&UserId>, provider: Option<&str>) -> String {
     let mut text = format!(
         "Messaging between ants; this session speaks as {ant}. send_message and ask_ant reach other \
          ants, check_inbox collects late replies, list_ants shows ants with the advertised whoami field, \
@@ -202,7 +206,13 @@ fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>, provide
             }
         }
     }
-    if manager {
+    if hub.trails.get().is_some() {
+        text.push_str(
+            " run_trail starts a trail run this ant conducts, a script whose code sends steps to ants and merges \
+             their replies: a saved trail by name, or a script written for the work at hand.",
+        );
+    }
+    if hub.requester.get().is_some() {
         text.push_str(
             " As a manager of ant templates, request_ant adds a worker ant from one when the work needs more hands \
              than the colony has; give the reason a human would need to approve it. retire_ant retires one it \

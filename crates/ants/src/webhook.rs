@@ -618,6 +618,7 @@ impl Hook {
                 key: webhook_seen_key(&hook.name, &event.hash),
                 message_id: format!("webhook.{}.{}", hook.name, event.hash),
                 text: event.text,
+                trail: None,
             })
             .await?;
         if delivered.duplicate {

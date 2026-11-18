@@ -132,6 +132,12 @@ impl Tab {
 }
 
 impl Cursor {
+    pub fn mouse_select(&mut self, at: usize) {
+        if let Some(tab) = self.tabs.get_mut(self.tab) {
+            tab.at = at.min(tab.rows().saturating_sub(1));
+        }
+    }
+
     /// The cursor on the first option of the first of `questions`, asked in the message `id`.
     pub fn new(id: Uuid, questions: &Questions) -> Self {
         let tabs = questions
@@ -390,6 +396,27 @@ fn rows(question: &Question, tab: &Tab, focused: bool, width: usize) -> Vec<Line
         row(tab.options, String::new(), &text, style::dim());
     }
     lines
+}
+
+pub fn mouse_regions(data: &Data, area: ratatui::layout::Rect, lines: &[Line<'_>], top: usize, question: Uuid) {
+    for (row, line) in lines.iter().enumerate().skip(top).take(usize::from(area.height)) {
+        let text = line.to_string();
+        let text = text.trim_start().strip_prefix("› ").unwrap_or(text.trim_start()).trim_start();
+        let text = if text.starts_with("[ ] ") || text.starts_with("[x] ") { &text[4..] } else { text };
+        if text.starts_with(TYPE) {
+            data.mouse.add(
+                ratatui::layout::Rect { y: area.y + (row - top) as u16, height: 1, ..area },
+                super::mouse::Target::Question(question, usize::MAX),
+            );
+            continue;
+        }
+        let Some((number, _)) = text.split_once(' ') else { continue };
+        let Some(at) = number.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) else { continue };
+        data.mouse.add(
+            ratatui::layout::Rect { y: area.y + (row - top) as u16, height: 1, ..area },
+            super::mouse::Target::Question(question, at),
+        );
+    }
 }
 
 /// A question's `text` in lines at most `width` wide, each of its lines wrapped.

@@ -736,6 +736,19 @@ fn the_memory_pressure_table_reaches_every_ant() {
 }
 
 #[test]
+fn the_trails_table_caps_the_workers_of_every_ant() {
+    let loaded = parse_all("[trails]\nworkers = 2\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+    assert!(loaded.ants.iter().all(|ant| ant.trail_workers == 2));
+    assert_eq!(config(loaded.ants[0].clone()).unwrap().pooling.trail_workers, 2);
+    let default = parse_all("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+    assert_eq!(default.ants[0].trail_workers, crate::trail::DEFAULT_WORKERS);
+    let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
+    assert!(err("[trails]\nworkers = 0").contains("[trails] workers is 0; it takes 1 to 16"));
+    assert!(err("[trails]\nworkers = 17").contains("[trails] workers is 17; it takes 1 to 16"));
+    assert!(err("[trails]\nthreads = 2").contains("unknown field `threads`"));
+}
+
+#[test]
 fn schedules_take_the_top_level_server_and_unique_names() {
     let loaded = parse_all(
         "nats = \"wss://hub.example/nats\"\njs_domain = \"hub\"\n\
@@ -838,6 +851,15 @@ fn the_cli_section_overrides_the_top_level_server() {
     let still = cli("[cli]\ntheme = \"light\"\nanimate = false").unwrap();
     assert_eq!((still.theme, still.animate), (Theme::Light, false));
     assert!(cli("[cli]\ntheme = \"blue\"").is_err());
+    assert!(relative.mouse, "mouse reporting is enabled by default");
+    assert_eq!(relative.notify, Notify::Bell);
+    let quiet = cli("[cli]\nmouse = false\nnotify = \"off\"").unwrap();
+    assert!(!quiet.mouse);
+    assert_eq!(quiet.notify, Notify::Off);
+    assert_eq!(cli("[cli]\nnotify = \"terminal\"").unwrap().notify, Notify::Terminal);
+    assert!(parse_all("[cli]\nmouse = false\nnotify = \"terminal\"").is_ok());
+    assert!(cli("[cli]\nnotify = \"desktop\"").is_err());
+    assert!(cli("[cli]\nmouse = \"off\"").is_err());
 
     assert_eq!(relative.summaries, SummaryConfig::default(), "on demand, by the messenger");
     let ahead = cli("[cli]\nsummaries = \"ahead\"\nsummary_daily_tokens = 50000\nsummary_ant = \"scribe\"").unwrap();

@@ -117,6 +117,10 @@ impl Inbox<'_> {
                 let post = post.with_owner(envelope.owner.clone()).with_creator(envelope.creator.clone());
                 Reply::Post(post.spend(envelope.turn_budget)?)
             }
+            // A step of a trail the ant conducts, sent itself: the answer returns to the run in the ant's inbox.
+            _ if envelope.trail_step.is_some() && envelope.from == *self.ant => {
+                Reply::Message(Box::new(envelope.reply(self.ant.clone(), text, Role::Ant)?))
+            }
             _ if envelope.webhook || envelope.from == *self.ant => {
                 // Nobody reads a webhook's inbox, nor the ant's own for work it handed itself: the answer goes to the
                 // thread's owner, else only to the log for a webhook and to the default human for a handoff.

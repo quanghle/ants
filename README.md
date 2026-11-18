@@ -25,7 +25,7 @@ flowchart LR
     end
 
     subgraph hub["Hub"]
-        hserver["nats-server<br/>JetStream domain: hub<br/>stream ANTS · 17 KV · ants_files"]
+        hserver["nats-server<br/>JetStream domain: hub<br/>stream ANTS · 19 KV · ants_files"]
         services["ants signer · channel serve<br/>webhook serve"]
         services <--> hserver
     end
@@ -40,7 +40,7 @@ flowchart LR
     cleaf <-->|"wss:// · tls:// · tunnel · bridge"| hserver
 ```
 
-- **Hub:** a `nats-server` with JetStream holding stream `ANTS` (inboxes, channels, notes, approvals, timelines, dead letters, admin orders), 17 KV buckets, attachment store `ants_files`, and stream `ANTS_SENSE` (each ant's signed, hash-chained sense event log, reachable by machine hosts only).
+- **Hub:** a `nats-server` with JetStream holding stream `ANTS` (inboxes, channels, notes, approvals, timelines, dead letters, admin orders), 19 KV buckets, attachment store `ants_files`, and stream `ANTS_SENSE` (each ant's signed, hash-chained sense event log, reachable by machine hosts only).
 - **Leaf:** optional local `nats-server` (`127.0.0.1:4222`) per node with a store-and-forward outbox (`ANTS_OUT`) that drains to the hub on reconnect.
 - **Daemon:** `ants daemon` runs per-ant ACP session pools, exposes collaboration tools to each session over MCP, and acks JetStream deliveries only after replies are stored. A harness definition's `protocol` key can run a CLI on its native protocol instead, behind an in-process ACP translator ([harness protocols](docs/config.md#harness-protocols)).
 - **Humans, assistants & ants:** humans own threads, decide tool approvals (a rejection can carry a note telling the ant what to do instead), and converse through the CLI or `ants chat`; optional personal assistant ants triage queues under device-signed grants; capability-tagged worker ants collaborate within shared turn budgets.
@@ -90,7 +90,9 @@ ants inbox                                          # unread replies across devi
 ants colony                                         # active ants and harness status
 ants channel create ops --member dev-a
 ants post --wait '#ops' "@dev-a check the failing build"
-ants                                                # full-screen terminal chat UI (also: ants chat)
+ants trail save deploy.py                           # a trail: a Python script orchestrating ants
+ants trail run deploy --follow                      # start and follow a run, its spending limits shown first
+ants                                                # full-screen chat with mouse, clipboard and background alerts (also: ants chat)
 ```
 
 `ants setup --managed-nats` instead has `ants daemon` start, supervise and stop that `nats-server` itself, with no separate NATS service ([docs/operations.md](docs/operations.md#managed-nats-server)).
@@ -129,6 +131,7 @@ ants ask --wait @dev-b "run the test suite"
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Wire stores and subjects, delivery retries, worktrees, colony, MCP tools, channels, escalations, dead letters |
 | [docs/sense.md](docs/sense.md) | Built-in sense: an ant's brief, memories, resume registers and handoffs, tasks, commitments, reminders, persona, skills and dreams, what operators see of them, limits |
+| [docs/trails.md](docs/trails.md) | Trails: Python scripts a conductor's daemon runs to coordinate ants and humans; saving, starting (CLI, `run_trail`, schedules), following, stopping and resuming runs, limits, trust, storage, workers |
 | [docs/cli.md](docs/cli.md) | Full CLI command reference, environment variables, thread search/marks, `ants chat` and `ants dash` |
 | [docs/config.md](docs/config.md) | `config.toml`, shared settings, harnesses, fallbacks, templates, manager ants, spend caps, permissions, redaction, schedules |
 | [docs/auth.md](docs/auth.md) | NKey/JWT credentials, revocations, backups, device encryption and sealed messages, admin orders, assistants, GitHub login, OS keystores, ACLs |
@@ -138,10 +141,11 @@ ants ask --wait @dev-b "run the test suite"
 | [docs/operations.md](docs/operations.md) | Platform specifics, binary upgrades, launchd/systemd units, the daemon-managed `nats-server`, `/healthz` and Prometheus metrics, daemon footprint |
 | [docs/container-demo.md](docs/container-demo.md) | Isolated three-node local demo in Apple container, Docker, Podman or wslc |
 | [contrib/skills/ants/SKILL.md](contrib/skills/ants/SKILL.md) | Agent skill teaching external coding agents to use the `ants` CLI |
+| [contrib/skills/ants-trails/SKILL.md](contrib/skills/ants-trails/SKILL.md) | Trail authoring guide for ants and humans: the API, sandbox, limits, patterns and complete example trails |
 
 ## Contributing
 
-Workspace crates: `ants-proto` (wire types and NATS permissions, no I/O), `ants-sense` (built-in identity, memory and work provider), `ants-daemon` (bus, ACP pool, delivery, approvals, MCP server), `ants` (CLI and service binary), and `ants-test-support` (test helpers).
+Workspace crates: `ants-proto` (wire types and NATS permissions, no I/O), `ants-sense` (built-in identity, memory and work provider), `ants-trail` (trails: Python scripts run by Monty in one-shot `ants subprocess` workers), `ants-daemon` (bus, ACP pool, delivery, approvals, MCP server), `ants` (CLI and service binary), and `ants-test-support` (test helpers).
 
 Run the full CI check suite locally before submitting changes (`rust-toolchain.toml` pins Rust 1.100):
 

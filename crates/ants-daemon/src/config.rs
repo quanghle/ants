@@ -27,6 +27,8 @@
 //! inline_images = true              # draw image attachments in `ants chat` (default false: their lines only)
 //! theme = "auto"                    # the avatars' colours: "auto" (ask the terminal, the default), "dark" or "light"
 //! animate = true                    # move the avatars in `ants chat` with their ants' states (the default)
+//! mouse = true                      # mouse wheel and clicks in `ants chat` (default true)
+//! notify = "bell"                   # unfocused chat: "bell" (default), "terminal" or "off"
 //!
 //! [storage]                         # warnings of JetStream storage filling up (crate::monitoring::storage)
 //! warn_percent = 80                 # warn a human past this share of a store's limit; 0 never
@@ -36,6 +38,9 @@
 //! [memory_pressure]                 # while memory is low (crate::limits::pressure)
 //! min_available = "1GB"             # below this much memory available, or a share such as "10%"; "0" never
 //! max_harnesses = 1                 # the most harnesses each ant runs while memory is low
+//!
+//! [trails]                          # trail runs the ants conduct (crate::trail)
+//! workers = 4                       # trail scripts computing at once across the process, 1 to 16 (the default 4)
 //!
 //! [host]                            # this machine's host connection (crate::host); off without credentials
 //! creds = "~/.config/ants/auth/host.creds"  # default: that file, else host-<machine>.creds beside it, if either exists
@@ -137,7 +142,7 @@ mod templated;
 
 pub use amend::{append, template_of, with_allow_rule, without_ant, write};
 pub use ant::{Ant, builtin_messenger, builtin_sage};
-pub use cli::{CliDefaults, Summaries, SummaryConfig, Theme, with_cli_login};
+pub use cli::{CliDefaults, Notify, Summaries, SummaryConfig, Theme, with_cli_login};
 pub use dropin::{dropin_dir, dropin_files};
 pub use entry::{entry, template_entry, toml_string};
 pub use host::HostSettings;
@@ -218,6 +223,9 @@ struct File {
     /// What the ants do while memory is low ([`crate::limits::pressure`]).
     #[serde(default)]
     memory_pressure: pressure::Settings,
+    /// How the ants run trails ([`crate::trail`]).
+    #[serde(default)]
+    trails: TrailsSection,
     #[serde(default)]
     cli: CliSection,
     #[serde(default)]
@@ -235,6 +243,30 @@ struct File {
     /// Read by `ants signer` only ([`registration::signer_registration`]).
     #[serde(default, rename = "registration")]
     _registration: Option<serde::de::IgnoredAny>,
+}
+
+/// The `[trails]` table.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct TrailsSection {
+    /// Trail workers computing at once across the process's runs.
+    workers: usize,
+}
+
+impl Default for TrailsSection {
+    fn default() -> Self {
+        Self { workers: crate::trail::DEFAULT_WORKERS }
+    }
+}
+
+impl TrailsSection {
+    fn validate(self) -> Result<()> {
+        let max = crate::trail::MAX_WORKERS;
+        if !(1..=max).contains(&self.workers) {
+            bail!("[trails] workers is {}; it takes 1 to {max}", self.workers);
+        }
+        Ok(())
+    }
 }
 
 fn yes() -> bool {

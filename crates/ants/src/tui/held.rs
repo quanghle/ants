@@ -16,7 +16,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{ListState, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
@@ -229,8 +229,7 @@ impl Page {
             })
             .collect();
         let selected = self.selected.at(&Self::ids(&held.orders));
-        let list_widget = style::list(rows, Some(selected), focused);
-        frame.render_stateful_widget(list_widget, list, &mut ListState::default().with_selected(Some(selected)));
+        super::mouse::list(frame, list, data, "held", rows, selected, focused);
     }
 }
 

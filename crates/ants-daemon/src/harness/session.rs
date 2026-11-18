@@ -74,6 +74,9 @@ pub struct Prompt {
     /// What the channel of the prompt's thread is for, added to the prompt only when it is the first of a session
     /// that started, was loaded or was rebuilt, as the brief is: a session keeps the description it started with.
     pub channel: Option<String>,
+    /// Receives when the prompt got its thread's harness, once any wait for a free one is over: before the harness
+    /// starts, when it must.
+    pub began: Option<oneshot::Sender<tokio::time::Instant>>,
 }
 
 /// Messages added to a running prompt, for a harness that takes them into its turn (`_ants/steer`).
@@ -104,6 +107,7 @@ impl Prompt {
             steering: None,
             brief: None,
             channel: None,
+            began: None,
         }
     }
 }

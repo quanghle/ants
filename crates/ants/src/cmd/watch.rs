@@ -258,6 +258,13 @@ impl Printer {
                 };
                 return self.line(&format!("[{thread}] {named}{forged}: approval {who}/{request_id} {outcome}"));
             }
+            StatusUpdate::Step { run, call, label, to, step_thread, stage } => {
+                let label = label.as_deref().map_or_default(|label| format!(" ({label})"));
+                let stage = stage.as_str();
+                return self.line(&format!(
+                    "[{thread}] {named}{forged}: trail run {run} step {call}{label} to {to} {stage} on {step_thread}"
+                ));
+            }
         };
         let key = (who.clone(), thread.clone(), verb);
         if !forged.is_empty() {

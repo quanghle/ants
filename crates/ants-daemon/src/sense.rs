@@ -154,6 +154,11 @@ impl Sense {
         self.stores.unkept(why);
     }
 
+    /// Why the process keeps none of its ants' data, followed ([`Self::unkept`]).
+    pub fn why_unkept(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.stores.why_unkept()
+    }
+
     /// The skills sense offers the harness of the ant whose home is `home`: its skills directory, in the Claude Code
     /// plugin of its sense files.
     pub fn skills(&self, home: &Path) -> crate::harness::Skills {
@@ -173,6 +178,15 @@ pub fn take_over(home: &Path, ant: &UserId) -> Result<Option<UserId>> {
     ants_sense::identity::take_over(home, ant).with_context(|| {
         format!("listing the earlier name of {ant} in {}", ants_sense::home::Home::new(home).names().display())
     })
+}
+
+/// Whether a tool call titled `title` calls one of sense's own tools, served as `sense_<tool>`: as Claude Code titles
+/// it, `mcp__<server>__sense_<tool>`, as Codex does, `mcp.<server>.sense_<tool>`, or by its name alone.
+pub(crate) fn calls_own_tool(title: &str) -> bool {
+    let first = title.split_whitespace().next().unwrap_or_default();
+    let tool = first.rsplit(['/', '.', ':']).find(|part| !part.is_empty()).unwrap_or_default();
+    let tool = tool.rsplit("__").next().unwrap_or_default();
+    tool.strip_prefix(NAME).and_then(|rest| rest.strip_prefix('_')).is_some_and(|rest| !rest.is_empty())
 }
 
 #[cfg(test)]

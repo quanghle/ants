@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use super::approvals::Asking;
 use super::exec::{Job, Outcome, Quoted};
 use super::model::{Action, Focus, Key, Model, Page};
-use super::{attach, complete, nav, question, snooze, thread};
+use super::{attach, complete, nav, snooze, thread};
 use crate::messages::{attachments, forward};
 use crate::people::quiet;
 use crate::{live, tools};
@@ -462,9 +462,7 @@ impl Model {
     fn question(&self, now: DateTime<Utc>) -> Result<(ThreadId, Uuid, Questions), String> {
         let thread = self.target()?;
         let asked = match self.page() {
-            Page::Thread(page) => {
-                question::keyed(&self.data, &page.history.entries, now).map(|(id, asked)| (id, asked.clone()))
-            }
+            Page::Thread(page) => page.question(&self.data, now).map(|(id, asked)| (id, asked.clone())),
             _ => self.data.question(&thread).map(|asked| (asked.id, asked.question.clone())),
         };
         let me = self.data.me();

@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use ants_daemon::host::{self, Host};
 use ants_daemon::profile::shared::{self, Shared, Via};
@@ -10,7 +11,7 @@ use ants_daemon::provider::Providers;
 use ants_daemon::schedule::Schedule;
 use ants_daemon::{Config, Stop};
 use ants_proto::{Machine, UserId};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tracing::Instrument as _;
 
@@ -81,14 +82,14 @@ impl Links {
 
     /// Run the host connection `host`, and sense's link of its own and the reading of the shared settings `served`
     /// lists; with neither, all stop. Sense is told first why it keeps none of its ants' data where `served` says so,
-    /// for each of its ants to say so as it starts.
+    /// for each of its ants to say so as it starts; with a link of its own, the link tells it ([`SenseRun`]).
     pub(super) fn reconcile(&mut self, host: Option<(Host, Vec<UserId>)>, served: Option<&Served>) {
         if let Some(served) = served {
-            let off = match &served.sense {
-                Some(SenseLink::Off(why)) => Some(why.clone()),
-                _ => None,
-            };
-            self.providers.sense().unkept(off);
+            match &served.sense {
+                Some(SenseLink::Off(why)) => self.providers.sense().unkept(Some(why.clone())),
+                Some(SenseLink::Own(_)) => {}
+                None => self.providers.sense().unkept(None),
+            }
         }
         self.host.reconcile(host);
         self.sense.reconcile(match served.and_then(|s| s.sense.as_ref()) {
@@ -146,7 +147,7 @@ impl HostRun {
     }
 }
 
-/// Sense's link of its own without a host connection ([`host::run_sense`]), if any, in its task.
+/// Sense's link of its own without a host connection, kept up ([`host::keep_sense`]), if any, in its task.
 #[derive(Default)]
 pub(super) struct SenseRun(Option<SenseTask>);
 
@@ -154,12 +155,15 @@ pub(super) struct SenseTask {
     host: Host,
     /// The contents of its credentials file when it started ([`creds_snapshot`]).
     creds: Option<Vec<u8>>,
+    /// Tells the link to try again at once, if down.
+    again: Arc<Notify>,
     task: JoinHandle<()>,
 }
 
 impl SenseRun {
-    /// Run the link `wanted`: the one running carries on unless it changed, its credentials file changed or it stopped,
-    /// when it starts again; with none wanted, it stops.
+    /// Run the link `wanted`: the one running carries on, trying again at once if down, unless it changed, its
+    /// credentials file changed or it stopped, when it starts again, no longer saying why sense keeps none of its ants'
+    /// data unless it fails again; with none wanted, it stops.
     fn reconcile(&mut self, wanted: Option<Host>) {
         let Some(wanted) = wanted else {
             if let Some(old) = self.0.take() {
@@ -171,22 +175,17 @@ impl SenseRun {
         let creds = creds_snapshot(wanted.creds.as_deref());
         // Each reload makes the ants' restarts afresh, which sense's link does not use.
         let same = |r: &SenseTask| r.host == Host { restarts: r.host.restarts.clone(), ..wanted.clone() };
-        if self.0.as_ref().is_some_and(|r| same(r) && r.creds == creds && !r.task.is_finished()) {
+        if let Some(run) = self.0.as_ref().filter(|r| same(r) && r.creds == creds && !r.task.is_finished()) {
+            run.again.notify_waiters();
             return;
         }
-        let (started, providers) = (wanted.clone(), wanted.providers.clone());
-        let sense = providers.sense().hosting();
+        wanted.providers.sense().unkept(None);
+        let (started, again) = (wanted.clone(), Arc::new(Notify::new()));
+        let nudged = again.clone();
         let task = tokio::spawn(
-            async move {
-                if let Err(e) = Box::pin(host::run_sense(started, sense)).await {
-                    tracing::error!(error = format!("{e:#}"), "sense's link stopped");
-                    let why = format!("sense's link with the host credentials stopped: {e:#}");
-                    providers.sense().unkept(Some(why));
-                }
-            }
-            .instrument(tracing::info_span!("sense")),
+            async move { Box::pin(host::keep_sense(started, &nudged)).await }.instrument(tracing::info_span!("sense")),
         );
-        if let Some(old) = self.0.replace(SenseTask { host: wanted, creds, task }) {
+        if let Some(old) = self.0.replace(SenseTask { host: wanted, creds, again, task }) {
             old.task.abort();
         }
     }

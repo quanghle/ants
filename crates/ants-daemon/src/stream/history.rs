@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::time::SystemTime;
 
 use ants_proto::{
-    ChannelId, Envelope, EscalationReason, MergedCall, MergedEnd, MergedRejection, NotesPost, ThreadId, UserId, Uuid,
+    ChannelId, Envelope, EscalationReason, MergedEnd, MergedRejection, NotesPost, ThreadId, UserId, Uuid,
     inbox_consumer, notes_consumer, sent_reader, subject,
 };
 use anyhow::{Context as _, Result};
@@ -264,9 +264,8 @@ pub(crate) struct Active {
     pub sent: Vec<Sent>,
     /// The ant's tool requests rejected on it, as its timeline keeps them: empty when it could not be read.
     pub rejections: Vec<MergedRejection>,
-    /// The ant's tool calls on it, as its timeline keeps them: empty when it could not be read.
-    pub calls: Vec<MergedCall>,
-    /// How the ant's prompts on it ended, as its timeline keeps them: empty when it could not be read.
+    /// How the ant's prompts on it ended, with their tool calls, as its timeline keeps them: empty when it could not
+    /// be read.
     pub ends: Vec<MergedEnd>,
     /// The issues the ant escalated on it: each reason, and tool request, once, however many messages it took. Tool
     /// requests and questions to humans are not counted.
@@ -382,13 +381,12 @@ pub(crate) async fn active(
         let stored = timelines.remove(&thread);
         let timeline = stored.as_ref().map_or_default(|stored| stored.show(ant, budget / ENTRY_SHARE));
         let rejections = stored.as_ref().map_or_default(|stored| stored.rejections().to_vec());
-        let calls = stored.as_ref().map_or_default(|stored| stored.calls().to_vec());
         let ends = stored.map_or_default(|stored| stored.ends().to_vec());
         let escalations = escalated.remove(&thread).map_or(0, |issues| u32::try_from(issues.len()).unwrap_or(u32::MAX));
         let own = own.remove(&thread).unwrap_or_default().into_iter();
         let sent = own.filter_map(|(seq, id)| entries.get(&seq).map(|entry| Sent::new(id, &entry.text))).collect();
         let history = format(entries.into_values().collect(), budget);
-        Active { thread, history, timeline, sent, rejections, calls, ends, escalations }
+        Active { thread, history, timeline, sent, rejections, ends, escalations }
     });
     Ok(active.collect())
 }
@@ -629,9 +627,8 @@ mod tests {
         let timeline = &threads[1].timeline;
         assert!(timeline.contains("execute: cargo build (completed)\n") && !timeline.contains("dev-a's"), "{timeline}");
         assert!(timeline.contains(" cancelled by a human after 1 s\n"), "{timeline}");
-        let titles: Vec<_> = threads[1].calls.iter().map(|c| c.call.title.as_str()).collect();
-        assert_eq!((titles, threads[1].ends.len()), (vec!["cargo build"], 1));
-        assert!(threads[0].calls.is_empty() && threads[0].ends.is_empty());
+        assert_eq!(threads[1].ends.len(), 1);
+        assert!(threads[0].ends.is_empty());
         assert_eq!((threads[0].escalations, threads[1].escalations), (1, 0), "a reason once, tool requests aside");
         assert_eq!(
             timeline.matches("the prompt of message").count(),
@@ -668,7 +665,16 @@ mod tests {
 
     /// A timeline's entries: a prompt that ended `how` after a second.
     fn ended(how: ants_proto::PromptEnd) -> Vec<ants_proto::TimelineEntry> {
-        let end = ants_proto::TimelineEnd { how, duration_ms: 1_000, tokens: 0, cost: 0.0, asked: 0, rebuilt: false };
+        let end = ants_proto::TimelineEnd {
+            how,
+            duration_ms: 1_000,
+            tokens: 0,
+            cost: 0.0,
+            asked: 0,
+            rebuilt: false,
+            calls: std::collections::BTreeMap::new(),
+            sense_calls: 0,
+        };
         vec![ants_proto::TimelineEntry::Ended(end)]
     }
 

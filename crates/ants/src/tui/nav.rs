@@ -158,10 +158,12 @@ fn line(
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: &Item, now: DateTime<Utc>, focused: bool) {
+    data.mouse.add(area, super::mouse::Target::Nav(selected.clone()));
     let counts = data.counts();
     let mut lines = Vec::new();
     let mut section = None;
     let mut at = 0;
+    let mut hits = Vec::new();
     for item in items(data, selected, now) {
         if item.section() != section {
             section = item.section();
@@ -173,10 +175,18 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: &Item, now: Da
             at = lines.len();
             line = line.patch_style(style::highlight(focused));
         }
+        hits.push((lines.len(), item));
         lines.push(line);
     }
     let height = usize::from(area.height.saturating_sub(2));
-    let top = (at + 1).saturating_sub(height);
+    let inner = style::block(String::new(), focused).inner(area);
+    let top = data.mouse.top("nav", inner, at, at, at + 1, lines.len());
+    for (row, item) in hits {
+        if row >= top && row < top + height {
+            data.mouse
+                .add(Rect { y: inner.y + (row - top) as u16, height: 1, ..inner }, super::mouse::Target::Nav(item));
+        }
+    }
     let paragraph = Paragraph::new(lines)
         .block(style::block(String::new(), focused))
         .scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
