@@ -362,9 +362,9 @@ fn answer(item: Item, now: DateTime<Utc>) -> Result<Answer, Answer> {
     Ok(Answer { text, json: json!({"promise": item}), is_error: false })
 }
 
-/// The refusal of a call its store failed, showing the commitment found at another revision.
-fn refused(error: StoreError) -> Answer {
-    let mut answer = Answer::from(error);
+/// The refusal of a call, showing the commitment found at another revision.
+fn refused(error: impl Into<Answer>) -> Answer {
+    let mut answer = error.into();
     if answer.json["current"]["kind"] == KIND {
         answer.json["promise"] = answer.json["current"].clone();
     }

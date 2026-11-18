@@ -161,7 +161,9 @@ store failing a call is refused alike by every tool: `not_found` for an item mis
 revision than the call expected (the current item as `current` in JSON) or one other writers kept changing, and
 `unavailable` when sense's data cannot be read or written. A write deciding from what it read decides again when
 another writer changed the item meanwhile, up to 8 times, then answers `conflict`. Each refusal carries a stable `error`
-code: these, and those each tool names below.
+code: these, and those each tool names below, as `too_many` and `invalid_trigger` of `sense_remind` ([Work and
+reminders](#work-and-reminders)). Only a failure to read or write sense's data, which a later call may not meet,
+answers `unavailable`: a tool's own limits never do.
 
 ## Identity
 
@@ -490,7 +492,9 @@ reminder. Other triggers are `{"kind":"at","at":"2026-12-01T12:00:00Z"}`,
 or `{"kind":"condition","condition":{...}}` using a condition below. Empty arguments or `action=list` list reminders;
 `show`, `ack`, `drop` and `renew` take `id`. `postpone` takes `id` and exactly one of `after_seconds` or a future RFC
 3339 `at`. Optional positive `revision` guards mutations. Acknowledging a recurring reminder advances to the next
-occurrence. Weekdays are `mon` through `sun`; delays are 1 through 31,536,000 seconds.
+occurrence. Weekdays are `mon` through `sun`; delays are 1 through 31,536,000 seconds. A trigger giving no time to
+fire at, or a reminder time out of the range of times, as a commitment due within thirty days of the last time
+representable, is refused with `invalid_trigger`.
 
 The active daemon fires reminders; a standby fires none until it takes the ant over, then goes on with the stored
 schedule and any firing pending. Between firings the schedule sleeps until the next is due or a call to sense changes
@@ -512,7 +516,8 @@ Condition triggers use the following objects:
 | `sense` | `event` (`commitment_overdue`, `lease_expired`), optional `id` | A matching commitment becomes overdue or task lease expires. |
 
 Checks run no more than once a minute, or once every five minutes for `gh` and `bd`; ten unchanged checks increase the
-interval to thirty minutes. An ant holds at most fifty active triggers, including automatic promise reminders.
+interval to thirty minutes. An ant holds at most fifty active triggers, including automatic promise reminders: a
+`sense_remind` or `sense_promise` call that would make more active is refused with `too_many`.
 Ordinary reminders expire after thirty days unless renewed; automatic commitment reminders remain valid until thirty
 days after the later of creation or renewal and the commitment's due time, so a distant due date cannot expire before
 firing. Command conditions run only under the ant's tool allow rules, in its workdir and environment, with a
