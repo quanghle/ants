@@ -34,6 +34,7 @@ use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_daemon::secrets::keystore::{self, Store};
 use ants_proto::provider::EventKind;
 use ants_proto::{AntIdentity, IDENTITIES_BUCKET, MovedMark, SharedSettings, UserId};
+use ants_sense::home::Home;
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Utc};
 use data_encoding::BASE64;
@@ -54,7 +55,7 @@ const PACK_WAIT: Duration = Duration::from_mins(2);
 const PACK_POLL: Duration = Duration::from_secs(1);
 /// What of an ant's home is not its memory, relative to the home: its worktrees, the daemon's delivery notes, MCP state
 /// and lifecycle events, a git repository's history and a bd task database. sense's files but its id and the ant's
-/// earlier names are left out too ([`sense_left_out`]).
+/// earlier names are left out too ([`Home::left_out`]).
 const LEFT_OUT: [&str; 9] = [
     "worktrees",
     "answered",
@@ -189,7 +190,7 @@ pub fn core_files_of(ant: &Ant, home: &Path, harness: &[PathBuf]) -> Result<Vec<
         for entry in entries {
             let entry = entry?;
             let rel = dir.join(entry.file_name());
-            let left_out = LEFT_OUT.iter().any(|left| rel == Path::new(left)) || sense_left_out(&rel);
+            let left_out = LEFT_OUT.iter().any(|left| rel == Path::new(left)) || Home::left_out(&rel);
             if left_out || task_db.contains(&rel) {
                 continue;
             }
@@ -203,15 +204,6 @@ pub fn core_files_of(ant: &Ant, home: &Path, harness: &[PathBuf]) -> Result<Vec<
     }
     files.sort();
     Ok(files)
-}
-
-/// Whether `rel`, relative to the home, is of sense's files left out: all but the sense id and the earlier names, which
-/// the ant keeps wherever it goes ([`ants_sense::identity`]); the cache and chain status are of the log on this
-/// machine's bus, and the skill files travel in sense's part, with the log ([`ants_sense::export`]).
-fn sense_left_out(rel: &Path) -> bool {
-    let sense = Path::new(ants_sense::log::SENSE_DIR);
-    let kept = [ants_sense::identity::ID_FILE, ants_sense::identity::NAMES_FILE];
-    rel != sense && rel.starts_with(sense) && !kept.iter().any(|file| rel == sense.join(file))
 }
 
 /// The files `paths` of the home `home`, read, as `kind`.

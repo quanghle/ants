@@ -15,10 +15,18 @@ const COPILOT_SKILLS_DIRS: &str = "COPILOT_SKILLS_DIRS";
 /// The key of a session/new or session/load `_meta` naming the skills directory, which the native translators read.
 const META_KEY: &str = "ants/skills";
 
-/// `dir` when it holds a skill: a directory with a `SKILL.md`.
-pub(super) fn offered(dir: &Path) -> Option<&Path> {
-    let mut entries = std::fs::read_dir(dir).ok()?.flatten();
-    entries.any(|entry| entry.path().join("SKILL.md").is_file()).then_some(dir)
+/// The ant's confirmed skills: the directory holding them, one directory a skill, and the root of the Claude Code
+/// plugin whose skills they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skills {
+    pub dir: PathBuf,
+    pub plugin: PathBuf,
+}
+
+/// `skills` when its directory holds a skill: a directory with a `SKILL.md`.
+pub(super) fn offered(skills: &Skills) -> Option<&Skills> {
+    let mut entries = std::fs::read_dir(&skills.dir).ok()?.flatten();
+    entries.any(|entry| entry.path().join("SKILL.md").is_file()).then_some(skills)
 }
 
 /// The variable adding the skills of `dir` to an ACP harness process with the ant's `env`, after the skill directories
@@ -35,20 +43,23 @@ pub(super) fn env(harness: &Harness, env: &[(String, String)], dir: &Path) -> Op
     Some((COPILOT_SKILLS_DIRS.to_owned(), value))
 }
 
-/// The `_meta` of a session/new or session/load offering the skills of `dir`: its path for the native translators, and
-/// for the Claude Agent SDK its parent loaded as a local plugin, whose `skills` directory it is.
-pub(super) fn meta(dir: &Path) -> Meta {
-    let plugin = dir.parent().unwrap_or(dir);
-    let plugins = json!([{ "type": "local", "path": plugin, "skipMcpDiscovery": true }]);
+/// The `_meta` of a session/new or session/load offering `skills`: their directory for the native translators, and
+/// for the Claude Agent SDK their plugin, loaded as a local one.
+pub(super) fn meta(skills: &Skills) -> Meta {
+    let plugins = json!([{ "type": "local", "path": skills.plugin, "skipMcpDiscovery": true }]);
     let mut meta = Meta::new();
-    meta.insert(META_KEY.to_owned(), json!(dir));
+    meta.insert(META_KEY.to_owned(), json!(skills.dir));
     meta.insert("claudeCode".to_owned(), json!({ "options": { "plugins": plugins } }));
     meta
 }
 
-/// The skills directory a session/new or session/load `meta` offers ([`meta`]).
-pub(super) fn of_meta(meta: Option<&Meta>) -> Option<PathBuf> {
-    meta?.get(META_KEY).and_then(Value::as_str).map(PathBuf::from)
+/// The skills a session/new or session/load `meta` offers ([`meta`]).
+pub(super) fn of_meta(meta: Option<&Meta>) -> Option<Skills> {
+    let meta = meta?;
+    let dir = meta.get(META_KEY).and_then(Value::as_str).map(PathBuf::from)?;
+    let plugins = meta.get("claudeCode").and_then(|claude| claude.pointer("/options/plugins/0/path"));
+    let plugin = plugins.and_then(Value::as_str).map(PathBuf::from)?;
+    Some(Skills { dir, plugin })
 }
 
 #[cfg(test)]
@@ -61,14 +72,18 @@ mod tests {
         Harnesses::builtin().define(parse_definitions(&text).unwrap()).unwrap().get("h").unwrap()
     }
 
+    fn skills(dir: &Path) -> Skills {
+        Skills { dir: dir.to_owned(), plugin: "/plugin".into() }
+    }
+
     #[test]
     fn a_directory_offers_skills_once_one_has_its_skill_md() {
         let dir = ants_test_support::scratch_dir("skills-offered");
-        assert_eq!(offered(&dir.join("missing")), None);
+        assert_eq!(offered(&skills(&dir.join("missing"))), None);
         std::fs::create_dir_all(dir.join("draft")).unwrap();
-        assert_eq!(offered(&dir), None, "no SKILL.md yet");
+        assert_eq!(offered(&skills(&dir)), None, "no SKILL.md yet");
         std::fs::write(dir.join("draft/SKILL.md"), "---\nname: draft\n---\n").unwrap();
-        assert_eq!(offered(&dir), Some(dir.as_path()));
+        assert_eq!(offered(&skills(&dir)), Some(&skills(&dir)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -92,10 +107,11 @@ mod tests {
 
     #[test]
     fn the_meta_names_the_skills_and_their_plugin() {
-        let meta = meta(Path::new("/home/a/.sense/skills"));
-        assert_eq!(of_meta(Some(&meta)), Some(PathBuf::from("/home/a/.sense/skills")));
+        let offered = Skills { dir: "/home/a/.sense/skills".into(), plugin: "/home/a/plugin".into() };
+        let meta = meta(&offered);
+        assert_eq!(of_meta(Some(&meta)), Some(offered));
         let plugins = &meta["claudeCode"]["options"]["plugins"];
-        assert_eq!(plugins, &json!([{ "type": "local", "path": "/home/a/.sense", "skipMcpDiscovery": true }]));
+        assert_eq!(plugins, &json!([{ "type": "local", "path": "/home/a/plugin", "skipMcpDiscovery": true }]));
         assert_eq!(of_meta(None), None);
         assert_eq!(of_meta(Some(&Meta::new())), None);
     }

@@ -142,7 +142,8 @@ async fn a_wake_the_ant_does_not_take_is_refused() {
     let invalid = RpcError::INVALID_PARAMS;
     assert_eq!(refused(request(&ant, None, "r1"), "sense").await, invalid, "another provider's ant");
     let foreign = ThreadId::generate();
-    assert_eq!(refused(request(&ant, Some(&foreign), "r1"), "clock").await, invalid, "no thread of the ant");
+    let unknown = refused(request(&ant, Some(&foreign), "r1"), "clock").await;
+    assert_eq!(unknown, RpcError::UNKNOWN_THREAD, "no thread of the ant");
     assert_eq!(refused(WakeRequest { text: " \n".to_owned(), ..request(&ant, None, "r1") }, "clock").await, invalid);
     let long = "x".repeat(MAX_WAKE_TEXT + 1);
     assert_eq!(refused(WakeRequest { text: long, ..request(&ant, None, "r1") }, "clock").await, invalid);

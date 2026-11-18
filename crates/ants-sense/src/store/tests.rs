@@ -236,7 +236,7 @@ async fn the_cache_is_built_again_unless_built_from_this_log_where_it_catches_up
     drop(store);
 
     // A corrupt cache file: replaced, built again.
-    std::fs::write(crate::cache::cache_file(&home), b"not a database at all, not even close to one").unwrap();
+    std::fs::write(crate::home::Home::new(&home).cache(), b"not a database at all, not even close to one").unwrap();
     let store = open(&counted, &sense, Some(&home)).await;
     assert_eq!((titles(&store).len(), counted.read()), (3, 3));
     std::fs::remove_dir_all(&home).unwrap();
