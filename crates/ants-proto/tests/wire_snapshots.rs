@@ -177,6 +177,7 @@ fn envelope() -> Envelope {
         trail_start: Some(Box::new(TrailStart {
             trail: "nightly-audit".parse().unwrap(),
             args: serde_json::json!({"repo": "app"}),
+            limits: TrailLimits { steps: 100, wall_secs: 2 * 24 * 3600, ..TrailLimits::DEFAULT },
         })),
         review_outcomes: Some(ReviewOutcomes {
             dream: 7,

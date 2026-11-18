@@ -5,7 +5,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ants_proto::{RunId, RunState, ThreadId, TrailFunction, TrailLimits, TrailName, TrailRun, TrailSource};
+use ants_proto::{RunId, RunState, ThreadId, TrailFunction, TrailName, TrailRun, TrailSource};
 use chrono::{DateTime, Utc};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -19,7 +19,7 @@ use super::messages::ask_wait;
 use super::tools::{Tools, text};
 use crate::provider::context::{origin, settled};
 use crate::sync::MutexExt as _;
-use crate::trail::{RunStatus, StartRun, Trails};
+use crate::trail::{AskedLimits, RunStatus, StartRun, Trails};
 
 /// How often a waiting call looks for the run's end.
 const POLL: Duration = Duration::from_millis(500);
@@ -45,6 +45,9 @@ struct RunTrail {
     /// How long `wait` waits, such as `90s` or `10m`: default `5m`, at most `30m`.
     #[serde(default)]
     timeout: Option<String>,
+    /// What the run may spend; each limit left out takes its default, and one over its maximum is refused.
+    #[serde(default)]
+    limits: Option<AskedLimits>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -64,10 +67,11 @@ struct StopTrail {
 fn description() -> String {
     format!(
         "Start a trail run conducted by this ant: a saved trail by `name`, or a `script` of its own (refused on a \
-         thread a webhook started), with `args` as its JSON input. The run reports on the current thread and answers \
-         to the thread's owner, who gets its end there. Returns the run id at once, or with `wait` the run's result \
-         or error (waiting at most `timeout`). trail_status tells how a run stands and stop_trail stops one. Write \
-         a trail for work whose steps are known in code: fan-outs, pipelines, verification rounds.\n\n{}",
+         thread a webhook started), with `args` as its JSON input and `limits` raising or lowering what it may spend \
+         (`steps`, `at_once`, `turns`, `wall`). The run reports on the current thread and answers to the thread's \
+         owner, who gets its end there. Returns the run id at once, or with `wait` the run's result or error (waiting \
+         at most `timeout`). trail_status tells how a run stands and stop_trail stops one. Write a trail for work \
+         whose steps are known in code: fan-outs, pipelines, verification rounds.\n\n{}",
         crate::trail::GUIDE
     )
 }
@@ -89,6 +93,7 @@ impl Hub {
             _ => return Err("give either `name` or `script`".to_owned()),
         };
         let wait = if args.wait { Some(ask_wait(args.timeout.as_deref())?) } else { None };
+        let limits = args.limits.unwrap_or_default().limits().map_err(|e| format!("limits: {e}"))?;
         let current = self.sessions.locked().current.get(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; runs start only while one is")?;
         let stored = self.origin_of(thread).await.map_err(|e| {
@@ -96,14 +101,8 @@ impl Hub {
             "the thread's origin cannot be read".to_owned()
         })?;
         let origin = settled(stored, origin(&current, None, &self.humans.humans()));
-        let start = StartRun {
-            trail,
-            args: args.args,
-            owner: current.owner.clone(),
-            origin,
-            thread: thread.clone(),
-            limits: TrailLimits::default(),
-        };
+        let start =
+            StartRun { trail, args: args.args, owner: current.owner.clone(), origin, thread: thread.clone(), limits };
         let run = trails.start(start).await?;
         tracing::info!(%thread, %run, "trail run started from a tool call");
         let started = format!("Started run {run} on thread {thread}; its end goes to the thread's owner there.");

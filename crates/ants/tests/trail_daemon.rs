@@ -718,7 +718,8 @@ async fn a_schedule_s_firing_starts_its_saved_trail_once_on_its_thread() {
             .from_webhook()
             .starting(Some(start.clone()))
     };
-    let start = TrailStart { trail: "count".parse().unwrap(), args: json!({"n": 1}) };
+    let limits = TrailLimits { steps: 7, wall_secs: 3600, ..TrailLimits::DEFAULT };
+    let start = TrailStart { trail: "count".parse().unwrap(), args: json!({"n": 1}), limits };
     let firing = fire(&start);
 
     let run = lead.trails.start_fired(&firing, &start).await.unwrap();
@@ -726,12 +727,12 @@ async fn a_schedule_s_firing_starts_its_saved_trail_once_on_its_thread() {
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!(2) });
     let header = lead.header(&run).await;
     assert_eq!((&header.thread, header.owner.as_ref()), (&firing.thread_id, Some(&UserId::human())));
-    assert_eq!(header.trail.as_ref(), Some(&start.trail));
+    assert_eq!((header.trail.as_ref(), header.limits), (Some(&start.trail), limits), "under the limits asked for");
     assert!(!header.origin.trusted(), "a schedule's run is as untrusted as a webhook's: {:?}", header.origin);
     assert_eq!(lead.trails.start_fired(&firing, &start).await.unwrap(), run, "delivered again");
     assert_eq!(lead.header(&run).await.started_at, header.started_at, "no run starts again");
 
-    let missing = TrailStart { trail: "gone".parse().unwrap(), args: Value::Null };
+    let missing = TrailStart { trail: "gone".parse().unwrap(), args: Value::Null, limits: TrailLimits::DEFAULT };
     let error = lead.trails.start_fired(&fire(&missing), &missing).await.unwrap_err();
     assert!(error.contains("no trail is saved as gone"), "{error}");
     std::fs::remove_dir_all(&dir).unwrap();
@@ -799,6 +800,19 @@ async fn run_trail_starts_a_saved_or_inline_trail_and_a_webhook_s_thread_runs_on
     assert_eq!((&header.thread, header.owner.as_ref()), (&asked.thread_id, Some(&UserId::human())));
     let (ok, text) = run_trail(&client, json!({"name": "count", "script": script})).await;
     assert!(!ok && text.contains("either `name` or `script`"), "{text}");
+    let limits = json!({"steps": 9, "at_once": 2, "turns": 30, "wall": "2h"});
+    let (ok, text) = run_trail(&client, json!({"name": "count", "args": {"n": 1}, "limits": limits})).await;
+    assert!(ok, "{text}");
+    let asked = TrailLimits { steps: 9, concurrency: 2, turns: 30, wall_secs: 7200, ..TrailLimits::DEFAULT };
+    assert_eq!(lead.header(&started(&text)).await.limits, asked, "the run's record keeps the limits asked for");
+    for (limits, why) in [
+        (json!({"steps": 501}), "limits: steps is over the most a run may take, 500"),
+        (json!({"wall": "8d"}), "limits: wall is over the most a run may take, 7d"),
+        (json!({"at_once": 0}), "limits: at_once must be more than 0"),
+    ] {
+        let (ok, text) = run_trail(&client, json!({"name": "count", "limits": limits})).await;
+        assert!(!ok && text.contains(why), "{text}");
+    }
 
     let hooked = Envelope::new(ant("github"), ant("lead"), "an issue").from_webhook();
     let _turn = mcp.begin(&hooked);

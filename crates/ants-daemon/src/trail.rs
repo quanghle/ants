@@ -8,6 +8,7 @@
 
 mod control;
 mod driver;
+mod limits;
 mod load;
 mod report;
 mod saved;
@@ -41,6 +42,8 @@ use report::Stray;
 use saved::Saved;
 use steps::Taken;
 use store::Store;
+
+pub use limits::AskedLimits;
 
 /// How to write a trail, in brief, for the tool starting runs to teach.
 pub const GUIDE: &str = ants_trail::GUIDE;
@@ -264,7 +267,8 @@ impl Trails {
     }
 
     /// Start the run of the saved trail `start` that `firing`, a schedule's message to the conductor, asks for: on the
-    /// firing's thread, answering to its owner. The run takes the firing's id, so a firing delivered again starts none.
+    /// firing's thread, answering to its owner, under the limits it asks for. The run takes the firing's id, so a firing
+    /// delivered again starts none.
     pub async fn start_fired(&self, firing: &Envelope, start: &TrailStart) -> Result<RunId, String> {
         let run =
             firing.id.to_string().parse::<RunId>().map_err(|e| format!("the firing's id makes no run id: {e}"))?;
@@ -277,7 +281,7 @@ impl Trails {
             owner: firing.owner.clone(),
             origin: crate::provider::context::origin(firing, None, &self.inner.humans.humans()),
             thread: firing.thread_id.clone(),
-            limits: TrailLimits::default(),
+            limits: start.limits,
         };
         self.start_as(run, start).await
     }

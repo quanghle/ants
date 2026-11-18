@@ -150,6 +150,14 @@ expression: value
     "trail": "nightly-audit",
     "args": {
       "repo": "app"
+    },
+    "limits": {
+      "steps": 100,
+      "concurrency": 4,
+      "turns": 200,
+      "wall_secs": 172800,
+      "compute_ms": 10000,
+      "session_bytes": 786432
     }
   },
   "review_outcomes": {

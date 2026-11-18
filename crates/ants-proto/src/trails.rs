@@ -411,12 +411,14 @@ pub enum TrailAction {
 }
 
 /// The run a schedule's message asks its recipient to start, as the run's conductor ([`Envelope::trail_start`]): the
-/// saved trail `trail` with `args`.
+/// saved trail `trail` with `args`, under `limits`, which the conductor refuses over [`TrailLimits::MAX`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrailStart {
     pub trail: TrailName,
     #[serde(default)]
     pub args: Value,
+    #[serde(default)]
+    pub limits: TrailLimits,
 }
 
 /// The script a run starts: a saved trail's, by name, or one given inline.
