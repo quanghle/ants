@@ -27,7 +27,7 @@ enum Chat {
     Shown(&'static str),
     /// Why ants chat has none.
     Exempt(&'static str),
-    /// A gap to close: the bd issue tracking it, else `todo: ` and what is missing.
+    /// A gap to close: the bd issue tracking it.
     Missing(&'static str),
 }
 
@@ -35,10 +35,10 @@ const SERVICE: &str = "a service, run on its own";
 const CREDENTIALS: &str = "the credentials files and keys of the machine running it";
 const MACHINE: &str = "sets up or checks the machine running it";
 const MOVING: &str = "moves an ant between machines: files, config file and provider data of the machine running it";
-const ADD_ANT: &str = "todo: add or clone an ant by admin order, as /retire retires one";
-const NOTES: &str = "todo: post to a thread's notes, which the thread view shows";
-const ASSISTANT: &str = "todo: /assistant set ANT, clear and allow, beside ants-waemb's enable, show and disable";
-const DEAD: &str = "todo: replay or drop a dead letter, which the thread view shows as `gave up`";
+const ADD_ANT: &str = "ants-rjatj.13";
+const NOTES: &str = "ants-rjatj.14";
+const ASSISTANT: &str = "ants-waemb";
+const DEAD: &str = "ants-rjatj.18";
 const SEND: &str = "the command bar: `@user TEXT` starts a thread, a text alone replies on the open one";
 const POST: &str = "the command bar: `#channel TEXT` posts to a channel";
 
@@ -95,9 +95,9 @@ const CLI: &[(&str, Chat)] = &[
     ("trail", Missing("ants-rjatj.2")),
     ("digest", Slash("digest")),
     ("attachment get", Slash("save")),
-    ("notify", Missing("todo: snooze and resume push notifications on every device, and show what holds them")),
+    ("notify", Missing("ants-rjatj.16")),
     ("remind set", Slash("remind")),
-    ("remind list", Missing("todo: list the reminders not due yet; home shows those due")),
+    ("remind list", Missing("ants-rjatj.15")),
     ("remind clear", Slash("unremind")),
     ("assistant enable", Missing("ants-waemb")),
     ("assistant disable", Missing("ants-waemb")),
@@ -105,7 +105,7 @@ const CLI: &[(&str, Chat)] = &[
     ("assistant set", Missing(ASSISTANT)),
     ("assistant clear", Missing(ASSISTANT)),
     ("assistant allow", Missing(ASSISTANT)),
-    ("assistant confirm", Missing("todo: confirm the assistant's held tool decisions, as `o` its held admin orders")),
+    ("assistant confirm", Missing("ants-rjatj.17")),
     ("assistant seal", Exempt("the assistant's enrollment as a device of the human, with a key of this machine")),
     ("assistant key", Exempt("prints or makes the encryption key of an ant of this machine's config file")),
     ("watch", Shown("the ant view's now column, as `ants watch ANT` follows an ant, and a thread's live tool calls")),
@@ -308,11 +308,8 @@ fn every_place_named_is_in_ants_chat() {
             Shown(text) | Exempt(text) if text.trim().is_empty() => problems.push(format!("{at} says nothing")),
             Shown(_) | Exempt(_) => {}
             Missing(gap) => {
-                let issue = gap.strip_prefix("ants-").is_some_and(|id| !id.is_empty() && !id.contains(' '));
-                if !issue && !gap.strip_prefix("todo: ").is_some_and(|what| !what.trim().is_empty()) {
-                    problems.push(format!(
-                        "{at}: Missing names a bd issue (\"ants-…\"), else \"todo: \" and what is missing"
-                    ));
+                if !gap.strip_prefix("ants-").is_some_and(|id| !id.is_empty() && !id.contains(' ')) {
+                    problems.push(format!("{at}: Missing names the bd issue of the gap (\"ants-…\")"));
                 }
             }
         }
