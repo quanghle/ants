@@ -218,6 +218,30 @@ async fn a_busy_harness_is_never_stopped() {
 }
 
 #[tokio::test]
+async fn a_prompt_waiting_for_a_free_harness_is_told_when_it_gets_one() {
+    let (pool, _, gate) = fake_pool(1, Sessions::Loadable);
+    let (t1, t2) = (thread(1), thread(2));
+    let busy = pool.prompt(&t1, "hold a");
+    let others = async {
+        settle().await;
+        let (began_tx, mut began) = oneshot::channel();
+        let waiting = pool.run(&t2, Prompt { began: Some(began_tx), ..Prompt::new("b") });
+        let release = async {
+            settle().await;
+            assert!(began.try_recv().is_err(), "not while it waits");
+            let released = tokio::time::Instant::now();
+            gate.add_permits(1);
+            released
+        };
+        let (reply, released) = tokio::join!(waiting, release);
+        assert_eq!(reply.unwrap().text, "s2: b");
+        assert!(began.try_recv().unwrap() >= released);
+    };
+    let (a, ()) = tokio::join!(busy, others);
+    assert_eq!(a.unwrap(), "s1: hold a");
+}
+
+#[tokio::test]
 async fn a_restart_stops_idle_harnesses_at_once_and_busy_ones_after_their_prompt() {
     let (pool, log, gate) = fake_pool(4, Sessions::Loadable);
     let (t1, t2) = (thread(1), thread(2));

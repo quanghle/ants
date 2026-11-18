@@ -335,13 +335,14 @@ impl Pool {
     }
 
     /// [`Pool::run`] on `fallback`, `None` for the ant's own harness. An error on a fallback carries [`OnFallback`].
-    pub async fn run_on(&self, thread: &ThreadId, prompt: Prompt, fallback: Option<usize>) -> Result<Reply> {
+    pub async fn run_on(&self, thread: &ThreadId, mut prompt: Prompt, fallback: Option<usize>) -> Result<Reply> {
         let on = |e: anyhow::Error| match fallback.and_then(|i| Some((i, self.fallbacks.get(i)?))) {
             Some((index, (name, _))) => e.context(OnFallback { index, name: name.clone() }),
             None => e,
         };
         let review = self.launch.policy().reviewing(thread);
-        let lease = self.checkout(thread, fallback, review).await.map_err(on)?;
+        let began = prompt.began.take();
+        let lease = self.checkout(thread, fallback, review, began).await.map_err(on)?;
         let before = lease.session.id();
         let mut reply = lease.session.run(prompt).await.map_err(on);
         let after = lease.session.id();
@@ -462,16 +463,32 @@ impl Pool {
         self.slots.locked()
     }
 
-    /// The thread's live session on `fallback`, a review's if `review`, marked busy until the lease drops.
-    async fn checkout(&self, thread: &ThreadId, fallback: Option<usize>, review: bool) -> Result<Lease<'_>> {
+    /// The thread's live session on `fallback`, a review's if `review`, marked busy until the lease drops. Tells
+    /// `began` when the wait for it is over, before a harness starts.
+    async fn checkout(
+        &self,
+        thread: &ThreadId,
+        fallback: Option<usize>,
+        review: bool,
+        began: Option<tokio::sync::oneshot::Sender<tokio::time::Instant>>,
+    ) -> Result<Lease<'_>> {
+        let tell = |began: Option<tokio::sync::oneshot::Sender<_>>| {
+            if let Some(began) = began {
+                let _ = began.send(tokio::time::Instant::now());
+            }
+        };
         loop {
             let mut changed = pin!(self.changed.notified());
             changed.as_mut().enable();
             match self.claim(thread, fallback, review) {
                 Claim::Live(session) => {
+                    tell(began);
                     return Ok(Lease { pool: self, thread: thread.clone(), session, rebuilt: false });
                 }
-                Claim::Start => return self.start(thread, fallback, review).await,
+                Claim::Start => {
+                    tell(began);
+                    return self.start(thread, fallback, review).await;
+                }
                 Claim::Wait => changed.await,
             }
         }

@@ -55,3 +55,13 @@ fn only_the_sense_module_and_the_files_listed_name_ants_sense() {
     let ants = naming(&daemon.join("../ants"));
     assert_eq!(ants, ANTS_NAMING, "the ants crate reaches ants_sense in the files listed, all naming it");
 }
+
+#[test]
+fn a_call_of_senses_own_tools_is_told_by_its_title() {
+    for title in ["mcp__ants__sense_remember", "mcp.ants.sense_recall", "sense_dream", "ants/sense_promise x"] {
+        assert!(super::calls_own_tool(title), "{title}");
+    }
+    for title in ["mcp__ants__send_message", "sense_", "cat sense_notes.md", "nonsense_tool", "", "sensed"] {
+        assert!(!super::calls_own_tool(title), "{title}");
+    }
+}

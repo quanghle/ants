@@ -178,6 +178,8 @@ async fn tool_calls_are_stored_on_the_thread_timeline() {
         assert_eq!(calls, [("call-0", "tool", Some("pending")), ("call-1", "tool", Some("pending"))]);
         let [(message, end)] = &ends_on(&bus, &t1, 1).await[..] else { unreachable!() };
         assert_eq!((*message, end.how, end.asked, end.rebuilt), (sent.id, PromptEnd::Replied, 0, false));
+        let counted = ants_proto::CallCount { calls: 2, failed: 0 };
+        assert_eq!((end.calls.iter().collect::<Vec<_>>(), end.sense_calls), (vec![(&"other".to_owned(), &counted)], 0));
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
