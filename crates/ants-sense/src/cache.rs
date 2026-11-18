@@ -276,9 +276,14 @@ impl Cache {
         rows.map(|item| Ok(serde_json::from_str(&item?)?)).collect()
     }
 
-    /// The experience of the ant whose names are `own` ([`crate::thread::experience`]).
-    pub fn experience(&self, own: &[UserId], top: usize) -> Result<Option<Experience>, CacheError> {
-        experience::count(&self.db, own, top)
+    /// The experience of the ant whose names are `own`, since `since` if given ([`crate::thread::experience`]).
+    pub fn experience(
+        &self,
+        own: &[UserId],
+        since: Option<DateTime<Utc>>,
+        top: usize,
+    ) -> Result<Option<Experience>, CacheError> {
+        experience::count(&self.db, own, since, top)
     }
 
     /// The items, of `kind` if given, whose title or body holds any word of `text`, the best matches first (BM25, a

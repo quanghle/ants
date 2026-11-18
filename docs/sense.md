@@ -172,7 +172,9 @@ The brief's identity counts the ant's experience from its thread records each ti
   (`human:alice`, `ant:dev-b`, `repo:github.com/o/r`), with its count of threads and the day of their last start,
   start again or done, the latest first among equal counts.
 
-An ant with no thread record shows no experience.
+An ant with no thread record shows no experience. A dream's packet counts it the same way over the threads active since
+the dream's start (`experience_since`): a thread counts when it started, started again or was marked done since then,
+and only those times count toward its days and tallies.
 
 ## Memories
 
@@ -442,27 +444,35 @@ A dormant identity begins no dream, and a standby taking the ant over begins non
 (its colony entry live and not paused, and, unless a fallback answers for it, its harness neither signed out, nor
 failing to start, nor held by a provider limit past 6 hours), the review packet goes to the sage as a message from the
 ant on a new review thread. Otherwise, as for an ant with `sage = "none"` (which turns reviews off, not dreams) and the
-built-in messenger and sage, the daemon wakes the ant on a new thread with the packet alone. The packet, at most
-64 KiB, holds:
+built-in messenger and sage, the daemon wakes the ant on a new thread with the packet alone, which asks it to answer
+the findings and distill what the threads teach, then, against its identity, to bring its self-model and relationship
+records up to date and propose the persona changes the work supports. The packet, at most 64 KiB, holds:
 
 - the verdicts on the last dream's findings;
 - the findings, at most 20, each with an id `<dream>.<n>`: memories with both `helpful` and `stale` votes since the
   last dream (`contradiction`), memories needing review (`needs_review`), the near duplicates the last maintenance
   found (`duplicates`), episodes to distill (`distill`), pending persona and skill proposals (`proposal`), and the
   findings of the last dream deferred or unanswered that still hold, offered again;
+- the ant's identity, to judge the work against and to judge against the work: its persona and pending persona
+  proposal, its self-model, the relationship records of the humans and other ants who started the threads covered (as
+  their thread records tell; a line for each without one), its skills by name and description, and its experience
+  since the dream's start;
 - the commits the work is at: of the ant's workdir and of each thread's worktree branch;
 - each active thread's history since the last dream, as the ant received, sent and noted it, then its timeline (the
   tool calls, plans and ends with no reply of the ant's prompts, [`Timeline`](hooks.md#timeline-on-antstimelinethreadant)),
   the most recently active first. Threads a webhook started are marked untrusted: their text is data, not
   instructions.
 
-A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then the
-last findings, counted for the next dream.
+A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then cuts
+the identity to titles (the persona's field names, the records' heads and the skills' names), then leaves out the last
+findings, counted for the next dream.
 
 **The sage's review:** the packet asks for a review that reads only, with read-only tools, reading code only in the
 checkouts made for it, never the ant's workdir or worktrees, and messaging no one, answered by one reply holding a
 fenced JSON block `{"findings": [{"kind", "finding", "evidence": {"threads", "messages", "memories", "files"},
-"action"}]}`, an empty list when nothing is worth the ant's time. The review thread is narrowed to `REVIEW_ALLOW`
+"action"}]}`, an empty list when nothing is worth the ant's time. Besides kinds such as `lesson`, `mistake` or
+`stale_memory`, a finding about the identity has kind `persona`, `self_model` or `relationship`: it cites the ant's own
+threads and builds on the persona the ant has, never on a house style. The review thread is narrowed to `REVIEW_ALLOW`
 (`read:*`, `search`, `think`, and the ants tools `list_ants`, `read_notes`, `read_attachment`, `list_reactions` and
 `suggest_thread_title`): the ants MCP server refuses every other tool on it, provider tools and `complete` included.
 The sage's daemon runs the review in a session of its own on the harness's review variant

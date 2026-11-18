@@ -228,8 +228,13 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     }
 
     /// [`Cache::experience`].
-    pub fn experience(&self, own: &[UserId], top: usize) -> Result<Option<Experience>, StoreError> {
-        Ok(self.cache.experience(own, top)?)
+    pub fn experience(
+        &self,
+        own: &[UserId],
+        since: Option<DateTime<Utc>>,
+        top: usize,
+    ) -> Result<Option<Experience>, StoreError> {
+        Ok(self.cache.experience(own, since, top)?)
     }
 
     /// The items matching `text` best ([`Cache::search`]).
@@ -600,8 +605,12 @@ pub trait Items: Send + Sync {
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<Hit>, StoreError>>;
     /// [`Store::experience`].
-    fn experience<'a>(&'a self, own: &'a [UserId], top: usize)
-    -> BoxFuture<'a, Result<Option<Experience>, StoreError>>;
+    fn experience<'a>(
+        &'a self,
+        own: &'a [UserId],
+        since: Option<DateTime<Utc>>,
+        top: usize,
+    ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>>;
     /// [`Store::history`].
     /// Cached history, including pending revisions with sequence 0; never requires another network round trip.
     fn history<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Vec<Revision>, StoreError>>;
@@ -735,12 +744,13 @@ where
     fn experience<'a>(
         &'a self,
         own: &'a [UserId],
+        since: Option<DateTime<Utc>>,
         top: usize,
     ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>> {
         Box::pin(async move {
             let mut store = self.lock().await;
             store.refresh().await?;
-            store.experience(own, top)
+            store.experience(own, since, top)
         })
     }
 
