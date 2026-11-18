@@ -70,6 +70,7 @@ vote or propose.
 |---|---|
 | Tools | 12 |
 | Brief | 8000 bytes; over it, the work is cut first and the persona last ([Brief](#brief)) |
+| Experience | the 3 people and 3 repositories of the most threads, in the brief's identity ([Identity](#identity)) |
 | Memory | title 200 characters, body 4 KiB; the live core memories 2,000 bytes in all |
 | Self-model, relationship record | title 200 characters, body 2,000 bytes |
 | Persona | 500 bytes a field |
@@ -147,6 +148,20 @@ it first started and when it last started again, its session gone, and when it w
 last expired. Each event changes the record once and a repeat nothing, so a thread takes about two changes of the log,
 its start and its end, none per prompt. An end of a thread sense never saw start records nothing. A clone inherits no
 thread record; an export carries them with the log.
+
+The brief's identity counts the ant's experience from its thread records each time it is composed, keeping no counter
+(`ants_sense::thread::experience`):
+
+- the threads, and those marked done;
+- the active days: the UTC days on which a thread started, started again or was marked done. A record keeps only the
+  first start and the last start again and done of its thread, so a thread worked over many days counts three of them
+  at most, and a session expiring counts none;
+- the 3 humans or other ants who started the most of its threads, never the ant itself under any of its names, nor a
+  webhook or provider; and the 3 repositories the most of its threads started in. Each is named by its scope
+  (`human:alice`, `ant:dev-b`, `repo:github.com/o/r`), with its count of threads and the day of their last start,
+  start again or done, the latest first among equal counts.
+
+An ant with no thread record shows no experience.
 
 ## Memories
 
@@ -476,8 +491,10 @@ Sense's brief ([Briefs](architecture.md#briefs)) holds, in order, the sections i
 1. a one-line warning when the ant's log is broken, where and why, and one when the log holds over 32 MiB, with how to
    write less, as nothing trims it (`ants doctor` reports both);
 2. `## Identity`: the card's name, sense id and birth, earlier names, the ant it was cloned from, its harnesses, models
-   and machines; while dormant, since when; after a return, once, when it returned and why, with the ant's last
-   handoff, when acknowledged, in a `## Last handoff` section after the unacknowledged handoffs;
+   and machines; the ant's experience, from its thread records: its threads, those done and its active days, then
+   the people and the repositories of the most threads ([Identity](#identity)); while dormant, since when; after a
+   return, once, when it returned and why, with the ant's last handoff, when acknowledged, in a `## Last handoff`
+   section after the unacknowledged handoffs;
 3. `## Persona`: the persona's fields, or how to propose one;
 4. `## Self-model`: the self-model, its id and revision, inside the block of recalled memories, or how to start one;
 5. `## This thread`: the thread's resume register, its revision first, or how to start one;

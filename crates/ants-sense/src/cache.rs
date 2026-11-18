@@ -8,13 +8,14 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use ants_proto::{Machine, SenseId};
+use ants_proto::{Machine, SenseId, UserId};
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 
 use crate::items::{BODY, Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, TITLE, state_at};
 use crate::log::{Checked, Position, SENSE_DIR};
+use crate::thread::experience::{self, Experience};
 
 /// The file of [`SENSE_DIR`] holding the cache.
 pub const CACHE_FILE: &str = "cache.db";
@@ -273,6 +274,11 @@ impl Cache {
         let value = value.map(Value::to_string);
         let rows = query.query_map(params![kind, path, value, limit_of(limit)], |row| row.get::<_, String>(0))?;
         rows.map(|item| Ok(serde_json::from_str(&item?)?)).collect()
+    }
+
+    /// The experience of the ant whose names are `own` ([`crate::thread::experience`]).
+    pub fn experience(&self, own: &[UserId], top: usize) -> Result<Option<Experience>, CacheError> {
+        experience::count(&self.db, own, top)
     }
 
     /// The items, of `kind` if given, whose title or body holds any word of `text`, the best matches first (BM25, a

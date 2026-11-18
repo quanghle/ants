@@ -3,9 +3,11 @@ use crate::items::Values;
 use crate::persona::{FIELDS, MAX_FIELD_BYTES, PERSONA, persona_id};
 use crate::store::Write;
 
-/// sense with long work sections, records of the ant and of alice, who started the thread, and a full persona.
+/// sense with long work sections, records of the ant and of alice, who started the thread, a full persona, and the
+/// experience of threads.
 async fn crowded() -> (Sense, Arc<dyn Items>) {
     let (sense, items) = filled().await;
+    worked(&sense).await;
     let blockers: Vec<_> = (0..10).map(|i| format!("Blocker {i}: {}", "wait ".repeat(30))).collect();
     let register = json!({"goal": "Ship the parser", "blockers": blockers, "revision": 1});
     call(&sense, thread::checkpoint, THREAD, register).await;
@@ -46,6 +48,7 @@ async fn over_its_budget_the_brief_cuts_the_work_and_keeps_a_full_persona_and_th
     assert!(persona.len() > 4 * (MAX_FIELD_BYTES - 10), "{persona}");
     let brief = session_brief(&sense, 8_000).await;
     assert!(brief.len() <= 8_000);
+    position(section(&brief, "## Identity"), "Most threads in: repo:github.com/o/r");
     for heading in ["## Identity", "## Persona", "## Self-model", "## Relationships", "## Core loop"] {
         assert_eq!(section(&brief, heading), section(&full, heading));
     }

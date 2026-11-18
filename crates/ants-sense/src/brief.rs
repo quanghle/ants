@@ -1,9 +1,9 @@
-//! The brief (requirements ants-x39hk.8.1 and ants-x39hk.8.2): what an ant reads first in each session, and again on
+//! The brief (requirements ants-x39hk.8.1 and ants-x39hk.8.6): what an ant reads first in each session, and again on
 //! demand with `sense_brief`. Its sections come in a fixed order ([`sections`]): warnings when the ant's log is
-//! broken or over its size limit ([`SIZE_LIMIT`]), the identity, the persona, the self-model, the thread's resume
-//! register, the unacknowledged handoffs, open commitments, fired and upcoming reminders, claimed and ready tasks, the
-//! relationship records of the thread's participants, the core and top memories, the skills index, and the core loop
-//! of tools.
+//! broken or over its size limit ([`SIZE_LIMIT`]), the identity with the experience counted from the ant's thread
+//! records ([`thread::experience`]), the persona, the self-model, the thread's resume register, the unacknowledged
+//! handoffs, open commitments, fired and upcoming reminders, claimed and ready tasks, the relationship records of the
+//! thread's participants, the core and top memories, the skills index, and the core loop of tools.
 //!
 //! The brief stays within its byte budget ([`fit`]), cutting what other calls show before the ant's identity
 //! ([`Order`]): memories and skills are shortened to their titles first, then the work sections, memories and skills
@@ -24,6 +24,7 @@ use crate::memory::{self, MemoryItem, Ranked, Scope, Status, Trust, framed, part
 use crate::records::{self, RecordItem};
 use crate::skill::{self, Skill};
 use crate::store::{Items, StoreError};
+use crate::thread::experience::Experience;
 use crate::thread::{self, Handoff, Register};
 use crate::{Answer, Sense, persona, promise, remind, task};
 
@@ -36,8 +37,13 @@ pub const MORE: &str = "… more: ";
 /// What the line telling the ant of its return starts with.
 pub const RETURNED: &str = "Returned ";
 
+/// The most people and the most repositories the identity names: those of the ant's most threads.
+pub const TOP_EXPERIENCE: usize = 3;
+
 /// The most characters of a break's reason in the warning.
 const REASON_CHARS: usize = 160;
+/// The most characters of a person or repository the identity names, more than any name has.
+const SCOPE_CHARS: usize = 72;
 
 /// The core loop of tools: each tool and when to use it.
 const CORE_LOOP: &[(&str, &str)] = &[
@@ -207,7 +213,8 @@ async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>)
     let mut sections = Vec::new();
     sections.extend(items.broken().await.as_ref().map(warning));
     sections.extend(size_warning(items.log_bytes().await));
-    sections.push(identity_section(card, context));
+    let experience = thread::experience::experience(items, &context.ant, TOP_EXPERIENCE).await?;
+    sections.push(identity_section(card, context, experience.as_ref()));
     sections.push(persona_section(persona::current(items).await?.as_ref()));
     sections.push(self_model_section(records::self_model(items).await?.as_ref()));
     sections.push(register_section(thread::register(items, &context.thread).await?.as_ref()));
@@ -257,10 +264,11 @@ fn size_warning(bytes: u64) -> Option<Section> {
     Some(Section::whole(line, String::new()))
 }
 
-fn identity_section(card: Option<&Card>, context: &CallContext) -> Section {
+fn identity_section(card: Option<&Card>, context: &CallContext, experience: Option<&Experience>) -> Section {
     let heading = "## Identity".to_owned();
+    let experience = experience.map_or_default(|experience| format!("\n{}", experience_lines(experience)));
     let Some(card) = card else {
-        return Section::whole(heading, format!("{}, with no sense card yet.", context.ant));
+        return Section::whole(heading, format!("{}, with no sense card yet.{experience}", context.ant));
     };
     let mut body = format!("{} (sense identity {}), born {}.", card.name, card.sense, card.born.format("%Y-%m-%d"));
     if !card.earlier_names.is_empty() {
@@ -275,6 +283,7 @@ fn identity_section(card: Option<&Card>, context: &CallContext) -> Section {
             let _ = write!(body, "\n{label}: {}.", values.join(", "));
         }
     }
+    body.push_str(&experience);
     if !card.active
         && let Some(at) = card.retired_at
     {
@@ -334,6 +343,33 @@ fn self_model_section(found: Option<&RecordItem>) -> Section {
     let mut section = Section { order: Order::SelfModel, ..Section::cut_with("## Self-model", found.text(), &more) };
     (section.framed, section.titles) = (true, Some(found.head()));
     section
+}
+
+/// The lines of `experience`: the threads and their days, then the people and the repositories of the most threads.
+fn experience_lines(experience: &Experience) -> String {
+    let plural = |count: u32, noun: &str| if count == 1 { format!("1 {noun}") } else { format!("{count} {noun}s") };
+    let mut lines = format!(
+        "Experience: {}, {} done, on {}.",
+        plural(experience.threads, "thread"),
+        experience.done,
+        plural(experience.active_days, "active day")
+    );
+    for (label, tallies) in [("Most threads with", &experience.people), ("Most threads in", &experience.repos)] {
+        let named: Vec<_> = tallies
+            .iter()
+            .map(|tally| {
+                let mut scope = tally.scope.to_string();
+                if scope.chars().count() > SCOPE_CHARS {
+                    scope = scope.chars().take(SCOPE_CHARS - 1).chain(['…']).collect();
+                }
+                format!("{scope} ({}, last {})", tally.threads, tally.last.format("%Y-%m-%d"))
+            })
+            .collect();
+        if !named.is_empty() {
+            let _ = write!(lines, "\n{label}: {}.", named.join(", "));
+        }
+    }
+    lines
 }
 
 /// The relationship records of the thread's participants.
