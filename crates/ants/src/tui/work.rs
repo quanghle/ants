@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ants_proto::{ChannelId, EscalationReason, Questions, ThreadDone, ThreadId, UserId, Uuid};
+use ants_proto::{ChannelId, EscalationReason, NoticeKind, Questions, ThreadDone, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -80,6 +80,8 @@ pub struct Alert {
     pub seq: u64,
     pub at: DateTime<Utc>,
     pub text: String,
+    /// The dead letter it is, or a daemon's notice of giving up on a message tells of, by stream sequence.
+    pub dead: Option<u64>,
 }
 
 /// A message on a thread.
@@ -155,13 +157,17 @@ impl Facts {
             return;
         }
         let fact = self.0.entry(entry.thread_id.clone()).or_default();
-        let alert = || Alert { seq: entry.seq, at: entry.stored_at, text: entry.text.clone() };
+        let alert = |dead| Alert { seq: entry.seq, at: entry.stored_at, text: entry.text.clone(), dead };
         if let Some(notice) = entry.notice {
             // A daemon's notice answers nothing: only one a human has to act on reaches the inbox, and only one holding
             // the thread counts, as what the thread is stuck on.
             if let (true, Some(to)) = (notice.needs_action(), &entry.to) {
-                if notice.holds_thread() {
-                    fact.escalated.insert(to.clone(), alert());
+                // The notice of giving up on a message follows its dead letter: with none read before it, the
+                // letter was replayed or dropped already, and the thread is held no more.
+                let gave_up = notice == NoticeKind::GaveUp && entry.in_reply_to.is_some();
+                let dead = fact.dead.as_ref().filter(|_| gave_up).map(|d| d.seq);
+                if notice.holds_thread() && (!gave_up || dead.is_some()) {
+                    fact.escalated.insert(to.clone(), alert(dead));
                 }
                 if let (true, Some(from)) = (to == me, &entry.from) {
                     fact.inbox.push(Inboxed {
@@ -200,9 +206,9 @@ impl Facts {
                 fact.latest = Some(Said { seq: entry.seq, at: entry.stored_at, from: from.clone(), to: to.clone() });
             }
             (Kind::Escalation, _, Some(to)) if entry.reason != Some(EscalationReason::Approval) => {
-                fact.escalated.insert(to.clone(), alert());
+                fact.escalated.insert(to.clone(), alert(None));
             }
-            (Kind::Dead, _, _) => fact.dead = Some(alert()),
+            (Kind::Dead, _, _) => fact.dead = Some(alert(Some(entry.seq))),
             (Kind::NoReply, Some(ant), _) => {
                 if let Some(end) = &entry.no_reply {
                     fact.ended.insert(ant.clone(), end.message);
@@ -242,12 +248,23 @@ impl Data {
         fact.sent.iter().filter(|(u, _)| self.is_human(u)).map(|(_, seq)| *seq).max().unwrap_or(0)
     }
 
-    /// Why the thread is stuck: its latest escalation to a human or dead letter that no human said anything after.
+    /// Why the thread is stuck: its latest escalation to a human or dead letter that no human said anything after, but
+    /// a dead letter replayed or dropped here, and the notice of it.
     pub fn stuck(&self, thread: &ThreadId) -> Option<&Alert> {
         let fact = self.facts.get(thread)?;
         let after = self.last_human(fact);
         let escalated = fact.escalated.iter().filter(|(to, _)| self.is_human(to)).map(|(_, a)| a);
-        escalated.chain(&fact.dead).filter(|a| a.seq > after).max_by_key(|a| a.seq)
+        escalated.chain(&fact.dead).filter(|a| a.seq > after && !self.cleared(a)).max_by_key(|a| a.seq)
+    }
+
+    /// The latest dead letter read on the thread, unless replayed or dropped here.
+    pub fn dead_letter(&self, thread: &ThreadId) -> Option<&Alert> {
+        self.facts.get(thread)?.dead.as_ref().filter(|a| !self.cleared(a))
+    }
+
+    /// Whether `alert` is of a dead letter replayed or dropped here.
+    fn cleared(&self, alert: &Alert) -> bool {
+        alert.dead.is_some_and(|seq| self.dead_cleared.contains(&seq))
     }
 
     /// Whether `ant` is on the thread where a human reaches it: it posted there to a channel, or a message or

@@ -28,7 +28,7 @@ mod route;
 pub use bar::{Bar, Draft, Edited, Note, Tone};
 pub use drafts::{Conversation, Drafts};
 pub use history::{FILE as HISTORY_FILE, History};
-pub use parse::{COMMANDS, Command, Goto, Notify, OnThread, Slash, Trail, parse};
+pub use parse::{COMMANDS, Command, Dead, Goto, Notify, OnThread, Slash, Trail, parse};
 pub use route::Route;
 
 /// A paste of more bytes than this is staged as a text file rather than put in the bar.
@@ -261,6 +261,7 @@ impl Model {
             Slash::Unremind => Ok(Some(self.set_reminder(self.target()?, None))),
             Slash::Reminders => run(Job::Reminders),
             Slash::Title(text) => run(Job::Title { thread: self.target()?, text }),
+            Slash::Notes(text) => run(Job::Notes { thread: self.target()?, text }),
             Slash::React(reaction) => {
                 let message = match self.page() {
                     Page::Channel(page) => page.post(&self.data).map(|p| p.id),
@@ -300,6 +301,7 @@ impl Model {
                 run(Job::Save(Box::new(listed), to.map(|to| attach::expand(&to))))
             }
             Slash::Retire(ant) => run(Job::Retire { ant }),
+            Slash::Dead(dead) => self.dead(dead),
             Slash::Trail(trail) => run(match trail {
                 Trail::List => Job::TrailList,
                 Trail::Show(what) => Job::TrailShow(what),
@@ -464,8 +466,11 @@ impl Model {
             "answer" => self.question(now).err(),
             "forward" if matches!(self.page(), Page::Thread(page) if page.chosen().is_some()) => None,
             "save" => self.attachment().is_none().then(|| "no attachment on the selected message".to_owned()),
+            "dead" => self.letter(None).err(),
             "grant" | "done" | "undone" | "pin" | "unpin" | "mute" | "unmute" | "snooze" | "unsnooze" | "remind"
-            | "unremind" | "archive" | "unarchive" | "title" | "react" | "tldr" | "tree" | "forward" => target.err(),
+            | "unremind" | "archive" | "unarchive" | "title" | "notes" | "react" | "tldr" | "tree" | "forward" => {
+                target.err()
+            }
             _ => None,
         }
     }
@@ -555,9 +560,9 @@ impl Model {
     }
 
     /// Take how a job the bar ran went: its line and warnings on the status line, opening the thread it started, the
-    /// text and files of a message withdrawn to edit into the bar, the run of a trail planned to confirm, and what it
-    /// shows in the pager; on failure, the error, and its text and quote back as the draft of the conversation it was
-    /// typed in if that holds none.
+    /// text and files of a message withdrawn to edit into the bar, the run of a trail planned to confirm, the dead
+    /// letter it replayed or dropped, and what it shows in the pager; on failure, the error, and its text and quote
+    /// back as the draft of the conversation it was typed in if that holds none.
     pub fn outcome(&mut self, outcome: Outcome) -> Option<Action> {
         self.follow_drafts();
         self.bar.staged.sent(&outcome.text, outcome.result.is_err());
@@ -566,6 +571,7 @@ impl Model {
         match outcome.result {
             Ok(mut done) => {
                 self.data.withdrawn.extend(done.withdrew);
+                self.data.dead_cleared.extend(done.dead);
                 if let Some((text, files)) = done.edit.take() {
                     self.bar.set_text(&text);
                     for path in files {
@@ -1206,6 +1212,31 @@ mod tests {
         m.key(Key::Enter, at(0));
         assert_eq!(m.bar.status.as_ref().unwrap().text, "dropped the file attached");
         assert!(m.bar.staged.names().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notes_posts_to_the_notes_of_the_thread_with_the_files_attached() {
+        let dir = ants_test_support::scratch_dir("bar-notes");
+        std::fs::write(dir.join("plan.md"), b"# plan").unwrap();
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let run = |m: &mut Model, text: &str| {
+            m.follow_drafts();
+            m.bar.focused = true;
+            m.bar.set_text(text);
+            m.key(Key::Enter, at(0))
+        };
+        assert_eq!(run(&mut m, "/notes split the work"), None);
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "no thread open or selected");
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        let notes = Job::Notes { thread: thread.clone(), text: "split the work".into() };
+        assert_eq!(run(&mut m, "/notes split the work"), Some(Action::Run(notes, "/notes split the work".into())));
+        assert!(!m.bar.focused, "a slash command leaves the bar");
+        run(&mut m, &format!("/attach {}/plan.md", dir.display()));
+        let Some(Action::Run(Job::Attached { job, files }, _)) = run(&mut m, "/notes the plan") else { panic!() };
+        assert_eq!((*job, files.len()), (Job::Notes { thread, text: "the plan".into() }, 1));
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "sending with 1 file…");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

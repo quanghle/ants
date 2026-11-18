@@ -52,8 +52,8 @@ impl Model {
         if let Some(taken) = self.overlay_key(key) {
             return taken;
         }
-        if self.interrupting.is_some() {
-            return self.confirm_key(key);
+        if self.interrupting.is_some() || self.dropping.is_some() {
+            return self.confirm_key(key).or_else(|| self.drop_key(key));
         }
         if self.starting.is_some() {
             return self.start_key(key);
@@ -259,6 +259,7 @@ impl Model {
         }
         if self.picking.take().is_some()
             || self.interrupting.take().is_some()
+            || self.dropping.take().is_some()
             || self.starting.take().is_some()
             || self.snoozing.take().is_some()
         {
@@ -307,6 +308,7 @@ impl Model {
             || self.copying.is_some()
             || self.catchup.shown()
             || self.interrupting.is_some()
+            || self.dropping.is_some()
             || self.starting.is_some()
             || self.asking.as_ref().is_some_and(Asking::takes_keys)
             || (!self.bar.focused && matches!(self.page(), Page::Thread(page) if page.listing()))
