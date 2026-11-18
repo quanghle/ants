@@ -99,6 +99,36 @@ async fn sense_tools_are_served_with_its_prefix_and_the_json_argument() {
     assert_eq!(result.structured_content.unwrap()["error"], "unavailable");
 }
 
+/// The instructions the ants MCP server gives a session of `mcp`'s ant as it initializes.
+async fn instructions(mcp: &Mcp) -> String {
+    let (url, token) = http_server(mcp, &from_human().thread_id);
+    let client = http_client(&url, &token).await;
+    client.peer_info().and_then(|info| info.instructions.clone()).expect("instructions")
+}
+
+#[tokio::test]
+async fn the_instructions_leave_memory_to_the_provider_and_tell_the_handoffs_apart() {
+    let homes = [home("instructions"), home("instructions-sense"), home("instructions-other")];
+    let (without, _sent) = start(&homes[0]).await;
+    let text = instructions(&without).await;
+    assert!(text.contains("handoff hands work to this ant itself on another thread"), "{text}");
+    assert!(text.ends_with("Memory and task tools follow the ant's configured instructions."), "{text}");
+    assert!(!text.contains("_* come from"), "{text}");
+
+    let (sense, _sent) = start(&homes[1]).await;
+    sense.with_provider(crate::provider::connect(crate::sense::keeping_none()).await.unwrap());
+    let text = instructions(&sense).await;
+    assert!(text.contains("The tools named sense_* come from sense"), "{text}");
+    assert!(text.contains("sense_handoff, unlike handoff, sends nothing"), "{text}");
+    assert!(!text.contains("configured instructions"), "{text}");
+
+    let (other, _sent) = start(&homes[2]).await;
+    with_fake(&other).await;
+    let text = instructions(&other).await;
+    assert!(text.contains("The tools named send_* come from send"), "{text}");
+    assert!(!text.contains("sense_handoff") && !text.contains("configured instructions"), "{text}");
+}
+
 fn json_object(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     let serde_json::Value::Object(object) = value else { panic!("an object") };
     object

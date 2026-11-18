@@ -181,15 +181,25 @@ fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>, provide
          message, prefixed with an [ants] line naming the question and the option picked. send_message, \
          ask_ant, route, post_channel and post_notes attach files from the working directory (attach), and \
          attach_to_reply attaches them to the turn's final answer, secrets in text files replaced with [redacted]; \
-         read_attachment reads a file attached to a message by the handle listed with it. Memory and task tools \
-         follow the ant's configured instructions."
+         read_attachment reads a file attached to a message by the handle listed with it. handoff hands work to \
+         this ant itself on another thread, where it runs as its own prompt while this one goes on."
     );
-    if let Some(provider) = provider {
-        let _ = write!(
-            text,
-            " The tools named {provider}_* come from {provider}, this ant's provider of identity, memory and work; \
-             each answers as brief text, or as JSON when called with json set to true."
-        );
+    match provider {
+        None => text.push_str(" Memory and task tools follow the ant's configured instructions."),
+        Some(provider) => {
+            let _ = write!(
+                text,
+                " The tools named {provider}_* come from {provider}, this ant's provider of identity, memory and \
+                 work; each answers as brief text, or as JSON when called with json set to true."
+            );
+            if provider == crate::sense::NAME {
+                text.push_str(
+                    " sense_handoff, unlike handoff, sends nothing: it records, as this thread's last write, what \
+                     was done, is in flight and comes next, which the ant's briefs show until a sense_checkpoint \
+                     acknowledges it.",
+                );
+            }
+        }
     }
     if manager {
         text.push_str(
