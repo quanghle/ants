@@ -86,8 +86,8 @@ impl Ground {
 }
 
 async fn persona(items: &dyn Items, ground: &Ground) -> Result<Option<Gathered>, StoreError> {
-    let call = "sense_identity, giving values, voice, boundaries and working_style, a reason and this finding's id as \
-                finding, then answer applied naming the proposal made";
+    let call = "sense_identity, giving values, voice, boundaries, working_style and profile, a reason and this \
+                finding's id as finding, then answer applied naming the proposal made";
     let threads = ground.threads;
     Ok(match persona::current(items).await?.filter(|item| !persona::text(&item.values).is_empty()) {
         Some(item) => ground.inherited("persona", "persona", &item, call),
