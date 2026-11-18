@@ -38,7 +38,7 @@ async fn thread_started(items: &dyn Items, thread: &ThreadId, by: &Starter, repo
 
 /// The identity findings gathered now whose key starts with `kind`, by key with their counts.
 async fn found(items: &dyn Items, kind: &str) -> Vec<(String, Option<u64>)> {
-    let gathered = crate::dream::identity_findings::gather(items, &user("dev-a")).await.unwrap();
+    let gathered = crate::dream::identity_findings::gather(items, &user("dev-a"), &[]).await.unwrap();
     gathered.into_iter().map(|found| (found.key(), found.count)).filter(|(key, _)| key.starts_with(kind)).collect()
 }
 
@@ -135,7 +135,7 @@ async fn a_self_model_unchanged_over_thirty_active_days_with_someone_new_is_foun
     assert!(found(&*items, "stale").await.is_empty(), "29 active days, bob new");
 
     started(&*items, 49..50, &alice, "github.com/o/r", day(30)).await;
-    let stale = crate::dream::identity_findings::gather(&*items, &user("dev-a")).await.unwrap();
+    let stale = crate::dream::identity_findings::gather(&*items, &user("dev-a"), &[]).await.unwrap();
     let stale: Vec<_> = stale.iter().filter(|found| found.kind == FindingKind::StaleSelfModel).collect();
     assert_eq!(stale.len(), 1);
     assert_eq!((stale[0].key(), stale[0].count), ("stale_self_model:self".into(), Some(1)));
@@ -214,7 +214,7 @@ async fn what_a_clone_inherited_is_found_after_five_threads_of_its_own_until_mad
     started(&*items, 24..25, &webhook(), "github.com/o/r", from).await;
     let all = keyed(&[("inherited:persona", 5), ("inherited:self", 5), ("inherited:skill:release", 5)]);
     assert_eq!(found(&*items, "").await, all);
-    let gathered = crate::dream::identity_findings::gather(&*items, &user("dev-a")).await.unwrap();
+    let gathered = crate::dream::identity_findings::gather(&*items, &user("dev-a"), &[]).await.unwrap();
     let ids: Vec<_> = gathered.iter().map(|found| found.items.clone()).collect();
     assert_eq!(ids, [vec![persona_id()], vec![record_id(&Scope::Own).unwrap()], vec![skill_id("release")]]);
     assert!(

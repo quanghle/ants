@@ -599,7 +599,9 @@ do, whatever a sage answers (**The answer**, below):
 - `no_persona`: no persona after 5 threads, and none proposed;
 - `no_self_model`: no self-model after 5 threads;
 - `no_relationship`: no relationship record of a human or ant who started 3 of the ant's threads or more, one finding
-  each, the most threads first;
+  each, the most threads first; for an ant also reviewed by the ant as a sage 3 times or more, the one finding tells
+  of both grounds in place of `no_reviewed_relationship` (below) and rests on both counts, coming again when either
+  steps;
 - `stale_self_model`: a self-model unchanged over 30 active days or more in which the ant worked with a human, ant or
   repository its threads had not before the self-model last changed, naming at most 5 of them;
 - `inherited`: a persona, self-model or skill a clone still holds as inherited ([Identity](#identity)), after 5 threads
@@ -635,7 +637,7 @@ untrusted, after the identity findings and before `vitals`:
 - `unanswered_reviews`: an ant reviewed within the last 14 active days that left half or more of the findings of its
   last 3 reviews with findings unanswered, its latest review left out, one finding each;
 - `no_reviewed_relationship`: no relationship record of an ant reviewed 3 times or more, one finding each, the most
-  reviewed first;
+  reviewed first, none for an ant with a `no_relationship` finding, which covers it (above);
 - `costly_reviews`: an ant reviewed within the last 14 active days whose last 5 reviews of known spend, its latest
   review left out, spent more than 1,000,000 tokens or a cost of 2.00 a review on average and had none of their
   findings applied, one finding each.

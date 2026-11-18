@@ -783,7 +783,8 @@ impl Gathered {
 /// `previous` that still hold, then the packet's own on what they do not cover yet, those on the identity of the ant
 /// first ([`identity_findings`]), which stay whatever a sage answers as the open ones do ([`review::answered`]), then
 /// those on memories and proposals, then those on its practice as a sage from the records of the `reviews` it made
-/// ([`practice_findings`]), then those on the vital signs of the work ([`vitals`]), up to [`MAX_FINDINGS`]. An open finding on the identity, the practice or the vital signs holds while its ground does,
+/// ([`practice_findings`]), then those on the vital signs of the work ([`vitals`]), up to [`MAX_FINDINGS`]. An ant both
+/// worked with and reviewed has one finding on its relationship record, the identity's, telling of both. An open finding on the identity, the practice or the vital signs holds while its ground does,
 /// taking the text and count gathered now. One of the `rested` stays out while what it is about is unchanged and the
 /// ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts; `rested` keeps those resting on.
 async fn findings(
@@ -798,8 +799,15 @@ async fn findings(
     let proposals = proposals(items, start.at).await?;
     let memories: Vec<_> = items.list(MEMORY, usize::MAX).await?.into_iter().filter_map(MemoryItem::of).collect();
     let live = |id: &ItemId| memories.iter().find(|found| found.id() == id).filter(|f| f.memory.status.live());
-    let identity_found = identity_findings::gather(items, &start.writer.ant).await?;
-    let practice = practice_findings::gather(items, reviews, ages).await?;
+    let identity_found = identity_findings::gather(items, &start.writer.ant, reviews).await?;
+    let mut practice = practice_findings::gather(items, reviews, ages).await?;
+    let folded = |reviewed: &Gathered| {
+        reviewed.kind == FindingKind::NoReviewedRelationship
+            && identity_found
+                .iter()
+                .any(|worked| worked.kind == FindingKind::NoRelationship && worked.about == reviewed.about)
+    };
+    practice.retain(|reviewed| !folded(reviewed));
     let vital = vitals::gather(&start.vitals, &vitals::trend(items, number).await?);
     let mut found: Vec<Finding> = Vec::new();
     for open in previous.into_iter().flat_map(Dream::open) {
