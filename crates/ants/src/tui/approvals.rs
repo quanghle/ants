@@ -1,23 +1,26 @@
 //! Tool request cards: the pending tool requests, on home and on their thread, with the ant, the tool and its input,
 //! answered at once with a, A or r through the path of `ants tools approve` and `reject`, the first decision winning
-//! ([`crate::live::Feed::decide`]); Enter shows a request in full as `ants dash` does, where a, A or r answer it
-//! too. n opens the command bar on a note: Enter rejects the request, and once the rejection is stored sends the note
-//! to the ant on the request's thread, as `ants tools reject --note` does; refused, the note comes back into the bar.
+//! ([`crate::live::Feed::decide`]); Enter shows a request in full ([`full`]), where a, A or r answer it too. n opens
+//! the command bar on a note: Enter rejects the request, and once the rejection is stored sends the note to the ant on
+//! the request's thread, as `ants tools reject --note` does; refused, the note comes back into the bar.
 //! A request settled while the UI runs keeps its card a while ([`SETTLED_FOR`]), saying how it was settled and by
 //! whom, unless the human decided it here.
+
+use std::cell::Cell;
 
 use ants_proto::{ApprovalRequest, ThreadId, Verdict};
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::model::{Data, Key};
 use super::style;
 use crate::live;
 use crate::tools::{self, State};
+
+mod full;
+mod text;
 
 /// How long the card of a request settled while the UI runs stays.
 pub const SETTLED_FOR: TimeDelta = TimeDelta::minutes(2);
@@ -160,6 +163,9 @@ pub struct Asking {
     pub storing: bool,
     /// The note to send the ant once the rejection being stored is stored.
     pub note: Option<String>,
+    /// The first row of the body shown in full, and how many rows a page scrolls, as last drawn.
+    top: Cell<usize>,
+    page: Cell<usize>,
 }
 
 /// What a key does to the request being answered.
@@ -182,7 +188,15 @@ pub enum Answer {
 impl Asking {
     /// Show the pending `request` in full.
     pub fn full(request: ApprovalRequest) -> Self {
-        Self { request, state: State::Pending, full: true, storing: false, note: None }
+        Self {
+            request,
+            state: State::Pending,
+            full: true,
+            storing: false,
+            note: None,
+            top: Cell::default(),
+            page: Cell::default(),
+        }
     }
 
     /// Answer the pending `request` with `verdict` at once, its decision then being stored. Refused for a verdict the
@@ -192,7 +206,7 @@ impl Asking {
         if let Some(refusal) = live::refusal(&request, &state, verdict) {
             return Err(refusal);
         }
-        Ok(Self { request, state, full: false, storing: true, note: None })
+        Ok(Self { request, state, full: false, storing: true, note: None, top: Cell::default(), page: Cell::default() })
     }
 
     /// Whether keys go to it rather than to the view: while shown in full.
@@ -201,6 +215,12 @@ impl Asking {
     }
 
     pub fn key(&mut self, key: Key) -> Answer {
+        if self.full
+            && let Some(top) = full::scrolled(key, self.top.get(), self.page.get())
+        {
+            self.top.set(top);
+            return Answer::Keep;
+        }
         if self.storing {
             if self.full && matches!(key, Key::Esc | Key::Char('q')) {
                 self.full = false;
@@ -255,34 +275,9 @@ impl Asking {
     }
 }
 
-/// The request being answered in full over the screen, as `ants dash` shows it.
+/// The request being answered in full over the screen.
 pub fn draw_full(f: &mut Frame, asking: &Asking, now: DateTime<Utc>) {
-    let [_, area, _] =
-        Layout::vertical([Constraint::Percentage(15), Constraint::Percentage(70), Constraint::Percentage(15)])
-            .areas(f.area());
-    let [_, area, _] =
-        Layout::horizontal([Constraint::Percentage(10), Constraint::Percentage(80), Constraint::Percentage(10)])
-            .areas(area);
-    let request = &asking.request;
-    let mut lines: Vec<Line> =
-        tools::details(request, &asking.state, now).lines().map(|l| Line::raw(l.to_owned())).collect();
-    if asking.state != State::Pending {
-        lines.push(Line::raw(format!("settled  {}", how(&asking.state, &request.ant))));
-    }
-    lines.push(Line::raw(""));
-    let id = tools::qualified(request);
-    let prompt = Style::new().fg(style::PENDING).bold();
-    if asking.storing {
-        lines.push(Line::styled("storing the decision…", prompt));
-    } else if asking.state == State::Pending {
-        let keys = keys(request).replace("Enter details", "Enter open its thread · Esc back");
-        lines.push(Line::styled(keys, prompt));
-    } else {
-        lines.push(Line::styled("answered already · Enter open its thread · Esc back", prompt));
-    }
-    f.render_widget(Clear, area);
-    let block = Block::bordered().title(format!(" Tool request {id} ")).border_style(Style::new().fg(style::PENDING));
-    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+    full::draw(f, asking, now);
 }
 
 /// `text` in at most `width` characters, an ellipsis ending it when cut.
