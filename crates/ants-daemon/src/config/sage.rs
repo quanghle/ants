@@ -2,7 +2,7 @@
 //! top-level `sage`, which names the built-in sage ([`super::builtin_sage`]) unless set ([`Sage`]). A sage has no sage
 //! of its own: the built-in ants, and every ant the file names as another's sage, are reviewed by no one ([`settle`],
 //! [`Ant::reviewed_by`]). On a server taking credentials, a machine without the built-in sage's leaves it to another
-//! ([`served_here`]).
+//! ([`super::builtins`]).
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -12,7 +12,7 @@ use ants_proto::UserId;
 use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 
-use super::{Ant, HostSettings};
+use super::Ant;
 
 /// What a `sage` setting names: the ant that reviews, or none (`"none"`), which turns reviews off.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -95,14 +95,6 @@ pub(super) fn settle(ants: &mut [Ant], default: &Sage) -> Result<bool> {
     }
     let sage = UserId::sage();
     Ok(sages.contains(&sage) && !ants.iter().any(|ant| ant.name == sage))
-}
-
-/// Whether the machine serves the built-in `sage` the file names ([`super::builtin_sage`]): unless the server takes
-/// credentials and the sage has none on the machine, it being left to another machine then. A server takes
-/// credentials where the machine's `host` credentials or one of the file's `ants` has some: only `ants auth` issues
-/// them, and a server without authentication has its ants connect as no one, as the sage then does too.
-pub(super) fn served_here(sage: &Ant, ants: &[Ant], host: &HostSettings) -> bool {
-    sage.creds.is_some() || (host.creds.is_none() && ants.iter().all(|ant| ant.creds.is_none()))
 }
 
 #[cfg(test)]
@@ -227,40 +219,5 @@ mod tests {
         assert!(err("sage = \"\"").contains("sage \"\" is neither"));
         assert_eq!("none".parse::<Sage>().unwrap().to_string(), "none");
         assert_eq!("lead".parse::<Sage>().unwrap().to_string(), "lead");
-    }
-
-    #[test]
-    fn on_a_server_taking_credentials_the_builtin_sage_is_served_only_where_its_own_are() {
-        let home = ants_test_support::scratch_dir("sage-creds").canonicalize().unwrap();
-        let auth = home.join(".config/ants/auth");
-        std::fs::create_dir_all(&auth).unwrap();
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let load = |text: &str| {
-            let loaded = parse(&format!("harness = \"copilot\"\n{text}"), &dir.join("config.toml"), &home).unwrap();
-            let names: Vec<String> = loaded.ants.iter().map(|ant| ant.name.to_string()).collect();
-            (names, loaded)
-        };
-        let bare = format!("messenger = false\n{}", ant("dev-b", ""));
-        let (names, open) = load(&bare);
-        assert_eq!(names, ["dev-b", "sage"], "without credentials anywhere the sage connects as no one, as dev-b does");
-        assert_eq!(open.sage_elsewhere, None);
-
-        let leaf = format!("messenger = false\n{}", ant("dev-b", "creds = \"~/.config/ants/auth/dev-b.creds\""));
-        let (names, elsewhere) = load(&leaf);
-        assert_eq!(names, ["dev-b"], "dev-b's credentials tell the server takes some, and the sage has none here");
-        assert_eq!(elsewhere.sage_elsewhere, Some(auth.join("sage.creds")));
-        assert_eq!(elsewhere.ants[0].reviewed_by(), Some(UserId::sage()), "dev-b names the sage served elsewhere");
-
-        std::fs::write(auth.join("messenger.creds"), "").unwrap();
-        assert_eq!(load(&ant("dev-b", "")).0, ["dev-b", "messenger"], "so do the built-in messenger's");
-        std::fs::remove_file(auth.join("messenger.creds")).unwrap();
-        std::fs::write(auth.join("host.creds"), "").unwrap();
-        assert_eq!(load(&bare).0, ["dev-b"], "and the machine's host credentials");
-
-        std::fs::write(auth.join("sage.creds"), "").unwrap();
-        let (names, served) = load(&leaf);
-        assert_eq!(names, ["dev-b", "sage"]);
-        assert_eq!((served.ants[1].creds.as_deref(), served.sage_elsewhere), (Some(&*auth.join("sage.creds")), None));
-        std::fs::remove_dir_all(&home).unwrap();
     }
 }

@@ -1,7 +1,5 @@
 //! `ants daemon`: serve the ants of the config file.
 
-use std::path::Path;
-
 use ants_daemon::admin::ConfigFile;
 use anyhow::Result;
 
@@ -20,25 +18,20 @@ pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Resul
     let mut triggers = reload::Triggers::new(config.clone(), Some(dropins), reload::CHECK_EVERY)?;
     let edited = ConfigFile::new(config, triggers.edits());
     triggers.watch_shared(edited.shared.subscribe());
+    triggers.watch_creds(ants_daemon::config::builtins::creds_files()?);
     let hostname = ants_daemon::colony::machine().await;
-    let listed = serve::ants(args, &default_path, &hostname)?;
+    let listed = serve::ants(args, &default_path, &hostname, conn.creds)?;
     // The ants connect to the file's top-level nats, where it sets one: the address the managed server must answer.
     let local_url = listed.host.as_ref().and_then(|host| host.nats.clone()).unwrap_or_else(|| conn.nats.to_owned());
     let nats_server = listed.nats_server;
     let served = || {
-        let listed = serve::ants(args, &default_path, &hostname)?;
+        let listed = serve::ants(args, &default_path, &hostname, conn.creds)?;
         if listed.nats_server != nats_server {
             tracing::warn!("the [nats_server] table changed; it takes effect on a restart");
         }
         edited.shared.listed(&listed.ants);
-        let mut configs = serve::configs(
-            listed.ants,
-            &listed.harnesses,
-            conn.nats,
-            conn.creds.map(Path::to_path_buf),
-            conn.js_domain.cloned(),
-            Some(&edited.shared),
-        )?;
+        let mut configs =
+            serve::configs(listed.ants, &listed.harnesses, conn.nats, conn.js_domain.cloned(), Some(&edited.shared))?;
         for config in &configs {
             config.pause.credit(edited.pausers.take(&config.ant));
         }

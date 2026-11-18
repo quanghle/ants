@@ -9,6 +9,7 @@ ants auth user alice --human --js-domain hub            # alice.creds (human rol
 ants auth user alice --human --admin --js-domain hub    # alice.creds (human role and admin role)
 ants auth user pa --assistant-of alice --js-domain hub  # pa.creds (ant role, assistant of alice)
 ants auth user dev-a --js-domain hub                    # dev-a.creds (ant role)
+ants auth user messenger --js-domain hub                # messenger.creds (the built-in messenger, served only where they are)
 ants auth user sage --js-domain hub                     # sage.creds (the built-in sage, served only where they are)
 ants auth user github --webhook --to dev-a --js-domain hub
 ants auth user nightly --webhook --to dev-a --js-domain hub  # schedules use webhook credentials
