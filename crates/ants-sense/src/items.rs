@@ -144,6 +144,22 @@ pub(crate) fn values_of(value: &impl Serialize) -> Values {
     }
 }
 
+/// What `read` makes of each of `found`, beside its item. One it cannot read is left out with a warning naming it,
+/// so a malformed item hides itself alone from a listing.
+pub(crate) fn readable<T, E: std::fmt::Display>(
+    found: Vec<Item>,
+    read: impl Fn(&Item) -> Result<T, E>,
+) -> Vec<(Item, T)> {
+    let read = |item: Item| match read(&item) {
+        Ok(read) => Some((item, read)),
+        Err(error) => {
+            tracing::warn!(item = %item.id, kind = %item.kind, "left an unreadable item out: {error}");
+            None
+        }
+    };
+    found.into_iter().filter_map(read).collect()
+}
+
 /// A flag kept only while set: null when unset.
 pub(crate) mod flag {
     use serde::{Deserialize, Deserializer, Serializer};

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::brief::Listing;
-use crate::items::{Item, ItemId, Values, changed, stamp};
+use crate::items::{Item, ItemId, Values, changed, readable, stamp};
 use crate::sanitize::{Limit, Lines, sanitize};
 use crate::store::{Items, StoreError, Write};
 use crate::{Answer, Sense, remind};
@@ -105,11 +105,8 @@ impl Promise {
 
 /// Open commitments, overdue first, then by due time and creation time.
 pub async fn open(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<(Item, Promise)>, StoreError> {
-    let mut promises = Vec::new();
-    for item in items.list_by(KIND, "status", Some(&json!(Status::Open)), usize::MAX).await? {
-        let promise = Promise::of(&item)?;
-        promises.push((item, promise));
-    }
+    let mut promises =
+        readable(items.list_by(KIND, "status", Some(&json!(Status::Open)), usize::MAX).await?, Promise::of);
     promises.sort_by_key(|(item, promise)| (promise.due > now, promise.due, item.created.at, item.id.clone()));
     Ok(promises)
 }

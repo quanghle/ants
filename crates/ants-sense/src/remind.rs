@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::brief::Listing;
-use crate::items::{Item, ItemId, Values, changed, stamp, values_of};
+use crate::items::{Item, ItemId, Values, changed, readable, stamp, values_of};
 use crate::store::{Items, StoreError, Write, read_modify_write};
 use crate::{Answer, Sense};
 
@@ -243,13 +243,10 @@ pub fn remind<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer>
 
 /// Active reminders, including pending and exhausted-but-unacknowledged one-shot reminders, soonest first.
 pub async fn active(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<(Item, Reminder)>, StoreError> {
-    let mut reminders = Vec::new();
-    for item in items.list(KIND, usize::MAX).await? {
-        let reminder = Reminder::of(&item)?;
-        if (reminder.status == Status::Active && !reminder.expired(now)) || reminder.status == Status::Exhausted {
-            reminders.push((item, reminder));
-        }
-    }
+    let mut reminders = readable(items.list(KIND, usize::MAX).await?, Reminder::of);
+    reminders.retain(|(_, reminder)| {
+        (reminder.status == Status::Active && !reminder.expired(now)) || reminder.status == Status::Exhausted
+    });
     reminders.sort_by_key(|(item, reminder)| (reminder.next_due.unwrap_or(DateTime::<Utc>::MAX_UTC), item.id.clone()));
     Ok(reminders)
 }
@@ -306,18 +303,15 @@ pub async fn due(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<Due>, Stor
 
 /// Persisted deliveries still awaiting confirmation, independent of the current clock.
 pub async fn pending_work(items: &dyn Items) -> Result<Vec<Firing>, StoreError> {
-    let mut firings = Vec::new();
-    for item in items.list(KIND, usize::MAX).await? {
-        firings.extend(Reminder::of(&item)?.pending);
-    }
+    let reminders = readable(items.list(KIND, usize::MAX).await?, Reminder::of);
+    let mut firings: Vec<_> = reminders.into_iter().filter_map(|(_, reminder)| reminder.pending).collect();
     firings.sort_by_key(|firing| (firing.at, firing.id.clone()));
     Ok(firings)
 }
 
 async fn schedule(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<Due>, StoreError> {
     let mut due = Vec::new();
-    for item in list_active(items).await? {
-        let reminder = Reminder::of(&item)?;
+    for (item, reminder) in readable(list_active(items).await?, Reminder::of) {
         let at = if reminder.pending.is_some() {
             Some(now)
         } else {
@@ -612,10 +606,8 @@ pub(crate) async fn write_creations(
     // Only a conflict on the quota is decided again: one on the writes given is the caller's to answer.
     read_modify_write(|| async move {
         let quota = items.get(guard).await?;
-        let mut count = 0;
-        for item in list_active(items).await? {
-            count += usize::from(!Reminder::of(&item)?.expired(now));
-        }
+        let active = readable(list_active(items).await?, Reminder::of);
+        let count = active.iter().filter(|(_, reminder)| !reminder.expired(now)).count();
         if count.saturating_sub(removed) + added > MAX_ACTIVE {
             return Err(StoreError::Unavailable(format!("at most {MAX_ACTIVE} active reminders are permitted")));
         }
@@ -659,8 +651,7 @@ pub(crate) async fn resumed(
         return Ok(Vec::new());
     }
     let mut writes = Vec::new();
-    for item in list_active(items).await? {
-        let mut reminder = Reminder::of(&item)?;
+    for (item, mut reminder) in readable(list_active(items).await?, Reminder::of) {
         let Some(expires) = reminder.expires.filter(|at| *at > since) else { continue };
         reminder.expires = Some(add(expires, paused)?);
         writes.push(change_to(&item, &reminder)?);
