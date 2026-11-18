@@ -24,7 +24,8 @@ message instead.
 
 A trail is a `.py` file whose first statement is a literal `meta`: a `name` of letters, digits, `-` and `_`, a
 `description`, and the `phases` the script announces. The meta is read without running the script; a file without it
-is refused. The script runs top to bottom with `await` allowed at the top level, and the value of its last expression,
+is refused. A trail is saved under a name of 1-64 lowercase letters, digits and `-`: its meta's `name` when it is one,
+else the name `ants trail save --name` gives. The script runs top to bottom with `await` allowed at the top level, and the value of its last expression,
 which must be JSON (None, bools, numbers, strings, lists, dicts with string keys), is the run's result.
 
 ```python
@@ -77,8 +78,11 @@ Only `agent()` and `human()` suspend a run. Both are coroutine functions: await 
 
 ### Errors
 
-A step that fails (no such ant, a reply still off its schema after two retries, the run's step limit reached) raises
-`RuntimeError` with the reason where the step is awaited. An exception the script does not catch fails the run with
+A step that fails (an `ant=` naming a human or no valid ant name, a `capability=` no ant but the conductor
+advertises, malformed questions, a reply still off its schema after two retries, the step's message withdrawn from its
+recipient's queue, the run's step limit reached) raises `RuntimeError` with the reason where the step is awaited. A
+step to an ant no daemon serves raises nothing: it waits in that ant's queue, as any message does, until the run ends
+or a human stops it. An exception the script does not catch fails the run with
 its traceback, lines numbered as in the file. Inside `parallel` or `pipeline`, an uncaught exception of one coroutine
 fails the whole gather, and the run abandons the other steps. Catch a step's error inside the per-item coroutine when
 the trail can go on without that item, and log what was lost.
@@ -102,9 +106,9 @@ the trail can go on without that item, and log what was lost.
 | Steps at once | 4 (16) | later steps wait in the run until a step is answered; nothing raises |
 | Turns, spent by the steps as ant messages spend turns | 200 (2000) | the run fails, naming the limit |
 | Wall time | 24 h (7 d) | the run fails, naming the limit |
-| Compute of one resume | 10 s | the run fails, naming the limit |
+| Compute of one resume | 10 s | `TimeoutError`: the run fails, naming the limit |
 | Stored session, the script's suspended state | 768 KiB | the run fails, naming its size and the limit |
-| Memory | 64 MiB | `MemoryError` in the script |
+| Memory | 64 MiB | `MemoryError`: the run fails |
 | Nested calls | 200 | `RecursionError` in the script |
 
 A run's limits are set when it starts, and each step also counts against the spending caps of the ant that answers
@@ -424,8 +428,11 @@ Args:
 
 ## Running a trail
 
-A human starts a run with `ants trail run`, which shows what the run may spend before it starts; an ant starts one
-with the `run_trail` MCP tool, from a saved trail's name or a script of its own; a `[[schedule]]` entry with `trail =`
-starts one on its schedule. Saved trails are colony-wide, put and removed only by humans; a daemon also reads
-`~/.ants/trails/*.py`. A run started on a thread a webhook started may run only a saved trail. `ants trail runs`,
-`show`, `stop` and `resume` manage runs.
+A human starts a run with `ants trail run`, which shows what the run may spend before it starts and takes the limit
+flags `--steps`, `--at-once`, `--turns` and `--wall`; an ant starts one with the `run_trail` MCP tool, from a saved
+trail's `name` or a `script` of its own, on its current thread, getting the run's id at once or, with `wait`, its
+result; a `[[schedule]]` entry with `trail =` (and `args =`, a table) starts a saved trail on its `ant` at each firing.
+Runs of `run_trail` and schedules take the default limits. Saved trails are colony-wide, put and removed only by
+humans; a conductor's daemon also reads `~/.ants/trails/<name>.py` on its machine, the colony's trail winning a name
+both have. A run started on a thread a webhook or schedule started runs only a saved trail, its steps narrowed to
+read-only tools. `ants trail runs`, `show`, `stop` and `resume` manage runs; see the repository's `docs/trails.md`.
