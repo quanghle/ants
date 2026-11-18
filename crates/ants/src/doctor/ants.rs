@@ -10,8 +10,9 @@ use ants_daemon::records::reactions;
 use ants_daemon::secrets::creds::{self, Kind};
 use ants_daemon::secrets::keystore;
 use ants_daemon::{Launch, PermissionPolicy};
-use ants_proto::{MACHINES_BUCKET, Machine, ReactionChange, ReactionsRequest, ReactionsResponder, Uuid};
+use ants_proto::{ColonyEntry, MACHINES_BUCKET, Machine, ReactionChange, ReactionsRequest, ReactionsResponder, Uuid};
 use ants_sense::log::{ChainStatus, SIZE_LIMIT};
+use chrono::{DateTime, Utc};
 
 use super::credentials::{check_creds, check_key};
 use super::server::{Unreached, connect};
@@ -156,26 +157,53 @@ fn issue_host(machine: &Machine) -> String {
     )
 }
 
-/// A failure when sense, the provider of some of `ants`, keeps none of their data: without host credentials, which it
-/// writes their logs with, where the ants have their own, on a server with authentication; `ants daemon` serves them
-/// without it, whole file or one ant (`--ant`) alike. Nothing where no ant uses sense or it keeps their data.
-pub(super) fn check_sense_kept(host: &config::HostSettings, ants: &[Ant], hostname: &str) -> Option<Check> {
+/// A failure when sense keeps none of the data of ants on this machine: of those of `ants` using it, without host
+/// credentials, which it writes their logs with, where the ants have their own, on a server with authentication
+/// (`ants daemon` serves them without it, whole file or one ant (`--ant`) alike); and of the others whose live colony
+/// entries among `colony` as of `now` say so ([`ColonyEntry::sense_unkept`]), on the machine as `hostname` or `host`'s
+/// top-level `machine` names it, as an ant `ants daemon --ant` serves from its flags alone, with no config file.
+/// Nothing where sense keeps the data of them all.
+pub(super) fn check_sense_kept(
+    host: &config::HostSettings,
+    ants: &[Ant],
+    hostname: &str,
+    colony: &[ColonyEntry],
+    now: DateTime<Utc>,
+) -> Option<Check> {
     let sensed: Vec<&str> = ants
         .iter()
         .filter(|a| a.provider_setting == ants_daemon::provider::Setting::Sense)
         .map(|a| a.name.as_str())
         .collect();
-    if sensed.is_empty() || host.creds.is_some() || ants.iter().all(|ant| ant.creds.is_none()) {
+    let uncredentialed = !sensed.is_empty() && host.creds.is_none() && ants.iter().any(|ant| ant.creds.is_some());
+    let named = if uncredentialed { sensed.as_slice() } else { &[] };
+    let here = |e: &ColonyEntry| e.machine == hostname || host.top_machine.as_deref() == Some(e.machine.as_str());
+    let told = colony
+        .iter()
+        .filter(|e| here(e) && ants_daemon::colony::is_live(e, now) && !named.contains(&e.ant.as_str()))
+        .filter_map(|e| Some((&e.ant, e.sense_unkept.as_ref()?)))
+        .map(|(ant, why)| format!("the colony entry of {ant} says sense keeps none of its data: {why}"));
+    let mut details = Vec::new();
+    if uncredentialed {
+        details.push(format!(
+            "sense keeps none of the data of {}: no host credentials, which it writes their logs with on a server with \
+             authentication; they are served without memories, tasks or brief",
+            sensed.join(", ")
+        ));
+    }
+    details.extend(told);
+    if details.is_empty() {
         return None;
     }
-    let detail = format!(
-        "sense keeps none of the data of {}: no host credentials, which it writes their logs with on a server with \
-         authentication; they are served without memories, tasks or brief",
-        sensed.join(", ")
-    );
-    let without = "provider = \"none\" in the [[ant]] table of an ant meant to go without, or at the top of the config \
-                   file for all of them";
-    Some(Check::fail("sense data", detail, vec![issue_host(&host.machine_or(hostname)), without.to_owned()]))
+    let mut fix = vec![issue_host(&host.machine_or(hostname))];
+    if uncredentialed {
+        fix.push(
+            "provider = \"none\" in the [[ant]] table of an ant meant to go without, or at the top of the config file \
+             for all of them"
+                .to_owned(),
+        );
+    }
+    Some(Check::fail("sense data", details.join("; "), fix))
 }
 
 /// A warning when the config file's top-level `machine`, which names the machine in its ants' colony entries, is no

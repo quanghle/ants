@@ -90,7 +90,9 @@ vote or propose. So is a review an ant asks of its sage ([Dreams](#dreams)), who
 - **`ants doctor`:** `sense chain` fails at a break in the ant's log, and `sense size` warns past 32 MiB
   ([cli.md](cli.md)); the ant's brief warns of both too. `sense data` fails when sense keeps none of the ants' data:
   no host credentials on a server with authentication. It names the fixes: `ants auth host MACHINE`, or
-  `provider = "none"` for an ant meant to go without.
+  `provider = "none"` for an ant meant to go without. It fails too for each ant whose live colony entry on the machine
+  says why sense keeps none of its data (`sense_unkept`), as one `ants daemon --ant` serves from flags, with no config
+  file.
 - **Sense keeping none of the ant's data:** the daemon warns once per ant as it starts, and the ant's colony entry
   carries why (`sense_unkept`) until sense keeps the data again, which `ants colony` and `ants ant show` show; the ant
   is still served, without memories, tasks or brief, as one whose external provider is down is. It still answers other
