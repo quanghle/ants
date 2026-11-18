@@ -204,6 +204,7 @@ dependencies = [
  "ants-proto",
  "ants-sense",
  "ants-test-support",
+ "ants-trail",
  "anyhow",
  "async-nats",
  "chrono",

@@ -1331,6 +1331,9 @@ fn trails() {
                 thread: other_thread(),
                 message: id(5),
                 sent_at: at(4),
+                sent: true,
+                turn_budget: 4,
+                retries: 1,
             }],
             queued: vec![QueuedCall { call: 4, function: TrailFunction::Human, args: serde_json::json!(["ship it?"]) }],
         },
@@ -1351,4 +1354,44 @@ fn trails() {
     snap("trail_run_index", &TrailRunIndex { runs: vec![run()] });
     let limits: TrailLimits = parse(r#"{"steps": 10}"#);
     assert_eq!(limits, TrailLimits { steps: 10, ..TrailLimits::DEFAULT }, "missing limits take their defaults");
+}
+
+#[test]
+fn trail_control() {
+    let request = |action| TrailRequest { id: id(1), ant: user("planner"), by: user("alice"), sent_at: at(0), action };
+    snap(
+        "trail_requests",
+        &[
+            request(TrailAction::Start {
+                trail: TrailSource::Saved("release".parse().unwrap()),
+                args: serde_json::json!({"version": "1.2.0"}),
+                thread: thread(),
+                limits: TrailLimits { steps: 20, ..TrailLimits::DEFAULT },
+            }),
+            request(TrailAction::Start {
+                trail: TrailSource::Script("agent('dev-a', 'build it')".to_owned()),
+                args: serde_json::Value::Null,
+                thread: thread(),
+                limits: TrailLimits::DEFAULT,
+            }),
+            request(TrailAction::Stop { run: run() }),
+            request(TrailAction::Resume {
+                run: run(),
+                limits: Some(TrailLimits { steps: 40, ..TrailLimits::DEFAULT }),
+            }),
+        ],
+    );
+    let reply = |outcome| TrailReply { request_id: id(1), ant: user("planner"), outcome };
+    snap(
+        "trail_replies",
+        &[
+            reply(TrailOutcome::Started { run: run() }),
+            reply(TrailOutcome::Stopped {
+                run: run(),
+                waiting: vec![WaitingStep { to: user("dev-a"), message: id(5) }],
+            }),
+            reply(TrailOutcome::Resumed { run: run() }),
+            reply(TrailOutcome::Refused { error: "no saved trail release".to_owned() }),
+        ],
+    );
 }

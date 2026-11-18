@@ -96,6 +96,18 @@ impl RunState {
     pub fn limits(&self) -> &Limits {
         &self.limits
     }
+
+    /// The answered calls, in the order the session receives their answers.
+    #[must_use]
+    pub fn answered(&self) -> &[u32] {
+        &self.answered
+    }
+
+    /// The state under `limits` instead, as when a run that failed on a limit continues under raised ones.
+    pub fn with_limits(self, limits: Limits) -> Result<Self, RunError> {
+        limits.check().map_err(RunError::Limits)?;
+        Ok(Self { limits, ..self })
+    }
 }
 
 /// A run of a trail. The host starts it, performs the calls it hands out, answers them and resumes it until it ends;

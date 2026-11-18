@@ -193,7 +193,7 @@ pub(super) fn human_notify_rights(human: &UserId) -> Vec<String> {
 }
 
 /// The streams and buckets a human sets up, and what of them it reads and writes that an ant may not.
-pub(super) fn human_store_rights(human: &UserId) -> [String; 46] {
+pub(super) fn human_store_rights(human: &UserId) -> [String; 47] {
     let colony_stream = kv_stream(COLONY_BUCKET);
     let channels = kv_stream(CHANNELS_BUCKET);
     let humans = kv_stream(HUMANS_BUCKET);
@@ -249,6 +249,8 @@ pub(super) fn human_store_rights(human: &UserId) -> [String; 46] {
         subject::ALL_APPROVAL_DECISIONS.to_owned(),
         subject::ALL_CANCELS.to_owned(),
         subject::ALL_QUEUE_REQUESTS.to_owned(),
+        // Starting, stopping and resuming an ant's trail runs.
+        subject::ALL_TRAIL_REQUESTS.to_owned(),
         // Sending admin orders, which only an admin's signature makes a daemon carry out.
         subject::ALL_ADMIN_ORDERS_SENT.to_owned(),
         // Answering an ant's request for the reactions to a message it reads.

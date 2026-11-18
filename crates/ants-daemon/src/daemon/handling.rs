@@ -306,6 +306,12 @@ impl Inbox<'_> {
     /// daemon's alone ([`Escalator::took_climb`]), and so is the sage's answer to the review of a dream, unless its
     /// findings prompt the ant ([`crate::sense::Sense::review_answer`]).
     async fn arrived(&self, incoming: &mut Incoming) -> Result<bool> {
+        if let Some(trails) = &self.trails
+            && incoming.post.is_none()
+            && trails.take(&incoming.envelope).await?
+        {
+            return Ok(false);
+        }
         let sender = self.humans.sender_role(&incoming.envelope);
         if let Some(sense) = self.sense.filter(|_| incoming.post.is_none() && sender == Role::Ant)
             && let Some(prompt) = sense.review_answer(self.ant, &mut incoming.envelope).await?

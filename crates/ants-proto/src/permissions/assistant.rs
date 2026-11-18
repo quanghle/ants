@@ -35,7 +35,7 @@ impl Permissions {
     /// answered only under keys naming it ([`assisted_withdrawal_key`]). It gets none of a human's
     /// rights whose subjects do not name who acts, which readers could not tell from its human's: cancelling or asking
     /// for a queue on [`subject::ALL_CANCELS`] and [`subject::ALL_QUEUE_REQUESTS`] (whose request's `by` no reader can
-    /// check), creating message marks in [`ATTEMPTS_BUCKET`], recording an owner under any key, putting dead letters,
+    /// check), starting, stopping or resuming a trail run on [`subject::ALL_TRAIL_REQUESTS`], creating message marks in [`ATTEMPTS_BUCKET`], recording an owner under any key, putting dead letters,
     /// answering an ant's reactions requests or another's renewal, setting another ant's avatar
     /// ([`IDENTITIES_BUCKET`]), saving or deleting a trail ([`TRAILS_BUCKET`], whose entries name the human who saved
     /// them). Nor does it
@@ -72,6 +72,7 @@ impl Permissions {
             // Subjects naming no sender, whose readers could not tell its acts from its human's.
             subject::ALL_CANCELS.to_owned(),
             subject::ALL_QUEUE_REQUESTS.to_owned(),
+            subject::ALL_TRAIL_REQUESTS.to_owned(),
             subject::ALL_REACTIONS_REPLIES.to_owned(),
             subject::ALL_RENEW_REQUESTS.to_owned(),
             subject::DEAD_ALL.to_owned(),

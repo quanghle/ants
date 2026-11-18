@@ -114,7 +114,7 @@ pub fn leaf_user(machine: &Machine) -> String {
 }
 
 /// Refuse `jwt`, uplink credentials of `machine`'s leaf node, if over [`MAX_UPLINK_JWT`]. Each ant adds about 4.8 KB
-/// to them, 5.1 KB with a JetStream domain.
+/// to them, 5.2 KB with a JetStream domain.
 pub(super) fn check_uplink_size(jwt: &str, machine: &Machine) -> Result<()> {
     if jwt.len() > MAX_UPLINK_JWT {
         bail!(
