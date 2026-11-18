@@ -224,7 +224,7 @@ async fn known(items: &dyn Items, at: DateTime<Utc>) -> Result<HashSet<Scope>, S
         match record.origin.by {
             Starter::Human { user } => known.insert(Scope::Human(user)),
             Starter::Ant { user } => known.insert(Scope::Ant(user)),
-            Starter::Webhook { .. } | Starter::Review { .. } | Starter::Provider { .. } => false,
+            Starter::Webhook { .. } | Starter::Review { .. } | Starter::Provider { .. } | Starter::Unknown => false,
         };
         known.extend(record.repo.and_then(|repo| format!("repo:{repo}").parse().ok()));
     }

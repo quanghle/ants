@@ -51,6 +51,8 @@ pub struct Store<L, S, V> {
     log: AntLog<L, S, V>,
     cache: Cache,
     machine: Machine,
+    /// Why the latest [`Store::sync`] failed; none when it succeeded.
+    unsynced: Option<String>,
 }
 
 impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
@@ -77,7 +79,7 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
             }
         };
         log.resume(position);
-        let mut store = Self { log, cache, machine: "offline".parse().expect("a machine name") };
+        let mut store = Self { log, cache, machine: "offline".parse().expect("a machine name"), unsynced: None };
         match store.sync().await {
             Err(StoreError::Log(error)) if is_offline(&error) => {}
             Err(StoreError::Unavailable(_)) if store.cache.pending_conflict()?.is_some() => {}
@@ -104,8 +106,24 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     /// Catch up with the verified log, then append queued local changes in order. A conflict retains the affected
     /// write and those after it, returning an error rather than overwriting either side.
     pub async fn sync(&mut self) -> Result<(), StoreError> {
-        self.catch_up().await?;
-        self.flush().await
+        let synced = match self.catch_up().await {
+            Ok(()) => self.flush().await,
+            failed => failed,
+        };
+        self.unsynced = synced.as_ref().err().map(|error| match error {
+            StoreError::Unavailable(reason) => reason.clone(),
+            error => error.to_string(),
+        });
+        synced
+    }
+
+    /// The outcome of the latest [`Store::sync`], a failure as [`StoreError::Unavailable`]: what a call refusing to
+    /// work offline checks, its provider call having synced as it started ([`Stores::synced`]).
+    pub fn last_sync(&self) -> Result<(), StoreError> {
+        match &self.unsynced {
+            Some(reason) => Err(StoreError::Unavailable(reason.clone())),
+            None => Ok(()),
+        }
     }
 
     async fn catch_up(&mut self) -> Result<(), StoreError> {
@@ -606,6 +624,8 @@ pub trait Items: Send + Sync {
     fn at<'a>(&'a self, id: &'a ItemId, at: DateTime<Utc>) -> BoxFuture<'a, Result<Option<Item>, StoreError>>;
     /// [`Store::sync`].
     fn sync(&self) -> BoxFuture<'_, Result<(), StoreError>>;
+    /// [`Store::last_sync`].
+    fn last_sync(&self) -> BoxFuture<'_, Result<(), StoreError>>;
     /// The sense identity whose items these are.
     fn sense(&self) -> BoxFuture<'_, SenseId>;
     /// The first break of the log read so far ([`crate::log::Chain::broken`]).
@@ -771,6 +791,10 @@ where
         Box::pin(async move { self.lock().await.sync().await })
     }
 
+    fn last_sync(&self) -> BoxFuture<'_, Result<(), StoreError>> {
+        Box::pin(async move { self.lock().await.last_sync() })
+    }
+
     fn sense(&self) -> BoxFuture<'_, SenseId> {
         Box::pin(async move { self.lock().await.sense().clone() })
     }
@@ -800,7 +824,7 @@ pub trait Stores: Send + Sync {
 
     /// The items of `ant` caught up with its log, as a provider call starts, so that the reads of the call serve the
     /// cache; still the items when the hub cannot be reached or writes wait for the log, as the reads meet any failure
-    /// appending them.
+    /// appending them, and a call refusing to work offline checks the outcome ([`Items::last_sync`]).
     fn synced<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         Box::pin(async move {
             let items = self.items(ant).await?;
