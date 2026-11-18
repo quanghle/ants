@@ -4,6 +4,11 @@ use serde_json::{Value, json};
 
 use crate::store::StoreError;
 
+/// The most seconds of an `after` trigger: a year.
+pub const MAX_AFTER_SECONDS: u64 = 365 * 24 * 60 * 60;
+/// The most bytes of each text of a condition.
+pub const MAX_CONDITION_BYTES: usize = 4096;
+
 /// Reminder time zones are deliberately UTC, so a restart or host timezone change cannot move a firing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -27,8 +32,8 @@ impl Trigger {
         match self {
             Self::At { .. } => Ok(()),
             Self::After { seconds } => {
-                if *seconds == 0 || *seconds > 31_536_000 {
-                    return Err("after.seconds must be between 1 and 31536000.".into());
+                if !(1..=MAX_AFTER_SECONDS).contains(seconds) {
+                    return Err(format!("after.seconds must be between 1 and {MAX_AFTER_SECONDS}."));
                 }
                 Ok(())
             }
@@ -111,12 +116,17 @@ fn validate_condition(condition: &Value) -> Result<(), String> {
     }
     let text = |name: &str| -> Result<&str, String> {
         let value = map.get(name).and_then(Value::as_str).ok_or_else(|| format!("condition.{name} is required."))?;
-        if value.trim().is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
-            return Err(format!("condition.{name} must be a nonempty single-line string up to 4096 bytes."));
+        if value.trim().is_empty() || value.len() > MAX_CONDITION_BYTES || value.chars().any(char::is_control) {
+            return Err(format!(
+                "condition.{name} must be a nonempty single-line string up to {MAX_CONDITION_BYTES} bytes."
+            ));
         }
-        let clean =
-            crate::sanitize::sanitize(value, crate::sanitize::Lines::Single, crate::sanitize::Limit::Bytes(4096))
-                .map_err(|error| error.to_string())?;
+        let clean = crate::sanitize::sanitize(
+            value,
+            crate::sanitize::Lines::Single,
+            crate::sanitize::Limit::Bytes(MAX_CONDITION_BYTES),
+        )
+        .map_err(|error| error.to_string())?;
         if clean.text != value {
             return Err(format!("condition.{name} contains hidden characters or secrets."));
         }
@@ -169,7 +179,7 @@ fn validate_condition(condition: &Value) -> Result<(), String> {
 }
 
 pub(super) fn schema() -> Value {
-    let text = json!({"type":"string","minLength":1,"maxLength":4096});
+    let text = json!({"type":"string","minLength":1,"maxLength":MAX_CONDITION_BYTES});
     let condition = |kind: &str, fields: Value, required: &[&str]| {
         let mut properties = fields.as_object().unwrap().clone();
         properties.insert("kind".into(), json!({"const":kind}));
@@ -190,7 +200,7 @@ pub(super) fn schema() -> Value {
         {"type":"object","additionalProperties":false,"required":["kind","at"],
          "properties":{"kind":{"const":"at"},"at":{"type":"string","format":"date-time"}}},
         {"type":"object","additionalProperties":false,"required":["kind","seconds"],
-         "properties":{"kind":{"const":"after"},"seconds":{"type":"integer","minimum":1,"maximum":31536000}}},
+         "properties":{"kind":{"const":"after"},"seconds":{"type":"integer","minimum":1,"maximum":MAX_AFTER_SECONDS}}},
         {"type":"object","additionalProperties":false,"required":["kind","time","timezone"],
          "properties":{"kind":{"const":"daily"},"time":{"type":"string","pattern":"^([01][0-9]|2[0-3]):[0-5][0-9]$"},
                        "timezone":{"const":"UTC"}}},

@@ -14,13 +14,12 @@ use ants_proto::SenseId;
 use ants_proto::provider::{CallContext, ToolCall};
 use chrono::SecondsFormat;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::Sense;
 use crate::items::{Item, ItemId};
 use crate::memory::{
-    MAX_TITLE_CHARS, Scope, Trust, holds_recalled_block, holds_recalled_marker, invalid, redacted, sanitized,
-    unavailable,
+    Given, MAX_TITLE_CHARS, Scope, Trust, holds_recalled_block, holds_recalled_marker, redacted, sanitized,
 };
 use crate::sanitize::{Limit, sanitize_body, sanitize_title};
 use crate::store::{Items, StoreError};
@@ -159,38 +158,31 @@ pub fn is_record(kind: &str) -> bool {
     kind == SELF_MODEL || kind == RELATIONSHIP
 }
 
-/// Answers a `sense_remember` call of `kind` [`SELF_MODEL`] or [`RELATIONSHIP`]: replace the record from the revision
-/// read, none or 0 for the first.
-pub(crate) async fn remember(sense: &Sense, call: &ToolCall, kind: &str) -> Result<Answer, Answer> {
-    let arguments = &call.arguments;
-    let scope = match (kind, text(arguments, "scope")?.map(str::parse::<Scope>).transpose().map_err(invalid)?) {
+/// Answers a `sense_remember` call `given` of kind [`SELF_MODEL`] or [`RELATIONSHIP`]: replace the record from the
+/// revision read, none or 0 for the first.
+pub(crate) async fn remember(sense: &Sense, call: &ToolCall, given: Given) -> Result<Answer, Answer> {
+    let kind = given.kind.as_deref().unwrap_or_default();
+    let scope = match (kind, given.scope) {
         (SELF_MODEL, None | Some(Scope::Own)) => Scope::Own,
-        (SELF_MODEL, Some(_)) => return Err(invalid("The self-model's scope is self.".into())),
+        (SELF_MODEL, Some(_)) => return Err(Answer::invalid("The self-model's scope is self.")),
         (_, Some(scope @ (Scope::Human(_) | Scope::Ant(_)))) => scope,
-        (_, _) => return Err(invalid("A relationship record's scope is human:<name> or ant:<name>.".into())),
+        (_, _) => return Err(Answer::invalid("A relationship record's scope is human:<name> or ant:<name>.")),
     };
-    let title = text(arguments, "title")?;
+    let title = given.title.as_deref();
     let title =
         sanitized("title", title, sanitize_title(title.unwrap_or_default().trim(), Limit::Chars(MAX_TITLE_CHARS)))?;
-    let body = text(arguments, "body")?;
+    let body = given.body.as_deref();
     let body = sanitized("body", body, sanitize_body(body.unwrap_or_default().trim(), Limit::Bytes(MAX_RECORD_BYTES)))?;
     if holds_recalled_block(&title.text) || holds_recalled_block(&body.text) {
         let message = "Recalled memories are not stored again: write what was learned in new words.";
         return Err(Answer::error("recalled_block", message.into()));
     }
-    let revision = match arguments.get("revision") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(value.as_u64().ok_or_else(|| invalid("revision must be a revision number.".into()))?),
-    };
+    let revision = given.revision;
     let context = &call.context;
     let untrusted = if !context.trusted() {
         Some("the thread came from a webhook")
-    } else if let Some(quotes) = text(arguments, "quotes")? {
-        match quotes {
-            "recalled" => Some("it quotes recalled memories"),
-            "external" => Some("it quotes outside content"),
-            other => return Err(invalid(format!("quotes must be recalled or external, not {other:?}."))),
-        }
+    } else if let Some(quotes) = given.quotes {
+        Some(quotes.why())
     } else if holds_recalled_marker(&title.text) || holds_recalled_marker(&body.text) {
         Some("it quotes recalled memories")
     } else {
@@ -212,7 +204,7 @@ pub(crate) async fn remember(sense: &Sense, call: &ToolCall, kind: &str) -> Resu
     };
     values.insert(crate::fork::INHERITED.into(), Value::Null);
 
-    let items = sense.items(&context.ant).await.map_err(unavailable)?;
+    let items = sense.items(&context.ant).await?;
     let id = record_id(&record.scope).expect("a record's scope");
     let by = context.thread.as_str();
     let item = match items.put(&id, kind, values, Some(revision.unwrap_or(0)), by).await {
@@ -225,7 +217,7 @@ pub(crate) async fn remember(sense: &Sense, call: &ToolCall, kind: &str) -> Resu
             );
             return Err(Answer::error("not_found", message));
         }
-        Err(e) => return Err(unavailable(e)),
+        Err(e) => return Err(e.into()),
     };
     let (redacted_text, redacted_json) = redacted(&redactions);
     let mut text = format!("Saved {} {id}: revision {}.", name(&record.scope), item.revision);
@@ -249,14 +241,6 @@ fn name(scope: &Scope) -> String {
     match scope {
         Scope::Own => "the self-model".into(),
         scope => format!("the relationship record of {scope}"),
-    }
-}
-
-fn text<'a>(arguments: &'a Map<String, Value>, name: &str) -> Result<Option<&'a str>, Answer> {
-    match arguments.get(name) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(text)),
-        Some(_) => Err(invalid(format!("{name} must be a string."))),
     }
 }
 

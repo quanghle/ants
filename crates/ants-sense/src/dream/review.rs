@@ -14,11 +14,11 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use super::packet::{commits, finding_line};
-use super::{BY, Dream, Finding, FindingKind, MAX_DREAM_WRITES, MAX_FINDINGS, State, TRIES, last};
+use super::{BY, Dream, Finding, FindingKind, MAX_DREAM_WRITES, MAX_FINDINGS, State, last};
 use crate::items::{ItemId, Values};
 use crate::memory::Trust;
 use crate::sanitize::{Limit, sanitize_title};
-use crate::store::{Items, StoreError};
+use crate::store::{Items, StoreError, read_modify_write};
 
 /// What opens the block the sage's findings are shown to the ant in: another ant's suggestions, not instructions.
 /// Markers of the block in the sage's text are made plain brackets, so no finding closes it early.
@@ -229,8 +229,8 @@ pub async fn answered(
     message: Uuid,
     text: Option<&str>,
 ) -> Result<Option<Reviewed>, StoreError> {
-    let parsed = text.and_then(parse);
-    for _ in 0..TRIES {
+    let parsed = &text.and_then(parse);
+    read_modify_write(|| async move {
         let Some((mut dream, revision)) = last(items).await? else { return Ok(None) };
         let Some(mut review) = dream.review.clone().filter(|review| review.thread == *thread) else { return Ok(None) };
         if dream.sage.as_ref() != Some(sage) {
@@ -241,7 +241,7 @@ pub async fn answered(
             return Ok(Some(if prompted { Reviewed::Prompt(prompt(&dream, sage)) } else { Reviewed::Quiet }));
         }
         review.answer = Some(message);
-        let reviewed = match &parsed {
+        let reviewed = match parsed {
             Some(parsed) if !parsed.findings.is_empty() => {
                 let mut findings = sage_findings(items, &dream, &parsed.findings).await?;
                 findings.extend(dream.findings.iter().filter(|finding| finding.dream() < dream.number).cloned());
@@ -269,13 +269,10 @@ pub async fn answered(
         values.insert("thread".into(), json!(dream.thread));
         values.insert("findings".into(), json!(dream.findings));
         values.insert("review".into(), json!(dream.review));
-        match items.change(&Dream::id(dream.number), values, Some(revision), BY).await {
-            Ok(_) => return Ok(Some(reviewed)),
-            Err(StoreError::Conflict { .. }) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Err(StoreError::Unavailable("the dreams kept changing meanwhile".into()))
+        items.change(&Dream::id(dream.number), values, Some(revision), BY).await?;
+        Ok(Some(reviewed))
+    })
+    .await
 }
 
 /// The sage's `given` findings as findings of `dream`, numbered from 1: untrusted when one cites a thread of untrusted
@@ -360,20 +357,17 @@ fn prompt(dream: &Dream, sage: &UserId) -> String {
 
 /// Note that the review of dream `number` was sent to the sage.
 pub async fn review_sent(items: &dyn Items, number: u64) -> Result<(), StoreError> {
-    for _ in 0..TRIES {
+    read_modify_write(|| async move {
         let gone = || StoreError::NotFound(Dream::id(number));
         let (mut dream, revision) = super::get(items, number).await?.ok_or_else(gone)?;
         let Some(review) = dream.review.as_mut().filter(|review| !review.sent) else { return Ok(()) };
         review.sent = true;
         let mut values = Values::new();
         values.insert("review".into(), json!(dream.review));
-        match items.change(&Dream::id(number), values, Some(revision), BY).await {
-            Ok(_) => return Ok(()),
-            Err(StoreError::Conflict { .. }) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Err(StoreError::Unavailable(format!("dream {number} kept changing meanwhile")))
+        items.change(&Dream::id(number), values, Some(revision), BY).await?;
+        Ok(())
+    })
+    .await
 }
 
 /// The ids of the open findings resting on untrusted text of the last dream when `thread` is its dream thread: what a
