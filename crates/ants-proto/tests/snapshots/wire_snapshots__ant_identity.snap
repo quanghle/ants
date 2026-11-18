@@ -1,0 +1,22 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "id": "0123456789abcdef0123456789abcdef",
+  "born": "2025-01-01T12:00:00Z",
+  "avatar": "lead",
+  "color": "azure",
+  "prompts": 42,
+  "moved": {
+    "at": "2025-01-01T12:02:00Z",
+    "by": "alice"
+  },
+  "cloned_from": {
+    "ant": "dev-b",
+    "id": "fedcba9876543210fedcba9876543210",
+    "at": "2025-01-01T12:01:00Z"
+  },
+  "sense": "01JD8X5G3T7Q9R2M4N6P8S0V1W"
+}

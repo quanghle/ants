@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_proto::UserId;
-use ants_proto::provider::{CallContext, Host, RpcError, WakeRequest};
+use ants_proto::provider::{Host, RpcError, WakeRequest};
 use ants_sense::Sense;
 use ants_sense::memory;
 use ants_sense::remind::{self, ConditionCheck, Firing};
@@ -62,11 +62,12 @@ impl Drop for Serving {
 /// Start only after the ant holds its colony registration and its wake service is installed.
 pub(super) fn serve(
     sense: Arc<Sense>,
+    wakers: crate::provider::wake::Wakers,
     config: &crate::daemon::Config,
     machine: &str,
     dreaming: Arc<dyn Dreaming>,
 ) -> Serving {
-    let host = crate::provider::wake::Ants::default();
+    let host = crate::provider::wake::Ants::new(wakers);
     host.named(ants_sense::NAME);
     let settings = Settings {
         ant: config.ant.clone(),
@@ -81,11 +82,11 @@ pub(super) fn serve(
 
 fn start(sense: Arc<Sense>, host: Arc<dyn Host>, settings: Settings) -> Serving {
     Serving(Mutex::new(Some(tokio::spawn(async move {
-        // Subscribe first: a successful tool call during a schedule read must wake the following sleep.
-        let mut changes = sense.changes();
+        // Subscribe first: a call changing the ant's items during a schedule read must wake the following sleep.
+        let mut changes = sense.changes(&settings.ant);
         loop {
             let result = async {
-                let items = sense.items(&settings.ant).await?;
+                let items = sense.synced(&settings.ant).await?;
                 cycle(&sense, &*items, &*host, &settings, Utc::now()).await
             }
             .await;
@@ -125,10 +126,16 @@ async fn cycle(
         return Ok(None);
     }
     let started = tokio::time::Instant::now();
+    // A failed wake ends the firings but holds back neither maintenance nor dreams, the cycle ending in its error.
+    let mut undelivered = None;
     for firing in remind::pending_work(items).await? {
-        deliver(items, host, &settings.ant, &firing).await?;
+        if let Err(error) = deliver(items, host, &settings.ant, &firing).await {
+            undelivered = Some(error);
+            break;
+        }
     }
-    for due in remind::due(items, now).await? {
+    let due = if undelivered.is_none() { remind::due(items, now).await? } else { Vec::new() };
+    for due in due {
         let at = now + chrono::Duration::from_std(started.elapsed()).expect("a bounded check");
         let firing = if due.condition.is_some() {
             match remind::reserve_condition(items, &due.id, at).await? {
@@ -138,8 +145,11 @@ async fn cycle(
         } else {
             remind::prepare_firing(items, &due.id, at, "reminder time reached").await?
         };
-        if let Some(firing) = firing {
-            deliver(items, host, &settings.ant, &firing).await?;
+        if let Some(firing) = firing
+            && let Err(error) = deliver(items, host, &settings.ant, &firing).await
+        {
+            undelivered = Some(error);
+            break;
         }
     }
     let now = now + chrono::Duration::from_std(started.elapsed()).expect("a bounded check");
@@ -154,6 +164,9 @@ async fn cycle(
         })),
         None => None,
     };
+    if let Some(error) = undelivered {
+        return Err(error);
+    }
     let next = [memory::next_maintenance(items).await?, remind::next_due(items, now).await?, dream];
     let next = next.into_iter().flatten().min();
     // A concurrent schedule update or a stale reservation must not turn a due record into a busy loop.
@@ -167,20 +180,14 @@ async fn probe(
     settings: &Settings,
     check: &ConditionCheck,
 ) -> Result<Option<Firing>> {
-    let Some(item) = items.get(&check.id).await?.filter(|item| item.revision == check.revision) else {
+    if items.get(&check.id).await?.is_none_or(|item| item.revision != check.revision) {
         return Ok(None);
-    };
-    let source = item
-        .values
-        .get("source_context")
-        .or_else(|| item.values.get(ants_sense::memory::WRITER))
-        .and_then(|value| serde_json::from_value::<CallContext>(value.clone()).ok())
-        .and_then(|mut context| {
-            context.ant = settings.ant.clone();
-            context.thread = item.text("thread").parse().ok()?;
-            context.machine.clone_from(&settings.machine);
-            Some(context)
-        });
+    }
+    let source = check.source.clone().map(|mut context| {
+        context.ant = settings.ant.clone();
+        context.machine.clone_from(&settings.machine);
+        context
+    });
     let workdir = source
         .as_ref()
         .and_then(|context| sense.workdir(context))
@@ -188,7 +195,9 @@ async fn probe(
             check
                 .workdir
                 .as_ref()
-                .filter(|workdir| workdir.is_absolute() && item.text("workdir_machine") == settings.machine)
+                .filter(|workdir| {
+                    workdir.is_absolute() && check.workdir_machine.as_deref() == Some(settings.machine.as_str())
+                })
                 .cloned()
         })
         .unwrap_or_else(|| settings.workdir.clone());
@@ -215,7 +224,7 @@ async fn deliver(items: &dyn Items, host: &dyn Host, ant: &UserId, firing: &Firi
         id: firing.id.clone(),
     };
     match host.wake(request.clone()).await {
-        Err(error) if request.thread.is_some() && unknown_thread(&error) => {
+        Err(error) if request.thread.is_some() && error.code == RpcError::UNKNOWN_THREAD => {
             // A source session may be absent after a restart. Keep the durable firing identity on the new thread.
             request.thread = None;
             host.wake(request).await?;
@@ -226,10 +235,6 @@ async fn deliver(items: &dyn Items, host: &dyn Host, ant: &UserId, firing: &Firi
     }
     remind::confirm_delivered(items, &firing.reminder, &firing.id, Utc::now()).await?;
     Ok(())
-}
-
-fn unknown_thread(error: &RpcError) -> bool {
-    error.code == RpcError::INVALID_PARAMS && error.message.contains(" is no thread of ant ")
 }
 
 async fn wait(changes: &mut watch::Receiver<()>, next: Option<DateTime<Utc>>) -> bool {

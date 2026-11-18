@@ -1,5 +1,5 @@
 //! Proposals (requirements ants-x39hk.6.5 and ants-x39hk.6.7): how the ant changes its persona ([`crate::persona`]) and
-//! its skills ([`crate::skill`]). A call of `sense_persona` or `sense_skill` changes nothing yet: it writes a proposal,
+//! its skills ([`crate::skill`]). A call of `sense_identity` or `sense_skill` changes nothing yet: it writes a proposal,
 //! an item of kind [`PROPOSAL`] holding the whole version proposed, its reason and the revision of its target it was
 //! made from. A target has at most one pending proposal, a new one superseding it.
 //!
@@ -59,6 +59,23 @@ pub struct Decided {
     pub at: DateTime<Utc>,
     pub dream: u64,
     pub finding: String,
+}
+
+/// What a confirmed version of a target holds beside its content ([`content`]): the proposal confirmed, when, and
+/// the reason it was proposed for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Confirmation {
+    pub proposal: Option<ItemId>,
+    pub confirmed: Option<DateTime<Utc>>,
+    pub reason: String,
+}
+
+impl Confirmation {
+    /// The confirmation `values`, a version of a target, hold; empty when they hold none.
+    pub fn of(values: &Values) -> Self {
+        serde_json::from_value(Value::Object(values.clone())).unwrap_or_default()
+    }
 }
 
 /// A proposal, as its item holds it.
@@ -208,7 +225,8 @@ pub(crate) async fn refuse_untrusted(
 
 /// Write `proposal`, made in `context`, superseding the pending proposal of its target in the same event. Returns it
 /// and the id of the one it superseded.
-pub async fn propose(items: &dyn Items, proposal: Proposal) -> Result<(ProposalItem, Option<ItemId>), StoreError> {
+pub async fn propose(items: &dyn Items, mut proposal: Proposal) -> Result<(ProposalItem, Option<ItemId>), StoreError> {
+    proposal.version.insert("reason".into(), json!(proposal.reason));
     let (by, proposal) = (&proposal.writer.thread.to_string(), &proposal);
     read_modify_write(|| async move {
         let earlier = pending_for(items, &proposal.target).await?;
@@ -244,7 +262,7 @@ pub(crate) async fn decide(
     };
     read_modify_write(|| async move {
         let gone = || StoreError::NotFound(id.clone());
-        let (mut dream, revision) =
+        let (dream, revision) =
             dream::get(items, number).await?.ok_or_else(|| StoreError::NotFound(Dream::id(number)))?;
         if dream.state == State::Done {
             return Ok(Err(Answer::error("done", format!("Dream {number} is done: its diary is written."))));
@@ -256,11 +274,10 @@ pub(crate) async fn decide(
             Judgement::Rejected => Status::Rejected,
             Judgement::Deferred => return Ok(Ok(found)),
         };
-        dream.verdicts.retain(|earlier| earlier.finding != verdict.finding);
-        dream.verdicts.push(verdict.clone());
-        let mut values = Values::new();
-        values.insert("verdicts".into(), json!(dream.verdicts));
-        let mut writes = vec![Write::Change { id: Dream::id(number), values, expected: Some(revision) }];
+        let mut judged = dream.clone();
+        judged.verdicts.retain(|earlier| earlier.finding != verdict.finding);
+        judged.verdicts.push(verdict.clone());
+        let mut writes = vec![dream.change(&judged, revision)];
         let decided_here = proposal.decided.as_ref().is_some_and(|decided| decided.finding == finding.id);
         match (proposal.status, status) {
             (Status::Pending, _) => {}
@@ -326,8 +343,7 @@ async fn check(items: &dyn Items, found: &ProposalItem, now: DateTime<Utc>) -> R
         return Err(Answer::error("stale", message));
     }
     if proposal.kind == crate::persona::PERSONA
-        && let Some(confirmed) = target.as_ref().and_then(|target| target.values.get("confirmed"))
-        && let Ok(confirmed) = serde_json::from_value::<DateTime<Utc>>(confirmed.clone())
+        && let Some(confirmed) = target.as_ref().and_then(|target| Confirmation::of(&target.values).confirmed)
         && now < confirmed + Duration::hours(crate::persona::PERSONA_EVERY_HOURS)
     {
         let message = format!(

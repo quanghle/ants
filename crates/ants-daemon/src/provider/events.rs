@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ants_proto::provider::{BoxFuture, Capability, Connected, Event, EventKind, Origin, RpcError};
@@ -51,16 +51,11 @@ const LAST_RETRY: Duration = Duration::from_mins(5);
 /// How long a stopping daemon waits for the provider to ack an ant's retirement before the ant leaves the colony.
 pub const RETIRED_WAIT: Duration = Duration::from_secs(10);
 
-/// What connects the provider of an ant: [`super::of`] in the daemon.
+/// What connects the provider of an ant: [`super::Providers::of`] in the daemon.
 pub type Resolve = Arc<dyn Fn(UserId) -> BoxFuture<'static, Option<Connected>> + Send + Sync>;
 
-/// The outbox of the process, delivering to each ant's provider ([`super::of`]).
-pub fn outbox() -> &'static Outbox {
-    static OUTBOX: OnceLock<Outbox> = OnceLock::new();
-    OUTBOX.get_or_init(|| Outbox::new(Arc::new(|ant: UserId| Box::pin(async move { super::of(&ant).await }))))
-}
-
-/// The queues of the ants' events and the one task delivering them, started on the first event.
+/// The queues of the ants' events and the one task delivering them, started on the first event: one a process
+/// ([`super::Providers::outbox`]).
 #[derive(Clone)]
 pub struct Outbox(Arc<Inner>);
 

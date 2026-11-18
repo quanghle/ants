@@ -1,9 +1,9 @@
-use ants_proto::{Envelope, NoticeKind, ThreadId};
+use ants_proto::{ColonyEntry, Envelope, NoticeKind, ThreadId};
 use ants_sense::dream::{self, Commit, REVIEW_BEGIN, Review, Thread};
 use ants_sense::proposal;
 use chrono::DateTime;
 
-use super::super::dreams::{Dreams, review_answer};
+use super::super::dreams::{Dreams, review_answer, serving_sage};
 use super::*;
 
 #[derive(Default)]
@@ -61,6 +61,7 @@ impl Fake {
                 started_by: "human alice".into(),
                 text: format!("the work of {id}"),
                 timeline: format!("the calls of {id}"),
+                actions: Vec::new(),
             })
             .collect();
     }
@@ -168,6 +169,32 @@ async fn a_takeover_wakes_a_dream_begun_but_not_woken_and_begins_none_again() {
     *fake.idle.locked() = Some(now + chrono::Duration::hours(1));
     cycle(&Sense::new(), &*takeover, &host, &dreaming(&fake), hours_later).await.unwrap();
     assert_eq!(host.requests.locked().len(), 2, "no second dream within a day");
+}
+
+#[tokio::test]
+async fn a_refused_wake_holds_back_neither_maintenance_nor_the_dream() {
+    let (sense, stores) = setup().await;
+    let id = create(&sense, json!({"kind":"at","at":Utc::now()})).await;
+    let fake = Arc::new(Fake::default());
+    let now = Utc::now();
+    fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false)]);
+    let host = Wakes::default();
+    let refused = RpcError::unavailable("ant dev-scheduler was woken 60 times within the hour");
+    host.errors.locked().extend(std::iter::repeat_n(refused, 10));
+
+    let error = cycle(&sense, &*stores.items, &host, &dreaming(&fake), now).await.unwrap_err();
+    assert!(format!("{error:#}").contains("60 times within the hour"), "{error:#}");
+    assert!(memory::last_maintenance(&*stores.items).await.unwrap().is_some(), "maintenance ran");
+    assert!(last(&*stores.items).await.unwrap().thread.is_none(), "the dream began, its wake refused");
+    assert_eq!(host.requests.locked().len(), 2, "the reminder's wake, then the dream's");
+    assert_eq!(remind::pending_work(&*stores.items).await.unwrap()[0].id, format!("{id}:1"));
+
+    host.errors.locked().clear();
+    cycle(&sense, &*stores.items, &host, &dreaming(&fake), now + chrono::Duration::minutes(1)).await.unwrap();
+    assert_eq!(host.requests.locked()[2].id, format!("{id}:1"));
+    assert!(remind::pending_work(&*stores.items).await.unwrap().is_empty());
+    assert!(stores.items.get(&id).await.unwrap().unwrap().values.contains_key("delivered"));
+    assert!(last(&*stores.items).await.unwrap().thread.is_some(), "the dream woken too");
 }
 
 fn sage() -> UserId {
@@ -287,6 +314,35 @@ async fn an_ant_without_a_sage_serving_it_or_its_own_sage_dreams_on_the_packet_a
         let begun = last(&*items).await.unwrap();
         assert_eq!((begun.sage, begun.review, begun.state), (None, None, dream::State::Fallback));
     }
+}
+
+#[test]
+fn an_ant_a_live_ant_names_as_its_sage_sends_its_own_sage_no_review_packet() {
+    let now = Utc::now();
+    let listed = |ant: &str, machine: &str, sage: Option<&str>, beat: DateTime<Utc>| -> ColonyEntry {
+        serde_json::from_value(json!({
+            "ant": ant, "machine": machine, "instance": "run-1", "harness": "copilot", "capabilities": [],
+            "started_at": beat, "heartbeat_at": beat, "activity": "idle", "handling": 0, "harnesses": 0,
+            "version": "0.1.0", "perms": 1, "sage": sage,
+        }))
+        .unwrap()
+    };
+    let (lead, sage) = ("lead".parse::<UserId>().unwrap(), UserId::sage());
+    let serving = |entries: &[ColonyEntry]| serving_sage(&lead, sage.clone(), entries, now);
+    let (own, served) = (listed("lead", "m1", Some("sage"), now), listed("sage", "m1", None, now));
+    assert_eq!(serving(&[own.clone(), served.clone()]), Some(sage.clone()), "no other ant names lead");
+    let other = listed("dev-b", "m1", Some("sage"), now);
+    assert_eq!(serving(&[other, own.clone(), served.clone()]), Some(sage.clone()));
+
+    let elsewhere = listed("dev-a", "m2", Some("lead"), now);
+    assert_eq!(
+        serving(&[elsewhere, own.clone(), served.clone()]),
+        None,
+        "dev-a, whose config on another machine or shared settings name lead, makes lead a sage"
+    );
+    let stale = listed("dev-a", "m2", Some("lead"), now - chrono::Duration::minutes(5));
+    assert_eq!(serving(&[stale, own.clone(), served]), Some(sage.clone()), "an ant no daemon serves now makes none");
+    assert_eq!(serving(&[own]), None, "no daemon serves the sage");
 }
 
 #[tokio::test]

@@ -42,10 +42,12 @@ pub fn about(e: &ColonyEntry, now: DateTime<Utc>) -> Vec<(&'static str, String)>
         ("workdir", e.workdir.clone().unwrap_or_else(|| "-".to_owned())),
         ("capabilities", or_none(e.capabilities.clone())),
         ("escalates to", or_none(e.escalate_to.iter().map(ToString::to_string).collect())),
+        ("sage", e.sage.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string)),
         ("harnesses", format!("{} running, {} messages in hand", e.harnesses, e.handling)),
         ("version", format!("{} (permissions {})", e.version, e.perms)),
         ("up", format!("{}, heartbeat {} ago", short(since(e.started_at, now)), short(since(e.heartbeat_at, now)))),
         ("whoami", e.whoami.as_deref().map_or_else(|| "-".to_owned(), |w| w.trim().to_owned())),
+        ("profile", e.profile.as_deref().map_or_else(|| "-".to_owned(), |p| p.trim().to_owned())),
     ]
 }
 
@@ -250,6 +252,11 @@ mod tests {
         assert_eq!(rows["escalates to"], "-");
         assert_eq!(rows["up"], "2h, heartbeat 3s ago");
         assert_eq!(rows["whoami"], "Maintain the backend.\nReview NATS changes.");
+        assert_eq!((rows["sage"].as_str(), rows["profile"].as_str()), ("-", "-"));
+        e.sage = Some("sage".parse().unwrap());
+        e.profile = Some("Good for NATS.\n".to_owned());
+        let rows: BTreeMap<&str, String> = about(&e, now()).into_iter().collect();
+        assert_eq!((rows["sage"].as_str(), rows["profile"].as_str()), ("sage", "Good for NATS."));
         e.model = AntModel::of(Some("gpt-5".to_owned()), Some("high".to_owned()), None);
         let rows: BTreeMap<&str, String> = about(&e, now()).into_iter().collect();
         assert_eq!(rows["model"], "gpt-5, effort high");

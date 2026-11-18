@@ -123,7 +123,7 @@ async fn proposals_of_skills_on_untrusted_threads_are_refused() {
 #[test]
 fn the_skill_files_match_the_confirmed_skills() {
     let home = ants_test_support::scratch_dir("skills");
-    let root = skills_dir(&home);
+    let root = Home::new(&home).skills();
     let skill = |name: &str, files: &[(&str, &str)]| Skill {
         name: name.into(),
         description: "d".into(),

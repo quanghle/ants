@@ -208,7 +208,7 @@ A daemon serves the built-in `sage` while an ant of its file names `sage` as its
 
 Once a day at most an ant using sense sends its sage a review packet of its recent work, and the sage's findings come back to the ant to verify ([dreams](sense.md#dreams)); while no daemon serves the sage, or for 6 hours without its answer, the ant reviews the packet alone, as an ant with `sage = "none"` always does. The sage reviews with read-only tools on its harness's `review` variant ([Harnesses](#harnesses)); a sage on a harness running its tools unasked without one, such as `antigravity`, declines every review, the ant reviewing the packet alone, and `ants doctor` warns of it (`ant NAME reviews`).
 
-A sage has no sage of its own: neither the built-in sage, nor the built-in messenger, nor an ant another ant of the file names as its sage, the top-level `sage` not applying to it. A sage whose `[[ant]]` names an ant as its sage, or an ant naming itself, fails config loading, and an `ants ant set` order naming one for the built-in ants or a sage is refused. Which ants are sages is told from the file's tables and top-level `sage`: the shared settings that name another ant change only the sage of the ant they belong to.
+A sage has no sage of its own: neither the built-in sage, nor the built-in messenger, nor an ant another ant of the file names as its sage, the top-level `sage` not applying to it. A sage whose `[[ant]]` names an ant as its sage, or an ant naming itself, fails config loading, and an `ants ant set` order naming one for the built-in ants or a sage is refused. Which ants are sages is told from the file's tables and top-level `sage`: the shared settings that name another ant change only the sage of the ant they belong to. Across machines and shared settings the colony tells the rest: each ant's colony entry names the sage its config and shared settings resolve (`sage`, missing for a sage and where reviews are off), and an ant that a live colony entry of another ant names as its sage sends no review packet, reviewing the packet alone whatever its own `sage`. So an ant made a sage only by another machine's file or by shared settings is reviewed by no one either, and `lead` and `dev-a` naming each other both review alone.
 
 ## Pausing an ant
 
@@ -687,14 +687,18 @@ Memory counts as recovered once available memory reaches 150 % of `min_available
 
 ## Avatars
 
-Every ant has a pixel-art avatar derived from its identity record in `ants_identities` (its avatar seed, else its
-`id`), or from its name while no record is readable. `ants chat`, `ants colony`, `ants watch`, `ants inbox` and
-`ants ant show` put its one-line face before its name, and the ant view of `ants chat` and `ants ant avatar` draw its
-head. `[cli]` `theme` picks the palette for the terminal's background: `dark`, `light`, or `auto` (the default), which
-asks the terminal for its background colour (OSC 11) and waits up to 200 ms for an answer, then reads `COLORFGBG`,
-else takes `dark`. With `NO_COLOR` set, or off a terminal, faces show without colour and the head as ASCII. `[cli]`
-`animate = false` keeps the heads in `ants chat` still and turns its spinners a frame a second; otherwise only the head
-on screen moves, spinners turn 8 frames a second, and the screen is drawn again only when a frame changes.
+Every ant has a pixel-art avatar derived from its identity record in `ants_identities` (the avatar seed a human set,
+else the `sense` id it names, else its `id`), or from its name while no record is readable. One sense identity so shows
+one face on any record: an ant revoked and added again keeps its face, and a clone, with its own sense id, has its own.
+An ant revoked and added again with the home of the earlier one keeps its birth and growth stage too: its new record
+starts from those its sense identity kept of the earlier one ([sense.md](sense.md#identity)), while a new ant and a
+clone start at birth, `callow`. `ants chat`, `ants colony`, `ants watch`, `ants inbox` and `ants ant show` put its
+one-line face before its name, and the ant view of `ants chat` and `ants ant avatar` draw its head. `[cli]` `theme`
+picks the palette for the terminal's background: `dark`, `light`, or `auto` (the default), which asks the terminal for
+its background colour (OSC 11) and waits up to 200 ms for an answer, then reads `COLORFGBG`, else takes `dark`. With
+`NO_COLOR` set, or off a terminal, faces show without colour and the head as ASCII. `[cli]` `animate = false` keeps the
+heads in `ants chat` still and turns its spinners a frame a second; otherwise only the head on screen moves, spinners
+turn 8 frames a second, and the screen is drawn again only when a frame changes.
 
 ## Exporting and importing an ant
 
@@ -703,7 +707,8 @@ another bus, as for a new job; `ants ant import FILE` there adds it from the fil
 The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files", "provider"}`:
 
 - `bus`: the public key of the account of the bus exported from.
-- `identity`: the ant's identity record, unmarked: its `id`, `born`, `avatar`, `color`, `prompts` and `cloned_from`.
+- `identity`: the ant's identity record, unmarked: its `id`, `born`, `avatar`, `color`, `prompts`, `cloned_from` and
+  `sense`.
 - `settings`: `whoami`, `harness`, `model`, `reasoning_effort`, `context` and `fallback`, taken from the ant's
   [shared settings](#shared-settings) where the bus holds a record of them that verifies, as its daemon serves them
   (one that does not verify is left out with a warning), else from its `[[ant]]` (`harness`, the machine's, always

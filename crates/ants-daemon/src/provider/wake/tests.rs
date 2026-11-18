@@ -142,7 +142,8 @@ async fn a_wake_the_ant_does_not_take_is_refused() {
     let invalid = RpcError::INVALID_PARAMS;
     assert_eq!(refused(request(&ant, None, "r1"), "sense").await, invalid, "another provider's ant");
     let foreign = ThreadId::generate();
-    assert_eq!(refused(request(&ant, Some(&foreign), "r1"), "clock").await, invalid, "no thread of the ant");
+    let unknown = refused(request(&ant, Some(&foreign), "r1"), "clock").await;
+    assert_eq!(unknown, RpcError::UNKNOWN_THREAD, "no thread of the ant");
     assert_eq!(refused(WakeRequest { text: " \n".to_owned(), ..request(&ant, None, "r1") }, "clock").await, invalid);
     let long = "x".repeat(MAX_WAKE_TEXT + 1);
     assert_eq!(refused(WakeRequest { text: long, ..request(&ant, None, "r1") }, "clock").await, invalid);
@@ -187,12 +188,13 @@ impl Provider for Clock {
 async fn a_provider_wakes_only_the_ants_served_here() {
     let Some(setup) = Setup::start().await else { return };
     let clock = Arc::new(Clock::default());
-    super::super::connect(clock.clone()).await.expect("connects");
+    let served = Wakers::default();
+    super::super::connect(clock.clone(), &served).await.expect("connects");
     let host = clock.host.locked().clone().unwrap();
     let ant = p("wake-served");
     let unserved = host.wake(request(&ant, None, "r1")).await.unwrap_err();
     assert_eq!(unserved.code, RpcError::UNAVAILABLE);
-    let serving = register(setup.waker(&ant).await);
+    let serving = register(&served, setup.waker(&ant).await);
     let woken = host.wake(request(&ant, None, "r1")).await.unwrap();
     assert_eq!(setup.sent()[0].thread_id, woken.thread);
     drop(serving);

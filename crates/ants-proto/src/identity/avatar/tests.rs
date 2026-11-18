@@ -184,6 +184,11 @@ fn the_record_seeds_and_colours_the_avatar() {
     let born = "2026-11-15T10:00:00Z".parse().unwrap();
     let mut record = AntIdentity::new(ant.clone(), "0123456789abcdef0123456789abcdef".into(), born);
     assert_eq!(Avatar::of(&ant, Some(&record)), Avatar::derive("0123456789abcdef0123456789abcdef"));
+    let sense: crate::SenseId = "01JD8X5G3T7Q9R2M4N6P8S0V1W".parse().unwrap();
+    record.sense = Some(sense.clone());
+    assert_eq!(Avatar::of(&ant, Some(&record)), Avatar::derive(sense.as_str()), "the sense id before the record's id");
+    let again = AntIdentity { id: "fedcba9876543210fedcba9876543210".into(), ..record.clone() };
+    assert_eq!(Avatar::of(&ant, Some(&again)), Avatar::of(&ant, Some(&record)), "one face for one sense identity");
     record.avatar = Some("lead".into());
     record.color = Some("Azure".into());
     let avatar = Avatar::of(&ant, Some(&record));

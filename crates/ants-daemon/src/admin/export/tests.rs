@@ -24,6 +24,7 @@ fn orders(machine: &str) -> Orders {
         accounts: vec![],
         config: Some(ConfigFile::new(path, Arc::new(Notify::new()))),
         restarts: Restarts::default(),
+        providers: Default::default(),
         creds: None,
         js_domain: None,
         leaf: None,

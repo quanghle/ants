@@ -215,6 +215,11 @@ impl Mcp {
         let _ = self.hub.reaction_asker.set(asker);
     }
 
+    /// What asks for reactions and changes them for the ant, once set.
+    pub fn reaction_asker(&self) -> Option<ReactionAsker> {
+        self.hub.reaction_asker.get().cloned()
+    }
+
     /// Take the ant for the assistant of `human`, as its credentials' assistant_of tag says.
     pub fn with_assisting(&self, human: UserId) {
         let _ = self.hub.assisting.set(human);

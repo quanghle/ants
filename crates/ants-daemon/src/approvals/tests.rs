@@ -41,6 +41,14 @@ fn tool() -> ToolCall {
     ToolCall { kind: "execute".into(), title: "git push".into(), ..Default::default() }
 }
 
+/// The tool request rejection last kept on the timeline of `ant` on `thread`, and the message it is kept under.
+async fn rejection(stream: &jetstream::stream::Stream, thread: &ThreadId, ant: &UserId) -> (Uuid, TimelineRejection) {
+    let stored = stream.direct_get_last_for_subject(subject::timeline(thread, ant)).await.unwrap();
+    let record: Timeline = serde_json::from_slice(&stored.payload).unwrap();
+    let [TimelineEntry::Rejected(rejected)] = record.entries.as_slice() else { panic!("{record:?}") };
+    (record.message, rejected.clone())
+}
+
 #[tokio::test]
 async fn the_human_decides_and_silence_rejects() {
     let Some(server) = Server::start() else { return };
@@ -81,6 +89,28 @@ async fn the_human_decides_and_silence_rejects() {
     // Both the request and the decision stay in the stream for a late `ants tools list`.
     assert_eq!(stream.get_last_raw_message_by_subject(&request.subject()).await.unwrap().sequence, 1);
     assert!(stream.get_last_raw_message_by_subject(&decision.subject()).await.is_ok());
+    let timeline = subject::timeline(&thread, &ant);
+    assert!(stream.direct_get_last_for_subject(&timeline).await.is_err(), "nothing kept of an allowed request");
+
+    // A human's rejection is kept on the thread's timeline: with no message being answered, under the nil id.
+    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())));
+    let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
+    let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
+    let decision = request.decide(Verdict::Reject).by(Some(UserId::human()));
+    human_js.publish(decision.subject(), serde_json::to_vec(&decision).unwrap().into()).await.unwrap().await.unwrap();
+    assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::Reject);
+    assert_eq!(decided_update(&mut statuses).await, (Verdict::Reject, DecidedBy::Human, Some(UserId::human())));
+    let (message, rejected) = rejection(&stream, &thread, &ant).await;
+    assert_eq!(message, Uuid::nil());
+    let expected = TimelineRejection {
+        request: request.id,
+        kind: "execute".into(),
+        title: "git push".into(),
+        by: DecidedBy::Human,
+        decider: Some(UserId::human()),
+        via: None,
+    };
+    assert_eq!(rejected, expected);
 
     // Silence rejects, and the thread's owner is told before the ant goes on.
     let alice: UserId = "alice".parse().unwrap();
@@ -93,6 +123,12 @@ async fn the_human_decides_and_silence_rejects() {
         Verdict::Reject
     );
     assert_eq!(decided_update(&mut statuses).await, (Verdict::Reject, DecidedBy::Expiry, None));
+    let (message, rejected) = rejection(&stream, &thread, &ant).await;
+    assert_eq!(
+        (message, rejected.by, rejected.decider),
+        (asked.id, DecidedBy::Expiry, None),
+        "under the message answered"
+    );
     let stored = stream.direct_get_last_for_subject(subject::inbox(&alice, &ant)).await.unwrap();
     let told: Envelope = serde_json::from_slice(&stored.payload).unwrap();
     assert_eq!((&told.from, &told.owner), (&ant, &Some(alice.clone())));

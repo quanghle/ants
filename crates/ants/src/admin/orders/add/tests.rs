@@ -211,6 +211,7 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
         remote_admin: true,
         config: Some(config),
         restarts: Restarts::default(),
+        providers: Default::default(),
         leaf: Some(leaf),
     };
     let (ants, watched) = tokio::sync::watch::channel(vec![dev_a.clone()]);

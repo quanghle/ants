@@ -1,8 +1,8 @@
 //! An ant's sense identity: its id ([`SenseId`]), minted when the ant first uses sense and kept in its home
-//! ([`ID_FILE`]) and in its card ([`Card`]), the item sense alone writes, from the ant's lifecycle events
+//! ([`Home::id`]) and in its card ([`Card`]), the item sense alone writes, from the ant's lifecycle events
 //! ([`record_event`]) and the start of each of its sessions ([`record_session`]). The id never changes: not on a
 //! rename, a change of harness or model, a move, a retirement or a revival; a clone gets its own. A renamed ant's home
-//! lists its earlier names ([`NAMES_FILE`]), whose events in its log are its own ([`crate::log::Chain`]): an import
+//! lists its earlier names ([`Home::names`]), whose events in its log are its own ([`crate::log::Chain`]): an import
 //! under another name lists the name before ([`note_renamed`]), and so does an ant added under another name with the
 //! home of an earlier one ([`take_over`]). A card made anew, as on another bus, starts with the names listed.
 //!
@@ -10,9 +10,12 @@
 //! and its reminders paused, the daemon firing none, until a revival or an addition under another ants identity
 //! makes it active again, its reminders' expiry put off by the time it was dormant. The card keeps its last
 //! dormancies ([`Card::dormancies`]), so maintenance counts only its active time in the ages of its memories.
+//!
+//! `sense_identity` ([`identity`]) shows the card whole with the ant's persona, self-model, relationship records and
+//! skills, and is the one tool changing the persona, the self-model and the relationship records.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ants_proto::provider::{CallContext, Event, EventKind};
 use ants_proto::{SenseId, UserId};
@@ -22,15 +25,17 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::cache::CacheError;
+use crate::home::Home;
 use crate::items::{Item, Values};
-use crate::log::{SENSE_DIR, read_status};
+use crate::log::read_status;
 use crate::remind;
 use crate::store::{Items, StoreError, Write, read_modify_write};
 
-/// The file of [`SENSE_DIR`] holding the ant's sense id.
-pub const ID_FILE: &str = "id";
-/// The file of [`SENSE_DIR`] listing the ant's earlier names, one a line, the oldest first.
-pub const NAMES_FILE: &str = "names";
+mod tool;
+
+pub(crate) use tool::relationships;
+pub use tool::{identity, schema};
+
 /// The kind of the card's item; an ant has one.
 pub const CARD: &str = "card";
 /// Whom sense's own changes are made for ([`crate::items::Stamp::by`]): the card's only writer.
@@ -40,14 +45,9 @@ const EVENTS_KEPT: usize = 16;
 /// How many of its last dormancies the card keeps.
 const DORMANCIES_KEPT: usize = 16;
 
-/// Where the sense id of the ant whose home is `home` is kept.
-pub fn id_file(home: &Path) -> PathBuf {
-    home.join(SENSE_DIR).join(ID_FILE)
-}
-
 /// The sense id kept in `home`; none when there is none.
 pub fn read_id(home: &Path) -> io::Result<Option<SenseId>> {
-    let text = match std::fs::read_to_string(id_file(home)) {
+    let text = match std::fs::read_to_string(Home::new(home).id()) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
@@ -67,22 +67,12 @@ pub fn sense_id(home: &Path) -> io::Result<SenseId> {
 
 /// Keep `id` as the sense id in `home`, written whole.
 pub fn keep_id(home: &Path, id: &SenseId) -> io::Result<()> {
-    let file = id_file(home);
-    let dir = file.parent().expect("a file in a directory");
-    std::fs::create_dir_all(dir)?;
-    let beside = dir.join(format!("{ID_FILE}.new"));
-    std::fs::write(&beside, format!("{id}\n"))?;
-    std::fs::rename(&beside, &file)
-}
-
-/// Where the earlier names of the ant whose home is `home` are listed.
-pub fn names_file(home: &Path) -> PathBuf {
-    home.join(SENSE_DIR).join(NAMES_FILE)
+    crate::home::write(&Home::new(home).id(), format!("{id}\n").as_bytes())
 }
 
 /// The earlier names listed in `home`, the oldest first; none when it lists none.
 pub fn earlier_names(home: &Path) -> io::Result<Vec<UserId>> {
-    let text = match std::fs::read_to_string(names_file(home)) {
+    let text = match std::fs::read_to_string(Home::new(home).names()) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
@@ -101,12 +91,10 @@ pub fn note_renamed(home: &Path, from: &UserId) -> io::Result<()> {
         return Ok(());
     }
     names.push(from.clone());
-    let file = names_file(home);
-    let dir = file.parent().expect("a file in a directory");
-    std::fs::create_dir_all(dir)?;
-    let beside = dir.join(format!("{NAMES_FILE}.new"));
-    std::fs::write(&beside, names.iter().map(|name| format!("{name}\n")).collect::<String>())?;
-    std::fs::rename(&beside, &file)
+    crate::home::write(
+        &Home::new(home).names(),
+        names.iter().map(|name| format!("{name}\n")).collect::<String>().as_bytes(),
+    )
 }
 
 /// Let `ant` take over `home`, as when an ant is added under a new name with the home of an earlier one: the name the
@@ -171,6 +159,18 @@ pub struct Card {
     /// kept after the brief told it of its return.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dormancies: Vec<Dormancy>,
+    /// The growth its ants identity record held as last told ([`record_growth`]), which a record made again for the
+    /// ant, as after a revoke and re-add, starts from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub growth: Option<Growth>,
+}
+
+/// The birth of an ants identity record and the prompts the ant completed since ([`ants_proto::AntIdentity::born`],
+/// [`ants_proto::AntIdentity::prompts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Growth {
+    pub born: DateTime<Utc>,
+    pub prompts: u64,
 }
 
 /// A time an identity was dormant: from its retirement to the event ending its dormancy.
@@ -213,6 +213,7 @@ impl Card {
             moved_at: None,
             events: Vec::new(),
             dormancies: Vec::new(),
+            growth: None,
         }
     }
 
@@ -307,6 +308,13 @@ impl Card {
         (self.active, self.returned_at) = (true, Some(at));
     }
 
+    /// Note `growth`, keeping the earlier birth and the larger count of it and the one noted, so a growth told late
+    /// never undoes a later one.
+    fn grew(&mut self, growth: Growth) {
+        let noted = self.growth.get_or_insert(growth);
+        (noted.born, noted.prompts) = (noted.born.min(growth.born), noted.prompts.max(growth.prompts));
+    }
+
     /// Note a session started as `context` says: its identity, harness, model and machine.
     fn session(&mut self, context: &CallContext) {
         self.named(&context.ant);
@@ -371,6 +379,12 @@ pub async fn record_event(items: &dyn Items, event: &Event) -> Result<Card, Stor
 /// Note on the card in `items`, made first when there is none, the session starting as `context` says.
 pub async fn record_session(items: &dyn Items, context: &CallContext) -> Result<Card, StoreError> {
     update(items, &context.ant, context.at, |card| card.session(context)).await
+}
+
+/// Note on the card in `items`, made first when there is none, the growth of the ant's identity record, as its daemon
+/// tells: written only when it grew.
+pub async fn record_growth(items: &dyn Items, ant: &UserId, growth: Growth) -> Result<Card, StoreError> {
+    update(items, ant, Utc::now(), |card| card.grew(growth)).await
 }
 
 /// Note that the brief told the ant of its return ([`Card::returned`]), and so of its dormancy when it is active.

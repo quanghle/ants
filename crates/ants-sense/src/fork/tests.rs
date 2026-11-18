@@ -104,9 +104,8 @@ async fn a_clone_keeps_memories_and_the_self_model_marked_inherited_and_drops_th
     let new = json!({"kind": "fact", "title": "New", "body": "Lexer is fast now.", "supersedes": old});
     let new = id(&call(&sense, "remember", new).await);
     call(&sense, "vote", json!({"id": new, "vote": "helpful"})).await;
-    call(&sense, "remember", json!({"kind": "self_model", "title": "Me", "body": "Careful."})).await;
-    let bob = json!({"kind": "relationship", "scope": "human:bob", "title": "Bob", "body": "Reviews fast."});
-    call(&sense, "remember", bob).await;
+    call(&sense, "identity", json!({"self_model": "Careful.", "title": "Me"})).await;
+    call(&sense, "identity", json!({"relationship": "Reviews fast.", "who": "human:bob", "title": "Bob"})).await;
     call(&sense, "checkpoint", json!({"goal": "Ship"})).await;
     call(&sense, "handoff", json!({"done": ["Lexer"]})).await;
     call(&sense, "task", json!({"action": "create", "title": "Parser"})).await;
@@ -148,11 +147,11 @@ async fn a_clone_keeps_memories_and_the_self_model_marked_inherited_and_drops_th
 async fn the_clone_takes_the_source_as_it_was_when_cloned() {
     let (sense, source, clone) = sense().await;
     let before = id(&call(&sense, "remember", json!({"kind": "fact", "title": "Before", "body": "Kept."})).await);
-    call(&sense, "remember", json!({"kind": "self_model", "title": "Me", "body": "Then."})).await;
+    call(&sense, "identity", json!({"self_model": "Then.", "title": "Me"})).await;
     let at = Utc::now();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     call(&sense, "remember", json!({"kind": "fact", "title": "After", "body": "Not kept."})).await;
-    call(&sense, "remember", json!({"kind": "self_model", "title": "Me", "body": "Now.", "revision": 1})).await;
+    call(&sense, "identity", json!({"self_model": "Now.", "title": "Me", "revision": 1})).await;
 
     sense.event(cloned(SOURCE, at)).await.unwrap();
 
@@ -167,9 +166,8 @@ async fn the_clone_takes_the_source_as_it_was_when_cloned() {
 async fn a_fork_tried_again_copies_only_what_the_clone_lacks() {
     let (sense, source, clone) = sense().await;
     call(&sense, "remember", json!({"kind": "fact", "title": "One", "body": "First fact."})).await;
-    call(&sense, "remember", json!({"kind": "self_model", "title": "Theirs", "body": "The source's."})).await;
-    let own = json!({"kind": "self_model", "title": "Mine", "body": "The clone's own."});
-    call_as(&sense, CLONE, "remember", own).await;
+    call(&sense, "identity", json!({"self_model": "The source's.", "title": "Theirs"})).await;
+    call_as(&sense, CLONE, "identity", json!({"self_model": "The clone's own.", "title": "Mine"})).await;
 
     assert_eq!(fork(&*source, &*clone, Utc::now()).await.unwrap(), 1, "the clone's own self-model stays");
     assert_eq!(fork(&*source, &*clone, Utc::now()).await.unwrap(), 0);
@@ -195,10 +193,9 @@ async fn a_clone_of_an_ant_sense_does_not_keep_gets_its_card_alone() {
 #[tokio::test]
 async fn a_record_the_clone_writes_anew_is_no_longer_inherited() {
     let (sense, source, clone) = sense().await;
-    call(&sense, "remember", json!({"kind": "self_model", "title": "Me", "body": "Careful."})).await;
+    call(&sense, "identity", json!({"self_model": "Careful.", "title": "Me"})).await;
     fork(&*source, &*clone, Utc::now()).await.unwrap();
-    let bolder = json!({"kind": "self_model", "title": "Me", "body": "Bolder.", "revision": 1});
-    call_as(&sense, CLONE, "remember", bolder).await;
+    call_as(&sense, CLONE, "identity", json!({"self_model": "Bolder.", "title": "Me", "revision": 1})).await;
     let model = crate::records::self_model(&*clone).await.unwrap().unwrap();
     assert_eq!((model.item.revision, model.record.inherited), (2, None));
 }
@@ -217,13 +214,16 @@ async fn a_clone_keeps_the_persona_and_the_skills_but_not_their_proposals() {
         Write::Create { id: crate::skill::skill_id("release"), kind: SKILL.into(), values: skill },
     ];
     source.write(&writes, "test").await.unwrap();
-    call(&sense, "persona", json!({"voice": "Loud.", "reason": "Why not."})).await;
+    call(&sense, "identity", json!({"voice": "Loud.", "reason": "Why not."})).await;
 
     sense.event(cloned(SOURCE, Utc::now())).await.unwrap();
 
     let from = source.sense().await;
     let persona = crate::persona::current(&*clone).await.unwrap().unwrap();
-    assert_eq!((persona.text("voice"), &persona.values[INHERITED]), ("Plain.", &json!(from)));
+    assert_eq!(
+        (crate::persona::text(&persona.values).as_str(), &persona.values[INHERITED]),
+        ("Voice: Plain.", &json!(from))
+    );
     let skills = crate::skill::skills(&*clone).await.unwrap();
     assert_eq!(skills.iter().map(|skill| skill.name.as_str()).collect::<Vec<_>>(), ["release"]);
     assert_eq!(count(&*source, crate::proposal::PROPOSAL).await, 1);

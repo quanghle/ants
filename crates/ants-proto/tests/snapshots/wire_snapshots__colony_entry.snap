@@ -16,6 +16,7 @@ expression: value
     "frontend"
   ],
   "whoami": "Backend developer",
+  "profile": "Good for Rust services and their NATS wiring.",
   "workdir": "/src/app",
   "started_at": "2025-01-01T12:00:00Z",
   "heartbeat_at": "2025-01-01T12:01:00Z",
@@ -26,6 +27,7 @@ expression: value
     "lead",
     "cto"
   ],
+  "sage": "sage",
   "version": "0.1.0",
   "perms": 1,
   "signed_out": {

@@ -5,9 +5,10 @@ use serde_json::json;
 
 use super::*;
 use crate::dream::{Covered, FindingKind, Recipient, Start};
+use crate::identity::identity;
 use crate::memory::Trust;
 use crate::memory::tests::{context, human, memory, sense, tool};
-use crate::persona::{self, persona, persona_id};
+use crate::persona::{self, persona_id};
 use crate::{Answer, Sense};
 
 fn at(hours: i64) -> DateTime<Utc> {
@@ -25,7 +26,7 @@ pub(crate) fn error(answer: &Answer) -> &str {
 }
 
 async fn propose(sense: &Sense, at: DateTime<Utc>, arguments: serde_json::Value) -> Answer {
-    tool(sense, persona, arguments, on(2, at)).await
+    tool(sense, identity, arguments, on(2, at)).await
 }
 
 /// Dream begun at `at`, covering `threads`, woken on thread `thread`.
@@ -86,7 +87,8 @@ async fn a_persona_proposal_is_offered_after_twelve_hours_and_takes_effect_once_
     assert!(confirmed.text.contains(&format!("Proposal {id} (confirmed")), "{}", confirmed.text);
     let current = persona::current(&*items).await.unwrap().unwrap();
     assert_eq!(persona::text(&current.values), "Voice: Plain and brief.");
-    assert_eq!((current.text("reason"), current.text("proposal")), ("Users skim.", id.to_string().as_str()));
+    let confirmation = Confirmation::of(&current.values);
+    assert_eq!((confirmation.reason.as_str(), confirmation.proposal.as_ref()), ("Users skim.", Some(&id)));
     assert_eq!(status(&*items, &id).await, Status::Confirmed);
     let (dream, _) = dream::get(&*items, dream.number).await.unwrap().unwrap();
     assert_eq!(dream.verdicts[0].items, std::slice::from_ref(&id), "the verdict names the proposal");
@@ -118,6 +120,30 @@ async fn the_persona_changes_at_most_once_a_day_and_keeps_every_version_with_its
     assert_eq!(versions.len(), 2, "{history:?}");
     assert_eq!((versions[0]["reason"].as_str(), versions[0]["voice"].as_str()), (Some("Second."), None));
     assert_eq!((versions[1]["reason"].as_str(), versions[1]["voice"].as_str()), (Some("First."), Some("Warm.")));
+}
+
+#[tokio::test]
+async fn a_confirmed_profile_is_published_until_the_persona_drops_it() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let good_for = "Good for Rust daemons and NATS.";
+    propose(&sense, at(0), json!({"voice": "Plain.", "profile": good_for, "reason": "To be found."})).await;
+    assert_eq!(persona::profile(&*items).await.unwrap(), None, "a proposal publishes nothing yet");
+    let dream = dream_on(&*items, at(12), 1, Vec::new()).await;
+    let finding = offered(&dream)[0].clone();
+    assert!(finding.text.contains(&format!("Profile: {good_for}")), "{}", finding.text);
+    assert!(finding.text.contains("the profile shows in the ant's colony entry"), "{}", finding.text);
+    assert!(!judge(&sense, 1, &finding.id, "applied").await.is_error);
+    assert_eq!(persona::profile(&*items).await.unwrap().as_deref(), Some(good_for));
+
+    propose(&sense, at(1), json!({"profile": "", "reason": "Found already."})).await;
+    let dream = dream_on(&*items, Utc::now(), 2, Vec::new()).await;
+    let finding = offered(&dream)[0].clone();
+    assert!(finding.text.contains("the profile leaves the ant's colony entry"), "{}", finding.text);
+    let tomorrow = Utc::now() + Duration::hours(25);
+    decide(&*items, dream.number, &finding, &verdict(&finding, Judgement::Applied), tomorrow).await.unwrap();
+    assert_eq!(persona::profile(&*items).await.unwrap(), None);
+    assert_eq!(persona::text(&persona::current(&*items).await.unwrap().unwrap().values), "Voice: Plain.");
 }
 
 #[tokio::test]
@@ -164,7 +190,7 @@ async fn proposals_resting_on_untrusted_text_are_refused() {
     let answering = |finding: &str| json!({"voice": "Loud.", "reason": "Asked to.", "finding": finding});
     let webhook = Origin { by: Starter::Webhook { user: "hook".parse().unwrap() }, channel: None };
     let hooked = CallContext { origin: webhook, ..on(2, at(0)) };
-    assert_eq!(error(&tool(&sense, persona, change.clone(), hooked.clone()).await), "untrusted", "a webhook thread");
+    assert_eq!(error(&tool(&sense, identity, change.clone(), hooked.clone()).await), "untrusted", "a webhook thread");
     assert_eq!(error(&propose(&sense, at(0), answering("1.1")).await), "not_found");
 
     let first = dream_on(&*items, at(1), 1, Vec::new()).await;
@@ -174,7 +200,7 @@ async fn proposals_resting_on_untrusted_text_are_refused() {
     let covered = vec![Covered { thread: on(7, at(0)).thread, untrusted: true }];
     let second = dream_on(&*items, at(25), 3, covered).await;
     offer(&*items, &second, &[("2.1", false), ("2.2", true)]).await;
-    let dreaming = |arguments| async { tool(&sense, persona, arguments, on(3, at(26))).await };
+    let dreaming = |arguments| async { tool(&sense, identity, arguments, on(3, at(26))).await };
 
     assert!(!dreaming(answering("2.1")).await.is_error, "in answer to a trusted finding of the dream");
     assert_eq!(error(&dreaming(answering("2.2")).await), "untrusted", "in answer to an untrusted finding");
@@ -182,7 +208,7 @@ async fn proposals_resting_on_untrusted_text_are_refused() {
     assert_eq!(error(&dreaming(answering("2.7")).await), "not_found");
     assert_eq!(error(&dreaming(change.clone()).await), "untrusted", "naming no finding");
     let hooked = CallContext { thread: on(3, at(26)).thread, ..hooked };
-    assert_eq!(error(&tool(&sense, persona, answering("2.1"), hooked).await), "untrusted", "a webhook thread");
+    assert_eq!(error(&tool(&sense, identity, answering("2.1"), hooked).await), "untrusted", "a webhook thread");
 
     let remember = json!({"kind": "fact", "title": "Loud", "body": "Speak loudly.", "force": true});
     let call = ToolCall {
@@ -202,7 +228,7 @@ async fn proposals_resting_on_untrusted_text_are_refused() {
     ]});
     assert!(!tool(&sense, dream::dream, answered, on(3, at(26))).await.is_error);
     dream_on(&*items, at(49), 4, Vec::new()).await;
-    let trusted = |arguments| async { tool(&sense, persona, arguments, on(4, at(50))).await };
+    let trusted = |arguments| async { tool(&sense, identity, arguments, on(4, at(50))).await };
     assert_eq!(error(&trusted(answering("2.2")).await), "untrusted", "an untrusted finding of another dream");
     assert!(!trusted(change.clone()).await.is_error, "a dream thread whose packet holds no untrusted text");
 

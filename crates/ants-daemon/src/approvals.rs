@@ -32,7 +32,9 @@
 //! nor wait in `ants_sessions`: the request has its own time limit, and only the ant's own chain may decide it.
 //!
 //! However a request is settled, by a human, an ant of the chain or its expiry, the ant tells it on the thread's status
-//! as a `decided` update before it goes on: observers, which read no inbox, learn of a member's decision that way.
+//! as a `decided` update before it goes on: observers, which read no inbox, learn of a member's decision that way. A
+//! rejection is also kept on the thread's timeline ([`TimelineEntry::Rejected`]), where the ant's own reader finds it
+//! for its dreams.
 //!
 //! # An assistant's decision
 //!
@@ -54,7 +56,7 @@ use std::time::Duration;
 
 use ants_proto::{
     Act, ActAnswer, ApprovalDecision, ApprovalRequest, DecidedBy, Envelope, Escalation, Hop, STREAM, State,
-    StatusUpdate, ThreadId, ToolCall, UserId, Uuid, Verdict,
+    StatusUpdate, ThreadId, Timeline, TimelineEntry, TimelineRejection, ToolCall, UserId, Uuid, Verdict,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
@@ -223,6 +225,24 @@ impl NatsApprover {
         }
     }
 
+    /// Keep on the thread's timeline that `request` was rejected `by` `decider`, `via` its assistant, under the message
+    /// being answered there, for the ant's dreams, whose packets show it ([`TimelineEntry::Rejected`]). Best effort,
+    /// stored before the ant goes on.
+    async fn tell_rejected(
+        &self,
+        request: &ApprovalRequest,
+        by: DecidedBy,
+        decider: Option<UserId>,
+        via: Option<UserId>,
+    ) {
+        let message = self.answering.locked().get(&request.thread_id).map_or(Uuid::nil(), |e| e.id);
+        let (kind, title) = (request.tool.kind.clone(), request.tool.title.clone());
+        let rejection = TimelineRejection { request: request.id, kind, title, by, decider, via }.bounded();
+        let entries = vec![TimelineEntry::Rejected(rejection)];
+        let record = Timeline::new(self.ant.clone(), request.thread_id.clone(), message, entries, 0);
+        crate::monitoring::timeline::publish(&self.js, &record).await;
+    }
+
     /// Hand `envelope`, which carries an approval decision and arrived on its own subject
     /// ([`Envelope::check_subject`]), to the request it decides, if that one still waits and the sender is in the
     /// ant's escalate_to. Anything else is ignored: a late decision, or one from outside the chain. Never prompt
@@ -377,6 +397,9 @@ impl NatsApprover {
             };
         let verdict = decided.as_ref().map_or(Verdict::Reject, |(verdict, ..)| *verdict);
         if let Some((verdict, by, decider, via)) = decided {
+            if verdict == Verdict::Reject {
+                self.tell_rejected(&request, by, decider.clone(), via.clone()).await;
+            }
             let decided = StatusUpdate::Decided { request_id: request.id, verdict, by, decider, via };
             crate::monitoring::status::publish(&self.client, &self.ant, &request.thread_id, decided);
         }

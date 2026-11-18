@@ -78,7 +78,7 @@ fn the_sense_id_is_minted_once_and_kept_in_the_home() {
     assert_eq!(read_id(&home).unwrap(), Some(id.clone()));
     assert_eq!(std::fs::read_to_string(home.join(".sense/id")).unwrap(), format!("{id}\n"));
     assert_eq!(std::fs::read_dir(home.join(".sense")).unwrap().count(), 1, "nothing left beside it");
-    std::fs::write(id_file(&home), "not an id").unwrap();
+    std::fs::write(Home::new(&home).id(), "not an id").unwrap();
     assert!(sense_id(&home).is_err(), "a damaged id is not replaced by another");
     std::fs::remove_dir_all(&home).unwrap();
 }
@@ -154,16 +154,29 @@ async fn renames_clones_moves_retirements_and_revivals_are_written_on_the_card()
 #[tokio::test]
 async fn a_revival_puts_off_the_expiry_of_the_reminders_paused() {
     let items = fresh().await;
-    let reminder = |status: &str, expires: &str| {
-        let values = serde_json::json!({"title": "check", "status": status, "expires": at(expires)});
-        Write::Create { id: ItemId::new(), kind: remind::KIND.into(), values: remind::values(values) }
+    let reminder = |status: remind::Status, expires: &str| {
+        let writer = context("id1", "claude", None, "laptop");
+        let trigger = remind::Trigger::At { at: at("09:00:00") };
+        let mut reminder = remind::Reminder::new(
+            "check".into(),
+            writer.thread.clone(),
+            trigger,
+            at("09:00:00"),
+            at(expires),
+            &writer,
+            None,
+        );
+        reminder.status = status;
+        Write::Create { id: ItemId::new(), kind: remind::KIND.into(), values: reminder.values() }
     };
-    let writes = [reminder("active", "12:00:00"), reminder("active", "10:30:00"), reminder("done", "12:00:00")];
+    let (active, dropped) = (remind::Status::Active, remind::Status::Dropped);
+    let writes = [reminder(active, "12:00:00"), reminder(active, "10:30:00"), reminder(dropped, "12:00:00")];
     items.write(&writes, "test").await.unwrap();
     let expires = async || {
         let mut all = Vec::new();
         for write in &writes {
-            all.push(remind::date(&items.get(write.id()).await.unwrap().unwrap(), "expires").unwrap());
+            let item = items.get(write.id()).await.unwrap().unwrap();
+            all.push(remind::Reminder::of(&item).unwrap().expires.unwrap());
         }
         all
     };
@@ -225,6 +238,21 @@ async fn sessions_note_the_harnesses_models_and_machines_an_ant_ran_under() {
 }
 
 #[tokio::test]
+async fn the_card_keeps_the_growth_its_record_held_as_it_grew() {
+    let items = fresh().await;
+    let growth = |born: &str, prompts| Growth { born: at(born), prompts };
+    let card = record_growth(&*items, &dev_a(), growth("08:00:00", 42)).await.unwrap();
+    assert_eq!(card.growth, Some(growth("08:00:00", 42)), "the card made with it");
+    let card = record_growth(&*items, &dev_a(), growth("09:00:00", 10)).await.unwrap();
+    assert_eq!(card.growth, Some(growth("08:00:00", 42)), "a growth told late undoes nothing");
+    let card = record_growth(&*items, &dev_a(), growth("08:00:00", 100)).await.unwrap();
+    assert_eq!(card.growth, Some(growth("08:00:00", 100)));
+    let before = revision(&*items).await;
+    record_growth(&*items, &dev_a(), growth("08:00:00", 100)).await.unwrap();
+    assert_eq!(revision(&*items).await, before, "nothing new, nothing written");
+}
+
+#[tokio::test]
 async fn two_writers_sharing_a_log_keep_one_card() {
     let (log, sense): (&'static MemoryLog, _) = (Box::leak(Box::default()), SenseId::new());
     let (one, two) = (items(log, &sense).await, items(log, &sense).await);
@@ -257,7 +285,7 @@ async fn a_renamed_ant_keeps_its_card_under_its_new_name_with_its_earlier_one() 
     let in_b = CallContext { ant: dev_b.clone(), ..context("id1", "claude", None, "laptop") };
     for reopened in 0..3 {
         if reopened == 2 {
-            std::fs::remove_file(home_b.join(SENSE_DIR).join("cache.db")).unwrap();
+            std::fs::remove_file(Home::new(&home_b).cache()).unwrap();
         }
         let new = items_in(log, &sense, "dev-b", earlier_names(&home_b).unwrap(), &home_b).await;
         let card = match reopened {

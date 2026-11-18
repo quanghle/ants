@@ -24,9 +24,12 @@ fn a_cache_of_another_schema_or_unreadable_is_replaced_with_an_empty_one() {
     let built = Cache::open(&home).unwrap().built().unwrap();
     assert_eq!(built, Some(Built { sense, incarnation: "one".into(), position: None }), "kept");
 
-    Connection::open(cache_file(&home)).unwrap().pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
+    Connection::open(Home::new(&home).cache())
+        .unwrap()
+        .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+        .unwrap();
     assert_eq!(Cache::open(&home).unwrap().built().unwrap(), None);
-    std::fs::write(cache_file(&home), vec![0xff; 4096]).unwrap();
+    std::fs::write(Home::new(&home).cache(), vec![0xff; 4096]).unwrap();
     assert_eq!(Cache::open(&home).unwrap().built().unwrap(), None);
     std::fs::remove_dir_all(&home).unwrap();
 }
@@ -42,7 +45,7 @@ fn pending_writes_prevent_replacing_a_corrupt_missing_or_different_log_cache() {
     cache.enqueue(&pending).unwrap();
     assert!(cache.reset(&sense, "two").is_err());
     drop(cache);
-    let file = cache_file(&home);
+    let file = Home::new(&home).cache();
     std::fs::write(&file, b"corrupt with pending writes").unwrap();
     assert!(Cache::open(&home).is_err());
     assert_eq!(std::fs::read(&file).unwrap(), b"corrupt with pending writes");
