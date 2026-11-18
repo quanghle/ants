@@ -257,6 +257,33 @@ async fn an_ant_that_arrived_is_told_of_how_not_as_added() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[tokio::test]
+async fn events_queued_under_an_earlier_name_are_told_of_the_renamed_ant() {
+    let dir = ants_test_support::scratch_dir("events-renamed");
+    let old = [EventKind::ThreadExpired, EventKind::SessionLost];
+    let lines: String = old
+        .iter()
+        .map(|kind| serde_json::to_string(&event(Uuid::new_v4(), &p("dev-a"), "ida", Some(&t("t1")), kind.clone())))
+        .map(|line| line.unwrap() + "\n")
+        .collect();
+    std::fs::create_dir_all(dir.join(DIR)).unwrap();
+    std::fs::write(queue_file(&dir), lines).unwrap();
+    std::fs::create_dir_all(dir.join(crate::sense::DIR)).unwrap();
+    std::fs::write(dir.join(crate::sense::DIR).join("names"), "dev-a\n").unwrap();
+    let provider = Recording::taking_events();
+    let outbox = outbox_to(provider.clone()).await;
+    Lifecycle::open(&outbox, &p("dev-b"), "idb", &dir).await.unwrap();
+    took(&provider, 3).await;
+    let got = provider.got.locked().clone();
+    assert_eq!(
+        got.iter().map(|e| e.kind.clone()).collect::<Vec<_>>(),
+        [old[0].clone(), old[1].clone(), EventKind::AntAdded]
+    );
+    assert!(got.iter().all(|e| e.ant == p("dev-b")), "{got:?}");
+    assert_eq!(got[0].identity, "ida", "an event keeps the identity it happened to");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn a_thread_start_told_again_keeps_its_id() {
     let id = |message| derived(&["dev-a", "t1", message, "thread_started"]);

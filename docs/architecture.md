@@ -270,7 +270,7 @@ Delivery:
 
 - The daemon queues each event in the ant's home, `<home>/lifecycle/events.jsonl`, one JSON event per line, appended and synced before the event counts as sent. The file is rewritten without an event once the provider acked it, and removed when empty. Past 1,000 events, the oldest are dropped with a warning.
 - One task per daemon process delivers every ant's queue, one event in flight per ant, in queue order, waiting 30 s for each ack. While the provider is not connected or fails, the event is sent again, with the same `id`, after a backoff doubling from 1 s to 5 min. A provider answering `-32001` (events not agreed) gets none of the ant's queued events.
-- A daemon starting picks up the events left in the home's queue. `lifecycle/identity` holds the identity id last told as added, and events a crash could repeat carry ids derived from what they tell (the ant and its identity, the thread and its first message), so the provider can drop the repeats.
+- A daemon starting picks up the events left in the home's queue, those of an earlier name the home lists (`.sense/names`) told under the ant's current name. `lifecycle/identity` holds the identity id last told as added, and events a crash could repeat carry ids derived from what they tell (the ant and its identity, the thread and its first message), so the provider can drop the repeats.
 - Clones and exports leave `lifecycle` out of the home they copy; clones leave `.sense` out too, exports keep only `.sense/id` of it.
 
 ### Wake requests

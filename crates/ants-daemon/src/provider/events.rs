@@ -5,7 +5,8 @@
 //! An ant's events wait in its home, one JSON [`Event`] a line in [`QUEUE`], from when they happen until its provider
 //! acks them, so a restarted daemon tells those left. One task delivers the events of every ant ([`Outbox`]), an ant's
 //! next only once its provider acked the one before, retrying with a backoff while the provider fails or is not
-//! connected. Past [`CAP`] waiting, an ant's oldest go, with a warning.
+//! connected. Past [`CAP`] waiting, an ant's oldest go, with a warning. An ant renamed takes the events queued under
+//! its earlier names, as its provider serves it under its new one.
 //!
 //! Beside the queue, [`IDENTITY`] holds the id of the identity record the provider was told of, so a daemon tells of an
 //! ant new to its home ([`EventKind::AntAdded`]) once; and [`RETIRED`] marks an ant retired ([`mark_retired`]) until
@@ -110,13 +111,17 @@ impl Outbox {
         (self.0.resolve)(ant.clone()).await.is_none_or(|provider| provider.has(Capability::Events))
     }
 
-    /// Read the queue of `ant`, whose home is `home`, from its file, unless read already, and deliver what it holds.
+    /// Read the queue of `ant`, whose home is `home`, from its file, unless read already, and deliver what it holds:
+    /// the events queued under an earlier name of the ant as its own ([`Queue::read`]), and no queue read under
+    /// another name from the same file any more.
     pub async fn open(&self, ant: &UserId, home: &Path) {
         let mut queues = self.0.queues.lock().await;
         if queues.contains_key(ant) {
             return;
         }
-        let queue = Queue::read(queue_file(home), self.0.retry.0).await;
+        let file = queue_file(home);
+        queues.retain(|_, queue| queue.file != file);
+        let queue = Queue::read(home, ant, self.0.retry.0).await;
         let pending = !queue.events.is_empty();
         queues.insert(ant.clone(), queue);
         drop(queues);
@@ -139,7 +144,7 @@ impl Outbox {
         let queue = match queues.entry(event.ant.clone()) {
             std::collections::hash_map::Entry::Occupied(queue) => queue.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(Queue::read(queue_file(home), self.0.retry.0).await)
+                entry.insert(Queue::read(home, &event.ant, self.0.retry.0).await)
             }
         };
         let stored = queue.push(event).await;
@@ -266,8 +271,11 @@ impl Inner {
 }
 
 impl Queue {
-    async fn read(file: PathBuf, backoff: Duration) -> Self {
-        let mut events = VecDeque::new();
+    /// The queue of `ant` in `home`, its events queued under an earlier name of the ant ([`crate::sense::earlier_names`])
+    /// told as its own, as the name they carry is no longer served: written again when any was.
+    async fn read(home: &Path, ant: &UserId, backoff: Duration) -> Self {
+        let file = queue_file(home);
+        let mut events: VecDeque<Event> = VecDeque::new();
         match tokio::fs::read_to_string(&file).await {
             Ok(text) => {
                 for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -280,8 +288,9 @@ impl Queue {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => tracing::warn!(file = %file.display(), error = %e, "reading the queue of lifecycle events"),
         }
+        let renamed = rename(home, ant, &mut events);
         let mut queue = Self { file, events, sending: false, retry_at: None, backoff };
-        if queue.trim() > 0 {
+        if queue.trim() > 0 || renamed {
             queue.store().await;
         }
         queue
@@ -315,6 +324,26 @@ impl Queue {
             tracing::warn!(file = %self.file.display(), error = format!("{e:#}"), "storing the lifecycle events");
         }
     }
+}
+
+/// Give `ant` the events of `events` carrying an earlier name of it, as `home` lists them: whether any carried one.
+fn rename(home: &Path, ant: &UserId, events: &mut VecDeque<Event>) -> bool {
+    if events.iter().all(|event| event.ant == *ant) {
+        return false;
+    }
+    let earlier = match crate::sense::earlier_names(home) {
+        Ok(earlier) => earlier,
+        Err(e) => {
+            tracing::warn!(%ant, error = format!("{e:#}"), "reading the earlier names of an ant for its lifecycle events");
+            return false;
+        }
+    };
+    let mut renamed = false;
+    for event in events.iter_mut().filter(|event| earlier.contains(&event.ant)) {
+        event.ant = ant.clone();
+        renamed = true;
+    }
+    renamed
 }
 
 async fn append(file: &Path, bytes: &[u8]) -> Result<()> {

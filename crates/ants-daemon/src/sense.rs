@@ -163,6 +163,12 @@ pub fn take_over(home: &Path, ant: &UserId) -> Result<Option<UserId>> {
     })
 }
 
+/// The earlier names of the ant whose home is `home`, the oldest first ([`ants_sense::identity::earlier_names`]).
+pub fn earlier_names(home: &Path) -> Result<Vec<UserId>> {
+    ants_sense::identity::earlier_names(home)
+        .with_context(|| format!("reading {}", ants_sense::home::Home::new(home).names().display()))
+}
+
 /// Sense keeping no data, its tools that need some refusing.
 #[cfg(test)]
 pub(crate) fn keeping_none() -> Arc<dyn Provider> {
