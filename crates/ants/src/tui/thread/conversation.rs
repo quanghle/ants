@@ -365,7 +365,7 @@ impl Shown<'_> {
             lines.push(self.stamped(Line::from(Span::styled(format!("{head}  {text}"), style)), e.stored_at));
         } else {
             lines.push(self.stamped(Line::from(Span::styled(head, style)), e.stored_at));
-            push(lines, &format!("{rest}{text}"), rest, style, self.width);
+            push(lines, &text, rest, style, self.width);
         }
     }
 
@@ -586,13 +586,11 @@ fn indented(indent: &str, line: Line<'static>) -> Line<'static> {
     Line::from(spans).style(line.style)
 }
 
-/// Add `line`, cut to `width` characters a line, those after the first begun with `rest`.
-fn push(lines: &mut Vec<Line<'static>>, line: &str, rest: &str, style: Style, width: usize) {
-    let mut chars = line.chars().peekable();
-    lines.push(Line::styled(chars.by_ref().take(width.max(1)).collect::<String>(), style));
-    let room = width.saturating_sub(rest.chars().count()).max(1);
-    while chars.peek().is_some() {
-        lines.push(Line::styled(format!("{rest}{}", chars.by_ref().take(room).collect::<String>()), style));
+/// Add `line`, wrapped at words into lines `width` columns wide begun with `indent`, a word too long cut.
+fn push(lines: &mut Vec<Line<'static>>, line: &str, indent: &str, style: Style, width: usize) {
+    let room = width.saturating_sub(indent.chars().count()).max(1);
+    for row in markdown::wrap(&[Span::raw(line.to_owned())], room) {
+        lines.push(indented(indent, Line::from(row)).style(style));
     }
 }
 

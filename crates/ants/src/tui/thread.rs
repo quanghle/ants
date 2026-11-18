@@ -1331,6 +1331,25 @@ mod tests {
     }
 
     #[test]
+    fn a_question_wraps_at_words() {
+        let thread = ThreadId::generate();
+        let said = "Run a backfill now, even though it locks the orders table for an hour or so?";
+        let mut asks = message(1, &thread, "dev-a", "alice", said);
+        asks.question = Some(Question::new(said, &["yes".to_owned(), "no".to_owned()], true).unwrap().into());
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(vec![asks])).unwrap();
+        let m = model();
+        for width in 60..=110 {
+            let shown = screen(&page, &m, width, at(2));
+            let conversation = shown.split('└').next().unwrap();
+            let words: Vec<&str> = conversation.split(|c: char| c.is_whitespace() || c == '│').collect();
+            for word in ["locks", "the", "orders", "table"] {
+                assert!(words.contains(&word), "{word:?} cut at {width}:\n{shown}");
+            }
+        }
+    }
+
+    #[test]
     fn keys_move_the_selection_copy_it_and_toggle_how_the_human_holds_the_thread() {
         let thread = ThreadId::generate();
         let mut m = model();
