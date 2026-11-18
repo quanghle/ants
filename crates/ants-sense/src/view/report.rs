@@ -9,7 +9,8 @@
 //!   ([`crate::thread::calls`]) and the verdicts given in dreams;
 //! - its memories by kind and status, with their votes and reads in full;
 //! - its dreams, and their findings by kind, each by the last verdict given on it in any dream, then the vital signs
-//!   of the periods of the last [`TREND`] dreams keeping them, all calls of sense's tools among them;
+//!   of the periods of the last [`TREND`] dreams keeping them, all calls of sense's tools among them, and the change of
+//!   the last one's against the mean of the dreams before ([`crate::dream::changes`]);
 //! - as a sage, the tally of the reviews it made of other ants ([`crate::dream::reviews`]): their findings by what
 //!   came of them, of the [`TOP`] kinds and ants of the most; none for an ant that reviewed nobody;
 //! - its persona and self-model, with their revisions, the self-model's age in active days, and the proposals;
@@ -392,6 +393,15 @@ fn dreams_lines(text: &mut String, data: &Data) {
     for (dream, signs) in &kept[kept.len().saturating_sub(shown)..] {
         let _ = writeln!(text, "  dream {}, began {}: {}.", dream.number, day(dream.at), signs.line());
     }
+    let Some((last, signs)) = kept.last() else { return };
+    let before = crate::dream::before(last.number);
+    let trend: Vec<_> = (kept.iter())
+        .filter(|(dream, _)| before.contains(&dream.number))
+        .map(|(dream, signs)| (dream.number, (*signs).clone()))
+        .collect();
+    if let Some(changes) = crate::dream::changes(signs, &trend) {
+        let _ = writeln!(text, "  dream {} against {changes}.", last.number);
+    }
 }
 
 /// The tally of the reviews the ant made as a sage, by kind and by ant; nothing when it made none.
@@ -727,6 +737,8 @@ Dreams: 2 (1 fallback, 1 done), 0 sent to a sage; 0 writes on dream threads.
   Vital signs of their periods, the last 5 dreams keeping them:
   dream 1, began {first_dream}: 2 prompts (2 replied), 5 sense tool calls.
   dream 2, began {next_dream}: no prompt measured.
+  dream 2 against the mean of the dream before: threads worked 0 (mean 1, -100%); prompts replied 0 (mean 2, \
+             -100%); sense tool calls 0 (mean 5, -100%).
 Persona: revision 2, confirmed {confirmed}; 1 proposals (1 confirmed).
 Self-model: revision 1, written {written}; since then 1 threads on 1 active days.
 People: 3 started its threads, 1 with a relationship record; of the 1 who started 3 or more, 1 with one; 1 \

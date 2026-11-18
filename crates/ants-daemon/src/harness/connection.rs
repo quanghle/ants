@@ -191,8 +191,19 @@ impl Connected<'_> {
         opened: Option<BriefReason>,
     ) -> Result<ControlFlow<()>, agent_client_protocol::Error> {
         let Turn { prompt, reply } = turn;
-        let Prompt { text, limits, spend, mut stop, progress, mut history, attachments, steering, brief, channel } =
-            prompt;
+        let Prompt {
+            text,
+            limits,
+            spend,
+            mut stop,
+            progress,
+            mut history,
+            attachments,
+            steering,
+            brief,
+            channel,
+            began: _,
+        } = prompt;
         let channel = channel.as_deref();
         let ((lines, images), mut briefed) =
             tokio::join!(attached(attachments, self.images), self.brief(brief.as_ref(), channel, opened));
