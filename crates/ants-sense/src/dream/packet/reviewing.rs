@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, Utc};
 
+use super::Section;
 use crate::brief::TOP_EXPERIENCE;
 use crate::dream::vitals::cost;
 use crate::dream::{Dream, Judgement, ReviewRecord, ReviewedFinding, review_records, review_tally, tally_lines};
@@ -20,60 +21,9 @@ use crate::store::{Items, StoreError};
 /// The share of a packet's budget a sage's reviews of other ants take at most: one part in this many.
 pub const REVIEWING_SHARE: usize = 8;
 
-/// The reviews section of a sage's own packet ([`reviewing`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Reviewing {
-    /// Its heading and what it holds.
-    pub head: String,
-    /// Each review, the latest asked first, with what came of its findings.
-    pub reviews: Vec<String>,
-    /// The tally of all the sage's reviews.
-    pub tally: String,
-}
-
-impl Reviewing {
-    /// Whether it lists no review: an ant that reviewed none in the period.
-    pub fn is_empty(&self) -> bool {
-        self.reviews.is_empty()
-    }
-
-    /// Its text, keeping the first `kept` reviews.
-    pub fn text(&self, kept: usize) -> String {
-        let mut text = self.head.clone();
-        for review in self.reviews.iter().take(kept) {
-            text.push_str(review);
-        }
-        text.push_str(&self.left_out(kept));
-        text.push_str(&self.tally);
-        text
-    }
-
-    /// The most reviews it keeps within `bytes`; none when its heading and tally alone take more.
-    pub(super) fn within(&self, bytes: usize) -> usize {
-        let mut kept = 0;
-        let mut taken = self.head.len() + self.tally.len();
-        for review in &self.reviews {
-            if taken + review.len() + self.left_out(kept + 1).len() > bytes {
-                break;
-            }
-            taken += review.len();
-            kept += 1;
-        }
-        kept
-    }
-
-    fn left_out(&self, kept: usize) -> String {
-        match self.reviews.len().saturating_sub(kept) {
-            0 => String::new(),
-            1 => "\n1 earlier review left out for room.\n".into(),
-            left => format!("\n{left} earlier reviews left out for room.\n"),
-        }
-    }
-}
-
 /// The reviews section of the packet of `dream` of a sage, whose items `items` holds: the reviews asked, answered or
 /// with a verdict told within the dream's period; empty when there are none.
-pub async fn reviewing(items: &dyn Items, dream: &Dream) -> Result<Reviewing, StoreError> {
+pub async fn reviewing(items: &dyn Items, dream: &Dream) -> Result<Section, StoreError> {
     let within = |at: Option<DateTime<Utc>>| at.is_some_and(|at| dream.since <= at && at < dream.at);
     let mut reviews: Vec<_> = review_records(items, usize::MAX)
         .await?
@@ -85,7 +35,7 @@ pub async fn reviewing(items: &dyn Items, dream: &Dream) -> Result<Reviewing, St
         })
         .collect();
     if reviews.is_empty() {
-        return Ok(Reviewing::default());
+        return Ok(Section::default());
     }
     reviews.sort_by(|a, b| b.received.cmp(&a.received).then_with(|| a.ant.cmp(&b.ant)));
     let head = format!(
@@ -98,7 +48,7 @@ pub async fn reviewing(items: &dyn Items, dream: &Dream) -> Result<Reviewing, St
     );
     let tally =
         review_tally(items, TOP_EXPERIENCE).await?.map_or_default(|tally| format!("\n{}\n", tally_lines(&tally)));
-    Ok(Reviewing { head, reviews: reviews.iter().map(review).collect(), tally })
+    Ok(Section { head, entries: reviews.iter().map(review).collect(), tally, noun: "earlier review" })
 }
 
 /// `review` as the section shows it.

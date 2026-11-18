@@ -560,8 +560,10 @@ changes the work supports with `sense_identity`. Each colony entry names the sag
 resolve, so an ant made a sage only by another machine's config or by shared settings (`ants ant set dev-a sage=lead`)
 is reviewed by no one either, for as long as a daemon serves the ant naming it. The packet, at most 64 KiB, holds:
 
-- for the ant, the verdicts on the last dream's findings; for the sage, its earlier findings for the ant and what
-  became of them (below);
+- for the ant, the verdicts on the last dream's findings, each with its reason and the items it names, or
+  `unanswered`, then their tally (the counts its diary's title gives), at most an eighth of the packet's budget, the
+  last findings' verdicts left out first; for the sage, its earlier findings for the ant and what became of them
+  (below);
 - the findings, at most 20, each with an id `<dream>.<n>`: those of a sage's answer to the last dream's review come too
   late (**The answer**, below) first, then the findings of the last dream deferred or unanswered that still hold,
   offered again, then what the ant's identity lacks for its work (below), memories with both `helpful` and `stale`
@@ -587,8 +589,8 @@ is reviewed by no one either, for as long as a daemon serves the ant naming it. 
   most in all; what fails to be read is left out, and the packet goes without it. Sense stores none of them.
 
 A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then the
-vital signs' line for each thread, then the sage's earlier findings, or a sage's reviews of other ants, down to their
-tally, then cuts the identity to titles (the persona's field names, the records' heads and the skills' names), then
+vital signs' line for each thread, then the verdicts on the last dream's findings down to their tally, then the sage's
+earlier findings, or a sage's reviews of other ants, down to their tally, then cuts the identity to titles (the persona's field names, the records' heads and the skills' names), then
 leaves out the last findings, counted for the next dream.
 
 **The sage's earlier findings:** a sage keeps nothing between reviews, so its packet shows the findings it gave the ant

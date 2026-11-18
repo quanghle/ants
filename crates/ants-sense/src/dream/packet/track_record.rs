@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use ants_proto::{FindingOutcome, FindingVerdict, UserId};
 use chrono::{DateTime, Duration, Utc};
 
+use super::Section;
 use crate::dream::reviews::told_reason;
 use crate::dream::vitals::percent;
 use crate::dream::{Dream, Finding, FindingKind, FindingTally, Judgement, Signs, TREND, Verdict, get};
@@ -32,76 +33,30 @@ pub const OUTCOME_DAYS: i64 = 90;
 /// The share of a packet's budget the sage's earlier findings take at most: one part in this many.
 pub const TRACK_RECORD_SHARE: usize = 8;
 
-/// The earlier findings section of a sage's packet ([`track_record`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TrackRecord {
-    /// Its heading and what it holds.
-    pub head: String,
-    /// Each finding, the latest reviews first, with its verdict and what became of what was written for it: the first
-    /// of each review under the review's heading.
-    pub findings: Vec<String>,
-    /// The tally by kind, or that there were no findings.
-    pub tally: String,
-}
-
-impl TrackRecord {
-    /// Its text, keeping the first `kept` findings.
-    pub fn text(&self, kept: usize) -> String {
-        let mut text = self.head.clone();
-        for finding in self.findings.iter().take(kept) {
-            text.push_str(finding);
-        }
-        text.push_str(&self.left_out(kept));
-        text.push_str(&self.tally);
-        text
-    }
-
-    /// The most findings it keeps within `bytes`; none when its heading and tally alone take more.
-    pub(super) fn within(&self, bytes: usize) -> usize {
-        let fixed = self.head.len() + self.tally.len();
-        let mut kept = 0;
-        let mut taken = fixed;
-        for finding in &self.findings {
-            if taken + finding.len() + self.left_out(kept + 1).len() > bytes {
-                break;
-            }
-            taken += finding.len();
-            kept += 1;
-        }
-        kept
-    }
-
-    fn left_out(&self, kept: usize) -> String {
-        match self.findings.len().saturating_sub(kept) {
-            0 => String::new(),
-            1 => "\n1 earlier finding left out for room.\n".into(),
-            left => format!("\n{left} earlier findings left out for room.\n"),
-        }
-    }
-}
-
 /// The earlier findings section of the packet of `dream` for `sage`, reviewing `ant`, whose items `items` holds: the
 /// findings `sage` gave in the dreams that began within [`TRACK_RECORD_DAYS`] of the ant's active time before
-/// `dream`, each with the last verdict on it, in the dream that offered it or one offering it again.
+/// `dream`, each with the last verdict on it, in the dream that offered it or one offering it again: an entry each,
+/// the first of each review under the review's heading.
 pub async fn track_record(
     items: &dyn Items,
     dream: &Dream,
     sage: &UserId,
     ant: &UserId,
-) -> Result<TrackRecord, StoreError> {
+) -> Result<Section, StoreError> {
     let card = crate::identity::card(items).await?;
     let ages = memory::Ages::new(dream.at, card.iter().flat_map(|card| card.dormant(dream.at)));
     let dreams = earlier(items, dream.number, &ages, TRACK_RECORD_DAYS).await?;
     let verdicts = last_verdicts(&dreams);
     let mut vitals = Vitals::new(items, dream, &dreams);
-    let mut record = TrackRecord {
+    let mut record = Section {
         head: format!(
             "\n## Earlier findings of {sage}\n\nWhat {sage} found in the work of {ant} over its last \
              {TRACK_RECORD_DAYS} active days, the latest reviews first: each finding with its suggested action, the \
              verdict of {ant} and, for one applied, what became of what {ant} wrote or voted on for it and the vital \
              signs of {ant} over the dreams before it was applied and since, side by side.\n"
         ),
-        ..TrackRecord::default()
+        noun: "earlier finding",
+        ..Section::default()
     };
     let mut tallies: BTreeMap<String, FindingTally> = BTreeMap::new();
     for earlier in dreams.iter().filter(|earlier| earlier.sage.as_ref() == Some(sage)) {
@@ -124,7 +79,7 @@ pub async fn track_record(
             }
             let again = dream.findings.iter().any(|offered| offered.id == finding.id);
             entry.push_str(&finding_entry(finding, verdict, &written, signs.as_deref(), again));
-            record.findings.push(entry);
+            record.entries.push(entry);
         }
     }
     if tallies.is_empty() {
