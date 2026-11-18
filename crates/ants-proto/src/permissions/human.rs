@@ -5,8 +5,8 @@ use super::{ack_subjects, kv_stream, ordered_consumer_subjects};
 use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, HUMANS_BUCKET, IDENTITIES_BUCKET,
     INTAKE_STREAM, LINKS_BUCKET, MACHINES_BUCKET, NOTIFY_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET,
-    PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET, SESSIONS_BUCKET, STREAM, THREADS_BUCKET, UserId, WEBHOOKS_BUCKET,
-    channel_manager_serving_subject, notify_consumer, subject,
+    PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET, SESSIONS_BUCKET, STREAM, THREADS_BUCKET, TRAIL_RUNS_BUCKET,
+    TRAILS_BUCKET, UserId, WEBHOOKS_BUCKET, channel_manager_serving_subject, notify_consumer, subject,
 };
 #[cfg(doc)]
 use {
@@ -38,6 +38,22 @@ pub(super) fn identity_rights() -> [String; 3] {
         format!("$JS.API.STREAM.CREATE.{identities}"),
         format!("$JS.API.DIRECT.GET.{identities}"),
         format!("$KV.{IDENTITIES_BUCKET}.*"),
+    ]
+}
+
+/// What a human's credentials need of the trails: creating and looking up [`TRAILS_BUCKET`] and [`TRAIL_RUNS_BUCKET`],
+/// whose stream info lists the saved trails and every conductor's runs, putting and deleting every saved trail, which
+/// every user reads, and reading every run's records by direct gets naming no subject (`ants trail runs`), writing
+/// none: a run's conductor alone writes them, and stops or resumes a run on a human's request.
+pub(super) fn trail_rights() -> [String; 6] {
+    let (trails, runs) = (kv_stream(TRAILS_BUCKET), kv_stream(TRAIL_RUNS_BUCKET));
+    [
+        format!("$JS.API.STREAM.CREATE.{trails}"),
+        format!("$JS.API.STREAM.INFO.{trails}"),
+        format!("$KV.{TRAILS_BUCKET}.*"),
+        format!("$JS.API.STREAM.CREATE.{runs}"),
+        format!("$JS.API.STREAM.INFO.{runs}"),
+        format!("$JS.API.DIRECT.GET.{runs}"),
     ]
 }
 
@@ -177,7 +193,7 @@ pub(super) fn human_notify_rights(human: &UserId) -> Vec<String> {
 }
 
 /// The streams and buckets a human sets up, and what of them it reads and writes that an ant may not.
-pub(super) fn human_store_rights(human: &UserId) -> [String; 46] {
+pub(super) fn human_store_rights(human: &UserId) -> [String; 47] {
     let colony_stream = kv_stream(COLONY_BUCKET);
     let channels = kv_stream(CHANNELS_BUCKET);
     let humans = kv_stream(HUMANS_BUCKET);
@@ -233,6 +249,8 @@ pub(super) fn human_store_rights(human: &UserId) -> [String; 46] {
         subject::ALL_APPROVAL_DECISIONS.to_owned(),
         subject::ALL_CANCELS.to_owned(),
         subject::ALL_QUEUE_REQUESTS.to_owned(),
+        // Starting, stopping and resuming an ant's trail runs.
+        subject::ALL_TRAIL_REQUESTS.to_owned(),
         // Sending admin orders, which only an admin's signature makes a daemon carry out.
         subject::ALL_ADMIN_ORDERS_SENT.to_owned(),
         // Answering an ant's request for the reactions to a message it reads.

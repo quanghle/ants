@@ -1,4 +1,5 @@
-//! Schedules of the daemon config file: prompts sent on a timetable, each as a new thread to an ant or a channel.
+//! Schedules of the daemon config file: prompts sent on a timetable, each as a new thread to an ant or a channel, or
+//! saved trails an ant starts on one.
 //!
 //! ```toml
 //! [[schedule]]
@@ -17,6 +18,13 @@
 //! every = "15m"                     # at whole multiples of 15 minutes since 1970-01-01 00:00 UTC
 //! channel = "ops"
 //! text = "Anything stuck?"
+//!
+//! [[schedule]]
+//! name = "weekly-review"
+//! cron = "0 9 * * 1"
+//! ant = "lead"                      # the conductor of the runs
+//! trail = "review-open-prs"         # instead of text: start this saved trail ([crate::trail])
+//! args = { repo = "acme/app" }      # optional: the run's JSON input
 //! ```
 //!
 //! A firing time depends only on the schedule and the clock, never on when a daemon started, so every daemon serving
@@ -30,11 +38,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_proto::{ChannelId, Destination, JsDomain, UserId};
+use ants_proto::{ChannelId, Destination, JsDomain, TrailName, TrailStart, UserId};
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Datelike as _, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Timelike as _, Utc};
 use jiff::tz::{AmbiguousOffset, TimeZone};
 use serde::Deserialize;
+use serde_json::Value;
 
 /// Shortest `every`.
 pub const MIN_EVERY: Duration = Duration::from_secs(60);
@@ -58,7 +67,9 @@ pub struct Entry {
     #[serde(default)]
     broadcast: bool,
     owner: Option<UserId>,
-    text: String,
+    text: Option<String>,
+    trail: Option<TrailName>,
+    args: Option<serde_json::Map<String, Value>>,
     #[serde(default)]
     catch_up: bool,
     allow: Option<Vec<String>>,
@@ -88,7 +99,10 @@ pub struct Schedule {
     pub destination: Destination,
     pub mentions: Mentions,
     pub owner: Option<UserId>,
+    /// The prompt; for a trail schedule, the line its message shows.
     pub text: String,
+    /// The saved trail a firing starts, with the ant as its conductor, rather than prompting the ant.
+    pub trail: Option<TrailStart>,
     /// Send the latest firing missed while no daemon could, late, rather than skip it.
     pub catch_up: bool,
     /// The tool rules the threads it starts are narrowed to; None for [`ants_proto::WEBHOOK_ALLOW`].
@@ -132,9 +146,22 @@ impl Schedule {
             (Some(mentions), false) => Mentions::Listed(mentions),
             (None, true) => Mentions::Members,
         };
-        if entry.text.trim().is_empty() {
-            bail!("empty text");
-        }
+        let (text, trail) = match (entry.text, entry.trail) {
+            (Some(text), None) if entry.args.is_some() => bail!("args go with trail only, not text: {text:?}"),
+            (Some(text), None) if text.trim().is_empty() => bail!("empty text"),
+            (Some(text), None) => (text, None),
+            (None, Some(_)) if !matches!(destination, Destination::Ant(_)) => {
+                bail!("a trail schedule names the ant conducting its runs, not a channel")
+            }
+            (None, Some(_)) if entry.allow.is_some() => {
+                bail!("allow goes with text only: a trail's steps are narrowed as a webhook's threads are")
+            }
+            (None, Some(trail)) => {
+                let args = entry.args.map_or(Value::Null, Value::Object);
+                (format!("Scheduled run of trail {trail}."), Some(TrailStart { trail, args }))
+            }
+            _ => bail!("give exactly one of text and trail"),
+        };
         if let Some(url) = &entry.nats {
             crate::bus::check_url(url)?;
         }
@@ -150,7 +177,8 @@ impl Schedule {
             destination,
             mentions,
             owner: entry.owner,
-            text: entry.text,
+            text,
+            trail,
             catch_up: entry.catch_up,
             allow: entry.allow,
         })
@@ -581,5 +609,30 @@ mod tests {
         assert!(e.to_string().contains("empty text"), "{e}");
         let e = entry("name = \"human\"\ntext = \"t\"\ncron = \"@daily\"\nant = \"dev-a\"\n").unwrap_err();
         assert!(e.to_string().contains("no schedule"), "{e}");
+    }
+
+    #[test]
+    fn an_entry_starts_a_saved_trail_with_its_args() {
+        let base = "name = \"weekly\"\ncron = \"@weekly\"\nant = \"dev-a\"\n";
+        let s = entry(&format!("{base}trail = \"review\"\nargs = {{ repo = \"app\", depth = 2 }}\n")).unwrap();
+        let trail = s.trail.unwrap();
+        assert_eq!(trail.trail.as_str(), "review");
+        assert_eq!(trail.args, serde_json::json!({"repo": "app", "depth": 2}));
+        assert!(s.text.contains("review"), "{}", s.text);
+        let s = entry(&format!("{base}trail = \"review\"\n")).unwrap();
+        assert_eq!(s.trail.unwrap().args, serde_json::Value::Null, "no args");
+
+        for (extra, why) in [
+            ("", "exactly one of text and trail"),
+            ("text = \"t\"\ntrail = \"review\"", "exactly one of text and trail"),
+            ("text = \"t\"\nargs = { a = 1 }", "args go with trail only"),
+            ("trail = \"Review!\"", "trail"),
+            ("trail = \"review\"\nallow = [\"read\"]", "allow"),
+        ] {
+            let e = format!("{:#}", entry(&format!("{base}{extra}\n")).unwrap_err());
+            assert!(e.contains(why), "{extra}: {e}");
+        }
+        let e = entry("name = \"w\"\ncron = \"@weekly\"\nchannel = \"ops\"\ntrail = \"review\"\n").unwrap_err();
+        assert!(format!("{e:#}").contains("not a channel"), "{e:#}");
     }
 }

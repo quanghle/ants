@@ -54,13 +54,23 @@ pub(crate) async fn latest(js: &jetstream::Context, filter: &str) -> Result<Vec<
 
 /// [`latest`] of `bucket`, a KV bucket of history 1, on `filter`, a subject under `$KV.<bucket>.`.
 pub(crate) async fn latest_in(js: &jetstream::Context, bucket: &str, filter: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    Ok(latest_after(js, bucket, filter, 1).await?.0)
+}
+
+/// [`latest_in`] from the stream's sequence `from` on, with the sequence to read from next for the entries put since.
+pub(crate) async fn latest_after(
+    js: &jetstream::Context,
+    bucket: &str,
+    filter: &str,
+    from: u64,
+) -> Result<(Vec<(String, Vec<u8>)>, u64)> {
     let stream = format!("KV_{bucket}");
     let client = js.client();
     let wait = client.timeout().unwrap_or(Duration::from_secs(10));
     let inbox = client.new_inbox();
     let mut replies = client.subscribe(inbox.clone()).await?;
     let prefix = format!("$KV.{bucket}.");
-    let (mut entries, mut seq) = (Vec::new(), 1);
+    let (mut entries, mut seq) = (Vec::new(), from);
     loop {
         let request = json!({ "seq": seq, "next_by_subj": filter, "batch": BATCH });
         let request = async_nats::Request::new().inbox(inbox.clone()).payload(serde_json::to_vec(&request)?.into());
@@ -74,12 +84,12 @@ pub(crate) async fn latest_in(js: &jetstream::Context, bucket: &str, filter: &st
             };
             match msg.status {
                 None => {}
-                Some(StatusCode::NOT_FOUND) => return Ok(entries),
+                Some(StatusCode::NOT_FOUND) => return Ok((entries, seq)),
                 Some(StatusCode::NO_RESPONDERS) => bail!("no {bucket} bucket: `ants init` creates it"),
                 Some(status) if status.as_u16() == 204 => {
                     let pending = msg.headers.as_ref().and_then(|h| h.get("Nats-Num-Pending"));
                     if got == 0 || pending.is_some_and(|n| n.as_str() == "0") {
-                        return Ok(entries);
+                        return Ok((entries, seq));
                     }
                     break;
                 }

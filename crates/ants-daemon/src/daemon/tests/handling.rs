@@ -621,3 +621,34 @@ async fn a_withdrawal_an_assistant_records_while_no_daemon_serves_is_honoured_be
     }
     assert_eq!(bus.unacked().await, 0);
 }
+
+#[tokio::test]
+async fn a_schedule_s_trail_firing_is_never_prompted_and_its_failed_start_is_told_to_the_owner() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let [hook, dev_b] = ants(["nightly", "dev-b"]);
+    bus.mark_webhook(&hook).await;
+    let start = ants_proto::TrailStart { trail: "review".parse().unwrap(), args: serde_json::Value::Null };
+    let firing = Envelope::new(hook.clone(), bus.dev.clone(), "Scheduled run of trail review.")
+        .with_owner(Some(UserId::human()))
+        .from_webhook()
+        .starting(Some(start.clone()));
+    let seq = bus::publish_json(&bus.js, firing.subject(), &firing, None).await.unwrap();
+    // An ant's message asking for a run is no firing: prompted as any other.
+    let forged = Envelope::new(dev_b, bus.dev.clone(), "forged").starting(Some(start));
+    let forged_seq = bus::publish_json(&bus.js, forged.subject(), &forged, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let told = next_envelope(&mut to_human).await;
+        assert_eq!((told.in_reply_to, &told.thread_id), (Some(firing.id), &firing.thread_id));
+        assert!(told.text.contains("could not start a run of trail review for nightly"), "{}", told.text);
+        assert!(told.text.contains("the bus keeps no trail runs"), "{}", told.text);
+        bus.until_acked(seq).await;
+        bus.until_acked(forged_seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().answered, ["forged"], "the firing prompts nothing");
+}

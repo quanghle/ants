@@ -129,6 +129,7 @@ Live progress of an ant on a thread, from its daemon: `ant`, `thread_id`, `at`, 
 | `escalated` | `to`, `escalation` | An escalation was sent (below) |
 | `asked` | `to`, `message` (id), `question`: `{questions: [{text, header?, options: [{label, description?}], multi_select, free_text}]}` | Questions were asked of a human (below) |
 | `decided` | `request_id`, `verdict`, `by`, `decider`?, `via`? | A tool request was settled (below) |
+| `step` | `run`, `call`, `label`?, `to`, `step_thread`, `stage` (`started`, `answered`, `failed`, `dropped`) | A trail run's step, on the conductor's status of the run's thread |
 
 Check: `subject == "ants.status." + ant + "." + thread_id`.
 

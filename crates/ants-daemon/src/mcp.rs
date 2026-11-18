@@ -74,12 +74,14 @@ mod reactions;
 mod routing;
 mod serve;
 mod tools;
+mod trails;
 mod turn;
 
 pub use assist::{HumanMessage, HumanSealing, HumanStore, jetstream_store};
 pub use attach::{FileAccess, jetstream_files};
 pub use channels::{ChannelAccess, jetstream_channels};
 pub use managers::{AntAsk, AntRequester, ManagerAsk, Requester, RetireAsk};
+pub(crate) use messages::asked_questions;
 pub(crate) use provider::Directories;
 pub use reactions::{ReactionAsker, local_reaction_asker, nats_reaction_asker};
 pub(crate) use routing::why_unserved;
@@ -165,6 +167,7 @@ impl Mcp {
             files: OnceLock::new(),
             redactor: OnceLock::new(),
             provider: OnceLock::new(),
+            trails: OnceLock::new(),
             served: Mutex::default(),
             callers: OnceLock::new(),
             origin_store: OnceLock::new(),
@@ -259,6 +262,11 @@ impl Mcp {
     /// Take `provider` for the ant's provider, which [`Mcp::provider`] gives.
     pub fn with_provider(&self, provider: Connected) {
         let _ = self.hub.provider.set(provider);
+    }
+
+    /// Start the ant's trail runs through `trails` for `run_trail`; without them the tool is refused.
+    pub fn with_trails(&self, trails: crate::trail::Trails) {
+        let _ = self.hub.trails.set(trails);
     }
 
     /// The ant's provider, connected: none when the ant has none.
@@ -386,6 +394,8 @@ struct Hub {
     redactor: OnceLock<Arc<Redactor>>,
     /// The ant's provider ([`crate::provider`]).
     provider: OnceLock<Connected>,
+    /// The runs the ant conducts ([`Mcp::with_trails`]).
+    trails: OnceLock<crate::trail::Trails>,
     /// The provider's tools as listed last.
     served: Mutex<provider::Served>,
     /// Who the provider calls are for ([`Mcp::with_callers`]).

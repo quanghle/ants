@@ -385,6 +385,21 @@ pub fn queued(ant: &UserId) -> String {
     format!("ants.queued.{ant}")
 }
 
+/// Where a human asks the daemon of `ant`, as a trail's conductor, to start, stop or resume a run
+/// ([`TrailRequest`](super::TrailRequest); core NATS, not stored). Only humans publish here, and only that ant's daemon
+/// listens.
+pub fn trail(ant: &UserId) -> String {
+    format!("ants.trail.{ant}")
+}
+
+/// Every trail request, of all ants.
+pub const ALL_TRAIL_REQUESTS: &str = "ants.trail.*";
+
+/// Where the daemon of `ant` answers a trail request ([`TrailReply`](super::TrailReply); core NATS).
+pub fn trailed(ant: &UserId) -> String {
+    format!("ants.trailed.{ant}")
+}
+
 /// The colony entry of an ant: the subject its daemon puts [`super::ColonyEntry`] on.
 pub fn colony(ant: &UserId) -> String {
     format!("$KV.{}.{ant}", super::COLONY_BUCKET)
