@@ -15,7 +15,7 @@ use crate::provider::{Definition, Setting};
 use crate::schedule::{self, Schedule};
 
 /// Check the top-level settings of the config `file` at `path`: its `harness` among the `harnesses`, its `provider`
-/// among the `providers`, its `[cli]`, `[storage]`, `[memory_pressure]` and `machine`.
+/// among the `providers`, its `[cli]`, `[storage]`, `[memory_pressure]`, `[trails]` and `machine`.
 pub(super) fn check_top_level(
     file: &File,
     harnesses: &Harnesses,
@@ -34,6 +34,7 @@ pub(super) fn check_top_level(
     file.cli.summary().with_context(|| format!("config {}", path.display()))?;
     file.storage.validate().with_context(|| format!("config {}", path.display()))?;
     file.memory_pressure.validate().with_context(|| format!("config {}", path.display()))?;
+    file.trails.validate().with_context(|| format!("config {}", path.display()))?;
     if let Some(machine) = &file.machine {
         check_machine(machine).with_context(|| format!("config {}", path.display()))?;
     }
@@ -87,6 +88,7 @@ pub(super) fn settle_ant(
     ant.machine.clone_from(&file.machine);
     ant.storage = file.storage;
     ant.memory_pressure = file.memory_pressure;
+    ant.trail_workers = file.trails.workers;
     Ok(ant)
 }
 

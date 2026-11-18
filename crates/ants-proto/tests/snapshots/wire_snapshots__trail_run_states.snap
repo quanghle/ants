@@ -1,0 +1,136 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  {
+    "run": "019a7d2f-0000-7000-8000-000000000001",
+    "conductor": "planner",
+    "trail": "release",
+    "script": "agent('dev-a', 'build it')",
+    "args": {
+      "version": "1.2.0"
+    },
+    "owner": "alice",
+    "thread": "019a7d2c-0000-7000-8000-000000000001",
+    "origin": {
+      "by": {
+        "kind": "human",
+        "user": "alice"
+      },
+      "channel": "backend"
+    },
+    "limits": {
+      "steps": 20,
+      "concurrency": 4,
+      "turns": 200,
+      "wall_secs": 86400,
+      "compute_ms": 10000,
+      "session_bytes": 786432
+    },
+    "state": "running",
+    "phase": "review",
+    "steps": 3,
+    "turns": 5,
+    "started_at": "2025-01-01T12:00:00Z",
+    "updated_at": "2025-01-01T12:09:00Z"
+  },
+  {
+    "run": "019a7d2f-0000-7000-8000-000000000001",
+    "conductor": "planner",
+    "trail": "release",
+    "script": "agent('dev-a', 'build it')",
+    "args": {
+      "version": "1.2.0"
+    },
+    "owner": "alice",
+    "thread": "019a7d2c-0000-7000-8000-000000000001",
+    "origin": {
+      "by": {
+        "kind": "human",
+        "user": "alice"
+      },
+      "channel": "backend"
+    },
+    "limits": {
+      "steps": 20,
+      "concurrency": 4,
+      "turns": 200,
+      "wall_secs": 86400,
+      "compute_ms": 10000,
+      "session_bytes": 786432
+    },
+    "state": "waiting",
+    "phase": "review",
+    "steps": 3,
+    "turns": 5,
+    "started_at": "2025-01-01T12:00:00Z",
+    "updated_at": "2025-01-01T12:09:00Z"
+  },
+  {
+    "run": "019a7d2f-0000-7000-8000-000000000001",
+    "conductor": "planner",
+    "trail": "release",
+    "script": "agent('dev-a', 'build it')",
+    "args": {
+      "version": "1.2.0"
+    },
+    "owner": "alice",
+    "thread": "019a7d2c-0000-7000-8000-000000000001",
+    "origin": {
+      "by": {
+        "kind": "human",
+        "user": "alice"
+      },
+      "channel": "backend"
+    },
+    "limits": {
+      "steps": 20,
+      "concurrency": 4,
+      "turns": 200,
+      "wall_secs": 86400,
+      "compute_ms": 10000,
+      "session_bytes": 786432
+    },
+    "state": "stopped",
+    "by": "alice",
+    "phase": "review",
+    "steps": 3,
+    "turns": 5,
+    "started_at": "2025-01-01T12:00:00Z",
+    "updated_at": "2025-01-01T12:09:00Z"
+  },
+  {
+    "run": "019a7d2f-0000-7000-8000-000000000001",
+    "conductor": "planner",
+    "trail": "release",
+    "script": "agent('dev-a', 'build it')",
+    "args": {
+      "version": "1.2.0"
+    },
+    "owner": "alice",
+    "thread": "019a7d2c-0000-7000-8000-000000000001",
+    "origin": {
+      "by": {
+        "kind": "human",
+        "user": "alice"
+      },
+      "channel": "backend"
+    },
+    "limits": {
+      "steps": 20,
+      "concurrency": 4,
+      "turns": 200,
+      "wall_secs": 86400,
+      "compute_ms": 10000,
+      "session_bytes": 786432
+    },
+    "state": "failed",
+    "error": "steps limit of 20 reached",
+    "phase": "review",
+    "steps": 3,
+    "turns": 5,
+    "started_at": "2025-01-01T12:00:00Z",
+    "updated_at": "2025-01-01T12:09:00Z"
+  }
+]

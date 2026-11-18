@@ -14,7 +14,7 @@ use ants_proto::{
     DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, INCARNATION_KEY, LINKS_BUCKET,
     MACHINES_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET,
     SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET,
-    WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
+    TRAIL_RUN_RETENTION, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, TrailLimits, WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
@@ -45,13 +45,15 @@ pub enum Object {
     Devices,
     Machines,
     Identities,
+    Trails,
+    TrailRuns,
     /// The attachments' store ([`FILES_BUCKET`]).
     Files,
 }
 
 impl Object {
     /// Every object, the stream first.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 21] = [
         Self::Stream,
         Self::Colony,
         Self::Sessions,
@@ -70,6 +72,8 @@ impl Object {
         Self::Devices,
         Self::Machines,
         Self::Identities,
+        Self::Trails,
+        Self::TrailRuns,
         Self::Files,
     ];
 
@@ -94,6 +98,8 @@ impl Object {
             Self::Devices => DEVICES_BUCKET,
             Self::Machines => MACHINES_BUCKET,
             Self::Identities => IDENTITIES_BUCKET,
+            Self::Trails => TRAILS_BUCKET,
+            Self::TrailRuns => TRAIL_RUNS_BUCKET,
         })
     }
 
@@ -132,6 +138,8 @@ impl Object {
             Self::Devices => Spec::Bucket(Box::new(devices_config())),
             Self::Machines => Spec::Bucket(Box::new(machines_config())),
             Self::Identities => Spec::Bucket(Box::new(identities_config())),
+            Self::Trails => Spec::Bucket(Box::new(trails_config())),
+            Self::TrailRuns => Spec::Bucket(Box::new(trail_runs_config())),
         }
     }
 
@@ -422,6 +430,26 @@ async fn mark_incarnation(identities: &kv::Store, anew: bool) -> Result<()> {
     written.context("writing the incarnation marker of bucket ants_identities")
 }
 
+/// The saved trails ([`TRAILS_BUCKET`]): a trail lasts until a human deletes it.
+pub fn trails_config() -> kv::Config {
+    lasting_config(TRAILS_BUCKET, "Saved trails, written by humans")
+}
+
+/// The trail runs ([`TRAIL_RUNS_BUCKET`]): each entry expires [`TRAIL_RUN_RETENTION`] and a run's most wall time after
+/// its last put. A run's entries are put while it runs, which is never longer than that wall time, so those of a
+/// finished run last [`TRAIL_RUN_RETENTION`] at least after its end, and none of a running one expires. A bucket max
+/// age needs no write to refresh old entries, as per-message TTLs would.
+pub fn trail_runs_config() -> kv::Config {
+    kv::Config {
+        bucket: TRAIL_RUNS_BUCKET.to_owned(),
+        description: "Trail runs: each run's header, session and answered calls, written by its conductor".to_owned(),
+        history: 1,
+        max_age: TRAIL_RUN_RETENTION + TrailLimits::MAX.wall_time(),
+        storage: stream::StorageType::File,
+        ..Default::default()
+    }
+}
+
 /// The read markers of the humans ([`READ_BUCKET`]).
 pub fn read_config() -> kv::Config {
     lasting_config(READ_BUCKET, "What each human has read of its inbox, on any of its devices")
@@ -588,6 +616,8 @@ mod tests {
             Object::Devices,
             Object::Machines,
             Object::Identities,
+            Object::Trails,
+            Object::TrailRuns,
             Object::Files,
         ];
         assert_eq!(problems(&check(&js, |_| true).await), left, "the rest is created");
@@ -595,7 +625,15 @@ mod tests {
         let human = |s: &str| s != Object::Presence.info_subject() && s != Object::Identities.info_subject();
         assert_eq!(
             problems(&init(&js, human).await.unwrap()),
-            [Object::Read, Object::Notify, Object::Devices, Object::Machines, Object::Files]
+            [
+                Object::Read,
+                Object::Notify,
+                Object::Devices,
+                Object::Machines,
+                Object::Trails,
+                Object::TrailRuns,
+                Object::Files
+            ]
         );
         assert!(init(&js, human).await.unwrap().is_empty(), "creating those buckets again changes nothing");
         assert!(check(&js, |_| true).await.is_empty(), "all there");

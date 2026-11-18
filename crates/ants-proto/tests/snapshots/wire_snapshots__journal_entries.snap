@@ -1,0 +1,30 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  {
+    "call": 1,
+    "function": "agent",
+    "args": [
+      "dev-a",
+      "build it"
+    ],
+    "answer": {
+      "ok": {
+        "ok": true
+      }
+    }
+  },
+  {
+    "call": 2,
+    "function": "agent",
+    "args": [
+      "dev-a",
+      "build it"
+    ],
+    "answer": {
+      "error": "dev-a is not an ant"
+    }
+  }
+]

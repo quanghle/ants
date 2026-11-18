@@ -5,8 +5,9 @@ use super::human::{notify_prefs_rights, read_marker_rights, thread_rights};
 use super::{Permissions, covers, kv_stream};
 use crate::{
     ATTEMPTS_BUCKET, CHANNELS_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, INTAKE_STREAM,
-    OUTBOX_STREAM, OWNERS_BUCKET, Role, THREADS_BUCKET, UserId, assisted_marks_key, assisted_reminders_key,
-    chan_reader, inbox_consumer, inbox_prefix, notes_consumer, notify_consumer, sent_reader, spare_readers, subject,
+    OUTBOX_STREAM, OWNERS_BUCKET, Role, THREADS_BUCKET, TRAILS_BUCKET, UserId, assisted_marks_key,
+    assisted_reminders_key, chan_reader, inbox_consumer, inbox_prefix, notes_consumer, notify_consumer, sent_reader,
+    spare_readers, subject,
 };
 #[cfg(doc)]
 use crate::{AssistantOf, assisted_owner_key, assisted_withdrawal_key, unserved_key};
@@ -34,9 +35,10 @@ impl Permissions {
     /// answered only under keys naming it ([`assisted_withdrawal_key`]). It gets none of a human's
     /// rights whose subjects do not name who acts, which readers could not tell from its human's: cancelling or asking
     /// for a queue on [`subject::ALL_CANCELS`] and [`subject::ALL_QUEUE_REQUESTS`] (whose request's `by` no reader can
-    /// check), creating message marks in [`ATTEMPTS_BUCKET`], recording an owner under any key, putting dead letters,
+    /// check), starting, stopping or resuming a trail run on [`subject::ALL_TRAIL_REQUESTS`], creating message marks in [`ATTEMPTS_BUCKET`], recording an owner under any key, putting dead letters,
     /// answering an ant's reactions requests or another's renewal, setting another ant's avatar
-    /// ([`IDENTITIES_BUCKET`]). Nor does it
+    /// ([`IDENTITIES_BUCKET`]), saving or deleting a trail ([`TRAILS_BUCKET`], whose entries name the human who saved
+    /// them). Nor does it
     /// decide approval requests on [`subject::ALL_APPROVAL_DECISIONS`]: it decides one for its human in a message to
     /// the ant (`on_behalf_of`), which waits for its human's confirmation, as readers ignore a stored decision carrying
     /// `on_behalf_of` and one stored there would keep its human's own from being stored. It sends admin orders for its
@@ -70,6 +72,7 @@ impl Permissions {
             // Subjects naming no sender, whose readers could not tell its acts from its human's.
             subject::ALL_CANCELS.to_owned(),
             subject::ALL_QUEUE_REQUESTS.to_owned(),
+            subject::ALL_TRAIL_REQUESTS.to_owned(),
             subject::ALL_REACTIONS_REPLIES.to_owned(),
             subject::ALL_RENEW_REQUESTS.to_owned(),
             subject::DEAD_ALL.to_owned(),
@@ -78,6 +81,7 @@ impl Permissions {
             "ants.out.owners.*.*".to_owned(),
             format!("$KV.{CHANNELS_BUCKET}.>"),
             format!("$KV.{IDENTITIES_BUCKET}.*"),
+            format!("$KV.{TRAILS_BUCKET}.*"),
             format!("$JS.API.STREAM.INFO.{OUTBOX_STREAM}"),
             format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
             format!("$JS.API.STREAM.MSG.GET.{INTAKE_STREAM}"),

@@ -42,6 +42,7 @@ pub mod records;
 pub mod secrets;
 pub mod sense;
 pub mod stream;
+pub mod trail;
 
 pub mod sync;
 #[cfg(test)]

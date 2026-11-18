@@ -1,0 +1,29 @@
+[package]
+name = "ants-trail"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "trails, Python scripts that orchestrate ants, run by Monty in one-shot ants workers"
+
+[dependencies]
+monty = "1.5.0"
+# The worker's memory limit: the `ants` binary's global allocator counts live bytes for Monty and caps a worker.
+monty-alloc = { version = "1.5.0", features = ["exit-code"] }
+monty-types = "1.5.0"
+num-bigint = { version = "0.4", default-features = false }
+# Monty's own parser, at Monty's version: reads a trail's meta without running it.
+ruff_python_ast = "0.0.14"
+ruff_python_parser = "0.0.14"
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror = "2.0.21"
+tokio = { workspace = true, features = ["io-util", "macros", "process", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt"] }
+
+[lints]
+workspace = true
