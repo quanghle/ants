@@ -1,8 +1,9 @@
 # Trails
 
 A trail is a Python script that coordinates several ants and humans over time. A conductor, the ant a run is started
-on, has its daemon run the script; each `agent()` or `human()` call of the script is a step, a message the conductor
-sends on a fresh thread, and the run waits for its answer without a process, surviving restarts. The script's code, not
+on, has its daemon run the script; each `agent()`, `human()` or `trail()` call of the script is a step (a message the
+conductor sends on a fresh thread, or a child run of a saved trail), and the run waits for its answer without a
+process, surviving restarts. The script's code, not
 a model, decides which ant takes each step, how many steps run at once and how their results merge.
 
 This document says what a trail is, how runs start, report, stop and resume, what they may spend and trust, and where
@@ -40,12 +41,16 @@ phase("report")
 ```
 
 The script runs top to bottom with `await` allowed at the top level; the value of its last expression, which must be
-JSON, is the run's result. It reaches the host only through these names:
+JSON, is the run's result. `meta` may also list `"waypoints": [...]` (at most 32 Python identifiers): each names a
+top-level `async def` taking one state argument, a new run enters the first waypoint with `args` after running the top
+level, and the top level may then hold only `meta`, imports, definitions and constants. The script reaches the host
+only through these names:
 
 | Name | What it does |
 |---|---|
 | `await agent(prompt, ant=None, capability=None, schema=None, label=None)` | One step: `prompt` to the ant `ant` names, to an ant other than the conductor advertising `capability` (picked as `route` picks one), or to the conductor itself. Returns the reply's text, or with `schema` (a JSON Schema) its JSON, asked for again at most twice on a mismatch. |
 | `await human(questions)` | One step: asks the run's owner, else the default human, 1 to 4 questions as `ask_human` does; returns the answer's text. |
+| `await trail(name, args=None)` | One step: runs saved trail `name` as a child run on a spin-off thread with the same conductor, owner and origin, sharing the root run's limits and returning its result. |
 | `phase(title)`, `log(text)`, `print()` | Notes on the run's thread; never wait. |
 | `args` | The run's JSON input (`None` without). |
 | `await parallel(*coroutines)` | All results in argument order once every coroutine finished (`asyncio.gather`). |
@@ -53,7 +58,8 @@ JSON, is the run's result. It reaches the host only through these names:
 
 A step that fails raises `RuntimeError` where it is awaited: an `ant=` naming a human or no valid ant name, a
 `capability` no ant but the conductor advertises, malformed `human()` questions, a reply still off its schema after
-two re-asks, a step's message withdrawn from its recipient's queue (`<ant> never answered`), or the run's step limit
+two re-asks, a step's message withdrawn from its recipient's queue (`<ant> never answered`), an unknown saved trail,
+`args` over 64 KiB, an ancestor-trail cycle or a failed child run in `trail()`, or the run's step limit
 reached. A step to an ant no daemon serves waits in that ant's queue, as any message does, until the run ends or a
 human stops it. An exception the script does not catch fails the run with its traceback, lines numbered as in the
 file (`trail.py`).
@@ -67,8 +73,9 @@ tests (`crates/ants/tests/trail_guide.rs`); the `run_trail` tool's description c
 
 `ants trail save FILE` checks a file, without running it, and saves it for the whole colony in `ants_trails` under its
 meta's `name` or `--name`: 1–64 of `a-z`, `0-9` and `-`, not a UUID (meta's own `name` may also hold capitals and `_`,
-needing `--name` then). A saved trail's script holds at most 256 KiB, its description 1000 characters, and at most 32
-phases of one line of 1–120 characters each. Only humans save and remove trails; ants and humans read them.
+needing `--name` then). A saved trail's script holds at most 256 KiB, its description 1000 characters, at most 32
+phases of one line of 1–120 characters each, and at most 32 waypoints. Only humans save and remove trails; ants and
+humans read them.
 
 A conductor's daemon also finds trails in `~/.ants/trails/<name>.py` on its machine, and the CLI lists and runs the
 `.py` files of the CLI machine's `~/.ants/trails` by the same name, the file's, whatever its meta's `name`. On a name
@@ -173,7 +180,7 @@ they may be raised on resume:
 
 | Limit | Default | Maximum | Flag, key | Past it |
 |---|---|---|---|---|
-| Steps, `agent()` and `human()` calls (re-asks not counted) | 50 | 500 | `--steps`, `steps` | the call raises `RuntimeError: the run reached its limit of N steps` |
+| Steps, `agent()`, `human()` and `trail()` calls (child runs included; re-asks not counted) | 50 | 500 | `--steps`, `steps` | the call raises `RuntimeError: the run reached its limit of N steps` |
 | Steps outstanding at once | 4 | 16 | `--at-once`, `at_once` | later steps wait in the run; nothing raises |
 | Turns the steps spend, as ant messages spend them | 200 | 2000 | `--turns`, `turns` | the run fails |
 | Wall time from start, stopped time included | 24h | 7d | `--wall`, `wall` | the run fails, waiting or not |
@@ -188,7 +195,8 @@ child's. `ants trail show RUN` names it (`state: failed on its turns limit: …`
 ([Restarts, stops and resumes](#restarts-stops-and-resumes)).
 
 Each `agent()` step reserves up to 8 of the run's turns as its message's turn budget; the turns its reply spent, and
-one per re-ask, count against the run's turns, and a run that cannot reserve one fails on its turn limit. Each step
+one per re-ask, count against the run's turns, and a run that cannot reserve one fails on its turn limit. Child runs
+started with `trail()` share the root run's step, turn and remaining wall-time limits. Each step
 also counts against the spending caps of the ant answering it. Keep the script's own work small: only the compute
 between steps counts against the compute limit, and every variable counts against the session's size at each
 suspension.
@@ -215,8 +223,8 @@ the run.
 
 | Store | Kept | Holds |
 |---|---|---|
-| KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, script, who saved it and when. |
-| KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (trail or inline script, args, owner, origin, limits, state, spending, thread, times), `<ant>.<run>.session` the dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out. |
+| KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, waypoints, script, who saved it and when. |
+| KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (trail or inline script, args, owner, origin, limits, state, spending, thread, optional `parent`, times), `<ant>.<run>.session` the dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out. |
 
 `ants init` creates both buckets. A run's states are `running`, `waiting` (on human steps only), `stopped`, `done` and
 `failed`. Its records stay 37 days after their last write: 30 days of keeping plus the longest wall time, so a
@@ -230,16 +238,16 @@ finished run stays at least 30 days. The full layout is in [architecture.md](arc
 - **Replay:** a session the worker cannot restore (dumped by another Monty version, or lost) is rebuilt from the
   journal: the script starts again with the run's clock and seed, its steps answered from the journal in order. A
   script whose steps no longer match the journal fails the run, naming the first call that differs.
-- **Stop:** `ants trail stop RUN` stops a run: no further step goes out and the replies of the steps waited on answer
+- **Stop:** `ants trail stop RUN` stops a run (and any running child runs): no further step goes out and the replies of the steps waited on answer
   nothing. The conductor withdraws the steps sent to itself; the command lists those still in other ants' queues, each
   with the `ants withdraw ANT MESSAGE` withdrawing it. The conductor stops a run it conducts the same way with
   `stop_trail`, the run then stopped by the conductor, and the tool lists the steps in other ants' queues for a human to
   withdraw. An admin's `ants ant stop-trail ANT RUN` has the conductor's daemon stop it by [admin
   order](auth.md#admin-orders): unlike the request, which only a daemon up answers, the order waits for the machine's
   daemon while it is away and is recorded with the admin and time (`ants ant orders ANT`), its result listing the steps
-  in other ants' queues. Wall time keeps running while stopped.
+  in other ants' queues. Ending a parent run stops its still-running children. Wall time keeps running while stopped.
 - **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose record names the limit it failed on, from
-  its last stored session; the steps waited on go out anew, on new threads. Limit flags replace the run's limits they name, within the
+  its last stored session, resuming its stopped child runs too; the steps waited on go out anew, on new threads. Limit flags replace the run's limits they name, within the
   maxima. A run done, failed otherwise, running or waiting is refused. An admin's `ants ant resume-trail ANT RUN`
   resumes it by admin order the same way, limit flags included.
 

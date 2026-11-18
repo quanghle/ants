@@ -38,7 +38,7 @@ scheduling reminders, maintenance and dreams, and making a review's checkouts.
 - **The MCP server's instructions**, naming the `sense_*` tools as the ant's provider's and telling `sense_handoff`
   from ants' own `handoff`: `handoff` sends work to the ant itself on another thread, to run there as its own prompt;
   `sense_handoff` sends nothing and records the thread's end for the briefs to show. The brief's last section lists
-  each tool and when to use it.
+  the 11 session tools (all except `sense_dream`) and when to use each.
 - **Wake-ups:** reminders, and dreams the ant reviews alone, reach the ant as messages from itself, marked
   `wake from sense` in `ants thread show` and `ants chat` ([Wake requests](architecture.md#wake-requests)).
 
@@ -849,7 +849,7 @@ Sense's brief ([Briefs](architecture.md#briefs)) holds, in order, the sections i
     ranks them without a query, inside the block of recalled memories, leaving out the episodes of the handoffs above;
     on a review, the 2 best memories of the ant under review are among them however the sage's own rank;
 12. `## Skills`: each skill's name and description;
-13. `## Core loop`: each sense tool and when to use it.
+13. `## Core loop`: the 11 session sense tools (all except `sense_dream`) and when to use each.
 
 The brief stays within the request's budget, 8000 bytes. Over it, the brief gives up what other calls show first and
 the ant's identity last, each step taken only while the brief is still over (`ants_sense::brief`):

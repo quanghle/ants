@@ -23,9 +23,12 @@ message instead.
 ## The file
 
 A trail is a `.py` file whose first statement is a literal `meta`: a `name` of letters, digits, `-` and `_`, a
-`description`, and the `phases` the script announces. The meta is read without running the script; a file without it
+`description`, the `phases` the script announces, and optional `waypoints` (up to 32 top-level `async def` entry points
+taking one state argument, the first entered at start, with the top level then holding only `meta`, imports,
+definitions and constants). The meta is read without running the script; a file without it
 is refused. A trail is saved under a name of 1-64 lowercase letters, digits and `-`: its meta's `name` when it is one,
-else the name `ants trail save --name` gives. The script runs top to bottom with `await` allowed at the top level, and the value of its last expression,
+else the name `ants trail save --name` gives. Without `waypoints`, the script runs top to bottom with `await` allowed
+at the top level, and the value of its last expression,
 which must be JSON (None, bools, numbers, strings, lists, dicts with string keys), is the run's result.
 
 ```python
@@ -64,6 +67,9 @@ Nothing else of the host is reachable: these names are defined before the script
   `description`), and optionally a `header`, `multi_select` (default False) and `free_text` (default True). Returns the
   answer as text: for one question, the label picked (labels joined by `, ` with `multi_select`) or the text typed; for
   several, one line per question, `title: answer`. Set `"free_text": False` to compare the answer with a label.
+- `await trail(name, args=None)`: one step answered by a child run of saved trail `name` on a spin-off thread with the
+  same conductor, owner and origin, sharing the root run's limits and returning its JSON result. Refuses an unknown
+  trail, `args` over 64 KiB, or a trail on the calling run's ancestor chain.
 - `phase(title)`: starts a phase, named as in meta's `phases`, shown as a note on the run's thread.
 - `log(text)`: a note on the run's thread; `print()` writes notes too. Neither waits.
 - `args`: the JSON value the run was started with (None without).
@@ -73,14 +79,15 @@ Nothing else of the host is reachable: these names are defined before the script
   moving on to its next stage as soon as its own step is answered, with no barrier between stages; returns the last
   stage's results in item order.
 
-Only `agent()` and `human()` suspend a run. Both are coroutine functions: await them, or hand their coroutines to
-`parallel`. Their arguments must be JSON: anything else raises TypeError.
+Only `agent()`, `human()` and `trail()` suspend a run. All three are coroutine functions: await them, or hand their
+coroutines to `parallel`. Their arguments must be JSON: anything else raises TypeError.
 
 ### Errors
 
 A step that fails (an `ant=` naming a human or no valid ant name, a `capability=` no ant but the conductor
 advertises, malformed questions, a reply still off its schema after two retries, the step's message withdrawn from its
-recipient's queue, the run's step limit reached) raises `RuntimeError` with the reason where the step is awaited. A
+recipient's queue, an unknown trail, ancestor cycle or failed child run in `trail()`, the run's step limit reached)
+raises `RuntimeError` with the reason where the step is awaited. A
 step to an ant no daemon serves raises nothing: it waits in that ant's queue, as any message does, until the run ends
 or a human stops it. An exception the script does not catch fails the run with
 its traceback, lines numbered as in the file. Inside `parallel` or `pipeline`, an uncaught exception of one coroutine
@@ -102,7 +109,7 @@ the trail can go on without that item, and log what was lost.
 
 | Limit | Default (maximum) | Past it |
 |---|---|---|
-| Steps, `agent()` and `human()` calls | 50 (500) | the call raises `RuntimeError: the run reached its limit of N steps` |
+| Steps, `agent()`, `human()` and `trail()` calls (child runs included) | 50 (500) | the call raises `RuntimeError: the run reached its limit of N steps` |
 | Steps at once | 4 (16) | later steps wait in the run until a step is answered; nothing raises |
 | Turns, spent by the steps as ant messages spend turns | 200 (2000) | the run fails, naming the limit |
 | Wall time | 24 h (7 d) | the run fails, naming the limit |
