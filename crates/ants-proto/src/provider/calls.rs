@@ -186,6 +186,10 @@ pub enum EventKind {
     AntRevived,
     ThreadStarted {
         origin: Origin,
+        /// The repository of the ant's working directory, named as [`CallContext::repo`] is; none outside a git
+        /// repository with a remote.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
     },
     ThreadDone,
     ThreadExpired,

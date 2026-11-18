@@ -14,6 +14,9 @@
 //! handoff, what the brief cuts when over its budget.
 //!
 //! Every text passes the sanitizer, and each item carries its writer, taken from the call's context, never from text.
+//!
+//! Beside what the ant keeps, sense records each thread from its lifecycle events: who started it, where, and when it
+//! started and ended ([`record`]).
 
 use std::fmt::Write as _;
 
@@ -28,6 +31,8 @@ use crate::memory::{MAX_BODY_BYTES, MAX_TITLE_CHARS, Memory, MemoryKind, Scope, 
 use crate::sanitize::{Limit, Lines, sanitize};
 use crate::store::{Items, StoreError, Write};
 use crate::{Answer, Sense};
+
+pub mod record;
 
 /// The kind of a thread's resume register.
 pub const CHECKPOINT: &str = "checkpoint";

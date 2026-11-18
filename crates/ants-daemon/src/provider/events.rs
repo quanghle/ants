@@ -376,6 +376,8 @@ pub struct Lifecycle {
     identity: String,
     home: PathBuf,
     outbox: Outbox,
+    /// The ant's working directory, whose repository its threads start in ([`Lifecycle::with_workdir`]).
+    workdir: Option<PathBuf>,
 }
 
 /// The mark of a retired ant ([`RETIRED`]): the id and time of its [`EventKind::AntRetired`], and whether it was told.
@@ -397,7 +399,7 @@ impl Lifecycle {
         }
         outbox.open(ant, home).await;
         let (identity, home) = (identity.to_owned(), home.to_owned());
-        let lifecycle = Self { ant: ant.clone(), identity, home, outbox: outbox.clone() };
+        let lifecycle = Self { ant: ant.clone(), identity, home, outbox: outbox.clone(), workdir: None };
         lifecycle.started().await;
         Some(lifecycle)
     }
@@ -431,10 +433,18 @@ impl Lifecycle {
         self.push(event(Uuid::new_v4(), &self.ant, &self.identity, thread, kind)).await;
     }
 
-    /// Tell of `thread` started by message `message` from `origin`: told again with the same id when the message is.
+    /// The lifecycle telling of threads started in the repository of `workdir`, the ant's working directory.
+    #[must_use]
+    pub fn with_workdir(self, workdir: PathBuf) -> Self {
+        Self { workdir: Some(workdir), ..self }
+    }
+
+    /// Tell of `thread` started by message `message` from `origin`, in the repository of the ant's working directory:
+    /// told again with the same id when the message is.
     pub async fn thread_started(&self, thread: &ThreadId, message: &str, origin: Origin) {
         let id = derived(&[self.ant.as_str(), thread.as_str(), message, "thread_started"]);
-        self.push(event(id, &self.ant, &self.identity, Some(thread), EventKind::ThreadStarted { origin })).await;
+        let repo = self.workdir.as_deref().and_then(super::context::repository);
+        self.push(event(id, &self.ant, &self.identity, Some(thread), EventKind::ThreadStarted { origin, repo })).await;
     }
 
     /// Tell of `thread` marked done at `at`, by the done state stored at sequence `seq` of the stream of
