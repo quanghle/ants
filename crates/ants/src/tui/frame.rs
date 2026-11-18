@@ -80,7 +80,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         return Line::styled(" ↑↓ select · Tab/Enter complete · Esc close the list", dim());
     }
     if model.bar.focused {
-        return Line::styled(" Enter send · Ctrl-J new line · Ctrl-E editor · Ctrl-K commands · Esc leave", dim());
+        return Line::styled(" Enter send · Ctrl-J new line · Ctrl-G editor · / commands · Esc leave", dim());
     }
     let card = match model.page() {
         Page::Home(page) => page.card(&model.data, now).map(|(cursor, _)| cursor),
@@ -114,8 +114,8 @@ const HELP: &[(&str, &str)] = &[
     ("w ←→ a", "on an ant: its threads in work, pane, ask; in a channel: ←→ its state tab"),
     ("[ ] \\", "on an ant: scroll its about or now column up, down; switch between the two"),
     ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
-    ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),
-    ("Ctrl-J Ctrl-E", "in the bar: a new line (or \\ Enter, Shift-Enter), the text in the editor"),
+    ("/command", "in the bar: a command on the selection (/ lists them)"),
+    ("Ctrl-J Ctrl-G", "in the bar: a new line (or \\ Enter, Shift-Enter), the text in the editor"),
     ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
     ("y p m e d z", "in a thread: copy, pin, mute, archive, done, snooze (again to undo)"),
     ("a A r n", "on a tool request: allow once, always, reject at once, or reject with a note to the ant"),
@@ -229,7 +229,7 @@ mod tests {
     fn the_command_bar_shows_its_hint_then_its_text_status_and_keys() {
         let mut m = model();
         let shown = screen(&m, at(0));
-        assert!(shown.contains("Ctrl-K commands · @ ant · # channel"), "{shown}");
+        assert!(shown.contains("/ commands · @ ant · # channel"), "{shown}");
         m.key(Key::Char('@'), at(0));
         let shown = screen(&m, at(0));
         assert!(shown.contains("@bob") && shown.contains("human"), "{shown}");
@@ -242,9 +242,10 @@ mod tests {
         assert!(shown.contains("@dev-a"), "{shown}");
         assert!(shown.contains("nothing to send to @dev-a"), "{shown}");
         assert!(shown.contains("Enter send · Ctrl-J new line"), "{shown}");
-        m.key(Key::Ctrl('k'), at(0));
+        m.key(Key::Ctrl('u'), at(0));
+        m.key(Key::Char('/'), at(0));
         let shown = screen(&m, at(0));
-        assert!(shown.contains("/approve   [ID] [--always]   ") && shown.contains("/reject"), "{shown}");
+        assert!(shown.contains("/approve      [ID] [--always]") && shown.contains("/reject"), "{shown}");
     }
 
     #[test]

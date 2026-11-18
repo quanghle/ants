@@ -52,6 +52,14 @@ pub enum Key {
     Interrupt,
     /// Ctrl and another key, for the views to come (Ctrl-K, Ctrl-X).
     Ctrl(char),
+    /// Alt and a character: Alt-B, Alt-F and Alt-D in the command bar.
+    Alt(char),
+    /// Alt-Backspace: delete the word before the cursor in the command bar.
+    AltBackspace,
+    /// Ctrl-Left or Alt-Left: a word back in the command bar.
+    WordLeft,
+    /// Ctrl-Right or Alt-Right: a word on in the command bar.
+    WordRight,
     Char(char),
 }
 

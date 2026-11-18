@@ -257,16 +257,36 @@ fn key_of(key: KeyEvent) -> Option<Key> {
     if key.code == KeyCode::Enter && key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) {
         return Some(Key::Newline);
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
+    let (ctrl, alt) = (key.modifiers.contains(KeyModifiers::CONTROL), key.modifiers.contains(KeyModifiers::ALT));
+    // AltGr, which the Windows console reports as Ctrl with Alt, types its character.
+    if let KeyCode::Char(c) = key.code
+        && ctrl
+        && alt
+        && !c.is_ascii_alphabetic()
+    {
+        return Some(Key::Char(c));
+    }
+    if ctrl {
         return match key.code {
             KeyCode::Char('c') => Some(Key::Interrupt),
             // Ctrl-J sends a line feed, which a terminal in raw mode tells from Enter's carriage return.
             KeyCode::Char('j') => Some(Key::Newline),
             // As a terminal without the kitty keyboard protocol sends it.
             KeyCode::Enter => Some(Key::Enter),
+            KeyCode::Left => Some(Key::WordLeft),
+            KeyCode::Right => Some(Key::WordRight),
             KeyCode::Char(c) => Some(Key::Ctrl(c)),
             _ => None,
         };
+    }
+    if alt {
+        match key.code {
+            KeyCode::Char(c) => return Some(Key::Alt(c)),
+            KeyCode::Backspace => return Some(Key::AltBackspace),
+            KeyCode::Left => return Some(Key::WordLeft),
+            KeyCode::Right => return Some(Key::WordRight),
+            _ => {}
+        }
     }
     Some(match key.code {
         KeyCode::Up => Key::Up,
@@ -702,6 +722,13 @@ mod tests {
         assert_eq!(key(KeyCode::Enter, KeyModifiers::SHIFT), Some(Key::Newline));
         assert_eq!(key(KeyCode::Char('j'), KeyModifiers::CONTROL), Some(Key::Newline), "a line feed");
         assert_eq!(key(KeyCode::Enter, KeyModifiers::CONTROL), Some(Key::Enter));
+        assert_eq!(key(KeyCode::Char('b'), KeyModifiers::ALT), Some(Key::Alt('b')), "not typed");
+        assert_eq!(key(KeyCode::Backspace, KeyModifiers::ALT), Some(Key::AltBackspace));
+        assert_eq!(key(KeyCode::Left, KeyModifiers::CONTROL), Some(Key::WordLeft));
+        assert_eq!(key(KeyCode::Right, KeyModifiers::ALT), Some(Key::WordRight));
+        let alt_gr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert_eq!(key(KeyCode::Char('@'), alt_gr), Some(Key::Char('@')), "AltGr on Windows types");
+        assert_eq!(key(KeyCode::Char('€'), alt_gr), Some(Key::Char('€')));
         assert_eq!(key(KeyCode::Enter, KeyModifiers::NONE), Some(Key::Enter));
         assert_eq!(key(KeyCode::Backspace, KeyModifiers::NONE), Some(Key::Backspace));
     }
