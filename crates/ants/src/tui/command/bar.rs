@@ -130,6 +130,15 @@ impl Bar {
         self.pastes.get(usize::try_from(at).ok()?).map(String::as_str)
     }
 
+    /// Empty the bar, dropping the reply `>` and the note set up: what Ctrl-C does to a bar holding text. The bar's
+    /// history (ants-njvxu.6) keeps the text from here.
+    pub fn empty_into_history(&mut self) {
+        self.set_text("");
+        self.pick = complete::Pick::default();
+        self.quoting = None;
+        self.noting = None;
+    }
+
     pub fn is_empty(&self) -> bool {
         self.chars.is_empty()
     }

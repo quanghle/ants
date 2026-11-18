@@ -15,6 +15,8 @@ use super::{approvals, catchup, compact, keymap, nav};
 
 /// How wide the nav is.
 const NAV_WIDTH: u16 = 24;
+/// The footer after a first Ctrl-C with nothing open and the bar empty.
+pub const QUIT_AGAIN: &str = "Ctrl-C again to quit";
 
 pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     if model.compact {
@@ -66,6 +68,9 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
 /// The footer at most `width` wide: a prompt taking the keys, the latest notice, the keys of the bar or of a focused
 /// question card, a confirmation or draft of the view, else the hints of the key table ([`keymap::footer`]).
 fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
+    if model.quitting_at(now) {
+        return style::notice(QUIT_AGAIN, false);
+    }
     if let Some(picker) = &model.picking {
         return picker.line();
     }
@@ -272,6 +277,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_first_ctrl_c_on_an_empty_bar_asks_for_a_second_for_a_second() {
+        let mut m = model();
+        m.key(Key::Interrupt, at(0));
+        assert_eq!(text(&footer_line(&m, at(0), 100)).trim(), QUIT_AGAIN);
+        assert!(text(&footer_line(&m, at(1), 100)).ends_with("? help"));
     }
 
     #[test]

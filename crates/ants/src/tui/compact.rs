@@ -86,6 +86,9 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
 
 /// The latest notice, else the top home item with the keys.
 fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>) -> Line<'static> {
+    if model.quitting_at(now) {
+        return Line::styled(format!("      {}", super::frame::QUIT_AGAIN), Style::new().fg(style::INFO));
+    }
     if let Some(notice) = model.notice_at(now) {
         let color = if notice.level == Level::Error { style::ERROR } else { style::INFO };
         return Line::styled(format!("      {}", notice.text), Style::new().fg(color));
@@ -129,7 +132,7 @@ impl Model {
     /// does.
     pub(super) fn compact_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         match key {
-            Key::Char('q') => return Some(Action::Quit),
+            Key::Char('q') => return self.quit(now),
             Key::Char('R') => return Some(Action::Refresh),
             Key::Up | Key::Down | Key::Char('j' | 'k') | Key::PageUp | Key::PageDown | Key::Home | Key::End => {
                 return None;

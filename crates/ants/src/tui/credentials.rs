@@ -213,6 +213,11 @@ pub struct Page {
 impl Page {
     pub const ARMED_KEYS: &str = "y confirms the order above · any other key leaves the request waiting";
 
+    /// Drop the confirmation asked for, if any: whether there was one.
+    pub fn disarm(&mut self) -> bool {
+        self.armed.take().is_some()
+    }
+
     /// The keys of the order `a` or `r` asked to confirm, while it waits.
     pub fn prompt(&self) -> Option<&'static str> {
         self.armed.as_ref().map(|_| Self::ARMED_KEYS)

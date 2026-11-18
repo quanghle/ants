@@ -214,9 +214,23 @@ pub const GLOBAL: &[Entry] = &[
         on_view,
     ),
     Entry::new(&[Key::Char('R')], "R", "read again", "read everything again", 80, always),
-    Entry::new(&[Key::Char('q')], "q", "quit", "quit", 90, always),
+    Entry::new(
+        &[Key::Char('q')],
+        "q",
+        "quit",
+        "quit, the bar empty; soon after q closed something, nothing",
+        90,
+        bar_empty,
+    ),
     Entry::new(&[Key::Char('?')], "?", "help", "this help", HELP_ONLY, always),
-    Entry::new(&[Key::Interrupt], "Ctrl-C", "quit", "quit", HELP_ONLY, always),
+    Entry::new(
+        &[Key::Interrupt],
+        "Ctrl-C",
+        "close",
+        "close what is open, else empty the bar, else quit on a second Ctrl-C within a second",
+        HELP_ONLY,
+        always,
+    ),
 ];
 
 const NAV: &[Entry] = &[
@@ -454,6 +468,10 @@ const HELD: &[Entry] = &[
 
 fn always(_: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
     Ok(())
+}
+
+fn bar_empty(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
+    check(model.bar.is_empty(), "the bar holds text: Ctrl-C empties it")
 }
 
 fn check(holds: bool, why: &'static str) -> Result<(), &'static str> {

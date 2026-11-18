@@ -136,6 +136,11 @@ impl Page {
         }
     }
 
+    /// Drop the confirmation asked for, if any: whether there was one.
+    pub fn disarm(&mut self) -> bool {
+        std::mem::take(&mut self.armed)
+    }
+
     /// The keys of the restart `r` asked to confirm, while it waits, else of what is being written in the pane.
     pub fn prompt(&self) -> Option<&'static str> {
         match self.pane {

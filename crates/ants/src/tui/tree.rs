@@ -405,6 +405,11 @@ impl Page {
         Self { root, selected: None, armed: false, links: Vec::new(), spend: None }
     }
 
+    /// Drop the confirmation asked for, if any: whether there was one.
+    pub fn disarm(&mut self) -> bool {
+        std::mem::take(&mut self.armed)
+    }
+
     /// The keys of the cancel `x` asked to confirm, while it waits.
     pub fn prompt(&self) -> Option<&'static str> {
         self.armed.then_some(Self::ARMED_KEYS)
