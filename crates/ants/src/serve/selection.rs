@@ -39,7 +39,7 @@ pub struct AntOptions {
     /// Directory the harness works in (default: the current directory).
     #[arg(long)]
     workdir: Option<PathBuf>,
-    /// The ant's own files (default: ~/.ants/<ant>).
+    /// The ant's own files (default: ~/.ants/agents/<ant>).
     #[arg(long)]
     home: Option<PathBuf>,
     /// Role instructions shared in the colony and prepended to every prompt.

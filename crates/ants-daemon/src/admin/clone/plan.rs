@@ -73,10 +73,10 @@ pub(super) fn plan(
         bail!("{src} is built in: it is not cloned");
     }
     let (base, user_home) = (path.parent().unwrap_or(Path::new(".")), config::home_dir()?);
-    let src_home = ant.home.clone().unwrap_or_else(|| user_home.join(".ants").join(src.as_str()));
+    let src_home = ant.home.clone().unwrap_or_else(|| config::default_home(&user_home, src.as_str()));
     let new_home = match settings.get("home") {
         Some(home) => config::resolve(Path::new(home.as_str().context("home is no string")?), base, &user_home),
-        None => user_home.join(".ants").join(new.as_str()),
+        None => config::default_home(&user_home, new.as_str()),
     };
     if new_home.starts_with(&src_home) || src_home.starts_with(&new_home) {
         bail!("the clone's home {} and {src}'s {} must not hold one another", new_home.display(), src_home.display());

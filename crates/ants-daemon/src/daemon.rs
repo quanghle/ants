@@ -226,7 +226,7 @@ pub struct Spending {
 /// Where the ant keeps its files, and when the bus's storage filling up is told.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Storage {
-    /// The ant's own files (usually `~/.ants/<ant>`).
+    /// The ant's own files (usually `~/.ants/agents/<ant>`).
     pub home: PathBuf,
     /// When to warn a human of JetStream storage filling up.
     pub jetstream: crate::monitoring::storage::Settings,

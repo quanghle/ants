@@ -105,8 +105,8 @@ async fn add(
     let creds_path = dir.join(format!("{ant}.creds"));
     let (base, home) = (path.parent().unwrap_or(Path::new(".")), config::home_dir()?);
     let home_set = settings.get("home").map(|h| h.as_str().context("home is no string")).transpose()?;
-    let ant_home =
-        home_set.map_or_else(|| home.join(".ants").join(ant.as_str()), |h| config::resolve(Path::new(h), base, &home));
+    let ant_home = home_set
+        .map_or_else(|| config::default_home(&home, ant.as_str()), |h| config::resolve(Path::new(h), base, &home));
     let workdir = match settings.get("workdir") {
         Some(_) => None,
         None => Some(ant_home.clone()),

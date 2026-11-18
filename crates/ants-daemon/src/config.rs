@@ -186,6 +186,12 @@ pub(crate) fn home_dir() -> Result<PathBuf> {
     std::env::home_dir().context("no home directory")
 }
 
+/// The home of `ant` unless its `home` names another: `~/.ants/agents/<ant>`, `user_home` standing for `~`. Kept in a
+/// directory of their own, ant homes cannot meet the other entries of `~/.ants` whatever an ant's name.
+pub fn default_home(user_home: &Path, ant: &str) -> PathBuf {
+    user_home.join(".ants").join("agents").join(ant)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {

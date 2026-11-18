@@ -156,7 +156,7 @@ fn check_dev_b(b: Ant) {
     assert_eq!(config.policy.escalation, Chain::default(), "no chain: escalations go to the owner");
     assert_eq!(config.policy.escalation.after, Some(DEFAULT_ESCALATE_AFTER));
     assert_eq!(config.policy.escalation.remind, Some(DEFAULT_ESCALATION_REMINDER));
-    assert!(config.storage.home.ends_with(".ants/dev-b"));
+    assert!(config.storage.home.ends_with(".ants/agents/dev-b"));
     assert_eq!(config.presence.whoami, None);
     assert_eq!(config.harness.model_settings, ModelSettings::default());
     assert!(config.harness.instructions.is_empty(), "no memory or task tool by default");
@@ -367,7 +367,7 @@ fn the_top_level_harness_is_the_default_one_and_runs_the_builtin_messenger() {
     );
     let root = manifest_dir().parent().unwrap().parent().unwrap().to_owned();
     let messenger = &ants[2];
-    let dir = root.join(".ants/messenger");
+    let dir = root.join(".ants/agents/messenger");
     assert_eq!((&messenger.workdir, messenger.home.as_ref()), (&dir, Some(&dir)));
     assert_eq!(messenger.js_domain.as_ref().map(JsDomain::as_str), Some("hub"));
     let stock = Ant {
@@ -618,7 +618,7 @@ fn the_builtin_messenger_finds_its_credentials_and_creates_its_workdir() {
     assert_eq!(messenger.creds, Some(auth.join("messenger.creds")));
     let config = config(messenger).unwrap();
     assert!(config.presence.defer_to_others);
-    assert_eq!(config.harness.workdir, home.join(".ants/messenger").canonicalize().unwrap());
+    assert_eq!(config.harness.workdir, home.join(".ants/agents/messenger").canonicalize().unwrap());
     assert_eq!(config.harness.model_settings, ModelSettings::default());
     std::fs::remove_dir_all(&home).unwrap();
 }

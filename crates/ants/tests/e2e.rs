@@ -629,7 +629,7 @@ fn the_builtin_messenger_hands_over_to_a_listed_one() {
     assert!(Command::new("kill").arg("-TERM").arg(listed.0.id().to_string()).status().unwrap().success());
     listed.0.wait().unwrap();
     wait_for("builtin", "serving inbox", 2);
-    assert!(served_from().ends_with(".ants/messenger"), "{}", logs());
+    assert!(served_from().ends_with(".ants/agents/messenger"), "{}", logs());
     ask("second");
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);

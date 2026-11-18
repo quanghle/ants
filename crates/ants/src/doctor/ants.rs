@@ -257,7 +257,7 @@ fn check_sense_log(ant: &Ant) -> Vec<Check> {
     let home = match &ant.home {
         Some(home) => home.clone(),
         None => match std::env::home_dir() {
-            Some(dir) => dir.join(".ants").join(ant.name.as_str()),
+            Some(dir) => ants_daemon::config::default_home(&dir, ant.name.as_str()),
             None => return Vec::new(),
         },
     };

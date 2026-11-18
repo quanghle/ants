@@ -145,7 +145,7 @@ mod tests {
         let home = ants_test_support::scratch_dir("sage-home").canonicalize().unwrap();
         let config = builtin_sage(Some("copilot"), &home).into_config("nats://unused", &Harnesses::builtin()).unwrap();
         assert!(config.presence.defer_to_others, "served only while holding the sage's colony entry");
-        assert_eq!(config.harness.workdir, home.join(".ants/sage").canonicalize().unwrap());
+        assert_eq!(config.harness.workdir, home.join(".ants/agents/sage").canonicalize().unwrap());
         assert_eq!(config.policy.sage, None);
         std::fs::remove_dir_all(&home).unwrap();
 

@@ -51,7 +51,7 @@ pub struct Ant {
     /// The template's named sets of tool rules it has, besides the template's `allow`.
     #[serde(default)]
     pub allow_sets: Vec<String>,
-    /// Default: `~/.ants/<name>`.
+    /// Default: `~/.ants/agents/<name>`.
     pub home: Option<PathBuf>,
     /// Role instructions shared in the colony and prepended to every prompt.
     pub whoami: Option<String>,
@@ -294,7 +294,7 @@ impl Ant {
             .with_context(|| format!("ant {}: workdir {}", self.name, self.workdir.display()))?;
         let home = match self.home {
             Some(home) => home,
-            None => home_dir()?.join(".ants").join(self.name.as_str()),
+            None => super::default_home(&home_dir()?, self.name.as_str()),
         };
         let nats_url = self.nats.unwrap_or_else(|| default_nats.to_owned());
         crate::bus::check_url(&nats_url).with_context(|| format!("ant {}", self.name))?;
@@ -410,7 +410,7 @@ impl Ant {
 
 /// The ant a file serves unless it sets `messenger = false` or lists one named `messenger`: the file's `harness`, which
 /// it needs, with its default model, reasoning effort and context, and otherwise the settings of an ant that sets
-/// nothing. Its home and workdir are `~/.ants/messenger`, created when it starts, and its credentials
+/// nothing. Its home and workdir are `~/.ants/agents/messenger`, created when it starts, and its credentials
 /// `~/.config/ants/auth/messenger.creds` (where `ants auth user messenger` writes them) if that file exists; on a
 /// server taking credentials, a machine without that file leaves it to another ([`super::builtins`]).
 pub fn builtin_messenger(harness: Option<&str>, home: &Path) -> Ant {
@@ -419,8 +419,8 @@ pub fn builtin_messenger(harness: Option<&str>, home: &Path) -> Ant {
 
 /// The ant a file serves while one of its ants names `sage` as its sage and it lists no ant of the name
 /// ([`super::sage::settle`]); set up, and left to another machine, as the built-in messenger is
-/// ([`builtin_messenger`]), in `~/.ants/sage`, with `~/.config/ants/auth/sage.creds`. Its shared settings, such as its
-/// model and reasoning effort, change as any ant's.
+/// ([`builtin_messenger`]), in `~/.ants/agents/sage`, with `~/.config/ants/auth/sage.creds`. Its shared settings, such
+/// as its model and reasoning effort, change as any ant's.
 pub fn builtin_sage(harness: Option<&str>, home: &Path) -> Ant {
     builtin(UserId::sage(), harness, home)
 }
@@ -432,7 +432,7 @@ pub(super) fn builtin_creds(name: &UserId, home: &Path) -> PathBuf {
 }
 
 fn builtin(name: UserId, harness: Option<&str>, home: &Path) -> Ant {
-    let dir = home.join(".ants").join(name.as_str());
+    let dir = super::default_home(home, name.as_str());
     let creds = builtin_creds(&name, home);
     Ant {
         harness: harness.map(str::to_owned),

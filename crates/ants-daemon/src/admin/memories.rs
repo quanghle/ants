@@ -149,7 +149,7 @@ pub(crate) async fn read(ant: &Ant, harness: Option<&Harness>, env: &Env, provid
         Some(of) => provider_memories(&ant.name, of, &mut budget, &mut skipped).await,
         None => None,
     };
-    let ant_home = ant.home.clone().unwrap_or_else(|| env.home.join(".ants").join(ant.name.as_str()));
+    let ant_home = ant.home.clone().unwrap_or_else(|| crate::config::default_home(&env.home, ant.name.as_str()));
     let globs = harness.map_or_default(Harness::memory_files);
     let files = files(globs, &ant.workdir, &ant_home, &env.home, &mut budget, &mut skipped);
     let db =

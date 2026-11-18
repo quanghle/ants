@@ -65,7 +65,7 @@ pub fn unlist(path: &Path, name: &UserId, manager: Option<&UserId>) -> Result<Un
     let key = ant.creds.as_deref().and_then(|creds| key_of(creds).ok());
     let home = match &ant.home {
         Some(home) => home.clone(),
-        None => std::env::home_dir().context("no home directory")?.join(".ants").join(name.as_str()),
+        None => ants_daemon::config::default_home(&std::env::home_dir().context("no home directory")?, name.as_str()),
     };
     ants_daemon::provider::events::mark_retired(&home)?;
     if let Err(e) = config::without_ant(path, name).and_then(|text| config::write(path, &text)) {

@@ -59,7 +59,7 @@ pub struct EnableArgs {
     /// Keep the ant's NKey seed in the OS credential store, never in a file: the credentials name the stored key.
     #[arg(long)]
     pub store_key: bool,
-    /// The ant's own files, also its workdir (default: ~/.ants/<name>).
+    /// The ant's own files, also its workdir (default: ~/.ants/agents/<name>).
     #[arg(long)]
     pub home: Option<PathBuf>,
     /// Role instructions in place of the assistant's default ones (shown in the colony, prepended to every prompt).
@@ -360,7 +360,7 @@ fn entry(
 ) -> Result<String> {
     let home = match &args.home {
         Some(home) => std::path::absolute(home)?,
-        None => std::env::home_dir().context("no home directory")?.join(".ants").join(ant.as_str()),
+        None => config::default_home(&std::env::home_dir().context("no home directory")?, ant.as_str()),
     };
     std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
     let mut p = Ant::new(ant.clone(), home.clone());
@@ -523,7 +523,7 @@ impl Dedicated {
         };
         let home = match &entry.home {
             Some(home) => home.clone(),
-            None => std::env::home_dir().context("no home directory")?.join(".ants").join(ant.as_str()),
+            None => config::default_home(&std::env::home_dir().context("no home directory")?, ant.as_str()),
         };
         if home.canonicalize().ok().as_ref() != Some(&entry.workdir) {
             return Ok(None);

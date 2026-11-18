@@ -149,10 +149,10 @@ fn risky(rule: &str) -> bool {
     ["*", "fetch", "execute"].contains(&kind)
 }
 
-/// Whether `workdir` is the home of `ant`, `home` as its entry sets one, or as `~/.ants/<ant>` by default on any
+/// Whether `workdir` is the home of `ant`, `home` as its entry sets one, or as `~/.ants/agents/<ant>` by default on any
 /// machine: the workdir of a dedicated assistant, holding no repository.
 fn is_home(ant: &UserId, workdir: &Path, home: Option<&Path>) -> bool {
-    home.is_some_and(|home| home == workdir) || workdir.ends_with(Path::new(".ants").join(ant.as_str()))
+    home.is_some_and(|home| home == workdir) || workdir.ends_with(Path::new(".ants/agents").join(ant.as_str()))
 }
 
 /// The credentials of the human the CLI acts as, which sign its grant and its consent records: a human device's.

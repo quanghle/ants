@@ -43,7 +43,7 @@ pub(crate) enum AntCommand {
     },
     /// Add the ant NAME on MACHINE by admin order: its daemon generates the ant's key, has `ants signer` sign it on
     /// the order, writes its credentials, appends its `[[ant]]` table with the settings given and starts it. Paths
-    /// are MACHINE's; the workdir defaults to the ant's home, ~/.ants/NAME there. Needs a human device's admin
+    /// are MACHINE's; the workdir defaults to the ant's home, ~/.ants/agents/NAME there. Needs a human device's admin
     /// credentials, and `ants signer` running.
     Add {
         name: UserId,
@@ -61,7 +61,7 @@ pub(crate) enum AntCommand {
     /// thread's session (forked when the harness can, else starting over from the thread's history), history and
     /// worktree (on the branch ants/NEW/THREAD, with its uncommitted changes), has `ants signer` sign NEW's key on the
     /// order, starts NEW and resumes SRC. Not copied: queued messages, channel memberships, references and spend
-    /// counters. Paths are the machine's; the home defaults to ~/.ants/NEW there. Needs a human device's admin
+    /// counters. Paths are the machine's; the home defaults to ~/.ants/agents/NEW there. Needs a human device's admin
     /// credentials, and `ants signer` running.
     Clone {
         #[arg(add = ArgValueCandidates::new(completions::ants))]

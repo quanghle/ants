@@ -319,7 +319,7 @@ mod tests {
             let loaded = config::load(&config)?;
             let mut configs = serve::configs(loaded.ants, &loaded.harnesses, &server.url, None, None)?;
             for c in &mut configs {
-                c.storage.home = dir.join("homes").join(c.ant.as_str());
+                c.storage.home = dir.join("agents").join(c.ant.as_str());
             }
             let (host, sense, shared, machine) = (None, None, None, None);
             Ok(serve::Served { configs, schedules: Vec::new(), metrics: None, host, sense, shared, machine })

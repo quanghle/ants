@@ -348,7 +348,10 @@ fn pack_ant(
 pub(crate) fn home_of(ant: &Ant) -> Result<PathBuf> {
     match &ant.home {
         Some(home) => Ok(home.clone()),
-        None => Ok(std::env::home_dir().context("no home directory")?.join(".ants").join(ant.name.as_str())),
+        None => Ok(ants_daemon::config::default_home(
+            &std::env::home_dir().context("no home directory")?,
+            ant.name.as_str(),
+        )),
     }
 }
 

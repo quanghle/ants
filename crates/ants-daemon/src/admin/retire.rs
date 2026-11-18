@@ -159,7 +159,7 @@ struct Unlisted {
 /// its credentials left beside the host credentials `host_creds`, is retired from those.
 fn unlist(path: &Path, host_creds: &Path, ant: &UserId) -> Result<Unlisted> {
     let loaded = config::load(path)?;
-    let default_home = || -> Result<PathBuf> { Ok(config::home_dir()?.join(".ants").join(ant.as_str())) };
+    let default_home = || -> Result<PathBuf> { Ok(config::default_home(&config::home_dir()?, ant.as_str())) };
     let Some(entry) = loaded.ants.into_iter().find(|a| a.name == *ant) else {
         let left = host_creds.parent().map(|dir| dir.join(format!("{ant}.creds"))).filter(|c| c.exists());
         let Some(creds) = left else { bail!("config {} lists no ant {ant}", path.display()) };
