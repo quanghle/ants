@@ -1352,6 +1352,12 @@ fn trails() {
         ],
     );
     snap("trail_run_index", &TrailRunIndex { runs: vec![run()] });
+    let limits: TrailLimits = parse(r#"{"steps": 10}"#);
+    assert_eq!(limits, TrailLimits { steps: 10, ..TrailLimits::DEFAULT }, "missing limits take their defaults");
+}
+
+#[test]
+fn trail_control() {
     let request = |action| TrailRequest { id: id(1), ant: user("planner"), by: user("alice"), sent_at: at(0), action };
     snap(
         "trail_requests",
@@ -1388,6 +1394,4 @@ fn trails() {
             reply(TrailOutcome::Refused { error: "no saved trail release".to_owned() }),
         ],
     );
-    let limits: TrailLimits = parse(r#"{"steps": 10}"#);
-    assert_eq!(limits, TrailLimits { steps: 10, ..TrailLimits::DEFAULT }, "missing limits take their defaults");
 }
