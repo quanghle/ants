@@ -22,7 +22,6 @@ mod stores;
 mod workdirs;
 
 pub use ants_sense::home::DIR;
-pub use ants_sense::memory::{normalize_remote, remote_url};
 pub use ants_sense::{CAPABILITIES, NAME};
 pub(crate) use scheduler::{Daemon, Dreaming, Serving};
 pub use stores::{Hosting, Link};
@@ -80,10 +79,23 @@ impl Sense {
     }
 
     /// Run the schedule of the ant `config` serves on `machine` until the guard drops, its dreams taking from the
-    /// daemon what `dreaming` gives. Start only after the ant holds its colony registration and its wake service is
-    /// installed.
-    pub(crate) fn schedule(&self, config: &Config, machine: &str, dreaming: Arc<dyn Dreaming>) -> Serving {
-        scheduler::serve(self.provider.clone(), self.wakers.clone(), config, machine, dreaming)
+    /// daemon what `dreaming` gives, and each of its reads of the ant's items putting the profile of the ant's
+    /// confirmed persona in `workload` ([`published::profile`]). Start only after the ant holds its colony registration
+    /// and its wake service is installed.
+    pub(crate) fn schedule(
+        &self,
+        config: &Config,
+        machine: &str,
+        dreaming: Arc<dyn Dreaming>,
+        workload: Arc<crate::colony::Workload>,
+    ) -> Serving {
+        scheduler::serve(self.provider.clone(), self.wakers.clone(), config, machine, dreaming, workload)
+    }
+
+    /// Put in `workload` the profile of `ant`'s confirmed persona before the ant's first colony entry, which then
+    /// shows it, as the schedule's reads keep it current after ([`published::first_profile`]).
+    pub(crate) async fn first_profile(&self, ant: &UserId, workload: &crate::colony::Workload) {
+        published::first_profile(&self.provider, ant, workload).await;
     }
 
     /// The items of `ant`, synced; none when sense keeps none of its data, as the ant is still served without them.
@@ -129,11 +141,10 @@ impl Sense {
         scheduler::review_given(&*items, request, text, spent).await
     }
 
-    /// Keep what `workload` puts in `ant`'s colony entry of its sense data current, until dropped: the profile of the
-    /// ant's confirmed persona ([`published::profile`]) and why sense keeps none of its data ([`published::unkept`]).
+    /// Keep what `workload` puts in `ant`'s colony entry of why sense keeps none of its data current, until dropped
+    /// ([`published::unkept`]); the schedule keeps its profile current ([`Sense::schedule`]).
     pub(crate) async fn publish(&self, ant: &UserId, workload: &crate::colony::Workload) {
-        let unkept = published::unkept(self.stores.why_unkept(), ant, workload);
-        tokio::join!(published::profile(&self.provider, ant, workload), unkept);
+        published::unkept(self.stores.why_unkept(), ant, workload).await;
     }
 
     /// The process keeps none of its ants' data, for the reason `why`, as it makes no host connection and sense no link
@@ -167,6 +178,24 @@ pub fn take_over(home: &Path, ant: &UserId) -> Result<Option<UserId>> {
     ants_sense::identity::take_over(home, ant).with_context(|| {
         format!("listing the earlier name of {ant} in {}", ants_sense::home::Home::new(home).names().display())
     })
+}
+
+#[cfg(test)]
+impl Sense {
+    /// What the record of the review of dream `dream` of `ant` in the sense data of `sage` says its thread spent, none
+    /// when it says nothing. Panics when sense keeps no such record.
+    pub(crate) async fn review_spent(
+        &self,
+        sage: &UserId,
+        ant: &UserId,
+        dream: u64,
+    ) -> Option<crate::limits::caps::Spent> {
+        let items = self.kept(sage).await.unwrap().expect("sense keeps the sage's data");
+        let record = ants_sense::dream::review_record(&*items, ant, dream).await.unwrap().expect("the review's record");
+        assert!(record.answered.is_some(), "the review answered: {record:?}");
+        let spent = record.spent?;
+        Some(crate::limits::caps::Spent { tokens: spent.tokens, cost: spent.cost_micros as f64 / 1e6 })
+    }
 }
 
 /// Sense keeping no data, its tools that need some refusing.

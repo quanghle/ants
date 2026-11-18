@@ -4,6 +4,7 @@
 use std::fmt;
 use std::path::{Component, Path};
 
+use ants_proto::provider::{normalize_remote, remote_url};
 use data_encoding::HEXLOWER;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -11,7 +12,7 @@ use sha2::{Digest, Sha256};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use super::{Citation, MEMORY, MemoryItem, Status, normalize_remote, remote_url};
+use super::{Citation, MEMORY, MemoryItem, Status};
 use crate::items::{ItemId, Values};
 use crate::store::{Items, StoreError, read_modify_write};
 

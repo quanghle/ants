@@ -1,5 +1,6 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use ants_proto::provider::{Output, Provider};
 use chrono::{DateTime, Duration, Utc};
 
 use super::*;
@@ -8,7 +9,7 @@ use crate::log::{AppendError, LogError, Stored};
 async fn at(sense: &Sense, thread: &str, elapsed: Duration, arguments: Value) -> Answer {
     let mut call = call(thread, arguments);
     call.context.at += elapsed;
-    task(sense, &call).await
+    answer(sense, &call).await
 }
 
 fn token(answer: &Answer) -> u64 {
@@ -192,10 +193,13 @@ async fn task_only_ready_tasks_can_be_claimed_and_cas_guards_racing_claims_and_b
     assert_eq!(items.history(&blocker).await.unwrap().len(), 5);
 }
 
+/// A log out of reach while `online` is not set, counting its reads.
+#[derive(Default)]
 struct SwitchLog {
     log: MemoryLog,
     online: Arc<AtomicBool>,
     drop_after_append: Arc<AtomicBool>,
+    reads: Arc<AtomicUsize>,
 }
 
 impl EventLog for SwitchLog {
@@ -211,6 +215,7 @@ impl EventLog for SwitchLog {
     }
 
     async fn read_after(&self, sense: &SenseId, after: u64, limit: usize) -> Result<Vec<Stored>, LogError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         if !self.online.load(Ordering::SeqCst) {
             return Err(LogError::unreachable("hub unavailable"));
         }
@@ -234,9 +239,9 @@ async fn task_offline_claims_never_queue_and_acknowledged_claims_survive_post_ap
     let online = Arc::new(AtomicBool::new(true));
     let drop_after_append = Arc::new(AtomicBool::new(false));
     let (sense, items) = setup_log(SwitchLog {
-        log: MemoryLog::default(),
         online: online.clone(),
         drop_after_append: drop_after_append.clone(),
+        ..SwitchLog::default()
     })
     .await;
     let id = create(&sense, "ship", 1).await;
@@ -268,4 +273,24 @@ async fn task_offline_claims_never_queue_and_acknowledged_claims_survive_post_ap
     let pending = items.change(&id, provisional.values(), Some(current.revision), "t2").await.unwrap();
     assert_eq!(items.history(&id).await.unwrap().last().unwrap().sequence, 0);
     assert!(fencing_token(&*items, &TaskItem::of(pending).unwrap()).await.is_err(), "pending seq0 cannot fence");
+}
+
+#[tokio::test]
+async fn a_task_call_syncs_the_log_once_and_is_refused_offline() {
+    let (online, reads) = (Arc::new(AtomicBool::new(true)), Arc::new(AtomicUsize::new(0)));
+    let (sense, items) =
+        setup_log(SwitchLog { online: online.clone(), reads: reads.clone(), ..SwitchLog::default() }).await;
+    for arguments in [json!({"action": "create", "title": "ship"}), json!({"action": "ready"})] {
+        let before = reads.load(Ordering::SeqCst);
+        let result = sense.call_tool(call("t1", arguments)).await.unwrap();
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(reads.load(Ordering::SeqCst) - before, 1, "one sync a call");
+    }
+    online.store(false, Ordering::SeqCst);
+    for arguments in [json!({"action": "create", "title": "offline"}), json!({"action": "ready"})] {
+        let result = sense.call_tool(call("t1", arguments)).await.unwrap();
+        let Output::Json(json) = result.output else { panic!("a JSON answer") };
+        assert!(result.is_error && json["error"] == "unavailable", "{json}");
+    }
+    assert_eq!(items.pending().await.unwrap(), 0, "nothing queued offline");
 }
