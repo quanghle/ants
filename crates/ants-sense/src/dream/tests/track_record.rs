@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration as Pause;
 
+use ants_proto::{FindingOutcome, FindingVerdict};
+
 use super::*;
 use crate::proposal::{PROPOSAL, Proposal};
 
@@ -240,6 +242,38 @@ async fn the_earlier_findings_reach_back_thirty_active_days_the_dormant_ones_not
     let none = track_record(&*items, &current, &user("elder"), &user("dev-a")).await.unwrap();
     assert!(none.findings.is_empty(), "{none:?}");
     assert_eq!(none.tally, "\nNo findings of elder in the last 30 active days of dev-a.\n");
+}
+
+#[tokio::test]
+async fn the_outcomes_told_the_sage_reach_back_ninety_active_days_the_track_record_thirty() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let now = Utc::now();
+    let day = |n: i64| now + Duration::days(n);
+    let written = store(&kept, &lesson("Pin the toolchain")).await;
+    let applied = |id: &str, items: &[&ItemId], at| vec![verdict(id, Judgement::Applied, "Done.", items, at)];
+    let beyond = day(-OUTCOME_DAYS - 1);
+    let gone = reviewed(1, beyond, "sage", vec![advised("1.1", "lesson", "Long gone.")], applied("1.1", &[], beyond));
+    let far = day(-(TRACK_RECORD_DAYS + OUTCOME_DAYS) / 2);
+    let followed = applied("2.1", &[&written], far);
+    keep(&*items, &gone).await;
+    keep(&*items, &reviewed(2, far, "sage", vec![advised("2.1", "lesson", "Sixty active days ago.")], followed)).await;
+    std::thread::sleep(Pause::from_millis(5));
+    let voted = tool(&sense, memory::vote, json!({"id": written, "vote": "wrong"}), on(2)).await;
+    assert!(!voted.is_error, "{voted:?}");
+
+    let ages = memory::Ages::new(now, std::iter::empty());
+    let told = packet::outcomes(&*items, 3, &ages, &UserId::sage()).await.unwrap();
+    let undone = FindingOutcome {
+        finding: "2.1".into(),
+        verdict: FindingVerdict::Applied,
+        holds: false,
+        reason: "Done.".into(),
+    };
+    assert_eq!(told, [undone], "followed for {OUTCOME_DAYS} active days, the older not told");
+    let current = reviewed(3, now, "sage", Vec::new(), Vec::new());
+    let record = track_record(&*items, &current, &UserId::sage(), &user("dev-a")).await.unwrap();
+    assert!(record.findings.is_empty(), "the packet shows {TRACK_RECORD_DAYS} active days: {record:?}");
 }
 
 #[test]

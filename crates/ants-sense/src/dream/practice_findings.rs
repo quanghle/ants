@@ -1,8 +1,10 @@
 //! The findings of a sage's dream on its practice of reviewing ([`super`]): how the findings it gave other ants fared,
-//! gathered from the records of its reviews alone ([`ReviewRecord`]), never their text, so never untrusted:
+//! gathered from the records of its reviews alone ([`ReviewRecord`]), never their threads' text, so trusted but for
+//! the reasons the ants reviewed gave:
 //!
 //! - a kind of finding rejected [`REJECTED_FINDINGS`] times in [`JUDGED_FINDINGS`] or more of the verdicts on it told
-//!   over the last [`PRACTICE_DAYS`] active days, at least [`JUDGED_FINDINGS`] of them, one finding each;
+//!   over the last [`PRACTICE_DAYS`] active days, at least [`JUDGED_FINDINGS`] of them, one finding each, quoting the
+//!   reasons of up to [`QUOTED_REASONS`] of the latest rejected, the reviewed ants' text: untrusted when it quotes any;
 //! - [`UNDONE_FINDINGS`] applied findings or more undone since, as told over the same days: a memory written for one
 //!   voted wrong or stale, a proposal rejected;
 //! - an ant reviewed within those days that left [`UNANSWERED_PERCENT`] percent or more of the findings of its last
@@ -19,6 +21,7 @@
 //! the reviews to come. The numbers are first guesses, to tune on real reviews.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use ants_proto::UserId;
 use chrono::{DateTime, Duration, Utc};
@@ -53,6 +56,8 @@ pub const COSTLY_REVIEW_TOKENS: u64 = 1_000_000;
 pub const COSTLY_REVIEW_COST_MICROS: u64 = 2_000_000;
 /// The most findings an undone findings' finding names.
 const MAX_NAMED: usize = 5;
+/// The most reasons for rejecting a kind of finding its finding quotes, the latest told first.
+pub const QUOTED_REASONS: usize = 3;
 
 /// How a finding on the practice is answered, as its text tells.
 const ANSWERS: &str = "a lesson with sense_remember, the self-model with sense_identity or a skill for how to review \
@@ -87,26 +92,43 @@ fn by_ant(reviews: &[ReviewRecord]) -> BTreeMap<&UserId, Vec<&ReviewRecord>> {
     by_ant
 }
 
+type Rejections<'a> = (u32, u32, Vec<(&'a UserId, &'a ReviewedFinding)>);
+
 fn rejected_kinds(reviews: &[ReviewRecord], recent: &dyn Fn(Option<DateTime<Utc>>) -> bool) -> Vec<Gathered> {
-    let mut kinds: BTreeMap<&str, (u32, u32)> = BTreeMap::new();
-    let judged = reviews.iter().flat_map(|review| &review.findings).filter(|f| f.verdict.is_some() && recent(f.told));
-    for finding in judged {
-        let (judged, rejected) = kinds.entry(&finding.kind).or_default();
+    let mut kinds: BTreeMap<&str, Rejections> = BTreeMap::new();
+    let judged = reviews.iter().flat_map(|review| review.findings.iter().map(move |finding| (&review.ant, finding)));
+    for (ant, finding) in judged.filter(|(_, f)| f.verdict.is_some() && recent(f.told)) {
+        let (judged, rejected, reasons) = kinds.entry(&finding.kind).or_default();
         *judged += 1;
-        *rejected += u32::from(finding.verdict == Some(Judgement::Rejected));
+        if finding.verdict == Some(Judgement::Rejected) {
+            *rejected += 1;
+            if !finding.reason.is_empty() {
+                reasons.push((ant, finding));
+            }
+        }
     }
     kinds
         .into_iter()
-        .filter(|(_, (judged, rejected))| {
+        .filter(|(_, (judged, rejected, _))| {
             *judged >= JUDGED_FINDINGS && rejected * JUDGED_FINDINGS >= REJECTED_FINDINGS * judged
         })
-        .map(|(kind, (judged, rejected))| {
-            let text = format!(
+        .map(|(kind, (judged, rejected, mut reasons))| {
+            reasons.sort_by_key(|(_, finding)| std::cmp::Reverse(finding.told));
+            let quoted: Vec<_> = reasons
+                .iter()
+                .take(QUOTED_REASONS)
+                .map(|(ant, finding)| format!("{ant} on {}: \"{}\"", finding.id, finding.reason))
+                .collect();
+            let mut text = format!(
                 "Of the {judged} findings of kind {kind} judged by the ants reviewed over the last {PRACTICE_DAYS} \
-                 active days, {rejected} were rejected: keep what that teaches of when such a finding is worth giving, \
-                 as {ANSWERS}."
+                 active days, {rejected} were rejected."
             );
-            subject(FindingKind::RejectedKind, kind, step(rejected, REJECTED_FINDINGS), text)
+            let untrusted = !quoted.is_empty();
+            if untrusted {
+                let _ = write!(text, " The latest reasons, the words of the ants reviewed: {}.", quoted.join("; "));
+            }
+            let _ = write!(text, " Keep what that teaches of when such a finding is worth giving, as {ANSWERS}.");
+            Gathered { untrusted, ..subject(FindingKind::RejectedKind, kind, step(rejected, REJECTED_FINDINGS), text) }
         })
         .collect()
 }
