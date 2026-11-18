@@ -70,7 +70,8 @@ pub use practice_findings::{
     REJECTED_FINDINGS, RELATIONSHIP_AFTER_REVIEWS, UNANSWERED_PERCENT, UNANSWERED_REVIEWS, UNDONE_FINDINGS,
 };
 pub use review::{
-    Advice, Evidence, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse, review_sent, untrusted_on,
+    Advice, Evidence, FOLLOW_UP, FollowUp, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse,
+    review_sent, untrusted_on,
 };
 pub use reviews::{
     AntTally, FindingTally, KindTally, REVIEW, ReviewCost, ReviewRecord, ReviewSpend, ReviewTally, ReviewedFinding,

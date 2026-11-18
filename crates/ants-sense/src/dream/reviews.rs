@@ -2,7 +2,8 @@
 //! [`REVIEW`] named after the ant reviewed and its dream ([`ItemId::named`]), which sense alone writes ([`BY`]), as it
 //! does the thread records ([`crate::thread::record`]). The review message makes it ([`review_received`]): the ant, its
 //! dream and the thread. The sage's answer gives its findings by kind ([`review_answered`]), read as the ant's daemon
-//! reads it ([`super::parse`]) and numbered as the ant numbers them, `<dream>.<n>`; the first answer stays. Each later
+//! reads it ([`super::parse`]) and numbered as the ant numbers them, `<dream>.<n>`, a [`super::FOLLOW_UP`] with the
+//! earlier finding it follows when the records of the ant's earlier reviews hold it; the first answer stays. Each later
 //! review message of the ant tells what is new in the verdicts and outcomes of the sage's earlier findings
 //! ([`ants_proto::ReviewOutcomes`]), which go to the records of the reviews that made them. With the answer the sage's
 //! daemon tells what the review thread spent, from its spend ledger ([`ReviewSpend`]). A record holds the kinds,
@@ -75,6 +76,10 @@ pub struct ReviewedFinding {
     pub id: String,
     /// Its kind, in the sage's words.
     pub kind: String,
+    /// Of a [`super::FOLLOW_UP`], the id of the earlier finding it follows, as the sage named it ([`super::FollowUp`]):
+    /// none when no record of an earlier review of the ant holds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follows: Option<String>,
     /// The ant's last verdict on it, once told; none while unanswered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<Judgement>,
@@ -196,8 +201,9 @@ pub async fn review_received(
 }
 
 /// Note in `items`, a sage's, its answer `text` at `at` to the review of dream `dream` of `ant` on `thread`, which
-/// `spent` what its daemon knew: its findings, as the ant's daemon reads them ([`parse`]), by kind; none when it holds
-/// none readable. Whether it changed the record: once answered, a review keeps its first answer.
+/// `spent` what its daemon knew: its findings, as the ant's daemon reads them ([`parse`]), by kind, a follow-up with the
+/// earlier finding it follows when the record of an earlier review of `ant` holds it; none when it holds none
+/// readable. Whether it changed the record: once answered, a review keeps its first answer.
 pub async fn review_answered(
     items: &dyn Items,
     ant: &UserId,
@@ -207,19 +213,22 @@ pub async fn review_answered(
     spent: Option<ReviewSpend>,
     at: DateTime<Utc>,
 ) -> Result<bool, StoreError> {
-    let findings: Vec<_> = parse(text)
-        .map_or_default(|parsed| parsed.findings)
-        .into_iter()
-        .zip(1..)
-        .map(|((_, advice), n)| ReviewedFinding {
+    let mut findings = Vec::new();
+    for ((_, advice), n) in parse(text).map_or_default(|parsed| parsed.findings).into_iter().zip(1..) {
+        let follows = match advice.follows {
+            Some(follows) => earlier_finding(items, ant, dream, follows.named).await?,
+            None => None,
+        };
+        findings.push(ReviewedFinding {
             id: format!("{dream}.{n}"),
             kind: advice.kind,
+            follows,
             verdict: None,
             holds: false,
             reason: String::new(),
             told: None,
-        })
-        .collect();
+        });
+    }
     let findings = &findings;
     let id = &review_id(ant, dream);
     read_modify_write(|| async move {
@@ -239,6 +248,21 @@ pub async fn review_answered(
         Ok(true)
     })
     .await
+}
+
+/// Finding `named` when it is one of the sage's for `ant` before dream `dream`, as the records of its reviews hold them.
+async fn earlier_finding(
+    items: &dyn Items,
+    ant: &UserId,
+    dream: u64,
+    named: String,
+) -> Result<Option<String>, StoreError> {
+    let Some(earlier) = named.split_once('.').and_then(|(earlier, _)| earlier.parse().ok()) else { return Ok(None) };
+    if earlier >= dream {
+        return Ok(None);
+    }
+    let record = review_record(items, ant, earlier).await?;
+    Ok(record.filter(|record| record.findings.iter().any(|finding| finding.id == named)).map(|_| named))
 }
 
 /// The findings of a sage, or of one kind or for one ant, and what the ants made of them.

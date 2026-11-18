@@ -12,7 +12,8 @@ fn user(name: &str) -> UserId {
 
 /// A finding of a sage, of `kind`, first offered as `id`.
 fn advised(id: &str, kind: &str, text: &str) -> Finding {
-    let advice = Advice { kind: kind.into(), evidence: Evidence::default(), action: format!("Act on {id}.") };
+    let action = format!("Act on {id}.");
+    let advice = Advice { kind: kind.into(), evidence: Evidence::default(), action, follows: None };
     Finding { id: id.into(), kind: FindingKind::Sage, text: text.into(), advice: Some(advice), ..finding(1) }
 }
 

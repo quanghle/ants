@@ -55,6 +55,82 @@ fn an_answer_is_read_from_its_last_json_block_at_most_twenty_findings() {
     assert_eq!(parse("```\n{\"verdict\": 1}\n```"), None);
 }
 
+#[test]
+fn a_follow_up_names_the_finding_it_follows_by_its_id() {
+    let cited = json!({"files": ["src/lib.rs:12"]});
+    let follow = |kind: &str, follows: serde_json::Value| json!({"kind": kind, "follows": follows, "finding": "Still so.", "evidence": cited, "action": "Act."});
+    let given = [
+        follow("Follow Up", json!(" 03.2 ")),
+        follow("follow_up", json!("the first one")),
+        follow("follow_up", json!(3.2)),
+        follow("lesson", json!("3.2")),
+    ];
+    let parsed = parse(&fenced(&given)).unwrap();
+    let follows: Vec<_> = parsed.findings.iter().map(|(_, advice)| advice.follows.clone()).collect();
+    let named = FollowUp { named: "3.2".into(), finding: None };
+    assert_eq!(follows, [Some(named), None, None, None], "a follow_up's id, nothing else");
+}
+
+#[tokio::test]
+async fn a_follow_up_is_linked_to_the_earlier_finding_it_follows_and_one_naming_none_stands_unlinked() {
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let (writer, ant) = (on(9), context(human()).ant);
+    let thread = sent(&*items).await;
+    let cited = json!({"threads": [on(1).thread.to_string()]});
+    let first =
+        fenced(&[finding("lesson", "Pin the toolchain", cited.clone()), finding("mistake", "Retries", cited.clone())]);
+    let reviewed = answered(&*items, &sage(), &thread, uuid::Uuid::now_v7(), Some(&first)).await.unwrap();
+    assert!(matches!(reviewed, Some(Reviewed::Prompt(_))), "{reviewed:?}");
+
+    let covered = vec![Covered { thread: on(1).thread, untrusted: false, review: false }];
+    let to_sage = |at| Start { recipient: Recipient::Sage(sage()), threads: covered.clone(), ..start(at, &writer) };
+    let (dream, _) = get(&*items, 1).await.unwrap().unwrap();
+    let second = begin(&*items, to_sage(dream.next())).await.unwrap().unwrap();
+    review_sent(&*items, 2).await.unwrap();
+    let follow = |follows: &str, text: &str| json!({"kind": "follow_up", "follows": follows, "finding": text, "evidence": cited, "action": "Look again."});
+    let answer = fenced(&[
+        follow("1.2", "Retries still hide failures"),
+        follow("1.9", "Names no such finding"),
+        finding("follow_up", "Names nothing", cited.clone()),
+    ]);
+    let thread = second.review.clone().unwrap().thread;
+    let Some(Reviewed::Prompt(prompt)) =
+        answered(&*items, &sage(), &thread, uuid::Uuid::now_v7(), Some(&answer)).await.unwrap()
+    else {
+        panic!("findings prompt the ant");
+    };
+    let block = prompt.split(REVIEW_BEGIN).nth(1).unwrap().split(REVIEW_END).next().unwrap();
+    for line in [
+        "- 2.1 (sage: follow_up of 1.2): Retries still hide failures\n",
+        "- 2.2 (sage: follow_up, unlinked: 1.9 is no earlier finding of the sage for the ant): Names no such finding\n",
+        "- 2.3 (sage: follow_up, unlinked: naming no earlier finding): Names nothing\n",
+    ] {
+        assert!(block.contains(line), "{line:?} in {prompt}");
+    }
+    let (second, _) = get(&*items, 2).await.unwrap().unwrap();
+    let follows: Vec<_> = second.findings.iter().take(3).map(|f| f.advice.clone().unwrap().follows).collect();
+    let linked = FollowUp { named: "1.2".into(), finding: Some("1.2".into()) };
+    assert_eq!(follows, [Some(linked), Some(FollowUp { named: "1.9".into(), finding: None }), None]);
+
+    let third = begin(&*items, to_sage(second.next())).await.unwrap().unwrap();
+    let read = track_record(&*items, &third, &sage(), &ant).await.unwrap();
+    let text = read.text(read.entries.len());
+    let shown = [
+        "### Review of dream 2, ",
+        "- 2.1 (follow_up of 1.2): Retries still hide failures\n",
+        "- 2.2 (follow_up, unlinked: 1.9 is no earlier finding of the sage for the ant): Names no such finding\n",
+        "- 2.3 (follow_up, unlinked: naming no earlier finding): Names nothing\n",
+        "### Review of dream 1, ",
+        "- 1.1 (lesson): Pin the toolchain\n  Suggested action: Act on Pin the toolchain\n  Verdict: unanswered \
+         (offered again below)\n- 1.2 (mistake): Retries\n",
+        "  Followed up by 2.1.\n",
+        "### Tally",
+    ];
+    let at: Vec<_> = shown.iter().map(|line| text.find(line).unwrap_or_else(|| panic!("{line:?} in {text}"))).collect();
+    assert!(at.is_sorted() && text.matches("Followed up by").count() == 1, "{text}");
+}
+
 #[tokio::test]
 async fn the_sages_findings_prompt_the_ant_marked_untrusted_where_they_rest_on_untrusted_text() {
     let (sense, kept) = sense().await;
@@ -263,8 +339,13 @@ async fn a_late_answer_is_offered_in_the_next_dream_and_its_verdicts_reach_the_s
     assert_eq!(verdicts, [Some(Judgement::Rejected), Some(Judgement::Deferred), None]);
     let read = track_record(&*items, &third, &sage(), &ant).await.unwrap();
     let text = read.text(read.entries.len());
+    let shown = "- 1.1 (lesson): Late lesson\n  Suggested action: Act on Late lesson\n  Verdict: rejected";
+    assert!(text.contains(shown), "by the sage's numbering: {text}");
     assert!(
-        text.contains("- 1.2 (lesson): Late lesson\n  Suggested action: Act on Late lesson\n  Verdict: rejected"),
+        text.contains(
+            "- 1.2 (mistake): From the hook\n  Suggested action: Act on From the hook\n  Verdict: \
+                           deferred: Later. (offered again below as 1.3)\n"
+        ),
         "{text}"
     );
 }

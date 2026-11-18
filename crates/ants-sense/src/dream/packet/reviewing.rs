@@ -2,9 +2,10 @@
 //! records alone ([`ReviewRecord`]), never the text of their threads, which the packet leaves out ([`Covered::review`]):
 //! those asked, answered or told of within the dream's period, the latest asked first, each with the ant and dream
 //! reviewed, when asked and answered, what an answered one spent ([`ReviewRecord::spent`]) or that its spend is
-//! unknown, and each finding's kind and what came of it; then the tally of all its reviews ([`tally_lines`]). It takes
-//! at most a share of the packet's budget ([`REVIEWING_SHARE`]), the earliest reviews left out first, and shrinks to
-//! its heading and tally for room before the identity is cut to titles.
+//! unknown, and each finding's kind, for a follow-up the earlier finding it follows, and what came of it; then the
+//! tally of all its reviews ([`tally_lines`]). It takes at most a share of the packet's budget ([`REVIEWING_SHARE`]),
+//! the earliest reviews left out first, and shrinks to its heading and tally for room before the identity is cut to
+//! titles.
 //!
 //! [`Covered::review`]: crate::dream::Covered::review
 
@@ -72,7 +73,11 @@ fn review(review: &ReviewRecord) -> String {
         text.push_str("No findings.\n");
     }
     for finding in &review.findings {
-        let _ = writeln!(text, "- {} {}: {}", finding.id, finding.kind, came_of(finding));
+        let _ = write!(text, "- {} {}", finding.id, finding.kind);
+        if let Some(follows) = &finding.follows {
+            let _ = write!(text, " of {follows}");
+        }
+        let _ = writeln!(text, ": {}", came_of(finding));
     }
     text
 }

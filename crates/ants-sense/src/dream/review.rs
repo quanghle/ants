@@ -1,12 +1,15 @@
 //! Sage reviews (requirements ants-x39hk.12.3 to ants-x39hk.12.5): the review of a dream its daemon sends the ant's
 //! sage ([`Review`]), and the sage's answer ([`answered`]): at most [`MAX_FINDINGS`] findings in a JSON block
-//! ([`parse`]), each with its kind, evidence and suggested action ([`Advice`]). They become the dream's findings, with
+//! ([`parse`]), each with its kind, evidence and suggested action ([`Advice`]), a [`FOLLOW_UP`] with the earlier finding
+//! it follows ([`FollowUp`]), linked when it is one of the sage's earlier findings for the ant. They become the dream's
+//! findings, with
 //! the packet's on the identity and those carried from earlier dreams, which stay whatever the sage answers ([`kept`]),
 //! and prompt the ant on the review thread inside a marked block ([`REVIEW_BEGIN`]) as another ant's suggestions to
 //! verify against their evidence, not instructions. A finding resting on a thread of untrusted origin, or on an
 //! untrusted memory, is marked untrusted ([`Finding::untrusted`]); what the ant writes on the thread while one is open
 //! is untrusted too ([`untrusted_on`]).
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use ants_proto::{FindingOutcome, ThreadId, UserId};
@@ -14,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use super::packet::{commits, finding_line};
+use super::packet::{commits, earlier_findings, finding_line};
 use super::{BY, Covered, Dream, Finding, FindingKind, MAX_DREAM_WRITES, MAX_FINDINGS, State, last};
 use crate::items::{ItemId, Values};
 use crate::memory::{Memory, Trust};
@@ -26,6 +29,10 @@ use crate::store::{Items, StoreError, read_modify_write};
 pub const REVIEW_BEGIN: &str = "<sage-review>";
 /// What closes the block of the sage's findings ([`REVIEW_BEGIN`]).
 pub const REVIEW_END: &str = "</sage-review>";
+
+/// The kind of a sage's finding answering one of its earlier findings for the ant that did not hold, naming it
+/// ([`Advice::follows`]).
+pub const FOLLOW_UP: &str = "follow_up";
 
 /// The most characters of a finding's kind, in the sage's words.
 const MAX_KIND_CHARS: usize = 40;
@@ -121,6 +128,37 @@ pub struct Advice {
     pub kind: String,
     pub evidence: Evidence,
     pub action: String,
+    /// Of a [`FOLLOW_UP`], the earlier finding it follows, as the sage named it: none when it named none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follows: Option<FollowUp>,
+}
+
+/// The earlier finding a sage's [`FOLLOW_UP`] names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowUp {
+    /// Its id, `<dream>.<n>`, as the sage's earlier findings show it: numbered as the sage's record of its review.
+    pub named: String,
+    /// Its id among the ant's findings, once it is found among the sage's earlier findings for the ant
+    /// ([`super::packet::earlier_findings`]): none when it is not, the link dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finding: Option<String>,
+}
+
+impl Advice {
+    /// What the marks of its finding show of the finding it follows, by the id `linked` gives of the link: ` of <id>`
+    /// for a [`FOLLOW_UP`] linked, else that it is unlinked and what it named; nothing for another kind.
+    pub(super) fn follows_marks(&self, linked: impl Fn(&FollowUp) -> Option<&str>) -> String {
+        if self.kind != FOLLOW_UP {
+            return String::new();
+        }
+        match &self.follows {
+            Some(follows) => match linked(follows) {
+                Some(id) => format!(" of {id}"),
+                None => format!(", unlinked: {} is no earlier finding of the sage for the ant", follows.named),
+            },
+            None => ", unlinked: naming no earlier finding".into(),
+        }
+    }
 }
 
 /// A sage's answer, read.
@@ -136,7 +174,8 @@ pub struct Parsed {
 
 /// The findings of a sage's answer `text`: from its last fenced block, or else its whole text, holding JSON of the form
 /// `{"findings": [{"kind", "finding", "evidence": {"threads", "messages", "memories", "files"}, "action"}]}`, or the
-/// list alone. None when no such block is in it.
+/// list alone, a [`FOLLOW_UP`] naming the finding it follows in `follows` ([`FollowUp::named`]). None when no such
+/// block is in it.
 pub fn parse(text: &str) -> Option<Parsed> {
     let list = blocks(text).into_iter().rev().find_map(findings_in)?;
     let mut parsed = Parsed::default();
@@ -188,7 +227,16 @@ fn finding_of(given: &Value) -> Option<(String, Advice)> {
     let finding = text(&["finding", "text"], MAX_FINDING_CHARS)?;
     let action = text(&["action", "suggested_action"], MAX_ACTION_CHARS)?;
     let evidence = evidence_of(object.get("evidence")?.as_object()?);
-    (!evidence.is_empty()).then_some((finding, Advice { kind, evidence, action }))
+    let follows = object.get("follows").filter(|_| kind == FOLLOW_UP).and_then(Value::as_str).and_then(finding_id);
+    let follows = follows.map(|named| FollowUp { named, finding: None });
+    (!evidence.is_empty()).then_some((finding, Advice { kind, evidence, action, follows }))
+}
+
+/// `text` as a finding's id, `<dream>.<n>`: none when it is none.
+pub(super) fn finding_id(text: &str) -> Option<String> {
+    let (dream, n) = text.trim().split_once('.')?;
+    let (dream, n) = (dream.parse::<u64>().ok()?, n.parse::<u64>().ok()?);
+    (dream > 0 && n > 0).then(|| format!("{dream}.{n}"))
 }
 
 fn evidence_of(object: &Map<String, Value>) -> Evidence {
@@ -331,7 +379,8 @@ fn kept(dream: &Dream, after: usize) -> Vec<Finding> {
 
 /// The sage's `given` findings as findings of `dream`, numbered past `past`: untrusted when one cites a thread of
 /// untrusted origin, or one the packet did not cover, or an untrusted memory, or, citing no thread, rests on a packet
-/// holding the text of an untrusted thread ([`Covered::untrusted_text`]).
+/// holding the text of an untrusted thread ([`Covered::untrusted_text`]). A [`FOLLOW_UP`] is linked to the finding it
+/// names when that is one of the sage's earlier findings for the ant ([`earlier_findings`]), else kept unlinked.
 async fn sage_findings(
     items: &dyn Items,
     dream: &Dream,
@@ -340,6 +389,12 @@ async fn sage_findings(
 ) -> Result<Vec<Finding>, StoreError> {
     let untrusted_thread = |thread: &ThreadId| {
         dream.threads.iter().find(|covered| covered.thread == *thread).is_none_or(|covered| covered.untrusted)
+    };
+    let earlier = match &dream.sage {
+        Some(sage) if given.iter().any(|(_, advice)| advice.follows.is_some()) => {
+            earlier_findings(items, dream, sage).await?
+        }
+        _ => HashMap::new(),
     };
     let mut findings = Vec::with_capacity(given.len());
     for (n, (text, advice)) in given.iter().enumerate() {
@@ -354,6 +409,10 @@ async fn sage_findings(
                 untrusted_text = Memory::of(&item).is_some_and(|memory| memory.trust == Trust::Untrusted);
             }
         }
+        let mut advice = advice.clone();
+        if let Some(follows) = &mut advice.follows {
+            follows.finding = earlier.get(&follows.named).cloned();
+        }
         findings.push(Finding {
             id: format!("{}.{}", dream.number, past + n + 1),
             kind: FindingKind::Sage,
@@ -362,7 +421,7 @@ async fn sage_findings(
             untrusted: untrusted_text,
             key: None,
             count: None,
-            advice: Some(advice.clone()),
+            advice: Some(advice),
         });
     }
     Ok(findings)

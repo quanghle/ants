@@ -165,6 +165,35 @@ async fn the_sage_keeps_a_record_of_each_review_and_tallies_what_came_of_its_fin
 }
 
 #[tokio::test]
+async fn a_review_record_keeps_the_earlier_finding_a_follow_up_follows_when_an_earlier_record_holds_it() {
+    let (_sense, kept) = super::sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let (ant, writer, now) = (context(human()).ant, on(9), Utc::now());
+    let asked = |dream| ReviewOutcomes { dream, findings: Vec::new() };
+    assert!(review_received(&*items, &ant, &on(1).thread, &asked(1), now - Duration::hours(30)).await.unwrap());
+    let first = findings(&["lesson", "mistake"]);
+    assert!(review_answered(&*items, &ant, &on(1).thread, 1, &first, None, now - Duration::hours(30)).await.unwrap());
+
+    let follow = |follows: &str| {
+        let evidence = json!({"files": ["src/lib.rs:1"]});
+        json!({"kind": "follow_up", "follows": follows, "finding": "Still so.", "evidence": evidence, "action": "Act."})
+    };
+    let given = [follow("1.2"), follow("1.9"), follow("2.1"), follow("3.1")];
+    let answer = format!("Reviewed.\n\n```json\n{:#}\n```", json!({"findings": given}));
+    assert!(review_received(&*items, &ant, &on(2).thread, &asked(2), now - Duration::hours(2)).await.unwrap());
+    assert!(review_answered(&*items, &ant, &on(2).thread, 2, &answer, None, now - Duration::hours(2)).await.unwrap());
+    let record = review_record(&*items, &ant, 2).await.unwrap().unwrap();
+    let follows: Vec<_> = record.findings.iter().map(|finding| finding.follows.as_deref()).collect();
+    assert_eq!(follows, [Some("1.2"), None, None, None], "only a finding of an earlier review of the ant");
+
+    let threads = vec![Covered { thread: on(2).thread, untrusted: true, review: false }];
+    let dream = begin(&*items, Start { threads, ..start(now, &writer) }).await.unwrap().unwrap();
+    let listed = crate::dream::reviewing(&*items, &dream).await.unwrap();
+    let text = listed.text(listed.entries.len());
+    assert!(text.contains("- 2.1 follow_up of 1.2: unanswered\n- 2.2 follow_up: unanswered\n"), "{text}");
+}
+
+#[tokio::test]
 async fn a_verdict_s_reason_is_kept_on_one_line_bounded_and_redacted_and_only_with_a_new_verdict() {
     let (_sense, kept) = sense().await;
     let items: Arc<dyn Items> = kept.clone();

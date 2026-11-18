@@ -35,32 +35,42 @@ pub const TRACK_RECORD_SHARE: usize = 8;
 
 /// The earlier findings section of the packet of `dream` for `sage`, reviewing `ant`, whose items `items` holds: the
 /// findings `sage` gave in the dreams that began within [`TRACK_RECORD_DAYS`] of the ant's active time before
-/// `dream`, each with the last verdict on it, in the dream that offered it or one offering it again: an entry each,
-/// the first of each review under the review's heading.
+/// `dream`, each by its id in the sage's record of its review ([`own`]) and with the last verdict on it, in the dream
+/// that offered it or one offering it again, and the chain of follow-ups: a [`FOLLOW_UP`] with the finding it follows,
+/// a finding followed up with its follow-ups. An entry each, the first of each review under the review's heading.
+///
+/// [`FOLLOW_UP`]: crate::dream::FOLLOW_UP
 pub async fn track_record(
     items: &dyn Items,
     dream: &Dream,
     sage: &UserId,
     ant: &UserId,
 ) -> Result<Section, StoreError> {
-    let card = crate::identity::card(items).await?;
-    let ages = memory::Ages::new(dream.at, card.iter().flat_map(|card| card.dormant(dream.at)));
-    let dreams = earlier(items, dream.number, &ages, TRACK_RECORD_DAYS).await?;
+    let dreams = covered(items, dream).await?;
     let verdicts = last_verdicts(&dreams);
+    let by_sage: Vec<_> = dreams.iter().filter(|earlier| earlier.sage.as_ref() == Some(sage)).collect();
+    let mut followed: HashMap<String, Vec<String>> = HashMap::new();
+    for (finding, told_as) in by_sage.iter().flat_map(|earlier| own(earlier)) {
+        let follows = finding.advice.as_ref().and_then(|advice| advice.follows.as_ref());
+        if let Some(follows) = follows.filter(|follows| follows.finding.is_some()) {
+            followed.entry(follows.named.clone()).or_default().push(told_as);
+        }
+    }
     let mut vitals = Vitals::new(items, dream, &dreams);
     let mut record = Section {
         head: format!(
             "\n## Earlier findings of {sage}\n\nWhat {sage} found in the work of {ant} over its last \
              {TRACK_RECORD_DAYS} active days, the latest reviews first: each finding with its suggested action, the \
              verdict of {ant} and, for one applied, what became of what {ant} wrote or voted on for it and the vital \
-             signs of {ant} over the dreams before it was applied and since, side by side.\n"
+             signs of {ant} over the dreams before it was applied and since, side by side; a follow_up with the \
+             finding it follows, and a finding followed up with its follow-ups.\n"
         ),
         noun: "earlier finding",
         ..Section::default()
     };
     let mut tallies: BTreeMap<String, FindingTally> = BTreeMap::new();
-    for earlier in dreams.iter().filter(|earlier| earlier.sage.as_ref() == Some(sage)) {
-        for (n, (finding, _)) in own(earlier).enumerate() {
+    for earlier in by_sage {
+        for (n, (finding, told_as)) in own(earlier).enumerate() {
             let found = verdicts.get(finding.id.as_str()).copied();
             let verdict = found.map(|(_, verdict)| verdict);
             let (mut written, mut signs) = (Vec::new(), None);
@@ -78,7 +88,10 @@ pub async fn track_record(
                 let _ = write!(entry, "\n### Review of dream {number}, {day}\n\n");
             }
             let again = dream.findings.iter().any(|offered| offered.id == finding.id);
-            entry.push_str(&finding_entry(finding, verdict, &written, signs.as_deref(), again));
+            entry.push_str(&finding_entry((finding, &told_as), verdict, &written, signs.as_deref(), again));
+            if let Some(follow_ups) = followed.get(&told_as) {
+                let _ = writeln!(entry, "  Followed up by {}.", follow_ups.join(", "));
+            }
             record.entries.push(entry);
         }
     }
@@ -95,6 +108,26 @@ pub async fn track_record(
         let _ = writeln!(record.tally, "- all: {}.", all.counts());
     }
     Ok(record)
+}
+
+/// The findings `sage` gave the ant in the dreams the earlier findings section of the packet of `dream` covers
+/// ([`track_record`]), each by its id in the sage's record of its review ([`own`]) to its id among the ant's.
+pub(in crate::dream) async fn earlier_findings(
+    items: &dyn Items,
+    dream: &Dream,
+    sage: &UserId,
+) -> Result<HashMap<String, String>, StoreError> {
+    let dreams = covered(items, dream).await?;
+    let by_sage = dreams.iter().filter(|earlier| earlier.sage.as_ref() == Some(sage));
+    Ok(by_sage.flat_map(own).map(|(finding, told_as)| (told_as, finding.id.clone())).collect())
+}
+
+/// The dreams the earlier findings section of the packet of `dream` covers: those before it that began within
+/// [`TRACK_RECORD_DAYS`] of the ant's active time, its dormancies not counted, the latest first.
+async fn covered(items: &dyn Items, dream: &Dream) -> Result<Vec<Dream>, StoreError> {
+    let card = crate::identity::card(items).await?;
+    let ages = memory::Ages::new(dream.at, card.iter().flat_map(|card| card.dormant(dream.at)));
+    earlier(items, dream.number, &ages, TRACK_RECORD_DAYS).await
 }
 
 /// The dreams before dream `number` that began within `days` of the ant's active time, by `ages`, the latest first.
@@ -263,16 +296,20 @@ pub(in crate::dream) async fn outcomes(
     Ok(outcomes)
 }
 
-/// `finding` as the section shows it, with the last `verdict` on it, what became of the items `written` for it and the
-/// line of the vital `signs` around it; `again` when the dream of the packet offers it again.
+/// `finding` as the section shows it, by the id it was `told_as` in the sage's record of its review, with the last
+/// `verdict` on it, what became of the items `written` for it and the line of the vital `signs` around it; `again` when
+/// the dream of the packet offers it again.
 fn finding_entry(
-    finding: &Finding,
+    (finding, told_as): (&Finding, &str),
     verdict: Option<&Verdict>,
     written: &[(String, bool)],
     signs: Option<&str>,
     again: bool,
 ) -> String {
-    let mut entry = format!("- {} ({}): {}\n", finding.id, kind(finding), finding.text);
+    let follows = finding.advice.as_ref().map_or_default(|advice| {
+        advice.follows_marks(|follows| follows.finding.is_some().then_some(follows.named.as_str()))
+    });
+    let mut entry = format!("- {told_as} ({}{follows}): {}\n", kind(finding), finding.text);
     if let Some(advice) = &finding.advice {
         let _ = writeln!(entry, "  Suggested action: {}", advice.action);
     }
@@ -282,8 +319,10 @@ fn finding_entry(
         }
         None => entry.push_str("  Verdict: unanswered"),
     }
-    if again {
+    if again && finding.id == told_as {
         entry.push_str(" (offered again below)");
+    } else if again {
+        let _ = write!(entry, " (offered again below as {})", finding.id);
     }
     entry.push('\n');
     if !written.is_empty() {

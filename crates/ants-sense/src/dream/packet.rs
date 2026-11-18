@@ -22,8 +22,8 @@ pub use identity::{Identity, identity};
 pub use reviewing::{REVIEWING_SHARE, reviewing};
 pub use section::Section;
 use track_record::TRACK_RECORD_SHARE;
-pub(super) use track_record::outcomes;
 pub use track_record::{OUTCOME_DAYS, TRACK_RECORD_DAYS, track_record};
+pub(super) use track_record::{earlier_findings, outcomes};
 
 /// The most bytes of a review packet.
 pub const PACKET_BUDGET: usize = 64 * 1024;
@@ -323,9 +323,10 @@ fn render(
             follow_up = match earlier {
                 Earlier::Sage(_) => {
                     " Hold the threads against the earlier findings below and what became of them, and answer an \
-                     earlier finding that did not hold with a finding of kind follow_up naming its id. The vital \
-                     signs beside an applied finding are numbers side by side, not its effect: a few threads make \
-                     weak evidence."
+                     earlier finding that did not hold with a finding of kind follow_up naming its id, as listed \
+                     there, in \"follows\": {\"kind\": \"follow_up\", \"follows\": \"3.2\", ...}; one naming none \
+                     of them stands unlinked. The vital signs beside an applied finding are numbers side by side, not \
+                     its effect: a few threads make weak evidence."
                 }
                 Earlier::Last(_) | Earlier::Reviewing(..) => "",
             },
@@ -449,7 +450,7 @@ pub(super) fn commits(dream: &Dream, text: &mut String) {
 pub(super) fn finding_line(finding: &Finding, number: u64) -> String {
     let mut marks = finding.kind.to_string();
     if let Some(advice) = &finding.advice {
-        let _ = write!(marks, ": {}", advice.kind);
+        let _ = write!(marks, ": {}{}", advice.kind, advice.follows_marks(|follows| follows.finding.as_deref()));
     }
     if finding.untrusted {
         marks.push_str(", untrusted");
