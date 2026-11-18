@@ -434,6 +434,7 @@ impl Lifecycle {
     }
 
     /// The lifecycle telling of threads started in the repository of `workdir`, the ant's working directory.
+    #[must_use]
     pub fn with_workdir(self, workdir: PathBuf) -> Self {
         Self { workdir: Some(workdir), ..self }
     }
