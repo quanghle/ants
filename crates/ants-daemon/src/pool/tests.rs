@@ -128,6 +128,20 @@ async fn the_cap_stops_the_least_recently_used_and_it_resumes() {
 }
 
 #[tokio::test]
+async fn a_review_runs_in_a_session_of_its_own_on_the_thread_s_session() {
+    let (pool, log, _) = fake_pool(4, Sessions::Loadable);
+    pool.prompt(&thread(1), "a").await.unwrap();
+    let review = ants_proto::REVIEW_ALLOW.map(str::to_owned);
+    let narrowed = pool.launch().policy().narrow(&thread(1), Some(&review));
+    assert_eq!(pool.prompt(&thread(1), "b").await.unwrap(), "s1: b");
+    assert_eq!(pool.prompt(&thread(1), "c").await.unwrap(), "s1: c");
+    drop(narrowed);
+    pool.prompt(&thread(1), "d").await.unwrap();
+    let log = log.locked();
+    assert_eq!((log.starts, log.loaded.as_slice()), (3, &["s1".to_owned(), "s1".to_owned()][..]));
+}
+
+#[tokio::test]
 async fn idle_harnesses_stop_and_resume_on_the_next_message() {
     let (pool, log, _) = fake_pool(4, Sessions::Loadable);
     pool.prompt(&thread(1), "a").await.unwrap();

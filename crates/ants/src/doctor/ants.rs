@@ -327,7 +327,7 @@ pub(super) fn responder(responder: ReactionsResponder) -> &'static str {
 
 /// A warning for each ant whose harness runs its tools unasked while the ant gates them: with allow rules or tool
 /// approvals by its `escalate_to` ants, or as the destination of schedules or webhooks narrowing the threads they
-/// start.
+/// start; and, for a sage, for each harness that declines its reviews, running its tools unasked with no review set.
 pub(super) fn check_bypassed(loaded: &config::Loaded, webhooks: &[webhook::Webhook]) -> Vec<Check> {
     let mut checks = Vec::new();
     for ant in &loaded.ants {
@@ -337,6 +337,10 @@ pub(super) fn check_bypassed(loaded: &config::Loaded, webhooks: &[webhook::Webho
         }
         let check = format!("ant {} tool permissions", ant.name);
         let fix = vec![harness.gated_fix()];
+        if let Some(why) = harness.unheld_review().filter(|_| ant.is_sage) {
+            let detail = format!("the sage declines the reviews of dreams: {why}");
+            checks.push(Check::warn(format!("ant {} reviews", ant.name), detail, vec![harness.review_fix()]));
+        }
         let allow = if ant.allow_tools { vec!["*".to_owned()] } else { ant.allow.clone() };
         if let Some(detail) = harness.unenforced(&allow, !ant.escalate_to.is_empty()) {
             checks.push(Check::warn(check.clone(), detail, fix.clone()));

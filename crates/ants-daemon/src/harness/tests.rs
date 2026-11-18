@@ -436,6 +436,45 @@ fn a_harness_running_its_tools_unasked_tells_which_gating_misses_them() {
     assert_eq!(asking.get("copilot").unwrap().unenforced(&rules(&["read"]), true), None);
 }
 
+#[test]
+fn reviews_run_on_a_variant_asking_before_running_tools() {
+    let reviewing = |harness: &Harness| harness.reviewing().map(|h| (h.args, h.mode));
+    let strings = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let copilot = builtin("copilot").reviewing().unwrap();
+    assert!(!copilot.bypasses_permissions());
+    assert_eq!(command_line(&copilot, &[], Some("default")).1, ["--acp", "--context", "default"]);
+    assert_eq!(reviewing(&builtin("claude")), Some((Vec::new(), Some("default".to_owned()))));
+    assert_eq!(reviewing(&builtin("codex")), Some((Vec::new(), Some("read-only".to_owned()))));
+    assert_eq!(reviewing(&builtin("antigravity")), None);
+    let unheld = builtin("antigravity").unheld_review().unwrap();
+    assert!(unheld.contains("harness antigravity runs its tools unasked and its definition sets no review"));
+    assert_eq!(builtin("copilot").unheld_review(), None);
+
+    let asking = custom("command = \"x\"\nargs = [\"--a\"]");
+    assert_eq!(reviewing(&asking), Some((strings(&["--a"]), None)), "itself");
+    assert_eq!(custom("command = \"x\"\nbypass_permissions = true").reviewing(), None);
+    let native = custom("command = \"x\"\nprotocol = \"codex\"\nreview = { mode = \"read-only\" }");
+    assert_eq!(reviewing(&native), Some((Vec::new(), Some("read-only".to_owned()))));
+
+    let define = |text: &str| parse_definitions(text).and_then(|defs| Harnesses::builtin().define(defs));
+    let err = |text: &str| format!("{:#}", define(text).unwrap_err());
+    assert!(err("[harnesses.custom]\ncommand = \"x\"\nreview = {}").contains("review must set args or mode"));
+    let blank = err("[harnesses.custom]\ncommand = \"x\"\nreview = { mode = \" \" }");
+    assert!(blank.contains("harness custom: review: harness custom: mode must not be blank"), "{blank}");
+    let replaced =
+        "[harnesses.copilot]\ncommand = \"copilot\"\nargs = [\"--acp\", \"--allow-all\"]\nbypass_permissions = true";
+    let replaced = define(replaced).unwrap();
+    assert_eq!(replaced.get("copilot").unwrap().reviewing(), None, "a definition replacing a built-in sets its own");
+}
+
+#[tokio::test]
+async fn a_review_session_rejects_tools_outside_the_review_unasked() {
+    let launch = codex(PermissionPolicy::allow_all()).for_review().unwrap();
+    let session = Session::start(&launch, None).await.unwrap();
+    assert_eq!(session.prompt("go").await.unwrap(), "cancel", "send_message is not read only");
+    session.close().await;
+}
+
 #[derive(Clone, Copy)]
 enum ConfigBehavior {
     Apply,

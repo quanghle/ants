@@ -1131,3 +1131,24 @@ fn ants_whose_harness_runs_tools_unasked_are_warned_of_rules_that_miss_them() {
     assert!(checks[0].fix[0].starts_with("add `harness = \"NAME\"` at the top of"), "{}", checks[0]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_sage_on_a_harness_that_cannot_hold_reviews_is_warned_of_declining_them() {
+    let dir = ants_test_support::scratch_dir("doctor-unheld-reviews");
+    let config = dir.join("ants.toml");
+    let reviews = |harness: &str| {
+        std::fs::write(
+            &config,
+            format!("messenger = false\nharness = \"{harness}\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n"),
+        )
+        .unwrap();
+        let checks = check_bypassed(&config::load(&config).unwrap(), &[]);
+        checks.into_iter().filter(|c| c.check == "ant sage reviews").collect::<Vec<_>>()
+    };
+    let warned = reviews("antigravity");
+    assert_eq!(warned.len(), 1);
+    assert!(warned[0].detail.contains("harness antigravity runs its tools unasked"), "{}", warned[0]);
+    assert!(warned[0].fix[0].starts_with("set review in [harnesses.antigravity]"), "{}", warned[0]);
+    assert!(reviews("claude").is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

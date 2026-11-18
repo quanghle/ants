@@ -108,6 +108,8 @@ struct Live {
     session: Arc<Session>,
     /// The fallback it runs, `None` for the ant's own harness.
     fallback: Option<usize>,
+    /// Whether it runs a review's prompts ([`Launch::for_review`]).
+    review: bool,
     last_used: Instant,
     /// Prompts in flight. A busy harness is never stopped.
     busy: usize,
@@ -323,7 +325,8 @@ impl Pool {
             Some((index, (name, _))) => e.context(OnFallback { index, name: name.clone() }),
             None => e,
         };
-        let lease = self.checkout(thread, fallback).await.map_err(on)?;
+        let review = self.launch.policy().reviewing(thread);
+        let lease = self.checkout(thread, fallback, review).await.map_err(on)?;
         let before = lease.session.id();
         let reply = lease.session.run(prompt).await.map_err(on);
         let after = lease.session.id();
@@ -441,32 +444,35 @@ impl Pool {
         self.slots.locked()
     }
 
-    /// The thread's live session on `fallback`, marked busy until the lease drops.
-    async fn checkout(&self, thread: &ThreadId, fallback: Option<usize>) -> Result<Lease<'_>> {
+    /// The thread's live session on `fallback`, a review's if `review`, marked busy until the lease drops.
+    async fn checkout(&self, thread: &ThreadId, fallback: Option<usize>, review: bool) -> Result<Lease<'_>> {
         loop {
             let mut changed = pin!(self.changed.notified());
             changed.as_mut().enable();
-            match self.claim(thread, fallback) {
+            match self.claim(thread, fallback, review) {
                 Claim::Live(session) => return Ok(Lease { pool: self, thread: thread.clone(), session }),
-                Claim::Start => return self.start(thread, fallback).await,
+                Claim::Start => return self.start(thread, fallback, review).await,
                 Claim::Wait => changed.await,
             }
         }
     }
 
-    fn claim(&self, thread: &ThreadId, fallback: Option<usize>) -> Claim {
+    fn claim(&self, thread: &ThreadId, fallback: Option<usize>, review: bool) -> Claim {
         let mut slots = self.slots();
         let restarts = self.restarts.load(Ordering::Relaxed);
         match slots.get_mut(thread) {
             Some(Slot::Ready(live))
-                if live.session.is_alive() && live.fallback == fallback && live.restarts == restarts =>
+                if live.session.is_alive()
+                    && live.fallback == fallback
+                    && live.review == review
+                    && live.restarts == restarts =>
             {
                 live.busy += 1;
                 return Claim::Live(live.session.clone());
             }
             // A dead harness with a prompt in flight is about to fail it; take over once it has.
             Some(Slot::Ready(Live { busy: 1.., .. }) | Slot::Starting) => return Claim::Wait,
-            // Dead, idle on another harness, or started before a restart.
+            // Dead, idle on another harness or for another kind of prompt, or started before a restart.
             Some(Slot::Ready(_)) => {
                 slots.remove(thread);
             }
@@ -490,12 +496,21 @@ impl Pool {
         }
     }
 
-    /// Start the harness of a thread claimed as [`Slot::Starting`] on `fallback`, resuming its stored session unless
-    /// that last ran in another harness.
-    async fn start(&self, thread: &ThreadId, fallback: Option<usize>) -> Result<Lease<'_>> {
+    /// Start the harness of a thread claimed as [`Slot::Starting`] on `fallback`, for a review if `review`, resuming
+    /// its stored session unless that last ran in another harness.
+    async fn start(&self, thread: &ThreadId, fallback: Option<usize>, review: bool) -> Result<Lease<'_>> {
         let mut starting = Starting { pool: self, thread, done: false };
         let restarts = self.restarts.load(Ordering::Relaxed);
         let launch = self.launch_on(fallback)?;
+        let reviewing;
+        let launch = if review {
+            reviewing = launch
+                .for_review()
+                .with_context(|| format!("not reviewing: {}", launch.unheld_review().unwrap_or_default()))?;
+            &reviewing
+        } else {
+            launch
+        };
         let harness = launch.harness_name();
         let stored = self.store.get(thread).await?;
         let moved = stored.as_ref().is_some_and(|stored| stored.harness != harness);
@@ -535,7 +550,7 @@ impl Pool {
             tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
         }
         let session = Arc::new(session);
-        let live = Live { session: session.clone(), fallback, last_used: Instant::now(), busy: 1, restarts };
+        let live = Live { session: session.clone(), fallback, review, last_used: Instant::now(), busy: 1, restarts };
         self.slots().insert(thread.clone(), Slot::Ready(live));
         starting.done = true;
         Ok(Lease { pool: self, thread: thread.clone(), session })

@@ -39,6 +39,9 @@ pub struct Harness {
     /// a thread's narrowed tool rules do not reach them.
     #[serde(default)]
     pub(crate) bypass_permissions: bool,
+    /// How a session reviewing for a sage starts instead ([`ants_proto::REVIEW_ALLOW`]): keeping its tools read only,
+    /// or sending its tool requests to ants. Unset, a harness that runs its tools unasked declines reviews.
+    pub(crate) review: Option<Review>,
     /// The values an ant's `context` may take, and what each selects. Empty: the harness takes no `context`.
     #[serde(default)]
     pub(crate) context: BTreeMap<String, ContextValue>,
@@ -85,6 +88,14 @@ pub struct ContextValue {
     pub(crate) window: Option<u64>,
     /// Bytes of history a rebuilt session is seeded with, over the harness's.
     pub(crate) history_budget: Option<usize>,
+}
+
+/// The arguments and mode a review session starts with ([`Harness::review`]), each in place of the harness's when set.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Review {
+    pub(crate) args: Option<Vec<String>>,
+    pub(crate) mode: Option<String>,
 }
 
 impl Harness {
@@ -142,6 +153,40 @@ impl Harness {
             (true, true) => "its allow rules and tool approvals by its escalate_to ants",
         };
         Some(format!("harness {} runs its tools unasked, so {gating} do not apply to them", self.name))
+    }
+
+    /// The harness a review session runs: its [`Self::review`] variant, else itself when it asks before running tools.
+    /// None when it runs them unasked and sets no review, so nothing holds a review to read-only tools.
+    pub fn reviewing(&self) -> Option<Self> {
+        let Some(review) = &self.review else { return (!self.bypasses_permissions()).then(|| self.clone()) };
+        Some(Self {
+            args: review.args.clone().unwrap_or_else(|| self.args.clone()),
+            mode: review.mode.clone().or_else(|| self.mode.clone()),
+            bypass_permissions: false,
+            review: None,
+            ..self.clone()
+        })
+    }
+
+    /// Why a review sent to an ant on this harness is declined, when nothing holds it to read-only tools
+    /// ([`Self::reviewing`]).
+    pub fn unheld_review(&self) -> Option<String> {
+        self.reviewing().is_none().then(|| {
+            format!(
+                "harness {} runs its tools unasked and its definition sets no review to hold a review to read-only \
+                 tools",
+                self.name
+            )
+        })
+    }
+
+    /// What to change for the harness to hold reviews to read-only tools.
+    pub fn review_fix(&self) -> String {
+        format!(
+            "set review in [harnesses.{}] to the args or mode that keep its tools read only or make it ask before \
+             running them (docs/config.md#harnesses)",
+            self.name
+        )
     }
 
     /// What to change for the ant's tool gating to reach the harness's tools, or, for a native protocol, which no
@@ -237,6 +282,14 @@ impl Harness {
         }
         if self.window == Some(0) {
             bail!("harness {name}: window must be above 0; omit it when unknown");
+        }
+        if let Some(review) = &self.review {
+            if review.args.is_none() && review.mode.is_none() {
+                bail!("harness {name}: review must set args or mode");
+            }
+            if let Some(reviewing) = self.reviewing() {
+                reviewing.validate().with_context(|| format!("harness {name}: review"))?;
+            }
         }
         Ok(())
     }
