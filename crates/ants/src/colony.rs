@@ -188,6 +188,21 @@ pub fn memory_low(entries: &[ColonyEntry], now: DateTime<Utc>) -> Vec<String> {
         .collect()
 }
 
+/// One line per ant whose sense, its provider, keeps none of its data ([`ColonyEntry::sense_unkept`]): it is served
+/// without memories, tasks or brief.
+pub fn sense_unkept(entries: &[ColonyEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter_map(|e| {
+            let why = e.sense_unkept.as_deref()?;
+            Some(format!(
+                "{}: served on {} without memories, tasks or brief, sense keeping none of its data: {why}.",
+                e.ant, e.machine
+            ))
+        })
+        .collect()
+}
+
 /// One line per ant whose machine's config sets some of its shared settings otherwise ([`ColonyEntry::drift`]), which
 /// the daemon ignores for the shared ones.
 pub fn drifted(entries: &[ColonyEntry]) -> Vec<String> {
@@ -392,7 +407,15 @@ pub async fn show(nats: &crate::connection::Nats<'_>, json: bool) -> Result<()> 
             println!("{note}");
         }
         let collisions = faces.collisions(entries.iter().map(|e| &e.ant));
-        let notes = [moved, held(&entries, now), memory_low(&entries, now), drifted(&entries), collisions].concat();
+        let notes = [
+            moved,
+            held(&entries, now),
+            memory_low(&entries, now),
+            sense_unkept(&entries),
+            drifted(&entries),
+            collisions,
+        ]
+        .concat();
         if !notes.is_empty() {
             println!("\n{}", notes.join("\n"));
         }
@@ -408,6 +431,20 @@ mod tests {
     use super::*;
     use crate::test_support::Server;
     use crate::test_support::colony::entry;
+
+    #[test]
+    fn an_ant_whose_sense_keeps_none_of_its_data_is_noted_with_why() {
+        let now = Utc::now();
+        let mut unkept = entry("dev-a", 60, 2, now);
+        unkept.sense_unkept = Some("no host credentials on m1".to_owned());
+        let notes = sense_unkept(&[entry("dev-b", 60, 2, now), unkept]);
+        assert_eq!(
+            notes,
+            [
+                "dev-a: served on m1 without memories, tasks or brief, sense keeping none of its data: no host credentials on m1."
+            ]
+        );
+    }
 
     #[test]
     fn a_drifted_ant_is_noted_with_its_machine_and_fields() {

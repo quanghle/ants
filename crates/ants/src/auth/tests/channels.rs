@@ -113,6 +113,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
         capabilities: Vec::new(),
         whoami: None,
         profile: None,
+        sense_unkept: None,
         workdir: None,
         started_at: now,
         heartbeat_at: now,

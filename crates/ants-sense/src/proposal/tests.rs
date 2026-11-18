@@ -32,7 +32,8 @@ async fn propose(sense: &Sense, at: DateTime<Utc>, arguments: serde_json::Value)
 /// Dream begun at `at`, covering `threads`, woken on thread `thread`.
 pub(crate) async fn dream_on(items: &dyn Items, at: DateTime<Utc>, thread: u8, threads: Vec<Covered>) -> Dream {
     let writer = on(9, at);
-    let start = Start { at, recipient: Recipient::Ant, threads, commits: Vec::new(), writer: &writer };
+    let start =
+        Start { at, recipient: Recipient::Ant, threads, commits: Vec::new(), writer: &writer, vitals: Vec::new() };
     let begun = dream::begin(items, start).await.unwrap().unwrap();
     dream::woken(items, begun.number, &on(thread, at).thread).await.unwrap()
 }

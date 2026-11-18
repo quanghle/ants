@@ -1,8 +1,10 @@
 //! What of an ant's sense data the colony sees: the profile of its confirmed persona, in which the ant tells other ants
-//! and the messenger what it is good for, published in its colony entry.
+//! and the messenger what it is good for, published in its colony entry, and why sense keeps none of its data, where
+//! it keeps none.
 
 use ants_proto::{COLONY_HEARTBEAT, UserId};
 use ants_sense::Sense;
+use tokio::sync::watch;
 
 use crate::colony::Workload;
 
@@ -27,9 +29,27 @@ pub(super) async fn profile(sense: &Sense, ant: &UserId, workload: &Workload) {
     }
 }
 
+/// Keep `workload`'s reason why sense keeps none of `ant`'s data, which `ant`'s colony entry shows, the one `why`
+/// follows, warning of each reason once as it first shows. Runs until dropped.
+pub(super) async fn unkept(mut why: watch::Receiver<Option<String>>, ant: &UserId, workload: &Workload) {
+    let mut warned = None;
+    loop {
+        let current = why.borrow_and_update().clone();
+        if let Some(reason) = current.as_ref().filter(|_| current != warned) {
+            tracing::warn!(%ant, "sense keeps none of the ant's data, which is served without them: {reason}");
+            warned.clone_from(&current);
+        }
+        workload.set_sense_unkept(current);
+        if why.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use ants_proto::SenseId;
@@ -87,6 +107,54 @@ mod tests {
         let arguments = register.as_object().unwrap().clone();
         let noted = ToolCall { name: "checkpoint".into(), arguments, context, format: Format::Json };
         assert!(!sense.call_tool(noted).await.unwrap().is_error);
+    }
+
+    /// Counts the warnings logged while it is the default subscriber.
+    struct Warnings(Arc<AtomicUsize>);
+
+    impl tracing::Subscriber for Warnings {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[tokio::test]
+    async fn why_sense_keeps_none_of_the_data_shows_in_the_entry_and_warns_once_each() {
+        let warnings = Arc::new(AtomicUsize::new(0));
+        let _logged = tracing::subscriber::set_default(Warnings(warnings.clone()));
+        let off = || Some("no host credentials on m1".to_owned());
+        let (why, followed) = watch::channel(off());
+        let (dev, workload) = (ant(), Workload::default());
+        let shown = async |want: Option<String>, warned: usize| {
+            let shows = async || workload.sense_unkept() == want && warnings.load(Ordering::Relaxed) == warned;
+            eventually_within(Duration::from_secs(5), &format!("{want:?}, warned {warned} times"), shows).await;
+        };
+        let checked = async {
+            shown(off(), 1).await;
+            why.send_replace(None);
+            shown(None, 1).await;
+            why.send_replace(off());
+            shown(off(), 1).await;
+            let stopped = Some("the host connection stopped".to_owned());
+            why.send_replace(stopped.clone());
+            shown(stopped, 2).await;
+        };
+        tokio::select! {
+            () = unkept(followed, &dev, &workload) => unreachable!("follows until dropped"),
+            () = checked => {}
+        }
     }
 
     #[tokio::test]

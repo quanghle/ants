@@ -201,12 +201,12 @@ fn over_its_budget_the_earlier_findings_shrink_to_their_tally_before_the_identit
     let reader = Reader::Sage(user("dev-a"));
 
     let long = record(30, 400);
-    let shared = compose(&dream, Earlier::Sage(&long), &reader, &identity, &threads, PACKET_BUDGET);
+    let shared = compose(&dream, Earlier::Sage(&long), &[], &reader, &identity, &threads, PACKET_BUDGET);
     assert!(shared.contains("- 0.19 (lesson)") && !shared.contains("- 0.20 (lesson)"), "an eighth: {shared}");
     assert!(shared.contains("11 earlier findings left out for room.") && shared.contains("message 3"), "{shared}");
 
     let earlier = record(10, 30);
-    let within = |budget| compose(&dream, Earlier::Sage(&earlier), &reader, &identity, &threads, budget);
+    let within = |budget| compose(&dream, Earlier::Sage(&earlier), &[], &reader, &identity, &threads, budget);
     let whole = within(PACKET_BUDGET);
     assert!(whole.contains("- 0.10 (lesson)") && !whole.contains("earlier findings left out"), "{whole}");
     assert!(whole.find("## Earlier findings").unwrap() < whole.find("## Findings").unwrap(), "{whole}");

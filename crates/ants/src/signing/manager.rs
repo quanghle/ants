@@ -321,7 +321,8 @@ mod tests {
             for c in &mut configs {
                 c.storage.home = dir.join("homes").join(c.ant.as_str());
             }
-            Ok(serve::Served { configs, schedules: Vec::new(), metrics: None, host: None, shared: None, machine: None })
+            let (host, sense, shared, machine) = (None, None, None, None);
+            Ok(serve::Served { configs, schedules: Vec::new(), metrics: None, host, sense, shared, machine })
         };
         let triggers = crate::reload::Triggers::new(config.clone(), None, Duration::from_millis(200)).unwrap();
         let daemon = Box::pin(serve::run(served().unwrap(), served, triggers, pending(), pending()));

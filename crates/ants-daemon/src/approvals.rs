@@ -118,6 +118,9 @@ type Settled = (Verdict, DecidedBy, Option<UserId>, Option<UserId>);
 /// The message being answered on each thread, naming whom a request of its turn that expires is told of.
 type Answering = Arc<Mutex<HashMap<ThreadId, Envelope>>>;
 
+/// How many tool requests the turn on each thread asked so far.
+type Asked = Arc<Mutex<HashMap<ThreadId, u32>>>;
+
 /// Asks the humans on `ants.approvals.<ant>`, and the ant's chain.
 #[derive(Clone)]
 pub struct NatsApprover {
@@ -131,6 +134,7 @@ pub struct NatsApprover {
     /// Who is a human, and who is told of an expired request on a thread with no owner.
     humans: Registry,
     answering: Answering,
+    asked: Asked,
     /// Finds the assistant of the human a request waits for, which gets the request too; none asks no assistant.
     assistants: Option<AssistantFirst>,
 }
@@ -163,8 +167,8 @@ impl From<Offered> for Heard {
 
 impl NatsApprover {
     pub fn new(client: async_nats::Client, js: jetstream::Context, ant: UserId, timeout: Duration) -> Self {
-        let (chain, waiting, humans, answering) = Default::default();
-        Self { client, js, ant, timeout, chain, waiting, humans, answering, assistants: None }
+        let (chain, waiting, humans, answering, asked) = Default::default();
+        Self { client, js, ant, timeout, chain, waiting, humans, answering, asked, assistants: None }
     }
 
     /// The same, also sending each request to the assistant of the human it waits for, which `assistants` finds.
@@ -190,7 +194,13 @@ impl NatsApprover {
     pub fn begin(&self, envelope: &Envelope) -> Turn {
         let thread = envelope.thread_id.clone();
         self.answering.locked().insert(thread.clone(), envelope.clone());
-        Turn { answering: self.answering.clone(), thread }
+        self.asked.locked().insert(thread.clone(), 0);
+        Turn { answering: self.answering.clone(), asked: self.asked.clone(), thread }
+    }
+
+    /// How many tool requests the turn begun on `thread` asked so far: 0 with none begun.
+    pub fn asked(&self, thread: &ThreadId) -> u32 {
+        self.asked.locked().get(thread).copied().unwrap_or(0)
     }
 
     /// Tell the thread's owner, else the default human, and the ants of the chain `asked` about it, that `request`
@@ -381,6 +391,9 @@ impl NatsApprover {
             self.waiting.locked().remove(&id);
         });
         self.store(&request).await?;
+        if let Some(asked) = self.asked.locked().get_mut(&request.thread_id) {
+            *asked += 1;
+        }
         let mut asked = self.ask_chain_logged(&request).await;
         asked.extend(self.ask_assistant(&request, &human).await);
         let waits = StatusUpdate::Approval { request_id: request.id };
@@ -600,12 +613,14 @@ impl NatsApprover {
 /// See [`NatsApprover::begin`].
 pub struct Turn {
     answering: Answering,
+    asked: Asked,
     thread: ThreadId,
 }
 
 impl Drop for Turn {
     fn drop(&mut self) {
         self.answering.locked().remove(&self.thread);
+        self.asked.locked().remove(&self.thread);
     }
 }
 

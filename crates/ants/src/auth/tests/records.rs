@@ -25,6 +25,7 @@ async fn ants_write_their_own_colony_entry_and_everyone_reads_the_colony() {
         capabilities: vec!["rust".to_owned()],
         whoami: None,
         profile: None,
+        sense_unkept: None,
         workdir: None,
         started_at: now,
         heartbeat_at: now,

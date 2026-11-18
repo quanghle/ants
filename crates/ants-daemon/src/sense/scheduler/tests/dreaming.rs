@@ -1,5 +1,5 @@
 use ants_proto::{ColonyEntry, Envelope, NoticeKind, ThreadId};
-use ants_sense::dream::{self, Commit, Dream, REVIEW_BEGIN, Review, Thread};
+use ants_sense::dream::{self, Commit, Dream, REVIEW_BEGIN, Review, Signs, Tally, Thread};
 use ants_sense::proposal;
 use chrono::DateTime;
 
@@ -56,6 +56,7 @@ impl Fake {
                 text: format!("the work of {id}"),
                 timeline: format!("the calls of {id}"),
                 actions: Vec::new(),
+                signs: Signs { threads: 1, ..Signs::default() },
             })
             .collect();
     }
@@ -189,6 +190,47 @@ async fn a_refused_wake_holds_back_neither_maintenance_nor_the_dream() {
     assert!(remind::pending_work(&*stores.items).await.unwrap().is_empty());
     assert!(stores.items.get(&id).await.unwrap().unwrap().values.contains_key("delivered"));
     assert!(last(&*stores.items).await.unwrap().thread.is_some(), "the dream woken too");
+}
+
+#[tokio::test]
+async fn a_dreams_vital_signs_move_with_the_ant_and_nothing_is_written_for_them_between_dreams() {
+    let (log, identity) = (SharedLog::default(), SenseId::new());
+    let first = open(log.clone(), identity.clone()).await;
+    let fake = Arc::new(Fake::default());
+    let (now, host) = (Utc::now(), Wakes::default());
+    fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false)]);
+    let mut signs = fake.threads.locked()[0].signs.clone();
+    signs.prompts.cancelled = 1;
+    signs.prompts.capped = 1;
+    signs.calls.insert("execute".into(), Tally { calls: 10, failed: 3 });
+    signs.rejected = 1;
+    fake.threads.locked()[0].signs = signs.clone();
+    cycle(&Sense::new(), &*first, &host, &dreaming(&fake), now).await.unwrap();
+    assert_eq!(last(&*first).await.unwrap().vitals, Some(signs));
+
+    let written = log.0.last_sequence(&identity).await.unwrap();
+    for hours in [1, 12, 23] {
+        let at = now + chrono::Duration::hours(hours);
+        *fake.idle.locked() = Some(at - chrono::Duration::hours(1));
+        cycle(&Sense::new(), &*first, &host, &dreaming(&fake), at).await.unwrap();
+    }
+    assert_eq!(log.0.last_sequence(&identity).await.unwrap(), written, "nothing written between dreams");
+    drop(first);
+
+    let takeover = open(log, identity).await;
+    let fake = Arc::new(Fake::default());
+    let day_later = now + chrono::Duration::hours(25);
+    fake.set(Some(day_later - chrono::Duration::hours(1)), &[("next-thread", false)]);
+    fake.threads.locked()[0].signs.prompts.cancelled = 2;
+    cycle(&Sense::new(), &*takeover, &host, &dreaming(&fake), day_later).await.unwrap();
+    let requests = host.requests.locked().clone();
+    let packet = &requests.last().unwrap().text;
+    assert!(requests.last().unwrap().id.starts_with("dream-2-"), "{packet}");
+    for row in
+        ["| | dream 1 | dream 2 |", "| prompts cancelled by a human | 1 | 2 |", "| tool calls failed | 3 (30%) | 0 |"]
+    {
+        assert!(packet.contains(row), "{row} in {packet}");
+    }
 }
 
 fn sage() -> UserId {

@@ -12,7 +12,8 @@
 //! those carried from earlier dreams, and otherwise the packet's own: contradicting votes, memories needing review,
 //! near duplicates, episodes to distill and pending persona and skill proposals made
 //! [`proposal::CONFIRM_AFTER_HOURS`] or more before ([`proposals`], [`crate::proposal`]), then what the ant's identity
-//! lacks for the work it did, from sense data alone ([`identity_findings`]). The ant answers each with
+//! lacks for the work it did, from sense data alone ([`identity_findings`]), then the vital signs of the work turned
+//! sharply for the worse ([`vitals`]). The ant answers each with
 //! `sense_dream` ([`dream`]) as applied (naming the items it wrote), rejected or deferred, with a reason, applied
 //! confirming a proposal and rejected discarding it; the deferred and unanswered come again in the next dream while
 //! they still hold. A rejected finding rests ([`Rested`]): no dream gathers it again until what it is about changed
@@ -20,7 +21,8 @@
 //! due ([`proposal_due`]). Writes on the dream thread through the tools that change memories or records count
 //! toward [`MAX_DREAM_WRITES`], and are untrusted while a finding resting on untrusted text is open ([`counted`],
 //! [`untrusted_on`]); persona and skill proposals are refused on untrusted ground ([`untrusted`]). Finishing a dream,
-//! or beginning the next one, writes its diary: an episode memory summarizing its verdicts.
+//! or beginning the next one, writes its diary: an episode memory summarizing its verdicts. Each dream keeps the vital
+//! signs of the work it reviews, measured by the daemon as it begins ([`Signs`]).
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
@@ -44,6 +46,7 @@ mod packet;
 mod review;
 pub(crate) mod reviews;
 mod tool;
+mod vitals;
 
 pub use identity_findings::{
     OWN_AFTER_THREADS, PERSONA_AFTER_THREADS, RELATIONSHIP_AFTER_THREADS, SELF_MODEL_AFTER_THREADS, STALE_ACTIVE_DAYS,
@@ -60,6 +63,10 @@ pub use reviews::{
     review_received, review_record, review_records, review_tally, tally_lines,
 };
 pub use tool::{dream, schema};
+pub use vitals::{
+    CANCELLED_FINDING, CAPPED_FINDING, Ends, FAILED_MIN_CALLS, FAILED_SHARE_FACTOR, REJECTED_FINDING, Signs, TREND,
+    Tally, trend,
+};
 
 /// The kind of each dream's item ([`Dream`]).
 pub const DREAM: &str = "dream";
@@ -172,6 +179,8 @@ pub enum FindingKind {
     StaleSelfModel,
     /// A persona, self-model or skill still as a clone inherited it.
     Inherited,
+    /// A vital sign of the work turned sharply for the worse ([`vitals`]).
+    Vitals,
 }
 
 impl FindingKind {
@@ -198,6 +207,7 @@ impl fmt::Display for FindingKind {
             Self::NoRelationship => "no_relationship",
             Self::StaleSelfModel => "stale_self_model",
             Self::Inherited => "inherited",
+            Self::Vitals => "vitals",
         })
     }
 }
@@ -318,6 +328,10 @@ pub struct Dream {
     pub writes: Vec<ItemId>,
     /// Its diary episode, once written.
     pub diary: Option<ItemId>,
+    /// The vital signs of the work it reviews, as the daemon measured them when it began: none for a dream before
+    /// they were kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vitals: Option<Signs>,
 }
 
 impl Dream {
@@ -475,6 +489,8 @@ pub struct Start<'a> {
     pub commits: Vec<Commit>,
     /// The context the diary of the last dream is written in when the ant left it unfinished.
     pub writer: &'a CallContext,
+    /// The vital signs of the work on each of `threads`.
+    pub vitals: Vec<(ThreadId, Signs)>,
 }
 
 /// Begin the next dream as `start` says, unless one began within [`DREAM_EVERY_HOURS`]: its findings gathered, the
@@ -529,6 +545,7 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
             verdicts: Vec::new(),
             writes: Vec::new(),
             diary: None,
+            vitals: Some(Signs::sum(start.vitals.iter().map(|(_, signs)| signs))),
         };
         writes.push(Write::Put {
             id: Dream::id(number),
@@ -691,10 +708,10 @@ impl Gathered {
 
 /// The findings of dream `number`, beginning as `start` says and reviewing from `since`: the open findings of
 /// `previous` that still hold, then the packet's own on what they do not cover yet, those on memories and proposals
-/// first, then those on the identity of the ant ([`identity_findings`]), up to [`MAX_FINDINGS`]. An open finding on the
-/// identity holds while its ground does, taking the text and count gathered now. One of the `rested` stays out while
-/// what it is about is unchanged and the ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts;
-/// `rested` keeps those resting on.
+/// first, then those on the identity of the ant ([`identity_findings`]), then those on the vital signs of the work
+/// ([`vitals`]), up to [`MAX_FINDINGS`]. An open finding on the identity or the vital signs holds while its ground
+/// does, taking the text and count gathered now. One of the `rested` stays out while what it is about is unchanged and
+/// the ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts; `rested` keeps those resting on.
 async fn findings(
     items: &dyn Items,
     previous: Option<&Dream>,
@@ -708,6 +725,7 @@ async fn findings(
     let memories: Vec<_> = items.list(MEMORY, usize::MAX).await?.into_iter().filter_map(MemoryItem::of).collect();
     let live = |id: &ItemId| memories.iter().find(|found| found.id() == id).filter(|f| f.memory.status.live());
     let identity_found = identity_findings::gather(items, &start.writer.ant).await?;
+    let vital = vitals::gather(&start.vitals, &vitals::trend(items, number).await?);
     let mut found: Vec<Finding> = Vec::new();
     for open in previous.into_iter().flat_map(Dream::open) {
         let mut open = open.clone();
@@ -717,8 +735,9 @@ async fn findings(
             FindingKind::NeedsReview => {
                 open.items.iter().all(|id| live(id).is_some_and(|f| f.memory.status == Status::NeedsReview))
             }
-            kind if kind.identity() => {
-                let now = identity_found.iter().find(|gathered| open.key.as_ref() == Some(&gathered.key()));
+            kind if kind.identity() || kind == FindingKind::Vitals => {
+                let mut regathered = identity_found.iter().chain(&vital);
+                let now = regathered.find(|gathered| open.key.as_ref() == Some(&gathered.key()));
                 if let Some(now) = now {
                     (open.text, open.items, open.count) = (now.text.clone(), now.items.clone(), now.count);
                 }
@@ -733,6 +752,7 @@ async fn findings(
     let diary = previous.and_then(|previous| previous.diary.as_ref());
     let mut fresh = gather(items, &memories, since, diary, proposals).await?;
     fresh.extend(identity_found);
+    fresh.extend(vital);
     let covered: BTreeSet<_> = found.iter().filter_map(|finding| finding.key.clone()).collect();
     let resting = |at| ages.since(at) < Duration::days(REST_DAYS);
     let mut n = 0;

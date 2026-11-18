@@ -1,11 +1,12 @@
 //! The daemon's part of the ant's dreams ([`ants_sense::dream`]): when one is due, the ant has had no prompt running
 //! for [`IDLE_MINUTES`] and its threads were active since the last dream, it gathers them, with the timeline the ant
-//! stored on them and what was done with them besides writing on them ([`actions`]), and the commits they left, and
-//! begins the dream. It sends the packet to the ant's sage when one serves it and the ant is no live ant's sage
-//! ([`serving_sage`]), as a message from the ant on a new thread narrowed to a review ([`ants_proto::REVIEW_ALLOW`])
-//! naming the commits for the sage's daemon to check out ([`crate::checkouts`]), and takes the sage's answer there as it
-//! arrives ([`review_answer`]); without a sage, or once the sage leaves the review unanswered or answers with nothing
-//! readable, it wakes the ant on a new thread with the packet alone.
+//! stored on them, what was done with them besides writing on them ([`actions`]) and the vital signs of the work on
+//! them ([`vitals`]), and the commits they left, and begins the dream. It sends the packet to the ant's sage when one
+//! serves it and the ant is no live ant's sage ([`serving_sage`]), as a message from the ant on a new thread narrowed
+//! to a review ([`ants_proto::REVIEW_ALLOW`]) naming the commits for the sage's daemon to check out
+//! ([`crate::checkouts`]), and takes the sage's answer there as it arrives ([`review_answer`]); without a sage, or once
+//! the sage leaves the review unanswered or answers with nothing readable, it wakes the ant on a new thread with the
+//! packet alone.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -30,6 +31,7 @@ use crate::stream::reading::Reading;
 use crate::sync::MutexExt as _;
 
 mod actions;
+mod vitals;
 
 /// How long a git command naming a commit may take.
 const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -114,7 +116,8 @@ pub(super) async fn step(
     // A sage reviews others, never itself.
     let sage = dreams.daemon.sage().await?.filter(|sage| *sage != settings.ant);
     let recipient = dream::recipient(sage);
-    let start = Start { at: now, recipient, threads: covered.collect(), commits, writer: &writer };
+    let vitals = threads.iter().map(|thread| (thread.id.clone(), thread.signs.clone())).collect();
+    let start = Start { at: now, recipient, threads: covered.collect(), commits, writer: &writer, vitals };
     let Some(begun) = dream::begin(items, start).await? else {
         // Another daemon began one meanwhile.
         return Ok(now);
@@ -275,7 +278,9 @@ impl Dreaming for Daemon {
             let mut threads = Vec::with_capacity(active.len());
             let mut actions =
                 actions::Actions::new(&self.js, self.js_domain.as_ref(), &self.ant, self.reactions.as_ref()).await;
-            for history::Active { thread: id, history: text, timeline, sent, rejections } in active {
+            for history::Active { thread: id, history: text, timeline, sent, rejections, calls, ends, escalations } in
+                active
+            {
                 let origin = match &self.origins {
                     Some(origins) => origins.get(&id).await.unwrap_or_else(|e| {
                         tracing::warn!(thread = %id, error = format!("{e:#}"), "reading the origin of a thread");
@@ -286,7 +291,8 @@ impl Dreaming for Daemon {
                 let untrusted = origin.as_ref().is_some_and(|origin| !origin.trusted());
                 let started_by = origin.map_or_else(|| "someone not known".to_owned(), |origin| starter(&origin.by));
                 let actions = actions.of(&id, &sent, &rejections, (since, until)).await;
-                threads.push(Thread { id, untrusted, started_by, text, timeline, actions });
+                let signs = vitals::signs(&calls, &ends, escalations, &actions);
+                threads.push(Thread { id, untrusted, started_by, text, timeline, actions, signs });
             }
             Ok(threads)
         })

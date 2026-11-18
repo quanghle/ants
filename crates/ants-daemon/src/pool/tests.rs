@@ -340,12 +340,13 @@ async fn a_session_lost_is_told_lost_then_rebuilt() {
     let (launch, log, _) = fake::launch();
     let store = SessionStore::memory();
     let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE).with_lifecycle(lifecycle.clone());
-    pool.prompt(&thread(1), "a").await.unwrap();
+    assert!(!pool.run(&thread(1), Prompt::new("a")).await.unwrap().rebuilt);
     pool.shutdown().await;
     log.locked().lose_sessions = true;
 
     let pool = Pool::new(launch, store, 4, IDLE).with_lifecycle(lifecycle);
-    pool.prompt(&thread(1), "b").await.unwrap();
+    assert!(pool.run(&thread(1), Prompt::new("b")).await.unwrap().rebuilt, "the reply tells of the rebuilt session");
+    assert!(!pool.run(&thread(1), Prompt::new("c")).await.unwrap().rebuilt, "rebuilt once");
     tests::took(&provider, 3).await;
     let lost = [EventKind::AntAdded, EventKind::SessionLost, EventKind::SessionRebuilt { reason: Rebuilt::Lost }];
     assert_eq!(provider.kinds(), lost, "a new session is not one lost");
@@ -414,7 +415,7 @@ async fn a_prompt_that_outgrows_the_context_window_runs_again_in_a_new_session_o
     let reply = pool.run(&thread(1), with_history("overflow")).await.unwrap();
     let seeded = "[ants] The session of this thread outgrew the model's context window, so this one starts over, \
                       its context rebuilt from the thread's history.\n\nHISTORY 32768\n\noverflow";
-    assert_eq!(reply, Reply { text: format!("s2: {seeded}"), cut: None });
+    assert_eq!(reply, Reply { text: format!("s2: {seeded}"), cut: None, rebuilt: true });
     assert_eq!(
         store.get(&thread(1)).await.unwrap().map(|s| s.session),
         Some(SessionId::new("s2")),
@@ -461,7 +462,7 @@ async fn a_prompt_past_its_time_limit_is_cancelled_and_the_session_goes_on() {
     let limits = PromptLimits { timeout: Some(Duration::from_millis(50)), max_tool_calls: None };
     let reply = pool.run(&thread(1), Prompt { limits, ..Prompt::new("stall") }).await.unwrap();
     let cut = "Prompt time limit reached (50ms)".to_owned();
-    assert_eq!(reply, Reply { text: "partial".to_owned(), cut: Some(cut) });
+    assert_eq!(reply, Reply { text: "partial".to_owned(), cut: Some(cut), rebuilt: false });
     assert_eq!(pool.prompt(&thread(1), "b").await.unwrap(), "s1: b");
     let log = log.locked();
     assert_eq!((log.starts, log.cancelled), (1, 1));
