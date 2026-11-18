@@ -87,7 +87,7 @@ pub use reactions::{ReactionAsker, local_reaction_asker, nats_reaction_asker};
 pub(crate) use routing::why_unserved;
 pub use routing::{Colony, ColonyLookup, jetstream_colony, jetstream_lookup};
 pub use serve::bridge_stdio;
-pub(crate) use tools::own_names;
+pub use tools::own_names;
 pub use turn::{Completed, Turn};
 
 use asks::{Asks, Stored};

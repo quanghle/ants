@@ -83,7 +83,7 @@ impl Tools {
 }
 
 /// The names of all of ants' own tools, whichever an ant is offered: no provider's tool takes one.
-pub(crate) fn own_names() -> &'static HashSet<String> {
+pub fn own_names() -> &'static HashSet<String> {
     static NAMES: LazyLock<HashSet<String>> = LazyLock::new(|| {
         let all = Tools::messages_router()
             + Tools::routing_router()
