@@ -1,4 +1,5 @@
 use ants_daemon::profile::identity::Identity;
+use ants_proto::SenseId;
 use chrono::{TimeZone as _, Utc};
 
 use super::*;
@@ -26,6 +27,12 @@ fn a_record_s_avatar_is_described_with_its_growth() {
     assert!(lines[ants_proto::HEAD_ROWS + 1].starts_with(&format!("{antennae} antennae, ")), "{text}");
     assert_eq!(lines[ants_proto::HEAD_ROWS + 2], "born 2025-01-02 03:04:05Z (3d ago)");
     assert_eq!(lines[ants_proto::HEAD_ROWS + 3], "worker, 42 prompts; veteran at 100");
+
+    record.sense = Some("01JD8X5G3T7Q9R2M4N6P8S0V1W".parse().unwrap());
+    let faces = Faces::new(Identities::from([(dev_a.clone(), record)]), Depth::Plain, Theme::Dark);
+    let sensed = describe(&faces, &dev_a, born);
+    let face = Avatar::derive("01JD8X5G3T7Q9R2M4N6P8S0V1W").face();
+    assert!(sensed.contains(&format!("{face} dev-a  blue (set)\n")), "drawn from the sense id: {sensed}");
 
     let unborn = describe(&faces, &dev_b, born);
     let named = Avatar::derive("dev-b");
@@ -95,8 +102,14 @@ async fn an_ant_keeps_its_own_identity_and_humans_restyle_it() {
     assert_eq!((styled.avatar.as_deref(), styled.color.as_deref()), (Some("pebble"), Some("blue")));
     let counted = own.count_prompt().await.unwrap().unwrap();
     assert_eq!((counted.prompts, counted.avatar.as_deref(), counted.id), (2, Some("pebble"), born.id));
+    let sense = SenseId::new();
+    let named = own.name_sense(&sense).await.unwrap().unwrap();
+    assert_eq!((named.sense.as_ref(), named.seed()), (Some(&sense), "pebble"), "the ant names its sense identity");
+    let again = own.name_sense(&SenseId::new()).await.unwrap().unwrap();
+    assert_eq!(again.sense, Some(sense.clone()), "the first writer wins");
     let reset = update(&h_js, None, &dev_a, Some(None), Some(None)).await.unwrap();
-    assert_eq!((reset.avatar, reset.color, reset.prompts), (None, None, 2), "back to the id's avatar");
+    assert_eq!((reset.avatar.as_deref(), reset.color.as_deref(), reset.prompts), (None, None, 2), "back to its own");
+    assert_eq!((reset.sense.as_ref(), reset.seed()), (Some(&sense), sense.as_str()), "the sense id's");
     let unknown = update(&h_js, None, &dev_a, None, Some(Some("plaid".to_owned()))).await.unwrap_err();
     assert!(format!("{unknown:#}").contains("no colour plaid"), "{unknown:#}");
     let unborn = update(&h_js, None, &dev_b, Some(Some("x".to_owned())), None).await.unwrap_err();

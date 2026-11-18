@@ -121,9 +121,15 @@ code: these, and those each tool names below.
 
 ## Identity
 
-Each ant using sense has one sense identity, whose id, a ULID, is minted when the ant first uses sense, kept in its home
-(`.sense/id`) and on its identity card. The id stays the same across renames, harness and model changes, moves to other
-machines and buses, retirement and revival:
+Each ant using sense has one sense identity, whose id, a ULID, is kept in its home (`.sense/id`), on its identity card
+and in its identity record in `ants_identities` (`sense`), so its homes on every machine, as a standby daemon's, open
+the same one. A daemon opening the ant's sense data settles its home's id against the record: the home's id is written
+to a record naming none, by compare-and-set, the first writer winning; a home without one takes the record's, as after
+its `.sense/id` was removed; and an id is minted only when neither has one. A home and a record naming different ids
+are refused, sense keeping the ant's data closed and the error saying how to settle it: removing the home's
+`.sense/id` takes the record's, `ants auth revoke` and adding the ant again keeps the home's. Until the daemon has read
+the record, as at start while another ant's event asks for this one's data, a home without an id opens nothing. The id
+stays the same across renames, harness and model changes, moves to other machines and buses, retirement and revival:
 
 - **Renames:** an import under another name (`ants ant import --as`) lists the old name in the home's `.sense/names`
   (one a line, the oldest first, carried by exports), so the renamed ant keeps its log and card. So does an ant added
@@ -134,12 +140,13 @@ machines and buses, retirement and revival:
   part of it carries the log and the skill files ([sense's part](config.md#senses-part)), which sense takes in under
   the same id, the card and memories read again from the log there. With `--no-provider` they stay behind, and sense
   starts a new card under the same id.
-- **Clones:** a clone leaves `.sense` out of the home it copies, so it mints its own id. When its `ant_cloned` reaches
-  sense and the same daemon keeps the source's data, sense forks the source's identity into the clone's: the clone
-  keeps a copy of the source's memories (with their links, writers and votes), self-model, persona and skills as they
-  were when it was cloned, each marked `inherited` with the source's sense id, and none of its tasks, commitments,
-  reminders, relationship records, resume registers, handoffs, thread records, votes, persona and skill proposals,
-  dreams or card. A record the clone writes anew is its own. The clone's first brief may come before the fork.
+- **Clones:** a clone leaves `.sense` out of the home it copies, and its new identity record names no sense id, so it
+  mints its own. When its `ant_cloned` reaches sense and the same daemon keeps the source's data, sense forks the
+  source's identity into the clone's: the clone keeps a copy of the source's memories (with their links, writers and
+  votes), self-model, persona and skills as they were when it was cloned, each marked `inherited` with the source's
+  sense id, and none of its tasks, commitments, reminders, relationship records, resume registers, handoffs, thread
+  records, votes, persona and skill proposals, dreams or card. A record the clone writes anew is its own. The clone's
+  first brief may come before the fork.
 - **Retirement:** a retired ant's identity is dormant and keeps all its data: its commitments stay open and its
   reminders paused, nothing firing and no maintenance or dream running, until a revival or an addition under another
   ants identity id, as after a revoke and re-add. That puts off the expiry of each reminder active at the retirement by

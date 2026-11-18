@@ -1,14 +1,15 @@
 //! The ant's identity record ([`AntIdentity`]) in [`IDENTITIES_BUCKET`]: created by its daemon on start when absent, so
 //! the first daemon to start the ant anywhere sets its id and birth, and its completed prompts counted by
-//! compare-and-set by the daemon serving it, so a standby daemon taking it over carries on the same count. A record
-//! marked moved (`ants ant export --move`) keeps every daemon from serving the ant until `ants ant unseal` clears the
-//! mark: the daemon serving it drains it as on a stop, and a daemon starting it waits ([`Identity::moved`],
-//! [`Identity::unsealed`]).
+//! compare-and-set by the daemon serving it, so a standby daemon taking it over carries on the same count. A daemon
+//! serving the ant with built-in sense names its sense identity there when the record names none
+//! ([`Identity::name_sense`]), so every machine opens the same one. A record marked moved (`ants ant export --move`)
+//! keeps every daemon from serving the ant until `ants ant unseal` clears the mark: the daemon serving it drains it as
+//! on a stop, and a daemon starting it waits ([`Identity::moved`], [`Identity::unsealed`]).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ants_proto::{AntIdentity, IDENTITIES_BUCKET, JsDomain, UserId};
+use ants_proto::{AntIdentity, IDENTITIES_BUCKET, JsDomain, SenseId, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use chrono::Utc;
@@ -67,6 +68,16 @@ impl Identity {
     /// is missing.
     pub async fn count_prompt(&self) -> Result<Option<AntIdentity>> {
         self.change(|record| record.prompts += 1).await
+    }
+
+    /// Name `sense` as the ant's sense identity in the record, creating the record first when absent, unless it names
+    /// one already: the first writer wins. The record as stored, naming the sense identity that won; None when the
+    /// bucket is missing.
+    pub async fn name_sense(&self, sense: &SenseId) -> Result<Option<AntIdentity>> {
+        self.change(|record| {
+            record.sense.get_or_insert_with(|| sense.clone());
+        })
+        .await
     }
 
     /// The record of `ant`, any ant's: None when absent, or when the bucket is missing.

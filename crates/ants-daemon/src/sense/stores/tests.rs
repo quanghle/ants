@@ -24,6 +24,12 @@ fn added(identity: &str) -> Event {
     }
 }
 
+/// Serve `ant` from `home` in `stores`, its daemon finding no identity record.
+fn serve(stores: &SenseStores, ant: &UserId, home: &Path) {
+    stores.serve(ant, home, None);
+    stores.identify(ant, None);
+}
+
 async fn link(server: &NatsServer) -> Link {
     let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
     Link::new(js, None, vec![], Machine::from_hostname("studio"))
@@ -34,7 +40,7 @@ async fn nothing_is_kept_without_a_host_connection_and_nothing_reached_while_it_
     let stores = SenseStores::new();
     let home = scratch_dir("sense-stores-off");
     let kept = async |stores: &SenseStores| stores.items(&dev_a()).await.err().unwrap();
-    stores.serve(&dev_a(), &home, None);
+    serve(&stores, &dev_a(), &home);
     assert!(matches!(kept(&stores).await, StoreError::NotKept(_)));
     let first = stores.hosting();
     assert!(matches!(kept(&stores).await, StoreError::Unavailable(_)));
@@ -73,7 +79,7 @@ async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
     let Some(server) = NatsServer::start() else { return };
     let home = scratch_dir("sense-stores");
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home, None);
+    serve(&stores, &dev_a(), &home);
     let hosting = stores.hosting();
     hosting.up(link(&server).await);
     assert!(!home.join(".sense").exists(), "nothing opened before the first use");
@@ -106,7 +112,7 @@ async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
 
     std::fs::remove_file(home.join(".sense/cache.db")).unwrap();
     let elsewhere = SenseStores::new();
-    elsewhere.serve(&dev_a(), &home, None);
+    serve(&elsewhere, &dev_a(), &home);
     let hosting = elsewhere.hosting();
     hosting.up(link(&server).await);
     let sense = Sense::with_stores(elsewhere.clone());
@@ -122,6 +128,77 @@ async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
     std::fs::remove_dir_all(&home).unwrap();
 }
 
+/// The identity record names the ant's sense id, so its homes on every machine open one sense identity: the first
+/// home's id is written to the record, a home without one takes the record's, also once its id file is removed, and a
+/// home keeping another is refused, its items closed. A home whose daemon has not read the record opens only under the
+/// id it keeps, and an ant whose record and home name none, as a clone, mints its own.
+#[tokio::test]
+async fn the_identity_record_names_one_sense_identity_for_every_home() {
+    let Some(server) = NatsServer::start() else { return };
+    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    crate::hub::create_identities(&js).await.unwrap();
+    let record = Identity::new(&js, None, &dev_a()).await.unwrap();
+    let homes = [scratch_dir("sense-named-a"), scratch_dir("sense-named-b"), scratch_dir("sense-named-c")];
+    let serving = async |ant: &UserId, home: &Path| {
+        let stores = SenseStores::new();
+        stores.serve(ant, home, None);
+        let hosting = stores.hosting();
+        hosting.up(link(&server).await);
+        (stores, hosting)
+    };
+    let identified = async |stores: &SenseStores, ant: &UserId| {
+        stores.identify(ant, Some(Identity::new(&js, None, ant).await.unwrap()));
+    };
+
+    let (stores, _hosting) = serving(&dev_a(), &homes[0]).await;
+    let awaited = stores.items(&dev_a()).await.err().unwrap();
+    assert!(matches!(&awaited, StoreError::Unavailable(e) if e.contains("identity record")), "{awaited}");
+    assert_eq!(identity::read_id(&homes[0]).unwrap(), None, "nothing minted before the record is read");
+    identified(&stores, &dev_a()).await;
+    Sense::with_stores(stores.clone()).event(added("id1")).await.unwrap();
+    let id = identity::read_id(&homes[0]).unwrap().expect("minted");
+    assert_eq!(record.read().await.unwrap().unwrap().sense, Some(id.clone()), "the record names it");
+
+    for removed in [false, true] {
+        if removed {
+            std::fs::remove_file(identity::id_file(&homes[1])).unwrap();
+        }
+        let (stores, _hosting) = serving(&dev_a(), &homes[1]).await;
+        identified(&stores, &dev_a()).await;
+        let card = Sense::with_stores(stores.clone()).card(&dev_a()).await.unwrap().expect("built from the log");
+        assert_eq!((&card.sense, card.identities.as_slice()), (&id, &["id1".to_owned()][..]));
+        assert_eq!(identity::read_id(&homes[1]).unwrap(), Some(id.clone()), "the home takes the record's");
+    }
+
+    let other = SenseId::new();
+    identity::keep_id(&homes[2], &other).unwrap();
+    let (stores, _hosting) = serving(&dev_a(), &homes[2]).await;
+    let opened = stores.items(&dev_a()).await.unwrap();
+    assert_eq!(opened.sense().await, other, "the home's id while the record is unread");
+    identified(&stores, &dev_a()).await;
+    let refused = stores.items(&dev_a()).await.err().unwrap();
+    assert!(
+        matches!(&refused, StoreError::Unavailable(e) if e.contains(&format!("its identity record names {id}"))),
+        "{refused}"
+    );
+    let slot = stores.state().ants[&dev_a()].items.clone();
+    assert!(slot.lock().await.is_none(), "the items opened are closed");
+    assert_eq!(identity::read_id(&homes[2]).unwrap(), Some(other), "the home is left alone");
+    assert_eq!(record.read().await.unwrap().unwrap().sense, Some(id.clone()), "and so is the record");
+
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let home_b = scratch_dir("sense-named-clone");
+    let (stores, _hosting) = serving(&dev_b, &home_b).await;
+    identified(&stores, &dev_b).await;
+    let own = stores.items(&dev_b).await.unwrap().sense().await;
+    assert_ne!(own, id, "a sense identity of its own");
+    let named = Identity::new(&js, None, &dev_b).await.unwrap().read().await.unwrap().unwrap().sense;
+    assert_eq!((named, identity::read_id(&home_b).unwrap()), (Some(own.clone()), Some(own)));
+    for home in homes.into_iter().chain([home_b]) {
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
 /// An ant imported under another name on the same bus, its home holding its sense id and listing its old name, keeps
 /// its card, as read again from its log alone.
 #[tokio::test]
@@ -130,7 +207,7 @@ async fn a_renamed_ant_keeps_its_card() {
     let (home_a, home_b) = (scratch_dir("sense-stores-a"), scratch_dir("sense-stores-b"));
     let dev_b: UserId = "dev-b".parse().unwrap();
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home_a, None);
+    serve(&stores, &dev_a(), &home_a);
     let hosting = stores.hosting();
     hosting.up(link(&server).await);
     Sense::with_stores(stores.clone()).event(added("id1")).await.unwrap();
@@ -142,7 +219,7 @@ async fn a_renamed_ant_keeps_its_card() {
     identity::note_renamed(&home_b, &dev_a()).unwrap();
     for reopened in [false, true] {
         let stores = SenseStores::new();
-        stores.serve(&dev_b, &home_b, None);
+        serve(&stores, &dev_b, &home_b);
         let hosting = stores.hosting();
         hosting.up(link(&server).await);
         let sense = Sense::with_stores(stores.clone());
@@ -169,7 +246,7 @@ async fn an_export_moves_the_sense_data_to_another_bus() {
     let (Some(bus_a), Some(bus_b)) = (NatsServer::start(), NatsServer::start()) else { return };
     let (home_a, home_b) = (scratch_dir("sense-export-a"), scratch_dir("sense-export-b"));
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home_a, None);
+    serve(&stores, &dev_a(), &home_a);
     let hosting = stores.hosting();
     hosting.up(link(&bus_a).await);
     let sense = Sense::with_stores(stores.clone());
@@ -188,7 +265,7 @@ async fn an_export_moves_the_sense_data_to_another_bus() {
     drop(hosting);
 
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home_b, None);
+    serve(&stores, &dev_a(), &home_b);
     let hosting = stores.hosting();
     hosting.up(link(&bus_b).await);
     let sense = Sense::with_stores(stores.clone());
@@ -212,7 +289,7 @@ async fn an_export_moves_the_sense_data_to_another_bus() {
     let home_c = scratch_dir("sense-export-c");
     identity::keep_id(&home_c, &SenseId::new()).unwrap();
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home_c, None);
+    serve(&stores, &dev_a(), &home_c);
     let hosting = stores.hosting();
     hosting.up(link(&bus_b).await);
     let refused = Sense::with_stores(stores.clone()).import(request(&exported)).await.unwrap_err();
@@ -223,7 +300,7 @@ async fn an_export_moves_the_sense_data_to_another_bus() {
     let home_d = scratch_dir("sense-export-d");
     identity::keep_id(&home_d, &id).unwrap();
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home_d, None);
+    serve(&stores, &dev_a(), &home_d);
     let hosting = stores.hosting();
     hosting.up(link(&bus_c).await);
     let sense = Sense::with_stores(stores.clone());
@@ -259,7 +336,7 @@ async fn actual_disconnect_serves_cached_briefs_and_reconnect_drains_without_ano
     let Some(mut server) = NatsServer::start_on(free_port()) else { return };
     let home = scratch_dir("sense-stores-offline");
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home, None);
+    serve(&stores, &dev_a(), &home);
     let hosting = stores.hosting();
     let link = link(&server).await;
     let client = link.js.client().clone();
@@ -298,7 +375,7 @@ async fn cached_writes_survive_process_restart_and_the_new_host_link_drains_them
     let Some(server) = NatsServer::start() else { return };
     let home = scratch_dir("sense-stores-restart");
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home, None);
+    serve(&stores, &dev_a(), &home);
     let hosting = stores.hosting();
     hosting.up(link(&server).await);
     let items = stores.items(&dev_a()).await.unwrap();
@@ -309,7 +386,7 @@ async fn cached_writes_survive_process_restart_and_the_new_host_link_drains_them
     drop((items, stores));
 
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home, None);
+    serve(&stores, &dev_a(), &home);
     let items = stores.items(&dev_a()).await.unwrap();
     assert_eq!(items.list("note", 10).await.unwrap().len(), 2, "opened from durable cache before a host link exists");
     assert_eq!(items.pending().await.unwrap(), 1);
@@ -328,7 +405,7 @@ async fn reconnect_reopens_an_unused_pending_cache_without_waiting_for_a_tool() 
     let Some(server) = NatsServer::start() else { return };
     let home = scratch_dir("sense-stores-lazy-restart");
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home, None);
+    serve(&stores, &dev_a(), &home);
     let hosting = stores.hosting();
     let first_link = link(&server).await;
     let js = first_link.js.clone();
@@ -339,7 +416,7 @@ async fn reconnect_reopens_an_unused_pending_cache_without_waiting_for_a_tool() 
     drop((items, stores));
 
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home, None);
+    serve(&stores, &dev_a(), &home);
     let hosting = stores.hosting();
     hosting.up(link(&server).await);
     eventually("unused durable outbox reopened and appended", async || {
@@ -358,7 +435,7 @@ async fn a_disconnected_initial_host_opens_the_cache_before_its_log_can_be_opene
     let Some(mut server) = NatsServer::start_on(free_port()) else { return };
     let home = scratch_dir("sense-stores-cached-host");
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home, None);
+    serve(&stores, &dev_a(), &home);
     let hosting = stores.hosting();
     hosting.up(link(&server).await);
     let items = stores.items(&dev_a()).await.unwrap();
@@ -373,7 +450,7 @@ async fn a_disconnected_initial_host_opens_the_cache_before_its_log_can_be_opene
     .await;
 
     let stores = SenseStores::new();
-    stores.serve(&dev_a(), &home, None);
+    serve(&stores, &dev_a(), &home);
     let hosting = stores.hosting();
     hosting.up(next);
     let items = stores.items(&dev_a()).await.unwrap();

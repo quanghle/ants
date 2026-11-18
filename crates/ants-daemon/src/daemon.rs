@@ -552,6 +552,7 @@ async fn services(
     let sense = crate::sense::of(&config.provider);
     if let Some(sense) = sense {
         sense.serve(&config.ant, &config.storage.home, config.connection.creds.clone());
+        sense.identify(&config.ant, identity.clone());
     }
     let lifecycle = match &identity_id {
         Some(id) => Lifecycle::open(events::outbox(), &config.ant, id, &config.storage.home)
