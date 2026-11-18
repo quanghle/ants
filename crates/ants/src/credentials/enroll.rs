@@ -448,6 +448,10 @@ impl Approver {
         &self.hub
     }
 
+    pub(crate) fn js_domain(&self) -> Option<&JsDomain> {
+        self.js_domain.as_ref()
+    }
+
     /// Check that `request` proves its enrollment credentials of the team's account for its ant, unexpired, and if it
     /// names a leaf node, the leaf's uplink credentials.
     fn check(&self, request: &EnrollRequest) -> Result<()> {

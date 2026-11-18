@@ -521,8 +521,9 @@ async fn forget_if_retired(
 ) {
     if *served == Served::Stopped
         && events::retirement(&config.storage.home).await.is_some_and(|r| Some(r) != retired_before)
+        && let Err(e) = bus::forget_retired(js, &config.ant).await
     {
-        bus::forget_retired(js, &config.ant).await;
+        tracing::warn!(ant = %config.ant, error = format!("{e:#}"), "deleting consumers of the retired ant");
     }
 }
 

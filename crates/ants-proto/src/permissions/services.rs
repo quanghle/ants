@@ -7,8 +7,8 @@ use super::{Permissions, kv_stream, ordered_consumer_subjects};
 use crate::{AntRequest, MACHINES_BUCKET, ReactionsRequest, channel_manager_serving_key};
 use crate::{
     CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, ENROLL_INBOX, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET,
-    INTAKE_STREAM, LINKS_BUCKET, REACTIONS_BUCKET, STREAM, UserId, channel_manager_serving_subject, inbox_consumer,
-    inbox_prefix, subject,
+    INTAKE_STREAM, LINKS_BUCKET, REACTIONS_BUCKET, STREAM, THREADS_BUCKET, UserId, chan_consumer,
+    channel_manager_serving_subject, done_reader, inbox_consumer, inbox_prefix, subject,
 };
 
 impl Permissions {
@@ -133,6 +133,21 @@ impl Permissions {
                 records,
                 growth,
                 subject::all_shared_settings(),
+            ],
+            subscribe: vec![format!("{ENROLL_INBOX}.>")],
+        }
+    }
+
+    /// What retirement cleanup allows on the hub: checking one ant's colony entry and deleting only its channel
+    /// and done consumers, never its inbox consumer.
+    pub fn for_retired_consumers(ant: &UserId) -> Self {
+        let colony = kv_stream(COLONY_BUCKET);
+        let threads = kv_stream(THREADS_BUCKET);
+        Self {
+            publish: vec![
+                format!("$JS.API.DIRECT.GET.{colony}.$KV.{COLONY_BUCKET}.{ant}"),
+                format!("$JS.API.CONSUMER.DELETE.{STREAM}.{}", chan_consumer(ant)),
+                format!("$JS.API.CONSUMER.DELETE.{threads}.{}", done_reader(ant)),
             ],
             subscribe: vec![format!("{ENROLL_INBOX}.>")],
         }

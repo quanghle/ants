@@ -423,6 +423,9 @@ impl Signer<'_> {
         } else {
             crate::credentials::revoke::push(self.url, self.dir).await.err().map(|e| format!("{e:#}"))
         };
+        if push_error.is_none() {
+            super::retire::clean_consumers(self.url, approver.js_domain(), self.dir, name).await;
+        }
         report(request, &Event::Retired { revoked: revoked.len(), push_error: push_error.clone() });
         let (leaf_jwt, leaf_error) = match &request.leaf {
             Some(leaf) => {

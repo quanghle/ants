@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use ants_daemon::admin::ConfigFile;
-use ants_proto::{AdminOp, OrderState, Permissions, Role};
+use ants_proto::{AdminOp, OrderState, Permissions, Role, STREAM, THREADS_BUCKET, chan_consumer, done_reader};
 use serde_json::{Value, json};
 
 use crate::admin::orders::send;
@@ -39,11 +39,18 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
     let team = server.dir().join("auth");
     let (_, h_js) = server.connect_as(&bob, Role::Human).await;
     ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
+    ants_daemon::bus::ensure_colony(&h_js, ants_proto::COLONY_TTL).await.unwrap();
+    h_js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
     let admin_creds = server.dir().join("alice-admin.creds");
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
-    let rights = Permissions::for_user(&alice, Role::Human);
+    let threads = format!("KV_{THREADS_BUCKET}");
+    let mut rights = Permissions::for_user(&alice, Role::Human);
+    rights.publish.extend([
+        format!("$JS.API.CONSUMER.INFO.{STREAM}.{}", chan_consumer(&dev_b)),
+        format!("$JS.API.CONSUMER.INFO.{threads}.{}", done_reader(&dev_b)),
+    ]);
     issue_device_with(&team, &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
     let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
@@ -82,7 +89,15 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
     assert_eq!((ant.model.as_deref(), ant.creds.as_deref()), (Some("gpt-5"), Some(creds.as_path())));
     let reload = tokio::time::timeout(WAIT, triggers.next()).await.expect("a reload at once");
     assert_eq!(reload, crate::reload::Trigger::Edited);
-    ants_daemon::bus::connect(&server.url, Some(&creds), None, &dev_b, "test").await.expect("dev-b connects");
+    let (_, worker) =
+        ants_daemon::bus::connect(&server.url, Some(&creds), None, &dev_b, "test").await.expect("dev-b connects");
+    let stream = ants_daemon::bus::open_stream(&worker, &dev_b).await.unwrap();
+    drop(ants_daemon::bus::chan_consumer(&stream, &dev_b, WAIT, 5, 1).await.unwrap());
+    drop(ants_daemon::provider::events::done::consumer(&worker, &dev_b).await.unwrap());
+    let channel_stream = js.get_stream_no_info(STREAM).await.unwrap();
+    let done_stream = js.get_stream_no_info(threads).await.unwrap();
+    channel_stream.consumer_info(chan_consumer(&dev_b)).await.unwrap();
+    done_stream.consumer_info(done_reader(&dev_b)).await.unwrap();
 
     let listed = AdminOp::Add { settings: Default::default(), assistant_of: None };
     let (_, again) = send(&admin, &js, Some(m1.clone()), &dev_a, listed, WAIT).await.unwrap();
@@ -96,6 +111,8 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
     assert_eq!((retired.state, retired.reason.as_deref()), (OrderState::Applied, None));
     let result = retired.result.unwrap();
     assert_eq!((&result["stopped"], &result["revoked"]), (&json!(true), &json!([finding.key])));
+    assert!(channel_stream.consumer_info(chan_consumer(&dev_b)).await.is_err(), "offline ant's channel consumer");
+    assert!(done_stream.consumer_info(done_reader(&dev_b)).await.is_err(), "offline ant's done consumer");
     assert!(!creds.exists(), "its credentials go");
     assert!(revoke::revoked(&team).unwrap().iter().any(|r| r.key == finding.key));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "its table goes, with the comment above it");

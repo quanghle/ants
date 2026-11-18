@@ -533,17 +533,22 @@ pub async fn chan_consumer<I>(
 /// channel posts' ([`ants_proto::chan_consumer`]) and the done states' ([`ants_proto::done_reader`]), as its
 /// retirement stops it, so neither piles up for an ant that may never be served again. Serving it again creates them
 /// anew, starting with what is stored from then on.
-pub async fn forget_retired(js: &jetstream::Context, ant: &UserId) {
+pub async fn forget_retired(js: &jetstream::Context, ant: &UserId) -> Result<()> {
     let threads = format!("KV_{THREADS_BUCKET}");
+    let mut failed = Vec::new();
     for (stream, name) in [(STREAM, ants_proto::chan_consumer(ant)), (threads.as_str(), ants_proto::done_reader(ant))] {
         match js.delete_consumer_from_stream(&name, stream).await {
             Ok(_) => tracing::info!(consumer = name, "deleted the consumer of the retired ant"),
             Err(e)
                 if matches!(e.kind(), ConsumerErrorKind::JetStream(e)
                 if [ErrorCode::CONSUMER_NOT_FOUND, ErrorCode::STREAM_NOT_FOUND].contains(&e.error_code())) => {}
-            Err(e) => tracing::warn!(consumer = name, error = %e, "deleting a consumer of the retired ant"),
+            Err(e) => failed.push(format!("{stream}/{name}: {e:#}")),
         }
     }
+    if !failed.is_empty() {
+        anyhow::bail!("{}", failed.join("; "));
+    }
+    Ok(())
 }
 
 /// Where [`store`] put a message.

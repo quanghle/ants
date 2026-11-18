@@ -38,6 +38,7 @@ pub use self::issuing::{
 #[cfg(test)]
 pub use self::issuing::{issue, issue_with, sign_device};
 pub use self::renewal::{Renewed, renew, renew_registered};
+pub(crate) use self::short_lived::retired_consumer_creds;
 pub use self::short_lived::{approver_creds, issue_bootstrap, issue_enrollment, revoker_creds, signer_creds};
 pub use self::uplink::{check_leaf, extend_leaf, issue_leaf, leaf_system_creds, leaf_user, shrink_leaf};
 

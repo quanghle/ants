@@ -8,10 +8,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_daemon::config;
+use ants_daemon::records::direct_kv::DirectKv;
 use ants_daemon::secrets::creds::Finding;
 use ants_daemon::secrets::keystore;
-use ants_proto::{LeafRole, Machine, UserId};
+use ants_daemon::{bus, colony, config};
+use ants_proto::{COLONY_BUCKET, ColonyEntry, ENROLL_INBOX, JsDomain, LeafRole, Machine, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::Context;
 
@@ -25,6 +26,42 @@ use crate::{add, auth};
 /// credentials, which cuts off what still runs.
 pub const STOP_WAIT: Duration = Duration::from_mins(5);
 const STOP_POLL: Duration = Duration::from_secs(1);
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Delete consumers the ant's daemon could not clean up at shutdown. Call after applying the revocation, with the
+/// team key, and leave the consumers alone if the ant is still served or holds another live key.
+pub(crate) async fn clean_consumers(url: &str, domain: Option<&JsDomain>, dir: &Path, ant: &UserId) {
+    let cleanup = async {
+        bus::check_url(url)?;
+        let creds = auth::retired_consumer_creds(dir, domain, ant)?;
+        let connect = async_nats::ConnectOptions::with_credentials(&creds)?
+            .name("ants-retired-consumers")
+            .custom_inbox_prefix(ENROLL_INBOX)
+            .connection_timeout(CLEANUP_TIMEOUT)
+            .connect(url);
+        let client = tokio::time::timeout(CLEANUP_TIMEOUT, connect).await.context("no answer from the hub")??;
+        let mut js = bus::jetstream(client, domain);
+        js.set_timeout(CLEANUP_TIMEOUT);
+        let colony = DirectKv::new(&js, domain, COLONY_BUCKET).await?;
+        if let Some(value) = colony.get(ant.as_str()).await? {
+            let entry: ColonyEntry = serde_json::from_slice(&value).context("reading the colony entry")?;
+            entry.check_key(ant.as_str())?;
+            if colony::is_live(&entry, chrono::Utc::now()) {
+                return Ok(());
+            }
+        }
+        if !crate::signing::signer::live(dir)?.iter().any(|key| key.name == ant.as_str()) {
+            bus::forget_retired(&js, ant).await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    if let Err(e) = cleanup.await {
+        tracing::warn!(
+            %ant, error = format!("{e:#}"),
+            "deleting consumers of the retired ant; retry the same key revocation on the hub once no daemon serves it"
+        );
+    }
+}
 
 /// An ant whose entry left the config file.
 #[derive(Debug)]
@@ -353,14 +390,19 @@ pub async fn retire(
     if let Some(u) = &unlisted {
         println!("{}", home_note(name, &u.template, &u.home));
     }
-    match revoked {
-        Some(revoked) if !revoked.is_empty() && !args.no_push => crate::cmd::auth::push(url, js_domain, &dir).await,
-        Some(revoked) if !revoked.is_empty() => {
-            println!("push the revocation to the hub with: ants auth push --nats URL");
-            Ok(())
+    if let Some(revoked) = revoked {
+        if args.no_push {
+            if !revoked.is_empty() {
+                println!("push the revocation to the hub with: ants auth push --nats URL");
+            }
+        } else {
+            if !revoked.is_empty() {
+                crate::cmd::auth::push(url, js_domain, &dir).await?;
+            }
+            clean_consumers(url, js_domain, &dir, name).await;
         }
-        _ => Ok(()),
     }
+    Ok(())
 }
 
 #[cfg(test)]

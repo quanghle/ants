@@ -87,6 +87,11 @@ pub fn revoker_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String>
     short_lived_creds(dir, js_domain, Permissions::for_device_revoker())
 }
 
+/// Short-lived credentials for checking and cleaning up one retired ant ([`Permissions::for_retired_consumers`]).
+pub(crate) fn retired_consumer_creds(dir: &Path, js_domain: Option<&JsDomain>, ant: &UserId) -> Result<String> {
+    short_lived_creds(dir, js_domain, Permissions::for_retired_consumers(ant))
+}
+
 pub(super) fn short_lived_creds(dir: &Path, js_domain: Option<&JsDomain>, permissions: Permissions) -> Result<String> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();

@@ -287,6 +287,9 @@ async fn retire(
     let role = asked.assistant_of.as_ref().map_or(LeafRole::Ant, LeafRole::AssistantOf);
     let newly = if keys.is_empty() { Vec::new() } else { revoke::revoke(dir, None, &keys)? };
     let push_error = if newly.is_empty() { None } else { revoke::push(url, dir).await.err().map(|e| format!("{e:#}")) };
+    if push_error.is_none() {
+        crate::signing::retire::clean_consumers(url, approver.js_domain(), dir, ant).await;
+    }
     let leaf = match &request.leaf {
         Some(leaf) => match check_leaf(approver, request, leaf, machine, revoked) {
             Ok(()) => drop_from_leaf(approver, &leaf.jwt, machine, ant, role).await,

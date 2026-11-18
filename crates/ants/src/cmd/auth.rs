@@ -740,6 +740,9 @@ pub(crate) async fn revoke_credentials(
         return Ok(());
     }
     push(url, domain, &dir).await?;
+    for ant in &retired {
+        crate::signing::retire::clean_consumers(url, domain, &dir, ant).await;
+    }
     if let Some(ant) = ant {
         devices::forget_identity(url, domain, &dir, &ant.parse()?).await?;
         println!("{ant}'s identity deleted from {IDENTITIES_BUCKET}");

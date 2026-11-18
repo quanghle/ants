@@ -171,7 +171,7 @@ async fn an_ant_s_daemon_deletes_its_own_done_and_channel_consumers_on_its_retir
     drop(serve(&d_js, &dev_a).await);
     drop(serve(&b_js, &dev_b).await);
 
-    bus::forget_retired(&d_js, &dev_a).await;
+    bus::forget_retired(&d_js, &dev_a).await.unwrap();
     for (name, stream) in [(chan_consumer(&dev_a), STREAM), (ants_proto::done_reader(&dev_a), threads.as_str())] {
         let Err(gone) = d_js.delete_consumer_from_stream(&name, stream).await else { panic!("{name} left") };
         assert!(
@@ -192,6 +192,73 @@ async fn an_ant_s_daemon_deletes_its_own_done_and_channel_consumers_on_its_retir
     let message = timeout(WAIT, dones.next()).await.unwrap().unwrap().unwrap();
     let done = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::done_key(&revived));
     assert_eq!(message.subject.as_str(), done, "only what is marked done once it is served again");
+}
+
+#[tokio::test]
+async fn revoking_a_retired_ant_cleans_up_only_its_channel_and_done_consumers() {
+    use ants_daemon::provider::events::done;
+    use ants_proto::{COLONY_BUCKET, COLONY_TTL, THREADS_BUCKET, inbox_consumer};
+
+    let Some(server) = Server::start_with("domain: hub", "") else { return };
+    let domain = "hub".parse().unwrap();
+    let domain = Some(&domain);
+    let team = server.dir().join("auth");
+    let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
+    let threads = format!("KV_{THREADS_BUCKET}");
+    let mut inspect = Permissions::for_user(&alice, Role::Human);
+    inspect.publish.extend([
+        format!("$JS.API.CONSUMER.INFO.{STREAM}.*"),
+        format!("$JS.API.CONSUMER.INFO.{threads}.*"),
+        format!("$KV.{COLONY_BUCKET}.{dev_a}"),
+    ]);
+    let human_creds = server.dir().join("alice.creds");
+    issue_with(&team, &alice, Role::Human.into(), inspect.with_js_domain(domain), &human_creds).unwrap();
+    let human = connect_to(&server.url, &human_creds, domain, &alice).await;
+    let colony = bus::ensure_colony(&human, COLONY_TTL).await.unwrap();
+    let channel_stream = bus::ensure_stream(&human).await.unwrap();
+    let done_stream = human.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
+
+    let first = server.creds_in(&dev_a, domain);
+    let first_key = read_creds(&first).unwrap().1.public_key();
+    let last = server.creds_in(&dev_a, domain);
+    let last_key = read_creds(&last).unwrap().1.public_key();
+    let other = server.creds_in(&dev_b, domain);
+    for (ant, creds) in [(&dev_a, &first), (&dev_b, &other)] {
+        let js = connect_to(&server.url, creds, domain, ant).await;
+        let stream = bus::open_stream(&js, ant).await.unwrap();
+        drop(bus::inbox_consumer(&stream, ant, WAIT, 5, 1).await.unwrap());
+        drop(bus::chan_consumer(&stream, ant, WAIT, 5, 1).await.unwrap());
+        drop(done::consumer(&js, ant).await.unwrap());
+    }
+    let conn = crate::connection::Connection { nats: &server.url, creds: None, js_domain: domain };
+    let revoke = async |key: &str| {
+        crate::cmd::auth::revoke_credentials(None, vec![key.to_owned()], Vec::new(), false, Some(team.clone()), &conn)
+            .await
+            .unwrap();
+    };
+    let check = async |removed: bool| {
+        assert_eq!(channel_stream.consumer_info(chan_consumer(&dev_a)).await.is_err(), removed);
+        assert_eq!(done_stream.consumer_info(ants_proto::done_reader(&dev_a)).await.is_err(), removed);
+        channel_stream.consumer_info(inbox_consumer(&dev_a)).await.unwrap();
+        channel_stream.consumer_info(chan_consumer(&dev_b)).await.unwrap();
+        done_stream.consumer_info(ants_proto::done_reader(&dev_b)).await.unwrap();
+    };
+    revoke(&first_key).await;
+    check(false).await;
+
+    let beat = async |age| {
+        let entry = crate::test_support::colony::entry(dev_a.as_str(), 60, age, chrono::Utc::now());
+        colony.put(dev_a.as_str(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+    };
+    beat(0).await;
+    revoke(&last_key).await;
+    check(false).await;
+
+    beat(60).await;
+    revoke(&last_key).await;
+    check(true).await;
+    revoke(&last_key).await;
+    check(true).await;
 }
 
 #[tokio::test]

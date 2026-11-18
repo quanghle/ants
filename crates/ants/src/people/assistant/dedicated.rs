@@ -591,7 +591,11 @@ impl Dedicated {
             self.home.display()
         );
         match (revoked, no_push) {
-            (true, false) => crate::cmd::auth::push(nats.url, nats.domain, &dir).await,
+            (true, false) => {
+                crate::cmd::auth::push(nats.url, nats.domain, &dir).await?;
+                retire::clean_consumers(nats.url, nats.domain, &dir, name).await;
+                Ok(())
+            }
             (true, true) => {
                 println!("push the revocation to the hub with: ants auth push --nats URL");
                 Ok(())
