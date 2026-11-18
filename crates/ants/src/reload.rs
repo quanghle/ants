@@ -1,8 +1,8 @@
 //! When `ants daemon` and `ants webhook serve` reload their config file: on SIGHUP, at once after an admin order
 //! edited it ([`Triggers::edits`]) or the shared settings of an ant changed ([`Triggers::watch_shared`]), and once an edit of the file, or of the daemon's drop-in harness files, settled. The file is polled, its modification time, length and inode
 //! compared every [`CHECK_EVERY`] on the process's own runtime, with no watcher thread, and so are the drop-in files
-//! ([`ants_daemon::config::dropin_files`]) listed by name; a change counts once two checks in a row find them the
-//! same.
+//! ([`ants_daemon::config::dropin_files`]) listed by name and the daemon's credentials files of the built-in ants
+//! ([`Triggers::watch_creds`]); a change counts once two checks in a row find them the same.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,18 +39,20 @@ impl FileId {
     }
 }
 
-/// The config file, or none at its path, and the drop-in files, by path.
+/// The config file, or none at its path, the drop-in files, by path, and the credentials files, or none at each path.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Found {
     file: Option<FileId>,
     dropins: Vec<(PathBuf, FileId)>,
+    creds: Vec<Option<FileId>>,
 }
 
-/// A config file, and a directory of drop-in files, checked for changes.
+/// A config file, a directory of drop-in files, and credentials files, checked for changes.
 #[derive(Debug)]
 struct Watched {
     path: PathBuf,
     dropins: Option<PathBuf>,
+    creds: Vec<PathBuf>,
     /// The files as last loaded.
     loaded: Found,
     /// The files as the last check found them.
@@ -59,7 +61,8 @@ struct Watched {
 
 impl Watched {
     fn new(path: PathBuf, dropins: Option<PathBuf>) -> Self {
-        let mut watched = Self { path, dropins, loaded: Found::default(), seen: Found::default() };
+        let (creds, loaded, seen) = (Vec::new(), Found::default(), Found::default());
+        let mut watched = Self { path, dropins, creds, loaded, seen };
         watched.loading();
         watched
     }
@@ -71,19 +74,22 @@ impl Watched {
             .into_iter()
             .filter_map(|path| FileId::of(&path).ok().map(|id| (path, id)))
             .collect();
-        Found { file: FileId::of(&self.path).ok(), dropins }
+        let creds = self.creds.iter().map(|path| FileId::of(path).ok()).collect();
+        Found { file: FileId::of(&self.path).ok(), dropins, creds }
     }
 
-    /// Whether the files are other than the ones loaded and unchanged since the last check: an edit still being
-    /// written waits for a later check. The files found count as loaded then.
-    fn settled(&mut self) -> bool {
+    /// Why to reload, where the files are other than the ones loaded and unchanged since the last check: an edit
+    /// still being written waits for a later check. The files found count as loaded then.
+    fn settled(&mut self) -> Option<Trigger> {
         let now = self.found();
         let settled = now != self.loaded && now == self.seen;
+        let config = (&now.file, &now.dropins) != (&self.loaded.file, &self.loaded.dropins);
         self.seen = now;
-        if settled {
-            self.loaded.clone_from(&self.seen);
+        if !settled {
+            return None;
         }
-        settled
+        self.loaded.clone_from(&self.seen);
+        Some(if config { Trigger::Changed } else { Trigger::Credentials })
     }
 
     /// Count the files found now as loaded, as a reload by SIGHUP reads them.
@@ -103,6 +109,8 @@ pub enum Trigger {
     Edited,
     /// The shared settings of an ant changed ([`ants_daemon::profile::shared`]).
     Shared,
+    /// Credentials files of the built-in ants came, went or changed, and settled ([`Triggers::watch_creds`]).
+    Credentials,
 }
 
 impl Trigger {
@@ -112,6 +120,7 @@ impl Trigger {
             Trigger::Changed => "the config changed",
             Trigger::Edited => "an admin order edited the config",
             Trigger::Shared => "the shared settings of an ant changed",
+            Trigger::Credentials => "the credentials of a built-in ant changed",
         }
     }
 }
@@ -151,6 +160,14 @@ impl Triggers {
         self.shared = Some(changes);
     }
 
+    /// Reload as well once one of the credentials files `creds`, those of the built-in ants
+    /// ([`ants_daemon::config::builtins::creds_files`]), comes, goes or changes and settles, as which built-in ants the
+    /// machine serves, and with what credentials, depends on them.
+    pub fn watch_creds(&mut self, creds: Vec<PathBuf>) {
+        self.file.creds = creds;
+        self.file.loading();
+    }
+
     /// Wait for the next reason to reload. Cancel-safe, for `tokio::select!`.
     pub async fn next(&mut self) -> Trigger {
         loop {
@@ -168,9 +185,11 @@ impl Triggers {
                 } else {
                     return Trigger::Shared;
                 },
-                _ = self.checks.tick() => if self.file.settled() {
-                    tracing::info!(file = %self.file.path.display(), "the config changed");
-                    return Trigger::Changed;
+                _ = self.checks.tick() => if let Some(trigger) = self.file.settled() {
+                    if trigger == Trigger::Changed {
+                        tracing::info!(file = %self.file.path.display(), "the config changed");
+                    }
+                    return trigger;
                 },
             }
         }
@@ -219,23 +238,23 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(&path, "a = 1\n").unwrap();
         let mut file = Watched::new(path.clone(), None);
-        assert!(!file.settled(), "nothing changed");
+        assert!(file.settled().is_none(), "nothing changed");
 
         std::fs::write(&path, "a = 1\nb = 2\n").unwrap();
-        assert!(!file.settled(), "first seen");
+        assert!(file.settled().is_none(), "first seen");
         std::fs::write(&path, "a = 1\nb = 2\nc = 3\n").unwrap();
-        assert!(!file.settled(), "still changing");
-        assert!(file.settled(), "unchanged since the last check");
-        assert!(!file.settled(), "loaded already");
+        assert!(file.settled().is_none(), "still changing");
+        assert!(file.settled().is_some(), "unchanged since the last check");
+        assert!(file.settled().is_none(), "loaded already");
 
         std::fs::remove_file(&path).unwrap();
-        assert!(!file.settled());
-        assert!(file.settled(), "a removed file counts too, for its load to fail");
+        assert!(file.settled().is_none());
+        assert!(file.settled().is_some(), "a removed file counts too, for its load to fail");
         let staged = dir.join(".config.toml.new");
         std::fs::write(&staged, "a = 2\n").unwrap();
         std::fs::rename(&staged, &path).unwrap();
         file.loading();
-        assert!(!file.settled() && !file.settled(), "a reload by SIGHUP read it");
+        assert!(file.settled().is_none() && file.settled().is_none(), "a reload by SIGHUP read it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -248,14 +267,40 @@ mod tests {
         let mut file = Watched::new(path, Some(dropins.clone()));
         std::fs::create_dir(&dropins).unwrap();
         std::fs::write(dropins.join("notes.txt"), "").unwrap();
-        assert!(!file.settled() && !file.settled(), "an empty directory and other files change nothing");
+        assert!(
+            file.settled().is_none() && file.settled().is_none(),
+            "an empty directory and other files change nothing"
+        );
         std::fs::write(dropins.join("codex.toml"), "[harnesses.codex]\ncommand = \"codex-acp\"\n").unwrap();
-        assert!(!file.settled(), "first seen");
-        assert!(file.settled(), "a new file");
+        assert!(file.settled().is_none(), "first seen");
+        assert!(file.settled().is_some(), "a new file");
         std::fs::write(dropins.join("codex.toml"), "[harnesses.codex]\ncommand = \"codex-acp2\"\n").unwrap();
-        assert!(!file.settled() && file.settled(), "an edited file");
+        assert!(file.settled().is_none() && file.settled().is_some(), "an edited file");
         std::fs::remove_file(dropins.join("codex.toml")).unwrap();
-        assert!(!file.settled() && file.settled(), "a removed file");
+        assert!(file.settled().is_none() && file.settled().is_some(), "a removed file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_built_in_ants_credentials_coming_going_or_changing_count_as_such() {
+        let dir = ants_test_support::scratch_dir("reload-creds");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        let (messenger, sage) = (dir.join("messenger.creds"), dir.join("sage.creds"));
+        std::fs::write(&sage, "old").unwrap();
+        let mut file = Watched::new(path.clone(), None);
+        file.creds = vec![messenger.clone(), sage.clone()];
+        file.loading();
+        assert_eq!((file.settled(), file.settled()), (None, None), "nothing changed");
+        std::fs::write(&messenger, "issued").unwrap();
+        assert_eq!((file.settled(), file.settled()), (None, Some(Trigger::Credentials)), "copied in");
+        std::fs::write(&sage, "renewed").unwrap();
+        assert_eq!((file.settled(), file.settled()), (None, Some(Trigger::Credentials)), "replaced");
+        std::fs::remove_file(&messenger).unwrap();
+        assert_eq!((file.settled(), file.settled()), (None, Some(Trigger::Credentials)), "removed");
+        std::fs::write(&path, "harness = \"copilot\"\n").unwrap();
+        std::fs::remove_file(&sage).unwrap();
+        assert_eq!((file.settled(), file.settled()), (None, Some(Trigger::Changed)), "with the config, a change of it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -269,6 +314,10 @@ mod tests {
         std::fs::write(&path, "a = 2\nb = 3\n").unwrap();
         let trigger = tokio::time::timeout(Duration::from_secs(5), triggers.next()).await.expect("a reload");
         assert_eq!(trigger, Trigger::Changed);
+        triggers.watch_creds(vec![dir.join("sage.creds")]);
+        std::fs::write(dir.join("sage.creds"), "").unwrap();
+        let trigger = tokio::time::timeout(Duration::from_secs(5), triggers.next()).await.expect("a reload");
+        assert_eq!(trigger, Trigger::Credentials);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

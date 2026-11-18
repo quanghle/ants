@@ -363,7 +363,8 @@ fn tell_elsewhere(left: &[Elsewhere]) {
     let told = std::mem::replace(&mut *ELSEWHERE_TOLD.lock().unwrap_or_else(PoisonError::into_inner), now);
     for left in left.iter().filter(|left| !told.contains(&left.ant.name)) {
         let also = if left.ant.is_sage { ", the ants here naming it all the same" } else { "" };
-        tracing::info!("the built-in {} is left to another machine{also}: {}", left.ant.name, elsewhere(left));
+        let (name, why) = (&left.ant.name, elsewhere(left));
+        tracing::info!("the built-in {name} is left to another machine{also}: {why}, the daemon serving it once there");
     }
 }
 

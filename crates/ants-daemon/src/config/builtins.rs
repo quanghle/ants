@@ -4,8 +4,11 @@
 
 use std::path::{Path, PathBuf};
 
+use ants_proto::UserId;
+use anyhow::Result;
+
 use super::ant::builtin_creds;
-use super::{Ant, HostSettings};
+use super::{Ant, HostSettings, home_dir};
 
 /// A built-in ant the file serves but the machine leaves to another, the server taking credentials and the ant having
 /// none on the machine.
@@ -15,6 +18,12 @@ pub struct Elsewhere {
     pub ant: Ant,
     /// Where its credentials belong: `~/.config/ants/auth/<name>.creds`.
     pub creds: PathBuf,
+}
+
+/// Where the credentials of each built-in ant belong, which the machine serving it or not depends on.
+pub fn creds_files() -> Result<Vec<PathBuf>> {
+    let home = home_dir()?;
+    Ok([UserId::messenger(), UserId::sage()].iter().map(|name| builtin_creds(name, &home)).collect())
 }
 
 /// Whether the server takes credentials, as the machine's `host` credentials or those of one of `ants` tell: only
@@ -37,8 +46,6 @@ pub(super) fn leave(ants: &mut Vec<Ant>, host: &HostSettings, home: &Path) -> Ve
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::UserId;
-
     use super::*;
     use crate::config::{Loaded, parse};
 

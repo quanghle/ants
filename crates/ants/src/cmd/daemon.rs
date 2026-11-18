@@ -20,6 +20,7 @@ pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Resul
     let mut triggers = reload::Triggers::new(config.clone(), Some(dropins), reload::CHECK_EVERY)?;
     let edited = ConfigFile::new(config, triggers.edits());
     triggers.watch_shared(edited.shared.subscribe());
+    triggers.watch_creds(ants_daemon::config::builtins::creds_files()?);
     let hostname = ants_daemon::colony::machine().await;
     let listed = serve::ants(args, &default_path, &hostname)?;
     // The ants connect to the file's top-level nats, where it sets one: the address the managed server must answer.
