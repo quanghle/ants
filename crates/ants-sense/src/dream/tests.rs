@@ -233,13 +233,13 @@ async fn verdicts_are_taken_on_the_dream_thread_checked_and_replaced() {
     let one = |verdict: serde_json::Value| json!({"verdicts": [verdict]});
     let refusals = [
         (one(json!({"finding": "1.9", "verdict": "rejected", "reason": "No."})), "not_found"),
-        (one(json!({"finding": "1.1", "verdict": "applied", "reason": "Done."})), "invalid"),
+        (one(json!({"finding": "1.1", "verdict": "applied", "reason": "Done."})), "invalid_arguments"),
         (
             one(json!({"finding": "1.1", "verdict": "applied", "reason": "Done.", "items": [ItemId::new()]})),
             "not_found",
         ),
-        (one(json!({"finding": "1.1", "verdict": "rejected", "reason": " "})), "invalid"),
-        (one(json!({"finding": "1.1", "verdict": "maybe", "reason": "Hm."})), "invalid"),
+        (one(json!({"finding": "1.1", "verdict": "rejected", "reason": " "})), "invalid_arguments"),
+        (one(json!({"finding": "1.1", "verdict": "maybe", "reason": "Hm."})), "invalid_arguments"),
         (one(json!({"finding": "1.1", "verdict": "rejected", "reason": "x".repeat(501)})), "too_long"),
     ];
     for (arguments, code) in refusals {

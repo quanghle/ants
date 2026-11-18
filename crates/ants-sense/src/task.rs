@@ -18,6 +18,22 @@ pub use lease::{Lease, fencing_token};
 
 /// The only item kind that can be ready or claimed.
 pub const TASK: &str = "task";
+/// The most characters of a task's title.
+pub const MAX_TITLE_CHARS: usize = 200;
+/// The most bytes of a task's body.
+pub const MAX_BODY_BYTES: usize = 4 * 1024;
+/// The most bytes of a task's reference in a team's tracker.
+pub const MAX_REF_BYTES: usize = 1_024;
+/// The priority of a task given none.
+pub const DEFAULT_PRIORITY: u8 = 2;
+/// The lowest priority of a task, from 0 (the highest).
+pub const MAX_PRIORITY: u8 = 4;
+/// The most relationships of a task.
+pub const MAX_DEPENDENCIES: usize = 100;
+/// The tasks a list shows given no limit.
+pub const DEFAULT_LIMIT: usize = 20;
+/// The most tasks a list shows.
+pub const MAX_LIMIT: usize = 100;
 
 /// A task's state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,13 +227,13 @@ impl Graph {
         let mut parents = 0;
         for dep in &task.dependencies {
             if &dep.id == id {
-                return Err(invalid("A task cannot refer to itself."));
+                return Err(Answer::invalid("A task cannot refer to itself."));
             }
             if !self.0.contains_key(&dep.id) {
-                return Err(invalid(format!("Dependency {} is not a task.", dep.id)));
+                return Err(Answer::invalid(format!("Dependency {} is not a task.", dep.id)));
             }
             if !seen.insert(dep) {
-                return Err(invalid(format!("Duplicate dependency {}.", dep.id)));
+                return Err(Answer::invalid(format!("Duplicate dependency {}.", dep.id)));
             }
             if dep.kind == DependencyKind::ParentChild {
                 parents += 1;
@@ -229,14 +245,17 @@ impl Graph {
                     .iter()
                     .any(|other| other.kind == DependencyKind::Related && &other.id == id)
                 {
-                    return Err(invalid(format!("Related dependency {} exists in the other direction.", dep.id)));
+                    return Err(Answer::invalid(format!(
+                        "Related dependency {} exists in the other direction.",
+                        dep.id
+                    )));
                 }
             } else if self.reaches(&dep.id, id) {
-                return Err(invalid(format!("Dependency {} would create a cycle.", dep.id)));
+                return Err(Answer::invalid(format!("Dependency {} would create a cycle.", dep.id)));
             }
         }
         if parents > 1 {
-            return Err(invalid("A task has at most one parent."));
+            return Err(Answer::invalid("A task has at most one parent."));
         }
         Ok(())
     }
@@ -304,25 +323,24 @@ struct Request {
     status: Option<Status>,
     priority: Option<u8>,
     dependencies: Option<Vec<Dependency>>,
-    external_ref: Option<Value>,
+    external_ref: Option<String>,
     limit: Option<usize>,
 }
 
 impl Request {
     fn parse(call: &ToolCall) -> Result<Self, Answer> {
-        let request: Self = serde_json::from_value(Value::Object(call.arguments.clone()))
-            .map_err(|e| invalid(format!("Invalid task arguments: {e}.")))?;
-        if request.priority.is_some_and(|p| p > 4) {
-            return Err(invalid("priority must be from 0 to 4."));
+        let request: Self = crate::tools::arguments(call)?;
+        if request.priority.is_some_and(|p| p > MAX_PRIORITY) {
+            return Err(Answer::invalid(format!("priority must be from 0 to {MAX_PRIORITY}.")));
         }
         if request.revision == Some(0) || request.token == Some(0) {
-            return Err(invalid("revision and token must be positive integers."));
+            return Err(Answer::invalid("revision and token must be positive integers."));
         }
-        if request.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
-            return Err(invalid("limit must be from 1 to 100."));
+        if request.limit.is_some_and(|limit| !(1..=MAX_LIMIT).contains(&limit)) {
+            return Err(Answer::invalid(format!("limit must be from 1 to {MAX_LIMIT}.")));
         }
-        if request.dependencies.as_ref().is_some_and(|deps| deps.len() > 100) {
-            return Err(invalid("At most 100 dependencies."));
+        if request.dependencies.as_ref().is_some_and(|deps| deps.len() > MAX_DEPENDENCIES) {
+            return Err(Answer::invalid(format!("At most {MAX_DEPENDENCIES} dependencies.")));
         }
         let editing = request.title.is_some()
             || request.body.is_some()
@@ -337,24 +355,26 @@ impl Request {
                     || request.limit.is_some()
                     || request.token.is_some() =>
             {
-                return Err(invalid("create accepts task fields, not id, revision, token or limit."));
+                return Err(Answer::invalid("create accepts task fields, not id, revision, token or limit."));
             }
             Action::Show
                 if editing || request.revision.is_some() || request.limit.is_some() || request.token.is_some() =>
             {
-                return Err(invalid("show accepts only id."));
+                return Err(Answer::invalid("show accepts only id."));
             }
             Action::List | Action::Ready
                 if editing || request.id.is_some() || request.revision.is_some() || request.token.is_some() =>
             {
-                return Err(invalid("list and ready accept only limit."));
+                return Err(Answer::invalid("list and ready accept only limit."));
             }
-            Action::Update if request.limit.is_some() => return Err(invalid("update does not accept limit.")),
+            Action::Update if request.limit.is_some() => return Err(Answer::invalid("update does not accept limit.")),
             Action::Claim if editing || request.limit.is_some() || request.token.is_some() => {
-                return Err(invalid("claim accepts only id and an optional expected revision."));
+                return Err(Answer::invalid("claim accepts only id and an optional expected revision."));
             }
             Action::Heartbeat | Action::Release | Action::Close if editing || request.limit.is_some() => {
-                return Err(invalid("heartbeat, release and close accept only id, token and an optional revision."));
+                return Err(Answer::invalid(
+                    "heartbeat, release and close accept only id, token and an optional revision.",
+                ));
             }
             _ => {}
         }
@@ -363,31 +383,43 @@ impl Request {
 
     fn values(&self, old: Option<&Task>, call: &ToolCall) -> Result<Task, Answer> {
         if matches!(self.status, Some(Status::InProgress | Status::Closed)) {
-            return Err(invalid("Use claim for in_progress and close for closed; status cannot bypass a lease."));
+            return Err(Answer::invalid(
+                "Use claim for in_progress and close for closed; status cannot bypass a lease.",
+            ));
         }
         if old.is_some_and(|old| old.lease.is_some() && self.status.is_some_and(|status| status != old.status)) {
-            return Err(invalid("Release the lease before changing status, or use close with the claim token."));
+            return Err(Answer::invalid(
+                "Release the lease before changing status, or use close with the claim token.",
+            ));
         }
         let title = self.title.as_deref().or_else(|| old.map(|old| old.title.as_str())).unwrap_or_default();
-        let title = sanitize_title(title.trim(), Limit::Chars(200)).map_err(|e| invalid(e.to_string()))?.text;
+        let title = sanitize_title(title.trim(), Limit::Chars(MAX_TITLE_CHARS))
+            .map_err(|e| Answer::invalid(e.to_string()))?
+            .text;
         if title.is_empty() {
-            return Err(invalid("title is required."));
+            return Err(Answer::invalid("title is required."));
         }
         let body = self.body.as_deref().or_else(|| old.map(|old| old.body.as_str())).unwrap_or_default();
-        let body = sanitize_body(body.trim(), Limit::Bytes(4_096)).map_err(|e| invalid(e.to_string()))?.text;
+        let body =
+            sanitize_body(body.trim(), Limit::Bytes(MAX_BODY_BYTES)).map_err(|e| Answer::invalid(e.to_string()))?.text;
+        // Given as null, unlike left out, the reference is cleared.
         let external_ref = if call.arguments.contains_key("external_ref") {
-            match self.external_ref.as_ref() {
-                None | Some(Value::Null) => None,
-                Some(Value::String(reference)) if !reference.trim().is_empty() && reference.len() <= 1_024 => {
-                    let reference = sanitize_title(reference.trim(), Limit::Bytes(1_024))
-                        .map_err(|error| invalid(error.to_string()))?
+            match &self.external_ref {
+                None => None,
+                Some(reference) if !reference.trim().is_empty() && reference.len() <= MAX_REF_BYTES => {
+                    let reference = sanitize_title(reference.trim(), Limit::Bytes(MAX_REF_BYTES))
+                        .map_err(|error| Answer::invalid(error.to_string()))?
                         .text;
                     if reference.trim().is_empty() {
-                        return Err(invalid("external_ref must be nonempty text after sanitization."));
+                        return Err(Answer::invalid("external_ref must be nonempty text after sanitization."));
                     }
                     Some(reference)
                 }
-                _ => return Err(invalid("external_ref must be nonempty text of at most 1,024 bytes, or null.")),
+                Some(_) => {
+                    let message =
+                        format!("external_ref must be nonempty text of at most {MAX_REF_BYTES} bytes, or null.");
+                    return Err(Answer::invalid(message));
+                }
             }
         } else {
             old.and_then(|old| old.external_ref.clone())
@@ -396,7 +428,7 @@ impl Request {
             title,
             body,
             status: self.status.or_else(|| old.map(|old| old.status)).unwrap_or(Status::Open),
-            priority: self.priority.or_else(|| old.map(|old| old.priority)).unwrap_or(2),
+            priority: self.priority.or_else(|| old.map(|old| old.priority)).unwrap_or(DEFAULT_PRIORITY),
             dependencies: self
                 .dependencies
                 .clone()
@@ -424,15 +456,15 @@ pub fn schema() -> Value {
                 "type": "integer", "minimum": 1,
                 "description": "Claim event sequence; required for heartbeat, release, close and updates while held."
             },
-            "title": {"type": "string", "maxLength": 200},
-            "body": {"type": "string", "description": "At most 4 KiB."},
+            "title": {"type": "string", "maxLength": MAX_TITLE_CHARS},
+            "body": {"type": "string", "description": format!("At most {MAX_BODY_BYTES} bytes.")},
             "status": {
                 "enum": ["open", "in_progress", "blocked", "deferred", "closed"],
                 "description": "create/update accept open, blocked or deferred; claim and close set the other states."
             },
-            "priority": {"type": "integer", "minimum": 0, "maximum": 4, "default": 2},
+            "priority": {"type": "integer", "minimum": 0, "maximum": MAX_PRIORITY, "default": DEFAULT_PRIORITY},
             "dependencies": {
-                "type": "array", "maxItems": 100,
+                "type": "array", "maxItems": MAX_DEPENDENCIES,
                 "description": "Replaces all relationships. blocks names a prerequisite; parent-child names the parent.",
                 "items": {
                     "type": "object", "additionalProperties": false,
@@ -444,7 +476,7 @@ pub fn schema() -> Value {
                 }
             },
             "external_ref": {"type": ["string", "null"], "description": "Team tracker reference; null clears it."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": DEFAULT_LIMIT}
         }
     })
 }
@@ -456,12 +488,12 @@ pub fn task<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
 
 async fn run(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     let request = Request::parse(call)?;
-    let items = sense.items(&call.context.ant).await.map_err(store_error)?;
-    items.sync().await.map_err(store_error)?;
-    let graph = Graph::load(&*items).await.map_err(store_error)?;
+    let items = sense.items(&call.context.ant).await.map_err(refused)?;
+    items.sync().await.map_err(refused)?;
+    let graph = Graph::load(&*items).await.map_err(refused)?;
     match request.action {
         Action::List | Action::Ready => {
-            let tasks = graph.sorted(request.action == Action::Ready, request.limit.unwrap_or(20));
+            let tasks = graph.sorted(request.action == Action::Ready, request.limit.unwrap_or(DEFAULT_LIMIT));
             let text = if tasks.is_empty() {
                 "No tasks.".to_owned()
             } else {
@@ -478,11 +510,11 @@ async fn run(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
             let id = ItemId::new();
             graph.validate(&id, &task)?;
             let writes = graph.writes(Write::Create { id, kind: TASK.into(), values: task.values() });
-            let item = items.write(&writes, call.context.thread.as_str()).await.map_err(store_error)?.remove(0);
+            let item = items.write(&writes, call.context.thread.as_str()).await.map_err(refused)?.remove(0);
             Ok(shown(TaskItem::of(item).expect("created task")))
         }
         Action::Show | Action::Update | Action::Claim | Action::Heartbeat | Action::Release | Action::Close => {
-            let id = request.id.as_ref().ok_or_else(|| invalid("id is required."))?;
+            let id = request.id.as_ref().ok_or_else(|| Answer::invalid("id is required."))?;
             let current = graph.0.get(id).ok_or_else(|| Answer::error("not_found", format!("No task {id}.")))?;
             if request.action == Action::Show {
                 return lease::shown(&*items, current.clone()).await;
@@ -512,7 +544,7 @@ async fn run(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
             } else {
                 items.write(&writes, call.context.thread.as_str()).await
             };
-            let item = written.map_err(store_error)?.remove(0);
+            let item = written.map_err(refused)?.remove(0);
             lease::shown(&*items, TaskItem::of(item).expect("updated task")).await
         }
     }
@@ -520,10 +552,6 @@ async fn run(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
 
 fn shown(task: TaskItem) -> Answer {
     Answer { text: task.text(), json: json!({"task": task.json()}), is_error: false }
-}
-
-fn invalid(message: impl Into<String>) -> Answer {
-    Answer::error("invalid", message.into())
 }
 
 fn conflict(task: &TaskItem) -> Answer {
@@ -535,14 +563,14 @@ fn conflict(task: &TaskItem) -> Answer {
     answer
 }
 
-fn store_error(error: StoreError) -> Answer {
-    match error {
-        StoreError::Conflict { current, .. } => match TaskItem::of(*current) {
-            Some(task) => conflict(&task),
-            None => Answer::error("conflict", "A related item changed; read again before retrying.".into()),
-        },
-        error => Answer::error("unavailable", format!("Tasks are not available: {error}")),
+/// The refusal of a call its store failed, showing the task found at another revision.
+fn refused(error: StoreError) -> Answer {
+    if let StoreError::Conflict { current, .. } = &error
+        && let Some(task) = TaskItem::of((**current).clone())
+    {
+        return conflict(&task);
     }
+    error.into()
 }
 
 #[cfg(test)]

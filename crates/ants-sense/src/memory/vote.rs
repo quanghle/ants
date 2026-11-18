@@ -15,21 +15,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::remember::{invalid, unavailable};
 use super::{MemoryItem, Status, WRITER, writer};
 use crate::Sense;
 use crate::items::{ItemId, Values};
 use crate::sanitize::{Limit, sanitize_title};
-use crate::store::{StoreError, Write};
-use crate::tools::Answer;
+use crate::store::{Write, read_modify_write};
+use crate::tools::{Answer, MAX_REASON_CHARS};
 
 /// The kind of the items holding votes.
 pub const VOTE: &str = "vote";
-
-/// The most characters of a vote's reason.
-const MAX_REASON_CHARS: usize = 500;
-/// How many times a vote is counted again on a memory changed meanwhile.
-const TRIES: usize = 3;
 
 /// A thread's feedback on a memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -102,20 +96,19 @@ pub fn vote<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
     Box::pin(async move { vote_in(sense, call).await.unwrap_or_else(|refused| refused) })
 }
 
+/// The arguments of a `sense_vote` call.
+#[derive(Deserialize)]
+struct Request {
+    id: ItemId,
+    vote: Vote,
+    reason: Option<String>,
+}
+
 async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
-    let arguments = &call.arguments;
-    let text = |name: &str| match arguments.get(name) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(text.trim())),
-        Some(_) => Err(invalid(format!("{name} must be a string."))),
-    };
-    let id = text("id")?.ok_or_else(|| invalid("id is missing.".into()))?;
-    let id: ItemId = id.parse().map_err(|_| invalid(format!("No memory id: {id:?}.")))?;
-    let vote = text("vote")?.ok_or_else(|| invalid("vote is missing: helpful, stale or wrong.".into()))?;
-    let vote: Vote = vote.parse().map_err(|_| invalid(format!("No vote {vote:?}: helpful, stale or wrong.")))?;
-    let reason = match text("reason")? {
+    let Request { id, vote, reason } = crate::tools::arguments(call)?;
+    let reason = match reason {
         Some(reason) => {
-            sanitize_title(reason, Limit::Chars(MAX_REASON_CHARS))
+            sanitize_title(reason.trim(), Limit::Chars(MAX_REASON_CHARS))
                 .map_err(|refused| Answer::error("too_long", format!("The reason is too long: {refused}.")))?
                 .text
         }
@@ -126,18 +119,20 @@ async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         let message = "Votes are not taken in a thread a webhook started: outside content may steer them.";
         return Err(Answer::error("untrusted", message.into()));
     }
-    let items = sense.items(&context.ant).await.map_err(unavailable)?;
-    let ballot = ItemId::named(VOTE, &format!("{id}/{}", context.thread));
-    for _ in 0..TRIES {
-        let found = items.get(&id).await.map_err(unavailable)?.and_then(MemoryItem::of);
-        let found = found.ok_or_else(|| Answer::error("not_found", format!("No memory {id}.")))?;
+    let items = sense.items(&context.ant).await?;
+    let (items, id, reason) = (&*items, &id, &reason);
+    let ballot = &ItemId::named(VOTE, &format!("{id}/{}", context.thread));
+    read_modify_write(|| async move {
+        let Some(found) = items.get(id).await?.and_then(MemoryItem::of) else {
+            return Ok(Err(Answer::error("not_found", format!("No memory {id}."))));
+        };
         let memory = &found.memory;
         if !memory.status.live() {
             let by = memory.superseded_by.as_ref().map_or_else(String::new, |by| format!(" by {by}"));
             let message = format!("Memory {id} is {}{by}: vote on a live one.", memory.status.name());
-            return Err(Answer::error("conflict", message));
+            return Ok(Err(Answer::error("conflict", message)));
         }
-        let cast = items.get(&ballot).await.map_err(unavailable)?;
+        let cast = items.get(ballot).await?;
         let previous = cast.as_ref().and_then(|cast| cast.text("vote").parse::<Vote>().ok());
         let mut votes = memory.votes.clone();
         if let Some(previous) = previous {
@@ -171,13 +166,10 @@ async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
             },
             Write::Change { id: id.clone(), values: changed, expected: Some(found.item.revision) },
         ];
-        match items.write(&writes, context.thread.as_str()).await {
-            Ok(written) => return Ok(voted(&found, vote, previous, status, &votes, written[1].revision)),
-            Err(StoreError::Conflict { .. }) => continue,
-            Err(e) => return Err(unavailable(e)),
-        }
-    }
-    Err(Answer::error("conflict", format!("Memory {id} kept changing meanwhile: try again.")))
+        let written = items.write(&writes, context.thread.as_str()).await?;
+        Ok(Ok(voted(&found, vote, previous, status, &votes, written[1].revision)))
+    })
+    .await?
 }
 
 fn voted(

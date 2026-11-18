@@ -20,19 +20,13 @@ use serde_json::{Value, json};
 
 use crate::dream::{self, Dream, Finding, Judgement, State, Verdict};
 use crate::items::{Item, ItemId, Values};
-use crate::memory::invalid;
-use crate::store::{Items, StoreError, Write};
-use crate::tools::Answer;
+use crate::store::{Items, StoreError, Write, read_modify_write};
+use crate::tools::{Answer, MAX_REASON_CHARS};
 
 /// The kind of a proposal's item.
 pub const PROPOSAL: &str = "proposal";
 /// The hours from a proposal to the dream that may confirm it, at least.
 pub const CONFIRM_AFTER_HOURS: i64 = 12;
-/// The most characters of a proposal's reason.
-pub const MAX_REASON_CHARS: usize = 500;
-
-/// How many times a write is tried again on items changed meanwhile.
-const TRIES: usize = 3;
 
 /// Where a proposal stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,11 +193,11 @@ pub(crate) async fn refuse_untrusted(
     finding: Option<&str>,
 ) -> Result<(), Answer> {
     if let Some(finding) = finding
-        && dream::finding(items, finding).await.map_err(unavailable)?.is_none()
+        && dream::finding(items, finding).await?.is_none()
     {
         return Err(Answer::error("not_found", format!("No dream has a finding {finding:?}.")));
     }
-    match dream::untrusted(items, context, finding).await.map_err(unavailable)? {
+    match dream::untrusted(items, context, finding).await? {
         Some(why) => Err(Answer::error(
             "untrusted",
             format!("Refused: {why}; persona and skills change only on trusted ground."),
@@ -215,8 +209,8 @@ pub(crate) async fn refuse_untrusted(
 /// Write `proposal`, made in `context`, superseding the pending proposal of its target in the same event. Returns it
 /// and the id of the one it superseded.
 pub async fn propose(items: &dyn Items, proposal: Proposal) -> Result<(ProposalItem, Option<ItemId>), StoreError> {
-    let by = proposal.writer.thread.to_string();
-    for _ in 0..TRIES {
+    let (by, proposal) = (&proposal.writer.thread.to_string(), &proposal);
+    read_modify_write(|| async move {
         let earlier = pending_for(items, &proposal.target).await?;
         let id = ItemId::new();
         let mut writes = vec![Write::Create { id: id.clone(), kind: PROPOSAL.into(), values: proposal.values() }];
@@ -226,18 +220,11 @@ pub async fn propose(items: &dyn Items, proposal: Proposal) -> Result<(ProposalI
             values.insert("superseded_by".into(), json!(id));
             writes.push(Write::Change { id: earlier.id().clone(), values, expected: Some(earlier.item.revision) });
         }
-        match items.write(&writes, &by).await {
-            Ok(mut written) => {
-                let item = written.swap_remove(0);
-                let made =
-                    ProposalItem::of(item).ok_or_else(|| StoreError::Unavailable("unreadable proposal".into()))?;
-                return Ok((made, earlier.map(|earlier| earlier.id().clone())));
-            }
-            Err(StoreError::Conflict { .. }) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Err(StoreError::Unavailable("the proposals kept changing meanwhile".into()))
+        let item = items.write(&writes, by).await?.swap_remove(0);
+        let made = ProposalItem::of(item).ok_or_else(|| StoreError::Unavailable("unreadable proposal".into()))?;
+        Ok((made, earlier.map(|earlier| earlier.id().clone())))
+    })
+    .await
 }
 
 /// Decide the proposal `finding` of dream `number` offers, as `verdict` says, at `now`: applied confirms it, putting
@@ -255,19 +242,19 @@ pub(crate) async fn decide(
     let Some(id) = finding.items.first() else {
         return Err(Answer::error("not_found", format!("Finding {} names no proposal.", finding.id)));
     };
-    for _ in 0..TRIES {
+    read_modify_write(|| async move {
+        let gone = || StoreError::NotFound(id.clone());
         let (mut dream, revision) =
-            dream::get(items, number).await.map_err(unavailable)?.ok_or_else(|| gone(Dream::id(number)))?;
+            dream::get(items, number).await?.ok_or_else(|| StoreError::NotFound(Dream::id(number)))?;
         if dream.state == State::Done {
-            return Err(Answer::error("done", format!("Dream {number} is done: its diary is written.")));
+            return Ok(Err(Answer::error("done", format!("Dream {number} is done: its diary is written."))));
         }
-        let found =
-            items.get(id).await.map_err(unavailable)?.and_then(ProposalItem::of).ok_or_else(|| gone(id.clone()))?;
+        let found = items.get(id).await?.and_then(ProposalItem::of).ok_or_else(gone)?;
         let proposal = &found.proposal;
         let status = match verdict.verdict {
             Judgement::Applied => Status::Confirmed,
             Judgement::Rejected => Status::Rejected,
-            Judgement::Deferred => return Ok(found),
+            Judgement::Deferred => return Ok(Ok(found)),
         };
         dream.verdicts.retain(|earlier| earlier.finding != verdict.finding);
         dream.verdicts.push(verdict.clone());
@@ -277,10 +264,10 @@ pub(crate) async fn decide(
         let decided_here = proposal.decided.as_ref().is_some_and(|decided| decided.finding == finding.id);
         match (proposal.status, status) {
             (Status::Pending, _) => {}
-            (current, wanted) if current == wanted && decided_here => return Ok(found),
+            (current, wanted) if current == wanted && decided_here => return Ok(Ok(found)),
             (Status::Superseded | Status::Rejected, Status::Rejected) => {
-                write(items, &writes).await?;
-                return Ok(found);
+                items.write(&writes, dream::BY).await?;
+                return Ok(Ok(found));
             }
             (current, _) => {
                 let mut message = format!("Proposal {id} is {} already", current.name());
@@ -288,11 +275,13 @@ pub(crate) async fn decide(
                     let _ = write!(message, ", by {by}");
                 }
                 message.push_str(": reject this finding.");
-                return Err(Answer::error("decided", message));
+                return Ok(Err(Answer::error("decided", message)));
             }
         }
         if status == Status::Confirmed {
-            check(items, &found, now).await?;
+            if let Err(refused) = check(items, &found, now).await {
+                return Ok(Err(refused));
+            }
             let mut version = proposal.version.clone();
             version.insert("proposal".into(), json!(id));
             version.insert("confirmed".into(), json!(now));
@@ -308,16 +297,10 @@ pub(crate) async fn decide(
         values.insert("status".into(), json!(status));
         values.insert("decided".into(), json!(Decided { at: now, dream: number, finding: finding.id.clone() }));
         writes.push(Write::Change { id: id.clone(), values, expected: Some(found.item.revision) });
-        match items.write(&writes, dream::BY).await {
-            Ok(mut written) => {
-                let item = written.pop().ok_or_else(|| gone(id.clone()))?;
-                return ProposalItem::of(item).ok_or_else(|| gone(id.clone()));
-            }
-            Err(StoreError::Conflict { .. }) => {}
-            Err(e) => return Err(unavailable(e)),
-        }
-    }
-    Err(unavailable(StoreError::Unavailable(format!("dream {number} kept changing meanwhile"))))
+        let item = items.write(&writes, dream::BY).await?.pop().ok_or_else(gone)?;
+        Ok(Ok(ProposalItem::of(item).ok_or_else(gone)?))
+    })
+    .await?
 }
 
 /// Refuse confirming `found` at `now` when it is not ripe, its target changed since it was made, or it would change
@@ -332,7 +315,7 @@ async fn check(items: &dyn Items, found: &ProposalItem, now: DateTime<Utc>) -> R
         );
         return Err(Answer::error("too_soon", message));
     }
-    let target = items.get(&proposal.target).await.map_err(unavailable)?;
+    let target = items.get(&proposal.target).await?;
     let at = target.as_ref().map_or(0, |target| target.revision);
     if at != proposal.base {
         let message = format!(
@@ -355,10 +338,6 @@ async fn check(items: &dyn Items, found: &ProposalItem, now: DateTime<Utc>) -> R
         return Err(Answer::error("too_soon", message));
     }
     Ok(())
-}
-
-async fn write(items: &dyn Items, writes: &[Write]) -> Result<(), Answer> {
-    items.write(writes, dream::BY).await.map(drop).map_err(unavailable)
 }
 
 /// The values of version `values` of a target with its revision's metadata removed: what a proposal compares.
@@ -389,32 +368,20 @@ pub async fn versions(items: &dyn Items, target: &ItemId) -> Result<Vec<(u64, Da
     Ok(versions)
 }
 
-fn gone(id: ItemId) -> Answer {
-    unavailable(StoreError::NotFound(id))
-}
-
-pub(crate) fn unavailable(e: StoreError) -> Answer {
-    Answer::error("unavailable", format!("Proposals are not available: {e}."))
-}
-
-/// The reason given in `arguments`, sanitized; refused when missing.
-pub(crate) fn reason(arguments: &serde_json::Map<String, Value>) -> Result<String, Answer> {
-    let given = match arguments.get("reason") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(text)) => Some(text.trim()),
-        Some(_) => return Err(invalid("reason must be a string.".into())),
-    };
+/// The reason `given`, sanitized; refused when missing.
+pub(crate) fn reason(given: Option<&str>) -> Result<String, Answer> {
+    let given = given.map(str::trim);
     let sanitized =
         crate::sanitize::sanitize_title(given.unwrap_or_default(), crate::sanitize::Limit::Chars(MAX_REASON_CHARS));
     Ok(crate::memory::sanitized("reason", given, sanitized)?.text)
 }
 
-/// The finding named in `arguments`, if any.
-pub(crate) fn finding(arguments: &serde_json::Map<String, Value>) -> Result<Option<String>, Answer> {
-    match arguments.get("finding") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) if !text.trim().is_empty() => Ok(Some(text.trim().to_owned())),
-        Some(_) => Err(invalid("finding must be a finding's id, such as 3.1.".into())),
+/// The finding `given`, if any.
+pub(crate) fn finding(given: Option<&str>) -> Result<Option<String>, Answer> {
+    match given.map(str::trim) {
+        None => Ok(None),
+        Some("") => Err(Answer::invalid("finding must be a finding's id, such as 3.1.")),
+        Some(finding) => Ok(Some(finding.to_owned())),
     }
 }
 

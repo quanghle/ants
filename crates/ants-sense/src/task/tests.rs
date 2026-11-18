@@ -75,7 +75,7 @@ async fn task_external_references_cannot_inject_lines_into_briefs() {
     assert!(!answer.is_error, "{answer:?}");
     assert_eq!(answer.json["task"]["external_ref"], "bd:team-1 next");
     let invalid = invoke(&sense, json!({"action":"create","title":"Empty reference","external_ref":"\u{200b}"})).await;
-    assert_eq!(invalid.json["error"], "invalid");
+    assert_eq!(invalid.json["error"], "invalid_arguments");
 }
 
 #[tokio::test]
@@ -156,7 +156,7 @@ async fn task_relationships_validate_types_targets_duplicates_parentage_and_cycl
         json!({"action": "update", "id": c, "revision": 1, "dependencies": [{"kind": "discovered-from", "id": a}]}),
     )
     .await;
-    assert_eq!(cycle.json["error"], "invalid");
+    assert_eq!(cycle.json["error"], "invalid_arguments");
     assert!(cycle.text.contains("cycle"));
     assert_eq!(items.history(&c).await.unwrap().len(), 1);
     assert!(ready(&*items, 100).await.unwrap().iter().any(|task| task.id() == &b), "parent does not block");
@@ -171,7 +171,7 @@ async fn task_relationships_validate_types_targets_duplicates_parentage_and_cycl
         json!({"action": "update", "id": a, "revision": 2, "dependencies": [{"kind": "related", "id": c}]}),
     )
     .await;
-    assert_eq!(duplicate.json["error"], "invalid");
+    assert_eq!(duplicate.json["error"], "invalid_arguments");
     assert_eq!(items.history(&a).await.unwrap().len(), 2);
 }
 

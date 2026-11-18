@@ -3,39 +3,67 @@ use crate::sanitize::{Limit, Lines, sanitize};
 
 use super::*;
 
+/// The most characters of a reminder's title.
+const MAX_TITLE_CHARS: usize = 2_000;
+/// The longest postponement given in seconds: a year.
+const MAX_POSTPONE_SECONDS: u64 = 365 * 24 * 60 * 60;
+
 pub(super) fn schema() -> Value {
     json!({
         "type":"object","additionalProperties":false,
         "properties":{
             "action":{"enum":["create","list","show","ack","postpone","drop","renew"]},
             "id":{"type":"string"},
-            "title":{"type":"string","minLength":1,"maxLength":2000},
+            "title":{"type":"string","minLength":1,"maxLength":MAX_TITLE_CHARS},
             "trigger":trigger::schema(),
             "at":{"type":"string","format":"date-time","description":"Postpone until this RFC 3339 time."},
-            "after_seconds":{"type":"integer","minimum":1,"maximum":31536000,"description":"Postpone by this duration."},
+            "after_seconds":{
+                "type":"integer","minimum":1,"maximum":MAX_POSTPONE_SECONDS,"description":"Postpone by this duration."
+            },
             "revision":{"type":"integer","minimum":1}
         }
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Action {
+    Create,
+    List,
+    Show,
+    Ack,
+    Postpone,
+    Drop,
+    Renew,
+}
+
+/// The arguments of a `sense_remind` call.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Request {
+    action: Option<Action>,
+    id: Option<ItemId>,
+    title: Option<String>,
+    trigger: Option<Trigger>,
+    at: Option<DateTime<Utc>>,
+    after_seconds: Option<u64>,
+    revision: Option<u64>,
+}
+
 pub(super) async fn handle(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
-    for key in call.arguments.keys() {
-        if !["action", "id", "title", "trigger", "at", "after_seconds", "revision"].contains(&key.as_str()) {
-            return Err(invalid(&format!("Unknown reminder argument {key:?}.")));
-        }
+    let request: Request = crate::tools::arguments(call)?;
+    let action = request.action.unwrap_or(match (&request.trigger, &request.id) {
+        (Some(_), _) => Action::Create,
+        (None, Some(_)) => Action::Show,
+        (None, None) => Action::List,
+    });
+    if request.revision == Some(0) {
+        return Err(Answer::invalid("revision must be positive."));
     }
-    let args = &call.arguments;
-    let action = match args.get("action") {
-        Some(Value::String(action)) => action.as_str(),
-        None if args.contains_key("trigger") => "create",
-        None if args.contains_key("id") => "show",
-        None => "list",
-        _ => return Err(invalid("action must be a string.")),
-    };
     let items = sense.items(&call.context.ant).await.map_err(refused)?;
     let now = call.context.at;
     let by = call.context.thread.as_str();
-    if action == "list" {
+    if action == Action::List {
         let reminders = active(&*items, now).await.map_err(refused)?;
         let text = if reminders.is_empty() {
             "No active reminders.".into()
@@ -44,48 +72,40 @@ pub(super) async fn handle(sense: &Sense, call: &ToolCall) -> Result<Answer, Ans
         };
         return Ok(Answer { text, json: json!({"reminders":reminders}), is_error: false });
     }
-    if action == "create" {
-        return create(sense, &*items, call).await;
+    if action == Action::Create {
+        return create(sense, &*items, call, request).await;
     }
-    let id = args
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid("id must name a reminder."))?
-        .parse::<ItemId>()
-        .map_err(|_| invalid("id must be an item id."))?;
-    let item = get(&*items, &id).await.map_err(refused)?;
-    if let Some(revision) = args.get("revision") {
-        let revision =
-            revision.as_u64().filter(|revision| *revision > 0).ok_or_else(|| invalid("Invalid revision."))?;
-        if revision != item.revision {
-            return Err(refused(StoreError::Conflict { expected: revision, current: Box::new(item) }));
-        }
+    let id = request.id.as_ref().ok_or_else(|| Answer::invalid("id must name a reminder."))?;
+    let item = get(&*items, id).await.map_err(refused)?;
+    if let Some(revision) = request.revision
+        && revision != item.revision
+    {
+        return Err(refused(StoreError::Conflict { expected: revision, current: Box::new(item) }));
     }
-    if action == "show" {
+    if action == Action::Show {
         return Ok(answer(item));
     }
     deny_webhook_command(call, &trigger(&item).map_err(refused)?)?;
-    if action == "ack" && item.text("status") == "acknowledged" {
+    if action == Action::Ack && item.text("status") == "acknowledged" {
         return Ok(answer(item));
     }
-    let changed = mutation(&item, call, action)?;
+    let changed = mutation(&item, call, &request, action)?;
     let writes = [Write::Change { id: item.id.clone(), values: changed, expected: Some(item.revision) }];
     let item = write_creations(&*items, &writes, by, now).await.map_err(refused)?.remove(0);
     Ok(answer(item))
 }
 
-async fn create(sense: &Sense, items: &dyn Items, call: &ToolCall) -> Result<Answer, Answer> {
-    let args = &call.arguments;
+async fn create(sense: &Sense, items: &dyn Items, call: &ToolCall, request: Request) -> Result<Answer, Answer> {
     let now = call.context.at;
     let by = call.context.thread.as_str();
-    let title = args.get("title").and_then(Value::as_str).ok_or_else(|| invalid("title is required."))?;
-    let title = sanitize(title, Lines::Single, Limit::Chars(2000)).map_err(|error| invalid(&error.to_string()))?;
+    let title = request.title.as_deref().ok_or_else(|| Answer::invalid("title is required."))?;
+    let title = sanitize(title, Lines::Single, Limit::Chars(MAX_TITLE_CHARS))
+        .map_err(|error| Answer::invalid(format!("title: {error}.")))?;
     if title.text.trim().is_empty() {
-        return Err(invalid("title must be nonempty."));
+        return Err(Answer::invalid("title must be nonempty."));
     }
-    let trigger: Trigger = serde_json::from_value(args.get("trigger").cloned().unwrap_or_default())
-        .map_err(|error| invalid(&format!("Invalid trigger: {error}")))?;
-    trigger.validate().map_err(|error| invalid(&error))?;
+    let trigger = request.trigger.ok_or_else(|| Answer::invalid("trigger is required."))?;
+    trigger.validate().map_err(|error| Answer::invalid(format!("trigger: {error}.")))?;
     deny_webhook_command(call, &trigger)?;
     let at = trigger.first(now).map_err(refused)?;
     let mut values = values(json!({
@@ -104,14 +124,13 @@ async fn create(sense: &Sense, items: &dyn Items, call: &ToolCall) -> Result<Ans
     Ok(answer(write_creations(items, &writes, by, now).await.map_err(refused)?.remove(0)))
 }
 
-fn mutation(item: &Item, call: &ToolCall, action: &str) -> Result<Values, Answer> {
-    let args = &call.arguments;
+fn mutation(item: &Item, call: &ToolCall, request: &Request, action: Action) -> Result<Values, Answer> {
     let now = call.context.at;
     let mut changed = values(json!({WRITER:writer(&call.context)}));
     match action {
-        "ack" => {
+        Action::Ack => {
             if !matches!(item.text("status"), "active" | "exhausted" | "expired") {
-                return Err(invalid("Only an undropped reminder can be acknowledged."));
+                return Err(Answer::invalid("Only an undropped reminder can be acknowledged."));
             }
             changed.insert("pending".into(), Value::Null);
             changed.insert("acknowledged_at".into(), json!(now));
@@ -129,38 +148,36 @@ fn mutation(item: &Item, call: &ToolCall, action: &str) -> Result<Values, Answer
                 }
             }
         }
-        "drop" => {
+        Action::Drop => {
             changed.insert("pending".into(), Value::Null);
             changed.insert("next_due".into(), Value::Null);
             changed.insert("status".into(), "dropped".into());
         }
-        "postpone" => {
+        Action::Postpone => {
             if !matches!(item.text("status"), "active" | "exhausted") || expired(item, now) {
-                return Err(invalid("Only an active, unexpired reminder can be postponed."));
+                return Err(Answer::invalid("Only an active, unexpired reminder can be postponed."));
             }
-            let at = match (args.get("at"), args.get("after_seconds")) {
-                (Some(Value::String(at)), None) => {
-                    at.parse::<DateTime<Utc>>().map_err(|_| invalid("at must be an RFC 3339 time."))?
-                }
+            let at = match (request.at, request.after_seconds) {
+                (Some(at), None) => at,
                 (None, Some(seconds)) => {
-                    let seconds = seconds
-                        .as_u64()
-                        .filter(|seconds| *seconds > 0 && *seconds <= 31_536_000)
-                        .ok_or_else(|| invalid("after_seconds must be between 1 and 31536000."))?;
+                    if !(1..=MAX_POSTPONE_SECONDS).contains(&seconds) {
+                        let message = format!("after_seconds must be between 1 and {MAX_POSTPONE_SECONDS}.");
+                        return Err(Answer::invalid(message));
+                    }
                     add(now, Duration::seconds(seconds as i64)).map_err(refused)?
                 }
-                _ => return Err(invalid("Supply exactly one of at or after_seconds.")),
+                _ => return Err(Answer::invalid("Supply exactly one of at or after_seconds.")),
             };
             if at <= now {
-                return Err(invalid("Postponement time must be in the future."));
+                return Err(Answer::invalid("Postponement time must be in the future."));
             }
             changed.extend(values(json!({
                 "status":"active","pending":null,"next_due":at,"occurrence_firings":0,"snoozed":true
             })));
         }
-        "renew" => {
+        Action::Renew => {
             if !matches!(item.text("status"), "active" | "expired") {
-                return Err(invalid("Only an active or expired reminder can be renewed."));
+                return Err(Answer::invalid("Only an active or expired reminder can be renewed."));
             }
             changed.insert("expires".into(), json!(renewed_expiry(item, now).map_err(refused)?));
             if item.text("status") == "expired" || expired(item, now) {
@@ -175,7 +192,7 @@ fn mutation(item: &Item, call: &ToolCall, action: &str) -> Result<Values, Answer
                 })));
             }
         }
-        _ => return Err(invalid("Unknown reminder action.")),
+        Action::Create | Action::List | Action::Show => return Err(Answer::invalid("No change of a reminder.")),
     }
     Ok(changed)
 }
@@ -194,10 +211,6 @@ fn answer(item: Item) -> Answer {
     Answer { text: line(&item), json: json!({"reminder":item}), is_error: false }
 }
 
-fn invalid(message: &str) -> Answer {
-    Answer::error("invalid_arguments", message.into())
-}
-
 fn deny_webhook_command(call: &ToolCall, trigger: &Trigger) -> Result<(), Answer> {
     if trigger.condition().is_some_and(|condition| condition["kind"] == "command")
         && matches!(call.context.origin.by, ants_proto::provider::Starter::Webhook { .. })
@@ -207,18 +220,11 @@ fn deny_webhook_command(call: &ToolCall, trigger: &Trigger) -> Result<(), Answer
     Ok(())
 }
 
+/// The refusal of a call its store failed, showing the reminder found at another revision.
 fn refused(error: StoreError) -> Answer {
-    let code = match error {
-        StoreError::NotFound(_) => "not_found",
-        StoreError::Conflict { .. } => "conflict",
-        _ => "unavailable",
-    };
-    let mut answer = Answer::error(code, format!("Reminder not changed: {error}."));
-    if let StoreError::Conflict { current, .. } = error {
-        if current.kind == KIND {
-            answer.json["reminder"] = json!(current);
-        }
-        answer.json["current"] = json!(current);
+    let mut answer = Answer::from(error);
+    if answer.json["current"]["kind"] == KIND {
+        answer.json["reminder"] = answer.json["current"].clone();
     }
     answer
 }

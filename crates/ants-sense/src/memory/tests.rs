@@ -115,17 +115,26 @@ fn remotes_normalize_to_host_and_path() {
     assert!("team".parse::<Scope>().is_err() && "human:Not A Name".parse::<Scope>().is_err());
 }
 
+#[test]
+fn the_remote_of_a_git_config_is_origin_else_the_first() {
+    let config = "[core]\n\tbare = false\n[remote \"upstream\"]\n\turl = https://github.com/up/repo.git\n\
+                  [Remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n\tURL = \"git@GitHub.com:o/r.git\"\n";
+    assert_eq!(remote_url(config), Some("git@GitHub.com:o/r.git"));
+    assert_eq!(remote_url("[remote \"fork\"]\nurl = ssh://git@host:22/f/r # mine\n"), Some("ssh://git@host:22/f/r"));
+    assert_eq!(remote_url("[core]\n\turl = https://h/o/r\n[branch \"main\"]\n\tremote = origin\n"), None);
+}
+
 #[tokio::test]
 async fn a_memory_is_validated_and_stamped_by_ants_never_by_its_text() {
     let (sense, store) = sense().await;
     let cases = [
-        (json!({"title": "t", "body": "b"}), "invalid"),
-        (json!({"kind": "rumour", "title": "t", "body": "b"}), "invalid"),
-        (json!({"kind": "fact", "title": " ", "body": "b"}), "invalid"),
-        (json!({"kind": "fact", "title": "t"}), "invalid"),
-        (json!({"kind": "fact", "title": "t", "body": "b", "importance": 6}), "invalid"),
-        (json!({"kind": "fact", "title": "t", "body": "b", "scope": "team"}), "invalid"),
-        (json!({"kind": "fact", "title": "t", "body": "b", "citations": ["x.rs:9-3"]}), "invalid"),
+        (json!({"title": "t", "body": "b"}), "invalid_arguments"),
+        (json!({"kind": "rumour", "title": "t", "body": "b"}), "invalid_arguments"),
+        (json!({"kind": "fact", "title": " ", "body": "b"}), "invalid_arguments"),
+        (json!({"kind": "fact", "title": "t"}), "invalid_arguments"),
+        (json!({"kind": "fact", "title": "t", "body": "b", "importance": 6}), "invalid_arguments"),
+        (json!({"kind": "fact", "title": "t", "body": "b", "scope": "team"}), "invalid_arguments"),
+        (json!({"kind": "fact", "title": "t", "body": "b", "citations": ["x.rs:9-3"]}), "invalid_arguments"),
         (json!({"kind": "fact", "title": "t".repeat(201), "body": "b"}), "too_long"),
         (json!({"kind": "fact", "title": "t", "body": "b".repeat(4097)}), "too_long"),
     ];

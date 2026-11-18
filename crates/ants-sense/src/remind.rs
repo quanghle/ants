@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::items::{Item, ItemId, Values};
-use crate::store::{Items, StoreError, Write};
+use crate::store::{Items, StoreError, Write, read_modify_write};
 use crate::{Answer, Sense};
 
 mod tool;
@@ -24,7 +24,6 @@ pub use trigger::Trigger;
 pub const KIND: &str = "reminder";
 pub const MAX_ACTIVE: usize = 50;
 pub const CONDITION_DAYS: i64 = 30;
-const RETRIES: usize = 8;
 const SCHEDULER: &str = "sense:scheduler";
 
 /// One due trigger. A pending delivery has no condition to re-evaluate.
@@ -136,7 +135,7 @@ pub async fn prepare_firing(
     now: DateTime<Utc>,
     reason: &str,
 ) -> Result<Option<Firing>, StoreError> {
-    for _ in 0..RETRIES {
+    read_modify_write(|| async move {
         let item = get(items, id).await?;
         if let Some(firing) = pending(&item)? {
             return Ok(Some(firing));
@@ -145,10 +144,8 @@ pub async fn prepare_firing(
             return Ok(None);
         }
         if expired(&item, now) {
-            match expire(items, &item).await {
-                Err(StoreError::Conflict { .. }) => continue,
-                result => return result.map(|_| None),
-            }
+            expire(items, &item).await?;
+            return Ok(None);
         }
         if date(&item, "next_due").is_none_or(|at| at > now) {
             return Ok(None);
@@ -156,12 +153,9 @@ pub async fn prepare_firing(
         if trigger(&item)?.condition().is_some() && number(&item, "occurrence_firings") == 0 && !snoozed(&item) {
             return Ok(None);
         }
-        match prepare(items, &item, now, reason, Values::new()).await {
-            Err(StoreError::Conflict { .. }) => continue,
-            result => return result.map(Some),
-        }
-    }
-    Err(busy())
+        prepare(items, &item, now, reason, Values::new()).await.map(Some)
+    })
+    .await
 }
 
 /// Confirm an actual successful wake. A retry of the same confirmation is a no-op; an older id cannot confirm a
@@ -172,7 +166,7 @@ pub async fn confirm_delivered(
     firing_id: &str,
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
-    for _ in 0..RETRIES {
+    read_modify_write(|| async move {
         let item = get(items, id).await?;
         let Some(firing) = pending(&item)? else { return Ok(()) };
         if firing.id != firing_id {
@@ -184,12 +178,9 @@ pub async fn confirm_delivered(
         } else {
             finish_occurrence(&item, now, &mut values)?;
         }
-        match change(items, &item, values, SCHEDULER, true).await {
-            Err(StoreError::Conflict { .. }) => continue,
-            result => return result.map(drop),
-        }
-    }
-    Err(busy())
+        change(items, &item, values, SCHEDULER, true).await.map(drop)
+    })
+    .await
 }
 
 /// Record a condition check without changing its prior observation.
@@ -225,16 +216,14 @@ pub async fn reserve_condition(
     id: &ItemId,
     now: DateTime<Utc>,
 ) -> Result<Option<ConditionCheck>, StoreError> {
-    for _ in 0..RETRIES {
+    read_modify_write(|| async move {
         let item = get(items, id).await?;
         if pending(&item)?.is_some() || item.text("status") != "active" {
             return Ok(None);
         }
         if expired(&item, now) {
-            match expire(items, &item).await {
-                Err(StoreError::Conflict { .. }) => continue,
-                result => return result.map(|_| None),
-            }
+            expire(items, &item).await?;
+            return Ok(None);
         }
         if date(&item, "next_due").is_none_or(|at| at > now) {
             return Ok(None);
@@ -247,22 +236,18 @@ pub async fn reserve_condition(
             return Ok(None);
         };
         let next = add(now, interval(condition, number(&item, "unchanged_checks")))?;
-        match change(items, &item, values(json!({"next_due":next,"check_started":now})), SCHEDULER, true).await {
-            Err(StoreError::Conflict { .. }) => continue,
-            Ok(reserved) => {
-                return Ok(Some(ConditionCheck {
-                    id: reserved.id,
-                    revision: reserved.revision,
-                    at: now,
-                    condition: condition.clone(),
-                    observation: item.values.get("observation").cloned(),
-                    workdir: item.values.get("workdir").and_then(Value::as_str).map(PathBuf::from),
-                }));
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(busy())
+        let reserved =
+            change(items, &item, values(json!({"next_due":next,"check_started":now})), SCHEDULER, true).await?;
+        Ok(Some(ConditionCheck {
+            id: reserved.id,
+            revision: reserved.revision,
+            at: now,
+            condition: condition.clone(),
+            observation: item.values.get("observation").cloned(),
+            workdir: item.values.get("workdir").and_then(Value::as_str).map(PathBuf::from),
+        }))
+    })
+    .await
 }
 
 /// Apply a reserved probe's result. Postponement, acknowledgement or a newer reservation invalidates the probe.
@@ -401,9 +386,10 @@ pub(crate) async fn write_creations(
     if added == 0 {
         return items.write(writes, by).await;
     }
-    let guard = ItemId::named("reminder-quota", "active");
-    for _ in 0..RETRIES {
-        let quota = items.get(&guard).await?;
+    let guard = &ItemId::named("reminder-quota", "active");
+    // Only a conflict on the quota is decided again: one on the writes given is the caller's to answer.
+    read_modify_write(|| async move {
+        let quota = items.get(guard).await?;
         let count = items
             .list_by(KIND, "status", Some(&json!("active")), usize::MAX)
             .await?
@@ -422,15 +408,17 @@ pub(crate) async fn write_creations(
             expected: Some(revision),
         });
         match items.write(&batch, by).await {
-            Err(StoreError::Conflict { current, .. }) if current.id == guard => continue,
             Ok(mut items) => {
                 items.pop();
-                return Ok(items);
+                Ok(Ok(items))
             }
-            result => return result,
+            Err(StoreError::Conflict { expected, current }) if current.id != *guard => {
+                Ok(Err(StoreError::Conflict { expected, current }))
+            }
+            Err(e) => Err(e),
         }
-    }
-    Err(busy())
+    })
+    .await?
 }
 
 /// The changes resuming the reminders paused while the ant was dormant, from `since` to `until`: each active one
@@ -530,10 +518,6 @@ pub(crate) async fn change(
 
 fn add(at: DateTime<Utc>, duration: Duration) -> Result<DateTime<Utc>, StoreError> {
     at.checked_add_signed(duration).ok_or_else(|| StoreError::Unavailable("reminder time is out of range".into()))
-}
-
-fn busy() -> StoreError {
-    StoreError::Unavailable("reminder changed repeatedly; retry the operation".into())
 }
 
 #[cfg(test)]

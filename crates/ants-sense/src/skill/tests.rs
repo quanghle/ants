@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use serde_json::json;
+use serde_json::{Map, json};
 
 use super::*;
 use crate::memory::tests::{context, human, sense, tool};
@@ -57,18 +57,18 @@ async fn a_skill_takes_effect_once_a_later_dream_confirms_it_and_keeps_every_ver
     let reason = "Releases go wrong.";
     let files = json!({"scripts/tag.sh": "git tag v1\n"});
     let refusals = [
-        (json!({"name": "release", "files": files, "reason": reason}), "invalid"),
-        (json!({"name": "Release", "content": CONTENT, "reason": reason}), "invalid"),
-        (json!({"name": "notes", "content": CONTENT, "reason": reason}), "invalid"),
-        (json!({"name": "release", "content": "# Release\n", "reason": reason}), "invalid"),
-        (json!({"name": "release", "content": CONTENT}), "invalid"),
-        (json!({"name": "release", "content": CONTENT, "files": {"../x": "y"}, "reason": reason}), "invalid"),
+        (json!({"name": "release", "files": files, "reason": reason}), "invalid_arguments"),
+        (json!({"name": "Release", "content": CONTENT, "reason": reason}), "invalid_arguments"),
+        (json!({"name": "notes", "content": CONTENT, "reason": reason}), "invalid_arguments"),
+        (json!({"name": "release", "content": "# Release\n", "reason": reason}), "invalid_arguments"),
+        (json!({"name": "release", "content": CONTENT}), "invalid_arguments"),
+        (json!({"name": "release", "content": CONTENT, "files": {"../x": "y"}, "reason": reason}), "invalid_arguments"),
         (
             json!({"name": "release", "content": CONTENT, "files": {"a": "x".repeat(MAX_FILE_BYTES + 1)}, "reason": reason}),
             "too_long",
         ),
         (json!({"name": "release", "remove": true, "reason": reason}), "not_found"),
-        (json!({"content": CONTENT, "reason": reason}), "invalid"),
+        (json!({"content": CONTENT, "reason": reason}), "invalid_arguments"),
     ];
     for (arguments, code) in refusals {
         assert_eq!(error(&call(&sense, arguments.clone()).await), code, "{arguments}");
