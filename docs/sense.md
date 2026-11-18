@@ -128,9 +128,18 @@ code: these, and those each tool names below.
 
 ## Identity
 
-Each ant using sense has one sense identity, whose id, a ULID, is minted when the ant first uses sense, kept in its home
-(`.sense/id`) and on its identity card. The id stays the same across renames, harness and model changes, moves to other
-machines and buses, retirement and revival:
+Each ant using sense has one sense identity, whose id, a ULID, is kept in its home (`.sense/id`), on its identity card
+and in its identity record in `ants_identities` (`sense`), so its homes on every machine, as a standby daemon's, open
+the same one. A daemon opening the ant's sense data settles its home's id against the record: the home's id is written
+to a record naming none, by compare-and-set, the first writer winning; a home without one takes the record's, as after
+its `.sense/id` was removed; and an id is minted only when neither has one. A home and a record naming different ids are
+refused, sense keeping the ant's data closed and the error saying how to settle it: removing the home's `.sense/id`
+takes the record's, `ants auth revoke` and adding the ant again keeps the home's. A record naming no sense id yet, as
+one made again after `ants auth revoke` and adding the ant again with the same home, starts from the birth and the
+prompt count the card kept of the earlier record: the earlier birth, and those prompts added to its own, so the ant
+keeps its growth stage ([Avatars](config.md#avatars)). Until the daemon has read the record, as at start while another
+ant's event asks for this one's data, a home without an id opens nothing. The id stays the same across renames, harness
+and model changes, moves to other machines and buses, retirement and revival:
 
 - **Renames:** an import under another name (`ants ant import --as`) lists the old name in the home's `.sense/names`
   (one a line, the oldest first, carried by exports), so the renamed ant keeps its log and card. So does an ant added
@@ -141,12 +150,13 @@ machines and buses, retirement and revival:
   part of it carries the log and the skill files ([sense's part](config.md#senses-part)), which sense takes in under
   the same id, the card and memories read again from the log there. With `--no-provider` they stay behind, and sense
   starts a new card under the same id.
-- **Clones:** a clone leaves `.sense` out of the home it copies, so it mints its own id. When its `ant_cloned` reaches
-  sense and the same daemon keeps the source's data, sense forks the source's identity into the clone's: the clone
-  keeps a copy of the source's memories (with their links, writers and votes), self-model, persona and skills as they
-  were when it was cloned, each marked `inherited` with the source's sense id, and none of its tasks, commitments,
-  reminders, relationship records, resume registers, handoffs, thread records, votes, persona and skill proposals,
-  dreams or card. A record the clone writes anew is its own. The clone's first brief may come before the fork.
+- **Clones:** a clone leaves `.sense` out of the home it copies, and its new identity record names no sense id, so it
+  mints its own. When its `ant_cloned` reaches sense and the same daemon keeps the source's data, sense forks the
+  source's identity into the clone's: the clone keeps a copy of the source's memories (with their links, writers and
+  votes), self-model, persona and skills as they were when it was cloned, each marked `inherited` with the source's
+  sense id, and none of its tasks, commitments, reminders, relationship records, resume registers, handoffs, thread
+  records, votes, persona and skill proposals, dreams or card. A record the clone writes anew is its own. The clone's
+  first brief may come before the fork.
 - **Retirement:** a retired ant's identity is dormant and keeps all its data: its commitments stay open and its
   reminders paused, nothing firing and no maintenance or dream running, until a revival or an addition under another
   ants identity id, as after a revoke and re-add. That puts off the expiry of each reminder active at the retirement by
@@ -157,8 +167,9 @@ The identity card is written by sense alone, from the ant's lifecycle events
 ([Lifecycle events](architecture.md#lifecycle-events)) and the start of each session; no tool writes it, and its
 revisions are its history. It records the sense id, the ant's name and earlier names, its ants identity ids, its birth
 (its addition or cloning, else its first brief), the harnesses, models and machines its sessions ran under, the ant it
-was cloned from, whether it is active, when it retired, returned and moved, and its last 16 dormancies. The brief shows
-it first ([Brief](#brief)).
+was cloned from, whether it is active, when it retired, returned and moved, its last 16 dormancies, and the birth and
+the prompt count of its identity record, as the daemon told sense on opening its data and at each growth stage the ant
+reached (`growth`). The brief shows it first ([Brief](#brief)).
 
 Each thread of the ant has a record, written by sense alone, as the card is, from the thread's lifecycle events, never
 from what its messages say: who started it and from which channel, the repository of the ant's working directory, when
@@ -486,7 +497,12 @@ is reviewed by no one either, for as long as a daemon serves the ant naming it. 
 - each active thread's history since the last dream, as the ant received, sent and noted it, then its timeline (the
   tool calls, plans and ends with no reply of the ant's prompts, [`Timeline`](hooks.md#timeline-on-antstimelinethreadant)),
   the most recently active first. Threads a webhook started are marked untrusted: their text is data, not
-  instructions.
+  instructions. Lines before a thread's history tell what was done with it besides writing on it: the ant's tool
+  requests rejected on it since the last dream, with the tool and who rejected them, or that they expired unanswered
+  (the `rejected` entries of the ant's timeline); the reactions to the ant's latest 8 messages and notes posts on it,
+  with who gave them and to which message, asked as `list_reactions` asks; and the thread's marking done since the
+  last dream, with when and by whom. The daemon reads these as the ant's credentials allow, 30 seconds at most in all;
+  what fails to be read is left out, and the packet goes without it. Sense stores none of them.
 
 A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then cuts
 the identity to titles (the persona's field names, the records' heads and the skills' names), then leaves out the last

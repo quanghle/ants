@@ -4,6 +4,12 @@
 //! process restart. One retry worker per host connection drains durable local outboxes after reconnect. An ant's sense
 //! data travel to another bus by export and import ([`ants_sense::export`]); a home awaiting the import opens none of
 //! them until it lands.
+//!
+//! The ant's identity record names its sense id ([`ants_proto::AntIdentity::sense`]), so its homes on every machine
+//! open the same sense identity: the id of a home is written to a record naming none, the first writer winning, a home
+//! without one takes the record's, an id is minted only when neither has one, and a home and a record naming different
+//! ones are refused ([`SenseStores::identify`]). The card keeps the birth and the prompt count the record holds, which a
+//! record made again for the ant, as after a revoke and re-add, starts from ([`note_growth`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,11 +17,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::provider::BoxFuture;
-use ants_proto::{JsDomain, Machine, SenseId, UserId};
+use ants_proto::{AntIdentity, JsDomain, Machine, SenseId, UserId};
 use ants_sense::cache::Cache;
 use ants_sense::export::{self, SenseExport};
 use ants_sense::home::Home;
-use ants_sense::identity;
+use ants_sense::identity::{self, Growth};
 use ants_sense::log::{
     AccountVerifier, AntLog, AppendError, Event, EventLog, LogError, LogErrorKind, Revocations, Signature, Signer,
     Stored, Verifier, VerifyError,
@@ -26,6 +32,7 @@ use async_nats::jetstream;
 use serde::{Deserialize, Serialize};
 
 use super::log::{AntSigner, DeviceRevocations, JetStreamLog};
+use crate::profile::identity::Identity;
 
 /// The items of the ants a process serves, reached over its host connection.
 #[derive(Default)]
@@ -58,6 +65,21 @@ struct Served {
     /// A digest of the credentials as they were when served: the items, signed with them, open again once they change.
     signer: Option<u64>,
     items: Arc<tokio::sync::Mutex<Option<Opened>>>,
+    named: Named,
+}
+
+/// What names the sense id of an ant served besides its home.
+#[derive(Clone, Default)]
+enum Named {
+    /// Its daemon has not read its identity record yet: its items open only under the id its home keeps.
+    #[default]
+    Awaited,
+    /// No identity record, as without an identities bucket: the home's id, minted there when it has none.
+    Home,
+    /// Its identity record, which the home's id is settled against on the next opening.
+    Record(Arc<Identity>),
+    /// The home's id is the one the record names.
+    Settled,
 }
 
 type Opened = Arc<dyn Items>;
@@ -183,9 +205,29 @@ impl SenseStores {
         {
             return;
         }
-        let served = Served { home: home.to_owned(), creds, signer, items: Arc::default() };
+        let served = Served { home: home.to_owned(), creds, signer, items: Arc::default(), named: Named::Awaited };
         state.ants.insert(ant.clone(), served);
         self.changed.notify_one();
+    }
+
+    /// The daemon of `ant`, served, read its identity `record`, None when it has none, as without an identities bucket.
+    /// Until then a home without a sense id opens nothing: the home's id is settled against the record on the next
+    /// opening of its items, written to it when it names none, a home without one taking the record's or, when the
+    /// record names none either, a new one written to the record first; a home and a record naming different ones are
+    /// refused, the items opened before closed. Without a record, the home's id is minted when it has none.
+    pub fn identify(&self, ant: &UserId, record: Option<Identity>) {
+        if let Some(served) = self.state().ants.get_mut(ant) {
+            served.named = record.map_or(Named::Home, |record| Named::Record(Arc::new(record)));
+        }
+    }
+
+    /// The home's id of `ant` is settled against the record in `named`, if `items` are still the ones served.
+    fn settled(&self, ant: &UserId, items: &Arc<tokio::sync::Mutex<Option<Opened>>>) {
+        if let Some(served) = self.state().ants.get_mut(ant)
+            && Arc::ptr_eq(&served.items, items)
+        {
+            served.named = Named::Settled;
+        }
     }
 
     async fn retry_pending(&self) {
@@ -221,6 +263,7 @@ struct Of {
     creds: Option<PathBuf>,
     link: Option<Arc<Link>>,
     route: Route,
+    named: Named,
 }
 
 impl SenseStores {
@@ -232,14 +275,14 @@ impl SenseStores {
             Host::Up(link) => Some(link.clone()),
         };
         let (items, home, creds) = (served.items.clone(), served.home.clone(), served.creds.clone());
-        Ok(Of { items, home, creds, link, route: state.route.clone() })
+        Ok(Of { items, home, creds, link, route: state.route.clone(), named: served.named.clone() })
     }
 }
 
 impl Stores for SenseStores {
     fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         Box::pin(async move {
-            let Of { items, home, creds, link, route } = self.of(ant)?;
+            let Of { items: slot, home, creds, link, route, named } = self.of(ant)?;
             let files = Home::new(&home);
             if files.awaits_import() {
                 return Err(StoreError::Unavailable(format!(
@@ -248,29 +291,55 @@ impl Stores for SenseStores {
                     files.importing().display()
                 )));
             }
-            let mut opened = items.lock().await;
-            if let Some(current) = opened.as_ref() {
-                match current.sync().await {
+            let mut opened = slot.lock().await;
+            let mut current = opened.clone();
+            if let Some(items) = &current {
+                match items.sync().await {
                     Err(StoreError::Log(error))
-                        if error.kind == LogErrorKind::Incarnation && current.pending().await? == 0 =>
+                        if error.kind == LogErrorKind::Incarnation && items.pending().await? == 0 =>
                     {
                         *opened = None;
+                        current = None;
                     }
                     // The items remain readable, including when a conflict requires explicit reconciliation.
-                    Ok(()) | Err(StoreError::Log(_)) | Err(StoreError::Unavailable(_)) => return Ok(current.clone()),
+                    Ok(()) | Err(StoreError::Log(_)) | Err(StoreError::Unavailable(_)) => {}
                     Err(error) => return Err(error),
                 }
             }
-            if link.is_none() && !files.cache().exists() {
-                return Err(match self.state().host {
-                    Host::Connecting => StoreError::Unavailable("the host connection is not up yet".into()),
-                    _ => StoreError::NotKept("no host connection".into()),
-                });
+            let items = match current {
+                Some(items) => items,
+                None => {
+                    if link.is_none() && !files.cache().exists() {
+                        return Err(match self.state().host {
+                            Host::Connecting => StoreError::Unavailable("the host connection is not up yet".into()),
+                            _ => StoreError::NotKept("no host connection".into()),
+                        });
+                    }
+                    if let Named::Record(record) = &named {
+                        take_named(ant, &home, record).await?;
+                    }
+                    let items =
+                        open(ant, &home, creds.as_deref(), link.as_deref(), route, matches!(named, Named::Home))
+                            .await
+                            .map_err(|e| StoreError::Unavailable(format!("opening the sense data of {ant}: {e:#}")))?;
+                    *opened = Some(items.clone());
+                    items
+                }
+            };
+            if let Named::Record(record) = &named
+                && link
+                    .is_some_and(|link| link.js.client().connection_state() == async_nats::connection::State::Connected)
+            {
+                match settle(ant, &home, record, &*items).await {
+                    Ok(true) => self.settled(ant, &slot),
+                    // Settled on a later opening, the record unread meanwhile.
+                    Ok(false) => {}
+                    Err(refused) => {
+                        *opened = None;
+                        return Err(refused);
+                    }
+                }
             }
-            let items = open(ant, &home, creds.as_deref(), link.as_deref(), route)
-                .await
-                .map_err(|e| StoreError::Unavailable(format!("opening the sense data of {ant}: {e:#}")))?;
-            *opened = Some(items.clone());
             Ok(items)
         })
     }
@@ -293,7 +362,7 @@ impl Stores for SenseStores {
 
     fn import<'a>(&'a self, ant: &'a UserId, export: SenseExport) -> BoxFuture<'a, Result<(), StoreError>> {
         Box::pin(async move {
-            let Of { items, home, creds, link, route } = self.of(ant)?;
+            let Of { items, home, creds, link, route, .. } = self.of(ant)?;
             let link = link.ok_or_else(|| StoreError::Unavailable("no host connection".into()))?;
             let mut opened = items.lock().await;
             *opened = None;
@@ -346,21 +415,82 @@ async fn import(
     export::import_done(home).map_err(|e| unavailable(e.into()))
 }
 
-/// The items of `ant`, whose home is `home`, its sense id minted there first if it has none, signed with its
-/// credentials at `creds`, over `link`; its events under the earlier names its home lists are its own.
+/// Have the home of `ant`, `home`, keep a sense id when it keeps none: the one its identity `record` names, or a new
+/// one the record then names, unless another daemon named one first. Nothing when it keeps one, which [`settle`]
+/// settles against the record once opened.
+async fn take_named(ant: &UserId, home: &Path, record: &Identity) -> Result<(), StoreError> {
+    let unavailable = |e: anyhow::Error| StoreError::Unavailable(format!("naming the sense identity of {ant}: {e:#}"));
+    if identity::read_id(home).map_err(|e| unavailable(e.into()))?.is_some() || Home::new(home).has_pending_writes() {
+        return Ok(());
+    }
+    let minted = SenseId::new();
+    let named = record.name_sense(&minted, None).await.map_err(unavailable)?;
+    let sense = named.and_then(|record| record.sense).unwrap_or(minted);
+    identity::keep_id(home, &sense).map_err(|e| unavailable(e.into()))
+}
+
+/// Settle the sense id of `items`, those of `ant` whose home is `home`, against its identity `record`, naming it there
+/// when the record names none, the record then starting from the growth the card kept of an earlier one, as after a
+/// revoke and re-add, and noting the record's on the card: whether it is settled, false when the record or the card
+/// cannot be read; refused when the record names another sense id, with how to settle that.
+async fn settle(ant: &UserId, home: &Path, record: &Identity, items: &dyn Items) -> Result<bool, StoreError> {
+    let sense = items.sense().await;
+    let unsettled = |e: &dyn std::fmt::Display| {
+        tracing::warn!(%ant, error = format!("{e:#}"), "naming the sense identity in the ant's identity record");
+        Ok(false)
+    };
+    let earlier = match identity::card(items).await {
+        Ok(card) => card.and_then(|card| card.growth).map(|growth| (growth.born, growth.prompts)),
+        Err(e) => return unsettled(&e),
+    };
+    let stored = match record.name_sense(&sense, earlier).await {
+        Ok(stored) => stored,
+        Err(e) => return unsettled(&e),
+    };
+    match stored.as_ref().and_then(|stored| stored.sense.as_ref()) {
+        Some(named) if *named != sense => Err(StoreError::Unavailable(format!(
+            "the home of {ant} keeps sense identity {sense} and its identity record names {named}: removing {} takes \
+             the record's, `ants auth revoke {ant}` and adding it again keeps the home's",
+            Home::new(home).id().display()
+        ))),
+        _ => {
+            if let Some(stored) = &stored
+                && let Err(e) = note_growth(ant, items, stored).await
+            {
+                tracing::warn!(%ant, error = format!("{e:#}"), "noting the ant's growth on its card");
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// Note on the card of `ant` in `items` the birth and the prompt count its identity `record` holds, when the record
+/// names their sense id, so a record made again for the ant starts from them ([`settle`]).
+pub(super) async fn note_growth(ant: &UserId, items: &dyn Items, record: &AntIdentity) -> Result<(), StoreError> {
+    if record.sense.as_ref() != Some(&items.sense().await) {
+        return Ok(());
+    }
+    identity::record_growth(items, ant, Growth { born: record.born, prompts: record.prompts }).await.map(drop)
+}
+
+/// The items of `ant`, whose home is `home`, under the sense id it keeps, minted there first if it has none when
+/// `mint`, signed with its credentials at `creds`, over `link`; its events under the earlier names its home lists are
+/// its own.
 async fn open(
     ant: &UserId,
     home: &Path,
     creds: Option<&Path>,
     link: Option<&Link>,
     route: Route,
+    mint: bool,
 ) -> Result<Arc<dyn Items>> {
     let sense = match identity::read_id(home)? {
         Some(sense) => sense,
         None if Home::new(home).has_pending_writes() => {
             anyhow::bail!("sense identity missing while pending writes remain; cache left untouched");
         }
-        None => identity::sense_id(home)?,
+        None if mint => identity::sense_id(home)?,
+        None => anyhow::bail!("waiting for the daemon of {ant} to read its identity record, which names its sense id"),
     };
     let earlier =
         identity::earlier_names(home).with_context(|| format!("reading {}", Home::new(home).names().display()))?;

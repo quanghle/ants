@@ -61,6 +61,7 @@ impl Fake {
                 started_by: "human alice".into(),
                 text: format!("the work of {id}"),
                 timeline: format!("the calls of {id}"),
+                actions: Vec::new(),
             })
             .collect();
     }
