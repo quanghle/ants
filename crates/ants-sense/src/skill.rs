@@ -17,14 +17,14 @@ use std::path::{Component, Path, PathBuf};
 
 use ants_proto::UserId;
 use ants_proto::provider::{BoxFuture, ToolCall};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::Sense;
 use crate::home::Home;
-use crate::items::{Item, ItemId, Values};
+use crate::items::{Item, ItemId, Values, stamp, values_of};
 use crate::memory::{holds_recalled_marker, redacted};
-use crate::proposal::{self, Proposal, ProposalItem, Status, time};
+use crate::proposal::{self, Confirmation, Proposal, ProposalItem, Status, time};
 use crate::sanitize::{Limit, Redaction, sanitize_body};
 use crate::store::{Items, StoreError};
 use crate::tools::Answer;
@@ -66,22 +66,36 @@ pub struct Skill {
 impl Skill {
     /// The skill `item` holds; none for a skill removed.
     pub fn of(item: &Item) -> Option<Self> {
-        if item.kind != SKILL || item.values.get("removed").and_then(Value::as_bool) == Some(true) {
-            return None;
-        }
-        let files = files_of(&item.values);
+        let version = Version::of(&item.values).filter(|version| item.kind == SKILL && !version.removed)?;
+        let files = version.files.unwrap_or_default();
         files.contains_key(SKILL_FILE).then(|| Self {
-            name: item.text("name").to_owned(),
-            description: item.text("description").to_owned(),
+            name: version.name,
+            description: version.description.unwrap_or_default(),
             files,
             revision: item.revision,
         })
     }
 }
 
-fn files_of(values: &Values) -> BTreeMap<String, String> {
-    let files = values.get("files").and_then(Value::as_object).into_iter().flatten();
-    files.filter_map(|(path, text)| Some((path.clone(), text.as_str()?.to_owned()))).collect()
+/// A version of a skill, as its item and its proposals hold it beside their [`proposal::Confirmation`]: a removed
+/// one holds its name alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Version {
+    name: String,
+    description: Option<String>,
+    files: Option<BTreeMap<String, String>>,
+    #[serde(default, with = "crate::items::flag")]
+    removed: bool,
+}
+
+impl Version {
+    fn of(values: &Values) -> Option<Self> {
+        serde_json::from_value(Value::Object(values.clone())).ok()
+    }
+
+    fn files(values: &Values) -> BTreeMap<String, String> {
+        Self::of(values).and_then(|version| version.files).unwrap_or_default()
+    }
 }
 
 /// The confirmed skills in `items`, by name.
@@ -285,23 +299,18 @@ async fn propose(items: &dyn Items, call: &ToolCall, request: &Request, name: &s
     let current = items.get(&id).await?;
     let live = current.as_ref().and_then(Skill::of);
     let mut redactions = Vec::new();
-    let (mut version, summary) = if request.remove == Some(true) {
+    let (version, summary) = if request.remove == Some(true) {
         if request.content.is_some() || request.files.is_some() {
             return Err(Answer::invalid("remove takes no content or files."));
         }
         let Some(live) = &live else {
             return Err(Answer::error("not_found", format!("No skill {name} to remove.")));
         };
-        let mut version = Values::new();
-        version.insert("name".into(), json!(name));
-        version.insert("removed".into(), json!(true));
-        version.insert("description".into(), Value::Null);
-        version.insert("files".into(), Value::Null);
-        (version, format!("Remove skill {name}: {}", live.description))
+        let version = Version { name: name.to_owned(), description: None, files: None, removed: true };
+        (values_of(&version), format!("Remove skill {name}: {}", live.description))
     } else {
         edited(items, request, name, live.as_ref(), &mut redactions).await?
     };
-    version.insert("reason".into(), json!(reason));
     let made = Proposal {
         target: id,
         kind: SKILL.into(),
@@ -398,12 +407,8 @@ async fn edited(
         }
     }
     let summary = summary(name, &description, live, &files);
-    let mut version = Values::new();
-    version.insert("name".into(), json!(name));
-    version.insert("description".into(), json!(description));
-    version.insert("files".into(), json!(files));
-    version.insert("removed".into(), Value::Null);
-    Ok((version, summary))
+    let version = Version { name: name.to_owned(), description: Some(description), files: Some(files), removed: false };
+    Ok((values_of(&version), summary))
 }
 
 /// What a proposal of skill `name` changes, from `live`, to make it `files`.
@@ -463,7 +468,7 @@ async fn list(items: &dyn Items) -> Result<Answer, Answer> {
             let _ = write!(
                 text,
                 "\n- {} {}",
-                found.proposal.version.get("name").and_then(Value::as_str).unwrap_or_default(),
+                Version::of(&found.proposal.version).map_or_default(|version| version.name),
                 found.line()
             );
         }
@@ -501,11 +506,12 @@ async fn show(items: &dyn Items, name: &str, path: Option<&str>) -> Result<Answe
         });
     }
     let others: Vec<_> = skill.files.keys().filter(|path| *path != SKILL_FILE).map(String::as_str).collect();
+    let confirmation = Confirmation::of(&item.values);
     let mut text = format!(
         "Skill {name}, revision {}, confirmed {}: {}",
         skill.revision,
-        item.text("confirmed"),
-        item.text("reason")
+        confirmation.confirmed.map_or_default(stamp),
+        confirmation.reason
     );
     if !others.is_empty() {
         let _ = write!(text, "\nOther files (sense_skill name={name} path=<path> reads one): {}", others.join(", "));
@@ -526,7 +532,7 @@ async fn show_proposal(items: &dyn Items, id: &ItemId, path: Option<&str>) -> Re
     let found = found
         .filter(|found| found.proposal.kind == SKILL)
         .ok_or_else(|| Answer::error("not_found", format!("No skill proposal {id}.")))?;
-    let files = files_of(&found.proposal.version);
+    let files = Version::files(&found.proposal.version);
     if let Some(path) = path {
         let text =
             files.get(path).ok_or_else(|| Answer::error("not_found", format!("Proposal {id} has no file {path}.")))?;
@@ -552,16 +558,14 @@ async fn show_history(items: &dyn Items, name: &str) -> Result<Answer, Answer> {
     let mut text = format!("{} versions of skill {name}, the newest first:", versions.len());
     let mut json = Vec::new();
     for (revision, at, values) in versions.iter().rev() {
-        let reason = values.get("reason").and_then(Value::as_str).unwrap_or_default();
-        let what = if values.get("removed").and_then(Value::as_bool) == Some(true) {
-            "removed".to_owned()
-        } else {
-            let files: Vec<_> = files_of(values).into_keys().collect();
-            format!(
-                "{}; files {}",
-                values.get("description").and_then(Value::as_str).unwrap_or_default(),
-                files.join(", ")
-            )
+        let reason = Confirmation::of(values).reason;
+        let what = match Version::of(values) {
+            Some(version) if version.removed => "removed".to_owned(),
+            version => {
+                let (description, files) = version.map_or_default(|version| (version.description, version.files));
+                let files: Vec<_> = files.unwrap_or_default().into_keys().collect();
+                format!("{}; files {}", description.unwrap_or_default(), files.join(", "))
+            }
         };
         let _ = write!(text, "\n- Revision {revision}, {}: {reason}\n  {what}", time(*at));
         let mut version = Value::Object(values.clone());

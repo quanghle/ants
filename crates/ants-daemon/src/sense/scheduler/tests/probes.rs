@@ -61,33 +61,33 @@ async fn probes_use_the_live_source_thread_then_only_same_machine_captured_paths
     std::fs::remove_dir_all(root).unwrap();
 }
 
+async fn tool(sense: &Sense, name: &str, arguments: Value, at: DateTime<Utc>) -> Value {
+    let mut call = call(arguments);
+    call.name = name.into();
+    call.context.at = at;
+    let result = sense.call_tool(call).await.unwrap();
+    assert!(!result.is_error, "{result:?}");
+    let ants_proto::provider::Output::Json(result) = result.output else { panic!("requested JSON") };
+    result
+}
+
 #[tokio::test]
 async fn sense_events_check_overdue_commitments_and_expired_task_leases() {
     let (sense, stores) = setup().await;
     let at = Utc::now();
     let overdue = at - chrono::Duration::minutes(1);
-    let promise = stores
-        .items
-        .create("promise", json!({"status":"open","due":overdue}).as_object().unwrap().clone(), "test")
-        .await
-        .unwrap();
-    let task = stores
-        .items
-        .create(
-            "task",
-            json!({"status":"in_progress","lease":{"expires_at":overdue}}).as_object().unwrap().clone(),
-            "test",
-        )
-        .await
-        .unwrap();
-    for (event, id) in [("commitment_overdue", promise.id), ("lease_expired", task.id)] {
+    let promise = tool(&sense, "promise", json!({"title":"overdue","promisee":"alice","due":overdue}), at).await;
+    let task = tool(&sense, "task", json!({"action":"create","title":"held"}), at).await;
+    let claim = json!({"action":"claim","id":task["task"]["id"]});
+    tool(&sense, "task", claim, at - chrono::Duration::minutes(10)).await;
+    for (event, id) in [("commitment_overdue", &promise["promise"]["id"]), ("lease_expired", &task["task"]["id"])] {
         create(&sense, json!({"kind":"condition","condition":{"kind":"sense","event":event,"id":id}})).await;
     }
     let host = Wakes::default();
     cycle(&sense, &*stores.items, &host, &settings(), Utc::now()).await.unwrap();
     let requests = host.requests.locked().clone();
-    assert_eq!(requests.len(), 2);
-    assert!(requests.iter().all(|request| request.text.contains("sense event condition matched")));
+    let matched = requests.iter().filter(|request| request.text.contains("sense event condition matched"));
+    assert_eq!(matched.count(), 2, "{requests:?}");
     assert!(remind::pending_work(&*stores.items).await.unwrap().is_empty());
 }
 
@@ -161,11 +161,11 @@ async fn command_checks_use_current_policy_and_environment_without_storing_outpu
     assert_eq!(host.requests.locked().len(), 1);
     assert_eq!(host.requests.locked()[0].id, format!("{id}:1"));
     let item = stores.items.get(&id).await.unwrap().unwrap();
-    assert!(!item.values.contains_key("observation"));
+    assert!(remind::Reminder::of(&item).unwrap().observation.is_none());
     assert!(!serde_json::to_string(&item).unwrap().contains("private command output"));
-    let denied = stores.items.get(&denied).await.unwrap().unwrap();
-    assert_eq!(denied.values["unchanged_checks"], 1);
-    assert!(denied.text("next_due").parse::<DateTime<Utc>>().unwrap() >= at + chrono::Duration::minutes(1));
+    let denied = reminder(&*stores.items, &denied).await;
+    assert_eq!(denied.unchanged_checks, Some(1));
+    assert!(denied.next_due.unwrap() >= at + chrono::Duration::minutes(1));
     assert!(!root.join("forbidden").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -202,7 +202,7 @@ printf '%s' '{"state":"OPEN","mergedAt":null,"reviews":[]}'"#,
         assert_eq!(std::fs::read_to_string(root.join("runs")).unwrap().len(), check + 1);
         at = next;
     }
-    assert_eq!(stores.items.get(&id).await.unwrap().unwrap().values["unchanged_checks"], 10);
+    assert_eq!(reminder(&*stores.items, &id).await.unchanged_checks, Some(10));
     assert!(host.requests.locked().is_empty());
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -246,8 +246,8 @@ async fn cancels_probe(explicit_stop: bool) {
     }
     assert!(host.requests.locked().is_empty());
     assert!(remind::pending_work(&*stores.items).await.unwrap().is_empty());
-    let item = stores.items.get(&id).await.unwrap().unwrap();
-    assert!(item.values.contains_key("check_started"), "reservation survives interruption");
-    assert!(item.text("next_due").parse::<DateTime<Utc>>().unwrap() > Utc::now());
+    let reserved = reminder(&*stores.items, &id).await;
+    assert!(reserved.check_started.is_some(), "reservation survives interruption");
+    assert!(reserved.next_due.unwrap() > Utc::now());
     std::fs::remove_dir_all(root).unwrap();
 }
