@@ -1,6 +1,8 @@
 use ants_proto::FindingVerdict::{Applied, Rejected};
+use ants_proto::provider::Starter;
 use ants_proto::{FindingOutcome, FindingVerdict};
 
+use super::identity_findings::started;
 use super::reviews::findings as answer_of;
 use super::*;
 
@@ -276,33 +278,78 @@ async fn a_relationship_record_is_asked_of_each_ant_reviewed_three_times_until_w
 }
 
 #[tokio::test]
-async fn a_finding_on_the_practice_applied_rests_while_its_ground_is_unchanged() {
+async fn a_finding_on_the_practice_applied_names_what_it_asks_and_rests_while_its_ground_is_unchanged() {
     let (sense, kept) = sense().await;
     let items: Arc<dyn Items> = kept.clone();
     let writer = on(90);
     let now = Utc::now();
     let day = |n: i64| now + Duration::days(n);
-    for dream in 1..=3 {
-        review(&*items, ("dev-b", dream, dream as u8), &[], &[], day(-1)).await;
+    for dream in 1..=4 {
+        review(&*items, ("dev-b", dream, dream as u8), &[], &["lesson"], day(-1)).await;
     }
     let lesson = store(&kept, &lesson("Review dev-b by its commits")).await;
 
     let first = begin(&*items, start(day(0), &writer)).await.unwrap().unwrap();
     let found: Vec<_> = first.findings.iter().map(|f| (f.id.as_str(), f.kind)).collect();
-    assert_eq!(found, [("1.1", FindingKind::NoReviewedRelationship)]);
+    assert_eq!(found, [("1.1", FindingKind::UnansweredReviews), ("1.2", FindingKind::NoReviewedRelationship)]);
     woken(&*items, 1, &on(91).thread).await.unwrap();
-    let verdicts =
-        json!({"verdicts": [{"finding": "1.1", "verdict": "applied", "reason": "A lesson.", "items": [lesson]}]});
-    assert!(!tool(&sense, dream, verdicts, on(91)).await.is_error);
+    let applied = |finding: &str, item: &serde_json::Value| {
+        let verdict = json!({"finding": finding, "verdict": "applied", "reason": "Kept.", "items": [item]});
+        json!({"verdicts": [verdict]})
+    };
+    let refused = tool(&sense, dream, applied("1.2", &json!(lesson)), on(91)).await;
+    assert_eq!(error(&refused), "invalid_arguments");
+    assert_eq!(
+        refused.text,
+        "Finding 1.2 (no_reviewed_relationship): applied names the relationship record of ant:dev-b written; none of \
+         the items given is."
+    );
+    let other = json!({"relationship": "Terse.", "who": "ant:dev-c", "title": "dev-c"});
+    let other = tool(&sense, crate::identity::identity, other, context(human())).await.json["id"].clone();
+    assert_eq!(error(&tool(&sense, dream, applied("1.1", &other), on(91)).await), "invalid_arguments", "not dev-b");
+    assert!(!tool(&sense, dream, applied("1.1", &json!(lesson)), on(91)).await.is_error, "a lesson answers it");
 
     let second = begin(&*items, start(day(1), &writer)).await.unwrap().unwrap();
-    assert!(second.findings.is_empty(), "applied, it rests though no record is written: {:?}", second.findings);
-    for dream in 4..=6 {
-        review(&*items, ("dev-b", dream, dream as u8), &[], &[], day(1)).await;
+    let found: Vec<_> = second.findings.iter().map(|f| (f.id.as_str(), f.kind)).collect();
+    assert_eq!(found, [("1.2", FindingKind::NoReviewedRelationship)], "applied, 1.1 rests though its ground holds");
+    for dream in 5..=7 {
+        review(&*items, ("dev-b", dream, dream as u8), &[], &["lesson", "mistake"], day(1)).await;
     }
     let third = begin(&*items, start(day(2), &writer)).await.unwrap().unwrap();
     let found: Vec<_> = third.findings.iter().map(|f| (f.kind, f.count)).collect();
-    assert_eq!(found, [(FindingKind::NoReviewedRelationship, Some(6))], "reviewed 6 times, it changed");
+    assert!(found.contains(&(FindingKind::UnansweredReviews, Some(4))), "5 left unanswered, it changed: {found:?}");
+}
+
+#[tokio::test]
+async fn an_ant_both_worked_with_and_reviewed_makes_one_finding_on_its_relationship_record() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let now = Utc::now();
+    let day = |n: i64| now + Duration::days(n);
+    for dream in 1..=3 {
+        review(&*items, ("dev-b", dream, 30 + dream as u8), &[], &[], day(-2)).await;
+    }
+    let first = begin(&*items, start(day(0), &on(9))).await.unwrap().unwrap();
+    let found: Vec<_> = first.findings.iter().map(|f| (f.id.as_str(), f.kind)).collect();
+    assert_eq!(found, [("1.1", FindingKind::NoReviewedRelationship)], "reviewed alone");
+
+    let dev_b = Starter::Ant { user: "dev-b".parse().unwrap() };
+    started(&*items, 20..23, &dev_b, "github.com/o/r", day(-10)).await;
+    let second = reject(&sense, &*items, 2, day(1), "2.1").await;
+    let found: Vec<_> = second.findings.iter().map(|f| (f.id.as_str(), f.kind, f.count)).collect();
+    assert_eq!(found, [("2.1", FindingKind::NoRelationship, Some(6))], "one, the open 1.1 folded in");
+    let text = &second.findings[0].text;
+    assert!(text.contains("ant:dev-b, who started 3 of the ant's threads and was reviewed 3 times"), "{text}");
+    assert!(text.contains("what working together taught and what works in reviewing ant:dev-b"), "{text}");
+
+    let third = begin(&*items, start(day(2), &on(9))).await.unwrap().unwrap();
+    assert!(third.findings.is_empty(), "rejected, it rests for both: {:?}", third.findings);
+    for dream in 4..=6 {
+        review(&*items, ("dev-b", dream, 30 + dream as u8), &[], &[], day(2)).await;
+    }
+    let fourth = begin(&*items, start(day(3), &on(9))).await.unwrap().unwrap();
+    let found: Vec<_> = fourth.findings.iter().map(|f| (f.kind, f.count)).collect();
+    assert_eq!(found, [(FindingKind::NoRelationship, Some(9))], "the reviews doubled");
 }
 
 #[tokio::test]
