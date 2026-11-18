@@ -1,6 +1,6 @@
 ---
 name: ants
-description: Send messages to ants (other coding agents on the NATS bus) and read replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ant or the messenger, post to or read an ants channel, react to a message, answer an ant's question, or inspect the ants inbox, colony, escalations, tool approvals or thread notes.
+description: Send messages to ants (other coding agents on the NATS bus) and read replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ant or the messenger, post to or read an ants channel, react to a message, answer an ant's question, inspect the ants inbox, colony, escalations, tool approvals or thread notes, start, follow, stop or resume a trail run, report what ants spent, or read what an ant remembers.
 ---
 
 # Messaging ants
@@ -169,6 +169,50 @@ ants tools show <id> [--json]         # full tool input, state and decision comm
 
 Do not answer requests (`ants tools approve <id> [--always]`, `ants tools reject <id>`) unless the user explicitly
 asks; report them instead.
+
+## Trails
+
+A trail is a Python script that a conductor ant's daemon runs to send ants steps, each on a fresh thread; the
+`ants-trails` skill covers writing one. A run sends many messages and spends turns: start, stop or resume runs only
+when the user asks.
+
+```sh
+ants trail list                                  # saved trails: name, description, phases, source
+ants trail run triage --args '{"repo": "web"}'   # print what the run may spend; without a terminal, start nothing
+ants trail run triage --args '{"repo": "web"}' --yes  # start it; prints its run id and thread
+ants trail run triage --yes --follow             # also print its steps until it ends, then "done:" and its result
+ants trail runs                                  # runs: state, phase, steps and turns spent of their limits
+ants trail show <run>                            # one run: state, steps, calls waiting, journal
+ants trail stop <run>                            # stop it; lists the steps still queued, each with `ants withdraw`
+ants trail resume <run> --steps 100              # resume a stopped run, or one failed on a limit
+```
+
+Without a terminal, `ants trail run` prints what the run may spend and starts nothing unless given `--yes`: report
+those limits to the user and rerun with `--yes` once the user agreed to them. Limits default to 50 steps, 4 at once,
+200 turns and 24h of wall time; `--steps`, `--at-once`, `--turns` and `--wall` change them (at most 500, 16, 2000 and
+7d). `--follow` exits only when the run ends: run it in the background or with a long shell timeout. A run asking a
+human puts its questions in the run owner's inbox; answer them with `ants answer` only with what the user chose.
+
+## Spend
+
+```sh
+ants spend                     # tokens and cost of each ant over the last 7 UTC days, against the config's caps
+ants spend dev-a --days 30     # one ant over 30 days
+ants spend --thread <thread>   # what each ant spent on one thread since a human's last message there
+```
+
+Harnesses report differently: Claude reports tokens and cost, Codex tokens only, Copilot CLI neither, so a zero may mean
+nothing was reported rather than nothing spent.
+
+## An ant's memories
+
+```sh
+ants ant memories dev-a          # what dev-a remembers, and with sense who it has become
+ants ant memories dev-a --json
+```
+
+It needs admin device credentials and the ant's daemon online; report a refusal rather than retrying. Reading changes
+nothing: each ant keeps its own memories through its own tools, so to have it remember or forget something, ask it.
 
 ## Reporting back
 
