@@ -3,8 +3,9 @@
 //! The rest is sense's alone, behind [`Sense`]: the data it keeps of the ants a process serves ([`stores`]), over their
 //! event logs in the hub's stream ([`log`]); each ant's schedule of reminders, memory maintenance and dreams
 //! ([`scheduler`]); its sage's answers to the reviews of its dreams; the skills it offers the ant's harness; the
-//! workdirs of the ant's threads, through which it reaches the ant's files ([`workdirs`]); and the profile the ant
-//! publishes in its colony entry ([`published`]). A home an ant takes over keeps the sense data in it ([`take_over`]).
+//! workdirs of the ant's threads, through which it reaches the ant's files ([`workdirs`]); and what its colony entry
+//! shows of it: the profile the ant publishes, or why sense keeps none of its data ([`published`]). A home an ant
+//! takes over keeps the sense data in it ([`take_over`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
@@ -86,10 +87,18 @@ impl Sense {
         scheduler::review_answer(&*items, envelope).await
     }
 
-    /// Keep the profile `workload` puts in `ant`'s colony entry that of the ant's confirmed persona, until dropped
-    /// ([`published::profile`]).
-    pub(crate) async fn publish_profile(&self, ant: &UserId, workload: &crate::colony::Workload) {
-        published::profile(&self.provider, ant, workload).await;
+    /// Keep what `workload` puts in `ant`'s colony entry of its sense data current, until dropped: the profile of the
+    /// ant's confirmed persona ([`published::profile`]) and why sense keeps none of its data ([`published::unkept`]).
+    pub(crate) async fn publish(&self, ant: &UserId, workload: &crate::colony::Workload) {
+        let unkept = published::unkept(self.stores.why_unkept(), ant, workload);
+        tokio::join!(published::profile(&self.provider, ant, workload), unkept);
+    }
+
+    /// The process keeps none of its ants' data, for the reason `why`, as it makes no host connection and sense no link
+    /// of its own; with None, it may again ([`SenseStores::unkept`]). Each ant's colony entry and the daemon's log say
+    /// so.
+    pub fn unkept(&self, why: Option<String>) {
+        self.stores.unkept(why);
     }
 
     /// The skills sense offers the harness of the ant whose home is `home`: its skills directory, in the Claude Code

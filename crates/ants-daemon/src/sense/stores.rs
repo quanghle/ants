@@ -39,6 +39,8 @@ use crate::profile::identity::Identity;
 pub struct SenseStores {
     state: Mutex<State>,
     changed: tokio::sync::Notify,
+    /// Why the process keeps none of its ants' data ([`SenseStores::unkept`]); None while it may.
+    unkept: tokio::sync::watch::Sender<Option<String>>,
 }
 
 #[derive(Default)]
@@ -191,6 +193,21 @@ impl SenseStores {
         Hosting { stores: self.clone(), generation, retry }
     }
 
+    /// The process keeps none of its ants' data, for the reason `why`, as it makes no host connection and sense no link
+    /// of its own; with None, it may again.
+    pub fn unkept(&self, why: Option<String>) {
+        self.unkept.send_if_modified(|current| {
+            let changed = *current != why;
+            *current = why;
+            changed
+        });
+    }
+
+    /// Why the process keeps none of its ants' data, followed ([`Self::unkept`]).
+    pub fn why_unkept(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.unkept.subscribe()
+    }
+
     /// The process serves `ant`, whose home is `home` and whose credentials are at `creds`, if any. An ant served from
     /// the same home before under another name is no longer; one served again with other credentials, as after a
     /// revoke and re-add, signs with the new ones.
@@ -312,7 +329,9 @@ impl Stores for SenseStores {
                     if link.is_none() && !files.cache().exists() {
                         return Err(match self.state().host {
                             Host::Connecting => StoreError::Unavailable("the host connection is not up yet".into()),
-                            _ => StoreError::NotKept("no host connection".into()),
+                            _ => StoreError::NotKept(
+                                self.unkept.borrow().clone().unwrap_or_else(|| "no host connection".into()),
+                            ),
                         });
                     }
                     if let Named::Record(record) = &named {

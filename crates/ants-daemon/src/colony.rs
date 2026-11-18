@@ -32,7 +32,7 @@ pub struct Registration {
 /// What the daemon is doing, shared by the inbox loop and the heartbeats: the messages being handled, the live
 /// harnesses, the agent the latest harness start named, whether the harness is signed out, held back by a provider
 /// limit or failing to start, the fallback answering meanwhile, whether memory is low, whether the ant is paused, its
-/// drift and the profile it published.
+/// drift, the profile it published and why sense keeps none of its data.
 #[derive(Debug, Default)]
 pub struct Workload {
     handling: AtomicUsize,
@@ -46,12 +46,13 @@ pub struct Workload {
     paused: Mutex<Option<Paused>>,
     drift: Mutex<Vec<String>>,
     profile: Mutex<Option<String>>,
+    sense_unkept: Mutex<Option<String>>,
     /// When the last message handled ended.
     worked: Mutex<Option<DateTime<Utc>>>,
     /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in or started with another
     /// agent, a provider limit starts or ends, the harness's start failures hold messages or no longer do, a fallback
-    /// starts or stops answering, memory turns low or recovers, the ant is paused or resumed, or its drift or profile
-    /// changes, so the colony shows it before the next beat.
+    /// starts or stops answering, memory turns low or recovers, the ant is paused or resumed, or its drift, profile or
+    /// why sense keeps none of its data changes, so the colony shows it before the next beat.
     changed: Notify,
 }
 
@@ -182,6 +183,19 @@ impl Workload {
         self.profile.locked().clone()
     }
 
+    /// Note why sense, the ant's provider, keeps none of its data here, or with `None` that it keeps them.
+    pub fn set_sense_unkept(&self, why: Option<String>) {
+        let mut current = self.sense_unkept.locked();
+        if *current != why {
+            *current = why;
+            self.changed.notify_one();
+        }
+    }
+
+    pub fn sense_unkept(&self) -> Option<String> {
+        self.sense_unkept.locked().clone()
+    }
+
     pub fn memory_low(&self) -> Option<MemoryLow> {
         self.memory_low.locked().clone()
     }
@@ -218,6 +232,7 @@ impl Workload {
         entry.paused = self.paused();
         entry.drift = self.drift();
         entry.profile = self.profile();
+        entry.sense_unkept = self.sense_unkept();
     }
 }
 
@@ -251,6 +266,7 @@ pub async fn entry(config: &Config) -> ColonyEntry {
         capabilities: presence.capabilities.clone(),
         whoami: presence.whoami.clone(),
         profile: None,
+        sense_unkept: None,
         workdir: Some(harness.workdir.display().to_string()),
         started_at: now,
         heartbeat_at: now,
@@ -444,6 +460,7 @@ async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, ent
                 && entry.paused == workload.paused()
                 && entry.drift == workload.drift()
                 && entry.profile == workload.profile()
+                && entry.sense_unkept == workload.sense_unkept()
             {
                 // Turned and turned back before this task ran: nothing new to show.
                 continue;
@@ -724,6 +741,7 @@ mod tests {
             capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
             whoami: None,
             profile: None,
+            sense_unkept: None,
             workdir: None,
             started_at: now,
             heartbeat_at: now,
@@ -843,6 +861,17 @@ mod tests {
         assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "its drop too");
         workload.stamp(&mut stamped);
         assert_eq!(stamped.profile, None);
+
+        let why = Some("no host credentials".to_owned());
+        workload.set_sense_unkept(why.clone());
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "sense keeping none shows");
+        workload.set_sense_unkept(why.clone());
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_none(), "the same reason again");
+        workload.stamp(&mut stamped);
+        assert_eq!(stamped.sense_unkept, why);
+        workload.set_sense_unkept(None);
+        workload.stamp(&mut stamped);
+        assert_eq!(stamped.sense_unkept, None);
     }
 
     #[test]

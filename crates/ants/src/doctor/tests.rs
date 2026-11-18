@@ -585,6 +585,27 @@ fn the_host_check_wants_host_credentials_of_the_machine_once_ants_have_credentia
 }
 
 #[test]
+fn sense_keeping_none_of_its_ants_data_fails_naming_the_fixes() {
+    let ant = |name: &str, creds: bool, setting| Ant {
+        creds: creds.then(|| PathBuf::from(format!("{name}.creds"))),
+        provider_setting: setting,
+        ..Ant::new(name.parse().unwrap(), PathBuf::from("/w"))
+    };
+    let (sense, none) = (ants_daemon::provider::Setting::Sense, ants_daemon::provider::Setting::None);
+    let mut host = config::HostSettings::default();
+    let check = |host: &config::HostSettings, ants: &[Ant]| check_sense_kept(host, ants, "box.local");
+    assert!(check(&host, &[ant("dev-a", false, sense.clone())]).is_none(), "no authentication: kept as no one");
+    let ants = [ant("dev-a", true, sense.clone()), ant("dev-b", true, none.clone()), ant("dev-c", true, sense)];
+    let failed = check(&host, &ants).unwrap();
+    assert_eq!((failed.status, failed.check.as_str()), (Status::Fail, "sense data"), "{failed}");
+    assert!(failed.detail.contains("none of the data of dev-a, dev-c: no host credentials"), "{failed}");
+    assert!(failed.fix[0].starts_with("ants auth host box ") && failed.fix[1].contains("provider = \"none\""));
+    assert!(check(&host, &[ant("dev-b", true, none)]).is_none(), "no ant uses sense");
+    host.creds = Some(PathBuf::from("host.creds"));
+    assert!(check(&host, &ants).is_none(), "sense writes the logs with the host credentials");
+}
+
+#[test]
 fn a_top_level_machine_no_machine_name_is_warned_of_unless_the_host_table_names_one() {
     let mut host = config::HostSettings::default();
     assert!(check_machine_name(&host, "box.local").is_none());

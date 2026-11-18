@@ -53,7 +53,7 @@ pub fn about(e: &ColonyEntry, now: DateTime<Utc>) -> Vec<(&'static str, String)>
 
 /// What holds `ant` back now, one line each: its move to another bus (`moved`), no daemon serving it, a stale entry, a
 /// harness signed out, failing to start or held by a provider limit, a fallback answering for it, low memory on its
-/// machine. Empty when nothing does.
+/// machine, sense keeping none of its data. Empty when nothing does.
 pub fn holds(ant: &UserId, entry: Option<&ColonyEntry>, moved: Option<&MovedMark>, now: DateTime<Utc>) -> Vec<String> {
     if let Some(mark) = moved {
         return vec![crate::export::moved_line(ant, mark, now)];
@@ -64,7 +64,7 @@ pub fn holds(ant: &UserId, entry: Option<&ColonyEntry>, moved: Option<&MovedMark
     }
     let entries = std::slice::from_ref(e);
     let prefix = format!("{ant}: ");
-    [colony::held(entries, now), colony::memory_low(entries, now)]
+    [colony::held(entries, now), colony::memory_low(entries, now), colony::sense_unkept(entries)]
         .concat()
         .into_iter()
         .map(|line| line.strip_prefix(&prefix).map_or_else(|| line.clone(), str::to_owned))
@@ -277,10 +277,12 @@ mod tests {
         assert!(holds(&ant, Some(&e), None, now()).is_empty());
         e.signed_out = Some(SignInNeeded { since: now() - chrono::Duration::minutes(5), sign_in: None });
         e.memory_low = Some(MemoryLow { since: now(), available: 512 << 20, max_harnesses: 1 });
+        e.sense_unkept = Some("no host credentials on m1".to_owned());
         let lines = holds(&ant, Some(&e), None, now());
-        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(lines[0].starts_with("harness copilot signed out for 5m"), "{lines:?}");
         assert!(lines[1].starts_with("memory low on m1"), "{lines:?}");
+        assert!(lines[2].starts_with("served on m1 without memories"), "{lines:?}");
         let mark = MovedMark { at: now() - chrono::Duration::minutes(5), by: "alice".parse().unwrap() };
         let lines = holds(&ant, Some(&e), Some(&mark), now());
         assert_eq!(lines.len(), 1, "a moved ant is held by its move alone: {lines:?}");

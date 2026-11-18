@@ -266,6 +266,7 @@ fn colony() {
             capabilities: vec!["rust".to_owned(), "frontend".to_owned()],
             whoami: Some("Backend developer".to_owned()),
             profile: Some("Good for Rust services and their NATS wiring.".to_owned()),
+            sense_unkept: Some("no host credentials on a server with authentication".to_owned()),
             workdir: Some("/src/app".to_owned()),
             started_at: at(0),
             heartbeat_at: at(1),

@@ -3,9 +3,11 @@
 //! [`MACHINES_BUCKET`] current: the ants the daemon serves, put on start and whenever they change, and never deleted,
 //! so an ant stays addressable on its machine after its colony entry expired. It also takes the admin orders to the
 //! machine's ants and records their outcomes ([`crate::admin`]), reading the humans' consent to their assistants'
-//! orders from [`ants_proto::HUMANS_BUCKET`] ([`crate::admin::held`]), and keeps the shared settings of the machine's ants
-//! ([`crate::profile::shared`]), creating those still missing from the machine's config. Without host credentials, where the ants have their
-//! own, the connection stays off and the daemon serves its ants as before.
+//! orders from [`ants_proto::HUMANS_BUCKET`] ([`crate::admin::held`]), and keeps the shared settings of the machine's
+//! ants ([`crate::profile::shared`]), creating those still missing from the machine's config. Without host credentials,
+//! where the ants have their own, the connection stays off and the daemon serves its ants as before, sense keeping none
+//! of their data ([`uncredentialed`]). A daemon serving one ant (`ants daemon --ant`) makes no host connection, but
+//! sense a link of its own with the host credentials, carrying its logs alone ([`run_sense`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,17 +62,30 @@ impl Host {
         nats: String,
         creds: Option<PathBuf>,
         js_domain: Option<JsDomain>,
+        ant_creds: impl Iterator<Item = bool>,
+    ) -> Option<Self> {
+        let named = machine.as_ref().or(fallback.as_ref()).map_or_else(|| "MACHINE".to_owned(), ToString::to_string);
+        let host = Self::quietly(machine, fallback, nats, creds, js_domain, ant_creds);
+        if host.is_none() && !OFF_TOLD.swap(true, Ordering::Relaxed) {
+            tracing::info!(
+                "no host credentials: the machine's record of its ants and its admin orders stay off; issue them \
+                 with `ants auth host {named}` and name them in the config's [host] table"
+            );
+        }
+        host
+    }
+
+    /// [`Self::new`], saying nothing when there is none, as for sense's link of its own ([`run_sense`]), where each ant
+    /// using sense says so as it starts.
+    pub fn quietly(
+        machine: Option<Machine>,
+        fallback: Option<Machine>,
+        nats: String,
+        creds: Option<PathBuf>,
+        js_domain: Option<JsDomain>,
         mut ant_creds: impl Iterator<Item = bool>,
     ) -> Option<Self> {
         if creds.is_none() && ant_creds.any(|has| has) {
-            if !OFF_TOLD.swap(true, Ordering::Relaxed) {
-                let named =
-                    machine.as_ref().or(fallback.as_ref()).map_or_else(|| "MACHINE".to_owned(), ToString::to_string);
-                tracing::info!(
-                    "no host credentials: the machine's record of its ants and its admin orders stay off; issue \
-                     them with `ants auth host {named}` and name them in the config's [host] table"
-                );
-            }
             return None;
         }
         Some(Self {
@@ -85,6 +100,15 @@ impl Host {
             leaf: None,
         })
     }
+}
+
+/// Why sense keeps none of the data of the ants of `machine`, a machine without host credentials whose ants connect
+/// with their own, and how to mend it.
+pub fn uncredentialed(machine: &Machine) -> String {
+    format!(
+        "no host credentials on {machine}, which sense writes its logs with on a server with authentication: issue \
+         them with `ants auth host {machine}`, or set provider = \"none\" for an ant meant to go without"
+    )
 }
 
 /// The machine `host` stands for: its `machine`, which must be the one its credentials name if they name one, else
@@ -133,11 +157,7 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
 /// [`run`], sense reaching the data of the process's ants over the connection once up, when `sense` is given
 /// ([`crate::sense`]).
 pub async fn run_keeping(host: Host, ants: watch::Receiver<Vec<UserId>>, sense: Option<Hosting>) -> Result<()> {
-    let hostname = colony::machine().await;
-    let otherwise = host.fallback.clone().unwrap_or_else(|| Machine::from_hostname(&hostname));
-    let machine = machine_of(host.machine.as_ref(), host.creds.as_deref(), otherwise)?;
-    let accounts: Vec<String> = host.creds.as_deref().map(creds::account).transpose()?.into_iter().collect();
-    let Some(js) = connect(&host, &machine).await? else { return Ok(()) };
+    let Some((js, hostname, machine, accounts)) = link(&host).await? else { return Ok(()) };
     if let Some(sense) = &sense {
         sense.up(Link::new(js.clone(), host.js_domain.clone(), accounts.clone(), machine.clone()));
     }
@@ -163,6 +183,26 @@ pub async fn run_keeping(host: Host, ants: watch::Receiver<Vec<UserId>>, sense: 
         () = admin::serve(js.clone(), host.js_domain.clone(), orders) => Ok(()),
         kept = keep_shared(&js, &host, &machine, &accounts, shared, polled) => kept,
     }
+}
+
+/// Connect as `host` for sense alone, reaching the data of the process's ants over the connection once up
+/// ([`crate::sense`]), with none of a host connection's other duties: no machine record, admin orders or shared
+/// settings. Runs until dropped; fails only on what waiting cannot mend, as [`run`] does.
+pub async fn run_sense(host: Host, sense: Hosting) -> Result<()> {
+    let Some((js, _, machine, accounts)) = link(&host).await? else { return Ok(()) };
+    sense.up(Link::new(js, host.js_domain.clone(), accounts, machine));
+    std::future::pending().await
+}
+
+/// The connection as `host` ([`connect`]), with the machine's host name, the machine it stands for ([`machine_of`])
+/// and the accounts of its credentials.
+async fn link(host: &Host) -> Result<Option<(async_nats::jetstream::Context, String, Machine, Vec<String>)>> {
+    let hostname = colony::machine().await;
+    let otherwise = host.fallback.clone().unwrap_or_else(|| Machine::from_hostname(&hostname));
+    let machine = machine_of(host.machine.as_ref(), host.creds.as_deref(), otherwise)?;
+    let accounts: Vec<String> = host.creds.as_deref().map(creds::account).transpose()?.into_iter().collect();
+    let js = connect(host, &machine).await?;
+    Ok(js.map(|js| (js, hostname, machine, accounts)))
 }
 
 /// Keep `shared` current with the shared settings of `ants`, verified against `accounts` ([`shared::refresh`]), until

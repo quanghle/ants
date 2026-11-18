@@ -576,6 +576,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         capabilities: vec!["ci".to_owned()],
         whoami: Some("Keeps the build green.".to_owned()),
         profile: None,
+        sense_unkept: None,
         workdir: None,
         started_at: now,
         heartbeat_at: now,

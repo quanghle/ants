@@ -17,6 +17,7 @@ expression: value
   ],
   "whoami": "Backend developer",
   "profile": "Good for Rust services and their NATS wiring.",
+  "sense_unkept": "no host credentials on a server with authentication",
   "workdir": "/src/app",
   "started_at": "2025-01-01T12:00:00Z",
   "heartbeat_at": "2025-01-01T12:01:00Z",

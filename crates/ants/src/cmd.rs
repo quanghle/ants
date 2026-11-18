@@ -102,7 +102,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::Update(args) => update::run(args).await,
         Command::Tools(command) => tools::run(&conn, command).await,
         Command::Dead(command) => Box::pin(dead::run(&nats()?, command)).await,
-        Command::Daemon(DaemonCommand::Daemon(args)) => daemon::run(&conn, *args).await,
+        Command::Daemon(DaemonCommand::Daemon(args)) => Box::pin(daemon::run(&conn, *args)).await,
         Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
         Command::Harness(command) => harness::run(command).await,
         Command::Doctor(args) => doctor::run(&conn, args).await,
