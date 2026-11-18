@@ -225,6 +225,21 @@ async fn sessions_note_the_harnesses_models_and_machines_an_ant_ran_under() {
 }
 
 #[tokio::test]
+async fn the_card_keeps_the_growth_its_record_held_as_it_grew() {
+    let items = fresh().await;
+    let growth = |born: &str, prompts| Growth { born: at(born), prompts };
+    let card = record_growth(&*items, &dev_a(), growth("08:00:00", 42)).await.unwrap();
+    assert_eq!(card.growth, Some(growth("08:00:00", 42)), "the card made with it");
+    let card = record_growth(&*items, &dev_a(), growth("09:00:00", 10)).await.unwrap();
+    assert_eq!(card.growth, Some(growth("08:00:00", 42)), "a growth told late undoes nothing");
+    let card = record_growth(&*items, &dev_a(), growth("08:00:00", 100)).await.unwrap();
+    assert_eq!(card.growth, Some(growth("08:00:00", 100)));
+    let before = revision(&*items).await;
+    record_growth(&*items, &dev_a(), growth("08:00:00", 100)).await.unwrap();
+    assert_eq!(revision(&*items).await, before, "nothing new, nothing written");
+}
+
+#[tokio::test]
 async fn two_writers_sharing_a_log_keep_one_card() {
     let (log, sense): (&'static MemoryLog, _) = (Box::leak(Box::default()), SenseId::new());
     let (one, two) = (items(log, &sense).await, items(log, &sense).await);

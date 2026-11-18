@@ -1,7 +1,7 @@
-use ants_proto::SENSE_STREAM;
 use ants_proto::provider::{
     AntRef, BriefReason, BriefRequest, CallContext, Event, EventKind, Export, ImportRequest, Origin, Provider, Starter,
 };
+use ants_proto::{SENSE_STREAM, Stage};
 use ants_sense::Sense;
 use ants_test_support::{NatsServer, eventually, free_port, scratch_dir};
 use serde_json::json;
@@ -195,6 +195,64 @@ async fn the_identity_record_names_one_sense_identity_for_every_home() {
     let named = Identity::new(&js, None, &dev_b).await.unwrap().read().await.unwrap().unwrap().sense;
     assert_eq!((named, identity::read_id(&home_b).unwrap()), (Some(own.clone()), Some(own)));
     for home in homes.into_iter().chain([home_b]) {
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
+/// An ant revoked and added again in the same home keeps the birth and the growth of its earlier record, which its card
+/// kept: its new record starts from them, once. A new ant, as a clone, starts as its record was made.
+#[tokio::test]
+async fn an_ant_added_again_keeps_its_birth_and_its_growth() {
+    let Some(server) = NatsServer::start() else { return };
+    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    crate::hub::create_identities(&js).await.unwrap();
+    let (home, home_b) = (scratch_dir("sense-growth-a"), scratch_dir("sense-growth-b"));
+    let record = Identity::new(&js, None, &dev_a()).await.unwrap();
+    let born = "2025-01-01T00:00:00Z".parse().unwrap();
+    let earlier = AntIdentity { prompts: 42, ..AntIdentity::new(dev_a(), "id1".into(), born) };
+    record.replace(&earlier).await.unwrap();
+    let opened = async |ant: &UserId, home: &Path, event: Event| {
+        let stores = SenseStores::new();
+        stores.serve(ant, home, None);
+        let hosting = stores.hosting();
+        hosting.up(link(&server).await);
+        stores.identify(ant, Some(Identity::new(&js, None, ant).await.unwrap()));
+        Sense::with_stores(stores.clone()).event(event).await.unwrap();
+        let items = stores.items(ant).await.unwrap();
+        let card = identity::card(&*items).await.unwrap().unwrap();
+        (items, card.growth, hosting)
+    };
+
+    let (items, growth, _hosting) = opened(&dev_a(), &home, added("id1")).await;
+    assert_eq!(growth, Some(Growth { born, prompts: 42 }), "the card keeps the record's growth once it names it");
+    let named = record.read().await.unwrap().unwrap();
+    assert_eq!((named.born, named.prompts), (born, 42), "a record naming no sense id with no growth kept is kept");
+    for (prompts, sense) in [(100, named.sense.clone()), (500, None)] {
+        note_growth(&dev_a(), &*items, &AntIdentity { prompts, sense, ..named.clone() }).await.unwrap();
+    }
+    let card = identity::card(&*items).await.unwrap().unwrap();
+    assert_eq!(card.growth, Some(Growth { born, prompts: 100 }), "told of the record naming its sense id alone");
+    drop(items);
+
+    record.delete().await.unwrap();
+    let again = record.ensure().await.unwrap().unwrap();
+    assert_eq!((again.prompts, again.stage()), (0, Stage::Callow), "added again, a new record");
+    record.count_prompt().await.unwrap();
+    let (_items, growth, _hosting) = opened(&dev_a(), &home, added(&again.id)).await;
+    let restored = record.read().await.unwrap().unwrap();
+    assert_eq!((&restored.id, restored.born, restored.prompts), (&again.id, born, 101), "its birth and growth kept");
+    assert_eq!((restored.stage(), &restored.sense), (Stage::Veteran, &named.sense));
+    assert_eq!(growth, Some(Growth { born, prompts: 101 }));
+    let (_items, _, _hosting) = opened(&dev_a(), &home, added(&again.id)).await;
+    assert_eq!(record.read().await.unwrap().unwrap(), restored, "a daemon starting again adds nothing");
+
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let new = Identity::new(&js, None, &dev_b).await.unwrap();
+    let made = new.ensure().await.unwrap().unwrap();
+    let (_items, growth, _hosting) = opened(&dev_b, &home_b, Event { ant: dev_b.clone(), ..added(&made.id) }).await;
+    let started = new.read().await.unwrap().unwrap();
+    assert_eq!((started.born, started.prompts, growth), (made.born, 0, Some(Growth { born: made.born, prompts: 0 })));
+    for home in [home, home_b] {
         std::fs::remove_dir_all(home).unwrap();
     }
 }

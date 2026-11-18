@@ -1212,8 +1212,8 @@ struct Inbox<'a> {
     home: &'a std::path::Path,
     /// Told of the threads the ant starts ([`Inbox::thread_started`]); None when its provider takes no events.
     lifecycle: Option<&'a Lifecycle>,
-    /// The ant's sense, which takes its sage's answers to the reviews of its dreams ([`Inbox::arrived`]); None when
-    /// sense is not its provider.
+    /// The ant's sense, which takes its sage's answers to the reviews of its dreams ([`Inbox::arrived`]) and is told
+    /// of its growth ([`Inbox::count_prompt`]); None when sense is not its provider.
     sense: Option<&'a crate::sense::Sense>,
 }
 

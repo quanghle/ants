@@ -2,9 +2,10 @@
 //! the first daemon to start the ant anywhere sets its id and birth, and its completed prompts counted by
 //! compare-and-set by the daemon serving it, so a standby daemon taking it over carries on the same count. A daemon
 //! serving the ant with built-in sense names its sense identity there when the record names none
-//! ([`Identity::name_sense`]), so every machine opens the same one. A record marked moved (`ants ant export --move`)
-//! keeps every daemon from serving the ant until `ants ant unseal` clears the mark: the daemon serving it drains it as
-//! on a stop, and a daemon starting it waits ([`Identity::moved`], [`Identity::unsealed`]).
+//! ([`Identity::name_sense`]), so every machine opens the same one, a record made again for the ant starting from the
+//! birth and growth its sense identity kept. A record marked moved (`ants ant export --move`) keeps every daemon from
+//! serving the ant until `ants ant unseal` clears the mark: the daemon serving it drains it as on a stop, and a daemon
+//! starting it waits ([`Identity::moved`], [`Identity::unsealed`]).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,7 +13,7 @@ use std::time::Duration;
 use ants_proto::{AntIdentity, IDENTITIES_BUCKET, JsDomain, SenseId, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use data_encoding::HEXLOWER;
 use ring::rand::{SecureRandom as _, SystemRandom};
 
@@ -71,11 +72,23 @@ impl Identity {
     }
 
     /// Name `sense` as the ant's sense identity in the record, creating the record first when absent, unless it names
-    /// one already: the first writer wins. The record as stored, naming the sense identity that won; None when the
-    /// bucket is missing.
-    pub async fn name_sense(&self, sense: &SenseId) -> Result<Option<AntIdentity>> {
+    /// one already: the first writer wins. A record naming none yet, as one made again after a revoke, starts from
+    /// `earlier`, the birth and the prompt count the sense identity kept of the ant's earlier record: its birth the
+    /// earlier one, and those prompts added to its own. The record as stored, naming the sense identity that won; None
+    /// when the bucket is missing.
+    pub async fn name_sense(
+        &self,
+        sense: &SenseId,
+        earlier: Option<(DateTime<Utc>, u64)>,
+    ) -> Result<Option<AntIdentity>> {
         self.change(|record| {
-            record.sense.get_or_insert_with(|| sense.clone());
+            if record.sense.is_some() {
+                return;
+            }
+            record.sense = Some(sense.clone());
+            if let Some((born, prompts)) = earlier {
+                (record.born, record.prompts) = (record.born.min(born), record.prompts + prompts);
+            }
         })
         .await
     }

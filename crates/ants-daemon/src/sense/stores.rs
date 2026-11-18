@@ -8,7 +8,8 @@
 //! The ant's identity record names its sense id ([`ants_proto::AntIdentity::sense`]), so its homes on every machine
 //! open the same sense identity: the id of a home is written to a record naming none, the first writer winning, a home
 //! without one takes the record's, an id is minted only when neither has one, and a home and a record naming different
-//! ones are refused ([`SenseStores::identify`]).
+//! ones are refused ([`SenseStores::identify`]). The card keeps the birth and the prompt count the record holds, which a
+//! record made again for the ant, as after a revoke and re-add, starts from ([`note_growth`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,10 +17,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::provider::BoxFuture;
-use ants_proto::{JsDomain, Machine, SenseId, UserId};
+use ants_proto::{AntIdentity, JsDomain, Machine, SenseId, UserId};
 use ants_sense::cache::Cache;
 use ants_sense::export::{self, SenseExport};
-use ants_sense::identity;
+use ants_sense::identity::{self, Growth};
 use ants_sense::log::{
     AccountVerifier, AntLog, AppendError, Event, EventLog, LogError, Revocations, Signature, Signer, Stored, Verifier,
     VerifyError,
@@ -421,31 +422,53 @@ async fn take_named(ant: &UserId, home: &Path, record: &Identity) -> Result<(), 
         return Ok(());
     }
     let minted = SenseId::new();
-    let named = record.name_sense(&minted).await.map_err(unavailable)?;
+    let named = record.name_sense(&minted, None).await.map_err(unavailable)?;
     let sense = named.and_then(|record| record.sense).unwrap_or(minted);
     identity::keep_id(home, &sense).map_err(|e| unavailable(e.into()))
 }
 
 /// Settle the sense id of `items`, those of `ant` whose home is `home`, against its identity `record`, naming it there
-/// when the record names none: whether it is settled, false when the record cannot be read; refused when the record
-/// names another, with how to settle that.
+/// when the record names none, the record then starting from the growth the card kept of an earlier one, as after a
+/// revoke and re-add, and noting the record's on the card: whether it is settled, false when the record or the card
+/// cannot be read; refused when the record names another sense id, with how to settle that.
 async fn settle(ant: &UserId, home: &Path, record: &Identity, items: &dyn Items) -> Result<bool, StoreError> {
     let sense = items.sense().await;
-    let named = match record.name_sense(&sense).await {
-        Ok(named) => named.and_then(|record| record.sense),
-        Err(e) => {
-            tracing::warn!(%ant, error = format!("{e:#}"), "naming the sense identity in the ant's identity record");
-            return Ok(false);
-        }
+    let unsettled = |e: &dyn std::fmt::Display| {
+        tracing::warn!(%ant, error = format!("{e:#}"), "naming the sense identity in the ant's identity record");
+        Ok(false)
     };
-    match named {
-        Some(named) if named != sense => Err(StoreError::Unavailable(format!(
+    let earlier = match identity::card(items).await {
+        Ok(card) => card.and_then(|card| card.growth).map(|growth| (growth.born, growth.prompts)),
+        Err(e) => return unsettled(&e),
+    };
+    let stored = match record.name_sense(&sense, earlier).await {
+        Ok(stored) => stored,
+        Err(e) => return unsettled(&e),
+    };
+    match stored.as_ref().and_then(|stored| stored.sense.as_ref()) {
+        Some(named) if *named != sense => Err(StoreError::Unavailable(format!(
             "the home of {ant} keeps sense identity {sense} and its identity record names {named}: removing {} takes \
              the record's, `ants auth revoke {ant}` and adding it again keeps the home's",
             identity::id_file(home).display()
         ))),
-        _ => Ok(true),
+        _ => {
+            if let Some(stored) = &stored
+                && let Err(e) = note_growth(ant, items, stored).await
+            {
+                tracing::warn!(%ant, error = format!("{e:#}"), "noting the ant's growth on its card");
+            }
+            Ok(true)
+        }
     }
+}
+
+/// Note on the card of `ant` in `items` the birth and the prompt count its identity `record` holds, when the record
+/// names their sense id, so a record made again for the ant starts from them ([`settle`]).
+pub(super) async fn note_growth(ant: &UserId, items: &dyn Items, record: &AntIdentity) -> Result<(), StoreError> {
+    if record.sense.as_ref() != Some(&items.sense().await) {
+        return Ok(());
+    }
+    identity::record_growth(items, ant, Growth { born: record.born, prompts: record.prompts }).await.map(drop)
 }
 
 /// Whether changes of the ant whose home is `home` wait to be appended to its log.

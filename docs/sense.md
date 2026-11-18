@@ -125,11 +125,14 @@ Each ant using sense has one sense identity, whose id, a ULID, is kept in its ho
 and in its identity record in `ants_identities` (`sense`), so its homes on every machine, as a standby daemon's, open
 the same one. A daemon opening the ant's sense data settles its home's id against the record: the home's id is written
 to a record naming none, by compare-and-set, the first writer winning; a home without one takes the record's, as after
-its `.sense/id` was removed; and an id is minted only when neither has one. A home and a record naming different ids
-are refused, sense keeping the ant's data closed and the error saying how to settle it: removing the home's
-`.sense/id` takes the record's, `ants auth revoke` and adding the ant again keeps the home's. Until the daemon has read
-the record, as at start while another ant's event asks for this one's data, a home without an id opens nothing. The id
-stays the same across renames, harness and model changes, moves to other machines and buses, retirement and revival:
+its `.sense/id` was removed; and an id is minted only when neither has one. A home and a record naming different ids are
+refused, sense keeping the ant's data closed and the error saying how to settle it: removing the home's `.sense/id`
+takes the record's, `ants auth revoke` and adding the ant again keeps the home's. A record naming no sense id yet, as
+one made again after `ants auth revoke` and adding the ant again with the same home, starts from the birth and the
+prompt count the card kept of the earlier record: the earlier birth, and those prompts added to its own, so the ant
+keeps its growth stage ([Avatars](config.md#avatars)). Until the daemon has read the record, as at start while another
+ant's event asks for this one's data, a home without an id opens nothing. The id stays the same across renames, harness
+and model changes, moves to other machines and buses, retirement and revival:
 
 - **Renames:** an import under another name (`ants ant import --as`) lists the old name in the home's `.sense/names`
   (one a line, the oldest first, carried by exports), so the renamed ant keeps its log and card. So does an ant added
@@ -157,8 +160,9 @@ The identity card is written by sense alone, from the ant's lifecycle events
 ([Lifecycle events](architecture.md#lifecycle-events)) and the start of each session; no tool writes it, and its
 revisions are its history. It records the sense id, the ant's name and earlier names, its ants identity ids, its birth
 (its addition or cloning, else its first brief), the harnesses, models and machines its sessions ran under, the ant it
-was cloned from, whether it is active, when it retired, returned and moved, and its last 16 dormancies. The brief shows
-it first ([Brief](#brief)).
+was cloned from, whether it is active, when it retired, returned and moved, its last 16 dormancies, and the birth and
+the prompt count of its identity record, as the daemon told sense on opening its data and at each growth stage the ant
+reached (`growth`). The brief shows it first ([Brief](#brief)).
 
 Each thread of the ant has a record, written by sense alone, as the card is, from the thread's lifecycle events, never
 from what its messages say: who started it and from which channel, the repository of the ant's working directory, when

@@ -690,12 +690,15 @@ Memory counts as recovered once available memory reaches 150 % of `min_available
 Every ant has a pixel-art avatar derived from its identity record in `ants_identities` (the avatar seed a human set,
 else the `sense` id it names, else its `id`), or from its name while no record is readable. One sense identity so shows
 one face on any record: an ant revoked and added again keeps its face, and a clone, with its own sense id, has its own.
-`ants chat`, `ants colony`, `ants watch`, `ants inbox` and `ants ant show` put its one-line face before its name, and
-the ant view of `ants chat` and `ants ant avatar` draw its head. `[cli]` `theme` picks the palette for the terminal's
-background: `dark`, `light`, or `auto` (the default), which asks the terminal for its background colour (OSC 11) and
-waits up to 200 ms for an answer, then reads `COLORFGBG`, else takes `dark`. With `NO_COLOR` set, or off a terminal,
-faces show without colour and the head as ASCII. `[cli]` `animate = false` keeps the heads in `ants chat` still;
-otherwise only the head on screen moves, and the screen is drawn again only when its frame changes.
+An ant revoked and added again with the home of the earlier one keeps its birth and growth stage too: its new record
+starts from those its sense identity kept of the earlier one ([sense.md](sense.md#identity)), while a new ant and a
+clone start at birth, `callow`. `ants chat`, `ants colony`, `ants watch`, `ants inbox` and `ants ant show` put its
+one-line face before its name, and the ant view of `ants chat` and `ants ant avatar` draw its head. `[cli]` `theme`
+picks the palette for the terminal's background: `dark`, `light`, or `auto` (the default), which asks the terminal for
+its background colour (OSC 11) and waits up to 200 ms for an answer, then reads `COLORFGBG`, else takes `dark`. With
+`NO_COLOR` set, or off a terminal, faces show without colour and the head as ASCII. `[cli]` `animate = false` keeps the
+heads in `ants chat` still; otherwise only the head on screen moves, and the screen is drawn again only when its frame
+changes.
 
 ## Exporting and importing an ant
 

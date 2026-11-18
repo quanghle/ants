@@ -103,9 +103,9 @@ async fn an_ant_keeps_its_own_identity_and_humans_restyle_it() {
     let counted = own.count_prompt().await.unwrap().unwrap();
     assert_eq!((counted.prompts, counted.avatar.as_deref(), counted.id), (2, Some("pebble"), born.id));
     let sense = SenseId::new();
-    let named = own.name_sense(&sense).await.unwrap().unwrap();
+    let named = own.name_sense(&sense, None).await.unwrap().unwrap();
     assert_eq!((named.sense.as_ref(), named.seed()), (Some(&sense), "pebble"), "the ant names its sense identity");
-    let again = own.name_sense(&SenseId::new()).await.unwrap().unwrap();
+    let again = own.name_sense(&SenseId::new(), None).await.unwrap().unwrap();
     assert_eq!(again.sense, Some(sense.clone()), "the first writer wins");
     let reset = update(&h_js, None, &dev_a, Some(None), Some(None)).await.unwrap();
     assert_eq!((reset.avatar.as_deref(), reset.color.as_deref(), reset.prompts), (None, None, 2), "back to its own");
