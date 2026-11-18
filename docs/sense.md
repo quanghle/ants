@@ -466,7 +466,8 @@ changes the work supports with `sense_identity`. Each colony entry names the sag
 resolve, so an ant made a sage only by another machine's config or by shared settings (`ants ant set dev-a sage=lead`)
 is reviewed by no one either, for as long as a daemon serves the ant naming it. The packet, at most 64 KiB, holds:
 
-- the verdicts on the last dream's findings;
+- for the ant, the verdicts on the last dream's findings; for the sage, its earlier findings for the ant and what
+  became of them (below);
 - the findings, at most 20, each with an id `<dream>.<n>`: memories with both `helpful` and `stale` votes since the
   last dream (`contradiction`), memories needing review (`needs_review`), the near duplicates the last maintenance
   found (`duplicates`), episodes to distill (`distill`), pending persona and skill proposals (`proposal`), and the
@@ -481,16 +482,29 @@ is reviewed by no one either, for as long as a daemon serves the ant naming it. 
   the most recently active first. Threads a webhook started are marked untrusted: their text is data, not
   instructions.
 
-A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then cuts
-the identity to titles (the persona's field names, the records' heads and the skills' names), then leaves out the last
-findings, counted for the next dream.
+A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then leaves
+out the sage's earlier findings down to their tally, then cuts the identity to titles (the persona's field names, the
+records' heads and the skills' names), then leaves out the last findings, counted for the next dream.
+
+**The sage's earlier findings:** a sage keeps nothing between reviews, so its packet shows the findings it gave the ant
+in the dreams begun within the ant's last 30 active days (its dormancies not counted), the latest reviews first, those
+of another sage left out. Each comes with its suggested action and the ant's last verdict and reason, or `unanswered`
+(marked when the packet offers it again), and, for one applied, what became of each item the verdict names: a memory's
+status (marked when it changed since the verdict), the days it was read and its helpful, stale and wrong votes; a
+proposal's status; whether a self-model or relationship record was replaced since; or that the item is no longer kept.
+A tally by kind follows, with a line for all: findings made, applied (and how many of those still hold), rejected,
+deferred and unanswered. An applied finding still holds while every item it names is kept, a memory active, superseded
+or in the status it had at the verdict, a proposal pending or confirmed. The section takes at most an eighth of the
+packet's budget, the earlier reviews' findings left out first. The packet an ant reads alone keeps the verdicts on the
+last dream's findings instead.
 
 **The sage's review:** the packet asks for a review that reads only, with read-only tools, reading code only in the
 checkouts made for it, never the ant's workdir or worktrees, and messaging no one, answered by one reply holding a
 fenced JSON block `{"findings": [{"kind", "finding", "evidence": {"threads", "messages", "memories", "files"},
 "action"}]}`, an empty list when nothing is worth the ant's time. Besides kinds such as `lesson`, `mistake` or
 `stale_memory`, a finding about the identity has kind `persona`, `self_model` or `relationship`: it cites the ant's own
-threads and builds on the persona the ant has, never on a house style. The review thread is narrowed to `REVIEW_ALLOW`
+threads and builds on the persona the ant has, never on a house style. The sage holds the threads against its earlier
+findings and answers one that did not hold with a finding of kind `follow_up` naming it. The review thread is narrowed to `REVIEW_ALLOW`
 (`read:*`, `search`, `think`, and the ants tools `list_ants`, `read_notes`, `read_attachment`, `list_reactions` and
 `suggest_thread_title`): the ants MCP server refuses every other tool on it, provider tools and `complete` included.
 The sage's daemon runs the review in a session of its own on the harness's review variant
