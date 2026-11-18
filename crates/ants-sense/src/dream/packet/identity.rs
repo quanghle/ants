@@ -103,7 +103,11 @@ async fn relationships_part(
         let scope = match record.origin.by {
             Starter::Human { user } => Scope::Human(user),
             Starter::Ant { user } | Starter::Review { user } if !own.contains(&user) => Scope::Ant(user),
-            Starter::Ant { .. } | Starter::Review { .. } | Starter::Webhook { .. } | Starter::Provider { .. } => {
+            Starter::Ant { .. }
+            | Starter::Review { .. }
+            | Starter::Webhook { .. }
+            | Starter::Provider { .. }
+            | Starter::Unknown => {
                 continue;
             }
         };

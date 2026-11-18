@@ -204,9 +204,9 @@ fn deny_webhook_command(call: &ToolCall, trigger: &Trigger) -> Result<(), Answer
     Ok(())
 }
 
-/// The refusal of a call its store failed, showing the reminder found at another revision.
-fn refused(error: StoreError) -> Answer {
-    let mut answer = Answer::from(error);
+/// The refusal of a call, showing the reminder found at another revision.
+fn refused(error: impl Into<Answer>) -> Answer {
+    let mut answer = error.into();
     if answer.json["current"]["kind"] == KIND {
         answer.json["reminder"] = answer.json["current"].clone();
     }

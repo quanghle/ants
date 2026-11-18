@@ -15,14 +15,13 @@
 use std::fmt::Write as _;
 
 use ants_proto::UserId;
-use ants_proto::provider::{BoxFuture, CallContext, Starter, ToolCall};
+use ants_proto::provider::{BoxFuture, CallContext, Starter, ToolCall, normalize_remote};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::{
     Access, DEFAULT_IMPORTANCE, MEMORY, Memory, MemoryItem, RECALLED_BEGIN, RECALLED_END, Scope, Status, chain,
-    normalize_remote,
 };
 use crate::Sense;
 use crate::items::{Item, ItemId};
@@ -192,7 +191,7 @@ pub fn participants(context: &CallContext) -> Vec<Scope> {
     match &context.origin.by {
         Starter::Human { user } => vec![Scope::Human(user.clone())],
         Starter::Ant { user } | Starter::Review { user } => vec![Scope::Ant(user.clone())],
-        Starter::Webhook { .. } | Starter::Provider { .. } => Vec::new(),
+        Starter::Webhook { .. } | Starter::Provider { .. } | Starter::Unknown => Vec::new(),
     }
 }
 
@@ -360,7 +359,9 @@ async fn read(items: &dyn Items, id: &ItemId, history: bool, context: &CallConte
     if let Some(found) = items.get(id).await?.and_then(RecordItem::of) {
         if history {
             return Err(Answer::invalid(format!(
-                "{id} is a record, replaced in place: history needs the id of a memory."
+                "{id} is a record, replaced in place: history needs the id of a memory; sense_identity with history \
+                 and who {} shows the record's revisions.",
+                found.record.scope
             )));
         }
         let json = json!({"note": NOTE, "record": found.json()});
@@ -507,6 +508,7 @@ fn starter(by: &Starter) -> String {
         Starter::Webhook { user } => format!("webhook {user}"),
         Starter::Review { user } => format!("ant {user}, asking a review"),
         Starter::Provider { name } => format!("provider {name}"),
+        Starter::Unknown => "someone of a kind not known".to_owned(),
     }
 }
 
