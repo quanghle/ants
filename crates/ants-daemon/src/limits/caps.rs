@@ -8,7 +8,9 @@
 //! What a thread spent since a human's last message on it is kept in the KV bucket `ants_sessions` under
 //! `<ant>.<thread>.spend`, and what the ant spent in a UTC day under `<ant>.day.<YYYY-MM-DD>`, so both
 //! survive harness and daemon restarts. A message from any human gives the thread a fresh allowance; the ant's
-//! allowance comes back at 00:00 UTC. Spend is kept whether or not the ant has caps, for `ants spend` to report.
+//! allowance comes back at 00:00 UTC. Spend is kept whether or not the ant has caps, for `ants spend` to report. The
+//! thread's key also keeps what it spent in all, which no fresh allowance starts over: what a sage's review thread
+//! cost ([`Ledger::thread_total`]).
 //!
 //! Spend first passing a share of a cap short of it gives a [`Warning`], once per thread allowance or UTC day: that it
 //! was given is kept with the spend, so restarts and later prompts do not give it again.
@@ -70,6 +72,9 @@ struct ThreadSpend {
     reading: Option<f64>,
     tokens: u64,
     cost: f64,
+    /// What the thread spent in all, which a fresh allowance leaves alone, unlike `tokens` and `cost`.
+    #[serde(default)]
+    total: Spent,
     /// The thread's escalation, from when it first went anywhere until a human's message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     escalation: Option<Pending>,
@@ -300,7 +305,7 @@ impl Ended {
     }
 }
 
-/// Tokens and cost spent: by the ant in a UTC day, or by a thread since a human's last message on it.
+/// Tokens and cost spent: by the ant in a UTC day, or by a thread, since a human's last message on it or in all.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Spent {
     pub tokens: u64,
@@ -446,10 +451,11 @@ impl Ledger {
         .await
     }
 
-    /// What the ant spent on the thread since a human's last message on it.
-    pub async fn thread_spent(&self, thread: &ThreadId) -> Result<Spent> {
+    /// What the ant spent on the thread in all, every prompt and across restarts, whatever humans' messages and
+    /// leaders' answers on it gave it fresh allowances.
+    pub async fn thread_total(&self, thread: &ThreadId) -> Result<Spent> {
         let spent: ThreadSpend = self.store.get(thread_spend_key(&self.ant, thread)).await?;
-        Ok(Spent { tokens: spent.tokens, cost: spent.cost })
+        Ok(spent.total)
     }
 
     /// The reminder of the thread's escalation, if it has one.
@@ -668,6 +674,7 @@ impl Ledger {
                 };
                 spent.tokens += tokens;
                 spent.cost += cost;
+                spent.total += Spent { tokens, cost };
                 let total = Spent { tokens: spent.tokens, cost: spent.cost };
                 let (tokens_cap, cost_cap) =
                     (("max_thread_tokens", caps.thread_tokens), ("max_thread_cost", caps.thread_cost));
@@ -881,8 +888,30 @@ mod tests {
         assert_eq!(day, Spent { tokens: 70, cost: 0.5 });
         let spent: ThreadSpend = store.get(thread_spend_key(&ant(), &thread(1))).await.unwrap();
         assert_eq!((spent.tokens, spent.cost), (70, 0.5));
-        assert_eq!(ledger.thread_spent(&thread(1)).await.unwrap(), Spent { tokens: 70, cost: 0.5 });
-        assert_eq!(ledger.thread_spent(&thread(2)).await.unwrap(), Spent::default(), "nothing spent on it");
+        assert_eq!(ledger.thread_total(&thread(1)).await.unwrap(), Spent { tokens: 70, cost: 0.5 });
+        assert_eq!(ledger.thread_total(&thread(2)).await.unwrap(), Spent::default(), "nothing spent on it");
+    }
+
+    /// A human's message or a leader's answer gives the thread a fresh allowance, its caps and `ants spend` counting
+    /// from nothing again, but leaves what it spent in all.
+    #[tokio::test]
+    async fn a_fresh_allowance_leaves_the_thread_s_total() {
+        let caps = Caps { thread_tokens: Some(100), ..Caps::default() };
+        let store = Store::Memory(Arc::default());
+        let ledger = Ledger::with_store(store.clone(), ant(), caps);
+        let t = thread(1);
+        ledger.record_on(&t, &Spend::Tokens(120), DAY).await.unwrap();
+        ledger.record_on(&t, &cost("s1", 0.25), DAY).await.unwrap();
+        ledger.reset(&t).await.unwrap();
+        assert_eq!(ledger.reached_on(&t, DAY).await.unwrap(), None, "a human's message frees the thread");
+        ledger.record_on(&t, &Spend::Tokens(30), DAY).await.unwrap();
+        ledger.fresh_allowance(&t).await.unwrap();
+        ledger.record_on(&t, &cost("s1", 0.75), DAY).await.unwrap();
+
+        let ledger = Ledger::with_store(store, ant(), caps);
+        assert_eq!(ledger.thread_total(&t).await.unwrap(), Spent { tokens: 150, cost: 0.75 }, "after a restart too");
+        let kv = ledger.store.get::<ThreadSpend>(thread_spend_key(&ant(), &t)).await.unwrap();
+        assert_eq!((kv.tokens, kv.cost), (0, 0.5), "the allowance counts from the last one");
     }
 
     #[tokio::test]

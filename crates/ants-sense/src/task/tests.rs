@@ -57,8 +57,13 @@ fn call(thread: &str, arguments: Value) -> ToolCall {
     }
 }
 
+/// The answer to `call` as a provider call gets it, the items caught up with the log as it starts.
+async fn answer(sense: &Sense, call: &ToolCall) -> Answer {
+    sense.changing(&call.context.ant, task(sense, call)).await
+}
+
 async fn invoke(sense: &Sense, args: Value) -> Answer {
-    task(sense, &call("t1", args)).await
+    answer(sense, &call("t1", args)).await
 }
 
 async fn create(sense: &Sense, title: &str, priority: u8) -> ItemId {
