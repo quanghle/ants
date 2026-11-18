@@ -41,7 +41,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Credentials(page) => page.draw(frame, view, data, now, focused),
         Page::Held(page) => page.draw(frame, view, data, now, focused),
     }
-    model.bar.draw(frame, bar, &model.completions());
+    model.bar.draw(frame, bar, &model.completions(), &model.bar_title());
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
     if let Some(asking) = model.asking.as_ref().filter(|a| a.full) {
         approvals::draw_full(frame, asking, now);

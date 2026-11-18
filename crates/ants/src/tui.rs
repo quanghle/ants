@@ -343,6 +343,7 @@ impl Chat {
         *dirty |= self.animate(started);
         if *dirty || drawn.elapsed() >= REDRAW {
             self.model.look(Utc::now());
+            self.model.follow_drafts();
             terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;
             (*dirty, *drawn) = (false, Instant::now());
         }

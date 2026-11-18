@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::command::Conversation;
 use super::model::Data;
 use super::style;
 use super::work::ThreadState;
@@ -132,6 +133,7 @@ fn line(
             if unread.other > 0 {
                 spans.push(Span::styled(format!(" ·{}", unread.other), style::dim()));
             }
+            spans.extend(data.drafts.mark(&Conversation::Channel(channel.clone())));
             Line::from(spans)
         }
         Item::Ant(ant) => {
@@ -144,7 +146,11 @@ fn line(
                 Span::raw(format!(" {ant}")),
             ])
         }
-        Item::Person(person) => super::people::nav_line(data, person),
+        Item::Person(person) => {
+            let mut line = super::people::nav_line(data, person);
+            line.spans.extend(data.drafts.mark(&Conversation::Person(person.clone())));
+            line
+        }
     }
 }
 

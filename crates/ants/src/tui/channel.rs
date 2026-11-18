@@ -14,6 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use super::attach;
+use super::command::Conversation;
 use super::exec::Job;
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
@@ -344,6 +345,7 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize
         Span::styled(format!(" {} ", ago(post.at, now)), style::dim()),
         Span::raw(crate::text::excerpt(first, 200)),
     ]);
+    head.extend(data.drafts.mark(&Conversation::Thread(post.thread.clone())));
     let mut lines = vec![Line::from(head)];
     lines.extend(attach::lines(&post.attachments, marked, "  "));
     let state = data.state(&post.thread);

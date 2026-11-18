@@ -12,6 +12,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
+use super::command::Conversation;
 use super::model::{Data, Key, To};
 use super::select::Selection;
 use super::style::{self, ago};
@@ -496,6 +497,7 @@ fn row(data: &Data, thread: &ThreadId, state: ThreadState, snoozed: bool, now: D
     let spend = data.cards.spent(thread).map_or_else(|| "-".to_owned(), |s| dollars(s.cost));
     let age = summary.map_or_else(String::new, |s| ago(s.last_at, now));
     let mut title = vec![Span::raw(data.title(thread))];
+    title.extend(data.drafts.mark(&Conversation::Thread(thread.clone())));
     if snoozed {
         title.push(Span::styled(" · snoozed", style::dim()));
     }
