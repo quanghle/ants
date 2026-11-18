@@ -45,7 +45,7 @@ flowchart LR
 - **Daemon:** `ants daemon` runs per-ant ACP session pools, exposes collaboration tools to each session over MCP, and acks JetStream deliveries only after replies are stored. A harness definition's `protocol` key can run a CLI on its native protocol instead, behind an in-process ACP translator ([harness protocols](docs/config.md#harness-protocols)).
 - **Humans, assistants & ants:** humans own threads, decide tool approvals (a rejection can carry a note telling the ant what to do instead), and converse through the CLI or `ants chat`; optional personal assistant ants triage queues under device-signed grants; capability-tagged worker ants collaborate within shared turn budgets.
 
-A message on a thread with a running prompt steers it: human replies, channel replies delivered to the ant included, and other ants' messages that start something rather than answer. Harnesses of protocol `claude`, `codex` and `copilot-sdk` take it into the running turn, whose answer then replies to it; others cancel the prompt (in-flight tool calls are cancelled) and run the message next in the same session. Messages on new threads still wait for a free harness. A reply sent with `ants ask --queue` (or `/later` in `ants chat`) waits behind the running prompt instead. An ant starts work of its own on another thread with the MCP tool `handoff`, the current prompt going on.
+A message on a thread with a running prompt steers it: protocols `claude`, `codex` and `copilot-sdk` fold it into the running turn, while others cancel the prompt and run it next in the same session; `--queue` (or `/later` in `ants chat`) queues behind the running prompt instead, and an ant starts independent work on another thread with MCP `handoff` ([delivery](docs/architecture.md#pool-worktrees-and-at-least-once-retries)).
 
 See [docs/architecture.md](docs/architecture.md) for the store/subject model, delivery loop, MCP tools, channels, and escalation mechanics.
 
@@ -85,7 +85,7 @@ Bring up a local `nats-server`, config, background services, shell completions, 
 
 ```sh
 ants setup --ant dev-a --workdir ~/src/some-repo
-ants ask --wait @dev-a "summarise the open TODOs"
+ants ask --wait @dev-a "summarize the open TODOs"
 ants inbox                                          # unread replies across devices
 ants colony                                         # active ants and harness status
 ants channel create ops --member dev-a
