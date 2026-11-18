@@ -35,6 +35,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("unsnooze", "", "bring the thread back on home"),
     ("remind", "DURATION|TIME [NOTE]", "remind of the thread (or selected message) on home and by push then"),
     ("unremind", "", "clear the thread's reminder"),
+    ("reminders", "", "every reminder, the soonest due first, in the pager"),
     ("archive", "", "archive the thread"),
     ("unarchive", "", "unarchive the thread"),
     ("title", "TEXT", "title the thread"),
@@ -103,6 +104,8 @@ pub enum Slash {
     /// Remind of the thread as `DURATION|TIME [NOTE]` says.
     Remind(String),
     Unremind,
+    /// List every reminder, as `ants remind list` does.
+    Reminders,
     Title(String),
     React(Reaction),
     Goto(Goto),
@@ -254,6 +257,7 @@ fn slash(text: &str) -> Result<Slash, String> {
         "unsnooze" => bare(Slash::Unsnooze),
         "remind" => text().map(Slash::Remind),
         "unremind" => bare(Slash::Unremind),
+        "reminders" => bare(Slash::Reminders),
         "title" => text().map(Slash::Title),
         "react" => text()?.parse().map(Slash::React).map_err(|e| e.to_string()),
         "goto" => goto(&text()?).map(Slash::Goto),
@@ -378,6 +382,9 @@ mod tests {
         assert_eq!(ok("/unsnooze"), Slash::Unsnooze);
         assert_eq!(ok("/remind 2h look again"), Slash::Remind("2h look again".into()));
         assert_eq!(ok("/unremind"), Slash::Unremind);
+        assert_eq!(ok("/reminders"), Slash::Reminders);
+        assert_eq!(parse("/reminders soon").unwrap_err(), "usage: /reminders");
+        assert_eq!(parse("/remind").unwrap_err(), "usage: /remind DURATION|TIME [NOTE]");
         assert_eq!(ok("/forward @dev-b"), Slash::Forward { to: user("dev-b"), note: String::new() });
         assert_eq!(ok("/forward @dev-b take it"), Slash::Forward { to: user("dev-b"), note: "take it".into() });
         assert_eq!(parse("/forward dev-b").unwrap_err(), "usage: /forward @ANT [TEXT]");

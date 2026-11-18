@@ -1,4 +1,5 @@
-//! `ants remind`: set, list and clear the CLI's human's reminders, as `/remind` in `ants chat` does.
+//! `ants remind`: set, list and clear the CLI's human's reminders, as `/remind`, `/reminders` and `/unremind` in `ants
+//! chat` do.
 
 use anyhow::Result;
 use clap::Subcommand;

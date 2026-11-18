@@ -1,6 +1,6 @@
 //! A human's reminders ([`Reminders`]), set, listed and cleared outside `ants chat` with `ants remind set|list|clear`,
-//! in the same entry `/remind` in `ants chat` changes; and when `DURATION|TIME [NOTE]` says to be reminded, which both
-//! take ([`parse`]).
+//! in the same entry `/remind` in `ants chat` changes and `/reminders` lists ([`read`], [`table`]); and when
+//! `DURATION|TIME [NOTE]` says to be reminded, which both take ([`parse`]).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -110,8 +110,7 @@ fn set_line(thread: &ThreadId, reminder: &Reminder, replaced: bool) -> String {
 /// `ants remind list [--json]`: the human's reminders, soonest due first.
 pub async fn list(nats: &Nats<'_>, json: bool) -> Result<()> {
     let (_, meta) = connect(nats).await?;
-    let reminders = meta.reminders().await?;
-    let titles = meta.titles(reminders.remind.keys()).await?;
+    let (reminders, titles) = read(&meta).await?;
     let now = Utc::now();
     if json {
         for (thread, reminder) in soonest(&reminders) {
@@ -119,8 +118,20 @@ pub async fn list(nats: &Nats<'_>, json: bool) -> Result<()> {
         }
         return Ok(());
     }
-    print!("{}", listing(&reminders, &titles, now, local));
+    print!("{}", table(&reminders, &titles, now));
     Ok(())
+}
+
+/// The human's reminders, read back through `meta`, and the titles of their threads.
+pub async fn read(meta: &thread_meta::Meta) -> Result<(Reminders, HashMap<ThreadId, ThreadTitle>)> {
+    let reminders = meta.reminders().await?;
+    let titles = meta.titles(reminders.remind.keys()).await?;
+    Ok((reminders, titles))
+}
+
+/// The reminders as `ants remind list` prints them at `now`, on the local clock.
+pub fn table(reminders: &Reminders, titles: &HashMap<ThreadId, ThreadTitle>, now: DateTime<Utc>) -> String {
+    listing(reminders, titles, now, local)
 }
 
 /// The reminders of `reminders`, soonest due first.

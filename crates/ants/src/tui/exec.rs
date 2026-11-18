@@ -1,7 +1,7 @@
 //! What the command bar's sends and slash commands do over the CLI's connection, in the background while the UI goes
 //! on: the same library code as `ants ask`, `ants post`, `ants answer`, `ants react`, `ants cancel`, `ants thread
-//! done|title|pin|mute...` and `ants trail` ([`super::trail`]) run, each returning the line those print and the warnings
-//! they log.
+//! done|title|pin|mute...`, `ants remind list` ([`super::remind`]) and `ants trail` ([`super::trail`]) run, each
+//! returning the line those print and the warnings they log.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -19,7 +19,7 @@ use futures::future::LocalBoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 
-use super::{attach, trail};
+use super::{attach, remind, trail};
 use crate::admin::orders;
 use crate::admin::pause;
 use crate::cmd::{cancel, send};
@@ -49,7 +49,7 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    fn meta(&self) -> Result<&Meta> {
+    pub(super) fn meta(&self) -> Result<&Meta> {
         self.meta.as_ref().map_err(|e| anyhow!("{e}"))
     }
 }
@@ -145,6 +145,8 @@ pub enum Job {
         channel: ChannelId,
         level: ChannelNotify,
     },
+    /// List the human's reminders, as `ants remind list` does.
+    Reminders,
     Title {
         thread: ThreadId,
         text: String,
@@ -359,6 +361,7 @@ impl Job {
             Self::ChannelNotify { channel, level } => {
                 Ok(Done::line(quiet::channel_notify(&ctx.js, me, &channel, level).await?))
             }
+            Self::Reminders => remind::listed(ctx).await,
             Self::Title { thread, text } => {
                 Ok(Done::line(thread_meta::retitle(&ctx.js, ctx.meta()?, &ctx.sealing, &thread, &text, false).await?))
             }

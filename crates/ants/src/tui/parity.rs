@@ -109,7 +109,7 @@ const CLI: &[(&str, Chat)] = &[
     ("attachment get", Slash("save")),
     ("notify", Missing("ants-rjatj.16")),
     ("remind set", Slash("remind")),
-    ("remind list", Missing("ants-rjatj.15")),
+    ("remind list", Slash("reminders")),
     ("remind clear", Slash("unremind")),
     ("assistant enable", Missing("ants-waemb")),
     ("assistant disable", Missing("ants-waemb")),

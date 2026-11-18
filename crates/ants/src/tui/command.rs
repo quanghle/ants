@@ -256,6 +256,7 @@ impl Model {
                 self.remind_as(self.target()?, message, &text, now).map(Some)
             }
             Slash::Unremind => Ok(Some(self.set_reminder(self.target()?, None))),
+            Slash::Reminders => run(Job::Reminders),
             Slash::Title(text) => run(Job::Title { thread: self.target()?, text }),
             Slash::React(reaction) => {
                 let message = match self.page() {
