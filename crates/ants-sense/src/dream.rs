@@ -541,11 +541,11 @@ pub async fn finding(items: &dyn Items, id: &str) -> Result<Option<Finding>, Sto
     Ok(dream.findings.into_iter().find(|finding| finding.id == id))
 }
 
-/// Why what the ant writes in `context`, in answer to `finding` if it names one, rests on untrusted text; none when it
-/// does not (requirements ants-x39hk.6.5 and ants-x39hk.12.5). It does when the thread came from a webhook, the
-/// finding is untrusted ([`Finding::untrusted`]), or the call is on the thread of a dream whose packet held untrusted
-/// text, an untrusted finding or the history of an untrusted thread: the ant may answer any of them without naming
-/// it. `sense_persona` and `sense_skill` refuse their proposals then.
+/// Why a persona or skill proposal made in `context`, in answer to `finding` if it names one, rests on untrusted text;
+/// none when it does not (requirements ants-x39hk.6.5 and ants-x39hk.12.5). It does when the thread came from a
+/// webhook, or when the finding it names is untrusted ([`Finding::untrusted`]). On the thread of a dream whose packet
+/// holds untrusted text, an untrusted finding or the history of an untrusted thread, it does too unless it names a
+/// finding of that dream: one naming none, or a finding the dream does not hold, may answer the untrusted text.
 pub async fn untrusted(
     items: &dyn Items,
     context: &CallContext,
@@ -554,18 +554,34 @@ pub async fn untrusted(
     if !context.trusted() {
         return Ok(Some("the thread came from a webhook".into()));
     }
-    if let Some(id) = finding
-        && self::finding(items, id).await?.is_some_and(|finding| finding.untrusted)
-    {
-        return Ok(Some(format!("finding {id} rests on untrusted text")));
-    }
     let on = items.list_by(DREAM, "thread", Some(&json!(context.thread)), 1).await?;
-    let Some(dream) = on.first().map(Dream::of).transpose()? else { return Ok(None) };
+    let dream = on.first().map(Dream::of).transpose()?;
+    if let Some(id) = finding {
+        let held = dream.as_ref().and_then(|dream| dream.findings.iter().find(|finding| finding.id == id));
+        let untrusted = match held {
+            Some(held) => held.untrusted,
+            None => self::finding(items, id).await?.is_some_and(|finding| finding.untrusted),
+        };
+        if untrusted {
+            return Ok(Some(format!("finding {id} rests on untrusted text")));
+        }
+        if held.is_some() || dream.is_none() {
+            return Ok(None);
+        }
+    }
+    let Some(dream) = dream else { return Ok(None) };
+    let answers = match finding {
+        Some(id) => format!("finding {id} is not one of its findings"),
+        None => "the proposal names none of its findings in `finding`".into(),
+    };
     if let Some(finding) = dream.findings.iter().find(|finding| finding.untrusted) {
-        return Ok(Some(format!("dream {} offers untrusted finding {}", dream.number, finding.id)));
+        return Ok(Some(format!("dream {} offers untrusted finding {} and {answers}", dream.number, finding.id)));
     }
     if dream.threads.iter().any(|covered| covered.untrusted) {
-        return Ok(Some(format!("the packet of dream {} holds the history of an untrusted thread", dream.number)));
+        return Ok(Some(format!(
+            "the packet of dream {} holds the history of an untrusted thread and {answers}",
+            dream.number
+        )));
     }
     Ok(None)
 }
