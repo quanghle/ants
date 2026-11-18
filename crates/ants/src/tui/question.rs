@@ -448,8 +448,9 @@ impl Card<'_> {
     }
 
     /// The questions, each with its options in a line, then the answers, at most `width` wide; on the card the keys
-    /// answer, its [`body`] under `cursor` while focused, then the keys it takes: Enter focusing it with `enter`.
-    pub fn lines(&self, width: usize, cursor: Option<&Cursor>, enter: bool) -> Vec<Line<'static>> {
+    /// answer, its [`body`] under `cursor` while focused, then the keys it takes: Enter focusing it with `enter`, the
+    /// digits only once ↑ selects a message while `writing` in its thread.
+    pub fn lines(&self, width: usize, cursor: Option<&Cursor>, (enter, writing): (bool, bool)) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         let questions = self.question.questions.as_slice();
         match (self.keys, self.asked.id) {
@@ -460,6 +461,8 @@ impl Card<'_> {
                 lines.extend(body(self.question, id, cursor, width));
                 let keys = match cursor {
                     Some(cursor) => cursor.keys(),
+                    None if writing && enter => "Enter choose · ↑ then 1-9 answer",
+                    None if writing => "↑ then 1-9 answer",
                     None if enter => "1-9 answer · Enter choose",
                     None => "1-9 answer",
                 };
@@ -543,7 +546,7 @@ mod tests {
         let card = &cards(&m.data, &entries, at(2))[0];
         assert_eq!(card.title(), " question from dev-b ");
         assert_eq!(
-            shown(&card.lines(80, None, true)),
+            shown(&card.lines(80, None, (true, false))),
             ["Which retry policy?", "  1 exponential", "  2 fixed 5s", "  type an answer", "1-9 answer · Enter choose"]
         );
 
@@ -557,7 +560,7 @@ mod tests {
         let card = &cards(&m.data, &entries, at(3))[0];
         assert_eq!(card.answers, ["answered by alice: option 2, fixed 5s"]);
         assert_eq!(
-            shown(&card.lines(80, None, true)),
+            shown(&card.lines(80, None, (true, false))),
             ["Which retry policy?", "1 exponential  2 fixed 5s", "answered by alice: option 2, fixed 5s"]
         );
         assert_eq!(thread_key(Key::Char('1'), &m.data, &thread, &entries, at(3)), None, "answered");
@@ -678,7 +681,7 @@ mod tests {
         let card = &cards(&m.data, &entries, at(2))[0];
         assert_eq!(card.title(), " questions from dev-b ");
         assert_eq!(
-            shown(&card.lines(80, None, false)),
+            shown(&card.lines(80, None, (false, false))),
             ["[Q1]  Q2  Submit", "Ship it?", "  1 yes", "  2 no", "1-9 answer"]
         );
         let Some(Keyed::Focus(cursor)) = thread_key(Key::Char('2'), &m.data, &thread, &entries, at(2)) else {
@@ -700,7 +703,7 @@ mod tests {
             entries.push(asked);
         }
         let shown: Vec<Vec<String>> =
-            cards(&m.data, &entries, at(3)).iter().map(|c| shown(&c.lines(80, None, false))).collect();
+            cards(&m.data, &entries, at(3)).iter().map(|c| shown(&c.lines(80, None, (false, false)))).collect();
         assert_eq!(shown, [vec!["Ship it?", "1 yes  2 no"], vec!["Tag it?", "  1 yes", "  2 no", "1-9 answer"]]);
         let job =
             Job::Answer { thread: thread.clone(), question: entries[1].id.unwrap(), picks: vec![Pick::option(1)] };

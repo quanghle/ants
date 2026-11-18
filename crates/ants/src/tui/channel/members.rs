@@ -436,7 +436,7 @@ mod tests {
         let mut m = ops();
         let Page::Channel(page) = m.page() else { panic!() };
         assert_eq!(page.prompt(), None);
-        keys(&mut m, [Key::Char('M')]);
+        keys(&mut m, [Key::Up, Key::Char('M')]);
         let Page::Channel(page) = m.page() else { panic!() };
         assert_eq!(page.prompt().unwrap(), "↑↓ row · Enter edit · a add · d remove or clear · Esc close");
         assert_eq!(keys(&mut m, [Key::Char('q'), Key::Char('n'), Key::Char('/')]), None, "taken by the editor");
@@ -451,7 +451,7 @@ mod tests {
         let mut m = model();
         m.select(nav::Item::Channel("ops".parse().unwrap()));
         m.focus = crate::tui::model::Focus::View;
-        keys(&mut m, [Key::Char('M')]);
+        keys(&mut m, [Key::Up, Key::Char('M')]);
         assert!(editor(&m).is_none());
         assert_eq!(status(&m), ("#ops is not read yet".to_owned(), Tone::Error));
     }
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn a_completes_ants_and_humans_not_members_yet_and_adds_them() {
         let mut m = ops();
-        keys(&mut m, [Key::Char('M'), Key::Char('a')]);
+        keys(&mut m, [Key::Up, Key::Char('M'), Key::Char('a')]);
         let entry = &m.data.channels[0];
         let words = |m: &Model| -> Vec<String> {
             editor(m).unwrap().completions(&m.data.channels[0], &m.data).into_iter().map(|c| c.word).collect()
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn a_paste_goes_into_the_row_typed_in_and_never_acts_as_keys() {
         let mut m = ops();
-        keys(&mut m, [Key::Char('M')]);
+        keys(&mut m, [Key::Up, Key::Char('M')]);
         m.paste("dd", at(1));
         assert!(!m.bar.focused && m.bar.is_empty() && editor(&m).unwrap().typing.is_none(), "dropped");
         keys(&mut m, [Key::Char('a')]);
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn d_removes_the_member_selected() {
         let mut m = ops();
-        keys(&mut m, [Key::Char('M')]);
+        keys(&mut m, [Key::Up, Key::Char('M')]);
         row(&mut m, 2);
         assert_eq!(keys(&mut m, [Key::Char('d')]), written(Change { remove: vec![user("bob")], ..Change::default() }));
         row(&mut m, 4);
@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn the_messenger_is_an_ant_of_the_colony_set_or_cleared() {
         let mut m = ops();
-        keys(&mut m, [Key::Char('M')]);
+        keys(&mut m, [Key::Up, Key::Char('M')]);
         row(&mut m, 5);
         keys(&mut m, [Key::Enter]);
         assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text, "@dev-m", "from what it is");
@@ -531,7 +531,7 @@ mod tests {
     #[test]
     fn the_owner_is_an_ant_set_or_cleared() {
         let mut m = ops();
-        keys(&mut m, [Key::Char('M')]);
+        keys(&mut m, [Key::Up, Key::Char('M')]);
         row(&mut m, 6);
         keys(&mut m, [Key::Enter]);
         keys(&mut m, std::iter::repeat_n(Key::Backspace, 6));
@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn the_description_is_at_most_1000_characters() {
         let mut m = ops();
-        keys(&mut m, [Key::Char('M')]);
+        keys(&mut m, [Key::Up, Key::Char('M')]);
         row(&mut m, 7);
         keys(&mut m, [Key::Enter]);
         assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text, "Deploys and outages.");
@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn a_write_refused_shows_on_the_status_line_and_one_done_reads_the_channel_back() {
         let mut m = ops();
-        keys(&mut m, [Key::Char('M')]);
+        keys(&mut m, [Key::Up, Key::Char('M')]);
         let refused = anyhow::anyhow!("no permission to write ants_channels");
         m.outcome(Outcome { result: Err(refused), text: String::new(), quoting: None });
         assert_eq!(status(&m), ("no permission to write ants_channels".to_owned(), Tone::Error));
@@ -591,7 +591,7 @@ mod tests {
         let mut m = ops();
         let before = shown(&m, 130, 30);
         assert!(before.lines().nth(4).unwrap().contains("M manage"), "{before}");
-        keys(&mut m, [Key::Char('M'), Key::Char('a'), Key::Char('c')]);
+        keys(&mut m, [Key::Up, Key::Char('M'), Key::Char('a'), Key::Char('c')]);
         let shown = self::shown(&m, 130, 30);
         let lines: Vec<&str> = shown.lines().collect();
         let left = lines[0].chars().collect::<String>().split("manage #ops").next().unwrap().chars().count();

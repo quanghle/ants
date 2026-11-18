@@ -372,8 +372,8 @@ mod tests {
         m.select(nav::Item::Person(bob));
         let shown = screen(&m, at(1));
         assert!(shown.contains(" bob · online "), "{shown}");
-        assert!(shown.contains("no messages with bob yet: n writes one"), "{shown}");
-        assert!(shown.contains("Enter open · n new message"), "{shown}");
+        assert!(shown.contains("no messages with bob yet: type one"), "{shown}");
+        assert!(shown.contains("a-z write · ↑ select · Enter open"), "{shown}");
     }
 
     fn text(line: &Line) -> String {
@@ -486,6 +486,9 @@ mod tests {
         }
         let push = crate::test_support::live::request("dev-a", "git push", vec![ants_proto::Verdict::AllowOnce]);
         m.data.live.approvals = vec![ants_proto::ApprovalRequest { thread_id: thread, ..push }];
+        let footer = text(&footer_line(&m, at(2), 80));
+        assert!(footer.starts_with(" a-z write · ↑ select · Enter details · "), "letters written: {footer}");
+        m.key(Key::Up, at(2));
         let footer = text(&footer_line(&m, at(2), 80));
         assert!(footer.starts_with(" a allow · A always · r reject · n note · Enter details · "), "{footer}");
         assert!(footer.ends_with(" · ? help"), "{footer}");

@@ -69,7 +69,7 @@ impl Model {
         let lower = typed.to_lowercase();
         let views = keymap::views(self);
         let keys = views.into_iter().flat_map(keymap::entries).chain(keymap::GLOBAL);
-        let keys = keys.filter(|e| !e.keys.contains(&Key::Ctrl('k'))).map(|e| {
+        let keys = keys.filter(|e| !e.keys.is_empty() && !e.keys.contains(&Key::Ctrl('k'))).map(|e| {
             let entry = Entry {
                 word: e.label.to_owned(),
                 detail: e.long.to_owned(),
@@ -133,7 +133,16 @@ impl Model {
             Act::Key(key) => {
                 self.bar.set_text("");
                 self.bar.focused = false;
-                return self.key(key, now);
+                // A letter picked while writing acts as on the message selected, else the latest.
+                if !matches!(key, Key::Char(_)) || !self.typing() {
+                    return self.key(key, now);
+                }
+                self.selecting = Some(self.conversation());
+                let action = self.key(key, now);
+                if self.selecting.is_some() {
+                    self.unselect(false);
+                }
+                return action;
             }
             Act::Go(place) => {
                 self.bar.set_text("");

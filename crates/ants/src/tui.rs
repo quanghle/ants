@@ -287,6 +287,8 @@ fn key_of(key: KeyEvent) -> Option<Key> {
             KeyCode::Enter => Some(Key::Enter),
             KeyCode::Left => Some(Key::WordLeft),
             KeyCode::Right => Some(Key::WordRight),
+            KeyCode::Home => Some(Key::CtrlHome),
+            KeyCode::End => Some(Key::CtrlEnd),
             // Ctrl-\ comes as Ctrl-4 from a terminal that sends its control code, as most do.
             KeyCode::Char('4') => Some(Key::Ctrl('\\')),
             KeyCode::Char(c) => Some(Key::Ctrl(c)),

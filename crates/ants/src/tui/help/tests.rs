@@ -49,6 +49,8 @@ fn taken(source: &str, name: &str) -> Vec<Key> {
             "AltBackspace" => Key::AltBackspace,
             "WordLeft" => Key::WordLeft,
             "WordRight" => Key::WordRight,
+            "CtrlHome" => Key::CtrlHome,
+            "CtrlEnd" => Key::CtrlEnd,
             "Char" | "Ctrl" | "Alt" => {
                 let args = parenthesized(&rest[name.len()..]);
                 let chars = quoted(args);

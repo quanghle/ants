@@ -225,7 +225,7 @@ impl Page {
         let block = style::block(format!(" {}{state} ", self.with), focused && self.draft.is_none());
         if dms.is_empty() {
             let text = if data.live.stored_at.is_some() {
-                format!("no messages with {} yet: n writes one", self.with)
+                format!("no messages with {} yet: type one", self.with)
             } else {
                 "reading the stream…".to_owned()
             };
@@ -328,6 +328,7 @@ mod tests {
         assert_eq!((m.page().name(), m.focus), ("dm", Focus::View));
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Open(thread)));
         m.key(Key::Esc, at(2));
+        m.key(Key::Up, at(2));
         m.key(Key::Char('n'), at(2));
         for key in [Key::Char('q'), Key::Char('?'), Key::Char('x'), Key::Backspace, Key::Tab, Key::Char(' ')] {
             assert_eq!(m.key(key, at(2)), None, "{key:?} goes to the message being written");
@@ -340,6 +341,7 @@ mod tests {
         let View::Dm(page) = m.page() else { panic!("not a DM") };
         assert_eq!(page.prompt(), None, "sent, so no longer written");
 
+        m.key(Key::Up, at(3));
         m.key(Key::Char('n'), at(3));
         assert_eq!(m.key(Key::Enter, at(3)), None, "nothing to send");
         m.paste("see\r\nyou", at(3));

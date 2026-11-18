@@ -14,6 +14,12 @@ use crate::tui::{channel, credentials, held, nav, notices, thread, work};
 
 impl Model {
     pub fn key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
+        let action = self.dispatch(key, now);
+        self.settle();
+        action
+    }
+
+    fn dispatch(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         self.follow_drafts();
         let quitting = self.quitting.take().is_some_and(|at| now - at < QUIT_WITHIN);
         self.notice.take_if(|n| n.level == Level::Error);
@@ -69,6 +75,16 @@ impl Model {
             && self.focus == Focus::View
             && let Some(action) = self.card_key(key, now)
         {
+            return action;
+        }
+        if self.bar.focused
+            && self.focus == Focus::View
+            && matches!(key, Key::PageUp | Key::PageDown | Key::CtrlHome | Key::CtrlEnd)
+            && matches!(self.page(), Page::Thread(_))
+        {
+            return self.view_key(key, now);
+        }
+        if let Some(action) = self.conversation_key(key, now) {
             return action;
         }
         if let Some(action) = self.bar_key(key, now) {

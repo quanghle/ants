@@ -32,6 +32,7 @@ use crate::threads::thread::Entry;
 use crate::tools::Update;
 
 mod keys;
+mod typing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -62,6 +63,10 @@ pub enum Key {
     WordLeft,
     /// Ctrl-Right or Alt-Right: a word on in the command bar.
     WordRight,
+    /// Ctrl-Home: the thread's first message, the bar focused too.
+    CtrlHome,
+    /// Ctrl-End: the thread's latest message, the bar focused too.
+    CtrlEnd,
     Char(char),
 }
 
@@ -366,6 +371,9 @@ pub struct Model {
     pub fold: fold::Fold,
     /// When Ctrl-C, nothing being open and the bar empty, asked for a second one to quit.
     pub quitting: Option<DateTime<Utc>>,
+    /// The conversation whose message or post Up selected, the view's single keys acting on it; else, in a thread, a
+    /// channel's feed or a DM, a printable key is written in the bar ([`Model::typing`]).
+    pub selecting: Option<command::Conversation>,
     /// When q last closed the help, the notices, the digest or a tool request, or came again soon after: a q that soon
     /// never quits.
     closed_by_q: Option<DateTime<Utc>>,
@@ -419,6 +427,7 @@ impl Model {
             compact: false,
             fold: fold::Fold::default(),
             quitting: None,
+            selecting: None,
             closed_by_q: None,
         }
     }

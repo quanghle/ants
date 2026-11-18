@@ -52,8 +52,6 @@ impl Model {
                 Key::Ctrl('k') if self.bar.is_empty() => self.bar.insert('/'),
                 Key::Ctrl('k') => {}
                 Key::Char(c @ ('@' | '#')) if self.focus == Focus::View => self.bar.insert(c),
-                // The bar replies on the thread open.
-                Key::Char('i') if self.focus == Focus::View && matches!(self.page(), Page::Thread(_)) => {}
                 _ => return None,
             }
             self.bar.focused = true;
@@ -713,6 +711,7 @@ mod tests {
     fn a_dm_being_written_keeps_its_keys_and_the_bar_asks_its_person() {
         let mut m = model();
         m.pages.push(Page::Dm(crate::tui::dm::Page::new(user("bob"))));
+        m.key(Key::Up, at(0));
         typed(&mut m, "n@");
         assert!(!m.bar.focused, "@ goes to the message being written");
         m.key(Key::Esc, at(0));
@@ -945,19 +944,23 @@ mod tests {
     }
 
     #[test]
-    fn i_in_a_thread_focuses_the_bar_to_reply_there() {
+    fn i_in_a_thread_is_written_and_with_a_message_selected_focuses_the_bar_to_reply_there() {
         let thread = ThreadId::generate();
         let mut m = model();
         m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy")], at(1));
         m.focus = Focus::View;
         m.key(Key::Char('i'), at(1));
-        assert!(!m.bar.focused, "only in a thread");
+        assert!(!m.bar.focused, "home has no conversation to write in");
         m.pages.push(Page::Thread(thread::Page::new(thread)));
         m.key(Key::Char('i'), at(1));
-        assert!(m.bar.focused);
-        assert_eq!(m.bar.text(), "", "i is not typed");
+        assert_eq!((m.bar.text(), m.bar.focused), ("i".to_owned(), true), "written");
+        m.key(Key::Ctrl('u'), at(1));
+        m.key(Key::Esc, at(1));
+        m.key(Key::Up, at(1));
+        assert!(!m.typing());
         m.key(Key::Char('i'), at(1));
-        assert_eq!(m.bar.text(), "i", "typed once the bar has focus");
+        assert!(m.bar.focused && m.typing());
+        assert_eq!(m.bar.text(), "", "i is not written then");
     }
 
     #[test]
@@ -1007,6 +1010,7 @@ mod tests {
 
         m.key(Key::Esc, at(3));
         m.key(Key::Up, at(3));
+        m.key(Key::Up, at(3));
         m.bar.set_text("@dev-b and the docs");
         m.key(Key::Char('>'), at(3));
         assert_eq!(m.bar.text(), "and the docs", "a human's message gets no mention, and the one typed goes");
@@ -1015,6 +1019,7 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Run(reply, "and the docs".into())));
 
         m.key(Key::Esc, at(3));
+        m.key(Key::Up, at(3));
         m.key(Key::Char('>'), at(3));
         assert!(m.bar.quoting.is_some());
         m.key(Key::Ctrl('u'), at(3));
@@ -1031,7 +1036,8 @@ mod tests {
             vec![message(1, &thread, "alice", "dev-a", "deploy"), message(2, &thread, "dev-a", "alice", "done")];
         m.stored(entries.clone(), at(2));
         m.focus = Focus::View;
-        m.key(Key::Char('f'), at(2));
+        m.bar.focused = true;
+        typed(&mut m, "/forward @");
         assert_eq!((m.bar.text(), m.bar.focused), ("/forward @".to_owned(), true));
         typed(&mut m, "dev-b");
         assert_eq!(m.key(Key::Enter, at(2)), None, "following the latest, the thread goes, by its TL;DR");
@@ -1119,6 +1125,7 @@ mod tests {
         m.key(Key::Esc, at(1));
         assert!(m.bar.is_empty(), "the draft stays with home");
         m.bar.set_text("deploy the docs too");
+        m.key(Key::Up, at(1));
         assert_eq!(m.key(Key::Char('E'), at(1)), None, "a draft in the bar is kept");
         assert_eq!(m.bar.text(), "deploy the docs too");
         assert!(m.bar.status.as_ref().unwrap().text.starts_with("the bar holds a draft"));

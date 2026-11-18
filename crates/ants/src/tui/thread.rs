@@ -249,6 +249,36 @@ impl Page {
         self.scroll.set(if top == bottom && self.selected.is_none() { Scroll::Latest } else { Scroll::At(top) });
     }
 
+    /// Select the message held at the top, else the one selected, else the latest, or the latest in view when scrolled
+    /// up: Up from typing.
+    pub fn select(&mut self) {
+        if let Some(held) = self.held() {
+            self.selected.get_or_insert(held);
+        } else if self.selected.is_none() {
+            if self.scroll.get() == Scroll::Latest {
+                self.selected = self.messages().last().map(|e| e.seq);
+            } else {
+                self.line(false);
+            }
+        }
+    }
+
+    /// Whether a message is selected rather than the latest followed.
+    pub fn selecting(&self) -> bool {
+        self.selected.is_some()
+    }
+
+    /// Leave the selection, the view where it is, or following the latest when `latest`: back to typing.
+    pub fn unselect(&mut self, latest: bool) {
+        self.selected = None;
+        self.at = None;
+        if latest {
+            self.scroll.set(Scroll::Latest);
+        } else {
+            self.scroll_by(0);
+        }
+    }
+
     /// Up, or with `down` Down: scroll inside the selected message while it goes on past the view that way, else
     /// select the next message that way; with the selection out of view, select the message in view nearest that way.
     fn line(&mut self, down: bool) {
@@ -396,7 +426,15 @@ impl Page {
         }
         if matches!(
             key,
-            Key::Up | Key::Down | Key::Char('k' | 'j') | Key::PageUp | Key::PageDown | Key::Home | Key::End
+            Key::Up
+                | Key::Down
+                | Key::Char('k' | 'j')
+                | Key::PageUp
+                | Key::PageDown
+                | Key::Home
+                | Key::End
+                | Key::CtrlHome
+                | Key::CtrlEnd
         ) && self.at.take().is_some()
         {
             self.scroll.set(Scroll::At(self.top.get()));
@@ -412,9 +450,13 @@ impl Page {
                 self.selected = first;
                 self.scroll.set(Scroll::Reveal { up: false });
             }
-            Key::End => {
+            Key::End | Key::CtrlEnd => {
                 self.selected = None;
                 self.scroll.set(Scroll::Latest);
+            }
+            Key::CtrlHome => {
+                self.top.set(0);
+                self.scroll.set(Scroll::At(0));
             }
             Key::Char('y') => return self.selection().map(|e| To::Do(Action::Copy(e.text.clone()))),
             Key::Char('v') => return self.selection().map(|e| To::Do(Action::Page(e.text.clone()))),
@@ -759,6 +801,7 @@ fn draw_cards(
     now: DateTime<Utc>,
 ) -> Cards {
     let width = usize::from(area.width.saturating_sub(2));
+    let writing = model.typing();
     let requests = approvals::cards(&model.data, Some(thread), now);
     let questions = question::cards(&model.data, entries, now);
     let pending = requests.iter().position(|c| c.settled.is_none()).map(Shows::Request);
@@ -777,7 +820,7 @@ fn draw_cards(
     let (title, lines, style, rows, carded) = match shows {
         Shows::Request(at) => {
             let card = requests[at];
-            let lines = |rows| approvals::lines(card, model.asking.as_ref(), true, now, (width, rows));
+            let lines = |rows| approvals::lines(card, model.asking.as_ref(), (true, writing), now, (width, rows));
             let rows = (1..=approvals::CARD_LINES).rev().find(|rows| lines(*rows).len() <= room).unwrap_or(1);
             let style = if card.settled.is_some() { style::dim() } else { Style::new().fg(style::PENDING) };
             let id = format!("{}/{} ", card.request.ant, card.request.id);
@@ -789,7 +832,7 @@ fn draw_cards(
         Shows::Question(at) => {
             let card = &questions[at];
             // Enter shows a pending tool request before it focuses a question.
-            let lines = card.lines(width, cursor, pending.is_none());
+            let lines = card.lines(width, cursor, (pending.is_none(), writing));
             (card.title(), scrolled(lines, room, cursor.is_some()), card.style(), 0, Some(card.asked.seq))
         }
     };
@@ -1148,6 +1191,7 @@ mod tests {
         };
         assert!(shown(&m).contains("  ⎿ ● dev-a  Ran 2 commands · 10.0s · 1 failed"), "{}", shown(&m));
 
+        m.selecting = Some(m.conversation());
         assert_eq!(m.key(Key::Char('T'), at(40)), Some(Action::KeepTools(Tools::None)));
         assert_eq!(m.notice_at(at(40)).map(|n| n.text.as_str()), Some("tool calls: none"));
         let none = shown(&m);
@@ -1334,11 +1378,14 @@ mod tests {
         for height in [24, 30] {
             let shown = crate::test_support::render::rendered(100, height, |f| crate::tui::frame::draw(f, &m, at(5)));
             assert!(shown.contains("│execute: git push origin main"), "{height}: {shown}");
-            assert!(shown.contains("a allow · r reject"), "{height}: {shown}");
+            assert!(shown.contains("Enter details · ↑ then a r n answer"), "{height}: {shown}");
             assert!(shown.contains("1 tool request and 1 question also wait"), "{height}: {shown}");
             assert!(shown.contains("tool request  execute: git pu… · card below"), "one line: {shown}");
             assert!(shown.contains("execute: git tag v1") && shown.contains("1 yes"), "the others in full: {shown}");
         }
+        m.key(Key::Up, at(5));
+        let shown = crate::test_support::render::rendered(100, 24, |f| crate::tui::frame::draw(f, &m, at(5)));
+        assert!(shown.contains("a allow · r reject"), "a message selected: {shown}");
         assert_eq!(m.key(Key::Char('1'), at(5)), None, "the question's card is not on screen");
         assert!(m.asking.is_none());
         assert_eq!(m.key(Key::Char('a'), at(5)), Some(Action::Decide(Box::new(push), Verdict::AllowOnce)));
@@ -1346,6 +1393,9 @@ mod tests {
         m.data.live.approvals.clear();
         let shown = crate::test_support::render::rendered(100, 20, |f| crate::tui::frame::draw(f, &m, at(5)));
         assert!(shown.contains("│Backfill the table?") && shown.contains("│1-9 answer · Enter choose"), "{shown}");
+        m.key(Key::End, at(5));
+        let shown = crate::test_support::render::rendered(100, 20, |f| crate::tui::frame::draw(f, &m, at(5)));
+        assert!(shown.contains("│Enter choose · ↑ then 1-9 answer"), "writing: {shown}");
         assert!(shown.contains("asks  Backfill the table? · card below"), "{shown}");
     }
 
@@ -1373,6 +1423,7 @@ mod tests {
             screen.contains("1 question also waits above") && !screen.contains("1-9 answer"),
             "the request's card shows, the question's folds: {screen}"
         );
+        m.key(Key::Up, at(2));
         assert_eq!(m.key(Key::Char('1'), at(2)), None, "no key answers a card not on screen");
         assert!(m.asking.is_none());
         m.key(Key::Enter, at(2));

@@ -801,6 +801,7 @@ mod tests {
         let (root, spun) = delegated(&mut m);
         m.pages.push(View::Thread(crate::tui::thread::Page::new(root.clone())));
         m.focus = Focus::View;
+        m.key(Key::Up, at(9));
         assert_eq!(m.key(Key::Char('t'), at(9)), None);
         assert_eq!(m.page().name(), "tree");
         assert_eq!(m.tree_shown(), Some((root.clone(), vec![root.clone(), spun])));

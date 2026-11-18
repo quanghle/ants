@@ -53,7 +53,18 @@ impl Entry {
 
     /// Whether the row's keys act on `model` now, else why not.
     pub fn applies(&self, model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
+        if self.written(model) {
+            return Err("written in the bar: ↑ selects a message first");
+        }
         (self.when)(model, now)
+    }
+
+    /// Whether the row's key is a printable one written in the bar while typing in a conversation, rather than acting;
+    /// n and N step through a find shown in the thread all the same.
+    fn written(&self, model: &Model) -> bool {
+        let letter = matches!(self.keys.first(), Some(Key::Char(c)) if !matches!(c, '?' | '@' | '#' | '/'));
+        let stepping = finding(model) && self.keys.iter().all(|k| matches!(k, Key::Char('n' | 'N')));
+        letter && !stepping && !model.bar.focused && model.typing()
     }
 
     /// The row as the footer shows it: "label short".
@@ -84,6 +95,8 @@ pub enum View {
     Bar,
     /// A tool request shown in full.
     Request,
+    /// A thread, a channel's feed or a DM with nothing selected, a printable key written in the bar.
+    Typing,
 }
 
 impl View {
@@ -107,6 +120,7 @@ impl View {
             Self::Held => "held orders",
             Self::Bar => "the command bar",
             Self::Request => "a tool request in full",
+            Self::Typing => "a conversation, writing",
         }
     }
 }
@@ -140,7 +154,7 @@ pub fn views(model: &Model) -> Vec<View> {
             return vec![pane, View::Ant];
         }
     };
-    vec![view]
+    if model.typing() { vec![View::Typing, view] } else { vec![view] }
 }
 
 /// The footer of `model` at most `width` wide: the hints of the views on screen and of everywhere that can act now,
@@ -192,6 +206,7 @@ pub fn entries(view: View) -> &'static [Entry] {
         View::Held => HELD,
         View::Bar => BAR,
         View::Request => REQUEST,
+        View::Typing => TYPING,
     }
 }
 
@@ -212,7 +227,7 @@ const DIGITS: &[Key] = &[
 
 /// The rows that hold everywhere, under the views'.
 pub const GLOBAL: &[Entry] = &[
-    Entry::new(&[Key::Esc], "Esc", "back", "back to the previous view, else to the nav", 9, on_view),
+    Entry::new(&[Key::Esc], "Esc", "back", "back to the previous view, else to the nav", 9, not_selecting),
     Entry::new(&[Key::Tab], "Tab", "nav/view", "move between the nav and the view", 40, always),
     Entry::new(
         &[Key::Ctrl('k'), Key::Char('/')],
@@ -354,7 +369,15 @@ const THREAD: &[Entry] = &[
     Entry::new(&[Key::Enter], "Enter", "details", "the oldest tool request waiting in full", 5, thread_pending),
     Entry::new(DIGITS, "1-9", "answer", "answer the question waiting by number", 6, thread_question),
     Entry::new(&[Key::Enter], "Enter", "answer", "focus the card of the question waiting", 7, thread_question),
-    Entry::new(&[Key::Char('i')], "i", "reply", "reply on the thread in the command bar", 8, always),
+    Entry::new(&[Key::Char('i')], "i", "write", "back to writing in the bar (End and Esc too)", 8, selecting),
+    Entry::new(
+        &[Key::CtrlHome, Key::CtrlEnd],
+        "Ctrl-Home",
+        "first/latest",
+        "show the first message, Ctrl-End follow the latest; while writing too, as PgUp and PgDn scroll",
+        HELP_ONLY,
+        always,
+    ),
     Entry::new(
         &[Key::Char('n'), Key::Char('N')],
         "n N",
@@ -454,8 +477,28 @@ const WORK: &[Entry] = &[
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
 
+const TYPING: &[Entry] = &[
+    Entry::new(
+        &[],
+        "a-z",
+        "write",
+        "a printable key is written in the bar, Enter sending it here; ? on an empty bar shows this help",
+        0,
+        always,
+    ),
+    Entry::new(
+        &[Key::Up],
+        "↑",
+        "select",
+        "select the latest message or post: the keys of the view then act on it, i, End or Esc back to writing",
+        1,
+        always,
+    ),
+];
+
 const CHANNEL: &[Entry] = &[
     Entry::new(UP_DOWN, "↑↓", "post", "select a post", 10, always),
+    Entry::new(&[Key::Char('i')], "i", "write", "back to writing in the bar (End and Esc too)", 8, selecting),
     Entry::new(&[Key::Enter], "Enter", "open", "open the selected post's thread", 5, post_selected),
     Entry::new(&[Key::Left, Key::Right], "←→", "tab", "the channel's state tab", 11, always),
     Entry::new(
@@ -477,6 +520,7 @@ const DM: &[Entry] = &[
     Entry::new(UP_DOWN, "↑↓", "thread", "select a thread", 10, always),
     Entry::new(&[Key::Enter], "Enter", "open", "open the selected thread", 5, always),
     Entry::new(&[Key::Char('n')], "n", "new message", "write a new message to the person", 6, always),
+    Entry::new(&[Key::Char('i')], "i", "write", "back to writing in the bar (End and Esc too)", 8, selecting),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
 
@@ -699,6 +743,15 @@ fn no_thread_open(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
 
 fn on_view(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
     check(model.focus == Focus::View, "the nav is focused")
+}
+
+fn selecting(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
+    check(model.selecting.is_some() && !model.typing(), "nothing selected: a printable key is written already")
+}
+
+fn not_selecting(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
+    check(model.selecting.is_none() || model.typing(), "Esc goes back to writing first")?;
+    on_view(model, now)
 }
 
 fn thread_selected(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {

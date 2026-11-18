@@ -509,6 +509,7 @@ mod tests {
         let mut m = model();
         m.select(nav::Item::Channel(ops.clone()));
         let set = |level| Some(Action::Run(Job::ChannelNotify { channel: ops.clone(), level }, String::new()));
+        m.key(Key::Up, at(1));
         assert_eq!(m.key(Key::Char('n'), at(1)), set(ChannelNotify::Mentions));
         assert_eq!(m.data.level(&ops), ChannelNotify::Mentions, "shown before it is stored");
         assert_eq!(m.key(Key::Char('n'), at(1)), set(ChannelNotify::All));

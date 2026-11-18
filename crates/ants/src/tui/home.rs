@@ -561,7 +561,7 @@ impl Page {
                     let card = approvals::lines(
                         card,
                         model.asking.as_ref(),
-                        at == selected,
+                        (at == selected, false),
                         now,
                         (width, approvals::CARD_LINES),
                     );

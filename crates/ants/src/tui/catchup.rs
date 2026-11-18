@@ -586,6 +586,7 @@ mod tests {
         let thread = finished(&mut m, 1);
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
         let asked = Action::Summarise(Ask::Tldr { thread: thread.clone(), ahead: false });
+        m.key(Key::Up, at(3));
         assert_eq!(m.key(Key::Char('S'), at(3)), Some(asked));
         assert_eq!(m.key(Key::Char('S'), at(3)), None, "asked for once at a time");
         assert!(shown(&m, at(3)).contains("TL;DR  asking for one…"));

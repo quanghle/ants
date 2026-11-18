@@ -98,12 +98,18 @@ pub fn how(state: &State, ant: &ants_proto::UserId) -> String {
     }
 }
 
-/// The keys answering `request`, as offered.
-fn keys(request: &ApprovalRequest) -> String {
-    [(Verdict::AllowOnce, "a allow"), (Verdict::AllowAlways, "A always")]
+/// The keys answering `request`, as offered; when `writing` in its thread, a letter is written in the bar until ↑
+/// selects a message.
+fn keys(request: &ApprovalRequest, writing: bool) -> String {
+    let offered = [(Verdict::AllowOnce, "a"), (Verdict::AllowAlways, "A")]
         .into_iter()
-        .filter(|(v, _)| request.options.contains(v))
-        .map(|(_, key)| key)
+        .filter(|(v, _)| request.options.contains(v));
+    if writing {
+        let letters: Vec<&str> = offered.map(|(_, key)| key).chain(["r", "n"]).collect();
+        return format!("Enter details · ↑ then {} answer", letters.join(" "));
+    }
+    offered
+        .map(|(v, _)| if v == Verdict::AllowOnce { "a allow" } else { "A always" })
         .chain(["r reject", "n reject with a note", "Enter details"])
         .collect::<Vec<_>>()
         .join(" · ")
@@ -133,11 +139,11 @@ pub fn fits(request: &ApprovalRequest, room: Option<(usize, usize)>) -> bool {
 
 /// The lines of `card`, at most `width` wide: with `keyed`, the card the keys answer, what the request asks over `rows`
 /// lines at most, how many more are left, and its keys; else the tool on one line; then that its answer is being stored,
-/// or how it was settled.
+/// or how it was settled. `writing` in its thread, the keys say a letter is written until ↑ selects a message.
 pub fn lines(
     card: Card,
     asking: Option<&Asking>,
-    keyed: bool,
+    (keyed, writing): (bool, bool),
     now: DateTime<Utc>,
     (width, rows): (usize, usize),
 ) -> Vec<Line<'static>> {
@@ -170,7 +176,7 @@ pub fn lines(
             if keyed {
                 Line::from(vec![
                     Span::styled(
-                        style::hints(&keys(request), width.saturating_sub(left.chars().count() + 3)),
+                        style::hints(&keys(request, writing), width.saturating_sub(left.chars().count() + 3)),
                         Style::new().fg(style::PENDING),
                     ),
                     Span::styled(format!(" · {left}"), style::dim()),
@@ -400,18 +406,21 @@ mod tests {
         assert_eq!(cards(&m.data, Some(&push.thread_id), at(10)).len(), 1);
         assert_eq!(cards(&m.data, None, at(200)).len(), 1, "a settled card goes after a while");
 
-        let pending = text(&lines(shown[0], None, true, at(10), (80, CARD_LINES)));
+        let pending = text(&lines(shown[0], None, (true, false), at(10), (80, CARD_LINES)));
         assert_eq!(pending[0], "execute: git push");
         assert!(
             pending[1].starts_with("a allow · r reject · n reject with a note · Enter details · expires in "),
             "{pending:?}"
         );
-        let narrow = text(&lines(shown[0], None, true, at(10), (60, CARD_LINES)));
+        let narrow = text(&lines(shown[0], None, (true, false), at(10), (60, CARD_LINES)));
         assert_eq!(narrow[1], "a allow · r reject · n reject with a note · expires in 0s", "the last hints go whole");
-        let settled = text(&lines(shown[1], None, false, at(10), (60, CARD_LINES)));
+        let settled = text(&lines(shown[1], None, (false, false), at(10), (60, CARD_LINES)));
         assert!(settled[1].starts_with("rejected by bob at "), "{settled:?}");
         let asking = Asking::decide(push, Verdict::AllowOnce).unwrap();
-        assert_eq!(text(&lines(shown[0], Some(&asking), true, at(10), (60, CARD_LINES)))[1], "storing the decision…");
+        assert_eq!(
+            text(&lines(shown[0], Some(&asking), (true, false), at(10), (60, CARD_LINES)))[1],
+            "storing the decision…"
+        );
     }
 
     #[test]
@@ -420,16 +429,16 @@ mod tests {
         let push = request("dev-a", "git push", vec![Verdict::AllowOnce, Verdict::AllowAlways])
             .labelled([(Verdict::AllowAlways, always.to_owned())].into());
         let card = Card { request: &push, settled: None };
-        let shown = text(&lines(card, None, true, at(10), (80, CARD_LINES)));
+        let shown = text(&lines(card, None, (true, false), at(10), (80, CARD_LINES)));
         assert_eq!(shown[1], format!("A always: {always}"), "{shown:?}");
         assert!(shown[2].starts_with("a allow · A always · r reject"), "{shown:?}");
-        assert_eq!(text(&lines(card, None, true, at(10), (20, CARD_LINES)))[1], "A always: Yes, and …");
+        assert_eq!(text(&lines(card, None, (true, false), at(10), (20, CARD_LINES)))[1], "A always: Yes, and …");
         let full = tools::details(&push, &State::Pending, at(10));
         assert!(full.contains(&format!("\nalways   {always}\n")), "{full}");
 
         let expired = Card { request: &push, settled: Some(&State::Expired) };
         assert!(
-            !text(&lines(expired, None, false, at(10), (80, CARD_LINES))).iter().any(|l| l.contains(always)),
+            !text(&lines(expired, None, (false, false), at(10), (80, CARD_LINES))).iter().any(|l| l.contains(always)),
             "settled"
         );
     }
