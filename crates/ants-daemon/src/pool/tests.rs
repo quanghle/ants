@@ -96,6 +96,25 @@ async fn a_thread_whose_worktree_fails_shares_the_workdir() {
 }
 
 #[tokio::test]
+async fn a_thread_under_review_works_among_its_checkouts() {
+    let Some(repo) = crate::test_support::repo("pool-checkouts") else { return };
+    let home = repo.parent().unwrap().join("home");
+    let (launch, log, _) = fake::launch();
+    let worktrees = Worktrees::find(&"sage".parse().unwrap(), &repo, &home).await.unwrap();
+    let checkouts = Checkouts::new(&home);
+    let pool = Pool::new(launch.in_dir(repo.clone()), SessionStore::memory(), 4, IDLE)
+        .with_worktrees(worktrees)
+        .with_checkouts(checkouts.clone());
+    let review = ants_proto::Envelope::on_thread(thread(1), "dev-a".parse().unwrap(), "sage".parse().unwrap(), "r");
+    let prepared = pool.checkouts().unwrap().prepare(&review).await;
+    pool.prompt(&thread(1), "a").await.unwrap();
+    pool.prompt(&thread(2), "b").await.unwrap();
+    assert_eq!(log.locked().cwds, [home.join("reviews/t1"), home.join("worktrees/t2")]);
+    drop(prepared);
+    std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
 async fn a_thread_keeps_its_harness_between_messages() {
     let (pool, log, _) = fake_pool(4, Sessions::Loadable);
     assert_eq!(pool.prompt(&thread(1), "one").await.unwrap(), "s1: one");

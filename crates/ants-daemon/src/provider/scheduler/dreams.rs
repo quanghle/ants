@@ -1,16 +1,16 @@
 //! The daemon's part of the ant's dreams ([`ants_sense::dream`]): when one is due, the ant has had no prompt running
 //! for [`IDLE_MINUTES`] and its threads were active since the last dream, it gathers them, with the timeline the ant
 //! stored on them, and the commits they left, and begins the dream. It sends the packet to the ant's sage when one
-//! serves it, as a message from the ant on a new thread narrowed to a review ([`ants_proto::REVIEW_ALLOW`]), and takes
-//! the sage's answer there as it arrives ([`review_answer`]); without a sage, or once the sage leaves the review
+//! serves it, as a message from the ant on a new thread narrowed to a review ([`ants_proto::REVIEW_ALLOW`]) naming the
+//! commits for the sage's daemon to check out ([`crate::checkouts`]), and takes the sage's answer there as it arrives ([`review_answer`]); without a sage, or once the sage leaves the review
 //! unanswered or answers with nothing readable, it wakes the ant on a new thread with the packet alone.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use ants_proto::provider::{BoxFuture, CallContext, Host, Origin, Starter, WakeRequest};
-use ants_proto::{Envelope, NoticeKind, REVIEW_ALLOW, ThreadId, UserId};
+use ants_proto::{Envelope, NoticeKind, REVIEW_ALLOW, ReviewCommit, ThreadId, UserId};
 use ants_sense::dream::{
     self, Commit, Covered, Dream, IDLE_MINUTES, PACKET_BUDGET, Reader, Review, Reviewed, SAGE_TIMEOUT_HOURS, Start,
     Thread,
@@ -41,8 +41,15 @@ pub(crate) trait Dreaming: Send + Sync {
     fn commits<'a>(&'a self, threads: &'a [ThreadId]) -> BoxFuture<'a, Vec<Commit>>;
     /// The ant's sage, when it has one and a daemon serves it now.
     fn sage(&self) -> BoxFuture<'_, Result<Option<UserId>>>;
-    /// Send the review packet `text` to `sage` as message `message` on `thread`.
-    fn review<'a>(&'a self, sage: &'a UserId, review: &'a Review, text: String) -> BoxFuture<'a, Result<()>>;
+    /// Send the review packet `text` to `sage` as `review`'s message on its thread, naming `commits` for the sage's
+    /// daemon to check out.
+    fn review<'a>(
+        &'a self,
+        sage: &'a UserId,
+        review: &'a Review,
+        commits: &'a [Commit],
+        text: String,
+    ) -> BoxFuture<'a, Result<()>>;
 }
 
 pub(super) struct Dreams {
@@ -136,7 +143,7 @@ async fn covered(dreams: &Dreams, dream: &Dream) -> Result<Vec<Thread>> {
 async fn review(items: &dyn Items, dreams: &Dreams, ant: &UserId, dream: &Dream, threads: &[Thread]) -> Result<()> {
     let (Some(sage), Some(review)) = (&dream.sage, &dream.review) else { return Ok(()) };
     let text = dream::packet(items, dream, &Reader::Sage(ant.clone()), threads).await?;
-    dreams.daemon.review(sage, review, text).await?;
+    dreams.daemon.review(sage, review, &dream.commits, text).await?;
     dream::review_sent(items, dream.number).await?;
     tracing::info!(%ant, %sage, dream = dream.number, thread = %review.thread, "sense dream review sent to the sage");
     Ok(())
@@ -292,12 +299,42 @@ impl Dreaming for Daemon {
         })
     }
 
-    fn review<'a>(&'a self, sage: &'a UserId, review: &'a Review, text: String) -> BoxFuture<'a, Result<()>> {
-        let mut envelope = Envelope::on_thread(review.thread.clone(), self.ant.clone(), sage.clone(), text)
-            .with_allow(Some(REVIEW_ALLOW.map(str::to_owned).to_vec()));
-        envelope.id = review.message;
-        (self.outbox)(envelope)
+    fn review<'a>(
+        &'a self,
+        sage: &'a UserId,
+        review: &'a Review,
+        commits: &'a [Commit],
+        text: String,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let mut envelope = Envelope::on_thread(review.thread.clone(), self.ant.clone(), sage.clone(), text)
+                .with_allow(Some(REVIEW_ALLOW.map(str::to_owned).to_vec()));
+            envelope.id = review.message;
+            envelope.review_commits = review_commits(&self.workdir, commits).await;
+            (self.outbox)(envelope).await
+        })
     }
+}
+
+/// `commits`, of the repository of `workdir`, as a review message names them: with the git directory they are in, for
+/// a sage's daemon on this machine to fetch them from.
+pub(super) async fn review_commits(workdir: &Path, commits: &[Commit]) -> Vec<ReviewCommit> {
+    let local = if commits.is_empty() {
+        None
+    } else {
+        let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+        let dir = crate::worktrees::run("git", workdir, args, &[], Some(GIT_TIMEOUT)).await;
+        dir.inspect_err(|e| tracing::info!(error = format!("{e:#}"), "the review names no local repository"))
+            .ok()
+            .map(|dir| dir.trim().to_owned())
+    };
+    let named = |commit: &Commit| ReviewCommit {
+        repo: commit.repo.clone(),
+        commit: commit.commit.clone(),
+        thread: commit.thread.clone(),
+        local: local.clone(),
+    };
+    commits.iter().map(named).collect()
 }
 
 fn starter(by: &Starter) -> String {

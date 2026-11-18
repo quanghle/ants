@@ -13,6 +13,7 @@ use async_nats::jetstream::{self, AckKind};
 
 use crate::bus;
 use crate::channel::{self, Context, Earlier};
+use crate::checkouts::Prepared;
 use crate::delivery::attempts::{Marker, Reply};
 use crate::escalation::{self, Stuck};
 use crate::files::Attached;
@@ -185,6 +186,7 @@ impl Inbox<'_> {
         let _turn = self.mcp.filter(|_| !joining).map(|mcp| begin_turn(mcp, incoming, msg));
         let _asking = self.approvals.filter(|_| !joining).map(|approvals| approvals.begin(envelope));
         let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off, own.then_some(spent)).await;
+        let (text, _checkouts) = self.review_checkouts(incoming, msg, joining, text).await;
         // The answer of a prompt a message joined is sent while the turn of the one it started with lasts.
         let mut _answering = None;
         let ran = if joining {
@@ -257,6 +259,27 @@ impl Inbox<'_> {
             tracing::warn!(%thread, error = format!("{e:#}"), "recording the reply");
         }
         self.deliver(incoming, &reply, msg, seq).await
+    }
+
+    /// Prompt `text` telling of the checkouts of the commits `incoming` names, with the checkouts, to keep while the
+    /// prompt lasts, when it is a review an ant asked for: a message, not a post or a webhook's, narrowed to
+    /// [`ants_proto::REVIEW_ALLOW`] ([`crate::checkouts`]). `text` alone for one `joining` a running prompt.
+    async fn review_checkouts(
+        &self,
+        incoming: &Incoming,
+        msg: &jetstream::Message,
+        joining: bool,
+        text: String,
+    ) -> (String, Option<Prepared>) {
+        let envelope = &incoming.envelope;
+        let review = !joining
+            && incoming.post.is_none()
+            && !envelope.webhook
+            && !self.humans.sender_role(envelope).is_human()
+            && ants_proto::is_review(envelope.allow.as_deref());
+        let Some(checkouts) = self.pool.checkouts().filter(|_| review) else { return (text, None) };
+        let prepared = self.acking(msg, checkouts.prepare(envelope)).await;
+        (format!("{text}\n\n{}", prepared.note()), Some(prepared))
     }
 
     /// Warn, once per sender, that the tool rules `envelope` narrows the thread to do not reach a harness running its

@@ -79,7 +79,9 @@ pub use enroll::{
     ENROLL_INBOX, ENROLL_REPEAT, EnrollHost, EnrollLeaf, EnrollReply, EnrollRequest, RenewReply, RenewRequest,
     enrollment_user,
 };
-pub use envelope::{Envelope, Mention, NotesPost, NoticeKind, Quote, SummaryOf, SummaryRequest, parse_mentions};
+pub use envelope::{
+    Envelope, Mention, NotesPost, NoticeKind, Quote, ReviewCommit, SummaryOf, SummaryRequest, parse_mentions,
+};
 pub use error::Error;
 pub use escalation::{Away, ChainEntry, Escalation, EscalationReason, Hop, OwnerBecause};
 pub use grant::{

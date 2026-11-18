@@ -115,7 +115,7 @@ fn render(dream: &Dream, previous: Option<&Dream>, reader: &Reader, threads: &[T
         Reader::Sage(ant) => format!(
             "# Review of dream {} of {ant}\n\nReview the work of {ant} since {since} UTC, {} threads, below. A \
              review changes nothing and messages no one: only read, with read-only tools, and read code only in a \
-             checkout of its own, cloned into its own workdir at the commits listed, never in the workdir or \
+             checkouts made for this review of the commits listed, under Checkouts at the end, never in the workdir or \
              worktrees of {ant}. Answer with one reply to this message holding a ```json block of the form \
              {{\"findings\": [{{\"kind\": \"lesson\", \"finding\": \"what holds\", \"evidence\": {{\"threads\": \
              [\"thread id\"], \"messages\": [\"message id\"], \"memories\": [\"memory id\"], \"files\": \

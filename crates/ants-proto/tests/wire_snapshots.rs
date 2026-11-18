@@ -167,6 +167,12 @@ fn envelope() -> Envelope {
         attachments: vec![attachment()],
         sealed: Some(Box::new(sealed())),
         notice: Some(NoticeKind::SignedOut),
+        review_commits: vec![ReviewCommit {
+            repo: "github.com/acme/app".to_owned(),
+            commit: "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_owned(),
+            thread: Some(other_thread()),
+            local: Some("/home/dev/app/.git".to_owned()),
+        }],
         sent_at: at(0),
     }
 }
@@ -194,6 +200,7 @@ fn plain_envelope() -> Envelope {
         attachments: Vec::new(),
         sealed: None,
         notice: None,
+        review_commits: Vec::new(),
         ..envelope()
     }
 }

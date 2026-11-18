@@ -2,6 +2,7 @@
 
 // An ant served: its inbox loop, the harness sessions it prompts and the worktrees they work in, the tools of those
 // harnesses, and what a thread committed.
+pub mod checkouts;
 pub mod daemon;
 pub mod harness;
 mod ipc;
