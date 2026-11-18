@@ -90,6 +90,41 @@ enum Killed {
     Paste(String),
 }
 
+/// What the bar holds for a conversation not shown: its text, with the cursor, and what Enter does with it beyond
+/// where the conversation sends.
+#[derive(Debug, Default)]
+pub struct Draft {
+    chars: Vec<char>,
+    pastes: Vec<String>,
+    cursor: usize,
+    quoting: Option<(ThreadId, Quoted)>,
+    noting: Option<Note>,
+}
+
+impl Draft {
+    /// The draft of `text`, replying to the message `quoting` or the note `noting` if any.
+    pub fn of(text: &str, quoting: Option<(ThreadId, Quoted)>, noting: Option<Note>) -> Self {
+        let chars: Vec<char> = text.chars().collect();
+        Self { cursor: chars.len(), chars, pastes: Vec::new(), quoting, noting }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chars.is_empty() && self.quoting.is_none() && self.noting.is_none()
+    }
+
+    /// The text, its pastes in full.
+    pub fn text(&self) -> String {
+        let paste = |c: &char| self.pastes.get(usize::try_from(u32::from(*c).checked_sub(PASTED)?).ok()?);
+        self.chars.iter().fold(String::new(), |mut text, c| {
+            match paste(c) {
+                Some(paste) => text.push_str(paste),
+                None => text.push(*c),
+            }
+            text
+        })
+    }
+}
+
 /// What Enter does with the note in the bar on a tool request.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Note {
@@ -108,6 +143,19 @@ impl Note {
 }
 
 impl Bar {
+    /// Hold `draft` in place of the draft held, which is returned.
+    pub fn swap(&mut self, draft: Draft) -> Draft {
+        let held = Draft {
+            chars: std::mem::replace(&mut self.chars, draft.chars),
+            pastes: std::mem::replace(&mut self.pastes, draft.pastes),
+            cursor: std::mem::replace(&mut self.cursor, draft.cursor),
+            quoting: std::mem::replace(&mut self.quoting, draft.quoting),
+            noting: std::mem::replace(&mut self.noting, draft.noting),
+        };
+        self.pick = complete::Pick::default();
+        held
+    }
+
     /// Remember that `text` being sent is the note on `request`.
     pub fn sending_note(&mut self, text: &str, request: Box<ApprovalRequest>) {
         self.notes.push((text.to_owned(), request));
@@ -426,27 +474,20 @@ impl Bar {
         u16::try_from(lines.len().min(MAX_LINES)).unwrap_or(1) + 2
     }
 
-    /// Draw the bar in `area`, and above it the `completions` of the word at the cursor, else the list of commands
-    /// when shown.
-    pub fn draw(&self, frame: &mut Frame, area: Rect, completions: &[complete::Candidate]) {
+    /// Draw the bar in `area`, its title naming where Enter sends (`to`), and above it the `completions` of the word
+    /// at the cursor, else the list of commands when shown.
+    pub fn draw(&self, frame: &mut Frame, area: Rect, completions: &[complete::Candidate], to: &str) {
         let width = usize::from(area.width.saturating_sub(2));
         let (lines, (row, column)) = self.lines(width);
         let top = (row + 1).saturating_sub(MAX_LINES);
-        let mut title = match self.staged.names()[..] {
-            [] => " > ".to_owned(),
-            ref names => format!(" > 📎 {} ", names.join(", ")),
-        };
+        let mut title = if to.is_empty() { " > ".to_owned() } else { format!(" > {to} ") };
+        if let names @ [_, ..] = &self.staged.names()[..] {
+            title = format!("{title}📎 {} ", names.join(", "));
+        }
         if let Some((_, quoted)) = &self.quoting {
             let room = usize::from(area.width.saturating_sub(4)).saturating_sub(title.chars().count());
             let line: String = quoted.quote.line().chars().take(room.saturating_sub(1)).collect();
             title = format!("{title}{line} ");
-        }
-        match &self.noting {
-            Some(Note::Reject(request)) => {
-                title = format!("{title}reject {} with a note to {} ", crate::tools::qualified(request), request.ant);
-            }
-            Some(Note::Reply(request)) => title = format!("{title}to {} on the request's thread ", request.ant),
-            None => {}
         }
         let mut block = style::block(title, self.focused);
         if let Some(status) = &self.status {

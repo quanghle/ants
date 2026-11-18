@@ -17,7 +17,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use super::acts::Change;
 use super::approvals;
-use super::command::GRANT;
+use super::command::{Conversation, GRANT};
 use super::exec::Job;
 use super::model::{Action, Data, Key, Model, To};
 use super::select::Selection;
@@ -485,6 +485,7 @@ impl Page {
                     Span::styled(format!("{:<9}", i.why.label()), Style::new().fg(i.why.color())),
                     Span::raw(data.title(&i.thread)),
                 ];
+                first.extend(data.drafts.mark(&Conversation::Thread(i.thread.clone())));
                 for (why, n) in &i.also {
                     first.push(Span::styled(" · ", style::dim()));
                     first.push(Span::styled(why.badge(*n), Style::new().fg(why.color())));

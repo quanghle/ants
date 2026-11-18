@@ -5,6 +5,8 @@
 //! command over the CLI's verbs, acting on the selected item or open thread ([`COMMANDS`]). Sends run in the background
 //! ([`super::exec`]); the bar's status line tells how they went, and a failed send's text, with the message it quoted, comes back into the bar.
 //! n on a tool request opens the bar on a note ([`Note`]): Enter rejects the request, then sends the note to its ant.
+//! The bar's title names where Enter sends the text as it stands ([`Route`]), and each conversation keeps its own
+//! draft ([`Drafts`]).
 
 use ants_proto::{ApprovalRequest, ChannelId, ChannelNotify, Questions, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
@@ -18,10 +20,16 @@ use crate::people::quiet;
 use crate::{live, tools};
 
 mod bar;
+mod drafts;
+mod history;
 mod parse;
+mod route;
 
-pub use bar::{Bar, Edited, Note, Tone};
+pub use bar::{Bar, Draft, Edited, Note, Tone};
+pub use drafts::{Conversation, Drafts};
+pub use history::{FILE as HISTORY_FILE, History};
 pub use parse::{COMMANDS, Command, Goto, Slash, parse};
+pub use route::Route;
 
 /// A paste of more bytes than this is staged as a text file rather than put in the bar.
 const PASTE_ATTACH: usize = 64 * 1024;
@@ -50,11 +58,15 @@ impl Model {
             self.bar.focused = true;
             return Some(None);
         }
+        if self.history_key(key) {
+            return Some(None);
+        }
         if self.complete_key(key) {
             return Some(None);
         }
         let before = self.bar.text();
         let edited = self.bar.key(key);
+        self.escaped(key, now);
         if self.bar.text() != before {
             self.bar.pick = complete::Pick::default();
         }
@@ -84,7 +96,11 @@ impl Model {
             return None;
         }
         let slash = matches!(command, Ok(Command::Slash(_)));
-        let done = command.and_then(|command| self.command(command, now));
+        let route = self.route(&text);
+        let done = command.and_then(|command| match command {
+            Command::Slash(command) => self.command(command, now),
+            message => self.message(message, route),
+        });
         let action = match done {
             Ok(action) => action,
             Err(why) => {
@@ -93,6 +109,7 @@ impl Model {
                 return None;
             }
         };
+        self.push_history(&text);
         self.bar.set_text("");
         self.bar.list = false;
         self.bar.status = None;
@@ -113,6 +130,8 @@ impl Model {
 
     /// Run `job`, which the bar's `text` asked for, with the files staged if it sends a message.
     fn run_job(&mut self, job: Job, text: String, slash: bool) -> Action {
+        let here = self.data.drafts.here().clone();
+        self.data.drafts.sending(&text, here);
         let job = match job.sends().then(|| self.bar.staged.take(&text)).flatten() {
             Some(files) => {
                 let count = if files.len() == 1 { "1 file".to_owned() } else { format!("{} files", files.len()) };
@@ -178,24 +197,22 @@ impl Model {
         Ok(Job::Answer { thread, question, picks: answer.picks })
     }
 
-    /// The action `command` takes, or why it cannot be taken.
-    fn command(&mut self, command: Command, now: DateTime<Utc>) -> Result<Option<Action>, String> {
+    /// The action sending the message `command` the way `route`, the route of the bar's text, goes.
+    fn message(&self, command: Command, route: Route) -> Result<Option<Action>, String> {
         let run = |job| Ok(Some(Action::Run(job, String::new())));
-        let slash = match command {
-            Command::Ask { to, text } => {
-                let (thread, quote) = self.quoting().map_or((None, None), |(thread, q)| (Some(thread), Some(q)));
-                return run(Job::Ask { to, thread, text, quote });
-            }
-            Command::Post { channel, text } => return run(Job::Post { channel, thread: None, text, quote: None }),
-            Command::Say(text) => return run(self.say(text)),
-            Command::Later(text) => {
-                return match self.say(text) {
-                    job @ (Job::Reply { .. } | Job::Post { thread: Some(_), .. }) => run(Job::Later(Box::new(job))),
-                    _ => Err("/later replies on an open thread: open one first".to_owned()),
-                };
-            }
-            Command::Slash(slash) => slash,
-        };
+        match command {
+            Command::Ask { text, .. } | Command::Post { text, .. } | Command::Say(text) => run(self.job(route, text)?),
+            Command::Later(text) => match self.job(route, text)? {
+                job @ (Job::Reply { .. } | Job::Post { thread: Some(_), .. }) => run(Job::Later(Box::new(job))),
+                _ => Err("/later replies on an open thread: open one first".to_owned()),
+            },
+            Command::Slash(_) => Err("nothing to send".to_owned()),
+        }
+    }
+
+    /// The action the slash command `slash` takes, or why it cannot be taken.
+    fn command(&mut self, slash: Slash, now: DateTime<Utc>) -> Result<Option<Action>, String> {
+        let run = |job| Ok(Some(Action::Run(job, String::new())));
         match slash {
             Slash::Approve { id, always } => {
                 let verdict = if always { Verdict::AllowAlways } else { Verdict::AllowOnce };
@@ -326,20 +343,6 @@ impl Model {
             Page::Thread(page) => page.attachment().cloned(),
             Page::Channel(page) => page.attachment(&self.data).cloned(),
             _ => None,
-        }
-    }
-
-    /// What plain text does: reply on the open thread, as a post on a channel's thread, post a new thread on the
-    /// channel on view, else ask the human's assistant, else the messenger ([`Job::Unaddressed`]).
-    fn say(&self, text: String) -> Job {
-        let quote = self.quoting().map(|(_, q)| q);
-        if let Some((channel, thread)) = self.channel_on_view() {
-            return Job::Post { channel, thread, text, quote };
-        }
-        match self.page() {
-            Page::Thread(page) => Job::Reply { thread: page.history.thread.clone(), text, quote },
-            Page::Dm(page) => Job::Ask { to: page.with.clone(), thread: None, text, quote: None },
-            _ => Job::Unaddressed { text },
         }
     }
 
@@ -480,10 +483,12 @@ impl Model {
 
     /// Take how a job the bar ran went: its line and warnings on the status line, opening the thread it started, and
     /// the text and files of a message withdrawn to edit into the bar; on failure, the error, and its text and quote
-    /// back into the bar if empty.
+    /// back as the draft of the conversation it was typed in if that holds none.
     pub fn outcome(&mut self, outcome: Outcome) -> Option<Action> {
+        self.follow_drafts();
         self.bar.staged.sent(&outcome.text, outcome.result.is_err());
         let note = self.bar.note_sent(&outcome.text);
+        let typed = self.data.drafts.sent(&outcome.text).filter(|typed| typed != self.data.drafts.here());
         match outcome.result {
             Ok(mut done) => {
                 self.data.withdrawn.extend(done.withdrew);
@@ -508,7 +513,12 @@ impl Model {
             }
             Err(e) => {
                 self.bar.set_status(format!("{e:#}"), Tone::Error);
-                if self.bar.is_empty() && !outcome.text.is_empty() {
+                if let Some(typed) = typed
+                    && !outcome.text.is_empty()
+                {
+                    let draft = Draft::of(&outcome.text, outcome.quoting, note.map(Note::Reply));
+                    self.data.drafts.keep(typed, draft);
+                } else if self.bar.is_empty() && !outcome.text.is_empty() {
                     self.bar.set_text(&outcome.text);
                     self.bar.quoting = outcome.quoting;
                     self.bar.noting = note.map(Note::Reply);
@@ -630,7 +640,7 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "who owns billing?".into())));
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
         typed(&mut m, "go on");
-        let reply = Job::Reply { thread: thread.clone(), text: "go on".into(), quote: None };
+        let reply = Job::Reply { thread: thread.clone(), to: None, text: "go on".into(), quote: None };
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(reply, "go on".into())));
         let mut post = message(1, &thread, "dev-a", "ops", "hi");
         (post.kind, post.channel) = (crate::threads::thread::Kind::Post, Some("ops".parse().unwrap()));
@@ -674,6 +684,7 @@ mod tests {
         let thread = ThreadId::generate();
         let mut m = model();
         let run = |m: &mut Model, text: &str| {
+            m.follow_drafts();
             m.bar.focused = true;
             m.bar.set_text(text);
             m.key(Key::Enter, at(0))
@@ -719,6 +730,7 @@ mod tests {
         page.history.loaded(&thread, Ok(vec![first.clone()])).unwrap();
         m.pages.push(Page::Thread(page));
         let answer = |m: &mut Model| {
+            m.follow_drafts();
             m.bar.focused = true;
             m.bar.set_text("/answer after lunch");
             match m.key(Key::Enter, at(2)) {
@@ -744,6 +756,7 @@ mod tests {
         page.history.loaded(&thread, Ok(vec![asked.clone()])).unwrap();
         m.pages.push(Page::Thread(page));
         let answer = |m: &mut Model, text: &str| {
+            m.follow_drafts();
             m.bar.focused = true;
             m.bar.set_text(text);
             m.key(Key::Enter, at(2))
@@ -766,6 +779,7 @@ mod tests {
         let push = request("dev-a", "git push", vec![Verdict::AllowOnce]);
         m.take(live::Event::Approval(tools::Update::Pending(push.clone())), at(0));
         let run = |m: &mut Model, text: &str| {
+            m.follow_drafts();
             m.bar.focused = true;
             m.bar.set_text(text);
             m.key(Key::Enter, at(0))
@@ -851,6 +865,7 @@ mod tests {
         };
         m.read(Read::Directory(Ok((vec![ops], ants_proto::Humans::default()))), at(1));
         let run = |m: &mut Model, text: &str| {
+            m.follow_drafts();
             m.bar.focused = true;
             m.bar.set_text(text);
             m.key(Key::Enter, at(1))
@@ -878,7 +893,7 @@ mod tests {
         m.bar.set_text("");
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
         typed(&mut m, "/later then the docs");
-        let reply = Job::Reply { thread, text: "then the docs".into(), quote: None };
+        let reply = Job::Reply { thread, to: None, text: "then the docs".into(), quote: None };
         let job = Job::Later(Box::new(reply));
         assert!(job.sends());
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "/later then the docs".into())));
@@ -952,7 +967,7 @@ mod tests {
         m.key(Key::Char('>'), at(3));
         assert_eq!(m.bar.text(), "and the docs", "a human's message gets no mention, and the one typed goes");
         let quote = Some(Quoted { id: ids[0], quote: ants_proto::Quote::new(user("alice"), "deploy"), sealed: false });
-        let reply = Job::Reply { thread, text: "and the docs".into(), quote };
+        let reply = Job::Reply { thread, to: None, text: "and the docs".into(), quote };
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Run(reply, "and the docs".into())));
 
         m.key(Key::Esc, at(3));
@@ -1005,11 +1020,13 @@ mod tests {
         let thread = ThreadId::generate();
         let mut m = model();
         m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy")], at(1));
+        m.follow_drafts();
         m.bar.focused = true;
         m.bar.set_text("/tree");
         assert_eq!(m.key(Key::Enter, at(1)), None);
         assert_eq!(m.bar.status.as_ref().unwrap().text, "no thread open or selected");
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        m.follow_drafts();
         m.bar.set_text("/tree");
         m.key(Key::Enter, at(1));
         assert_eq!(m.page().name(), "tree");
@@ -1056,8 +1073,10 @@ mod tests {
         page.history.loaded(&thread, Ok(entries)).unwrap();
         m.pages.push(Page::Thread(page));
         m.key(Key::Esc, at(1));
+        assert!(m.bar.is_empty(), "the draft stays with home");
+        m.bar.set_text("deploy the docs too");
         assert_eq!(m.key(Key::Char('E'), at(1)), None, "a draft in the bar is kept");
-        assert_eq!(m.bar.text(), "deploy the site");
+        assert_eq!(m.bar.text(), "deploy the docs too");
         assert!(m.bar.status.as_ref().unwrap().text.starts_with("the bar holds a draft"));
     }
 
@@ -1090,6 +1109,7 @@ mod tests {
 
         let thread = ThreadId::generate();
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        m.follow_drafts();
         m.bar.set_text("/done");
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(Job::Done { thread, done: true }, "/done".into())));
         assert_eq!(m.bar.staged.names(), ["notes.txt"], "only a message takes the files");
@@ -1106,17 +1126,15 @@ mod tests {
         let thread = ThreadId::generate();
         let mut m = model();
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
-        assert_eq!(
-            m.command(Command::Slash(Slash::Save(None)), at(0)),
-            Err("no attachment on the selected message".into())
-        );
+        assert_eq!(m.command(Slash::Save(None), at(0)), Err("no attachment on the selected message".into()));
         let mut sent = message(1, &thread, "dev-a", "alice", "the log");
         let envelope = ants_proto::Envelope::new(user("dev-a"), user("alice"), "x");
         let log = ants_daemon::files::reference("build.log", "text/plain", b"ok").unwrap();
         sent.attachments = crate::messages::attachments::listed(&[log], |id| envelope.attachment_handle(id));
         let Page::Thread(page) = m.pages.last_mut().unwrap() else { panic!() };
         page.history.loaded(&thread, Ok(vec![sent.clone()])).unwrap();
-        let saved = m.command(parse("/save ~/logs").unwrap(), at(0)).unwrap();
+        let Ok(Command::Slash(save)) = parse("/save ~/logs") else { panic!() };
+        let saved = m.command(save, at(0)).unwrap();
         let to = std::env::home_dir().map(|home| home.join("logs"));
         assert_eq!(saved, Some(Action::Run(Job::Save(Box::new(sent.attachments[0].clone()), to), String::new())));
     }

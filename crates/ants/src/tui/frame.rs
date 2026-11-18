@@ -41,7 +41,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Credentials(page) => page.draw(frame, view, data, now, focused),
         Page::Held(page) => page.draw(frame, view, data, now, focused),
     }
-    model.bar.draw(frame, bar, &model.completions());
+    model.bar.draw(frame, bar, &model.completions(), &model.bar_title());
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
     if let Some(asking) = model.asking.as_ref().filter(|a| a.full) {
         approvals::draw_full(frame, asking, now);
@@ -78,6 +78,9 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     }
     if model.bar.focused && !model.completions().is_empty() {
         return Line::styled(" ↑↓ select · Tab/Enter complete · Esc close the list", dim());
+    }
+    if model.data.history.searching().is_some() {
+        return Line::styled(" type to search the texts sent · Ctrl-R earlier · Enter take · Esc put back", dim());
     }
     if model.bar.focused {
         return Line::styled(" Enter send · Ctrl-J new line · Ctrl-G editor · / commands · Esc leave", dim());
@@ -117,6 +120,7 @@ const HELP: &[(&str, &str)] = &[
     ("/command", "in the bar: a command on the selection (/ lists them)"),
     ("Ctrl-J Ctrl-G", "in the bar: a new line (or \\ Enter, Shift-Enter), the text in the editor"),
     ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
+    ("Ctrl-P Ctrl-N Ctrl-R", "in the bar: the texts sent, earlier, later, searched; Esc twice keeps the text there"),
     ("y p m e d z", "in a thread: copy, pin, mute, archive, done, snooze (again to undo)"),
     ("a A r n", "on a tool request: allow once, always, reject at once, or reject with a note to the ant"),
     ("1-9 Enter", "on a question: answer by number, or focus its card: ↑↓ ←→ Space Enter Esc"),

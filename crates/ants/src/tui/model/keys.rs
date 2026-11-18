@@ -13,8 +13,12 @@ use crate::tui::{channel, credentials, held, nav, thread, work};
 
 impl Model {
     pub fn key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
+        self.follow_drafts();
         if key == Key::Interrupt {
             return Some(Action::Quit);
+        }
+        if self.esc_again(key, now) {
+            return None;
         }
         if self.asking.as_ref().is_some_and(Asking::takes_keys) && !self.help {
             return self.answer(key, now);
@@ -112,6 +116,7 @@ impl Model {
     /// line breaks and all; dropped where only keys are answered (help, the digest, a tool request, a confirmation) and
     /// in the compact view, rather than taken as keys.
     pub fn paste(&mut self, text: &str, now: DateTime<Utc>) {
+        self.follow_drafts();
         let text = pasted(text);
         if text.is_empty()
             || self.compact

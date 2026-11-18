@@ -178,6 +178,10 @@ pub struct Data {
     pub looks: faces::Looks,
     /// The messages the human withdrew here, marked before the ant's notice of each comes.
     pub withdrawn: HashSet<Uuid>,
+    /// The drafts of the conversations, the bar holding that of the one shown.
+    pub drafts: command::Drafts,
+    /// The texts sent from the bar, which it recalls.
+    pub history: command::History,
 }
 
 impl Data {
@@ -372,6 +376,8 @@ impl Model {
             credentials: credentials::Heard::default(),
             held: held::Orders::default(),
             looks: faces::Looks::default(),
+            drafts: command::Drafts::default(),
+            history: command::History::default(),
         };
         let nav = nav::Item::Home;
         Self {
