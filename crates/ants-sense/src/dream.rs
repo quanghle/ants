@@ -77,7 +77,7 @@ pub use reviews::{
 pub use tool::{dream, schema};
 pub use vitals::{
     CANCELLED_FINDING, CAPPED_FINDING, Ends, FAILED_MIN_CALLS, FAILED_SHARE_FACTOR, FAILED_SHARE_FLOOR,
-    REJECTED_FINDING, Signs, TREND, Tally, trend,
+    REJECTED_FINDING, Signs, TREND, Tally, before, changes, trend,
 };
 
 /// The kind of each dream's item ([`Dream`]).

@@ -1,13 +1,15 @@
 //! The vital signs of an ant's work over a dream's period ([`Signs`]): the daemon measures them on each thread the dream
 //! covers as it begins ([`Start::vitals`]) and the dream keeps their sum ([`Dream::vitals`]), so sense holds the trend
 //! for as long as its log lives, with nothing written between dreams. The packet shows them beside those of the dreams
-//! before ([`trend`]), with a line per thread ([`section`]), and a sign turning sharply for the worse is a finding
+//! before ([`trend`]), with a line per thread ([`section`]), the memories view and growth report each sign's change
+//! against their mean ([`changes`]), and a sign turning sharply for the worse is a finding
 //! ([`gather`]): [`CANCELLED_FINDING`] prompts cancelled by a human, [`CAPPED_FINDING`] cut by a cap,
 //! [`REJECTED_FINDING`] tool requests rejected, or a share of failed tool calls at least [`FAILED_SHARE_FACTOR`] times
 //! the mean of the dreams before, and at least [`FAILED_SHARE_FLOOR`], over [`FAILED_MIN_CALLS`] calls or more.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::ops::Range;
 
 use ants_proto::ThreadId;
 use serde::{Deserialize, Serialize};
@@ -188,7 +190,7 @@ impl Signs {
 /// number.
 pub async fn trend(items: &dyn Items, number: u64) -> Result<Vec<(u64, Signs)>, StoreError> {
     let mut trend = Vec::new();
-    for earlier in number.saturating_sub(TREND).max(1)..number {
+    for earlier in before(number) {
         if let Some((dream, _)) = get(items, earlier).await?
             && let Some(vitals) = dream.vitals
         {
@@ -196,6 +198,11 @@ pub async fn trend(items: &dyn Items, number: u64) -> Result<Vec<(u64, Signs)>, 
         }
     }
     Ok(trend)
+}
+
+/// The numbers of the dreams before dream `number` whose vital signs make its trend: the last [`TREND`].
+pub fn before(number: u64) -> Range<u64> {
+    number.saturating_sub(TREND).max(1)..number
 }
 
 /// The findings on the vital signs of `threads`, the threads a dream covers, against the `trend` of the dreams before:
@@ -290,14 +297,14 @@ pub(super) fn section<'a>(
     text.push_str("\n|---|");
     text.push_str(&"---:|".repeat(columns.len()));
     text.push('\n');
-    for (label, value) in ROWS {
-        if columns.iter().all(|(_, signs)| value(signs).is_empty()) {
+    for row in ROWS {
+        let cells: Vec<_> = columns.iter().map(|(_, signs)| row.cell(signs)).collect();
+        if cells.iter().all(String::is_empty) {
             continue;
         }
-        let _ = write!(text, "| {label} |");
-        for (_, signs) in &columns {
-            let value = value(signs);
-            let _ = write!(text, " {} |", if value.is_empty() { "0" } else { &value });
+        let _ = write!(text, "| {} |", row.label);
+        for cell in &cells {
+            let _ = write!(text, " {} |", if cell.is_empty() { "0" } else { cell });
         }
         text.push('\n');
     }
@@ -318,38 +325,116 @@ pub(super) fn section<'a>(
     }
 }
 
-/// A row of the vital-signs table: a sign's label and its value, empty when nothing counts.
-type Row = (&'static str, fn(&Signs) -> String);
+/// A row of the vital-signs table: a sign's label, its measure, none when the signs give it none, and how it shows.
+struct Row {
+    label: &'static str,
+    measure: fn(&Signs) -> Option<f64>,
+    unit: Unit,
+}
+
+/// How a sign shows.
+#[derive(Clone, Copy)]
+enum Unit {
+    Count,
+    /// Milliseconds, as a duration.
+    Millis,
+    /// Millionths, as a cost.
+    Micros,
+    /// The share of the tool calls that failed.
+    Failed,
+}
 
 /// The rows of the vital-signs table.
 const ROWS: &[Row] = &[
-    ("threads worked", |signs| count(signs.threads)),
-    ("threads marked done", |signs| count(signs.done)),
-    ("prompts replied", |signs| count(signs.prompts.replied)),
-    ("prompts with no reply", |signs| count(signs.prompts.no_reply)),
-    ("prompts cancelled by a human", |signs| count(signs.prompts.cancelled)),
-    ("prompts cut by a cap", |signs| count(signs.prompts.capped)),
-    ("prompts failed", |signs| count(signs.prompts.failed)),
-    ("time in prompts", |signs| if signs.prompt_ms == 0 { String::new() } else { duration(signs.prompt_ms) }),
-    ("tool calls", |signs| count(signs.all_calls().calls)),
-    ("tool calls failed", |signs| {
-        let all = signs.all_calls();
-        all.failed_share()
-            .filter(|_| all.failed > 0)
-            .map_or_default(|share| format!("{} ({})", all.failed, percent(share)))
-    }),
-    ("tokens", |signs| if signs.tokens == 0 { String::new() } else { signs.tokens.to_string() }),
-    ("cost", |signs| if signs.cost_micros == 0 { String::new() } else { cost(signs.cost_micros) }),
-    ("tool requests asked of humans", |signs| count(signs.asked)),
-    ("tool requests rejected", |signs| count(signs.rejected)),
-    ("tool requests expired", |signs| count(signs.expired)),
-    ("escalations", |signs| count(signs.escalations)),
-    ("sessions rebuilt", |signs| count(signs.rebuilt)),
-    ("sense tool calls", |signs| count(signs.sense_calls)),
+    Row { label: "threads worked", measure: |signs| Some(signs.threads.into()), unit: Unit::Count },
+    Row { label: "threads marked done", measure: |signs| Some(signs.done.into()), unit: Unit::Count },
+    Row { label: "prompts replied", measure: |signs| Some(signs.prompts.replied.into()), unit: Unit::Count },
+    Row { label: "prompts with no reply", measure: |signs| Some(signs.prompts.no_reply.into()), unit: Unit::Count },
+    Row {
+        label: "prompts cancelled by a human",
+        measure: |signs| Some(signs.prompts.cancelled.into()),
+        unit: Unit::Count,
+    },
+    Row { label: "prompts cut by a cap", measure: |signs| Some(signs.prompts.capped.into()), unit: Unit::Count },
+    Row { label: "prompts failed", measure: |signs| Some(signs.prompts.failed.into()), unit: Unit::Count },
+    Row { label: "time in prompts", measure: |signs| Some(signs.prompt_ms as f64), unit: Unit::Millis },
+    Row { label: "tool calls", measure: |signs| Some(signs.all_calls().calls.into()), unit: Unit::Count },
+    Row { label: "tool calls failed", measure: |signs| signs.all_calls().failed_share(), unit: Unit::Failed },
+    Row { label: "tokens", measure: |signs| Some(signs.tokens as f64), unit: Unit::Count },
+    Row { label: "cost", measure: |signs| Some(signs.cost_micros as f64), unit: Unit::Micros },
+    Row { label: "tool requests asked of humans", measure: |signs| Some(signs.asked.into()), unit: Unit::Count },
+    Row { label: "tool requests rejected", measure: |signs| Some(signs.rejected.into()), unit: Unit::Count },
+    Row { label: "tool requests expired", measure: |signs| Some(signs.expired.into()), unit: Unit::Count },
+    Row { label: "escalations", measure: |signs| Some(signs.escalations.into()), unit: Unit::Count },
+    Row { label: "sessions rebuilt", measure: |signs| Some(signs.rebuilt.into()), unit: Unit::Count },
+    Row { label: "sense tool calls", measure: |signs| Some(signs.sense_calls.into()), unit: Unit::Count },
 ];
 
-fn count(n: u32) -> String {
-    if n == 0 { String::new() } else { n.to_string() }
+impl Row {
+    /// The cell of `signs` in the table: empty when nothing counts.
+    fn cell(&self, signs: &Signs) -> String {
+        if let Unit::Failed = self.unit {
+            let all = signs.all_calls();
+            return all
+                .failed_share()
+                .filter(|_| all.failed > 0)
+                .map_or_default(|share| format!("{} ({})", all.failed, percent(share)));
+        }
+        (self.measure)(signs).filter(|value| *value > 0.0).map_or_default(|value| self.show(value))
+    }
+
+    fn show(&self, value: f64) -> String {
+        match self.unit {
+            Unit::Count if value.fract() == 0.0 => format!("{value:.0}"),
+            Unit::Count => format!("{value:.1}"),
+            Unit::Millis => duration(value.round() as u64),
+            Unit::Micros => cost(value.round() as u64),
+            Unit::Failed => percent(value),
+        }
+    }
+
+    /// The change of `now` against `mean`: in points for a share, else in percent of the mean; none from a mean of
+    /// zero.
+    fn change(&self, now: f64, mean: f64) -> Option<String> {
+        // Adding zero turns a rounded -0 into 0, which shows as +0.
+        match self.unit {
+            Unit::Failed => Some(format!("{:+} points", ((now - mean) * 100.0).round() + 0.0)),
+            _ if mean == 0.0 => None,
+            _ => Some(format!("{:+}%", ((now - mean) / mean * 100.0).round() + 0.0)),
+        }
+    }
+}
+
+/// Each of `signs` that counts, now or in the `trend` of the dreams before, with its change against its mean there,
+/// taken over the dreams that measure it: "the mean of the 2 dreams before: tool calls 30 (mean 20, +50%); …". None
+/// without a dream before or a sign that counts.
+pub fn changes(signs: &Signs, trend: &[(u64, Signs)]) -> Option<String> {
+    if trend.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for row in ROWS {
+        let Some(now) = (row.measure)(signs) else { continue };
+        let before: Vec<_> = trend.iter().filter_map(|(_, signs)| (row.measure)(signs)).collect();
+        let mean = (!before.is_empty()).then(|| before.iter().sum::<f64>() / before.len() as f64);
+        if now == 0.0 && mean.is_none_or(|mean| mean == 0.0) {
+            continue;
+        }
+        let shown = match mean {
+            None => row.show(now),
+            Some(mean) => match row.change(now, mean) {
+                Some(change) => format!("{} (mean {}, {change})", row.show(now), row.show(mean)),
+                None => format!("{} (mean {})", row.show(now), row.show(mean)),
+            },
+        };
+        parts.push(format!("{} {shown}", row.label));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let before =
+        if trend.len() == 1 { "the dream before".to_owned() } else { format!("the {} dreams before", trend.len()) };
+    Some(format!("the mean of {before}: {}", parts.join("; ")))
 }
 
 /// Signs on one line, a thread's or a period's: what counts of them.

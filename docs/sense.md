@@ -63,10 +63,11 @@ vote or propose. So is a review an ant asks of its sage ([Dreams](#dreams)), who
   `memories of provider sense`, who the ant has become, read from its cache without noting a session or writing
   anything: its identity (card, experience and, for a sage, the tally of its reviews), its growth report, its persona
   with its pending proposal, its self-model, each relationship record, its skills by name and description, its last
-  dream (the title of its diary, with its verdict counts and the vital signs of its period), then its core memories
-  and its top 10 memories of every scope as `sense_recall` ranks them without a query. Each entry is keyed by its id,
-  kind, scope and trust. Entries past the size cap of a memories read are left out and counted; an ant with no sense
-  data reads `no sense data` ([cli.md](cli.md)).
+  dream (the title of its diary, with its verdict counts and the vital signs of its period, each with its change
+  against the mean of up to 5 dreams before, as `prompts replied 3 (mean 1.5, +100%)`, a share of failed tool calls
+  in points), then its core memories and its top 10 memories of every scope as `sense_recall` ranks them without a
+  query. Each entry is keyed by its id, kind, scope and trust. Entries past the size cap of a memories read are left
+  out and counted; an ant with no sense data reads `no sense data` ([cli.md](cli.md)).
 - **The growth report:** the view's `growth report` entry counts, from the ant's sense data alone, how its identity
   grew, to judge the thresholds of the identity findings of dreams and of the brief, which it names last:
   - its threads: done, started again and expired, its active days, who started them (humans, other ants, itself,
@@ -78,7 +79,8 @@ vote or propose. So is a review an ant asks of its sage ([Dreams](#dreams)), who
   - its memories by kind and status, with their votes and reads in full;
   - its dreams by state, and their findings by kind, each by the last verdict given on it (applied, rejected,
     deferred, or unanswered), with the rejected ones resting, then the vital signs of the periods of the last 5 dreams
-    keeping them, which count all calls of sense's tools;
+    keeping them, which count all calls of sense's tools, and the change of the last one's against their mean in the
+    dreams before, as the memories view shows it;
   - for a sage, the tally of the reviews it made (below): the reviews and ants, and their findings by what came of
     them, and what the reviews spent, in all, for the 10 kinds and the 10 ants of the most (the ants with their
     spend), then how many are left; no line for an ant that reviewed nobody;

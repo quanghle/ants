@@ -107,6 +107,25 @@ fn a_packet_leaves_out_the_vital_signs_by_thread_after_the_threads() {
 }
 
 #[test]
+fn each_sign_changes_against_its_mean_in_the_dreams_before() {
+    let signs = Signs { calls: calls(&[("execute", 30, 6)]), prompt_ms: 90_000, escalations: 2, ..replied(3) };
+    let trend = [
+        (1, Signs { calls: calls(&[("execute", 20, 1)]), prompt_ms: 60_000, cost_micros: 500_000, ..replied(2) }),
+        (2, Signs { rejected: 1, ..replied(1) }),
+    ];
+    let changed = "the mean of the 2 dreams before: threads worked 1 (mean 1, +0%); prompts replied 3 (mean 1.5, \
+                   +100%); time in prompts 1m 30s (mean 30s, +200%); tool calls 30 (mean 10, +200%); tool calls \
+                   failed 20% (mean 5%, +15 points); cost 0.00 (mean 0.25, -100%); tool requests rejected 0 (mean \
+                   0.5, -100%); escalations 2 (mean 0)";
+    assert_eq!(changes(&signs, &trend).as_deref(), Some(changed), "the share's mean is of the dreams with calls");
+    let after_none = changes(&signs, &trend[1..]).unwrap();
+    assert!(after_none.starts_with("the mean of the dream before: "), "{after_none}");
+    assert!(after_none.contains("; tool calls failed 20%; "), "no dream before with calls: {after_none}");
+    assert_eq!(changes(&signs, &[]), None, "no dream before");
+    assert_eq!(changes(&Signs::default(), &[(1, Signs::default())]), None, "nothing counts");
+}
+
+#[test]
 fn each_vital_finding_is_gathered_when_its_ground_holds_and_not_otherwise() {
     let found = |threads: &[(ThreadId, Signs)], trend: &[(u64, Signs)]| -> Vec<(String, String)> {
         crate::dream::vitals::gather(threads, trend)
