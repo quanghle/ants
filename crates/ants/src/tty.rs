@@ -7,12 +7,12 @@ use std::time::Duration;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// How long the terminal has to answer.
-#[cfg_attr(not(unix), allow(dead_code, reason = "the terminal is asked on unix alone"))]
+#[cfg_attr(not(unix), expect(dead_code, reason = "the terminal is asked on unix alone"))]
 const WAIT: Duration = Duration::from_millis(200);
 
 /// The primary device attributes query, which about every terminal answers, after the questions: its answer coming
 /// last tells that the terminal has answered all it will.
-#[cfg_attr(not(unix), allow(dead_code, reason = "the terminal is asked on unix alone"))]
+#[cfg_attr(not(unix), expect(dead_code, reason = "the terminal is asked on unix alone"))]
 const ATTRIBUTES: &[u8] = b"\x1b[c";
 
 /// The bytes typed while the terminal was asked, which were no answer.
