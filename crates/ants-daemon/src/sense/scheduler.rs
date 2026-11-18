@@ -2,7 +2,8 @@
 //! delivery; a replacement daemon therefore resumes pending work with the same wake id. Nothing fires while the ant's
 //! sense identity is dormant ([`ants_sense::identity::Card::active`]); its revival changes the card, which wakes the
 //! scheduler. It also runs sense's daily memory maintenance and begins the ant's dreams ([`dreams`]), whose last ones
-//! are kept in sense data, so a replacement daemon runs them no sooner either.
+//! are kept in sense data, so a replacement daemon runs them no sooner either. Each read of the ant's items also
+//! publishes the profile of its confirmed persona ([`super::published::profile`]), dormant or not.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -35,6 +36,8 @@ struct Settings {
     allow: Vec<String>,
     /// None in tests that leave dreams out.
     dreams: Option<dreams::Dreams>,
+    /// What the ant's colony entry shows, its profile among it.
+    workload: Arc<crate::colony::Workload>,
 }
 
 /// Dropping the active daemon's guard cancels its scheduler, including an in-flight probe.
@@ -66,6 +69,7 @@ pub(super) fn serve(
     config: &crate::daemon::Config,
     machine: &str,
     dreaming: Arc<dyn Dreaming>,
+    workload: Arc<crate::colony::Workload>,
 ) -> Serving {
     let host = crate::provider::wake::Ants::new(wakers);
     host.named(ants_sense::NAME);
@@ -76,6 +80,7 @@ pub(super) fn serve(
         env: config.harness.env.clone(),
         allow: config.policy.allow.clone(),
         dreams: Some(dreams::Dreams::new(dreaming)),
+        workload,
     };
     start(sense, Arc::new(host), settings)
 }
@@ -87,6 +92,7 @@ fn start(sense: Arc<Sense>, host: Arc<dyn Host>, settings: Settings) -> Serving 
         loop {
             let result = async {
                 let items = sense.synced(&settings.ant).await?;
+                super::published::profile(&*items, &settings.ant, &settings.workload).await;
                 cycle(&sense, &*items, &*host, &settings, Utc::now()).await
             }
             .await;
