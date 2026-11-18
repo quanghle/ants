@@ -38,10 +38,50 @@ pub trait EventLog {
     fn incarnation(&self) -> &str;
 }
 
-/// Why the store did not take or give messages.
+/// Why the store did not take or give messages: of which kind, set where the error is made, and in what words.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
-pub struct LogError(pub String);
+#[error("{message}")]
+pub struct LogError {
+    pub kind: LogErrorKind,
+    pub message: String,
+}
+
+/// The kinds of [`LogError`]. Only an unreachable store lets a write wait for it ([`crate::store::is_offline`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogErrorKind {
+    /// The store did not answer: no connection, disconnected, timed out, no responders.
+    Unreachable,
+    /// The store, the signer or the credentials refused the message, such as another config, a permission or a
+    /// signer failing, or other writers kept appending.
+    Refused,
+    /// What the log holds, or what is kept of it here, does not check out: a message missing or malformed, an event
+    /// that could not be verified, or the chain status not kept.
+    Integrity,
+    /// The store is another incarnation than the one read before, such as the stream created again.
+    Incarnation,
+}
+
+impl LogError {
+    pub fn new(kind: LogErrorKind, message: impl Into<String>) -> Self {
+        Self { kind, message: message.into() }
+    }
+
+    pub fn unreachable(message: impl Into<String>) -> Self {
+        Self::new(LogErrorKind::Unreachable, message)
+    }
+
+    pub fn refused(message: impl Into<String>) -> Self {
+        Self::new(LogErrorKind::Refused, message)
+    }
+
+    pub fn integrity(message: impl Into<String>) -> Self {
+        Self::new(LogErrorKind::Integrity, message)
+    }
+
+    pub fn incarnation(message: impl Into<String>) -> Self {
+        Self::new(LogErrorKind::Incarnation, message)
+    }
+}
 
 /// Why the store did not append a message.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

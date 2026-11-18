@@ -402,7 +402,8 @@ async fn claude_sessions_resume_and_fork_counting_only_their_own_cost() {
 async fn claude_sessions_load_the_ants_skills_as_a_plugin_once_one_is_confirmed() {
     let native = Fixture::new("claude-skills", "");
     let skills = native.dir.join(".sense/skills");
-    let launch = native.launch(ModelSettings::default()).with_skills(skills.clone());
+    let offered = Skills { dir: skills.clone(), plugin: native.dir.join(".sense") };
+    let launch = native.launch(ModelSettings::default()).with_skills(offered);
     native.script(None, &[]);
     native.script(Some(2), &[vec![signed_in()]]);
     native.script(Some(4), &[vec![signed_in()]]);

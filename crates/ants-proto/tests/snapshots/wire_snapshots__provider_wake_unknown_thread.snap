@@ -1,0 +1,12 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "error": {
+    "code": -32004,
+    "message": "thread 019a7d2c-0000-7000-8000-000000000001 is no thread of ant dev-a"
+  }
+}

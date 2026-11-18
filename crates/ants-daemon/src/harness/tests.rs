@@ -673,7 +673,8 @@ async fn sessions_are_offered_the_ants_skills_once_one_is_confirmed() {
     });
     let home = ants_test_support::scratch_dir("harness-skills");
     let dir = home.join(".sense/skills");
-    let launch = Launch::with_transport(connect, PathBuf::from("/"), Default::default()).with_skills(dir.clone());
+    let skills = Skills { dir: dir.clone(), plugin: home.join(".sense") };
+    let launch = Launch::with_transport(connect, PathBuf::from("/"), Default::default()).with_skills(skills);
     Session::start(&launch, None).await.unwrap().close().await;
     assert_eq!(metas.locked().pop(), Some(None), "no skill confirmed yet");
 

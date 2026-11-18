@@ -1,20 +1,16 @@
-//! What the daemon serving an ant verified of its sense log, kept in the ant's home ([`ChainStatus`]), for `ants doctor`,
-//! whose credentials do not reach the log, to report.
+//! What the daemon serving an ant verified of its sense log, kept in the ant's home ([`ChainStatus`] in
+//! [`Home::status`]), for `ants doctor`, whose credentials do not reach the log, to report.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ants_proto::{SenseId, UserId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{Break, Chain, Mark};
+use crate::home::Home;
 
-/// The directory of an ant's home holding its sense files: its identity's id, the cache of its log and the
-/// [`ChainStatus`].
-pub const SENSE_DIR: &str = ".sense";
-/// The file of [`SENSE_DIR`] holding the [`ChainStatus`].
-pub const CHAIN_FILE: &str = "chain.json";
 /// The bytes of an ant's sense log past which `ants doctor` and the brief warn: 32 MiB.
 pub const SIZE_LIMIT: u64 = 32 << 20;
 
@@ -63,14 +59,9 @@ impl ChainStatus {
     }
 }
 
-/// Where the [`ChainStatus`] of the ant whose home is `home` is kept.
-pub fn status_file(home: &Path) -> PathBuf {
-    home.join(SENSE_DIR).join(CHAIN_FILE)
-}
-
 /// The [`ChainStatus`] kept in `home`; none when there is none.
 pub fn read_status(home: &Path) -> io::Result<Option<ChainStatus>> {
-    let text = match std::fs::read(status_file(home)) {
+    let text = match std::fs::read(Home::new(home).status()) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
@@ -80,10 +71,5 @@ pub fn read_status(home: &Path) -> io::Result<Option<ChainStatus>> {
 
 /// Keep `status` in `home`, replacing the file whole.
 pub fn write_status(home: &Path, status: &ChainStatus) -> io::Result<()> {
-    let file = status_file(home);
-    let dir = file.parent().expect("a file in a directory");
-    std::fs::create_dir_all(dir)?;
-    let beside = dir.join(format!("{CHAIN_FILE}.new"));
-    std::fs::write(&beside, serde_json::to_vec_pretty(status).map_err(io::Error::other)?)?;
-    std::fs::rename(&beside, &file)
+    crate::home::write(&Home::new(home).status(), &serde_json::to_vec_pretty(status).map_err(io::Error::other)?)
 }

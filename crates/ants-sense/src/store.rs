@@ -11,7 +11,9 @@ use serde_json::Value;
 use crate::cache::{Cache, CacheError, Hit, Pending};
 use crate::export::SenseExport;
 use crate::items::{Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, Values};
-use crate::log::{APPEND_TRIES, AntLog, Break, Checked, EventLog, LogError, Position, Signer, Stored, Verifier};
+use crate::log::{
+    APPEND_TRIES, AntLog, Break, Checked, EventLog, LogError, LogErrorKind, Position, Signer, Stored, Verifier,
+};
 use crate::thread::experience::Experience;
 
 /// Why a store did not answer.
@@ -407,46 +409,9 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     }
 }
 
-/// Only connectivity failures permit accepting a local write. Other failures must remain visible.
+/// Only an unreachable store permits accepting a local write. Other failures must remain visible.
 pub fn is_offline(error: &LogError) -> bool {
-    let message = error.0.to_ascii_lowercase();
-    if [
-        "signing:",
-        "verifying:",
-        "permission",
-        "authorization",
-        "authentication",
-        "signature",
-        "credentials",
-        "revoked",
-        "incarnation",
-        "integrity",
-        "chain",
-        "keeping the",
-    ]
-    .iter()
-    .any(|reason| message.contains(reason))
-    {
-        return false;
-    }
-    [
-        "unavailable",
-        "offline",
-        "unreachable",
-        "disconnected",
-        "not connected",
-        "connection closed",
-        "connection reset",
-        "connection refused",
-        "broken pipe",
-        "connection aborted",
-        "timed out",
-        "timeout",
-        "no responders",
-        "no answer to a direct get",
-    ]
-    .iter()
-    .any(|reason| message.contains(reason))
+    error.kind == LogErrorKind::Unreachable
 }
 
 /// One change of a [`Store::write`].

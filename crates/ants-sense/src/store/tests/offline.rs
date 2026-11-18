@@ -8,7 +8,7 @@ struct Fallible {
     log: MemoryLog,
     offline: AtomicBool,
     lose_ack: AtomicBool,
-    rejection: std::sync::Mutex<Option<&'static str>>,
+    rejection: std::sync::Mutex<Option<LogError>>,
 }
 
 impl Fallible {
@@ -17,20 +17,20 @@ impl Fallible {
     }
 
     fn available(&self) -> Result<(), LogError> {
-        if self.offline.load(Ordering::SeqCst) { Err(LogError("hub unavailable".into())) } else { Ok(()) }
+        if self.offline.load(Ordering::SeqCst) { Err(LogError::unreachable("hub unavailable")) } else { Ok(()) }
     }
 }
 
 impl EventLog for Fallible {
     async fn append(&self, sense: &SenseId, payload: Vec<u8>, expected_last: u64) -> Result<u64, AppendError> {
         self.available()?;
-        if let Some(rejection) = *self.rejection.lock().unwrap() {
-            return Err(LogError(rejection.into()).into());
+        if let Some(rejection) = self.rejection.lock().unwrap().clone() {
+            return Err(rejection.into());
         }
         let sequence = self.log.append(sense, payload, expected_last).await?;
         if self.lose_ack.swap(false, Ordering::SeqCst) {
             self.online(false);
-            return Err(LogError("publish acknowledgment timed out".into()).into());
+            return Err(LogError::unreachable("publish acknowledgment timed out").into());
         }
         Ok(sequence)
     }
@@ -87,7 +87,7 @@ async fn offline_batches_keep_order_and_cas_across_restart_then_join_the_verifie
     store.sync().await.unwrap();
     assert_eq!(store.get(&one.id).unwrap(), local, "acknowledgment preserves the accepted local change's stamp");
     assert_eq!(store.pending().unwrap(), 0);
-    assert!(!crate::cache::cache_file(&home).with_extension("pending").exists());
+    assert!(!crate::home::Home::new(&home).has_pending_writes());
     let history = store.history(&one.id).unwrap();
     assert_eq!(history.iter().map(|revision| revision.sequence).collect::<Vec<_>>(), [1, 2, 3]);
     assert_eq!(store.history(&two).unwrap()[0].sequence, 2);
@@ -173,7 +173,7 @@ async fn confirmed_writes_never_create_offline_fencing_sequences_or_queue_new_ef
 async fn authentication_signing_and_integrity_failures_never_queue_writes() {
     let (log, sense) = (Fallible::default(), SenseId::new());
     let mut store = open(&log, &sense, None).await;
-    *log.rejection.lock().unwrap() = Some("authorization violation: request timed out");
+    *log.rejection.lock().unwrap() = Some(LogError::refused("authorization violation: request timed out"));
     assert!(store.create("note", note("forbidden"), "t").await.is_err());
     assert_eq!(store.pending().unwrap(), 0);
     *log.rejection.lock().unwrap() = None;
@@ -266,4 +266,35 @@ async fn reconnect_appends_the_nonconflicting_prefix_before_reporting_a_later_co
     assert_eq!(store.pending().unwrap(), 1);
     assert_eq!(store.history(&first.id).unwrap()[0].sequence, 3);
     assert_eq!(log.last_sequence(&sense).await.unwrap(), 3);
+}
+
+/// Whether a write the log fails with `error` waits in the outbox, accepted, rather than failing.
+async fn queued(error: LogError) -> bool {
+    let (log, sense) = (Fallible::default(), SenseId::new());
+    let mut store = open(&log, &sense, None).await;
+    *log.rejection.lock().unwrap() = Some(error);
+    let created = store.create("note", note("one"), "t").await;
+    let pending = store.pending().unwrap();
+    assert_eq!(created.is_ok(), pending == 1, "{created:?}");
+    pending == 1
+}
+
+#[tokio::test]
+async fn an_unreachable_hub_queues_a_write_whatever_its_words() {
+    assert!(queued(LogError::unreachable("permission denied: signing credentials revoked")).await);
+}
+
+#[tokio::test]
+async fn a_refusal_never_queues_a_write_whatever_its_words() {
+    assert!(!queued(LogError::refused("hub unavailable: request timed out")).await);
+}
+
+#[tokio::test]
+async fn an_integrity_failure_never_queues_a_write_whatever_its_words() {
+    assert!(!queued(LogError::integrity("no responders: connection reset")).await);
+}
+
+#[tokio::test]
+async fn another_incarnation_never_queues_a_write_whatever_its_words() {
+    assert!(!queued(LogError::incarnation("host disconnected: timed out")).await);
 }

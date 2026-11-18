@@ -331,8 +331,8 @@ impl Codex {
 
     /// Make the skills `open` offers the server's extra skill roots, for the threads it opens from then on.
     async fn offer_skills(&self, open: &Open) -> Result<(), Error> {
-        if let Some(dir) = &open.skills {
-            self.shared.request("skills/extraRoots/set", json!({ "extraRoots": [dir] })).await?;
+        if let Some(skills) = &open.skills {
+            self.shared.request("skills/extraRoots/set", json!({ "extraRoots": [skills.dir] })).await?;
         }
         Ok(())
     }
