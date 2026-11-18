@@ -12,7 +12,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{ListState, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use super::model::{Data, Key, To};
 use super::select::Selection;
@@ -197,8 +197,9 @@ impl Page {
             let width = usize::from(area.width.saturating_sub(4));
             let rows: Vec<Text> = dms.iter().map(|dm| row(data, dm, width, now)).collect();
             let selected = self.selected.at(&dms.iter().map(|dm| dm.thread.clone()).collect::<Vec<_>>());
-            let list_widget = style::list(rows, Some(selected), focused).block(block);
-            frame.render_stateful_widget(list_widget, area, &mut ListState::default().with_selected(Some(selected)));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            super::mouse::list(frame, inner, data, &format!("dm:{}", self.with), rows, selected, focused);
         }
     }
 }
