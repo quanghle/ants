@@ -3,11 +3,12 @@
 
 use std::time::Duration;
 
-use ants_proto::{ChannelId, ChannelNotify, Reaction, ThreadId, TrailLimits, TrailName, UserId};
+use ants_proto::{ChannelId, ChannelNotify, Machine, Reaction, ThreadId, TrailLimits, TrailName, UserId};
 use chrono::TimeDelta;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::snooze;
+use crate::admin::orders::{add, clone};
 use crate::cmd::trail::runs::Pick;
 use crate::cmd::trail::{LimitArgs, Shown};
 use crate::threads::thread_meta::Marking;
@@ -51,6 +52,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("attach", "PATH", "attach a file to the next message"),
     ("detach", "", "drop the files attached"),
     ("save", "[PATH]", "save the marked attachment"),
+    ("add", "NAME --on MACHINE [FLAGS]", "add an ant by admin order, with the flags of ants ant add"),
+    ("clone", "ANT NEW [FLAGS]", "clone the ant as NEW by admin order, with the flags of ants ant clone"),
     ("retire", "ANT", "retire the ant by admin order, its home kept"),
     (
         "dead",
@@ -132,6 +135,23 @@ pub enum Slash {
     Detach,
     /// Save the marked attachment of the selected message, to the path if given.
     Save(Option<String>),
+    /// Add the ant `name` on `machine` with `settings` by admin order, waiting up to `wait` for its outcome, as
+    /// `ants ant add` does.
+    Add {
+        name: UserId,
+        machine: Machine,
+        settings: Map<String, Value>,
+        wait: Duration,
+    },
+    /// Clone `src` as `new` with `settings` over its own by admin order to `machine`, else to the machine serving it,
+    /// waiting up to `wait` for its outcome, as `ants ant clone` does.
+    Clone {
+        src: UserId,
+        new: UserId,
+        machine: Option<Machine>,
+        settings: Map<String, Value>,
+        wait: Duration,
+    },
     /// Retire the ant by admin order.
     Retire(UserId),
     Dead(Dead),
@@ -333,6 +353,16 @@ fn slash(text: &str) -> Result<Slash, String> {
         "attach" => text().map(Slash::Attach),
         "detach" => bare(Slash::Detach),
         "save" => Ok(Slash::Save(optional())),
+        "add" => {
+            let args: add::Args = flags("/add", args).map_err(|why| why.unwrap_or_else(usage))?;
+            let settings = add::settings(&args.name, &args.options).map_err(|e| format!("{e:#}"))?;
+            Ok(Slash::Add { name: args.name, machine: args.on, settings, wait: args.wait })
+        }
+        "clone" => {
+            let args: clone::Args = flags("/clone", args).map_err(|why| why.unwrap_or_else(usage))?;
+            let settings = add::settings(&args.new, &args.options).map_err(|e| format!("{e:#}"))?;
+            Ok(Slash::Clone { src: args.src, new: args.new, machine: args.machine, settings, wait: args.wait })
+        }
         "retire" => {
             let ant = text()?;
             ant.strip_prefix('@').unwrap_or(&ant).parse().map(Slash::Retire).map_err(|e| format!("{e}"))
@@ -453,6 +483,28 @@ fn once<T>(slot: &mut Option<T>, value: T) -> bool {
     slot.replace(value).is_none()
 }
 
+/// `args` read as the command line reads the arguments `T` of its command: words as [`quoted_words`] splits them,
+/// those before the first flag without a leading `@`. Or why not: clap's error in a line, None when none was given.
+fn flags<T: clap::Args>(command: &'static str, args: &str) -> Result<T, Option<String>> {
+    let mut words = quoted_words(args);
+    if words.is_empty() {
+        return Err(None);
+    }
+    for word in words.iter_mut().take_while(|word| !word.starts_with('-')) {
+        if let Some(ant) = word.strip_prefix('@') {
+            *word = ant.to_owned();
+        }
+    }
+    let command = clap::Command::new(command).no_binary_name(true).disable_help_flag(true);
+    let told = |e: clap::Error| {
+        let text = e.to_string();
+        let first = text.split("\n\n").next().unwrap_or_default();
+        Some(first.trim_start_matches("error: ").split_whitespace().collect::<Vec<_>>().join(" "))
+    };
+    let matches = T::augment_args(command).try_get_matches_from(words).map_err(told)?;
+    T::from_arg_matches(&matches).map_err(told)
+}
+
 fn goto(to: &str) -> Result<Goto, String> {
     let error = |e: ants_proto::Error| format!("{e}");
     if let Some(channel) = to.strip_prefix('#') {
@@ -468,6 +520,8 @@ fn goto(to: &str) -> Result<Goto, String> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::test_support::live::user;
 
@@ -655,6 +709,43 @@ mod tests {
         assert_eq!(parse("/dead replay -1").unwrap_err(), "SEQ not a number: -1");
     }
 
+    #[test]
+    fn add_and_clone_take_the_arguments_of_ants_ant_add_and_clone() {
+        let ok = |text: &str| match parse(text) {
+            Ok(Command::Slash(slash)) => slash,
+            other => panic!("{text}: {other:?}"),
+        };
+        let settings = |value: Value| match value {
+            Value::Object(settings) => settings,
+            other => panic!("{other}"),
+        };
+        let m1: Machine = "m1".parse().unwrap();
+        let add = ok("/add @dev-c --on m1 --model gpt-5 --whoami 'Reviews PRs' --capability rust,docs --wait 10m");
+        let expected = json!({ "model": "gpt-5", "whoami": "Reviews PRs", "capabilities": ["rust", "docs"] });
+        let wait = Duration::from_mins(10);
+        assert_eq!(add, Slash::Add { name: user("dev-c"), machine: m1.clone(), settings: settings(expected), wait });
+        let clone = ok("/CLONE dev-a @dev-c --machine m1 --home /srv/dev-c");
+        let (src, new, machine) = (user("dev-a"), user("dev-c"), Some(m1));
+        let settings = settings(json!({ "home": "/srv/dev-c" }));
+        assert_eq!(clone, Slash::Clone { src, new, machine, settings, wait: Duration::from_mins(40) });
+        let Slash::Add { wait, .. } = ok("/add dev-c --on m1") else { panic!("an add") };
+        assert_eq!(wait, Duration::from_mins(3), "the wait of ants ant add");
+
+        assert_eq!(parse("/add").unwrap_err(), "usage: /add NAME --on MACHINE [FLAGS]");
+        assert_eq!(parse("/clone").unwrap_err(), "usage: /clone ANT NEW [FLAGS]");
+        assert_eq!(
+            parse("/add dev-c").unwrap_err(),
+            "the following required arguments were not provided: --on <MACHINE>"
+        );
+        assert_eq!(parse("/clone dev-a").unwrap_err(), "the following required arguments were not provided: <NEW>");
+        let unknown = parse("/add dev-c --on m1 --colour red").unwrap_err();
+        assert!(unknown.starts_with("unexpected argument '--colour' found"), "{unknown}");
+        assert!(!unknown.contains('\n'), "one line: {unknown}");
+        assert!(parse("/add dev-c --on m1 --help").unwrap_err().starts_with("unexpected argument '--help'"));
+        assert_eq!(parse("/add human --on m1").unwrap_err(), "human is a human's name: an ant's name is lowercase");
+        assert!(parse("/clone dev-a 'dev c'").unwrap_err().starts_with("invalid value 'dev c' for '<NEW>'"));
+    }
+
     /// A sample of an argument [`COMMANDS`] names; a new placeholder needs one here.
     fn sample(arg: &str) -> &str {
         match arg {
@@ -670,6 +761,9 @@ mod tests {
             "#channel" => "#ops",
             "@user" | "@ANT" => "@dev-b",
             "ANT" => "dev-a",
+            "NEW" => "dev-c",
+            "MACHINE" => "m1",
+            "FLAGS" => "--model gpt-5 --allow 'execute:cargo test*'",
             "PATH" => "notes.txt",
             "ARGS" => r#"{"files": ["a.rs"]}"#,
             literal if literal.starts_with("--") || literal.chars().all(|c| c.is_ascii_lowercase()) => literal,

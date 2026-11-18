@@ -29,7 +29,7 @@ use crate::{auth, colony};
 pub(crate) mod consent;
 pub(crate) mod dedicated;
 
-pub(crate) use consent::{answer_order, orders_held_for};
+pub(crate) use consent::{answer_decision, answer_order, orders_held_for};
 pub use dedicated::{DisableArgs, EnableArgs};
 
 /// How many times storing a record is tried again when another device of the human stored one meanwhile.
@@ -411,6 +411,13 @@ enum Sealing {
     /// Enroll it with this key, as the same device if it already is with it.
     Set(DeviceKey),
     Off,
+}
+
+/// Designate `assistant` as the assistant of `human` with the device credentials `creds`, as `ants assistant set` does
+/// once its checks pass.
+#[cfg(test)]
+pub(crate) async fn designate(js: &jetstream::Context, creds: &Path, human: &UserId, assistant: &UserId) -> Result<()> {
+    put(js, creds, human, Some(assistant.clone()), Sealing::Keep).await.map(drop)
 }
 
 /// Sign the record of `assistant` (none: a withdrawal) by `human` with the device credentials `creds`, enrolling it

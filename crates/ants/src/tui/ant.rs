@@ -261,6 +261,7 @@ impl Page {
             Key::Char('w') => return Some(To::Work(Filter { user: Some(self.ant.clone()), ..Filter::default() })),
             Key::Char('a') => return Some(To::Bar(format!("@{} ", self.ant))),
             Key::Char('c') => return Some(To::Credentials),
+            Key::Char('C') => return Some(To::Bar(format!("/clone {} ", self.ant))),
             Key::Char('X') => return Some(To::Bar(format!("/retire {}", self.ant))),
             _ => {}
         }

@@ -300,6 +300,8 @@ impl Model {
                 let listed = self.attachment().ok_or("no attachment on the selected message")?;
                 run(Job::Save(Box::new(listed), to.map(|to| attach::expand(&to))))
             }
+            Slash::Add { name, machine, settings, wait } => run(Job::Add { name, machine, settings, wait }),
+            Slash::Clone { src, new, machine, settings, wait } => run(Job::Clone { src, new, machine, settings, wait }),
             Slash::Retire(ant) => run(Job::Retire { ant }),
             Slash::Dead(dead) => self.dead(dead),
             Slash::Trail(trail) => run(match trail {

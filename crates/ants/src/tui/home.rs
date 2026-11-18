@@ -208,12 +208,15 @@ fn asker(data: &Data, item: &Item, request: &ApprovalRequest) -> String {
     }
 }
 
-/// `text`, then what assistants decided on `request` for their humans.
+/// `text`, then what assistants decided on `request` for their humans: the human's own assistant's to confirm on the
+/// page `o` opens.
 fn decided(data: &Data, request: &ApprovalRequest, mut text: String) -> String {
     for held in data.live.held.get(&(request.ant.clone(), request.id)).into_iter().flatten() {
         let (assistant, human, verdict) = (&held.assistant, &held.human, crate::tools::spelling(held.verdict));
-        let id = crate::tools::qualified(request);
-        let _ = write!(text, " · {assistant} chose {verdict} for {human}: ants assistant confirm {id}");
+        let _ = write!(text, " · {assistant} chose {verdict} for {human}");
+        if human == data.me() {
+            text.push_str(": o lists it");
+        }
     }
     text
 }
@@ -522,7 +525,7 @@ impl Page {
         frame.render_widget(block, area);
         let mut first = vec![catchup::since_line(model, now)];
         first.extend(data.credentials.line());
-        first.extend(data.held.line());
+        first.extend(super::held::line(data));
         let tall = u16::try_from(first.len() + 1).unwrap_or(u16::MAX);
         let [top, area] = Layout::vertical([Constraint::Length(tall), Constraint::Min(0)]).areas(inner);
         let mut first: Vec<Line> = first.into_iter().map(|l| style::clip(l, usize::from(top.width))).collect();
@@ -744,7 +747,7 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(4)), None);
         assert!(m.asking.is_none(), "Enter lists the group's requests");
         let screen = shown(&m, at(4));
-        let expected = format!("pa chose allow-once for alice: ants assistant confirm dev-a/{}", push.id);
+        let expected = "pa chose allow-once for alice: o lists it";
         assert!(screen.contains("dev-a asks to run 2 tools") && screen.contains("Enter collapses"), "{screen}");
         let crate::tui::model::Page::Home(home) = m.page() else { panic!("home") };
         let rows: Vec<(Id, bool)> =

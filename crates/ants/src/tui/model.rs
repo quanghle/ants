@@ -111,7 +111,8 @@ pub enum Action {
     Summarise(catchup::Ask),
     /// Answer a request for credentials, as `ants enroll approve`, `reject` or `renew` does.
     Credentials(credentials::Order),
-    /// Answer an admin order of the human's assistant held for its consent, as `ants assistant confirm` does.
+    /// Answer an admin order or a decision of the human's assistant held for its consent, as `ants assistant confirm`
+    /// does.
     Answer(held::Answer),
     /// Read an ant's settings, or send an order changing them, as `ants ant set` does.
     Settings(settings::Ask),
@@ -188,8 +189,8 @@ pub struct Data {
     pub images: images::Images,
     /// The credentials asked for, heard where the team's account key is.
     pub credentials: credentials::Heard,
-    /// The admin orders of the human's assistant held for its consent.
-    pub held: held::Orders,
+    /// The admin orders of the human's assistant held for its consent, and its answers.
+    pub held: held::Held,
     /// How the ants look.
     pub looks: faces::Looks,
     /// The messages the human withdrew here, marked before the ant's notice of each comes.
@@ -292,7 +293,7 @@ impl Page {
             Self::Tree(_) => "tree",
             Self::Ant(_) => "ant",
             Self::Credentials(_) => "credentials",
-            Self::Held(_) => "held orders",
+            Self::Held(_) => "held for confirmation",
         }
     }
 }
@@ -338,7 +339,7 @@ pub enum To {
     Tools,
     /// The credentials asked for.
     Credentials,
-    /// The admin orders held for the human's consent.
+    /// The orders and decisions held for the human's consent.
     Held,
     /// Not another view: something to do.
     Do(Action),
@@ -418,7 +419,7 @@ impl Model {
             withdrawn: HashSet::new(),
             dead_cleared: HashSet::new(),
             credentials: credentials::Heard::default(),
-            held: held::Orders::default(),
+            held: held::Held::default(),
             looks: faces::Looks::default(),
             drafts: command::Drafts::default(),
             history: command::History::default(),
@@ -577,6 +578,8 @@ impl Model {
     /// Take word from following the tool requests: a settled request keeps its card a while, unless decided here.
     fn approval(&mut self, update: Update, now: DateTime<Utc>) {
         self.data.live.approval(&update);
+        let held = held::items(&self.data);
+        self.data.held.settled(&held);
         if let Update::Resolved(request, state) = update {
             if let Some(asking) = &mut self.asking
                 && !asking.settled(&request, &state)
@@ -897,9 +900,12 @@ impl Model {
         }
     }
 
-    /// Take in what a gathering of the held admin orders, or an answer to one, brought.
+    /// Take in what a gathering of the held admin orders, or an answer to one or to a held decision, brought.
     pub fn held(&mut self, event: held::Event, now: DateTime<Utc>) {
-        match self.data.held.take(event, now) {
+        let done = self.data.held.take(event, now);
+        let held = held::items(&self.data);
+        self.data.held.settled(&held);
+        match done {
             Some(Ok(done)) => self.notify(done, Level::Info, now),
             Some(Err(e)) => self.notify(e, Level::Error, now),
             None => {}
