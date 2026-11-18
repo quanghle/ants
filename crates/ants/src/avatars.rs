@@ -351,7 +351,7 @@ pub async fn update(
 /// What `ants ant avatar` changes in the ant's record: a new seed or colour, or back to the record's own.
 #[derive(Debug, Default)]
 pub struct Change {
-    /// Some(None) clears the seed, back to the record's id.
+    /// Some(None) clears the seed, back to the sense id the record names, else its id.
     pub seed: Option<Option<String>>,
     /// Some(None) clears the colour, back to the seed's hue.
     pub color: Option<Option<String>>,

@@ -10,7 +10,8 @@ use ants_daemon::provider::origins::OriginStore;
 use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
-    AdminOp, Envelope, IDENTITIES_BUCKET, MovedMark, OrderState, Permissions, Role, SharedSettings, ThreadId, UserId,
+    AdminOp, Envelope, IDENTITIES_BUCKET, MovedMark, OrderState, Permissions, Role, SenseId, SharedSettings, ThreadId,
+    UserId,
 };
 use serde_json::{Value, json};
 
@@ -93,6 +94,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
     let identity = Identity::new(&a_js, None, &dev_a).await.unwrap();
     let mut born = identity::born(&dev_a).unwrap();
     born.prompts = 7;
+    born.sense = Some(SenseId::new());
     identity.replace(&born).await.unwrap();
 
     let path = server.dir().join("config.toml");
@@ -186,6 +188,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
         let from = record.cloned_from.as_ref().expect("where dev-c came from");
         assert_eq!((from.ant.as_str(), from.id.as_str(), record.prompts), ("dev-a", born.id.as_str(), 7));
         assert_ne!(record.id, born.id, "a new id");
+        assert_eq!(record.sense, None, "its own sense identity, named once its daemon opens it");
 
         let edited = std::fs::read_to_string(&path).unwrap();
         assert!(edited.starts_with(&text), "dev-a resumed, the clone's table appended: {edited}");

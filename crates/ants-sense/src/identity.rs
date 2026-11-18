@@ -159,6 +159,18 @@ pub struct Card {
     /// kept after the brief told it of its return.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dormancies: Vec<Dormancy>,
+    /// The growth its ants identity record held as last told ([`record_growth`]), which a record made again for the
+    /// ant, as after a revoke and re-add, starts from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub growth: Option<Growth>,
+}
+
+/// The birth of an ants identity record and the prompts the ant completed since ([`ants_proto::AntIdentity::born`],
+/// [`ants_proto::AntIdentity::prompts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Growth {
+    pub born: DateTime<Utc>,
+    pub prompts: u64,
 }
 
 /// A time an identity was dormant: from its retirement to the event ending its dormancy.
@@ -201,6 +213,7 @@ impl Card {
             moved_at: None,
             events: Vec::new(),
             dormancies: Vec::new(),
+            growth: None,
         }
     }
 
@@ -295,6 +308,13 @@ impl Card {
         (self.active, self.returned_at) = (true, Some(at));
     }
 
+    /// Note `growth`, keeping the earlier birth and the larger count of it and the one noted, so a growth told late
+    /// never undoes a later one.
+    fn grew(&mut self, growth: Growth) {
+        let noted = self.growth.get_or_insert(growth);
+        (noted.born, noted.prompts) = (noted.born.min(growth.born), noted.prompts.max(growth.prompts));
+    }
+
     /// Note a session started as `context` says: its identity, harness, model and machine.
     fn session(&mut self, context: &CallContext) {
         self.named(&context.ant);
@@ -359,6 +379,12 @@ pub async fn record_event(items: &dyn Items, event: &Event) -> Result<Card, Stor
 /// Note on the card in `items`, made first when there is none, the session starting as `context` says.
 pub async fn record_session(items: &dyn Items, context: &CallContext) -> Result<Card, StoreError> {
     update(items, &context.ant, context.at, |card| card.session(context)).await
+}
+
+/// Note on the card in `items`, made first when there is none, the growth of the ant's identity record, as its daemon
+/// tells: written only when it grew.
+pub async fn record_growth(items: &dyn Items, ant: &UserId, growth: Growth) -> Result<Card, StoreError> {
+    update(items, ant, Utc::now(), |card| card.grew(growth)).await
 }
 
 /// Note that the brief told the ant of its return ([`Card::returned`]), and so of its dormancy when it is active.
