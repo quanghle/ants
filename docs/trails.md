@@ -355,7 +355,8 @@ they may be raised on resume:
 | Python call depth | 200 | 200 | none | `RecursionError` in the script |
 
 A resume is the script running from its start, or from one answered step, to its next wait; the caps of one resume
-apply anew at the next. A `TimeoutError` or `MemoryError` the script raises itself fails the run as any other exception
+apply anew at the next. Calls answered at once, as `log()`, `phase()` and `os.urandom()`, do not restart the compute
+limit: the script's computing before and after them counts toward the same resume. A `TimeoutError` or `MemoryError` the script raises itself fails the run as any other exception
 does, on no limit, and an error over 16 KiB is cut.
 
 A run failed on a limit keeps which in its record's `limit`: `steps` (a call past them raised and the script then

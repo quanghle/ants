@@ -150,6 +150,13 @@ fn a_timeout_or_memory_error_of_the_script_breaks_no_limit() {
     let (error, limit) = failed(start("raise MemoryError('too many files')\n", Limits::default()));
     assert!(error.ends_with("MemoryError: too many files"), "{error}");
     assert_eq!(limit, None);
+    // Worded as Monty's own, raised at the top or in a function.
+    let monty = "MemoryError('memory limit exceeded: 67108865 bytes > 67108864 bytes')";
+    for script in [format!("raise {monty}\n"), format!("def f():\n    raise {monty}\nf()\n")] {
+        let (error, limit) = failed(start(&script, Limits::default()));
+        assert!(error.ends_with("MemoryError: memory limit exceeded: 67108865 bytes > 67108864 bytes"), "{error}");
+        assert_eq!(limit, None, "{script}");
+    }
 
     let limits = Limits { compute_ms: 200, ..Limits::default() };
     let (error, limit) = failed(start("while True:\n    pass\n", limits));

@@ -242,7 +242,7 @@ async fn compute_dump_memory_and_recursion_limits_fail_the_run() {
         (
             "while True:\n    pass\n",
             Limits { compute_ms: 300, ..Limits::default() },
-            "TimeoutError: turn time limit exceeded",
+            "TimeoutError: feed time limit exceeded",
             Some(Limit::Compute),
         ),
         (
@@ -252,6 +252,12 @@ async fn compute_dump_memory_and_recursion_limits_fail_the_run() {
             Some(Limit::Session),
         ),
         ("def f(n):\n    return f(n + 1)\nf(0)\n", Limits::default(), "RecursionError", None),
+        (
+            "raise MemoryError('memory limit exceeded: 67108865 bytes > 67108864 bytes')\n",
+            Limits::default(),
+            "MemoryError: memory limit exceeded",
+            None,
+        ),
     ];
     for (script, limits, error, limit) in cases {
         let mut run = run(script, json!(null), limits);
@@ -265,6 +271,93 @@ async fn compute_dump_memory_and_recursion_limits_fail_the_run() {
     run.start(&worker).await.unwrap();
     assert!(failed(&run).starts_with("MemoryError: memory limit exceeded"), "{}", failed(&run));
     assert_eq!(failed_on(&run).1, Some(Limit::Memory));
+}
+
+/// A script computing in stretches of `STRETCH` iterations, each followed by `between`, `count` times (or forever),
+/// after awaiting `agent('go')` first if `wait`.
+fn stretches(between: &str, count: Option<u32>, wait: bool) -> String {
+    let repeat = count.map_or_else(|| "while True:".to_owned(), |count| format!("for k in range({count}):"));
+    let wait = if wait { "await agent('go')\n" } else { "" };
+    format!("import os\n{wait}{repeat}\n    for i in range({STRETCH}):\n        pass\n{between}'done'\n")
+}
+
+const STRETCH: u32 = 20_000;
+
+/// Runs one worker first: the first start of a new binary may take seconds on macOS.
+async fn warm(worker: &Worker) {
+    let mut run = run("'ok'\n", json!(null), Limits::default());
+    run.start(worker).await.unwrap();
+    assert_eq!(done(&run), &json!("ok"));
+}
+
+/// What the script does between two stretches: host calls the worker answers at once.
+const BETWEEN: [&str; 3] = [
+    "    log('tick')\n",
+    "    try:\n        undefined_name\n    except NameError:\n        pass\n",
+    "    os.urandom(1)\n",
+];
+
+#[tokio::test]
+async fn host_calls_answered_at_once_do_not_restart_the_compute_limit() {
+    let worker = worker();
+    let compute = std::time::Duration::from_millis(500);
+    let limits = Limits { compute_ms: 500, ..Limits::default() };
+    warm(&worker).await;
+    for between in BETWEEN {
+        // Fewer stretches than log() may note, many more than the limit allows.
+        let mut run = run(&stretches(between, Some(3000), false), json!(null), limits);
+        let started = std::time::Instant::now();
+        run.start(&worker).await.unwrap();
+        let took = started.elapsed();
+        let (error, limit) = failed_on(&run);
+        assert!(error.contains("TimeoutError"), "{between}: {error}");
+        assert_eq!(limit, Some(Limit::Compute), "{between}");
+        // The limit, a stretch and the worker's start, with room for a slow machine.
+        assert!(took < compute + std::time::Duration::from_secs(3), "{between}: {took:?}");
+    }
+}
+
+#[tokio::test]
+async fn each_answer_of_one_request_computes_within_the_limit_on_its_own() {
+    let worker = worker();
+    let compute = std::time::Duration::from_millis(2000);
+    let limits = Limits { compute_ms: 2000, ..Limits::default() };
+    warm(&worker).await;
+
+    // How long a stretch takes here, the worker's start left out, to give each answer three tenths of the limit.
+    let mut took = Vec::new();
+    for count in [100, 500] {
+        let mut run = run(&stretches(BETWEEN[2], Some(count), false), json!(null), Limits::default());
+        let started = std::time::Instant::now();
+        run.start(&worker).await.unwrap();
+        took.push(started.elapsed());
+        assert_eq!(done(&run), &json!("done"));
+    }
+    let stretch = took[1].saturating_sub(took[0]) / 400;
+    let count = u32::try_from((compute * 3 / 10).as_micros() / stretch.as_micros().max(1)).unwrap().max(1);
+
+    // Four answers each computing three tenths of the limit: more than the limit in all.
+    let item = |count: Option<u32>| {
+        let body = stretches(BETWEEN[2], count, true).replace('\n', "\n    ").replace("'done'", "return n");
+        format!("async def item(n):\n    {body}\nawait parallel(*[item(n) for n in range(4)])\n")
+    };
+    for (count, ends) in [(Some(count), true), (None, false)] {
+        let mut run = run(&item(count), json!(null), limits);
+        run.start(&worker).await.unwrap();
+        for call in run.outstanding().to_vec() {
+            run.answer(call.call, Answer::Ok(json!("go"))).unwrap();
+        }
+        let started = std::time::Instant::now();
+        run.resume(&worker).await.unwrap();
+        let took = started.elapsed();
+        if ends {
+            assert_eq!(done(&run), &json!([0, 1, 2, 3]), "each answer has the limit to itself");
+        } else {
+            // The first answer computing forever fails the request on the limit, not on four of them.
+            assert_eq!(failed_on(&run).1, Some(Limit::Compute));
+            assert!(took < compute + std::time::Duration::from_secs(3), "{took:?}");
+        }
+    }
 }
 
 #[cfg(unix)]
