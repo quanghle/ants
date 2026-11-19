@@ -7,7 +7,9 @@ the result; the top level then holds only meta, imports, definitions and constan
 - `await agent(prompt, ant=None, capability=None, schema=None, label=None, tips=None)`: one step, a message on a
   fresh thread with no context, to the ant named, to an ant with the capability, or else to the conductor itself.
   Returns the reply's text, or with `schema=` (a JSON Schema dict) the reply's JSON, asked for again at most twice on
-  a mismatch. `tips=KEY`, a stable one-line key, names the tips the steps under it share across runs.
+  a mismatch. `tips=KEY` (one line) is the step's tip key: the step carries the best tips ants left answering steps
+  under the key on earlier runs, and a tip left answering it goes under the key. Give each kind of step one stable
+  key (`tips="review"` on every file's review), not a per-item label; without `tips=`, tips are trail-wide.
 - `await human(questions)`: asks the run's owner as ask_human does (1-4 `{"question", "options": [2-9 labels]}`);
   returns the answer's text, for one question the label picked.
 - `await trail(name, args=None)`: one step answered by a child run of saved trail `name` on a spin-off thread (none

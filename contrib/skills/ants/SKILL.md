@@ -186,6 +186,8 @@ ants trail runs                                  # runs: state, phase, steps and
 ants trail show <run>                            # one run: state, steps, calls waiting, journal
 ants trail stop <run>                            # stop it; lists the steps still queued, each with `ants withdraw`
 ants trail resume <run> --steps 100              # resume a stopped run, or one failed on a limit
+ants trail tips triage                           # tips ants left on its steps, best first; --all adds retired ones
+ants trail tips triage --retire <id>             # retire a misleading tip
 ```
 
 Without a terminal, `ants trail run` prints what the run may spend and starts nothing unless given `--yes`: report
@@ -193,6 +195,9 @@ those limits to the user and rerun with `--yes` once the user agreed to them. Li
 200 turns and 24h of wall time; `--steps`, `--at-once`, `--turns` and `--wall` change them (at most 500, 16, 2000 and
 7d). `--follow` exits only when the run ends: run it in the background or with a long shell timeout. A run asking a
 human puts its questions in the run owner's inbox; answer them with `ants answer` only with what the user chose.
+
+Ants answering the steps of a saved trail leave tips for its later runs (`leave_tip`), vote on them (`vote_tip`)
+and search them (`trail_tips`) with MCP tools; each step carries the best few. Retire a tip only when the user asks.
 
 ## Spend
 

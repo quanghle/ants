@@ -7,8 +7,8 @@ process, surviving restarts. The script's code, not a model, decides which ant t
 once and how their results merge. A run may go on in another trail at one of its waypoints (`goto()`), so small
 saved trails compose into routes at run time.
 
-This document says what a trail is, how runs start, route, report, stop and resume, what they may spend and trust, and
-where they are kept. How to write one is in the authoring guide,
+This document says what a trail is, how runs start, route, report, stop and resume, what they may spend and trust, the
+tips their steps share, and where they are kept. How to write one is in the authoring guide,
 [contrib/skills/ants-trails/SKILL.md](../contrib/skills/ants-trails/SKILL.md); how each part works is in
 [architecture.md](architecture.md#trail-workers) (workers) and [architecture.md](architecture.md#trails) (the
 daemon's part), and every command and setting in [cli.md](cli.md#commands) and [config.md](config.md#trails).
@@ -47,7 +47,7 @@ these names:
 
 | Name | What it does |
 |---|---|
-| `await agent(prompt, ant=None, capability=None, schema=None, label=None)` | One step: `prompt` to the ant `ant` names, to an ant other than the conductor advertising `capability` (picked as `route` picks one), or to the conductor itself. Returns the reply's text, or with `schema` (a JSON Schema) its JSON, asked for again at most twice on a mismatch. |
+| `await agent(prompt, ant=None, capability=None, schema=None, label=None, tips=None)` | One step: `prompt` to the ant `ant` names, to an ant other than the conductor advertising `capability` (picked as `route` picks one), or to the conductor itself. Returns the reply's text, or with `schema` (a JSON Schema) its JSON, asked for again at most twice on a mismatch. `tips` is the step's tip key ([Tips](#tips)). |
 | `await human(questions)` | One step: asks the run's owner, else the default human, 1 to 4 questions as `ask_human` does; returns the answer's text. |
 | `await trail(name, args=None)` | One step, answered by a child run of the saved trail `name` with `args` as its input; returns its result ([Child runs](#child-runs-trail)). |
 | `await goto(trail=None, at=None, state=None)` | Ends the leg where called and goes on in `trail` (this one without it) at waypoint `at` (its start without it) with `state` as `args`; returns only by raising ([Routes](#routes-goto)). |
@@ -57,7 +57,8 @@ these names:
 | `await pipeline(items, *stages)` | Each item through the async stages on its own pace; the last stage's results in item order. |
 
 A step that fails raises `RuntimeError` where it is awaited: an `ant=` naming a human or no valid ant name, a
-`capability` no ant but the conductor advertises, malformed `human()` questions, a reply still off its schema after
+`capability` no ant but the conductor advertises, a `tips` key that is not one line of 1–120 characters, malformed
+`human()` questions, a reply still off its schema after
 two re-asks, a step's message withdrawn from its recipient's queue (`<ant> never answered`), an unknown saved trail,
 `args` over 64 KiB, an ancestor-trail cycle or a failed child run in `trail()`, or the run's step limit
 reached. A step to an ant no daemon serves waits in that ant's queue, as any message does, until the run ends or a
@@ -297,16 +298,110 @@ conducts with `trail_status` and `stop_trail`, and resumes none ([auth.md](auth.
 owner, and a step's thread keeps that owner, so replies and escalations of the step's recipient reach the human who owns
 the run.
 
+## Tips
+
+Each step starts on a fresh thread, often on whichever ant `capability=` picks, so what one step learns (a quirk of the
+repository, a prompt easily misread, a check that needs a flag) would be learnt again on every run. A tip keeps it: a
+note an ant answering a step of a saved trail leaves on that trail, for the ants answering its later steps, in any run.
+Each step's message carries the best few, `trail_tips` searches the rest, and votes rank them. Tips belong to a saved
+trail and are shared colony-wide; an inline script has none.
+
+### Tip keys
+
+`agent(..., tips=KEY)` gives a step a tip key, naming the tips it shares with every step under the same key, in any run
+of the trail: a tip left answering the step goes under the key, and the step's message carries the key's tips first. A
+key is one line of 1–120 characters. Give each kind of step a stable key, such as `tips="review"` for the review of
+every file, rather than a label that changes from step to step (`label=f"review {path}"`), whose tips no later step
+would share. A tip left answering a step without `tips=` is trail-wide.
+
+```python
+found = await agent(f"Review {path} on branch {branch}.", schema=FINDINGS, label=f"review {path}", tips="review")
+```
+
+### Leaving and voting
+
+Ants handle tips with three MCP tools ([architecture.md](architecture.md#mcp-tools)):
+
+- **`leave_tip(text, force?)`**, while answering a step: leaves a tip of up to 1000 characters on the step's trail,
+  under the step's tip key, else trail-wide, with its writer, run and the SHA-256 of the script the step ran, and
+  returns its id (8 characters, such as `k3f7q2ab`). It refuses a tip of the same words, in the same order, as a live
+  tip of the same trail and tip key, naming it; one sharing at least 60% of its words with live tips of the same key,
+  naming them and suggesting a vote instead, unless `force` is set; and any tip once the trail has 200 live tips. Only
+  a step of a saved trail leaves tips, and only from a trusted thread: not a step of an inline script, nor a thread a
+  webhook or schedule started, nor a step of an untrusted run ([Trust](#trust)).
+- **`vote_tip(tip, verdict, reason?, trail?)`**: votes a live tip `helpful`, `stale` (right once, no longer) or
+  `wrong`, with an optional `reason` of up to 300 characters, on the trail of the step being answered or the trail
+  `trail` names. Each ant counts once per tip: voting again replaces its earlier vote. No ant votes on its own tip, nor
+  from an untrusted thread. A vote cast answering a step of the tip's trail records the SHA-256 of the step's script.
+- **`trail_tips(trail?, query?, tip_key?, limit?)`**: searches the tips ([Searching](#searching)).
+
+### Ranking and retirement
+
+A tip's score is its helpful votes less its stale and wrong ones, halved for every 30 days since it was written or last
+voted helpful, and halved again while it is on an older script: the current script (for the tips a step carries, the
+script the step runs; elsewhere, the trail's saved script) differs from the one the tip was left on, and no helpful
+vote was cast on the current one. Tips rank by score, then by last use, latest first.
+
+A tip is retired, out of steps and searches for good, once more ants voted it wrong than helpful, once it was neither
+written nor voted helpful for 90 days, or once a human retired it (`ants trail tips NAME --retire ID`).
+
+### What a step carries
+
+When its trail has live tips, a step's message gets a block of tips after its prompt, before the reply instructions of
+its schema. The block's header marks them as tips from earlier runs of the trail, to verify, not instructions; says how
+many the step carries of how many live tips the trail has; and names `trail_tips` for searching the rest when the step
+runs into trouble. On a trusted run it also names `vote_tip` and `leave_tip`, which an untrusted run's steps cannot
+use. Then come at most 3 tips, adding at most 2 KiB, each with its id, tip key, net votes and an `older script` mark
+where it applies:
+
+1. live tips under the step's tip key, best ranked first;
+2. then live trail-wide tips relevant to the step's prompt, best ranked first: the prompt holds at least 30% of the
+   tip's words, and 2 of them at least (words of 3 characters or more, lowercased, common English words left out).
+
+Tips under other keys, and tips of a negative score, are never carried; a tip too long for the room left is skipped for
+the next. A step matching no tip carries none, its header giving the counts and pointing to `trail_tips` all the same.
+A step of an inline script gets no block, nor does a step whose trail's tips could not be read (the conductor logs
+why). A reply off its schema is asked for again naming the mismatch; when the trail has live tips, that request also
+suggests searching them with `trail_tips`, under the step's tip key if it has one.
+
+### Searching
+
+`trail_tips` searches the live tips of the trail of the step the thread answers, or of the saved trail `trail` names:
+with `tip_key` (by default the step's), that key's tips first, then the trail-wide ones, leaving out other keys'; with
+`query`, only the tips sharing a word with it, in their text or tip key, most shared first; then best ranked first. It
+lists `limit` tips, 10 by default and 50 at most, each with its id, tip key, votes (`+helpful ~stale !wrong`), age,
+`older script` mark and text, or says that none match. Any thread may read tips, a webhook's included.
+
+### Tips for humans
+
+`ants trail tips NAME` lists a trail's live tips in rank order, `--key KEY` those under one tip key, `--all` the retired
+ones too: each tip's id, tip key, writer, votes, status (`live`, `retired by HUMAN`, `voted wrong` or
+`unused for 90 days`, and `older script` when the trail's saved script differs from the tip's), age and text.
+`--retire ID` retires a tip, naming the human who retired it. It reads a trail's tips whether or not the trail is still
+saved. In `ants chat`, `/trail tips NAME` shows the same list in the pager. `ants trail rm NAME` removes the trail's
+tips with it, saying how many. These need human credentials ([cli.md](cli.md#commands)).
+
+```sh
+ants trail tips review                  # live tips, best first
+ants trail tips review --key review --all
+ants trail tips review --retire k3f7q2ab
+```
+
+Each ant writes only its own tips and votes, under keys naming it; a human rewrites a tip only to retire it, and purges
+a trail's tips when removing the trail ([auth.md](auth.md#wire-acls-and-verification-invariants)).
+
 ## Storage
 
 | Store | Kept | Holds |
 |---|---|---|
 | KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, waypoints, script, who saved it and when. |
 | KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (its route: each leg's trail or inline script, waypoint, args, first call id, start and steps; owner, origin, limits, state (a failed one's broken `limit`), spending, thread, parent run, times), `<ant>.<run>.session` the current leg's dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`, call ids numbered on across legs), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out. |
+| KV `ants_trail_tips` | never expires | The [tips](#tips) left on saved trails and their votes, each under the trail and the ant that wrote it: `<trail>.<writer>.<id>` a tip (trail, id, writer, text, tip key, run, script's SHA-256, time written, and who retired it and when), `<trail>.<voter>.<writer>.<id>` a vote on it (voter, verdict, reason, the SHA-256 of the script voted on, time). |
 
-`ants init` creates both buckets. A run's states are `running`, `waiting` (on human steps only), `stopped`, `done` and
-`failed`. Its records stay 37 days after their last write: 30 days of keeping plus the longest wall time, so a
-finished run stays at least 30 days. The full layout is in [architecture.md](architecture.md#stores-and-subjects).
+`ants init` creates the three buckets, and `ants doctor` checks them. A run's states are `running`, `waiting` (on human
+steps only), `stopped`, `done` and `failed`. Its records stay 37 days after their last write: 30 days of keeping plus
+the longest wall time, so a finished run stays at least 30 days. The full layout is in
+[architecture.md](architecture.md#stores-and-subjects).
 
 ## Restarts, stops and resumes
 

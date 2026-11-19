@@ -25,7 +25,7 @@ flowchart LR
     end
 
     subgraph hub["Hub"]
-        hserver["nats-server<br/>JetStream domain: hub<br/>stream ANTS · 19 KV · ants_files"]
+        hserver["nats-server<br/>JetStream domain: hub<br/>stream ANTS · 20 KV · ants_files"]
         services["ants signer · channel serve<br/>webhook serve"]
         services <--> hserver
     end
@@ -40,7 +40,7 @@ flowchart LR
     cleaf <-->|"wss:// · tls:// · tunnel · bridge"| hserver
 ```
 
-- **Hub:** a `nats-server` with JetStream holding stream `ANTS` (inboxes, channels, notes, approvals, timelines, dead letters, admin orders), 19 KV buckets, attachment store `ants_files`, and stream `ANTS_SENSE` (each ant's signed, hash-chained sense event log, reachable by machine hosts only).
+- **Hub:** a `nats-server` with JetStream holding stream `ANTS` (inboxes, channels, notes, approvals, timelines, dead letters, admin orders), 20 KV buckets, attachment store `ants_files`, and stream `ANTS_SENSE` (each ant's signed, hash-chained sense event log, reachable by machine hosts only).
 - **Leaf:** optional local `nats-server` (`127.0.0.1:4222`) per node with a store-and-forward outbox (`ANTS_OUT`) that drains to the hub on reconnect.
 - **Daemon:** `ants daemon` runs per-ant ACP session pools, exposes collaboration tools to each session over MCP, and acks JetStream deliveries only after replies are stored. A harness definition's `protocol` key can run a CLI on its native protocol instead, behind an in-process ACP translator ([harness protocols](docs/config.md#harness-protocols)).
 - **Humans, assistants & ants:** humans own threads, decide tool approvals (a rejection can carry a note telling the ant what to do instead), and converse through the CLI or `ants chat`; optional personal assistant ants triage queues under device-signed grants; capability-tagged worker ants collaborate within shared turn budgets.
@@ -131,7 +131,7 @@ ants ask --wait @dev-b "run the test suite"
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Wire stores and subjects, delivery retries, worktrees, colony, MCP tools, channels, escalations, dead letters |
 | [docs/sense.md](docs/sense.md) | Built-in sense: an ant's brief, memories, resume registers and handoffs, tasks, commitments, reminders, persona, skills and dreams, what operators see of them, limits |
-| [docs/trails.md](docs/trails.md) | Trails: Python scripts a conductor's daemon runs to coordinate ants and humans; saving, starting (CLI, `run_trail`, schedules), following, stopping and resuming runs, limits, trust, storage, workers |
+| [docs/trails.md](docs/trails.md) | Trails: Python scripts a conductor's daemon runs to coordinate ants and humans; saving, starting (CLI, `run_trail`, schedules), following, stopping and resuming runs, limits, trust, the tips steps leave for later runs, storage, workers |
 | [docs/cli.md](docs/cli.md) | Full CLI command reference, environment variables, thread search/marks, `ants chat` and `ants dash` |
 | [docs/config.md](docs/config.md) | `config.toml`, shared settings, harnesses, fallbacks, templates, manager ants, spend caps, permissions, redaction, schedules |
 | [docs/auth.md](docs/auth.md) | NKey/JWT credentials, revocations, backups, device encryption and sealed messages, admin orders, assistants, GitHub login, OS keystores, ACLs |
