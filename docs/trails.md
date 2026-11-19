@@ -328,7 +328,9 @@ finished run stays at least 30 days. The full layout is in [architecture.md](arc
   daemon while it is away and is recorded with the admin and time (`ants ant orders ANT`), its result listing the steps
   in other ants' queues. Ending a parent run stops its still-running children. Wall time keeps running while stopped.
 - **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose record names the limit it failed on, from
-  its last stored session, resuming its child runs stopped or failed on a limit too; the steps waited on go out anew, on new threads. Limit flags replace the run's limits they name, within the
+  its last stored session, resuming its child runs stopped or failed on a limit too; the steps waited on go out anew, on new threads,
+  and so do the calls refused since that session, as one past the run's steps: a run failing on a limit deletes their
+  errors from its journal. Limit flags replace the run's limits they name, within the
   maxima. A run done, failed otherwise, running or waiting is refused. An admin's `ants ant resume-trail ANT RUN`
   resumes it by admin order the same way, limit flags included.
 

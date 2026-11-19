@@ -385,3 +385,39 @@ async fn a_run_tells_its_route_on_its_thread_in_its_end_and_in_ants_trail_show()
     assert_eq!(json["children"][0]["run"], child.as_str(), "{json}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test]
+async fn a_daemon_restarted_after_resuming_a_run_failed_on_its_steps_on_a_later_leg_takes_the_reply_of_the_call_sent_anew()
+ {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-goto-limit-restart");
+    let legs = r#"
+async def first(args):
+    await goto(at="second", state=[await agent("a", ant="dev")])
+
+async def second(state):
+    return state + [await agent("b", ant="dev"), await agent("c", ant="dev")]
+"#;
+    save(&dir, "legs", &["first", "second"], legs);
+    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    let limits = TrailLimits { steps: 2, ..TrailLimits::default() };
+    let run = lead.start_saved("legs", human_origin(), limits, ThreadId::generate()).await;
+    for _ in 0..2 {
+        let step = lead.step().await;
+        assert!(lead.reply(&step, &step.text.to_uppercase()).await);
+    }
+    let RunState::Failed { error, limit } = lead.ended(&run).await else { panic!("not failed") };
+    assert!(error.ends_with("the run reached its limit of 2 steps"), "{error}");
+    assert_eq!(limit, Some(RunLimit::Steps), "refused by the conductor, the leg's own steps within the limit");
+
+    lead.trails.resume(&run, &UserId::human(), Some(TrailLimits { steps: 3, ..limits })).await.unwrap();
+    let c = lead.step().await;
+    assert_eq!(c.text, "c", "the refused call is sent anew");
+    drop(lead);
+
+    let again = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    assert!(again.reply(&c, "C").await);
+    assert_eq!(again.result(&run).await, json!(["A", "B", "C"]), "the reply answers the call");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

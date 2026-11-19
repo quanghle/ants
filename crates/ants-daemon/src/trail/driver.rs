@@ -129,6 +129,9 @@ impl Trails {
                 Status::Done { result } => return self.end(slot, RunState::Done { result }).await,
                 Status::Failed { error, limit } => {
                     let limit = limit.map(run_limit).or(broke);
+                    if limit.is_some() {
+                        self.forget_refusals(&header.run, &engine).await?;
+                    }
                     return self.end(slot, RunState::Failed { error, limit }).await;
                 }
                 Status::Running => {}
@@ -410,6 +413,22 @@ impl Trails {
         };
         self.inner.store.put_entry(run, &entry).await?;
         Ok(entry)
+    }
+
+    /// Delete the journal entries of the calls the run `run`, `engine`, failed on a limit, refused since its session was
+    /// stored, as one past its steps: those that session neither took an answer to nor lists a step for. Resuming the
+    /// run restores that session, whose script makes those calls anew, and a restart would take such an entry for the
+    /// answer to its call sent anew.
+    async fn forget_refusals(&self, run: &RunId, engine: &Run) -> Result<()> {
+        let store = &self.inner.store;
+        let Some(stored) = store.session(run).await? else { return Ok(()) };
+        let session: ants_trail::RunState = serde_json::from_str(&stored.session)?;
+        let pending = stored.pending.iter().map(|call| call.call);
+        let kept: HashSet<u32> = session.answered().iter().copied().chain(pending).collect();
+        for entry in engine.journal().iter().filter(|entry| !kept.contains(&entry.call)) {
+            store.delete_entry(run, entry.call).await?;
+        }
+        Ok(())
     }
 
     /// Publish the steps stored and not sent yet, then store them sent.

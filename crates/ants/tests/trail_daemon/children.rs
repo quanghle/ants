@@ -297,6 +297,33 @@ async fn resuming_a_run_failed_on_its_child_s_limit_resumes_the_child() {
 }
 
 #[tokio::test]
+async fn a_daemon_restarted_after_resuming_a_child_failed_on_its_steps_finishes_both() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-child-limit-restart");
+    let each = "out = []\nfor say in [\"a\", \"b\"]:\n    out.append(await agent(say, ant=\"dev\"))\nout\n";
+    let mut lead = conductor_with_saved(&server, &dir, &[("each", each)]).await;
+    let limits = TrailLimits { steps: 2, ..TrailLimits::default() };
+    let run = lead.start("await trail(\"each\")", limits).await;
+    let a = lead.step().await;
+    let child = a.trail_step.as_ref().unwrap().run.clone();
+    assert!(lead.reply(&a, "A").await);
+    assert_eq!(lead.ended(&run).await.failed_on(), Some(RunLimit::Steps));
+    assert_eq!(lead.header(&child).await.state.failed_on(), Some(RunLimit::Steps));
+
+    lead.trails.resume(&run, &UserId::human(), Some(TrailLimits { steps: 3, ..limits })).await.unwrap();
+    let b = lead.step().await;
+    assert_eq!((b.text.as_str(), &b.trail_step.as_ref().unwrap().run), ("b", &child), "the child resumes");
+    drop(lead);
+
+    let again = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    assert!(again.reply(&b, "B").await);
+    assert_eq!(again.result(&run).await, json!(["A", "B"]), "the reply answers the child's call");
+    assert_eq!(again.ended(&child).await, RunState::Done { result: json!(["A", "B"]) });
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
 async fn a_daemon_restarted_while_a_child_runs_finishes_both() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;
