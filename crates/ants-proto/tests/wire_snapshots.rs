@@ -1429,17 +1429,20 @@ fn trails() {
         "envelope_step",
         &Envelope { from: user("planner"), to: user("dev-a"), ..plain_envelope().as_step(trail_step()) },
     );
+    let saved = SavedTrail {
+        name: "release".parse().unwrap(),
+        description: "Cut a release".to_owned(),
+        phases: vec!["build".to_owned(), "review".to_owned()],
+        waypoints: vec!["build".to_owned(), "review".to_owned()],
+        script: "agent('dev-a', 'build it')".to_owned(),
+        saved_by: Saver::Human { user: user("alice") },
+        saved_from: None,
+        saved_at: at(0),
+    };
+    snap("saved_trail", &saved);
     snap(
-        "saved_trail",
-        &SavedTrail {
-            name: "release".parse().unwrap(),
-            description: "Cut a release".to_owned(),
-            phases: vec!["build".to_owned(), "review".to_owned()],
-            waypoints: vec!["build".to_owned(), "review".to_owned()],
-            script: "agent('dev-a', 'build it')".to_owned(),
-            saved_by: user("alice"),
-            saved_at: at(0),
-        },
+        "saved_trail_by_ant",
+        &SavedTrail { saved_by: Saver::Ant { user: user("dev-a") }, saved_from: Some(run()), ..saved },
     );
     let header = routed_run();
     assert_eq!(header.route_text(), "triage -> release@review");

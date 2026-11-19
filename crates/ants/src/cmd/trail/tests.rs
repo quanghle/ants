@@ -5,9 +5,10 @@ use std::path::Path;
 
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
-    CallAnswer, JournalEntry, PendingCall, QueuedCall, Role, RunId, RunState, StepStage, TRAIL_RUNS_BUCKET, ThreadId,
-    TrailFunction, TrailLeg, TrailLimits, TrailParent, TrailRun, TrailRunIndex, TrailSession, TrailStepThread, UserId,
-    Uuid, trail_call_key, trail_runs_index_key, trail_session_key, trail_thread_step_key,
+    CallAnswer, JournalEntry, PendingCall, QueuedCall, Role, RunId, RunState, SavedTrail, Saver, StepStage,
+    TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLeg, TrailLimits, TrailParent, TrailRun, TrailRunIndex,
+    TrailSession, TrailStepThread, UserId, Uuid, trail_call_key, trail_runs_index_key, trail_session_key,
+    trail_thread_step_key,
 };
 use async_nats::jetstream;
 use chrono::{TimeDelta, Utc};
@@ -62,7 +63,7 @@ fn a_file_saves_under_its_meta_name_or_the_one_given() {
         (trail.description.as_str(), trail.phases.as_slice()),
         ("Ship deploy", &["build".into(), "test".into()][..])
     );
-    assert_eq!((trail.saved_by.as_str(), trail.saved_at), ("alice", now));
+    assert_eq!((&trail.saved_by, trail.saved_at), (&Saver::Human { user: p("alice") }, now));
     assert_eq!(trail.script, script("deploy"));
     let renamed = saved::read(&path, Some("ship".parse().unwrap()), &p("alice"), now).unwrap();
     assert_eq!(renamed.name.as_str(), "ship");
@@ -160,6 +161,44 @@ async def patch(state):
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn a_trail_an_ant_saved_shows_the_ant_and_its_run() {
+    let now = Utc::now();
+    let run = RunId::generate();
+    let trail = |name: &str, saved_by, saved_from| SavedTrail {
+        name: name.parse().unwrap(),
+        description: format!("Ship {name}"),
+        phases: Vec::new(),
+        waypoints: Vec::new(),
+        script: script(name),
+        saved_by,
+        saved_from,
+        saved_at: now - TimeDelta::days(3),
+    };
+    let by_ant = trail("deploy", Saver::Ant { user: p("dev-a") }, Some(run.clone()));
+    let by_human = trail("review", Saver::Human { user: p("alice") }, None);
+    let listed = saved::listing(vec![by_ant.clone(), by_human], Vec::new());
+    let table = saved::table(&listed, now);
+    let lines: Vec<&str> = table.lines().collect();
+    let words = |line: &str| line.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(words(lines[0]).starts_with("NAME SOURCE SAVED BY SAVED FROM RUN PHASES"), "{table}");
+    assert!(words(lines[1]).starts_with(&format!("deploy colony ant dev-a 3d ago {run} -")), "{table}");
+    assert!(lines[2].starts_with("review") && lines[2].contains("alice"), "{table}");
+    let json = serde_json::to_value(&listed[0]).unwrap();
+    assert_eq!(json["saved_by"], json!({"kind": "ant", "user": "dev-a"}));
+    assert_eq!(json["saved_from"], run.as_str());
+    assert!(serde_json::to_value(&listed[1]).unwrap().get("saved_from").is_none());
+
+    let found = saved::Found { trail: by_ant.into(), shadows: None };
+    let text = saved::render(&found, now);
+    let first = text.lines().nth(1).unwrap();
+    assert!(
+        first.starts_with("saved for the colony by ant dev-a 3d ago (")
+            && first.ends_with(&format!(", from run {run}")),
+        "{text}"
+    );
+}
+
 /// The JetStream context of a human's connection, which creates the colony's missing buckets.
 async fn human(server: &Server, user: &UserId) -> jetstream::Context {
     let creds = server.creds_as(user, Role::Human);
@@ -168,7 +207,7 @@ async fn human(server: &Server, user: &UserId) -> jetstream::Context {
 }
 
 #[tokio::test]
-async fn humans_save_list_show_replace_and_remove_trails_and_ants_only_read_them() {
+async fn humans_save_list_show_replace_and_remove_trails_and_ants_save_none_from_the_command_line() {
     let Some(server) = Server::start() else { return };
     let dir = ants_test_support::scratch_dir("trail-saved");
     let local = dir.join("trails");
@@ -188,7 +227,8 @@ async fn humans_save_list_show_replace_and_remove_trails_and_ants_only_read_them
     let colony = saved::colony(&js).await.unwrap();
     assert_eq!(colony, std::slice::from_ref(&first));
     let found = saved::find(&js, &local, &first.name).await.unwrap();
-    assert_eq!(found.trail.source, Source::Colony { saved_by: alice.clone(), saved_at: first.saved_at });
+    let saved_by = Saver::Human { user: alice.clone() };
+    assert_eq!(found.trail.source, Source::Colony { saved_by, saved_from: None, saved_at: first.saved_at });
     assert_eq!(found.shadows, Some(local.join("deploy.py")));
     let shown = serde_json::to_value(saved::Shown::from(&found)).unwrap();
     assert_eq!((shown["name"].as_str(), shown["script"].as_str()), (Some("deploy"), Some(script("deploy").as_str())));

@@ -237,8 +237,8 @@ pub async fn resumed(ctx: &Ctx, pick: &Pick, limits: LimitArgs) -> Result<Done> 
 mod tests {
     use ants_proto::provider::{Origin, Starter};
     use ants_proto::{
-        Role, RunId, RunState, SavedTrail, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TrailAction, TrailLeg,
-        TrailOutcome, TrailRequest, TrailRun, TrailSource, TrailTip, Uuid, WaitingStep, subject,
+        Role, RunId, RunState, SavedTrail, Saver, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TrailAction,
+        TrailLeg, TrailOutcome, TrailRequest, TrailRun, TrailSource, TrailTip, Uuid, WaitingStep, subject,
     };
     use futures::StreamExt as _;
     use serde_json::json;
@@ -423,7 +423,8 @@ mod tests {
             phases: Vec::new(),
             waypoints: Vec::new(),
             script: SCRIPT.to_owned(),
-            saved_by: ctx.me.id.clone(),
+            saved_by: Saver::Human { user: ctx.me.id.clone() },
+            saved_from: None,
             saved_at: Utc::now(),
         };
         let payload = serde_json::to_vec(&saved).unwrap();

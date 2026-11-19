@@ -441,7 +441,7 @@ async fn mark_incarnation(identities: &kv::Store, anew: bool) -> Result<()> {
 
 /// The saved trails ([`TRAILS_BUCKET`]): a trail lasts until a human deletes it.
 pub fn trails_config() -> kv::Config {
-    lasting_config(TRAILS_BUCKET, "Saved trails, written by humans")
+    lasting_config(TRAILS_BUCKET, "Saved trails, written by humans and ants")
 }
 
 /// The trail runs ([`TRAIL_RUNS_BUCKET`]): each entry expires [`TRAIL_RUN_RETENTION`] and a run's most wall time after

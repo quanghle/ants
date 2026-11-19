@@ -1,0 +1,23 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "name": "release",
+  "description": "Cut a release",
+  "phases": [
+    "build",
+    "review"
+  ],
+  "waypoints": [
+    "build",
+    "review"
+  ],
+  "script": "agent('dev-a', 'build it')",
+  "saved_by": {
+    "kind": "ant",
+    "user": "dev-a"
+  },
+  "saved_from": "019a7d2f-0000-7000-8000-000000000001",
+  "saved_at": "2025-01-01T12:00:00Z"
+}

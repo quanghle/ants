@@ -76,13 +76,13 @@ struct TrailTips {
 
 impl Hub {
     /// The message `thread` handles.
-    fn handling(&self, thread: &ThreadId) -> Option<Envelope> {
+    pub(super) fn handling(&self, thread: &ThreadId) -> Option<Envelope> {
         self.sessions.locked().current.get(thread).cloned()
     }
 
     /// Whether `thread`, handling `current`, is trusted, its origin computed as `run_trail` computes it: a step of a
     /// run an untrusted thread started is narrowed as a webhook's thread is, so it is untrusted too.
-    async fn trusted(&self, thread: &ThreadId, current: &Envelope) -> Result<bool, String> {
+    pub(super) async fn trusted(&self, thread: &ThreadId, current: &Envelope) -> Result<bool, String> {
         let stored = self.origin_of(thread).await.map_err(|e| {
             tracing::warn!(%thread, error = format!("{e:#}"), "reading the thread's origin for a trail tip");
             "the thread's origin cannot be read".to_owned()
@@ -105,7 +105,7 @@ impl Hub {
         if !self.trusted(thread, &current).await? {
             return Err(UNTRUSTED.to_owned());
         }
-        // A trail removed while its run goes on keeps no tips: `ants trail rm` purged them.
+        // A trail removed while its run goes on takes no more tips.
         trails.saved_script(trail).await.map_err(|e| format!("{e}; tips are left only on saved trails"))?;
         let text = args.text.trim();
         if text.is_empty() {

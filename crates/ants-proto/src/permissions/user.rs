@@ -113,8 +113,9 @@ impl Permissions {
     /// and reads every ant's, which say nothing secret; a human reads every ant's and sets their avatars and colours
     /// ([`identity_rights`]).
     ///
-    /// Every ant and human reads the saved trails ([`TRAILS_BUCKET`]) by direct gets naming no subject, which only a
-    /// human puts and deletes. An ant gets, puts and deletes only the records of the trail runs it conducts
+    /// Every ant and human reads the saved trails ([`TRAILS_BUCKET`]) by direct gets naming no subject, and puts and
+    /// deletes any: a trail's key is its name, so no subject can name its saver, and the ant's daemon puts only new
+    /// trails and replaces or removes only those the ant saved ([`crate::Saver`]). An ant gets, puts and deletes only the records of the trail runs it conducts
     /// ([`trail_runs_subject`]); a human reads every run's and writes none ([`trail_rights`]), but asks an ant's daemon to
     /// start, stop or resume the runs it conducts ([`TrailRequest`], on [`subject::trail`], which the ant alone hears
     /// and answers on [`subject::trailed`]). Every ant and human reads the trails' tips ([`TRAIL_TIPS_BUCKET`]) by
@@ -269,6 +270,8 @@ impl Permissions {
             format!("$KV.{TRAIL_TIPS_BUCKET}.*.{user}.>"),
             // Put of its own ratings of the trails its runs took.
             format!("$KV.{TRAIL_RATINGS_BUCKET}.*.{user}.*"),
+            // Put and delete of saved trails, which its daemon does only for the trails it saved.
+            format!("$KV.{TRAILS_BUCKET}.*"),
             // Exactly its requests subject: an ant cannot answer its own requests one level below.
             subject::approvals(user),
             // Reading the decision stored on one of its requests: a direct get naming the subject in its own

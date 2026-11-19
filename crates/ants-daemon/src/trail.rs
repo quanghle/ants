@@ -49,7 +49,8 @@ use store::Store;
 
 pub use limits::AskedLimits;
 pub use ratings::{Rated, Ratings};
-pub use saved::SavedEntry;
+pub use saved::{PreparedSave, SaveFrom, SaveOutcome, SaveTrail, SavedEntry};
+pub(crate) use saved::{age, from_run};
 pub use tips::Tips;
 
 /// How to write a trail, in brief, for the tool starting runs to teach.

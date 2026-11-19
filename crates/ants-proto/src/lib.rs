@@ -165,7 +165,7 @@ pub use timeline::{
 pub use trails::RunLimit;
 pub use trails::{
     CallAnswer, JournalEntry, MAX_TRAIL_ARGS, MAX_TRAIL_DESCRIPTION, MAX_TRAIL_PHASES, MAX_TRAIL_SCRIPT,
-    MAX_TRAIL_WAYPOINTS, PendingCall, QueuedCall, RunState, SavedTrail, TRAIL_RUN_RETENTION, TrailAction,
+    MAX_TRAIL_WAYPOINTS, PendingCall, QueuedCall, RunState, SavedTrail, Saver, TRAIL_RUN_RETENTION, TrailAction,
     TrailFunction, TrailLeg, TrailLimits, TrailOutcome, TrailParent, TrailReply, TrailRequest, TrailRun, TrailRunIndex,
     TrailSession, TrailSource, TrailStart, TrailStep, TrailStepThread, WaitingStep, leg_entry,
 };
@@ -335,8 +335,9 @@ pub const THREADS_BUCKET: &str = "ants_threads";
 /// ([`Permissions::for_device_revoker`]). Beside it, under `<ant>.settings`, the ant's [`SharedSettings`], which only
 /// host credentials write ([`Permissions::for_host`]). Entries never expire.
 pub const IDENTITIES_BUCKET: &str = "ants_identities";
-/// KV bucket of the saved trails: one [`SavedTrail`] per trail, keyed by its name. Humans put and delete them; every
-/// ant and human reads them, by direct gets naming no subject ([`Permissions::for_user`]). Entries never expire.
+/// KV bucket of the saved trails: one [`SavedTrail`] per trail, keyed by its name. Humans put and delete any. An ant's
+/// daemon puts new ones and replaces or removes only those the ant saved ([`Saver`]). Every ant and human reads them,
+/// by direct gets naming no subject ([`Permissions::for_user`]). Entries never expire.
 pub const TRAILS_BUCKET: &str = "ants_trails";
 /// KV bucket of the trail runs, each under its conductor's keys: its [`TrailRun`] ([`trail_run_key`]), its
 /// [`TrailSession`] ([`trail_session_key`]), the [`JournalEntry`] of each call answered ([`trail_call_key`]), and the

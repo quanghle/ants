@@ -96,8 +96,14 @@ async def report(args):
 `ants trail save FILE` checks a file, without running it, and saves it for the whole colony in `ants_trails` under its
 meta's `name` or `--name`: 1–64 of `a-z`, `0-9` and `-`, not a UUID (meta's own `name` may also hold capitals and `_`,
 needing `--name` then). A saved trail's script holds at most 256 KiB, its description 1000 characters, at most 32
-phases of one line of 1–120 characters each, and at most 32 waypoints. Only humans save and remove trails; ants and
-humans read them.
+phases of one line of 1–120 characters each, and at most 32 waypoints. Every ant and human reads the saved trails.
+
+Humans save and remove any trail. An ant saves one with `save_trail` ([Starting a run](#starting-a-run)), from a
+script or from a finished run of an inline script it conducted, under the same checks, and under a name neither the
+colony nor the conductor machine's `~/.ants/trails` has a trail of. It replaces only a trail it saved, and only with
+`replace`, and removes only one it saved, with `remove_trail`; it does neither from an untrusted thread
+([Trust](#trust)). A saved trail records who saved it, a human or an ant, and the run an ant saved it from; a human
+saving under a taken name replaces the trail, an ant's included, and becomes its saver.
 
 A conductor's daemon also finds trails in `~/.ants/trails/<name>.py` on its machine, and the CLI lists and runs the
 `.py` files of the CLI machine's `~/.ants/trails` by the same name, the file's, whatever its meta's `name`. On a name
@@ -141,6 +147,15 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   (default `5m`, at most `30m`), else the run's id while the run goes on. `trail_status` tells the ant how a run it
   conducts stands, or lists those not ended, and `stop_trail` stops one ([Restarts, stops and
   resumes](#restarts-stops-and-resumes)). The tools are offered only while the bus keeps trail runs.
+
+  Once an inline script works and its steps will recur, **`save_trail(name, script?, run?, replace?)`** saves it for
+  the colony as the ant's: a `script`, or the script of a finished `run` of an inline script the ant conducted (done
+  or failed), recorded as the trail's source. A run of a saved trail is refused, as that trail is saved already. The
+  script is checked as `ants trail save` checks a file, not run, and every ant then runs it by name. A name a human or
+  another ant saved is refused, so a changed copy goes under a new name; the ant's own is replaced only with
+  `replace: true`. **`remove_trail(name)`** removes a trail the ant saved, refusing one a human or another ant saved
+  and a name only `~/.ants/trails` holds. It leaves the trail's [tips](#tips): a trail saved later under that name
+  inherits them, ranked as of an older script. Runs already started keep the script they started with.
 - **A schedule** with `trail = "NAME"` in place of `text` ([config.md](config.md#schedules)): each firing sends `ant`,
   the conductor, a message `Scheduled run of trail NAME.` carrying the trail and `args` (a TOML table); its daemon
   starts the saved trail on the firing's new thread instead of prompting the ant, owned by the schedule's `owner`, under
@@ -284,7 +299,9 @@ A run takes the trust of the thread it started on (its origin):
 - **Trusted:** runs started by a human with `ants trail run`, and by an ant's `run_trail` on a thread a human or ant
   started. These run saved trails and inline scripts alike.
 - **Untrusted:** runs on a thread a webhook or a schedule started, or one asking a review, which relays text from
-  outside the bus. These run only saved trails: an inline script is refused (`a run started from a webhook's thread
+  outside the bus. These run only saved trails, which a human saved or an ant saved from a trusted thread (`save_trail`
+  and `remove_trail` are refused on an untrusted thread, a step of an untrusted run included): an inline script is
+  refused (`a run started from a webhook's thread
   runs only saved trails`), a goto to one too (`… goes only to saved trails`), and each step's thread is narrowed to
   the read-only tool rules webhook threads get by default ([config.md](config.md#tool-permissions)). A schedule
   starting a trail sets no `allow` of its own.
@@ -292,9 +309,10 @@ A run takes the trust of the thread it started on (its origin):
 A run's legs and child runs keep its origin, so a goto or `trail()` never makes a run more trusted.
 
 Only humans start, stop and resume runs by request (`ants.trail.<ant>`, answered by the conductor's daemon while up),
-admins stop and resume them by [admin order](auth.md#admin-orders) as well, save and remove trails, and read every run's
-records; an ant reads and writes only the runs it conducts, starts runs only with `run_trail`, reads and stops those it
-conducts with `trail_status` and `stop_trail`, and resumes none ([auth.md](auth.md)). A `human()` step goes to the run's
+admins stop and resume them by [admin order](auth.md#admin-orders) as well, save and remove any trail, and read every
+run's records; an ant reads and writes only the runs it conducts, starts runs only with `run_trail`, reads and stops
+those it conducts with `trail_status` and `stop_trail`, resumes none, and saves and removes only its own trails, with
+`save_trail` and `remove_trail` ([auth.md](auth.md)). A `human()` step goes to the run's
 owner, and a step's thread keeps that owner, so replies and escalations of the step's recipient reach the human who owns
 the run.
 
@@ -327,9 +345,9 @@ Ants handle tips with three MCP tools ([architecture.md](architecture.md#mcp-too
   returns its id (8 characters, such as `k3f7q2ab`). It refuses a tip of the same words, in the same order, as a live
   tip of the same trail and tip key, naming it; one sharing at least 60% of its words with live tips of the same key,
   naming them and suggesting a vote instead, unless `force` is set; and any tip once the trail has 200 live tips. Only
-  a step of a trail still saved leaves tips (not of an inline script, nor of a trail `ants trail rm` removed while the
-  run went on), and only from a trusted thread: not a thread a webhook or schedule started, nor a step of an untrusted
-  run ([Trust](#trust)).
+  a step of a trail still saved leaves tips (not of an inline script, nor of a trail `ants trail rm` or `remove_trail`
+  removed while the run went on), and only from a trusted thread: not a thread a webhook or schedule started, nor a
+  step of an untrusted run ([Trust](#trust)).
 - **`vote_tip(tip, verdict, reason?, trail?)`**: votes a live tip `helpful`, `stale` (right once, no longer) or
   `wrong`, with an optional `reason` of up to 300 characters, on the trail of the step being answered or the trail
   `trail` names. Each ant counts once per tip: voting again replaces its earlier vote. No ant votes on its own tip, nor
@@ -389,13 +407,14 @@ ants trail tips review --retire k3f7q2ab
 ```
 
 Each ant writes only its own tips and votes, under keys naming it; a human rewrites a tip only to retire it, and purges
-a trail's tips when removing the trail ([auth.md](auth.md#wire-acls-and-verification-invariants)).
+a trail's tips when removing the trail ([auth.md](auth.md#wire-acls-and-verification-invariants)). An ant's
+`remove_trail` purges none.
 
 ## Storage
 
 | Store | Kept | Holds |
 |---|---|---|
-| KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, waypoints, script, who saved it and when. |
+| KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, waypoints, script, who saved it (a human or an ant) and when, and the run an ant saved it from. |
 | KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (its route: each leg's trail or inline script, waypoint, args, first call id, start and steps; owner, origin, limits, state (a failed one's broken `limit`), spending, thread, parent run, times), `<ant>.<run>.session` the current leg's dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`, call ids numbered on across legs), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out. |
 | KV `ants_trail_tips` | never expires | The [tips](#tips) left on saved trails and their votes, each under the trail and the ant that wrote it: `<trail>.<writer>.<id>` a tip (trail, id, writer, text, tip key, run, script's SHA-256, time written, and who retired it and when), `<trail>.<voter>.<writer>.<id>` a vote on it (voter, verdict, reason, the SHA-256 of the script voted on, time). |
 
