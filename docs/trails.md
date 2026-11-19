@@ -82,7 +82,8 @@ A trail's meta may list up to 32 `waypoints`, the places a run enters it: each n
 `async def <name>(args)` of the script, which takes the leg's input and returns the leg's result. A run of the trail
 starts at its first waypoint, a [`goto()`](#routes-goto) enters it at any. The top level of such a trail holds only its
 meta, imports, definitions and constants, its steps in its waypoints: a top-level `await`, `if`, loop or expression
-fails the check.
+fails the check, as does an `await` in a def's decorators, defaults or annotations or in a class's decorators, bases,
+keywords or body, all computed at the top level.
 
 ```python
 meta = {"name": "triage", "description": "Triages an issue", "phases": [], "waypoints": ["classify", "report"]}
