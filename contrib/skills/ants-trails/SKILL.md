@@ -279,7 +279,9 @@ and the `args` it takes, so another ant picks it from `ants trail list` and runs
 - **No silent caps.** When the script trims its input (to fit the step limit, say), `log()` what it skipped and why;
   return unverified or failed items rather than dropping them.
 - **Schemas for structured results.** Pass `schema=` whenever the script reads fields of a reply. Keep schemas small,
-  with `required` fields; a reply that does not match is asked for again.
+  with `required` fields; a reply that does not match is asked for again. Only `type`, `properties`, `required`,
+  `items`, `enum` and `additionalProperties: false` are checked: any other keyword (`minItems`, `pattern`, `format`,
+  `oneOf`, …) passes unchecked, so check such constraints in the script.
 - **Self-contained prompts.** Each step starts a fresh thread with no context: name the repository, branch, file,
   question and the shape of the answer in the prompt itself, and pass earlier results into it as text.
 - **Handle a step's error.** Wrap a step in `try`/`except RuntimeError` when the run can go on without it; let it

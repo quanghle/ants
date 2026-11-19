@@ -41,13 +41,19 @@ phase("report")
 {"reviews": reviews}
 ```
 
+Args:
+
+```json
+{"repo": "/src/app", "files": ["src/main.rs", "src/lib.rs"]}
+```
+
 The script runs top to bottom with `await` allowed at the top level; the value of its last expression, which must be
 JSON, is the run's result (a trail with [waypoints](#waypoints) returns it from one). It reaches the host only through
 these names:
 
 | Name | What it does |
 |---|---|
-| `await agent(prompt, ant=None, capability=None, schema=None, label=None, tips=None)` | One step: `prompt` to the ant `ant` names, to an ant other than the conductor advertising `capability` (picked as `route` picks one), or to the conductor itself. Returns the reply's text, or with `schema` (a JSON Schema) its JSON, asked for again at most twice on a mismatch. `tips` is the step's tip key ([Tips](#tips)). |
+| `await agent(prompt, ant=None, capability=None, schema=None, label=None, tips=None)` | One step: `prompt` to the ant `ant` names, to an ant other than the conductor advertising `capability` (picked as `route` picks one), or to the conductor itself. Returns the reply's text, or with `schema` (a JSON Schema, of which `type`, `properties`, `required`, `items`, `enum` and `additionalProperties: false` are checked, any other keyword passing unchecked) its JSON, asked for again at most twice on a mismatch. `tips` is the step's tip key ([Tips](#tips)). |
 | `await human(questions)` | One step: asks the run's owner, else the default human, 1 to 4 questions as `ask_human` does; returns the answer's text. |
 | `await trail(name, args=None)` | One step, answered by a child run of the saved trail `name` with `args` as its input; returns its result ([Child runs](#child-runs-trail)). |
 | `await goto(trail=None, at=None, state=None)` | Ends the leg where called and goes on in `trail` (this one without it) at waypoint `at` (its start without it) with `state` as `args`; returns only by raising ([Routes](#routes-goto)). |
@@ -79,7 +85,7 @@ meta, imports, definitions and constants, its steps in its waypoints: a top-leve
 fails the check.
 
 ```python
-meta = {"name": "triage", "description": "Triages an issue", "waypoints": ["classify", "report"]}
+meta = {"name": "triage", "description": "Triages an issue", "phases": [], "waypoints": ["classify", "report"]}
 
 async def classify(args):
     kind = await agent(f"Is issue {args['issue']} a bug or a question? Answer bug or question.")
@@ -91,12 +97,19 @@ async def report(args):
     return await agent(f"Comment on issue {args['issue']}: {args['outcome']}.")
 ```
 
+Args:
+
+```json
+{"issue": 413}
+```
+
 ## Saved trails
 
 `ants trail save FILE` checks a file, without running it, and saves it for the whole colony in `ants_trails` under its
-meta's `name` or `--name`: 1–64 of `a-z`, `0-9` and `-`, not a UUID (meta's own `name` may also hold capitals and `_`,
-needing `--name` then). A saved trail's script holds at most 256 KiB, its description 1000 characters, at most 32
-phases of one line of 1–120 characters each, and at most 32 waypoints. Every ant and human reads the saved trails.
+meta's `name` or `--name`: 1–64 of `a-z`, `0-9` and `-`, not starting with `-`, not a UUID (meta's own `name` may
+also hold capitals and `_`, needing `--name` then). A saved trail's script holds at most 256 KiB, its description 1000
+characters, at most 32 phases of one line of 1–120 characters each, and at most 32 waypoints. Every ant and human reads
+the saved trails.
 
 Humans save and remove any trail. An ant saves one with `save_trail` ([Starting a run](#starting-a-run)), from a script
 or from a finished run of an inline script it conducted, under the same checks, and under a name neither the colony nor
@@ -332,10 +345,11 @@ A run takes the trust of the thread it started on (its origin):
 - **Trusted:** runs started by a human with `ants trail run`, and by an ant's `run_trail` on a thread a human or ant
   started. These run saved trails and inline scripts alike.
 - **Untrusted:** runs on a thread a webhook or a schedule started, or one asking a review, which relays text from
-  outside the bus. These run only saved trails, which a human saved or an ant saved from a trusted thread (`save_trail`
-  and `remove_trail` are refused on an untrusted thread, a step of an untrusted run included, and `save_trail` in answer
-to a dream finding marked untrusted, or on a dream's thread whose dream holds untrusted text without naming a trusted
-finding): an inline script is
+  outside the bus. These run only saved trails: the colony's, which a human saved or an ant saved from a trusted
+  thread (`save_trail` and `remove_trail` are refused on an untrusted thread, a step of an untrusted run included, and
+  `save_trail` in answer to a dream finding marked untrusted, or on a dream's thread whose dream holds untrusted text
+  without naming a trusted finding), and the files of the conductor machine's `~/.ants/trails`, which name no saver
+  and pass no such check, so whoever writes there chooses what untrusted runs may run. An inline script is
   refused (`a run started from a webhook's thread
   runs only saved trails`), a goto to one too (`… goes only to saved trails`), and each step's thread is narrowed to
   the read-only tool rules webhook threads get by default ([config.md](config.md#tool-permissions)). A schedule
@@ -347,6 +361,13 @@ finding): an inline script is
   from any thread.
 
 A run's legs and child runs keep its origin, so a goto or `trail()` never makes a run more trusted.
+
+A firing sets its run's limits: the message starting the run carries the trail, `args` and limits, and the conductor
+takes those limits up to the maxima ([Limits](#limits)), where a plain message of the same sender spends at most 8
+turns. Whoever holds a schedule's or a webhook's credentials ([webhooks.md](webhooks.md#trail-runs)) may so start a run
+of any saved trail, on any ant those credentials reach, with any args, under limits of their choosing: such
+credentials are the operator's to guard. What the run costs stays bounded on each ant by its spending caps, which each
+step counts against ([config.md](config.md#prompt-limits-and-spending-caps)).
 
 Only humans start, stop and resume runs by request (`ants.trail.<ant>`, answered by the conductor's daemon while up),
 admins stop and resume them by [admin order](auth.md#admin-orders) as well, save and remove any trail, and read every
@@ -438,7 +459,7 @@ ones too: each tip's id, tip key, writer, votes, status (`live`, `retired by HUM
 `unused for 90 days`, and `older script` when the trail's saved script differs from the tip's), age and text.
 `--retire ID` retires a tip, naming the human who retired it. It reads a trail's tips whether or not the trail is still
 saved. In `ants chat`, `/trail tips NAME` shows the same list in the pager. `ants trail rm NAME` removes the trail's
-tips with it, saying how many. These need human credentials ([cli.md](cli.md#commands)).
+tips with it, saying how many. `--retire` and `ants trail rm` need human credentials ([cli.md](cli.md#commands)).
 
 ```sh
 ants trail tips review                  # live tips, best first

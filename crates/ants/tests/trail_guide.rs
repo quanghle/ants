@@ -1,5 +1,6 @@
-//! The examples of the trail authoring guide, contrib/skills/ants-trails/SKILL.md, each run to its end with the real
-//! worker and a fake host answering its steps, its gotos and trail() steps leading to the guide's other examples.
+//! The examples of the trail authoring guide, contrib/skills/ants-trails/SKILL.md, and of docs/trails.md, each run to
+//! its end with the real worker and a fake host answering its steps, its gotos and trail() steps leading to the same
+//! document's other examples.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -7,6 +8,7 @@ use ants_trail::{Answer, Call, Event, Function, Limits, Progress, Run, Status, W
 use serde_json::{Map, Value, json};
 
 const GUIDE: &str = include_str!("../../../contrib/skills/ants-trails/SKILL.md");
+const DOCS: &str = include_str!("../../../docs/trails.md");
 
 /// A fenced block of the guide: its language and its text.
 fn blocks(markdown: &str) -> Vec<(&str, String)> {
@@ -24,16 +26,17 @@ fn blocks(markdown: &str) -> Vec<(&str, String)> {
             (None, None) => {}
         }
     }
-    assert!(open.is_none(), "the guide has an unclosed fenced block");
+    assert!(open.is_none(), "a document has an unclosed fenced block");
     blocks
 }
 
-/// Each python block with its args, the json block right after it, if any.
-fn examples() -> Vec<(String, Value)> {
-    let blocks = blocks(GUIDE);
+/// Each python block that is a whole trail, its first statement its meta, with its args, the json block right after
+/// it, if any; a block of a few lines quoted from a trail is left out.
+fn examples(markdown: &str) -> Vec<(String, Value)> {
+    let blocks = blocks(markdown);
     let mut examples = Vec::new();
     for (i, (lang, script)) in blocks.iter().enumerate() {
-        if *lang != "python" {
+        if *lang != "python" || !script.starts_with("meta = ") {
             continue;
         }
         let args = match blocks.get(i + 1) {
@@ -213,7 +216,7 @@ impl<'a> Drive<'a> {
 
     /// A run of the example `trail` entered at `at`, its calls numbered from `first`.
     fn leg(&self, trail: &str, at: Option<&str>, args: Value, first: u32) -> Run {
-        let script = self.trails.get(trail).unwrap_or_else(|| panic!("no example of the guide is trail {trail}"));
+        let script = self.trails.get(trail).unwrap_or_else(|| panic!("no example of the document is trail {trail}"));
         Run::with_clock(script, at, args, Limits::default(), 1_700_000_000, 7)
             .unwrap_or_else(|e| panic!("entering trail {trail} at {at:?}: {e}"))
             .numbered_from(first)
@@ -281,11 +284,18 @@ impl<'a> Drive<'a> {
     }
 }
 
-#[tokio::test]
-async fn every_example_of_the_guide_runs_to_its_end() {
+/// What running every example of a document showed: the gotos refused, the routes taken and the child runs started.
+struct Ran {
+    refused: usize,
+    routes: Vec<String>,
+    children: usize,
+}
+
+/// Runs every example of `markdown` to its end, once with every step answered, then with failing steps.
+async fn run_examples(markdown: &str, at_least: usize) -> Ran {
     let worker = Worker::new(env!("CARGO_BIN_EXE_ants"));
-    let examples = examples();
-    assert!(examples.len() >= 5, "the guide has {} examples", examples.len());
+    let examples = examples(markdown);
+    assert!(examples.len() >= at_least, "the document has {} examples", examples.len());
     let mut trails = HashMap::new();
     let mut checked = Vec::new();
     for (script, args) in examples {
@@ -314,7 +324,18 @@ async fn every_example_of_the_guide_runs_to_its_end() {
             }
         }
     }
+    Ran { refused, routes, children }
+}
+
+#[tokio::test]
+async fn every_example_of_the_guide_runs_to_its_end() {
+    let Ran { refused, routes, children } = run_examples(GUIDE, 5).await;
     assert!(refused > 0, "no example has a goto refused: {routes:#?}");
     assert!(routes.iter().any(|route| route.matches(" -> ").count() >= 3), "no route of 4 legs: {routes:#?}");
     assert!(children > 0, "no example starts a child run: {routes:#?}");
+}
+
+#[tokio::test]
+async fn every_example_of_the_trails_docs_runs_to_its_end() {
+    run_examples(DOCS, 2).await;
 }

@@ -48,6 +48,19 @@ ant = "dev-a"
 - **Reload:** reloads on `SIGHUP` or file change (polled every 3 s, applied once stable across two checks), restarting only changed/added/removed `[[webhook]]` and `[[human]]` workers while keeping in-flight HTTP requests alive. `listen` and `metrics` require a restart.
 - **Stop:** on `SIGTERM`, Ctrl-C or a replaced executable (`--upgrade-check`), stops accepting connections, closes idle ones, and gives requests under way the rest of their `15s` timeout to be answered before exiting (status `75` after an upgrade); a second `SIGTERM` or Ctrl-C exits at once.
 
+### Trail runs
+
+A message from a webhook's credentials may start a [trail](trails.md) run instead of prompting its ant, as a schedule's
+firing does ([config.md](config.md#schedules)): it carries the saved trail, its `args` and the run's limits, and the
+ant's daemon conducts the run on the message's new thread, untrusted as the webhook's threads are
+([trails.md](trails.md#trust)). `ants webhook serve` sends no such message, but the credentials themselves may: the
+conductor takes the limits a firing asks for up to the maxima ([trails.md](trails.md#limits): 500 steps, 2000 turns,
+7 days), where a plain message of the same sender spends at most 8 turns. Whoever holds a webhook's or a schedule's
+credentials may so start a run of any saved trail on any ant those credentials reach, with any args, under limits of
+their choosing: such credentials are the operator's to guard, as the secrets of `ants webhook serve` are. Each step of
+the run still counts against the spending caps of the ant answering it
+([config.md](config.md#prompt-limits-and-spending-caps)), which bound what the run costs on each ant.
+
 ## Adding a webhook
 
 `ants webhook add` issues credentials (locally via `--dir`, or over NATS via `--enroll CREDS [--hub URL]` + `ants enroll approve NAME --webhook ...` on the hub, never through a leaf), writes a 64-hex secret to `<name>.secret` (`0600`), appends `[[webhook]]` to `webhooks.toml`, reloads `ants.webhook` / `ants-webhook`, and prints the URL and secret:

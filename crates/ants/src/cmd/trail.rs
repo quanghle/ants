@@ -76,8 +76,8 @@ pub(crate) enum TrailCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Remove a trail the colony saved, and the tips ants left on its steps. A local trail in ~/.ants/trails stays:
-    /// delete its file. Needs a human's credentials.
+    /// Remove a trail the colony saved, the tips ants left on its steps and the ratings its runs got. A local trail in
+    /// ~/.ants/trails stays: delete its file. Needs a human's credentials.
     Rm {
         /// The trail's name.
         name: TrailName,
