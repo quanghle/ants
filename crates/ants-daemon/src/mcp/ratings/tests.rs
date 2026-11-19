@@ -17,6 +17,7 @@ fn now() -> DateTime<Utc> {
 fn run(trail: Option<&str>) -> TrailRun {
     let leg = TrailLeg {
         trail: trail.map(name),
+        local: false,
         at: None,
         script: "meta = {}".to_owned(),
         args: json!(null),

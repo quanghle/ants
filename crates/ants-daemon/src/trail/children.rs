@@ -109,8 +109,9 @@ impl Trails {
         args: Value,
         limits: &TrailLimits,
     ) -> Result<(TrailLeg, Run, String), String> {
-        let script = self.inner.saved.script(&name).await?;
-        Leg { trail: Some(name), script, at: None, args, first_call: 0 }.prepare(limits)
+        let found = self.inner.saved.script(&name).await?;
+        Leg { trail: Some(name), local: found.local, script: found.script, at: None, args, first_call: 0 }
+            .prepare(limits)
     }
 
     /// Give back to the run of `slot` and its ancestors the steps `calls` of it counted and never sent ([`unsent`]), as

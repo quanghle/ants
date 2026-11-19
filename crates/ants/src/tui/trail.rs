@@ -290,6 +290,7 @@ mod tests {
     fn first_leg(trail: &TrailName, script: &str) -> TrailLeg {
         TrailLeg {
             trail: Some(trail.clone()),
+            local: false,
             at: None,
             script: script.to_owned(),
             args: json!(null),

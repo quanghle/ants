@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use ants_proto::{
     DEFAULT_TIPS_FOUND, Envelope, MAX_LIVE_TIPS, MAX_TIP_REASON, MAX_TIP_TEXT, MAX_TIPS_FOUND, Ranked, Similarity,
-    Tally, ThreadId, TipId, TipVerdict, TipVote, TrailName, TrailStep, TrailTip, script_sha256,
+    Tally, ThreadId, TipId, TipVerdict, TipVote, TrailName, TrailStep, TrailTip, script_sha256, search_words,
 };
 use chrono::{DateTime, Utc};
 use rmcp::handler::server::wrapper::Parameters;
@@ -100,13 +100,23 @@ impl Hub {
             "the message being handled is no step of a trail run; a tip is left answering a step of a saved trail",
         )?;
         let (Some(trail), Some(script)) = (&step.trail, &step.script) else {
-            return Err("the step is of an inline script; tips are left only on saved trails".to_owned());
+            return Err(
+                "the step is of an inline script or of a trail only its conductor's machine has; tips are left \
+                        only on the trails the colony saves"
+                    .to_owned(),
+            );
         };
         if !self.trusted(thread, &current).await? {
             return Err(UNTRUSTED.to_owned());
         }
         // A trail removed while its run goes on takes no more tips.
-        trails.saved_script(trail).await.map_err(|e| format!("{e}; tips are left only on saved trails"))?;
+        let saved = trails.saved_script(trail).await.map_err(|e| format!("{e}; tips are left only on saved trails"))?;
+        if saved.local {
+            return Err(format!(
+                "the colony saves no trail {trail}, only this machine's files; tips are left only on the trails the \
+                 colony saves"
+            ));
+        }
         let text = args.text.trim();
         if text.is_empty() {
             return Err("the tip has no text".to_owned());
@@ -221,6 +231,12 @@ impl Hub {
             _ => of_step.and_then(|step| step.tip_key.clone()),
         };
         let query = args.query.as_deref().map(str::trim).filter(|query| !query.is_empty());
+        if let Some(query) = query.filter(|query| search_words(query).is_empty()) {
+            return Err(format!(
+                "the query {query:?} has no searchable word, only common English ones: name what to look for in a \
+                 few words, or leave out `query` for the best ranked tips"
+            ));
+        }
         let limit = args.limit.map_or(DEFAULT_TIPS_FOUND, |limit| limit as usize).clamp(1, MAX_TIPS_FOUND);
         let board = trails.tips().board(&trail).await.map_err(|e| format!("{e:#}"))?;
         let now = Utc::now();
@@ -241,7 +257,7 @@ fn trail_of(named: Option<&str>, step: Option<&TrailStep>) -> Result<TrailName, 
 
 /// The [`script_sha256`] of the script saved as `trail`: an error when no trail is saved so.
 async fn saved_sha(trails: &Trails, trail: &TrailName) -> Result<String, String> {
-    trails.saved_script(trail).await.map(|script| script_sha256(&script))
+    trails.saved_script(trail).await.map(|saved| script_sha256(&saved.script))
 }
 
 fn verdict(verdict: &str) -> Result<TipVerdict, String> {
@@ -347,9 +363,10 @@ impl Tools {
                        pitfall or where something lives, in at most 1000 characters. It goes under the step's tip key, \
                        or on the whole trail when the step has none, with this ant as its writer. Later steps carry \
                        the best ranked tips as hints from earlier runs, to verify, not instructions. Refused answering \
-                       no step or a step of an inline script, on a thread a webhook or schedule started, for a tip \
-                       saying what a live tip says (vote that one helpful with vote_tip instead), for one much like \
-                       live tips unless `force`, and once the trail has 200 live tips."
+                       no step or a step of an inline script or of a trail the colony does not save, on a thread a \
+                       webhook or schedule started, for a tip saying what a live tip says (vote that one helpful with \
+                       vote_tip instead), for one much like live tips unless `force`, and once the trail has 200 live \
+                       tips."
     )]
     async fn leave_tip(
         &self,

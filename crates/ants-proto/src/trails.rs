@@ -42,7 +42,8 @@ pub use saving::{SAVE_TRAIL_REPEAT, SAVE_TRAIL_WAIT, SaveTrailOutcome, SaveTrail
 pub use tips::{
     DEFAULT_TIPS_FOUND, MAX_LIVE_TIPS, MAX_TIP_REASON, MAX_TIP_TEXT, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, MAX_TIPS_FOUND,
     Ranked, Retirement, Similarity, TIP_HALF_LIFE, TIP_RELEVANCE, TIP_RELEVANT_WORDS, TIP_SIMILARITY, TIP_UNUSED,
-    Tally, TipBoard, TipRetired, TipStatus, TipVerdict, TipVote, TrailTip, check_tip_key, script_sha256, tip_words,
+    Tally, TipBoard, TipRetired, TipStatus, TipVerdict, TipVote, TrailTip, check_tip_key, script_sha256, search_words,
+    tip_words,
 };
 
 /// Most bytes a trail's script has: a saved trail's and a run's.
@@ -72,7 +73,8 @@ pub struct TrailStep {
     /// again, with the step on the same thread, for an answer that does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<Value>,
-    /// The saved trail whose script made the call; none for an inline script.
+    /// The saved trail whose script made the call, which tips left answering the step go on; none for an inline script
+    /// or a trail the colony does not save ([`TrailRun::tip_trail`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail: Option<TrailName>,
     /// The [`script_sha256`] of that trail's script, as the run's leg ran it; none without a trail.
@@ -380,6 +382,12 @@ impl TrailRun {
         self.leg().and_then(|leg| leg.trail.as_ref())
     }
 
+    /// The trail the run is on when the colony saves it, which its steps' tips are on: none for an inline script, nor
+    /// for a trail only the conductor's machine has ([`TrailLeg::local`]).
+    pub fn tip_trail(&self) -> Option<&TrailName> {
+        self.leg().filter(|leg| !leg.local).and_then(|leg| leg.trail.as_ref())
+    }
+
     /// The saved trail the run started; none for a script given inline.
     pub fn first_trail(&self) -> Option<&TrailName> {
         self.route.first().and_then(|leg| leg.trail.as_ref())
@@ -405,6 +413,10 @@ pub struct TrailLeg {
     /// The saved trail; none for a script given inline, which only a run's first leg is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail: Option<TrailName>,
+    /// Whether that trail is only the conductor's machine's, from its `~/.ants/trails`, the colony saving none of its
+    /// name: its steps take no tips ([`TrailRun::tip_trail`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local: bool,
     /// The waypoint the leg entered the trail at; none for a trail without waypoints, entered at its start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,

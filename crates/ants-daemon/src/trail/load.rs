@@ -87,9 +87,9 @@ impl Trails {
     /// next pass, as the goto() may not have given them up before the daemon stopped.
     fn load_moved(&self, header: TrailRun, stored: TrailSession) -> Result<Arc<Slot>> {
         let leg = header.leg().context("the run has no leg")?.clone();
-        let TrailLeg { trail, at, script, args, first_call, .. } = leg;
+        let TrailLeg { trail, local, at, script, args, first_call, .. } = leg;
         let (_, engine, session) =
-            Leg { trail, script, at, args, first_call }.prepare(&header.limits).map_err(|e| anyhow!(e))?;
+            Leg { trail, local, script, at, args, first_call }.prepare(&header.limits).map_err(|e| anyhow!(e))?;
         {
             let mut threads = locked(&self.inner.threads);
             for call in stored.pending.iter().filter(|call| call.function != TrailFunction::Trail) {

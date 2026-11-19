@@ -93,9 +93,10 @@ fn listed(text: &str) -> Vec<&str> {
 async fn leave_tip_is_left_only_answering_a_step_of_a_saved_trail_on_a_trusted_thread() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;
-    let (dir, saved) = saving("tip-tools-leave");
-    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(saved.clone())).await;
-    let (dev_trails, dev) = ant_mcp(&server, "dev", &dir, &saved).await;
+    let dir = scratch_dir("tip-tools-leave");
+    save_for_colony(&server, "deploy", &format!("{META}{DEPLOY}")).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let (dev_trails, dev) = ant_mcp(&server, "dev", &dir, &dir.join("dev-trails")).await;
     let leave = async |thread: &ThreadId, text: &str| {
         call(&mcp_client(&dev, thread).await, "leave_tip", json!({"text": text})).await
     };
@@ -149,9 +150,51 @@ async fn leave_tip_is_left_only_answering_a_step_of_a_saved_trail_on_a_trusted_t
     let (ok, text) = call(&client, "trail_tips", json!({})).await;
     assert!(ok && text.contains(id.as_str()), "any thread reads the tips: {text}");
 
-    std::fs::remove_file(saved.join("deploy.py")).unwrap();
+    let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "rm").await.unwrap();
+    DirectKv::new(&js, None, ants_proto::TRAILS_BUCKET).await.unwrap().delete("deploy").await.unwrap();
     let (ok, text) = leave(&step.thread_id, "Tag the release once built").await;
     assert!(!ok && text.contains("no trail is saved as deploy"), "a trail removed mid-run takes no tips: {text}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_step_of_a_trail_only_its_conductor_s_machine_has_invites_no_tips_and_leave_tip_refuses_one() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let (dir, saved) = saving("tip-tools-local");
+    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(saved.clone())).await;
+    let (dev_trails, dev) = ant_mcp(&server, "dev", &dir, &dir.join("dev-trails")).await;
+    let earlier = TrailTip {
+        trail: deploy(),
+        id: TipId::generate(),
+        writer: ant("dev-b"),
+        text: "Run the migrations before the build".to_owned(),
+        tip_key: Some("build".to_owned()),
+        run: RunId::generate(),
+        script: script_sha256(DEPLOY),
+        written_at: chrono::Utc::now(),
+        retired: None,
+    };
+    dev_trails.tips().leave(&earlier).await.unwrap();
+
+    let thread = ThreadId::generate();
+    lead.start_saved("deploy", super::children::human_origin(), TrailLimits::default(), thread).await;
+    let step = lead.step().await;
+    let trail_step = step.trail_step.as_deref().unwrap();
+    assert_eq!((&trail_step.trail, &trail_step.script), (&None, &None), "the step names no trail to leave tips on");
+    assert_eq!(step.text, "build it", "no tips block, nor an invitation to leave_tip");
+    let _step = dev.begin(&step);
+    let client = mcp_client(&dev, &step.thread_id).await;
+    let (ok, text) = call(&client, "leave_tip", json!({"text": "Tag the release once built"})).await;
+    assert!(!ok && text.contains("only on the trails the colony saves"), "{text}");
+
+    let (neighbour_trails, neighbour) = ant_mcp(&server, "dev-c", &dir, &saved).await;
+    let naming = step_to("dev-c", Some("build"), &format!("{META}{DEPLOY}"));
+    let _naming = neighbour.begin(&naming);
+    let client = mcp_client(&neighbour, &naming.thread_id).await;
+    let (ok, text) = call(&client, "leave_tip", json!({"text": "Tag the release once built"})).await;
+    assert!(!ok && text.contains("the colony saves no trail deploy, only this machine's files"), "{text}");
+    assert_eq!(neighbour_trails.tips().board(&deploy()).await.unwrap().len(), 1, "no tip left");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -159,10 +202,11 @@ async fn leave_tip_is_left_only_answering_a_step_of_a_saved_trail_on_a_trusted_t
 async fn leave_tip_refuses_a_duplicate_unless_forced_and_vote_tip_counts_each_ant_once() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;
-    let (dir, saved) = saving("tip-tools-vote");
-    let (dev_trails, dev) = ant_mcp(&server, "dev", &dir, &saved).await;
-    let (_, lead) = ant_mcp(&server, "lead", &dir, &saved).await;
+    let dir = scratch_dir("tip-tools-vote");
     let script = format!("{META}{DEPLOY}");
+    save_for_colony(&server, "deploy", &script).await;
+    let (dev_trails, dev) = ant_mcp(&server, "dev", &dir, &dir.join("dev-trails")).await;
+    let (_, lead) = ant_mcp(&server, "lead", &dir, &dir.join("lead-trails")).await;
     let step = step_to("dev", Some("build"), &script);
     let _step = dev.begin(&step);
     let client = mcp_client(&dev, &step.thread_id).await;
@@ -272,6 +316,10 @@ async fn trail_tips_lists_the_live_tips_of_the_step_s_trail_and_tip_key_or_of_a_
     let (ok, text) = call(&client, "trail_tips", json!({"tip_key": "test", "query": "database cache"})).await;
     let found = listed(&text);
     assert!(ok && found.len() == 2 && found[0].contains("running database"), "{text}");
+    for query in ["what should it do", "??"] {
+        let (ok, text) = call(&client, "trail_tips", json!({"query": query})).await;
+        assert!(!ok && text.contains(&format!("the query {query:?} has no searchable word")), "{text}");
+    }
     let (ok, text) = call(&client, "trail_tips", json!({"query": "zebra"})).await;
     assert!(ok, "{text}");
     assert_eq!(

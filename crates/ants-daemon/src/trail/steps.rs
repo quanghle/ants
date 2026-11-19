@@ -203,12 +203,12 @@ pub(super) fn retry_tips(board: &TipBoard, step: &TrailStep, now: DateTime<Utc>)
     Some(format!("Earlier runs of trail {trail} left tips that may help: search them with trail_tips{under}."))
 }
 
-/// The step's [`TrailStep`] for `pending`, a call of `run`: with the saved trail of the run's leg, if any, and the
-/// [`script_sha256`] of the leg's script.
+/// The step's [`TrailStep`] for `pending`, a call of `run`: with the trail of the run's leg when the colony saves it
+/// ([`TrailRun::tip_trail`]), and then the [`script_sha256`] of the leg's script.
 pub(super) fn step(run: &TrailRun, pending: &PendingCall) -> TrailStep {
     let args = (pending.function == TrailFunction::Agent).then(|| AgentArgs::of(&pending.args).ok()).flatten();
     let (label, schema, tip_key) = args.map_or_default(|args| (args.label, args.schema, args.tips));
-    let trail = run.trail().cloned();
+    let trail = run.tip_trail().cloned();
     let script = trail.as_ref().and(run.leg()).map(|leg| script_sha256(&leg.script));
     TrailStep { run: run.run.clone(), call: pending.call, label, schema, trail, script, tip_key, bounds: None }
 }

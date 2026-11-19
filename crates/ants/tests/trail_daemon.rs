@@ -127,6 +127,23 @@ async fn init(server: &NatsServer) {
     }
 }
 
+/// Save `script` as the colony's trail `name`, as the human.
+async fn save_for_colony(server: &NatsServer, name: &str, script: &str) {
+    let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "save").await.unwrap();
+    let trail = ants_proto::SavedTrail {
+        name: name.parse().unwrap(),
+        description: "a test".to_owned(),
+        phases: Vec::new(),
+        waypoints: Vec::new(),
+        script: script.to_owned(),
+        saved_by: ants_proto::Saver::Human { user: UserId::human() },
+        saved_from: None,
+        saved_at: chrono::Utc::now(),
+    };
+    let kv = DirectKv::new(&js, None, ants_proto::TRAILS_BUCKET).await.unwrap();
+    kv.put(name, serde_json::to_vec(&trail).unwrap()).await.unwrap();
+}
+
 /// The conductor `lead`'s daemon, its runs continued, with `worker` as the `ants` binary and `colony` as the colony.
 async fn conductor(server: &NatsServer, worker: &Path, colony: Vec<ColonyEntry>) -> Conductor {
     conductor_full(server, worker, colony, Registry::new(UserId::human()), None).await

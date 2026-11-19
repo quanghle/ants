@@ -217,6 +217,12 @@ pub fn tip_words(text: &str) -> BTreeSet<String> {
     words(text).filter(|word| word.chars().count() >= 3 && !STOPWORDS.contains(&word.as_str())).collect()
 }
 
+/// The distinct words a tip search for `query` looks for: its lowercase alphanumeric words but for common English
+/// ones. A query without any matches no tip.
+pub fn search_words(query: &str) -> BTreeSet<String> {
+    words(query).filter(|word| !STOPWORDS.contains(&word.as_str())).collect()
+}
+
 /// The lowercase alphanumeric words of `text`, in order.
 fn words(text: &str) -> impl Iterator<Item = String> {
     text.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(str::to_lowercase)
@@ -417,8 +423,8 @@ impl TipBoard {
     }
 
     /// Up to `limit` (1 to [`MAX_TIPS_FOUND`]) live tips matching a search: with `tip_key`, those under that key,
-    /// first, and the trail-wide ones; with `query` words (but common English ones), those sharing at least one of
-    /// them in their text or tip key, most shared first; then in rank order.
+    /// first, and the trail-wide ones; with `query`, those sharing at least one of its [`search_words`] in their text
+    /// or tip key, most shared first, and none when it has no such word; then in rank order.
     pub fn search(
         &self,
         query: Option<&str>,
@@ -427,8 +433,8 @@ impl TipBoard {
         now: DateTime<Utc>,
         script: Option<&str>,
     ) -> Vec<Ranked<'_>> {
-        let query: BTreeSet<String> =
-            words(query.unwrap_or_default()).filter(|word| !STOPWORDS.contains(&word.as_str())).collect();
+        let searched = query.is_some();
+        let query = search_words(query.unwrap_or_default());
         let shared = |tip: &TrailTip| {
             let text = format!("{} {}", tip.text, tip.tip_key.as_deref().unwrap_or_default());
             words(&text).collect::<BTreeSet<String>>().intersection(&query).count()
@@ -437,7 +443,7 @@ impl TipBoard {
             .live_ranked(now, script)
             .filter(|r| tip_key.is_none() || r.tip.tip_key.is_none() || r.tip.tip_key.as_deref() == tip_key)
             .map(|r| (tip_key.is_some() && r.tip.tip_key.as_deref() == tip_key, shared(r.tip), r))
-            .filter(|(_, shared, _)| query.is_empty() || *shared > 0)
+            .filter(|(_, shared, _)| !searched || *shared > 0)
             .collect();
         found.sort_by(|(a_keyed, a_shared, a), (b_keyed, b_shared, b)| {
             b_keyed.cmp(a_keyed).then(b_shared.cmp(a_shared)).then_with(|| rank_order(a, b))
@@ -488,7 +494,10 @@ fn rank<'a>(tip: &'a TrailTip, votes: &'a [TipVote], now: DateTime<Utc>, script:
     let older_script = script
         .is_some_and(|current| current != tip.script && !helpful().any(|vote| vote.script.as_deref() == Some(current)));
     let halvings = unused.as_secs_f64() / TIP_HALF_LIFE.as_secs_f64();
-    let score = tally.net() as f64 * 0.5f64.powf(halvings) * if older_script { 0.5 } else { 1.0 };
+    let weight = 0.5f64.powf(halvings) * if older_script { 0.5 } else { 1.0 };
+    // Age and an older script weaken a tip: they shrink a positive net and deepen a negative one.
+    let net = tally.net() as f64;
+    let score = if net < 0.0 { net / weight } else { net * weight };
     let status = match &tip.retired {
         Some(TipRetired { by, at }) => TipStatus::Retired(Retirement::ByHuman { by: by.clone(), at: *at }),
         None if tally.wrong > tally.helpful => TipStatus::Retired(Retirement::VotedWrong),
@@ -630,6 +639,33 @@ mod tests {
     }
 
     #[test]
+    fn age_and_an_older_script_lower_a_tip_voted_down_as_they_lower_one_voted_up() {
+        let on_new =
+            |id, written| TrailTip { script: "new".to_owned(), ..tip("dev-a", id, None, "pin the image", written) };
+        let older = tip("dev-a", "aaaaaaaa", None, "pin the base image", 0);
+        let unused = on_new("bbbbbbbb", 0);
+        let recent = on_new("cccccccc", 60);
+        let helpful = on_new("dddddddd", 0);
+        let older_helpful = tip("dev-a", "eeeeeeee", None, "pin the base image", 0);
+        let votes = [
+            (&older, vote("dev-b", TipVerdict::Stale, 60)),
+            (&unused, vote("dev-b", TipVerdict::Stale, 60)),
+            (&recent, vote("dev-b", TipVerdict::Stale, 60)),
+            (&helpful, vote("dev-b", TipVerdict::Helpful, 0)),
+            (&older_helpful, vote("dev-b", TipVerdict::Helpful, 0)),
+        ];
+        let board = board(&[&older, &unused, &recent, &helpful, &older_helpful], &votes);
+        let score = |tip: &TrailTip| board.tip(&tip.id, day(60), Some("new")).unwrap().score;
+        assert!((score(&recent) + 1.0).abs() < 1e-9);
+        assert!((score(&unused) + 4.0).abs() < 1e-9, "unused for two half-lives, a negative net weighs four times");
+        assert!((score(&older) + 8.0).abs() < 1e-9, "and twice that on an older script");
+        assert!((score(&helpful) - 0.25).abs() < 1e-9, "a positive net still shrinks");
+        assert!((score(&older_helpful) - 0.125).abs() < 1e-9);
+        let ranked = ids(board.ranked(day(60), Some("new")));
+        assert_eq!(ranked, ["dddddddd", "eeeeeeee", "cccccccc", "bbbbbbbb", "aaaaaaaa"]);
+    }
+
+    #[test]
     fn only_tips_and_votes_under_their_own_keys_count_and_never_the_writers_vote() {
         let left = tip("dev-a", "aaaaaaaa", None, "pin the base image", 0);
         let missing = tip("dev-a", "bbbbbbbb", None, "gone", 0);
@@ -690,6 +726,9 @@ mod tests {
         assert_eq!(search(Some("Cargo registry"), None, 10), ["aaaaaaaa", "bbbbbbbb", "dddddddd", "cccccccc"]);
         assert_eq!(search(Some("cargo"), Some("build"), 10), ["aaaaaaaa", "bbbbbbbb"]);
         assert_eq!(search(Some("nothing"), None, 10), Vec::<&str>::new());
+        assert_eq!(search(Some("what should it do"), None, 10), Vec::<&str>::new(), "common words alone match none");
+        assert_eq!(search(Some("??"), Some("build"), 10), Vec::<&str>::new(), "nor does a query of no word");
+        assert!(search_words("what should it do?").is_empty());
         assert_eq!(search(None, None, 0).len(), 1, "a limit is at least 1");
         assert_eq!(search(None, None, usize::MAX).len(), 4);
     }

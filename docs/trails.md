@@ -420,8 +420,10 @@ the run.
 Each step starts on a fresh thread, often on whichever ant `capability=` picks, so what one step learns (a quirk of the
 repository, a prompt easily misread, a check that needs a flag) would be learnt again on every run. A tip keeps it: a
 note an ant answering a step of a saved trail leaves on that trail, for the ants answering its later steps, in any run.
-Each step's message carries the best few, `trail_tips` searches the rest, and votes rank them. Tips belong to a saved
-trail and are shared colony-wide; an inline script has none.
+Each step's message carries the best few, `trail_tips` searches the rest, and votes rank them. Tips belong to a trail
+the colony saves and are shared colony-wide; an inline script has none, nor does a trail only the conductor's
+`~/.ants/trails` holds, as the ants answering its steps on other machines know no trail of its name: its steps carry
+no tips and name no trail to leave them on.
 
 ### Tip keys
 
@@ -444,8 +446,9 @@ Ants handle tips with three MCP tools ([architecture.md](architecture.md#mcp-too
   returns its id (8 characters, such as `k3f7q2ab`). It refuses a tip of the same words, in the same order, as a live
   tip of the same trail and tip key, naming it; one sharing at least 60% of its words with live tips of the same key,
   naming them and suggesting a vote instead, unless `force` is set; and any tip once the trail has 200 live tips. Only
-  a step of a trail still saved leaves tips (not of an inline script, nor of a trail `ants trail rm` or `remove_trail`
-  removed while the run went on), and only from a trusted thread: not a thread a webhook or schedule started, nor a
+  a step of a trail the colony still saves leaves tips (not of an inline script, nor of a trail only the conductor's
+  machine has, nor of one `ants trail rm` or `remove_trail` removed while the run went on), and only from a trusted
+  thread: not a thread a webhook or schedule started, nor a
   step of an untrusted run ([Trust](#trust)).
 - **`vote_tip(tip, verdict, reason?, trail?)`**: votes a live tip `helpful`, `stale` (right once, no longer) or
   `wrong`, with an optional `reason` of up to 300 characters, on the trail of the step being answered or the trail
@@ -458,7 +461,9 @@ Ants handle tips with three MCP tools ([architecture.md](architecture.md#mcp-too
 A tip's score is its helpful votes less its stale and wrong ones, halved for every 30 days since it was written or last
 voted helpful, and halved again while it is on an older script: the current script (for the tips a step carries, the
 script the step runs; elsewhere, the trail's saved script) differs from the one the tip was left on, and no helpful
-vote was cast on the current one. Tips rank by score, then by last use, latest first.
+vote was cast on the current one. Of a tip voted down more than up, age and an older script double the score instead,
+deepening its negative net: of two such tips, the older or the one on an older script ranks lower. Tips rank by score,
+then by last use, latest first.
 
 A tip is retired, out of steps and searches for good, once more ants voted it wrong than helpful, once it was neither
 written nor voted helpful for 90 days, or once a human retired it (`ants trail tips NAME --retire ID`).
@@ -487,9 +492,10 @@ suggests searching them with `trail_tips`, under the step's tip key if it has on
 
 `trail_tips` searches the live tips of the trail of the step the thread answers, or of the saved trail `trail` names:
 with `tip_key` (by default the step's), that key's tips first, then the trail-wide ones, leaving out other keys'; with
-`query`, only the tips sharing a word with it, in their text or tip key, most shared first; then best ranked first. It
-lists `limit` tips, 10 by default and 50 at most, each with its id, tip key, votes (`+helpful ~stale !wrong`), age,
-`older script` mark and text, or says that none match. Any thread may read tips, a webhook's included.
+`query`, only the tips sharing a word with it, in their text or tip key, most shared first; then best ranked first. Its
+words are lowercased, common English words left out: a query of no other word (`what should it do`) is refused as
+having no searchable word. It lists `limit` tips, 10 by default and 50 at most, each with its id, tip key, votes
+(`+helpful ~stale !wrong`), age, `older script` mark and text, or says that none match. Any thread may read tips, a webhook's included.
 
 ### Tips for humans
 
