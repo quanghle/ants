@@ -557,7 +557,8 @@ the longest wall time, so a finished run stays at least 30 days. The full layout
   order](auth.md#admin-orders): unlike the request, which only a daemon up answers, the order waits for the machine's
   daemon while it is away and is recorded with the admin and time (`ants ant orders ANT`), its result listing the steps
   in other ants' queues. A stop arriving while the run's script computes waits for the computation to end, and gives up
-  the steps the run then waits on. Ending a parent run stops its still-running children. Wall time keeps running while
+  the steps the run then waits on; the conductor's daemon tells it pending at once, and `ants trail stop` says so when
+  the pass outlasts its 15 s wait. Stopping a stopped run again lists the steps still to withdraw. Ending a parent run stops its still-running children. Wall time keeps running while
   stopped.
 - **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose record names the limit it failed on, from
   its last stored session, resuming its child runs stopped or failed on a limit too (a child that left no record starts

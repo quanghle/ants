@@ -495,6 +495,85 @@ async fn a_stopped_run_gives_up_its_steps_and_resumes_with_fresh_ones() {
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!(["A", "B"]) });
 }
 
+/// The first answer on `answers` to the request `id` arriving within `wait`.
+async fn answers_to(
+    answers: &mut async_nats::Subscriber,
+    id: ants_proto::Uuid,
+    wait: Duration,
+) -> Option<TrailOutcome> {
+    let until = tokio::time::Instant::now() + wait;
+    while let Ok(answer) = tokio::time::timeout_at(until, answers.next()).await {
+        let answer: TrailReply = serde_json::from_slice(&answer.unwrap().payload).unwrap();
+        if answer.request_id == id {
+            return Some(answer.outcome);
+        }
+    }
+    None
+}
+
+#[tokio::test]
+async fn a_stop_while_the_script_computes_is_told_pending_and_a_start_asked_again_starts_one_run() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-slow-worker");
+    let (worker, computing, go) = (dir.join("worker"), dir.join("computing"), dir.join("go"));
+    let wrapper = format!(
+        "#!/bin/sh\ntouch {computing:?}\nwhile [ ! -e {go:?} ]; do sleep 0.05; done\nexec {:?} \"$@\"\n",
+        ants_binary()
+    );
+    std::fs::write(&worker, wrapper).unwrap();
+    std::process::Command::new("chmod").arg("+x").arg(&worker).status().unwrap();
+    let mut lead = conductor(&server, &worker, Vec::new()).await;
+    let mut answers = lead.client.subscribe(subject::trailed(&ant("lead"))).await.unwrap();
+    let client = lead.client.clone();
+    let publish = async |request: &TrailRequest| {
+        client.publish(request.subject(), serde_json::to_vec(request).unwrap().into()).await.unwrap();
+    };
+
+    let script = format!("{META}await agent(\"a\", ant=\"dev\")\n");
+    let action = TrailAction::Start {
+        trail: TrailSource::Script(script),
+        args: Value::Null,
+        thread: ThreadId::generate(),
+        limits: TrailLimits::default(),
+    };
+    let start = TrailRequest::new(ant("lead"), UserId::human(), action);
+    let run: RunId = start.id.to_string().parse().unwrap();
+    loop {
+        let heard = TrailRequest::new(ant("lead"), UserId::human(), TrailAction::Stop { run: RunId::generate() });
+        publish(&heard).await;
+        if answers_to(&mut answers, heard.id, Duration::from_millis(200)).await.is_some() {
+            break;
+        }
+    }
+    publish(&start).await;
+    let started = answers_to(&mut answers, start.id, Duration::from_secs(5)).await;
+    assert_eq!(started, Some(TrailOutcome::Started { run: run.clone() }), "the run takes the request's id");
+    eventually("the script computes", async || computing.exists()).await;
+
+    let stop = TrailRequest::new(ant("lead"), UserId::human(), TrailAction::Stop { run: run.clone() });
+    publish(&stop).await;
+    let pending = answers_to(&mut answers, stop.id, Duration::from_secs(5)).await;
+    assert_eq!(pending, Some(TrailOutcome::Stopping { run: run.clone() }), "the stop waits for the pass");
+    publish(&start).await;
+    let again = answers_to(&mut answers, start.id, Duration::from_secs(5)).await;
+    assert_eq!(again, Some(TrailOutcome::Started { run: run.clone() }), "answered while the stop waits");
+    assert_eq!(lead.trails.unfinished().len(), 1, "a start asked again starts no second run");
+
+    std::fs::write(&go, "").unwrap();
+    let step = lead.step().await;
+    let waiting = vec![WaitingStep { to: ant("dev"), message: step.id }];
+    let stopped = answers_to(&mut answers, stop.id, Duration::from_secs(30)).await;
+    assert_eq!(stopped, Some(TrailOutcome::Stopped { run: run.clone(), waiting: waiting.clone() }));
+    assert_eq!(lead.header(&run).await.state, RunState::Stopped { by: UserId::human() });
+
+    let again = TrailRequest::new(ant("lead"), UserId::human(), TrailAction::Stop { run: run.clone() });
+    publish(&again).await;
+    let listed = answers_to(&mut answers, again.id, Duration::from_secs(5)).await;
+    assert_eq!(listed, Some(TrailOutcome::Stopped { run, waiting }), "a stopped run lists the steps to withdraw");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[tokio::test]
 async fn a_resumed_run_counts_the_steps_it_sends_anew_once() {
     let Some(server) = NatsServer::start() else { return };

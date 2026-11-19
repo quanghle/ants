@@ -30,6 +30,12 @@ expression: value
   {
     "request_id": "019a7d2e-0000-7000-8000-000000000001",
     "ant": "planner",
+    "outcome": "stopping",
+    "run": "019a7d2f-0000-7000-8000-000000000001"
+  },
+  {
+    "request_id": "019a7d2e-0000-7000-8000-000000000001",
+    "ant": "planner",
     "outcome": "refused",
     "error": "no saved trail release"
   }

@@ -1581,6 +1581,7 @@ fn trail_control() {
                 waiting: vec![WaitingStep { to: user("dev-a"), message: id(5) }],
             }),
             reply(TrailOutcome::Resumed { run: run() }),
+            reply(TrailOutcome::Stopping { run: run() }),
             reply(TrailOutcome::Refused { error: "no saved trail release".to_owned() }),
         ],
     );

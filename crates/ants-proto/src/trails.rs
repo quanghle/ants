@@ -580,6 +580,7 @@ pub struct TrailRequest {
 pub enum TrailAction {
     /// Start a run of `trail` with `args`, reporting on `thread`, which the asking human owns: its owner record names
     /// the human for the conductor ([`crate::owner_key`]) before the request goes, so the steps' recipients trust it.
+    /// The run takes the request's id, so a start asked again under the same id starts one run.
     Start {
         trail: TrailSource,
         #[serde(default)]
@@ -681,6 +682,11 @@ pub enum TrailOutcome {
         waiting: Vec<WaitingStep>,
     },
     Resumed {
+        run: RunId,
+    },
+    /// The stop of a run whose script computes: it takes effect once that pass ends, and a [`TrailOutcome::Stopped`]
+    /// answers the same request then. A stop asked again of the stopped run lists the steps still to withdraw.
+    Stopping {
         run: RunId,
     },
     Refused {

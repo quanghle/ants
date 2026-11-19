@@ -281,3 +281,49 @@ async fn humans_stop_and_resume_runs_by_a_unique_start_of_their_id() {
     let error = super::super::run(&ant, TrailCommand::Stop { run: pick("0190aaaa") }).await.unwrap_err().to_string();
     assert!(error.starts_with("stopping a run needs a human's credentials"), "{error}");
 }
+
+#[tokio::test]
+async fn a_stop_waiting_for_the_runs_pass_is_told_pending_and_an_unanswered_start_names_its_run() {
+    let Some(server) = Server::start() else { return };
+    let alice = p("alice");
+    let (client, _) = server.connect_as(&alice, Role::Human).await;
+    let slow = p("slow");
+    let now = Utc::now();
+    let (computing, quick) = (record(&slow, None, RunState::Waiting, now), record(&slow, None, RunState::Waiting, now));
+    let (conductor_client, js) = server.connect(&slow).await;
+    let mut requests = conductor_client.subscribe(subject::trail(&slow)).await.unwrap();
+    js.query_account().await.unwrap();
+    let still = computing.run.clone();
+    tokio::spawn(async move {
+        while let Some(message) = requests.next().await {
+            let request: TrailRequest = serde_json::from_slice(&message.payload).unwrap();
+            let TrailAction::Stop { run } = &request.action else { continue };
+            let mut outcomes = vec![TrailOutcome::Stopping { run: run.clone() }];
+            if *run != still {
+                outcomes.push(TrailOutcome::Stopped { run: run.clone(), waiting: Vec::new() });
+            }
+            for outcome in outcomes {
+                let reply = request.answer(outcome);
+                conductor_client.publish(reply.subject(), serde_json::to_vec(&reply).unwrap().into()).await.unwrap();
+            }
+        }
+    });
+
+    let text = control::stop_within(&client, &alice, &computing, Duration::from_millis(500)).await.unwrap();
+    assert_eq!(text, control::stopping(&computing.run, &slow));
+    assert!(text.contains("pending") && text.contains(&format!("`ants trail stop {}`", computing.run)), "{text}");
+    let text = control::stop_within(&client, &alice, &quick, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(text, control::stopped(&quick.run, &slow, &[]), "the stop that took effect within the wait");
+
+    let start = TrailAction::Start {
+        trail: TrailSource::Saved("deploy".parse().unwrap()),
+        args: json!(null),
+        thread: ThreadId::generate(),
+        limits: TrailLimits::default(),
+    };
+    let error = control::ask(&client, &p("offline"), &alice, start, Duration::ZERO).await.unwrap_err().to_string();
+    assert!(
+        error.starts_with("no daemon serving offline answered within 0s; a run it starts later is run "),
+        "{error}"
+    );
+}

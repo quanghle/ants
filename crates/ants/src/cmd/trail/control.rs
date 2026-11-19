@@ -14,7 +14,8 @@ use futures::StreamExt as _;
 pub(super) const ANSWER_WAIT: Duration = Duration::from_secs(15);
 
 /// Ask `ant`'s daemon, as human `by`, for `action`, and wait up to `wait` for its answer: refused when the daemon
-/// refuses, or when none answers.
+/// refuses, or when none answers. A stop the daemon told pending, as the run's script computes, is
+/// [`TrailOutcome::Stopping`] when it did not take effect within `wait`.
 pub(super) async fn ask(
     client: &async_nats::Client,
     ant: &UserId,
@@ -27,29 +28,62 @@ pub(super) async fn ask(
     client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
     client.flush().await?;
     let deadline = tokio::time::Instant::now() + wait;
+    let mut pending = None;
     while let Ok(Some(message)) = tokio::time::timeout_at(deadline, answers.next()).await {
         let Ok(reply) = serde_json::from_slice::<TrailReply>(&message.payload) else { continue };
         if reply.request_id != request.id || reply.check_subject(&message.subject).is_err() {
             continue;
         }
-        if let TrailOutcome::Refused { error } = reply.outcome {
-            bail!("{ant} refused: {error}");
+        match reply.outcome {
+            TrailOutcome::Refused { error } => bail!("{ant} refused: {error}"),
+            stopping @ TrailOutcome::Stopping { .. } => pending = Some(stopping),
+            outcome => return Ok(outcome),
         }
-        return Ok(reply.outcome);
+    }
+    if let Some(stopping) = pending {
+        return Ok(stopping);
+    }
+    if let TrailAction::Start { .. } = request.action {
+        bail!(
+            "no daemon serving {ant} answered within {}s; a run it starts later is run {}, which `ants trail show \
+             {}` shows",
+            wait.as_secs(),
+            request.id,
+            request.id
+        );
     }
     bail!("no daemon serving {ant} answered within {}s", wait.as_secs())
 }
 
 /// Stop `run` as human `by`; what `ants trail stop` prints.
 pub(crate) async fn stop(client: &async_nats::Client, by: &UserId, run: &TrailRun) -> Result<String> {
+    stop_within(client, by, run, ANSWER_WAIT).await
+}
+
+/// Stop `run` as [`stop`] does, waiting at most `wait` for the conductor's answer.
+pub(super) async fn stop_within(
+    client: &async_nats::Client,
+    by: &UserId,
+    run: &TrailRun,
+    wait: Duration,
+) -> Result<String> {
     if run.finished() {
         bail!("run {} has ended: {}", run.run, super::runs::state(&run.state));
     }
     let action = TrailAction::Stop { run: run.run.clone() };
-    match ask(client, &run.conductor, by, action, ANSWER_WAIT).await? {
+    match ask(client, &run.conductor, by, action, wait).await? {
         TrailOutcome::Stopped { waiting, .. } => Ok(stopped(&run.run, &run.conductor, &waiting)),
+        TrailOutcome::Stopping { .. } => Ok(stopping(&run.run, &run.conductor)),
         other => bail!("{} answered {other:?}", run.conductor),
     }
+}
+
+/// What `ants trail stop` prints of `run`, whose stop `conductor` applies once the script's pass ends.
+pub(super) fn stopping(run: &RunId, conductor: &UserId) -> String {
+    format!(
+        "stop of run {run} pending on {conductor}: its script computes, and the run stops once that pass ends; `ants \
+         trail stop {run}` then lists the steps still to withdraw\n"
+    )
 }
 
 /// What `ants trail stop` prints of `run`, stopped by `conductor` with `waiting` steps.
