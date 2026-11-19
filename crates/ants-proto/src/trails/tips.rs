@@ -680,7 +680,7 @@ mod tests {
             (&older_helpful, vote("dev-b", TipVerdict::Helpful, 0)),
         ];
         let board = board(&[&older, &unused, &recent, &helpful, &older_helpful], &votes);
-        let score = |tip: &TrailTip| board.tip(&tip.id, day(60), Some("new")).unwrap().score;
+        let score = |tip: &TrailTip| board.tip(&tip.id, None, day(60), Some("new")).unwrap().score;
         assert!((score(&recent) + 1.0).abs() < 1e-9);
         assert!((score(&unused) + 4.0).abs() < 1e-9, "unused for two half-lives, a negative net weighs four times");
         assert!((score(&older) + 8.0).abs() < 1e-9, "and twice that on an older script");
