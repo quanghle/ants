@@ -117,6 +117,7 @@ impl Trails {
         self.reconcile().await;
     }
 
+    /// Continue run `run` from its records, listed in the index; a run with no header leaves the index.
     pub(super) async fn restore_run(&self, run: &RunId) -> Result<()> {
         let store = &self.inner.store;
         let header = match store.header(run).await? {
@@ -131,6 +132,7 @@ impl Trails {
             None => return store.list(run, false).await,
         };
         let slot = self.load(header, false).await?;
+        store.list(run, true).await?;
         locked(&self.inner.runs).insert(run.clone(), slot);
         self.wake(run);
         tracing::info!(run = %run, "trail run continued");

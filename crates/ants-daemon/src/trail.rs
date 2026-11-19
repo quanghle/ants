@@ -359,8 +359,17 @@ impl Trails {
     pub async fn start_fired(&self, firing: &Envelope, start: &TrailStart) -> Result<RunId, String> {
         let run =
             firing.id.to_string().parse::<RunId>().map_err(|e| format!("the firing's id makes no run id: {e}"))?;
-        if self.run(&run).await?.is_some() {
+        if locked(&self.inner.runs).contains_key(&run) {
             return Ok(run);
+        }
+        match self.inner.store.header(&run).await.map_err(|e| format!("reading the run: {e:#}"))? {
+            Some(header) if header.finished() => return Ok(run),
+            // Stored by a daemon stopped before it listed the run.
+            Some(_) => {
+                self.restore_run(&run).await.map_err(|e| format!("continuing the run: {e:#}"))?;
+                return Ok(run);
+            }
+            None => {}
         }
         let start = StartRun {
             trail: TrailSource::Saved(start.trail.clone()),
@@ -460,9 +469,10 @@ impl Trails {
             starved: false,
         };
         let slot = Slot::new(engine, book);
+        // Listed before its header is stored: a run listed with no header is dropped from the index at the next start.
         self.save_session(&slot).await?;
-        self.save_header(&slot).await?;
         self.inner.store.list(&run, true).await?;
+        self.save_header(&slot).await?;
         self.report_start(&started, &meta).await;
         self.report_leg(&started);
         locked(&self.inner.runs).insert(run.clone(), slot);
@@ -587,8 +597,8 @@ impl Trails {
         }
         let saved = async {
             self.save_session(&slot).await?;
-            self.save_header(&slot).await?;
-            self.inner.store.list(run, true).await
+            self.inner.store.list(run, true).await?;
+            self.save_header(&slot).await
         };
         saved.await.map_err(|e| format!("storing the run: {e:#}"))?;
         self.report_resumed(&slot.header(), by).await;

@@ -20,8 +20,8 @@ use ants_proto::{
     AdminOp, AdminOrder, AdminOutcome, AssistantGrant, ColonyEntry, DeviceId, Envelope, MACHINES_BUCKET, Machine,
     NotesPost, NoticeKind, OrderState, Pick, Role, RunId, RunLimit, RunState, StatusEvent, StatusUpdate, StepStage,
     TRAIL_RUNS_BUCKET, ThreadId, TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailRun,
-    TrailSession, TrailSource, TrailStart, TrailStepThread, UserId, WaitingStep, subject, trail_run_key,
-    trail_session_key, trail_thread_step_key,
+    TrailRunIndex, TrailSession, TrailSource, TrailStart, TrailStepThread, UserId, WaitingStep, subject, trail_run_key,
+    trail_runs_index_key, trail_session_key, trail_thread_step_key,
 };
 use ants_test_support::{NatsServer, eventually, eventually_within, scratch_dir};
 use futures::StreamExt as _;
@@ -800,6 +800,59 @@ async fn a_schedule_s_firing_starts_its_saved_trail_once_on_its_thread() {
     let missing = TrailStart { trail: "gone".parse().unwrap(), args: Value::Null, limits: TrailLimits::DEFAULT };
     let error = lead.trails.start_fired(&fire(&missing), &missing).await.unwrap_err();
     assert!(error.contains("no trail is saved as gone"), "{error}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_fired_run_stored_but_not_listed_is_continued_by_its_firing_delivered_again() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-fired-unlisted");
+    std::fs::write(dir.join("ask.py"), format!("{META}await agent(\"a\", ant=\"dev\")\n")).unwrap();
+    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    let start = TrailStart { trail: "ask".parse().unwrap(), args: Value::Null, limits: TrailLimits::DEFAULT };
+    let fire = || {
+        Envelope::new(ant("nightly"), ant("lead"), "Scheduled run of trail.")
+            .with_owner(Some(UserId::human()))
+            .from_webhook()
+            .starting(Some(start.clone()))
+    };
+    let firing = fire();
+    let run = lead.trails.start_fired(&firing, &start).await.unwrap();
+    let step = lead.step().await;
+    eventually("the step is stored sent", async || {
+        lead.session(&run).await.0.pending.iter().any(|call| call.message == step.id && call.sent)
+    })
+    .await;
+    let runs = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    drop(lead);
+    // As a daemon stopped between storing the run's header and listing it leaves the index.
+    let index = serde_json::to_vec(&TrailRunIndex { runs: Vec::new() }).unwrap();
+    runs.put(trail_runs_index_key(&ant("lead")), index).await.unwrap();
+
+    let mut again = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    assert!(again.trails.unfinished().is_empty(), "the index lists no run");
+    assert_eq!(again.trails.start_fired(&firing, &start).await.unwrap(), run, "delivered again");
+    assert_eq!(again.trails.unfinished().len(), 1, "the stored run is continued");
+    assert!(again.sends_no_step(Duration::from_secs(2)).await, "its step is not sent again");
+    let listed = runs.get(trail_runs_index_key(&ant("lead"))).await.unwrap().unwrap();
+    assert_eq!(serde_json::from_slice::<TrailRunIndex>(&listed).unwrap().runs, vec![run.clone()]);
+    assert!(again.reply(&step, "A").await);
+    assert_eq!(again.ended(&run).await, RunState::Done { result: json!("A") });
+
+    // Listed with no header stored: the restarted daemon drops it, and its firing delivered again starts it anew.
+    let lost = fire();
+    let lost_run: RunId = lost.id.to_string().parse().unwrap();
+    let index = serde_json::to_vec(&TrailRunIndex { runs: vec![lost_run.clone()] }).unwrap();
+    runs.put(trail_runs_index_key(&ant("lead")), index).await.unwrap();
+    drop(again);
+    let mut third = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    let listed = runs.get(trail_runs_index_key(&ant("lead"))).await.unwrap().unwrap();
+    assert!(serde_json::from_slice::<TrailRunIndex>(&listed).unwrap().runs.is_empty(), "dropped from the index");
+    assert_eq!(third.trails.start_fired(&lost, &start).await.unwrap(), lost_run);
+    let step = third.step().await;
+    assert!(third.reply(&step, "B").await);
+    assert_eq!(third.ended(&lost_run).await, RunState::Done { result: json!("B") });
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
