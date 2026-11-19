@@ -83,7 +83,12 @@ fn a_run_shows_its_phase_error_labels_and_answers_on_their_own_lines() {
 
     let mut follower = Follower::default();
     let mut lines = follower.header(&run);
-    let session = ants_proto::TrailSession { session: String::new(), pending: vec![pending], queued: Vec::new(), anew: Vec::new() };
+    let session = ants_proto::TrailSession {
+        session: String::new(),
+        pending: vec![pending],
+        queued: Vec::new(),
+        anew: Vec::new(),
+    };
     lines.extend(follower.session(&session));
     lines.extend(follower.entry(&journal[0]));
     assert_eq!(lines.len(), 3, "{lines:?}");

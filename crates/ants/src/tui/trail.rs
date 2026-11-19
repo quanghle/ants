@@ -392,13 +392,13 @@ mod tests {
 
     #[test]
     fn the_box_of_a_run_to_start_cuts_a_long_description_and_keeps_the_conductor_thread_and_limits() {
+        // A saved description is one line; one written over many is shown on one row all the same.
         let description: Vec<String> = (1..=20).map(|n| format!("line {n} of what the trail does")).collect();
         let planned = planned_review(&description.join("\n"));
         let shown = crate::test_support::render::rendered(100, 24, |f| planned.draw(f));
         for line in [
             "trail review, saved for the colony by alice",
-            "line 1 of what the trail does",
-            "more lines of the description",
+            "line 1 of what the trail does line 2 of",
             "phases: read, review",
             "conductor lead, reporting on a new thread",
             "steps:",
@@ -410,11 +410,7 @@ mod tests {
         ] {
             assert!(shown.contains(line), "{line}: {shown}");
         }
-        assert!(!shown.contains("line 20 of"), "{shown}");
-        // 24 rows, less the header, footer, borders and keys, leave 19: the first row, 9 of the description, the
-        // mark, the phases, the conductor and the 6 rows of the limits.
-        assert!(shown.contains("line 9 of") && !shown.contains("line 10 of"), "{shown}");
-        assert!(shown.contains("… 11 more lines of the description"), "{shown}");
+        assert!(!shown.contains("of the description"), "{shown}");
 
         let short = planned_review("Reviews each file");
         let shown = crate::test_support::render::rendered(100, 24, |f| short.draw(f));
