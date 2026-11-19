@@ -3,7 +3,7 @@
 //! reads the entries put since the last one.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ants_proto::{
     CallAnswer, JournalEntry, PendingCall, RunState, TRAIL_RUNS_BUCKET, TrailFunction, TrailRun, TrailSession, Uuid,
@@ -13,6 +13,7 @@ use anyhow::{Result, anyhow};
 use async_nats::jetstream;
 use chrono::Utc;
 use serde_json::Value;
+use tokio::time::Instant;
 
 use super::runs::{destination, entered, gist, header_json, parse};
 use crate::machines::latest_after;
@@ -173,15 +174,16 @@ async fn read(js: &jetstream::Context, key: &str, seqs: &mut (u64, u64)) -> Resu
 pub(super) struct Patience {
     /// How often the run's records are read again.
     pub(super) poll: Duration,
-    /// The reads failing in a row before the follow gives up.
-    pub(super) failed_reads: u32,
+    /// How long after the last read that held the follow gives up on reads that fail or get no answer.
+    pub(super) unread: Duration,
     /// How long a run past its wall time goes unchanged before the follow takes it for one no daemon conducts any more:
     /// only its conductor's daemon fails it on its wall time.
     pub(super) quiet: Duration,
 }
 
 impl Patience {
-    pub(super) const DEFAULT: Self = Self { poll: POLL, failed_reads: 120, quiet: Duration::from_secs(120) };
+    pub(super) const DEFAULT: Self =
+        Self { poll: POLL, unread: Duration::from_secs(60), quiet: Duration::from_secs(120) };
 }
 
 /// The exit status of a follow that gave up as its run's records stayed unreadable, which the run's failing does not
@@ -218,28 +220,31 @@ pub(super) async fn following(mut records: impl Records, run: TrailRun, json: bo
     }
     let mut follower = Follower::default();
     let mut last = run;
-    let (mut failed, mut changed) = (0, Instant::now());
+    let (mut held, mut changed, mut failing) = (Instant::now(), Instant::now(), false);
     let result = loop {
-        let read = match records.read().await {
+        let left = patience.unread.saturating_sub(held.elapsed());
+        let read = tokio::time::timeout(left, records.read()).await.unwrap_or_else(|_| Err(anyhow!("no answer")));
+        let read = match read {
             Ok(read) => {
-                failed = 0;
+                (held, failing) = (Instant::now(), false);
                 read
             }
-            Err(e) => {
-                failed += 1;
-                if failed >= patience.failed_reads {
-                    let id = &last.run;
-                    return Err(Unread(format!(
-                        "gave up following run {id}: its records could not be read {failed} times in a row: {e:#}; \
-                         `ants trail show {id}` shows it"
-                    ))
-                    .into());
-                }
-                if failed == 1 {
+            Err(e) if held.elapsed() < patience.unread => {
+                if !failing {
                     eprintln!("reading run {} failed: {e:#}; trying again", last.run);
+                    failing = true;
                 }
                 tokio::time::sleep(patience.poll).await;
                 continue;
+            }
+            Err(e) => {
+                let id = &last.run;
+                return Err(Unread(format!(
+                    "gave up following run {id}: its records could not be read for {}: {e:#}; \
+                     `ants trail show {id}` shows it",
+                    ants_proto::duration::format(patience.unread)
+                ))
+                .into());
             }
         };
         if read.header.is_some() || read.session.is_some() || !read.journal.is_empty() {

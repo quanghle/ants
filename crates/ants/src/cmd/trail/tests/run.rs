@@ -189,7 +189,26 @@ fn header(run: &TrailRun) -> anyhow::Result<Read> {
     Ok(Read { header: Some(run.clone()), ..Read::default() })
 }
 
-const PATIENT: Patience = Patience { poll: Duration::from_millis(1), failed_reads: 3, quiet: Duration::from_secs(1) };
+const PATIENT: Patience =
+    Patience { poll: Duration::from_millis(1), unread: Duration::from_secs(1), quiet: Duration::from_secs(1) };
+
+/// Reads that each take `delay` to fail, `fails` of them, then the record `then`.
+struct Slow {
+    delay: Duration,
+    fails: usize,
+    then: TrailRun,
+}
+
+impl Records for Slow {
+    async fn read(&mut self) -> anyhow::Result<Read> {
+        if self.fails == 0 {
+            return header(&self.then);
+        }
+        self.fails -= 1;
+        tokio::time::sleep(self.delay).await;
+        Err(anyhow::anyhow!("no answer reading ants_trail_runs"))
+    }
+}
 
 #[tokio::test]
 async fn a_follow_ends_once_a_run_past_its_wall_time_goes_unchanged() {
@@ -214,26 +233,52 @@ async fn a_follow_ends_once_a_run_past_its_wall_time_goes_unchanged() {
     following(records, later, false, PATIENT).await.expect("a run within its wall time is followed to its end");
 }
 
-#[tokio::test]
-async fn a_follow_tries_failed_reads_again_before_giving_up_with_a_status_of_its_own() {
+#[tokio::test(start_paused = true)]
+async fn a_follow_tries_failed_reads_again_for_a_minute_before_giving_up_with_a_status_of_its_own() {
     let run = record(&p("lead"), Some("deploy"), RunState::Running, Utc::now());
     let mut done = run.clone();
     done.state = RunState::Done { result: json!("shipped") };
-    let failed = || Err(anyhow::anyhow!("timed out"));
-    let records = Scripted([failed(), failed(), header(&done)].into());
-    following(records, run.clone(), true, PATIENT).await.expect("two failed reads are tried again");
+    let failed = || Err(anyhow::anyhow!("no responders"));
+    let mut reads: std::collections::VecDeque<_> = (0..100).map(|_| failed()).collect();
+    reads.push_back(header(&run));
+    reads.extend((0..100).map(|_| failed()));
+    reads.push_back(header(&done));
+    following(Scripted(reads), run.clone(), true, Patience::DEFAULT)
+        .await
+        .expect("reads failing for under a minute after the last that held are tried again");
 
-    let records = Scripted([failed(), failed(), failed(), header(&done)].into());
-    let error = following(records, run.clone(), false, PATIENT).await.unwrap_err();
+    let started = tokio::time::Instant::now();
+    let records = Scripted((0..1000).map(|_| failed()).collect());
+    let error = following(records, run.clone(), false, Patience::DEFAULT).await.unwrap_err();
     assert!(error.downcast_ref::<Unread>().is_some(), "{error}");
     assert_eq!(
         error.to_string(),
         format!(
-            "gave up following run {0}: its records could not be read 3 times in a row: timed out; `ants trail show {0}` shows it",
+            "gave up following run {0}: its records could not be read for 1m: no responders; `ants trail show {0}` shows it",
             run.run
         )
     );
+    let waited = started.elapsed();
+    assert!(waited >= Duration::from_secs(60) && waited < Duration::from_secs(61), "{waited:?}");
     assert_ne!(UNREAD_STATUS, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_follow_whose_reads_take_long_to_fail_gives_up_a_minute_after_the_last_that_held() {
+    let run = record(&p("lead"), Some("deploy"), RunState::Running, Utc::now());
+    let mut done = run.clone();
+    done.state = RunState::Done { result: json!("shipped") };
+    for delay in [Duration::from_secs(10), Duration::from_secs(3600)] {
+        let started = tokio::time::Instant::now();
+        let records = Slow { delay, fails: 120, then: done.clone() };
+        let error = following(records, run.clone(), false, Patience::DEFAULT).await.unwrap_err();
+        assert!(error.downcast_ref::<Unread>().is_some(), "{error}");
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_secs(60) && waited < Duration::from_secs(61), "{delay:?}: {waited:?}");
+    }
+
+    let records = Slow { delay: Duration::from_secs(10), fails: 5, then: done };
+    following(records, run, true, Patience::DEFAULT).await.expect("50 s of slow failures are tried again");
 }
 
 /// Answer each request on `ant`'s control subject with what `answer` makes of it, as `ant`'s daemon does.

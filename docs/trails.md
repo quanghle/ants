@@ -158,9 +158,9 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   and is owned by the human. The command prints the trail, conductor and thread and what the run may spend, then asks
   `Start the run? [y/N]`; without a terminal on stdin and stderr `--yes` is required. `--follow` then follows the run
   until it ends, exiting 0 once it is done and non-zero once it has failed or stopped, or once it is past its wall time
-  with its record unchanged for 2 minutes, as no daemon conducts it any more; records that stay unreadable for about a
-  minute end the following with exit 3. `--json` prints `{"run","conductor","thread"}`; a start declined with
-  `--json` prints nothing on stdout and exits non-zero.
+  with its record unchanged for 2 minutes, as no daemon conducts it any more; records that stay unreadable for a minute
+  after the last read that held, whether reads fail or get no answer, end the following with exit 3. `--json` prints
+  `{"run","conductor","thread"}`; a start declined with `--json` prints nothing on stdout and exits non-zero.
 
   ```sh
   ants trail run review --args '{"repo": "/src/app", "files": ["src/main.rs"]}' --steps 100 --follow
