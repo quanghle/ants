@@ -98,6 +98,7 @@ const CLI: &[(&str, Chat)] = &[
     ("trail rm", Exempt("removes a saved trail, as the command line saves them")),
     ("trail list", Slash("trail")),
     ("trail show", Slash("trail")),
+    ("trail tips", Slash("trail")),
     ("trail run", Slash("trail")),
     ("trail runs", Slash("trail")),
     ("trail stop", Slash("trail")),

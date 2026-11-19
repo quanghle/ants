@@ -130,9 +130,10 @@ fn parse(key: &str, payload: &[u8]) -> Option<SavedTrail> {
     checked.inspect_err(|e| tracing::warn!(key, "skipping a saved trail: {e:#}")).ok()
 }
 
-/// Remove the colony's trail `name`, refused when the colony has none of that name; `local` is the directory of this
-/// machine's trails, whose file of that name the refusal names.
-pub(super) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailName) -> Result<()> {
+/// Remove the colony's trail `name` and purge its tips, refused when the colony has none of that name; `local` is the
+/// directory of this machine's trails, whose file of that name the refusal names. Returns how many entries of tips and
+/// votes went. The tips go first, so that a failed purge leaves the trail to remove again.
+pub(super) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailName) -> Result<u64> {
     if latest_in(js, TRAILS_BUCKET, &format!("$KV.{TRAILS_BUCKET}.{name}")).await?.is_empty() {
         let path = self::local(local).into_iter().find_map(|t| match t.source {
             Source::Local { path } if t.name == *name => Some(path),
@@ -145,9 +146,12 @@ pub(super) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailNa
             None => bail!("the colony saved no trail {name}"),
         }
     }
+    let purged = super::tips::purge(js, name)
+        .await
+        .with_context(|| format!("purging the tips of trail {name}, which stays saved"))?;
     let kv = js.get_key_value(TRAILS_BUCKET).await.context("opening ants_trails (`ants init` creates it)")?;
     kv.delete(name.as_str()).await.with_context(|| format!("removing trail {name}"))?;
-    Ok(())
+    Ok(purged)
 }
 
 /// This machine's trails, the `.py` files of `dir` that pass [`ants_trail::check`], each named by its file's stem as a

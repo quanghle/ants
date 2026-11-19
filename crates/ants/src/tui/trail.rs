@@ -1,13 +1,14 @@
-//! `/trail`: the saved trails and the runs of trails as `ants trail` lists, shows, starts, stops and resumes them,
-//! with the CLI's own code. `/trail list`, `/trail show` and `/trail runs` show what `ants trail list`, `ants trail
-//! show` and `ants trail runs` print in the pager; `/trail run` shows what `ants trail run` prints of the run before it
-//! starts, the trail and what the run may spend, over the view, until `y` starts it, on a new thread then shown, or
-//! another key leaves it unstarted; `/trail stop` and `/trail resume` ask the run's conductor as `ants trail stop` and
-//! `ants trail resume` do.
+//! `/trail`: the saved trails, their tips and the runs of trails as `ants trail` lists, shows, starts, stops and
+//! resumes them, with the CLI's own code. `/trail list`, `/trail show`, `/trail tips` and `/trail runs` show what `ants
+//! trail list`, `ants trail show`, `ants trail tips` and `ants trail runs` print in the pager, the runs followed by the
+//! top tips of their trails; `/trail tips --retire` retires a tip as `ants trail tips --retire` does; `/trail run`
+//! shows what `ants trail run` prints of the run before it starts, the trail and what the run may spend, over the view,
+//! until `y` starts it, on a new thread then shown, or another key leaves it unstarted; `/trail stop` and `/trail
+//! resume` ask the run's conductor as `ants trail stop` and `ants trail resume` do.
 
-use ants_proto::{ThreadId, TrailLimits, TrailName, UserId};
-use anyhow::Result;
-use chrono::Utc;
+use ants_proto::{ThreadId, TipBoard, TrailLimits, TrailName, UserId};
+use anyhow::{Result, bail};
+use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
@@ -23,10 +24,19 @@ use super::model::{Action, Key, Model};
 use super::style::{block, dim};
 use crate::cmd::send;
 use crate::cmd::trail::runs::{self, Pick};
-use crate::cmd::trail::{self as cli, LimitArgs, Shown, control, saved, start};
+use crate::cmd::trail::{self as cli, LimitArgs, Shown, TipsArgs, control, saved, start, tips as cli_tips};
 
 /// How wide the summary of a run to start is at most.
 const WIDTH: u16 = 100;
+
+/// How many trails of the runs listed, the latest runs' first, `/trail runs` shows the top tips of.
+const TIPPED_TRAILS: usize = 8;
+
+/// How many of a trail's live tips `/trail runs` shows.
+const TOP_TIPS: usize = 3;
+
+/// How many characters of a tip's text `/trail runs` shows.
+const TIP_EXCERPT: usize = 80;
 
 /// A run of a saved trail `/trail run` planned, waiting for `y` to start: what `ants trail run` shows of it first.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,16 +109,82 @@ pub async fn shown(ctx: &Ctx, what: Shown) -> Result<Done> {
     Ok(Done { line, page: Some(page), ..Done::default() })
 }
 
-/// The runs of trails conductors recorded, as `ants trail runs` lists them, for the pager.
+/// The tips of a trail, as `ants trail tips` lists them, for the pager; or the tip retired, as `ants trail tips
+/// --retire` retires it.
+pub async fn tips(ctx: &Ctx, args: &TipsArgs) -> Result<Done> {
+    let now = Utc::now();
+    if let Some(id) = &args.retire {
+        if !ctx.me.role.is_human() {
+            bail!("retiring a tip needs a human's credentials; those of {} are an ant's", ctx.me.id);
+        }
+        let retired = cli_tips::retire(&ctx.js, &args.name, id, &ctx.me.id, now).await?;
+        return Ok(Done { line: cli_tips::retired(&retired, now), ..Done::default() });
+    }
+    let (board, script) = cli_tips::read(&ctx.js, &args.name).await?;
+    let line = cli_tips::summary(&board, args, script.as_deref(), now);
+    if cli_tips::listed(&board, args, script.as_deref(), now).is_empty() {
+        return Ok(Done { line, ..Done::default() });
+    }
+    Ok(Done { line, page: Some(cli_tips::render(&board, args, script.as_deref(), now)), ..Done::default() })
+}
+
+/// The runs of trails conductors recorded, as `ants trail runs` lists them, then the top tips of their trails, for the
+/// pager.
 pub async fn listed(ctx: &Ctx) -> Result<Done> {
     let listed = runs::list(&ctx.js, None).await?;
     if listed.is_empty() {
         return Ok(Done { line: "no runs of trails".to_owned(), ..Done::default() });
     }
+    let now = Utc::now();
     let going = listed.iter().filter(|run| !run.finished()).count();
     let recorded = if listed.len() == 1 { "1 run".to_owned() } else { format!("{} runs", listed.len()) };
     let line = format!("{recorded} recorded, {going} not over: the pager lists them");
-    Ok(Done { line, page: Some(runs::table(&listed, Utc::now())), ..Done::default() })
+    let mut page = runs::table(&listed, now);
+    let mut trails: Vec<&TrailName> = Vec::new();
+    for trail in listed.iter().rev().filter_map(|run| run.trail()) {
+        if !trails.contains(&trail) && trails.len() < TIPPED_TRAILS {
+            trails.push(trail);
+        }
+    }
+    for trail in trails {
+        match cli_tips::read(&ctx.js, trail).await {
+            Ok((board, script)) => page.push_str(&top_tips(&board, script.as_deref(), now)),
+            Err(e) => {
+                tracing::warn!(%trail, "not showing the tips of a trail: {e:#}");
+                break;
+            }
+        }
+    }
+    Ok(Done { line, page: Some(page), ..Done::default() })
+}
+
+/// The live tips of `board` in brief, the top [`TOP_TIPS`] in rank order for the current script `script`, after a
+/// blank line: nothing when it has none.
+fn top_tips(board: &TipBoard, script: Option<&str>, now: DateTime<Utc>) -> String {
+    let live: Vec<_> = board.ranked(now, script).into_iter().filter(|r| r.status.is_live()).collect();
+    if live.is_empty() {
+        return String::new();
+    }
+    let trail = board.trail();
+    let count = if live.len() == 1 { "1 live tip".to_owned() } else { format!("{} live tips", live.len()) };
+    let rows: Vec<[String; 4]> = live
+        .iter()
+        .take(TOP_TIPS)
+        .map(|ranked| {
+            let mut votes = cli_tips::votes(ranked);
+            if ranked.older_script {
+                votes.push_str(", older script");
+            }
+            let text = crate::text::one_line(&ranked.tip.text, TIP_EXCERPT);
+            [ranked.tip.id.to_string(), cli_tips::key(ranked.tip), votes, text]
+        })
+        .collect();
+    let mut out = format!("\n\ntrail {trail}: {count}, which /trail tips {trail} lists");
+    for row in cli::columns(&rows).lines() {
+        out.push_str("\n  ");
+        out.push_str(row);
+    }
+    out
 }
 
 /// Plan a run of the saved trail `name` with `args` on `conductor`, else whom a message naming no one goes to, under
@@ -161,8 +237,8 @@ pub async fn resumed(ctx: &Ctx, pick: &Pick, limits: LimitArgs) -> Result<Done> 
 mod tests {
     use ants_proto::provider::{Origin, Starter};
     use ants_proto::{
-        Role, RunId, RunState, SavedTrail, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, TrailAction, TrailLeg, TrailOutcome,
-        TrailRequest, TrailRun, TrailSource, Uuid, WaitingStep, subject,
+        Role, RunId, RunState, SavedTrail, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TrailAction, TrailLeg,
+        TrailOutcome, TrailRequest, TrailRun, TrailSource, TrailTip, Uuid, WaitingStep, subject,
     };
     use futures::StreamExt as _;
     use serde_json::json;
@@ -255,6 +331,10 @@ mod tests {
 
         m.focus = Focus::View;
         assert_eq!(run(&mut m, "/trail runs"), Some(Action::Run(Job::TrailRuns, "/trail runs".to_owned())));
+        let Some(Action::Run(Job::TrailTips(args), _)) = run(&mut m, "/trail tips review --all") else {
+            panic!("no tips")
+        };
+        assert_eq!((args.name.as_str(), args.all), ("review", true));
         let listed = Done { line: "1 run".to_owned(), page: Some("RUN  TRAIL".to_owned()), ..Done::default() };
         assert_eq!(m.outcome(done(listed)), Some(Action::Page("RUN  TRAIL".to_owned())));
         let Some(Action::Run(Job::TrailStop(pick), _)) = run(&mut m, "/trail stop 0190ab") else { panic!("no stop") };
@@ -489,5 +569,67 @@ mod tests {
         );
         let error = stopped(&ctx, &"0190c".parse().unwrap()).await.unwrap_err().to_string();
         assert!(error.starts_with("no run's id starts with 0190c"), "{error}");
+    }
+
+    /// Put the tip `id` of `writer` on `trail`, left on [`SCRIPT`] or another, as its daemon does.
+    async fn tip(ctx: &Ctx, trail: &TrailName, writer: &str, id: &str, text: &str, current: bool) -> TrailTip {
+        let script = if current { ants_proto::script_sha256(SCRIPT) } else { "old".to_owned() };
+        let tip = TrailTip {
+            trail: trail.clone(),
+            id: id.parse().unwrap(),
+            writer: user(writer),
+            text: text.to_owned(),
+            tip_key: None,
+            run: RunId::generate(),
+            script,
+            written_at: Utc::now(),
+            retired: None,
+        };
+        let payload = serde_json::to_vec(&tip).unwrap();
+        ctx.js.publish(format!("$KV.{TRAIL_TIPS_BUCKET}.{}", tip.key()), payload.into()).await.unwrap().await.unwrap();
+        tip
+    }
+
+    #[tokio::test]
+    async fn the_trail_jobs_list_and_retire_tips_and_show_the_top_ones_beside_the_runs() {
+        let Some(server) = crate::test_support::Server::start() else { return };
+        let (alice, lead) = (user("alice"), user("lead"));
+        let ctx = human(&server, &alice).await;
+        let name: TrailName = "chat-test-review".parse().unwrap();
+        let args = TipsArgs { name: name.clone(), key: None, all: false, retire: None };
+        let none = tips(&ctx, &args).await.unwrap();
+        assert_eq!((none.line.as_str(), none.page), ("no tips on trail chat-test-review", None));
+
+        save(&ctx, &name).await;
+        let pinned = tip(&ctx, &name, "dev-a", "aaaaaaaa", "pin the base image", true).await;
+        tip(&ctx, &name, "dev-b", "bbbbbbbb", "run the migrations\nfirst", false).await;
+        tip(&ctx, &name, "dev-c", "cccccccc", "cache the crates", true).await;
+        tip(&ctx, &name, "dev-c", "dddddddd", "a fourth tip", true).await;
+        let listed_tips = tips(&ctx, &args).await.unwrap();
+        assert_eq!(listed_tips.line, "trail chat-test-review: 4 live tips");
+        let page = listed_tips.page.unwrap();
+        assert!(page.contains("bbbbbbbb  trail-wide  dev-b   +0 ~0 !0  live, older script"), "{page}");
+        assert!(page.contains("\n  run the migrations\n  first\n"), "{page}");
+
+        let retire = TipsArgs { retire: Some(pinned.id.clone()), ..args.clone() };
+        let retired = tips(&ctx, &retire).await.unwrap();
+        assert!(
+            retired.line.starts_with("retired tip aaaaaaaa of trail chat-test-review, left by dev-a "),
+            "{retired:?}"
+        );
+        let error = tips(&ctx, &retire).await.unwrap_err().to_string();
+        assert!(error.starts_with("tip aaaaaaaa of trail chat-test-review was retired by alice"), "{error}");
+        let listed_tips = tips(&ctx, &args).await.unwrap();
+        assert_eq!(listed_tips.line, "trail chat-test-review: 3 live tips, 1 retired, which --all lists");
+
+        record(&server, &lead, &alice, &name, ThreadId::generate()).await;
+        let page = listed(&ctx).await.unwrap().page.unwrap();
+        let (runs, top) = page.split_once("\n\n").unwrap_or_else(|| panic!("{page}"));
+        assert!(runs.starts_with("RUN") && runs.contains("chat-test-review"), "{page}");
+        let top: Vec<&str> = top.lines().collect();
+        assert_eq!(top[0], "trail chat-test-review: 3 live tips, which /trail tips chat-test-review lists", "{page}");
+        assert_eq!(top.len(), 4, "the top 3: {page}");
+        assert!(top[1].starts_with("  ") && !page.contains("aaaaaaaa"), "{page}");
+        assert!(page.contains("bbbbbbbb  trail-wide  +0 ~0 !0, older script  run the migrations first"), "{page}");
     }
 }
