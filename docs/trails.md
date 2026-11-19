@@ -308,7 +308,9 @@ finished run stays at least 30 days. The full layout is in [architecture.md](arc
 
 - **Restart:** an answer's journal entry is stored before its reply is acked, and a run's session and header before
   its steps go out. A restarted daemon continues every run its `<ant>.runs` lists: steps sent before wait on, steps
-  never sent go out, answers stored past the session are given to the script.
+  never sent go out, answers stored past the session are given to the script. A goto stores the run's header with
+  the new leg, gives up the steps of the leg left, then stores the new leg's session: a daemon restarted between the
+  two gives up those steps, still in the stored session, before the new leg goes on.
 - **Replay:** a session the worker cannot restore (dumped by another Monty version, or lost) is rebuilt from the
   journal: the current leg's pinned script starts again at its waypoint with the leg's input, clock and seed, its
   steps answered from the journal in order. A script whose steps no longer match the journal fails the run, naming

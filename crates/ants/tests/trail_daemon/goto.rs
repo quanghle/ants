@@ -1,5 +1,7 @@
 //! goto(): a run leaves the leg it is on for another trail's waypoint, never one it entered before.
 
+use ants_proto::{MessageMark, TrailLeg, message_mark_key};
+
 use super::children::human_origin;
 use super::*;
 
@@ -207,6 +209,62 @@ async fn a_leg_goes_on_from_its_pinned_script_after_a_restart_or_a_replay() {
         assert!(header.route[1].script.ends_with(SECOND), "the leg's script is pinned: {}", header.route[1].script);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+#[tokio::test]
+async fn a_restart_after_a_goto_stored_its_next_leg_gives_up_the_steps_of_the_leg_left() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-goto-crash");
+    save(&dir, "first", &[], "await parallel(agent(\"mine\"), agent(\"yours\", ant=\"dev\"))\n");
+    save(&dir, "second", &[], "await agent(f\"next {args}\", ant=\"dev\")\n");
+    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    let thread = ThreadId::generate();
+    let run = lead.start_saved("first", human_origin(), TrailLimits::default(), thread.clone()).await;
+    let (first, second) = (lead.step().await, lead.step().await);
+    let (mine, yours) = if first.text == "mine" { (first, second) } else { (second, first) };
+    assert_eq!((&mine.to, &yours.to), (&ant("lead"), &ant("dev")));
+    eventually("the steps are stored sent", async || {
+        lead.session(&run).await.0.pending.iter().filter(|call| call.sent).count() == 2
+    })
+    .await;
+    lead.serving.abort();
+    // The daemon stopped as a goto() stored the run's header with the next leg, before it gave up the leg's steps.
+    let mut header = lead.header(&run).await;
+    let script = std::fs::read_to_string(dir.join("second.py")).unwrap();
+    let started_at = chrono::Utc::now();
+    let (trail, args) = (Some("second".parse().unwrap()), json!("moved"));
+    header.route.push(TrailLeg { trail, at: None, script, args, first_call: 10, started_at, steps: 0 });
+    let runs = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    runs.put(trail_run_key(&ant("lead"), &run), serde_json::to_vec(&header).unwrap()).await.unwrap();
+    drop(lead);
+
+    let (watcher, _) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "watch").await.unwrap();
+    let mut status = watcher.subscribe(subject::status(&ant("lead"), &thread)).await.unwrap();
+    let mut again = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    let next = again.step().await;
+    assert_eq!(next.text, "next moved", "the next leg goes on");
+    let mut dropped = Vec::new();
+    while dropped.len() < 2 {
+        let (event, stage) = step_status(&mut status).await;
+        let StatusUpdate::Step { step_thread, .. } = event.update else { unreachable!() };
+        if stage == StepStage::Dropped {
+            dropped.push(step_thread);
+        }
+    }
+    dropped.sort();
+    let mut left = vec![mine.thread_id.clone(), yours.thread_id.clone()];
+    left.sort();
+    assert_eq!(dropped, left, "the steps of the leg left are told dropped");
+    let attempts = ants_daemon::bus::ensure_attempts(&again.js, None, &ant("lead")).await.unwrap();
+    let mark = attempts.get(message_mark_key(&ant("lead"), &mine.id)).await.unwrap().expect("a mark");
+    let mark: MessageMark = serde_json::from_slice(&mark).unwrap();
+    assert!(matches!(&mark, MessageMark::Withdrawn { by, .. } if *by == ant("lead")), "withdrawn: {mark:?}");
+    assert!(again.reply(&yours, "late").await, "a reply to a step given up is not prompted");
+    assert!(again.reply(&next, "done").await);
+    assert_eq!(again.result(&run).await, json!("done"));
+    assert!(again.sends_no_step(Duration::from_millis(300)).await);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[tokio::test]

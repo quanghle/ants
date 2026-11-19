@@ -95,6 +95,7 @@ impl Trails {
 
     async fn pass(&self, slot: &Slot) -> Result<()> {
         let mut engine = slot.engine.lock().await;
+        self.give_up_left(slot).await?;
         // What the run fails on should the script fail next: the limit an answer handed to it raises for, or the run
         // broke.
         let mut broke = None;
