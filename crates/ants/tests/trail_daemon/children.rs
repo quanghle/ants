@@ -99,7 +99,7 @@ except RuntimeError as e:
     assert_eq!(told.thread_id, thread, "only the parent tells its owner its end: {told:?}");
     assert!(lead.sends_no_step(Duration::from_millis(300)).await && lead.told.is_empty(), "{:?}", lead.told);
     let notes = lead.notes(&step_thread, 2).await;
-    let start = format!("Run {child} of trail t started, answering call 0 of run {run}: a test");
+    let start = format!("Run {child} of trail echo (meta name t) started, answering call 0 of run {run}: a test");
     assert_eq!(notes[0], start, "the child's start is noted on its thread");
     assert!(notes.last().unwrap().contains(" is done "), "the child's end is noted on its thread: {notes:?}");
     std::fs::remove_dir_all(&dir).unwrap();
