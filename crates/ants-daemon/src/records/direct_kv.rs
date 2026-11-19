@@ -4,15 +4,21 @@
 //! [`ants_proto::ATTEMPTS_BUCKET`], and reads [`ants_proto::OWNERS_BUCKET`], through a [`DirectKv`], and its credentials
 //! allow no stream info of these buckets. A webhook reads and records the events it delivered, under its own keys of
 //! [`ants_proto::WEBHOOKS_BUCKET`], the same way.
+//!
+//! A stream may store a message it sent, rather than a writer put, on any key ([`crate::bus::relayed`]). Every read
+//! skips such a message. The readers of a bucket keeping each key's earlier messages, as the trails' buckets do
+//! ([`crate::hub`]), read past it to the last message the key's writer put ([`DirectKv::past_relays`]).
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
-use async_nats::jetstream;
 use async_nats::jetstream::context::{PublishError, PublishErrorKind};
 use async_nats::jetstream::message::StreamMessage;
 use async_nats::jetstream::stream::{DirectGetError, DirectGetErrorKind, Stream};
+use async_nats::jetstream::{self, consumer};
 use async_nats::{HeaderMap, RequestErrorKind, StatusCode};
 use futures::{StreamExt as _, TryStreamExt as _};
 
@@ -34,6 +40,8 @@ const BATCH_BYTES: usize = 4 << 20;
 const SEQUENCED_TRIES: usize = 10;
 /// The header making the stream remove a message after the given number of seconds, if it allows per-message TTLs.
 const TTL: &str = "Nats-TTL";
+/// How long a reader consumer left behind by an interrupted read past a relayed message lives on.
+const READER_INACTIVE: Duration = Duration::from_secs(30);
 
 /// A KV bucket of history 1 that allows direct gets, as [`crate::bus`] creates them.
 #[derive(Clone)]
@@ -45,6 +53,25 @@ pub struct DirectKv {
     api: String,
     /// Whether reads name their key in the request rather than in the subject ([`DirectKv::whole`]).
     whole: bool,
+    /// How a read of a key whose last message a stream relayed finds the last one its writer put; None: it fails.
+    past: Option<Past>,
+}
+
+/// How a read finds a key's last message its writer put, past those a stream relayed.
+#[derive(Clone)]
+enum Past {
+    /// By batched direct gets naming no subject ([`DirectKv::whole`]).
+    Gets,
+    /// Through the reader consumer named, its filter pinned to the user's own keys by its credentials, created for the
+    /// read and deleted after it, one read at a time.
+    Consumer { reader: String, held: Arc<tokio::sync::Mutex<()>> },
+}
+
+/// A message a writer put under a key.
+struct Put {
+    payload: Vec<u8>,
+    headers: HeaderMap,
+    time: SystemTime,
 }
 
 /// What a direct get of a key found.
@@ -61,13 +88,27 @@ impl DirectKv {
     pub async fn new(js: &jetstream::Context, js_domain: Option<&JsDomain>, bucket: &str) -> Result<Self> {
         let stream = js.get_stream_no_info(format!("KV_{bucket}")).await.with_context(|| format!("naming {bucket}"))?;
         let api = js_domain.map_or_default(|domain| format!("$JS.{domain}.API."));
-        Ok(Self { js: js.clone(), stream, bucket: bucket.to_owned(), api, whole: false })
+        Ok(Self { js: js.clone(), stream, bucket: bucket.to_owned(), api, whole: false, past: None })
     }
 
     /// [`DirectKv::new`], for credentials that may read the whole bucket by direct gets naming no subject
     /// (`$JS.API.DIRECT.GET.KV_<bucket>`) rather than its keys one by one: such a get names its key in the request.
     pub async fn whole(js: &jetstream::Context, js_domain: Option<&JsDomain>, bucket: &str) -> Result<Self> {
         Ok(Self { whole: true, ..Self::new(js, js_domain, bucket).await? })
+    }
+
+    /// For a bucket keeping each key's earlier messages, read [`DirectKv::whole`]: a key whose last message a stream
+    /// relayed reads as the last message its writer put, found by batched direct gets.
+    #[must_use]
+    pub fn past_relays(self) -> Self {
+        Self { past: Some(Past::Gets), ..self }
+    }
+
+    /// [`DirectKv::past_relays`] for credentials reading their own keys one by one: through the consumer `reader`,
+    /// which they may create on the bucket's stream filtering their own keys, take messages from and delete.
+    #[must_use]
+    pub fn past_relays_through(self, reader: String) -> Self {
+        Self { past: Some(Past::Consumer { reader, held: Arc::default() }), ..self }
     }
 
     /// Whether the bucket exists, found by reading a key of `ant`'s, which its credentials allow.
@@ -122,14 +163,86 @@ impl DirectKv {
             }
             Err(e) => return Err(e).with_context(|| format!("reading {key}")),
         };
-        if relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::DirectGet) {
-            bail!("reading {key}: its entry is a message a stream relayed, not one its writer put");
-        }
+        let put = if relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::DirectGet) {
+            let Some(past) = &self.past else {
+                bail!("reading {key}: its entry is a message a stream relayed, not one its writer put");
+            };
+            tracing::warn!(key, bucket = self.bucket, "reading past a message a stream relayed onto the key");
+            Box::pin(self.last_put(past, key)).await.with_context(|| format!("reading {key} past a relayed message"))?
+        } else {
+            Some(Put { payload: msg.payload.to_vec(), headers: msg.headers, time: msg.time.into() })
+        };
+        // The sequence stays the key's last message's, a relayed one too, which a write expecting it expects.
+        let Some(put) = put else { return Ok((Lookup::NoValue, msg.sequence, None, false)) };
         let marked = !marker.is_empty()
-            && msg.headers.get(KV_OPERATION).is_some_and(|op| op.as_str() == DELETED[0])
-            && msg.payload.as_ref() == marker;
-        let found = if is_deleted(&msg.headers) { Lookup::NoValue } else { Lookup::Value(msg.payload.to_vec()) };
-        Ok((found, msg.sequence, Some(msg.time.into()), marked))
+            && put.headers.get(KV_OPERATION).is_some_and(|op| op.as_str() == DELETED[0])
+            && put.payload == marker;
+        let found = if is_deleted(&put.headers) { Lookup::NoValue } else { Lookup::Value(put.payload) };
+        Ok((found, msg.sequence, Some(put.time), marked))
+    }
+
+    /// The last message its writer put under `key`, past those a stream relayed; None when there is none.
+    async fn last_put(&self, past: &Past, key: &str) -> Result<Option<Put>> {
+        match past {
+            Past::Gets => {
+                let mut last = None;
+                self.each_stored(key, |msg, relayed| {
+                    if !relayed {
+                        last = Some(Put { payload: msg.payload.to_vec(), headers: msg.headers, time: msg.time.into() });
+                    }
+                })
+                .await?;
+                Ok(last)
+            }
+            Past::Consumer { reader, held } => {
+                let _held = held.lock().await;
+                self.last_put_through(reader, key).await
+            }
+        }
+    }
+
+    /// [`DirectKv::last_put`] through the consumer `reader`, created filtering `key` alone and deleted after.
+    async fn last_put_through(&self, reader: &str, key: &str) -> Result<Option<Put>> {
+        let stream = format!("KV_{}", self.bucket);
+        // A consumer left by an interrupted read filters another key; as a rule none is left to delete.
+        let _ = self.js.delete_consumer_from_stream(reader, &stream).await;
+        let config = consumer::pull::Config {
+            name: Some(reader.to_owned()),
+            filter_subject: self.subject(key),
+            deliver_policy: consumer::DeliverPolicy::All,
+            ack_policy: consumer::AckPolicy::None,
+            inactive_threshold: READER_INACTIVE,
+            memory_storage: true,
+            ..Default::default()
+        };
+        let consumer = self.js.create_consumer_on_stream(config, &stream).await.context("creating the reader")?;
+        let read = async {
+            let (mut left, mut last) = (consumer.cached_info().num_pending, None);
+            while left > 0 {
+                let mut batch = consumer.fetch().max_messages(left.min(BATCH as u64) as usize).messages().await?;
+                let mut got = 0;
+                while let Some(msg) = batch.next().await {
+                    let msg = msg.map_err(|e| anyhow!(e))?;
+                    got += 1;
+                    let Ok(info) = msg.info() else { continue };
+                    if !relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::Consumer) {
+                        let time = SystemTime::from(info.published);
+                        let headers = msg.headers.clone().unwrap_or_default();
+                        last = Some(Put { payload: msg.payload.to_vec(), headers, time });
+                    }
+                }
+                if got == 0 {
+                    break;
+                }
+                left = left.saturating_sub(got);
+            }
+            Ok(last)
+        }
+        .await;
+        if let Err(e) = self.js.delete_consumer_from_stream(reader, &stream).await {
+            tracing::debug!(error = %e, consumer = reader, "deleting the reader");
+        }
+        read
     }
 
     /// The last message of `key`, by a direct get naming it in its subject, or in its request for [`DirectKv::whole`].
@@ -242,6 +355,15 @@ impl DirectKv {
         }
         let deleted = match self.last(key).await {
             Ok(msg) if is_deleted(&msg.headers) => msg.sequence,
+            Ok(msg)
+                if self.past.is_some()
+                    && relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::DirectGet) =>
+            {
+                match self.lookup_last(key).await? {
+                    (Lookup::Value(_), _) => return Ok(false),
+                    (_, last) => last,
+                }
+            }
             Ok(_) => return Ok(false),
             Err(e) => return Err(e).with_context(|| format!("reading {key}")),
         };
@@ -313,11 +435,34 @@ impl DirectKv {
         Ok(keys)
     }
 
-    /// Hand `each` the key and value of every entry under the keys matching `filter`, as last put, in the order
-    /// they were put, deleted entries left out: batched direct gets naming no subject, for credentials allowed them
-    /// ([`DirectKv::whole`]). Fails when the bucket does not exist.
+    /// Hand `each` the key and value of every entry under the keys matching `filter`, as its writer last put it, in
+    /// the order they were put, deleted entries left out: batched direct gets naming no subject, for credentials
+    /// allowed them ([`DirectKv::whole`]). A message a stream relayed is skipped, leaving the key as its writer put it
+    /// before, when the bucket keeps it. Fails when the bucket does not exist.
     pub async fn scan(&self, filter: &str, mut each: impl FnMut(&str, &[u8])) -> Result<()> {
-        let (bucket, prefix) = (&self.bucket, self.subject(""));
+        let prefix = self.subject("");
+        let mut last: HashMap<String, (u64, Option<Vec<u8>>)> = HashMap::new();
+        self.each_stored(filter, |msg, relayed| {
+            if relayed {
+                tracing::warn!(subject = %msg.subject, "skipping an entry a stream relayed");
+            } else if let Some(key) = msg.subject.strip_prefix(prefix.as_str()) {
+                let value = (!is_deleted(&msg.headers)).then(|| msg.payload.to_vec());
+                last.insert(key.to_owned(), (msg.sequence, value));
+            }
+        })
+        .await?;
+        let mut entries: Vec<_> = last.into_iter().filter_map(|(key, (seq, value))| Some((seq, key, value?))).collect();
+        entries.sort_unstable_by_key(|(seq, ..)| *seq);
+        for (_, key, value) in entries {
+            each(&key, &value);
+        }
+        Ok(())
+    }
+
+    /// Hand `each` every message stored under the keys matching `filter`, oldest first, and whether a stream relayed
+    /// it: batched direct gets naming no subject ([`DirectKv::whole`]).
+    async fn each_stored(&self, filter: &str, mut each: impl FnMut(StreamMessage, bool)) -> Result<()> {
+        let bucket = &self.bucket;
         let client = self.js.client();
         let wait = client.timeout().unwrap_or(Duration::from_secs(10));
         let inbox = client.new_inbox();
@@ -357,13 +502,7 @@ impl DirectKv {
                 let relayed = relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::DirectGet);
                 let msg = StreamMessage::try_from(msg).map_err(|e| anyhow!(e))?;
                 seq = msg.sequence + 1;
-                if relayed {
-                    tracing::warn!(subject = %msg.subject, "skipping an entry a stream relayed");
-                    continue;
-                }
-                if let Some(key) = msg.subject.strip_prefix(prefix.as_str()).filter(|_| !is_deleted(&msg.headers)) {
-                    each(key, &msg.payload);
-                }
+                each(msg, relayed);
             }
         }
     }

@@ -115,7 +115,7 @@ fn uplink_credentials_a_hub_would_refuse_are_neither_issued_nor_renewed() {
     let domain: JsDomain = "hub".parse().unwrap();
     let (ants, err) = uplink_for_most_ants(&team, &m1, Some(&domain), &out);
     eprintln!("{} ants fit the uplink of m1 (domain {domain})", ants.len());
-    assert!(ants.len() >= 47, "only {} ants fit", ants.len());
+    assert!(ants.len() >= 44, "only {} ants fit", ants.len());
     assert!(err.contains("max_control_line 65536") && err.contains("another leaf node"), "{err}");
     let (jwt, _) = read_creds(&out).unwrap();
     assert!(jwt.len() <= MAX_UPLINK_JWT, "the refused credentials are not written");
@@ -127,7 +127,7 @@ fn uplink_credentials_a_hub_would_refuse_are_neither_issued_nor_renewed() {
 }
 
 /// Each ant added behind a leaf node (`request_ant`, enrollment) grows its uplink JWT by the same amount, about
-/// 5.0 KB for a six-character name, 5.4 KB with the hub's JetStream domain, whose plain JetStream API and KV forms it
+/// 5.2 KB for a six-character name, 5.6 KB with the hub's JetStream domain, whose plain JetStream API and KV forms it
 /// leaves out: no permission is shared between two ants, and none is a pattern matching an ant not yet added.
 #[test]
 fn each_ant_added_grows_the_uplink_by_the_same_measure() {
@@ -135,7 +135,7 @@ fn each_ant_added_grows_the_uplink_by_the_same_measure() {
     let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
     init(&team).unwrap();
     let hub: JsDomain = "hub".parse().unwrap();
-    for (domain, least, most) in [(None, 4_500, 5_000), (Some(&hub), 4_800, 5_400)] {
+    for (domain, least, most) in [(None, 4_800, 5_300), (Some(&hub), 5_200, 5_700)] {
         issue_leaf(&team, &m1, &members(&[p("dev-00")], &[]), &[], EnrollApprover::Without, domain, &out).unwrap();
         let (mut jwt, _) = read_creds(&out).unwrap();
         let mut growth = Vec::new();
@@ -156,13 +156,13 @@ fn each_ant_added_grows_the_uplink_by_the_same_measure() {
         assert!(max - min <= 4, "ants of names of one length grow it alike: {growth:?}");
         assert!((least..=most).contains(&max), "{max} bytes per ant, domain {domain:?}");
         let room = (MAX_UPLINK_JWT - jwt.len()) / max + 6;
-        assert!(room >= if domain.is_some() { 47 } else { 50 }, "{room} ants fit");
+        assert!(room >= if domain.is_some() { 44 } else { 48 }, "{room} ants fit");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// Each assistant added behind a leaf node grows its uplink JWT by the same amount, about 3.5 KB for six-character
-/// names of it and its human, 3.9 KB with the hub's JetStream domain: less than an ant, as it holds none of an ant's
+/// Each assistant added behind a leaf node grows its uplink JWT by the same amount, about 3.8 KB for six-character
+/// names of it and its human, 4.2 KB with the hub's JetStream domain: less than an ant, as it holds none of an ant's
 /// reader consumers. The first one adds about 2.4 KB more (2.7 KB), the human reads every assistant shares.
 #[test]
 fn each_assistant_added_grows_the_uplink_by_the_same_measure() {
@@ -170,7 +170,7 @@ fn each_assistant_added_grows_the_uplink_by_the_same_measure() {
     let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
     init(&team).unwrap();
     let hub: JsDomain = "hub".parse().unwrap();
-    for (domain, each, shared) in [(None, 3_300..=3_700, 2_200..=2_600), (Some(&hub), 3_700..=4_100, 2_500..=2_900)] {
+    for (domain, each, shared) in [(None, 3_600..=4_000, 2_200..=2_600), (Some(&hub), 4_000..=4_400, 2_500..=2_900)] {
         issue_leaf(&team, &m1, &members(&[p("dev-00")], &[]), &[], EnrollApprover::Without, domain, &out).unwrap();
         let (mut jwt, _) = read_creds(&out).unwrap();
         let mut growth = Vec::new();

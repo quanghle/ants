@@ -1044,6 +1044,9 @@ fn humans_save_trails_ants_ask_the_keeper_and_each_ant_writes_only_the_runs_it_c
             "$JS.API.DIRECT.GET.KV_ants_trail_tips",
             "$JS.API.DIRECT.GET.KV_ants_trail_ratings",
             "$JS.API.DIRECT.GET.KV_ants_trail_runs.$KV.ants_trail_runs.dev-a.>",
+            "$JS.API.CONSUMER.CREATE.KV_ants_trail_runs.runsread-dev-a.$KV.ants_trail_runs.dev-a.>",
+            "$JS.API.CONSUMER.MSG.NEXT.KV_ants_trail_runs.runsread-dev-a",
+            "$JS.API.CONSUMER.DELETE.KV_ants_trail_runs.runsread-dev-a",
             "$KV.ants_trail_runs.dev-a.>",
             "$KV.ants_trail_tips.*.dev-a.>",
             "$KV.ants_trail_ratings.*.dev-a.*"

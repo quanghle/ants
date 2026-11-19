@@ -609,7 +609,9 @@ trail ([auth.md](auth.md#wire-acls-and-verification-invariants)).
 | KV `ants_trail_tips` | never expires | The [tips](#tips) left on saved trails and their votes, each under the trail and the ant that wrote it: `<trail>.<writer>.<id>` a tip (trail, id, writer, text, tip key, run, script's SHA-256, time written, and who retired it and when), `<trail>.<voter>.<writer>.<id>` a vote on it (voter, verdict, reason, the SHA-256 of the script voted on, time). |
 | KV `ants_trail_ratings` | never expires | The [ratings](#rating-and-finding-trails) conductors gave saved trails, `<trail>.<conductor>.<run>` one per run and trail: trail, conductor, run, outcome, task, reason, the SHA-256 of the script rated, time. |
 
-`ants init` creates the four buckets, and `ants doctor` checks them. A run's states are `running`, `waiting` (on human
+`ants init` creates the four buckets, and `ants doctor` checks them. Each bucket keeps every message of a key, not
+only the last, so a message a stream relayed onto a key ([auth.md](auth.md#wire-acls-and-verification-invariants))
+hides no entry: readers skip it and take the last message the key's writer put. A run's states are `running`, `waiting` (on human
 steps only), `stopped`, `done` and `failed`. Its records stay 37 days after their last write: 30 days of keeping plus
 the longest wall time, so a finished run stays at least 30 days. The full layout is in
 [architecture.md](architecture.md#stores-and-subjects).

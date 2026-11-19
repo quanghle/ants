@@ -317,17 +317,17 @@ impl TipBoard {
     /// The board of `trail` from the last value of each key of [`TRAIL_TIPS_BUCKET`] under `<trail>.>`, keys without
     /// the bucket's subject prefix. An entry that does not read as a tip, a vote or a retirement under its key, or is
     /// of another trail, is skipped, as are a writer's vote on its own tip and the votes and retirements of no tip
-    /// found. A tip is retired by a human only as its retirement's key says, whatever its record says.
+    /// found. A tip is retired by a human only as its retirement's key says, whatever its record says; an entry under
+    /// that key that does not read as a retirement retires it all the same, as by the user `human` when it was written.
     pub fn new<K: AsRef<str>, V: AsRef<[u8]>>(trail: TrailName, entries: impl IntoIterator<Item = (K, V)>) -> Self {
         let mut tips = Vec::new();
         let mut votes: HashMap<String, Vec<(String, TipVote)>> = HashMap::new();
-        let mut retirements: HashMap<String, TipRetired> = HashMap::new();
+        let mut retirements: HashMap<String, Option<TipRetired>> = HashMap::new();
         for (key, value) in entries {
             let (key, value) = (key.as_ref(), value.as_ref());
             if let [trail, TIP_RETIRED, writer, id] = key.split('.').collect::<Vec<_>>()[..] {
-                if let Ok(retired) = serde_json::from_slice::<TipRetired>(value) {
-                    retirements.insert(format!("{trail}.{writer}.{id}"), retired);
-                }
+                let retired = serde_json::from_slice::<TipRetired>(value).ok();
+                retirements.insert(format!("{trail}.{writer}.{id}"), retired);
             } else if key.split('.').count() == 3 {
                 if let Ok(tip) = serde_json::from_slice::<TrailTip>(value)
                     && tip.trail == trail
@@ -344,7 +344,8 @@ impl TipBoard {
         let tips = tips
             .into_iter()
             .map(|mut tip| {
-                tip.retired = retirements.remove(&tip.key());
+                let unread = || TipRetired { by: UserId::human(), at: tip.written_at };
+                tip.retired = retirements.remove(&tip.key()).map(|retired| retired.unwrap_or_else(unread));
                 let mut votes: Vec<TipVote> = votes
                     .remove(&tip.key())
                     .unwrap_or_default()
@@ -642,7 +643,11 @@ mod tests {
         ];
         let board = TipBoard::new("deploy".parse().unwrap(), entries);
         assert_eq!(board.len(), 1, "a retirement is no tip");
-        assert!(board.tip(&left.id, None, day(2), None).unwrap().status.is_live());
+        assert_eq!(
+            board.tip(&left.id, None, day(2), None).unwrap().status,
+            TipStatus::Retired(Retirement::ByHuman { by: UserId::human(), at: day(0) }),
+            "a retirement that does not read retires it all the same"
+        );
     }
 
     #[test]

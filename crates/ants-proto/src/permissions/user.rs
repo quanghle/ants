@@ -12,7 +12,7 @@ use crate::{
     HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, READ_BUCKET, Role, SESSIONS_BUCKET,
     STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET,
     TRAILS_BUCKET, UserId, chan_consumer, chan_reader, dead_reader, done_reader, inbox_consumer, inbox_prefix,
-    notes_consumer, sent_reader, spare_readers, subject, trail_runs_subject,
+    notes_consumer, sent_reader, spare_readers, subject, trail_runs_reader, trail_runs_subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -118,7 +118,8 @@ impl Permissions {
     /// `ants signer` to save a trail as its own or remove one it saved ([`crate::SaveTrailRequest`], on
     /// [`subject::save_trail`]), which writes only new trails and replaces or removes only those the ant saved
     /// ([`crate::Saver`], [`Permissions::for_trail_keeper`]). An ant gets, puts and deletes only the records of the trail runs it conducts
-    /// ([`trail_runs_subject`]); a human reads every run's and writes none ([`trail_rights`]), but asks an ant's daemon to
+    /// ([`trail_runs_subject`]), and reads one back past messages a stream relayed onto it through its own consumer
+    /// ([`trail_runs_reader`]); a human reads every run's and writes none ([`trail_rights`]), but asks an ant's daemon to
     /// start, stop or resume the runs it conducts ([`TrailRequest`], on [`subject::trail`], which the ant alone hears
     /// and answers on [`subject::trailed`]). Every ant and human reads the trails' tips ([`TRAIL_TIPS_BUCKET`]) by
     /// direct gets naming no subject; an ant puts only its own tips and its own votes, under keys naming it; a human
@@ -248,6 +249,7 @@ impl Permissions {
         let own_keys = format!("$KV.{SESSIONS_BUCKET}.{user}.>");
         let own_attempts = format!("$KV.{ATTEMPTS_BUCKET}.{user}.>");
         let own_runs = trail_runs_subject(user);
+        let (runs, runs_read) = (kv_stream(TRAIL_RUNS_BUCKET), trail_runs_reader(user));
         let dead_read = dead_reader(user);
         let sent_read = sent_reader(user);
         publish.extend([
@@ -264,7 +266,12 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{attempts}.{own_attempts}"),
             own_attempts,
             // Get, put and delete of the records of the trails it conducts.
-            format!("$JS.API.DIRECT.GET.{}.{own_runs}", kv_stream(TRAIL_RUNS_BUCKET)),
+            format!("$JS.API.DIRECT.GET.{runs}.{own_runs}"),
+            // Reading one of them back past messages a stream relayed onto it, through its own consumer, whose
+            // filter, part of the subject, is one of its own keys.
+            format!("$JS.API.CONSUMER.CREATE.{runs}.{runs_read}.{own_runs}"),
+            format!("$JS.API.CONSUMER.MSG.NEXT.{runs}.{runs_read}"),
+            format!("$JS.API.CONSUMER.DELETE.{runs}.{runs_read}"),
             own_runs,
             // Put of its own tips on trails and its own votes on tips.
             format!("$KV.{TRAIL_TIPS_BUCKET}.*.{user}.>"),

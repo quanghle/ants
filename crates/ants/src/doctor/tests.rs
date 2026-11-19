@@ -405,7 +405,7 @@ async fn the_trail_saves_check_tells_whether_the_signer_answers() {
     assert!(none.detail.starts_with("nothing answers its trail saves"), "{none}");
 
     let (human, js) = server.connect_as(&"alice".parse().unwrap(), Role::Human).await;
-    js.create_key_value(ants_daemon::hub::trails_config()).await.unwrap();
+    js.create_stream(ants_daemon::hub::trails_config()).await.unwrap();
     drop(human);
     let approver =
         crate::credentials::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, wait)

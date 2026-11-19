@@ -24,7 +24,7 @@ async fn conducting(server: &NatsServer) -> (Trails, async_nats::jetstream::Cont
         crate::hub::trail_ratings_config(),
     ];
     for config in configs {
-        js.create_key_value(config).await.unwrap();
+        js.create_stream(config).await.unwrap();
     }
     let outbox: Outbox = Arc::new(|_| Box::pin(async { Ok(()) }));
     let colony: Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));

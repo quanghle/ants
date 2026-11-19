@@ -144,8 +144,7 @@ pub(super) async fn purge(js: &jetstream::Context, name: &TrailName) -> Result<u
         .get_stream(format!("KV_{TRAIL_RATINGS_BUCKET}"))
         .await
         .context("opening ants_trail_ratings (`ants init` creates it)")?;
-    let purged = stream.purge().filter(format!("$KV.{TRAIL_RATINGS_BUCKET}.{name}.>")).await?;
-    Ok(purged.purged)
+    super::saved::purge_keys(&stream, &format!("$KV.{TRAIL_RATINGS_BUCKET}.{name}.>")).await
 }
 
 /// What `ants trail rm` adds to its line for the `purged` ratings it removed with the trail, before what it says of the

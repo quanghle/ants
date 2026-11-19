@@ -17,7 +17,7 @@ impl Tips {
     /// The tips in [`TRAIL_TIPS_BUCKET`], without a request: whether the bucket exists shows on the first read or
     /// write. `js_domain` is the domain `js` was made for ([`crate::bus::jetstream`]).
     pub async fn new(js: &jetstream::Context, js_domain: Option<&JsDomain>) -> Result<Self> {
-        Ok(Self { kv: DirectKv::whole(js, js_domain, TRAIL_TIPS_BUCKET).await? })
+        Ok(Self { kv: DirectKv::whole(js, js_domain, TRAIL_TIPS_BUCKET).await?.past_relays() })
     }
 
     /// Every tip left on `trail` and every vote on them, as last put: deleted entries are left out.

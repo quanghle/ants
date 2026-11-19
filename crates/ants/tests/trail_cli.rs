@@ -43,7 +43,7 @@ impl Conductor {
     async fn start(server: &NatsServer) -> Self {
         let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "init").await.unwrap();
         for config in [hub::trails_config(), hub::trail_runs_config(), hub::trail_tips_config()] {
-            js.create_key_value(config).await.unwrap();
+            js.create_stream(config).await.unwrap();
         }
         let lead: UserId = "lead".parse().unwrap();
         let (client, js) = ants_daemon::bus::connect(&server.url, None, None, &lead, "conductor").await.unwrap();

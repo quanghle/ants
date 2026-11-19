@@ -9,6 +9,7 @@ use ants_proto::{RatingSummary, RunId, SavedTrail, Saver, TRAILS_BUCKET, TrailNa
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
+use futures::StreamExt as _;
 use serde::Serialize;
 
 use crate::colony::{short, since};
@@ -176,6 +177,19 @@ pub(super) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailNa
         }
     }
     Ok(Purged { trail: saved, tips, ratings })
+}
+
+/// Purge the keys of `stream` matching `filter`: how many keys went, each counted once however many of its messages
+/// the bucket kept.
+pub(super) async fn purge_keys(stream: &jetstream::stream::Stream, filter: &str) -> Result<u64> {
+    let mut keys = stream.info_with_subjects(filter).await?;
+    let mut count = 0;
+    while let Some(key) = keys.next().await {
+        key?;
+        count += 1;
+    }
+    stream.purge().filter(filter).await?;
+    Ok(count)
 }
 
 /// This machine's trails, the `.py` files of `dir` that pass [`ants_trail::check`], each named by its file's stem as a
