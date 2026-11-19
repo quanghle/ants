@@ -83,12 +83,18 @@ fn answer(example: &str, call: &Call) -> Answer {
     match call.function {
         Function::Agent => {
             for key in args.keys() {
-                assert!(["prompt", "ant", "capability", "schema", "label"].contains(&key.as_str()), "{example}: {key}");
+                assert!(
+                    ["prompt", "ant", "capability", "schema", "label", "tips"].contains(&key.as_str()),
+                    "{example}: {key}"
+                );
             }
             let prompt = args["prompt"].as_str().unwrap_or_else(|| panic!("{example}: prompt {}", call.args));
             assert!(!prompt.trim().is_empty(), "{example}: an empty prompt");
-            for key in ["ant", "capability", "label"] {
+            for key in ["ant", "capability", "label", "tips"] {
                 assert!(args.get(key).is_none_or(Value::is_string), "{example}: {key} {}", call.args);
+            }
+            if let Some(key) = args.get("tips").and_then(Value::as_str) {
+                ants_proto::check_tip_key(key).unwrap_or_else(|e| panic!("{example}: tips {key:?}: {e}"));
             }
             let label = args.get("label").and_then(Value::as_str).unwrap_or("step");
             Answer::Ok(match args.get("schema") {

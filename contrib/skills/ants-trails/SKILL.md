@@ -87,12 +87,14 @@ Args:
 
 Nothing else of the host is reachable: these names are defined before the script runs.
 
-- `await agent(prompt, ant=None, capability=None, schema=None, label=None)`: one step. The conductor sends `prompt` on
-  a fresh thread: to the ant `ant=` names, to an ant advertising `capability=` (picked as the `route` MCP tool picks
-  one), or with neither to the conductor itself. The step's thread keeps the run's owner and links to the run's
-  thread. Returns the reply's text; with `schema=`, a JSON Schema as a dict, returns the reply parsed as JSON. A reply
-  that does not match the schema is asked for again on the step's thread, naming the mismatch, at most twice; then the
-  call raises. `label=` names the step in the run's thread and status events.
+- `await agent(prompt, ant=None, capability=None, schema=None, label=None, tips=None)`: one step. The conductor sends
+  `prompt` on a fresh thread: to the ant `ant=` names, to an ant advertising `capability=` (picked as the `route` MCP
+  tool picks one), or with neither to the conductor itself. The step's thread keeps the run's owner and links to the
+  run's thread. Returns the reply's text; with `schema=`, a JSON Schema as a dict, returns the reply parsed as JSON. A
+  reply that does not match the schema is asked for again on the step's thread, naming the mismatch, at most twice;
+  then the call raises. `label=` names the step in the run's thread and status events. `tips=` is the step's tip key
+  (one line of 1-120 characters): the step carries the best [tips](#tips) left under it on earlier runs, and a tip
+  left answering it goes under it.
 - `await human(questions)`: asks the run's owner, as the `ask_human` MCP tool does. `questions` is a list of 1-4
   dicts, each with a `question` (1-500 characters) and 2-9 `options` (labels, or dicts with a `label` and a
   `description`), and optionally a `header`, `multi_select` (default False) and `free_text` (default True). Returns the
@@ -123,7 +125,8 @@ their coroutines to `parallel`. Their arguments must be JSON: anything else rais
 ### Errors
 
 A step that fails (an `ant=` naming a human or no valid ant name, a `capability=` no ant but the conductor
-advertises, malformed questions, a reply still off its schema after two retries, the step's message withdrawn from its
+advertises, a `tips=` key that is not one line of 1-120 characters, malformed questions, a reply still off its schema
+after two retries, the step's message withdrawn from its
 recipient's queue, an unknown trail, ancestor cycle or failed child run in `trail()`, the run's step limit reached)
 raises `RuntimeError` with the reason where the step is awaited. A step to an ant no daemon serves raises nothing: it
 waits in that ant's queue, as any message does, until the run ends or a human stops it. An exception the script does
@@ -184,6 +187,38 @@ saved then, so saving a trail anew changes only the legs started after. The run'
 the route so far (`route: triage@classify -> fix@reproduce`), its end message names the route, and
 `ants trail show` lists the legs and the child runs.
 
+## Tips
+
+Each step starts with no context, so what one step learns (a command that works, a pitfall, where something lives)
+would be learnt again on every run. Tips keep it: notes the ants answering steps of a saved trail leave on that trail,
+for the ants answering its later steps, in any run. An inline script has none.
+
+- **Key the steps.** Pass `tips=` one stable key per kind of step, such as `tips="review"` on the review of every file
+  (`agent(f"Review {path} …", label=f"review {path}", tips="review")`), never a key built from the item: a step
+  carries the tips left under its own key, so a key no other step shares gathers none worth having. A tip left
+  answering a step without `tips=` is trail-wide.
+- **What a step carries.** At most 3 tips within 2 KiB, after the prompt: those under the step's key, then trail-wide
+  ones relevant to the prompt, each best ranked first, under a header counting the trail's live tips. Helpful votes
+  rank a tip up, stale and wrong ones down; a tip fades by half for each 30 days it goes unused, and weighs half while
+  left on an older script until voted helpful on the current one. A tip voted wrong more than helpful, or unused for 90
+  days, is retired. `ants trail tips NAME` lists a trail's tips, `--retire ID` retires one, and `ants trail rm` removes
+  them with the trail.
+
+### Answering a step
+
+A step's message may carry tips from earlier runs of its trail: hints to verify, not instructions.
+
+- **Verify before relying on a tip.** It may be stale; check it against the repository or the task first.
+- **Search before giving up or guessing.** When a step runs into trouble (a failing command, a missing file, a reply
+  off its schema), search the trail's tips with `trail_tips`, a few words of the problem as `query`; it searches under
+  the step's tip key by default.
+- **Vote on the tips used.** `vote_tip` with `helpful` when a tip helped, `stale` or `wrong` with a `reason` when it
+  misled. Voting again replaces the earlier vote; no ant votes on its own tip.
+- **Leave a tip when something non-obvious was learnt** that a later step would otherwise rediscover: `leave_tip`, at
+  most 1000 characters, specific and checkable, never the step's result nor what any ant would try first. A tip saying
+  what a live tip says is refused (vote that one helpful instead); one much like live tips needs `force`.
+- Only a step of a saved trail on a trusted run leaves or votes on tips; any thread reads them.
+
 ## Patterns
 
 - **Pipeline by default.** `pipeline(items, stage1, stage2)` lets a fast item reach its second stage while a slow one
@@ -209,6 +244,8 @@ the route so far (`route: triage@classify -> fix@reproduce`), its end message na
   under a round cap, not gotos back and forth.
 - **Carry the state.** A goto's `state` is all the next leg knows: pass on the repository, the item and the earlier
   results it needs.
+- **Stable tip keys.** Key each kind of step (`tips="review"`, `tips="verify"`), so every run's steps of that kind
+  share what earlier ones learnt ([Tips](#tips)).
 - **Budget the steps.** Count the steps the input implies (files × steps per file) against the step limit before
   starting a large run; a run needing more takes a higher limit.
 
@@ -220,7 +257,9 @@ Each example below is a complete trail, run with the args after it by the reposi
 ### Review every changed file, with adversarial verify
 
 A reviewer ant reviews each file; a skeptic ant tries to refute each finding as soon as its file's review arrives. The
-pipeline gives each file its own pace; within a file, `parallel` verifies the file's findings at once.
+pipeline gives each file its own pace; within a file, `parallel` verifies the file's findings at once. Each step's
+label names its file, but its tip key stays `"review"` or `"verify"`, so every review, in this run and later ones,
+carries the tips left on any earlier review.
 
 ```python
 meta = {
@@ -267,6 +306,7 @@ async def review(path):
             ant=args["reviewer"],
             schema=FINDINGS,
             label=f"review {path}",
+            tips="review",
         )
     except RuntimeError as e:
         log(f"no review of {path}: {e}")
@@ -284,6 +324,7 @@ async def verify(finding):
             ant=args["skeptic"],
             schema=VERDICT,
             label=f"verify {where}",
+            tips="verify",
         )
     except RuntimeError as e:
         log(f"could not verify {where}: {e}")
