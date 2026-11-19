@@ -161,6 +161,35 @@ fn each_ant_added_grows_the_uplink_by_the_same_measure() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Each assistant added behind a leaf node grows its uplink JWT by the same amount, about 3.5 KB for six-character
+/// names of it and its human, 3.9 KB with the hub's JetStream domain: less than an ant, as it holds none of an ant's
+/// reader consumers. The first one adds about 2.4 KB more (2.7 KB), the human reads every assistant shares.
+#[test]
+fn each_assistant_added_grows_the_uplink_by_the_same_measure() {
+    let dir = ants_test_support::scratch_dir("uplink-assistant-growth");
+    let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
+    init(&team).unwrap();
+    let hub: JsDomain = "hub".parse().unwrap();
+    for (domain, each, shared) in [(None, 3_300..=3_700, 2_200..=2_600), (Some(&hub), 3_700..=4_100, 2_500..=2_900)] {
+        issue_leaf(&team, &m1, &members(&[p("dev-00")], &[]), &[], EnrollApprover::Without, domain, &out).unwrap();
+        let (mut jwt, _) = read_creds(&out).unwrap();
+        let mut growth = Vec::new();
+        for i in 1..=5 {
+            let (assistant, human) = (p(&format!("pa-{i:03}")), p(&format!("hu-{i:03}")));
+            let more = Permissions::for_leaf(&m1, [(&assistant, LeafRole::AssistantOf(&human))]);
+            let renewed = extend_leaf(&team, &jwt, &m1, more.with_uplink_js_domain(domain)).unwrap();
+            growth.push(renewed.len() - jwt.len());
+            jwt = renewed;
+        }
+        eprintln!("uplink of m1 (domain {domain:?}): {} bytes, each assistant adds {growth:?}", jwt.len());
+        let (min, max) = (*growth[1..].iter().min().unwrap(), *growth[1..].iter().max().unwrap());
+        assert!(max - min <= 4, "assistants of names of one length grow it alike: {growth:?}");
+        assert!(each.contains(&max), "{max} bytes per assistant, domain {domain:?}");
+        assert!(shared.contains(&(growth[0] - max)), "{} bytes more for the first, domain {domain:?}", growth[0]);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// The longest uplink credentials `ants auth leaf` issues, far over the hub's max_control_line, still connect.
 #[tokio::test]
 async fn the_longest_uplink_credentials_connect() {
