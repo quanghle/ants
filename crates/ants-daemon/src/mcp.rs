@@ -73,6 +73,7 @@ mod provider;
 mod reactions;
 mod routing;
 mod serve;
+mod tips;
 mod tools;
 mod trails;
 mod turn;
@@ -264,7 +265,8 @@ impl Mcp {
         let _ = self.hub.provider.set(provider);
     }
 
-    /// Reach the ant's trail runs through `trails` for `run_trail`, `trail_status` and `stop_trail`, offered only then.
+    /// Reach the ant's trail runs through `trails` for `run_trail`, `trail_status` and `stop_trail`, and the trails'
+    /// tips for `leave_tip`, `vote_tip` and `trail_tips`, offered only then.
     pub fn with_trails(&self, trails: crate::trail::Trails) {
         let _ = self.hub.trails.set(trails);
     }

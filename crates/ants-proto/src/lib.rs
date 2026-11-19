@@ -360,8 +360,8 @@ pub const PRESENCE_TTL: Duration = Duration::from_secs(30);
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 /// The tool rules a thread a webhook or schedule starts is narrowed to when its config sets no `allow`
 /// ([`Envelope::allow`]): reading files in the workdir, searching, thinking, and the ants tools that talk to other ants,
-/// whose messages carry the narrowing on, ask a human a question, or end a turn with no reply.
-pub const WEBHOOK_ALLOW: [&str; 16] = [
+/// whose messages carry the narrowing on, ask a human a question, end a turn with no reply, or search a trail's tips.
+pub const WEBHOOK_ALLOW: [&str; 17] = [
     "read:*",
     "search",
     "think",
@@ -378,6 +378,7 @@ pub const WEBHOOK_ALLOW: [&str; 16] = [
     "other:suggest_thread_title",
     "other:complete",
     "other:ask_human",
+    "other:trail_tips",
 ];
 /// The tool rules the review thread of a dream is narrowed to on the sage's side (requirement ants-x39hk.12.4): reading
 /// files, searching, thinking, and the ants tools that only read; the ants MCP server refuses the others on it, the
