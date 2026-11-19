@@ -7,15 +7,15 @@ use ants_proto::{PendingCall, QueuedCall, RunId, RunState, TrailFunction, TrailL
 use ants_trail::{Run, RunState as Session};
 use anyhow::{Context as _, Result, anyhow, bail};
 
-use super::{Book, Leg, Slot, Step, Trails, driver, engine_limits, locked, steps};
+use super::{Book, Leg, Slot, Step, Trails, engine_limits, locked, steps};
 
 impl Trails {
     /// The run of `header` as its records hold it: its stored session, given the answers its journal holds beyond it.
     /// When `resumed`, under the header's limits and without the steps it waited on, which go out anew, but for its
     /// child runs, which resume with it, those failed on a limit too, or start anew when they left no record; else
-    /// waiting on those steps again. The steps that go out anew count again once sent, so the run and its ancestors in
-    /// memory are given back what those counted.
-    pub(super) async fn load(&self, mut header: TrailRun, resumed: bool) -> Result<Arc<Slot>> {
+    /// waiting on those steps again. The steps that go out anew counted once already: listed as such
+    /// ([`super::Book::anew`]), they count no step again, however often a resume is tried.
+    pub(super) async fn load(&self, header: TrailRun, resumed: bool) -> Result<Arc<Slot>> {
         let store = &self.inner.store;
         let run = header.run.clone();
         let mut stored = store.session(&run).await?.context("the run has no stored session")?;
@@ -43,14 +43,15 @@ impl Trails {
                 && engine.outstanding().iter().any(|c| c.call == pending.call)
         };
         let (pending, dropped): (Vec<_>, Vec<_>) = stored.pending.into_iter().partition(outstanding);
+        let mut anew = stored.anew;
         if resumed {
-            let anew = dropped.iter().filter(|call| engine.outstanding().iter().any(|c| c.call == call.call)).count();
-            let anew = u32::try_from(anew).unwrap_or(u32::MAX);
-            driver::uncount_steps(&mut header, anew);
-            for ancestor in self.ancestors(&header) {
-                driver::uncount_steps(&mut ancestor.book().header, anew);
-            }
+            // Those never sent were given back as the run stopped or ended.
+            let sent = dropped.iter().filter(|call| call.sent && call.function != TrailFunction::Trail);
+            anew.extend(sent.map(|call| call.call));
         }
+        anew.retain(|call| engine.outstanding().iter().any(|c| c.call == *call));
+        anew.sort_unstable();
+        anew.dedup();
         let live = !matches!(header.state, RunState::Stopped { .. });
         {
             let mut threads = locked(&self.inner.threads);
@@ -72,6 +73,7 @@ impl Trails {
             pending,
             queued,
             left: Vec::new(),
+            anew,
             answers: Vec::new(),
             broke: None,
             late: false,
@@ -100,6 +102,7 @@ impl Trails {
             pending: Vec::new(),
             queued: Vec::new(),
             left: stored.pending,
+            anew: Vec::new(),
             answers: Vec::new(),
             broke: None,
             late: false,

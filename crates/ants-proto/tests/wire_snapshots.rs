@@ -1487,14 +1487,11 @@ fn trails() {
                 retries: 1,
             }],
             queued: vec![QueuedCall { call: 4, function: TrailFunction::Human, args: serde_json::json!(["ship it?"]) }],
+            anew: vec![2],
         },
     );
-    let answer = |call, answer| JournalEntry {
-        call,
-        function: TrailFunction::Agent,
-        args: serde_json::json!(["dev-a", "build it"]),
-        answer,
-    };
+    let args = serde_json::json!(["dev-a", "build it"]);
+    let answer = |call, answer| JournalEntry { call, function: TrailFunction::Agent, args: args.clone(), answer };
     let refused = JournalEntry {
         call: 3,
         function: TrailFunction::Goto,

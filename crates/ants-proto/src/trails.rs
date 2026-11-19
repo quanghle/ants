@@ -510,6 +510,11 @@ pub struct TrailSession {
     /// The calls made beyond the run's concurrency, in order, waiting to be sent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued: Vec<QueuedCall>,
+    /// The calls whose steps went out before the run stopped or failed on a limit, to go out anew since its resume:
+    /// counted against its steps once already, they count no step again. Each leaves the list once its new step goes
+    /// out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anew: Vec<u32>,
 }
 
 impl TrailSession {
@@ -535,7 +540,7 @@ pub struct PendingCall {
     pub sent_at: DateTime<Utc>,
     /// Whether that message is published: the conductor's daemon puts the call before publishing its message, under the
     /// message's id, which the stream deduplicates, and marks it sent after, so its restarted daemon publishes again
-    /// only what it never did. A stopped run's steps are unsent again, to go out anew on resuming.
+    /// only what it never did. A stopped run's steps keep it; on resuming they go out anew, on new threads.
     #[serde(default)]
     pub sent: bool,
     /// The turns the step's thread had left as its last message on it went: what the step spent shows in the answer's
@@ -860,7 +865,8 @@ mod tests {
             turn_budget: step.turn_budget,
             retries: 0,
         };
-        let session = TrailSession { session: "{}".to_owned(), pending: vec![call], queued: Vec::new() };
+        let session =
+            TrailSession { session: "{}".to_owned(), pending: vec![call], queued: Vec::new(), anew: Vec::new() };
         let reply = step.reply(p("dev-a"), "built", crate::Role::Ant).unwrap();
         assert_eq!(session.answered_by(&reply, &reply.from).map(|c| c.call), Some(1));
         let by_another = step.follow_up(p("dev-b"), p("planner"), "built too");

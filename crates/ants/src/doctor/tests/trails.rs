@@ -264,7 +264,12 @@ async fn the_runs_check_reads_every_conductor_s_runs_with_a_human_s_credentials(
     let (_, a_js) = server.connect(&dev_a).await;
     let run = record("dev-a", RunState::Running, 1, now);
     put(&a_js, &run.key(), &run).await;
-    let session = TrailSession { session: "opaque".to_owned(), pending: vec![step("dev-b")], queued: Vec::new() };
+    let session = TrailSession {
+        session: "opaque".to_owned(),
+        pending: vec![step("dev-b")],
+        queued: Vec::new(),
+        anew: Vec::new(),
+    };
     put(&a_js, &trail_session_key(&dev_a, &run.run), &session).await;
     let checks = check_runs(Some(&served), now).await;
     assert_eq!(shown(&checks), [(Status::Ok, "no run stuck: 1 kept, 1 unfinished".to_owned(), vec![])]);

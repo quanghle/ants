@@ -341,7 +341,7 @@ they may be raised on resume:
 
 | Limit | Default | Maximum | Flag, key | Past it |
 |---|---|---|---|---|
-| Steps, `agent()`, `human()` and `trail()` calls (child runs included; re-asks not counted) | 50 | 500 | `--steps`, `steps` | the call raises `RuntimeError: the run reached its limit of N steps` |
+| Steps, `agent()`, `human()` and `trail()` calls sent (child runs included; re-asks, and a step sent anew on resuming, not counted) | 50 | 500 | `--steps`, `steps` | the call raises `RuntimeError: the run reached its limit of N steps` |
 | Steps outstanding at once | 4 | 16 | `--at-once`, `at_once` | later steps wait in the run; nothing raises |
 | Turns the steps spend, as ant messages spend them | 200 | 2000 | `--turns`, `turns` | the run fails |
 | Wall time from start, stopped time included | 24h | 7d | `--wall`, `wall` | the run fails, waiting or not |
@@ -584,14 +584,19 @@ the longest wall time, so a finished run stays at least 30 days. The full layout
   daemon while it is away and is recorded with the admin and time (`ants ant orders ANT`), its result listing the steps
   in other ants' queues. A stop arriving while the run's script computes waits for the computation to end, and gives up
   the steps the run then waits on; the conductor's daemon tells it pending at once, and `ants trail stop` says so when
-  the pass outlasts its 15 s wait. Stopping a stopped run again lists the steps still to withdraw. Ending a parent run stops its still-running children. Wall time keeps running while
+  the pass outlasts its 15 s wait. A stop takes effect once the run's record stores it: one that cannot be stored is
+  refused with the storing's error, the run going on. Stopping a stopped run again lists the steps still to withdraw,
+  those whose messages went out. Ending a parent run stops its still-running children. Wall time keeps running while
   stopped.
 - **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose record names the limit it failed on, from
   its last stored session, resuming its child runs stopped or failed on a limit too (a child that left no record starts
   anew); the steps waited on go out anew, on new threads,
   and so do the calls refused since that session, as one past the run's steps: a run failing on a limit deletes their
   errors from its journal. Limit flags replace the run's limits they name, within the
-  maxima. A run done, failed otherwise, running or waiting is refused. An admin's `ants ant resume-trail ANT RUN`
+  maxima. The steps sent anew count no step again, a resume tried again after its records were stored in part
+  included. A run done, failed otherwise, running or waiting is refused. A run's stops and resumes are taken one at a
+  time, however asked: a second resume asked beside one is refused as the run is no longer stopped, and a stop asked
+  while a resume is under way stops the resumed run. An admin's `ants ant resume-trail ANT RUN`
   resumes it by admin order the same way, limit flags included.
 
 ```sh

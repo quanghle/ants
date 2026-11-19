@@ -463,6 +463,7 @@ async fn humans_list_and_show_the_runs_conductors_keep() {
             retries: 0,
         }],
         queued: vec![QueuedCall { call: 3, function: TrailFunction::Agent, args: json!({"prompt": "announce"}) }],
+        anew: Vec::new(),
     };
     put(&a_js, &trail_session_key(&dev_a, &waiting.run), &session).await;
     let built = JournalEntry {
@@ -662,7 +663,12 @@ async fn humans_read_the_steps_a_conductor_recorded_on_the_thread_of_its_runs() 
     put(&lead_js, &trail_thread_step_key(&lead, &done.thread, &left), &mark(&done, 0, "dev-b")).await;
     put(&lead_js, &trail_thread_step_key(&lead, &elsewhere.thread, &other), &mark(&elsewhere, 0, "dev-b")).await;
     put(&lead_js, &trail_call_key(&lead, &running.run, 0), &journal(0, "build", CallAnswer::Ok(json!("built")))).await;
-    let session = TrailSession { session: "opaque".to_owned(), pending: vec![waited(1, &waiting)], queued: Vec::new() };
+    let session = TrailSession {
+        session: "opaque".to_owned(),
+        pending: vec![waited(1, &waiting)],
+        queued: Vec::new(),
+        anew: Vec::new(),
+    };
     put(&lead_js, &trail_session_key(&lead, &running.run), &session).await;
 
     let steps = runs::steps_on(&js, &lead, &running.thread).await.unwrap();
