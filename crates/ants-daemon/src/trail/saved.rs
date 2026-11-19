@@ -124,28 +124,26 @@ impl Saved {
         Self { kv, dir, ant, signer }
     }
 
-    /// The script of the trail saved as `name`.
+    /// The script of the trail saved as `name`: the colony's, else this machine's when the colony has none of that name
+    /// or the bus keeps no saved trails. Refused when the colony's are unread, as its trail would win.
     pub(super) async fn script(&self, name: &TrailName) -> Result<String, String> {
-        let mut unread = None;
-        if let Some(kv) = &self.kv {
-            match kv.get(name.as_str()).await {
-                Ok(Some(value)) => {
-                    let saved: SavedTrail =
-                        serde_json::from_slice(&value).map_err(|e| format!("reading saved trail {name}: {e}"))?;
-                    saved.check_key(name.as_str()).map_err(|e| e.to_string())?;
-                    return Ok(saved.script);
-                }
-                Ok(None) => {}
-                Err(e) => unread = Some(format!("{e:#}")),
+        let unread = |e: &str| format!("trail {name} is not run: the saved trails of the colony are unread ({e})");
+        let kv = self.kv.as_ref().ok_or_else(|| unread(UNREACHABLE))?;
+        match kv.lookup(name.as_str()).await.map_err(|e| unread(&format!("{e:#}")))? {
+            Lookup::Value(value) => {
+                let saved: SavedTrail =
+                    serde_json::from_slice(&value).map_err(|e| format!("reading saved trail {name}: {e}"))?;
+                saved.check_key(name.as_str()).map_err(|e| e.to_string())?;
+                return Ok(saved.script);
             }
+            Lookup::NoValue | Lookup::NoBucket => {}
         }
-        if let Some(path) = self.local(name).await {
-            return tokio::fs::read_to_string(&path).await.map_err(|e| format!("reading {}: {e}", path.display()));
+        match self.local(name).await {
+            Some(path) => {
+                tokio::fs::read_to_string(&path).await.map_err(|e| format!("reading {}: {e}", path.display()))
+            }
+            None => Err(format!("no trail is saved as {name}")),
         }
-        Err(match unread {
-            Some(e) => format!("no trail is saved as {name} (the saved trails of the colony are unread: {e})"),
-            None => format!("no trail is saved as {name}"),
-        })
     }
 
     /// The file of this machine's trail `name`, when it has one.
@@ -471,5 +469,29 @@ mod tests {
         kv.put("other", serde_json::to_vec(&trail).unwrap()).await.unwrap();
         let (entry, _) = saved.lookup(&"other".parse().unwrap()).await.unwrap();
         assert!(matches!(entry, Entry::Unreadable(why) if why.contains("found at other")));
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_of_the_colony_trails_runs_no_local_trail() {
+        let Some(server) = NatsServer::start() else { return };
+        let (client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let dir = ants_test_support::scratch_dir("saved-trail-unread");
+        std::fs::write(dir.join("deploy.py"), "agent('local')").unwrap();
+        let saved = Saved::new(&js, None, Some(dir), "dev-a".parse().unwrap(), SaveThrough::Bucket).await;
+        let name: TrailName = "deploy".parse().unwrap();
+        assert_eq!(saved.script(&name).await.unwrap(), "agent('local')", "a bus keeping no saved trails");
+
+        let mut gets = client.subscribe(format!("$JS.API.DIRECT.GET.KV_{TRAILS_BUCKET}")).await.unwrap();
+        let answering = client.clone();
+        tokio::spawn(async move {
+            use futures::StreamExt as _;
+            while let Some(get) = gets.next().await {
+                answering.publish(get.reply.unwrap(), "no stream message".into()).await.unwrap();
+            }
+        });
+        client.flush().await.unwrap();
+        let refused = saved.script(&name).await.unwrap_err();
+        assert!(refused.contains("the saved trails of the colony are unread"), "{refused}");
+        assert!(refused.contains("reading deploy"), "names the error: {refused}");
     }
 }

@@ -120,7 +120,9 @@ applied `trail` finding as holding only while its trail stays saved and is rated
 
 A conductor's daemon also finds trails in `~/.ants/trails/<name>.py` on its machine, and the CLI lists and runs the
 `.py` files of the CLI machine's `~/.ants/trails` by the same name, the file's, whatever its meta's `name`. On a name
-both have, the colony's trail runs, so every conductor runs the same trail by that name.
+both have, the colony's trail runs, so every conductor runs the same trail by that name. When the colony's trails
+cannot be read, a conductor runs no trail by name and names the error; a bus that keeps no saved trails leaves the
+machine's trails running.
 
 ```sh
 ants trail save review.py               # check and save for the colony; replaces a trail of that name
