@@ -23,7 +23,7 @@ fn parsed(args: &[&str]) -> Result<(TipsArgs, bool), clap::Error> {
 }
 
 fn args(name: &str) -> TipsArgs {
-    TipsArgs { name: name.parse().unwrap(), key: None, all: false, retire: None }
+    TipsArgs { name: name.parse().unwrap(), key: None, all: false, retire: None, writer: None }
 }
 
 fn now() -> DateTime<Utc> {
@@ -180,23 +180,23 @@ async fn humans_retire_tips_whether_their_trail_is_saved_or_not_and_removing_it_
     assert_eq!(error.to_string(), "retiring a tip needs a human's credentials; those of dev-a are an ant's");
 
     let at = Utc::now();
-    let retired = tips::retire(&js, &name, &current.id, &alice, at).await.unwrap();
+    let retired = tips::retire(&js, &name, &current.id, None, &alice, at).await.unwrap();
     assert_eq!(retired, TrailTip { retired: Some(TipRetired { by: alice.clone(), at }), ..current.clone() });
     let later = retired.written_at + TimeDelta::hours(3);
     let said = tips::retired(&retired, later);
     assert_eq!(said, "retired tip aaaaaaaa of trail deploy, left by dev-a 3h ago: pin the base image");
     let (board, _) = tips::read(&js, &name).await.unwrap();
-    let status = board.tip(&current.id, Utc::now(), None).unwrap().status;
+    let status = board.tip(&current.id, None, Utc::now(), None).unwrap().status;
     assert_eq!(status, TipStatus::Retired(Retirement::ByHuman { by: alice.clone(), at }));
-    assert_eq!(board.tip(&current.id, Utc::now(), None).unwrap().votes.len(), 1, "its votes stay");
+    assert_eq!(board.tip(&current.id, None, Utc::now(), None).unwrap().votes.len(), 1, "its votes stay");
     // Its writer puts it again, under its own credentials: it stays retired.
     put_tip(&ant_js, &current).await;
     let (board, _) = tips::read(&ant_js, &name).await.unwrap();
-    let status = board.tip(&current.id, Utc::now(), None).unwrap().status;
+    let status = board.tip(&current.id, None, Utc::now(), None).unwrap().status;
     assert_eq!(status, TipStatus::Retired(Retirement::ByHuman { by: alice.clone(), at }), "its writer revives none");
-    let error = tips::retire(&js, &name, &current.id, &alice, at).await.unwrap_err().to_string();
+    let error = tips::retire(&js, &name, &current.id, None, &alice, at).await.unwrap_err().to_string();
     assert_eq!(error, "tip aaaaaaaa of trail deploy was retired by alice 0s ago");
-    let error = tips::retire(&js, &name, &other.id, &alice, at).await.unwrap_err().to_string();
+    let error = tips::retire(&js, &name, &other.id, None, &alice, at).await.unwrap_err().to_string();
     assert_eq!(error, "trail deploy has no tip cccccccc: `ants trail tips deploy --all` lists them");
 
     let local = dir.join("trails");
@@ -210,8 +210,27 @@ async fn humans_retire_tips_whether_their_trail_is_saved_or_not_and_removing_it_
     put_tip(&js, &older).await;
     let (board, script) = tips::read(&js, &name).await.unwrap();
     assert_eq!((board.len(), script), (1, None), "tips outlive a trail no longer saved");
-    tips::retire(&js, &name, &older.id, &alice, Utc::now()).await.unwrap();
+    tips::retire(&js, &name, &older.id, None, &alice, Utc::now()).await.unwrap();
     let listed = tips::render(&tips::read(&js, &name).await.unwrap().0, &args("deploy"), None, Utc::now());
     assert_eq!(listed, "trail deploy: no live tips, 1 retired, which --all lists\n");
+
+    let first = TrailTip { written_at: Utc::now(), ..tip("dev-a", "dddddddd", None, "tag before pushing", 0, &sha) };
+    let copy = TrailTip { written_at: Utc::now(), ..tip("dev-b", "dddddddd", None, "push before tagging", 0, &sha) };
+    for tip in [&first, &copy] {
+        put_tip(&js, tip).await;
+    }
+    let error = tips::retire(&js, &name, &first.id, None, &alice, Utc::now()).await.unwrap_err().to_string();
+    let named = "tips of dev-a, dev-b on trail deploy share id dddddddd: name the tip's writer with --writer";
+    assert_eq!(error, named);
+    let retired = tips::retire(&js, &name, &copy.id, Some(&p("dev-b")), &alice, Utc::now()).await.unwrap();
+    assert_eq!(retired.writer, p("dev-b"));
+    let (board, _) = tips::read(&js, &name).await.unwrap();
+    assert!(board.tip(&first.id, Some(&p("dev-a")), Utc::now(), None).unwrap().status.is_live(), "the other stays");
+    assert!(parsed(&["deploy", "--writer", "dev-b"]).is_err(), "--writer goes with --retire");
+
+    let purged = saved::remove(&js, &local, &name).await.unwrap();
+    assert!(!purged.trail && purged.tips > 0, "removing a trail removed already purges what is left of it");
+    let error = saved::remove(&js, &local, &name).await.unwrap_err().to_string();
+    assert_eq!(error, "the colony saved no trail deploy");
     std::fs::remove_dir_all(dir).unwrap();
 }

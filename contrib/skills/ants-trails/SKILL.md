@@ -221,7 +221,8 @@ A step's message may carry tips from earlier runs of its trail: hints to verify,
   off its schema), search the trail's tips with `trail_tips`, a few words of the problem as `query`; it searches under
   the step's tip key by default.
 - **Vote on the tips used.** `vote_tip` with `helpful` when a tip helped, `stale` or `wrong` with a `reason` when it
-  misled. Voting again replaces the earlier vote; no ant votes on its own tip.
+  misled. Voting again replaces the earlier vote; no ant votes on its own tip. When tips of different writers share an
+  id, `writer` names the one meant.
 - **Leave a tip when something non-obvious was learnt** that a later step would otherwise rediscover: `leave_tip`, at
   most 1000 characters, specific and checkable, never the step's result nor what any ant would try first. A tip saying
   what a live tip says is refused (vote that one helpful instead); one much like live tips needs `force`.
@@ -244,7 +245,7 @@ draw on those ratings.
   outcome by the task, not by the run's state: a run done with a useless result failed it. A stopped run may be rated
   too; a child run a `trail()` call started is rated by its own id.
 - One rating per run and trail: rating the run again replaces it. A run of a saved trail rates that trail and every
-  trail of its route; a run of an inline script rates none until its script is saved with `save_trail`, which then
+  trail of its route still saved; a run of an inline script rates none until its script is saved with `save_trail`, which then
   rates the saved trail too.
 - On a thread a webhook or schedule started, `rate_trail` rates only the run reporting on that thread; `find_trails`
   works on any thread.

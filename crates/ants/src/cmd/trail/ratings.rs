@@ -59,10 +59,10 @@ fn parse(key: &str, payload: &[u8]) -> Option<TrailRating> {
     checked.inspect_err(|e| tracing::warn!(key, "skipping a trail rating: {e:#}")).ok()
 }
 
-/// The ratings by trail, each counted with its latest.
+/// The ratings by trail, each counted with its latest, those dated ahead ([`TrailRating::dated`]) left out.
 pub(crate) fn summaries(ratings: Vec<TrailRating>) -> BTreeMap<TrailName, RatingSummary> {
-    let mut summaries: BTreeMap<TrailName, RatingSummary> = BTreeMap::new();
-    for rating in ratings {
+    let (mut summaries, now): (BTreeMap<TrailName, RatingSummary>, _) = (BTreeMap::new(), Utc::now());
+    for rating in ratings.into_iter().filter(|rating| rating.dated(now)) {
         summaries.entry(rating.trail.clone()).or_default().add(rating);
     }
     summaries

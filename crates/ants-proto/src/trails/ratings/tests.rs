@@ -22,6 +22,7 @@ fn rating(trail: &str, outcome: RatingOutcome, task: &str, at: i64) -> TrailRati
         task: task.to_owned(),
         why: "it did".to_owned(),
         script: SHA.to_owned(),
+        untrusted: false,
         at: day(at),
     }
 }
@@ -192,4 +193,31 @@ fn a_trail_serves_a_task_its_description_matches_with_more_worked_than_failed() 
     assert!(!serves(false, &Counts { worked: 5, partly: 0, failed: 0 }));
     assert_eq!(Counts { worked: 3, partly: 1, failed: 0 }.rate(), Some(0.875));
     assert_eq!(Counts::default().rate(), None);
+}
+
+#[test]
+fn a_rating_dated_ahead_of_now_counts_for_nothing() {
+    let mut finder = finder("review rust changes", &[("review-changes", "")]);
+    finder.rating(rating("review-changes", RatingOutcome::Worked, "review rust changes", 9));
+    finder.rating(rating("review-changes", RatingOutcome::Worked, "review rust changes", 400));
+    let within = TrailRating {
+        at: day(10) + TRAIL_CLOCK_SKEW,
+        ..rating("review-changes", RatingOutcome::Failed, "review rust changes", 0)
+    };
+    assert!(within.dated(day(10)) && !within.dated(day(10) - TimeDelta::seconds(1)));
+    finder.rating(within);
+    let evidence = &finder.trails[&name("review-changes")];
+    assert_eq!(evidence.matching.counts, Counts { worked: 1, partly: 0, failed: 1 });
+    assert_eq!((evidence.alpha, evidence.beta), (2.0, 2.0));
+}
+
+#[test]
+fn a_summary_counts_the_ratings_of_untrusted_runs() {
+    let mut summary = RatingSummary::default();
+    summary.add(TrailRating { untrusted: true, ..rating("deploy", RatingOutcome::Worked, "ship it", 1) });
+    summary.add(rating("deploy", RatingOutcome::Failed, "ship it", 2));
+    assert_eq!((summary.counts.total(), summary.untrusted), (2, 1));
+    assert!(!summary.latest[0].untrusted && summary.latest[1].untrusted, "the latest first");
+    let json = serde_json::to_value(&summary.latest[0]).unwrap();
+    assert!(json.get("untrusted").is_none(), "a trusted run's rating names no mark: {json}");
 }

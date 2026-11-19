@@ -133,7 +133,7 @@ async fn leave_tip_is_left_only_answering_a_step_of_a_saved_trail_on_a_trusted_t
     assert!(ok && text.ends_with("on trail deploy, under tip key \"build\"."), "{text}");
     let id = left(&text);
     let board = dev_trails.tips().board(&deploy()).await.unwrap();
-    let tip = board.tip(&id, chrono::Utc::now(), None).unwrap().tip;
+    let tip = board.tip(&id, None, chrono::Utc::now(), None).unwrap().tip;
     assert_eq!((&tip.writer, tip.text.as_str()), (&ant("dev"), "Run the migrations before the build"));
     assert_eq!((tip.tip_key.as_deref(), &tip.run), (Some("build"), &run), "the step's tip key and run");
     assert_eq!(tip.script, script_sha256(&format!("{META}{DEPLOY}")), "the script the step ran");
@@ -247,7 +247,7 @@ async fn leave_tip_refuses_a_duplicate_unless_forced_and_vote_tip_counts_each_an
         vote(json!({"tip": first.as_str(), "verdict": "Helpful", "trail": "deploy", "reason": "it worked"})).await;
     assert!(ok && text.contains("replacing this ant's earlier stale vote") && text.contains("+1 ~0 !0"), "{text}");
     let board = dev_trails.tips().board(&deploy()).await.unwrap();
-    let votes = board.tip(&first, chrono::Utc::now(), None).unwrap().votes;
+    let votes = board.tip(&first, None, chrono::Utc::now(), None).unwrap().votes;
     assert_eq!(votes.len(), 1, "an ant counts once per tip: {votes:?}");
     assert_eq!((&votes[0].voter, votes[0].verdict), (&ant("lead"), TipVerdict::Helpful));
     assert_eq!((votes[0].reason.as_deref(), &votes[0].script), (Some("it worked"), &None), "voted from no step");
@@ -258,7 +258,7 @@ async fn leave_tip_refuses_a_duplicate_unless_forced_and_vote_tip_counts_each_an
     let (ok, text) = call(&client, "vote_tip", json!({"tip": second.as_str(), "verdict": "wrong"})).await;
     assert!(ok && text.contains("+0 ~0 !1") && text.ends_with("it is retired."), "{text}");
     let board = dev_trails.tips().board(&deploy()).await.unwrap();
-    let ranked = board.tip(&second, chrono::Utc::now(), None).unwrap();
+    let ranked = board.tip(&second, None, chrono::Utc::now(), None).unwrap();
     assert_eq!(ranked.votes[0].script, Some(script_sha256(&script)), "voted answering a step of its trail");
     let (ok, text) = call(&client, "vote_tip", json!({"tip": second.as_str(), "verdict": "helpful"})).await;
     assert!(!ok && text.contains(&format!("tip {second} is not live (voted wrong)")), "{text}");

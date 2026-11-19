@@ -58,6 +58,9 @@ pub const MAX_TRAIL_PHASES: usize = 32;
 pub const MAX_TRAIL_WAYPOINTS: usize = 32;
 /// How long [`TRAIL_RUNS_BUCKET`] keeps a finished run, at least.
 pub const TRAIL_RUN_RETENTION: Duration = Duration::from_hours(30 * 24);
+/// How far ahead of a reader's clock a tip, a vote or a rating may be dated and still count: one dated further ahead
+/// counts for nothing until then, so no date set ahead keeps a record from ageing.
+pub const TRAIL_CLOCK_SKEW: chrono::TimeDelta = chrono::TimeDelta::minutes(1);
 
 /// What makes a message a trail's step: the run and call it serves ([`Envelope::trail_step`]). Its recipient answers
 /// it with an ordinary reply on the step's thread.
