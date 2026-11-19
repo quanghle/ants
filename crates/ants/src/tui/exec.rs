@@ -237,6 +237,8 @@ pub enum Job {
     TrailList,
     /// Show the saved trail, else the run, named, as `ants trail show` does.
     TrailShow(crate::cmd::trail::Shown),
+    /// List a trail's tips, or retire one, as `ants trail tips` does.
+    TrailTips(crate::cmd::trail::TipsArgs),
     /// List the runs of trails, as `ants trail runs` does.
     TrailRuns,
     /// Plan a run of the saved trail `trail` with `args` on `conductor` under `limits`, reporting on `thread`, else a
@@ -429,6 +431,7 @@ impl Job {
             Self::Withdraw { ants, message, edit } => withdraw(ctx, &ants, message, edit.map(|e| *e)).await,
             Self::TrailList => trail::trails(ctx).await,
             Self::TrailShow(what) => trail::shown(ctx, what).await,
+            Self::TrailTips(args) => trail::tips(ctx, &args).await,
             Self::TrailRuns => trail::listed(ctx).await,
             Self::TrailPlan { trail, conductor, args, limits, thread } => {
                 trail::planned(ctx, &trail, conductor, args, limits, thread).await

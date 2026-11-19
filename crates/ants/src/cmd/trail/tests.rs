@@ -1,4 +1,5 @@
 mod run;
+mod tips;
 
 use std::path::Path;
 

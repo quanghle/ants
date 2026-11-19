@@ -1,8 +1,9 @@
-//! `ants trail`: save, list, show and remove saved trails, and start, list, show, follow, stop and resume the runs of
-//! trails.
+//! `ants trail`: save, list, show and remove saved trails, list and retire the tips ants left on their steps, and
+//! start, list, show, follow, stop and resume the runs of trails.
 //!
 //! The saved trails are those of [`ants_proto::TRAILS_BUCKET`], which humans put and remove, and those of
-//! `~/.ants/trails/*.py` on this machine ([`saved`]); the runs are the records conductors keep in
+//! `~/.ants/trails/*.py` on this machine ([`saved`]); the tips are those of [`ants_proto::TRAIL_TIPS_BUCKET`], which
+//! humans retire and purge with their trail ([`tips`]); the runs are the records conductors keep in
 //! [`ants_proto::TRAIL_RUNS_BUCKET`], which humans read ([`runs`], [`follow`]), and humans ask a run's conductor to
 //! start, stop and resume one ([`control`], [`start`]).
 
@@ -13,11 +14,12 @@ pub(crate) mod saved;
 pub(crate) mod start;
 #[cfg(test)]
 mod tests;
+pub(crate) mod tips;
 
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use ants_proto::{RunId, TrailLimits, TrailName, UserId, Uuid};
+use ants_proto::{RunId, TipId, TrailLimits, TrailName, UserId, Uuid};
 use anyhow::{Result, bail};
 use async_nats::jetstream;
 use chrono::Utc;
@@ -60,8 +62,19 @@ pub(crate) enum TrailCommand {
         #[arg(long)]
         follow: bool,
     },
-    /// Remove a trail the colony saved. A local trail in ~/.ants/trails stays: delete its file. Needs a human's
-    /// credentials.
+    /// List the tips ants left on a trail's steps, the live ones in the order steps carry them: id, tip key, writer,
+    /// votes (+helpful ~stale !wrong), status, whether it was left on an older script than the one the colony saved,
+    /// age and text. Works whether the trail is still saved or not.
+    Tips {
+        #[command(flatten)]
+        tips: TipsArgs,
+        /// One JSON object per tip: its record, votes, tally, status, score and older-script mark; with --retire, the
+        /// retired tip's record.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a trail the colony saved, and the tips ants left on its steps. A local trail in ~/.ants/trails stays:
+    /// delete its file. Needs a human's credentials.
     Rm {
         /// The trail's name.
         name: TrailName,
@@ -129,6 +142,22 @@ pub(crate) struct RunArgs {
     /// ends, rather than its steps.
     #[arg(long)]
     pub(crate) json: bool,
+}
+
+/// `ants trail tips`.
+#[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TipsArgs {
+    /// The trail's name.
+    pub(crate) name: TrailName,
+    /// Only the tips under this tip key, the `tips=` of the steps they were left on.
+    #[arg(long, value_name = "KEY")]
+    pub(crate) key: Option<String>,
+    /// The retired tips too, after the live ones.
+    #[arg(long)]
+    pub(crate) all: bool,
+    /// Retire the tip ID instead, which steps carry and searches find no more. Needs a human's credentials.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["key", "all"])]
+    pub(crate) retire: Option<TipId>,
 }
 
 /// What a run may spend, each limit at most its maximum ([`TrailLimits::MAX`]).
@@ -254,11 +283,12 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
                 follow::follow(&js, header, false).await?;
             }
         }
+        TrailCommand::Tips { tips: args, json } => show_tips(nats, &args, json).await?,
         TrailCommand::Rm { name } => {
             human(nats, "removing a trail")?;
             let (_, js) = nats.connect("ants-cli").await?;
-            saved::remove(&js, &saved::local_dir()?, &name).await?;
-            println!("removed trail {name}");
+            let purged = saved::remove(&js, &saved::local_dir()?, &name).await?;
+            println!("removed trail {name}{}", tips::purged(purged));
         }
         TrailCommand::Runs { ant, json } => {
             human(nats, "reading the runs of trails")?;
@@ -277,6 +307,33 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
                 println!("{}", runs::table(&listed, Utc::now()));
             }
         }
+    }
+    Ok(())
+}
+
+/// List the tips of the trail `args` names, or retire the one `--retire` names.
+async fn show_tips(nats: &Nats<'_>, args: &TipsArgs, json: bool) -> Result<()> {
+    if args.retire.is_some() {
+        human(nats, "retiring a tip")?;
+    }
+    let (_, js) = nats.connect("ants-cli").await?;
+    if let Some(id) = &args.retire {
+        let retired = tips::retire(&js, &args.name, id, &nats.me.id, Utc::now()).await?;
+        if json {
+            println!("{}", serde_json::to_string(&retired)?);
+        } else {
+            println!("{}", tips::retired(&retired, Utc::now()));
+        }
+        return Ok(());
+    }
+    let (board, script) = tips::read(&js, &args.name).await?;
+    let now = Utc::now();
+    if json {
+        for tip in &tips::listed(&board, args, script.as_deref(), now) {
+            println!("{}", serde_json::to_string(&tips::Json::from(tip))?);
+        }
+    } else {
+        print!("{}", tips::render(&board, args, script.as_deref(), now));
     }
     Ok(())
 }
@@ -336,7 +393,7 @@ fn human(nats: &Nats<'_>, what: &str) -> Result<()> {
 }
 
 /// `rows` as columns two spaces apart, each as wide as its widest cell, without trailing blanks.
-fn columns<const N: usize>(rows: &[[String; N]]) -> String {
+pub(crate) fn columns<const N: usize>(rows: &[[String; N]]) -> String {
     let mut widths = [0; N];
     for row in rows {
         for (width, cell) in widths.iter_mut().zip(row) {

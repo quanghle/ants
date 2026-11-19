@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 use super::snooze;
 use crate::admin::orders::{add, clone};
 use crate::cmd::trail::runs::Pick;
-use crate::cmd::trail::{LimitArgs, Shown};
+use crate::cmd::trail::{LimitArgs, Shown, TipsArgs};
 use crate::threads::thread_meta::Marking;
 
 /// The slash commands: name, arguments and what each does, as the list shows them. A command of several forms lists
@@ -62,9 +62,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ),
     (
         "trail",
-        "list | show NAME|RUN | runs | run NAME [@ANT] [--steps N] [--at-once N] [--turns N] [--wall DUR] \
-         [--thread THREAD] [ARGS] | stop RUN | resume RUN [--steps N] [--at-once N] [--turns N] [--wall DUR]",
-        "list or show saved trails and runs, start a run of a saved trail once y confirms it, stop or resume a run",
+        "list | show NAME|RUN | tips NAME [--key KEY] [--all] | tips NAME --retire ID | runs | run NAME [@ANT] \
+         [--steps N] [--at-once N] [--turns N] [--wall DUR] [--thread THREAD] [ARGS] | stop RUN | resume RUN \
+         [--steps N] [--at-once N] [--turns N] [--wall DUR]",
+        "list or show saved trails and runs, list or retire a trail's tips, start a run of a saved trail once y \
+         confirms it, stop or resume a run",
     ),
     ("quit", "", "leave ants chat"),
 ];
@@ -176,6 +178,8 @@ pub enum Trail {
     List,
     /// Show the saved trail, else the run, named.
     Show(Shown),
+    /// List a trail's tips, or retire one.
+    Tips(TipsArgs),
     Runs,
     /// Start a run of the saved trail `trail` with `args`, a JSON value, on `conductor`, else whom a message naming no
     /// one goes to, under `limits`, reporting on `thread`, else a new one, once confirmed.
@@ -413,6 +417,7 @@ fn trail(args: &str) -> Result<Trail, Option<String>> {
         ("show", what) if !what.is_empty() && !what.contains(char::is_whitespace) => {
             what.to_ascii_lowercase().parse().map(Trail::Show).map_err(|e| error(&e))
         }
+        ("tips", rest) => flags("/trail tips", rest).map(Trail::Tips),
         ("runs", "") => Ok(Trail::Runs),
         ("run", rest) if !rest.is_empty() => trail_run(rest),
         ("stop", run) if !run.is_empty() && !run.contains(char::is_whitespace) => {
@@ -665,11 +670,12 @@ mod tests {
         assert_eq!(trail("/trail stop 0190AB"), Trail::Stop("0190ab".parse().unwrap()));
         let resume = Trail::Resume { run: "0190ab".parse().unwrap(), limits: LimitArgs::default() };
         assert_eq!(trail("/trail resume 0190ab"), resume);
-        let usage = "usage: /trail list | show NAME|RUN | runs | run NAME [@ANT] [--steps N] [--at-once N] [--turns N] \
-                     [--wall DUR] [--thread THREAD] [ARGS] | stop RUN | resume RUN [--steps N] [--at-once N] [--turns N] \
-                     [--wall DUR]";
+        let usage = "usage: /trail list | show NAME|RUN | tips NAME [--key KEY] [--all] | tips NAME --retire ID | runs \
+                     | run NAME [@ANT] [--steps N] [--at-once N] [--turns N] [--wall DUR] [--thread THREAD] [ARGS] | \
+                     stop RUN | resume RUN [--steps N] [--at-once N] [--turns N] [--wall DUR]";
         for refused in [
             "/trail",
+            "/trail tips",
             "/trail runs all",
             "/trail run",
             "/trail stop",
@@ -688,6 +694,16 @@ mod tests {
         assert!(parse("/trail run review {files").unwrap_err().starts_with("ARGS not JSON"));
         assert!(parse("/trail run review @Lead").is_err());
         assert!(parse("/trail stop review").unwrap_err().contains("hex digits"));
+
+        let tips = |name: &str| TipsArgs { name: name.parse().unwrap(), key: None, all: false, retire: None };
+        assert_eq!(trail("/trail tips deploy"), Trail::Tips(tips("deploy")));
+        let keyed = TipsArgs { key: Some("build image".to_owned()), all: true, ..tips("deploy") };
+        assert_eq!(trail(r#"/trail tips deploy --key "build image" --all"#), Trail::Tips(keyed));
+        let retire = TipsArgs { retire: Some("abcdefgh".parse().unwrap()), ..tips("deploy") };
+        assert_eq!(trail("/trail tips deploy --retire abcdefgh"), Trail::Tips(retire));
+        assert!(parse("/trail tips deploy --retire abcdefgh --all").unwrap_err().contains("cannot be used with"));
+        assert!(parse("/trail tips deploy --json").unwrap_err().contains("--json"));
+        assert!(parse("/trail tips Not_A_Name").unwrap_err().contains("trail name"));
     }
 
     #[test]
@@ -826,7 +842,9 @@ mod tests {
     /// A sample of an argument [`COMMANDS`] names; a new placeholder needs one here.
     fn sample(arg: &str) -> &str {
         match arg {
-            "ID" | "THREAD" | "RUN" => "019a",
+            "THREAD" | "RUN" => "019a",
+            "ID" => "k3f7q2ab",
+            "KEY" => "build",
             "SEQ" => "12",
             "TEXT" | "NOTE" | "QUERY" => "ship it",
             "N" => "2",

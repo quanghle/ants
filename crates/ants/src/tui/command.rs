@@ -304,20 +304,26 @@ impl Model {
             Slash::Clone { src, new, machine, settings, wait } => run(Job::Clone { src, new, machine, settings, wait }),
             Slash::Retire(ant) => run(Job::Retire { ant }),
             Slash::Dead(dead) => self.dead(dead),
-            Slash::Trail(trail) => run(match trail {
-                Trail::List => Job::TrailList,
-                Trail::Show(what) => Job::TrailShow(what),
-                Trail::Runs => Job::TrailRuns,
-                Trail::Run { trail, conductor, args, limits, thread } => {
-                    let thread = thread.map(|on| self.on_thread(on)).transpose()?;
-                    Job::TrailPlan { trail, conductor, args, limits, thread }
-                }
-                Trail::Stop(run) => Job::TrailStop(run),
-                Trail::Resume { run, limits } => Job::TrailResume { run, limits },
-            }),
+            Slash::Trail(trail) => run(self.trail(trail)?),
             Slash::Attach(_) | Slash::Detach => Ok(None),
             Slash::Quit => Ok(Some(Action::Quit)),
         }
+    }
+
+    /// The job the `/trail` subcommand `trail` runs.
+    fn trail(&self, trail: Trail) -> Result<Job, String> {
+        Ok(match trail {
+            Trail::List => Job::TrailList,
+            Trail::Show(what) => Job::TrailShow(what),
+            Trail::Tips(args) => Job::TrailTips(args),
+            Trail::Runs => Job::TrailRuns,
+            Trail::Run { trail, conductor, args, limits, thread } => {
+                let thread = thread.map(|on| self.on_thread(on)).transpose()?;
+                Job::TrailPlan { trail, conductor, args, limits, thread }
+            }
+            Trail::Stop(run) => Job::TrailStop(run),
+            Trail::Resume { run, limits } => Job::TrailResume { run, limits },
+        })
     }
 
     /// Stage a file for the next message, or drop those staged, the bar kept open to write it.
