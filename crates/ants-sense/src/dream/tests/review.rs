@@ -57,7 +57,7 @@ fn an_answer_is_read_from_its_last_json_block_at_most_twenty_findings() {
     findings.push(finding(" ", "Without a kind", cited.clone()));
     let text = format!("```json\n{{\"findings\": []}}\n```\n{}", fenced(&findings));
     let parsed = parse(&text).unwrap();
-    assert_eq!((parsed.findings.len(), parsed.over, parsed.invalid), (MAX_FINDINGS, 1, 2));
+    assert_eq!((parsed.findings.len(), parsed.over, parsed.unreadable), (MAX_FINDINGS, 1, 2));
     let (text, advice) = &parsed.findings[0];
     assert_eq!((text.as_str(), advice.kind.as_str()), ("Finding 1", "stale_memory"));
     assert_eq!(advice.evidence.files, ["src/lib.rs:12"]);

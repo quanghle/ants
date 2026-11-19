@@ -9,7 +9,7 @@
 //! untrusted memory, is marked untrusted ([`Finding::untrusted`]); what the ant writes on the thread while one is open
 //! is untrusted too ([`untrusted_on`]). A [`TRAIL`] finding suggests a saved trail ([`Outline`]).
 
-mod outline;
+pub(in crate::dream) mod outline;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -70,9 +70,12 @@ pub struct Review {
     /// The id of the sage's answer, once taken.
     #[serde(default)]
     pub answer: Option<Uuid>,
-    /// The findings of the answer left out: past [`MAX_FINDINGS`], or unreadable.
-    #[serde(default)]
-    pub left_out: usize,
+    /// The readable findings of the answer left out past its caps ([`Parsed::over`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub over: usize,
+    /// The findings of the answer left out as unreadable ([`Parsed::unreadable`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unreadable: usize,
     /// What is new in the verdicts and outcomes of the sage's earlier findings since the ant's last review by it, as
     /// the message tells the sage ([`Dream::review_outcomes`]): set when the dream began, the same on every try.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -95,7 +98,8 @@ impl Review {
             message: Uuid::now_v7(),
             sent: false,
             answer: None,
-            left_out: 0,
+            over: 0,
+            unreadable: 0,
             outcomes,
             earlier_findings,
             late: Vec::new(),
@@ -194,7 +198,18 @@ pub struct Parsed {
     pub over: usize,
     /// The findings left out as unreadable: without a kind, a text, an action or any evidence, or of kind [`TRAIL`]
     /// without a cited thread or a readable outline.
-    pub invalid: usize,
+    pub unreadable: usize,
+}
+
+impl Parsed {
+    /// Whether it left out none of the findings given.
+    fn whole(&self) -> bool {
+        self.over + self.unreadable == 0
+    }
+}
+
+pub(in crate::dream) fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// The findings of a sage's answer `text`: from its last fenced block, or else its whole text, holding JSON of the form
@@ -213,7 +228,7 @@ pub fn parse(text: &str) -> Option<Parsed> {
                 trails += usize::from(finding.1.kind == TRAIL);
                 parsed.findings.push(finding);
             }
-            None => parsed.invalid += 1,
+            None => parsed.unreadable += 1,
         }
     }
     Some(parsed)
@@ -361,7 +376,7 @@ pub async fn answered(
             let past = own.filter_map(|finding| finding.id.split_once('.')?.1.parse().ok()).max().unwrap_or(0);
             review.answer = Some(message);
             review.late = sage_findings(items, &dream, &review, past, &late.findings).await?;
-            review.left_out = late.over + late.invalid;
+            (review.over, review.unreadable) = (late.over, late.unreadable);
             let taken = review.late.len();
             let mut values = Values::new();
             values.insert("review".into(), json!(review));
@@ -376,11 +391,11 @@ pub async fn answered(
                 dream.findings = findings;
                 dream.state = State::Answered;
                 dream.thread = Some(thread.clone());
-                review.left_out = parsed.over + parsed.invalid;
+                (review.over, review.unreadable) = (parsed.over, parsed.unreadable);
                 dream.review = Some(review);
                 Reviewed::Prompt(prompt(&dream, sage))
             }
-            Some(parsed) if parsed.over + parsed.invalid == 0 => {
+            Some(parsed) if parsed.whole() => {
                 dream.findings = kept(&dream, 0);
                 dream.state = State::Answered;
                 dream.review = Some(review);
@@ -481,12 +496,8 @@ fn prompt(dream: &Dream, sage: &UserId) -> String {
         own.len(),
         trail_applied(&dream.findings),
     );
-    if let Some(left_out) = dream.review.as_ref().map(|review| review.left_out).filter(|left_out| *left_out > 0) {
-        let _ = writeln!(
-            text,
-            "{left_out} more findings of the answer were left out: past the {MAX_FINDINGS} an answer gives, or \
-             unreadable."
-        );
+    if let Some(review) = &dream.review {
+        let _ = write!(text, "{}", left_out(review.over, review.unreadable));
     }
     let _ = writeln!(
         text,
@@ -509,6 +520,27 @@ fn prompt(dream: &Dream, sage: &UserId) -> String {
         }
     }
     commits(dream, &mut text);
+    text
+}
+
+/// The lines telling what an answer left out: `over` readable findings past its caps and `unreadable` findings, each
+/// told apart; nothing when it left out none.
+pub(in crate::dream) fn left_out(over: usize, unreadable: usize) -> String {
+    let mut text = String::new();
+    if over > 0 {
+        let _ = writeln!(
+            text,
+            "{over} more findings of the answer were left out: past the {MAX_FINDINGS} findings or the \
+             {MAX_TRAIL_FINDINGS} trail findings an answer gives."
+        );
+    }
+    if unreadable > 0 {
+        let _ = writeln!(
+            text,
+            "{unreadable} findings of the answer were left out as unreadable: without a kind, a text, an action or any \
+             evidence, or a trail finding without a cited thread or an outline within its bounds."
+        );
+    }
     text
 }
 

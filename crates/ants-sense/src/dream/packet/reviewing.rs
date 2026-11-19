@@ -2,7 +2,8 @@
 //! records alone ([`ReviewRecord`]), never the text of their threads, which the packet leaves out ([`Covered::review`]):
 //! those asked, answered or told of within the dream's period, the latest asked first, each with the ant and dream
 //! reviewed, when asked and answered, what an answered one spent ([`ReviewRecord::spent`]) or that its spend is
-//! unknown, and each finding's kind, for a follow-up the earlier finding it follows, and what came of it; then the
+//! unknown, each finding's kind, for a follow-up the earlier finding it follows, and what came of it, and how many
+//! findings of the answer were left out past its caps or as unreadable; then the
 //! tally of all its reviews ([`tally_lines`]). It takes at most a share of the packet's budget ([`REVIEWING_SHARE`]),
 //! the earliest reviews left out first, and shrinks to its heading and tally for room before the identity is cut to
 //! titles.
@@ -17,6 +18,7 @@ use chrono::{DateTime, Utc};
 
 use super::Section;
 use crate::brief::TOP_EXPERIENCE;
+use crate::dream::review::left_out;
 use crate::dream::vitals::cost;
 use crate::dream::{Dream, Judgement, ReviewRecord, ReviewedFinding, review_records, review_tally, tally_lines};
 use crate::store::{Items, StoreError};
@@ -99,6 +101,7 @@ fn review(review: &ReviewRecord, followed: &Followed<'_>) -> String {
             let _ = writeln!(text, "  Followed up by {}.", follow_ups.join(", "));
         }
     }
+    text.push_str(&left_out(review.over, review.unreadable));
     text
 }
 

@@ -18,10 +18,10 @@ daemon's part), and every command and setting in [cli.md](cli.md#commands) and [
 - **A skill** tells one ant how to do something: instructions the ant follows turn by turn, its intermediate results in
   one context window.
 - **Sense** is an ant's memory ([sense.md](sense.md)): its identity, memories and work, learned by the ant itself. No
-  trail enters it.
+  trail's script, tip or rating enters it; a memory may name a saved trail to take, and stays judged by its own votes.
 - **A trail** is a script a conductor's daemon runs, coordinating several ants and humans over time: its plan lives in
   code, its intermediate results in script variables, each step in a clean context. Trails are colony-wide, written
-  by humans or ants, and handed to ants, never learned.
+  by humans or ants, and handed to ants: a trail itself is never learned.
 
 Write a trail when work splits into many steps that each deserve a fresh context, when findings need a verifier other
 than their author, when discovery must repeat until it runs dry, or when a human must approve a step mid-run. For a
@@ -128,10 +128,13 @@ Trails also come from dreams ([sense.md](sense.md#dreams)): a sage's finding of 
 approach the ant took again and again across its threads, cites those threads, and outlines a saved trail taking its
 specifics as args (name, description, args with an example each, phases), without a script. The ant applies it on the
 dream thread by writing the script, trying it with `run_trail` where a run is safe, saving it with `save_trail` naming
-the finding in `finding`, and naming the trail in the `trails` of the finding's `sense_dream` verdict. Such a save
-counts as one of the dream's 20 writes; it is refused when the finding rests on untrusted text ([Trust](#trust)), or
-when a saved trail other than the one saved already serves the task the finding suggests (`find_trails` would show it
-with more ratings worked than failed): the finding is then rejected naming that trail. To spare such findings, the
+the finding in `finding`, and naming the trail in the `trails` of the finding's `sense_dream` verdict. A `trail`
+finding marked untrusted, resting on text from outside, is neither run nor saved: the ant's prompt says so and tells how
+to apply a trail finding only when a trusted one is among the findings, and the ant answers it rejected or deferred.
+Such a save counts as one of the dream's 20 writes; it is refused when the finding rests on untrusted text, when the
+dream covers untrusted text and the finding is no `trail` finding ([Trust](#trust)), or when a saved trail other than
+the one saved already serves the task the finding suggests (`find_trails` would show it with more ratings worked than
+failed): the finding is then rejected naming that trail. To spare such findings, the
 sage's packet lists the colony's saved trails, their descriptions and ratings, and the sage's track record counts an
 applied `trail` finding as holding only while its trail stays saved and is rated failed no more often than worked.
 
@@ -383,8 +386,8 @@ A run takes the trust of the thread it started on (its origin):
   outside the bus. These run only saved trails: the colony's, which a human saved or an ant saved from a trusted
   thread (`save_trail` and `remove_trail` are refused on an untrusted thread, a step of an untrusted run included, and
   `save_trail` in answer to a dream finding marked untrusted, or on a dream's thread whose dream holds untrusted text
-  without naming a trusted finding), and the files of the conductor machine's `~/.ants/trails`, which name no saver
-  and pass no such check, so whoever writes there chooses what untrusted runs may run. An inline script is
+  without naming a trusted `trail` finding of it), and the files of the conductor machine's `~/.ants/trails`, which
+  name no saver and pass no such check, so whoever writes there chooses what untrusted runs may run. An inline script is
   refused (`a run started from a webhook's thread
   runs only saved trails`), a goto to one too (`… goes only to saved trails`), and each step's thread is narrowed to
   the read-only tool rules webhook threads get by default ([config.md](config.md#tool-permissions)). A schedule

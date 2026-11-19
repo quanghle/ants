@@ -255,7 +255,7 @@ fn own(dream: &Dream) -> impl Iterator<Item = (&Finding, String)> {
 /// ant: a bounded batch of changed outcomes over [`OUTCOME_DAYS`] (oldest first), and follow-up targets over
 /// [`TRACK_RECORD_DAYS`], the same window as the packet's earlier findings. Both use the sage's numbering ([`own`]).
 /// An applied finding naming trails holds as [`track_record`] judges it by the colony's saved `trails`; where those
-/// are not known, as last told, or by its items alone when never told.
+/// are not known, as last told of the applied verdict, or by its items alone when never told of it.
 pub(in crate::dream) async fn review_history(
     items: &dyn Items,
     number: u64,
@@ -285,7 +285,10 @@ pub(in crate::dream) async fn review_history(
             let Some((_, verdict)) = verdicts.get(finding.id.as_str()) else { continue };
             let mut holds = verdict.verdict == Judgement::Applied;
             if holds && !verdict.trails.is_empty() {
-                let told_holds = told.get(told_as.as_str()).map(|(_, holds)| *holds);
+                let told_holds = told
+                    .get(told_as.as_str())
+                    .filter(|(told, _)| *told == FindingVerdict::Applied)
+                    .map(|(_, holds)| *holds);
                 holds = trails.named(&verdict.trails).1.or(told_holds).unwrap_or(true);
             }
             if holds {

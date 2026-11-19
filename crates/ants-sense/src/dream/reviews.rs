@@ -26,7 +26,7 @@ use rusqlite::{Connection, ToSql, named_params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::review::clean;
+use super::review::{clean, is_zero};
 use super::vitals::cost;
 use super::{Judgement, parse};
 use crate::cache::CacheError;
@@ -55,6 +55,12 @@ pub struct ReviewRecord {
     /// The findings of the answer, in their order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<ReviewedFinding>,
+    /// The readable findings of the answer left out past its caps ([`super::Parsed::over`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub over: usize,
+    /// The findings of the answer left out as unreadable ([`super::Parsed::unreadable`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unreadable: usize,
     /// What the review thread spent by the answer, when the sage's daemon knew.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spent: Option<ReviewSpend>,
@@ -110,7 +116,8 @@ impl ReviewRecord {
 
     fn new(ant: &UserId, dream: u64, thread: &ThreadId, at: DateTime<Utc>) -> Self {
         let (answered, findings, spent) = (None, Vec::new(), None);
-        Self { ant: ant.clone(), dream, thread: thread.clone(), received: at, answered, findings, spent }
+        let (ant, thread) = (ant.clone(), thread.clone());
+        Self { ant, dream, thread, received: at, answered, findings, over: 0, unreadable: 0, spent }
     }
 
     /// Apply `told` at `at`: the ant's verdict on one of its findings, its reason, and whether it still holds.
@@ -227,8 +234,10 @@ pub async fn review_answered(
             return Ok(false);
         }
         record.answered = Some(at);
-        record.findings = parse(text)
-            .map_or_default(|parsed| parsed.findings)
+        let parsed = parse(text).unwrap_or_default();
+        (record.over, record.unreadable) = (parsed.over, parsed.unreadable);
+        record.findings = parsed
+            .findings
             .into_iter()
             .zip(1..)
             .map(|((_, advice), n)| {
