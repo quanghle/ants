@@ -108,7 +108,7 @@ pub(super) fn stuck(
     let mut found: Vec<Check> = listed
         .iter()
         .filter_map(|run| {
-            let name = match run.trail() {
+            let name = match run.first_trail() {
                 Some(trail) => format!("run {} of trail {trail}", run.run),
                 None => format!("run {} of an inline script", run.run),
             };

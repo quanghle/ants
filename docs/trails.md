@@ -235,11 +235,12 @@ A run reports on the thread it started with, as its conductor:
   `ants trail resume <run>` when a limit was met), or who stopped it and how to resume it; a run of more than one leg
   ends it with a line `route: <route>`.
 
-`ants trail runs` lists the runs of every conductor, or `--ant CONDUCTOR`'s; `ants trail show RUN` prints a run (its
-id or a unique start of one): state, phase, spending, args, its route (each leg's trail, waypoint, start and steps),
-its child runs with their states, the calls waiting and queued, and its journal; `--follow` follows it as
-`ants trail run --follow` does. These need human credentials. In `ants chat`, `/trail runs` shows the same list in the
-pager, and `/trail show RUN` the run as `ants trail show RUN` prints it.
+`ants trail runs` lists the runs of every conductor, or `--ant CONDUCTOR`'s, each with the trail it started (its route
+once it went on by `goto()`); `ants trail show RUN` prints a run (its id or a unique start of one): state, phase,
+spending, args, its route (each leg's trail, waypoint, start and steps), its child runs with their states, the calls
+waiting and queued, and its journal; `--follow` follows it as `ants trail run --follow` does. These need human
+credentials. In `ants chat`, `/trail runs` shows the same list in the pager, and `/trail show RUN` the run as
+`ants trail show RUN` prints it.
 
 ## Limits
 
