@@ -92,7 +92,8 @@ impl Trails {
         // The header first: a session stored for a leg its header does not list yet would be one no restart finds. The
         // session last: until it is stored, a restart finds the steps left in the session before, and gives them up.
         let stored = async {
-            self.give_up_left(slot).await?;
+            self.save_header(slot).await?;
+            self.abandon_left(slot).await;
             self.save_session(slot).await
         };
         let stored = stored.await;
@@ -110,12 +111,17 @@ impl Trails {
             return Ok(());
         }
         self.save_header(slot).await?;
+        self.abandon_left(slot).await;
+        Ok(())
+    }
+
+    /// Give up the steps of the leg the run of `slot` left, its stored header listing the next.
+    async fn abandon_left(&self, slot: &Slot) {
         let (header, left) = {
             let mut book = slot.book();
             (book.header.clone(), std::mem::take(&mut book.left))
         };
         self.abandon(&header, &left).await;
-        Ok(())
     }
 }
 
