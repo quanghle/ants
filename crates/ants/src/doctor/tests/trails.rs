@@ -86,7 +86,7 @@ fn runs_moving_on_or_over_for_good_are_not_stuck() {
     let raised = record("dev-a", failed("Traceback:\nValueError: the run reached its limit of 50 steps", None), 2, now);
     let mut at_most = record("dev-a", failed("the run reached its limit of 500 steps", Some(RunLimit::Steps)), 2, now);
     at_most.limits.steps = TrailLimits::MAX.steps;
-    let no_flag = record("dev-a", failed("TimeoutError: turn time limit exceeded", Some(RunLimit::Compute)), 2, now);
+    let no_flag = record("dev-a", failed("TimeoutError: feed time limit exceeded", Some(RunLimit::Compute)), 2, now);
     let past_any_wall = record("dev-a", RunState::Stopped { by: p("alice") }, 8 * 24, now);
     let listed = [running.clone(), waiting_on_humans, done, raised, at_most, no_flag, past_any_wall];
     let pending = [(running.run, vec![step("dev-b"), step("dev-a")])];

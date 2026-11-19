@@ -163,8 +163,10 @@ fn start(script: &str, args: &serde_json::Value, limits: Limits, clock: i64, see
         Ok(run) => run.with_os_policy(policy(clock, seed)),
         Err(e) => return session.failed(e),
     };
+    // A feed, as Monty counts it, is one resume: the host calls answered at once (log(), os.urandom(), a name
+    // lookup) start a new turn of it, not a new feed.
     let tracker = ResourceTracker::new(ResourceLimits {
-        max_turn_duration: Some(limits.compute()),
+        max_feed_duration: Some(limits.compute()),
         max_memory: Some(limits.memory_bytes),
         max_recursion_depth: limits.recursion,
         ..ResourceLimits::default()
@@ -178,6 +180,7 @@ fn start(script: &str, args: &serde_json::Value, limits: Limits, clock: i64, see
         MontyObject::function("__ants_phase", None),
         MontyObject::function("__ants_log", None),
     ];
+    session.next_resume();
     let progress = run.start(inputs, tracker, session.writer());
     session.drive(progress).respond(session)
 }
@@ -201,6 +204,7 @@ fn resume(snapshot: &RawValue, answers: Vec<(u32, Answer)>, limits: Limits, seed
             }
         };
         session.next_resume();
+        waiting.tracker().on_feed_start();
         let progress = waiting.resume(vec![(call, result)], session.writer());
         match session.drive(progress) {
             Outcome::Waiting(next) => waiting = *next,
@@ -275,8 +279,8 @@ struct Session {
     called: usize,
     events: Vec<Event>,
     notes: Notes,
-    /// When Monty last took over, starting the turn its compute limit applies to.
-    turn: Instant,
+    /// When the current resume started, the compute limit applying to it.
+    resumed: Instant,
     /// The limit the script broke, should it fail: one of time or memory it failed on, else the steps once a call
     /// past them raised.
     limit: Option<Limit>,
@@ -328,29 +332,34 @@ impl Session {
             called: 0,
             events: Vec::new(),
             notes: Notes::default(),
-            turn: Instant::now(),
+            resumed: Instant::now(),
             limit: None,
         }
     }
 
-    /// Starts the turn Monty takes over for, lending it the writer of `print()`.
+    /// Lends Monty the writer of `print()`.
     fn writer(&mut self) -> PrintWriter<'_> {
-        self.turn = Instant::now();
         PrintWriter::Callback(&mut self.notes)
     }
 
-    /// Starts the resume of the next answer: its calls and notes are bounded anew.
+    /// Starts the next resume, of the start or of an answer: its compute, calls and notes are bounded anew.
     fn next_resume(&mut self) {
+        self.resumed = Instant::now();
         self.called = 0;
         self.notes.written = 0;
     }
 
     /// The limit of Monty's that `exception`, ending the script, says it broke. Monty raises an uncatchable
-    /// TimeoutError or MemoryError for its limits, but tells them from the script's own by nothing: the time limit
-    /// is told by the time the turn took, the memory limit by Monty's message naming the request's limit.
+    /// TimeoutError or MemoryError for its limits, never from a `raise` statement, which is where every exception
+    /// of the script's own comes from: its innermost frame then hides the caret, as CPython's traceback of a `raise`.
+    /// Past that, the time limit is told by the time the resume took, the memory limit by Monty's message naming the
+    /// request's limit, which tell them from the errors Monty's builtins raise.
     fn broke(&self, exception: &MontyException) -> Option<Limit> {
+        if exception.traceback().last().is_some_and(|frame| frame.hide_caret) {
+            return None;
+        }
         match exception.exc_type() {
-            ExcType::TimeoutError if self.turn.elapsed() >= self.limits.compute() => Some(Limit::Compute),
+            ExcType::TimeoutError if self.resumed.elapsed() >= self.limits.compute() => Some(Limit::Compute),
             ExcType::MemoryError => {
                 let message = exception.message()?.strip_prefix("memory limit exceeded: ")?;
                 let (used, limit) = message.strip_suffix(" bytes")?.split_once(" bytes > ")?;
