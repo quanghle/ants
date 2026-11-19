@@ -1289,6 +1289,7 @@ fn ants_whose_harness_runs_tools_unasked_are_warned_of_rules_that_miss_them() {
              [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nallow = [\"read:*\"]\n\
              [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\n\
              [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nharness = \"gated\"\nallow = [\"read:*\"]\n\
+             [[ant]]\nname = \"dev-d\"\nworkdir = \".\"\ntools = \"ask\"\nallow = [\"read:*\"]\n\
              [[schedule]]\nname = \"nightly\"\ncreds = {creds:?}\nevery = \"4h\"\nant = \"dev-b\"\ntext = \"t\"\nallow = [\"read:*\"]\n"
         ),
     )
@@ -1300,6 +1301,7 @@ fn ants_whose_harness_runs_tools_unasked_are_warned_of_rules_that_miss_them() {
         [("ant dev-a tool permissions", Status::Warn), ("ant dev-b tool permissions", Status::Warn)]
     );
     assert!(checks[1].detail.contains("schedule nightly"), "{}", checks[1]);
+    assert!(checks[0].fix[0].starts_with("set tools = \"ask\" on the ant or in [harnesses.claude]"), "{}", checks[0]);
 
     std::fs::write(&config, "messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n").unwrap();
     let mut checks = Vec::new();

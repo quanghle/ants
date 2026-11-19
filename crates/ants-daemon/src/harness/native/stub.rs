@@ -4,7 +4,8 @@
 //! The CLI answers `initialize` with `{name, version, fork, steer}`, `new` and `fork` with `{id}`, `load` with anything,
 //! `prompt` with `{stop, tokens}` and `steer`, which adds `{session, text}` to the running prompt, with `{accepted}`,
 //! failing as [`mapped`] reads. It notifies `update` with `{kind, text}` (`message`,
-//! `thought`), `{kind: "tool", id, title}` or `{kind: "cost", usd}`, and may ask `approve`, which is denied. `cancel`
+//! `thought`), `{kind: "tool", id, title}` or `{kind: "cost", usd}`, and may ask `approve` with `{id, tool}`, answered
+//! `{approved}`: asked of the client when the ant asks ants about its tools, else denied. `cancel`
 //! and `close` are notified to it. `mcp` is answered with `{servers}`, each an [`McpServerState`], and `mcp_sign_in`
 //! with `{url}`, the address to sign in at, if any; the browser's return is requested on the loopback.
 
@@ -12,7 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::Error;
-use agent_client_protocol::v1::schema::{ContentBlock, PromptResponse, StopReason, ToolCall, Usage};
+use agent_client_protocol::v1::schema::{
+    ContentBlock, PromptResponse, StopReason, ToolCall, ToolCallUpdate, ToolCallUpdateFields, Usage,
+};
 use ants_proto::McpServerState;
 use anyhow::bail;
 use serde_json::{Value, json};
@@ -20,8 +23,8 @@ use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    Cli, Harness, Incoming, Info, Native, NativeSession, Open, Process, Rpc, RpcError, Updates, context_overflow,
-    deny_approval, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out,
+    Cli, Harness, Incoming, Info, Native, NativeSession, Open, Process, Rpc, RpcError, Updates, approve,
+    context_overflow, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out,
 };
 use crate::sync::MutexExt as _;
 
@@ -84,7 +87,7 @@ fn mapped(e: &RpcError) -> Error {
     }
 }
 
-/// Send the CLI's updates to the prompt running, and deny what it asks.
+/// Send the CLI's updates to the prompt running, and answer what it asks ([`approve`]).
 async fn route(
     mut incoming: mpsc::UnboundedReceiver<Incoming>,
     mut flushes: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
@@ -119,8 +122,16 @@ async fn route(
                 }
             }
             Incoming::Request { id, method, params } if method == "approve" => {
-                deny_approval(&shared.cli, &params.to_string());
-                let _ = shared.rpc.respond(id, json!({ "approved": false })).await;
+                let updates = shared.current.locked().clone();
+                let call = ToolCallUpdate::new(
+                    params["id"].as_str().unwrap_or("approve").to_owned(),
+                    ToolCallUpdateFields::new().title(params["tool"].as_str().unwrap_or_default().to_owned()),
+                );
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    let approved = approve(&shared.cli, updates, call, &params.to_string()).await;
+                    let _ = shared.rpc.respond(id, json!({ "approved": approved })).await;
+                });
             }
             other => tracing::warn!(?other, "the stub CLI sent something unknown"),
         }
@@ -174,6 +185,8 @@ impl Native for Stub {
     }
 
     const MCP: bool = true;
+
+    const ASKS: bool = true;
 
     async fn new_session(&self, open: Open) -> Result<StubSession, Error> {
         let cli = &self.shared.cli;

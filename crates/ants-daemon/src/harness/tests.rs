@@ -437,6 +437,35 @@ fn a_harness_running_its_tools_unasked_tells_which_gating_misses_them() {
 }
 
 #[test]
+fn a_harness_asking_ants_about_its_tools_runs_its_ask_variant() {
+    let asking = |harness: &Harness| harness.with_tools(Some(Tools::Ask)).map(|h| (h.args, h.mode));
+    let copilot = builtin("copilot").with_tools(Some(Tools::Ask)).unwrap();
+    assert!(!copilot.bypasses_permissions());
+    assert_eq!(copilot.tools(), Tools::Ask);
+    assert_eq!(copilot.unenforced(&["read".to_owned()], true), None);
+    assert_eq!(command_line(&copilot, &[], Some("default")).1, ["--acp", "--context", "default"]);
+    assert_eq!(asking(&builtin("claude")).unwrap(), (Vec::new(), Some("auto".to_owned())));
+    assert_eq!(asking(&builtin("codex")).unwrap(), (Vec::new(), Some("agent".to_owned())));
+    assert_eq!(builtin("codex").with_tools(None).unwrap(), *builtin("codex"), "auto-approve by default");
+    let refused = format!("{:#}", builtin("antigravity").with_tools(Some(Tools::Ask)).unwrap_err());
+    assert!(refused.contains("harness antigravity runs its tools unasked and its definition sets no ask"), "{refused}");
+
+    let gated = custom("command = \"x\"\nargs = [\"--a\"]");
+    assert_eq!(asking(&gated).unwrap(), (vec!["--a".to_owned()], None), "itself");
+    let unasked = custom("command = \"x\"\nbypass_permissions = true\ntools = \"ask\"\nask = { mode = \"m\" }");
+    assert_eq!(unasked.with_tools(Some(Tools::AutoApprove)).unwrap().mode, None, "an ant's auto-approve wins");
+    assert_eq!(unasked.with_tools(None).unwrap().mode.as_deref(), Some("m"), "the definition's ask");
+
+    let define = |text: &str| parse_definitions(text).and_then(|defs| Harnesses::builtin().define(defs));
+    let err = |text: &str| format!("{:#}", define(text).unwrap_err());
+    assert!(err("[harnesses.custom]\ncommand = \"x\"\nask = {}").contains("ask must set args or mode"));
+    let unasking = err("[harnesses.antigravity]\ncommand = \"agy\"\nbypass_permissions = true\ntools = \"ask\"");
+    assert!(unasking.contains("tools = \"ask\" does not apply to it"), "{unasking}");
+    let tools = err("[harnesses.custom]\ncommand = \"x\"\ntools = \"sometimes\"");
+    assert!(tools.contains("auto-approve") && tools.contains("ask"), "{tools}");
+}
+
+#[test]
 fn reviews_run_on_a_variant_asking_before_running_tools() {
     let reviewing = |harness: &Harness| harness.reviewing().map(|h| (h.args, h.mode));
     let strings = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();

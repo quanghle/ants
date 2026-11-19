@@ -1188,6 +1188,28 @@ fn an_ant_added_from_a_template_takes_its_fallbacks_less_its_own_harness_and_mod
 }
 
 #[test]
+fn an_ants_tools_override_its_harness_and_fallbacks() {
+    let ant = |tools: &str, fallback: &str| {
+        let text = format!(
+            "[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"claude\"\n{tools}\nfallback = [{fallback}]"
+        );
+        let loaded = parse_all(&text)?;
+        loaded.ants[0].clone().into_config("nats://unused", &loaded.harnesses)
+    };
+    let config = ant("tools = \"ask\"", "\"codex\"").unwrap();
+    assert_eq!(config.harness.harness.mode.as_deref(), Some("auto"));
+    assert_eq!(config.harness.fallbacks[0].harness.mode.as_deref(), Some("agent"));
+    assert!(!config.harness.fallbacks[0].harness.bypasses_permissions());
+    let config = ant("", "\"codex\"").unwrap();
+    assert_eq!(config.harness.harness.mode.as_deref(), Some("bypassPermissions"), "auto-approve by default");
+
+    let err = format!("{:#}", ant("tools = \"ask\"", "\"antigravity\"").unwrap_err());
+    assert!(err.contains("ant dev-a: fallback \"antigravity\": harness antigravity runs its tools unasked"), "{err}");
+    let err = format!("{:#}", ant("tools = \"never\"", "").unwrap_err());
+    assert!(err.contains("tools"), "{err}");
+}
+
+#[test]
 fn the_signer_reads_only_the_templates_and_checks_requests_against_its_copy() {
     let dir = ants_test_support::scratch_dir("config-signer").canonicalize().unwrap();
     std::fs::create_dir(dir.join("src")).unwrap();

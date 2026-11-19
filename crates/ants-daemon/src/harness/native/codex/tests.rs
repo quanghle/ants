@@ -604,6 +604,44 @@ async fn codex_approval_requests_are_declined_without_asking_ants() {
     assert!(failed, "the declined command failed");
 }
 
+#[tokio::test]
+async fn codex_asks_ants_to_run_a_command_or_change_files_when_the_ant_asks() {
+    let codex = Fixture::new("codex-asking", "tools = \"ask\"");
+    let ask = |id: u64, method: &str, mut params: Value| {
+        (params["threadId"], params["turnId"]) = (THREAD.into(), TURN.into());
+        json!({ "id": id, "method": method, "params": params }).to_string()
+    };
+    let command = json!({ "itemId": "c1", "startedAtMs": 1, "command": "cargo test", "cwd": "/w", "reason": null });
+    let file = json!({ "itemId": "f1", "startedAtMs": 1, "reason": "write outside", "grantRoot": "/" });
+    let mut asking = turn_started(4, TURN);
+    asking.push(ask(0, "item/commandExecution/requestApproval", command));
+    let blocks = [
+        signed_in(),
+        vec![
+            vec![opened(3, THREAD)],
+            asking,
+            vec![ask(1, "item/fileChange/requestApproval", file)],
+            vec![delta("a1", "Done"), turn_completed(TURN, "completed", Value::Null)],
+        ],
+    ]
+    .concat();
+    codex.script(None, &blocks);
+    let policy = PermissionPolicy::new(Allowlist::parse(&["execute"]).unwrap(), None);
+    let session = Session::start(&codex.launch(ModelSettings::default()).with_policy(policy), None).await.unwrap();
+    assert_eq!(session.prompt("test it").await.unwrap(), "Done");
+    session.close().await;
+    let received = codex.received(1);
+    assert_eq!(received[3]["params"]["approvalPolicy"], "on-request");
+    assert_eq!(
+        received[5..7],
+        [
+            json!({ "id": 0, "result": { "decision": "accept" } }),
+            json!({ "id": 1, "result": { "decision": "decline" } }),
+        ],
+        "the command allowed by the allow rules, the edit with no approver to ask"
+    );
+}
+
 #[test]
 fn codex_modes_name_its_sandboxes() {
     let define = |table: &str| {

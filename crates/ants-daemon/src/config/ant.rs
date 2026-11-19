@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ants_proto::{BuiltinAnt, JsDomain, UserId};
@@ -19,7 +20,7 @@ use crate::daemon::{
     Config, Connection, HarnessSettings, Policy, Pooling, Presence, Spending, Storage, WorktreeSettings,
 };
 use crate::escalation::Chain;
-use crate::harness::{self, Harness, Harnesses, ModelSettings, PromptLimits};
+use crate::harness::{self, Harness, Harnesses, ModelSettings, PromptLimits, Tools};
 use crate::limits::caps::{Caps, Pool};
 use crate::limits::fallback::{self, Fallback};
 use crate::limits::pressure;
@@ -63,6 +64,9 @@ pub struct Ant {
     pub env: BTreeMap<String, String>,
     /// A harness name ([`Harnesses`]); the file's top-level `harness` when absent, which one of them must set.
     pub harness: Option<String>,
+    /// How the tools of its harness and fallbacks are approved, over their definitions' `tools`
+    /// ([`Harness::with_tools`]).
+    pub tools: Option<Tools>,
     /// The provider it is served with ([`Setting::named`]); the file's top-level `provider` when absent.
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -225,6 +229,7 @@ impl Ant {
             tasks: None,
             env: BTreeMap::new(),
             harness: None,
+            tools: None,
             provider: None,
             model: None,
             reasoning_effort: None,
@@ -274,7 +279,8 @@ impl Ant {
         let instructions = self.prompt_instructions();
         let caps = self.caps();
         let sage = self.reviewed_by();
-        let harness = harnesses.named(self.harness.as_deref()).with_context(|| format!("ant {}", self.name))?;
+        let named = harnesses.named(self.harness.as_deref()).with_context(|| format!("ant {}", self.name))?;
+        let harness = Arc::new(named.with_tools(self.tools).with_context(|| format!("ant {}", self.name))?);
         let model_settings = ModelSettings {
             model: self.model,
             reasoning_effort: self.reasoning_effort,
@@ -282,8 +288,9 @@ impl Ant {
             history_budget: self.history_budget,
         };
         model_settings.validate(&harness).with_context(|| format!("ant {}", self.name))?;
-        let fallbacks = fallbacks(self.template.is_some(), &self.fallback, &harness, &model_settings, harnesses)
-            .with_context(|| format!("ant {}", self.name))?;
+        let fallbacks =
+            fallbacks(self.template.is_some(), &self.fallback, &named, &model_settings, harnesses, self.tools)
+                .with_context(|| format!("ant {}", self.name))?;
         if self.builtin.is_some() {
             std::fs::create_dir_all(&self.workdir)
                 .with_context(|| format!("ant {}: creating workdir {}", self.name, self.workdir.display()))?;
@@ -447,14 +454,21 @@ fn builtin(kind: BuiltinAnt, harness: Option<&str>, home: &Path) -> Ant {
 }
 
 /// The fallbacks `entries` name for an ant whose own harness is `own` with `settings`: as [`fallback::resolve`] has
-/// them, or, of an ant added from a template (`templated`), as [`fallback::inherit`] does.
+/// them, or, of an ant added from a template (`templated`), as [`fallback::inherit`] does; their harnesses approve
+/// tools as the ant's `tools` says.
 pub(super) fn fallbacks(
     templated: bool,
     entries: &[String],
-    own: &std::sync::Arc<Harness>,
+    own: &Arc<Harness>,
     settings: &ModelSettings,
     harnesses: &Harnesses,
+    tools: Option<Tools>,
 ) -> Result<Vec<Fallback>> {
     let resolve = if templated { fallback::inherit } else { fallback::resolve };
-    resolve(entries, own, settings, harnesses)
+    let mut fallbacks = resolve(entries, own, settings, harnesses)?;
+    for fallback in &mut fallbacks {
+        let name = fallback.name();
+        fallback.harness = Arc::new(fallback.harness.with_tools(tools).with_context(|| format!("fallback {name:?}"))?);
+    }
+    Ok(fallbacks)
 }

@@ -716,6 +716,45 @@ async fn copilot_permission_requests_are_answered_without_asking_ants() {
     assert_eq!(decisions, [(json!("p1"), json!("approve-once")), (json!("p2"), json!("reject"))]);
 }
 
+#[tokio::test]
+async fn copilot_permission_requests_go_to_ants_when_the_ant_asks() {
+    let mut answered = 0;
+    let played = Played::new("copilot-asking", "tools = \"ask\"", move |method, params| {
+        let id = &params["sessionId"];
+        let asked = |request: &str, ask: Value| {
+            event(id, "permission.requested", json!({ "requestId": request, "permissionRequest": ask }))
+        };
+        let shell =
+            json!({ "kind": "shell", "toolCallId": "t1", "fullCommandText": "cargo test", "intention": "test" });
+        let write =
+            json!({ "kind": "write", "toolCallId": "t2", "fileName": "/w/a.rs", "diff": "", "intention": "edit" });
+        match method {
+            "session.send" => Some(default_answer(method, params).then(vec![asked("p1", shell), asked("p2", write)])),
+            "session.permissions.handlePendingPermissionRequest" => {
+                answered += 1;
+                let then = if answered == 2 { idle(id, false) } else { Vec::new() };
+                Some(Answer::ok(json!({ "success": true })).then(then))
+            }
+            _ => None,
+        }
+    });
+    let policy = PermissionPolicy::new(Allowlist::parse(&["execute"]).unwrap(), None);
+    let session = Session::start(&played.launch(ModelSettings::default()).with_policy(policy), None).await.unwrap();
+    assert_eq!(session.prompt("test it").await.unwrap(), "");
+    session.close().await;
+    let mut decisions: Vec<_> = played
+        .requests("session.permissions.handlePendingPermissionRequest")
+        .iter()
+        .map(|a| (a["requestId"].clone(), a["result"]["kind"].clone()))
+        .collect();
+    decisions.sort_by_key(|(request, _)| request.to_string());
+    assert_eq!(
+        decisions,
+        [(json!("p1"), json!("approve-once")), (json!("p2"), json!("reject"))],
+        "the command allowed by the allow rules, the edit with no approver to ask"
+    );
+}
+
 /// A `session.error` ending a turn.
 fn failing(params: &Value, error: Value) -> Answer {
     let id = &params["sessionId"];

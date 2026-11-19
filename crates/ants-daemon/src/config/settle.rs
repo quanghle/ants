@@ -146,9 +146,11 @@ fn check_machine(machine: &str) -> Result<()> {
     Ok(())
 }
 
-/// Check that `ant` names a harness, and that it and those of its fallbacks are defined.
+/// Check that `ant` names a harness, and that it and those of its fallbacks are defined and approve tools as its
+/// `tools` says.
 fn check_harnesses(ant: &Ant, harnesses: &Harnesses) -> Result<()> {
     let own = harnesses.named(ant.harness.as_deref())?;
+    own.with_tools(ant.tools)?;
     let settings = ModelSettings { model: ant.model.clone(), ..ModelSettings::default() };
-    fallbacks(ant.template.is_some(), &ant.fallback, &own, &settings, harnesses).map(drop)
+    fallbacks(ant.template.is_some(), &ant.fallback, &own, &settings, harnesses, ant.tools).map(drop)
 }

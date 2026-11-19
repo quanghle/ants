@@ -18,6 +18,11 @@
 # tool narrowing that cannot reach those tools. A [harnesses.<name>] table redefining one with a gated mode (such as
 # `mode = "default"`) and without `bypass_permissions` sends its tool requests to ants again.
 #
+# `tools` says how a harness's tools are approved: "auto-approve" (the default) runs them unasked as above; "ask"
+# starts sessions with the `args` or `mode` of `ask` instead, the harness's own gated or automatic mode, and sends
+# every tool request the harness would put to a human to ants: the ant's allow rules, then its approvers, rejected on
+# timeout. An ant's `tools` overrides its harness's. A harness offering no such mode (Antigravity) refuses "ask".
+#
 # `review` sets the `args` or `mode` a session reviewing for a sage starts with instead, so that it asks ants before
 # running a tool, which the daemon allows only within the review's read-only rules. A harness running its tools unasked
 # without `review` declines reviews; a [harnesses.<name>] table replacing a built-in sets its own.
@@ -25,10 +30,12 @@
 # GitHub Copilot CLI. A failed prompt ends as a reply, `Error: Failed to get response from the AI model; retried 5
 # times (...) Last error: 429 ...`. Its weekly rate limit lasts days, so it counts as a quota.
 # `--allow-all` allows every tool, path and URL; sessions stay in the agent mode, not the experimental autopilot.
+# Asking, without it, the CLI asks before running a tool its own rules do not allow.
 [harnesses.copilot]
 command = "copilot"
 args = ["--acp", "--allow-all"]
 bypass_permissions = true
+ask = { args = ["--acp"] }
 review = { args = ["--acp"] }
 sign_in = "copilot login"
 quota_exhausted = [
@@ -56,13 +63,15 @@ long_context = { args = ["--context", "long_context"] }
 
 # Claude Code through its ACP adapter, npm @agentclientprotocol/claude-agent-acp. Sign-in: `claude login`, or
 # ANTHROPIC_API_KEY. Sessions are switched to `bypassPermissions`, which the adapter offers only when not run as root
-# (unless IS_SANDBOX=1) and not disabled by the Claude Code settings' `disableBypassPermissionsMode`. A failed prompt
+# (unless IS_SANDBOX=1) and not disabled by the Claude Code settings' `disableBypassPermissionsMode`; asking, to `auto`,
+# whose classifier runs safe actions and asks about the rest (`acceptEdits` where the model lacks it). A failed prompt
 # is an ACP error with an `errorKind`: `You've hit your 5-hour limit · resets 6:43am`, `API Error: Request rejected
 # (429) · ...`, `Credit balance is too low` (`billing_error`).
 [harnesses.claude]
 command = "claude-agent-acp"
 mode = "bypassPermissions"
 bypass_permissions = true
+ask = { mode = "auto" }
 review = { mode = "default" }
 sign_in = "claude login"
 quota_exhausted = [
@@ -88,18 +97,20 @@ default = {}
 
 # Codex through its ACP adapter, npm @agentclientprotocol/codex-acp, which bundles @openai/codex. Sign-in: `codex-acp
 # login`, or CODEX_API_KEY or OPENAI_API_KEY with DEFAULT_AUTH_REQUEST = '{"methodId":"api-key"}' in `env`. Sessions
-# are switched to `agent-full-access`: no approvals, no sandbox. It reports tokens but no cost.
+# are switched to `agent-full-access`: no approvals, no sandbox; asking, to `agent`, which works in the workspace and
+# asks before leaving it or the network. It reports tokens but no cost.
 [harnesses.codex]
 command = "codex-acp"
 mode = "agent-full-access"
 bypass_permissions = true
+ask = { mode = "agent" }
 review = { mode = "read-only" }
 sign_in = "codex-acp login"
 memory_files = ["AGENTS.md", "AGENTS.override.md", "~/.codex/AGENTS.md", "~/.codex/AGENTS.override.md"]
 
 # Google Antigravity CLI. Sign-in: `agy` once (or `agy acp --login`), or a Gemini API key.
 # `--dangerously-skip-permissions` approves every tool request; without it, Antigravity still applies workspace reads
-# and edits per its own settings unasked, so it sets no review and declines reviews. No context selector: the model chooses the native
+# and edits per its own settings unasked, so it sets no review and declines reviews, and refuses `tools = "ask"`. No context selector: the model chooses the native
 # window. A failed prompt ends as a reply of `⚠ API error (attempt N): Error 429, Message:
 # ..., Status: RESOURCE_EXHAUSTED` lines and `⚠ Agent execution terminated due to error.`
 [harnesses.antigravity]

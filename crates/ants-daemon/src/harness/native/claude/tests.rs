@@ -192,9 +192,9 @@ const FIRST_ARGS: [&str; 13] = [
     "--replay-user-messages",
     "--thinking-display",
     "summarized",
+    "--strict-mcp-config",
     "--permission-prompts",
     "none",
-    "--strict-mcp-config",
 ];
 
 /// The events of a turn reading a file under `dir` with a todo list, then answering "Hello there".
@@ -449,21 +449,40 @@ async fn a_cancelled_claude_turn_is_interrupted_and_the_session_goes_on() {
     assert_eq!(native.received(2)[2], interrupt);
 }
 
-#[tokio::test]
-async fn a_tool_request_of_claude_is_denied_without_asking_ants() {
-    let native = Fixture::new("claude-approval", "mode = \"default\"");
+/// The answer of a session of a harness with `table`, on a launch with `allow` rules, to Claude Code's request to run
+/// `touch x`, and the arguments the CLI got.
+async fn approval(name: &str, table: &str, allow: &[&str]) -> (Value, Vec<String>) {
+    let native = Fixture::new(name, table);
     let ask = json!({ "type": "control_request", "request_id": "c1", "request": { "subtype": "can_use_tool",
         "tool_name": "Bash", "input": { "command": "touch x" }, "tool_use_id": "toolu_1" } });
     let denied = event(json!({ "type": "system", "subtype": "permission_denied", "tool_name": "Write",
         "tool_use_id": "toolu_2", "message": "Claude requested permissions to use Write, but you haven't granted it yet." }));
     let turn = vec![init(), denied, ask.to_string()];
-    native.script(None, &[vec![signed_in()], turn, vec![text("Skipped"), result(0.1, json!({}))]]);
-    // Every tool is allowed, were the request to reach ants.
-    let session = Session::start(&native.launch(ModelSettings::default()), None).await.unwrap();
-    assert_eq!(session.prompt("clean up").await.unwrap(), "Skipped");
+    native.script(None, &[vec![signed_in()], turn, vec![text("Done"), result(0.1, json!({}))]]);
+    let policy = PermissionPolicy::new(Allowlist::parse(allow).unwrap(), None);
+    let session = Session::start(&native.launch(ModelSettings::default()).with_policy(policy), None).await.unwrap();
+    assert_eq!(session.prompt("clean up").await.unwrap(), "Done");
     session.close().await;
-    let response = &native.received(2)[2]["response"];
-    assert_eq!((&response["request_id"], &response["response"]["behavior"]), (&json!("c1"), &json!("deny")));
+    let response = native.received(2)[2]["response"].clone();
+    assert_eq!(response["request_id"], "c1");
+    (response["response"].clone(), native.cli.args(2))
+}
+
+#[tokio::test]
+async fn a_tool_request_of_claude_is_denied_unless_the_ant_asks_ants() {
+    let (denied, args) = approval("claude-approval", "mode = \"default\"", &["*"]).await;
+    assert_eq!(denied["behavior"], "deny", "though every tool is allowed");
+    assert!(denied["message"].as_str().unwrap().contains("its permission settings allow"), "{denied}");
+    assert_eq!(args[..FIRST_ARGS.len()], FIRST_ARGS);
+
+    let asks = "mode = \"auto\"\ntools = \"ask\"";
+    let (allowed, args) = approval("claude-approval-allowed", asks, &["execute"]).await;
+    assert_eq!(allowed, json!({ "behavior": "allow", "updatedInput": { "command": "touch x" } }));
+    let prompts = ["--permission-prompts", "host", "--permission-prompt-tool", "stdio"];
+    assert_eq!(args[FIRST_ARGS.len() - 2..FIRST_ARGS.len() + 2], prompts);
+    let (rejected, _) = approval("claude-approval-rejected", asks, &["read"]).await;
+    assert_eq!(rejected["behavior"], "deny");
+    assert!(rejected["message"].as_str().unwrap().contains("approvers did not allow"), "{rejected}");
 }
 
 #[tokio::test]

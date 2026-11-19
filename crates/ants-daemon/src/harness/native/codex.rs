@@ -6,8 +6,9 @@
 //! approval policy and sandbox, the ant's model and reasoning effort, and the session's MCP servers as per-thread
 //! config (`mcp_servers.<name>`), none of which a thread keeps when resumed or forked. A prompt is a turn
 //! (`turn/start`, `turn/steer` to add a message to it, `turn/interrupt` to cancel) whose item and token-usage
-//! notifications stream as ACP updates until `turn/completed`. Approval requests of the server are declined at once. A
-//! closed session unsubscribes from its thread (`thread/unsubscribe`), which the server then unloads.
+//! notifications stream as ACP updates until `turn/completed`. Approval requests of the server are declined at once,
+//! unless the ant asks ants about its tools: then its threads run with approval policy `on-request`, and the server's
+//! requests to run a command or change files go to ants ([`super::approve`]). A closed session unsubscribes from its thread (`thread/unsubscribe`), which the server then unloads.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,7 +27,7 @@ use tokio::process::ChildStdin;
 use tokio::sync::mpsc;
 
 use super::{
-    Cli, Credentials, Harness, Incoming, Info, Native, NativeSession, Open, Process, Rpc, Setting, Updates,
+    Cli, Credentials, Harness, Incoming, Info, Native, NativeSession, Open, Process, Rpc, Setting, Updates, approve,
     context_overflow, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited, signed_out,
 };
 use crate::sync::MutexExt as _;
@@ -35,12 +36,17 @@ use crate::sync::MutexExt as _;
 const MIN_VERSION: [u64; 3] = [0, 169, 0];
 
 /// The definition's `mode` values, each with the approval policy and sandbox mode of the threads it opens; the first
-/// is the default. None asks: the sandbox is the restriction.
+/// is the default. None asks: the sandbox is the restriction, unless the ant asks ants about its tools
+/// ([`ASKING_POLICY`]).
 const MODES: [(&str, &str, &str); 3] = [
     ("workspace-write", "never", "workspace-write"),
     ("read-only", "never", "read-only"),
     ("full-access", "never", "danger-full-access"),
 ];
+
+/// The approval policy of the threads of an ant asking ants about its tools: the model asks to run what the sandbox
+/// would stop.
+const ASKING_POLICY: &str = "on-request";
 
 /// Notifications the translator reads nothing of, which the server is asked not to send.
 const UNREAD: [&str; 7] = [
@@ -77,6 +83,8 @@ struct Shared {
     process: tokio::sync::Mutex<Process>,
     /// Where the notifications of each thread running a prompt go, by thread id.
     threads: Mutex<HashMap<String, mpsc::UnboundedSender<Notification>>>,
+    /// Where the approval requests of each thread running a prompt go, when the ant asks ants about its tools.
+    asking: Mutex<HashMap<String, Updates>>,
     /// The latest rate-limit snapshot of each limit, merged from the sparse updates.
     limits: Mutex<HashMap<String, Map<String, Value>>>,
 }
@@ -112,15 +120,26 @@ impl Shared {
         }
     }
 
-    /// Answer a request of the server: an approval or a question for a human is declined, anything else refused.
+    /// Answer a request of the server: an approval to run a command or change files as ants decide
+    /// ([`approval`]), another or a question for a human declined, anything else refused.
     async fn asked(&self, id: Value, method: &str, params: &Value) {
+        if let Some(call) = approval(method, params) {
+            let updates = params["threadId"].as_str().and_then(|thread| self.asking.locked().get(thread).cloned());
+            let allowed = approve(&self.cli, updates, call, &format!("{method}: {}", asked_what(params))).await;
+            let decision = match (method.starts_with("item/"), allowed) {
+                (true, true) => json!({ "decision": "accept" }),
+                (true, false) => json!({ "decision": "decline" }),
+                (false, true) => json!({ "decision": "approved" }),
+                (false, false) => {
+                    json!({ "decision": { "denied": { "rejection": "the ant's tool permissions did not allow it" } } })
+                }
+            };
+            if let Err(e) = self.rpc.respond(id, decision).await {
+                tracing::debug!(error = %e, "answering codex");
+            }
+            return;
+        }
         let decline = match method {
-            "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
-                json!({ "decision": "decline" })
-            }
-            "execCommandApproval" | "applyPatchApproval" => {
-                json!({ "decision": { "denied": { "rejection": "the harness's permission settings ask no one" } } })
-            }
             "item/permissions/requestApproval" => json!({ "permissions": {}, "scope": "turn" }),
             "mcpServer/elicitation/request" => json!({ "action": "decline", "content": null, "_meta": null }),
             "item/tool/requestUserInput" => json!({ "answers": {} }),
@@ -133,12 +152,7 @@ impl Shared {
                 return;
             }
         };
-        let what = ["command", "reason", "message", "tool"].iter().find_map(|key| match &params[key] {
-            Value::String(text) => Some(text.clone()),
-            Value::Array(words) => Some(words.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")),
-            _ => None,
-        });
-        deny_approval(&self.cli, &format!("{method}: {}", what.unwrap_or_default()));
+        deny_approval(&self.cli, &format!("{method}: {}", asked_what(params)));
         if let Err(e) = self.rpc.respond(id, decline).await {
             tracing::debug!(error = %e, "answering codex");
         }
@@ -198,12 +212,45 @@ impl Shared {
     }
 }
 
-/// Route what the server sends: notifications to the prompts running, requests declined. Once its output ends, the
-/// prompts running end too.
+/// What the server's request `params` asks about, for the log.
+fn asked_what(params: &Value) -> String {
+    let what = ["command", "reason", "message", "tool"].iter().find_map(|key| match &params[key] {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(words) => Some(words.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")),
+        _ => None,
+    });
+    what.unwrap_or_default()
+}
+
+/// The tool call an approval request `method` of the server asks to run, when it asks to run a command or change
+/// files: the item it reported, by id.
+fn approval(method: &str, params: &Value) -> Option<ToolCallUpdate> {
+    let (kind, title) = match method {
+        "item/commandExecution/requestApproval" | "execCommandApproval" => (ToolKind::Execute, asked_what(params)),
+        "item/fileChange/requestApproval" | "applyPatchApproval" => {
+            let reason = params["reason"].as_str().filter(|reason| !reason.is_empty());
+            (
+                ToolKind::Edit,
+                reason.map_or_else(|| "Change files".to_owned(), |reason| format!("Change files: {reason}")),
+            )
+        }
+        _ => return None,
+    };
+    let id = params["itemId"].as_str().or_else(|| params["callId"].as_str()).unwrap_or("approval");
+    let fields = ToolCallUpdateFields::new().kind(kind).title(title).raw_input(params.clone());
+    Some(ToolCallUpdate::new(id.to_owned(), fields))
+}
+
+/// Route what the server sends: notifications to the prompts running, requests answered, those asking ants off the
+/// loop. Once its output ends, the prompts running end too.
 async fn route(mut incoming: mpsc::UnboundedReceiver<Incoming>, shared: Arc<Shared>) {
     while let Some(message) = incoming.recv().await {
         match message {
             Incoming::Notification { method, params } => shared.notified(&method, params),
+            Incoming::Request { id, method, params } if shared.cli.asks() && approval(&method, &params).is_some() => {
+                let shared = shared.clone();
+                tokio::spawn(async move { shared.asked(id, &method, &params).await });
+            }
             Incoming::Request { id, method, params } => shared.asked(id, &method, &params).await,
         }
     }
@@ -254,6 +301,7 @@ impl Native for Codex {
             rpc,
             process: tokio::sync::Mutex::new(process),
             threads: Mutex::default(),
+            asking: Mutex::default(),
             limits: Mutex::default(),
         });
         let router = tokio::spawn(route(incoming, shared.clone()));
@@ -276,6 +324,8 @@ impl Native for Codex {
     }
 
     const MCP: bool = true;
+
+    const ASKS: bool = true;
 
     fn credentials(&self) -> Option<Credentials> {
         let path = self.home.as_ref()?.join("auth.json");
@@ -342,6 +392,7 @@ impl Codex {
     fn thread(&self, open: &Open, id: Option<&str>) -> Value {
         let cli = &self.shared.cli;
         let (policy, sandbox) = permissions(cli.mode()).unwrap_or(("never", "workspace-write"));
+        let policy = if cli.asks() { ASKING_POLICY } else { policy };
         let mut config = Map::new();
         if let Some(effort) = cli.effort() {
             config.insert("model_reasoning_effort".to_owned(), effort.into());
@@ -422,6 +473,7 @@ struct Unroute<'a>(&'a Shared, &'a str);
 impl Drop for Unroute<'_> {
     fn drop(&mut self) {
         self.0.threads.locked().remove(self.1);
+        self.0.asking.locked().remove(self.1);
     }
 }
 
@@ -461,6 +513,7 @@ impl NativeSession for CodexSession {
     async fn prompt(&self, prompt: Vec<ContentBlock>, updates: Updates) -> Result<PromptResponse, Error> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         self.shared.threads.locked().insert(self.id.clone(), tx);
+        self.shared.asking.locked().insert(self.id.clone(), updates.clone());
         let _unroute = Unroute(&self.shared, &self.id);
         *self.turn.locked() = Running::default();
         let mut params = json!({ "threadId": self.id, "input": input(&prompt) });

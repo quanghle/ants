@@ -5,11 +5,13 @@
 //! definition's command itself and hands the SDK its stdio. Sessions are the CLI's own, created with an id chosen here,
 //! resumed and forked by id; a fork's totals start at its parent's, so its ACP id carries that base ([`based_id`]). Each
 //! carries the ant's model and reasoning effort, the ants MCP server and a permission
-//! handler approving whatever the CLI asks about the tools the definition leaves it, so nothing waits on a human.
+//! handler approving whatever the CLI asks about the tools the definition leaves it, so nothing waits on a human, or,
+//! when the ant asks ants about its tools, sending it to ants ([`super::approve`]).
 //! Events are read by their type name and JSON data rather than as the SDK's typed enum, which lacks the types of
 //! newer CLIs.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -23,8 +25,10 @@ use agent_client_protocol::v1::schema::{
 use ants_proto::{McpServerState, McpStatus};
 use anyhow::bail;
 use github_copilot_sdk as sdk;
+use sdk::handler::PermissionResult;
 use sdk::session::Session;
 use sdk::subscription::{EventSubscription, RecvErrorKind};
+use sdk::types::{PermissionRequestKind, RequestId};
 use sdk::{
     Attachment, DeliveryMode, ErrorKind, MessageOptions, PermissionRequestData, ProtocolErrorKind, ResumeSessionConfig,
     SessionConfig, SessionEvent, SessionId, SetModelOptions,
@@ -34,8 +38,9 @@ use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{mpsc, watch};
 
 use super::{
-    Cli, Harness, Info, Native, NativeSession, Open, Process, Setting, Updates, based_id, context_overflow, cost_base,
-    deny_approval, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out, unsupported,
+    Cli, Harness, Info, Native, NativeSession, Open, Process, Setting, Updates, approve, based_id, context_overflow,
+    cost_base, deny_approval, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out,
+    unsupported,
 };
 use crate::harness::mcp_sign_in::Report;
 use crate::sync::MutexExt as _;
@@ -227,35 +232,96 @@ impl Shared {
         Ok(status.version)
     }
 
-    /// The handler answering the CLI's permission requests: every one is approved, as the tools left to the model are
-    /// the ones the definition enables, except one that managed policy says a human must decide, which is denied.
-    fn permissions(&self) -> Arc<dyn sdk::handler::PermissionHandler> {
-        let cli = self.cli.clone();
-        sdk::permission::approve_if(move |request: &PermissionRequestData| {
-            let described = request.extra.get("permissionRequest").unwrap_or(&request.extra).to_string();
-            if request.managed_approval_required == Some(true) {
-                deny_approval(&cli, &described);
-                false
+    /// The handler answering the CLI's permission requests of a session whose prompt running sends them to `asking`
+    /// ([`Permissions`]).
+    fn permissions(&self, asking: Asking) -> Arc<dyn sdk::handler::PermissionHandler> {
+        Arc::new(Permissions { cli: self.cli.clone(), asking })
+    }
+}
+
+/// Where the permission requests of a session go: the prompt running, if any.
+type Asking = Arc<Mutex<Option<Updates>>>;
+
+/// The handler answering a session's permission requests: one that managed policy says a human must decide is
+/// denied; else every one is approved, as the tools left to the model are the ones the definition enables, unless the
+/// ant asks ants about its tools, when ants decide ([`approve`]).
+struct Permissions {
+    cli: Cli,
+    asking: Asking,
+}
+
+impl sdk::handler::PermissionHandler for Permissions {
+    fn handle<'a, 'b>(
+        &'a self,
+        _session: SessionId,
+        _request: RequestId,
+        data: PermissionRequestData,
+    ) -> Pin<Box<dyn Future<Output = PermissionResult> + Send + 'b>>
+    where
+        'a: 'b,
+        Self: 'b,
+    {
+        Box::pin(async move {
+            let described = data.extra.get("permissionRequest").unwrap_or(&data.extra).to_string();
+            if data.managed_approval_required == Some(true) {
+                deny_approval(&self.cli, &described);
+                return PermissionResult::reject(None);
+            }
+            if !self.cli.asks() {
+                tracing::debug!(
+                    harness = self.cli.name(),
+                    request = described,
+                    "approved a tool request of the harness"
+                );
+                return PermissionResult::approve_once();
+            }
+            let updates = self.asking.locked().clone();
+            if approve(&self.cli, updates, asked_call(&data), &described).await {
+                PermissionResult::approve_once()
             } else {
-                tracing::debug!(harness = cli.name(), request = described, "approved a tool request of the harness");
-                true
+                PermissionResult::reject(Some("The ant's tool permissions did not allow it.".to_owned()))
             }
         })
     }
+}
+
+/// The tool call a permission request of the CLI asks to run, by the id of the one it reported.
+fn asked_call(data: &PermissionRequestData) -> ToolCallUpdate {
+    let request = data.extra.get("permissionRequest").unwrap_or(&data.extra);
+    let text = |key: &str| request[key].as_str().unwrap_or_default().to_owned();
+    let (kind, title, path) = match data.kind {
+        Some(PermissionRequestKind::Shell) => (ToolKind::Execute, text("fullCommandText"), None),
+        Some(PermissionRequestKind::Write) => {
+            (ToolKind::Edit, format!("Write {}", text("fileName")), Some(text("fileName")))
+        }
+        Some(PermissionRequestKind::Read) => (ToolKind::Read, format!("Read {}", text("path")), Some(text("path"))),
+        Some(PermissionRequestKind::Url) => (ToolKind::Fetch, format!("Fetch {}", text("url")), None),
+        Some(PermissionRequestKind::Mcp) => {
+            (ToolKind::Other, format!("{}/{}", text("serverName"), text("toolName")), None)
+        }
+        _ => (ToolKind::Other, text("intention"), None),
+    };
+    let id = data.tool_call_id.clone().or_else(|| request["toolCallId"].as_str().map(str::to_owned));
+    let fields = ToolCallUpdateFields::new()
+        .kind(kind)
+        .title(title)
+        .raw_input(request.clone())
+        .locations(path.filter(|path| !path.is_empty()).map(|path| vec![ToolCallLocation::new(path)]));
+    ToolCallUpdate::new(id.unwrap_or_else(|| "permission".to_owned()), fields)
 }
 
 /// The settings every session opens with, whether new, resumed or forked: streamed replies, the session's working
 /// directory, MCP servers and skills, the ant's model and reasoning effort, no session telemetry, and the permission
 /// handler.
 macro_rules! settings {
-    ($config:expr, $shared:expr, $open:expr) => {{
+    ($config:expr, $shared:expr, $open:expr, $asking:expr) => {{
         let shared: &Shared = $shared;
         let open: Open = $open;
         let mut config = $config
             .with_streaming(true)
             .with_working_directory(open.cwd)
             .with_enable_session_telemetry(false)
-            .with_permission_handler(shared.permissions());
+            .with_permission_handler(shared.permissions($asking));
         if let Some(model) = shared.cli.model() {
             config = config.with_model(model);
         }
@@ -340,15 +406,18 @@ impl Native for Copilot {
 
     const MCP: bool = true;
 
+    const ASKS: bool = true;
+
     async fn new_session(&self, open: Open) -> Result<CopilotSession, Error> {
         let shared = &self.shared;
         let id = uuid::Uuid::new_v4().to_string();
         let sign_ins = open.sign_ins.clone();
-        let config = settings!(SessionConfig::default().with_session_id(id), shared, open);
+        let asking = Asking::default();
+        let config = settings!(SessionConfig::default().with_session_id(id), shared, open, asking.clone());
         let prepared = shared.client.prepare_session(config).map_err(failed)?;
         let events = prepared.subscribe();
         match prepared.start().await {
-            Ok(session) => Ok(CopilotSession::open(shared.clone(), session, events, 0.0, sign_ins).await),
+            Ok(session) => Ok(CopilotSession::open(shared.clone(), session, events, 0.0, sign_ins, asking).await),
             Err(e) => Err(shared.error(&e).await),
         }
     }
@@ -380,11 +449,12 @@ impl Copilot {
     async fn resume(&self, id: &str, open: Open, base: f64) -> Result<CopilotSession, Error> {
         let shared = &self.shared;
         let sign_ins = open.sign_ins.clone();
-        let config = settings!(ResumeSessionConfig::new(SessionId::from(id)), shared, open);
+        let asking = Asking::default();
+        let config = settings!(ResumeSessionConfig::new(SessionId::from(id)), shared, open, asking.clone());
         let prepared = shared.client.prepare_resume_session(config).map_err(failed)?;
         let events = prepared.subscribe();
         match prepared.start().await {
-            Ok(session) => Ok(CopilotSession::open(shared.clone(), session, events, base, sign_ins).await),
+            Ok(session) => Ok(CopilotSession::open(shared.clone(), session, events, base, sign_ins, asking).await),
             Err(e) => Err(shared.error(&e).await),
         }
     }
@@ -425,6 +495,7 @@ pub(crate) struct CopilotSession {
     shared: Arc<Shared>,
     session: Session,
     current: Current,
+    asking: Asking,
     router: tokio::task::JoinHandle<()>,
     /// The model and reasoning effort it runs, if set.
     model: Mutex<Option<String>>,
@@ -510,6 +581,7 @@ impl CopilotSession {
         events: EventSubscription,
         base: f64,
         sign_ins: Option<Report>,
+        asking: Asking,
     ) -> Self {
         let current = Current::default();
         let opened = Arc::new(mcp_sign_in::Opened { shared: shared.clone(), session: session.id().clone() });
@@ -530,6 +602,7 @@ impl CopilotSession {
             shared,
             session,
             current,
+            asking,
             router,
             model: Mutex::new(model),
             effort: Mutex::new(effort),
@@ -645,10 +718,10 @@ async fn route(
     }
 }
 
-/// Clears where the session's events go when the prompt ends, however it does.
-struct Running<'a>(&'a Mutex<Option<mpsc::UnboundedSender<SessionEvent>>>);
+/// Clears a slot of the prompt running, such as where the session's events go, when it ends, however it does.
+struct Running<'a, T>(&'a Mutex<Option<T>>);
 
-impl Drop for Running<'_> {
+impl<T> Drop for Running<'_, T> {
     fn drop(&mut self) {
         self.0.locked().take();
     }
@@ -684,6 +757,8 @@ impl NativeSession for CopilotSession {
         let (sender, mut events) = mpsc::unbounded_channel();
         *self.current.locked() = Some(sender);
         let _running = Running(&self.current);
+        *self.asking.locked() = Some(updates.clone());
+        let _asking = Running(&self.asking);
         self.steers.open();
         if let Err(e) = self.session.send(message(prompt)).await {
             self.steers.state.locked().open = false;

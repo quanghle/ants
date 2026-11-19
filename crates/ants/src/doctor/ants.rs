@@ -381,13 +381,14 @@ pub(super) fn responder(responder: ReactionsResponder) -> &'static str {
     }
 }
 
-/// A warning for each ant whose harness runs its tools unasked while the ant gates them: with allow rules or tool
+/// A warning for each ant whose harness, with the ant's `tools`, runs its tools unasked while the ant gates them: with allow rules or tool
 /// approvals by its `escalate_to` ants, or as the destination of schedules or webhooks narrowing the threads they
 /// start; and, for a sage, for each harness that declines its reviews, running its tools unasked with no review set.
 pub(super) fn check_bypassed(loaded: &config::Loaded, webhooks: &[webhook::Webhook]) -> Vec<Check> {
     let mut checks = Vec::new();
     for ant in &loaded.ants {
-        let Some(harness) = ant.harness.as_deref().and_then(|name| loaded.harnesses.get(name).ok()) else { continue };
+        let named = ant.harness.as_deref().and_then(|name| loaded.harnesses.get(name).ok());
+        let Some(harness) = named.and_then(|harness| harness.with_tools(ant.tools).ok()) else { continue };
         if !harness.bypasses_permissions() {
             continue;
         }

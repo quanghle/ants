@@ -41,7 +41,14 @@ pub struct Harness {
     pub(crate) bypass_permissions: bool,
     /// How a session reviewing for a sage starts instead ([`ants_proto::REVIEW_ALLOW`]): keeping its tools read only,
     /// or sending its tool requests to ants. Unset, a harness that runs its tools unasked declines reviews.
-    pub(crate) review: Option<Review>,
+    pub(crate) review: Option<Variant>,
+    /// Whether the ants running it approve its tools as its arguments and mode make it, or ask ants about what it
+    /// would ask a human ([`Tools`]); an ant's own `tools` wins over it.
+    #[serde(default)]
+    pub(crate) tools: Tools,
+    /// How a session starts when its ant asks ants about its tools (`tools = "ask"`): in a mode of the harness's own
+    /// that decides what is safe and asks about the rest. Unset, a harness that runs its tools unasked cannot ask.
+    pub(crate) ask: Option<Variant>,
     /// The values an ant's `context` may take, and what each selects. Empty: the harness takes no `context`.
     #[serde(default)]
     pub(crate) context: BTreeMap<String, ContextValue>,
@@ -90,12 +97,41 @@ pub struct ContextValue {
     pub(crate) history_budget: Option<usize>,
 }
 
-/// The arguments and mode a review session starts with ([`Harness::review`]), each in place of the harness's when set.
+/// The arguments and mode a session starts with in place of the harness's, each when set: a review session
+/// ([`Harness::review`]) or one asking ants about its tools ([`Harness::ask`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Review {
+pub(crate) struct Variant {
     pub(crate) args: Option<Vec<String>>,
     pub(crate) mode: Option<String>,
+}
+
+/// What becomes of the tool calls a harness would ask a human about: an ant's `tools`, else its harness's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Tools {
+    /// The harness runs as its arguments and mode make it, the built-ins approving every tool.
+    #[default]
+    AutoApprove,
+    /// The harness runs its [`Harness::ask`] variant and sends what it would ask a human to ants: the ant's allow
+    /// rules, then its approvers, else rejected.
+    Ask,
+}
+
+impl Tools {
+    /// Its name, as the `tools` key takes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AutoApprove => "auto-approve",
+            Self::Ask => "ask",
+        }
+    }
+}
+
+impl fmt::Display for Tools {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl Harness {
@@ -133,10 +169,63 @@ impl Harness {
         self.protocol
     }
 
-    /// Whether it runs its own tools without asking ants ([`Self::bypass_permissions`]), as every harness of a native
-    /// protocol does: the CLI's own permission settings decide.
+    /// Whether it runs its own tools without asking ants ([`Self::bypass_permissions`]), as a harness of a native
+    /// protocol does unless it asks ants ([`Tools::Ask`]): the CLI's own permission settings decide.
     pub fn bypasses_permissions(&self) -> bool {
-        self.bypass_permissions || self.protocol.is_native()
+        self.bypass_permissions || (self.protocol.is_native() && self.tools != Tools::Ask)
+    }
+
+    /// The `tools` its definition sets for the ants running it.
+    pub fn tools(&self) -> Tools {
+        self.tools
+    }
+
+    /// The harness an ant runs with `tools`, else with the definition's: itself, approving its tools as its arguments
+    /// and mode make it, or its variant asking ants about them ([`Self::ask`]).
+    pub fn with_tools(&self, tools: Option<Tools>) -> Result<Self> {
+        match tools.unwrap_or(self.tools) {
+            Tools::AutoApprove => Ok(Self { tools: Tools::AutoApprove, ..self.clone() }),
+            Tools::Ask => self.asking(),
+        }
+    }
+
+    /// Its variant sending what it would ask a human about its tools to ants: its [`Self::ask`] arguments and mode,
+    /// else its own when it asks the client already or speaks a native protocol whose translator forwards what the
+    /// CLI asks.
+    fn asking(&self) -> Result<Self> {
+        let name = &self.name;
+        if !native::asks(self.protocol) {
+            bail!(
+                "harness {name}: protocol {} has no hook to send its tool requests to ants, so tools = \"ask\" does \
+                 not apply to it",
+                self.protocol
+            );
+        }
+        if self.ask.is_none() && self.bypass_permissions && !self.protocol.is_native() {
+            bail!(
+                "harness {name} runs its tools unasked and its definition sets no ask table to start it asking, so \
+                 tools = \"ask\" does not apply to it: {}",
+                self.ask_fix()
+            );
+        }
+        let ask = self.ask.clone().unwrap_or_default();
+        Ok(Self {
+            args: ask.args.unwrap_or_else(|| self.args.clone()),
+            mode: ask.mode.or_else(|| self.mode.clone()),
+            bypass_permissions: false,
+            tools: Tools::Ask,
+            ask: None,
+            ..self.clone()
+        })
+    }
+
+    /// What to change for the harness to ask ants about its tools.
+    pub fn ask_fix(&self) -> String {
+        format!(
+            "set ask in [harnesses.{}] to the args or mode that make it ask before running tools it deems unsafe \
+             (docs/config.md#asking-ants-about-tools)",
+            self.name
+        )
     }
 
     /// What of an ant's tool gating does not reach this harness's own tools, when it bypasses permissions and the ant
@@ -192,6 +281,13 @@ impl Harness {
     /// What to change for the ant's tool gating to reach the harness's tools, or, for a native protocol, which no
     /// tool request leaves, where to restrict them.
     pub fn gated_fix(&self) -> String {
+        if self.with_tools(Some(Tools::Ask)).is_ok() {
+            return format!(
+                "set tools = \"ask\" on the ant or in [harnesses.{}] to send the tool calls it would ask a human \
+                 about to ants (docs/config.md#asking-ants-about-tools)",
+                self.name
+            );
+        }
         if self.protocol.is_native() {
             return format!(
                 "restrict its tools with the native permission settings of [harnesses.{}] (protocol {}: its mode and \
@@ -200,9 +296,9 @@ impl Harness {
             );
         }
         format!(
-            "redefine [harnesses.{}] without bypass_permissions, with a mode or arguments that ask before running \
-             tools (docs/config.md#harnesses), or pick another harness",
-            self.name
+            "{}, or redefine it without bypass_permissions, with a mode or arguments that ask before running tools \
+             (docs/config.md#harnesses), or pick another harness",
+            self.ask_fix()
         )
     }
 
@@ -290,6 +386,17 @@ impl Harness {
             if let Some(reviewing) = self.reviewing() {
                 reviewing.validate().with_context(|| format!("harness {name}: review"))?;
             }
+        }
+        if let Some(ask) = &self.ask
+            && ask.args.is_none()
+            && ask.mode.is_none()
+        {
+            bail!("harness {name}: ask must set args or mode");
+        }
+        if self.ask.is_some() {
+            self.asking()?.validate().with_context(|| format!("harness {name}: ask"))?;
+        } else if self.tools == Tools::Ask {
+            self.asking()?;
         }
         Ok(())
     }

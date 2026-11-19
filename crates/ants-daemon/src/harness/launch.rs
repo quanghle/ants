@@ -213,6 +213,8 @@ impl Launch {
             mode: None,
             bypass_permissions: false,
             review: None,
+            tools: Default::default(),
+            ask: None,
             context: BTreeMap::new(),
             sign_in: None,
             entra_client_id: None,

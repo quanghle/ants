@@ -7,7 +7,9 @@
 //! that base ([`based_id`]). A session's process gets its MCP servers on stdin
 //! (`mcp_set_servers`, with `--strict-mcp-config`) and their tools allowed (`--allowedTools=mcp__<server>`), the
 //! definition's `mode` as `--permission-mode`, and `--permission-prompts none`, so whatever Claude Code would ask a
-//! human about is denied rather than waited on. Cancel is Claude Code's `interrupt`; the process is killed when the
+//! human about is denied rather than waited on; when the ant asks ants about its tools, `--permission-prompts host
+//! --permission-prompt-tool stdio` instead, so it comes as a `can_use_tool` control request, sent to ants
+//! ([`super::approve`]). Cancel is Claude Code's `interrupt`; the process is killed when the
 //! turn does not end within [`INTERRUPT_GRACE`].
 
 use std::collections::{HashMap, HashSet};
@@ -29,8 +31,9 @@ use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{
-    Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates, based_id,
-    context_overflow, cost_base, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited, signed_out,
+    Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates, approve,
+    based_id, context_overflow, cost_base, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited,
+    signed_out,
 };
 use crate::harness::Skills;
 use crate::sync::MutexExt as _;
@@ -78,8 +81,11 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(10);
 /// How long a closed session's CLI has to exit, writing its cost totals to the transcript, before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(10);
 
-/// What a tool request Claude Code asks about is answered with.
+/// What a tool request Claude Code asks about is answered with, unless ants allow it.
 const DENIED: &str = "Denied: this harness runs only the tools its permission settings allow.";
+
+/// What a tool request ants were asked about and did not allow is answered with.
+const REJECTED: &str = "Rejected: the ant's allow rules and approvers did not allow this tool call.";
 
 /// The starts of Claude Code's messages of an exhausted plan, credit or spend allowance.
 const USAGE_LIMITS: &[&str] = &[
@@ -154,6 +160,8 @@ impl Native for Claude {
     }
 
     const MCP: bool = true;
+
+    const ASKS: bool = true;
 
     /// The API key and tokens in the environment and the login in `.credentials.json` of the configuration directory,
     /// which Claude Code keeps there unless in the macOS keychain.
@@ -246,6 +254,8 @@ impl Claude {
         let (events, received) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
             cli: self.cli.clone(),
+            cwd: open.cwd.clone(),
+            asking: Mutex::default(),
             writer: JsonWriter::new(stdin),
             process: tokio::sync::Mutex::new(Some(process)),
             pending: Mutex::new(Some(HashMap::new())),
@@ -293,12 +303,16 @@ impl Claude {
             "--replay-user-messages",
             "--thinking-display",
             "summarized",
-            "--permission-prompts",
-            "none",
             "--strict-mcp-config",
         ]
         .map(str::to_owned)
         .into();
+        let prompts: &[&str] = if self.cli.asks() {
+            &["--permission-prompts", "host", "--permission-prompt-tool", "stdio"]
+        } else {
+            &["--permission-prompts", "none"]
+        };
+        args.extend(prompts.iter().map(|arg| (*arg).to_owned()));
         match how {
             How::New(id) => args.extend(["--session-id".to_owned(), id.clone()]),
             How::Load(id) => args.extend(["--resume".to_owned(), id.clone()]),
@@ -337,6 +351,10 @@ fn no_credentials(account: &Value) -> bool {
 /// What a session's process and its reader share.
 struct Shared {
     cli: Cli,
+    /// The session's working directory, which tool titles are relative to.
+    cwd: PathBuf,
+    /// Where the tool requests of the turn running go, when the ant asks ants about its tools.
+    asking: Mutex<Option<Updates>>,
     writer: JsonWriter<ChildStdin>,
     /// Taken when the session closes.
     process: tokio::sync::Mutex<Option<Process>>,
@@ -367,13 +385,28 @@ impl Shared {
         }
     }
 
-    /// Answer a control request of the CLI: deny a tool request, refuse anything else.
+    /// Answer a control request of the CLI: a tool request as ants decide ([`approve`]), refusing anything else.
     async fn answer(&self, message: &Value) {
         let (id, request) = (&message["request_id"], &message["request"]);
         let response = if request["subtype"] == "can_use_tool" {
             let tool = request["tool_name"].as_str().unwrap_or("a tool");
-            deny_approval(&self.cli, &format!("{tool} {}", request["input"]));
-            json!({ "subtype": "success", "request_id": id, "response": { "behavior": "deny", "message": DENIED } })
+            let input = &request["input"];
+            let (kind, title) = describe(tool, input, &self.cwd);
+            let path = ["file_path", "notebook_path", "path"].iter().find_map(|key| input[key].as_str());
+            let fields = ToolCallUpdateFields::new()
+                .kind(kind)
+                .title(title)
+                .raw_input(input.clone())
+                .locations(path.map(|path| vec![ToolCallLocation::new(path)]));
+            let call_id = request["tool_use_id"].as_str().or(id.as_str()).unwrap_or_default();
+            let call = ToolCallUpdate::new(call_id.to_owned(), fields);
+            let updates = self.asking.locked().clone();
+            let decided = if approve(&self.cli, updates, call, &format!("{tool} {input}")).await {
+                json!({ "behavior": "allow", "updatedInput": input })
+            } else {
+                json!({ "behavior": "deny", "message": if self.cli.asks() { REJECTED } else { DENIED } })
+            };
+            json!({ "subtype": "success", "request_id": id, "response": decided })
         } else {
             let subtype = request["subtype"].as_str().unwrap_or_default();
             json!({ "subtype": "error", "request_id": id, "error": format!("Unsupported control request subtype: {subtype}") })
@@ -413,7 +446,11 @@ async fn read(mut lines: JsonLines<ChildStdout>, shared: Arc<Shared>, events: mp
                     let _ = waiting.send(response.clone());
                 }
             }
-            Some("control_request") => shared.answer(&message).await,
+            // Answered off the loop, as ants may take a while to decide on a tool request.
+            Some("control_request") => {
+                let shared = shared.clone();
+                tokio::spawn(async move { shared.answer(&message).await });
+            }
             Some("control_cancel_request") => {}
             _ => super::io::forward(&events, message),
         }
@@ -608,7 +645,9 @@ impl NativeSession for ClaudeSession {
         self.interrupted.store(false, Ordering::Relaxed);
         *self.steers.locked() = Steers::default();
         self.running.send_replace(Some(turn));
+        *self.shared.asking.locked() = Some(updates.clone());
         let done = self.turn(&mut events, &prompt, &updates).await;
+        self.shared.asking.locked().take();
         self.steers.locked().open = false;
         self.running.send_replace(None);
         done

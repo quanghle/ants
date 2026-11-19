@@ -308,18 +308,28 @@ async fn native_limit_errors_are_classified() {
     }
 }
 
-#[tokio::test]
-async fn a_native_approval_request_is_denied_without_asking_ants() {
-    let native = Fixture::new("native-approval", "");
+/// The answer the stub CLI of a harness with `table` gets to its approval request, on a launch with `allow` rules.
+async fn approval(name: &str, table: &str, allow: &[&str]) -> Value {
+    let native = Fixture::new(name, table);
     let ask = json!({ "jsonrpc": "2.0", "id": "a1", "method": "approve", "params": { "tool": "rm -rf build" } });
     let blocks =
-        [vec![], vec![hello()], vec![opened("n1")], vec![ask.to_string()], vec![message("Skipped"), end_turn(3, 1)]];
+        [vec![], vec![hello()], vec![opened("n1")], vec![ask.to_string()], vec![message("Done"), end_turn(3, 1)]];
     script(&native, None, &blocks);
-    // Every tool is allowed, were the request to reach ants.
-    let session = Session::start(&native.launch(ModelSettings::default()), None).await.unwrap();
-    assert_eq!(session.prompt("clean up").await.unwrap(), "Skipped");
+    let policy = PermissionPolicy::new(Allowlist::parse(allow).unwrap(), None);
+    let launch = native.launch(ModelSettings::default()).with_policy(policy);
+    let session = Session::start(&launch, None).await.unwrap();
+    assert_eq!(session.prompt("clean up").await.unwrap(), "Done");
     session.close().await;
-    assert_eq!(native.received(1)[3], json!({ "jsonrpc": "2.0", "id": "a1", "result": { "approved": false } }));
+    native.received(1)[3].clone()
+}
+
+#[tokio::test]
+async fn a_native_approval_request_is_denied_unless_the_ant_asks_ants() {
+    let answer = |approved: bool| json!({ "jsonrpc": "2.0", "id": "a1", "result": { "approved": approved } });
+    assert_eq!(approval("native-approval", "", &["*"]).await, answer(false), "denied, though every tool is allowed");
+    let asks = "tools = \"ask\"";
+    assert_eq!(approval("native-approval-allowed", asks, &["*"]).await, answer(true), "allowed by the allow rules");
+    assert_eq!(approval("native-approval-rejected", asks, &["read"]).await, answer(false), "no approver to ask");
 }
 
 #[tokio::test]
@@ -348,11 +358,14 @@ fn a_native_protocol_runs_tools_unasked_restricted_by_its_own_settings() {
     };
     let harness = define("protocol = \"stub\"\nmode = \"auto\"").unwrap();
     assert_eq!(harness.protocol(), Protocol::Stub);
-    assert!(harness.bypasses_permissions(), "no tool request of a native protocol reaches ants");
+    assert!(harness.bypasses_permissions(), "no tool request of a native protocol reaches ants unless it asks");
     let unenforced = harness.unenforced(&["read".to_owned()], true).unwrap();
     assert!(unenforced.contains("harness native runs its tools unasked"), "{unenforced}");
     let fix = harness.gated_fix();
-    assert!(fix.contains("native permission settings of [harnesses.native] (protocol stub"), "{fix}");
+    assert!(fix.contains("set tools = \"ask\" on the ant or in [harnesses.native]"), "{fix}");
+    let asking = define("protocol = \"stub\"\nmode = \"auto\"\ntools = \"ask\"").unwrap();
+    assert!(!asking.bypasses_permissions(), "what the CLI would ask a human about reaches ants");
+    assert_eq!(asking.unenforced(&["read".to_owned()], true), None);
 
     let err = format!("{:#}", define("protocol = \"stub\"\nmode = \"default\"").unwrap_err());
     assert!(err.contains("harness native: protocol stub takes mode ask or auto, not default"), "{err}");

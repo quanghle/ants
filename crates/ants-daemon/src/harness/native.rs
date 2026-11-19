@@ -8,7 +8,9 @@
 //! definition's sign-in), `session/new`, `session/load` and `session/fork` (advertised as the protocol supports them),
 //! `session/prompt`, `session/cancel`, `session/close`, and the session mode and model and reasoning effort selectors the
 //! daemon sets.
-//! It never asks the client for permission: tool approval is the CLI's own, set by the definition ([`deny_approval`]).
+//! Tool approval is the CLI's own, set by the definition: what the CLI would ask a human about is denied
+//! ([`deny_approval`]), unless the ant asks ants about its tools (`tools = "ask"`) and the protocol has a hook for it
+//! ([`Native::ASKS`]), when it goes to the client as an ACP permission request ([`Updates::ask`]).
 
 mod antigravity;
 mod claude;
@@ -33,11 +35,12 @@ use agent_client_protocol::v1::schema::{
     AgentCapabilities, AuthMethod, AuthMethodAgent, CancelNotification, CloseSessionRequest, CloseSessionResponse,
     ContentBlock, ContentChunk, Cost, ForkSessionRequest, ForkSessionResponse, Implementation, InitializeRequest,
     InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer, NewSessionRequest,
-    NewSessionResponse, Plan, PromptCapabilities, PromptRequest, PromptResponse, SessionCapabilities,
-    SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
-    SessionForkCapabilities, SessionId, SessionMode, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
-    TextContent, ToolCall, ToolCallUpdate, UsageUpdate,
+    NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PromptCapabilities, PromptRequest,
+    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, SessionCapabilities, SessionCloseCapabilities,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionForkCapabilities, SessionId,
+    SessionMode, SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, TextContent, ToolCall,
+    ToolCallUpdate, UsageUpdate,
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{AcpAgent, Agent, Client, DynConnectTo, Error, ErrorCode, JsonRpcResponse};
@@ -89,7 +92,7 @@ impl Protocol {
     }
 
     /// Whether a translator speaks it to the CLI, not ACP: then the CLI's own permission settings decide which tools
-    /// run, and no tool request reaches ants.
+    /// run, and only what it would ask a human about reaches ants, when the ant asks ([`asks`]).
     pub fn is_native(self) -> bool {
         self != Self::Acp
     }
@@ -108,11 +111,17 @@ struct Registration {
     validate: fn(&Harness) -> anyhow::Result<()>,
     connect: fn(Cli) -> DynConnectTo<Client>,
     mcp: Option<OpenHost>,
+    asks: bool,
 }
 
 impl Registration {
     fn of<N: Native>() -> Self {
-        Self { validate: N::validate, connect: connect::<N>, mcp: N::MCP.then_some(open_host::<N> as OpenHost) }
+        Self {
+            validate: N::validate,
+            connect: connect::<N>,
+            mcp: N::MCP.then_some(open_host::<N> as OpenHost),
+            asks: N::ASKS,
+        }
     }
 }
 
@@ -132,6 +141,12 @@ fn registration(protocol: Protocol) -> anyhow::Result<Option<Registration>> {
 /// Whether a session of a CLI speaking `protocol` reports its MCP servers and signs them in ([`mcp_host`]).
 pub(crate) fn reports_mcp(protocol: Protocol) -> bool {
     registration(protocol).ok().flatten().is_some_and(|registration| registration.mcp.is_some())
+}
+
+/// Whether a harness speaking `protocol` can send what it would ask a human about its tools to ants: ACP, or a native
+/// protocol with the hook ([`Native::ASKS`]).
+pub(crate) fn asks(protocol: Protocol) -> bool {
+    registration(protocol).ok().is_some_and(|registration| registration.is_none_or(|registration| registration.asks))
 }
 
 /// Check the keys of `harness` its protocol reads, such as the native permission mode `mode` names.
@@ -293,6 +308,12 @@ impl Cli {
         self.harness.mode.as_deref()
     }
 
+    /// Whether the ant asks ants about its tools (`tools = "ask"`): what the CLI would ask a human about goes to the
+    /// client ([`approve`]) rather than being denied.
+    pub(crate) fn asks(&self) -> bool {
+        self.harness.tools == super::Tools::Ask
+    }
+
     /// The definition's `mcp_sign_in`: the MCP servers a session serving a thread signs in to as they need it.
     pub(crate) fn mcp_sign_in(&self) -> &[String] {
         &self.harness.mcp_sign_in
@@ -401,6 +422,10 @@ pub(crate) trait Native: Sized + Send + Sync + 'static {
 
     /// Whether its sessions report their MCP servers and sign them in ([`NativeSession::mcp_servers`]).
     const MCP: bool = false;
+
+    /// Whether it can send what the CLI would ask a human about its tools to the client ([`Cli::asks`]), so an ant
+    /// may set `tools = "ask"` on it.
+    const ASKS: bool = false;
 }
 
 /// The credentials a native CLI signs in with ([`Native::credentials`]).
@@ -537,6 +562,44 @@ impl Updates {
         let usage = UsageUpdate::new(used, size).cost(cost_usd.map(|amount| Cost::new(amount, "USD")));
         self.send(SessionUpdate::UsageUpdate(usage));
     }
+
+    /// Ask the client whether the tool call `call` describes may run, offering allow once and reject: true only when
+    /// it allows. The answer comes from the ant's allow rules, else its approvers, so callers await it off the loop
+    /// reading the CLI.
+    pub(crate) async fn ask(&self, call: ToolCallUpdate) -> bool {
+        let options = vec![
+            PermissionOption::new(ALLOW, "Allow", PermissionOptionKind::AllowOnce),
+            PermissionOption::new(REJECT, "Reject", PermissionOptionKind::RejectOnce),
+        ];
+        let request = RequestPermissionRequest::new(self.session.clone(), call, options);
+        match self.cx.send_request(request).block_task().await {
+            Ok(response) => matches!(
+                response.outcome,
+                RequestPermissionOutcome::Selected(selected) if selected.option_id.0.as_ref() == ALLOW
+            ),
+            Err(e) => {
+                tracing::debug!(error = %e, "permission request");
+                false
+            }
+        }
+    }
+}
+
+/// The option ids of a permission request sent for a native CLI ([`Updates::ask`]).
+const ALLOW: &str = "allow";
+const REJECT: &str = "reject";
+
+/// Whether the tool call `call` describes, which the CLI asks to run, may: asked of the client through `updates`, the
+/// running prompt's, when the ant asks ants about its tools ([`Cli::asks`]), else denied ([`deny_approval`]).
+/// `request` describes it for the log.
+pub(crate) async fn approve(cli: &Cli, updates: Option<Updates>, call: ToolCallUpdate, request: &str) -> bool {
+    match updates.filter(|_| cli.asks()) {
+        Some(updates) => updates.ask(call).await,
+        None => {
+            deny_approval(cli, request);
+            false
+        }
+    }
 }
 
 /// The text of a prompt's blocks, joined by blank lines.
@@ -647,9 +710,9 @@ fn hint(retry_after: Option<Duration>) -> String {
 }
 
 /// Log that a native approval request, `request` describing what the CLI asked to do, is denied; the caller answers
-/// the CLI with its protocol's denial. ants sends no tool request of a native protocol to `ants.approvals`: the
-/// definition's native permission settings decide what runs unasked, and what the CLI would ask a human about is
-/// denied at once rather than left waiting.
+/// the CLI with its protocol's denial. Unless the ant asks ants about its tools ([`approve`]), no tool request of a
+/// native protocol reaches `ants.approvals`: the definition's native permission settings decide what runs unasked,
+/// and what the CLI would ask a human about is denied at once rather than left waiting.
 pub(crate) fn deny_approval(cli: &Cli, request: &str) {
     tracing::warn!(
         harness = cli.name(),
