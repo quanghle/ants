@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ants_proto::{
     DEFAULT_TURN_BUDGET, PendingCall, RunId, RunLimit, RunState, StepStage, ThreadId, TrailFunction, TrailRun,
-    TrailStepThread,
+    TrailSession, TrailStepThread,
 };
 use ants_trail::{Call, Event, Function, JournalEntry, Limit, Progress, Run, RunError, Status, WorkerError};
 use anyhow::{Result, anyhow};
@@ -21,7 +21,7 @@ use super::{Answer, Slot, Step, Trails, load, locked, steps};
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_mins(1);
 /// Most bytes of a run's session record, and of its header: NATS's 1 MiB payload, less room for its headers.
-pub(super) const MAX_RECORD: usize = 1024 * 1024 - 8 * 1024;
+pub const MAX_RECORD: usize = 1024 * 1024 - 8 * 1024;
 
 impl Trails {
     /// Drive each run woken, one pass at a time per run, and wake those whose wall time passed.
@@ -153,17 +153,20 @@ impl Trails {
                 continue;
             }
             let session = serde_json::to_string(engine.state())?;
-            let record =
-                session.len() + slot.book().pending.iter().map(|call| call.args.to_string().len()).sum::<usize>();
-            if record > MAX_RECORD {
+            let record = TrailSession { session, pending: slot.book().pending.clone(), queued: load::queued(&engine) };
+            // The record as save_session stores it: the session escaped once more, beside the calls it waits on.
+            let size = serde_json::to_vec(&record)?.len();
+            if size > MAX_RECORD {
                 broke = Some(RunLimit::Session);
-                engine.fail(format!("the run's session outgrew the {MAX_RECORD} bytes its record holds"));
+                engine.fail(format!(
+                    "the run's session record outgrew its room: {size} bytes, past the {MAX_RECORD} it holds"
+                ));
                 continue;
             }
             {
                 let mut book = slot.book();
-                book.session = session;
-                book.queued = load::queued(&engine);
+                book.session = record.session;
+                book.queued = record.queued;
                 if !matches!(book.header.state, RunState::Stopped { .. }) {
                     book.header.state = waiting_or_running(&book.pending, &engine);
                 }

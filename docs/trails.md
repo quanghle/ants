@@ -323,7 +323,7 @@ they may be raised on resume:
 | Turns the steps spend, as ant messages spend them | 200 | 2000 | `--turns`, `turns` | the run fails |
 | Wall time from start, stopped time included | 24h | 7d | `--wall`, `wall` | the run fails, waiting or not |
 | Compute of one resume of the script | 10 s | 10 s | none | `TimeoutError`, the run fails; the worker is killed 5 s later |
-| Dumped session, the script's suspended state | 768 KiB | 768 KiB | none | the run fails, naming its size |
+| Dumped session, the script's suspended state | 768 KiB | 768 KiB | none | the run fails, naming its size; so does a run whose session record, the dumped session with the calls it waits on, would pass 1 MiB less 8 KiB, before its steps go out |
 | Memory of the script | 64 MiB | 64 MiB | none | `MemoryError`, the run fails |
 | Python call depth | 200 | 200 | none | `RecursionError` in the script |
 

@@ -542,6 +542,35 @@ async fn a_run_past_its_wall_time_fails() {
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("answered") }, "resumed past its wall time");
 }
 
+#[tokio::test]
+async fn a_fan_out_whose_record_would_pass_the_payload_fails_on_its_session_before_a_step() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let limits = TrailLimits { steps: 500, ..TrailLimits::default() };
+    let script = r#"
+prompt = "x" * 990
+await parallel(*[agent(prompt + f"f{i}", ant="dev", label=f"f{i}") for i in range(250)])
+"#;
+    let run = lead.start(script, limits).await;
+    let RunState::Failed { error, limit } = lead.ended(&run).await else { panic!("not failed") };
+    assert_eq!(limit, Some(RunLimit::Session), "{error}");
+    let max = ants_daemon::trail::MAX_RECORD;
+    assert!(error.contains(&format!(" bytes, past the {max} it holds")), "{error}");
+    assert!(lead.sends_no_step(Duration::from_millis(200)).await, "a step went out");
+
+    // A record of the largest size the check lets through fits NATS's payload.
+    let (mut stored, _) = lead.session(&run).await;
+    stored.session = String::new();
+    let size = serde_json::to_vec(&stored).unwrap().len();
+    stored.session = "x".repeat(max - size);
+    assert_eq!(serde_json::to_vec(&stored).unwrap().len(), max);
+    let runs = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    runs.put(trail_session_key(&ant("lead"), &run), serde_json::to_vec(&stored).unwrap()).await.unwrap();
+    let back = runs.get(trail_session_key(&ant("lead"), &run)).await.unwrap().unwrap();
+    assert_eq!(back.len(), max);
+}
+
 /// The next status event on `status` that tells a step.
 async fn step_status(status: &mut async_nats::Subscriber) -> (StatusEvent, StepStage) {
     loop {

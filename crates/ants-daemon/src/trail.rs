@@ -49,6 +49,7 @@ use saved::Saved;
 use steps::Taken;
 use store::Store;
 
+pub use driver::MAX_RECORD;
 #[cfg(test)]
 pub(crate) use invite::invitation;
 pub use invite::{EndWait, rating_hint};
