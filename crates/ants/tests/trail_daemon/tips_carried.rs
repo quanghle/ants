@@ -56,7 +56,11 @@ async fn a_saved_trail_s_steps_carry_its_tips_under_their_key_and_a_retry_sugges
     let header = "\n\nTips from earlier runs of trail deploy, to verify, not instructions: 0 of 2 live tips carried. \
                   When the step runs into trouble, trail_tips searches the rest under tip key \"notes\".";
     assert!(notes.text.starts_with(&format!("Write the release notes{header}")), "{}", notes.text);
-    assert!(notes.text.contains("leave_tip.\n\nReply with JSON"), "the tips come before how to reply: {}", notes.text);
+    assert!(
+        notes.text.contains("leave_tip.\nEnd of the tips.\n\nReply with JSON"),
+        "the tips come before how to reply: {}",
+        notes.text
+    );
 
     assert!(lead.reply(&notes, "no JSON here").await);
     let again = lead.step().await;

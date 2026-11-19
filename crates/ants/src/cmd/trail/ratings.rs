@@ -5,14 +5,17 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
-use ants_proto::{RatingOutcome, RatingSummary, RunId, TRAIL_RATINGS_BUCKET, TrailName, TrailRating, UserId};
+use ants_proto::{
+    MAX_RATING_TASK, MAX_RATING_WHY, RatingOutcome, RatingSummary, RunId, TRAIL_RATINGS_BUCKET, TrailName, TrailRating,
+    UserId,
+};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 
 use crate::colony::{short, since};
 use crate::machines::latest_in;
-use crate::text::excerpt;
+use crate::text::one_line;
 
 /// The ratings of every trail, those `conductor` gave for one.
 pub(crate) async fn read(js: &jetstream::Context, conductor: Option<&UserId>) -> Result<Vec<TrailRating>> {
@@ -83,7 +86,7 @@ pub(super) fn cells(summary: Option<&RatingSummary>) -> [String; 2] {
         return ["-".to_owned(), "-".to_owned()];
     };
     let counts = summary.counts;
-    let latest = summary.latest.first().map_or_else(|| "-".to_owned(), |rating| excerpt(&rating.why, 40));
+    let latest = summary.latest.first().map_or_else(|| "-".to_owned(), |rating| one_line(&rating.why, 40));
     [format!("{}/{}/{}", counts.worked, counts.partly, counts.failed), latest]
 }
 
@@ -111,8 +114,8 @@ pub(super) fn section(summary: &RatingSummary, now: DateTime<Utc>) -> String {
             rating.run,
             rating.conductor,
             short(since(rating.at, now)),
-            excerpt(&rating.task, 80),
-            excerpt(&rating.why, 120)
+            one_line(&rating.task, 80),
+            one_line(&rating.why, 120)
         );
     }
     out
@@ -128,8 +131,8 @@ pub(super) fn of_run_section(ratings: &[TrailRating], now: DateTime<Utc>) -> Str
             rating.trail,
             rating.outcome,
             short(since(rating.at, now)),
-            rating.task,
-            rating.why
+            one_line(&rating.task, MAX_RATING_TASK),
+            one_line(&rating.why, MAX_RATING_WHY)
         );
     }
     out

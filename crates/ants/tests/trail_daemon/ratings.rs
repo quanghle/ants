@@ -206,13 +206,15 @@ async fn rate_trail_rates_the_saved_trails_a_run_took_and_find_trails_ranks_them
     assert!(ok, "{text}");
     let (head, rest) = text.split_once('\n').unwrap();
     assert!(head.starts_with("Saved trails for \"deploy the web applications\", ranked by a draw"), "{text}");
-    let entry = "1. deploy-web: Deploy the web app to staging\n   saved by ant lead; success 75% over 2 ratings on \
+    let entry = "1. deploy-web: \"Deploy the web app to staging\"\n   saved by ant lead; success 75% over 2 ratings on \
                  matching tasks (1 worked, 1 partly, 0 failed)\n   - ";
     assert!(rest.starts_with(entry), "{text}");
     assert!(!text.contains("deploy-db") && !text.contains("count-up"), "only the trails matching: {text}");
     assert!(text.ends_with("once it works, save_trail saves it for the colony."), "{text}");
     let (ok, text) = call(&client, "find_trails", json!({"query": "migrating databases"})).await;
-    assert!(ok && text.contains("\n1. deploy-db: Migrate the database schema\n   saved by ant lead; worth exploring"));
+    assert!(
+        ok && text.contains("\n1. deploy-db: \"Migrate the database schema\"\n   saved by ant lead; worth exploring")
+    );
     for (args, refused) in [
         (json!({"query": "the"}), "the query has no words"),
         (json!({"query": "deploy", "limit": 21}), "limit 21: from 1 to 20"),

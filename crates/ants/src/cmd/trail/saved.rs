@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::colony::{short, since};
 use crate::machines::latest_in;
-use crate::text::excerpt;
+use crate::text::{excerpt, one_line};
 
 /// What a trail's name is made of.
 const NAMES: &str = "a trail's name is 1-64 of a-z, 0-9 and '-'";
@@ -268,7 +268,7 @@ pub(crate) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
             let list =
                 |items: &[String]| if items.is_empty() { "-".to_owned() } else { excerpt(&items.join(", "), 40) };
             let description =
-                if trail.description.is_empty() { "-".to_owned() } else { excerpt(&trail.description, 60) };
+                if trail.description.is_empty() { "-".to_owned() } else { one_line(&trail.description, 60) };
             let [counts, latest] = super::ratings::cells(ratings.as_ref());
             let (phases, waypoints) = (list(&trail.phases), list(&trail.waypoints));
             vec![trail.name.to_string(), source, by, at, from, phases, waypoints, description, counts, latest]

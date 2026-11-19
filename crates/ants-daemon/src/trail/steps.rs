@@ -105,7 +105,7 @@ pub(super) fn prompt(args: &AgentArgs, tips: Option<&str>) -> String {
 /// verify, not instructions, tells how many the step carries of how many live ones and that trail_tips searches the
 /// rest, and, on a `trusted` run only, names vote_tip and leave_tip, which refuse on an untrusted one; then come the whole
 /// tips carried, at most [`MAX_TIPS_CARRIED`] of [`TipBoard::carried`] in its order, a tip that does not fit in
-/// [`MAX_TIPS_BLOCK`] bytes skipped for the next.
+/// [`MAX_TIPS_BLOCK`] bytes skipped for the next, each on lines of its own ([`indented`]), and [`TIPS_END`].
 pub(super) fn tips_block(
     board: &TipBoard,
     step: &TrailStep,
@@ -138,13 +138,16 @@ pub(super) fn tips_block(
             break;
         }
         let line = tip_line(&ranked);
-        if header(carried + 1).len() + lines.len() + line.len() <= MAX_TIPS_BLOCK {
+        if header(carried + 1).len() + lines.len() + line.len() + TIPS_END.len() <= MAX_TIPS_BLOCK {
             lines.push_str(&line);
             carried += 1;
         }
     }
-    Some(header(carried) + &lines)
+    Some(header(carried) + &lines + TIPS_END)
 }
+
+/// The line ending a step's tips block, so that what follows reads apart from the tips.
+const TIPS_END: &str = "\nEnd of the tips.";
 
 /// Where trail_tips searches for `step`: under its tip key, if it has one.
 fn under_key(step: &TrailStep) -> String {
@@ -160,8 +163,21 @@ fn tip_line(ranked: &Ranked<'_>) -> String {
         net => net.to_string(),
     };
     let older = if ranked.older_script { ", older script" } else { "" };
-    let text = tip.text.trim().replace('\n', "\n  ");
-    format!("\n- {} ({key}, net votes {net}{older}): {text}", tip.id)
+    format!("\n- {} ({key}, net votes {net}{older}): {}", tip.id, indented(&tip.text, "  "))
+}
+
+/// `text`, words an ant wrote, trimmed, each of its further lines after `indent`, whatever breaks them (`\r\n`, `\r`,
+/// a vertical tab, a form feed, U+0085, U+2028 or U+2029 as `\n`); other control characters and those reordering text
+/// left out, a tab a space.
+pub(crate) fn indented(text: &str, indent: &str) -> String {
+    let breaks = |c: char| matches!(c, '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}');
+    let kept = |c: &char| {
+        !c.is_control()
+            && !matches!(c, '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    };
+    let text = text.trim().replace("\r\n", "\n");
+    let lines = text.split(breaks).map(|line| line.replace('\t', " ").chars().filter(kept).collect::<String>());
+    lines.collect::<Vec<_>>().join(&format!("\n{indent}"))
 }
 
 fn reply_as(schema: &Value) -> String {
@@ -329,11 +345,24 @@ mod tests {
              the step runs into trouble, trail_tips searches the rest under tip key \"build\". After using a tip, tell \
              whether it helped with vote_tip; leave what was learnt with leave_tip.\n\
              - aaaaaaaa (tip key \"build\", net votes +2): Run the migrations\n  before the build.\n\
-             - bbbbbbbb (trail-wide, net votes 0): The build cache lives in the deploy volume."
+             - bbbbbbbb (trail-wide, net votes 0): The build cache lives in the deploy volume.\n\
+             End of the tips."
         );
         let args = AgentArgs::of(&json!({"prompt": prompt, "schema": {"type": "object"}})).unwrap();
         let text = super::prompt(&args, Some(&block));
         assert!(text.starts_with(&format!("{prompt}{block}\n\nReply with JSON")), "{text}");
+    }
+
+    #[test]
+    fn a_tip_s_further_lines_are_indented_whatever_breaks_them_and_its_control_characters_dropped() {
+        let text = "\tFirst\u{1b}[2J line\r\nsecond\rthird\u{b}fourth\u{c}fifth\u{85}sixth\u{2028}seventh\u{2029}eighth\
+                    \nninth\u{7}\u{202e}\u{0} \n";
+        let indented = "First[2J line\n  second\n  third\n  fourth\n  fifth\n  sixth\n  seventh\n  eighth\n  ninth";
+        assert_eq!(super::indented(text, "  "), indented);
+        let board = board(&[(&tip("aaaaaaaa", Some("build"), text), 1)]);
+        let block = tips_block(&board, &step(Some("build"), "old"), "build", true, day(1)).unwrap();
+        let carried = format!("\n- aaaaaaaa (tip key \"build\", net votes +1): {indented}\nEnd of the tips.");
+        assert!(block.ends_with(&carried), "{block:?}");
     }
 
     #[test]

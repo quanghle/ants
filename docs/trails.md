@@ -447,7 +447,8 @@ its schema. The block's header marks them as tips from earlier runs of the trail
 many the step carries of how many live tips the trail has; and names `trail_tips` for searching the rest when the step
 runs into trouble. On a trusted run it also names `vote_tip` and `leave_tip`, which an untrusted run's steps cannot
 use. Then come at most 3 tips, adding at most 2 KiB, each with its id, tip key, net votes and an `older script` mark
-where it applies:
+where it applies, its text's further lines indented whatever breaks them and its other control characters left out,
+and a line `End of the tips.` closes the block:
 
 1. live tips under the step's tip key, best ranked first;
 2. then live trail-wide tips relevant to the step's prompt, best ranked first: the prompt holds at least 30% of the
@@ -512,13 +513,15 @@ half, and the trails are ranked by a draw from each one's Beta(1 + worked, 1 + f
 those with few ratings get tried. The draws are seeded by the thread and the query, so a search repeated on a thread
 ranks alike. It lists `limit` trails (5 by default, at most 20), each with its description, saver, the share that
 worked over its matching ratings with the counts, or `worth exploring` without any, and its 3 latest matching ratings
-with their outcome, age, task and reason; on a trusted thread it ends noting that a script of the ant's own runs with
-`run_trail(script: …)` and `save_trail` saves it once it works.
+with their outcome, age, task and reason; the description, task and reason show quoted, their line breaks and control
+characters escaped, so each stays on its line. On a trusted thread it ends noting that a script of the ant's own runs
+with `run_trail(script: …)` and `save_trail` saves it once it works.
 
 `ants trail list` adds the columns `RATINGS` (worked/partly/failed) and `LATEST` (the latest reason) when any trail has
 ratings, `ants trail show NAME` the counts and the 3 latest ratings, each with its run, conductor, age, task and
 reason, `ants trail runs` a `RATED` column (each trail's outcome) and `ants trail show RUN` the run's ratings; `--json`
-carries them under `ratings`. In `ants chat`, `/trail list`, `/trail show` and `/trail runs` show the same.
+carries them under `ratings`, and every listing shows a rating's task and reason on one line, as tips' text, control
+characters left out. In `ants chat`, `/trail list`, `/trail show` and `/trail runs` show the same.
 `ants trail rm NAME` purges the trail's ratings with its tips; an ant's `remove_trail` purges none, so a trail saved
 later under that name inherits them, weighing half as of another script.
 

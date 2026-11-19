@@ -161,7 +161,8 @@ fn rated_text(run: &TrailRun, outcome: RatingOutcome, task: &str, rated: &[Rated
     out
 }
 
-/// What `find_trails` tells of the trails `found` for `query`, with the hint to write a script when `trusted`.
+/// What `find_trails` tells of the trails `found` for `query`, with the hint to write a script when `trusted`: a
+/// description and a reason quoted as a task is, so their line breaks and control characters show escaped on one line.
 fn found_text(query: &str, found: &[Found<SavedEntry>], trusted: bool, now: DateTime<Utc>) -> String {
     let mut out = if found.is_empty() {
         format!("No saved trail matches {query:?}.")
@@ -170,7 +171,8 @@ fn found_text(query: &str, found: &[Found<SavedEntry>], trusted: bool, now: Date
     };
     for (n, trail) in found.iter().enumerate() {
         let local = if trail.item.local { " (local to this machine)" } else { "" };
-        let _ = write!(out, "\n{}. {}{local}: {}", n + 1, trail.name, clip(trail.item.description.trim(), 300));
+        let description = clip(trail.item.description.trim(), 300);
+        let _ = write!(out, "\n{}. {}{local}: {description:?}", n + 1, trail.name);
         let saver = trail.item.saver.as_ref().map_or_default(|saver| format!("saved by {saver}; "));
         let counts = &trail.matching.counts;
         match counts.rate() {
@@ -190,7 +192,7 @@ fn found_text(query: &str, found: &[Found<SavedEntry>], trusted: bool, now: Date
         for rating in trail.matching.latest.iter().take(LATEST_RATINGS) {
             let _ = write!(
                 out,
-                "\n   - {}, {} ago, {:?}: {}",
+                "\n   - {}, {} ago, {:?}: {:?}",
                 rating.outcome,
                 age(rating.at, now),
                 rating.task,

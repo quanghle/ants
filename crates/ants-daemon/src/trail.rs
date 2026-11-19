@@ -58,6 +58,7 @@ pub use ratings::{RatedTrail, Ratings, colony_rated};
 pub(crate) use report::clip;
 pub use saved::{PreparedSave, SaveFrom, SaveOutcome, SaveTrail, SavedEntry};
 pub(crate) use saved::{age, from_run};
+pub(crate) use steps::indented;
 pub use tips::Tips;
 
 /// How to write a trail, in brief, for the tool starting runs to teach.

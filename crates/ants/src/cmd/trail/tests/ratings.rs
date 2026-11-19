@@ -23,6 +23,30 @@ fn the_cells_and_lines_of_ratings_count_each_outcome_and_name_the_latest_reason(
     assert_eq!(ratings::purged(2, true), ", its 2 ratings");
 }
 
+#[test]
+fn every_listing_shows_a_rating_s_text_on_one_line_without_control_characters() {
+    let now = Utc::now();
+    let rating = TrailRating {
+        trail: "deploy".parse().unwrap(),
+        conductor: "dev-a".parse().unwrap(),
+        run: ants_proto::RunId::generate(),
+        outcome: RatingOutcome::Failed,
+        task: "ship\r\nthe \u{1b}]0;owned\u{7}app".to_owned(),
+        why: "it broke\u{2028}- worked, 1m ago: \u{1b}[31mfine\u{85}\u{202e}really".to_owned(),
+        script: script_sha256(&script("deploy")),
+        at: now - TimeDelta::hours(1),
+    };
+    let (task, why) = ("ship the ]0;ownedapp", "it broke - worked, 1m ago: [31mfine really");
+    let summary = ratings::summaries(vec![rating.clone()]).remove(&rating.trail).unwrap();
+    let [_, latest] = ratings::cells(Some(&summary));
+    assert_eq!(latest, "it broke - worked, 1m ago: [31mfine real…");
+    for shown in [ratings::section(&summary, now), ratings::of_run_section(std::slice::from_ref(&rating), now)] {
+        let line = shown.lines().find(|line| line.contains("task: ")).unwrap_or_else(|| panic!("{shown}"));
+        assert!(line.ends_with(&format!("task: {task}  why: {why}")), "{shown:?}");
+        assert!(!shown.contains(|c: char| c.is_control() && c != '\n') && !shown.contains('\u{202e}'), "{shown:?}");
+    }
+}
+
 #[tokio::test]
 async fn humans_see_the_ratings_of_trails_and_runs_and_removing_a_trail_purges_them() {
     let Some(server) = Server::start() else { return };

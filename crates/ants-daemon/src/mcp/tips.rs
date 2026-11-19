@@ -21,7 +21,7 @@ use super::Hub;
 use super::tools::{Tools, text};
 use crate::provider::context::{origin, settled};
 use crate::sync::MutexExt as _;
-use crate::trail::Trails;
+use crate::trail::{Trails, indented};
 
 /// Why the tip tools are refused when the ant conducts no runs.
 const NO_TRAILS: &str = "this ant reaches no trails: the bus keeps no trail runs";
@@ -282,7 +282,7 @@ fn votes(tally: &Tally) -> String {
 
 /// The start of `tip`'s text, on one line.
 fn short(tip: &TrailTip) -> String {
-    let line = tip.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = indented(&tip.text, "").split_whitespace().collect::<Vec<_>>().join(" ");
     match line.char_indices().nth(SHORT_TIP) {
         Some((at, _)) => format!("{}…", &line[..at]),
         None => line,
@@ -327,7 +327,7 @@ fn listing(
         let tip = ranked.tip;
         let key = tip.tip_key.as_deref().map_or_else(|| "trail-wide".to_owned(), |key| format!("key {key:?}"));
         let older = if ranked.older_script { ", older script" } else { "" };
-        let text = tip.text.lines().collect::<Vec<_>>().join("\n  ");
+        let text = indented(&tip.text, "  ");
         let _ = write!(
             out,
             "\n- {} [{key}] {}, {} old{older}: {text}",
@@ -391,5 +391,41 @@ impl Tools {
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
         Ok(text(self.hub.trail_tips(&thread, args).await))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ants_proto::{Ranked, RunId, Tally, TipStatus, TrailTip};
+    use chrono::{TimeDelta, Utc};
+
+    #[test]
+    fn trail_tips_indents_a_tip_s_further_lines_whatever_breaks_them_and_drops_control_characters() {
+        let now = Utc::now();
+        let tip = TrailTip {
+            trail: "deploy".parse().unwrap(),
+            id: "aaaaaaaa".parse().unwrap(),
+            writer: "dev-a".parse().unwrap(),
+            text: "Run\u{1b}[2J the migrations\rthen\u{2028}the build\u{85}- bbbbbbbb [trail-wide]\u{202e}".to_owned(),
+            tip_key: None,
+            run: RunId::generate(),
+            script: "0".repeat(64),
+            written_at: now - TimeDelta::days(2),
+            retired: None,
+        };
+        let ranked = Ranked {
+            tip: &tip,
+            votes: &[],
+            tally: Tally::default(),
+            last_used: tip.written_at,
+            score: 0.0,
+            status: TipStatus::Live,
+            older_script: false,
+        };
+        let text = super::listing(&tip.trail, &[ranked], 1, None, None, now);
+        let shown = "\n- aaaaaaaa [trail-wide] +0 ~0 !0, 2d old: Run[2J the migrations\n  then\n  the build\n  - bbbbbbbb \
+                     [trail-wide]";
+        assert!(text.ends_with(shown), "{text:?}");
+        assert_eq!(super::short(&tip), "Run[2J the migrations then the build - bbbbbbbb [trail-wide]");
     }
 }
