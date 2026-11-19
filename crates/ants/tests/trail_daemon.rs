@@ -494,6 +494,27 @@ async fn a_stopped_run_gives_up_its_steps_and_resumes_with_fresh_ones() {
 }
 
 #[tokio::test]
+async fn a_resumed_run_counts_the_steps_it_sends_anew_once() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let limits = TrailLimits { steps: 2, ..TrailLimits::default() };
+    let run = lead.start(r#"await parallel(agent("a", ant="dev"), agent("b", ant="ops"))"#, limits).await;
+    lead.step().await;
+    lead.step().await;
+    lead.trails.stop(&run, &UserId::human()).await.unwrap();
+    assert_eq!(lead.header(&run).await.steps, 2);
+
+    lead.trails.resume(&run, &UserId::human(), None).await.unwrap();
+    let (first, second) = (lead.step().await, lead.step().await);
+    assert!(lead.reply(&first, &first.text.to_uppercase()).await);
+    assert!(lead.reply(&second, &second.text.to_uppercase()).await);
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!(["A", "B"]) });
+    let header = lead.header(&run).await;
+    assert_eq!((header.steps, header.leg().unwrap().steps), (2, 2), "the steps sent anew count once");
+}
+
+#[tokio::test]
 async fn a_run_past_its_wall_time_fails() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;

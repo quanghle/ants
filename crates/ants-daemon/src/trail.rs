@@ -598,7 +598,8 @@ impl Trails {
         let saved = async {
             self.save_session(&slot).await?;
             self.inner.store.list(run, true).await?;
-            self.save_header(&slot).await
+            self.save_header(&slot).await?;
+            self.save_ancestors(&slot.header()).await
         };
         saved.await.map_err(|e| format!("storing the run: {e:#}"))?;
         self.report_resumed(&slot.header(), by).await;
