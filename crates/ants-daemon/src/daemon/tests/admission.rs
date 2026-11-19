@@ -140,6 +140,75 @@ async fn an_ant_that_marks_its_message_as_a_webhook_s_gets_the_answer_itself() {
     assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing goes to the owner");
 }
 
+/// A sender with a webhook marker is a webhook whether its message says so or not: its thread is narrowed and its
+/// answer goes to the owner the webhook names.
+#[tokio::test]
+async fn a_webhook_s_message_leaving_out_its_mark_is_a_webhook_s() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let [hook] = ants(["github"]);
+    bus.mark_webhook(&hook).await;
+    let unmarked = Envelope::new(hook.clone(), bus.dev.clone(), "build red").with_owner(Some(UserId::human()));
+    assert!(!unmarked.webhook);
+    let seq = bus::publish_json(&bus.js, unmarked.subject(), &unmarked, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let reply = next_envelope(&mut to_human).await;
+        assert_eq!(reply.in_reply_to, Some(unmarked.id));
+        assert_eq!(reply.allow, Some(WEBHOOK_ALLOW.map(str::to_owned).to_vec()), "the thread is narrowed");
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().answered.len(), 1);
+    let kept = bus.ledger.narrowed(&unmarked.thread_id, None).await.unwrap();
+    assert_eq!(kept, Some(WEBHOOK_ALLOW.map(str::to_owned).to_vec()));
+}
+
+/// A message whose sender's webhook marker cannot be read is not prompted: tried again, it is answered once the
+/// marker can be read, as the ant's message it is.
+#[tokio::test]
+async fn a_message_whose_sender_s_marker_cannot_be_read_waits_for_it() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let [dev_b] = ants(["dev-b"]);
+    let [mut to_dev_b] = inboxes(&bus, std::array::from_ref(&dev_b)).await;
+    bus.js.delete_key_value(ants_proto::WEBHOOKS_BUCKET).await.unwrap();
+    let message = Envelope::new(dev_b.clone(), bus.dev.clone(), "trusted?");
+    let seq = bus::publish_json(&bus.js, message.subject(), &message, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        // Past a retry or two.
+        assert!(timeout(Duration::from_millis(900), to_dev_b.next()).await.is_err(), "not answered unchecked");
+        assert!(log.locked().answered.is_empty());
+        bus.js.create_key_value(crate::hub::webhooks_config()).await.unwrap();
+        let reply = next_envelope(&mut to_dev_b).await;
+        assert_eq!((reply.in_reply_to, &reply.allow), (Some(message.id), &None), "an ant's, not narrowed");
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().answered, ["trusted?"]);
+}
+
+/// Checking the claims of a message whose sender's marker cannot be read fails, the message taken as a webhook's
+/// naming no owner.
+#[tokio::test]
+async fn an_unread_marker_fails_the_claims_check_and_takes_the_message_as_a_webhook_s() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    let webhooks = Webhooks::new(jetstream::with_domain(bus.client.clone(), "nowhere"));
+    let claims = Claims { humans: &bus.humans, webhooks: &webhooks, threads: &bus.threads };
+    let [dev_b] = ants(["dev-b"]);
+    let mut envelope = Envelope::new(dev_b, bus.dev.clone(), "hi").with_owner(Some(UserId::human()));
+    assert!(claims.sender_claims(&mut envelope, 1).await.is_err());
+    assert!(envelope.webhook);
+    assert_eq!(envelope.owner, None);
+}
+
 /// A message claiming to be sent for a human by an ant its grant does not name is the ant's own: answered as any
 /// other, with nothing told to the human.
 #[tokio::test]

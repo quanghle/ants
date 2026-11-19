@@ -96,6 +96,8 @@ impl Bus {
         let limits = PromptLimits::default();
         let workload = Arc::new(colony::Workload::default());
         let channels = bus::ensure_channels(&js).await.unwrap();
+        // As `ants init` makes it: a daemon reads every sender's webhook marker there.
+        js.create_key_value(crate::hub::webhooks_config()).await.unwrap();
         // Before any post: a new channel consumer starts at the posts stored from then on.
         bus::chan_consumer(&stream, &dev, ACK_WAIT, MAX_DELIVER, 4).await.unwrap();
         let threads = Threads::new(js.clone(), dev.clone(), bus::ensure_sessions(&js, js_domain, &dev).await.unwrap());
@@ -262,12 +264,7 @@ impl Bus {
 
     /// Put the marker of `hook`, as `ants webhook serve` does before it delivers.
     async fn mark_webhook(&self, hook: &UserId) {
-        let config = jetstream::kv::Config {
-            bucket: ants_proto::WEBHOOKS_BUCKET.to_owned(),
-            max_age: ants_proto::WEBHOOK_RETENTION,
-            ..Default::default()
-        };
-        let webhooks = self.js.create_key_value(config).await.unwrap();
+        let webhooks = self.js.create_key_value(crate::hub::webhooks_config()).await.unwrap();
         let marker = serde_json::to_vec(&ants_proto::Serving::here("m")).unwrap();
         webhooks.put(ants_proto::webhook_marker_key(hook), marker.into()).await.unwrap();
     }

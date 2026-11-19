@@ -360,6 +360,8 @@ async fn the_human_s_side_tells_the_owner_the_thread_s_posts_name_not_the_one_an
     let (_, b_js) = server.connect(&dev_b).await;
     let (_, lead_js) = server.connect(&lead).await;
     let stream = bus::ensure_stream(&h_js).await.unwrap();
+    // The senders' webhook markers are read there.
+    h_js.create_key_value(ants_daemon::hub::webhooks_config()).await.unwrap();
     let mut to_human = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
     let mut to_alice = h_client.subscribe(subject::inbox_of(&alice)).await.unwrap();
     h_client.flush().await.unwrap();

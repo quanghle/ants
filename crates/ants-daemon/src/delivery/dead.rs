@@ -529,7 +529,10 @@ pub async fn bury_undelivered(
             let mut envelope =
                 serde_json::from_slice::<Envelope>(&msg.payload).ok().filter(|e| e.check_subject(&msg.subject).is_ok());
             if let Some(envelope) = envelope.as_mut() {
-                claims.sender_claims(envelope, seq).await;
+                // Unchecked, it is kept as a webhook's naming no owner or creator.
+                if let Err(e) = claims.sender_claims(envelope, seq).await {
+                    tracing::warn!(error = format!("{e:#}"), "checking the claims of an undelivered message");
+                }
             }
             (letter_of(&ant, seq, advisory.deliveries, &error, &msg.payload, envelope.as_ref()), None)
         }

@@ -2,7 +2,7 @@
 //! creator checked against stored state ([`Claims`]).
 
 use ants_proto::{Acting, ChannelPost, Envelope, Humans, ThreadId, ThreadOrigin, UserId};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use async_nats::jetstream::{self, AckKind};
 
 use crate::bus;
@@ -25,34 +25,48 @@ pub struct Claims<'a> {
 
 impl Claims<'_> {
     /// Check what inbox message `envelope`, at stream sequence `seq`, says of its sender and thread: its sender wrote
-    /// it. `webhook` holds only from a webhook ([`Webhooks`]) or a human. A human's owner and creator hold, and a
+    /// it. `webhook` holds only from a webhook ([`Webhooks`]) or a human, and holds from a webhook whether or not the
+    /// message says so. A sender whose marker cannot be read is an error, the message taken as a webhook's naming no
+    /// owner or creator, for its daemon to try it again. A human's owner and creator hold, and a
     /// webhook's owner, the human its config names. From an ant, a thread a channel post started has the owner and
     /// creator its posts say ([`Threads::origin_of`]); any other has the owner a human's or a webhook's message on it to
     /// the sender, or to an ant that passed the link to it on to the sender, named ([`Threads::owner_for`]), else that
     /// of the thread it was spun off ([`Envelope::origin_thread`]): a channel thread's under the same check as its
     /// creator, another's under the same as its own; else, for an assistant's message for its human naming the human,
     /// the human; else none, whatever owner the ant names.
-    pub async fn sender_claims(&self, envelope: &mut Envelope, seq: u64) {
-        if envelope.webhook && !self.humans.is_human(&envelope.from) && !self.webhooks.is_webhook(&envelope.from).await
-        {
-            tracing::warn!(
-                thread = %envelope.thread_id,
-                sender = %envelope.from,
-                "taking a message marked as a webhook's for an ant's: the sender has no webhook marker"
-            );
-            envelope.webhook = false;
+    pub async fn sender_claims(&self, envelope: &mut Envelope, seq: u64) -> Result<()> {
+        if !self.humans.is_human(&envelope.from) {
+            match self.webhooks.marked(&envelope.from).await {
+                Ok(true) => envelope.webhook = true,
+                Ok(false) if envelope.webhook => {
+                    tracing::warn!(
+                        thread = %envelope.thread_id,
+                        sender = %envelope.from,
+                        "taking a message marked as a webhook's for an ant's: the sender has no webhook marker"
+                    );
+                    envelope.webhook = false;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    envelope.webhook = true;
+                    envelope.owner = None;
+                    envelope.creator = None;
+                    envelope.origin_thread = None;
+                    bail!("reading the webhook marker of the sender {}: {error}", envelope.from);
+                }
+            }
         }
         if self.humans.sender_role(envelope).is_human() {
-            return;
+            return Ok(());
         }
         if envelope.webhook {
             envelope.creator = None;
             envelope.origin_thread = None;
-            return;
+            return Ok(());
         }
         if envelope.owner.is_none() && envelope.creator.is_none() {
             envelope.origin_thread = None;
-            return;
+            return Ok(());
         }
         let humans = self.humans.humans();
         match self.threads.origin_of(&envelope.thread_id, seq, &humans).await {
@@ -72,6 +86,7 @@ impl Claims<'_> {
                 envelope.origin_thread = None;
             }
         }
+        Ok(())
     }
 
     /// Check the owner and creator `envelope`, an ant's message at stream sequence `seq` on a thread no channel post
@@ -348,12 +363,12 @@ impl Inbox<'_> {
 
     /// Check what the inbox message in `incoming`, at stream sequence `seq`, says of its sender and thread
     /// ([`Claims::sender_claims`]).
-    pub(super) async fn sender_claims(&self, incoming: &mut Incoming, seq: u64) {
+    pub(super) async fn sender_claims(&self, incoming: &mut Incoming, seq: u64) -> Result<()> {
         if incoming.post.is_some() {
-            return;
+            return Ok(());
         }
         let claims = Claims { humans: self.humans, webhooks: self.webhooks, threads: self.threads };
-        claims.sender_claims(&mut incoming.envelope, seq).await;
+        claims.sender_claims(&mut incoming.envelope, seq).await
     }
 
     /// Wait, up to [`OWNER_LANDS_WITHIN`], for the owner a human's message in `incoming` names to be recorded for its

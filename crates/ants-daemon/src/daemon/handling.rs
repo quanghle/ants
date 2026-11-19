@@ -72,7 +72,8 @@ impl Inbox<'_> {
             }
         };
         self.thread_origin(&mut incoming, seq).await;
-        self.sender_claims(&mut incoming, seq).await;
+        // A sender whose webhook marker cannot be read fails the attempt: tried again, and buried after the last.
+        let claimed = self.sender_claims(&mut incoming, seq).await;
         self.owner_landed(&incoming, &msg).await;
         if self.settled_before(&incoming, &msg, seq).await {
             return (thread, Handled::Done);
@@ -80,10 +81,13 @@ impl Inbox<'_> {
         let envelope = &incoming.envelope;
         let attempt = Attempt::of(delivered, MAX_ATTEMPTS);
         // Taken up before anything is done for it, unless a human withdrew it first (`ants withdraw`).
-        let result = match self.take_up(envelope).await {
-            Ok(Some(withdrawal)) => self.withdrawn(&incoming, &msg, seq, &withdrawal).await,
-            Ok(None) => Box::pin(self.take(&mut incoming, &msg, seq, attempt)).await,
+        let result = match claimed {
             Err(e) => Err(e),
+            Ok(()) => match self.take_up(envelope).await {
+                Ok(Some(withdrawal)) => self.withdrawn(&incoming, &msg, seq, &withdrawal).await,
+                Ok(None) => Box::pin(self.take(&mut incoming, &msg, seq, attempt)).await,
+                Err(e) => Err(e),
+            },
         };
         let Err(e) = result else {
             self.sign_in.settled();

@@ -30,21 +30,22 @@ impl Webhooks {
     /// Whether `sender` is a webhook: its marker is in the webhooks bucket. A marker that cannot be read counts as
     /// none.
     pub async fn is_webhook(&self, sender: &UserId) -> bool {
+        self.marked(sender).await.unwrap_or(false)
+    }
+
+    /// Whether `sender` is a webhook: its marker is in the webhooks bucket; an error when the marker cannot be read.
+    pub async fn marked(&self, sender: &UserId) -> Result<bool, String> {
         if self.found.locked().get(sender).is_some_and(|at| at.elapsed() < KEEP) {
-            return true;
+            return Ok(true);
         }
-        let found = match self.read(sender).await {
-            Ok(found) => found,
-            Err(error) => {
-                tracing::warn!(
-                    %sender,
-                    error,
-                    "reading the webhook's marker; with credentials, `ants auth user` (or `ants auth leaf`) as the \
-                     human issues them again with the right to read it"
-                );
-                false
-            }
-        };
+        let found = self.read(sender).await.inspect_err(|error| {
+            tracing::warn!(
+                %sender,
+                error,
+                "reading the webhook's marker; with credentials, `ants auth user` (or `ants auth leaf`) as the \
+                 human issues them again with the right to read it"
+            );
+        })?;
         let mut kept = self.found.locked();
         if found {
             if kept.len() >= MAX_KEPT {
@@ -54,7 +55,7 @@ impl Webhooks {
         } else {
             kept.remove(sender);
         }
-        found
+        Ok(found)
     }
 
     async fn read(&self, sender: &UserId) -> Result<bool, String> {
