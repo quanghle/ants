@@ -362,7 +362,7 @@ results = await parallel(*[gather(source) for source in args["sources"]])
 notes = [r for r in results if r is not None and r["relevant"]]
 silent = [r["source"] for r in results if r is not None and not r["relevant"]]
 if silent:
-    log(f"nothing on the question in: {', '.join(silent)}")
+    log(f"nothing on the question in {', '.join(silent)}")
 
 phase("synthesize")
 if notes:
@@ -448,7 +448,7 @@ Args:
 
 ### Ask the owner before acting
 
-A plan goes to the run's thread as a note, the owner approves it or not, and only then a step applies it. The apply
+A plan goes to the run's thread as a note, the owner approves it or not, and only then does a step apply it. The apply
 step starts with no context, so its prompt carries the plan.
 
 ```python

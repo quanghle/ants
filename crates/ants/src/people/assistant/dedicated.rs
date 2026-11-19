@@ -597,7 +597,7 @@ impl Dedicated {
                 Ok(())
             }
             (true, true) => {
-                println!("push the revocation to the hub with: ants auth push --nats URL");
+                println!("push the revocation to the hub with `ants auth push --nats URL`");
                 Ok(())
             }
             (false, _) => Ok(()),

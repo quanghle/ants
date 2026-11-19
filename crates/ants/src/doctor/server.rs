@@ -169,11 +169,11 @@ pub(super) async fn check_jetstream(
     let set_domain = format!("--js-domain {hub_domain}, or js_domain = \"{hub_domain}\" in {config}");
     match (issued, domain, &identity.finding) {
         (Some(issued), Some(used), _) if issued != used => {
-            let detail = format!("the credentials were issued for JetStream domain {issued}, the CLI uses {used}");
+            let detail = format!("the credentials were issued for JetStream domain {issued}; the CLI uses {used}");
             return Check::fail(check, detail, vec![set_domain]);
         }
         (None, Some(used), Some(finding)) => {
-            let detail = format!("the credentials were issued for no JetStream domain, the CLI uses {used}");
+            let detail = format!("the credentials were issued for no JetStream domain; the CLI uses {used}");
             let fix = finding.renew().into_iter().take(1).map(|c| format!("{c} --js-domain {used}")).collect();
             return Check::fail(check, detail, fix);
         }

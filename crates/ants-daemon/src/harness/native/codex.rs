@@ -94,9 +94,10 @@ impl Shared {
         match self.rpc.request(method, params).await {
             Ok(result) => Ok(result),
             Err(e) if e.is_closed() => Err(self.process.lock().await.exited().await),
-            Err(e) if e.message.starts_with("no rollout found") => {
-                Err(failed(format!("codex {method}: {}; codex keeps a thread once a turn started in it", e.message)))
-            }
+            Err(e) if e.message.starts_with("no rollout found") => Err(failed(format!(
+                "codex {method}: {}; codex keeps a thread once a turn has started in it",
+                e.message
+            ))),
             Err(e) => Err(failed(format!("codex {method}: {}", e.message))),
         }
     }

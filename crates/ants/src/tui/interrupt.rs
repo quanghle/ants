@@ -20,7 +20,7 @@ pub struct Confirm {
 impl Confirm {
     /// The footer asking for `y`.
     pub fn line(&self) -> Line<'static> {
-        let what = "y cancels the prompt, any other key keeps it running";
+        let what = "y cancels the prompt; any other key keeps it running";
         let text = format!(" {} is running a tool call, {}: {what}", self.ant, self.tool);
         Line::styled(text, Style::new().fg(Color::Yellow))
     }
@@ -104,7 +104,7 @@ mod tests {
         m.take(live::Event::Status(tool(&thread, "dev-b", "c1", Some("git push"), "in_progress", 4)), at(4));
         assert_eq!(m.key(Key::Char('x'), at(4)), None);
         let line = m.interrupting.as_ref().map(|c| c.line().to_string());
-        let asks = "dev-b is running a tool call, git push: y cancels the prompt, any other key keeps it running";
+        let asks = "dev-b is running a tool call, git push: y cancels the prompt; any other key keeps it running";
         assert_eq!(line.as_deref().map(str::trim), Some(asks));
         assert_eq!(m.key(Key::Char('n'), at(5)), None);
         assert_eq!(m.interrupting, None, "any other key drops it");

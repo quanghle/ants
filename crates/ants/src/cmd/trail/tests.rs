@@ -178,7 +178,7 @@ async fn humans_save_list_show_replace_and_remove_trails_and_ants_only_read_them
     let js = human(&server, &alice).await;
 
     let error = saved::find(&js, &local, &"absent".parse().unwrap()).await.unwrap_err().to_string();
-    assert!(error.starts_with("no trail absent, neither in the colony nor in"), "{error}");
+    assert!(error.starts_with("no trail absent, either in the colony or in"), "{error}");
     let found = saved::find(&js, &local, &"deploy".parse().unwrap()).await.unwrap();
     assert!(matches!(found.trail.source, Source::Local { .. }) && found.shadows.is_none());
 

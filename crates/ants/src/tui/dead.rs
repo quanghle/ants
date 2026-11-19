@@ -34,7 +34,7 @@ impl Letter {
             Some(text) => format!("dead letter {} (\"{}\")", self.seq, excerpt(text, 40)),
             None => format!("dead letter {}", self.seq),
         };
-        let text = format!(" {letter}: y drops it unreplayed, any other key keeps it");
+        let text = format!(" {letter}: y drops it unreplayed; any other key keeps it");
         Line::styled(text, Style::new().fg(Color::Yellow))
     }
 }
@@ -132,7 +132,7 @@ mod tests {
         let replay = Some(Action::Run(Job::DeadReplay(2), "/dead replay".into()));
         assert_eq!(run(&mut m, "/dead replay"), replay, "home's stuck item");
         assert_eq!(run(&mut m, "/dead drop"), None);
-        let asks = "dead letter 2 (\"build it\"): y drops it unreplayed, any other key keeps it";
+        let asks = "dead letter 2 (\"build it\"): y drops it unreplayed; any other key keeps it";
         assert_eq!(m.dropping.as_ref().map(|l| l.line().to_string()), Some(format!(" {asks}")));
         assert_eq!(m.key(Key::Char('n'), at(9)), None);
         assert!(m.dropping.is_none(), "any other key keeps it");

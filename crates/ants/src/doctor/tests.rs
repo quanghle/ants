@@ -1300,7 +1300,7 @@ fn ants_whose_harness_runs_tools_unasked_are_warned_of_rules_that_miss_them() {
         checks.iter().map(|c| (c.check.as_str(), c.status)).collect::<Vec<_>>(),
         [("ant dev-a tool permissions", Status::Warn), ("ant dev-b tool permissions", Status::Warn)]
     );
-    assert!(checks[1].detail.contains("schedule nightly"), "{}", checks[1]);
+    assert!(checks[1].detail.contains("schedule nightly narrows its threads to"), "{}", checks[1]);
     assert!(checks[0].fix[0].starts_with("set tools = \"ask\" on the ant or in [harnesses.claude]"), "{}", checks[0]);
 
     std::fs::write(&config, "messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n").unwrap();

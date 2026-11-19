@@ -153,8 +153,8 @@ pub(crate) enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// List the devices of a human, one per credentials issued to it with `ants auth user NAME --human`: id, label,
-    /// key, when issued, and whether revoked.
+    /// List the devices of a human, one per set of credentials issued to it with `ants auth user NAME --human`: id,
+    /// label, key, when issued, and whether revoked.
     Devices {
         human: UserId,
         /// One JSON object per line.
@@ -246,7 +246,7 @@ pub(crate) struct UserArgs {
     #[arg(long, conflicts_with = "webhook")]
     human: bool,
     /// Issue an observer's read-only credentials, for hooks (`ants hook run`, docs/hooks.md): it reads approval
-    /// requests and decisions, dead letters, every ant's status (escalations among it) and the colony, and
+    /// requests and decisions, dead letters, every ant's status updates (escalations among them) and the colony, and
     /// publishes nothing.
     #[arg(long, conflicts_with_all = ["human", "webhook", "label"])]
     observer: bool,
@@ -407,7 +407,8 @@ pub(crate) async fn run(conn: &Connection<'_>, command: AuthCommand) -> Result<(
                 .collect();
             if keys.is_empty() {
                 bail!(
-                    "{human} holds no admin credentials neither revoked nor expired; `ants auth admin list` lists them"
+                    "{human} holds no live admin credentials (neither revoked nor expired); `ants auth admin list` \
+                     lists them"
                 );
             }
             revoke_credentials(None, keys, Vec::new(), no_push, Some(dir), conn).await
@@ -731,7 +732,7 @@ pub(crate) async fn revoke_credentials(
     }
     if no_push {
         println!(
-            "push them to the hub with: ants auth push --nats URL (leaf nodes with a system account uplink get \
+            "push them to the hub with `ants auth push --nats URL` (leaf nodes with a system account uplink get \
              them with the push and keep them)"
         );
         if let Some(ant) = &ant {

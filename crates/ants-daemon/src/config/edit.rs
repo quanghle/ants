@@ -247,7 +247,7 @@ pub fn needed(change: &FieldChange, current: Option<&Value>) -> Result<bool> {
     }
     if !same_opt(current, change.expected.as_ref()) {
         bail!(
-            "{field} changed since the order was sent: it holds {}, the order expected {}",
+            "{field} changed since the order was sent: it holds {}; the order expected {}",
             shown(current),
             shown(change.expected.as_ref())
         );
@@ -397,7 +397,7 @@ max_harnesses = 2
             change("model", Some(json!("gpt-4")), Some(json!("o3"))),
         ];
         let e = file.change(&p("dev-b"), &changes).unwrap_err().to_string();
-        assert_eq!(e, "model changed since the order was sent: it holds nothing, the order expected \"gpt-4\"");
+        assert_eq!(e, "model changed since the order was sent: it holds nothing; the order expected \"gpt-4\"");
         assert_eq!(file.text(), FILE);
 
         let rename = file.change(&p("dev-b"), &[change("name", Some(json!("dev-b")), Some(json!("dev-c")))]);

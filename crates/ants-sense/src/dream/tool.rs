@@ -105,7 +105,7 @@ async fn dream_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     if decided.iter().any(|found| found.proposal.kind == skill::SKILL && found.proposal.status == Status::Confirmed)
         && let Err(e) = skill::materialize_for(sense, &context.ant).await
     {
-        let _ = write!(warning, "\nWarning: the skill files were not written, the next brief tries again: {e}.");
+        let _ = write!(warning, "\nWarning: the skill files were not written; the next brief tries again: {e}.");
     }
     let (items, dream, verdicts, decided, warning) = (&*items, &dream, &verdicts, &decided, &warning);
     read_modify_write(|| async move {

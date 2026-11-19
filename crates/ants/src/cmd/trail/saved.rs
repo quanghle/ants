@@ -264,7 +264,7 @@ pub(super) async fn find(js: &jetstream::Context, local: &Path, name: &TrailName
         }
         (None, Some(trail)) => Ok(Found { trail, shadows: None }),
         (None, None) => {
-            bail!("no trail {name}, neither in the colony nor in {}: `ants trail list` lists them", local.display())
+            bail!("no trail {name}, either in the colony or in {}: `ants trail list` lists them", local.display())
         }
     }
 }

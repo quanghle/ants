@@ -57,7 +57,7 @@ pub(crate) enum EnrollCommand {
     },
     /// Renew the credentials NAME asks for (`ants renew`): valid, unrevoked credentials of the team, for the new key,
     /// with the same name, kind, members, device and --js-domain, and the permissions their kind has in this version.
-    /// With --auto, renew every credentials asking, as they ask, until stopped. Credentials a registration granted
+    /// With --auto, renew all credentials asking, as they ask, until stopped. Credentials a registration granted
     /// (`ants login`) are left to `ants signer`.
     Renew {
         /// The name the credentials carry: an ant, a human, a webhook, an observer, channel-manager or leaf-<machine>.
@@ -66,7 +66,7 @@ pub(crate) enum EnrollCommand {
         /// The asking holder's new public key, needed when several ask for NAME.
         #[arg(long, value_name = "KEY", conflicts_with = "auto")]
         public_key: Option<String>,
-        /// Keep running and renew every credentials whose holder asks, without an approval each.
+        /// Keep running and renew all credentials whose holders ask, without approving each.
         #[arg(long, conflicts_with = "name")]
         auto: bool,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).

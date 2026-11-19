@@ -331,7 +331,7 @@ On the hub, `scripts/install-units.sh --devtunnel-host ants-hub` (`--devtunnel-b
 
 - **CLI login (default)**: run `devtunnel user login -g -d` as the service user with the tunnel owner or an authorized org/tenant account (`devtunnel access create ants-hub --org ORG` or `--tenant`). Keychain credentials last several days; re-running `devtunnel user login -g -d` after expiry recovers on the next 30 s retry without restart. Headless workers can use Entra service principals (`--sp-tenant-id`, `--sp-client-id`, `--sp-certificate-file`) or managed identities (`--mi-client-id`).
 - **Connect token (`--devtunnel-token FILE`)**: issue a 24 h token (`devtunnel token ants-hub --scopes connect`), write `FILE` (`0600`), and install with `--devtunnel-token FILE` (`--access-token -` on stdin). Replace `FILE` before expiry and restart `ants.devtunnel` / `ants-devtunnel`.
-- **Checks**: `ants doctor` checks the installed unit: running, and either the CLI login (as for `devtunnel host`) or the token file, present with mode `0600` and failing once its token expired, warning 6 h before (the JWT's `exp`; a day after the file was written for a token that is no JWT).
+- **Checks**: `ants doctor` checks the installed unit: running, and either the CLI login (as for `devtunnel host`) or the token file, present with mode `0600` and failing once its token has expired, warning 6 h before (the JWT's `exp`; a day after the file was written for a token that is no JWT).
 
 Stopping `devtunnel connect` leaves the hub-side socket from `devtunnel host` to `nats-server` open until hub `ping_interval: "30s"` reaps it.
 

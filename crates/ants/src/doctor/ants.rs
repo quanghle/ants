@@ -416,8 +416,9 @@ pub(super) fn check_bypassed(loaded: &config::Loaded, webhooks: &[webhook::Webho
             )
             .collect();
         if !narrowing.is_empty() {
+            let verb = if narrowing.len() == 1 { "narrows" } else { "narrow" };
             let detail = format!(
-                "harness {harness} runs its tools unasked, so the tool rules {} narrow its threads to do not apply",
+                "harness {harness} runs its tools unasked, so the tool rules {} {verb} its threads to do not apply",
                 narrowing.join(", ")
             );
             checks.push(Check::warn(check, detail, fix));

@@ -68,7 +68,7 @@ pub(crate) enum TrailCommand {
     },
     /// Start a run of a trail: a saved one, the colony's before a local one of the same name, or the script of a .py
     /// file, checked here and sent as is. Prints what the run may spend and asks to confirm, unless --yes. The run's
-    /// conductor, the ant whose daemon runs it, defaults to whom `ants ask` without @ant goes: the human's assistant,
+    /// conductor, the ant whose daemon runs it, defaults to where `ants ask` without @ant goes: the human's assistant,
     /// else the messenger. Needs a human's credentials.
     Run(RunArgs),
     /// Stop a run: it sends no further step and ignores the replies of the steps it waited on. Prints the steps still
@@ -122,7 +122,7 @@ pub(crate) struct RunArgs {
     #[arg(long, short = 'y')]
     pub(crate) yes: bool,
     /// Follow the run until it ends: its phase, steps sent, answered and queued, and its result or error. Exits 0 once
-    /// it is done, non-zero once it failed or stopped; interrupting stops the following, not the run.
+    /// it is done, non-zero once it has failed or stopped; interrupting stops the following, not the run.
     #[arg(long)]
     pub(crate) follow: bool,
     /// Print the started run as one JSON object (run, conductor, thread), and with --follow the run's record once it

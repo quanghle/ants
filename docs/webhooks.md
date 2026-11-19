@@ -89,7 +89,7 @@ questions = true                              # questions ants ask alice with as
 quiet = "22:00-07:00"                         # optional local quiet window (start inclusive, end exclusive)
 timezone = "America/New_York"                 # optional per-human zone (requires `quiet`)
 bypass = ["approvals"]                        # optional kinds bypassing quiet hours and snooze: approvals, escalations (and notices), questions
-digest = true                                 # one digest of the held notices when quiet hours or snooze end (default false)
+digest = true                                 # one digest of the held notices when quiet hours or snooze ends (default false)
 stand_in = "bob"                              # optional human relayed what waits for alice while away
 ```
 
@@ -114,10 +114,10 @@ All sinks run concurrently within `timeout` (`1s`–`30s`, default `10s`); failu
 
 ### Quiet hours, snooze and muted threads
 
-Held notices for approvals, escalations, questions, notices and completions are dropped (logged as `held back a notice`, leaving requests pending and inbox messages unread); unserved-ant notices (`unserved`) wait until quiet hours or snooze end. `bypass` never overrides a muted thread.
+Held notices for approvals, escalations, questions, notices and completions are dropped (logged as `held back a notice`, leaving requests pending and inbox messages unread); unserved-ant notices (`unserved`) wait until quiet hours or snooze ends. `bypass` never overrides a muted thread.
 
-- **Digest:** with `digest = true`, each approval, escalation, question, notice or completion held back by quiet hours or a snooze (not by a mute) is counted per kind in KV `ants_notify` under `held.<human>` (`{since, counts}`), with compare-and-set by whichever instance took it. Once neither quiet hours nor a snooze hold (checked every minute and before the next notice sent, so `ants notify resume` ends one early), one instance claims the count by deleting it at the revision it read and sends a single `digest` notice to every sink: the counts per kind since the first held notice, and the tool requests still pending (up to 10 in the text, all in the [JSON notice](#json-notice)). The count survives restarts and is shared by every instance listing the human, which should all set `digest` alike; a digest is sent at most once, a lost one is not retried, and nothing is marked read or decided.
-- **Reminders:** a reminder set in `ants chat` (`/remind`, `b`; `/reminders` lists them) is stored per human in KV `ants_threads` under `reminders.<human>`. Every 30 seconds, each instance listing the human marks the reminders due `pushed` there with compare-and-set, and the one whose write lands sends a `reminder` notice of each to every sink: a reminder is pushed at most once, and neither quiet hours, a snooze nor a muted thread hold it back.
+- **Digest:** with `digest = true`, each approval, escalation, question, notice or completion held back by quiet hours or a snooze (not by a mute) is counted per kind in KV `ants_notify` under `held.<human>` (`{since, counts}`), with compare-and-set by whichever instance took it. Once neither quiet hours nor a snooze holds (checked every minute and before the next notice sent, so `ants notify resume` ends one early), one instance claims the count by deleting it at the revision it read and sends a single `digest` notice to every sink: the counts per kind since the first held notice, and the tool requests still pending (up to 10 in the text, all in the [JSON notice](#json-notice)). The count survives restarts and is shared by every instance listing the human, which should all set `digest` alike; a digest is sent at most once, a lost one is not retried, and nothing is marked read or decided.
+- **Reminders:** a reminder set in `ants chat` (`/remind`, `b`; `/reminders` lists them) is stored per human in KV `ants_threads` under `reminders.<human>`. Every 30 seconds, each instance listing the human marks the reminders due `pushed` there with compare-and-set, and the one whose write lands sends a `reminder` notice of each to every sink: a reminder is pushed at most once, and neither quiet hours, a snooze nor a muted thread holds it back.
 
 - **Snooze:** `ants notify snooze DUR` (`1s`–`365d`), `ants notify resume`, `ants notify status [--json]`; in `ants chat`, `/notify snooze DUR`, `/notify resume` and `/notify status`.
 - **Thread mute:** `ants thread mute THREAD [--for DUR]` (default `30d`) and `ants thread unmute THREAD`.
@@ -126,7 +126,7 @@ Runtime holds live in KV `ants_notify` under `<human>` (`{snoozed_until, muted, 
 
 ### Stand-in
 
-A human counts as away when quiet hours or a snooze hold back a notice and no `device` of its sinks follows what the notice is about (presence as above). While away, `ants webhook serve` relays to the human's stand-in:
+A human counts as away when quiet hours or a snooze holds back a notice and no `device` of its sinks follows what the notice is about (presence as above). While away, `ants webhook serve` relays to the human's stand-in:
 
 - pending tool requests waiting for the human (`ApprovalRequest.human`: the thread's human owner, else the default human), and
 - escalations an ant sent to the human's inbox, reminders included (not expired-request notices, not muted threads).

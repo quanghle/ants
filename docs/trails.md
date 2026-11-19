@@ -53,7 +53,7 @@ these names:
 | `await goto(trail=None, at=None, state=None)` | Ends the leg where called and goes on in `trail` (this one without it) at waypoint `at` (its start without it) with `state` as `args`; returns only by raising ([Routes](#routes-goto)). |
 | `phase(title)`, `log(text)`, `print()` | Notes on the run's thread; never wait. |
 | `args` | The leg's JSON input (`None` without): the run's input on its first leg, the goto's `state` on later ones. |
-| `await parallel(*coroutines)` | All results in argument order once every coroutine finished (`asyncio.gather`). |
+| `await parallel(*coroutines)` | All results in argument order once every coroutine has finished (`asyncio.gather`). |
 | `await pipeline(items, *stages)` | Each item through the async stages on its own pace; the last stage's results in item order. |
 
 A step that fails raises `RuntimeError` where it is awaited: an `ant=` naming a human or no valid ant name, a
@@ -122,7 +122,7 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   `--ant` names another. The run reports on `--thread` (an id, a unique start of one, or `last`) or a new thread,
   and is owned by the human. The command prints the trail, conductor and thread and what the run may spend, then asks
   `Start the run? [y/N]`; without a terminal `--yes` is required. `--follow` then follows the run until it ends,
-  exiting 0 once it is done and non-zero once it failed or stopped; `--json` prints `{"run","conductor","thread"}`.
+  exiting 0 once it is done and non-zero once it has failed or stopped; `--json` prints `{"run","conductor","thread"}`.
 
   ```sh
   ants trail run review --args '{"repo": "/src/app", "files": ["src/main.rs"]}' --steps 100 --follow

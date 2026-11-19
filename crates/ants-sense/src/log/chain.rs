@@ -336,7 +336,7 @@ impl Chain {
         if let Some(seen) = &self.seen
             && seen.index > last
         {
-            let reason = format!("the log ends at event {last}, event {} was verified before", seen.index);
+            let reason = format!("the log ends at event {last}; event {} was verified before", seen.index);
             let index = last + 1;
             self.broken.get_or_insert(Break { index, sequence: None, reason });
         }

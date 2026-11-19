@@ -17,8 +17,8 @@ pub(crate) enum KeysCommand {
     /// JWT and the stored keys' references. Leaf node uplink credentials, which nats-server reads, are refused.
     Store { files: Vec<PathBuf> },
     /// Move the seeds of each credentials file (default: --creds) back from the OS credential store into the file,
-    /// readable by its owner only, then delete it from the store: for a machine without an unlocked store, or to
-    /// back the seed up.
+    /// readable by its owner only, then delete them from the store: for a machine without an unlocked store, or to
+    /// back the seeds up.
     Unstore { files: Vec<PathBuf> },
     /// Delete each credentials file and the seeds it keeps in the OS credential store. The credentials, and the live
     /// ones they were renewed from, stay valid until they expire: revoke them with `ants auth revoke --key KEY

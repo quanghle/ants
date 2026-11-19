@@ -141,7 +141,7 @@ pub(super) async fn check_webhooks(path: &Path) -> Vec<Check> {
         checks.push(Check::ok("webhook secrets", format!("{files} secret files of {shown}, each with mode 0600")));
     }
     for (what, var) in &unset {
-        let detail = format!("{what}: {var} is not set here, only the environment of `ants webhook serve` may hold it");
+        let detail = format!("{what}: {var} is not set here; only the environment of `ants webhook serve` may hold it");
         checks.push(Check::warn("webhook secrets", detail, vec![format!("export {var}, or name a secret_file")]));
     }
     if checks.iter().any(|c| c.status != Status::Ok) {

@@ -393,7 +393,7 @@ pub async fn retire(
     if let Some(revoked) = revoked {
         if args.no_push {
             if !revoked.is_empty() {
-                println!("push the revocation to the hub with: ants auth push --nats URL");
+                println!("push the revocation to the hub with `ants auth push --nats URL`");
             }
         } else {
             if !revoked.is_empty() {

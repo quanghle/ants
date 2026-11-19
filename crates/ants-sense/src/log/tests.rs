@@ -247,7 +247,7 @@ async fn a_log_ending_before_or_differing_from_what_was_verified_is_broken() {
             assert!(broken.reason.contains("differs from event 3 as verified before"), "{}", broken.reason);
         } else {
             assert_eq!((broken.index, broken.sequence), (3, None));
-            assert!(broken.reason.contains("ends at event 2, event 3 was verified before"), "{}", broken.reason);
+            assert!(broken.reason.contains("ends at event 2; event 3 was verified before"), "{}", broken.reason);
         }
         std::fs::remove_dir_all(&home).unwrap();
     }

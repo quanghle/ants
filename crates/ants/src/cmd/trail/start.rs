@@ -241,7 +241,7 @@ pub(super) async fn run(
     } else {
         println!("{}", start.started(&run));
         if !follow {
-            println!("`ants trail show {run} --follow` follows it, `ants trail stop {run}` stops it");
+            println!("`ants trail show {run} --follow` follows it; `ants trail stop {run}` stops it");
         }
     }
     if follow {

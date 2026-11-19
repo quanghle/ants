@@ -333,7 +333,7 @@ async fn codex_threads_resume_and_fork_with_their_permissions_and_mcp_servers() 
     assert_eq!(forked["params"]["sandbox"], "danger-full-access");
 
     let err = format!("{:#}", fork(&launch, &SessionId::new(THREAD)).await.unwrap_err());
-    assert!(err.contains("no rollout found") && err.contains("once a turn started in it"), "{err}");
+    assert!(err.contains("no rollout found") && err.contains("once a turn has started in it"), "{err}");
 }
 
 #[tokio::test]
