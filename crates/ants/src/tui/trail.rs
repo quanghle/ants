@@ -23,7 +23,7 @@ use super::model::{Action, Key, Model};
 use super::style::{block, dim};
 use crate::cmd::send;
 use crate::cmd::trail::runs::{self, Pick};
-use crate::cmd::trail::{self as cli, Shown, control, saved, start};
+use crate::cmd::trail::{self as cli, LimitArgs, Shown, control, saved, start};
 
 /// How wide the summary of a run to start is at most.
 const WIDTH: u16 = 100;
@@ -150,10 +150,11 @@ pub async fn stopped(ctx: &Ctx, pick: &Pick) -> Result<Done> {
     Ok(Done { line, warnings: lines.map(str::to_owned).collect(), ..Done::default() })
 }
 
-/// Resume the run `pick` names under its own limits, as `ants trail resume` does.
-pub async fn resumed(ctx: &Ctx, pick: &Pick) -> Result<Done> {
+/// Resume the run `pick` names under its own limits with those `limits` gives instead, as `ants trail resume` does.
+pub async fn resumed(ctx: &Ctx, pick: &Pick, limits: LimitArgs) -> Result<Done> {
     let run = runs::pick(&ctx.js, pick).await?;
-    Ok(Done { line: control::resume(&ctx.client, &ctx.me.id, &run, None).await?, ..Done::default() })
+    let limits = if limits.given() { Some(limits.over(run.limits)?) } else { None };
+    Ok(Done { line: control::resume(&ctx.client, &ctx.me.id, &run, limits).await?, ..Done::default() })
 }
 
 #[cfg(test)]
@@ -258,7 +259,12 @@ mod tests {
         assert_eq!(m.outcome(done(listed)), Some(Action::Page("RUN  TRAIL".to_owned())));
         let Some(Action::Run(Job::TrailStop(pick), _)) = run(&mut m, "/trail stop 0190ab") else { panic!("no stop") };
         assert_eq!(pick.to_string(), "0190ab");
-        assert!(matches!(run(&mut m, "/trail resume 0190ab"), Some(Action::Run(Job::TrailResume(_), _))));
+        let Some(Action::Run(Job::TrailResume { run: pick, limits }, _)) =
+            run(&mut m, "/trail resume 0190ab --steps 80")
+        else {
+            panic!("no resume")
+        };
+        assert_eq!((pick.to_string(), limits.steps), ("0190ab".to_owned(), Some(80)));
     }
 
     #[test]
@@ -474,7 +480,13 @@ mod tests {
         let stop = stopped(&ctx, &pick).await.unwrap();
         assert!(stop.line.starts_with(&format!("stopped run {} on lead: ", record.run)), "{}", stop.line);
         assert_eq!(stop.warnings.last().unwrap(), &format!("dev-a message {0}: ants withdraw dev-a {0}", Uuid::nil()));
-        assert_eq!(resumed(&ctx, &pick).await.unwrap().line, format!("resumed run {} on lead", record.run));
+        let own = LimitArgs::default();
+        assert_eq!(resumed(&ctx, &pick, own).await.unwrap().line, format!("resumed run {} on lead", record.run));
+        let raised = LimitArgs { turns: Some(400), wall: Some(std::time::Duration::from_hours(48)), ..own };
+        assert_eq!(
+            resumed(&ctx, &pick, raised).await.unwrap().line,
+            format!("resumed run {} on lead under 50 steps, 4 at once, 400 turns, 2d of wall time", record.run)
+        );
         let error = stopped(&ctx, &"0190c".parse().unwrap()).await.unwrap_err().to_string();
         assert!(error.starts_with("no run's id starts with 0190c"), "{error}");
     }

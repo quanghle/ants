@@ -63,7 +63,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     (
         "trail",
         "list | show NAME|RUN | runs | run NAME [@ANT] [--steps N] [--at-once N] [--turns N] [--wall DUR] \
-         [--thread THREAD] [ARGS] | stop RUN | resume RUN",
+         [--thread THREAD] [ARGS] | stop RUN | resume RUN [--steps N] [--at-once N] [--turns N] [--wall DUR]",
         "list or show saved trails and runs, start a run of a saved trail once y confirms it, stop or resume a run",
     ),
     ("quit", "", "leave ants chat"),
@@ -187,7 +187,11 @@ pub enum Trail {
         thread: Option<OnThread>,
     },
     Stop(Pick),
-    Resume(Pick),
+    /// Resume the run `run`, under its own limits with those `limits` gives instead.
+    Resume {
+        run: Pick,
+        limits: LimitArgs,
+    },
 }
 
 /// The thread `/trail run --thread` names.
@@ -411,10 +415,10 @@ fn trail(args: &str) -> Result<Trail, Option<String>> {
         }
         ("runs", "") => Ok(Trail::Runs),
         ("run", rest) if !rest.is_empty() => trail_run(rest),
-        (verb @ ("stop" | "resume"), run) if !run.is_empty() && !run.contains(char::is_whitespace) => {
-            let run = run.parse().map_err(|e: String| Some(e))?;
-            Ok(if verb == "stop" { Trail::Stop(run) } else { Trail::Resume(run) })
+        ("stop", run) if !run.is_empty() && !run.contains(char::is_whitespace) => {
+            run.parse().map(Trail::Stop).map_err(|e: String| Some(e))
         }
+        ("resume", rest) if !rest.is_empty() => trail_resume(rest),
         _ => Err(None),
     }
 }
@@ -423,16 +427,50 @@ fn trail(args: &str) -> Result<Trail, Option<String>> {
 /// any order, then the script's args; None for its usage.
 fn trail_run(args: &str) -> Result<Trail, Option<String>> {
     let error = |e: &dyn std::fmt::Display| Some(e.to_string());
-    let (name, mut rest) = first_word(args);
+    let (name, rest) = first_word(args);
     let trail = name.parse().map_err(|e| error(&e))?;
-    let (mut conductor, mut limits, mut thread) = (None, LimitArgs::default(), None);
+    let (TrailOptions { conductor, limits, thread }, rest) = trail_options(rest, true)?;
+    let limits = limits.over(TrailLimits::DEFAULT).map_err(|e| error(&e))?;
+    let args = match rest {
+        "" => None,
+        json => Some(crate::cmd::trail::start::json_args(json).map_err(|e| Some(format!("ARGS {e}")))?),
+    };
+    Ok(Trail::Run { trail, conductor, args, limits, thread })
+}
+
+/// The resume `/trail resume`'s `args` ask for: the run, then the options of `ants trail resume` naming limits; None
+/// for its usage.
+fn trail_resume(args: &str) -> Result<Trail, Option<String>> {
+    let (run, rest) = first_word(args);
+    let run = run.parse().map_err(|e: String| Some(e))?;
+    let (TrailOptions { limits, .. }, rest) = trail_options(rest, false)?;
+    if !rest.is_empty() {
+        return Err(None);
+    }
+    limits.over(TrailLimits::DEFAULT).map_err(|e| Some(e.to_string()))?;
+    Ok(Trail::Resume { run, limits })
+}
+
+/// The options of `/trail run`, else of `/trail resume`.
+#[derive(Default)]
+struct TrailOptions {
+    conductor: Option<UserId>,
+    limits: LimitArgs,
+    thread: Option<OnThread>,
+}
+
+/// The options at the start of `rest`, in any order, and the text after them: the limits `ants trail run` and `ants
+/// trail resume` take, and for `/trail run` (`run`) its conductor and thread too.
+fn trail_options(mut rest: &str, run: bool) -> Result<(TrailOptions, &str), Option<String>> {
+    let error = |e: &dyn std::fmt::Display| Some(e.to_string());
+    let mut options = TrailOptions::default();
     loop {
         let (word, after) = first_word(rest);
-        if let Some(ant) = word.strip_prefix('@') {
-            if conductor.is_some() {
+        if let Some(ant) = word.strip_prefix('@').filter(|_| run) {
+            if options.conductor.is_some() {
                 return Err(None);
             }
-            conductor = Some(ant.parse().map_err(|e| error(&e))?);
+            options.conductor = Some(ant.parse().map_err(|e| error(&e))?);
             rest = after;
             continue;
         }
@@ -447,36 +485,36 @@ fn trail_run(args: &str) -> Result<Trail, Option<String>> {
         let placeholder = match option {
             "steps" | "at-once" | "turns" => "N",
             "wall" => "DUR",
-            "thread" => "THREAD",
-            _ => return Err(Some(format!("no option --{option}: /trail run takes {OPTIONS}"))),
+            "thread" if run => "THREAD",
+            _ if run => return Err(Some(format!("no option --{option}: /trail run takes {RUN_OPTIONS}"))),
+            _ => return Err(Some(format!("no option --{option}: /trail resume takes {RESUME_OPTIONS}"))),
         };
         let shown = format!("'--{option} <{placeholder}>'");
         if value.is_empty() {
             return Err(Some(format!("a value is required for {shown} but none was supplied")));
         }
         let invalid = |e: &dyn std::fmt::Display| Some(format!("invalid value '{value}' for {shown}: {e}"));
+        let limits = &mut options.limits;
         let given = match option {
             "steps" => once(&mut limits.steps, value.parse().map_err(|e| invalid(&e))?),
             "at-once" => once(&mut limits.at_once, value.parse().map_err(|e| invalid(&e))?),
             "turns" => once(&mut limits.turns, value.parse().map_err(|e| invalid(&e))?),
             "wall" => once(&mut limits.wall, ants_proto::duration::parse(value).map_err(|e| invalid(&e))?),
-            _ => once(&mut thread, value.parse().map_err(|e| invalid(&e))?),
+            _ => once(&mut options.thread, value.parse().map_err(|e| invalid(&e))?),
         };
         if !given {
             return Err(Some(format!("{shown} is given twice")));
         }
         rest = after;
     }
-    let limits = limits.over(TrailLimits::DEFAULT).map_err(|e| error(&e))?;
-    let args = match rest {
-        "" => None,
-        json => Some(crate::cmd::trail::start::json_args(json).map_err(|e| Some(format!("ARGS {e}")))?),
-    };
-    Ok(Trail::Run { trail, conductor, args, limits, thread })
+    Ok((options, rest))
 }
 
 /// The options `/trail run` takes, as `ants trail run` names them.
-const OPTIONS: &str = "--steps, --at-once, --turns, --wall and --thread";
+const RUN_OPTIONS: &str = "--steps, --at-once, --turns, --wall and --thread";
+
+/// The options `/trail resume` takes, as `ants trail resume` names them.
+const RESUME_OPTIONS: &str = "--steps, --at-once, --turns and --wall";
 
 /// Set `slot` to `value` unless set already: whether it was not.
 fn once<T>(slot: &mut Option<T>, value: T) -> bool {
@@ -625,15 +663,20 @@ mod tests {
         assert_eq!(trail(r#"/trail run review @lead {"files": ["a.rs", "b.rs"]}"#), run(Some("lead"), args.clone()));
         assert_eq!(trail(r#"/trail run review {"files": ["a.rs", "b.rs"]}"#), run(None, args));
         assert_eq!(trail("/trail stop 0190AB"), Trail::Stop("0190ab".parse().unwrap()));
-        assert_eq!(trail("/trail resume 0190ab"), Trail::Resume("0190ab".parse().unwrap()));
+        let resume = Trail::Resume { run: "0190ab".parse().unwrap(), limits: LimitArgs::default() };
+        assert_eq!(trail("/trail resume 0190ab"), resume);
         let usage = "usage: /trail list | show NAME|RUN | runs | run NAME [@ANT] [--steps N] [--at-once N] [--turns N] \
-                     [--wall DUR] [--thread THREAD] [ARGS] | stop RUN | resume RUN";
+                     [--wall DUR] [--thread THREAD] [ARGS] | stop RUN | resume RUN [--steps N] [--at-once N] [--turns N] \
+                     [--wall DUR]";
         for refused in [
             "/trail",
             "/trail runs all",
             "/trail run",
             "/trail stop",
             "/trail stop a b",
+            "/trail resume",
+            "/trail resume 0190ab now",
+            "/trail resume 0190ab @lead",
             "/trail list all",
             "/trail show",
         ] {
@@ -691,6 +734,40 @@ mod tests {
         }
         assert!(parse("/trail run review @lead @dev-a").unwrap_err().starts_with("usage: /trail"));
         assert!(parse("/trail run review {} --steps 2").unwrap_err().starts_with("ARGS not JSON"));
+    }
+
+    #[test]
+    fn trail_resume_takes_the_limits_of_ants_trail_resume_after_its_run() {
+        let resume = |text: &str| match parse(text) {
+            Ok(Command::Slash(Slash::Trail(Trail::Resume { run, limits }))) => (run.to_string(), limits),
+            other => panic!("{text}: {other:?}"),
+        };
+        let limits =
+            LimitArgs { steps: Some(100), at_once: Some(2), turns: Some(400), wall: Some(Duration::from_hours(48)) };
+        assert_eq!(
+            resume("/trail resume 0190AB --turns 400 --wall=2d --steps 100 --at-once 2"),
+            ("0190ab".into(), limits)
+        );
+        let turns = LimitArgs { turns: Some(2000), ..LimitArgs::default() };
+        assert_eq!(resume("/trail resume 0190ab --turns=2000"), ("0190ab".into(), turns));
+        for (refused, why) in [
+            ("/trail resume 0190ab --steps 0", "--steps must be more than 0"),
+            ("/trail resume 0190ab --steps 501", "--steps is over the most a run may take, 500"),
+            ("/trail resume 0190ab --wall 8d", "--wall is over the most a run may take, 7d"),
+            ("/trail resume 0190ab --turns", "a value is required for '--turns <N>' but none was supplied"),
+            ("/trail resume 0190ab --wall 2d --wall=3d", "'--wall <DUR>' is given twice"),
+            (
+                "/trail resume 0190ab --thread last",
+                "no option --thread: /trail resume takes --steps, --at-once, --turns and --wall",
+            ),
+            (
+                "/trail resume 0190ab --follow",
+                "no option --follow: /trail resume takes --steps, --at-once, --turns and --wall",
+            ),
+        ] {
+            assert_eq!(parse(refused).unwrap_err(), why, "{refused}");
+        }
+        assert!(parse("/trail resume --steps 2").unwrap_err().contains("hex digits"));
     }
 
     #[test]

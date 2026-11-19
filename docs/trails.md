@@ -341,8 +341,8 @@ ants trail stop 0198c4
 ants trail resume 0198c4 --turns 400 --wall 2d --follow
 ```
 
-`/trail stop RUN` and `/trail resume RUN` in `ants chat` stop and resume a run the same way, a resume under the run's
-own limits.
+`/trail stop RUN` and `/trail resume RUN [--steps N] [--at-once N] [--turns N] [--wall DUR]` in `ants chat` stop and
+resume a run the same way, a resume's options replacing the run's limits they name as `ants trail resume`'s flags do.
 
 ## Workers
 

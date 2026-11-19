@@ -313,7 +313,7 @@ impl Model {
                     Job::TrailPlan { trail, conductor, args, limits, thread }
                 }
                 Trail::Stop(run) => Job::TrailStop(run),
-                Trail::Resume(run) => Job::TrailResume(run),
+                Trail::Resume { run, limits } => Job::TrailResume { run, limits },
             }),
             Slash::Attach(_) | Slash::Detach => Ok(None),
             Slash::Quit => Ok(Some(Action::Quit)),
