@@ -135,6 +135,10 @@ async fn leave_tip_is_left_only_answering_a_step_of_a_saved_trail_on_a_trusted_t
     assert!(!ok && text.contains("untrusted"), "{text}");
     let (ok, text) = call(&client, "trail_tips", json!({})).await;
     assert!(ok && text.contains(id.as_str()), "any thread reads the tips: {text}");
+
+    std::fs::remove_file(saved.join("deploy.py")).unwrap();
+    let (ok, text) = leave(&step.thread_id, "Tag the release once built").await;
+    assert!(!ok && text.contains("no trail is saved as deploy"), "a trail removed mid-run takes no tips: {text}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

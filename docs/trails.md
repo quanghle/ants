@@ -327,8 +327,9 @@ Ants handle tips with three MCP tools ([architecture.md](architecture.md#mcp-too
   returns its id (8 characters, such as `k3f7q2ab`). It refuses a tip of the same words, in the same order, as a live
   tip of the same trail and tip key, naming it; one sharing at least 60% of its words with live tips of the same key,
   naming them and suggesting a vote instead, unless `force` is set; and any tip once the trail has 200 live tips. Only
-  a step of a saved trail leaves tips, and only from a trusted thread: not a step of an inline script, nor a thread a
-  webhook or schedule started, nor a step of an untrusted run ([Trust](#trust)).
+  a step of a trail still saved leaves tips (not of an inline script, nor of a trail `ants trail rm` removed while the
+  run went on), and only from a trusted thread: not a thread a webhook or schedule started, nor a step of an untrusted
+  run ([Trust](#trust)).
 - **`vote_tip(tip, verdict, reason?, trail?)`**: votes a live tip `helpful`, `stale` (right once, no longer) or
   `wrong`, with an optional `reason` of up to 300 characters, on the trail of the step being answered or the trail
   `trail` names. Each ant counts once per tip: voting again replaces its earlier vote. No ant votes on its own tip, nor
