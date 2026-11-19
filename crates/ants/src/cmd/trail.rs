@@ -132,7 +132,7 @@ pub(crate) struct RunArgs {
 }
 
 /// What a run may spend, each limit at most its maximum ([`TrailLimits::MAX`]).
-#[derive(clap::Args, Debug, Clone, Copy, Default)]
+#[derive(clap::Args, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct LimitArgs {
     /// Steps the run sends in all (50 by default, at most 500).
     #[arg(long, value_name = "N")]

@@ -252,8 +252,11 @@ pub enum Job {
     TrailStart(Box<crate::cmd::trail::start::Start>),
     /// Stop the run picked, as `ants trail stop` does.
     TrailStop(crate::cmd::trail::runs::Pick),
-    /// Resume the run picked, as `ants trail resume` does.
-    TrailResume(crate::cmd::trail::runs::Pick),
+    /// Resume the run picked, with the limits given instead of its own, as `ants trail resume` does.
+    TrailResume {
+        run: crate::cmd::trail::runs::Pick,
+        limits: crate::cmd::trail::LimitArgs,
+    },
 }
 
 /// A message withdrawn to send again: its text and attachments.
@@ -432,7 +435,7 @@ impl Job {
             }
             Self::TrailStart(start) => trail::started(ctx, &start).await,
             Self::TrailStop(run) => trail::stopped(ctx, &run).await,
-            Self::TrailResume(run) => trail::resumed(ctx, &run).await,
+            Self::TrailResume { run, limits } => trail::resumed(ctx, &run, limits).await,
         }
     }
 }
