@@ -41,6 +41,8 @@ mod children;
 mod goto;
 #[path = "trail_daemon/tips.rs"]
 mod tips;
+#[path = "trail_daemon/tips_carried.rs"]
+mod tips_carried;
 
 const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": [\"one\"]}\n";
 

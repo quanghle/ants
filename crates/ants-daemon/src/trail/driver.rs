@@ -349,7 +349,7 @@ impl Trails {
                 retries: 0,
             };
             if call.function != Function::Trail {
-                if let Err(error) = steps::envelope(&header, &pending) {
+                if let Err(error) = steps::envelope(&header, &pending, None) {
                     issued.answers.push(self.raise(&header.run, call, error).await?);
                     continue;
                 }
@@ -431,7 +431,8 @@ impl Trails {
         Ok(())
     }
 
-    /// Publish the steps stored and not sent yet, then store them sent.
+    /// Publish the steps stored and not sent yet, then store them sent. The agent() steps of a saved trail carry its
+    /// tips, read once for them all.
     async fn publish(&self, slot: &Slot) -> Result<()> {
         let (header, unsent) = {
             let book = slot.book();
@@ -440,12 +441,17 @@ impl Trails {
         if unsent.is_empty() || matches!(header.state, RunState::Stopped { .. }) {
             return Ok(());
         }
+        let tips = if unsent.iter().any(|call| call.function == TrailFunction::Agent) {
+            self.step_tips(&header).await
+        } else {
+            None
+        };
         for call in &unsent {
             if call.function == TrailFunction::Trail {
                 self.publish_child(slot, &header, call).await?;
                 continue;
             }
-            let message = steps::envelope(&header, call).map_err(|e| anyhow!(e))?;
+            let message = steps::envelope(&header, call, tips.as_ref()).map_err(|e| anyhow!(e))?;
             let thread = TrailStepThread {
                 run: header.run.clone(),
                 call: call.call,
