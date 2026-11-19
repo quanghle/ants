@@ -26,7 +26,8 @@ pub(crate) async fn hub(nats: &Nats<'_>, identities_restored: bool) -> Result<Ve
         devices::publish_or_warn(&js, own).await;
     }
     lines.push(format!(
-        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
+        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} \
+         ready",
         ants_proto::STREAM,
         ants_proto::COLONY_BUCKET,
         ants_proto::SESSIONS_BUCKET,
@@ -47,6 +48,7 @@ pub(crate) async fn hub(nats: &Nats<'_>, identities_restored: bool) -> Result<Ve
         ants_proto::IDENTITIES_BUCKET,
         ants_proto::TRAILS_BUCKET,
         ants_proto::TRAIL_RUNS_BUCKET,
+        ants_proto::TRAIL_TIPS_BUCKET,
         ants_proto::FILES_BUCKET
     ));
     if identities_restored {

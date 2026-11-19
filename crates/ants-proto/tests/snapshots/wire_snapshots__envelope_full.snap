@@ -144,7 +144,10 @@ expression: value
         }
       },
       "type": "object"
-    }
+    },
+    "trail": "release",
+    "script": "58f93952fac8f1b84a37b9a5181994a5fe0bc91ebdcbd35083e7715c7ca54a3e",
+    "tip_key": "review"
   },
   "trail_start": {
     "trail": "nightly-audit",

@@ -95,7 +95,7 @@ pub use identity::{
     AntIdentity, Avatar, Cell, ClonedFrom, FACE_WIDTH, Frame, Grid, HEAD_COLUMNS, HEAD_ROWS, HUE_NAMES, Mood, Motion,
     MovedMark, Palette, Pixel, Rgb, SeedSource, Side, Stage, Theme, hue_named,
 };
-pub use ids::{BuiltinAnt, ChannelId, JsDomain, Machine, Reaction, Role, RunId, ThreadId, TrailName, UserId};
+pub use ids::{BuiltinAnt, ChannelId, JsDomain, Machine, Reaction, Role, RunId, ThreadId, TipId, TrailName, UserId};
 pub use inbox::{ChannelNotify, ChannelReadMarkers, HeldNotices, NotifyPrefs, ReadMarker};
 pub use keys::{
     ANTS_VERSION, Feed, SERVING_EVERY, SPARE_READERS, Serving, TRAIL_RUNS_INDEX, TRAIL_STEPS, assisted_marks_key,
@@ -109,7 +109,7 @@ pub use keys::{
     trail_session_key, trail_step_key, unserved_key, webhook_marker_key, webhook_marker_subject, webhook_seen_key,
 };
 pub(crate) use keys::{STORAGE_WARNING_PREFIX, WEBHOOK_MARKER};
-pub use keys::{TRAIL_STEPS_ON, trail_thread_step_key, trail_thread_steps_prefix};
+pub use keys::{TRAIL_STEPS_ON, trail_thread_step_key, trail_thread_steps_prefix, trail_tip_key, trail_tip_vote_key};
 pub use login::{
     BOOTSTRAP_MAX_PAYLOAD, BOOTSTRAP_USER, LOGIN_REPEAT, LOGIN_TTL, LoginAnswer, LoginReply, LoginRequest,
     MAX_REGISTRATIONS, REGISTERED_TAG, tagged_registered,
@@ -165,6 +165,11 @@ pub use trails::{
     MAX_TRAIL_WAYPOINTS, PendingCall, QueuedCall, RunState, SavedTrail, TRAIL_RUN_RETENTION, TrailAction,
     TrailFunction, TrailLeg, TrailLimits, TrailOutcome, TrailParent, TrailReply, TrailRequest, TrailRun, TrailRunIndex,
     TrailSession, TrailSource, TrailStart, TrailStep, TrailStepThread, WaitingStep, leg_entry,
+};
+pub use trails::{
+    DEFAULT_TIPS_FOUND, MAX_LIVE_TIPS, MAX_TIP_REASON, MAX_TIP_TEXT, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, MAX_TIPS_FOUND,
+    Ranked, Retirement, Similarity, TIP_HALF_LIFE, TIP_RELEVANCE, TIP_RELEVANT_WORDS, TIP_SIMILARITY, TIP_UNUSED,
+    Tally, TipBoard, TipRetired, TipStatus, TipVerdict, TipVote, TrailTip, check_tip_key, script_sha256, tip_words,
 };
 
 /// JetStream stream holding every durable ants message.
@@ -336,6 +341,15 @@ pub const TRAILS_BUCKET: &str = "ants_trails";
 /// wall time ([`TrailLimits::MAX`]) after their last put, so a run's entries outlive its end by
 /// [`TRAIL_RUN_RETENTION`] at least.
 pub const TRAIL_RUNS_BUCKET: &str = "ants_trail_runs";
+/// KV bucket of the trail tips: what an ant answering a step of a saved trail learnt, for the ants answering its later
+/// steps. Each [`TrailTip`] is keyed by its trail, writer and id ([`trail_tip_key`]), and each ant's [`TipVote`] on it
+/// by the trail, the voter, then the tip's writer and id ([`trail_tip_vote_key`]), so a trail's tips and votes are the
+/// keys under `<trail>.>`, and an ant's own under `<trail>.<ant>.>`, which is all its credentials let it write here
+/// (`$KV.ants_trail_tips.*.<ant>.>`, one subject per ant). Each ant creates only its own tips and puts only its own
+/// votes, voting again replacing its vote; a human rewrites a tip only to retire it ([`TrailTip::retired`]) and purges
+/// a trail's tips when removing the trail. Every ant and human reads them all, by direct gets naming no subject
+/// ([`Permissions::for_user`]), which a reader ranks with a [`TipBoard`]. Entries never expire.
+pub const TRAIL_TIPS_BUCKET: &str = "ants_trail_tips";
 /// Most characters a thread title has.
 pub const MAX_TITLE: usize = 120;
 /// How often a following CLI re-puts its device's [`Presence`].

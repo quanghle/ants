@@ -14,7 +14,8 @@ use ants_proto::{
     DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, INCARNATION_KEY, LINKS_BUCKET,
     MACHINES_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET,
     SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET,
-    TRAIL_RUN_RETENTION, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, TrailLimits, WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
+    TRAIL_RUN_RETENTION, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TrailLimits, WEBHOOK_RETENTION,
+    WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
@@ -47,13 +48,14 @@ pub enum Object {
     Identities,
     Trails,
     TrailRuns,
+    TrailTips,
     /// The attachments' store ([`FILES_BUCKET`]).
     Files,
 }
 
 impl Object {
     /// Every object, the stream first.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Stream,
         Self::Colony,
         Self::Sessions,
@@ -74,6 +76,7 @@ impl Object {
         Self::Identities,
         Self::Trails,
         Self::TrailRuns,
+        Self::TrailTips,
         Self::Files,
     ];
 
@@ -100,6 +103,7 @@ impl Object {
             Self::Identities => IDENTITIES_BUCKET,
             Self::Trails => TRAILS_BUCKET,
             Self::TrailRuns => TRAIL_RUNS_BUCKET,
+            Self::TrailTips => TRAIL_TIPS_BUCKET,
         })
     }
 
@@ -140,6 +144,7 @@ impl Object {
             Self::Identities => Spec::Bucket(Box::new(identities_config())),
             Self::Trails => Spec::Bucket(Box::new(trails_config())),
             Self::TrailRuns => Spec::Bucket(Box::new(trail_runs_config())),
+            Self::TrailTips => Spec::Bucket(Box::new(trail_tips_config())),
         }
     }
 
@@ -450,6 +455,11 @@ pub fn trail_runs_config() -> kv::Config {
     }
 }
 
+/// The trails' tips and their votes ([`TRAIL_TIPS_BUCKET`]): a tip lasts until a human purges its trail's.
+pub fn trail_tips_config() -> kv::Config {
+    lasting_config(TRAIL_TIPS_BUCKET, "Trail tips and their votes, each written by its ant")
+}
+
 /// The read markers of the humans ([`READ_BUCKET`]).
 pub fn read_config() -> kv::Config {
     lasting_config(READ_BUCKET, "What each human has read of its inbox, on any of its devices")
@@ -618,6 +628,7 @@ mod tests {
             Object::Identities,
             Object::Trails,
             Object::TrailRuns,
+            Object::TrailTips,
             Object::Files,
         ];
         assert_eq!(problems(&check(&js, |_| true).await), left, "the rest is created");
@@ -632,6 +643,7 @@ mod tests {
                 Object::Machines,
                 Object::Trails,
                 Object::TrailRuns,
+                Object::TrailTips,
                 Object::Files
             ]
         );

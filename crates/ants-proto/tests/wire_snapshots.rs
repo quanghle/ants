@@ -242,6 +242,9 @@ fn trail_step() -> TrailStep {
         call: 3,
         label: Some("review".to_owned()),
         schema: Some(serde_json::json!({"properties": {"ok": {"type": "boolean"}}, "type": "object"})),
+        trail: Some("release".parse().unwrap()),
+        script: Some(script_sha256("agent('dev-a', 'build it')")),
+        tip_key: Some("review".to_owned()),
     }
 }
 
@@ -1492,6 +1495,30 @@ fn trails() {
         ],
     );
     snap("trail_run_index", &TrailRunIndex { runs: vec![run()] });
+    snap(
+        "trail_tip",
+        &TrailTip {
+            trail: "release".parse().unwrap(),
+            id: "k3f7q2ab".parse().unwrap(),
+            writer: user("dev-a"),
+            text: "Run the migrations before the smoke tests.".to_owned(),
+            tip_key: Some("review".to_owned()),
+            run: run(),
+            script: script_sha256("agent('dev-a', 'build it')"),
+            written_at: at(3),
+            retired: Some(TipRetired { by: user("alice"), at: at(9) }),
+        },
+    );
+    snap(
+        "tip_vote",
+        &TipVote {
+            voter: user("dev-b"),
+            verdict: TipVerdict::Stale,
+            reason: Some("the smoke tests now run the migrations".to_owned()),
+            script: Some(script_sha256("agent('dev-a', 'build it')")),
+            at: at(5),
+        },
+    );
     let limits: TrailLimits = parse(r#"{"steps": 10}"#);
     assert_eq!(limits, TrailLimits { steps: 10, ..TrailLimits::DEFAULT }, "missing limits take their defaults");
 }

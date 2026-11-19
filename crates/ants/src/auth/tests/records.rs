@@ -298,14 +298,20 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
 #[tokio::test]
 async fn humans_save_the_trails_ants_read_and_each_ant_keeps_only_the_runs_it_conducts() {
     use ants_proto::{
-        RunId, SavedTrail, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, ThreadId, TrailStepThread, trail_run_key,
-        trail_session_key, trail_thread_step_key, trail_thread_steps_prefix,
+        RunId, SavedTrail, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, ThreadId, TrailStepThread,
+        trail_run_key, trail_session_key, trail_thread_step_key, trail_thread_steps_prefix, trail_tip_key,
+        trail_tip_vote_key,
     };
     let Some(server) = Server::start() else { return };
     let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
     let (_a, a_js) = server.connect(&dev_a).await;
     let (_h, h_js) = server.connect(&human).await;
-    for config in [ants_daemon::hub::trails_config(), ants_daemon::hub::trail_runs_config()] {
+    let configs = [
+        ants_daemon::hub::trails_config(),
+        ants_daemon::hub::trail_runs_config(),
+        ants_daemon::hub::trail_tips_config(),
+    ];
+    for config in configs {
         assert!(a_js.create_key_value(config.clone()).await.is_err(), "only a human creates {}", config.bucket);
         h_js.create_key_value(config).await.unwrap();
     }
@@ -356,4 +362,18 @@ async fn humans_save_the_trails_ants_read_and_each_ant_keeps_only_the_runs_it_co
     let read = crate::machines::latest_in(&h_js, TRAIL_RUNS_BUCKET, &filter).await.unwrap();
     assert_eq!(read, [(key.clone(), marker(&thread))], "a human reads the steps on one thread alone");
     assert!(all.put(&key, marker(&thread)).await.is_err(), "a human keeps no step");
+
+    let (deploy, tip) = ("deploy".parse().unwrap(), ants_proto::TipId::generate());
+    let tips = DirectKv::whole(&a_js, None, TRAIL_TIPS_BUCKET).await.unwrap();
+    assert!(tips.create(trail_tip_key(&deploy, &dev_a, &tip), b"{}".to_vec()).await.unwrap());
+    tips.put(trail_tip_vote_key(&deploy, &dev_b, &tip, &dev_a), b"{}".to_vec()).await.unwrap();
+    let forged = [trail_tip_key(&deploy, &dev_b, &tip), trail_tip_vote_key(&deploy, &dev_a, &tip, &dev_b)];
+    for key in forged {
+        assert!(tips.put(&key, b"{}".to_vec()).await.is_err(), "dev-a writes no tip or vote of dev-b's: {key}");
+    }
+    let filter = format!("$KV.{TRAIL_TIPS_BUCKET}.deploy.>");
+    assert_eq!(crate::machines::latest_in(&b_js, TRAIL_TIPS_BUCKET, &filter).await.unwrap().len(), 2, "ants read all");
+    let stream = h_js.get_stream(format!("KV_{TRAIL_TIPS_BUCKET}")).await.unwrap();
+    stream.purge().filter(&filter).await.unwrap();
+    assert!(crate::machines::latest_in(&b_js, TRAIL_TIPS_BUCKET, &filter).await.unwrap().is_empty(), "a human purges");
 }

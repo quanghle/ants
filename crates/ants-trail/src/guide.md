@@ -4,9 +4,10 @@ many run at once and how results merge. Its first statement is a literal
 the last expression (JSON) is the run's result. With `"waypoints": ["a", "b"]` in meta (at most 32), each naming a
 top-level `async def a(args)`, a run enters at a waypoint (the first unless a goto names one), whose return value is
 the result; the top level then holds only meta, imports, definitions and constants.
-- `await agent(prompt, ant=None, capability=None, schema=None, label=None)`: one step, a message on a fresh thread
-  with no context, to the ant named, to an ant with the capability, or else to the conductor itself. Returns the
-  reply's text, or with `schema=` (a JSON Schema dict) the reply's JSON, asked for again at most twice on a mismatch.
+- `await agent(prompt, ant=None, capability=None, schema=None, label=None, tips=None)`: one step, a message on a
+  fresh thread with no context, to the ant named, to an ant with the capability, or else to the conductor itself.
+  Returns the reply's text, or with `schema=` (a JSON Schema dict) the reply's JSON, asked for again at most twice on
+  a mismatch. `tips=KEY`, a stable one-line key, names the tips the steps under it share across runs.
 - `await human(questions)`: asks the run's owner as ask_human does (1-4 `{"question", "options": [2-9 labels]}`);
   returns the answer's text, for one question the label picked.
 - `await trail(name, args=None)`: one step answered by a child run of saved trail `name` on a spin-off thread (none

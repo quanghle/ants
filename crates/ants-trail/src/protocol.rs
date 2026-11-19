@@ -94,8 +94,8 @@ pub enum Limit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Function {
-    /// `agent(prompt, ant=, capability=, schema=, label=)`: args `{"prompt", "ant"?, "capability"?, "schema"?,
-    /// "label"?}`, the keyword arguments given as None left out.
+    /// `agent(prompt, ant=, capability=, schema=, label=, tips=)`: args `{"prompt", "ant"?, "capability"?, "schema"?,
+    /// "label"?, "tips"?}`, the keyword arguments given as None left out.
     Agent,
     /// `human(questions)`: args `{"questions"}`.
     Human,

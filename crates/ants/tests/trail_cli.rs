@@ -7,6 +7,7 @@ use std::process::{Output, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ants_daemon::hub;
 use ants_daemon::people::humans::Registry;
 use ants_daemon::trail::{Conducting, Trails};
 use ants_proto::{Envelope, Role, UserId};
@@ -41,7 +42,7 @@ impl Drop for Conductor {
 impl Conductor {
     async fn start(server: &NatsServer) -> Self {
         let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "init").await.unwrap();
-        for config in [ants_daemon::hub::trails_config(), ants_daemon::hub::trail_runs_config()] {
+        for config in [hub::trails_config(), hub::trail_runs_config(), hub::trail_tips_config()] {
             js.create_key_value(config).await.unwrap();
         }
         let lead: UserId = "lead".parse().unwrap();

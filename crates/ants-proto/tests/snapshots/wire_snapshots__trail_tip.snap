@@ -1,0 +1,18 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "trail": "release",
+  "id": "k3f7q2ab",
+  "writer": "dev-a",
+  "text": "Run the migrations before the smoke tests.",
+  "tip_key": "review",
+  "run": "019a7d2f-0000-7000-8000-000000000001",
+  "script": "58f93952fac8f1b84a37b9a5181994a5fe0bc91ebdcbd35083e7715c7ca54a3e",
+  "written_at": "2025-01-01T12:03:00Z",
+  "retired": {
+    "by": "alice",
+    "at": "2025-01-01T12:09:00Z"
+  }
+}

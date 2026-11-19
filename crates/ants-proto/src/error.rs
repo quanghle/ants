@@ -58,4 +58,13 @@ pub enum Error {
     InvalidTrail { name: TrailName, why: String },
     #[error("trail limit {limit} of {value} is out of range: use 1-{max}")]
     TrailLimit { limit: &'static str, value: u64, max: u64 },
+    #[error("invalid tip id {0:?}: use 8 of a-z and 2-7")]
+    InvalidTipId(String),
+    /// A trail tip or vote found under another key than its own.
+    #[error("{kind} {key} found at {at}")]
+    ForeignTip { kind: &'static str, key: String, at: String },
+    #[error("invalid tip: {0}")]
+    InvalidTip(String),
+    #[error("invalid tip vote: {0}")]
+    InvalidTipVote(String),
 }

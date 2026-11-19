@@ -6,7 +6,8 @@ use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, HUMANS_BUCKET, IDENTITIES_BUCKET,
     INTAKE_STREAM, LINKS_BUCKET, MACHINES_BUCKET, NOTIFY_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET,
     PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET, SESSIONS_BUCKET, STREAM, THREADS_BUCKET, TRAIL_RUNS_BUCKET,
-    TRAILS_BUCKET, UserId, WEBHOOKS_BUCKET, channel_manager_serving_subject, notify_consumer, subject,
+    TRAIL_TIPS_BUCKET, TRAILS_BUCKET, UserId, WEBHOOKS_BUCKET, channel_manager_serving_subject, notify_consumer,
+    subject,
 };
 #[cfg(doc)]
 use {
@@ -41,13 +42,14 @@ pub(super) fn identity_rights() -> [String; 3] {
     ]
 }
 
-/// What a human's credentials need of the trails: creating and looking up [`TRAILS_BUCKET`] and [`TRAIL_RUNS_BUCKET`],
-/// whose stream info lists the saved trails and every conductor's runs, putting and deleting every saved trail, which
-/// every user reads, and reading every run's records by direct gets naming no subject (`ants trail runs`, and in `ants
-/// chat` the steps a conductor keeps under one thread), writing none: a run's conductor alone writes them, and stops or
-/// resumes a run on a human's request.
-pub(super) fn trail_rights() -> [String; 6] {
-    let (trails, runs) = (kv_stream(TRAILS_BUCKET), kv_stream(TRAIL_RUNS_BUCKET));
+/// What a human's credentials need of the trails: creating and looking up [`TRAILS_BUCKET`], [`TRAIL_RUNS_BUCKET`]
+/// and [`TRAIL_TIPS_BUCKET`], whose stream info lists the saved trails, every conductor's runs and the trails' tips,
+/// putting and deleting every saved trail, which every user reads, and reading every run's records by direct gets
+/// naming no subject (`ants trail runs`, and in `ants chat` the steps a conductor keeps under one thread), writing
+/// none: a run's conductor alone writes them, and stops or resumes a run on a human's request. Of the tips, which
+/// every user reads, it rewrites any to retire it and purges a removed trail's.
+pub(super) fn trail_rights() -> [String; 10] {
+    let (trails, runs, tips) = (kv_stream(TRAILS_BUCKET), kv_stream(TRAIL_RUNS_BUCKET), kv_stream(TRAIL_TIPS_BUCKET));
     [
         format!("$JS.API.STREAM.CREATE.{trails}"),
         format!("$JS.API.STREAM.INFO.{trails}"),
@@ -55,6 +57,10 @@ pub(super) fn trail_rights() -> [String; 6] {
         format!("$JS.API.STREAM.CREATE.{runs}"),
         format!("$JS.API.STREAM.INFO.{runs}"),
         format!("$JS.API.DIRECT.GET.{runs}"),
+        format!("$JS.API.STREAM.CREATE.{tips}"),
+        format!("$JS.API.STREAM.INFO.{tips}"),
+        format!("$KV.{TRAIL_TIPS_BUCKET}.>"),
+        format!("$JS.API.STREAM.PURGE.{tips}"),
     ]
 }
 

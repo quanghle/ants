@@ -27,6 +27,14 @@ use crate::{
     trail_session_key, trail_step_key,
 };
 
+mod tips;
+
+pub use tips::{
+    DEFAULT_TIPS_FOUND, MAX_LIVE_TIPS, MAX_TIP_REASON, MAX_TIP_TEXT, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, MAX_TIPS_FOUND,
+    Ranked, Retirement, Similarity, TIP_HALF_LIFE, TIP_RELEVANCE, TIP_RELEVANT_WORDS, TIP_SIMILARITY, TIP_UNUSED,
+    Tally, TipBoard, TipRetired, TipStatus, TipVerdict, TipVote, TrailTip, check_tip_key, script_sha256, tip_words,
+};
+
 /// Most bytes a trail's script has: a saved trail's and a run's.
 pub const MAX_TRAIL_SCRIPT: usize = 256 * 1024;
 /// Most bytes a run's arguments have, as JSON.
@@ -54,6 +62,16 @@ pub struct TrailStep {
     /// again, with the step on the same thread, for an answer that does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<Value>,
+    /// The saved trail whose script made the call; none for an inline script.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail: Option<TrailName>,
+    /// The [`script_sha256`] of that trail's script, as the run's leg ran it; none without a trail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
+    /// The call's tip key (`agent(..., tips=KEY)`), naming the tips ([`TrailTip::tip_key`]) the step carries first and
+    /// a tip left answering it goes under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip_key: Option<String>,
 }
 
 /// A saved trail in [`TRAILS_BUCKET`], under the key of its name. Humans put and delete them; every ant and human reads
@@ -686,7 +704,15 @@ mod tests {
         let message = Envelope::new(p("planner"), p("dev-a"), "build it");
         let json = serde_json::to_value(&message).unwrap();
         assert!(json.get("trail_step").is_none(), "a plain message serializes as before: {json}");
-        let step = TrailStep { run: RunId::generate(), call: 1, label: None, schema: None };
+        let step = TrailStep {
+            run: RunId::generate(),
+            call: 1,
+            label: None,
+            schema: None,
+            trail: None,
+            script: None,
+            tip_key: None,
+        };
         let sent = message.as_step(step.clone());
         let back: Envelope = serde_json::from_value(serde_json::to_value(&sent).unwrap()).unwrap();
         assert_eq!(back.trail_step.as_deref(), Some(&step));
@@ -702,6 +728,9 @@ mod tests {
             call: 1,
             label: None,
             schema: None,
+            trail: None,
+            script: None,
+            tip_key: None,
         });
         let call = PendingCall {
             call: 1,
@@ -734,6 +763,9 @@ mod tests {
             call: 2,
             label: None,
             schema: None,
+            trail: None,
+            script: None,
+            tip_key: None,
         });
         let call = PendingCall {
             call: 2,

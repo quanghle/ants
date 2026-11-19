@@ -15,10 +15,12 @@ use crate::{
     OWNERS_BUCKET, Permissions, REACTIONS_BUCKET, READ_BUCKET, ReadMarker, SESSIONS_BUCKET, THREADS_BUCKET,
 };
 #[cfg(doc)]
-use crate::{JournalEntry, TrailRun, TrailRunIndex, TrailSession, TrailStepThread};
 use crate::{
-    PERMISSIONS_VERSION, PermissionsVersion, Reaction, RunId, TRAIL_RUNS_BUCKET, ThreadId, UserId, WEBHOOKS_BUCKET,
-    subject,
+    JournalEntry, TRAIL_TIPS_BUCKET, TipVote, TrailRun, TrailRunIndex, TrailSession, TrailStepThread, TrailTip,
+};
+use crate::{
+    PERMISSIONS_VERSION, PermissionsVersion, Reaction, RunId, TRAIL_RUNS_BUCKET, ThreadId, TipId, TrailName, UserId,
+    WEBHOOKS_BUCKET, subject,
 };
 
 /// Durable JetStream consumer name of a user's inbox. The CLI with an ant's credentials reads the ant's inbox back
@@ -441,6 +443,18 @@ pub fn trail_thread_steps_prefix(conductor: &UserId, thread: &ThreadId) -> Strin
 /// The subject of every key of a conductor's runs in the stream of [`TRAIL_RUNS_BUCKET`]: those its credentials write.
 pub fn trail_runs_subject(conductor: &UserId) -> String {
     format!("$KV.{TRAIL_RUNS_BUCKET}.{conductor}.>")
+}
+
+/// Key of a [`TrailTip`] in [`TRAIL_TIPS_BUCKET`]: its trail, then its writer, so credentials can confine an ant to
+/// its own tips, then its id.
+pub fn trail_tip_key(trail: &TrailName, writer: &UserId, id: &TipId) -> String {
+    format!("{trail}.{writer}.{id}")
+}
+
+/// Key of `voter`'s [`TipVote`] on the tip [`trail_tip_key`] names in [`TRAIL_TIPS_BUCKET`]: the trail, then the
+/// voter in the writer's place, so one subject confines an ant to its own tips and votes, then the tip's writer and id.
+pub fn trail_tip_vote_key(trail: &TrailName, writer: &UserId, id: &TipId, voter: &UserId) -> String {
+    format!("{trail}.{voter}.{writer}.{id}")
 }
 
 /// The conductor and run a key of [`trail_run_key`] names, or `None` for any other key of [`TRAIL_RUNS_BUCKET`], as

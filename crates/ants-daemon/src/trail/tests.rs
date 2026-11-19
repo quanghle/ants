@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use super::schema::{check, reply_json};
+use super::steps::AgentArgs;
 
 #[test]
 fn reply_json_takes_the_whole_text_or_its_first_fenced_block() {
@@ -40,4 +41,14 @@ fn check_names_the_first_mismatch_by_its_path() {
         check(&schema, &json!({"name": "x", "size": 1.5, "tags": []})).unwrap_err(),
         "$.size is a number, not integer or null"
     );
+}
+
+#[test]
+fn an_agent_call_s_tip_key_is_one_line() {
+    let args = AgentArgs::of(&json!({"prompt": "fix it", "tips": "fix the build"})).unwrap();
+    assert_eq!(args.tips.as_deref(), Some("fix the build"));
+    for bad in ["", "two\nlines"] {
+        let e = AgentArgs::of(&json!({"prompt": "fix it", "tips": bad})).err().expect("refused");
+        assert!(e.starts_with("agent() names no tip key as "), "{e}");
+    }
 }

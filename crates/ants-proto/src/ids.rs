@@ -1,5 +1,5 @@
 //! Identifiers that travel as subject tokens: [`UserId`], [`ThreadId`], [`ChannelId`], [`Reaction`], [`JsDomain`],
-//! [`TrailName`] and [`RunId`], each 1-64 of `a-z`, `0-9` and `-`; a machine's name ([`Machine`]), with the subjects and consumers of its leaf node;
+//! [`TrailName`] and [`RunId`], each 1-64 of `a-z`, `0-9` and `-`; a trail tip's id ([`TipId`]); a machine's name ([`Machine`]), with the subjects and consumers of its leaf node;
 //! and the [`Role`] of a user, human or ant.
 
 use std::fmt;
@@ -93,6 +93,16 @@ token_id!(
     |s: &str| valid_token(s) && s != TRAIL_RUNS_INDEX && s != TRAIL_STEPS && s != TRAIL_STEPS_ON,
     |value| Error::InvalidId { kind: "trail run id", value }
 );
+token_id!(
+    /// A trail tip's id, unique within its trail's tips: 8 of `a-z` and `2-7` (lowercase base32), one key token in
+    /// [`crate::TRAIL_TIPS_BUCKET`], short enough to name a tip by.
+    TipId,
+    |s: &str| s.len() == TIP_ID_LEN && s.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)),
+    Error::InvalidTipId
+);
+
+/// The characters of a [`TipId`].
+const TIP_ID_LEN: usize = 8;
 
 impl UserId {
     /// The default human: a human whether or not [`HUMANS_BUCKET`] lists it, and the one escalations go to when a
@@ -299,6 +309,14 @@ impl RunId {
     }
 }
 
+impl TipId {
+    /// A new, random tip id: 40 random bits in lowercase base32.
+    pub fn generate() -> Self {
+        let random = Uuid::new_v4();
+        Self(data_encoding::BASE32_NOPAD.encode(&random.as_bytes()[..5]).to_ascii_lowercase())
+    }
+}
+
 impl ThreadId {
     /// A new, time-ordered thread id.
     pub fn generate() -> Self {
@@ -357,6 +375,17 @@ mod tests {
         assert_eq!(run.as_str().parse::<RunId>().unwrap(), run);
         for bad in [TRAIL_RUNS_INDEX, TRAIL_STEPS, TRAIL_STEPS_ON, "a.b", "", "-r"] {
             assert!(bad.parse::<RunId>().is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn tip_ids_are_eight_of_lowercase_base32() {
+        let tip = TipId::generate();
+        assert_eq!(tip.as_str().parse::<TipId>().unwrap(), tip);
+        assert_ne!(tip, TipId::generate());
+        assert!("k3f9q2ab".parse::<TipId>().is_err(), "9 is no base32 digit");
+        for bad in ["k3f7q2a", "k3f7q2abc", "K3F7Q2AB", "k3f7q2a1", "k3f7.2ab"] {
+            assert!(bad.parse::<TipId>().is_err(), "{bad:?} should be rejected");
         }
     }
 

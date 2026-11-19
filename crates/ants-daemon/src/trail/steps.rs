@@ -1,6 +1,8 @@
 //! A call's step: the message carrying it to its recipient, and the answer a reply to it gives the call.
 
-use ants_proto::{Envelope, PendingCall, TrailFunction, TrailRun, TrailStep, WEBHOOK_ALLOW};
+use ants_proto::{
+    Envelope, PendingCall, TrailFunction, TrailRun, TrailStep, WEBHOOK_ALLOW, check_tip_key, script_sha256,
+};
 use ants_trail::{Answer, Function};
 use serde::Deserialize;
 use serde_json::Value;
@@ -22,11 +24,18 @@ pub(super) struct AgentArgs {
     pub(super) schema: Option<Value>,
     #[serde(default)]
     pub(super) label: Option<String>,
+    /// The tip key naming the tips the step carries first and a tip left answering it goes under.
+    #[serde(default)]
+    pub(super) tips: Option<String>,
 }
 
 impl AgentArgs {
     pub(super) fn of(args: &Value) -> Result<Self, String> {
-        serde_json::from_value(args.clone()).map_err(|e| format!("agent() takes a prompt: {e}"))
+        let args: Self = serde_json::from_value(args.clone()).map_err(|e| format!("agent() takes a prompt: {e}"))?;
+        if let Some(key) = &args.tips {
+            check_tip_key(key).map_err(|e| format!("agent() names no tip key as {key:?}: {e}"))?;
+        }
+        Ok(args)
     }
 }
 
@@ -97,11 +106,14 @@ pub(super) fn again(why: &str, schema: &Value) -> String {
     format!("The reply does not match the schema: {why}. {}", reply_as(schema))
 }
 
-/// The step's [`TrailStep`] for `pending`, a call of `run`.
+/// The step's [`TrailStep`] for `pending`, a call of `run`: with the saved trail of the run's leg, if any, and the
+/// [`script_sha256`] of the leg's script.
 pub(super) fn step(run: &TrailRun, pending: &PendingCall) -> TrailStep {
     let args = (pending.function == TrailFunction::Agent).then(|| AgentArgs::of(&pending.args).ok()).flatten();
-    let (label, schema) = args.map_or_default(|args| (args.label, args.schema));
-    TrailStep { run: run.run.clone(), call: pending.call, label, schema }
+    let (label, schema, tip_key) = args.map_or_default(|args| (args.label, args.schema, args.tips));
+    let trail = run.trail().cloned();
+    let script = trail.as_ref().and(run.leg()).map(|leg| script_sha256(&leg.script));
+    TrailStep { run: run.run.clone(), call: pending.call, label, schema, trail, script, tip_key }
 }
 
 /// The message of `pending`, a call of `run`, as first sent: the same each time it is made, so a repeat of it is a

@@ -69,7 +69,7 @@ fn failed(response: Response) -> (String, Option<Limit>) {
 const FAN_OUT: &str = r#"
 async def item(name):
     first = await agent(f"first {name}")
-    return await agent(f"then {first}", label=name)
+    return await agent(f"then {first}", label=name, tips="then")
 
 await parallel(*[item(name) for name in args["items"]])
 "#;
@@ -89,7 +89,7 @@ fn call_ids_do_not_depend_on_how_answers_are_batched() {
     let mut separate = calls(&one);
     separate.extend(calls(&two));
     assert_eq!(calls(&batched), separate);
-    assert_eq!(separate[0].args, json!({"prompt": "then C", "label": "c"}));
+    assert_eq!(separate[0].args, json!({"prompt": "then C", "label": "c", "tips": "then"}));
     let Response::Suspended { pending, .. } = &batched else { unreachable!() };
     assert_eq!(pending.len(), 3);
 }

@@ -5,7 +5,7 @@ use super::human::{notify_prefs_rights, read_marker_rights, thread_rights};
 use super::{Permissions, covers, kv_stream};
 use crate::{
     ATTEMPTS_BUCKET, CHANNELS_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, INTAKE_STREAM,
-    OUTBOX_STREAM, OWNERS_BUCKET, Role, THREADS_BUCKET, TRAILS_BUCKET, UserId, assisted_marks_key,
+    OUTBOX_STREAM, OWNERS_BUCKET, Role, THREADS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, UserId, assisted_marks_key,
     assisted_reminders_key, chan_reader, inbox_consumer, inbox_prefix, notes_consumer, notify_consumer, sent_reader,
     spare_readers, subject,
 };
@@ -38,12 +38,12 @@ impl Permissions {
     /// check), starting, stopping or resuming a trail run on [`subject::ALL_TRAIL_REQUESTS`], creating message marks in [`ATTEMPTS_BUCKET`], recording an owner under any key, putting dead letters,
     /// answering an ant's reactions requests or another's renewal, setting another ant's avatar
     /// ([`IDENTITIES_BUCKET`]), saving or deleting a trail ([`TRAILS_BUCKET`], whose entries name the human who saved
-    /// them). Nor does it
+    /// them), retiring or purging tips ([`TRAIL_TIPS_BUCKET`]), whose ants vote as themselves. Nor does it
     /// decide approval requests on [`subject::ALL_APPROVAL_DECISIONS`]: it decides one for its human in a message to
     /// the ant (`on_behalf_of`), which waits for its human's confirmation, as readers ignore a stored decision carrying
     /// `on_behalf_of` and one stored there would keep its human's own from being stored. It sends admin orders for its
     /// human (`on_behalf_of`), which daemons hold for the human's confirmation. Nor does it change the team: no entry of [`HUMANS_BUCKET`] (where its human's grant stands) or [`CHANNELS_BUCKET`],
-    /// whose description of a channel it asks the channel manager to change for its human instead, no stream created, updated or purged of a message. It puts no device encryption key, no presence and no
+    /// whose description of a channel it asks the channel manager to change for its human instead, no stream created, updated or purged, nor a message deleted from one. It puts no device encryption key, no presence and no
     /// notification holds, which only a human's devices have, and it gets no power of the account key: it signs no
     /// credentials and records no revocation.
     pub fn for_assistant(assistant: &UserId, human: &UserId) -> Self {
@@ -82,6 +82,7 @@ impl Permissions {
             format!("$KV.{CHANNELS_BUCKET}.>"),
             format!("$KV.{IDENTITIES_BUCKET}.*"),
             format!("$KV.{TRAILS_BUCKET}.*"),
+            format!("$KV.{TRAIL_TIPS_BUCKET}.>"),
             format!("$JS.API.STREAM.INFO.{OUTBOX_STREAM}"),
             format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
             format!("$JS.API.STREAM.MSG.GET.{INTAKE_STREAM}"),
@@ -89,9 +90,15 @@ impl Permissions {
         let humans = format!("$KV.{HUMANS_BUCKET}.");
         let withheld = |s: &str| {
             s.starts_with(&humans)
-                || ["$JS.API.STREAM.CREATE.", "$JS.API.STREAM.UPDATE.", "$JS.API.STREAM.MSG.DELETE.", "$JS.*.API."]
-                    .iter()
-                    .any(|prefix| s.starts_with(prefix))
+                || [
+                    "$JS.API.STREAM.CREATE.",
+                    "$JS.API.STREAM.UPDATE.",
+                    "$JS.API.STREAM.PURGE.",
+                    "$JS.API.STREAM.MSG.DELETE.",
+                    "$JS.*.API.",
+                ]
+                .iter()
+                .any(|prefix| s.starts_with(prefix))
         };
         let marks_of_its_own = |s: &str| own_marks.iter().any(|k| s.ends_with(k.as_str()));
         as_human.retain(|s| {

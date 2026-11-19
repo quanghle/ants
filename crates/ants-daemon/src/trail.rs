@@ -19,6 +19,7 @@ mod steps;
 mod store;
 #[cfg(test)]
 mod tests;
+mod tips;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -46,6 +47,7 @@ use steps::Taken;
 use store::Store;
 
 pub use limits::AskedLimits;
+pub use tips::Tips;
 
 /// How to write a trail, in brief, for the tool starting runs to teach.
 pub const GUIDE: &str = ants_trail::GUIDE;
@@ -144,6 +146,7 @@ struct Inner {
     worker: Worker,
     store: Store,
     saved: Saved,
+    tips: Tips,
     humans: Registry,
     colony: Colony,
     outbox: Outbox,
@@ -276,6 +279,7 @@ impl Trails {
         COMPUTING.get_or_init(|| Semaphore::new(workers.clamp(1, MAX_WORKERS)));
         let store = Store::new(&js, js_domain.as_ref(), ant.clone()).await?;
         let saved = Saved::new(&js, js_domain.as_ref(), trails_dir).await;
+        let tips = Tips::new(&js, js_domain.as_ref()).await?;
         let (wake, woken) = mpsc::unbounded_channel();
         let inner = Inner {
             ant,
@@ -283,6 +287,7 @@ impl Trails {
             worker: Worker::new(worker),
             store,
             saved,
+            tips,
             humans,
             colony,
             outbox,
@@ -298,6 +303,11 @@ impl Trails {
 
     pub fn ant(&self) -> &UserId {
         &self.inner.ant
+    }
+
+    /// The tips of the colony's trails, read, left and voted on under the ant's credentials.
+    pub fn tips(&self) -> &Tips {
+        &self.inner.tips
     }
 
     /// Whether `other` is a clone of these trails.

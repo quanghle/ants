@@ -69,6 +69,10 @@ except RuntimeError as e:
     let parent = header.parent.as_ref().expect("a parent");
     assert_eq!((&parent.run, parent.call, &parent.origin_thread), (&run, 0, &thread));
     assert_eq!((&header.thread, header.trail().map(ToString::to_string)), (&step_thread, Some("echo".into())));
+    let marks = step.trail_step.as_ref().unwrap();
+    let script = header.leg().map(|leg| ants_proto::script_sha256(&leg.script));
+    assert_eq!((marks.trail.as_ref(), &marks.script), (header.trail(), &script), "the step names its trail's script");
+    assert!(marks.script.is_some());
     assert_eq!((header.owner.as_ref(), &header.origin), (Some(&UserId::human()), &human_origin()));
     assert_eq!(step.origin_thread.as_ref(), Some(&thread), "the child's steps link to the root run's thread");
     assert_eq!(step.owner, Some(UserId::human()));

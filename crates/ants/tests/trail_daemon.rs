@@ -9,6 +9,7 @@ use std::time::Duration;
 use agent_client_protocol::v1::schema::McpServer;
 use ants_daemon::admin::restart::Restarts;
 use ants_daemon::harness::McpSession;
+use ants_daemon::hub;
 use ants_daemon::mcp::Mcp;
 use ants_daemon::people::humans::Registry;
 use ants_daemon::records::direct_kv::DirectKv;
@@ -38,6 +39,8 @@ use tokio::task::JoinHandle;
 mod children;
 #[path = "trail_daemon/goto.rs"]
 mod goto;
+#[path = "trail_daemon/tips.rs"]
+mod tips;
 
 const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": [\"one\"]}\n";
 
@@ -94,7 +97,7 @@ impl Drop for Conductor {
 /// The buckets `ants init` creates, as the human.
 async fn init(server: &NatsServer) {
     let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "init").await.unwrap();
-    for config in [ants_daemon::hub::trails_config(), ants_daemon::hub::trail_runs_config()] {
+    for config in [hub::trails_config(), hub::trail_runs_config(), hub::trail_tips_config()] {
         js.create_key_value(config).await.unwrap();
     }
 }
@@ -289,7 +292,7 @@ async fn a_human_starts_a_run_fanning_out_to_two_ants_whose_replies_finish_it() 
     let TrailOutcome::Refused { error } = refused else { panic!("not refused: {refused:?}") };
     assert!(error.contains("conducts no run"), "{error}");
     let script = r#"
-await parallel(agent("build it", ant="dev"), agent("review it", capability="review"))
+await parallel(agent("build it", ant="dev", tips="build"), agent("review it", capability="review"))
 "#;
     let start = TrailAction::Start {
         trail: TrailSource::Script(format!("{META}{script}")),
@@ -307,7 +310,11 @@ await parallel(agent("build it", ant="dev"), agent("review it", capability="revi
     assert_eq!((dev.to.as_str(), reviewer.to.as_str()), ("dev", "reviewer"));
     assert_ne!(dev.thread_id, reviewer.thread_id, "each step has a thread of its own");
     assert_eq!(dev.text, "build it");
-    assert_eq!(dev.trail_step.as_ref().unwrap().run, run);
+    let marks = dev.trail_step.as_ref().unwrap();
+    assert_eq!(marks.run, run);
+    assert_eq!(marks.tip_key.as_deref(), Some("build"), "the step carries its tip key");
+    assert_eq!((&marks.trail, &marks.script), (&None, &None), "an inline script is no saved trail");
+    assert_eq!(reviewer.trail_step.as_ref().unwrap().tip_key, None);
     assert_eq!(dev.owner, Some(UserId::human()), "the step's thread keeps the run's owner");
 
     let unrelated = Envelope::new(ant("dev"), ant("lead"), "hello");
