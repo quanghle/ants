@@ -48,8 +48,10 @@ fn shown(arg: &str) -> Shown {
 #[test]
 fn show_takes_a_uuid_for_a_run_and_anything_else_for_a_trail() {
     let run = RunId::generate();
-    assert_eq!(shown(run.as_str()), Shown::Run(run));
+    assert_eq!(shown(run.as_str()), Shown::Run(run.clone()));
+    assert_eq!(shown(&run.as_str().to_ascii_uppercase()), Shown::Run(run));
     assert_eq!(shown("deploy"), Shown::Trail("deploy".parse().unwrap()));
+    assert_eq!(shown("0190AB"), Shown::Pick("0190ab".parse().unwrap()));
     assert!(Cli::try_parse_from(["ants", "trail", "show", "Not_A_Name"]).is_err());
 }
 

@@ -10,7 +10,7 @@
 //! start, stop and resume one ([`control`], [`start`]).
 
 pub(crate) mod control;
-mod follow;
+pub(crate) mod follow;
 pub(crate) mod ratings;
 pub(crate) mod runs;
 pub(crate) mod saved;
@@ -212,19 +212,24 @@ impl LimitArgs {
     }
 }
 
-/// What `ants trail show` shows: a run, named by its id, a UUID; otherwise a saved trail. `ants trail save` refuses a
-/// name reading as a UUID, so no trail hides behind a run.
+/// What `ants trail show` shows: a run, named by its id, a UUID; otherwise a saved trail, or a start of a run's id no
+/// trail's name can be, as in capitals. `ants trail save` refuses a name reading as a UUID, so no trail hides behind a
+/// run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Shown {
     Trail(TrailName),
     Run(RunId),
+    Pick(runs::Pick),
 }
 
 impl FromStr for Shown {
     type Err = ants_proto::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if Uuid::try_parse(s).is_ok() { s.parse().map(Self::Run) } else { s.parse().map(Self::Trail) }
+        if Uuid::try_parse(s).is_ok() {
+            return s.to_ascii_lowercase().parse().map(Self::Run);
+        }
+        s.parse().map(Self::Trail).or_else(|e| s.parse().map(Self::Pick).map_err(|_| e))
     }
 }
 
@@ -258,7 +263,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
             }
         }
         TrailCommand::Show { what, json, follow } => {
-            if matches!(what, Shown::Run(_)) {
+            if matches!(what, Shown::Run(_) | Shown::Pick(_)) {
                 human(nats, "reading a trail's runs")?;
             }
             let (_, js) = nats.connect("ants-cli").await?;
@@ -370,10 +375,11 @@ pub(crate) enum Found {
 }
 
 /// What `what` names: a run, by its id; else the saved trail of that name, the colony's before a local one; else, for
-/// a `human`, the one run whose id starts so.
+/// a `human`, the one run whose id starts so. Several runs' ids starting so are refused, naming them.
 pub(crate) async fn find(js: &jetstream::Context, what: Shown, human: bool) -> Result<Found> {
     let name = match what {
         Shown::Run(run) => return Ok(Found::Run(run)),
+        Shown::Pick(pick) => return Ok(Found::Run(runs::pick(js, &pick).await?.run)),
         Shown::Trail(name) => name,
     };
     let e = match saved::find(js, &saved::local_dir()?, &name).await {
@@ -387,8 +393,11 @@ pub(crate) async fn find(js: &jetstream::Context, what: Shown, human: bool) -> R
         Err(e) => e,
     };
     let Some(pick) = name.as_str().parse::<runs::Pick>().ok().filter(|_| human) else { return Err(e) };
-    let Ok(run) = runs::pick(js, &pick).await else { return Err(e) };
-    Ok(Found::Run(run.run))
+    let listed = runs::list(js, None).await?;
+    if !listed.iter().any(|run| pick.starts(&run.run)) {
+        return Err(e);
+    }
+    Ok(Found::Run(runs::picked(listed, &pick, "`ants trail runs` lists the runs kept")?.run))
 }
 
 /// The run `run` as `ants trail show RUN` prints it at `now`.

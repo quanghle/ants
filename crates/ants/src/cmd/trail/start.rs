@@ -1,7 +1,7 @@
 //! `ants trail run`: what a run of a trail may spend, shown and confirmed, then the run asked of its conductor.
 
 use std::fmt::Write as _;
-use std::io::{BufRead as _, IsTerminal as _, Write as _};
+use std::io::{BufRead, IsTerminal as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -180,15 +180,26 @@ pub(crate) fn summary(plan: &Plan, conductor: &UserId, thread: Option<&ThreadId>
     out
 }
 
-/// Ask `question` on the terminal: None without one.
+/// Ask `question` on the terminal, stdin and stderr: None without one on both.
 pub(super) fn ask_terminal(question: &str) -> Result<Option<bool>> {
-    if !std::io::stdin().is_terminal() {
+    let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    ask(question, terminal, std::io::stdin().lock(), std::io::stderr())
+}
+
+/// Ask `question` on `output`, reading the answer from `input`: None unless both are a `terminal`.
+pub(super) fn ask(
+    question: &str,
+    terminal: bool,
+    mut input: impl BufRead,
+    mut output: impl std::io::Write,
+) -> Result<Option<bool>> {
+    if !terminal {
         return Ok(None);
     }
-    eprint!("{question} [y/N] ");
-    std::io::stderr().flush()?;
+    write!(output, "{question} [y/N] ")?;
+    output.flush()?;
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
+    input.read_line(&mut line)?;
     Ok(Some(matches!(line.trim(), "y" | "Y" | "yes")))
 }
 
@@ -225,6 +236,7 @@ pub(super) async fn run(
     if !yes {
         match confirm("Start the run?")? {
             Some(true) => {}
+            Some(false) if json => bail!("not started"),
             Some(false) => {
                 println!("not started");
                 return Ok(());

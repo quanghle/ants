@@ -106,6 +106,13 @@ impl FromStr for Pick {
     }
 }
 
+impl Pick {
+    /// Whether the id `run` starts with this one.
+    pub(crate) fn starts(&self, run: &RunId) -> bool {
+        run.as_str().starts_with(&self.0)
+    }
+}
+
 impl std::fmt::Display for Pick {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -127,8 +134,8 @@ pub(crate) async fn pick_of(js: &jetstream::Context, conductor: &UserId, pick: &
 }
 
 /// The one run of `runs` whose id starts with `pick`; `listed` says where to find the runs when none does.
-fn picked(runs: Vec<TrailRun>, pick: &Pick, listed: &str) -> Result<TrailRun> {
-    let mut found: Vec<TrailRun> = runs.into_iter().filter(|r| r.run.as_str().starts_with(&pick.0)).collect();
+pub(super) fn picked(runs: Vec<TrailRun>, pick: &Pick, listed: &str) -> Result<TrailRun> {
+    let mut found: Vec<TrailRun> = runs.into_iter().filter(|r| pick.starts(&r.run)).collect();
     match found.len() {
         0 => bail!("no run's id starts with {pick}: {listed}"),
         1 => Ok(found.remove(0)),

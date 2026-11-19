@@ -4,15 +4,15 @@ use std::time::Duration;
 
 use ants_proto::{
     CallAnswer, JournalEntry, PendingCall, QueuedCall, Role, RunId, RunState, ThreadId, TrailAction, TrailFunction,
-    TrailLeg, TrailLimits, TrailOutcome, TrailRequest, TrailRunIndex, TrailSession, TrailSource, UserId, Uuid,
-    WaitingStep, subject, trail_runs_index_key,
+    TrailLeg, TrailLimits, TrailOutcome, TrailRequest, TrailRun, TrailRunIndex, TrailSession, TrailSource, UserId,
+    Uuid, WaitingStep, subject, trail_runs_index_key,
 };
 use chrono::{TimeDelta, Utc};
 use clap::Parser;
 use futures::StreamExt as _;
 use serde_json::json;
 
-use super::super::follow::Follower;
+use super::super::follow::{Follower, Patience, Read, Records, UNREAD_STATUS, Unread, following};
 use super::super::start::{self, Plan, Trail};
 use super::super::{LimitArgs, RunArgs, TrailCommand, control, runs};
 use super::{human, p, put, record, script, write};
@@ -166,6 +166,76 @@ fn a_follower_prints_each_change_of_a_run_once() {
     assert!(follower.header(&header).is_empty());
 }
 
+#[test]
+fn the_start_is_asked_only_with_a_terminal_on_stdin_and_stderr() {
+    let mut asked = Vec::new();
+    assert_eq!(start::ask("Start the run?", false, &b"y\n"[..], &mut asked).unwrap(), None);
+    assert!(asked.is_empty());
+    assert_eq!(start::ask("Start the run?", true, &b"y\n"[..], &mut asked).unwrap(), Some(true));
+    assert_eq!(asked, b"Start the run? [y/N] ");
+    assert_eq!(start::ask("Start the run?", true, &b"\n"[..], std::io::sink()).unwrap(), Some(false));
+}
+
+/// Records read in the order given, then unchanged.
+struct Scripted(std::collections::VecDeque<anyhow::Result<Read>>);
+
+impl Records for Scripted {
+    async fn read(&mut self) -> anyhow::Result<Read> {
+        self.0.pop_front().unwrap_or_else(|| Ok(Read::default()))
+    }
+}
+
+fn header(run: &TrailRun) -> anyhow::Result<Read> {
+    Ok(Read { header: Some(run.clone()), ..Read::default() })
+}
+
+const PATIENT: Patience = Patience { poll: Duration::from_millis(1), failed_reads: 3, quiet: Duration::from_secs(1) };
+
+#[tokio::test]
+async fn a_follow_ends_once_a_run_past_its_wall_time_goes_unchanged() {
+    let mut run = record(&p("lead"), Some("deploy"), RunState::Running, Utc::now() - TimeDelta::hours(2));
+    run.limits.wall_secs = 3600;
+    let records = Scripted([header(&run)].into());
+    let error = following(records, run.clone(), false, PATIENT).await.unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "run {} is past its wall time of 1h and its record has not changed for 1s: no daemon of lead conducts it any more",
+            run.run
+        )
+    );
+    assert!(error.downcast_ref::<Unread>().is_none());
+
+    let mut later = run.clone();
+    later.limits.wall_secs = 86_400;
+    let mut done = later.clone();
+    done.state = RunState::Done { result: json!("shipped") };
+    let records = Scripted([header(&later), Ok(Read::default()), Ok(Read::default()), header(&done)].into());
+    following(records, later, false, PATIENT).await.expect("a run within its wall time is followed to its end");
+}
+
+#[tokio::test]
+async fn a_follow_tries_failed_reads_again_before_giving_up_with_a_status_of_its_own() {
+    let run = record(&p("lead"), Some("deploy"), RunState::Running, Utc::now());
+    let mut done = run.clone();
+    done.state = RunState::Done { result: json!("shipped") };
+    let failed = || Err(anyhow::anyhow!("timed out"));
+    let records = Scripted([failed(), failed(), header(&done)].into());
+    following(records, run.clone(), true, PATIENT).await.expect("two failed reads are tried again");
+
+    let records = Scripted([failed(), failed(), failed(), header(&done)].into());
+    let error = following(records, run.clone(), false, PATIENT).await.unwrap_err();
+    assert!(error.downcast_ref::<Unread>().is_some(), "{error}");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "gave up following run {0}: its records could not be read 3 times in a row: timed out; `ants trail show {0}` shows it",
+            run.run
+        )
+    );
+    assert_ne!(UNREAD_STATUS, 1);
+}
+
 /// Answer each request on `ant`'s control subject with what `answer` makes of it, as `ant`'s daemon does.
 async fn conductor(server: &Server, ant: &UserId, answer: fn(&TrailRequest) -> TrailOutcome) {
     let (client, js) = server.connect(ant).await;
@@ -198,6 +268,8 @@ async fn run_confirms_asks_the_conductor_and_reports_its_refusal() {
     let error = start::run(&nats, run_args(&[file, "--ant", "lead"]), |_| Ok(None)).await.unwrap_err();
     assert_eq!(error.to_string(), "no terminal to confirm the run on: --yes starts it without asking");
     start::run(&nats, run_args(&[file, "--ant", "lead"]), |_| Ok(Some(false))).await.unwrap();
+    let declined = start::run(&nats, run_args(&[file, "--ant", "lead", "--json"]), |_| Ok(Some(false))).await;
+    assert_eq!(declined.unwrap_err().to_string(), "not started");
     let main = run_args(&[file, "--ant", "lead", "--args", r#"{"branch": "main"}"#]);
     start::run(&nats, main, |_| Ok(Some(true))).await.unwrap();
     let error = start::run(&nats, run_args(&[file, "--ant", "lead", "--yes"]), |_| unreachable!()).await.unwrap_err();
@@ -248,6 +320,21 @@ async fn humans_stop_and_resume_runs_by_a_unique_start_of_their_id() {
     );
     let error = runs::pick(&js, &pick("0190c")).await.unwrap_err().to_string();
     assert_eq!(error, "no run's id starts with 0190c: `ants trail runs` lists the runs kept");
+
+    let find = |s: &str| super::super::find(&js, s.parse().unwrap(), true);
+    let error = find("0190aaa").await.err().unwrap().to_string();
+    assert!(
+        error.starts_with("2 runs' ids start with 0190aaa (") && error.ends_with("): give more of the id"),
+        "{error}"
+    );
+    let error = find("0190c").await.err().unwrap().to_string();
+    assert!(error.starts_with("no trail 0190c, either in the colony or in"), "{error}");
+    for id in ["0190aaaa", "0190AAAA", "0190AAAA-0000-7000-8000-000000000001"] {
+        let Ok(super::super::Found::Run(run)) = find(id).await else { panic!("{id} is no run") };
+        assert_eq!(run, waiting.run, "{id}");
+    }
+    let error = find("0190AAA").await.err().unwrap().to_string();
+    assert!(error.starts_with("2 runs' ids start with 0190aaa ("), "{error}");
 
     let error = control::stop(&client, &alice, &done).await.unwrap_err().to_string();
     assert_eq!(error, format!("run {} has ended: done", done.run));

@@ -68,7 +68,14 @@ fn main() -> Result<()> {
         std::process::exit(ants_trail::worker::main());
     }
     completions::answer();
-    run()
+    let result = run();
+    if let Err(e) = &result
+        && e.downcast_ref::<cmd::trail::follow::Unread>().is_some()
+    {
+        eprintln!("Error: {e:?}");
+        std::process::exit(cmd::trail::follow::UNREAD_STATUS);
+    }
+    result
 }
 
 #[tokio::main(flavor = "current_thread")]
