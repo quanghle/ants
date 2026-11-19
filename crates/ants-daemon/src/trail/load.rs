@@ -12,11 +12,12 @@ use super::{Book, Leg, Slot, Step, Trails, engine_limits, locked, steps};
 impl Trails {
     /// The run of `header` as its records hold it: its stored session, given the answers its journal holds beyond it.
     /// When `resumed`, under the header's limits and without the steps it waited on, which go out anew, but for its
-    /// child runs, which resume with it, those failed on a limit too; else waiting on those steps again.
+    /// child runs, which resume with it, those failed on a limit too, or start anew when they left no record; else
+    /// waiting on those steps again.
     pub(super) async fn load(&self, header: TrailRun, resumed: bool) -> Result<Arc<Slot>> {
         let store = &self.inner.store;
         let run = header.run.clone();
-        let stored = store.session(&run).await?.context("the run has no stored session")?;
+        let mut stored = store.session(&run).await?.context("the run has no stored session")?;
         let mut session: Session = serde_json::from_str(&stored.session).context("parsing the run's session")?;
         if header.leg().is_none_or(|leg| leg.first_call != session.first_call()) {
             return self.load_moved(header, stored);
@@ -27,7 +28,7 @@ impl Trails {
         let mut calls: BTreeSet<u32> = session.answered().iter().copied().collect();
         calls.extend(Run::restore(session.clone(), Vec::new()).outstanding().iter().map(|call| call.call));
         if resumed {
-            for call in self.rerun_children(&run, &stored.pending, session.answered()).await? {
+            for call in self.rerun_children(&run, &mut stored.pending, session.answered()).await? {
                 calls.remove(&call);
             }
         }

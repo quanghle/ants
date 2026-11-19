@@ -2,7 +2,7 @@
 //! of the calling run ([`TrailParent`]), with its parent's owner and origin, on a thread of its own. Its result answers
 //! the call and its failure raises there; it tells its end on its own thread, sending its owner nothing. Stopping or
 //! ending a run stops its children; resuming it resumes them, those that failed on a limit too, whose errors no longer
-//! answer their calls.
+//! answer their calls, and starts anew those that left no record.
 //!
 //! A run and its descendants, its tree, share its root's limits: each step and turn a run spends is charged to every
 //! ancestor too, so the root's counters hold the tree's, and each call is checked against them. A child's pass stores
@@ -179,22 +179,24 @@ impl Trails {
     }
 
     /// The calls among `pending`, those of run `run` its session has not taken an answer to (`answered`), whose child
-    /// runs failed on a limit: resuming the run resumes them, so the error each answered its call with is deleted from
-    /// the run's journal.
+    /// runs failed on a limit or left no record: resuming the run resumes the former and starts the latter anew, marked
+    /// unsent, so the error each answered its call with is deleted from the run's journal.
     pub(super) async fn rerun_children(
         &self,
         run: &RunId,
-        pending: &[PendingCall],
+        pending: &mut [PendingCall],
         answered: &[u32],
     ) -> Result<Vec<u32>> {
         let mut rerun = Vec::new();
-        for call in pending.iter().filter(|call| !answered.contains(&call.call)) {
+        for call in pending.iter_mut().filter(|call| !answered.contains(&call.call)) {
             let Some(child) = call.child() else { continue };
-            let header = self.inner.store.header(&child).await?;
-            if header.is_some_and(|child| child.state.failed_on().is_some()) {
-                self.inner.store.delete_entry(run, call.call).await?;
-                rerun.push(call.call);
+            match self.inner.store.header(&child).await? {
+                Some(child) if child.state.failed_on().is_none() => continue,
+                Some(_) => {}
+                None => call.sent = false,
             }
+            self.inner.store.delete_entry(run, call.call).await?;
+            rerun.push(call.call);
         }
         Ok(rerun)
     }
