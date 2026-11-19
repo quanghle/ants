@@ -33,6 +33,7 @@ fn record(conductor: &str, state: RunState, hours: i64, now: DateTime<Utc>) -> T
         thread: ThreadId::generate(),
         parent: None,
         spends_from: None,
+        grants: Vec::new(),
         origin: Origin { by: Starter::Human { user: p("alice") }, channel: None },
         limits: TrailLimits::default(),
         state,

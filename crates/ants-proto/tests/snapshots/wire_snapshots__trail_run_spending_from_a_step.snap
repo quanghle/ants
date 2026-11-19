@@ -34,10 +34,28 @@ expression: value
     "conductor": "lead",
     "run": "019a7d2e-0000-7000-8000-000000000009",
     "call": 4,
-    "route": [
-      "deploy"
-    ]
+    "bounds": {
+      "steps": 6,
+      "turns": 40,
+      "until": "2025-01-01T12:09:00Z",
+      "route": [
+        "deploy"
+      ]
+    }
   },
+  "grants": [
+    {
+      "call": 2,
+      "thread": "019a7d2e-0000-7000-8000-00000000000a",
+      "steps": 3,
+      "turns": 20,
+      "spent": {
+        "steps": 1,
+        "turns": 2,
+        "running": 1
+      }
+    }
+  ],
   "origin": {
     "by": {
       "kind": "human",

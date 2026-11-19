@@ -139,6 +139,9 @@ impl Trails {
                 if header.parent.is_none() && !self.report_end(&header).await {
                     bail!("the message telling the run's end is not stored");
                 }
+                if !self.tell_spent(&header).await {
+                    bail!("the notice telling what the runs answering its step spent is not stored");
+                }
                 return store.list(run, false).await;
             }
             Some(header) => header,

@@ -155,9 +155,10 @@ pub struct Envelope {
     /// [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail_step: Option<Box<TrailStep>>,
-    /// On a reply to a trail step on the step's thread, what the runs its sender started with `run_trail` while
-    /// answering the step spent since its last reply there told ([`TrailSpent`]): the step's conductor charges it to the
-    /// step's run. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    /// On a reply to a trail step on the step's thread, or its sender's [`NoticeKind::RunSpent`] notice there, what the
+    /// runs its sender started with `run_trail` while answering the step spent in all so far ([`TrailSpent`]): the
+    /// step's conductor charges what it has not charged yet to the step's run. Never copied by [`Envelope::reply`] or
+    /// [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail_spent: Option<TrailSpent>,
     /// The trail run a schedule asks its recipient to start, the message's thread the run's: the recipient's daemon
@@ -274,6 +275,9 @@ pub enum NoticeKind {
     /// An MCP server the ant's harness signs in to as its sessions open needs a browser sign-in, or failed to sign
     /// in: the ant answers without the server meanwhile.
     McpSignIn,
+    /// A run the ant started with `run_trail` while answering a trail step ended or stopped: the notice, on the step's
+    /// thread to its conductor, tells what the runs started answering the step spent ([`Envelope::trail_spent`]).
+    RunSpent,
 }
 
 impl NoticeKind {
@@ -293,6 +297,7 @@ impl NoticeKind {
             Self::RequestExpired => "request_expired",
             Self::Steered => "steered",
             Self::McpSignIn => "mcp_sign_in",
+            Self::RunSpent => "run_spent",
         }
     }
 

@@ -78,6 +78,8 @@ struct Conductor {
     told: Vec<Envelope>,
     invited: Vec<Envelope>,
     notes: Arc<MemoryNotes>,
+    /// Set, the next message the conductor sends fails, and is not sent.
+    failing: Arc<std::sync::atomic::AtomicBool>,
     serving: JoinHandle<()>,
 }
 
@@ -157,9 +159,15 @@ async fn conductor_full(
     let (client, js) = ants_daemon::bus::connect(&server.url, None, None, &lead, "conductor").await.unwrap();
     let attempts = ants_daemon::bus::ensure_attempts(&js, None, &lead).await.unwrap();
     let (tx, sent) = mpsc::unbounded_channel();
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fails = failing.clone();
     let outbox: ants_daemon::mcp::Outbox = Arc::new(move |envelope| {
         let tx = tx.clone();
+        let failed = fails.swap(false, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {
+            if failed {
+                anyhow::bail!("the bus is away");
+            }
             tx.send(envelope).unwrap();
             Ok(())
         })
@@ -191,7 +199,7 @@ async fn conductor_full(
         let trails = trails.clone();
         async move { trails.serve().await }
     });
-    Conductor { trails, js, client, sent, told: Vec::new(), invited: Vec::new(), notes, serving }
+    Conductor { trails, js, client, sent, told: Vec::new(), invited: Vec::new(), notes, failing, serving }
 }
 
 fn ants_binary() -> PathBuf {

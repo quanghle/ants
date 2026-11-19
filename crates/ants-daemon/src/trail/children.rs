@@ -19,15 +19,18 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use super::{Leg, Slot, Trails, driver, locked, steps};
+use super::{Leg, Slot, Trails, driver, locked, nested, steps};
 
 /// What a run's tree may still spend, as its root's counters and limits say.
 pub(super) struct Budget {
     pub(super) limits: TrailLimits,
     /// The steps the tree sent.
     pub(super) steps: u32,
-    /// The turns neither spent nor held by a step of the tree.
+    /// The turns neither spent nor held by a step of the tree's turn budget.
     pub(super) turns: u32,
+    /// The steps and turns the grants of the tree's steps hold ([`ants_proto::StepGrant`]): out of what later grants
+    /// take, not out of the tree's own steps.
+    pub(super) held: (u32, u32),
 }
 
 impl Trails {
@@ -48,7 +51,7 @@ impl Trails {
             ));
         }
         let root = self.root(header);
-        if let Some(from) = root.spends_from.as_ref().filter(|from| from.route.contains(&name)) {
+        if let Some(from) = root.spends_from.as_ref().filter(|from| from.bounds.route.contains(&name)) {
             return Some(format!(
                 "trail {name} is on the route of run {}, whose step run {} spends from: no trail calls itself",
                 from.run, root.run
@@ -87,6 +90,7 @@ impl Trails {
             thread: call.thread.clone(),
             parent: Some(TrailParent { run: parent.run.clone(), call: call.call, origin_thread }),
             spends_from: None,
+            grants: Vec::new(),
             origin: parent.origin.clone(),
             limits,
             state: RunState::Running,
@@ -318,9 +322,16 @@ impl Trails {
     pub(super) fn budget(&self, header: &TrailRun) -> Budget {
         let root = self.root(header);
         let tree = self.tree(&root.run);
-        let reserved: u32 = tree.iter().map(|slot| slot.book().pending.iter().map(driver::reserved).sum::<u32>()).sum();
+        let (mut reserved, mut held, mut held_turns) = (0_u32, 0_u32, 0_u32);
+        for slot in &tree {
+            let book = slot.book();
+            reserved = reserved.saturating_add(book.pending.iter().map(driver::reserved).sum::<u32>());
+            let (steps, turns) = nested::held_by(&book);
+            held = held.saturating_add(steps);
+            held_turns = held_turns.saturating_add(turns);
+        }
         let turns = root.limits.turns.saturating_sub(root.turns).saturating_sub(reserved);
-        Budget { limits: root.limits, steps: root.steps, turns }
+        Budget { limits: root.limits, steps: root.steps, turns, held: (held, held_turns) }
     }
 
     /// Whether a step of the tree of the run of `header` holds turns it may give back.

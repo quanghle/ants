@@ -174,7 +174,7 @@ fn envelope() -> Envelope {
             local: Some("/home/dev/app/.git".to_owned()),
         }],
         trail_step: Some(Box::new(trail_step())),
-        trail_spent: Some(TrailSpent { steps: 3, turns: 7 }),
+        trail_spent: Some(TrailSpent { steps: 3, turns: 7, running: 1 }),
         trail_start: Some(Box::new(TrailStart {
             trail: "nightly-audit".parse().unwrap(),
             args: serde_json::json!({"repo": "app"}),
@@ -1367,6 +1367,7 @@ fn trail_child_runs() {
         thread: other_thread(),
         parent: Some(TrailParent { run: run(), call: 2, origin_thread: thread() }),
         spends_from: None,
+        grants: Vec::new(),
         origin: provider::Origin { by: provider::Starter::Human { user: user("alice") }, channel: Some(channel()) },
         limits: TrailLimits { steps: 20, ..TrailLimits::DEFAULT },
         state: RunState::Running,
@@ -1423,6 +1424,7 @@ fn routed_run() -> TrailRun {
         thread: thread(),
         parent: None,
         spends_from: None,
+        grants: Vec::new(),
         origin: provider::Origin { by: provider::Starter::Human { user: user("alice") }, channel: Some(channel()) },
         limits: TrailLimits { steps: 20, ..TrailLimits::DEFAULT },
         state: RunState::Done { result: serde_json::json!({"tag": "v1.2.0"}) },
@@ -1612,7 +1614,26 @@ fn trail_run_spending_from_a_step() {
         conductor: user("lead"),
         run: "019a7d2e-0000-7000-8000-000000000009".parse().unwrap(),
         call: 4,
-        route: vec!["deploy".parse().unwrap()],
+        bounds: StepBounds { steps: 6, turns: 40, until: at(9), route: vec!["deploy".parse().unwrap()] },
     };
-    snap("trail_run_spending_from_a_step", &TrailRun { spends_from: Some(spends_from), ..routed_run() });
+    let grant = StepGrant {
+        call: 2,
+        thread: "019a7d2e-0000-7000-8000-00000000000a".parse().unwrap(),
+        steps: 3,
+        turns: 20,
+        spent: TrailSpent { steps: 1, turns: 2, running: 1 },
+    };
+    let run = TrailRun { spends_from: Some(spends_from), grants: vec![grant], ..routed_run() };
+    snap("trail_run_spending_from_a_step", &run);
+}
+
+#[test]
+fn trail_answering() {
+    let answering = TrailAnswering {
+        conductor: user("lead"),
+        run: "019a7d2e-0000-7000-8000-000000000009".parse().unwrap(),
+        call: 4,
+        runs: vec!["019a7d2e-0000-7000-8000-00000000000b".parse().unwrap()],
+    };
+    snap("trail_answering", &answering);
 }

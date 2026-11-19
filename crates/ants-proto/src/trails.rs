@@ -79,20 +79,23 @@ pub struct TrailStep {
     /// a tip left answering it goes under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tip_key: Option<String>,
-    /// What a run its recipient starts with `run_trail` while answering it may spend, as the step's run had left when
-    /// the step went; none from a conductor that tells nothing of it.
+    /// The step's grant: what the runs its recipient starts with `run_trail` while answering it may spend together;
+    /// none from a conductor that tells nothing of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bounds: Option<StepBounds>,
 }
 
-/// What a run started with `run_trail` while answering a step may spend ([`TrailStep::bounds`]): what the step's run,
-/// through its root's limits, had left as the step went. Such a run takes at most these as its limits, and what it
-/// spends comes back with the replies to the step ([`TrailSpent`]), charged to the step's run and its ancestors.
+/// What the runs started with `run_trail` while answering a step may spend together ([`TrailStep::bounds`]): the
+/// step's grant, which its conductor took out of what the step's run, through its root's limits, had left as the step
+/// went, and holds for the step until it is answered and those runs have ended. The recipient's daemon cuts each such
+/// run to what the grant leaves after the runs it already started answering the step: the limits of those still
+/// running, the spending of the others. What they spend goes back to the conductor ([`TrailSpent`]), charged to the
+/// step's run and its ancestors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepBounds {
-    /// Steps the step's run had left, the step itself counted.
+    /// Steps granted.
     pub steps: u32,
-    /// Turns the step's run had left, neither spent nor held by its steps waiting for an answer, this one included.
+    /// Turns granted.
     pub turns: u32,
     /// When the step's run fails on its wall time.
     pub until: DateTime<Utc>,
@@ -102,24 +105,40 @@ pub struct StepBounds {
     pub route: Vec<TrailName>,
 }
 
-/// What the runs started with `run_trail` while answering a step spent since the last reply to the step told
-/// ([`Envelope::trail_spent`]), carried by the recipient's reply on the step's thread: the step's conductor charges it to
-/// the step's run and its ancestors, as a child run's steps and turns are.
+/// What the runs started with `run_trail` while answering a step spent in all so far, and how many of them still run
+/// ([`Envelope::trail_spent`]): carried by the recipient's replies on the step's thread and by its
+/// [`NoticeKind::RunSpent`] notice there as each such run ends or stops. The step's conductor charges the part it has
+/// not charged yet to the step's run and its ancestors ([`StepGrant::spent`]), so a message told twice charges once.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TrailSpent {
     pub steps: u32,
     pub turns: u32,
+    /// The runs still running or waiting: neither ended nor stopped.
+    pub running: u32,
 }
 
-impl TrailSpent {
-    pub fn is_none(&self) -> bool {
-        self.steps == 0 && self.turns == 0
-    }
+/// A step's grant, as its conductor holds it in the header of the step's run ([`TrailRun::grants`]): what the runs
+/// started answering the step may spend ([`StepBounds`]), and what they told they spent. It is held, less what was
+/// spent, while the run waits on the step or while such runs still run, and given back otherwise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepGrant {
+    pub call: u32,
+    /// The step's thread: a step sent anew, on resuming its run, goes on a new thread with a new grant.
+    pub thread: ThreadId,
+    /// Steps granted.
+    #[serde(default)]
+    pub steps: u32,
+    /// Turns granted.
+    #[serde(default)]
+    pub turns: u32,
+    /// What the runs answering the step told they spent, all charged, and how many of them still run.
+    #[serde(default)]
+    pub spent: TrailSpent,
 }
 
 /// The step a run started with `run_trail` while answering it spends from ([`TrailRun::spends_from`]): the run is
-/// started under the step's [`StepBounds`], and what it spends goes back with the replies to the step.
+/// started, and resumed, within the step's grant ([`StepBounds`]), and what it spends goes back to the step's conductor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpendsFrom {
     /// The step's conductor, under whose keys the step's run is kept.
@@ -128,9 +147,24 @@ pub struct SpendsFrom {
     pub run: RunId,
     /// The step's call.
     pub call: u32,
-    /// The step's [`StepBounds::route`]: the run, and its child runs, take none of these trails.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub route: Vec<TrailName>,
+    /// The step's grant: the run, and its child runs, take none of the trails on its route.
+    pub bounds: StepBounds,
+}
+
+/// The runs a recipient started with `run_trail` while answering one step, kept by the recipient's daemon in
+/// [`TRAIL_RUNS_BUCKET`] under [`crate::trail_answering_key`] of the step's thread, so a restart still tells all they
+/// spent. Readers should treat unknown fields as additions, not errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrailAnswering {
+    /// The step's conductor.
+    pub conductor: UserId,
+    /// The step's run.
+    pub run: RunId,
+    /// The step's call.
+    pub call: u32,
+    /// The runs started answering it, in order.
+    #[serde(default)]
+    pub runs: Vec<RunId>,
 }
 
 /// Who saved a trail: a human, with `ants trail save`, or an ant, with its `save_trail` tool.
@@ -342,6 +376,9 @@ pub struct TrailRun {
     /// spends from the step's run. None for a run started otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spends_from: Option<SpendsFrom>,
+    /// The grants of its steps still held, or whose runs told some spending ([`StepGrant`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<StepGrant>,
     /// Where that thread came from, as the conductor's daemon settled it: a run from a webhook's thread is untrusted.
     pub origin: Origin,
     pub limits: TrailLimits,

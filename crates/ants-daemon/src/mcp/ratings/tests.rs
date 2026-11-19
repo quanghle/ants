@@ -32,6 +32,7 @@ fn run(trail: Option<&str>) -> TrailRun {
         thread: ThreadId::generate(),
         parent: None,
         spends_from: None,
+        grants: Vec::new(),
         origin: Origin { by: Starter::Human { user: UserId::human() }, channel: None },
         limits: TrailLimits::default(),
         state: RunState::Done { result: json!(1) },

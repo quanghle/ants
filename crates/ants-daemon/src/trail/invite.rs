@@ -216,6 +216,7 @@ mod tests {
             thread: ThreadId::generate(),
             parent: None,
             spends_from: None,
+            grants: Vec::new(),
             origin: Origin { by: Starter::Human { user: UserId::human() }, channel: None },
             limits: TrailLimits::default(),
             state,

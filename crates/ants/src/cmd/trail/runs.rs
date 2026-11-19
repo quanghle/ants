@@ -337,8 +337,8 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
     if let Some(from) = &r.spends_from {
         let _ = writeln!(
             out,
-            "started answering call {} of run {} of {}, spending from that run's limits",
-            from.call, from.run, from.conductor
+            "started answering call {} of run {} of {}, spending from that run's grant of {} steps and {} turns",
+            from.call, from.run, from.conductor, from.bounds.steps, from.bounds.turns
         );
     }
     let _ = match &r.state {

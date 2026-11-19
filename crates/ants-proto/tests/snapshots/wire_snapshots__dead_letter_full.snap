@@ -166,7 +166,8 @@ expression: value
     },
     "trail_spent": {
       "steps": 3,
-      "turns": 7
+      "turns": 7,
+      "running": 1
     },
     "trail_start": {
       "trail": "nightly-audit",

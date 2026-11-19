@@ -449,6 +449,7 @@ mod tests {
             thread,
             parent: None,
             spends_from: None,
+            grants: Vec::new(),
             origin: Origin { by: Starter::Human { user: owner.clone() }, channel: None },
             limits: TrailLimits::DEFAULT,
             state: RunState::Running,

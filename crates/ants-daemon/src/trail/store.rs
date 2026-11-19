@@ -1,11 +1,13 @@
 //! A run's records in [`TRAIL_RUNS_BUCKET`], under the conductor's own keys: its header ([`TrailRun`]), its session
 //! ([`TrailSession`]), one journal entry per answered call, the index of the conductor's runs not finished
 //! ([`TrailRunIndex`]), which the daemon reads at start, as an ant cannot list the bucket's keys, and what it keeps of
-//! each step's thread ([`TrailStepThread`]), under the step's thread and the run's.
+//! each step's thread ([`TrailStepThread`]), under the step's thread and the run's; and, as the recipient of a step, the
+//! runs it started answering it ([`TrailAnswering`]).
 
 use ants_proto::{
-    JsDomain, RunId, TRAIL_RUNS_BUCKET, ThreadId, TrailRun, TrailRunIndex, TrailSession, TrailStepThread, UserId,
-    trail_call_key, trail_run_key, trail_runs_index_key, trail_session_key, trail_step_key, trail_thread_step_key,
+    JsDomain, RunId, TRAIL_RUNS_BUCKET, ThreadId, TrailAnswering, TrailRun, TrailRunIndex, TrailSession,
+    TrailStepThread, UserId, trail_answering_key, trail_call_key, trail_run_key, trail_runs_index_key,
+    trail_session_key, trail_step_key, trail_thread_step_key,
 };
 use ants_trail::JournalEntry;
 use anyhow::{Context as _, Result};
@@ -88,6 +90,15 @@ impl Store {
     /// Keep `step`, the step thread `thread`, under its run's thread alone.
     pub(super) async fn put_thread_step(&self, thread: &ThreadId, step: &TrailStepThread) -> Result<()> {
         self.put(trail_thread_step_key(&self.ant, &step.run_thread, thread), step).await
+    }
+
+    /// The runs the ant started answering the step on `thread`.
+    pub(super) async fn answering(&self, thread: &ThreadId) -> Result<Option<TrailAnswering>> {
+        self.get(trail_answering_key(&self.ant, thread)).await
+    }
+
+    pub(super) async fn put_answering(&self, thread: &ThreadId, record: &TrailAnswering) -> Result<()> {
+        self.put(trail_answering_key(&self.ant, thread), record).await
     }
 
     /// The runs of the index: those started or resumed and not finished.

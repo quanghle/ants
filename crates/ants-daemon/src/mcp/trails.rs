@@ -73,7 +73,8 @@ fn description() -> String {
          (`steps`, `at_once`, `turns`, `wall`). The run reports on the current thread and answers to the thread's \
          owner, who gets its end there. Returns the run id at once, or with `wait` the run's result or error (waiting \
          at most `timeout`). Started while answering a trail step, the run spends from the step's run: its limits are \
-         cut to what that run has left, what it spends counts against that run, and a trail on that run's route is \
+         cut to what the step's grant leaves after the runs already started answering it, what it spends counts \
+         against that run, and a trail on that run's route is \
          refused, as no trail calls itself. trail_status tells how a run stands and stop_trail stops one. Before writing a script, \
          find_trails finds the saved trails for the task; once a run ends, rate_trail rates it, as its end invites. \
          Once an inline script works and its steps will recur, save_trail saves it for every ant to run by name. Write \
@@ -103,7 +104,7 @@ impl Hub {
         let limits = args.limits.unwrap_or_default().limits().map_err(|e| format!("limits: {e}"))?;
         let current = self.sessions.locked().current.get(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; runs start only while one is")?;
-        let (limits, spends_from) = spending(&current, &trail, limits)?;
+        let spends_from = spending(&current, &trail)?;
         let stored = self.origin_of(thread).await.map_err(|e| {
             tracing::warn!(%thread, error = format!("{e:#}"), "reading the thread's origin for a trail run");
             "the thread's origin cannot be read".to_owned()
@@ -113,13 +114,18 @@ impl Hub {
             TrailSource::Script(script) => crate::trail::script_description(script),
             TrailSource::Saved(_) => None,
         };
-        let spends = spends_from.as_ref().map_or_default(|from| {
+        let spends = async |run: &RunId| {
+            let Some(from) = &spends_from else { return String::new() };
+            let limits = match trails.run(run).await {
+                Ok(Some(header)) => format!("its limits are {}", header.limits),
+                _ => "its limits are cut to the step's grant".to_owned(),
+            };
             format!(
-                " It spends from run {} of {}, whose step this thread answers: its limits are {limits}, and what it \
-                 spends counts against that run.",
+                " It spends from run {} of {}, whose step this thread answers: {limits}, within what the step's grant \
+                 leaves, and what it spends counts against that run.",
                 from.run, from.conductor
             )
-        });
+        };
         let start = StartRun {
             trail,
             args: args.args,
@@ -127,10 +133,11 @@ impl Hub {
             origin,
             thread: thread.clone(),
             limits,
-            spends_from,
+            spends_from: spends_from.clone(),
         };
         let Some(wait) = wait else {
             let run = trails.start(start).await?;
+            let spends = spends(&run).await;
             tracing::info!(%thread, %run, "trail run started from a tool call");
             let started = format!(
                 "Started run {run} on thread {thread}; its end goes to the thread's owner there, and invites this \
@@ -141,6 +148,7 @@ impl Hub {
         let mut waiting = trails.start_waited(start).await?;
         let run = waiting.run().clone();
         tracing::info!(%thread, %run, "trail run started from a tool call");
+        let spends = spends(&run).await;
         let started =
             format!("Started run {run} on thread {thread}; its end goes to the thread's owner there.{spends}");
         let suggested = well_rated(trails, described.as_deref()).await;
@@ -196,34 +204,28 @@ impl Hub {
     }
 }
 
-/// The limits of a run asking for `limits`, started with `trail` on a thread handling `current`, and the step it spends
-/// from: when `current` is a step telling its bounds, the limits cut to them, refused for a trail on the step's route.
-fn spending(
-    current: &Envelope,
-    trail: &TrailSource,
-    limits: ants_proto::TrailLimits,
-) -> Result<(ants_proto::TrailLimits, Option<SpendsFrom>), String> {
-    let Some(step) = current.trail_step.as_deref() else { return Ok((limits, None)) };
-    let Some(bounds) = &step.bounds else { return Ok((limits, None)) };
+/// The step a run started with `trail` on a thread handling `current` spends from: `current` when it is a step telling
+/// its grant, whose daemon cuts the run's limits to what the grant leaves; refused for a trail on the step's route.
+fn spending(current: &Envelope, trail: &TrailSource) -> Result<Option<SpendsFrom>, String> {
+    let Some(step) = current.trail_step.as_deref() else { return Ok(None) };
+    let Some(bounds) = &step.bounds else { return Ok(None) };
     if let TrailSource::Saved(name) = trail
         && let Some(refused) = crate::trail::refused_on_route(name, step, bounds)
     {
         return Err(refused);
     }
-    let limits = crate::trail::within(limits, bounds, Utc::now())?;
-    let from = SpendsFrom {
+    Ok(Some(SpendsFrom {
         conductor: current.from.clone(),
         run: step.run.clone(),
         call: step.call,
-        route: bounds.route.clone(),
-    };
-    Ok((limits, Some(from)))
+        bounds: bounds.clone(),
+    }))
 }
 
 impl Hub {
     /// What `reply`, a message going out while a message `current` is handled, tells the runs started answering
-    /// `current` spent since the last reply told: something only when `current` is a trail step and `reply` goes back to
-    /// its conductor on the step's thread.
+    /// `current` spent in all: something only when `current` is a trail step the ant started runs answering and `reply`
+    /// goes back to its conductor on the step's thread.
     pub(super) async fn trail_spent(&self, current: Option<&Envelope>, reply: &Envelope) -> Option<TrailSpent> {
         let (current, trails) = (current?, self.trails.get()?);
         let step = current.trail_step.as_deref()?;
@@ -234,7 +236,7 @@ impl Hub {
         if !answers {
             return None;
         }
-        trails.spent_answering(&current.from, step).await
+        trails.spent_answering(&current.from, &current.thread_id, step).await
     }
 }
 
@@ -322,8 +324,8 @@ fn status_text(status: &RunStatus, now: DateTime<Utc>) -> String {
     if let Some(from) = &header.spends_from {
         let _ = write!(
             out,
-            "\nStarted answering call {} of run {} of {}: it spends from that run, which counts what it spent by each \
-             reply to the step.",
+            "\nStarted answering call {} of run {} of {}: it spends from that run, within the step's grant, and tells \
+             that run what it spent with each reply to the step and as it ends or stops.",
             from.call, from.run, from.conductor
         );
     }

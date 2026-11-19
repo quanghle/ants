@@ -1,0 +1,12 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "conductor": "lead",
+  "run": "019a7d2e-0000-7000-8000-000000000009",
+  "call": 4,
+  "runs": [
+    "019a7d2e-0000-7000-8000-00000000000b"
+  ]
+}

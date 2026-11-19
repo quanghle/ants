@@ -306,15 +306,17 @@ impl Trails {
     }
 
     /// Tell the end of the run of `header`, stored: to the run_trail call waiting on it, else by the invitation to rate
-    /// it, and to its owner. A message not stored is sent again, under the same id, until it is.
+    /// it, to its owner, and, for a run started answering a step, what the runs answering the step spent to the step's
+    /// conductor. A message not stored is sent again, under the same id, until it is.
     async fn tell_end(&self, header: &TrailRun) {
         let mut invited = self.hand_end(header);
-        let mut told = false;
+        let (mut told, mut spent) = (false, false);
         let mut delay = RETRY_FIRST;
         loop {
             invited = invited || self.invite(header).await;
             told = told || self.report_end(header).await;
-            if invited && told {
+            spent = spent || self.tell_spent(header).await;
+            if invited && told && spent {
                 return;
             }
             tracing::warn!(run = %header.run, retry_in = ?delay, "telling the end of a trail run");
@@ -329,6 +331,8 @@ impl Trails {
         let header = slot.header();
         let budget = self.budget(&header);
         let (mut steps, mut turns) = (budget.steps, budget.turns);
+        let waiting = u32::try_from(slot.book().pending.len()).unwrap_or(u32::MAX);
+        let (mut made, mut granted) = (0_u32, Vec::new());
         let mut issued = Issued::default();
         let mut colony = None;
         // A call answered while the script computed is outstanding in the engine until the next pass hands it in.
@@ -395,12 +399,22 @@ impl Trails {
                 locked(&self.inner.threads).insert(pending.thread.clone(), Step::Live(header.run.clone()));
             }
             steps += 1;
+            made += 1;
+            if call.function == Function::Agent {
+                granted.push((pending.call, pending.thread.clone()));
+            }
             {
                 let mut book = slot.book();
                 count_steps(&mut book.header, 1);
                 book.pending.push(pending);
             }
             self.charge(&header, 1, 0);
+        }
+        if !granted.is_empty() {
+            // Shared among the steps going out now and the calls held back for room, as many as may be out at once.
+            let queued = u32::try_from(engine.queued().len()).unwrap_or(u32::MAX);
+            let room = header.limits.concurrency.saturating_sub(waiting);
+            self.grant(slot, &granted, room.min(made.saturating_add(queued)));
         }
         Ok(issued)
     }

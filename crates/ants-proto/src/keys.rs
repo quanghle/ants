@@ -425,6 +425,16 @@ pub fn trail_step_key(conductor: &UserId, thread: &ThreadId) -> String {
     format!("{conductor}.{TRAIL_STEPS}.{thread}")
 }
 
+/// The key token under which an ant keeps the runs it started answering a step ([`trail_answering_key`]), which no
+/// [`RunId`] is.
+pub const TRAIL_ANSWERING: &str = "answering";
+
+/// Key of the [`TrailAnswering`] of the runs `ant` started with `run_trail` while answering the step on `thread`, in
+/// [`TRAIL_RUNS_BUCKET`].
+pub fn trail_answering_key(ant: &UserId, thread: &ThreadId) -> String {
+    format!("{ant}.{TRAIL_ANSWERING}.{thread}")
+}
+
 /// The key token under which a conductor indexes its [`TrailStepThread`]s by the thread of their run
 /// ([`trail_thread_step_key`]), which no [`RunId`] is.
 pub const TRAIL_STEPS_ON: &str = "on";

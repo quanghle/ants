@@ -98,15 +98,16 @@ pub use identity::{
 pub use ids::{BuiltinAnt, ChannelId, JsDomain, Machine, Reaction, Role, RunId, ThreadId, TipId, TrailName, UserId};
 pub use inbox::{ChannelNotify, ChannelReadMarkers, HeldNotices, NotifyPrefs, ReadMarker};
 pub use keys::{
-    ANTS_VERSION, Feed, SERVING_EVERY, SPARE_READERS, Serving, TRAIL_RUNS_INDEX, TRAIL_STEPS, assisted_marks_key,
-    assisted_owner_key, assisted_reminders_key, assisted_withdrawal_key, attempt_key, chan_consumer, chan_reader,
-    channel_manager_serving_key, channel_manager_serving_subject, channel_reads_key, channel_seen_key, daily_spend_key,
-    dead_reader, done_key, done_reader, escalation_deadlines_key, held_key, inbox_consumer, inbox_prefix, link_key,
-    link_outbox, links_to, marks_key, mention_key, message_mark_key, notes_consumer, notify_consumer, owner_key,
-    owner_outbox, owner_record_id, parse_link_key, parse_reaction_key, parse_trail_run_key, reaction_key, reactions_to,
-    reminders_key, sent_reader, session_key, spare_readers, storage_warning_key, summary_key, thread_origin_key,
-    thread_spend_key, title_key, trail_call_key, trail_run_key, trail_runs_index_key, trail_runs_subject,
-    trail_session_key, trail_step_key, unserved_key, webhook_marker_key, webhook_marker_subject, webhook_seen_key,
+    ANTS_VERSION, Feed, SERVING_EVERY, SPARE_READERS, Serving, TRAIL_ANSWERING, TRAIL_RUNS_INDEX, TRAIL_STEPS,
+    assisted_marks_key, assisted_owner_key, assisted_reminders_key, assisted_withdrawal_key, attempt_key,
+    chan_consumer, chan_reader, channel_manager_serving_key, channel_manager_serving_subject, channel_reads_key,
+    channel_seen_key, daily_spend_key, dead_reader, done_key, done_reader, escalation_deadlines_key, held_key,
+    inbox_consumer, inbox_prefix, link_key, link_outbox, links_to, marks_key, mention_key, message_mark_key,
+    notes_consumer, notify_consumer, owner_key, owner_outbox, owner_record_id, parse_link_key, parse_reaction_key,
+    parse_trail_run_key, reaction_key, reactions_to, reminders_key, sent_reader, session_key, spare_readers,
+    storage_warning_key, summary_key, thread_origin_key, thread_spend_key, title_key, trail_answering_key,
+    trail_call_key, trail_run_key, trail_runs_index_key, trail_runs_subject, trail_session_key, trail_step_key,
+    unserved_key, webhook_marker_key, webhook_marker_subject, webhook_seen_key,
 };
 pub(crate) use keys::{STORAGE_WARNING_PREFIX, WEBHOOK_MARKER};
 pub use keys::{
@@ -165,9 +166,9 @@ pub use timeline::{
 pub use trails::RunLimit;
 pub use trails::{
     CallAnswer, JournalEntry, MAX_TRAIL_ARGS, MAX_TRAIL_DESCRIPTION, MAX_TRAIL_PHASES, MAX_TRAIL_SCRIPT,
-    MAX_TRAIL_WAYPOINTS, PendingCall, QueuedCall, RunState, SavedTrail, Saver, SpendsFrom, StepBounds,
-    TRAIL_RUN_RETENTION, TrailAction, TrailFunction, TrailLeg, TrailLimits, TrailOutcome, TrailParent, TrailReply,
-    TrailRequest, TrailRun, TrailRunIndex, TrailSession, TrailSource, TrailSpent, TrailStart, TrailStep,
+    MAX_TRAIL_WAYPOINTS, PendingCall, QueuedCall, RunState, SavedTrail, Saver, SpendsFrom, StepBounds, StepGrant,
+    TRAIL_RUN_RETENTION, TrailAction, TrailAnswering, TrailFunction, TrailLeg, TrailLimits, TrailOutcome, TrailParent,
+    TrailReply, TrailRequest, TrailRun, TrailRunIndex, TrailSession, TrailSource, TrailSpent, TrailStart, TrailStep,
     TrailStepThread, WaitingStep, leg_entry,
 };
 pub use trails::{

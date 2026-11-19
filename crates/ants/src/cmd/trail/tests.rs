@@ -285,6 +285,7 @@ fn record(conductor: &UserId, trail: Option<&str>, state: RunState, started: chr
         thread: ThreadId::generate(),
         parent: None,
         spends_from: None,
+        grants: Vec::new(),
         origin: Origin { by: Starter::Human { user: p("alice") }, channel: None },
         limits: TrailLimits::default(),
         state,
@@ -340,8 +341,8 @@ fn a_run_started_answering_a_step_shows_the_run_it_spends_from() {
     let now = Utc::now();
     let mut run = record(&p("dev-a"), None, RunState::Running, now);
     let from = RunId::generate();
-    let route = vec!["deploy".parse().unwrap()];
-    run.spends_from = Some(ants_proto::SpendsFrom { conductor: p("lead"), run: from.clone(), call: 2, route });
+    let bounds = ants_proto::StepBounds { steps: 3, turns: 20, until: now, route: vec!["deploy".parse().unwrap()] };
+    run.spends_from = Some(ants_proto::SpendsFrom { conductor: p("lead"), run: from.clone(), call: 2, bounds });
     let detail = runs::Detail {
         run,
         pending: Vec::new(),
@@ -351,7 +352,9 @@ fn a_run_started_answering_a_step_shows_the_run_it_spends_from() {
         ratings: Vec::new(),
     };
     let text = runs::render(&detail, now);
-    let line = format!("\nstarted answering call 2 of run {from} of lead, spending from that run's limits\n");
+    let line = format!(
+        "\nstarted answering call 2 of run {from} of lead, spending from that run's grant of 3 steps and 20 turns\n"
+    );
     assert!(text.contains(&line), "{text}");
 }
 

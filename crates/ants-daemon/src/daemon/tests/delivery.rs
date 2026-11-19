@@ -308,6 +308,7 @@ async fn a_run_s_rating_invitation_rates_it_under_a_webhook_s_own_rules() {
         thread: hooked.thread_id.clone(),
         parent: None,
         spends_from: None,
+        grants: Vec::new(),
         origin: ants_proto::provider::Origin {
             by: ants_proto::provider::Starter::Webhook { user: hook },
             channel: None,

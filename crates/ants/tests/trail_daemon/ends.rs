@@ -99,7 +99,17 @@ async fn conductor_failing(server: &NatsServer, fails: usize) -> (Conductor, Arc
         let trails = trails.clone();
         async move { trails.serve().await }
     });
-    let conductor = Conductor { trails, js, client, sent, told: Vec::new(), invited: Vec::new(), notes, serving };
+    let conductor = Conductor {
+        trails,
+        js,
+        client,
+        sent,
+        told: Vec::new(),
+        invited: Vec::new(),
+        notes,
+        failing: Default::default(),
+        serving,
+    };
     (conductor, tried)
 }
 
