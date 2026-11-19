@@ -16,8 +16,8 @@ use crate::{
 };
 #[cfg(doc)]
 use crate::{
-    JournalEntry, TRAIL_RATINGS_BUCKET, TRAIL_TIPS_BUCKET, TipVote, TrailRating, TrailRun, TrailRunIndex, TrailSession,
-    TrailStepThread, TrailTip,
+    JournalEntry, TRAIL_RATINGS_BUCKET, TRAIL_TIPS_BUCKET, TipRetired, TipVote, TrailRating, TrailRun, TrailRunIndex,
+    TrailSession, TrailStepThread, TrailTip,
 };
 use crate::{
     PERMISSIONS_VERSION, PermissionsVersion, Reaction, RunId, TRAIL_RUNS_BUCKET, ThreadId, TipId, TrailName, UserId,
@@ -456,6 +456,17 @@ pub fn trail_tip_key(trail: &TrailName, writer: &UserId, id: &TipId) -> String {
 /// voter in the writer's place, so one subject confines an ant to its own tips and votes, then the tip's writer and id.
 pub fn trail_tip_vote_key(trail: &TrailName, writer: &UserId, id: &TipId, voter: &UserId) -> String {
     format!("{trail}.{voter}.{writer}.{id}")
+}
+
+/// The key token, in a writer's place, under which humans retire tips ([`trail_tip_retired_key`]): no [`UserId`], as
+/// `_` is in none, so no ant's credentials (`$KV.ants_trail_tips.*.<ant>.>`) write under it.
+pub const TIP_RETIRED: &str = "_retired";
+
+/// Key of a human's [`TipRetired`] of the tip [`trail_tip_key`] names in [`TRAIL_TIPS_BUCKET`]: the trail, then
+/// [`TIP_RETIRED`] in the writer's place, so only humans write it, then the tip's writer and id. Readers take a tip's
+/// retirement from this key alone, never from the tip's record, which its writer may put again.
+pub fn trail_tip_retired_key(trail: &TrailName, writer: &UserId, id: &TipId) -> String {
+    format!("{trail}.{TIP_RETIRED}.{writer}.{id}")
 }
 
 /// Key of a [`TrailRating`] in [`TRAIL_RATINGS_BUCKET`]: its trail, then its conductor, so credentials can confine an

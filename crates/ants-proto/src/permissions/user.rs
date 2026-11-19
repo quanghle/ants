@@ -122,7 +122,7 @@ impl Permissions {
     /// start, stop or resume the runs it conducts ([`TrailRequest`], on [`subject::trail`], which the ant alone hears
     /// and answers on [`subject::trailed`]). Every ant and human reads the trails' tips ([`TRAIL_TIPS_BUCKET`]) by
     /// direct gets naming no subject; an ant puts only its own tips and its own votes, under keys naming it; a human
-    /// rewrites any tip, to retire it, and purges a trail's. Every ant and human reads the trails' ratings
+    /// retires any tip, under a key no ant writes ([`crate::trail_tip_retired_key`]), and purges a trail's. Every ant and human reads the trails' ratings
     /// ([`TRAIL_RATINGS_BUCKET`]) the same way; an ant puts only its own, under keys naming it, and a human writes none
     /// but purges a removed trail's.
     ///

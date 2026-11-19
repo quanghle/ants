@@ -1104,13 +1104,14 @@ fn each_ant_leaves_its_own_tips_and_votes_and_only_humans_retire_or_purge_them()
     let (own_vote, others_vote) =
         ("$KV.ants_trail_tips.deploy.dev-a.dev-b.k3f7q2ab", "$KV.ants_trail_tips.deploy.dev-b.dev-a.k3f7q2ab");
     let purge = "$JS.API.STREAM.PURGE.KV_ants_trail_tips";
+    let retire = "$KV.ants_trail_tips.deploy._retired.dev-a.k3f7q2ab";
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
     assert!(may(&ant, own_tip) && may(&ant, own_vote));
-    for denied in [others_tip, others_vote, purge] {
+    for denied in [others_tip, others_vote, purge, retire] {
         assert!(!may(&ant, denied), "an ant may publish {denied}");
     }
     let human = Permissions::for_user(&p("alice"), Role::Human);
-    for allowed in [own_tip, others_tip, own_vote, purge] {
+    for allowed in [own_tip, others_tip, own_vote, purge, retire] {
         assert!(may(&human, allowed), "a human may not publish {allowed}");
     }
     // An assistant votes and leaves tips as itself, and retires or purges none for its human.
@@ -1118,7 +1119,7 @@ fn each_ant_leaves_its_own_tips_and_votes_and_only_humans_retire_or_purge_them()
     assert!(may(&assistant, "$KV.ants_trail_tips.deploy.pa.k3f7q2ab"));
     assert!(may(&assistant, "$KV.ants_trail_tips.deploy.pa.dev-a.k3f7q2ab"));
     assert!(may(&assistant, "$JS.API.DIRECT.GET.KV_ants_trail_tips"));
-    for denied in [own_tip, others_vote, purge] {
+    for denied in [own_tip, others_vote, purge, retire] {
         assert!(!may(&assistant, denied), "an assistant may publish {denied}");
     }
     let domain: JsDomain = "hub".parse().unwrap();

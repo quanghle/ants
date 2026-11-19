@@ -13,7 +13,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::{Error, MAX_TITLE, RunId, TipId, TrailName, UserId, trail_tip_key, trail_tip_vote_key};
+use crate::{
+    Error, MAX_TITLE, RunId, TIP_RETIRED, TipId, TrailName, UserId, trail_tip_key, trail_tip_retired_key,
+    trail_tip_vote_key,
+};
 #[cfg(doc)]
 use crate::{TRAIL_TIPS_BUCKET, TrailStep};
 
@@ -52,8 +55,8 @@ const STOPWORDS: &[&str] = &[
 ];
 
 /// A tip in [`TRAIL_TIPS_BUCKET`], under [`TrailTip::key`]: what an ant answering a step of a saved trail learnt, for
-/// the ants answering the trail's later steps. Its writer creates it once; a human rewrites it only to retire it.
-/// Readers should treat unknown fields as additions, not errors.
+/// the ants answering the trail's later steps. Its writer creates it once; a human retires it under another key
+/// ([`TrailTip::retired_key`]). Readers should treat unknown fields as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrailTip {
     pub trail: TrailName,
@@ -70,12 +73,14 @@ pub struct TrailTip {
     /// The [`script_sha256`] of the script of the step it was left on.
     pub script: String,
     pub written_at: DateTime<Utc>,
-    /// Set by a human retiring it.
+    /// Who retired it, as a [`TipBoard`] reads it from [`TrailTip::retired_key`]: what a record says here is
+    /// never taken, as its writer puts the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retired: Option<TipRetired>,
 }
 
-/// A human's retiring of a tip.
+/// A human's retiring of a tip, under the tip's [`TrailTip::retired_key`]. Readers should treat unknown fields as
+/// additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipRetired {
     pub by: UserId,
@@ -86,6 +91,11 @@ impl TrailTip {
     /// Its key in [`TRAIL_TIPS_BUCKET`] ([`trail_tip_key`]).
     pub fn key(&self) -> String {
         trail_tip_key(&self.trail, &self.writer, &self.id)
+    }
+
+    /// The key of its retirement by a human ([`trail_tip_retired_key`]), which no ant writes.
+    pub fn retired_key(&self) -> String {
+        trail_tip_retired_key(&self.trail, &self.writer, &self.id)
     }
 
     /// The key of `voter`'s vote on it ([`trail_tip_vote_key`]).
@@ -298,14 +308,20 @@ pub struct TipBoard {
 
 impl TipBoard {
     /// The board of `trail` from the last value of each key of [`TRAIL_TIPS_BUCKET`] under `<trail>.>`, keys without
-    /// the bucket's subject prefix. An entry that does not read as a tip or a vote under its key, or is of another
-    /// trail, is skipped, as are a writer's vote on its own tip and the votes on no tip found.
+    /// the bucket's subject prefix. An entry that does not read as a tip, a vote or a retirement under its key, or is
+    /// of another trail, is skipped, as are a writer's vote on its own tip and the votes and retirements of no tip
+    /// found. A tip is retired by a human only as its retirement's key says, whatever its record says.
     pub fn new<K: AsRef<str>, V: AsRef<[u8]>>(trail: TrailName, entries: impl IntoIterator<Item = (K, V)>) -> Self {
         let mut tips = Vec::new();
         let mut votes: HashMap<String, Vec<(String, TipVote)>> = HashMap::new();
+        let mut retirements: HashMap<String, TipRetired> = HashMap::new();
         for (key, value) in entries {
             let (key, value) = (key.as_ref(), value.as_ref());
-            if key.split('.').count() == 3 {
+            if let [trail, TIP_RETIRED, writer, id] = key.split('.').collect::<Vec<_>>()[..] {
+                if let Ok(retired) = serde_json::from_slice::<TipRetired>(value) {
+                    retirements.insert(format!("{trail}.{writer}.{id}"), retired);
+                }
+            } else if key.split('.').count() == 3 {
                 if let Ok(tip) = serde_json::from_slice::<TrailTip>(value)
                     && tip.trail == trail
                     && tip.check_key(key).is_ok()
@@ -320,7 +336,8 @@ impl TipBoard {
         }
         let tips = tips
             .into_iter()
-            .map(|tip| {
+            .map(|mut tip| {
+                tip.retired = retirements.remove(&tip.key());
                 let mut votes: Vec<TipVote> = votes
                     .remove(&tip.key())
                     .unwrap_or_default()
@@ -520,9 +537,21 @@ mod tests {
     }
 
     fn board(tips: &[&TrailTip], votes: &[(&TrailTip, TipVote)]) -> TipBoard {
+        board_retired(tips, votes, &[])
+    }
+
+    /// The board of `tips` with `votes`, each of `retired` retired by a human on a day.
+    fn board_retired(
+        tips: &[&TrailTip],
+        votes: &[(&TrailTip, TipVote)],
+        retired: &[(&TrailTip, &str, i64)],
+    ) -> TipBoard {
         let tips = tips.iter().map(|tip| (tip.key(), serde_json::to_vec(tip).unwrap()));
         let votes = votes.iter().map(|(tip, vote)| (tip.vote_key(&vote.voter), serde_json::to_vec(vote).unwrap()));
-        TipBoard::new("deploy".parse().unwrap(), tips.chain(votes))
+        let retired = retired.iter().map(|(tip, by, at)| {
+            (tip.retired_key(), serde_json::to_vec(&TipRetired { by: p(by), at: day(*at) }).unwrap())
+        });
+        TipBoard::new("deploy".parse().unwrap(), tips.chain(votes).chain(retired))
     }
 
     fn ids<'a>(ranked: impl IntoIterator<Item = Ranked<'a>>) -> Vec<&'a str> {
@@ -531,8 +560,7 @@ mod tests {
 
     #[test]
     fn a_tip_retires_when_a_human_says_more_vote_it_wrong_or_it_goes_unused() {
-        let mut by_human = tip("dev-a", "aaaaaaaa", None, "pin the base image", 0);
-        by_human.retired = Some(TipRetired { by: p("alice"), at: day(1) });
+        let by_human = tip("dev-a", "aaaaaaaa", None, "pin the base image", 0);
         let wronged = tip("dev-a", "bbbbbbbb", None, "use port 8080", 0);
         let unused = tip("dev-a", "cccccccc", None, "run the linter first", 0);
         let renewed = tip("dev-a", "dddddddd", None, "tag before pushing", 0);
@@ -543,7 +571,7 @@ mod tests {
             (&renewed, vote("dev-b", TipVerdict::Helpful, 50)),
             (&renewed, vote("dev-c", TipVerdict::Stale, 60)),
         ];
-        let board = board(&[&by_human, &wronged, &unused, &renewed], &votes);
+        let board = board_retired(&[&by_human, &wronged, &unused, &renewed], &votes, &[(&by_human, "alice", 1)]);
         let status = |id: &str| board.tip(&id.parse().unwrap(), day(100), None).unwrap().status;
         assert_eq!(status("aaaaaaaa"), TipStatus::Retired(Retirement::ByHuman { by: p("alice"), at: day(1) }));
         assert_eq!(status("bbbbbbbb"), TipStatus::Retired(Retirement::VotedWrong));
@@ -553,6 +581,34 @@ mod tests {
         assert_eq!(board.live(day(100)), 1);
         assert_eq!(board.live(day(89)), 2, "unused for less than 90 days, a tip lives");
         assert_eq!(ids(board.ranked(day(100), None))[0], "dddddddd", "live tips rank first");
+    }
+
+    #[test]
+    fn a_human_retires_a_tip_under_a_key_no_ant_writes_whatever_its_record_says() {
+        let left = tip("dev-a", "aaaaaaaa", None, "pin the base image", 0);
+        assert_eq!(left.retired_key(), "deploy._retired.dev-a.aaaaaaaa");
+        assert!(left.retired_key().split('.').nth(1).unwrap().parse::<UserId>().is_err(), "no ant writes it");
+        let mut claimed = tip("dev-a", "bbbbbbbb", None, "use port 8080", 0);
+        claimed.retired = Some(TipRetired { by: p("alice"), at: day(1) });
+        let board = board_retired(&[&left, &claimed], &[], &[(&left, "alice", 1)]);
+        let ranked = board.tip(&left.id, day(2), None).unwrap();
+        assert_eq!(ranked.status, TipStatus::Retired(Retirement::ByHuman { by: p("alice"), at: day(1) }));
+        assert_eq!(ranked.tip.retired, Some(TipRetired { by: p("alice"), at: day(1) }));
+        let ranked = board.tip(&claimed.id, day(2), None).unwrap();
+        assert_eq!(
+            (ranked.status, &ranked.tip.retired),
+            (TipStatus::Live, &None),
+            "a record's own claim counts for nothing"
+        );
+        let elsewhere = tip("dev-b", "cccccccc", None, "no such tip", 0);
+        let entries = [
+            (left.key(), serde_json::to_vec(&left).unwrap()),
+            (elsewhere.retired_key(), serde_json::to_vec(&TipRetired { by: p("alice"), at: day(1) }).unwrap()),
+            (left.retired_key(), b"not json".to_vec()),
+        ];
+        let board = TipBoard::new("deploy".parse().unwrap(), entries);
+        assert_eq!(board.len(), 1, "a retirement is no tip");
+        assert!(board.tip(&left.id, day(2), None).unwrap().status.is_live());
     }
 
     #[test]

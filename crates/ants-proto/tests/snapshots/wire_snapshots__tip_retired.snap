@@ -1,0 +1,8 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "by": "alice",
+  "at": "2025-01-01T12:09:00Z"
+}

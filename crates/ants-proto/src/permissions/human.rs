@@ -48,7 +48,7 @@ pub(super) fn identity_rights() -> [String; 3] {
 /// putting and deleting every saved trail, which every user reads, and reading every run's records by direct gets
 /// naming no subject (`ants trail runs`, and in `ants chat` the steps a conductor keeps under one thread), writing
 /// none: a run's conductor alone writes them, and stops or resumes a run on a human's request. Of the tips, which
-/// every user reads, it rewrites any to retire it and purges a removed trail's. Of the ratings, which every user
+/// every user reads, it retires any under the tip's retirement key, which no ant writes, and purges a removed trail's. Of the ratings, which every user
 /// reads and only their conductors write, it purges a removed trail's.
 pub(super) fn trail_rights() -> [String; 13] {
     let (trails, runs, tips) = (kv_stream(TRAILS_BUCKET), kv_stream(TRAIL_RUNS_BUCKET), kv_stream(TRAIL_TIPS_BUCKET));

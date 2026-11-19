@@ -1,6 +1,6 @@
 //! `ants trail tips`: the tips ants left on a trail's steps, and their votes, in [`TRAIL_TIPS_BUCKET`], ranked as
-//! steps carry them ([`TipBoard`]). A human retires a tip by rewriting its record ([`retire`]), and removing a saved
-//! trail purges its tips ([`purge`]).
+//! steps carry them ([`TipBoard`]). A human retires a tip under its retirement key, which no ant writes ([`retire`]),
+//! and removing a saved trail purges its tips ([`purge`]).
 
 use std::fmt::Write as _;
 
@@ -156,8 +156,8 @@ impl<'a> From<&Ranked<'a>> for Json<'a> {
     }
 }
 
-/// Retire the tip `id` of the trail `name` as `by`, a human, at `now`: its record rewritten with who retired it and
-/// when, which steps carry and searches find no more. Refused for a tip the trail lacks or one retired already.
+/// Retire the tip `id` of the trail `name` as `by`, a human, at `now`: who retired it and when, put under its
+/// [`TrailTip::retired_key`], which its writer cannot undo, so steps carry and searches find it no more. Refused for a tip the trail lacks or one retired already.
 pub(crate) async fn retire(
     js: &jetstream::Context,
     name: &TrailName,
@@ -177,10 +177,11 @@ pub(crate) async fn retire(
         status => bail!("tip {id} of trail {name} is retired already: {status}"),
     }
     let mut tip = ranked.tip.clone();
-    tip.retired = Some(TipRetired { by: by.clone(), at: now });
+    let retired = TipRetired { by: by.clone(), at: now };
     let kv = js.get_key_value(TRAIL_TIPS_BUCKET).await.context("opening ants_trail_tips (`ants init` creates it)")?;
-    let payload = serde_json::to_vec(&tip)?;
-    kv.put(tip.key(), payload.into()).await.with_context(|| format!("retiring tip {id} of trail {name}"))?;
+    let payload = serde_json::to_vec(&retired)?;
+    kv.put(tip.retired_key(), payload.into()).await.with_context(|| format!("retiring tip {id} of trail {name}"))?;
+    tip.retired = Some(retired);
     Ok(tip)
 }
 

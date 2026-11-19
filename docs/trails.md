@@ -468,9 +468,9 @@ ants trail tips review --key review --all
 ants trail tips review --retire k3f7q2ab
 ```
 
-Each ant writes only its own tips and votes, under keys naming it; a human rewrites a tip only to retire it, and purges
-a trail's tips when removing the trail ([auth.md](auth.md#wire-acls-and-verification-invariants)). An ant's
-`remove_trail` purges none.
+Each ant writes only its own tips and votes, under keys naming it; a human retires a tip under a retirement key no ant
+writes, so a retired tip stays retired whatever its writer puts, and purges a trail's tips when removing the trail
+([auth.md](auth.md#wire-acls-and-verification-invariants)). An ant's `remove_trail` purges none.
 
 ## Rating and finding trails
 

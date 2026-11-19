@@ -49,11 +49,13 @@ fn vote(voter: &str, verdict: TipVerdict, days: i64) -> TipVote {
     TipVote { voter: p(voter), verdict, reason: None, script: None, at: now() - TimeDelta::days(days) }
 }
 
-/// The entries of `tips` and their `votes` under their keys, as a trail's whole board reads them.
+/// The entries of `tips`, their retirements and their `votes` under their keys, as a trail's whole board reads them.
 fn entries(tips: &[&TrailTip], votes: &[(&TrailTip, TipVote)]) -> Vec<(String, Vec<u8>)> {
+    let retired =
+        tips.iter().filter_map(|tip| Some((tip.retired_key(), serde_json::to_vec(tip.retired.as_ref()?).unwrap())));
     let tips = tips.iter().map(|tip| (tip.key(), serde_json::to_vec(tip).unwrap()));
     let votes = votes.iter().map(|(tip, vote)| (tip.vote_key(&vote.voter), serde_json::to_vec(vote).unwrap()));
-    tips.chain(votes).collect()
+    tips.chain(retired).chain(votes).collect()
 }
 
 #[test]
@@ -187,13 +189,18 @@ async fn humans_retire_tips_whether_their_trail_is_saved_or_not_and_removing_it_
     let status = board.tip(&current.id, Utc::now(), None).unwrap().status;
     assert_eq!(status, TipStatus::Retired(Retirement::ByHuman { by: alice.clone(), at }));
     assert_eq!(board.tip(&current.id, Utc::now(), None).unwrap().votes.len(), 1, "its votes stay");
+    // Its writer puts it again, under its own credentials: it stays retired.
+    put_tip(&ant_js, &current).await;
+    let (board, _) = tips::read(&ant_js, &name).await.unwrap();
+    let status = board.tip(&current.id, Utc::now(), None).unwrap().status;
+    assert_eq!(status, TipStatus::Retired(Retirement::ByHuman { by: alice.clone(), at }), "its writer revives none");
     let error = tips::retire(&js, &name, &current.id, &alice, at).await.unwrap_err().to_string();
     assert_eq!(error, "tip aaaaaaaa of trail deploy was retired by alice 0s ago");
     let error = tips::retire(&js, &name, &other.id, &alice, at).await.unwrap_err().to_string();
     assert_eq!(error, "trail deploy has no tip cccccccc: `ants trail tips deploy --all` lists them");
 
     let local = dir.join("trails");
-    assert_eq!(saved::remove(&js, &local, &name).await.unwrap().tips, 3, "two tips and a vote");
+    assert_eq!(saved::remove(&js, &local, &name).await.unwrap().tips, 4, "two tips, a vote and a retirement");
     assert!(saved::get(&js, &name).await.unwrap().is_none());
     assert!(tips::read(&js, &name).await.unwrap().0.is_empty());
     assert_eq!(tips::read(&js, &"build".parse().unwrap()).await.unwrap().0.len(), 1, "another trail's tips stay");

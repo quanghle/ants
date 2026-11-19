@@ -110,8 +110,8 @@ pub use keys::{
 };
 pub(crate) use keys::{STORAGE_WARNING_PREFIX, WEBHOOK_MARKER};
 pub use keys::{
-    TRAIL_STEPS_ON, trail_rating_key, trail_thread_step_key, trail_thread_steps_prefix, trail_tip_key,
-    trail_tip_vote_key,
+    TIP_RETIRED, TRAIL_STEPS_ON, trail_rating_key, trail_thread_step_key, trail_thread_steps_prefix, trail_tip_key,
+    trail_tip_retired_key, trail_tip_vote_key,
 };
 pub use login::{
     BOOTSTRAP_MAX_PAYLOAD, BOOTSTRAP_USER, LOGIN_REPEAT, LOGIN_TTL, LoginAnswer, LoginReply, LoginRequest,
@@ -357,8 +357,8 @@ pub const TRAIL_RUNS_BUCKET: &str = "ants_trail_runs";
 /// by the trail, the voter, then the tip's writer and id ([`trail_tip_vote_key`]), so a trail's tips and votes are the
 /// keys under `<trail>.>`, and an ant's own under `<trail>.<ant>.>`, which is all its credentials let it write here
 /// (`$KV.ants_trail_tips.*.<ant>.>`, one subject per ant). Each ant creates only its own tips and puts only its own
-/// votes, voting again replacing its vote; a human rewrites a tip only to retire it ([`TrailTip::retired`]) and purges
-/// a trail's tips when removing the trail. Every ant and human reads them all, by direct gets naming no subject
+/// votes, voting again replacing its vote; a human retires a tip under a key no ant writes ([`trail_tip_retired_key`])
+/// and purges a trail's tips when removing the trail. Every ant and human reads them all, by direct gets naming no subject
 /// ([`Permissions::for_user`]), which a reader ranks with a [`TipBoard`]. Entries never expire.
 pub const TRAIL_TIPS_BUCKET: &str = "ants_trail_tips";
 /// KV bucket of the trail ratings: each conductor's judgement of whether a run of a saved trail served the task it was

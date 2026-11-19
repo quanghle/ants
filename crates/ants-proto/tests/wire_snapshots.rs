@@ -1514,6 +1514,7 @@ fn trails() {
             retired: Some(TipRetired { by: user("alice"), at: at(9) }),
         },
     );
+    snap("tip_retired", &TipRetired { by: user("alice"), at: at(9) });
     snap(
         "tip_vote",
         &TipVote {

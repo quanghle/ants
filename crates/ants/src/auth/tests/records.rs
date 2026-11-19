@@ -300,7 +300,7 @@ async fn humans_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
     use ants_proto::{
         RunId, SavedTrail, Saver, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, ThreadId,
         TrailStepThread, trail_rating_key, trail_run_key, trail_session_key, trail_thread_step_key,
-        trail_thread_steps_prefix, trail_tip_key, trail_tip_vote_key,
+        trail_thread_steps_prefix, trail_tip_key, trail_tip_retired_key, trail_tip_vote_key,
     };
     let Some(server) = Server::start() else { return };
     let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
@@ -370,7 +370,11 @@ async fn humans_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
     let tips = DirectKv::whole(&a_js, None, TRAIL_TIPS_BUCKET).await.unwrap();
     assert!(tips.create(trail_tip_key(&deploy, &dev_a, &tip), b"{}".to_vec()).await.unwrap());
     tips.put(trail_tip_vote_key(&deploy, &dev_b, &tip, &dev_a), b"{}".to_vec()).await.unwrap();
-    let forged = [trail_tip_key(&deploy, &dev_b, &tip), trail_tip_vote_key(&deploy, &dev_a, &tip, &dev_b)];
+    let forged = [
+        trail_tip_key(&deploy, &dev_b, &tip),
+        trail_tip_vote_key(&deploy, &dev_a, &tip, &dev_b),
+        trail_tip_retired_key(&deploy, &dev_a, &tip),
+    ];
     for key in forged {
         assert!(tips.put(&key, b"{}".to_vec()).await.is_err(), "dev-a writes no tip or vote of dev-b's: {key}");
     }
