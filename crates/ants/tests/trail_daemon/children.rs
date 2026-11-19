@@ -47,6 +47,7 @@ async fn a_child_run_s_result_answers_the_call_and_its_failure_raises_there() {
     let dir = scratch_dir("trail-child");
     let saved = [("echo", ECHO), ("broken", "raise ValueError(\"bad input\")\n")];
     let mut lead = conductor_with_saved(&server, &dir, &saved).await;
+    save_for_colony(&server, "echo", &format!("{META}{ECHO}")).await;
     let thread = ThreadId::generate();
     let mut status = lead.client.subscribe(subject::status(&ant("lead"), &thread)).await.unwrap();
     let script = r#"

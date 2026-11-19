@@ -1356,6 +1356,7 @@ fn trail_child_runs() {
         conductor: user("planner"),
         route: vec![TrailLeg {
             trail: Some("review".parse().unwrap()),
+            local: false,
             at: None,
             script: "await agent('review it', ant='dev-a')".to_owned(),
             args: serde_json::json!({"pr": 7}),
@@ -1402,6 +1403,7 @@ fn routed_run() -> TrailRun {
         route: vec![
             TrailLeg {
                 trail: Some("triage".parse().unwrap()),
+                local: false,
                 at: None,
                 script: "await goto('release', at='review', state={'version': '1.2.0'})".to_owned(),
                 args: serde_json::json!({"bug": 7}),
@@ -1411,6 +1413,7 @@ fn routed_run() -> TrailRun {
             },
             TrailLeg {
                 trail: Some("release".parse().unwrap()),
+                local: false,
                 at: Some("review".to_owned()),
                 script: "async def review(state):\n    return await agent(state['version'], ant='dev-a')".to_owned(),
                 args: serde_json::json!({"version": "1.2.0"}),

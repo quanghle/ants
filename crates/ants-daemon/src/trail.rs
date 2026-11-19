@@ -58,7 +58,7 @@ pub use limits::AskedLimits;
 pub use nested::{refused_on_route, within};
 pub use ratings::{RatedTrail, Ratings, colony_rated};
 pub(crate) use report::clip;
-pub use saved::{PreparedSave, SaveFrom, SaveOutcome, SaveTrail, SavedEntry};
+pub use saved::{PreparedSave, SaveFrom, SaveOutcome, SaveTrail, SavedEntry, SavedScript};
 pub(crate) use saved::{age, from_run};
 pub(crate) use steps::indented;
 pub use tips::Tips;
@@ -250,6 +250,8 @@ impl Slot {
 /// A leg to start: a run of `trail`'s script, entered at the waypoint `at`, else at its start.
 struct Leg {
     trail: Option<TrailName>,
+    /// Whether the trail is only this machine's ([`TrailLeg::local`]).
+    local: bool,
     script: String,
     at: Option<String>,
     args: Value,
@@ -260,7 +262,7 @@ struct Leg {
 impl Leg {
     /// The leg, checked to fit, as the run's route records it, its run, and its session as JSON.
     fn prepare(self, limits: &TrailLimits) -> Result<(TrailLeg, Run, String), String> {
-        let Self { trail, script, at, args, first_call } = self;
+        let Self { trail, local, script, at, args, first_call } = self;
         if script.len() > MAX_TRAIL_SCRIPT {
             return Err(format!("the script has {} bytes; a trail takes at most {MAX_TRAIL_SCRIPT}", script.len()));
         }
@@ -273,7 +275,7 @@ impl Leg {
             .numbered_from(first_call);
         let session = serde_json::to_string(engine.state()).map_err(|e| e.to_string())?;
         let at = engine.state().entry().map(str::to_owned);
-        let leg = TrailLeg { trail, at, script, args, first_call, started_at: Utc::now(), steps: 0 };
+        let leg = TrailLeg { trail, local, at, script, args, first_call, started_at: Utc::now(), steps: 0 };
         Ok((leg, engine, session))
     }
 }
@@ -429,17 +431,18 @@ impl Trails {
     async fn start_as(&self, run: RunId, start: StartRun) -> Result<RunId, String> {
         let StartRun { trail, args, owner, origin, thread, limits, spends_from } = start;
         limits.check().map_err(|e| e.to_string())?;
-        let (name, script) = match trail {
+        let (name, script, local) = match trail {
             TrailSource::Saved(name) => {
-                let script = self.inner.saved.script(&name).await?;
-                (Some(name), script)
+                let found = self.inner.saved.script(&name).await?;
+                (Some(name), found.script, found.local)
             }
             TrailSource::Script(_) if !origin.trusted() => {
                 return Err("a run started from a webhook's thread runs only saved trails".to_owned());
             }
-            TrailSource::Script(script) => (None, script),
+            TrailSource::Script(script) => (None, script, false),
         };
-        let (leg, engine, session) = Leg { trail: name, script, at: None, args, first_call: 0 }.prepare(&limits)?;
+        let (leg, engine, session) =
+            Leg { trail: name, local, script, at: None, args, first_call: 0 }.prepare(&limits)?;
         let now = leg.started_at;
         let header = TrailRun {
             run,
@@ -822,10 +825,11 @@ impl Trails {
         Ok(None)
     }
 
-    /// The tips of the saved trail the run of `header` is on, for its steps: none for an inline script, nor, warned of,
-    /// when they cannot be read, the steps then going without.
+    /// The tips of the saved trail the run of `header` is on, for its steps: none for an inline script or a trail the
+    /// colony does not save ([`TrailRun::tip_trail`]), nor, warned of, when they cannot be read, the steps then going
+    /// without.
     async fn step_tips(&self, header: &TrailRun) -> Option<TipBoard> {
-        let trail = header.trail()?;
+        let trail = header.tip_trail()?;
         match self.inner.tips.board(trail).await {
             Ok(board) => Some(board),
             Err(e) => {

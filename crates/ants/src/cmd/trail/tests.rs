@@ -274,6 +274,7 @@ fn record(conductor: &UserId, trail: Option<&str>, state: RunState, started: chr
         conductor: conductor.clone(),
         route: vec![TrailLeg {
             trail: trail.map(|t| t.parse().unwrap()),
+            local: false,
             at: None,
             script: script(trail.unwrap_or("inline")),
             args: json!({"branch": "main"}),
@@ -361,6 +362,7 @@ fn a_run_shows_the_legs_of_its_route_and_the_gotos_it_made() {
     let mut run = record(&p("dev-a"), Some("triage"), RunState::Running, now);
     let next = TrailLeg {
         trail: Some("release".parse().unwrap()),
+        local: false,
         at: Some("review".to_owned()),
         script: script("release"),
         args: json!({"version": "1.2"}),

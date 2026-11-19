@@ -16,9 +16,8 @@ await parallel(
 async fn a_saved_trail_s_steps_carry_its_tips_under_their_key_and_a_retry_suggests_them() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;
-    let dir = scratch_dir("trail-tips-carried");
-    std::fs::write(dir.join("deploy.py"), format!("{META}{DEPLOY}")).unwrap();
-    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    save_for_colony(&server, "deploy", &format!("{META}{DEPLOY}")).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
     let tip = |tip_key: &str, text: &str| TrailTip {
         trail: "deploy".parse().unwrap(),
         id: TipId::generate(),
@@ -67,5 +66,4 @@ async fn a_saved_trail_s_steps_carry_its_tips_under_their_key_and_a_retry_sugges
     assert_eq!(again.thread_id, notes.thread_id);
     let suggestion = "search them with trail_tips under tip key \"notes\". Reply with JSON";
     assert!(again.text.contains(suggestion), "{}", again.text);
-    std::fs::remove_dir_all(&dir).unwrap();
 }

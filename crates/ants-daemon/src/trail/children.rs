@@ -109,8 +109,9 @@ impl Trails {
         args: Value,
         limits: &TrailLimits,
     ) -> Result<(TrailLeg, Run, String), String> {
-        let script = self.inner.saved.script(&name).await?;
-        Leg { trail: Some(name), script, at: None, args, first_call: 0 }.prepare(limits)
+        let found = self.inner.saved.script(&name).await?;
+        Leg { trail: Some(name), local: found.local, script: found.script, at: None, args, first_call: 0 }
+            .prepare(limits)
     }
 
     /// Give back the step counted for a trail() call of the run of `slot` whose child run did not start, to the run and

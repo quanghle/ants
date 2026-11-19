@@ -22,6 +22,7 @@ fn record(conductor: &str, state: RunState, hours: i64, now: DateTime<Utc>) -> T
         conductor: p(conductor),
         route: vec![TrailLeg {
             trail: Some("deploy".parse().unwrap()),
+            local: false,
             at: None,
             script: "agent('build')\n".to_owned(),
             args: serde_json::Value::Null,

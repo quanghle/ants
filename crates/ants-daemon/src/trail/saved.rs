@@ -87,6 +87,14 @@ pub(super) struct Saved {
     signer: Option<async_nats::Client>,
 }
 
+/// The script of a saved trail, as a run takes it.
+#[derive(Debug, Clone)]
+pub struct SavedScript {
+    pub script: String,
+    /// Whether it is this machine's, in `~/.ants/trails`, the colony having none of its name.
+    pub local: bool,
+}
+
 /// A saved trail, as a search for trails reads it.
 #[derive(Debug, Clone)]
 pub struct SavedEntry {
@@ -126,7 +134,7 @@ impl Saved {
 
     /// The script of the trail saved as `name`: the colony's, else this machine's when the colony has none of that name
     /// or the bus keeps no saved trails. Refused when the colony's are unread, as its trail would win.
-    pub(super) async fn script(&self, name: &TrailName) -> Result<String, String> {
+    pub(super) async fn script(&self, name: &TrailName) -> Result<SavedScript, String> {
         let unread = |e: &str| format!("trail {name} is not run: the saved trails of the colony are unread ({e})");
         let kv = self.kv.as_ref().ok_or_else(|| unread(UNREACHABLE))?;
         match kv.lookup(name.as_str()).await.map_err(|e| unread(&format!("{e:#}")))? {
@@ -134,14 +142,15 @@ impl Saved {
                 let saved: SavedTrail =
                     serde_json::from_slice(&value).map_err(|e| format!("reading saved trail {name}: {e}"))?;
                 saved.check_key(name.as_str()).map_err(|e| e.to_string())?;
-                return Ok(saved.script);
+                return Ok(SavedScript { script: saved.script, local: false });
             }
             Lookup::NoValue | Lookup::NoBucket => {}
         }
         match self.local(name).await {
-            Some(path) => {
-                tokio::fs::read_to_string(&path).await.map_err(|e| format!("reading {}: {e}", path.display()))
-            }
+            Some(path) => match tokio::fs::read_to_string(&path).await {
+                Ok(script) => Ok(SavedScript { script, local: true }),
+                Err(e) => Err(format!("reading {}: {e}", path.display())),
+            },
             None => Err(format!("no trail is saved as {name}")),
         }
     }
@@ -479,7 +488,8 @@ mod tests {
         std::fs::write(dir.join("deploy.py"), "agent('local')").unwrap();
         let saved = Saved::new(&js, None, Some(dir), "dev-a".parse().unwrap(), SaveThrough::Bucket).await;
         let name: TrailName = "deploy".parse().unwrap();
-        assert_eq!(saved.script(&name).await.unwrap(), "agent('local')", "a bus keeping no saved trails");
+        let found = saved.script(&name).await.unwrap();
+        assert_eq!((found.script.as_str(), found.local), ("agent('local')", true), "a bus keeping no saved trails");
 
         let mut gets = client.subscribe(format!("$JS.API.DIRECT.GET.KV_{TRAILS_BUCKET}")).await.unwrap();
         let answering = client.clone();
