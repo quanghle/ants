@@ -163,6 +163,7 @@ the trail can go on without that item, and log what was lost.
 | Arguments of the calls of one resume, as JSON | 1 MiB | `RuntimeError` naming the cap |
 | Result of the run, as JSON | 768 KiB | the run fails, naming its size |
 | Nested calls | 200 | `RecursionError` in the script |
+| Lists and dicts nested in one JSON value: args, a call's arguments, an answer, the result | 100 | deeper arguments raise `TypeError` at the call; a deeper result fails the run |
 
 A run's limits are set when it starts, and each step also counts against the spending caps of the ant that answers it.
 A run's legs share its limits and what it spent, and a goto spends nothing. A child run's steps and turns count

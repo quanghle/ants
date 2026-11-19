@@ -71,6 +71,11 @@ reached. A step to an ant no daemon serves waits in that ant's queue, as any mes
 human stops it. An exception the script does not catch fails the run with its traceback, lines numbered as in the
 file (`trail.py`).
 
+Each JSON value a run takes or makes nests at most 100 lists and dicts (arrays and objects): a run's args deeper are
+refused at its start, a call's arguments deeper (a goto's `state` among them, one level down) raise `TypeError` where
+the call is made, a deeper result fails the run, a reply to a `schema=` step nested deeper does not match and is asked
+for again, and any other answer nested deeper raises `RuntimeError` where it is awaited.
+
 The script runs sandboxed: no files, environment, network, subprocesses or sleep; the clock reads the leg's start time
 on every call and `random` is seeded once per leg, so the same answers make the same calls. The authoring guide
 covers the API, the sandbox, the bundled modules, patterns and complete example trails, each run by the repository's
@@ -364,6 +369,7 @@ they may be raised on resume:
 | Arguments of the calls of one resume, as JSON, and 64 bytes per call | 1 MiB | 1 MiB | none | the call raises `RuntimeError` naming the cap |
 | Result of the run, as JSON | 768 KiB | 768 KiB | none | the run fails, naming its size |
 | Python call depth | 200 | 200 | none | `RecursionError` in the script |
+| Lists and dicts nested in one JSON value | 100 | 100 | none | refused where the value is given ([The script](#the-script)) |
 
 A resume is the script running from its start, or from one answered step, to its next wait; the caps of one resume
 apply anew at the next. Calls answered at once, as `log()`, `phase()` and `os.urandom()`, do not restart the compute
@@ -657,7 +663,9 @@ worker. `[trails] workers` in the config file caps the workers computing at once
 workers = 4
 ```
 
-A worker failing with the run unchanged is retried, after 1 s and up to 1 min apart.
+A worker that cannot start, crashes, or whose exit status or output cannot be read is tried again, the run unchanged,
+after 1 s and up to 1 min apart. A worker past its compute or memory limit, one writing a response larger than its request
+takes, or one that exits normally with a response the daemon cannot read, fails the run, as the same request would bring the same again.
 
 `ants doctor` starts the worker of the daemon service's `ants`, else its own, as a daemon does, with a request it
 refuses before running anything. With a human's credentials it lists the runs stuck: those stopped or failed on a limit
