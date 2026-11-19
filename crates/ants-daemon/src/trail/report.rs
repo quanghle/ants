@@ -90,15 +90,10 @@ impl Trails {
     pub(super) fn report_step(&self, run: &TrailRun, step: &PendingCall, stage: StepStage) {
         tracing::info!(run = %run.run, call = step.call, to = %step.to, thread = %step.thread, stage = stage.as_str(),
             "trail step");
-        let label = match step.function {
-            TrailFunction::Agent => steps::AgentArgs::of(&step.args).ok().and_then(|args| args.label),
-            TrailFunction::Trail => steps::TrailArgs::of(&step.args).ok().map(|args| format!("trail {}", args.name)),
-            TrailFunction::Human | TrailFunction::Goto => None,
-        };
         let update = StatusUpdate::Step {
             run: run.run.clone(),
             call: step.call,
-            label,
+            label: step_label(step),
             to: step.to.clone(),
             step_thread: step.thread.clone(),
             stage,
@@ -241,4 +236,14 @@ pub(crate) fn clip(text: &str, max: usize) -> String {
     let mut clipped: String = text.chars().take(max.saturating_sub(1)).collect();
     clipped.push('…');
     clipped
+}
+
+/// The label of `step` its `step` status updates and its marker carry: an agent() step's `label`, `trail NAME` for a
+/// trail() step.
+pub(super) fn step_label(step: &PendingCall) -> Option<String> {
+    match step.function {
+        TrailFunction::Agent => steps::AgentArgs::of(&step.args).ok().and_then(|args| args.label),
+        TrailFunction::Trail => steps::TrailArgs::of(&step.args).ok().map(|args| format!("trail {}", args.name)),
+        TrailFunction::Human | TrailFunction::Goto => None,
+    }
 }

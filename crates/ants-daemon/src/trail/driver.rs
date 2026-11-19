@@ -451,17 +451,20 @@ impl Trails {
             None
         };
         for call in &unsent {
-            if call.function == TrailFunction::Trail {
-                self.publish_child(slot, &header, call).await?;
-                continue;
-            }
-            let message = steps::envelope(&header, call, tips.as_ref()).map_err(|e| anyhow!(e))?;
             let thread = TrailStepThread {
                 run: header.run.clone(),
                 call: call.call,
                 to: call.to.clone(),
                 run_thread: header.thread.clone(),
+                label: super::report::step_label(call),
             };
+            if call.function == TrailFunction::Trail {
+                // A trail() step sends no message: its thread, the child run's, keeps no step key.
+                self.inner.store.put_thread_step(&call.thread, &thread).await?;
+                self.publish_child(slot, &header, call).await?;
+                continue;
+            }
+            let message = steps::envelope(&header, call, tips.as_ref()).map_err(|e| anyhow!(e))?;
             self.inner.store.put_step(&call.thread, &thread).await?;
             (self.inner.outbox)(message).await?;
             if let Some(pending) = slot.book().pending.iter_mut().find(|pending| pending.message == call.message) {

@@ -82,6 +82,11 @@ impl Store {
     /// steps of that thread alone.
     pub(super) async fn put_step(&self, thread: &ThreadId, step: &TrailStepThread) -> Result<()> {
         self.put(trail_step_key(&self.ant, thread), step).await?;
+        self.put_thread_step(thread, step).await
+    }
+
+    /// Keep `step`, the step thread `thread`, under its run's thread alone.
+    pub(super) async fn put_thread_step(&self, thread: &ThreadId, step: &TrailStepThread) -> Result<()> {
         self.put(trail_thread_step_key(&self.ant, &step.run_thread, thread), step).await
     }
 

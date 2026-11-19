@@ -280,7 +280,8 @@ A run reports on the thread it started with, as its conductor:
   went to, its stage and its thread, which `Enter` on the step opens ([cli.md](cli.md#ants-chat)). Status events are
   never stored, so the view also reads the steps from the records of the runs that the ants on the thread conduct
   when the thread shows: the markers each conductor keeps under the thread (`<ant>.on.<thread>.*`, read by a filtered
-  direct get, so a thread's steps are read alone; each marker's time is its step's start), then for each run found its
+  direct get, so a thread's steps are read alone; each marker's time is its step's start, and it carries the step's
+  label; a `trail()` step's marker sits there too), then for each run found its
   journal (`answered`, or `failed` for an error) and, while it goes on, the calls its session waits on (`started`); a
   step otherwise is `dropped`, as is one sent anew on a new thread after a resume. A run's thread opened after its
   steps ran lists them all the same, for as long as the run's records are kept.
@@ -515,7 +516,7 @@ trail ([auth.md](auth.md#wire-acls-and-verification-invariants)).
 | Store | Kept | Holds |
 |---|---|---|
 | KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, waypoints, script, who saved it (a human or an ant) and when, and the run an ant saved it from. |
-| KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (its route: each leg's trail or inline script, waypoint, args, first call id, start and steps; owner, origin, limits, state (a failed one's broken `limit`), spending, thread, parent run, times), `<ant>.<run>.session` the current leg's dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`, call ids numbered on across legs), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out. |
+| KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (its route: each leg's trail or inline script, waypoint, args, first call id, start and steps; owner, origin, limits, state (a failed one's broken `limit`), spending, thread, parent run, times), `<ant>.<run>.session` the current leg's dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`, call ids numbered on across legs), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread, label?}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out; a `trail()` step, whose thread is its child run's, keeps the latter alone. |
 | KV `ants_trail_tips` | never expires | The [tips](#tips) left on saved trails and their votes, each under the trail and the ant that wrote it: `<trail>.<writer>.<id>` a tip (trail, id, writer, text, tip key, run, script's SHA-256, time written, and who retired it and when), `<trail>.<voter>.<writer>.<id>` a vote on it (voter, verdict, reason, the SHA-256 of the script voted on, time). |
 | KV `ants_trail_ratings` | never expires | The [ratings](#rating-and-finding-trails) conductors gave saved trails, `<trail>.<conductor>.<run>` one per run and trail: trail, conductor, run, outcome, task, reason, the SHA-256 of the script rated, time. |
 

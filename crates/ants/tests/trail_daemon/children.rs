@@ -84,6 +84,13 @@ except RuntimeError as e:
     let failed = result["b"].as_str().unwrap();
     assert!(failed.starts_with("trail broken failed: ") && failed.contains("bad input"), "{failed}");
     assert_eq!(lead.ended(&child).await, RunState::Done { result: json!("A") });
+    let runs = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    let marker = runs.get(trail_thread_step_key(&ant("lead"), &thread, &step_thread)).await.unwrap();
+    let marker: TrailStepThread = serde_json::from_slice(&marker.expect("kept under the run's thread")).unwrap();
+    let kept = (&marker.run, marker.call, &marker.to, &marker.run_thread, marker.label.as_deref());
+    assert_eq!(kept, (&run, 0, &ant("lead"), &thread, Some("trail echo")), "the trail() step's marker");
+    let own = runs.get(ants_proto::trail_step_key(&ant("lead"), &step_thread)).await.unwrap();
+    assert!(own.is_none(), "the child run's thread is no step thread");
     let header = lead.header(&run).await;
     assert_eq!((header.steps, header.turns), (3, 1), "the children's steps and turns count as the parent's");
     let told = lead.told().await;

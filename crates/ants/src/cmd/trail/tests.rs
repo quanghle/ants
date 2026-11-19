@@ -537,7 +537,8 @@ fn a_step_is_started_until_answered_failed_or_dropped_as_the_records_tell() {
     let marked: Vec<runs::Marked> = [(0, 0), (1, 1), (2, 2), (2, 3), (3, 4)]
         .into_iter()
         .map(|(call, at)| {
-            let marker = TrailStepThread { run: run.clone(), call, to: p("dev-b"), run_thread: run_thread.clone() };
+            let marker =
+                TrailStepThread { run: run.clone(), call, to: p("dev-b"), run_thread: run_thread.clone(), label: None };
             (threads[at].clone(), marker, now + TimeDelta::seconds(i64::try_from(at).unwrap()))
         })
         .collect();
@@ -566,6 +567,49 @@ fn a_step_is_started_until_answered_failed_or_dropped_as_the_records_tell() {
     assert_eq!((unknown[3].2, unknown[4].2), (StepStage::Started, StepStage::Started), "a session not read");
 }
 
+#[test]
+fn a_step_keeps_the_label_its_marker_carries_once_its_run_ended() {
+    let (run, run_thread) = (RunId::generate(), ThreadId::generate());
+    let (child, asked, older) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+    let now = Utc::now();
+    let mark = |call: u32, to: &str, label: Option<&str>| TrailStepThread {
+        run: run.clone(),
+        call,
+        to: p(to),
+        run_thread: run_thread.clone(),
+        label: label.map(str::to_owned),
+    };
+    let marked = vec![
+        (child, mark(0, "lead", Some("trail echo")), now),
+        (asked, mark(1, "dev-b", Some("review")), now + TimeDelta::seconds(1)),
+        (older, mark(2, "dev-b", None), now + TimeDelta::seconds(2)),
+    ];
+    let echoed = JournalEntry {
+        call: 0,
+        function: TrailFunction::Trail,
+        args: json!({"name": "echo", "args": {}}),
+        answer: CallAnswer::Ok(json!("A")),
+    };
+    let child_failed = JournalEntry {
+        call: 2,
+        function: TrailFunction::Trail,
+        args: json!({"name": "broken"}),
+        answer: CallAnswer::Error("bad input".into()),
+    };
+    let steps = runs::staged(&p("lead"), marked, &[echoed, child_failed], Some(&[]));
+    let shown: Vec<_> = steps.iter().map(|s| (s.call, s.to.as_str(), s.label.as_deref(), s.stage)).collect();
+    assert_eq!(
+        shown,
+        [
+            (0, "lead", Some("trail echo"), StepStage::Answered),
+            (1, "dev-b", Some("review"), StepStage::Dropped),
+            (2, "dev-b", Some("trail broken"), StepStage::Failed),
+        ],
+        "a trail() step reads back with its label and stage, an unanswered one of a stopped run keeps its label, and a \
+         marker without one takes it from its call's arguments"
+    );
+}
+
 #[tokio::test]
 async fn humans_read_the_steps_a_conductor_recorded_on_the_thread_of_its_runs() {
     let Some(server) = Server::start() else { return };
@@ -587,6 +631,7 @@ async fn humans_read_the_steps_a_conductor_recorded_on_the_thread_of_its_runs() 
         call,
         to: p(to),
         run_thread: run.thread.clone(),
+        label: None,
     };
     put(&lead_js, &trail_thread_step_key(&lead, &running.thread, &answered), &mark(&running, 0, "dev-c")).await;
     put(&lead_js, &trail_thread_step_key(&lead, &running.thread, &waiting), &mark(&running, 1, "dev-b")).await;

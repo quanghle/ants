@@ -218,7 +218,13 @@ mod tests {
         let (thread, other) = (ThreadId::generate(), ThreadId::generate());
         let (own, unindexed, elsewhere) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
         let put = async |key: String, call: u32, run_thread: &ThreadId| {
-            let marker = TrailStepThread { run: run.clone(), call, to: user("dev-b"), run_thread: run_thread.clone() };
+            let marker = TrailStepThread {
+                run: run.clone(),
+                call,
+                to: user("dev-b"),
+                run_thread: run_thread.clone(),
+                label: None,
+            };
             let payload = serde_json::to_vec(&marker).unwrap().into();
             lead_js.publish(format!("$KV.{TRAIL_RUNS_BUCKET}.{key}"), payload).await.unwrap().await.unwrap();
         };

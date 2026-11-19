@@ -545,7 +545,8 @@ pub struct TrailRunIndex {
 /// A step's thread, as its conductor keeps it in [`TRAIL_RUNS_BUCKET`] under [`trail_step_key`] from before the step is
 /// sent, so a message on it after the run ended, or after a restart, is still told to be the step's and reported on the
 /// run's thread rather than prompting the conductor; and under [`trail_thread_step_key`], so a human reads the steps
-/// of the runs on one thread by its keys alone.
+/// of the runs on one thread by its keys alone. A trail() step, whose thread is its child run's, is kept under the
+/// latter alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrailStepThread {
     pub run: RunId,
@@ -554,6 +555,10 @@ pub struct TrailStepThread {
     pub to: UserId,
     /// The run's thread ([`TrailRun::thread`]).
     pub run_thread: ThreadId,
+    /// The step's label, as its `step` status update tells it ([`crate::StatusUpdate::Step`]): an agent() step's
+    /// `label`, `trail NAME` for a trail() step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// A human asking `ant`'s daemon, the conductor of the run, to start, stop or resume one, on [`subject::trail`] with core

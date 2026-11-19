@@ -352,8 +352,8 @@ async fn humans_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
 
     let (thread, other, step) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
     let marker = |run_thread: &ThreadId| {
-        let marker = TrailStepThread { run: run.clone(), call: 1, to: dev_b.clone(), run_thread: run_thread.clone() };
-        serde_json::to_vec(&marker).unwrap()
+        let (run, to, run_thread) = (run.clone(), dev_b.clone(), run_thread.clone());
+        serde_json::to_vec(&TrailStepThread { run, call: 1, to, run_thread, label: None }).unwrap()
     };
     let key = trail_thread_step_key(&dev_a, &thread, &step);
     runs.put(&key, marker(&thread)).await.unwrap();
