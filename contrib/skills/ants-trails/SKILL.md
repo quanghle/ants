@@ -157,12 +157,16 @@ the trail can go on without that item, and log what was lost.
 | Compute of one resume | 10 s | `TimeoutError`: the run fails, naming the limit |
 | Stored session, the script's suspended state | 768 KiB | the run fails, naming its size and the limit |
 | Memory | 64 MiB | `MemoryError`: the run fails |
+| Notes of one resume: `print()`, `log()` and `phase()` text, 16 bytes more per note | 64 KiB | `RuntimeError` naming the cap; a note over 4000 bytes is cut |
+| Arguments of the calls of one resume, as JSON | 1 MiB | `RuntimeError` naming the cap |
+| Result of the run, as JSON | 768 KiB | the run fails, naming its size |
 | Nested calls | 200 | `RecursionError` in the script |
 
 A run's limits are set when it starts, and each step also counts against the spending caps of the ant that answers
 it. A run's legs share its limits and what it spent, and a goto spends nothing. A child run's steps and turns count
 against the limits of its root run, the one no `trail()` started, and its wall time ends with its parent's. A run
-failed on a limit continues from its stored record with `ants trail resume`. Keep the script's own work small: only
+failed on a limit continues from its stored record with `ants trail resume`; a `TimeoutError` or `MemoryError` the
+script raises itself is no limit, and fails the run as any exception does. Keep the script's own work small: only
 the compute between steps (parsing, sorting, building prompts) counts against the compute limit, and large variables
 (whole files, long lists of replies) count against the session limit at every suspension.
 

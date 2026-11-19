@@ -1,11 +1,14 @@
 //! The `ants subprocess` worker: serves one [`Request`] from stdin with one [`Response`] on stdout, then exits.
 
+use std::borrow::Cow;
 use std::io::{self, Read, Write};
+use std::time::Instant;
 
 use monty::{FunctionCall, OsCall, RunProgress};
 use monty_types::{
     DateTimeSource, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, OsFunctionCall,
-    OsPolicy, PrintWriter, ProcessTime, RandomSeed, RandomStart, ResourceLimits, ResourceTracker, SleepMode,
+    OsPolicy, PrintWriter, PrintWriterCallback, ProcessTime, RandomSeed, RandomStart, ResourceLimits, ResourceTracker,
+    SleepMode,
 };
 use serde_json::value::RawValue;
 
@@ -15,8 +18,22 @@ use crate::value::{from_monty, to_monty};
 
 /// The worker thread's stack: Monty recurses on the native stack, up to [`Limits::MAX_RECURSION`] Python frames.
 const STACK_BYTES: usize = 16 * 1024 * 1024;
-/// `print()` output one request may collect; past it `print()` raises MemoryError.
-const PRINT_BYTES: usize = 64 * 1024;
+/// Bytes `print()`, `log()` and `phase()` may write in one resume, each note counting [`NOTE_COST`] on top of its
+/// text; past them the call raises RuntimeError.
+pub(crate) const NOTE_BYTES: usize = 64 * 1024;
+/// What one note costs on top of its text: its JSON object, `{"log":""},`, and more.
+const NOTE_COST: usize = 16;
+/// Bytes of one note's text; a longer one is cut, ending with `…`.
+pub(crate) const MAX_NOTE: usize = 4000;
+/// Bytes of JSON the arguments of the calls of one resume may have, each call counting [`CALL_COST`] on top: what a
+/// run's record holds of its waiting calls. Past them the call raises RuntimeError.
+pub(crate) const CALL_BYTES: usize = 1024 * 1024;
+/// What one call costs on top of its arguments: its id and function.
+const CALL_COST: usize = 64;
+/// Bytes of JSON a trail's result may have: what its session might, so that the run's record holds it.
+pub(crate) const MAX_RESULT: usize = Limits::MAX_DUMP_BYTES;
+/// Bytes of a failed script's error; a longer one is cut, ending with `…`.
+pub(crate) const MAX_ERROR: usize = 16 * 1024;
 /// Bytes of JSON a goto's state, the next leg's input, may have.
 const MAX_STATE: usize = 64 * 1024;
 /// The exit status of a worker that could not read its request or write its response, or whose thread panicked.
@@ -58,6 +75,52 @@ fn stdio() -> io::Result<()> {
 
 /// Serves one request, as JSON.
 pub(crate) fn serve(input: &str) -> Response {
+    bounded(respond(input))
+}
+
+/// The most bytes of JSON the response to a request of `resumes` resumes (a start is one) takes, what the runner
+/// reads at most: a session or a result, an error, and for each resume its calls, the ids of those waiting and its
+/// notes, each byte of a note's text escaped as `\u00XX` at worst.
+#[must_use]
+pub(crate) fn response_bound(resumes: usize) -> usize {
+    let once = 2 * Limits::MAX_DUMP_BYTES + 6 * MAX_ERROR;
+    let each = 2 * CALL_BYTES + 6 * (NOTE_BYTES + NOTE_COST);
+    resumes.max(1).saturating_mul(each).saturating_add(once)
+}
+
+/// Fails a script whose result is too large to store, and cuts a too long error.
+fn bounded(response: Response) -> Response {
+    match response {
+        Response::Done { result, calls, events } => {
+            let size = serde_json::to_vec(&result).map_or(usize::MAX, |result| result.len());
+            if size <= MAX_RESULT {
+                return Response::Done { result, calls, events };
+            }
+            let error = format!("the trail's result has {size} bytes of JSON; a result holds at most {MAX_RESULT}");
+            Response::Failed { error, calls, events, limit: None }
+        }
+        Response::Failed { error, calls, events, limit } => {
+            Response::Failed { error: cut(error, MAX_ERROR), calls, events, limit }
+        }
+        other => other,
+    }
+}
+
+/// `text` cut to at most `most` bytes, ending with `…` if cut.
+fn cut(mut text: String, most: usize) -> String {
+    if text.len() <= most {
+        return text;
+    }
+    let mut end = most - '…'.len_utf8();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push('…');
+    text
+}
+
+fn respond(input: &str) -> Response {
     let request = match serde_json::from_str::<Request>(input) {
         Ok(request) => request,
         Err(e) => return Response::Refused { error: format!("unreadable request: {e}") },
@@ -115,7 +178,7 @@ fn start(script: &str, args: &serde_json::Value, limits: Limits, clock: i64, see
         MontyObject::function("__ants_phase", None),
         MontyObject::function("__ants_log", None),
     ];
-    let progress = run.start(inputs, tracker, PrintWriter::CollectString(&mut session.print, Some(PRINT_BYTES)));
+    let progress = run.start(inputs, tracker, session.writer());
     session.drive(progress).respond(session)
 }
 
@@ -137,8 +200,8 @@ fn resume(snapshot: &RawValue, answers: Vec<(u32, Answer)>, limits: Limits, seed
                 ExtFunctionResult::Error(MontyException::new(ExcType::RuntimeError, Some(message)))
             }
         };
-        let progress =
-            waiting.resume(vec![(call, result)], PrintWriter::CollectString(&mut session.print, Some(PRINT_BYTES)));
+        session.next_resume();
+        let progress = waiting.resume(vec![(call, result)], session.writer());
         match session.drive(progress) {
             Outcome::Waiting(next) => waiting = *next,
             ended => return ended.respond(session),
@@ -208,16 +271,94 @@ struct Session {
     seed: u64,
     steps: u32,
     calls: Vec<Call>,
+    /// Bytes the calls of the current resume cost, against [`CALL_BYTES`].
+    called: usize,
     events: Vec<Event>,
-    print: String,
+    notes: Notes,
+    /// When Monty last took over, starting the turn its compute limit applies to.
+    turn: Instant,
     /// The limit the script broke, should it fail: one of time or memory it failed on, else the steps once a call
     /// past them raised.
     limit: Option<Limit>,
 }
 
+/// The notes of the current resume: what `print()` wrote not yet turned into events, and the bytes of notes written.
+#[derive(Default)]
+struct Notes {
+    print: String,
+    written: usize,
+}
+
+impl Notes {
+    /// Counts `bytes` more written by `by`, refusing them past [`NOTE_BYTES`].
+    fn write(&mut self, by: &str, bytes: usize) -> Result<(), MontyException> {
+        let written = self.written.saturating_add(bytes);
+        if written > NOTE_BYTES {
+            return Err(MontyException::new(
+                ExcType::RuntimeError,
+                Some(format!("{by} passes the {NOTE_BYTES} bytes print(), log() and phase() may write in one resume")),
+            ));
+        }
+        self.written = written;
+        Ok(())
+    }
+}
+
+impl PrintWriterCallback for Notes {
+    fn stdout_write(&mut self, output: Cow<'_, str>) -> Result<(), MontyException> {
+        self.write("print()", output.len() + NOTE_COST * output.matches('\n').count())?;
+        self.print.push_str(&output);
+        Ok(())
+    }
+
+    fn stdout_push(&mut self, end: char) -> Result<(), MontyException> {
+        self.write("print()", end.len_utf8() + if end == '\n' { NOTE_COST } else { 0 })?;
+        self.print.push(end);
+        Ok(())
+    }
+}
+
 impl Session {
     fn new(limits: Limits, seed: u64, steps: u32) -> Self {
-        Self { limits, seed, steps, calls: Vec::new(), events: Vec::new(), print: String::new(), limit: None }
+        Self {
+            limits,
+            seed,
+            steps,
+            calls: Vec::new(),
+            called: 0,
+            events: Vec::new(),
+            notes: Notes::default(),
+            turn: Instant::now(),
+            limit: None,
+        }
+    }
+
+    /// Starts the turn Monty takes over for, lending it the writer of `print()`.
+    fn writer(&mut self) -> PrintWriter<'_> {
+        self.turn = Instant::now();
+        PrintWriter::Callback(&mut self.notes)
+    }
+
+    /// Starts the resume of the next answer: its calls and notes are bounded anew.
+    fn next_resume(&mut self) {
+        self.called = 0;
+        self.notes.written = 0;
+    }
+
+    /// The limit of Monty's that `exception`, ending the script, says it broke. Monty raises an uncatchable
+    /// TimeoutError or MemoryError for its limits, but tells them from the script's own by nothing: the time limit
+    /// is told by the time the turn took, the memory limit by Monty's message naming the request's limit.
+    fn broke(&self, exception: &MontyException) -> Option<Limit> {
+        match exception.exc_type() {
+            ExcType::TimeoutError if self.turn.elapsed() >= self.limits.compute() => Some(Limit::Compute),
+            ExcType::MemoryError => {
+                let message = exception.message()?.strip_prefix("memory limit exceeded: ")?;
+                let (used, limit) = message.strip_suffix(" bytes")?.split_once(" bytes > ")?;
+                let (used, limit) = (used.parse::<usize>().ok()?, limit.parse::<usize>().ok()?);
+                (limit == self.limits.memory_bytes && used > limit).then_some(Limit::Memory)
+            }
+            _ => None,
+        }
     }
 
     fn failed(&mut self, exception: MontyException) -> Response {
@@ -231,13 +372,7 @@ impl Session {
         loop {
             progress = match progress {
                 Err(e) => {
-                    // Monty's time and memory limits raise these, which the script cannot catch.
-                    let broke = match e.exc_type() {
-                        ExcType::TimeoutError => Some(Limit::Compute),
-                        ExcType::MemoryError => Some(Limit::Memory),
-                        _ => None,
-                    };
-                    self.limit = broke.or(self.limit);
+                    self.limit = self.broke(&e).or(self.limit);
                     return Outcome::Failed(trail::render(e));
                 }
                 Ok(RunProgress::Complete(result)) => {
@@ -249,10 +384,7 @@ impl Session {
                 Ok(RunProgress::ResolveFutures(waiting)) => return Outcome::Waiting(Box::new(waiting)),
                 Ok(RunProgress::FunctionCall(call)) => self.call(call),
                 Ok(RunProgress::OsCall(call)) => self.os(call),
-                Ok(RunProgress::NameLookup(lookup)) => lookup.resume(
-                    NameLookupResult::Undefined,
-                    PrintWriter::CollectString(&mut self.print, Some(PRINT_BYTES)),
-                ),
+                Ok(RunProgress::NameLookup(lookup)) => lookup.resume(NameLookupResult::Undefined, self.writer()),
             };
         }
     }
@@ -264,15 +396,16 @@ impl Session {
             "__ants_trail" => Some(Function::Trail),
             "__ants_goto" => Some(Function::Goto),
             "__ants_phase" | "__ants_log" => {
+                let phase = call.function_name == "__ants_phase";
                 let text = call.args.arg(0).and_then(|a| a.as_str()).unwrap_or_default().to_owned();
+                let text = cut(text, MAX_NOTE);
+                let by = if phase { "phase()" } else { "log()" };
+                if let Err(e) = self.notes.write(by, text.len() + NOTE_COST) {
+                    return call.resume(ExtFunctionResult::Error(e), self.writer());
+                }
                 self.flush(false);
-                self.events.push(if call.function_name == "__ants_phase" {
-                    Event::Phase(text)
-                } else {
-                    Event::Log(text)
-                });
-                return call
-                    .resume(MontyObject::none(), PrintWriter::CollectString(&mut self.print, Some(PRINT_BYTES)));
+                self.events.push(if phase { Event::Phase(text) } else { Event::Log(text) });
+                return call.resume(MontyObject::none(), self.writer());
             }
             _ => None,
         };
@@ -288,14 +421,12 @@ impl Session {
             Some(function) => match call.args.arg(0).map(from_monty).transpose() {
                 Ok(args) => {
                     let args = args.unwrap_or_default();
-                    match oversized(function, &args) {
-                        Some(error) => {
-                            ExtFunctionResult::Error(MontyException::new(ExcType::RuntimeError, Some(error)))
-                        }
-                        None => {
+                    match oversized(function, &args).map_or_else(|| self.charge(function, &args), Err) {
+                        Err(error) => ExtFunctionResult::Error(MontyException::new(ExcType::RuntimeError, Some(error))),
+                        Ok(()) => {
                             self.steps += u32::from(function.is_step());
                             self.calls.push(Call { call: call.call_id, function, args });
-                            return call.resume_pending(PrintWriter::CollectString(&mut self.print, Some(PRINT_BYTES)));
+                            return call.resume_pending(self.writer());
                         }
                     }
                 }
@@ -305,7 +436,21 @@ impl Session {
                 )),
             },
         };
-        call.resume(result, PrintWriter::CollectString(&mut self.print, Some(PRINT_BYTES)))
+        call.resume(result, self.writer())
+    }
+
+    /// Counts a call's arguments against the [`CALL_BYTES`] of the current resume, refusing them past it.
+    fn charge(&mut self, function: Function, args: &serde_json::Value) -> Result<(), String> {
+        let size = serde_json::to_vec(args).map_or(usize::MAX, |args| args.len());
+        let called = self.called.saturating_add(size).saturating_add(CALL_COST);
+        if called > CALL_BYTES {
+            let name = function.name();
+            return Err(format!(
+                "{name}()'s arguments of {size} bytes of JSON pass the {CALL_BYTES} bytes the calls of one resume may have"
+            ));
+        }
+        self.called = called;
+        Ok(())
     }
 
     /// Answers `os.urandom` from the seed; refuses every other OS call.
@@ -322,17 +467,18 @@ impl Session {
             },
             other => other.no_handler_result(),
         };
-        call.resume(result, PrintWriter::CollectString(&mut self.print, Some(PRINT_BYTES)))
+        call.resume(result, self.writer())
     }
 
     /// Turns the complete lines `print()` wrote, and with `all` the rest too, into log events.
     fn flush(&mut self, all: bool) {
-        let end = if all { self.print.len() } else { self.print.rfind('\n').map_or(0, |i| i + 1) };
+        let print = &mut self.notes.print;
+        let end = if all { print.len() } else { print.rfind('\n').map_or(0, |i| i + 1) };
         if end == 0 {
             return;
         }
-        let printed: String = self.print.drain(..end).collect();
-        self.events.extend(printed.lines().map(|line| Event::Log(line.to_owned())));
+        let printed: String = print.drain(..end).collect();
+        self.events.extend(printed.lines().map(|line| Event::Log(cut(line.to_owned(), MAX_NOTE))));
     }
 }
 

@@ -329,7 +329,14 @@ they may be raised on resume:
 | Dumped session, the script's suspended state | 768 KiB | 768 KiB | none | the run fails, naming its size; so does a run whose session record, the dumped session with the calls it waits on, would pass 1 MiB less 8 KiB, before its steps go out |
 | Result or error, in the run's record | 1 MiB less the rest of the record | same | none | a result fails the run, naming its size (a `trail()` call raises with that error); an error is cut to 8000 characters |
 | Memory of the script | 64 MiB | 64 MiB | none | `MemoryError`, the run fails |
+| Notes of one resume: the text of `print()`, `log()` and `phase()`, and 16 bytes per note | 64 KiB | 64 KiB | none | the call raises `RuntimeError` naming the cap; a note's text over 4000 bytes is cut, ending with `…` |
+| Arguments of the calls of one resume, as JSON, and 64 bytes per call | 1 MiB | 1 MiB | none | the call raises `RuntimeError` naming the cap |
+| Result of the run, as JSON | 768 KiB | 768 KiB | none | the run fails, naming its size |
 | Python call depth | 200 | 200 | none | `RecursionError` in the script |
+
+A resume is the script running from its start, or from one answered step, to its next wait; the caps of one resume
+apply anew at the next. A `TimeoutError` or `MemoryError` the script raises itself fails the run as any other exception
+does, on no limit, and an error over 16 KiB is cut.
 
 A run failed on a limit keeps which in its record's `limit`: `steps` (a call past them raised and the script then
 failed), `turns`, `wall`, `compute`, `session` or `memory`; a run failing as its child run failed on one keeps the

@@ -38,6 +38,9 @@ pub enum WorkerError {
     /// Exited normally with no readable response.
     #[error("the worker's response is unreadable: {0}")]
     Protocol(String),
+    /// Wrote more than any response to the request takes, in bytes; the rest is not read.
+    #[error("the worker's response passes the {0} bytes a response to its request takes")]
+    Oversized(usize),
 }
 
 impl Worker {
@@ -50,6 +53,10 @@ impl Worker {
     /// Serves `request` in a new worker, killed once `deadline` passes.
     pub async fn call(&self, request: &Request, deadline: Duration) -> Result<Response, WorkerError> {
         let input = serde_json::to_vec(request).map_err(|e| WorkerError::Spawn(e.to_string()))?;
+        let most = crate::worker::response_bound(match request {
+            Request::Start { .. } => 1,
+            Request::Resume { answers, .. } => answers.len(),
+        });
         let mut child = Command::new(&self.program)
             .arg("subprocess")
             .env_clear()
@@ -59,7 +66,7 @@ impl Worker {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| WorkerError::Spawn(format!("{}: {e}", self.program.display())))?;
-        let (Some(mut stdin), Some(mut stdout), Some(mut stderr)) =
+        let (Some(mut stdin), Some(stdout), Some(mut stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
             return Err(WorkerError::Spawn("the worker's stdio is not piped".to_owned()));
@@ -70,16 +77,37 @@ impl Worker {
                 let _ = stdin.write_all(&input).await;
                 drop(stdin);
             };
-            let (mut out, mut err) = (Vec::new(), Vec::new());
-            let ((), read, _) = tokio::join!(write, stdout.read_to_end(&mut out), stderr.read_to_end(&mut err));
+            // Past the bound the pipe closes, which ends a worker still writing.
+            let read = async move {
+                let mut out = Vec::new();
+                stdout
+                    .take(u64::try_from(most).unwrap_or(u64::MAX).saturating_add(1))
+                    .read_to_end(&mut out)
+                    .await
+                    .map(|_| out)
+            };
+            let tail = async {
+                let (mut tail, mut buf) = (Vec::new(), [0; 4096]);
+                while let Ok(n @ 1..) = stderr.read(&mut buf).await {
+                    tail.extend_from_slice(&buf[..n]);
+                    if tail.len() > 2 * STDERR_TAIL {
+                        tail.drain(..tail.len() - STDERR_TAIL);
+                    }
+                }
+                tail
+            };
+            let ((), read, err) = tokio::join!(write, read, tail);
             let status = child.wait().await;
-            (status, read.map(|_| out), err)
+            (status, read, err)
         };
         let Ok((status, out, err)) = tokio::time::timeout(deadline, exchange).await else {
             // The exchange future, dropped, no longer borrows the child.
             let _ = child.kill().await;
             return Err(WorkerError::ComputeLimit(deadline));
         };
+        if out.as_ref().is_ok_and(|out| out.len() > most) {
+            return Err(WorkerError::Oversized(most));
+        }
         let status = status.map_err(|e| WorkerError::Protocol(e.to_string()))?;
         classify(status, &out.map_err(|e| e.to_string()), &err)
     }
@@ -169,6 +197,27 @@ pub(crate) mod tests {
         let started = std::time::Instant::now();
         assert!(matches!(call(&slow, Duration::from_millis(300)).await, Err(WorkerError::ComputeLimit(_))));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_response_past_its_bound_is_refused_and_the_largest_valid_one_read() {
+        let flood = fake("flood", "cat >/dev/null; exec yes");
+        let started = std::time::Instant::now();
+        let most = crate::worker::response_bound(1);
+        assert_eq!(call(&flood, Duration::from_secs(30)).await.unwrap_err(), WorkerError::Oversized(most));
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        // A session at its limit, the calls of one resume at theirs, notes at theirs, escaped at worst.
+        let session = format!("[\"{}\"]", "s".repeat(crate::Limits::MAX_DUMP_BYTES - 4));
+        let args = serde_json::json!({"prompt": "p".repeat(crate::worker::CALL_BYTES - 64 - 13)});
+        let calls = vec![crate::Call { call: u32::MAX, function: crate::Function::Agent, args }];
+        let events = vec![crate::Event::Log("\u{1}".repeat(crate::worker::NOTE_BYTES - 16))];
+        let snapshot = serde_json::value::RawValue::from_string(session).unwrap();
+        let largest = Response::Suspended { snapshot, calls, pending: vec![u32::MAX], events };
+        let path = dir().join("largest.json");
+        std::fs::write(&path, serde_json::to_vec(&largest).unwrap()).unwrap();
+        let read = fake("largest", &format!("cat >/dev/null; cat '{}'", path.display()));
+        assert!(matches!(call(&read, Duration::from_secs(30)).await, Ok(Response::Suspended { .. })));
     }
 
     #[test]

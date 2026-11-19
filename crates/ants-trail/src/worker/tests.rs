@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::serve;
+use super::{CALL_BYTES, MAX_ERROR, MAX_NOTE, MAX_RESULT, NOTE_BYTES, serve};
 use crate::protocol::{Answer, Call, Event, Function, Limit, Limits, Request, Response};
 
 const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": []}\n";
@@ -140,6 +140,90 @@ fn an_uncaught_error_fails_with_the_traceback_of_the_script() {
     assert!(error.contains("File \"trail.py\", line 4, in <module>"), "{error}");
     assert!(error.contains("File \"trail.py\", line 3, in f"), "{error}");
     assert!(error.ends_with("ValueError: bad"), "{error}");
+}
+
+#[test]
+fn a_timeout_or_memory_error_of_the_script_breaks_no_limit() {
+    let (error, limit) = failed(start("raise TimeoutError('the review did not converge')\n", Limits::default()));
+    assert!(error.ends_with("TimeoutError: the review did not converge"), "{error}");
+    assert_eq!(limit, None);
+    let (error, limit) = failed(start("raise MemoryError('too many files')\n", Limits::default()));
+    assert!(error.ends_with("MemoryError: too many files"), "{error}");
+    assert_eq!(limit, None);
+
+    let limits = Limits { compute_ms: 200, ..Limits::default() };
+    let (error, limit) = failed(start("while True:\n    pass\n", limits));
+    assert!(error.contains("TimeoutError"), "{error}");
+    assert_eq!(limit, Some(Limit::Compute));
+    let limits = Limits { memory_bytes: 1024 * 1024, ..Limits::default() };
+    let (error, limit) = failed(start("x = 'a' * (8 * 1024 * 1024)\n", limits));
+    assert!(error.contains("MemoryError"), "{error}");
+    assert_eq!(limit, Some(Limit::Memory));
+}
+
+#[test]
+fn print_past_its_cap_fails_naming_it_and_breaks_no_limit() {
+    let cap = format!("print() passes the {NOTE_BYTES} bytes print(), log() and phase() may write in one resume");
+    for script in
+        ["for i in range(100):\n    print('x' * 1000)\n", "for i in range(100):\n    print('x' * 1000)\n    log('.')\n"]
+    {
+        let (error, limit) = failed(start(script, Limits::default()));
+        assert!(error.ends_with(&format!("RuntimeError: {cap}")), "{error}");
+        assert_eq!(limit, None);
+    }
+}
+
+#[test]
+fn notes_are_cut_and_bounded_per_resume() {
+    let Response::Done { events, .. } =
+        start("log('x' * 20000)\nphase('y' * 5000)\nprint('z' * 6000)\n", Limits::default())
+    else {
+        panic!("not done");
+    };
+    let cut = |c: &str| format!("{}…", c.repeat(MAX_NOTE - '…'.len_utf8()));
+    assert_eq!(events, [Event::Log(cut("x")), Event::Phase(cut("y")), Event::Log(cut("z"))]);
+
+    let (error, limit) = failed(start("for i in range(10000):\n    log('a')\n", Limits::default()));
+    assert!(
+        error.ends_with(&format!(
+            "RuntimeError: log() passes the {NOTE_BYTES} bytes print(), log() and phase() may write in one resume"
+        )),
+        "{error}"
+    );
+    assert_eq!(limit, None);
+
+    // Each resume may write as much again.
+    let script =
+        "for i in range(12):\n    log('a' * 3000)\nawait agent('x')\nfor i in range(12):\n    log('b' * 3000)\n'end'\n";
+    let started = start(script, Limits::default());
+    let call = calls(&started)[0].call;
+    let Response::Done { events, .. } = resume(&started, &[(call, Answer::Ok(json!(1)))], 1) else {
+        panic!("not done")
+    };
+    assert_eq!(events.len(), 12);
+}
+
+#[test]
+fn the_calls_of_one_resume_are_bounded() {
+    let script = "await parallel(*[agent('x' * 400000) for i in range(3)])\n";
+    let Response::Failed { error, calls, limit, .. } = start(script, Limits::default()) else { panic!("not failed") };
+    assert_eq!(calls.len(), 2, "the third passes the bound");
+    let past = format!(
+        "agent()'s arguments of 400013 bytes of JSON pass the {CALL_BYTES} bytes the calls of one resume may have"
+    );
+    assert!(error.ends_with(&format!("RuntimeError: {past}")), "{error}");
+    assert_eq!(limit, None);
+}
+
+#[test]
+fn a_result_too_large_to_store_fails_and_a_long_error_is_cut() {
+    let (error, limit) = failed(start("'x' * 800000\n", Limits::default()));
+    assert_eq!(error, format!("the trail's result has 800002 bytes of JSON; a result holds at most {MAX_RESULT}"));
+    assert_eq!(limit, None);
+
+    let (long, _) = failed(start("raise ValueError('x' * 100000)\n", Limits::default()));
+    assert_eq!(long.len(), MAX_ERROR);
+    assert!(long.ends_with("xx…"), "{long}");
 }
 
 #[test]

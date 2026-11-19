@@ -441,6 +441,10 @@ impl Run {
                 let error = format!("the trail ran out of memory ({most} bytes)");
                 self.end(Status::Failed { error, limit: Some(Limit::Memory) }, &mut progress);
             }
+            // The same request would answer the same.
+            Err(e @ WorkerError::Oversized(_)) => {
+                self.end(Status::Failed { error: e.to_string(), limit: None }, &mut progress);
+            }
             Err(e) => return Err(e.into()),
         }
         Ok(progress)

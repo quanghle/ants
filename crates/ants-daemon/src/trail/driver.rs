@@ -211,6 +211,9 @@ impl Trails {
                 let limit = if e == WorkerError::OutOfMemory { Limit::Memory } else { Limit::Compute };
                 Ok(engine.fail_on(Some(limit), format!("replaying the run's journal: {e}")))
             }
+            Err(RunError::Worker(e @ WorkerError::Oversized(_))) => {
+                Ok(engine.fail(format!("replaying the run's journal: {e}")))
+            }
             Err(RunError::Worker(e)) => Err(anyhow!(e).context("replaying the trail's journal")),
             Err(e) => Ok(engine.fail(e.to_string())),
         }

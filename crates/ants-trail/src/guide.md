@@ -26,6 +26,8 @@ the result; the top level then holds only meta, imports, definitions and constan
 - Limits: 50 steps (500 at most, child runs included; the call past it raises), 4 at once (16; the rest wait),
   200 turns (2000), 24 h of wall time (7 d), 10 s of compute per resume and a 768 KiB stored session; past one the run
   fails, naming it. A run's start sets the first four (run_trail's `limits`: `steps`, `at_once`, `turns`, `wall`).
+  Per resume, 64 KiB of print(), log() and phase() text and 1 MiB of call arguments (past either the call raises
+  RuntimeError); notes over 4000 bytes are cut; a result over 768 KiB fails the run.
 Patterns: pipeline by default, parallel only when a stage needs every result; verify each finding with a skeptic step
 on another ant than its author; repeat discovery until a round finds nothing new, under a round cap; log whatever is
 skipped or capped; schema= for every reply whose fields are read; self-contained prompts; try/except RuntimeError
