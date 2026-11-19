@@ -153,8 +153,8 @@ pub(crate) fn limits_line(limits: &TrailLimits) -> String {
 /// What `ants trail run` shows before the run starts: the trail, its conductor and thread, and what the run may spend.
 pub(crate) fn summary(plan: &Plan, conductor: &UserId, thread: Option<&ThreadId>, limits: &TrailLimits) -> String {
     let mut out = format!("trail {}, {}\n", plan.name, plan.from);
-    if !plan.description.is_empty() {
-        let _ = writeln!(out, "  {}", plan.description);
+    for line in plan.description.lines() {
+        let _ = writeln!(out, "  {line}");
     }
     if !plan.phases.is_empty() {
         let _ = writeln!(out, "  phases: {}", plan.phases.join(", "));
