@@ -331,6 +331,10 @@ fn finding_entry(
         let lines: Vec<_> = written.iter().map(|(line, _)| line.as_str()).collect();
         let _ = writeln!(entry, "  Written: {}", lines.join("; "));
     }
+    if let Some(verdict) = verdict.filter(|verdict| !verdict.trails.is_empty()) {
+        let trails: Vec<_> = verdict.trails.iter().map(ToString::to_string).collect();
+        let _ = writeln!(entry, "  Saved trails: {}.", trails.join(", "));
+    }
     entry.push_str(signs.unwrap_or_default());
     entry
 }

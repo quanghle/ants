@@ -191,9 +191,9 @@ pub const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "dream",
-        description: "On a dream thread: answer each finding of the dream as applied (naming the items written), \
-                      rejected or deferred, with a reason, and finish the dream with done. Without arguments, show \
-                      the dream's findings and verdicts.",
+        description: "On a dream thread: answer each finding of the dream as applied (naming the items written or \
+                      the trails saved), rejected or deferred, with a reason, and finish the dream with done. Without \
+                      arguments, show the dream's findings and verdicts.",
         schema: crate::dream::schema,
         handler: crate::dream::dream,
     },

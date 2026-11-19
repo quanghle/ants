@@ -13,14 +13,20 @@ fn user(name: &str) -> UserId {
 /// A finding of a sage, of `kind`, first offered as `id`.
 fn advised(id: &str, kind: &str, text: &str) -> Finding {
     let action = format!("Act on {id}.");
-    let advice =
-        Advice { kind: kind.into(), evidence: Evidence::default(), action, follows: None, follows_missing: false };
+    let advice = Advice {
+        kind: kind.into(),
+        evidence: Evidence::default(),
+        action,
+        follows: None,
+        follows_missing: false,
+        trail: None,
+    };
     Finding { id: id.into(), kind: FindingKind::Sage, text: text.into(), advice: Some(advice), ..finding(1) }
 }
 
 fn verdict(finding: &str, verdict: Judgement, reason: &str, items: &[&ItemId], at: DateTime<Utc>) -> Verdict {
     let items = items.iter().map(|&id| id.clone()).collect();
-    Verdict { finding: finding.into(), verdict, reason: reason.into(), items, at }
+    Verdict { finding: finding.into(), verdict, reason: reason.into(), items, trails: Vec::new(), at }
 }
 
 /// Dream `number`, begun at `at` with `sage` reviewing, offering `findings` and judged by `verdicts`.
@@ -326,4 +332,22 @@ fn over_its_budget_the_earlier_findings_shrink_to_their_tally_before_the_identit
     let titles = within(tally.len() - 1);
     assert!(titles.contains(&identity.titles) && titles.contains(left_out), "{titles}");
     assert!(titles.contains("10 made") && titles.contains("Finding number 5"), "{titles}");
+}
+
+#[tokio::test]
+async fn a_trail_finding_applied_shows_the_sage_the_trails_saved_for_it() {
+    let (_, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let now = Utc::now();
+    let mut applied = verdict("1.1", Judgement::Applied, "Saved it.", &[], now - Duration::hours(23));
+    applied.trails = vec!["release-notes".parse().unwrap()];
+    let finding = advised("1.1", TRAIL, "Release notes drafted by hand thrice.");
+    keep(&*items, &reviewed(1, now - Duration::hours(24), "sage", vec![finding], vec![applied])).await;
+
+    let current = reviewed(2, now, "sage", Vec::new(), Vec::new());
+    let read = packet(&*items, &current, &Reader::Sage(user("dev-a")), &[]).await.unwrap();
+    let entry = "- 1.1 (trail): Release notes drafted by hand thrice.\n  Suggested action: Act on 1.1.\n  Verdict: \
+                 applied: Saved it.\n  Saved trails: release-notes.\n";
+    assert!(part(&read, "\n## Earlier findings of sage\n").contains(entry), "{read}");
+    assert!(read.contains("A trail finding also holds \"trail\": {\"name\": \"release-notes\""), "{read}");
 }

@@ -135,6 +135,7 @@ mod tests {
             action: "Remember to rebase.".into(),
             follows: None,
             follows_missing: false,
+            trail: None,
         });
         let kind = if sage { FindingKind::Sage } else { FindingKind::Distill };
         let text = format!("Finding {id}.");
@@ -143,7 +144,7 @@ mod tests {
 
     fn verdict(finding: &str, verdict: Judgement) -> Verdict {
         let reason = format!("{verdict} for a reason.");
-        Verdict { finding: finding.into(), verdict, reason, items: vec![], at: context(human()).at }
+        Verdict { finding: finding.into(), verdict, reason, items: vec![], trails: vec![], at: context(human()).at }
     }
 
     fn entry<'a>(entries: &'a [MemoryEntry], key: &str) -> &'a str {

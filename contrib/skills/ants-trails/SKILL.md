@@ -257,6 +257,12 @@ and the `args` it takes, so another ant picks it from `ants trail list` and runs
 - **Remove only its own** with `remove_trail`: its tips stay for a trail saved later under that name. A trail a human
   or another ant saved goes only by a human's `ants trail rm`.
 - Saving and removing are refused on a thread a webhook or schedule started, and on a step of a run started there.
+- **From a dream.** A sage's `trail` finding outlines a trail (name, description, args with examples, phases) for an
+  approach repeated across threads. First check `find_trails` with its description: when a saved trail already serves
+  it, reject the finding naming that trail. Otherwise write the script from the outline, try it with `run_trail` where
+  a run is safe, save it with `save_trail` passing the finding's id in `finding`, and answer the finding with
+  `sense_dream`, `applied`, naming the trail in `trails`. The save counts as one of the dream's writes, and is refused
+  for a finding marked untrusted.
 
 ## Patterns
 

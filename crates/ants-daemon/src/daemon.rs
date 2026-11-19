@@ -639,6 +639,9 @@ async fn services(
     )
     .await?;
     connect_mcp(&mut mcp, config, client, js, &redactor, humans, providers).await?;
+    if let Some(sense) = sense {
+        mcp.with_dreams(sense.dreams());
+    }
     mcp.with_origins(crate::provider::origins::OriginStore::kv(sessions_kv.clone(), config.ant.clone()));
     if let Some(identity) = &identity {
         mcp.with_callers(Callers::new(config.ant.clone(), machine.to_owned(), identity.clone()));

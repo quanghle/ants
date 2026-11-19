@@ -23,8 +23,10 @@
 //! since the verdict or [`REST_DAYS`] of the ant's active time passed. A ripe proposal no dream offered makes a dream
 //! due ([`proposal_due`]). Writes on the dream thread through the tools that change memories or records count
 //! toward [`MAX_DREAM_WRITES`], and are untrusted while a finding resting on untrusted text is open ([`counted`],
-//! [`untrusted_on`]); persona and skill proposals are refused on untrusted ground ([`untrusted`]). Finishing a dream,
-//! or beginning the next one, writes its diary: an episode memory summarizing its verdicts. Each dream keeps the vital
+//! [`untrusted_on`]); persona and skill proposals, and trails saved, are refused on untrusted ground ([`ground`]). A
+//! sage's [`TRAIL`] finding is applied by saving the trail it suggests, which the daemon records on the dream thread
+//! ([`trail_saved`]), counted as a write, and naming it in the verdict's trails. Finishing a dream, or beginning the
+//! next one, writes its diary: an episode memory summarizing its verdicts. Each dream keeps the vital
 //! signs of the work it reviews, measured by the daemon as it begins ([`Signs`]).
 //!
 //! A sage's own dream covers the reviews it was asked as threads too ([`Covered::review`]), but its packet lists them by
@@ -37,7 +39,7 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
 
 use ants_proto::provider::{CallContext, ToolCall};
-use ants_proto::{ReviewOutcomes, ThreadId, UserId};
+use ants_proto::{ReviewOutcomes, ThreadId, TrailName, UserId};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -70,8 +72,8 @@ pub use practice_findings::{
     REJECTED_FINDINGS, RELATIONSHIP_AFTER_REVIEWS, UNANSWERED_PERCENT, UNANSWERED_REVIEWS, UNDONE_FINDINGS,
 };
 pub use review::{
-    Advice, Evidence, FOLLOW_UP, FollowUp, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse,
-    review_sent, untrusted_on,
+    Advice, Evidence, FOLLOW_UP, FollowUp, MAX_TRAIL_FINDINGS, Outline, Parsed, REVIEW_BEGIN, REVIEW_END, Review,
+    Reviewed, TRAIL, answered, parse, review_sent, untrusted_on,
 };
 pub use reviews::{
     AntTally, FindingTally, KindTally, REVIEW, ReviewCost, ReviewRecord, ReviewSpend, ReviewTally, ReviewedFinding,
@@ -336,6 +338,35 @@ pub struct Verdict {
     /// With [`Judgement::Applied`]: the items written or changed.
     #[serde(default)]
     pub items: Vec<ItemId>,
+    /// With [`Judgement::Applied`]: the trails saved on the dream thread for the finding ([`Dream::trails`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trails: Vec<TrailName>,
+    pub at: DateTime<Utc>,
+}
+
+impl Verdict {
+    /// What it names, as ` (items a, b) (trails c)`: nothing when it names nothing.
+    pub fn named(&self) -> String {
+        let mut named = String::new();
+        if !self.items.is_empty() {
+            let items: Vec<_> = self.items.iter().map(ItemId::as_str).collect();
+            let _ = write!(named, " (items {})", items.join(", "));
+        }
+        if !self.trails.is_empty() {
+            let trails: Vec<_> = self.trails.iter().map(TrailName::as_str).collect();
+            let _ = write!(named, " (trails {})", trails.join(", "));
+        }
+        named
+    }
+}
+
+/// A trail saved on a dream thread ([`trail_saved`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedTrail {
+    pub name: TrailName,
+    /// The finding the save named as the one it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finding: Option<String>,
     pub at: DateTime<Utc>,
 }
 
@@ -389,6 +420,9 @@ pub struct Dream {
     /// The items written on the dream thread ([`counted`]), one per write.
     #[serde(default)]
     pub writes: Vec<ItemId>,
+    /// The trails saved on the dream thread ([`trail_saved`]), each counted as a write.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trails: Vec<SavedTrail>,
     /// Its diary episode, once written.
     pub diary: Option<ItemId>,
     /// The vital signs of the work it reviews, as the daemon measured them when it began: none for a dream before
@@ -456,6 +490,11 @@ impl Dream {
     /// on and the review thread.
     pub fn own_threads(&self) -> impl Iterator<Item = &ThreadId> {
         self.thread.iter().chain(self.review.as_ref().map(|review| &review.thread))
+    }
+
+    /// The writes made on its thread, toward [`MAX_DREAM_WRITES`]: the items written and the trails saved.
+    pub fn writes_made(&self) -> usize {
+        self.writes.len() + self.trails.len()
     }
 
     /// Its open findings resting on untrusted text: unanswered or deferred.
@@ -628,6 +667,7 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
             findings,
             verdicts: Vec::new(),
             writes: Vec::new(),
+            trails: Vec::new(),
             diary: None,
             vitals: Some(Signs::sum(start.vitals.iter().map(|(_, signs)| signs))),
         };
@@ -703,12 +743,13 @@ pub async fn finding(items: &dyn Items, id: &str) -> Result<Option<Finding>, Sto
     Ok(dream.findings.into_iter().chain(late).find(|finding| finding.id == id))
 }
 
-/// Why a persona or skill proposal made in `context`, in answer to `finding` if it names one, rests on untrusted text;
-/// none when it does not (requirements ants-x39hk.6.5 and ants-x39hk.12.5). It does when the thread came from a
-/// webhook or asks a review, or when the finding it names is untrusted ([`Finding::untrusted`]). On the thread of a
-/// dream whose packet holds untrusted text, an untrusted finding or the history of an untrusted thread, it does too
-/// unless it names a finding of that dream: one naming none, or a finding the dream does not hold, may answer the
-/// untrusted text. The reviews a sage's dream covers hold none: their text is left out ([`Covered::untrusted_text`]).
+/// Why a persona or skill proposal, or a trail saved, made in `context`, in answer to `finding` if it names one, rests
+/// on untrusted text; none when it does not (requirements ants-x39hk.6.5, ants-x39hk.12.5 and ants-x39hk.12.54). It
+/// does when the thread came from a webhook or asks a review, or when the finding it names is untrusted
+/// ([`Finding::untrusted`]). On the thread of a dream whose packet holds untrusted text, an untrusted finding or the
+/// history of an untrusted thread, it does too unless it names a finding of that dream: one naming none, or a finding
+/// the dream does not hold, may answer the untrusted text. The reviews a sage's dream covers hold none: their text is
+/// left out ([`Covered::untrusted_text`]).
 pub async fn untrusted(
     items: &dyn Items,
     context: &CallContext,
@@ -735,7 +776,7 @@ pub async fn untrusted(
     let Some(dream) = dream else { return Ok(None) };
     let answers = match finding {
         Some(id) => format!("finding {id} is not one of its findings"),
-        None => "the proposal names none of its findings in `finding`".into(),
+        None => "no finding of it is named in `finding`".into(),
     };
     if let Some(finding) = dream.findings.iter().find(|finding| finding.untrusted) {
         return Ok(Some(format!("dream {} offers untrusted finding {} and {answers}", dream.number, finding.id)));
@@ -747,6 +788,96 @@ pub async fn untrusted(
         )));
     }
     Ok(None)
+}
+
+/// Why a write made in `context` in answer to a finding is refused ([`ground`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refused {
+    /// No dream has the finding named.
+    NotFound(String),
+    /// It rests on untrusted text, as [`untrusted`] tells.
+    Untrusted(String),
+    /// The dream whose thread it is on, by number, made its [`MAX_DREAM_WRITES`].
+    Cap(u64),
+}
+
+impl Refused {
+    /// Its error code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound(_) => "not_found",
+            Self::Untrusted(_) => "untrusted",
+            Self::Cap(_) => "dream_cap",
+        }
+    }
+
+    /// What it tells, `changed` naming what changes only on trusted ground, such as `trails are saved`.
+    pub fn text(&self, changed: &str) -> String {
+        match self {
+            Self::NotFound(finding) => format!("No dream has a finding {finding:?}."),
+            Self::Untrusted(why) => format!("Refused: {why}; {changed} only on trusted ground."),
+            Self::Cap(number) => capped(*number),
+        }
+    }
+}
+
+/// Why a write made in `context`, in answer to `finding` if it names one, is refused: the finding is no dream's, it
+/// rests on untrusted text ([`untrusted`]) or, when `writes` counts it toward [`MAX_DREAM_WRITES`], it is on the thread
+/// of the last dream, which made them all. None when it is not.
+pub async fn ground(
+    items: &dyn Items,
+    context: &CallContext,
+    finding: Option<&str>,
+    writes: bool,
+) -> Result<Option<Refused>, StoreError> {
+    if let Some(id) = finding
+        && self::finding(items, id).await?.is_none()
+    {
+        return Ok(Some(Refused::NotFound(id.to_owned())));
+    }
+    if let Some(why) = untrusted(items, context, finding).await? {
+        return Ok(Some(Refused::Untrusted(why)));
+    }
+    if writes
+        && let Some((dream, _)) = last(items).await?
+        && dream.thread.as_ref() == Some(&context.thread)
+        && dream.writes_made() >= MAX_DREAM_WRITES
+    {
+        return Ok(Some(Refused::Cap(dream.number)));
+    }
+    Ok(None)
+}
+
+/// Record trail `name` saved in `context`, in answer to `finding` if it names one, when on the thread of the last
+/// dream: counted toward its [`MAX_DREAM_WRITES`]. Returns the dream's number and the writes it made; none on another
+/// thread, recording nothing.
+pub async fn trail_saved(
+    items: &dyn Items,
+    context: &CallContext,
+    name: &TrailName,
+    finding: Option<&str>,
+) -> Result<Option<(u64, usize)>, StoreError> {
+    read_modify_write(|| async move {
+        let Some((mut dream, revision)) = last(items).await? else { return Ok(None) };
+        if dream.thread.as_ref() != Some(&context.thread) {
+            return Ok(None);
+        }
+        let finding = finding.map(str::to_owned);
+        dream.trails.push(SavedTrail { name: name.clone(), finding, at: context.at });
+        let mut values = Values::new();
+        values.insert("trails".into(), json!(dream.trails));
+        items.change(&Dream::id(dream.number), values, Some(revision), BY).await?;
+        Ok(Some((dream.number, dream.writes_made())))
+    })
+    .await
+}
+
+/// The refusal of a write on the thread of dream `number`, which made its [`MAX_DREAM_WRITES`].
+fn capped(number: u64) -> String {
+    format!(
+        "Dream {number} made its {MAX_DREAM_WRITES} writes, the most a dream makes: answer the findings left with \
+         sense_dream as deferred, so the next dream offers them again."
+    )
 }
 
 /// A finding gathered for a dream, before it is numbered.
@@ -966,24 +1097,20 @@ fn close(mut dream: Dream, revision: u64, context: &CallContext, at: DateTime<Ut
 }
 
 /// The diary episode of `dream`, written in `context`: how many findings it had, the verdict on each and the items
-/// written, within a memory's limits.
+/// written and trails saved, within a memory's limits.
 fn diary(dream: &Dream, context: &CallContext) -> Memory {
     let title = dream.summary();
     let mut lines = vec![format!(
         "Reviewed {} threads since {} UTC; {} of {MAX_DREAM_WRITES} writes made.",
         dream.threads.len(),
         dream.since.format("%Y-%m-%d %H:%M"),
-        dream.writes.len()
+        dream.writes_made()
     )];
     for finding in &dream.findings {
         let mut line = format!("- {} {}: ", finding.id, finding.kind);
         match dream.verdict(&finding.id) {
             Some(verdict) => {
-                let _ = write!(line, "{}: {}", verdict.verdict, verdict.reason);
-                if !verdict.items.is_empty() {
-                    let items: Vec<_> = verdict.items.iter().map(ItemId::as_str).collect();
-                    let _ = write!(line, " (items {})", items.join(", "));
-                }
+                let _ = write!(line, "{}: {}{}", verdict.verdict, verdict.reason, verdict.named());
             }
             None => line.push_str("unanswered"),
         }
@@ -1033,13 +1160,8 @@ pub(crate) async fn counted(sense: &Sense, handler: Handler, call: &ToolCall) ->
         Ok(Some((dream, _))) if on_thread(&dream) => dream,
         _ => return handler(sense, call).await,
     };
-    if dream.writes.len() >= MAX_DREAM_WRITES {
-        let message = format!(
-            "Dream {} made its {MAX_DREAM_WRITES} writes, the most a dream makes: answer the findings left with \
-             sense_dream as deferred, so the next dream offers them again.",
-            dream.number
-        );
-        return Answer::error("dream_cap", message);
+    if dream.writes_made() >= MAX_DREAM_WRITES {
+        return Answer::error("dream_cap", capped(dream.number));
     }
     let untrusted: Vec<_> = dream.untrusted_open().map(|finding| finding.id.as_str()).collect();
     let quotable = matches!(call.name.as_str(), "remember" | "identity");
@@ -1075,7 +1197,7 @@ pub(crate) async fn counted(sense: &Sense, handler: Handler, call: &ToolCall) ->
     answer
 }
 
-/// Count a write of `id` on the thread of dream `number`; returns the writes counted.
+/// Count a write of `id` on the thread of dream `number`; returns the writes made ([`Dream::writes_made`]).
 async fn count_write(items: &dyn Items, number: u64, id: ItemId) -> Result<usize, StoreError> {
     let id = &id;
     read_modify_write(|| async move {
@@ -1084,7 +1206,7 @@ async fn count_write(items: &dyn Items, number: u64, id: ItemId) -> Result<usize
         let mut values = Values::new();
         values.insert("writes".into(), json!(dream.writes));
         items.change(&Dream::id(number), values, Some(revision), BY).await?;
-        Ok(dream.writes.len())
+        Ok(dream.writes_made())
     })
     .await
 }

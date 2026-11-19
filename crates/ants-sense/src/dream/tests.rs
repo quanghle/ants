@@ -354,6 +354,7 @@ fn reviewing(threads: u8, findings: usize) -> Dream {
         findings: (1..=findings).map(finding).collect(),
         verdicts: Vec::new(),
         writes: Vec::new(),
+        trails: Vec::new(),
         diary: None,
         vitals: None,
     }
@@ -402,7 +403,14 @@ fn over_its_budget_the_verdicts_on_the_last_dream_shrink_to_their_tally_before_t
         let at = Utc::now();
         let verdict = |finding: &Finding| {
             let reason = "x".repeat(bytes);
-            Verdict { finding: finding.id.clone(), verdict: Judgement::Applied, reason, items: Vec::new(), at }
+            Verdict {
+                finding: finding.id.clone(),
+                verdict: Judgement::Applied,
+                reason,
+                items: Vec::new(),
+                trails: Vec::new(),
+                at,
+            }
         };
         let mut last = reviewing(0, findings);
         last.verdicts = last.findings.iter().take(findings - 1).map(verdict).collect();
@@ -547,4 +555,5 @@ mod review;
 mod reviews;
 mod sage_dream;
 mod track_record;
+mod trail_findings;
 mod vitals;

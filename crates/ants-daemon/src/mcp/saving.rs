@@ -1,6 +1,9 @@
 //! The trails ants save for the colony ([`crate::trail::Trails::save`]): `save_trail` saves a script, or a finished
 //! inline run's, under a name as the ant's own, and `remove_trail` removes one the ant saved. Both are refused on a
-//! thread a webhook or schedule started, which a step of a run such a thread started is too.
+//! thread a webhook or schedule started, which a step of a run such a thread started is too. A save on a dream's thread
+//! or in answer to a dream finding is checked against the ant's dreams too ([`crate::sense::Dreams::ground`]).
+
+use std::fmt::Write as _;
 
 use ants_proto::{Envelope, RunState, SavedTrail, ThreadId, TrailName};
 use chrono::Utc;
@@ -12,7 +15,8 @@ use serde::Deserialize;
 
 use super::Hub;
 use super::tools::{Tools, text};
-use crate::trail::{SaveFrom, SaveOutcome, age, from_run};
+use crate::sense::Grounded;
+use crate::trail::{SaveFrom, SaveOutcome, Trails, age, from_run};
 
 /// Why saving and removing are refused when the ant conducts no runs.
 const NO_TRAILS: &str = "this ant saves no trails: the bus keeps no trail runs";
@@ -34,6 +38,9 @@ struct SaveTrail {
     /// Replace the trail this ant saved before under `name`; without it, that name is refused.
     #[serde(default)]
     replace: bool,
+    /// On a dream thread: the dream finding this save answers, such as 3.1.
+    #[serde(default)]
+    finding: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -51,17 +58,46 @@ impl Hub {
             .ok_or("no message is being handled on this thread; trails are saved only while one is")?;
         self.refuse_saving(thread, &current).await?;
         let name = trail_name(&args.name)?;
+        let finding = args.finding.as_deref().map(str::trim).filter(|finding| !finding.is_empty());
         let from = match (args.script, args.run) {
             (Some(script), None) => SaveFrom::Script(script),
             (None, Some(run)) => SaveFrom::Run(run.trim().parse().map_err(|_| format!("{run:?} is no run id"))?),
             (Some(_), Some(_)) => return Err("give `script` or `run`, not both".to_owned()),
             (None, None) => return Err("give `script` or `run`".to_owned()),
         };
-        let prepared = trails.prepare_save(crate::trail::SaveTrail { name, from, replace: args.replace }).await?;
+        let ask = crate::trail::SaveTrail { name: name.clone(), from, replace: args.replace };
+        let prepared = trails.prepare_save(ask).await?;
         // Checked and stored apart, so that what grounds a save can be checked between the two.
+        let grounded = self.ground_save(thread, finding).await?;
+        if let (Some(task), Some(finding)) = (grounded.as_ref().and_then(|g| g.suggested.as_deref()), finding) {
+            refuse_served(trails, task, thread, &name, finding).await?;
+        }
         let outcome = trails.commit_save(prepared).await?;
-        tracing::info!(%thread, trail = %outcome.trail.name, "trail saved from a tool call");
-        Ok(saved_text(&outcome))
+        tracing::info!(%thread, trail = %outcome.trail.name, finding, "trail saved from a tool call");
+        let mut text = saved_text(&outcome);
+        if let Some(dream) = match grounded {
+            Some(grounded) => grounded.saved(&name).await,
+            None => None,
+        } {
+            let _ = write!(text, "\n{dream}");
+        }
+        Ok(text)
+    }
+
+    /// Check a save on `thread`, in answer to `finding` if it names one, against the ant's dreams, which only sense
+    /// keeps ([`crate::sense::Dreams::ground`]): without them, a save naming a finding is refused and one naming none
+    /// passes.
+    async fn ground_save(&self, thread: &ThreadId, finding: Option<&str>) -> Result<Option<Grounded>, String> {
+        let Some(dreams) = self.dreams.get() else {
+            return match finding {
+                Some(finding) => Err(format!(
+                    "No dream has a finding {finding:?}: dreams are sense's, and sense is not this ant's provider."
+                )),
+                None => Ok(None),
+            };
+        };
+        let context = self.call_context(thread).await;
+        dreams.ground(&self.ant, context, finding).await.map(Some).map_err(|refusal| refusal.text)
     }
 
     /// Remove the colony's trail `name`, which the ant saved, from `thread`.
@@ -85,6 +121,34 @@ impl Hub {
     /// The one gate of saving and removing trails: refused unless `thread`, handling `current`, is trusted.
     async fn refuse_saving(&self, thread: &ThreadId, current: &Envelope) -> Result<(), String> {
         if self.trusted(thread, current).await? { Ok(()) } else { Err(UNTRUSTED_SAVE.to_owned()) }
+    }
+}
+
+/// Refuse saving trail `name` for `finding`, a sage's trail finding suggesting a trail for `task`, when a saved trail
+/// other than `name` already serves such tasks ([`Trails::serving`]): the finding is then rejected naming that trail.
+/// Ratings that cannot be read refuse nothing.
+async fn refuse_served(
+    trails: &Trails,
+    task: &str,
+    thread: &ThreadId,
+    name: &TrailName,
+    finding: &str,
+) -> Result<(), String> {
+    let serving = match trails.serving(task, thread).await {
+        Ok(serving) => serving,
+        Err(e) => {
+            tracing::warn!(%thread, finding, error = e, "finding the saved trails serving a trail finding's task");
+            return Ok(());
+        }
+    };
+    match serving.iter().find(|found| found.name != *name) {
+        Some(found) => Err(format!(
+            "Refused: saved trail {other} already serves such tasks ({counts}): reject finding {finding} with \
+             sense_dream naming {other}, and run it with run_trail(name: \"{other}\").",
+            other = found.name,
+            counts = found.matching.counts
+        )),
+        None => Ok(()),
     }
 }
 
@@ -133,7 +197,10 @@ impl Tools {
                        run_trail. A name a human or another ant saved is refused: save a changed copy under a new \
                        name. A trail this ant saved is replaced only with `replace`; runs already started keep their \
                        script. Refused on a thread a webhook or schedule started. Save a script that worked and whose \
-                       steps recur, with its specifics taken as `args`.")]
+                       steps recur, with its specifics taken as `args`. On a dream thread, `finding` names the dream \
+                       finding the save answers, such as a sage's trail finding: refused when it rests on untrusted \
+                       text, or when a saved trail already serves the task it suggests; a save there counts as one of \
+                       the dream's writes.")]
     async fn save_trail(
         &self,
         Parameters(args): Parameters<SaveTrail>,

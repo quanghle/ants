@@ -211,22 +211,14 @@ pub async fn of_target(items: &dyn Items, target: &ItemId) -> Result<Vec<Proposa
 }
 
 /// Refuse a proposal made in `context` in answer to `finding`, if given, when it rests on untrusted text
-/// ([`dream::untrusted`]) or names a finding no dream has.
+/// ([`dream::untrusted`]) or names a finding no dream has ([`dream::ground`]).
 pub(crate) async fn refuse_untrusted(
     items: &dyn Items,
     context: &CallContext,
     finding: Option<&str>,
 ) -> Result<(), Answer> {
-    if let Some(finding) = finding
-        && dream::finding(items, finding).await?.is_none()
-    {
-        return Err(Answer::error("not_found", format!("No dream has a finding {finding:?}.")));
-    }
-    match dream::untrusted(items, context, finding).await? {
-        Some(why) => Err(Answer::error(
-            "untrusted",
-            format!("Refused: {why}; persona and skills change only on trusted ground."),
-        )),
+    match dream::ground(items, context, finding, false).await? {
+        Some(refused) => Err(Answer::error(refused.code(), refused.text("persona and skills change"))),
         None => Ok(()),
     }
 }

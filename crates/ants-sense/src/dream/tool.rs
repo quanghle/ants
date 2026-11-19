@@ -1,14 +1,18 @@
 //! `sense_dream`: the ant's verdicts on the findings of its dream, on the dream thread, and finishing the dream. A
-//! verdict on a proposal decides it ([`proposal::decide`]): applied confirms it, rejected discards it.
+//! verdict on a proposal decides it ([`proposal::decide`]): applied confirms it, rejected discards it. One applying a
+//! sage's [`TRAIL`] finding names the trail saved for it on the thread ([`Dream::trails`]).
 
 use std::fmt::Write as _;
 
+use ants_proto::TrailName;
 use ants_proto::provider::{BoxFuture, ToolCall};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{BY, Dream, Finding, FindingKind, Judgement, MAX_DREAM_WRITES, MAX_FINDINGS, State, Verdict, close, get};
+use super::{
+    BY, Dream, Finding, FindingKind, Judgement, MAX_DREAM_WRITES, MAX_FINDINGS, State, TRAIL, Verdict, close, get,
+};
 use crate::items::{Item, ItemId, Values};
 use crate::memory::{MEMORY, Scope};
 use crate::persona::persona_id;
@@ -40,6 +44,12 @@ pub fn schema() -> Value {
                                             (such as the self-model for no_self_model); none for a proposal, which \
                                             applied confirms.",
                         },
+                        "trails": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "With applied: the trails saved with save_trail on this dream's thread \
+                                            for the finding.",
+                        },
                     },
                     "required": ["finding", "verdict", "reason"],
                 },
@@ -65,6 +75,7 @@ struct GivenVerdict {
     verdict: Option<Judgement>,
     reason: Option<String>,
     items: Option<Vec<String>>,
+    trails: Option<Vec<String>>,
 }
 
 /// Answers a `sense_dream` call.
@@ -171,12 +182,19 @@ async fn verdicts(items: &dyn Items, dream: &Dream, given: Vec<GivenVerdict>) ->
             let item = items.get(&id).await?;
             named.push(item.ok_or_else(|| Answer::error("not_found", format!("Finding {finding}: no item {id}.")))?);
         }
+        let trails = saved(dream, finding, verdict, given.trails.unwrap_or_default())?;
         let mut written: Vec<_> = named.iter().map(|item| item.id.clone()).collect();
+        let trail = known.advice.as_ref().is_some_and(|advice| advice.kind == TRAIL);
         if known.kind == FindingKind::Proposal {
             written.clone_from(&known.items);
-        } else if verdict == Judgement::Applied && written.is_empty() {
+        } else if verdict == Judgement::Applied && trail && trails.is_empty() {
             return Err(Answer::invalid(format!(
-                "Finding {finding}: applied names the items written or voted on, or the proposal made."
+                "Finding {finding} (trail): a trail finding applied names the trail saved for it in trails."
+            )));
+        } else if verdict == Judgement::Applied && written.is_empty() && trails.is_empty() {
+            return Err(Answer::invalid(format!(
+                "Finding {finding}: applied names the items written or voted on, the trails saved, or the proposal \
+                 made."
             )));
         } else if verdict == Judgement::Applied
             && let Some(asked) = asked(known)
@@ -188,9 +206,33 @@ async fn verdicts(items: &dyn Items, dream: &Dream, given: Vec<GivenVerdict>) ->
             )));
         }
         verdicts.retain(|earlier| earlier.finding != finding);
-        verdicts.push(Verdict { finding: finding.to_owned(), verdict, reason, items: written, at });
+        verdicts.push(Verdict { finding: finding.to_owned(), verdict, reason, items: written, trails, at });
     }
     Ok(verdicts)
+}
+
+/// The trails `given` as saved for `finding` of `dream` by a verdict of `verdict`, checked: each saved on the dream's
+/// thread naming that finding or none ([`super::trail_saved`]), and only with [`Judgement::Applied`].
+fn saved(dream: &Dream, finding: &str, verdict: Judgement, given: Vec<String>) -> Result<Vec<TrailName>, Answer> {
+    if !given.is_empty() && verdict != Judgement::Applied {
+        return Err(Answer::invalid(format!("Finding {finding}: trails are named only with applied.")));
+    }
+    let mut trails: Vec<TrailName> = Vec::new();
+    for name in given {
+        let name: TrailName =
+            name.trim().parse().map_err(|_| Answer::invalid(format!("Finding {finding}: trails are trail names.")))?;
+        let for_it = |saved: &&super::SavedTrail| saved.finding.as_deref().is_none_or(|saved| saved == finding);
+        if !dream.trails.iter().filter(for_it).any(|saved| saved.name == name) {
+            return Err(Answer::error(
+                "not_found",
+                format!("Finding {finding}: trail {name} was saved on this dream's thread for no such finding."),
+            ));
+        }
+        if !trails.contains(&name) {
+            trails.push(name);
+        }
+    }
+    Ok(trails)
 }
 
 /// What an applied verdict on a finding names among its items, as the finding asks.
@@ -265,15 +307,26 @@ fn asked(finding: &Finding) -> Option<Asked> {
 /// `dream`'s findings and the verdicts on them.
 fn show(dream: &Dream) -> Answer {
     let mut text =
-        format!("Dream {} ({}), {} of {MAX_DREAM_WRITES} writes made.", dream.number, dream.state, dream.writes.len());
+        format!("Dream {} ({}), {} of {MAX_DREAM_WRITES} writes made.", dream.number, dream.state, dream.writes_made());
     if dream.findings.is_empty() {
         text.push_str("\nNo findings: remember what the threads teach, then finish with done.");
     }
     for finding in &dream.findings {
         let _ = write!(text, "\n{}", super::packet::finding_line(finding, dream.number));
         if let Some(verdict) = dream.verdict(&finding.id) {
-            let _ = write!(text, "\n  {}: {}", verdict.verdict, verdict.reason);
+            let _ = write!(text, "\n  {}: {}{}", verdict.verdict, verdict.reason, verdict.named());
         }
+    }
+    if !dream.trails.is_empty() {
+        let saved: Vec<_> = dream
+            .trails
+            .iter()
+            .map(|saved| match &saved.finding {
+                Some(finding) => format!("{} (for {finding})", saved.name),
+                None => saved.name.to_string(),
+            })
+            .collect();
+        let _ = write!(text, "\nSaved on this thread: {}.", saved.join(", "));
     }
     Answer { text, json: json(dream), is_error: false }
 }
@@ -303,7 +356,8 @@ fn json(dream: &Dream) -> Value {
         "state": dream.state,
         "findings": dream.findings,
         "verdicts": dream.verdicts,
-        "writes": dream.writes.len(),
+        "writes": dream.writes_made(),
+        "trails": dream.trails,
         "diary": dream.diary,
     })
 }

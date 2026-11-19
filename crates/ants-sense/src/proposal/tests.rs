@@ -49,7 +49,8 @@ pub(crate) async fn judge(sense: &Sense, thread: u8, finding: &str, verdict: &st
 }
 
 fn verdict(finding: &Finding, verdict: Judgement) -> Verdict {
-    Verdict { finding: finding.id.clone(), verdict, reason: "Judged.".into(), items: vec![], at: Utc::now() }
+    let reason = "Judged.".into();
+    Verdict { finding: finding.id.clone(), verdict, reason, items: vec![], trails: vec![], at: Utc::now() }
 }
 
 pub(crate) async fn status(items: &dyn Items, id: &ItemId) -> Status {

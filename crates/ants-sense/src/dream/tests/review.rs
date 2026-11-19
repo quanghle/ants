@@ -5,7 +5,7 @@ use super::identity_findings::started;
 use super::*;
 use crate::dream::review::clean;
 
-fn sage() -> UserId {
+pub(super) fn sage() -> UserId {
     "sage".parse().unwrap()
 }
 
@@ -13,13 +13,13 @@ fn finding(kind: &str, text: &str, evidence: serde_json::Value) -> serde_json::V
     json!({"kind": kind, "finding": text, "evidence": evidence, "action": format!("Act on {text}")})
 }
 
-fn fenced(findings: &[serde_json::Value]) -> String {
+pub(super) fn fenced(findings: &[serde_json::Value]) -> String {
     let block = json!({"findings": findings});
     format!("Reviewed the work.\n\n```json\n{block:#}\n```\n\nThat is all.")
 }
 
 /// Begin dream 1 for the sage covering thread 1, trusted, and thread 2, untrusted; returns its review thread.
-async fn sent(items: &dyn Items) -> ThreadId {
+pub(super) async fn sent(items: &dyn Items) -> ThreadId {
     let writer = on(9);
     let threads = vec![
         Covered { thread: on(1).thread, untrusted: false, review: false },

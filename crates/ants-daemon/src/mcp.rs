@@ -171,6 +171,7 @@ impl Mcp {
             redactor: OnceLock::new(),
             provider: OnceLock::new(),
             trails: OnceLock::new(),
+            dreams: OnceLock::new(),
             served: Mutex::default(),
             callers: OnceLock::new(),
             origin_store: OnceLock::new(),
@@ -272,6 +273,12 @@ impl Mcp {
     /// and their ratings for `rate_trail` and `find_trails`, offered only then.
     pub fn with_trails(&self, trails: crate::trail::Trails) {
         let _ = self.hub.trails.set(trails);
+    }
+
+    /// Check through `dreams`, the ant's dreams as sense keeps them, the trails `save_trail` saves on a dream's thread
+    /// or in answer to a dream finding ([`crate::sense::Dreams::ground`]).
+    pub fn with_dreams(&self, dreams: crate::sense::Dreams) {
+        let _ = self.hub.dreams.set(dreams);
     }
 
     /// The ant's provider, connected: none when the ant has none.
@@ -401,6 +408,8 @@ struct Hub {
     provider: OnceLock<Connected>,
     /// The runs the ant conducts ([`Mcp::with_trails`]).
     trails: OnceLock<crate::trail::Trails>,
+    /// The ant's dreams, when its provider is sense ([`Mcp::with_dreams`]).
+    dreams: OnceLock<crate::sense::Dreams>,
     /// The provider's tools as listed last.
     served: Mutex<provider::Served>,
     /// Who the provider calls are for ([`Mcp::with_callers`]).

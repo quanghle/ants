@@ -1040,8 +1040,9 @@ const REVIEW_NOTE: &str = "[ants] Review the work and identity in the packet fro
     suggest an action for each finding, or return an empty list if none is warranted. Judge work against identity \
     and identity against work. For a persona, self_model or relationship finding, cite the ant's own threads and \
     build on its existing identity. Check the earlier findings against the new work; for a finding that did not \
-    hold, return a follow_up naming its id in \"follows\". Only read and suggest: change nothing and message no one. \
-    Read code only in the review checkouts of the commits named in the packet.";
+    hold, return a follow_up naming its id in \"follows\". For a multi-step approach repeated across the threads, \
+    return a trail finding outlining a saved trail that takes the specifics as args. Only read and suggest: change \
+    nothing and message no one. Read code only in the review checkouts of the commits named in the packet.";
 
 /// Why a turn that ended sends no reply, if it sends none: the session called `complete`, or the message was another
 /// ant's reply to the ant's `own`.

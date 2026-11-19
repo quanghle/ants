@@ -105,6 +105,15 @@ colony nor the conductor machine's `~/.ants/trails` has a trail of. It replaces 
 ([Trust](#trust)). A saved trail records who saved it, a human or an ant, and the run an ant saved it from; a human
 saving under a taken name replaces the trail, an ant's included, and becomes its saver.
 
+Trails also come from dreams ([sense.md](sense.md#dreams)): a sage's finding of kind `trail` tells of a multi-step
+approach the ant took again and again across its threads, cites those threads, and outlines a saved trail taking its
+specifics as args (name, description, args with an example each, phases), without a script. The ant applies it on the
+dream thread by writing the script, trying it with `run_trail` where a run is safe, saving it with `save_trail` naming
+the finding in `finding`, and naming the trail in the `trails` of the finding's `sense_dream` verdict. Such a save
+counts as one of the dream's 20 writes; it is refused when the finding rests on untrusted text ([Trust](#trust)), or
+when a saved trail other than the one saved already serves the task the finding suggests (`find_trails` would show it
+with more ratings worked than failed): the finding is then rejected naming that trail.
+
 A conductor's daemon also finds trails in `~/.ants/trails/<name>.py` on its machine, and the CLI lists and runs the
 `.py` files of the CLI machine's `~/.ants/trails` by the same name, the file's, whatever its meta's `name`. On a name
 both have, the colony's trail runs, so every conductor runs the same trail by that name.
@@ -153,12 +162,13 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   not ended, and `stop_trail` stops one ([Restarts, stops and resumes](#restarts-stops-and-resumes)). The tools are
   offered only while the bus keeps trail runs.
 
-  Once an inline script works and its steps will recur, **`save_trail(name, script?, run?, replace?)`** saves it for
-  the colony as the ant's: a `script`, or the script of a finished `run` of an inline script the ant conducted (done
-  or failed), recorded as the trail's source. A run of a saved trail is refused, as that trail is saved already. The
-  script is checked as `ants trail save` checks a file, not run, and every ant then runs it by name. A name a human or
-  another ant saved is refused, so a changed copy goes under a new name; the ant's own is replaced only with
-  `replace: true`. **`remove_trail(name)`** removes a trail the ant saved, refusing one a human or another ant saved
+  Once an inline script works and its steps will recur, **`save_trail(name, script?, run?, replace?, finding?)`** saves
+  it for the colony as the ant's: a `script`, or the script of a finished `run` of an inline script the ant conducted
+  (done or failed), recorded as the trail's source. A run of a saved trail is refused, as that trail is saved already.
+  The script is checked as `ants trail save` checks a file, not run, and every ant then runs it by name. A name a human
+  or another ant saved is refused, so a changed copy goes under a new name; the ant's own is replaced only with
+  `replace: true`. On a dream's thread, `finding` names the dream finding the save answers
+  ([Saved trails](#saved-trails)). **`remove_trail(name)`** removes a trail the ant saved, refusing one a human or another ant saved
   and a name only `~/.ants/trails` holds. It leaves the trail's [tips](#tips): a trail saved later under that name
   inherits them, ranked as of an older script. Runs already started keep the script they started with.
 - **A schedule** with `trail = "NAME"` in place of `text` ([config.md](config.md#schedules)): each firing sends `ant`,
@@ -316,7 +326,9 @@ A run takes the trust of the thread it started on (its origin):
   started. These run saved trails and inline scripts alike.
 - **Untrusted:** runs on a thread a webhook or a schedule started, or one asking a review, which relays text from
   outside the bus. These run only saved trails, which a human saved or an ant saved from a trusted thread (`save_trail`
-  and `remove_trail` are refused on an untrusted thread, a step of an untrusted run included): an inline script is
+  and `remove_trail` are refused on an untrusted thread, a step of an untrusted run included, and `save_trail` in answer
+to a dream finding marked untrusted, or on a dream's thread whose dream holds untrusted text without naming a trusted
+finding): an inline script is
   refused (`a run started from a webhook's thread
   runs only saved trails`), a goto to one too (`… goes only to saved trails`), and each step's thread is narrowed to
   the read-only tool rules webhook threads get by default ([config.md](config.md#tool-permissions)). A schedule

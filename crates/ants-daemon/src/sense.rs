@@ -3,9 +3,10 @@
 //! The rest is sense's alone, behind [`Sense`]: the data it keeps of the ants a process serves ([`stores`]), over their
 //! event logs in the hub's stream ([`log`]); each ant's schedule of reminders, memory maintenance and dreams
 //! ([`scheduler`]); its sage's answers to the reviews of its dreams; the skills it offers the ant's harness; the
-//! workdirs of the ant's threads, through which it reaches the ant's files ([`workdirs`]); and what its colony entry
-//! shows of it: the profile the ant publishes, or why sense keeps none of its data ([`published`]). A home an ant
-//! takes over keeps the sense data in it ([`take_over`]).
+//! workdirs of the ant's threads, through which it reaches the ant's files ([`workdirs`]); the ant's dreams as the
+//! trails it saves answer them ([`dreams`]); and what its colony entry shows of it: the profile the ant publishes, or
+//! why sense keeps none of its data ([`published`]). A home an ant takes over keeps the sense data in it
+//! ([`take_over`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use ants_proto::{AntIdentity, Envelope, SenseId, UserId};
 use ants_sense::store::{Items, StoreError};
 use anyhow::{Context as _, Result};
 
+mod dreams;
 pub mod log;
 mod published;
 mod scheduler;
@@ -23,6 +25,7 @@ mod workdirs;
 
 pub use ants_sense::home::DIR;
 pub use ants_sense::{CAPABILITIES, NAME};
+pub use dreams::{Dreams, Grounded, Refusal};
 pub(crate) use scheduler::{Daemon, Dreaming, Serving};
 pub use stores::{Hosting, Link};
 
@@ -86,6 +89,11 @@ impl Sense {
     /// The provider registered for the ants whose setting names sense.
     pub fn provider(&self) -> Arc<dyn Provider> {
         self.provider.clone()
+    }
+
+    /// The dreams of the ants it serves, as `save_trail` checks a save against them.
+    pub fn dreams(&self) -> Dreams {
+        Dreams::new(self.provider.clone())
     }
 
     /// Run the schedule of the ant `config` serves on `machine` until the guard drops, its dreams taking from the

@@ -112,7 +112,7 @@ impl Hub {
         }
     }
 
-    async fn call_context(&self, thread: &ThreadId) -> Result<CallContext, String> {
+    pub(super) async fn call_context(&self, thread: &ThreadId) -> Result<CallContext, String> {
         let caller = self.who_calls().await?;
         let origin = match self.origin_of(thread).await {
             Ok(Some(origin)) => origin,

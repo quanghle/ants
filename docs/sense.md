@@ -589,7 +589,7 @@ the daemon sends no further packet and wakes the ant with the packet alone. A sa
 an ant that a live colony entry names as its sage, so the requesting ant can proceed without waiting. The packet, at
 most 64 KiB, holds:
 
-- for the ant, the verdicts on the last dream's findings, each with its reason and the items it names, or
+- for the ant, the verdicts on the last dream's findings, each with its reason and the items and trails it names, or
   `unanswered`, then their tally (the counts its diary's title gives), at most an eighth of the packet's budget, the
   last findings' verdicts left out first; for the sage, its earlier findings for the ant and what became of them
   (below);
@@ -637,7 +637,7 @@ packet's own. Each comes with its suggested action and the ant's last verdict an
 the packet offers it again, with the id it is offered by when that differs), and, for one applied, what became of each
 item the verdict names: a memory's status (marked when it changed since the verdict), the days it was read and its
 helpful, stale and wrong votes; a proposal's status; whether a self-model or relationship record was replaced since;
-or that the item is no longer kept.
+or that the item is no longer kept; then the trails it names, saved for it.
 Beside a finding applied come the ant's vital signs (below) of the dream it was given in and up to 4 before, and of up
 to 5 dreams since, the one being reviewed included, side by side: the threads, the prompts cancelled by a human, the
 share of tool calls failed, the tool requests rejected and the tokens a thread; a dream keeping none is left out. They
@@ -739,7 +739,11 @@ fenced JSON block `{"findings": [{"kind", "finding", "evidence": {"threads", "me
 `stale_memory`, a finding about the identity has kind `persona`, `self_model` or `relationship`: it cites the ant's own
 threads and builds on the persona the ant has, never on a house style. The sage holds the threads against its earlier
 findings and answers one that did not hold with a finding of kind `follow_up` naming its id, as those findings show it,
-in `follows`: `{"kind": "follow_up", "follows": "3.2", …}`. The review thread is narrowed
+in `follows`: `{"kind": "follow_up", "follows": "3.2", …}`. A finding of kind `trail` tells of a multi-step approach
+the ant took again and again across its threads, or one another ant could reuse, cites each thread that took it, and
+suggests a saved trail taking its specifics (repositories, issues, ants, paths) as args, in `trail`: `{"name",
+"description", "args": {"repo": "an example from the threads"}, "phases": ["what each step does"]}`, at most 3 a
+review. It outlines no script: the ant writes one ([Trails](trails.md#saved-trails)). The review thread is narrowed
 to `REVIEW_ALLOW` (`read:*`, `search`, `think`, and the ants tools `list_ants`, `read_notes`, `read_attachment`,
 `list_reactions` and `suggest_thread_title`): the ants MCP server refuses every other tool on it, provider tools and
 `complete` included.
@@ -754,7 +758,11 @@ Before prompting, the sage's daemon checks out each commit the review names, at 
 checkout, or why a commit has none, which fails nothing. The checkouts go once the review's prompt ends, and those an
 earlier run left when the daemon starts.
 
-**The answer:** the sage's findings, at most 20, each needing a kind, a text, an action and some evidence, replace the
+**The answer:** the sage's findings, at most 20, each needing a kind, a text, an action and some evidence, a `trail`
+also a thread cited and a readable outline (a name made a trail name: lowercased, each run of characters other than
+`a-z` and `0-9` made a `-`, cut to 64; a description of 1–200 characters; at most 8 args, each a key of 1–40 of `a-z`,
+`0-9` and `_` with an example of 1–120 characters; 2–8 phases of 1–120 characters), else the finding is left out as
+unreadable, the trail findings past 3 left out as those past 20 are, replace the
 packet's own but those on the identity and those offered again (a late answer's to the dream before among them), which
 stay whatever the sage answers, the identity findings numbered on after the sage's; so a dream answered holds at most
 20 findings of the sage and 20 of the packet. The sage's are marked untrusted when they cite a thread a webhook started
@@ -801,10 +809,13 @@ the findings of an answer arriving after the ant went on with the packet alone, 
 record of the review they answer, by the sage's numbering. The tally of the sage's identity is counted from these
 records ([Identity](#identity)). A clone inherits no review record.
 
-**On the dream thread,** `sense_dream` answers findings: `verdicts`, a list of `{finding, verdict, reason, items?}`,
-`verdict` being `applied` (naming in `items` the memories or records written or voted on, or the proposal made; none
-for a `proposal` finding, which it confirms), `rejected` or `deferred`, the reason at most 500 characters; a later
-verdict on a finding replaces the earlier one. A finding on the identity or a sage's practice applied names, among its
+**On the dream thread,** `sense_dream` answers findings: `verdicts`, a list of `{finding, verdict, reason, items?,
+trails?}`, `verdict` being `applied` (naming in `items` the memories or records written or voted on, or the proposal
+made, none for a `proposal` finding, which it confirms; and in `trails` the trails saved on the dream thread for the
+finding, below), `rejected` or `deferred`, the reason at most 500 characters; a later verdict on a finding replaces the
+earlier one. A `trail` finding applied names its trail in `trails`, else the verdict is refused (`invalid_arguments`),
+as are `trails` on a verdict other than `applied`; a trail not saved on the dream thread naming that finding or none is
+`not_found`. A finding on the identity or a sage's practice applied names, among its
 items, one of the kind it asks for, else the verdict is refused (`invalid_arguments`): a persona proposal (or the
 persona) for `no_persona`; the self-model for `no_self_model` and `stale_self_model`; the relationship record of the
 human or ant named for `no_relationship` and `no_reviewed_relationship`; for `inherited`, the self-model or a proposal
@@ -815,14 +826,22 @@ no dream offers it again until what it is about
 changed since the verdict (one of its items written other than by a read, or the count it rests on) or 14 days of the
 ant's active time passed, its dormancies not counted; deferred and
 unanswered findings come again in the next dream while they hold. `done: true` finishes the dream; without arguments it
-shows the findings and verdicts. The dream thread makes at most 20 writes (`sense_remember`, `sense_vote` and the
-records `sense_identity` replaces), past which writes are refused (`dream_cap`). While a finding marked untrusted is
-open, unanswered or deferred, what `sense_remember` and `sense_identity` write on the dream thread is stored
-untrusted. Finishing the dream, or beginning the next one while it
-is unfinished, writes its diary: an episode memory counting the findings applied, rejected, deferred and unanswered,
-with each verdict and reason. A verdict on a proposal decides it at once ([Persona and skills](#persona-and-skills)).
-Refusals: `no_dream`, `not_dream_thread`, `done` (the dream is finished), `not_found` (a finding or item), `too_soon`,
-`stale` and `decided` (a proposal), `too_long`.
+shows the findings and verdicts, and the trails saved on the thread. The dream thread makes at most 20 writes
+(`sense_remember`, `sense_vote`, the records `sense_identity` replaces and the trails `save_trail` saves), past which
+writes are refused (`dream_cap`). While a finding marked untrusted is open, unanswered or deferred, what
+`sense_remember` and `sense_identity` write on the dream thread is stored untrusted.
+`save_trail` ([Trails](trails.md#saved-trails)) applies a `trail` finding: on the dream thread, naming the finding in
+`finding`, it saves the trail and records it on the dream, one of its 20 writes, refused past them or, as a persona or
+skill proposal is, on untrusted ground: when the finding it names is marked untrusted, or, naming none, while the
+dream's packet holds untrusted text or a finding marked untrusted. Naming a finding no dream holds is refused, as is
+naming a `trail` finding whose suggested description a saved trail other than the one saved already serves (its name
+and description match it and more of its ratings on such tasks worked than failed,
+[Rating and finding trails](trails.md#rating-and-finding-trails)): that finding is rejected naming the trail serving
+it. Finishing the dream, or beginning the next one while it is unfinished, writes its diary: an episode memory
+counting the findings applied, rejected, deferred and unanswered, with each verdict and reason and the items and trails
+it names. A verdict on a proposal decides it at once ([Persona and skills](#persona-and-skills)).
+Refusals: `no_dream`, `not_dream_thread`, `done` (the dream is finished), `not_found` (a finding, item or trail),
+`too_soon`, `stale` and `decided` (a proposal), `too_long`.
 
 ## Brief
 
