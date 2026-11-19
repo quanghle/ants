@@ -105,7 +105,7 @@ impl Hub {
         if !self.trusted(thread, &current).await? {
             return Err(UNTRUSTED.to_owned());
         }
-        // A trail removed while its run goes on keeps no tips: `ants trail rm` purged them.
+        // A trail removed while its run goes on takes no more tips.
         trails.saved_script(trail).await.map_err(|e| format!("{e}; tips are left only on saved trails"))?;
         let text = args.text.trim();
         if text.is_empty() {
