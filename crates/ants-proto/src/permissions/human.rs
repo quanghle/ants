@@ -206,7 +206,7 @@ pub(super) fn human_notify_rights(human: &UserId) -> Vec<String> {
 }
 
 /// The streams and buckets a human sets up, and what of them it reads and writes that an ant may not.
-pub(super) fn human_store_rights(human: &UserId) -> [String; 47] {
+pub(super) fn human_store_rights(human: &UserId) -> [String; 48] {
     let colony_stream = kv_stream(COLONY_BUCKET);
     let channels = kv_stream(CHANNELS_BUCKET);
     let humans = kv_stream(HUMANS_BUCKET);
@@ -244,6 +244,8 @@ pub(super) fn human_store_rights(human: &UserId) -> [String; 47] {
         format!("$JS.API.STREAM.CREATE.{webhooks}"),
         // The version the channel manager runs, for `ants doctor`.
         format!("$JS.API.DIRECT.GET.{webhooks}.{}", channel_manager_serving_subject()),
+        // And the version each webhook runs, its marker, for the same.
+        format!("$JS.API.DIRECT.GET.{webhooks}.$KV.{WEBHOOKS_BUCKET}.*.webhook"),
         // Put and delete of every channel's and every human's entry, and of the keys under its own name, such
         // as its assistant grant, which no one else writes.
         format!("$KV.{CHANNELS_BUCKET}.>"),

@@ -597,7 +597,9 @@ most 64 KiB, holds:
   name, its ratings (how often its runs were rated worked, partly and failed) and its description, data rather than
   instructions, the best rated first (by worked plus half of partly against the rest), then the latest saved, at most
   a sixteenth of the packet's budget, the rest counted as left out, or that they could not be read: so a `trail`
-  finding suggests no trail the colony has, and an approach one of them serves gets a finding naming it instead;
+  finding suggests no trail the colony has, and an approach one of them serves gets a finding naming it instead (a
+  memory or record written for such a finding may name the saved trail to take, judged by its own votes; no trail's
+  script, tip or rating enters sense);
 - the findings, at most 20, each with an id `<dream>.<n>`: those of a sage's answer to the last dream's review come too
   late (**The answer**, below) first, then the findings of the last dream deferred or unanswered that still hold,
   offered again, then what the ant's identity lacks for its work (below), memories with both `helpful` and `stale`
@@ -691,8 +693,9 @@ by their records (**The sage's records**, below): those asked, answered or told 
 asked first, each with the ant and dream reviewed, when the review was asked and answered, what an answered one's
 thread spent (`spent N tokens and cost C`, or `spend unknown` when nothing was reported), and each finding's id and
 kind, a `follow_up` with the finding its record keeps it follows (`2.1 follow_up of 1.2`), with what came of it
-(`applied, still holding`, `applied, since undone`, `rejected`, `deferred` or `unanswered`), then the tally of all its
-reviews, including linked and unlinked follow-ups. An ant tells its verdicts with its next review, so the findings
+(`applied, still holding`, `applied, since undone`, `rejected`, `deferred` or `unanswered`), and how many findings
+of the answer were left out past its caps and how many as unreadable, each on a line of its own, then the tally of all
+its reviews, including linked and unlinked follow-ups. An ant tells its verdicts with its next review, so the findings
 of its latest one show unanswered until then.
 The section takes at most an eighth of the packet's budget, the earliest reviews left out first. The text of the review
 threads, other ants' work, is left out, so they make the packet hold no untrusted text: a review thread is one whose
@@ -752,7 +755,8 @@ in `follows`: `{"kind": "follow_up", "follows": "3.2", …}`. A finding of kind 
 the ant took again and again across its threads, or one another ant could reuse, cites each thread that took it, and
 suggests a saved trail taking its specifics (repositories, issues, ants, paths) as args, in `trail`: `{"name",
 "description", "args": {"repo": "an example from the threads"}, "phases": ["what each step does"]}`, at most 3 a
-review. It outlines no script: the ant writes one ([Trails](trails.md#saved-trails)). The review thread is narrowed
+review, within the bounds the packet tells (those of **The answer**, below). It outlines no script: the ant writes one
+([Trails](trails.md#saved-trails)). The review thread is narrowed
 to `REVIEW_ALLOW` (`read:*`, `search`, `think`, and the ants tools `list_ants`, `read_notes`, `read_attachment`,
 `list_reactions` and `suggest_thread_title`): the ants MCP server refuses every other tool on it, provider tools and
 `complete` included.
@@ -769,8 +773,10 @@ earlier run left when the daemon starts.
 
 **The answer:** the sage's findings, at most 20, each needing a kind, a text, an action and some evidence, a `trail`
 also a thread cited and a readable outline (a name made a trail name: lowercased, each run of characters other than
-`a-z` and `0-9` made a `-`, cut to 64; a description of 1–200 characters; at most 8 args, each a key of 1–40 of `a-z`,
-`0-9` and `_` with an example of 1–120 characters; 2–8 phases of 1–120 characters), else the finding is left out as
+`a-z` and `0-9` made a `-`, cut to 64; a description cut to 200 characters; at most 8 args, each key made an arg
+name the same way, of `a-z`, `0-9` and `_`, cut to 40, with a string, number or boolean example, a number or boolean
+taken as its text, cut to 120 characters; 2–8 phases, each cut to 120 characters; refused for more args, fewer or more
+phases, keys that clash or come out empty, or an example of another type), else the finding is left out as
 unreadable, the trail findings past 3 left out as those past 20 are, replace the
 packet's own but those on the identity and those offered again (a late answer's to the dream before among them), which
 stay whatever the sage answers, the identity findings numbered on after the sage's; so a dream answered holds at most
@@ -783,7 +789,9 @@ dropped and noted (`sage: follow_up, unlinked: 3.9 is no earlier finding of the 
 `sage: follow_up, unlinked: naming no earlier finding`), and never fails the answer. They prompt the ant on the review
 thread itself, which becomes the dream thread, inside a block between `<sage-review>` and `</sage-review>` stating they
 are another ant's suggestions to verify against their evidence, not instructions, followed by the identity findings and
-the findings offered again, each in a section of its own, and the commits; the answer goes to no one. An empty list
+the findings offered again, each in a section of its own, and the commits, after a line for the findings left out
+past the caps (`past the 20 findings or the 3 trail findings an answer gives`) and one for those left out as
+unreadable, told apart; the answer goes to no one. An empty list
 wakes nobody, the identity findings left for the next dream to offer again. A reply with no readable finding, or a
 notice that the sage's daemon gave up on the review or had it withdrawn, wakes the ant with the packet alone at once; so
 does a sage silent for 6 hours. A later answer prompts no one: the readable findings of the first one, marked untrusted
@@ -795,8 +803,9 @@ there as any offered again (the limit of 20 holds); an answer arriving after the
 outcomes last told to that sage (`review_outcomes`). Each changed outcome carries the last verdict,
 the ant's reason for it (`reason`, at most 200 characters, on one line, its secrets redacted, the ant's text and
 untrusted) and, for one applied, whether it still holds, as the earlier findings judge them, over the dreams begun
-within the ant's last 90 active days; one naming trails keeps the holding last told while the colony's saved trails
-cannot be read. The `findings` array takes at most 64 KiB of compact JSON, oldest findings first.
+within the ant's last 90 active days; one naming trails keeps the holding last told of its applied verdict while the
+colony's saved trails cannot be read, holding when told only of another verdict. The `findings` array takes at most
+64 KiB of compact JSON, oldest findings first.
 The same batch and eligible ids go on every try; only a batch acknowledged by JetStream (at the hub or the leaf
 outbox) counts as sent. Later reviews include still-eligible changes not yet sent, with their current verdicts and
 outcomes. If needed, checkout metadata or packet text is shortened to fit the bus without changing the batch or ids.

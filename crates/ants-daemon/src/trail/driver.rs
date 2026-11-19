@@ -19,8 +19,8 @@ use super::report::clip;
 use super::{Answer, Slot, Step, Trails, load, locked, steps};
 
 /// How long a pass that failed waits before the next, at first and at most.
-const RETRY_FIRST: Duration = Duration::from_secs(1);
-const RETRY_MAX: Duration = Duration::from_mins(1);
+pub(super) const RETRY_FIRST: Duration = Duration::from_secs(1);
+pub(super) const RETRY_MAX: Duration = Duration::from_mins(1);
 /// Most bytes of a run's session record, and of its header: NATS's 1 MiB payload, less room for its headers.
 pub const MAX_RECORD: usize = 1024 * 1024 - 8 * 1024;
 /// Most characters of a run's phase, and of its error at its end when its record would not hold it whole.
@@ -158,7 +158,12 @@ impl Trails {
                 continue;
             }
             let session = serde_json::to_string(engine.state())?;
-            let record = TrailSession { session, pending: slot.book().pending.clone(), queued: load::queued(&engine) };
+            let (pending, anew) = {
+                let mut book = slot.book();
+                book.anew.retain(|call| engine.outstanding().iter().any(|c| c.call == *call));
+                (book.pending.clone(), book.anew.clone())
+            };
+            let record = TrailSession { session, pending, queued: load::queued(&engine), anew };
             // The record as save_session stores it: the session escaped once more, beside the calls it waits on.
             let size = serde_json::to_vec(&record)?.len();
             if size > MAX_RECORD {
@@ -211,7 +216,7 @@ impl Trails {
                 let limit = if e == WorkerError::OutOfMemory { Limit::Memory } else { Limit::Compute };
                 Ok(engine.fail_on(Some(limit), format!("replaying the run's journal: {e}")))
             }
-            Err(RunError::Worker(e @ WorkerError::Oversized(_))) => {
+            Err(RunError::Worker(e @ (WorkerError::Oversized(_) | WorkerError::Protocol(_)))) => {
                 Ok(engine.fail(format!("replaying the run's journal: {e}")))
             }
             Err(RunError::Worker(e)) => Err(anyhow!(e).context("replaying the trail's journal")),
@@ -228,11 +233,12 @@ impl Trails {
                     book.header.phase = Some(clip(phase, MAX_PHASE));
                 }
             }
-            let (cancelled, pending) =
+            let (cancelled, pending): (Vec<PendingCall>, _) =
                 std::mem::take(&mut book.pending).into_iter().partition(|call| progress.cancelled.contains(&call.call));
             book.pending = pending;
             (book.header.clone(), cancelled)
         };
+        self.give_back_unsent(slot, &cancelled);
         for call in &cancelled {
             self.retire(&header.run, call);
         }
@@ -265,7 +271,10 @@ impl Trails {
     }
 
     /// End the run of `slot` in `state`, bounded to what its record holds, then store and tell its end ([`Trails::close`]).
+    /// The steps it counted and never sent are given back.
     async fn end(&self, slot: &Slot, state: RunState) -> Result<()> {
+        let pending = slot.book().pending.clone();
+        self.give_back_unsent(slot, &pending);
         {
             let mut book = slot.book();
             book.header.state = state;
@@ -336,13 +345,16 @@ impl Trails {
         let mut issued = Issued::default();
         let mut colony = None;
         // A call answered while the script computed is outstanding in the engine until the next pass hands it in.
+        let anew = |call: &Call| slot.book().anew.contains(&call.call);
         let has_step = |call: &Call| {
             let book = slot.book();
             book.pending.iter().any(|pending| pending.call == call.call)
                 || book.answers.iter().any(|(answered, _)| *answered == call.call)
         };
         for call in engine.outstanding().iter().filter(|call| call.function.is_step() && !has_step(call)) {
-            if steps >= budget.limits.steps {
+            // A call sent anew on resuming counted its step already.
+            let counted = anew(call);
+            if !counted && steps >= budget.limits.steps {
                 let error = format!("the run reached its limit of {} steps", budget.limits.steps);
                 issued.answers.push(self.raise(&header.run, call, error).await?);
                 issued.broke = Some(RunLimit::Steps);
@@ -398,11 +410,15 @@ impl Trails {
                 }
                 locked(&self.inner.threads).insert(pending.thread.clone(), Step::Live(header.run.clone()));
             }
-            steps += 1;
             made += 1;
             if call.function == Function::Agent {
                 granted.push((pending.call, pending.thread.clone()));
             }
+            if counted {
+                slot.book().pending.push(pending);
+                continue;
+            }
+            steps += 1;
             {
                 let mut book = slot.book();
                 count_steps(&mut book.header, 1);
@@ -517,8 +533,12 @@ impl Trails {
             let message = self.bounded(&header, message);
             self.inner.store.put_step(&call.thread, &thread).await?;
             (self.inner.outbox)(message).await?;
-            if let Some(pending) = slot.book().pending.iter_mut().find(|pending| pending.message == call.message) {
-                pending.sent = true;
+            {
+                let mut book = slot.book();
+                if let Some(pending) = book.pending.iter_mut().find(|pending| pending.message == call.message) {
+                    pending.sent = true;
+                }
+                book.anew.retain(|anew| *anew != call.call);
             }
             self.report_step(&header, call, StepStage::Started);
         }
@@ -532,13 +552,15 @@ impl Trails {
     /// back.
     async fn publish_child(&self, slot: &Slot, header: &TrailRun, call: &PendingCall) -> Result<()> {
         if let Err(error) = self.start_child(header, call).await? {
-            self.give_back_step(slot);
+            self.give_back_unsent(slot, std::slice::from_ref(call));
             return self.resolve(slot, header, call, Answer::Error(error), 0).await;
         }
         let sent = {
             let mut book = slot.book();
             let pending = book.pending.iter_mut().find(|pending| pending.call == call.call && !pending.sent);
-            pending.map(|pending| pending.sent = true).is_some()
+            let sent = pending.map(|pending| pending.sent = true).is_some();
+            book.anew.retain(|anew| *anew != call.call);
+            sent
         };
         if sent {
             self.report_step(header, call, StepStage::Started);

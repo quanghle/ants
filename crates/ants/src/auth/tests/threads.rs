@@ -378,14 +378,14 @@ async fn the_human_s_side_tells_the_owner_the_thread_s_posts_name_not_the_one_an
         ChannelPost::on_thread(ops, thread.clone(), dev_b.clone(), "@dev-a check").with_owner(Some(human.clone()));
     let post_seq = bus::publish_json(&b_js, post.subject(), &post, None).await.unwrap();
 
-    let (humans, webhooks) = (Registry::new(alice.clone()), Webhooks::new(h_js.clone()));
+    let humans = Registry::new(alice.clone());
     let threads = Threads::new(
         h_js.clone(),
         alice.clone(),
         DirectKv::new(&h_js, None, ants_proto::SESSIONS_BUCKET).await.unwrap(),
     )
     .reading(Reading::Gets);
-    let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
+    let claims = Claims { humans: &humans, threads: &threads };
     for (consumer, seq) in [(ants_proto::inbox_consumer(&dev_a), message_seq), (chan_consumer(&dev_a), post_seq)] {
         let advisory = dead::MaxDeliveries { stream: STREAM.to_owned(), consumer, stream_seq: seq, deliveries: 5 };
         let (_, letter) = dead::bury_undelivered(&h_js, &stream, &advisory, &claims).await.unwrap().unwrap();

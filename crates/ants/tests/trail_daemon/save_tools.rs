@@ -215,7 +215,7 @@ async fn an_ant_replaces_and_removes_only_the_trails_it_saved_on_trusted_threads
     assert!(ok && text.starts_with("Removed trail deploy, which this ant saved 1m ago. Its tips stay"), "{text}");
     assert_eq!(colony_trail(&lead.js, "deploy").await, None);
     let board = lead.trails.tips().board(&tip.trail).await.unwrap();
-    assert!(board.tip(&tip.id, chrono::Utc::now(), None).is_some(), "the trail's tips stay");
+    assert!(board.tip(&tip.id, None, chrono::Utc::now(), None).is_ok(), "the trail's tips stay");
     let (ok, text) = save(&client, json!({"name": "deploy", "script": first})).await;
     assert!(ok && text.starts_with("Saved trail deploy"), "a removed name is saved anew: {text}");
     std::fs::remove_dir_all(&dir).unwrap();

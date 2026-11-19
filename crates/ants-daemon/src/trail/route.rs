@@ -40,19 +40,19 @@ impl Trails {
     async fn next_leg(&self, header: &TrailRun, engine: &Run, call: &Call) -> Result<(TrailLeg, Run, String), String> {
         let args = steps::GotoArgs::of(&call.args)?;
         let current = header.leg().ok_or("the run is on no leg")?;
-        let (trail, script) = match args.trail {
-            None => (current.trail.clone(), current.script.clone()),
+        let (trail, script, local) = match args.trail {
+            None => (current.trail.clone(), current.script.clone(), current.local),
             Some(name) => {
                 let name: TrailName = name.parse().map_err(|e| format!("goto() names no trail as {name:?}: {e}"))?;
-                let script = self.inner.saved.script(&name).await?;
-                (Some(name), script)
+                let found = self.inner.saved.script(&name).await?;
+                (Some(name), found.script, found.local)
             }
         };
         if trail.is_none() && !header.origin.trusted() {
             return Err("a run started from a webhook's thread goes only to saved trails".to_owned());
         }
         let first_call = engine.state().next_call();
-        let next = Leg { trail, script, at: args.at, args: args.state, first_call }.prepare(&header.limits)?;
+        let next = Leg { trail, local, script, at: args.at, args: args.state, first_call }.prepare(&header.limits)?;
         let leg = &next.0;
         if let Some(entered) = header.route.iter().find(|entered| entered.trail == leg.trail && entered.at == leg.at) {
             let entered = place(entered);

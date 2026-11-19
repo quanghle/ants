@@ -41,7 +41,6 @@ use crate::provider::context::Callers;
 use crate::provider::events::{self, Lifecycle};
 use crate::provider::wake;
 use crate::publish::{Publish, Publisher};
-use crate::records::webhooks::Webhooks;
 use crate::secrets::redact::Redactor;
 use crate::stream::notes::{self, NotesStore};
 use crate::stream::reading::Reading;
@@ -424,7 +423,6 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         escalator: &escalator,
         notes: notes.as_ref(),
         threads: &threads,
-        webhooks: &Webhooks::new(js.clone()),
         colony: &colony,
         humans: &humans,
         behalf: Records::new(js.clone(), config.connection.js_domain.clone(), account()),
@@ -1281,8 +1279,6 @@ struct Inbox<'a> {
     /// The thread notes, where the members of an escalation group other than its leader answer.
     notes: &'a dyn NotesStore,
     threads: &'a Threads,
-    /// Who of the senders that say so are webhooks.
-    webhooks: &'a Webhooks,
     /// The colony, for the members a triage prompt shows.
     colony: &'a Colony,
     /// Who is a human, and who gets the escalations of a thread with no owner.

@@ -19,10 +19,25 @@ fn started(text: &str) -> RunId {
 
 /// An outbox handing what it sends to the receiver.
 fn channel_outbox() -> (ants_daemon::mcp::Outbox, mpsc::UnboundedReceiver<Envelope>) {
+    channel_outbox_failing(0)
+}
+
+/// [`channel_outbox`], failing to send the first `spent` `run_spent` notices.
+fn channel_outbox_failing(spent: usize) -> (ants_daemon::mcp::Outbox, mpsc::UnboundedReceiver<Envelope>) {
     let (tx, rx) = mpsc::unbounded_channel::<Envelope>();
-    let outbox: ants_daemon::mcp::Outbox = Arc::new(move |envelope| {
+    let failures = Arc::new(std::sync::atomic::AtomicUsize::new(spent));
+    let outbox: ants_daemon::mcp::Outbox = Arc::new(move |envelope: Envelope| {
         let tx = tx.clone();
+        let fails = envelope.notice == Some(NoticeKind::RunSpent)
+            && failures
+                .try_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
         Box::pin(async move {
+            if fails {
+                anyhow::bail!("the bus is away");
+            }
             tx.send(envelope).unwrap();
             Ok(())
         })
@@ -255,4 +270,43 @@ result
     let RunState::Done { result } = lead.ended(&run).await else { panic!("not done") };
     let error = result.as_str().unwrap();
     assert!(error.contains("did not match the schema, asked 3 times"), "asked again twice in all: {error}");
+}
+
+#[tokio::test]
+async fn a_stopped_run_answering_a_step_tells_what_it_spent_until_the_notice_goes_out() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-nested-stop");
+    let saved = dir.join("saved");
+    std::fs::create_dir_all(&saved).unwrap();
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let (outbox, mut dev_sent) = channel_outbox_failing(1);
+    let (dev_trails, dev) = ant_mcp_sending(&server, "dev", &dir, &saved, outbox).await;
+    let serving = serve(&dev_trails);
+
+    let root = lead.start("await agent(\"fan out\", ant=\"dev\")\n", TrailLimits::default()).await;
+    let step = lead.step().await;
+    let _held = dev.begin(&step);
+    let client = mcp_client(&dev, &step.thread_id).await;
+    let (ok, text) = call(&client, "run_trail", json!({"script": format!("{META}{FOUR}")})).await;
+    assert!(ok, "{text}");
+    let run = started(&text);
+    let first = tokio::time::timeout(Duration::from_secs(30), dev_sent.recv()).await.unwrap().unwrap();
+    assert!(first.trail_step.is_some(), "the run's first step goes out");
+    dev_trails.stop(&run, &UserId::human()).await.unwrap();
+
+    let notice = loop {
+        let sent = tokio::time::timeout(Duration::from_secs(30), dev_sent.recv()).await.unwrap().unwrap();
+        if sent.notice == Some(NoticeKind::RunSpent) {
+            break sent;
+        }
+    };
+    assert_eq!((&notice.to, &notice.thread_id), (&ant("lead"), &step.thread_id), "on the step's thread");
+    let spent = notice.trail_spent.expect("the notice tells what was spent");
+    assert_eq!((spent.turns, spent.running), (0, 0), "sent again once its first send failed, none running: {spent:?}");
+    assert!(lead.trails.take(&notice).await.unwrap());
+    let header = lead.header(&root).await;
+    assert_eq!(header.steps, 1 + spent.steps, "its own step and what the stopped run told");
+    assert_eq!(header.grants[0].spent, spent);
+    serving.abort();
 }

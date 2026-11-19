@@ -16,8 +16,7 @@ use std::time::{Duration, SystemTime};
 
 use ants_daemon::bus;
 pub use ants_daemon::channel::list;
-use ants_daemon::channel::{CLOCK_SLACK, OriginFold, Stored, load, read_back};
-use ants_daemon::records::webhooks::Webhooks;
+use ants_daemon::channel::{CLOCK_SLACK, Stored, load, read_back};
 use ants_proto::{
     ChannelEntry, ChannelId, ChannelPost, Humans, ThreadId, ThreadMarks, ThreadOrigin, UserId, Uuid, subject,
 };
@@ -242,8 +241,7 @@ pub async fn serve(url: &str, creds: Option<&std::path::Path>, domain: Option<&a
     let (client, js) = connecting.await?.context("connecting")?;
     let published = ants_daemon::records::direct_kv::DirectKv::new(&js, domain, ants_proto::WEBHOOKS_BUCKET).await?;
     let key = ants_proto::channel_manager_serving_key();
-    let publishing =
-        crate::release::versions::keep_putting(published, key, crate::release::versions::serving().await, || {});
+    let publishing = crate::release::versions::keep_putting(published, key, crate::release::versions::serving().await);
     let account = ants_daemon::people::humans::account(creds);
     let humans = ants_daemon::people::humans::Registry::new(UserId::human()).verifying_grants(account.clone());
     let _watching = humans.watch(js.clone(), ants_daemon::people::humans::RETRY);
@@ -303,8 +301,7 @@ pub async fn compose(
 
 /// The owner and creator of `thread` in `channel`, read as `reader` reads channels back ([`read_from`]): as its posts
 /// still kept say ([`ThreadOrigin`] with `humans`), or None. A thread named after the post that started it is read from its
-/// start; any other from the channel's oldest post kept. A top-level post marked as a webhook's counts as one only from
-/// a human or a webhook ([`OriginFold`]).
+/// start; any other from the channel's oldest post kept.
 pub async fn thread_origin(
     js: &jetstream::Context,
     reader: &Me,
@@ -316,15 +313,14 @@ pub async fn thread_origin(
         Some(time) => consumer::DeliverPolicy::ByStartTime { start_time: time.into() },
         None => consumer::DeliverPolicy::All,
     };
-    let mut fold = OriginFold::new(ThreadOrigin::default());
+    let mut origin = ThreadOrigin::default();
     scan(js, reader, channel, start, |_, post| {
         if post.thread_id == *thread {
-            fold.push(post, humans);
+            origin.push(&post, humans);
         }
-        if fold.settled() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+        if origin.settled() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
     })
     .await?;
-    let origin = fold.resolve(thread, &Webhooks::new(js.clone())).await;
     Ok((origin.owner, origin.creator))
 }
 

@@ -2,14 +2,13 @@
 //! creator checked against stored state ([`Claims`]).
 
 use ants_proto::{Acting, ChannelPost, Envelope, Humans, ThreadId, ThreadOrigin, UserId};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
 
 use crate::bus;
 use crate::bus::relayed::{self, Read};
 use crate::channel::{self, Channels, Threads, Wake};
 use crate::people::humans::Registry;
-use crate::records::webhooks::Webhooks;
 
 use super::{Inbox, Incoming, OWNER_LANDS_WITHIN, Posted, STREAM_SOURCE, Steered, nak, stream_seq};
 
@@ -18,56 +17,31 @@ use super::{Inbox, Incoming, OWNER_LANDS_WITHIN, Posted, STREAM_SOURCE, Steered,
 pub struct Claims<'a> {
     /// Who is a human.
     pub humans: &'a Registry,
-    /// Who of the senders that say so are webhooks.
-    pub webhooks: &'a Webhooks,
     /// The channel threads, whose posts say who started each.
     pub threads: &'a Threads,
 }
 
 impl Claims<'_> {
     /// Check what inbox message `envelope`, at stream sequence `seq`, says of its sender and thread: its sender wrote
-    /// it. `webhook` holds only from a webhook ([`Webhooks`]) or a human, and holds from a webhook whether or not the
-    /// message says so. A sender whose marker cannot be read is an error, the message taken as a webhook's naming no
-    /// owner or creator, for its daemon to try it again. A human's owner and creator hold, and a
+    /// it, and its subject says whether it is a webhook's ([`Envelope::check_subject`]). A human's owner and creator hold, and a
     /// webhook's owner, the human its config names. From an ant, a thread a channel post started has the owner and
     /// creator its posts say ([`Threads::origin_of`]); any other has the owner a human's or a webhook's message on it to
     /// the sender, or to an ant that passed the link to it on to the sender, named ([`Threads::owner_for`]), else that
     /// of the thread it was spun off ([`Envelope::origin_thread`]): a channel thread's under the same check as its
     /// creator, another's under the same as its own; else, for an assistant's message for its human naming the human,
     /// the human; else none, whatever owner the ant names.
-    pub async fn sender_claims(&self, envelope: &mut Envelope, seq: u64) -> Result<()> {
-        if !self.humans.is_human(&envelope.from) {
-            match self.webhooks.marked(&envelope.from).await {
-                Ok(true) => envelope.webhook = true,
-                Ok(false) if envelope.webhook => {
-                    tracing::warn!(
-                        thread = %envelope.thread_id,
-                        sender = %envelope.from,
-                        "taking a message marked as a webhook's for an ant's: the sender has no webhook marker"
-                    );
-                    envelope.webhook = false;
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    envelope.webhook = true;
-                    envelope.owner = None;
-                    envelope.creator = None;
-                    envelope.origin_thread = None;
-                    bail!("reading the webhook marker of the sender {}: {error}", envelope.from);
-                }
-            }
-        }
+    pub async fn sender_claims(&self, envelope: &mut Envelope, seq: u64) {
         if self.humans.sender_role(envelope).is_human() {
-            return Ok(());
+            return;
         }
         if envelope.webhook {
             envelope.creator = None;
             envelope.origin_thread = None;
-            return Ok(());
+            return;
         }
         if envelope.owner.is_none() && envelope.creator.is_none() {
             envelope.origin_thread = None;
-            return Ok(());
+            return;
         }
         let humans = self.humans.humans();
         match self.threads.origin_of(&envelope.thread_id, seq, &humans).await {
@@ -87,7 +61,6 @@ impl Claims<'_> {
                 envelope.origin_thread = None;
             }
         }
-        Ok(())
     }
 
     /// Check the owner and creator `envelope`, an ant's message at stream sequence `seq` on a thread no channel post
@@ -185,7 +158,7 @@ impl Inbox<'_> {
     /// escalations nor the messages that follow on from this one name it, and so is a creator that is a human.
     pub(super) async fn admit(&self, msg: &jetstream::Message) -> Option<Incoming> {
         // Its subject pins no sender when a stream relayed it there ([`relayed`]).
-        if relayed::stored_relayed(msg.headers.as_ref(), Read::Consumer) {
+        if relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::Consumer) {
             self.bury_unanswerable(msg, "relayed by a stream, not published by its sender").await;
             return None;
         }
@@ -250,8 +223,8 @@ impl Inbox<'_> {
 
     /// The channel post `msg` to answer, if it wakes the ant ([`channel::wake`]). Any other is acked at once: the
     /// ant's own, one in a channel it is not a member of, one that does not @mention it and is not for it to
-    /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it. A post is a webhook's
-    /// only from a webhook ([`Webhooks`]) or a human, and for a human only from its assistant while the grant stands: a
+    /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it, and one whose `webhook`
+    /// disagrees with its subject is forged. A post is for a human only from its assistant while the grant stands: a
     /// forged `on_behalf_of` is cleared. No daemon tells the human of an honoured one, as every daemon sees it. A top-level post kept names its thread's owner, a human, and its
     /// creator, an ant ([`ThreadOrigin`]); any other names none until [`Inbox::handle`] reads its thread's.
     pub(super) async fn admit_post(&self, msg: &jetstream::Message, channels: &mut Channels) -> Option<Incoming> {
@@ -268,15 +241,6 @@ impl Inbox<'_> {
                 return None;
             }
         };
-        if post.webhook && !self.humans.is_human(&post.from) && !self.webhooks.is_webhook(&post.from).await {
-            tracing::warn!(
-                channel = %post.channel,
-                thread = %post.thread_id,
-                sender = %post.from,
-                "taking a post marked as a webhook's for an ant's: the sender has no webhook marker"
-            );
-            post.webhook = false;
-        }
         if let Acting::Forged(human) = self.behalf.acting(self.humans, &post.from, post.on_behalf_of.as_ref()).await {
             tracing::warn!(
                 channel = %post.channel,
@@ -314,7 +278,7 @@ impl Inbox<'_> {
     }
 
     /// Notify the human members `post`, in `msg`, @mentions ([`Threads::notify_mentioned`]) before the post is acked,
-    /// when the ant sends its notices: its own post, or a webhook's, checked against the webhook's marker, in a channel
+    /// when the ant sends its notices: its own post, or a webhook's, in a channel
     /// the ant is the messenger of. False when that failed: the post is naked, to be tried again.
     async fn notify_mentioned(
         &self,
@@ -369,12 +333,12 @@ impl Inbox<'_> {
 
     /// Check what the inbox message in `incoming`, at stream sequence `seq`, says of its sender and thread
     /// ([`Claims::sender_claims`]).
-    pub(super) async fn sender_claims(&self, incoming: &mut Incoming, seq: u64) -> Result<()> {
+    pub(super) async fn sender_claims(&self, incoming: &mut Incoming, seq: u64) {
         if incoming.post.is_some() {
-            return Ok(());
+            return;
         }
-        let claims = Claims { humans: self.humans, webhooks: self.webhooks, threads: self.threads };
-        claims.sender_claims(&mut incoming.envelope, seq).await
+        let claims = Claims { humans: self.humans, threads: self.threads };
+        claims.sender_claims(&mut incoming.envelope, seq).await;
     }
 
     /// Wait, up to [`OWNER_LANDS_WITHIN`], for the owner a human's message in `incoming` names to be recorded for its

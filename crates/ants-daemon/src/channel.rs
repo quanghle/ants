@@ -27,7 +27,6 @@ use futures::{StreamExt as _, TryStreamExt as _};
 use crate::records::direct_kv::DirectKv;
 use crate::records::links;
 use crate::records::owners::Owners;
-use crate::records::webhooks::Webhooks;
 pub use crate::stream::reading::Reading;
 use crate::sync::MutexExt as _;
 
@@ -344,60 +343,12 @@ impl Sink for Collect<'_> {
     }
 }
 
-/// Folds the posts of one thread, in order, into its [`ThreadOrigin`] ([`OriginFold::resolve`]): as the posts say,
-/// unless the author of the top-level post, no human, marked it as a webhook's and has no webhook marker
-/// ([`Webhooks`]); then as if only humans' posts said they were webhooks'.
-pub struct OriginFold {
-    origin: ThreadOrigin,
-    unmarked: ThreadOrigin,
-    /// The author of the thread's top-level post, when no human and the post is marked as a webhook's.
-    claimed: Option<UserId>,
-}
-
-impl OriginFold {
-    /// A fold going on from `origin`, that of the posts before.
-    pub fn new(origin: ThreadOrigin) -> Self {
-        Self { unmarked: origin.clone(), origin, claimed: None }
-    }
-
-    /// Take `post`, the next post stored on the thread.
-    pub fn push(&mut self, post: ChannelPost, humans: &Humans) {
-        let rooted = self.origin.root;
-        self.origin.push(&post, humans);
-        let human = humans.contains(&post.from);
-        if !rooted && self.origin.root && post.webhook && !human {
-            self.claimed = Some(post.from.clone());
-        }
-        self.unmarked.push(&ChannelPost { webhook: post.webhook && human, ..post }, humans);
-    }
-
-    /// Whether later posts change nothing.
-    pub fn settled(&self) -> bool {
-        self.origin.settled() && self.unmarked.settled()
-    }
-
-    /// The origin of `thread`, the top-level post's mark as a webhook's checked against its author's marker.
-    pub async fn resolve(self, thread: &ThreadId, webhooks: &Webhooks) -> ThreadOrigin {
-        match self.claimed {
-            Some(author) if !webhooks.is_webhook(&author).await => {
-                tracing::warn!(
-                    %thread,
-                    %author,
-                    "taking a top-level post marked as a webhook's for an ant's: the author has no webhook marker"
-                );
-                self.unmarked
-            }
-            _ => self.origin,
-        }
-    }
-}
-
-/// Folds the posts of one thread, up to stream sequence `upto`, into its [`ThreadOrigin`] ([`OriginFold`]).
+/// Folds the posts of one thread, up to stream sequence `upto`, into its [`ThreadOrigin`].
 struct Origin<'a> {
     thread: &'a ThreadId,
     humans: &'a Humans,
     upto: u64,
-    fold: OriginFold,
+    fold: ThreadOrigin,
 }
 
 impl Sink for Origin<'_> {
@@ -406,7 +357,7 @@ impl Sink for Origin<'_> {
             return ControlFlow::Break(());
         }
         if post.thread_id == *self.thread {
-            self.fold.push(post, self.humans);
+            self.fold.push(&post, self.humans);
         }
         if self.fold.settled() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
     }
@@ -626,8 +577,6 @@ pub struct Threads {
     /// The channel whose top-level post started each thread looked up so far ([`Threads::origin_of`]); None for a
     /// thread no channel post started.
     roots: Mutex<HashMap<ThreadId, Option<ChannelId>>>,
-    /// Who of the authors of top-level posts marked as webhooks' are webhooks.
-    webhooks: Webhooks,
     /// The senders found taking part in each thread so far ([`Threads::origin_for`]).
     parts: Mutex<HashSet<(ThreadId, UserId)>>,
     /// The owners recorded for threads humans and webhooks message ants on.
@@ -644,7 +593,6 @@ impl Threads {
             one_read: tokio::sync::Mutex::new(()),
             origins: Mutex::default(),
             roots: Mutex::default(),
-            webhooks: Webhooks::new(js.clone()),
             parts: Mutex::default(),
             owners: Owners::new(js),
         }
@@ -797,10 +745,9 @@ impl Threads {
     }
 
     /// The origin of the thread of `post`, at stream sequence `seq`: who started it, as the posts stored on it up to
-    /// `post` say ([`ThreadOrigin`]), not the owner and creator `post` carries. A top-level post is its own, its mark
-    /// as a webhook's checked already; the posts of any other thread are read from its start once, then on from where
-    /// the last read of it ended. A top-level post marked as a webhook's counts as one only from a human or a webhook
-    /// ([`Webhooks`]).
+    /// `post` say ([`ThreadOrigin`]), not the owner and creator `post` carries. A top-level post is its own; the posts
+    /// of any other thread are read from its start once, then on from where the last read of it ended. Each post is
+    /// a webhook's as its subject says ([`ChannelPost::check_subject`]).
     pub async fn origin(&self, post: &ChannelPost, seq: u64, humans: &Humans) -> Result<ThreadOrigin> {
         if post.starts_thread() {
             return Ok(ThreadOrigin::of_root(post, humans));
@@ -812,11 +759,11 @@ impl Threads {
             Some((origin, read)) => (origin, consumer::DeliverPolicy::ByStartSequence { start_sequence: read + 1 }),
             None => (ThreadOrigin::default(), from_start(&post.thread_id)),
         };
-        let mut fold = Origin { thread: &post.thread_id, humans, upto: seq, fold: OriginFold::new(origin) };
+        let mut fold = Origin { thread: &post.thread_id, humans, upto: seq, fold: origin };
         self.scan(&subject::chan_room(&post.channel), start, &mut fold)
             .await
             .with_context(|| format!("reading the origin of thread {} of #{}", post.thread_id, post.channel))?;
-        let origin = fold.fold.resolve(&post.thread_id, &self.webhooks).await;
+        let origin = fold.fold;
         let mut origins = self.origins.locked();
         if origins.len() >= MAX_ORIGINS {
             origins.clear();

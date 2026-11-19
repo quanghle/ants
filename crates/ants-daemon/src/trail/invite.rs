@@ -201,6 +201,7 @@ mod tests {
         let at = Utc.with_ymd_and_hms(2026, 11, 19, 8, 0, 0).unwrap();
         let leg = TrailLeg {
             trail: Some("review".parse().unwrap()),
+            local: false,
             at: None,
             script: "meta = {}".to_owned(),
             args: json!({"pr": 7}),

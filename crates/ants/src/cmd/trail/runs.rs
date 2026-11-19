@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use crate::colony::{short, since};
 use crate::machines::{latest_in, latest_timed_in};
-use crate::text::excerpt;
+use crate::text::{after_colon, one_line};
 
 /// The runs `conductor` keeps, else those of every conductor, oldest first.
 pub(crate) async fn list(js: &jetstream::Context, conductor: Option<&UserId>) -> Result<Vec<TrailRun>> {
@@ -221,7 +221,7 @@ pub(crate) fn table(runs: &[TrailRun], rated: &Rated, now: DateTime<Utc>) -> Str
                 r.conductor.to_string(),
                 r.owner.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string),
                 state(&r.state).to_owned(),
-                r.phase.as_deref().map_or_else(|| "-".to_owned(), |p| excerpt(p, 30)),
+                r.phase.as_deref().map_or_else(|| "-".to_owned(), |p| one_line(p, 30)),
                 format!("{}/{}", r.steps, r.limits.steps),
                 format!("{}/{}", r.turns, r.limits.turns),
                 ago(r.started_at, now),
@@ -236,13 +236,13 @@ pub(crate) fn table(runs: &[TrailRun], rated: &Rated, now: DateTime<Utc>) -> Str
 /// What a call asks, in short: its label, else its prompt or questions, or the trail it runs.
 pub(super) fn gist(args: &Value) -> String {
     if let Some(trail) = args.get("name").and_then(Value::as_str) {
-        return excerpt(&format!("trail {trail}"), 60);
+        return one_line(&format!("trail {trail}"), 60);
     }
     let text = ["label", "prompt", "questions"]
         .iter()
         .find_map(|key| args.get(key))
         .map_or_else(|| args.to_string(), |value| value.as_str().map_or_else(|| value.to_string(), str::to_owned));
-    excerpt(&text, 60)
+    one_line(&text, 60)
 }
 
 /// Where a goto() call asks to go: its trail, else the run's own, at its waypoint, else the trail's start.
@@ -251,7 +251,7 @@ pub(super) fn destination(args: &Value) -> String {
         args.get("trail").and_then(Value::as_str).map_or_else(|| "the same trail".to_owned(), |t| format!("trail {t}"));
     let at =
         args.get("at").and_then(Value::as_str).map_or_else(|| "its start".to_owned(), |at| format!("waypoint {at}"));
-    excerpt(&format!("{trail} at {at}"), 60)
+    one_line(&format!("{trail} at {at}"), 60)
 }
 
 /// Where `leg` entered its trail.
@@ -266,8 +266,8 @@ pub(super) fn entered(leg: &TrailLeg) -> String {
 /// Whom an agent call asks: the ant it names, else the capability, else the conductor itself.
 fn whom(args: &Value) -> String {
     match (args.get("ant").and_then(Value::as_str), args.get("capability").and_then(Value::as_str)) {
-        (Some(ant), _) => ant.to_owned(),
-        (None, Some(capability)) => format!("capability {capability}"),
+        (Some(ant), _) => one_line(ant, 60),
+        (None, Some(capability)) => format!("capability {}", one_line(capability, 60)),
         (None, None) => "-".to_owned(),
     }
 }
@@ -291,7 +291,7 @@ fn legs(route: &[TrailLeg]) -> Vec<[String; 6]> {
         .iter()
         .enumerate()
         .map(|(at, leg)| {
-            let input = if at == 0 { String::new() } else { format!("state {}", excerpt(&leg.args.to_string(), 60)) };
+            let input = if at == 0 { String::new() } else { format!("state {}", one_line(&leg.args.to_string(), 60)) };
             [
                 at.to_string(),
                 leg.trail.as_ref().map_or_else(|| "inline".to_owned(), ToString::to_string),
@@ -343,13 +343,17 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
     }
     let _ = match &r.state {
         RunState::Stopped { by } => writeln!(out, "state: stopped by {by}"),
-        RunState::Done { result } => writeln!(out, "state: done, result: {result}"),
-        RunState::Failed { error, limit: Some(limit) } => writeln!(out, "state: failed on its {limit} limit: {error}"),
-        RunState::Failed { error, limit: None } => writeln!(out, "state: failed: {error}"),
+        RunState::Done { result } => {
+            writeln!(out, "state: done, result: {}", one_line(&result.to_string(), usize::MAX))
+        }
+        RunState::Failed { error, limit: Some(limit) } => {
+            writeln!(out, "state: failed on its {limit} limit:{}", after_colon(error))
+        }
+        RunState::Failed { error, limit: None } => writeln!(out, "state: failed:{}", after_colon(error)),
         other => writeln!(out, "state: {}", state(other)),
     };
     if let Some(phase) = &r.phase {
-        let _ = writeln!(out, "phase: {phase}");
+        let _ = writeln!(out, "phase: {}", one_line(phase, usize::MAX));
     }
     let _ =
         write!(out, "started {} ({}), updated {}", local(r.started_at), ago(r.started_at, now), ago(r.updated_at, now));
@@ -373,7 +377,7 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
     );
     let args = r.route.first().map_or(&Value::Null, |leg| &leg.args);
     if !args.is_null() {
-        let _ = writeln!(out, "args: {}", excerpt(&args.to_string(), 200));
+        let _ = writeln!(out, "args: {}", one_line(&args.to_string(), 200));
     }
     let _ = writeln!(out, "\nroute: {}", r.route_text());
     out.push_str(&indented(&super::columns(&legs(&r.route))));
@@ -421,9 +425,9 @@ fn answered(run: &TrailRun, journal: &[JournalEntry]) -> Vec<[String; 5]> {
         .map(|e| {
             let answer = match &e.answer {
                 CallAnswer::Ok(value) => {
-                    format!("ok: {}", excerpt(&value.as_str().map_or_else(|| value.to_string(), str::to_owned), 40))
+                    format!("ok: {}", one_line(&value.as_str().map_or_else(|| value.to_string(), str::to_owned), 40))
                 }
-                CallAnswer::Error(error) => format!("error: {}", excerpt(error, 60)),
+                CallAnswer::Error(error) => format!("error: {}", one_line(error, 60)),
             };
             let whom = match e.function {
                 TrailFunction::Agent => whom(&e.args),

@@ -199,8 +199,8 @@ impl Tools {
                        script. Refused on a thread a webhook or schedule started. Save a script that worked and whose \
                        steps recur, with its specifics taken as `args`. On a dream thread, `finding` names the dream \
                        finding the save answers, such as a sage's trail finding: refused when it rests on untrusted \
-                       text, or when a saved trail already serves the task it suggests; a save there counts as one of \
-                       the dream's writes.")]
+                       text, when the dream covers untrusted text and it is no trail finding, or when a saved trail \
+                       already serves the task it suggests; a save there counts as one of the dream's writes.")]
     async fn save_trail(
         &self,
         Parameters(args): Parameters<SaveTrail>,

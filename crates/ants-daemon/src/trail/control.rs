@@ -149,8 +149,8 @@ impl Trails {
         done.unwrap_or_else(|error| TrailOutcome::Refused { error })
     }
 
-    /// The steps to other ants that run `run`, stopped, waited on as it stopped, and those of its child runs: None
-    /// when it is not stopped.
+    /// The steps to other ants that run `run`, stopped, waited on as it stopped, their messages sent, and those of its
+    /// child runs: None when it is not stopped.
     fn still_waiting(&self, run: &RunId) -> Option<Vec<WaitingStep>> {
         let slot = locked(&self.inner.runs).get(run).cloned()?;
         let pending = {
@@ -163,7 +163,7 @@ impl Trails {
         let mut waiting = Vec::new();
         for call in pending {
             match call.function {
-                TrailFunction::Agent if call.to != self.inner.ant => {
+                TrailFunction::Agent if call.sent && call.to != self.inner.ant => {
                     waiting.push(WaitingStep { to: call.to, message: call.message });
                 }
                 TrailFunction::Trail => {

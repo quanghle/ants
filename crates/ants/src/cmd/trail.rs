@@ -100,7 +100,7 @@ pub(crate) enum TrailCommand {
         /// The run's id, or a unique start of one.
         run: runs::Pick,
         #[command(flatten)]
-        limits: LimitArgs,
+        limits: ResumeLimitArgs,
         /// Follow the run then, as `ants trail run --follow` does.
         #[arg(long)]
         follow: bool,
@@ -161,6 +161,9 @@ pub(crate) struct TipsArgs {
     /// Retire the tip ID instead, which steps carry and searches find no more. Needs a human's credentials.
     #[arg(long, value_name = "ID", conflicts_with_all = ["key", "all"])]
     pub(crate) retire: Option<TipId>,
+    /// With --retire, the tip's writer: needed only when tips of different writers share the id.
+    #[arg(long, value_name = "ANT", requires = "retire")]
+    pub(crate) writer: Option<UserId>,
 }
 
 /// What a run may spend, each limit at most its maximum ([`TrailLimits::MAX`]).
@@ -178,6 +181,30 @@ pub(crate) struct LimitArgs {
     /// Time from the run's start to its end, stopped time included, such as 2h or 3d (24h by default, at most 7d).
     #[arg(long, value_name = "DUR", value_parser = ants_proto::duration::parse)]
     pub(crate) wall: Option<std::time::Duration>,
+}
+
+/// What a resumed run may spend: [`LimitArgs`], each limit left out keeping the run's own.
+#[derive(clap::Args, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ResumeLimitArgs {
+    /// Steps the run sends in all, at most 500; left out, the run's own limit.
+    #[arg(long, value_name = "N")]
+    pub(crate) steps: Option<u32>,
+    /// Steps waiting on an answer at once, at most 16; left out, the run's own limit.
+    #[arg(long, value_name = "N")]
+    pub(crate) at_once: Option<u32>,
+    /// Turns the run's steps spend in all, as ants' messages spend them, at most 2000; left out, the run's own limit.
+    #[arg(long, value_name = "N")]
+    pub(crate) turns: Option<u32>,
+    /// Time from the run's start to its end, stopped time included, such as 2h or 3d, at most 7d; left out, the run's
+    /// own limit.
+    #[arg(long, value_name = "DUR", value_parser = ants_proto::duration::parse)]
+    pub(crate) wall: Option<std::time::Duration>,
+}
+
+impl From<ResumeLimitArgs> for LimitArgs {
+    fn from(ResumeLimitArgs { steps, at_once, turns, wall }: ResumeLimitArgs) -> Self {
+        Self { steps, at_once, turns, wall }
+    }
 }
 
 impl LimitArgs {
@@ -285,6 +312,8 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
             human(nats, "resuming a run")?;
             let (client, js) = nats.connect("ants-cli").await?;
             let header = runs::pick(&js, &run).await?;
+            control::resumable(&header)?;
+            let limits = LimitArgs::from(limits);
             let limits = if limits.given() { Some(limits.over(header.limits)?) } else { None };
             println!("{}", control::resume(&client, &nats.me.id, &header, limits).await?);
             if follow {
@@ -297,7 +326,8 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
             let (_, js) = nats.connect("ants-cli").await?;
             let purged = saved::remove(&js, &saved::local_dir()?, &name).await?;
             let rated = ratings::purged(purged.ratings, purged.tips > 0);
-            println!("removed trail {name}{rated}{}", tips::purged(purged.tips));
+            let removed = if purged.trail { "removed trail" } else { "removed what was left of trail" };
+            println!("{removed} {name}{rated}{}", tips::purged(purged.tips));
         }
         TrailCommand::Runs { ant, json } => {
             human(nats, "reading the runs of trails")?;
@@ -328,7 +358,7 @@ async fn show_tips(nats: &Nats<'_>, args: &TipsArgs, json: bool) -> Result<()> {
     }
     let (_, js) = nats.connect("ants-cli").await?;
     if let Some(id) = &args.retire {
-        let retired = tips::retire(&js, &args.name, id, &nats.me.id, Utc::now()).await?;
+        let retired = tips::retire(&js, &args.name, id, args.writer.as_ref(), &nats.me.id, Utc::now()).await?;
         if json {
             println!("{}", serde_json::to_string(&retired)?);
         } else {

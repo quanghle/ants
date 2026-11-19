@@ -29,5 +29,8 @@ expression: value
         "ship it?"
       ]
     }
+  ],
+  "anew": [
+    2
   ]
 }

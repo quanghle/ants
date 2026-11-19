@@ -16,9 +16,8 @@ await parallel(
 async fn a_saved_trail_s_steps_carry_its_tips_under_their_key_and_a_retry_suggests_them() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;
-    let dir = scratch_dir("trail-tips-carried");
-    std::fs::write(dir.join("deploy.py"), format!("{META}{DEPLOY}")).unwrap();
-    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    save_for_colony(&server, "deploy", &format!("{META}{DEPLOY}")).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
     let tip = |tip_key: &str, text: &str| TrailTip {
         trail: "deploy".parse().unwrap(),
         id: TipId::generate(),
@@ -47,9 +46,10 @@ async fn a_saved_trail_s_steps_carry_its_tips_under_their_key_and_a_retry_sugges
         built.text
     );
     assert!(built.text.contains(": 1 of 2 live tips carried."), "{}", built.text);
-    assert!(
-        built.text.contains(&format!("- {} (tip key \"build\", net votes 0, older script): {}", build.id, build.text))
-    );
+    assert!(built.text.contains(&format!(
+        "- {} by {} (tip key \"build\", net votes 0, older script): {}",
+        build.id, build.writer, build.text
+    )));
     assert!(!built.text.contains(test.id.as_str()), "a tip under another key stays out: {}", built.text);
     assert!(built.text.contains("vote_tip") && built.text.contains("leave_tip"), "a trusted run: {}", built.text);
 
@@ -67,5 +67,4 @@ async fn a_saved_trail_s_steps_carry_its_tips_under_their_key_and_a_retry_sugges
     assert_eq!(again.thread_id, notes.thread_id);
     let suggestion = "search them with trail_tips under tip key \"notes\". Reply with JSON";
     assert!(again.text.contains(suggestion), "{}", again.text);
-    std::fs::remove_dir_all(&dir).unwrap();
 }

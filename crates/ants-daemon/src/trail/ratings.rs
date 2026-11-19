@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use ants_proto::{
-    Counts, Finder, Found, JsDomain, Query, RatingOutcome, SavedTrail, TRAIL_RATINGS_BUCKET, TRAILS_BUCKET, ThreadId,
-    TrailName, TrailRating, TrailRun, UserId, script_sha256, serves,
+    Counts, Finder, Found, JsDomain, Query, RatingOutcome, SavedTrail, Saver, TRAIL_RATINGS_BUCKET, TRAILS_BUCKET,
+    ThreadId, TrailName, TrailRating, TrailRun, UserId, script_sha256, serves,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -62,7 +62,8 @@ impl Ratings {
 }
 
 /// The colony's saved trails in [`TRAILS_BUCKET`], not this machine's local ones, each with its ratings counted by
-/// outcome, those of trails no longer saved left out. Fails when either bucket cannot be read.
+/// outcome, those of trails no longer saved and those dated ahead ([`TrailRating::dated`]) left out. Fails when either
+/// bucket cannot be read.
 pub async fn colony_rated(js: &jetstream::Context, js_domain: Option<&JsDomain>) -> Result<Vec<(SavedTrail, Counts)>> {
     let mut trails = BTreeMap::new();
     DirectKv::whole(js, js_domain, TRAILS_BUCKET)
@@ -75,10 +76,11 @@ pub async fn colony_rated(js: &jetstream::Context, js_domain: Option<&JsDomain>)
         })
         .await
         .context("reading the saved trails of the colony")?;
+    let now = Utc::now();
     DirectKv::whole(js, js_domain, TRAIL_RATINGS_BUCKET)
         .await?
         .scan(">", |key, value| match serde_json::from_slice::<TrailRating>(value) {
-            Ok(rating) if rating.check_key(key).is_ok() => {
+            Ok(rating) if rating.check_key(key).is_ok() && rating.dated(now) => {
                 if let Some((_, counts)) = trails.get_mut(&rating.trail) {
                     counts.add(rating.outcome);
                 }
@@ -88,6 +90,14 @@ pub async fn colony_rated(js: &jetstream::Context, js_domain: Option<&JsDomain>)
         .await
         .context("reading the trail ratings")?;
     Ok(trails.into_values().collect())
+}
+
+/// What rating a run did.
+pub struct Rated {
+    /// The saved trails rated.
+    pub trails: Vec<RatedTrail>,
+    /// The trails the run took that are no longer saved, left unrated.
+    pub unsaved: Vec<TrailName>,
 }
 
 /// A saved trail a run's rating rated.
@@ -127,19 +137,26 @@ impl Trails {
 
     /// Rate each saved trail run `run` took, ended or stopped, and each the colony saved from its script, as
     /// `outcome` for `task`, because of `why`: one rating per trail, replacing an earlier rating of the run. A trail
-    /// taken is rated of the script the run ran, one saved from the run of its script now.
-    pub async fn rate(
-        &self,
-        run: &TrailRun,
-        outcome: RatingOutcome,
-        task: &str,
-        why: &str,
-    ) -> Result<Vec<RatedTrail>, String> {
+    /// taken is rated of the script the run ran, one saved from the run of its script now; a trail taken but no longer
+    /// saved is not rated, nor one saved from the run by another than its conductor. A rating of an untrusted run says
+    /// so ([`TrailRating::untrusted`]).
+    pub async fn rate(&self, run: &TrailRun, outcome: RatingOutcome, task: &str, why: &str) -> Result<Rated, String> {
         let at = Utc::now();
-        let mut trails: Vec<(TrailName, String, bool)> =
-            route_trails(run).into_iter().map(|(trail, script)| (trail, script, false)).collect();
-        for saved in self.saved_trails().await? {
-            if saved.saved_from.as_ref() == Some(&run.run) && !trails.iter().any(|(name, ..)| *name == saved.name) {
+        let saved = self.saved_trails().await?;
+        let (mut trails, mut unsaved): (Vec<(TrailName, String, bool)>, Vec<TrailName>) = (Vec::new(), Vec::new());
+        for (trail, script) in route_trails(run) {
+            if saved.iter().any(|entry| entry.name == trail) {
+                trails.push((trail, script, false));
+            } else {
+                unsaved.push(trail);
+            }
+        }
+        for saved in saved {
+            let by_conductor = matches!(&saved.saver, Some(Saver::Ant { user }) if *user == run.conductor);
+            if by_conductor
+                && saved.saved_from.as_ref() == Some(&run.run)
+                && !trails.iter().any(|(name, ..)| *name == saved.name)
+            {
                 trails.push((saved.name, saved.script, true));
             }
         }
@@ -154,6 +171,7 @@ impl Trails {
                     task: task.trim().to_owned(),
                     why: why.trim().to_owned(),
                     script,
+                    untrusted: !run.origin.trusted(),
                     at,
                 };
                 (rating, saved_from)
@@ -164,6 +182,9 @@ impl Trails {
         }
         let store = &self.inner.ratings;
         let mut rated = Vec::new();
+        if !unsaved.is_empty() {
+            tracing::info!(run = %run.run, ?unsaved, "not rating trails no longer saved");
+        }
         for (rating, saved_from) in ratings {
             let key = rating.key();
             let earlier = store.get(&key).await.map_err(|e| format!("reading rating {key}: {e:#}"))?;
@@ -174,7 +195,7 @@ impl Trails {
                 saved_from,
             });
         }
-        Ok(rated)
+        Ok(Rated { trails: rated, unsaved })
     }
 
     /// The saved trails for `task`, ranked as a search on `thread` ranks them ([`Finder`]), at most `limit`.
@@ -198,8 +219,8 @@ impl Trails {
         Ok(found)
     }
 
-    /// The saved trails whose name and description match `description` with more of all their ratings worked than
-    /// failed, best first, at most `limit`, each with its counts: those a run of a script so described could take.
+    /// The saved trails whose name and description match `description` with more of all their ratings, those dated
+    /// ahead left out, worked than failed, best first, at most `limit`, each with its counts: those a run of a script so described could take.
     pub async fn well_rated(&self, description: &str, limit: usize) -> Result<Vec<(TrailName, Counts)>, String> {
         let query = Query::new(description);
         let mut found = Vec::new();
@@ -207,8 +228,13 @@ impl Trails {
             if !query.matches_trail(&trail.name, &trail.description) {
                 continue;
             }
-            let mut counts = Counts::default();
-            let read = self.inner.ratings.fold(Some(&trail.name), |rating| counts.add(rating.outcome)).await;
+            let (mut counts, now) = (Counts::default(), Utc::now());
+            let read = self.inner.ratings.fold(Some(&trail.name), |rating| {
+                if rating.dated(now) {
+                    counts.add(rating.outcome);
+                }
+            });
+            let read = read.await;
             read.map_err(|e| format!("{e:#}"))?;
             if serves(true, &counts) {
                 found.push((trail.name, counts));

@@ -53,6 +53,24 @@ fn run_takes_a_saved_trail_or_a_py_file_and_json_args() {
 }
 
 #[test]
+fn resume_help_keeps_the_runs_own_limits_and_names_no_default() {
+    use clap::CommandFactory as _;
+    let mut cli = Cli::command();
+    for path in [["trail", "resume"], ["ant", "resume-trail"]] {
+        let command = cli.find_subcommand_mut(path[0]).unwrap().find_subcommand_mut(path[1]).unwrap();
+        for flag in ["steps", "at_once", "turns", "wall"] {
+            let arg = command.get_arguments().find(|arg| arg.get_id() == flag).unwrap();
+            let help = arg.get_help().unwrap().to_string();
+            assert!(help.contains("left out, the run's own limit"), "{path:?} --{flag}: {help}");
+            assert!(!help.contains("default"), "{path:?} --{flag}: {help}");
+        }
+    }
+    let run = cli.find_subcommand_mut("trail").unwrap().find_subcommand_mut("run").unwrap();
+    let steps = run.get_arguments().find(|arg| arg.get_id() == "steps").unwrap();
+    assert!(steps.get_help().unwrap().to_string().contains("50 by default"));
+}
+
+#[test]
 fn limits_given_replace_the_base_within_their_maximum() {
     let base = TrailLimits { steps: 7, ..TrailLimits::DEFAULT };
     assert_eq!(LimitArgs::default().over(base).unwrap(), base);
@@ -124,7 +142,8 @@ fn a_follower_prints_each_change_of_a_run_once() {
     assert!(follower.header(&header).is_empty());
     let queued = QueuedCall { call: 1, function: TrailFunction::Agent, args: json!({"prompt": "test it"}) };
     let pending0 = pending(0, "dev-a", TrailFunction::Agent);
-    let mut session = TrailSession { session: String::new(), pending: vec![pending0], queued: vec![queued] };
+    let mut session =
+        TrailSession { session: String::new(), pending: vec![pending0], queued: vec![queued], anew: Vec::new() };
     assert_eq!(follower.session(&session), ["step 1 queued: test it", "step 0 sent to dev-a: step 0"]);
     assert!(follower.session(&session).is_empty());
     session.pending[0].retries = 1;
@@ -141,7 +160,7 @@ fn a_follower_prints_each_change_of_a_run_once() {
         args: json!({}),
         answer: CallAnswer::Ok(json!({"built": true})),
     };
-    assert_eq!(follower.entry(&answered).as_deref(), Some("step 0 answered: {…"));
+    assert_eq!(follower.entry(&answered).as_deref(), Some("step 0 answered: { \"built\": true }"));
     assert_eq!(follower.entry(&answered), None);
     let failed = JournalEntry { call: 1, answer: CallAnswer::Error("no".to_owned()), ..answered };
     assert_eq!(follower.entry(&failed).as_deref(), Some("step 1 failed: no"));
@@ -189,7 +208,26 @@ fn header(run: &TrailRun) -> anyhow::Result<Read> {
     Ok(Read { header: Some(run.clone()), ..Read::default() })
 }
 
-const PATIENT: Patience = Patience { poll: Duration::from_millis(1), failed_reads: 3, quiet: Duration::from_secs(1) };
+const PATIENT: Patience =
+    Patience { poll: Duration::from_millis(1), unread: Duration::from_secs(1), quiet: Duration::from_secs(1) };
+
+/// Reads that each take `delay` to fail, `fails` of them, then the record `then`.
+struct Slow {
+    delay: Duration,
+    fails: usize,
+    then: TrailRun,
+}
+
+impl Records for Slow {
+    async fn read(&mut self) -> anyhow::Result<Read> {
+        if self.fails == 0 {
+            return header(&self.then);
+        }
+        self.fails -= 1;
+        tokio::time::sleep(self.delay).await;
+        Err(anyhow::anyhow!("no answer reading ants_trail_runs"))
+    }
+}
 
 #[tokio::test]
 async fn a_follow_ends_once_a_run_past_its_wall_time_goes_unchanged() {
@@ -214,26 +252,52 @@ async fn a_follow_ends_once_a_run_past_its_wall_time_goes_unchanged() {
     following(records, later, false, PATIENT).await.expect("a run within its wall time is followed to its end");
 }
 
-#[tokio::test]
-async fn a_follow_tries_failed_reads_again_before_giving_up_with_a_status_of_its_own() {
+#[tokio::test(start_paused = true)]
+async fn a_follow_tries_failed_reads_again_for_a_minute_before_giving_up_with_a_status_of_its_own() {
     let run = record(&p("lead"), Some("deploy"), RunState::Running, Utc::now());
     let mut done = run.clone();
     done.state = RunState::Done { result: json!("shipped") };
-    let failed = || Err(anyhow::anyhow!("timed out"));
-    let records = Scripted([failed(), failed(), header(&done)].into());
-    following(records, run.clone(), true, PATIENT).await.expect("two failed reads are tried again");
+    let failed = || Err(anyhow::anyhow!("no responders"));
+    let mut reads: std::collections::VecDeque<_> = (0..100).map(|_| failed()).collect();
+    reads.push_back(header(&run));
+    reads.extend((0..100).map(|_| failed()));
+    reads.push_back(header(&done));
+    following(Scripted(reads), run.clone(), true, Patience::DEFAULT)
+        .await
+        .expect("reads failing for under a minute after the last that held are tried again");
 
-    let records = Scripted([failed(), failed(), failed(), header(&done)].into());
-    let error = following(records, run.clone(), false, PATIENT).await.unwrap_err();
+    let started = tokio::time::Instant::now();
+    let records = Scripted((0..1000).map(|_| failed()).collect());
+    let error = following(records, run.clone(), false, Patience::DEFAULT).await.unwrap_err();
     assert!(error.downcast_ref::<Unread>().is_some(), "{error}");
     assert_eq!(
         error.to_string(),
         format!(
-            "gave up following run {0}: its records could not be read 3 times in a row: timed out; `ants trail show {0}` shows it",
+            "gave up following run {0}: its records could not be read for 1m: no responders; `ants trail show {0}` shows it",
             run.run
         )
     );
+    let waited = started.elapsed();
+    assert!(waited >= Duration::from_secs(60) && waited < Duration::from_secs(61), "{waited:?}");
     assert_ne!(UNREAD_STATUS, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_follow_whose_reads_take_long_to_fail_gives_up_a_minute_after_the_last_that_held() {
+    let run = record(&p("lead"), Some("deploy"), RunState::Running, Utc::now());
+    let mut done = run.clone();
+    done.state = RunState::Done { result: json!("shipped") };
+    for delay in [Duration::from_secs(10), Duration::from_secs(3600)] {
+        let started = tokio::time::Instant::now();
+        let records = Slow { delay, fails: 120, then: done.clone() };
+        let error = following(records, run.clone(), false, Patience::DEFAULT).await.unwrap_err();
+        assert!(error.downcast_ref::<Unread>().is_some(), "{error}");
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_secs(60) && waited < Duration::from_secs(61), "{delay:?}: {waited:?}");
+    }
+
+    let records = Slow { delay: Duration::from_secs(10), fails: 5, then: done };
+    following(records, run, true, Patience::DEFAULT).await.expect("50 s of slow failures are tried again");
 }
 
 /// Answer each request on `ant`'s control subject with what `answer` makes of it, as `ant`'s daemon does.
@@ -338,6 +402,18 @@ async fn humans_stop_and_resume_runs_by_a_unique_start_of_their_id() {
 
     let error = control::stop(&client, &alice, &done).await.unwrap_err().to_string();
     assert_eq!(error, format!("run {} has ended: done", done.run));
+    // No conductor answers yet: a run ended with nothing to resume is refused without asking it.
+    let asked = std::time::Instant::now();
+    let error = control::resume(&client, &alice, &done, None).await.unwrap_err().to_string();
+    assert_eq!(error, format!("run {} has ended: done", done.run));
+    let failed = RunState::Failed { error: "boom".into(), limit: None };
+    let failed = ants_proto::TrailRun { state: failed, ..done.clone() };
+    let error = control::resume(&client, &alice, &failed, None).await.unwrap_err().to_string();
+    assert_eq!(error, format!("run {} has ended: failed, not on a limit", done.run));
+    assert!(asked.elapsed() < control::ANSWER_WAIT, "the conductor was asked");
+    let on_limit = RunState::Failed { error: "out of turns".into(), limit: Some(ants_proto::RunLimit::Turns) };
+    assert!(control::resumable(&ants_proto::TrailRun { state: on_limit, ..done.clone() }).is_ok());
+    assert!(control::resumable(&stopped).is_ok());
     let offline = p("offline");
     let unanswered =
         control::ask(&client, &offline, &alice, TrailAction::Stop { run: waiting.run.clone() }, Duration::ZERO);

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use ants_proto::{
     DEFAULT_TIPS_FOUND, Envelope, MAX_LIVE_TIPS, MAX_TIP_REASON, MAX_TIP_TEXT, MAX_TIPS_FOUND, Ranked, Similarity,
-    Tally, ThreadId, TipId, TipVerdict, TipVote, TrailName, TrailStep, TrailTip, script_sha256,
+    Tally, ThreadId, TipId, TipVerdict, TipVote, TrailName, TrailStep, TrailTip, UserId, script_sha256, search_words,
 };
 use chrono::{DateTime, Utc};
 use rmcp::handler::server::wrapper::Parameters;
@@ -47,6 +47,10 @@ struct LeaveTip {
 struct VoteTip {
     /// The tip's id, as the step's message or trail_tips shows it.
     tip: String,
+    /// The ant that left the tip, as the step's message or trail_tips shows it: needed only when tips of different
+    /// writers share the id.
+    #[serde(default)]
+    writer: Option<String>,
     /// helpful, stale (right once, no longer) or wrong.
     verdict: String,
     /// Why, in at most 300 characters.
@@ -100,13 +104,23 @@ impl Hub {
             "the message being handled is no step of a trail run; a tip is left answering a step of a saved trail",
         )?;
         let (Some(trail), Some(script)) = (&step.trail, &step.script) else {
-            return Err("the step is of an inline script; tips are left only on saved trails".to_owned());
+            return Err(
+                "the step is of an inline script or of a trail only its conductor's machine has; tips are left \
+                        only on the trails the colony saves"
+                    .to_owned(),
+            );
         };
         if !self.trusted(thread, &current).await? {
             return Err(UNTRUSTED.to_owned());
         }
         // A trail removed while its run goes on takes no more tips.
-        trails.saved_script(trail).await.map_err(|e| format!("{e}; tips are left only on saved trails"))?;
+        let saved = trails.saved_script(trail).await.map_err(|e| format!("{e}; tips are left only on saved trails"))?;
+        if saved.local {
+            return Err(format!(
+                "the colony saves no trail {trail}, only this machine's files; tips are left only on the trails the \
+                 colony saves"
+            ));
+        }
         let text = args.text.trim();
         if text.is_empty() {
             return Err("the tip has no text".to_owned());
@@ -176,10 +190,14 @@ impl Hub {
         let step = current.trail_step.as_deref();
         let trail = trail_of(args.trail.as_deref(), step)?;
         let id: TipId = args.tip.trim().parse().map_err(|e| format!("tip {:?}: {e}", args.tip))?;
+        let writer: Option<UserId> = match args.writer.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+            Some(writer) => Some(writer.parse().map_err(|e| format!("writer {writer:?}: {e}"))?),
+            None => None,
+        };
         let tips = trails.tips();
         let board = tips.board(&trail).await.map_err(|e| format!("{e:#}"))?;
         let now = Utc::now();
-        let ranked = board.tip(&id, now, None).ok_or_else(|| format!("trail {trail} has no tip {id}"))?;
+        let ranked = board.tip(&id, writer.as_ref(), now, None).map_err(|writers| missing(&trail, &id, &writers))?;
         if ranked.tip.writer == self.ant {
             return Err(format!("tip {id} is this ant's own; an ant votes only on the tips of others"));
         }
@@ -221,11 +239,32 @@ impl Hub {
             _ => of_step.and_then(|step| step.tip_key.clone()),
         };
         let query = args.query.as_deref().map(str::trim).filter(|query| !query.is_empty());
+        if let Some(query) = query.filter(|query| search_words(query).is_empty()) {
+            return Err(format!(
+                "the query {query:?} has no searchable word, only common English ones: name what to look for in a \
+                 few words, or leave out `query` for the best ranked tips"
+            ));
+        }
         let limit = args.limit.map_or(DEFAULT_TIPS_FOUND, |limit| limit as usize).clamp(1, MAX_TIPS_FOUND);
         let board = trails.tips().board(&trail).await.map_err(|e| format!("{e:#}"))?;
         let now = Utc::now();
         let found = board.search(query, tip_key.as_deref(), limit, now, script.as_deref());
         Ok(listing(&trail, &found, board.live(now), query, tip_key.as_deref(), now))
+    }
+}
+
+/// Why no tip `id` of `trail` is found, tips of `writers` having that id.
+fn missing(trail: &TrailName, id: &TipId, writers: &[&UserId]) -> String {
+    match writers {
+        [] => format!("trail {trail} has no tip {id}"),
+        [writer] => format!("trail {trail} has no tip {id} of that writer, only {writer}'s"),
+        writers => {
+            let writers: Vec<String> = writers.iter().map(ToString::to_string).collect();
+            format!(
+                "tips of {} on trail {trail} share id {id}: name the tip's writer with `writer`",
+                writers.join(", ")
+            )
+        }
     }
 }
 
@@ -241,7 +280,7 @@ fn trail_of(named: Option<&str>, step: Option<&TrailStep>) -> Result<TrailName, 
 
 /// The [`script_sha256`] of the script saved as `trail`: an error when no trail is saved so.
 async fn saved_sha(trails: &Trails, trail: &TrailName) -> Result<String, String> {
-    trails.saved_script(trail).await.map(|script| script_sha256(&script))
+    trails.saved_script(trail).await.map(|saved| script_sha256(&saved.script))
 }
 
 fn verdict(verdict: &str) -> Result<TipVerdict, String> {
@@ -330,8 +369,9 @@ fn listing(
         let text = indented(&tip.text, "  ");
         let _ = write!(
             out,
-            "\n- {} [{key}] {}, {} old{older}: {text}",
+            "\n- {} by {} [{key}] {}, {} old{older}: {text}",
             tip.id,
+            tip.writer,
             votes(&ranked.tally),
             age(tip.written_at, now)
         );
@@ -347,9 +387,10 @@ impl Tools {
                        pitfall or where something lives, in at most 1000 characters. It goes under the step's tip key, \
                        or on the whole trail when the step has none, with this ant as its writer. Later steps carry \
                        the best ranked tips as hints from earlier runs, to verify, not instructions. Refused answering \
-                       no step or a step of an inline script, on a thread a webhook or schedule started, for a tip \
-                       saying what a live tip says (vote that one helpful with vote_tip instead), for one much like \
-                       live tips unless `force`, and once the trail has 200 live tips."
+                       no step or a step of an inline script or of a trail the colony does not save, on a thread a \
+                       webhook or schedule started, for a tip saying what a live tip says (vote that one helpful with \
+                       vote_tip instead), for one much like live tips unless `force`, and once the trail has 200 live \
+                       tips."
     )]
     async fn leave_tip(
         &self,
@@ -364,7 +405,8 @@ impl Tools {
         description = "Vote on a live tip of a saved trail after using it: helpful, stale (right once, no longer) or \
                        wrong, with an optional `reason`. Each ant counts once per tip: voting again replaces its vote. \
                        A tip voted wrong more than helpful is retired, and helpful votes keep a tip ranked high. The \
-                       trail is that of the step being answered unless `trail` names it. Refused on a thread a webhook \
+                       trail is that of the step being answered unless `trail` names it; `writer` names the tip's writer \
+                       when tips of different writers share its id. Refused on a thread a webhook \
                        or schedule started, on this ant's own tips and on tips no longer live."
     )]
     async fn vote_tip(
@@ -382,7 +424,7 @@ impl Tools {
                        before giving up or guessing. The trail is that of the step being answered unless `trail` \
                        names a saved one; `tip_key` defaults to the step's tip key, whose tips come first with the \
                        trail-wide ones; `query` keeps the tips sharing its words; `limit` is 10 by default, at most \
-                       50. Each tip shows its id, tip key, votes (+helpful ~stale !wrong), age, and whether it was \
+                       50. Each tip shows its id, writer, tip key, votes (+helpful ~stale !wrong), age, and whether it was \
                        left on an older script. vote_tip tells whether one helped.")]
     async fn trail_tips(
         &self,
@@ -423,7 +465,7 @@ mod tests {
             older_script: false,
         };
         let text = super::listing(&tip.trail, &[ranked], 1, None, None, now);
-        let shown = "\n- aaaaaaaa [trail-wide] +0 ~0 !0, 2d old: Run[2J the migrations\n  then\n  the build\n  - bbbbbbbb \
+        let shown = "\n- aaaaaaaa by dev-a [trail-wide] +0 ~0 !0, 2d old: Run[2J the migrations\n  then\n  the build\n  - bbbbbbbb \
                      [trail-wide]";
         assert!(text.ends_with(shown), "{text:?}");
         assert_eq!(super::short(&tip), "Run[2J the migrations then the build - bbbbbbbb [trail-wide]");

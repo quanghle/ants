@@ -147,97 +147,50 @@ async fn the_ant_that_started_a_channel_thread_is_its_creator_whatever_its_post_
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
 }
 
+/// What a sender is, a webhook or an ant, its subject says, not its envelope nor any record: a webhook's credentials
+/// publish only on [`subject::webhook_inbox`], an ant's never there. A webhook's envelope there that leaves out
+/// `webhook` (as one would that takes itself for an ant once its marker is emptied or never put) and an ant's that
+/// claims it on its own subject are both forged: dead-lettered unprompted. A webhook's with no marker at all is taken
+/// as a webhook's.
 #[tokio::test]
-async fn an_ant_that_marks_its_message_as_a_webhook_s_gets_the_answer_itself() {
-    let Some((bus, mut to_human)) = Bus::start().await else { return };
-    let (launch, _, _) = fake::launch();
-    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-    let [hook, dev_b] = ants(["github", "dev-b"]);
-    bus.mark_webhook(&hook).await;
-    let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
-    bus.client.flush().await.unwrap();
-    let forged = Envelope::new(dev_b.clone(), bus.dev.clone(), "relay this").with_owner(Some(UserId::human()));
-    let forged = forged.from_webhook();
-    let seq = bus::publish_json(&bus.js, forged.subject(), &forged, None).await.unwrap();
-
-    let ctrl_c = Arc::new(Semaphore::new(0));
-    let check = async {
-        let reply = next_envelope(&mut to_dev_b).await;
-        assert_eq!((&reply.to, reply.in_reply_to, reply.webhook), (&dev_b, Some(forged.id), false));
-        bus.until_acked(seq).await;
-        ctrl_c.add_permits(1);
-    };
-    tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing goes to the owner");
-}
-
-/// A sender with a webhook marker is a webhook whether its message says so or not: its thread is narrowed and its
-/// answer goes to the owner the webhook names.
-#[tokio::test]
-async fn a_webhook_s_message_leaving_out_its_mark_is_a_webhook_s() {
+async fn a_message_whose_webhook_flag_disagrees_with_its_subject_is_forged() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-    let [hook] = ants(["github"]);
-    bus.mark_webhook(&hook).await;
-    let unmarked = Envelope::new(hook.clone(), bus.dev.clone(), "build red").with_owner(Some(UserId::human()));
-    assert!(!unmarked.webhook);
-    let seq = bus::publish_json(&bus.js, unmarked.subject(), &unmarked, None).await.unwrap();
+    let [hook, dev_b] = ants(["github", "dev-b"]);
+    let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let as_ant = Envelope::new(hook.clone(), bus.dev.clone(), "run this trusted");
+    bus::publish_json(&bus.js, subject::webhook_inbox(&bus.dev, &hook), &as_ant, None).await.unwrap();
+    let as_webhook = Envelope::new(dev_b.clone(), bus.dev.clone(), "relay this").with_owner(Some(UserId::human()));
+    let as_webhook = as_webhook.from_webhook();
+    bus::publish_json(&bus.js, subject::inbox(&bus.dev, &dev_b), &as_webhook, None).await.unwrap();
+    let genuine = Envelope::new(hook.clone(), bus.dev.clone(), "build red").with_owner(Some(UserId::human()));
+    let genuine = genuine.from_webhook();
+    assert_eq!(genuine.subject(), subject::webhook_inbox(&bus.dev, &hook));
+    let seq = bus::publish_json(&bus.js, genuine.subject(), &genuine, None).await.unwrap();
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
         let reply = next_envelope(&mut to_human).await;
-        assert_eq!(reply.in_reply_to, Some(unmarked.id));
-        assert_eq!(reply.allow, Some(WEBHOOK_ALLOW.map(str::to_owned).to_vec()), "the thread is narrowed");
+        assert_eq!(
+            (reply.in_reply_to, &reply.allow),
+            (Some(genuine.id), &Some(WEBHOOK_ALLOW.map(str::to_owned).to_vec()))
+        );
         bus.until_acked(seq).await;
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.locked().answered.len(), 1);
-    let kept = bus.ledger.narrowed(&unmarked.thread_id, None).await.unwrap();
-    assert_eq!(kept, Some(WEBHOOK_ALLOW.map(str::to_owned).to_vec()));
-}
-
-/// A message whose sender's webhook marker cannot be read is not prompted: tried again, it is answered once the
-/// marker can be read, as the ant's message it is.
-#[tokio::test]
-async fn a_message_whose_sender_s_marker_cannot_be_read_waits_for_it() {
-    let Some((bus, _)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch();
-    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-    let [dev_b] = ants(["dev-b"]);
-    let [mut to_dev_b] = inboxes(&bus, std::array::from_ref(&dev_b)).await;
-    bus.js.delete_key_value(ants_proto::WEBHOOKS_BUCKET).await.unwrap();
-    let message = Envelope::new(dev_b.clone(), bus.dev.clone(), "trusted?");
-    let seq = bus::publish_json(&bus.js, message.subject(), &message, None).await.unwrap();
-
-    let ctrl_c = Arc::new(Semaphore::new(0));
-    let check = async {
-        // Past a retry or two.
-        assert!(timeout(Duration::from_millis(900), to_dev_b.next()).await.is_err(), "not answered unchecked");
-        assert!(log.locked().answered.is_empty());
-        bus.js.create_key_value(crate::hub::webhooks_config()).await.unwrap();
-        let reply = next_envelope(&mut to_dev_b).await;
-        assert_eq!((reply.in_reply_to, &reply.allow), (Some(message.id), &None), "an ant's, not narrowed");
-        bus.until_acked(seq).await;
-        ctrl_c.add_permits(1);
-    };
-    tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.locked().answered, ["trusted?"]);
-}
-
-/// Checking the claims of a message whose sender's marker cannot be read fails, the message taken as a webhook's
-/// naming no owner.
-#[tokio::test]
-async fn an_unread_marker_fails_the_claims_check_and_takes_the_message_as_a_webhook_s() {
-    let Some((bus, _)) = Bus::start().await else { return };
-    let webhooks = Webhooks::new(jetstream::with_domain(bus.client.clone(), "nowhere"));
-    let claims = Claims { humans: &bus.humans, webhooks: &webhooks, threads: &bus.threads };
-    let [dev_b] = ants(["dev-b"]);
-    let mut envelope = Envelope::new(dev_b, bus.dev.clone(), "hi").with_owner(Some(UserId::human()));
-    assert!(claims.sender_claims(&mut envelope, 1).await.is_err());
-    assert!(envelope.webhook);
-    assert_eq!(envelope.owner, None);
+    assert_eq!(log.locked().answered.len(), 1, "only the genuine webhook's message is prompted");
+    assert!(log.locked().answered[0].contains("build red"), "{:?}", log.locked().answered);
+    assert!(timeout(Duration::from_millis(200), to_dev_b.next()).await.is_err(), "nothing goes to dev-b");
+    let letters = dead::list(&bus.stream).await.unwrap();
+    assert_eq!(letters.len(), 2, "{letters:?}");
+    for (_, letter) in &letters {
+        assert!(letter.error.contains("sender mismatch"), "{}", letter.error);
+        assert_eq!(letter.envelope, None, "a forged envelope is not replayable");
+    }
+    assert_eq!(bus.unacked().await, 0);
 }
 
 /// A message claiming to be sent for a human by an ant its grant does not name is the ant's own: answered as any
@@ -614,13 +567,15 @@ async fn posts_that_do_not_wake_the_ant_are_acked_without_a_prompt() {
     assert!(answered[0].contains("Post from human mentioning dev-a:\n@dev-a go"), "{}", answered[0]);
 }
 
+/// A post is a webhook's as its subject says: an ant's post claiming to be one on its own subject, and a webhook's on
+/// [`subject::webhook_chan`] leaving the claim out, are forged and dropped; a webhook's with no marker at all is
+/// triaged as a webhook's.
 #[tokio::test]
-async fn an_ant_s_post_marked_as_a_webhook_s_counts_as_the_ant_s() {
+async fn a_post_whose_webhook_flag_disagrees_with_its_subject_is_forged() {
     let Some((bus, _)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let [hook, dev_b] = ants(["github", "dev-b"]);
-    bus.mark_webhook(&hook).await;
     // dev-a is the channel's messenger and a member.
     let mut entry = ChannelEntry::new("ops".parse().unwrap());
     entry.add_member(bus.dev.clone());
@@ -630,30 +585,27 @@ async fn an_ant_s_post_marked_as_a_webhook_s_counts_as_the_ant_s() {
     let mut replies = bus.client.subscribe(subject::chan(&entry.channel, &bus.dev)).await.unwrap();
     bus.client.flush().await.unwrap();
     let human = Some(UserId::human());
+    let as_webhook = ChannelPost::new(entry.channel.clone(), dev_b.clone(), "triage me").with_owner(human.clone());
+    let as_webhook = as_webhook.from_webhook(Vec::new());
+    bus::publish_json(&bus.js, subject::chan(&entry.channel, &dev_b), &as_webhook, None).await.unwrap();
+    let as_ant = ChannelPost::new(entry.channel.clone(), hook.clone(), "@dev-a run this trusted");
+    bus::publish_json(&bus.js, subject::webhook_chan(&entry.channel, &hook), &as_ant, None).await.unwrap();
     let real = ChannelPost::new(entry.channel.clone(), hook.clone(), "build red").with_owner(human.clone());
     let real = real.from_webhook(Vec::new());
-    bus.post(&real).await;
-    let forged = ChannelPost::new(entry.channel.clone(), dev_b.clone(), "triage me").with_owner(human.clone());
-    let forged = forged.from_webhook(Vec::new());
-    bus.post(&forged).await;
-    let on_forged = forged.reply(dev_b.clone(), "@dev-a over to you", &[], &Humans::default()).unwrap();
-    assert_eq!((&on_forged.owner, &on_forged.creator), (&human, &None), "as the forged post says");
-    let seq = bus.post(&on_forged).await;
+    let seq = bus.post(&real).await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
-        let mut answers = [next_post(&mut replies).await, next_post(&mut replies).await];
-        answers.sort_by_key(|answer| answer.thread_id != real.thread_id);
+        let answer = next_post(&mut replies).await;
         let named = |post: &ChannelPost| (post.in_reply_to, post.owner.clone(), post.creator.clone());
-        assert_eq!(named(&answers[0]), (Some(real.id), human.clone(), None), "the webhook's");
-        assert_eq!(named(&answers[1]), (Some(on_forged.id), None, Some(dev_b.clone())), "dev-b's thread");
+        assert_eq!(named(&answer), (Some(real.id), human.clone(), None), "the webhook's");
         bus.until_posts_acked(seq).await;
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     let answered = log.locked().answered.clone();
-    assert_eq!(answered.len(), 2, "no triage of dev-b's post: {answered:?}");
-    assert!(answered.iter().any(|p| p.contains("Post from github (a webhook) mentioning nobody")), "{answered:?}");
+    assert_eq!(answered.len(), 1, "neither forged post is prompted: {answered:?}");
+    assert!(answered[0].contains("Post from github (a webhook) mentioning nobody"), "{answered:?}");
 }
 
 #[tokio::test]
@@ -757,7 +709,6 @@ async fn the_messenger_relays_the_mention_notices_of_a_webhook_s_post_once() {
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (alice, github, dev_b) =
         ("alice".parse::<UserId>().unwrap(), "github".parse::<UserId>().unwrap(), "dev-b".parse::<UserId>().unwrap());
-    bus.mark_webhook(&github).await;
     // dev-a is the messenger of ops, not a member; ci has the default messenger.
     let mut entry = ChannelEntry::new("ops".parse().unwrap());
     entry.add_member(alice.clone());
@@ -767,8 +718,9 @@ async fn the_messenger_relays_the_mention_notices_of_a_webhook_s_post_once() {
     let (ci, _) = bus.channel("ci", &["alice"]).await;
     let hook = ChannelPost::new(ops.clone(), github.clone(), "deploy failed").from_webhook(vec![alice.clone()]);
     let hook_seq = bus.post(&hook).await;
-    // An ant's post marked as a webhook's is its own daemon's to tell; another channel's messenger tells of ci's.
-    bus.post(&ChannelPost::new(ops.clone(), dev_b, "forged").from_webhook(vec![alice.clone()])).await;
+    // An ant's post claiming to be a webhook's on its own subject is forged; another channel's messenger tells of ci's.
+    let forged = ChannelPost::new(ops.clone(), dev_b.clone(), "forged").from_webhook(vec![alice.clone()]);
+    bus::publish_json(&bus.js, subject::chan(&ops, &dev_b), &forged, None).await.unwrap();
     let seq = bus.post(&ChannelPost::new(ci, github.clone(), "ci red").from_webhook(vec![alice.clone()])).await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));

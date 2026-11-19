@@ -14,7 +14,7 @@ use crate::{
 #[cfg(doc)]
 use crate::{
     ChannelPost, LINKS_BUCKET, MAX_TITLE, OWNERS_BUCKET, REVIEW_ALLOW, THREADS_BUCKET, ThreadOrigin, ThreadSummary,
-    ThreadTitle, Verdict, WEBHOOK_ALLOW, WEBHOOKS_BUCKET, owner_key, summary_key, title_key, webhook_marker_key,
+    ThreadTitle, Verdict, WEBHOOK_ALLOW, owner_key, summary_key, title_key,
 };
 
 /// One message between ants, or between an ant and a human.
@@ -73,11 +73,12 @@ pub struct Envelope {
     /// [`Envelope::follow_up`]: the sender sets it with [`Envelope::on_behalf`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<UserId>,
-    /// A webhook's message, as `ants webhook serve` marks it: its sender is no human, whatever the humans bucket says,
-    /// and an answer to it goes to the thread's owner, if any, not to the webhook's inbox, which nobody reads
-    /// ([`Envelope::sender_role`]). A daemon takes it only from a sender whose marker is in [`WEBHOOKS_BUCKET`]
-    /// ([`webhook_marker_key`]), which only a webhook's credentials write: from any other it is cleared, so no ant
-    /// sends an answer to the owner it names.
+    /// A webhook's message, as `ants webhook serve` and schedules send it: its sender is no human, whatever the humans
+    /// bucket says, and an answer to it goes to the thread's owner, if any, not to the webhook's inbox, which nobody
+    /// reads ([`Envelope::sender_role`]). It goes on [`subject::webhook_inbox`], which only a webhook's credentials
+    /// (and humans') publish on, and any other envelope on [`subject::inbox`], which no webhook's do: a reader takes
+    /// an envelope whose flag disagrees with its subject as forged ([`Envelope::check_subject`]), so no ant passes for
+    /// a webhook, nor a webhook for an ant.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
     /// The provider, by name, whose wake request the message is ([`crate::provider::method::WAKE`]): the ant's daemon
@@ -646,12 +647,14 @@ impl Envelope {
         })
     }
 
+    /// The subject the envelope goes on: [`subject::webhook_inbox`] for a webhook's ([`Envelope::webhook`]), else
+    /// [`subject::inbox`].
     pub fn subject(&self) -> String {
-        subject::inbox(&self.to, &self.from)
+        if self.webhook { subject::webhook_inbox(&self.to, &self.from) } else { subject::inbox(&self.to, &self.from) }
     }
 
     /// Check that the envelope arrived on its own [`Envelope::subject`]. Credentials pin the sender token of an inbox
-    /// subject, so a `from` that disagrees with it is forged.
+    /// subject, and whether it is a webhook's, so a `from` or a `webhook` that disagrees with it is forged.
     pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
         if subject == self.subject() {
             return Ok(());

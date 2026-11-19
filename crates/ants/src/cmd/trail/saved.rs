@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::colony::{short, since};
 use crate::machines::latest_in;
-use crate::text::{excerpt, one_line};
+use crate::text::one_line;
 
 /// What a trail's name is made of.
 const NAMES: &str = "a trail's name is 1-64 of a-z, 0-9 and '-'";
@@ -140,16 +140,30 @@ fn parse(key: &str, payload: &[u8]) -> Option<SavedTrail> {
 /// What `ants trail rm` purged with a trail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Purged {
+    /// Whether the trail was still saved, rather than removed already with tips or ratings left.
+    pub(super) trail: bool,
     /// Entries of tips and votes.
     pub(super) tips: u64,
     pub(super) ratings: u64,
 }
 
-/// Remove the colony's trail `name` and purge its tips and ratings, refused when the colony has none of that name;
-/// `local` is the directory of this machine's trails, whose file of that name the refusal names. The tips and ratings
-/// go first, so that a failed purge leaves the trail to remove again.
+/// Remove the colony's trail `name` and purge its tips and ratings, refused when the colony has none of that name and
+/// neither tips nor ratings are left of it; `local` is the directory of this machine's trails, whose file of that name
+/// the refusal names. The trail goes first, so that no tip left or rating put while it is removed outlives the purge,
+/// as tips are left and ratings put only of saved trails; removing it again purges what a failed purge left.
 pub(super) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailName) -> Result<Purged> {
-    if latest_in(js, TRAILS_BUCKET, &format!("$KV.{TRAILS_BUCKET}.{name}")).await?.is_empty() {
+    let saved = !latest_in(js, TRAILS_BUCKET, &format!("$KV.{TRAILS_BUCKET}.{name}")).await?.is_empty();
+    if saved {
+        let kv = js.get_key_value(TRAILS_BUCKET).await.context("opening ants_trails (`ants init` creates it)")?;
+        kv.delete(name.as_str()).await.with_context(|| format!("removing trail {name}"))?;
+    }
+    let tips = super::tips::purge(js, name)
+        .await
+        .with_context(|| format!("purging the tips of trail {name}, removed: `ants trail rm {name}` purges them"))?;
+    let ratings = super::ratings::purge(js, name)
+        .await
+        .with_context(|| format!("purging the ratings of trail {name}, removed: `ants trail rm {name}` purges them"))?;
+    if !saved && tips == 0 && ratings == 0 {
         let path = self::local(local).into_iter().find_map(|t| match t.source {
             Source::Local { path } if t.name == *name => Some(path),
             _ => None,
@@ -161,15 +175,7 @@ pub(super) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailNa
             None => bail!("the colony saved no trail {name}"),
         }
     }
-    let tips = super::tips::purge(js, name)
-        .await
-        .with_context(|| format!("purging the tips of trail {name}, which stays saved"))?;
-    let ratings = super::ratings::purge(js, name)
-        .await
-        .with_context(|| format!("purging the ratings of trail {name}, which stays saved"))?;
-    let kv = js.get_key_value(TRAILS_BUCKET).await.context("opening ants_trails (`ants init` creates it)")?;
-    kv.delete(name.as_str()).await.with_context(|| format!("removing trail {name}"))?;
-    Ok(Purged { tips, ratings })
+    Ok(Purged { trail: saved, tips, ratings })
 }
 
 /// This machine's trails, the `.py` files of `dir` that pass [`ants_trail::check`], each named by its file's stem as a
@@ -266,7 +272,7 @@ pub(crate) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
                 }
             };
             let list =
-                |items: &[String]| if items.is_empty() { "-".to_owned() } else { excerpt(&items.join(", "), 40) };
+                |items: &[String]| if items.is_empty() { "-".to_owned() } else { one_line(&items.join(", "), 40) };
             let description =
                 if trail.description.is_empty() { "-".to_owned() } else { one_line(&trail.description, 60) };
             let [counts, latest] = super::ratings::cells(ratings.as_ref());
@@ -360,7 +366,7 @@ pub(crate) fn render(found: &Found, now: DateTime<Utc>) -> String {
         let _ = writeln!(out, "description: {}", one_line(&trail.description, usize::MAX));
     }
     if !trail.phases.is_empty() {
-        let _ = writeln!(out, "phases: {}", trail.phases.join(", "));
+        let _ = writeln!(out, "phases: {}", one_line(&trail.phases.join(", "), usize::MAX));
     }
     if !trail.waypoints.is_empty() {
         let _ = writeln!(out, "waypoints: {}", trail.waypoints.join(", "));

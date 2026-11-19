@@ -17,11 +17,13 @@ use futures::StreamExt as _;
 /// How long reading the presences waits for each one the bucket said it has.
 const WAIT: Duration = Duration::from_secs(5);
 
-/// The presence bucket, created when missing and the credentials allow it (a human's). Creating it again with the
-/// same settings changes nothing, so this needs no stream info, which a human's credentials lack for it.
+/// The presence bucket, created as `ants init` does when missing and the credentials allow it (a human's). This needs
+/// no stream info, which a human's credentials lack for it: a bucket already there as `ants init` leaves it, its
+/// rollups denied, stays as it is.
 pub async fn ensure_bucket(js: &jetstream::Context) -> Result<()> {
-    js.create_key_value(ants_daemon::hub::presence_config()).await.context("creating the presence bucket")?;
-    Ok(())
+    Box::pin(ants_daemon::hub::ensure_unseen_bucket(js, ants_daemon::hub::Object::Presence))
+        .await
+        .context("creating the presence bucket")
 }
 
 /// Run `work` with `device` of `human` present as following `what`: its presence is put first, renewed every
@@ -230,5 +232,42 @@ mod tests {
             present.following(&alice, devices, Following::Inbox).await
         });
         assert!(deviceless.await.is_empty(), "no device, no presence");
+    }
+
+    /// `ants init` under a human's rights leaves the bucket denying rollups, which the KV configuration a create sends
+    /// cannot say: a device still keeps its presence there, and the rollups stay denied.
+    #[tokio::test]
+    async fn a_device_is_present_on_the_bucket_ants_init_made() {
+        let Some(server) = Server::start() else { return };
+        let alice = p("alice");
+        let (laptop, laptop_id) = device(&server, &alice, "laptop").await;
+        let creds = server.dir().join("alice-laptop.creds");
+        let rights = crate::people::humans::Rights::from_creds(Some(&creds)).unwrap();
+        ants_daemon::hub::init(&laptop, |s| rights.may_publish(s)).await.unwrap();
+        ensure_bucket(&laptop).await.unwrap();
+
+        let present = Present::new(&laptop, None).await.unwrap();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<()>();
+        let follow = while_following(&laptop, None, &alice, Some(laptop_id), Following::Inbox, seen_rx);
+        let check = async {
+            let mut found = HashSet::new();
+            for _ in 0..50 {
+                found = present.following(&alice, [laptop_id], Following::Inbox).await;
+                if !found.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(found, HashSet::from([laptop_id]), "the laptop follows the inbox");
+            assert_eq!(online(&laptop).await.unwrap(), HashSet::from([alice.clone()]));
+            seen_tx.send(()).unwrap();
+        };
+        let (_, ()) = tokio::join!(follow, check);
+
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("Nats-Rollup", "sub");
+        let subject = format!("$KV.{PRESENCE_BUCKET}.{}", presence_key(&alice, &laptop_id, Following::Inbox));
+        let rollup = laptop.publish_with_headers(subject, headers, "".into()).await.unwrap().await;
+        assert!(rollup.is_err(), "the bucket denies rollups");
     }
 }

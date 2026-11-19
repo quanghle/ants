@@ -17,6 +17,7 @@ pub use protocol::{Answer, Call, Event, Function, JournalEntry, Limit, Limits, R
 pub use run::{Progress, Run, RunError, RunState, Status};
 pub use runner::{GRACE, Worker, WorkerError, deadline};
 pub use trail::{Meta, SCRIPT_NAME, TrailError, check};
+pub use value::{MAX_DEPTH, check_depth};
 
 /// The trail API and patterns in short, as tool descriptions serve them; contrib/skills/ants-trails/SKILL.md is the
 /// full guide.

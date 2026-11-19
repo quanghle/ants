@@ -308,7 +308,8 @@ fn status_text(status: &RunStatus, now: DateTime<Utc>) -> String {
                 }
             })
             .collect();
-        let what = if waiting.iter().any(|step| step.sent) { "Waiting on" } else { "To send anew on resuming" };
+        let stopped = matches!(header.state, RunState::Stopped { .. });
+        let what = if stopped { "To send anew on resuming" } else { "Waiting on" };
         let _ = write!(out, "\n{what}: {}.", steps.join(", "));
     }
     if *queued > 0 {

@@ -151,14 +151,14 @@ async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
             stream_seq: seq,
             deliveries: 2,
         };
-        let (humans, webhooks) = (Registry::default(), Webhooks::new(h_js.clone()));
+        let humans = Registry::default();
         let threads = Threads::new(
             h_js.clone(),
             human.clone(),
             DirectKv::new(&h_js, None, ants_proto::SESSIONS_BUCKET).await.unwrap(),
         )
         .reading(Reading::Gets);
-        let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
+        let claims = Claims { humans: &humans, threads: &threads };
         assert_eq!(dead::bury_undelivered(&h_js, &stream, &advisory, &claims).await.unwrap(), None);
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(buried.try_recv().is_err(), "one watcher reports the dead letter");

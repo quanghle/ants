@@ -50,7 +50,7 @@ impl Tips {
 
 impl super::Trails {
     /// The script of the trail saved as `name`, which a run of it would take: an error when none is saved so.
-    pub async fn saved_script(&self, name: &TrailName) -> Result<String, String> {
+    pub async fn saved_script(&self, name: &TrailName) -> Result<super::SavedScript, String> {
         self.inner.saved.script(name).await
     }
 }

@@ -243,6 +243,22 @@ impl Trails {
         Some(spent)
     }
 
+    /// [`Trails::tell_spent`] for the run of `header`, stopped, in the background, sent again until stored.
+    pub(super) fn tell_spent_stopped(&self, header: TrailRun) {
+        if header.spends_from.is_none() {
+            return;
+        }
+        let trails = self.clone();
+        tokio::spawn(async move {
+            let mut delay = driver::RETRY_FIRST;
+            while !trails.tell_spent(&header).await {
+                tracing::warn!(run = %header.run, retry_in = ?delay, "telling what a stopped run answering a step spent");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(driver::RETRY_MAX);
+            }
+        });
+    }
+
     /// Tell the conductor of the step the run of `header`, ended or stopped, was started answering what the runs
     /// answering the step spent, in a notice on the step's thread: true once stored, or when the run answers no step. A
     /// notice not stored is sent again, under the same id.

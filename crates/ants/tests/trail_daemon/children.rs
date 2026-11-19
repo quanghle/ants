@@ -47,6 +47,7 @@ async fn a_child_run_s_result_answers_the_call_and_its_failure_raises_there() {
     let dir = scratch_dir("trail-child");
     let saved = [("echo", ECHO), ("broken", "raise ValueError(\"bad input\")\n")];
     let mut lead = conductor_with_saved(&server, &dir, &saved).await;
+    save_for_colony(&server, "echo", &format!("{META}{ECHO}")).await;
     let thread = ThreadId::generate();
     let mut status = lead.client.subscribe(subject::status(&ant("lead"), &thread)).await.unwrap();
     let script = r#"
@@ -98,7 +99,7 @@ except RuntimeError as e:
     assert_eq!(told.thread_id, thread, "only the parent tells its owner its end: {told:?}");
     assert!(lead.sends_no_step(Duration::from_millis(300)).await && lead.told.is_empty(), "{:?}", lead.told);
     let notes = lead.notes(&step_thread, 2).await;
-    let start = format!("Run {child} of trail t started, answering call 0 of run {run}: a test");
+    let start = format!("Run {child} of trail echo (meta name t) started, answering call 0 of run {run}: a test");
     assert_eq!(notes[0], start, "the child's start is noted on its thread");
     assert!(notes.last().unwrap().contains(" is done "), "the child's end is noted on its thread: {notes:?}");
     std::fs::remove_dir_all(&dir).unwrap();

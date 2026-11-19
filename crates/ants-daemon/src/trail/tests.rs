@@ -13,6 +13,14 @@ fn reply_json_takes_the_whole_text_or_its_first_fenced_block() {
 }
 
 #[test]
+fn reply_json_refuses_json_nested_deeper_than_a_run_takes() {
+    let nested = |depth: usize| format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+    assert!(reply_json(&nested(ants_trail::MAX_DEPTH)).is_ok());
+    let deeper = reply_json(&nested(ants_trail::MAX_DEPTH + 1)).unwrap_err();
+    assert!(deeper.contains("more than 100 deep"), "{deeper}");
+}
+
+#[test]
 fn check_names_the_first_mismatch_by_its_path() {
     let schema = json!({
         "type": "object",

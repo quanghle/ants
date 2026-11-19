@@ -97,6 +97,7 @@ pub use identity::{
 };
 pub use ids::{BuiltinAnt, ChannelId, JsDomain, Machine, Reaction, Role, RunId, ThreadId, TipId, TrailName, UserId};
 pub use inbox::{ChannelNotify, ChannelReadMarkers, HeldNotices, NotifyPrefs, ReadMarker};
+pub(crate) use keys::STORAGE_WARNING_PREFIX;
 pub use keys::{
     ANTS_VERSION, Feed, SERVING_EVERY, SPARE_READERS, Serving, TRAIL_ANSWERING, TRAIL_RUNS_INDEX, TRAIL_STEPS,
     assisted_marks_key, assisted_owner_key, assisted_reminders_key, assisted_withdrawal_key, attempt_key,
@@ -109,7 +110,6 @@ pub use keys::{
     trail_call_key, trail_run_key, trail_runs_index_key, trail_runs_subject, trail_session_key, trail_step_key,
     unserved_key, webhook_marker_key, webhook_marker_subject, webhook_seen_key,
 };
-pub(crate) use keys::{STORAGE_WARNING_PREFIX, WEBHOOK_MARKER};
 pub use keys::{
     TIP_RETIRED, TRAIL_STEPS_ON, trail_rating_key, trail_thread_step_key, trail_thread_steps_prefix, trail_tip_key,
     trail_tip_retired_key, trail_tip_vote_key,
@@ -167,9 +167,9 @@ pub use trails::RunLimit;
 pub use trails::{
     CallAnswer, JournalEntry, MAX_TRAIL_ARGS, MAX_TRAIL_DESCRIPTION, MAX_TRAIL_PHASES, MAX_TRAIL_SCRIPT,
     MAX_TRAIL_WAYPOINTS, PendingCall, QueuedCall, RunState, SavedTrail, Saver, SpendsFrom, StepBounds, StepGrant,
-    TRAIL_RUN_RETENTION, TrailAction, TrailAnswering, TrailFunction, TrailLeg, TrailLimits, TrailOutcome, TrailParent,
-    TrailReply, TrailRequest, TrailRun, TrailRunIndex, TrailSession, TrailSource, TrailSpent, TrailStart, TrailStep,
-    TrailStepThread, WaitingStep, leg_entry,
+    TRAIL_CLOCK_SKEW, TRAIL_RUN_RETENTION, TrailAction, TrailAnswering, TrailFunction, TrailLeg, TrailLimits,
+    TrailOutcome, TrailParent, TrailReply, TrailRequest, TrailRun, TrailRunIndex, TrailSession, TrailSource,
+    TrailSpent, TrailStart, TrailStep, TrailStepThread, WaitingStep, leg_entry,
 };
 pub use trails::{
     Counts, FIND_TRAILS_LIMIT, Finder, Found, LATEST_RATINGS, MAX_FIND_TRAILS, MAX_RATING_TASK, MAX_RATING_WHY, Query,
@@ -178,7 +178,8 @@ pub use trails::{
 pub use trails::{
     DEFAULT_TIPS_FOUND, MAX_LIVE_TIPS, MAX_TIP_REASON, MAX_TIP_TEXT, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, MAX_TIPS_FOUND,
     Ranked, Retirement, Similarity, TIP_HALF_LIFE, TIP_RELEVANCE, TIP_RELEVANT_WORDS, TIP_SIMILARITY, TIP_UNUSED,
-    Tally, TipBoard, TipRetired, TipStatus, TipVerdict, TipVote, TrailTip, check_tip_key, script_sha256, tip_words,
+    Tally, TipBoard, TipRetired, TipStatus, TipVerdict, TipVote, TrailTip, check_tip_key, script_sha256, search_words,
+    tip_words,
 };
 pub use trails::{SAVE_TRAIL_REPEAT, SAVE_TRAIL_WAIT, SaveTrailOutcome, SaveTrailReply, SaveTrailRequest, TrailChange};
 
@@ -196,13 +197,13 @@ pub const STREAM_SUBJECTS: [&str; 7] = [
 ];
 /// The inbox subjects [`STREAM`] republishes each message it stores on, to [`STORED_INBOX_DESTINATION`]: what it
 /// sources from a leaf's outbox it stores without publishing it on its subject.
-pub const STORED_INBOX_SOURCE: &str = "ants.inbox.*.*";
+pub const STORED_INBOX_SOURCE: &str = "ants.inbox.*.>";
 /// Where [`STREAM`] republishes a stored inbox message: the recipient's reply inboxes ([`subject::stored_inbox`]), which
 /// its credentials already read and no credentials publish to. The headers keep the original subject. The server also
 /// answers a direct get, and delivers a push consumer's messages, there for any client that names the subject, with
 /// headers that client stored: only a message without a reply subject, and with a single `Nats-Stream` and a single
 /// `Nats-Subject` header, the stream's own, is one it republished.
-pub const STORED_INBOX_DESTINATION: &str = "_INBOX.{{wildcard(1)}}.stored.{{wildcard(2)}}";
+pub const STORED_INBOX_DESTINATION: &str = "_INBOX.{{wildcard(1)}}.stored.>";
 /// JetStream stream on a machine's leaf node (in the leaf's own JetStream domain, the machine name) that keeps what
 /// the machine's clients send while the hub's [`STREAM`] is out of reach, under [`subject::outbox`] subjects.
 pub const OUTBOX_STREAM: &str = "ANTS_OUT";
@@ -272,10 +273,10 @@ pub const LINKS_BUCKET: &str = "ants_links";
 /// stream's retention.
 pub const OWNERS_BUCKET: &str = "ants_owners";
 /// KV bucket of the events each webhook delivered, keyed `<webhook>.<hash of the event id>` ([`webhook_seen_key`]),
-/// so a retried event is not delivered again, of each webhook's marker ([`webhook_marker_key`]), which tells
-/// daemons the webhook is one, and of the channel manager's [`Serving`] ([`channel_manager_serving_key`]). Each
-/// webhook writes and reads only its own keys, ants read only the markers, humans the markers and the channel
-/// manager's key; entries expire after [`WEBHOOK_RETENTION`].
+/// so a retried event is not delivered again, of each webhook's marker ([`webhook_marker_key`]), the version
+/// it runs, and of the channel manager's [`Serving`] ([`channel_manager_serving_key`]). Each webhook writes and reads
+/// only its own keys, ants read nothing of it, humans the markers and the channel manager's key; what tells a webhook
+/// from an ant is the subject of its messages ([`subject::webhook_inbox`]), never this bucket; entries expire after [`WEBHOOK_RETENTION`].
 pub const WEBHOOKS_BUCKET: &str = "ants_webhooks";
 /// How long [`WEBHOOKS_BUCKET`] remembers an event.
 pub const WEBHOOK_RETENTION: Duration = Duration::from_hours(7 * 24);

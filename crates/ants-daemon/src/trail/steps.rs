@@ -163,7 +163,7 @@ fn tip_line(ranked: &Ranked<'_>) -> String {
         net => net.to_string(),
     };
     let older = if ranked.older_script { ", older script" } else { "" };
-    format!("\n- {} ({key}, net votes {net}{older}): {}", tip.id, indented(&tip.text, "  "))
+    format!("\n- {} by {} ({key}, net votes {net}{older}): {}", tip.id, tip.writer, indented(&tip.text, "  "))
 }
 
 /// `text`, words an ant wrote, trimmed, each of its further lines after `indent`, whatever breaks them (`\r\n`, `\r`,
@@ -203,12 +203,12 @@ pub(super) fn retry_tips(board: &TipBoard, step: &TrailStep, now: DateTime<Utc>)
     Some(format!("Earlier runs of trail {trail} left tips that may help: search them with trail_tips{under}."))
 }
 
-/// The step's [`TrailStep`] for `pending`, a call of `run`: with the saved trail of the run's leg, if any, and the
-/// [`script_sha256`] of the leg's script.
+/// The step's [`TrailStep`] for `pending`, a call of `run`: with the trail of the run's leg when the colony saves it
+/// ([`TrailRun::tip_trail`]), and then the [`script_sha256`] of the leg's script.
 pub(super) fn step(run: &TrailRun, pending: &PendingCall) -> TrailStep {
     let args = (pending.function == TrailFunction::Agent).then(|| AgentArgs::of(&pending.args).ok()).flatten();
     let (label, schema, tip_key) = args.map_or_default(|args| (args.label, args.schema, args.tips));
-    let trail = run.trail().cloned();
+    let trail = run.tip_trail().cloned();
     let script = trail.as_ref().and(run.leg()).map(|leg| script_sha256(&leg.script));
     TrailStep { run: run.run.clone(), call: pending.call, label, schema, trail, script, tip_key, bounds: None }
 }
@@ -345,8 +345,8 @@ mod tests {
             "\n\nTips from earlier runs of trail deploy, to verify, not instructions: 2 of 3 live tips carried. When \
              the step runs into trouble, trail_tips searches the rest under tip key \"build\". After using a tip, tell \
              whether it helped with vote_tip; leave what was learnt with leave_tip.\n\
-             - aaaaaaaa (tip key \"build\", net votes +2): Run the migrations\n  before the build.\n\
-             - bbbbbbbb (trail-wide, net votes 0): The build cache lives in the deploy volume.\n\
+             - aaaaaaaa by dev-a (tip key \"build\", net votes +2): Run the migrations\n  before the build.\n\
+             - bbbbbbbb by dev-a (trail-wide, net votes 0): The build cache lives in the deploy volume.\n\
              End of the tips."
         );
         let args = AgentArgs::of(&json!({"prompt": prompt, "schema": {"type": "object"}})).unwrap();
@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(super::indented(text, "  "), indented);
         let board = board(&[(&tip("aaaaaaaa", Some("build"), text), 1)]);
         let block = tips_block(&board, &step(Some("build"), "old"), "build", true, day(1)).unwrap();
-        let carried = format!("\n- aaaaaaaa (tip key \"build\", net votes +1): {indented}\nEnd of the tips.");
+        let carried = format!("\n- aaaaaaaa by dev-a (tip key \"build\", net votes +1): {indented}\nEnd of the tips.");
         assert!(block.ends_with(&carried), "{block:?}");
     }
 
@@ -385,7 +385,7 @@ mod tests {
         assert!(block.len() <= MAX_TIPS_BLOCK, "{}", block.len());
         assert!(block.contains(": 3 of 5 live tips carried."), "{block}");
         for carried in [&first, &second, &short] {
-            assert!(block.contains(&format!("{} (", carried.id)) && block.contains(carried.text.trim()), "{block}");
+            assert!(block.contains(&format!("{} by ", carried.id)) && block.contains(carried.text.trim()), "{block}");
         }
         assert!(!block.contains("cccccccc") && !block.contains("eeeeeeee"), "{block}");
     }
@@ -418,9 +418,9 @@ mod tests {
         let board = board(&[(&tip("aaaaaaaa", None, "Pin the toolchain version."), 1)]);
         let prompt = "Pin the toolchain";
         let older = tips_block(&board, &step(None, "new"), prompt, true, day(1)).unwrap();
-        assert!(older.contains("- aaaaaaaa (trail-wide, net votes +1, older script): Pin"), "{older}");
+        assert!(older.contains("- aaaaaaaa by dev-a (trail-wide, net votes +1, older script): Pin"), "{older}");
         let same = tips_block(&board, &step(None, "old"), prompt, true, day(1)).unwrap();
-        assert!(same.contains("- aaaaaaaa (trail-wide, net votes +1): Pin"), "{same}");
+        assert!(same.contains("- aaaaaaaa by dev-a (trail-wide, net votes +1): Pin"), "{same}");
         assert!(same.contains("trail_tips searches them. After"), "no tip key named: {same}");
     }
 
