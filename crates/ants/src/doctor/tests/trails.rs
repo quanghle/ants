@@ -239,6 +239,31 @@ fn child_runs_show_only_where_resuming_them_moves_their_parent_on() {
     );
 }
 
+#[test]
+fn a_run_running_or_waiting_past_its_wall_time_names_the_stop_or_the_restart_moving_it_on() {
+    let now = Utc::now();
+    let running = record("dev-a", RunState::Running, 3 * 24, now);
+    let waiting = record("dev-a", RunState::Waiting, 26, now);
+    let failing_now = record("dev-a", RunState::Running, 24, now);
+    let listed = [&running, &waiting, &failing_now].map(Clone::clone);
+
+    let checks = stuck(&listed, &[], &colony(&["dev-a"], now), now);
+    let overdue = |run: &TrailRun, state: &str, past: &str| {
+        warn(
+            format!(
+                "run {} of trail deploy, conducted by dev-a, is still {state} {past} past its wall time of 1d: the \
+                 conductor's daemon does not drive it",
+                run.run
+            ),
+            format!(
+                "ants trail stop {}, or restart the daemon serving dev-a, which continues it from its records",
+                run.run
+            ),
+        )
+    };
+    assert_eq!(shown(&checks), [overdue(&running, "running", "2d"), overdue(&waiting, "waiting", "2h")]);
+}
+
 /// Put `value` under `key` of [`TRAIL_RUNS_BUCKET`], as the conductor owning the key does.
 async fn put(js: &async_nats::jetstream::Context, key: &str, value: &impl serde::Serialize) {
     let payload = serde_json::to_vec(value).unwrap();

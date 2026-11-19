@@ -562,7 +562,11 @@ the longest wall time, so a finished run stays at least 30 days. The full layout
   never sent go out, answers stored past the session are given to the script. A goto stores the run's header with
   the new leg, gives up the steps of the leg left, then stores the new leg's session: a daemon restarted between the
   two gives up those steps, still in the stored session, before the new leg goes on; a stop before then gives them up
-  with the current leg's, listing those in other ants' queues.
+  with the current leg's, listing those in other ants' queues. A run whose records the daemon cannot read as it starts
+  (the bucket out of reach, as on a leaf node whose uplink is not up yet, or a record that does not parse) is tried
+  again while the daemon lives, after 2 s and up to 5 min apart, and at once on a reply to one of its steps or a stop
+  of it; until then such a reply is not acked: it is delivered again, as a message whose handling failed is. An ended
+  run whose end the daemon could not tell is tried again the same way.
 - **Replay:** a session the worker cannot restore (dumped by another Monty version, or lost) is rebuilt from the
   journal: the current leg's pinned script starts again at its waypoint with the leg's input, clock and seed, its
   steps answered from the journal in order. A script whose steps no longer match the journal fails the run, naming
@@ -613,5 +617,6 @@ A worker failing with the run unchanged is retried, after 1 s and up to 1 min ap
 `ants doctor` starts the worker of the daemon service's `ants`, else its own, as a daemon does, with a request it
 refuses before running anything. With a human's credentials it lists the runs stuck: those stopped or failed on a limit
 (steps, turns or wall time, as their records say) that `ants trail resume` may still continue, naming the limits to
-raise; those whose steps went to ants not in the colony, naming `ants trail stop`; and those whose conductor is not in
-the colony ([cli.md](cli.md#identity-setup-completions-and-doctor)).
+raise; those whose steps went to ants not in the colony, naming `ants trail stop`; those running or waiting over
+5 min past their wall time, which the conductor's daemon does not drive, naming `ants trail stop` or a restart of that
+daemon; and those whose conductor is not in the colony ([cli.md](cli.md#identity-setup-completions-and-doctor)).
