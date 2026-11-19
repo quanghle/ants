@@ -124,7 +124,8 @@ fn a_follower_prints_each_change_of_a_run_once() {
     assert!(follower.header(&header).is_empty());
     let queued = QueuedCall { call: 1, function: TrailFunction::Agent, args: json!({"prompt": "test it"}) };
     let pending0 = pending(0, "dev-a", TrailFunction::Agent);
-    let mut session = TrailSession { session: String::new(), pending: vec![pending0], queued: vec![queued] };
+    let mut session =
+        TrailSession { session: String::new(), pending: vec![pending0], queued: vec![queued], anew: Vec::new() };
     assert_eq!(follower.session(&session), ["step 1 queued: test it", "step 0 sent to dev-a: step 0"]);
     assert!(follower.session(&session).is_empty());
     session.pending[0].retries = 1;

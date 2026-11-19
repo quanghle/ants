@@ -45,6 +45,8 @@ mod goto;
 mod guide;
 #[path = "trail_guide/host.rs"]
 mod guide_host;
+#[path = "trail_daemon/lifecycle.rs"]
+mod lifecycle;
 #[path = "trail_daemon/limits.rs"]
 mod limits;
 #[path = "trail_daemon/nested.rs"]
@@ -153,13 +155,29 @@ async fn conductor_full(
     humans: Registry,
     trails_dir: Option<PathBuf>,
 ) -> Conductor {
+    conductor_refusing(server, worker, colony, humans, trails_dir, None).await
+}
+
+/// [`conductor_full`], failing to send any message to `refused`.
+async fn conductor_refusing(
+    server: &NatsServer,
+    worker: &Path,
+    colony: Vec<ColonyEntry>,
+    humans: Registry,
+    trails_dir: Option<PathBuf>,
+    refused: Option<UserId>,
+) -> Conductor {
     let lead = ant("lead");
     let (client, js) = ants_daemon::bus::connect(&server.url, None, None, &lead, "conductor").await.unwrap();
     let attempts = ants_daemon::bus::ensure_attempts(&js, None, &lead).await.unwrap();
     let (tx, sent) = mpsc::unbounded_channel();
-    let outbox: ants_daemon::mcp::Outbox = Arc::new(move |envelope| {
+    let outbox: ants_daemon::mcp::Outbox = Arc::new(move |envelope: Envelope| {
         let tx = tx.clone();
+        let refused = refused.as_ref() == Some(&envelope.to);
         Box::pin(async move {
+            if refused {
+                anyhow::bail!("{} is unreachable", envelope.to);
+            }
             tx.send(envelope).unwrap();
             Ok(())
         })
@@ -650,6 +668,7 @@ await parallel(*[agent(prompt + f"f{i}", ant="dev", label=f"f{i}") for i in rang
     let max = ants_daemon::trail::MAX_RECORD;
     assert!(error.contains(&format!(" bytes, past the {max} it holds")), "{error}");
     assert!(lead.sends_no_step(Duration::from_millis(200)).await, "a step went out");
+    assert_eq!(lead.header(&run).await.steps, 0, "the steps of the failed pass never went out");
 
     // A record of the largest size the check lets through fits NATS's payload.
     let (mut stored, _) = lead.session(&run).await;
