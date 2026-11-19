@@ -313,8 +313,8 @@ async fn humans_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
         ants_daemon::hub::trail_ratings_config(),
     ];
     for config in configs {
-        assert!(a_js.create_key_value(config.clone()).await.is_err(), "only a human creates {}", config.bucket);
-        h_js.create_key_value(config).await.unwrap();
+        assert!(a_js.create_stream(config.clone()).await.is_err(), "only a human creates {}", config.name);
+        h_js.create_stream(config).await.unwrap();
     }
 
     let trail = SavedTrail {

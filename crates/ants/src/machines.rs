@@ -1,6 +1,7 @@
 //! `ants machines`: the machines whose daemons recorded the ants they serve ([`MACHINES_BUCKET`]), which stay there
 //! after an ant's colony entry expired, so that an ant that is offline still has a machine.
 
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 use ants_daemon::bus::relayed::{self, Read};
@@ -53,7 +54,9 @@ pub(crate) async fn latest(js: &jetstream::Context, filter: &str) -> Result<Vec<
     latest_in(js, MACHINES_BUCKET, filter).await
 }
 
-/// [`latest`] of `bucket`, a KV bucket of history 1, on `filter`, a subject under `$KV.<bucket>.`.
+/// [`latest`] of `bucket`, a KV bucket, on `filter`, a subject under `$KV.<bucket>.`: each key as its writer last put
+/// it. A message a stream relayed is skipped, leaving the key as its writer put it before, when the bucket keeps it,
+/// as the trails' buckets do.
 pub(crate) async fn latest_in(js: &jetstream::Context, bucket: &str, filter: &str) -> Result<Vec<(String, Vec<u8>)>> {
     Ok(latest_after(js, bucket, filter, 1).await?.0)
 }
@@ -91,7 +94,7 @@ async fn timed_after(
     let inbox = client.new_inbox();
     let mut replies = client.subscribe(inbox.clone()).await?;
     let prefix = format!("$KV.{bucket}.");
-    let (mut entries, mut seq) = (Vec::new(), from);
+    let (mut last, mut seq) = (Entries::new(), from);
     loop {
         let request = json!({ "seq": seq, "next_by_subj": filter, "batch": BATCH });
         let request = async_nats::Request::new().inbox(inbox.clone()).payload(serde_json::to_vec(&request)?.into());
@@ -105,12 +108,12 @@ async fn timed_after(
             };
             match msg.status {
                 None => {}
-                Some(StatusCode::NOT_FOUND) => return Ok((entries, seq)),
+                Some(StatusCode::NOT_FOUND) => return Ok((in_put_order(last), seq)),
                 Some(StatusCode::NO_RESPONDERS) => bail!("no {bucket} bucket: `ants init` creates it"),
                 Some(status) if status.as_u16() == 204 => {
                     let pending = msg.headers.as_ref().and_then(|h| h.get("Nats-Num-Pending"));
                     if got == 0 || pending.is_some_and(|n| n.as_str() == "0") {
-                        return Ok((entries, seq));
+                        return Ok((in_put_order(last), seq));
                     }
                     break;
                 }
@@ -125,12 +128,24 @@ async fn timed_after(
                 continue;
             }
             let deleted = msg.headers.get("KV-Operation").is_some();
-            if let Some(key) = msg.subject.strip_prefix(prefix.as_str()).filter(|_| !deleted) {
-                entries.push((key.to_owned(), msg.payload.to_vec(), SystemTime::from(msg.time).into()));
+            if let Some(key) = msg.subject.strip_prefix(prefix.as_str()) {
+                let value = (!deleted).then(|| (msg.payload.to_vec(), SystemTime::from(msg.time).into()));
+                last.insert(key.to_owned(), (msg.sequence, value));
             }
         }
     }
 }
+
+/// What a writer last put under each key, by the sequence of that message, deleted keys left out, in the order put.
+fn in_put_order(last: Entries) -> Vec<(String, Vec<u8>, DateTime<Utc>)> {
+    let mut entries: Vec<_> =
+        last.into_iter().filter_map(|(key, (seq, value))| value.map(|(value, at)| (seq, key, value, at))).collect();
+    entries.sort_unstable_by_key(|(seq, ..)| *seq);
+    entries.into_iter().map(|(_, key, value, at)| (key, value, at)).collect()
+}
+
+/// Each key's last message a writer put: its sequence, and its value and when it was put, None for a delete.
+type Entries = HashMap<String, (u64, Option<(Vec<u8>, DateTime<Utc>)>)>;
 
 fn sorted(mut records: Vec<MachineRecord>) -> Vec<MachineRecord> {
     records.sort_by(|a, b| a.machine.cmp(&b.machine));

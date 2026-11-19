@@ -198,8 +198,7 @@ pub(super) async fn purge(js: &jetstream::Context, name: &TrailName) -> Result<u
         .get_stream(format!("KV_{TRAIL_TIPS_BUCKET}"))
         .await
         .context("opening ants_trail_tips (`ants init` creates it)")?;
-    let purged = stream.purge().filter(format!("$KV.{TRAIL_TIPS_BUCKET}.{name}.>")).await?;
-    Ok(purged.purged)
+    super::saved::purge_keys(&stream, &format!("$KV.{TRAIL_TIPS_BUCKET}.{name}.>")).await
 }
 
 /// What `ants trail rm` adds to its line for the `purged` entries of tips and votes it removed with the trail.

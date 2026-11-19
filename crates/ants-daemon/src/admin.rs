@@ -167,7 +167,7 @@ pub async fn serve(js: jetstream::Context, js_domain: Option<JsDomain>, orders: 
     let taking = async {
         let mut delay = RETRY_FIRST;
         loop {
-            match take(&js, js_domain.as_ref(), &orders).await {
+            match Box::pin(take(&js, js_domain.as_ref(), &orders)).await {
                 Ok(()) => delay = RETRY_FIRST,
                 Err(e) => {
                     tracing::warn!(

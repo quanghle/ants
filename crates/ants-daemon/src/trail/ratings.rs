@@ -28,7 +28,7 @@ impl Ratings {
     /// The ratings in [`TRAIL_RATINGS_BUCKET`], put as `ant`, without a request: whether the bucket exists shows on the
     /// first read or write. `js_domain` is the domain `js` was made for ([`crate::bus::jetstream`]).
     pub async fn new(js: &jetstream::Context, js_domain: Option<&JsDomain>, ant: UserId) -> Result<Self> {
-        Ok(Self { ant, kv: DirectKv::whole(js, js_domain, TRAIL_RATINGS_BUCKET).await? })
+        Ok(Self { ant, kv: DirectKv::whole(js, js_domain, TRAIL_RATINGS_BUCKET).await?.past_relays() })
     }
 
     /// Store `rating`, one of this ant's runs, under its key, replacing an earlier rating of the run and trail.

@@ -111,7 +111,7 @@ impl Saved {
         through: SaveThrough,
     ) -> Self {
         let kv = match DirectKv::whole(js, js_domain, TRAILS_BUCKET).await {
-            Ok(kv) => Some(kv),
+            Ok(kv) => Some(kv.past_relays()),
             Err(e) => {
                 tracing::warn!(error = format!("{e:#}"), "reading no saved trails of the colony");
                 None
@@ -428,7 +428,7 @@ mod tests {
     async fn a_save_expecting_an_older_revision_saves_nothing() {
         let Some(server) = NatsServer::start() else { return };
         let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-        js.create_key_value(crate::hub::trails_config()).await.unwrap();
+        js.create_stream(crate::hub::trails_config()).await.unwrap();
         let dev_a: UserId = "dev-a".parse().unwrap();
         let saved = Saved::new(&js, None, None, dev_a.clone(), SaveThrough::Bucket).await;
         let name: TrailName = "deploy".parse().unwrap();

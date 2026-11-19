@@ -42,7 +42,7 @@ fn refused(outcome: Option<SaveTrailOutcome>, says: &str) {
 async fn the_keeper_writes_an_ant_s_own_trails_only() {
     let Some(server) = NatsServer::start() else { return };
     let (client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-    js.create_key_value(crate::hub::trails_config()).await.unwrap();
+    js.create_stream(crate::hub::trails_config()).await.unwrap();
     let kv = DirectKv::whole(&js, None, TRAILS_BUCKET).await.unwrap();
     let serving = tokio::spawn(serve(client, js.clone(), None));
     let (a, _) = bus::connect(&server.url, None, None, &p("dev-a"), "test").await.unwrap();

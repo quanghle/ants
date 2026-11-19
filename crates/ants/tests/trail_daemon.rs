@@ -121,7 +121,7 @@ async fn init(server: &NatsServer) {
     for config in
         [hub::trails_config(), hub::trail_runs_config(), hub::trail_tips_config(), hub::trail_ratings_config()]
     {
-        js.create_key_value(config).await.unwrap();
+        js.create_stream(config).await.unwrap();
     }
 }
 

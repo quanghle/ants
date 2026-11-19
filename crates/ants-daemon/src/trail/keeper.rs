@@ -95,7 +95,7 @@ pub async fn answer(kv: &DirectKv, request: &SaveTrailRequest) -> Result<SaveTra
 ///
 /// [`Permissions::for_trail_keeper`]: ants_proto::Permissions::for_trail_keeper
 pub async fn serve(client: async_nats::Client, js: jetstream::Context, js_domain: Option<JsDomain>) -> Result<()> {
-    let kv = DirectKv::whole(&js, js_domain.as_ref(), TRAILS_BUCKET).await?;
+    let kv = DirectKv::whole(&js, js_domain.as_ref(), TRAILS_BUCKET).await?.past_relays();
     let requests = client
         .queue_subscribe(subject::ALL_SAVE_TRAIL_REQUESTS, QUEUE.to_owned())
         .await

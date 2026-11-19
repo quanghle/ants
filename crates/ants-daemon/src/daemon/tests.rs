@@ -158,7 +158,7 @@ impl Bus {
             crate::hub::trail_ratings_config(),
         ];
         for config in configs {
-            self.js.create_key_value(config).await.unwrap();
+            self.js.create_stream(config).await.unwrap();
         }
         let conducting = crate::trail::Conducting {
             js: self.js.clone(),

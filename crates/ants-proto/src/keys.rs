@@ -446,6 +446,13 @@ pub fn trail_runs_subject(conductor: &UserId) -> String {
     format!("$KV.{TRAIL_RUNS_BUCKET}.{conductor}.>")
 }
 
+/// JetStream consumer on the stream of [`TRAIL_RUNS_BUCKET`] a conductor's daemon reads one of its keys back through,
+/// one read at a time, when the key's last message is one a stream relayed: its filter is pinned to
+/// [`trail_runs_subject`] of the conductor.
+pub fn trail_runs_reader(conductor: &UserId) -> String {
+    format!("runsread-{conductor}")
+}
+
 /// Key of a [`TrailTip`] in [`TRAIL_TIPS_BUCKET`]: its trail, then its writer, so credentials can confine an ant to
 /// its own tips, then its id.
 pub fn trail_tip_key(trail: &TrailName, writer: &UserId, id: &TipId) -> String {

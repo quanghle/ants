@@ -155,10 +155,10 @@ impl Object {
             Self::Devices => Spec::Bucket(Box::new(devices_config())),
             Self::Machines => Spec::Bucket(Box::new(machines_config())),
             Self::Identities => Spec::Bucket(Box::new(identities_config())),
-            Self::Trails => Spec::Bucket(Box::new(trails_config())),
-            Self::TrailRuns => Spec::Bucket(Box::new(trail_runs_config())),
-            Self::TrailTips => Spec::Bucket(Box::new(trail_tips_config())),
-            Self::TrailRatings => Spec::Bucket(Box::new(trail_ratings_config())),
+            Self::Trails => Spec::Stream(Box::new(trails_config())),
+            Self::TrailRuns => Spec::Stream(Box::new(trail_runs_config())),
+            Self::TrailTips => Spec::Stream(Box::new(trail_tips_config())),
+            Self::TrailRatings => Spec::Stream(Box::new(trail_ratings_config())),
         }
     }
 
@@ -505,34 +505,52 @@ async fn mark_incarnation(identities: &kv::Store) -> Result<()> {
     written.context("writing the incarnation marker of bucket ants_identities")
 }
 
-/// The saved trails ([`TRAILS_BUCKET`]): a trail lasts until a human deletes it.
-pub fn trails_config() -> kv::Config {
-    lasting_config(TRAILS_BUCKET, "Saved trails, written by humans and ants")
-}
-
-/// The trail runs ([`TRAIL_RUNS_BUCKET`]): each entry expires [`TRAIL_RUN_RETENTION`] and a run's most wall time after
-/// its last put. A run's entries are put while it runs, which is never longer than that wall time, so those of a
-/// finished run last [`TRAIL_RUN_RETENTION`] at least after its end, and none of a running one expires. A bucket max
-/// age needs no write to refresh old entries, as per-message TTLs would.
-pub fn trail_runs_config() -> kv::Config {
-    kv::Config {
-        bucket: TRAIL_RUNS_BUCKET.to_owned(),
-        description: "Trail runs: each run's header, session and answered calls, written by its conductor".to_owned(),
-        history: 1,
-        max_age: TRAIL_RUN_RETENTION + TrailLimits::MAX.wall_time(),
+/// The stream of a trails' bucket: a KV bucket that keeps every message of each key, not only its last, and denies
+/// rollups. A stream stores a message it or the server sent on any key ([`crate::bus::relayed`]), which in a bucket
+/// of history 1 would replace the entry its writer put; kept, that entry is still read, past the relayed messages
+/// ([`crate::records::direct_kv::DirectKv::past_relays`]), however many are relayed onto the key.
+fn trails_bucket_config(bucket: &str, description: &str, max_age: Duration) -> stream::Config {
+    stream::Config {
+        name: format!("KV_{bucket}"),
+        description: Some(description.to_owned()),
+        subjects: vec![format!("$KV.{bucket}.>")],
+        // Unlimited, as a count: KV clients refuse to open a bucket of history below 1.
+        max_messages_per_subject: i64::MAX,
+        max_age,
+        discard: stream::DiscardPolicy::New,
         storage: stream::StorageType::File,
+        num_replicas: 1,
+        allow_direct: true,
+        deny_delete: true,
         ..Default::default()
     }
 }
 
+/// The saved trails ([`TRAILS_BUCKET`]): a trail lasts until a human deletes it.
+pub fn trails_config() -> stream::Config {
+    trails_bucket_config(TRAILS_BUCKET, "Saved trails, written by humans and ants", Duration::ZERO)
+}
+
+/// The trail runs ([`TRAIL_RUNS_BUCKET`]): each message expires [`TRAIL_RUN_RETENTION`] and a run's most wall time
+/// after it was put. A run's entries are put while it runs, which is never longer than that wall time, so those of a
+/// finished run last [`TRAIL_RUN_RETENTION`] at least after its end, and none of a running one expires. A stream max
+/// age needs no write to refresh old entries, as per-message TTLs would.
+pub fn trail_runs_config() -> stream::Config {
+    trails_bucket_config(
+        TRAIL_RUNS_BUCKET,
+        "Trail runs: each run's header, session and answered calls, written by its conductor",
+        TRAIL_RUN_RETENTION + TrailLimits::MAX.wall_time(),
+    )
+}
+
 /// The trails' tips and their votes ([`TRAIL_TIPS_BUCKET`]): a tip lasts until a human purges its trail's.
-pub fn trail_tips_config() -> kv::Config {
-    lasting_config(TRAIL_TIPS_BUCKET, "Trail tips and their votes, each written by its ant")
+pub fn trail_tips_config() -> stream::Config {
+    trails_bucket_config(TRAIL_TIPS_BUCKET, "Trail tips and their votes, each written by its ant", Duration::ZERO)
 }
 
 /// The trails' ratings ([`TRAIL_RATINGS_BUCKET`]): a rating lasts until a human purges its trail's.
-pub fn trail_ratings_config() -> kv::Config {
-    lasting_config(TRAIL_RATINGS_BUCKET, "Trail ratings, each written by its run's conductor")
+pub fn trail_ratings_config() -> stream::Config {
+    trails_bucket_config(TRAIL_RATINGS_BUCKET, "Trail ratings, each written by its run's conductor", Duration::ZERO)
 }
 
 /// The read markers of the humans ([`READ_BUCKET`]).
@@ -770,8 +788,13 @@ mod tests {
         let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
         let legacy = [Object::TrailTips, Object::Presence, Object::Humans];
         for object in legacy {
-            let Spec::Bucket(config) = object.spec() else { unreachable!() };
-            js.create_key_value(*config).await.unwrap().put("a.b", "{}".into()).await.unwrap();
+            match object.spec() {
+                Spec::Bucket(config) => drop(js.create_key_value(*config).await.unwrap()),
+                Spec::Stream(config) => {
+                    drop(js.create_stream(stream::Config { allow_rollup: true, ..*config }).await.unwrap());
+                }
+            }
+            js.get_key_value(object.bucket().unwrap()).await.unwrap().put("a.b", "{}".into()).await.unwrap();
         }
         js.create_stream(stream::Config { allow_rollup: true, ..threads_config() }).await.unwrap();
         let found = check(&js, |_| true).await;

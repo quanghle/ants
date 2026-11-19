@@ -5,7 +5,8 @@
 
 use ants_proto::{
     JsDomain, RunId, TRAIL_RUNS_BUCKET, ThreadId, TrailRun, TrailRunIndex, TrailSession, TrailStepThread, UserId,
-    trail_call_key, trail_run_key, trail_runs_index_key, trail_session_key, trail_step_key, trail_thread_step_key,
+    trail_call_key, trail_run_key, trail_runs_index_key, trail_runs_reader, trail_session_key, trail_step_key,
+    trail_thread_step_key,
 };
 use ants_trail::JournalEntry;
 use anyhow::{Context as _, Result};
@@ -24,7 +25,7 @@ pub(super) struct Store {
 
 impl Store {
     pub(super) async fn new(js: &jetstream::Context, js_domain: Option<&JsDomain>, ant: UserId) -> Result<Self> {
-        let kv = DirectKv::new(js, js_domain, TRAIL_RUNS_BUCKET).await?;
+        let kv = DirectKv::new(js, js_domain, TRAIL_RUNS_BUCKET).await?.past_relays_through(trail_runs_reader(&ant));
         Ok(Self { kv, ant, index: tokio::sync::Mutex::new(()) })
     }
 
