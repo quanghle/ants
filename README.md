@@ -131,7 +131,7 @@ ants ask --wait @dev-b "run the test suite"
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Wire stores and subjects, delivery retries, worktrees, colony, MCP tools, channels, escalations, dead letters |
 | [docs/sense.md](docs/sense.md) | Built-in sense: an ant's brief, memories, resume registers and handoffs, tasks, commitments, reminders, persona, skills and dreams, what operators see of them, limits |
-| [docs/trails.md](docs/trails.md) | Trails: Python scripts a conductor's daemon runs to coordinate ants and humans; saving, starting (CLI, `run_trail`, schedules), following, stopping and resuming runs, limits, trust, the tips steps leave for later runs, storage, workers |
+| [docs/trails.md](docs/trails.md) | Trails: Python scripts a conductor's daemon runs to coordinate ants and humans; saving (`ants trail save`, ants' `save_trail`), starting (CLI, `run_trail`, schedules), following, stopping and resuming runs, limits, trust, the tips steps leave for later runs, storage, workers |
 | [docs/cli.md](docs/cli.md) | Full CLI command reference, environment variables, thread search/marks, `ants chat` and `ants dash` |
 | [docs/config.md](docs/config.md) | `config.toml`, shared settings, harnesses, fallbacks, templates, manager ants, spend caps, permissions, redaction, schedules |
 | [docs/auth.md](docs/auth.md) | NKey/JWT credentials, revocations, backups, device encryption and sealed messages, admin orders, assistants, GitHub login, OS keystores, ACLs |

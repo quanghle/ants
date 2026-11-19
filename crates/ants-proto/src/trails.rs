@@ -74,8 +74,34 @@ pub struct TrailStep {
     pub tip_key: Option<String>,
 }
 
-/// A saved trail in [`TRAILS_BUCKET`], under the key of its name. Humans put and delete them; every ant and human reads
-/// them. Readers should treat unknown fields as additions, not errors.
+/// Who saved a trail: a human, with `ants trail save`, or an ant, with its `save_trail` tool.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Saver {
+    Human { user: UserId },
+    Ant { user: UserId },
+}
+
+impl Saver {
+    pub fn user(&self) -> &UserId {
+        match self {
+            Self::Human { user } | Self::Ant { user } => user,
+        }
+    }
+}
+
+impl std::fmt::Display for Saver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Human { user } => write!(f, "{user}"),
+            Self::Ant { user } => write!(f, "ant {user}"),
+        }
+    }
+}
+
+/// A saved trail in [`TRAILS_BUCKET`], under the key of its name. Humans put and delete any. An ant's daemon puts new
+/// ones and replaces or removes only those the ant saved ([`Saver`]). Every ant and human reads them. Readers should
+/// treat unknown fields as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedTrail {
     pub name: TrailName,
@@ -90,8 +116,12 @@ pub struct SavedTrail {
     pub waypoints: Vec<String>,
     /// The script's source text.
     pub script: String,
-    /// The human who saved it.
-    pub saved_by: UserId,
+    /// The human or ant who saved it.
+    pub saved_by: Saver,
+    /// The run whose inline script an ant saved, conducted by that ant, so its record is `<saver>.<run>` in
+    /// [`TRAIL_RUNS_BUCKET`]; none for a script saved as given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_from: Option<RunId>,
     pub saved_at: DateTime<Utc>,
 }
 
@@ -109,12 +139,15 @@ impl SavedTrail {
         self.check()
     }
 
-    /// Check the trail's bounds: a script of 1 to [`MAX_TRAIL_SCRIPT`] bytes, a description of at most
-    /// [`MAX_TRAIL_DESCRIPTION`] characters, at most [`MAX_TRAIL_PHASES`] phases, each one line of 1 to
-    /// [`MAX_TITLE`] characters, and at most [`MAX_TRAIL_WAYPOINTS`] waypoints, each a name of 1 to [`MAX_TITLE`]
-    /// letters, digits and `_`.
+    /// Check the trail's bounds: a name not reading as a run's id, a script of 1 to [`MAX_TRAIL_SCRIPT`] bytes, a
+    /// description of at most [`MAX_TRAIL_DESCRIPTION`] characters, at most [`MAX_TRAIL_PHASES`] phases, each one line
+    /// of 1 to [`MAX_TITLE`] characters, and at most [`MAX_TRAIL_WAYPOINTS`] waypoints, each a name of 1 to
+    /// [`MAX_TITLE`] letters, digits and `_`.
     pub fn check(&self) -> Result<(), Error> {
         let invalid = |why: String| Err(Error::InvalidTrail { name: self.name.clone(), why });
+        if Uuid::try_parse(self.name.as_str()).is_ok() {
+            return invalid("a trail's name reads as a run's id, which `ants trail show` takes for a run".to_owned());
+        }
         if self.script.trim().is_empty() || self.script.len() > MAX_TRAIL_SCRIPT {
             return invalid(format!("a script has 1-{MAX_TRAIL_SCRIPT} bytes"));
         }
@@ -694,7 +727,8 @@ mod tests {
             phases: vec!["build".to_owned()],
             waypoints: Vec::new(),
             script: "agent('dev-a', 'build')".to_owned(),
-            saved_by: p("alice"),
+            saved_by: Saver::Human { user: p("alice") },
+            saved_from: None,
             saved_at: Utc::now(),
         }
     }
@@ -867,5 +901,15 @@ mod tests {
         for trail in bad {
             assert!(matches!(trail.check(), Err(Error::InvalidTrail { .. })), "{trail:?}");
         }
+    }
+
+    #[test]
+    fn a_trail_name_reading_as_a_run_id_fails_the_check() {
+        let trail = SavedTrail { name: RunId::generate().as_str().parse().unwrap(), ..saved() };
+        let error = trail.check().unwrap_err().to_string();
+        assert!(error.contains("reads as a run's id"), "{error}");
+        let saver = Saver::Ant { user: p("dev-a") };
+        assert_eq!((saver.to_string(), saver.user()), ("ant dev-a".to_owned(), &p("dev-a")));
+        assert_eq!(Saver::Human { user: p("alice") }.to_string(), "alice");
     }
 }

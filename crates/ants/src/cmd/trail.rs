@@ -1,7 +1,7 @@
 //! `ants trail`: save, list, show and remove saved trails, list and retire the tips ants left on their steps, and
 //! start, list, show, follow, stop and resume the runs of trails.
 //!
-//! The saved trails are those of [`ants_proto::TRAILS_BUCKET`], which humans put and remove, and those of
+//! The saved trails are those of [`ants_proto::TRAILS_BUCKET`], which humans and ants put and remove, and those of
 //! `~/.ants/trails/*.py` on this machine ([`saved`]); the tips are those of [`ants_proto::TRAIL_TIPS_BUCKET`], which
 //! humans retire and purge with their trail ([`tips`]); the runs are the records conductors keep in
 //! [`ants_proto::TRAIL_RUNS_BUCKET`], which humans read ([`runs`], [`follow`]), and humans ask a run's conductor to
@@ -393,9 +393,11 @@ fn human(nats: &Nats<'_>, what: &str) -> Result<()> {
 }
 
 /// `rows` as columns two spaces apart, each as wide as its widest cell, without trailing blanks.
-pub(crate) fn columns<const N: usize>(rows: &[[String; N]]) -> String {
-    let mut widths = [0; N];
+pub(crate) fn columns(rows: &[impl AsRef<[String]>]) -> String {
+    let mut widths: Vec<usize> = Vec::new();
     for row in rows {
+        let row = row.as_ref();
+        widths.resize(widths.len().max(row.len()), 0);
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
         }
@@ -403,7 +405,8 @@ pub(crate) fn columns<const N: usize>(rows: &[[String; N]]) -> String {
     let lines: Vec<String> = rows
         .iter()
         .map(|row| {
-            let cells: Vec<String> = row.iter().zip(widths).map(|(cell, width)| format!("{cell:width$}")).collect();
+            let cells: Vec<String> =
+                row.as_ref().iter().zip(&widths).map(|(cell, &width)| format!("{cell:width$}")).collect();
             cells.join("  ").trim_end().to_owned()
         })
         .collect();

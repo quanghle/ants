@@ -1,13 +1,76 @@
-//! The saved trails a run names: colony-wide in [`TRAILS_BUCKET`], which humans put, else in the machine's
+//! The saved trails a run names: colony-wide in [`TRAILS_BUCKET`], which humans and ants put, else in the machine's
 //! `~/.ants/trails/<name>.py`. The bucket wins a name both have, so every conductor of the colony runs the same
 //! trail by that name.
+//!
+//! An ant saves a trail as its own ([`Trails::save`]): under a new name, or replacing one it saved, and removes only
+//! its own ([`Trails::remove_saved`]). Each write expects the entry it checked, so a trail another saved meanwhile is
+//! never replaced nor removed.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
-use ants_proto::{JsDomain, SavedTrail, TRAILS_BUCKET, TrailName};
+use ants_proto::{JsDomain, RunId, RunState, SavedTrail, Saver, TRAILS_BUCKET, TrailName};
 use async_nats::jetstream;
+use chrono::{DateTime, Utc};
 
-use crate::records::direct_kv::DirectKv;
+use super::Trails;
+use crate::records::direct_kv::{DirectKv, Lookup};
+
+/// Why a save or a removal reaches no saved trail of the colony.
+const UNREACHABLE: &str = "the colony's saved trails are unreachable from this ant's daemon";
+
+/// Where the script of a trail an ant saves comes from.
+#[derive(Debug, Clone)]
+pub enum SaveFrom {
+    /// The script as given.
+    Script(String),
+    /// The script of a finished run of an inline script the ant conducted, recorded as the trail's source.
+    Run(RunId),
+}
+
+/// A trail an ant saves for the colony as its own ([`Trails::save`]).
+#[derive(Debug, Clone)]
+pub struct SaveTrail {
+    pub name: TrailName,
+    pub from: SaveFrom,
+    /// Replace the trail the ant saved under `name` before; without it, that name is refused.
+    pub replace: bool,
+}
+
+/// A save checked ([`Trails::prepare_save`]), for [`Trails::commit_save`] to store.
+#[derive(Debug, Clone)]
+pub struct PreparedSave {
+    trail: SavedTrail,
+    /// The stream sequence of the entry it replaces; none for a name the colony has no trail of.
+    last: Option<u64>,
+    before: Option<SavedTrail>,
+    run_state: Option<RunState>,
+}
+
+impl PreparedSave {
+    /// The trail to store.
+    pub fn trail(&self) -> &SavedTrail {
+        &self.trail
+    }
+}
+
+/// A trail an ant saved ([`Trails::commit_save`]).
+#[derive(Debug, Clone)]
+pub struct SaveOutcome {
+    pub trail: SavedTrail,
+    /// The trail of the ant's it replaced.
+    pub replaced: Option<SavedTrail>,
+    /// How the run it was saved from ended.
+    pub run_state: Option<RunState>,
+}
+
+/// What the colony holds under a trail's name.
+enum Entry {
+    Absent,
+    Saved(SavedTrail),
+    /// A value that is no trail saved under that name, for why.
+    Unreadable(String),
+}
 
 pub(super) struct Saved {
     kv: Option<DirectKv>,
@@ -41,17 +104,265 @@ impl Saved {
                 Err(e) => unread = Some(format!("{e:#}")),
             }
         }
-        if let Some(dir) = &self.dir {
-            let path = dir.join(format!("{name}.py"));
-            match tokio::fs::read_to_string(&path).await {
-                Ok(script) => return Ok(script),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("reading {}: {e}", path.display())),
-            }
+        if let Some(path) = self.local(name).await {
+            return tokio::fs::read_to_string(&path).await.map_err(|e| format!("reading {}: {e}", path.display()));
         }
         Err(match unread {
             Some(e) => format!("no trail is saved as {name} (the saved trails of the colony are unread: {e})"),
             None => format!("no trail is saved as {name}"),
         })
+    }
+
+    /// The file of this machine's trail `name`, when it has one.
+    async fn local(&self, name: &TrailName) -> Option<PathBuf> {
+        let path = self.dir.as_ref()?.join(format!("{name}.py"));
+        tokio::fs::metadata(&path).await.is_ok_and(|meta| meta.is_file()).then_some(path)
+    }
+
+    fn kv(&self) -> Result<&DirectKv, String> {
+        self.kv.as_ref().ok_or_else(|| UNREACHABLE.to_owned())
+    }
+
+    /// The colony's entry under `name`, and the stream sequence of the key's last message (0 for none), which
+    /// [`Saved::write`] and [`Saved::delete`] expect.
+    async fn lookup(&self, name: &TrailName) -> Result<(Entry, u64), String> {
+        let (found, last) =
+            self.kv()?.lookup_last(name.as_str()).await.map_err(|e| format!("reading saved trail {name}: {e:#}"))?;
+        let entry = match found {
+            Lookup::NoBucket => return Err(format!("{UNREACHABLE}: the bus keeps none (`ants init` creates them)")),
+            Lookup::NoValue => Entry::Absent,
+            Lookup::Value(value) => match serde_json::from_slice::<SavedTrail>(&value) {
+                Ok(trail) => match trail.check_key(name.as_str()) {
+                    Ok(()) => Entry::Saved(trail),
+                    Err(e) => Entry::Unreadable(e.to_string()),
+                },
+                Err(e) => Entry::Unreadable(e.to_string()),
+            },
+        };
+        Ok((entry, last))
+    }
+
+    /// Store `trail` under its name: as a new trail with no `last`, else replacing the key's last message, at stream
+    /// sequence `last`. Whether it stored the trail: false when the key changed meanwhile.
+    async fn write(&self, trail: &SavedTrail, last: Option<u64>) -> Result<bool, String> {
+        let kv = self.kv()?;
+        let value = serde_json::to_vec(trail).map_err(|e| e.to_string())?;
+        let stored = match last {
+            None => kv.create(trail.key(), value).await,
+            Some(last) => kv.update(trail.key(), value, last).await,
+        };
+        stored.map_err(|e| format!("saving trail {}: {e:#}", trail.name))
+    }
+
+    /// Remove the trail `name`, if the key's last message is still the one at stream sequence `last`. Whether it
+    /// removed it: false when the key changed meanwhile.
+    async fn delete(&self, name: &TrailName, last: u64) -> Result<bool, String> {
+        let deleted = self.kv()?.delete_expecting(name.as_str(), last, None).await;
+        deleted.map_err(|e| format!("removing trail {name}: {e:#}"))
+    }
+}
+
+impl Trails {
+    /// Check a save of a trail as the ant's own, the checks of `ants trail save` and these: a run's script only from a
+    /// finished run of an inline script the ant conducted, no name of this machine's trails, and a name the colony has
+    /// no trail of, or one the ant saved, with `replace`.
+    pub async fn prepare_save(&self, ask: SaveTrail) -> Result<PreparedSave, String> {
+        let saved = &self.inner.saved;
+        saved.kv()?;
+        let SaveTrail { name, from, replace } = ask;
+        let (script, saved_from, run_state) = match from {
+            SaveFrom::Script(script) => (script, None, None),
+            SaveFrom::Run(run) => {
+                let header = self.run(&run).await?.ok_or_else(|| format!("no run {run} conducted by this ant"))?;
+                if !header.finished() {
+                    let state = unfinished(&header.state);
+                    return Err(format!(
+                        "run {run} has not finished ({state}): save it once it ends, or pass `script`"
+                    ));
+                }
+                if let Some(trail) = header.first_trail() {
+                    return Err(format!(
+                        "run {run} ran saved trail {trail}, saved already; to keep a changed copy under a name of this \
+                         ant's, pass its `script`"
+                    ));
+                }
+                let leg = header.route.first().ok_or_else(|| format!("run {run} records no script"))?;
+                (leg.script.clone(), Some(run), Some(header.state))
+            }
+        };
+        let mine = Saver::Ant { user: self.inner.ant.clone() };
+        let mut trail = SavedTrail {
+            name,
+            description: String::new(),
+            phases: Vec::new(),
+            waypoints: Vec::new(),
+            script,
+            saved_by: mine.clone(),
+            saved_from,
+            saved_at: Utc::now(),
+        };
+        // The name and the script's size first, so that a script too long is not compiled.
+        trail.check().map_err(|e| e.to_string())?;
+        let meta = ants_trail::check(&trail.script).map_err(|e| match e {
+            ants_trail::TrailError::Syntax(traceback) => format!("the script does not compile:\n{traceback}"),
+            ants_trail::TrailError::Meta(why) => why,
+        })?;
+        (trail.description, trail.phases, trail.waypoints) = (meta.description, meta.phases, meta.waypoints);
+        trail.check().map_err(|e| e.to_string())?;
+        let name = &trail.name;
+        if let Some(path) = saved.local(name).await {
+            return Err(format!(
+                "this machine's trails hold one named {name}, {}, which a colony trail of that name would replace in \
+                 runs: pick another name",
+                path.display()
+            ));
+        }
+        let (entry, last) = saved.lookup(name).await?;
+        let before = match entry {
+            Entry::Absent => None,
+            Entry::Saved(before) if before.saved_by == mine => {
+                if !replace {
+                    let ago = age(before.saved_at, trail.saved_at);
+                    return Err(format!(
+                        "this ant saved trail {name} {ago} ago{}: pass `replace: true` to replace it",
+                        from_run(&before)
+                    ));
+                }
+                Some(before)
+            }
+            Entry::Saved(before) => {
+                return Err(format!(
+                    "trail {name} was saved by {}; an ant replaces only the trails it saved: save under another name",
+                    before.saved_by
+                ));
+            }
+            Entry::Unreadable(e) => return Err(unreadable(name, &e)),
+        };
+        let last = before.is_some().then_some(last);
+        Ok(PreparedSave { trail, last, before, run_state })
+    }
+
+    /// Store a save [`Trails::prepare_save`] checked, refused when the colony's entry of its name changed since.
+    pub async fn commit_save(&self, prepared: PreparedSave) -> Result<SaveOutcome, String> {
+        let PreparedSave { trail, last, before, run_state } = prepared;
+        if !self.inner.saved.write(&trail, last).await? {
+            return Err(format!(
+                "trail {} changed while saving and nothing was saved: call save_trail again",
+                trail.name
+            ));
+        }
+        Ok(SaveOutcome { trail, replaced: before, run_state })
+    }
+
+    /// Save a trail as the ant's own: [`Trails::prepare_save`], then [`Trails::commit_save`].
+    pub async fn save(&self, ask: SaveTrail) -> Result<SaveOutcome, String> {
+        let prepared = self.prepare_save(ask).await?;
+        self.commit_save(prepared).await
+    }
+
+    /// Remove the colony's trail `name`, which the ant saved, leaving its tips: refused for a name the colony saved no
+    /// trail of, an entry unreadable, a trail a human or another ant saved, and an entry changed since it was read.
+    /// Returns the trail removed.
+    pub async fn remove_saved(&self, name: &TrailName) -> Result<SavedTrail, String> {
+        let saved = &self.inner.saved;
+        let (entry, last) = saved.lookup(name).await?;
+        let trail = match entry {
+            Entry::Saved(trail) if trail.saved_by == (Saver::Ant { user: self.inner.ant.clone() }) => trail,
+            Entry::Saved(trail) => {
+                return Err(format!(
+                    "trail {name} was saved by {}; an ant removes only the trails it saved: ask a human",
+                    trail.saved_by
+                ));
+            }
+            Entry::Unreadable(e) => return Err(unreadable(name, &e)),
+            Entry::Absent => {
+                return Err(match saved.local(name).await {
+                    Some(path) => format!(
+                        "the colony saved no trail {name}; {} is this machine's, no colony trail, and goes with its file",
+                        path.display()
+                    ),
+                    None => format!("the colony saved no trail {name}"),
+                });
+            }
+        };
+        if !saved.delete(name, last).await? {
+            return Err(format!(
+                "trail {name} changed while removing it and nothing was removed: call remove_trail again"
+            ));
+        }
+        Ok(trail)
+    }
+}
+
+/// How long ago `then` was at `now`, in its largest whole unit: `3d`, `2h`, `5m`.
+pub(crate) fn age(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (now - then).to_std().unwrap_or_default().as_secs().max(60);
+    let unit = [86_400, 3_600, 60].into_iter().find(|unit| secs >= *unit).unwrap_or(60);
+    ants_proto::duration::format(Duration::from_secs(secs / unit * unit))
+}
+
+/// The run `trail` was saved from, as `, from run R`; nothing for none.
+pub(crate) fn from_run(trail: &SavedTrail) -> String {
+    trail.saved_from.as_ref().map_or_default(|run| format!(", from run {run}"))
+}
+
+fn unreadable(name: &TrailName, why: &str) -> String {
+    format!("trail {name} is saved but unreadable ({why}); only a human replaces or removes it")
+}
+
+/// How a run not finished stands.
+fn unfinished(state: &RunState) -> String {
+    match state {
+        RunState::Waiting => "waiting on humans".to_owned(),
+        RunState::Stopped { by } => format!("stopped by {by}"),
+        _ => "running".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ants_proto::UserId;
+    use ants_test_support::NatsServer;
+
+    use super::*;
+    use crate::bus;
+
+    #[tokio::test]
+    async fn a_save_expecting_an_older_revision_saves_nothing() {
+        let Some(server) = NatsServer::start() else { return };
+        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        js.create_key_value(crate::hub::trails_config()).await.unwrap();
+        let saved = Saved::new(&js, None, None).await;
+        let name: TrailName = "deploy".parse().unwrap();
+        let trail = SavedTrail {
+            name: name.clone(),
+            description: String::new(),
+            phases: Vec::new(),
+            waypoints: Vec::new(),
+            script: "agent('build')".to_owned(),
+            saved_by: Saver::Ant { user: "dev-a".parse().unwrap() },
+            saved_from: None,
+            saved_at: Utc::now(),
+        };
+        assert!(matches!(saved.lookup(&name).await.unwrap(), (Entry::Absent, 0)));
+        assert!(saved.write(&trail, None).await.unwrap());
+        assert!(!saved.write(&trail, None).await.unwrap(), "a new trail over a saved one saves nothing");
+        let (Entry::Saved(found), last) = saved.lookup(&name).await.unwrap() else { panic!("saved") };
+        assert_eq!(found, trail);
+
+        let elsewhere = SavedTrail { saved_by: Saver::Human { user: UserId::human() }, ..trail.clone() };
+        let kv = DirectKv::whole(&js, None, TRAILS_BUCKET).await.unwrap();
+        kv.put(name.as_str(), serde_json::to_vec(&elsewhere).unwrap()).await.unwrap();
+        assert!(!saved.write(&trail, Some(last)).await.unwrap(), "replacing a revision another replaced");
+        assert!(!saved.delete(&name, last).await.unwrap(), "removing a revision another replaced");
+        let (Entry::Saved(found), now) = saved.lookup(&name).await.unwrap() else { panic!("saved") };
+        assert_eq!(found, elsewhere);
+        assert!(saved.delete(&name, now).await.unwrap());
+        assert!(matches!(saved.lookup(&name).await.unwrap().0, Entry::Absent));
+        assert!(saved.write(&trail, None).await.unwrap(), "a new trail over a removed one");
+
+        kv.put("other", serde_json::to_vec(&trail).unwrap()).await.unwrap();
+        let (entry, _) = saved.lookup(&"other".parse().unwrap()).await.unwrap();
+        assert!(matches!(entry, Entry::Unreadable(why) if why.contains("found at other")));
     }
 }

@@ -26,8 +26,8 @@ A trail is a `.py` file whose first statement is a literal `meta`: a `name` of l
 `description`, the `phases` the script announces, and optional `waypoints` (up to 32 top-level `async def` entry points
 taking one state argument, the first entered at start, with the top level then holding only `meta`, imports,
 definitions and constants). The meta is read without running the script; a file without it
-is refused. A trail is saved under a name of 1-64 lowercase letters, digits and `-`: its meta's `name` when it is one,
-else the name `ants trail save --name` gives. The script runs top to bottom with `await` allowed at the top level, and
+is refused. A trail is saved under a name of 1-64 lowercase letters, digits and `-`, not a run's id: its meta's `name`
+when it is one, else the name `ants trail save --name` or `save_trail`'s `name` gives. The script runs top to bottom with `await` allowed at the top level, and
 the value of its last expression, which must be JSON (None, bools, numbers, strings, lists, dicts with string keys),
 is the run's result.
 
@@ -218,6 +218,23 @@ A step's message may carry tips from earlier runs of its trail: hints to verify,
   most 1000 characters, specific and checkable, never the step's result nor what any ant would try first. A tip saying
   what a live tip says is refused (vote that one helpful instead); one much like live tips needs `force`.
 - Only a step of a saved trail on a trusted run leaves or votes on tips; any thread reads them.
+
+## Saving
+
+Save a trail once an inline script worked and its steps will recur: a one-off stays inline. Generalize it first: move
+the repository, issue, files and ants it names into `args`, and have the meta's `description` name the task it serves
+and the `args` it takes, so another ant picks it from `ants trail list` and runs it by name.
+
+- **Save** with the `save_trail` tool: `script` for a script as written, or `run` for the id `run_trail` returned for a
+  finished run of an inline script this ant conducted, recorded as the trail's source. A run of a saved trail is
+  saved already. The script is checked as `ants trail save` checks a file, not run.
+- **Fork, never take over.** A name a human or another ant saved is refused, and so is a name of the conductor
+  machine's `~/.ants/trails`: save a changed copy under a new name.
+- **Replace only its own**, with `replace: true`; runs already started keep the script they started with, and the
+  trail's tips stay, ranked as of an older script.
+- **Remove only its own** with `remove_trail`: its tips stay for a trail saved later under that name. A trail a human
+  or another ant saved goes only by a human's `ants trail rm`.
+- Saving and removing are refused on a thread a webhook or schedule started, and on a step of a run started there.
 
 ## Patterns
 

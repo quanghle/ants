@@ -70,7 +70,8 @@ fn description() -> String {
          thread a webhook started), with `args` as its JSON input and `limits` raising or lowering what it may spend \
          (`steps`, `at_once`, `turns`, `wall`). The run reports on the current thread and answers to the thread's \
          owner, who gets its end there. Returns the run id at once, or with `wait` the run's result or error (waiting \
-         at most `timeout`). trail_status tells how a run stands and stop_trail stops one. Write a trail for work \
+         at most `timeout`). trail_status tells how a run stands and stop_trail stops one. Once an inline script works and its steps will \
+         recur, save_trail saves it for every ant to run by name. Write a trail for work \
          whose steps are known in code: fan-outs, pipelines, verification rounds, routes through saved trails.\n\n{}",
         crate::trail::GUIDE
     )

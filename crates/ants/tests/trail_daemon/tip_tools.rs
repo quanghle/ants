@@ -25,7 +25,7 @@ fn saving(name: &str) -> (PathBuf, PathBuf) {
 
 /// The trails of ant `name`, the machine's saved trails in `saved`, and its MCP server reaching them, its home in
 /// `dir`.
-async fn ant_mcp(server: &NatsServer, name: &str, dir: &Path, saved: &Path) -> (Trails, Mcp) {
+pub(super) async fn ant_mcp(server: &NatsServer, name: &str, dir: &Path, saved: &Path) -> (Trails, Mcp) {
     let user = ant(name);
     let (client, js) = ants_daemon::bus::connect(&server.url, None, None, &user, name).await.unwrap();
     let attempts = ants_daemon::bus::ensure_attempts(&js, None, &user).await.unwrap();

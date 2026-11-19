@@ -296,9 +296,9 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
 }
 
 #[tokio::test]
-async fn humans_save_the_trails_ants_read_and_each_ant_keeps_only_the_runs_it_conducts() {
+async fn humans_and_ants_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
     use ants_proto::{
-        RunId, SavedTrail, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, ThreadId, TrailStepThread,
+        RunId, SavedTrail, Saver, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, ThreadId, TrailStepThread,
         trail_run_key, trail_session_key, trail_thread_step_key, trail_thread_steps_prefix, trail_tip_key,
         trail_tip_vote_key,
     };
@@ -322,7 +322,8 @@ async fn humans_save_the_trails_ants_read_and_each_ant_keeps_only_the_runs_it_co
         phases: vec!["build".to_owned()],
         waypoints: Vec::new(),
         script: "agent('build')".to_owned(),
-        saved_by: human.clone(),
+        saved_by: Saver::Human { user: human.clone() },
+        saved_from: None,
         saved_at: chrono::Utc::now(),
     };
     let saved = DirectKv::whole(&h_js, None, TRAILS_BUCKET).await.unwrap();
@@ -330,10 +331,12 @@ async fn humans_save_the_trails_ants_read_and_each_ant_keeps_only_the_runs_it_co
     let read = DirectKv::whole(&a_js, None, TRAILS_BUCKET).await.unwrap();
     let got: SavedTrail = serde_json::from_slice(&read.get("deploy").await.unwrap().unwrap()).unwrap();
     assert_eq!(got, trail);
-    assert!(read.put("deploy", b"spoof".to_vec()).await.is_err(), "an ant saves no trail");
-    assert!(read.delete("deploy").await.is_err(), "nor deletes one");
+    let theirs = SavedTrail { saved_by: Saver::Ant { user: dev_a.clone() }, ..trail.clone() };
+    read.put("release", serde_json::to_vec(&theirs).unwrap()).await.unwrap();
+    read.delete("release").await.unwrap();
+    assert!(read.get("release").await.unwrap().is_none(), "an ant's credentials save and delete trails");
     saved.delete("deploy").await.unwrap();
-    assert!(read.get("deploy").await.unwrap().is_none(), "a human deletes it");
+    assert!(read.get("deploy").await.unwrap().is_none(), "a human deletes any");
 
     let run = RunId::generate();
     let runs = DirectKv::new(&a_js, None, TRAIL_RUNS_BUCKET).await.unwrap();

@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use ants_proto::{SavedTrail, TRAILS_BUCKET, TrailName, UserId, Uuid};
+use ants_proto::{RunId, SavedTrail, Saver, TRAILS_BUCKET, TrailName, UserId, Uuid};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -35,8 +35,13 @@ pub(super) struct Trail {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub(super) enum Source {
-    /// In [`TRAILS_BUCKET`], saved by a human.
-    Colony { saved_by: UserId, saved_at: DateTime<Utc> },
+    /// In [`TRAILS_BUCKET`], saved by a human or an ant, and by an ant maybe from a run it conducted.
+    Colony {
+        saved_by: Saver,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        saved_from: Option<RunId>,
+        saved_at: DateTime<Utc>,
+    },
     /// A file of this machine's `~/.ants/trails`.
     Local { path: PathBuf },
 }
@@ -48,7 +53,7 @@ impl From<SavedTrail> for Trail {
             description: saved.description,
             phases: saved.phases,
             waypoints: saved.waypoints,
-            source: Source::Colony { saved_by: saved.saved_by, saved_at: saved.saved_at },
+            source: Source::Colony { saved_by: saved.saved_by, saved_from: saved.saved_from, saved_at: saved.saved_at },
             script: saved.script,
         }
     }
@@ -59,8 +64,8 @@ pub(super) fn local_dir() -> Result<PathBuf> {
     Ok(std::env::home_dir().context("no home directory")?.join(".ants").join("trails"))
 }
 
-/// The trail of the file `path`, saved by `by` at `now` under `name`, else under its meta's name: refused when the file
-/// does not compile, lacks its literal meta first, or breaks the bounds of [`SavedTrail::check`].
+/// The trail of the file `path`, saved by the human `by` at `now` under `name`, else under its meta's name: refused when
+/// the file does not compile, lacks its literal meta first, or breaks the bounds of [`SavedTrail::check`].
 pub(super) fn read(path: &Path, name: Option<TrailName>, by: &UserId, now: DateTime<Utc>) -> Result<SavedTrail> {
     let script = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let meta = checked(path, &script)?;
@@ -70,14 +75,14 @@ pub(super) fn read(path: &Path, name: Option<TrailName>, by: &UserId, now: DateT
             anyhow!("{}: meta's name {:?} is no trail name: {NAMES}; or give --name", path.display(), meta.name)
         })?,
     };
-    usable(&name)?;
     let trail = SavedTrail {
         name,
         description: meta.description,
         phases: meta.phases,
         waypoints: meta.waypoints,
         script,
-        saved_by: by.clone(),
+        saved_by: Saver::Human { user: by.clone() },
+        saved_from: None,
         saved_at: now,
     };
     trail.check()?;
@@ -92,7 +97,8 @@ pub(super) fn checked(path: &Path, script: &str) -> Result<ants_trail::Meta> {
     })
 }
 
-/// Refuse a name reading as a run's id, which `ants trail show` takes for a run.
+/// Refuse a local trail's name reading as a run's id, which `ants trail show` takes for a run, as
+/// [`SavedTrail::check`] refuses a saved one's.
 fn usable(name: &TrailName) -> Result<()> {
     if Uuid::try_parse(name.as_str()).is_ok() {
         bail!("trail name {name} reads as a run's id, which `ants trail show` would look for instead: pick another");
@@ -216,35 +222,46 @@ pub(super) fn listing(colony: Vec<SavedTrail>, local: Vec<Trail>) -> Vec<Listed>
     colony.chain(local).collect()
 }
 
-/// The listed trails in columns, their waypoints in a column of their own when one has any.
+/// The listed trails in columns, the run an ant saved one from and their waypoints in columns of their own when a trail
+/// has any.
 pub(crate) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
-    let header = ["NAME", "SOURCE", "SAVED BY", "SAVED", "PHASES", "WAYPOINTS", "DESCRIPTION"].map(str::to_owned);
-    let rows: Vec<[String; 7]> = std::iter::once(header)
-        .chain(listed.iter().map(|Listed { trail, shadowed }| {
-            let (source, by, at) = match &trail.source {
-                Source::Colony { saved_by, saved_at } => {
-                    ("colony".to_owned(), saved_by.to_string(), format!("{} ago", short(since(*saved_at, now))))
-                }
+    let header = ["NAME", "SOURCE", "SAVED BY", "SAVED", "FROM RUN", "PHASES", "WAYPOINTS", "DESCRIPTION"];
+    let rows: Vec<Vec<String>> = listed
+        .iter()
+        .map(|Listed { trail, shadowed }| {
+            let (source, by, at, from) = match &trail.source {
+                Source::Colony { saved_by, saved_from, saved_at } => (
+                    "colony".to_owned(),
+                    saved_by.to_string(),
+                    format!("{} ago", short(since(*saved_at, now))),
+                    saved_from.as_ref().map_or_else(|| "-".to_owned(), RunId::to_string),
+                ),
                 Source::Local { path } => {
                     let shadowed = if *shadowed { " (the colony's runs)" } else { "" };
-                    (format!("{}{shadowed}", path.display()), "-".to_owned(), "-".to_owned())
+                    (format!("{}{shadowed}", path.display()), "-".to_owned(), "-".to_owned(), "-".to_owned())
                 }
             };
             let list =
                 |items: &[String]| if items.is_empty() { "-".to_owned() } else { excerpt(&items.join(", "), 40) };
             let description =
                 if trail.description.is_empty() { "-".to_owned() } else { excerpt(&trail.description, 60) };
-            [trail.name.to_string(), source, by, at, list(&trail.phases), list(&trail.waypoints), description]
-        }))
+            vec![trail.name.to_string(), source, by, at, from, list(&trail.phases), list(&trail.waypoints), description]
+        })
         .collect();
-    if listed.iter().any(|l| !l.trail.waypoints.is_empty()) {
-        return super::columns(&rows);
-    }
-    let rows: Vec<[String; 6]> = rows
-        .into_iter()
-        .map(|[name, source, by, at, phases, _, description]| [name, source, by, at, phases, description])
+    super::columns(&filled(&header, &["FROM RUN", "WAYPOINTS"], rows))
+}
+
+/// `rows` under `header`, without the `optional` columns that no row fills, all of whose cells are `-`.
+fn filled(header: &[&str], optional: &[&str], rows: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    let shown: Vec<bool> = (header.iter().enumerate())
+        .map(|(i, name)| !optional.contains(name) || rows.iter().any(|row| row[i] != "-"))
         .collect();
-    super::columns(&rows)
+    std::iter::once(header.iter().map(|name| (*name).to_owned()).collect())
+        .chain(rows)
+        .map(|row: Vec<String>| {
+            row.into_iter().zip(&shown).filter_map(|(cell, &shown)| shown.then_some(cell)).collect()
+        })
+        .collect()
 }
 
 /// The trail `ants trail show NAME` shows, which a run of NAME runs.
@@ -294,9 +311,13 @@ pub(crate) fn render(found: &Found, now: DateTime<Utc>) -> String {
     let Found { trail, shadows } = found;
     let mut out = format!("trail {}\n", trail.name);
     match &trail.source {
-        Source::Colony { saved_by, saved_at } => {
+        Source::Colony { saved_by, saved_from, saved_at } => {
             let at = saved_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
-            let _ = writeln!(out, "saved for the colony by {saved_by} {} ago ({at})", short(since(*saved_at, now)));
+            let _ = write!(out, "saved for the colony by {saved_by} {} ago ({at})", short(since(*saved_at, now)));
+            if let Some(run) = saved_from {
+                let _ = write!(out, ", from run {run}");
+            }
+            out.push('\n');
         }
         Source::Local { path } => {
             let _ = writeln!(out, "local: {}", path.display());
