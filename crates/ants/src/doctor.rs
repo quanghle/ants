@@ -19,7 +19,7 @@ use serde::Serialize;
 
 use self::ants::{
     check_ants, check_bypassed, check_host, check_machine_name, check_reactions, check_sense_kept, check_sense_logs,
-    check_shared_workdirs,
+    check_shared_workdirs, check_trail_saves,
 };
 use self::credentials::{check_backup, check_cli_creds};
 use self::leaf_node::{Leaf, check_leaf};
@@ -155,6 +155,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
         leaf.as_ref().and_then(|l| l.as_ref().ok()).is_some_and(|l| same_address(&setup.nats, &l.listen));
     let resolver = check_resolver(setup, through_leaf);
     let reactions = check_reactions(ants, setup, NETWORK_TIMEOUT);
+    let trail_saves = check_trail_saves(ants, setup, NETWORK_TIMEOUT);
     let update = check_update(loaded.as_ref().map_or_default(|l| l.auto_update));
     let worker = async {
         match (&loaded, &setup.worker) {
@@ -163,8 +164,8 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
             (Some(_), Some(program)) => check_worker(program).await,
         }
     };
-    let ((reached, connected), ants_checked, resolver, reactions, update, worker) =
-        tokio::join!(reach, ants_checked, resolver, reactions, update, worker);
+    let ((reached, connected), ants_checked, resolver, reactions, trail_saves, update, worker) =
+        tokio::join!(reach, ants_checked, resolver, reactions, trail_saves, update, worker);
     checks.extend(update);
     checks.extend(reached);
     let settings = loaded.as_ref().map_or_default(|l| l.storage);
@@ -180,6 +181,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.extend(check_shared_workdirs(ants, &setup.config));
     checks.extend(check_sense_logs(ants));
     checks.extend(reactions);
+    checks.extend(trail_saves);
     if let Some(loaded) = &loaded {
         let webhooks = setup.webhooks.exists().then(|| webhook::Config::read(&setup.webhooks).ok()).flatten();
         checks.extend(check_bypassed(loaded, webhooks.as_ref().map_or_default(|c| c.webhooks.as_slice())));

@@ -98,12 +98,14 @@ meta's `name` or `--name`: 1–64 of `a-z`, `0-9` and `-`, not a UUID (meta's ow
 needing `--name` then). A saved trail's script holds at most 256 KiB, its description 1000 characters, at most 32
 phases of one line of 1–120 characters each, and at most 32 waypoints. Every ant and human reads the saved trails.
 
-Humans save and remove any trail. An ant saves one with `save_trail` ([Starting a run](#starting-a-run)), from a
-script or from a finished run of an inline script it conducted, under the same checks, and under a name neither the
-colony nor the conductor machine's `~/.ants/trails` has a trail of. It replaces only a trail it saved, and only with
-`replace`, and removes only one it saved, with `remove_trail`; it does neither from an untrusted thread
-([Trust](#trust)). A saved trail records who saved it, a human or an ant, and the run an ant saved it from; a human
-saving under a taken name replaces the trail, an ant's included, and becomes its saver.
+Humans save and remove any trail. An ant saves one with `save_trail` ([Starting a run](#starting-a-run)), from a script
+or from a finished run of an inline script it conducted, under the same checks, and under a name neither the colony nor
+the conductor machine's `~/.ants/trails` has a trail of. It replaces only a trail it saved, and only with `replace`, and
+removes only one it saved, with `remove_trail`; it does neither from an untrusted thread ([Trust](#trust)). Ant
+credentials write no saved trail: with authentication, `ants signer` saves and removes them for ants, checking each is
+the ant's own ([auth.md](auth.md)), so both tools need it running. A saved trail records who saved it, a human or an
+ant, and the run an ant saved it from; a human saving under a taken name replaces the trail, an ant's included, and
+becomes its saver.
 
 Trails also come from dreams ([sense.md](sense.md#dreams)): a sage's finding of kind `trail` tells of a multi-step
 approach the ant took again and again across its threads, cites those threads, and outlines a saved trail taking its

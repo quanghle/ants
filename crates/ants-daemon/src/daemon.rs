@@ -489,6 +489,11 @@ async fn trails(
         attempts,
         workers: config.pooling.trail_workers,
         notes,
+        // Without credentials the server is open, with no `ants signer` to answer.
+        saves: match config.connection.creds {
+            Some(_) => crate::trail::SaveThrough::Signer,
+            None => crate::trail::SaveThrough::Bucket,
+        },
     };
     match Trails::new(conducting).await {
         Ok(trails) => {

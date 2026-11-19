@@ -165,6 +165,7 @@ impl Bus {
             ant: self.dev.clone(),
             worker: std::path::PathBuf::from("ants"),
             trails_dir: None,
+            saves: crate::trail::SaveThrough::Bucket,
             humans: Registry::default(),
             colony: self.colony.clone(),
             outbox: Arc::new(|_| Box::pin(async { Ok(()) })),

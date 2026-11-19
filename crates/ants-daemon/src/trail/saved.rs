@@ -1,23 +1,29 @@
-//! The saved trails a run names: colony-wide in [`TRAILS_BUCKET`], which humans and ants put, else in the machine's
-//! `~/.ants/trails/<name>.py`. The bucket wins a name both have, so every conductor of the colony runs the same
+//! The saved trails a run names: colony-wide in [`TRAILS_BUCKET`], which humans put and `ants signer` puts for ants,
+//! else in the machine's `~/.ants/trails/<name>.py`. The bucket wins a name both have, so every conductor of the colony runs the same
 //! trail by that name.
 //!
 //! An ant saves a trail as its own ([`Trails::save`]): under a new name, or replacing one it saved, and removes only
 //! its own ([`Trails::remove_saved`]). Each write expects the entry it checked, so a trail another saved meanwhile is
-//! never replaced nor removed.
+//! never replaced nor removed; the daemon asks `ants signer` to make it ([`keeper`]), which checks the same again.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ants_proto::{JsDomain, RunId, RunState, SavedTrail, Saver, TRAILS_BUCKET, TrailName, script_sha256};
+use ants_proto::{
+    JsDomain, RunId, RunState, SaveTrailOutcome, SaveTrailRequest, SavedTrail, Saver, TRAILS_BUCKET, TrailChange,
+    TrailName, UserId, script_sha256,
+};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 
-use super::Trails;
+use super::{SaveThrough, Trails, keeper};
 use crate::records::direct_kv::{DirectKv, Lookup};
 
 /// Why a save or a removal reaches no saved trail of the colony.
 const UNREACHABLE: &str = "the colony's saved trails are unreachable from this ant's daemon";
+/// Why a save or a removal went unanswered.
+const NO_KEEPER: &str = "`ants signer` did not answer, and only it saves an ant's trails: run it where the account key \
+                         is (scripts/install-units.sh --signer), then ask again";
 
 /// Where the script of a trail an ant saves comes from.
 #[derive(Debug, Clone)]
@@ -75,6 +81,10 @@ enum Entry {
 pub(super) struct Saved {
     kv: Option<DirectKv>,
     dir: Option<PathBuf>,
+    /// The ant saving.
+    ant: UserId,
+    /// The connection asking `ants signer` to save; none to save as it would, on a server without credentials.
+    signer: Option<async_nats::Client>,
 }
 
 /// A saved trail, as a search for trails reads it.
@@ -93,7 +103,13 @@ pub struct SavedEntry {
 }
 
 impl Saved {
-    pub(super) async fn new(js: &jetstream::Context, js_domain: Option<&JsDomain>, dir: Option<PathBuf>) -> Self {
+    pub(super) async fn new(
+        js: &jetstream::Context,
+        js_domain: Option<&JsDomain>,
+        dir: Option<PathBuf>,
+        ant: UserId,
+        through: SaveThrough,
+    ) -> Self {
         let kv = match DirectKv::whole(js, js_domain, TRAILS_BUCKET).await {
             Ok(kv) => Some(kv),
             Err(e) => {
@@ -101,7 +117,11 @@ impl Saved {
                 None
             }
         };
-        Self { kv, dir }
+        let signer = match through {
+            SaveThrough::Signer => Some(js.client()),
+            SaveThrough::Bucket => None,
+        };
+        Self { kv, dir, ant, signer }
     }
 
     /// The script of the trail saved as `name`.
@@ -160,20 +180,31 @@ impl Saved {
     /// Store `trail` under its name: as a new trail with no `last`, else replacing the key's last message, at stream
     /// sequence `last`. Whether it stored the trail: false when the key changed meanwhile.
     async fn write(&self, trail: &SavedTrail, last: Option<u64>) -> Result<bool, String> {
-        let kv = self.kv()?;
-        let value = serde_json::to_vec(trail).map_err(|e| e.to_string())?;
-        let stored = match last {
-            None => kv.create(trail.key(), value).await,
-            Some(last) => kv.update(trail.key(), value, last).await,
-        };
-        stored.map_err(|e| format!("saving trail {}: {e:#}", trail.name))
+        let change = TrailChange::Save { trail: trail.clone(), last };
+        self.change(change).await.map_err(|e| format!("saving trail {}: {e}", trail.name))
     }
 
     /// Remove the trail `name`, if the key's last message is still the one at stream sequence `last`. Whether it
     /// removed it: false when the key changed meanwhile.
     async fn delete(&self, name: &TrailName, last: u64) -> Result<bool, String> {
-        let deleted = self.kv()?.delete_expecting(name.as_str(), last, None).await;
-        deleted.map_err(|e| format!("removing trail {name}: {e:#}"))
+        let change = TrailChange::Remove { name: name.clone(), last };
+        self.change(change).await.map_err(|e| format!("removing trail {name}: {e}"))
+    }
+
+    /// Make `change` as the ant, through `ants signer` or, with no signer, as it would: whether it was made.
+    async fn change(&self, change: TrailChange) -> Result<bool, String> {
+        let request = SaveTrailRequest::new(self.ant.clone(), change);
+        let outcome = match &self.signer {
+            Some(client) => {
+                keeper::request(client, &request).await.map_err(|e| format!("{e:#}"))?.ok_or(NO_KEEPER.to_owned())?
+            }
+            None => keeper::answer(self.kv()?, &request).await.map_err(|e| format!("{e:#}"))?,
+        };
+        match outcome {
+            SaveTrailOutcome::Done => Ok(true),
+            SaveTrailOutcome::Changed => Ok(false),
+            SaveTrailOutcome::Refused { why } => Err(why),
+        }
     }
 
     /// Every saved trail, the colony's then this machine's whose names the colony has not, each by name. Fails when the
@@ -400,7 +431,8 @@ mod tests {
         let Some(server) = NatsServer::start() else { return };
         let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
         js.create_key_value(crate::hub::trails_config()).await.unwrap();
-        let saved = Saved::new(&js, None, None).await;
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        let saved = Saved::new(&js, None, None, dev_a.clone(), SaveThrough::Bucket).await;
         let name: TrailName = "deploy".parse().unwrap();
         let trail = SavedTrail {
             name: name.clone(),
@@ -408,26 +440,33 @@ mod tests {
             phases: Vec::new(),
             waypoints: Vec::new(),
             script: "agent('build')".to_owned(),
-            saved_by: Saver::Ant { user: "dev-a".parse().unwrap() },
+            saved_by: Saver::Ant { user: dev_a },
             saved_from: None,
             saved_at: Utc::now(),
         };
         assert!(matches!(saved.lookup(&name).await.unwrap(), (Entry::Absent, 0)));
         assert!(saved.write(&trail, None).await.unwrap());
-        assert!(!saved.write(&trail, None).await.unwrap(), "a new trail over a saved one saves nothing");
+        assert!(saved.write(&trail, None).await.unwrap(), "a repeat of the save saved it");
+        let later = SavedTrail { saved_at: Utc::now() + chrono::Duration::seconds(1), ..trail.clone() };
+        assert!(!saved.write(&later, None).await.unwrap(), "a new trail over a saved one saves nothing");
         let (Entry::Saved(found), last) = saved.lookup(&name).await.unwrap() else { panic!("saved") };
         assert_eq!(found, trail);
 
         let elsewhere = SavedTrail { saved_by: Saver::Human { user: UserId::human() }, ..trail.clone() };
         let kv = DirectKv::whole(&js, None, TRAILS_BUCKET).await.unwrap();
         kv.put(name.as_str(), serde_json::to_vec(&elsewhere).unwrap()).await.unwrap();
-        assert!(!saved.write(&trail, Some(last)).await.unwrap(), "replacing a revision another replaced");
+        assert!(!saved.write(&later, Some(last)).await.unwrap(), "replacing a revision another replaced");
         assert!(!saved.delete(&name, last).await.unwrap(), "removing a revision another replaced");
         let (Entry::Saved(found), now) = saved.lookup(&name).await.unwrap() else { panic!("saved") };
         assert_eq!(found, elsewhere);
-        assert!(saved.delete(&name, now).await.unwrap());
+        let refused = saved.delete(&name, now).await.unwrap_err();
+        assert!(refused.contains("saved by"), "{refused}");
+        kv.delete(name.as_str()).await.unwrap();
         assert!(matches!(saved.lookup(&name).await.unwrap().0, Entry::Absent));
         assert!(saved.write(&trail, None).await.unwrap(), "a new trail over a removed one");
+        let (_, now) = saved.lookup(&name).await.unwrap();
+        assert!(saved.delete(&name, now).await.unwrap());
+        assert!(saved.delete(&name, now).await.unwrap(), "a repeat of the removal removed it");
 
         kv.put("other", serde_json::to_vec(&trail).unwrap()).await.unwrap();
         let (entry, _) = saved.lookup(&"other".parse().unwrap()).await.unwrap();

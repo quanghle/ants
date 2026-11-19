@@ -355,6 +355,50 @@ async fn the_reactions_check_names_who_answers_an_ants_requests() {
     signer.abort();
 }
 
+/// Each ant's trail saves are asked of `ants signer` as the ant, changing nothing; an ant without credentials asks no
+/// one.
+#[tokio::test]
+async fn the_trail_saves_check_tells_whether_the_signer_answers() {
+    let Some(server) = Server::start() else { return };
+    let dev_a: UserId = "dev-a".parse().unwrap();
+    let creds = server.creds_as(&dev_a, Role::Ant);
+    let config = server.dir().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "messenger = false\nharness = \"copilot\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\ncreds = {creds:?}\n\
+             [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\n"
+        ),
+    )
+    .unwrap();
+    let loaded = config::load(&config).unwrap();
+    let setup = setup(&server, None);
+    let wait = ants_proto::SAVE_TRAIL_REPEAT + Duration::from_millis(500);
+    let checks = check_trail_saves(&loaded.ants, &setup, wait).await;
+    let open = named(&checks, "ant dev-b trail saves")[0];
+    assert_eq!(open.status, Status::Ok, "{open}");
+    let none = named(&checks, "ant dev-a trail saves")[0];
+    assert_eq!(none.status, Status::Warn, "{none}");
+    assert!(none.detail.starts_with("nothing answers its trail saves"), "{none}");
+
+    let (human, js) = server.connect_as(&"alice".parse().unwrap(), Role::Human).await;
+    js.create_key_value(ants_daemon::hub::trails_config()).await.unwrap();
+    drop(human);
+    let approver =
+        crate::credentials::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, wait)
+            .await
+            .unwrap();
+    let keeping = ants_daemon::trail::keeper::serve(approver.client.clone(), approver.hub().clone(), None);
+    let signer = tokio::spawn(keeping);
+    let checks = check_trail_saves(&loaded.ants, &setup, wait).await;
+    let answered = named(&checks, "ant dev-a trail saves")[0];
+    assert_eq!(
+        (answered.status, answered.detail.as_str()),
+        (Status::Ok, "ants signer answers save_trail and remove_trail")
+    );
+    signer.abort();
+}
+
 #[test]
 fn ants_sharing_a_git_workdir_with_worktrees_turned_off_are_warned() {
     let dir = ants_test_support::scratch_dir("doctor-shared-workdir").canonicalize().unwrap();

@@ -256,6 +256,8 @@ proptest! {
             (subject::reactions(&ant), vec!["ants", "reactions", a]),
             (subject::react(&ant), vec!["ants", "reactions", a, "react"]),
             (subject::reactions_reply(&ant), vec!["_INBOX", a, "reactions"]),
+            (subject::save_trail(&ant), vec!["ants", "savetrail", a]),
+            (subject::save_trail_reply(&ant), vec!["_INBOX", a, "savetrail"]),
             (subject::status(&ant, &thread), vec!["ants", "status", a, t]),
             (subject::cancel(&ant, &thread), vec!["ants", "cancel", a, t]),
             (subject::cancelled(&ant, &thread), vec!["ants", "cancelled", a, t]),

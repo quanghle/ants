@@ -319,6 +319,8 @@ The signer also signs and revokes keys on admins' `add` and `retire` orders, whi
 
 The signer also answers ants' reactions requests (MCP `react` and `list_reactions`, `ants react` with ant credentials) in queue group `reactions`: ant credentials neither read nor write `ants_reactions`, so the signer lists the reactions to a message, or adds or removes the ant's own, once it finds that the ant reads the message. With authentication, `react` therefore needs a running `ants signer` (listings are also answered by `ants webhook serve` with a `[[human]]` entry); a daemon without credentials answers its ants itself. Behind a leaf node, the signer's machine needs its uplink issued with `--enroll-approver` (see [auth.md](auth.md#wire-acls-and-verification-invariants)).
 
+The signer also saves and removes ants' trails (MCP `save_trail` and `remove_trail`) in queue group `savetrail`: a saved trail's key is its name, which no subject ties to its saver, so ant credentials neither put nor delete in `ants_trails`, and the signer writes for an ant only a trail saved as the ant's own, under a new name or over a trail the ant saved, and removes only such a trail. With authentication, `save_trail` and `remove_trail` therefore need a running `ants signer`; a daemon without credentials writes itself, with the same checks.
+
 ### Retiring an added ant
 
 Managers also get `retire_ant(name)` (`other:retire_ant`) for ants whose `added_by` matches them:

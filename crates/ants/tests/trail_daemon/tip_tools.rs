@@ -1,7 +1,7 @@
 //! The MCP tools of trail tips: `leave_tip` and `vote_tip`, refused on untrusted threads, and `trail_tips`, any
 //! thread's, called by the ants answering the steps of a saved trail.
 
-use ants_daemon::trail::DEFAULT_WORKERS;
+use ants_daemon::trail::{DEFAULT_WORKERS, SaveThrough};
 use ants_proto::{MAX_TIP_TEXT, TipId, TipVerdict, TrailName, TrailStep, TrailTip, script_sha256};
 
 use super::*;
@@ -46,6 +46,7 @@ pub(super) async fn ant_mcp(server: &NatsServer, name: &str, dir: &Path, saved: 
         attempts,
         workers: DEFAULT_WORKERS,
         notes: notes.clone(),
+        saves: SaveThrough::Bucket,
     };
     let trails = Trails::new(conducting).await.unwrap();
     let mcp = Mcp::start(user, &dir.join(name), outbox, colony, notes, humans, None).await.unwrap();

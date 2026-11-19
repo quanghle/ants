@@ -156,6 +156,7 @@ fn no_credentials_hold_a_jetstream_family_right_a_human_lacks() {
         ("observer", Permissions::for_observer(&p("watch"))),
         ("enroll approver", Permissions::for_enroll_approver()),
         ("reactions responder", Permissions::for_reactions_responder()),
+        ("trail keeper", Permissions::for_trail_keeper()),
         ("device revoker", Permissions::for_device_revoker()),
         ("bootstrap", Permissions::for_bootstrap()),
         ("registrar", Permissions::for_registrar()),
@@ -437,6 +438,7 @@ fn only_an_assistant_acts_for_its_human_on_the_subjects_naming_it() {
         Permissions::for_observer(&p("watcher")),
         Permissions::for_enroll_approver(),
         Permissions::for_reactions_responder(),
+        Permissions::for_trail_keeper(),
         Permissions::for_device_revoker(),
         Permissions::for_bootstrap(),
         Permissions::for_account_holder(),
@@ -1020,7 +1022,7 @@ fn each_ant_writes_only_its_own_identity_and_humans_read_all() {
 }
 
 #[test]
-fn humans_and_ants_save_trails_every_user_reads_and_each_ant_writes_only_the_runs_it_conducts() {
+fn humans_save_trails_ants_ask_the_keeper_and_each_ant_writes_only_the_runs_it_conducts() {
     let trails = |perms: &Permissions| -> Vec<String> {
         perms.publish.iter().chain(&perms.subscribe).filter(|s| s.contains("ants_trail")).cloned().collect()
     };
@@ -1033,8 +1035,7 @@ fn humans_and_ants_save_trails_every_user_reads_and_each_ant_writes_only_the_run
             "$JS.API.DIRECT.GET.KV_ants_trail_runs.$KV.ants_trail_runs.dev-a.>",
             "$KV.ants_trail_runs.dev-a.>",
             "$KV.ants_trail_tips.*.dev-a.>",
-            "$KV.ants_trail_ratings.*.dev-a.*",
-            "$KV.ants_trails.*"
+            "$KV.ants_trail_ratings.*.dev-a.*"
         ]
     );
     assert_eq!(
@@ -1064,18 +1065,29 @@ fn humans_and_ants_save_trails_every_user_reads_and_each_ant_writes_only_the_run
     for denied in ["$KV.ants_trail_runs.dev-b.r1", "$KV.ants_trail_runs.dev-a"] {
         assert!(!may(&ant, denied), "an ant may publish {denied}");
     }
-    // Any trail's key, as no subject names its saver: the ant's daemon keeps to the trails the ant saved.
-    assert!(may(&ant, "$KV.ants_trails.deploy"));
+    // No trail's key, as no subject names its saver: an ant asks the keeper, on its own subject only.
     let domain: crate::JsDomain = "hub".parse().unwrap();
     let in_domain = ant.clone().with_js_domain(Some(&domain));
-    assert!(may(&in_domain, "$JS.hub.API.$KV.ants_trails.deploy"));
+    assert!(!may(&ant, "$KV.ants_trails.deploy") && !may(&in_domain, "$JS.hub.API.$KV.ants_trails.deploy"));
+    assert!(may(&ant, "ants.savetrail.dev-a") && !may(&ant, "ants.savetrail.dev-b"));
+    assert!(ant.subscribe.iter().any(|have| covers(have, "_INBOX.dev-a.savetrail")));
+    assert!(!may(&ant, "_INBOX.dev-b.savetrail"));
+    // Only the keeper, `ants signer`, writes any trail for an ant and answers it.
+    let keeper = Permissions::for_trail_keeper();
+    for allowed in ["$KV.ants_trails.deploy", "_INBOX.dev-a.savetrail", "$JS.API.DIRECT.GET.KV_ants_trails"] {
+        assert!(may(&keeper, allowed), "the keeper may not publish {allowed}");
+    }
+    assert!(keeper.subscribe.iter().any(|have| covers(have, "ants.savetrail.dev-a")));
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    assert!(!may(&human, "_INBOX.dev-a.savetrail"), "a human answers no trail save");
     assert!(!may(&ant, "$JS.API.DIRECT.GET.KV_ants_trail_runs.$KV.ants_trail_runs.dev-b.r1"));
     for key in [crate::trail_run_key(&p("dev-a"), &run), crate::trail_call_key(&p("dev-a"), &run, 3)] {
         assert!(may(&ant, &format!("$KV.ants_trail_runs.{key}")), "{key}");
     }
-    // An assistant conducts and saves trails as an ant does, as itself.
+    // An assistant conducts and saves trails as an ant does, as itself, never writing one as its human.
     let assistant = Permissions::for_assistant(&p("pa"), &p("alice"));
-    assert!(may(&assistant, "$KV.ants_trails.deploy"));
+    assert!(!may(&assistant, "$KV.ants_trails.deploy"));
+    assert!(may(&assistant, "ants.savetrail.pa"));
     assert!(may(&assistant, "$KV.ants_trail_runs.pa.r1.session"));
     let observer = Permissions::for_observer(&p("watcher"));
     let webhook = Permissions::for_webhook(&p("hook"), &[Destination::Ant(p("dev-a"))]);
@@ -1505,6 +1517,7 @@ fn only_hosts_reach_sense_event_logs() {
         ("observer", Permissions::for_observer(&p("watch"))),
         ("enroll approver", Permissions::for_enroll_approver()),
         ("reactions responder", Permissions::for_reactions_responder()),
+        ("trail keeper", Permissions::for_trail_keeper()),
         ("device revoker", Permissions::for_device_revoker()),
         ("bootstrap", Permissions::for_bootstrap()),
         ("registrar", Permissions::for_registrar()),

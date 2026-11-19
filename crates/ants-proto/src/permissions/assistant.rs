@@ -5,7 +5,7 @@ use super::human::{notify_prefs_rights, read_marker_rights, thread_rights};
 use super::{Permissions, covers, kv_stream};
 use crate::{
     ATTEMPTS_BUCKET, CHANNELS_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, INTAKE_STREAM,
-    OUTBOX_STREAM, OWNERS_BUCKET, Role, THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_TIPS_BUCKET, UserId,
+    OUTBOX_STREAM, OWNERS_BUCKET, Role, THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, UserId,
     assisted_marks_key, assisted_reminders_key, chan_reader, inbox_consumer, inbox_prefix, notes_consumer,
     notify_consumer, sent_reader, spare_readers, subject,
 };
@@ -38,9 +38,9 @@ impl Permissions {
     /// check), starting, stopping or resuming a trail run on [`subject::ALL_TRAIL_REQUESTS`], creating message marks in [`ATTEMPTS_BUCKET`], recording an owner under any key, putting dead letters,
     /// answering an ant's reactions requests or another's renewal, setting another ant's avatar
     /// ([`IDENTITIES_BUCKET`]), retiring or purging tips ([`TRAIL_TIPS_BUCKET`]), whose ants vote as themselves, or
-    /// purging ratings ([`TRAIL_RATINGS_BUCKET`]), which it puts as itself of its own runs. It saves trails
-    /// ([`TRAILS_BUCKET`](crate::TRAILS_BUCKET)) as itself, an ant, which its daemon records as their saver, never as
-    /// its human. Nor does it decide approval requests on [`subject::ALL_APPROVAL_DECISIONS`]: it decides one for its human in a message to
+    /// purging ratings ([`TRAIL_RATINGS_BUCKET`]), which it puts as itself of its own runs, or saving and removing
+    /// trails itself ([`TRAILS_BUCKET`]), which no subject ties to their saver: it saves them as an ant does, asking
+    /// `ants signer`, which records it as their saver, never its human. Nor does it decide approval requests on [`subject::ALL_APPROVAL_DECISIONS`]: it decides one for its human in a message to
     /// the ant (`on_behalf_of`), which waits for its human's confirmation, as readers ignore a stored decision carrying
     /// `on_behalf_of` and one stored there would keep its human's own from being stored. It sends admin orders for its
     /// human (`on_behalf_of`), which daemons hold for the human's confirmation. Nor does it change the team: no entry of [`HUMANS_BUCKET`] (where its human's grant stands) or [`CHANNELS_BUCKET`],
@@ -84,6 +84,7 @@ impl Permissions {
             format!("$KV.{IDENTITIES_BUCKET}.*"),
             format!("$KV.{TRAIL_TIPS_BUCKET}.>"),
             format!("$KV.{TRAIL_RATINGS_BUCKET}.>"),
+            format!("$KV.{TRAILS_BUCKET}.*"),
             format!("$JS.API.STREAM.INFO.{OUTBOX_STREAM}"),
             format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
             format!("$JS.API.STREAM.MSG.GET.{INTAKE_STREAM}"),

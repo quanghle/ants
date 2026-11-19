@@ -24,7 +24,8 @@ use crate::node::members::EnrollApprover;
 /// ([`assistants`]), may do and the sourcing of the machine's outbox
 /// ([`Permissions::for_leaf`]), plus what the credentials of `webhooks` allow, for an `ants webhook serve` on the
 /// machine ([`webhook_permissions`]), plus [`EnrollApprover::With`] what `ants enroll` and `ants signer` on the machine
-/// need ([`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`]), and connect only as a leaf
+/// need ([`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`],
+/// [`Permissions::for_trail_keeper`]), and connect only as a leaf
 /// node, not as a client. Also writes the system account credentials of the leaf's second uplink beside them
 /// ([`leaf_system_creds`]).
 ///
@@ -113,8 +114,8 @@ pub fn leaf_user(machine: &Machine) -> String {
     format!("leaf-{machine}")
 }
 
-/// Refuse `jwt`, uplink credentials of `machine`'s leaf node, if over [`MAX_UPLINK_JWT`]. Each ant adds about 4.9 KB
-/// to them, 5.3 KB with a JetStream domain.
+/// Refuse `jwt`, uplink credentials of `machine`'s leaf node, if over [`MAX_UPLINK_JWT`]. Each ant adds about 5.0 KB
+/// to them, 5.4 KB with a JetStream domain.
 pub(super) fn check_uplink_size(jwt: &str, machine: &Machine) -> Result<()> {
     if jwt.len() > MAX_UPLINK_JWT {
         bail!(

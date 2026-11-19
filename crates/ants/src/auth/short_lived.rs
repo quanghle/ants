@@ -64,7 +64,8 @@ pub fn approver_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String
 }
 
 /// [`approver_creds`] for `ants signer`, which also answers ants' reactions requests
-/// ([`Permissions::for_reactions_responder`]) and humans' registration requests ([`Permissions::for_registrar`]).
+/// ([`Permissions::for_reactions_responder`]) and trail saves ([`Permissions::for_trail_keeper`]), and humans'
+/// registration requests ([`Permissions::for_registrar`]).
 pub fn signer_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
     let mut permissions = signer_permissions();
     // Registration happens on the hub only: a leaf uplink with signer_permissions never carries it.
@@ -73,10 +74,12 @@ pub fn signer_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> 
 }
 
 /// What `ants enroll` and `ants signer` need: [`Permissions::for_enroll_approver`],
-/// [`Permissions::for_reactions_responder`] and [`Permissions::for_account_holder`].
+/// [`Permissions::for_reactions_responder`], [`Permissions::for_trail_keeper`] and
+/// [`Permissions::for_account_holder`].
 pub(super) fn signer_permissions() -> Permissions {
     let mut permissions = Permissions::for_enroll_approver();
     merge(&mut permissions, Permissions::for_reactions_responder());
+    merge(&mut permissions, Permissions::for_trail_keeper());
     merge(&mut permissions, Permissions::for_account_holder());
     permissions
 }

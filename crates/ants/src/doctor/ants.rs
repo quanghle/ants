@@ -1,5 +1,5 @@
-//! The machine's ants: their credentials and harnesses, the host settings, shared workdirs, reactions responders and
-//! which webhooks bypass their approvals.
+//! The machine's ants: their credentials and harnesses, the host settings, shared workdirs, reactions responders, the
+//! signer saving their trails and which webhooks bypass their approvals.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,8 +9,12 @@ use ants_daemon::harness::{self, Harnesses, Readiness};
 use ants_daemon::records::reactions;
 use ants_daemon::secrets::creds::{self, Kind};
 use ants_daemon::secrets::keystore;
+use ants_daemon::trail::keeper;
 use ants_daemon::{Launch, PermissionPolicy};
-use ants_proto::{ColonyEntry, MACHINES_BUCKET, Machine, ReactionChange, ReactionsRequest, ReactionsResponder, Uuid};
+use ants_proto::{
+    ColonyEntry, MACHINES_BUCKET, Machine, ReactionChange, ReactionsRequest, ReactionsResponder, SaveTrailOutcome,
+    SaveTrailRequest, TrailChange, Uuid,
+};
 use ants_sense::log::{ChainStatus, SIZE_LIMIT};
 use chrono::{DateTime, Utc};
 
@@ -370,6 +374,44 @@ pub(super) async fn check_ant_reactions(ant: &Ant, setup: &Setup, wait: Duration
             let webhook = "or, for list_reactions only, ants webhook serve with a [[human]] entry".to_owned();
             Check::warn(check, detail, vec![signer, webhook])
         }
+    }
+}
+
+/// Whether `ants signer` answers each ant's trail saves, which its MCP save_trail and remove_trail make: asked as the
+/// ant, where its daemon connects, to remove a trail at stream sequence 0, which no trail is at, so nothing changes. An
+/// ant without credentials, on an open server, asks no one: its daemon writes the saved trails itself.
+pub(super) async fn check_trail_saves(ants: &[Ant], setup: &Setup, wait: Duration) -> Vec<Check> {
+    futures::future::join_all(ants.iter().map(|ant| check_ant_trail_saves(ant, setup, wait))).await
+}
+
+async fn check_ant_trail_saves(ant: &Ant, setup: &Setup, wait: Duration) -> Check {
+    let check = format!("ant {} trail saves", ant.name);
+    let Some(creds) = &ant.creds else {
+        return Check::ok(check, "no credentials, so an open server: the daemon saves and removes trails itself");
+    };
+    let url = ant.nats.as_deref().unwrap_or(&setup.nats);
+    let client = match connect(url, Some(creds), &ant.name).await {
+        Ok(client) => client,
+        Err(Unreached::Refused(e) | Unreached::Unreachable(e) | Unreached::NoKey(e) | Unreached::Other(e)) => {
+            return Check::skip(check, format!("not connected to {url} as {}: {e}", ant.name));
+        }
+    };
+    let probe = TrailChange::Remove { name: "doctor-probe".parse().expect("a trail name"), last: 0 };
+    match keeper::request_within(&client, &SaveTrailRequest::new(ant.name.clone(), probe), wait).await {
+        Ok(Some(SaveTrailOutcome::Refused { why })) => {
+            Check::warn(check, format!("ants signer refuses the ant's trail saves: {why}"), Vec::new())
+        }
+        Ok(Some(_)) => Check::ok(check, "ants signer answers save_trail and remove_trail"),
+        Ok(None) => Check::warn(
+            check,
+            format!("nothing answers its trail saves within {}s: save_trail and remove_trail fail", wait.as_secs()),
+            vec![
+                "ants signer on the machine holding the account key (scripts/install-units.sh --signer runs it as a \
+                 service)"
+                    .to_owned(),
+            ],
+        ),
+        Err(e) => Check::skip(check, format!("asking as {}: {e:#}", ant.name)),
     }
 }
 

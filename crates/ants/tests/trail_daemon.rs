@@ -171,6 +171,7 @@ async fn conductor_full(
         attempts,
         workers: ants_daemon::trail::DEFAULT_WORKERS,
         notes: notes.clone(),
+        saves: ants_daemon::trail::SaveThrough::Bucket,
     };
     let trails = Trails::new(conducting).await.unwrap();
     trails.restore().await;

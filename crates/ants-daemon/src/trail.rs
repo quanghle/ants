@@ -10,6 +10,7 @@ mod children;
 mod control;
 mod driver;
 mod invite;
+pub mod keeper;
 mod limits;
 mod load;
 mod ratings;
@@ -93,6 +94,17 @@ pub struct Conducting {
     pub workers: usize,
     /// The thread notes, where a run reports on its thread.
     pub notes: Arc<dyn NotesStore>,
+    pub saves: SaveThrough,
+}
+
+/// How a daemon saves and removes its ant's trails in [`ants_proto::TRAILS_BUCKET`], which ant credentials write
+/// nothing of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveThrough {
+    /// Asking `ants signer` ([`keeper`]).
+    Signer,
+    /// Writing the bucket as `ants signer` would: on a server without credentials, where nothing signs.
+    Bucket,
 }
 
 /// A run to start: what the MCP tool, a schedule and a human's [`ants_proto::TrailRequest`] ask for.
@@ -292,10 +304,11 @@ impl Trails {
             attempts,
             workers,
             notes,
+            saves,
         } = conducting;
         COMPUTING.get_or_init(|| Semaphore::new(workers.clamp(1, MAX_WORKERS)));
         let store = Store::new(&js, js_domain.as_ref(), ant.clone()).await?;
-        let saved = Saved::new(&js, js_domain.as_ref(), trails_dir).await;
+        let saved = Saved::new(&js, js_domain.as_ref(), trails_dir, ant.clone(), saves).await;
         let tips = Tips::new(&js, js_domain.as_ref()).await?;
         let ratings = Ratings::new(&js, js_domain.as_ref(), ant.clone()).await?;
         let (wake, woken) = mpsc::unbounded_channel();

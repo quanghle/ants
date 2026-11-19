@@ -28,12 +28,14 @@ use crate::{
 };
 
 mod ratings;
+mod saving;
 mod tips;
 
 pub use ratings::{
     Counts, FIND_TRAILS_LIMIT, Finder, Found, LATEST_RATINGS, MAX_FIND_TRAILS, MAX_RATING_TASK, MAX_RATING_WHY, Query,
     RATING_FULL_WEIGHT, RATING_MATCH_WORDS, RatingOutcome, RatingSummary, TrailRating, serves, stem,
 };
+pub use saving::{SAVE_TRAIL_REPEAT, SAVE_TRAIL_WAIT, SaveTrailOutcome, SaveTrailReply, SaveTrailRequest, TrailChange};
 pub use tips::{
     DEFAULT_TIPS_FOUND, MAX_LIVE_TIPS, MAX_TIP_REASON, MAX_TIP_TEXT, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, MAX_TIPS_FOUND,
     Ranked, Retirement, Similarity, TIP_HALF_LIFE, TIP_RELEVANCE, TIP_RELEVANT_WORDS, TIP_SIMILARITY, TIP_UNUSED,
@@ -104,9 +106,10 @@ impl std::fmt::Display for Saver {
     }
 }
 
-/// A saved trail in [`TRAILS_BUCKET`], under the key of its name. Humans put and delete any. An ant's daemon puts new
-/// ones and replaces or removes only those the ant saved ([`Saver`]). Every ant and human reads them. Readers should
-/// treat unknown fields as additions, not errors.
+/// A saved trail in [`TRAILS_BUCKET`], under the key of its name. Humans put and delete any. An ant saves new ones and
+/// replaces or removes only those it saved ([`Saver`]), through `ants signer` ([`SaveTrailRequest`]), as ant
+/// credentials write none. Every ant and human reads them. Readers should treat unknown fields as additions, not
+/// errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedTrail {
     pub name: TrailName,

@@ -296,7 +296,7 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
 }
 
 #[tokio::test]
-async fn humans_and_ants_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
+async fn humans_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
     use ants_proto::{
         RunId, SavedTrail, Saver, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, ThreadId,
         TrailStepThread, trail_rating_key, trail_run_key, trail_session_key, trail_thread_step_key,
@@ -333,9 +333,8 @@ async fn humans_and_ants_save_the_trails_and_each_ant_keeps_only_the_runs_it_con
     let got: SavedTrail = serde_json::from_slice(&read.get("deploy").await.unwrap().unwrap()).unwrap();
     assert_eq!(got, trail);
     let theirs = SavedTrail { saved_by: Saver::Ant { user: dev_a.clone() }, ..trail.clone() };
-    read.put("release", serde_json::to_vec(&theirs).unwrap()).await.unwrap();
-    read.delete("release").await.unwrap();
-    assert!(read.get("release").await.unwrap().is_none(), "an ant's credentials save and delete trails");
+    assert!(read.put("release", serde_json::to_vec(&theirs).unwrap()).await.is_err(), "an ant's credentials save none");
+    assert!(read.delete("deploy").await.is_err(), "an ant's credentials delete none");
     saved.delete("deploy").await.unwrap();
     assert!(read.get("deploy").await.unwrap().is_none(), "a human deletes any");
 

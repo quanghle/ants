@@ -178,6 +178,7 @@ pub use trails::{
     Ranked, Retirement, Similarity, TIP_HALF_LIFE, TIP_RELEVANCE, TIP_RELEVANT_WORDS, TIP_SIMILARITY, TIP_UNUSED,
     Tally, TipBoard, TipRetired, TipStatus, TipVerdict, TipVote, TrailTip, check_tip_key, script_sha256, tip_words,
 };
+pub use trails::{SAVE_TRAIL_REPEAT, SAVE_TRAIL_WAIT, SaveTrailOutcome, SaveTrailReply, SaveTrailRequest, TrailChange};
 
 /// JetStream stream holding every durable ants message.
 pub const STREAM: &str = "ANTS";
@@ -335,9 +336,11 @@ pub const THREADS_BUCKET: &str = "ants_threads";
 /// ([`Permissions::for_device_revoker`]). Beside it, under `<ant>.settings`, the ant's [`SharedSettings`], which only
 /// host credentials write ([`Permissions::for_host`]). Entries never expire.
 pub const IDENTITIES_BUCKET: &str = "ants_identities";
-/// KV bucket of the saved trails: one [`SavedTrail`] per trail, keyed by its name. Humans put and delete any. An ant's
-/// daemon puts new ones and replaces or removes only those the ant saved ([`Saver`]). Every ant and human reads them,
-/// by direct gets naming no subject ([`Permissions::for_user`]). Entries never expire.
+/// KV bucket of the saved trails: one [`SavedTrail`] per trail, keyed by its name. Humans put and delete any. An ant
+/// saves new ones and replaces or removes only those it saved ([`Saver`]) by asking `ants signer`
+/// ([`SaveTrailRequest`]), whose credentials alone write it for ants ([`Permissions::for_trail_keeper`]): no subject
+/// ties a name to its saver, so ant credentials, which a harness can read, write none of it. Every ant and human reads
+/// them, by direct gets naming no subject ([`Permissions::for_user`]). Entries never expire.
 pub const TRAILS_BUCKET: &str = "ants_trails";
 /// KV bucket of the trail runs, each under its conductor's keys: its [`TrailRun`] ([`trail_run_key`]), its
 /// [`TrailSession`] ([`trail_session_key`]), the [`JournalEntry`] of each call answered ([`trail_call_key`]), and the

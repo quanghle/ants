@@ -4,10 +4,10 @@
 
 use super::{Permissions, kv_stream, ordered_consumer_subjects};
 #[cfg(doc)]
-use crate::{AntRequest, MACHINES_BUCKET, ReactionsRequest, channel_manager_serving_key};
+use crate::{AntRequest, MACHINES_BUCKET, ReactionsRequest, SaveTrailRequest, channel_manager_serving_key};
 use crate::{
     CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, ENROLL_INBOX, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET,
-    INTAKE_STREAM, LINKS_BUCKET, REACTIONS_BUCKET, STREAM, THREADS_BUCKET, UserId, chan_consumer,
+    INTAKE_STREAM, LINKS_BUCKET, REACTIONS_BUCKET, STREAM, THREADS_BUCKET, TRAILS_BUCKET, UserId, chan_consumer,
     channel_manager_serving_subject, done_reader, inbox_consumer, inbox_prefix, subject,
 };
 
@@ -106,6 +106,23 @@ impl Permissions {
                 subject::ALL_REACT_REQUESTS.to_owned(),
                 format!("{ENROLL_INBOX}.>"),
             ],
+        }
+    }
+
+    /// What `ants signer` also allows itself, on the machine holding the account key, to save and remove trails for
+    /// ants ([`SaveTrailRequest`]): hearing every such request ([`subject::ALL_SAVE_TRAIL_REQUESTS`]); reading the saved
+    /// trails by direct gets naming no subject, as every user does; putting and deleting any saved trail, which only it
+    /// does for an ant, once it found the trail absent or saved by the ant; and answering on the ant's own
+    /// [`subject::save_trail_reply`]. The replies of its JetStream requests come under [`ENROLL_INBOX`], as those of
+    /// [`Permissions::for_enroll_approver`], with which it is issued.
+    pub fn for_trail_keeper() -> Self {
+        Self {
+            publish: vec![
+                format!("$JS.API.DIRECT.GET.{}", kv_stream(TRAILS_BUCKET)),
+                format!("$KV.{TRAILS_BUCKET}.*"),
+                subject::ALL_SAVE_TRAIL_REPLIES.to_owned(),
+            ],
+            subscribe: vec![subject::ALL_SAVE_TRAIL_REQUESTS.to_owned(), format!("{ENROLL_INBOX}.>")],
         }
     }
 

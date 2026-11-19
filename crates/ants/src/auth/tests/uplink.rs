@@ -127,7 +127,7 @@ fn uplink_credentials_a_hub_would_refuse_are_neither_issued_nor_renewed() {
 }
 
 /// Each ant added behind a leaf node (`request_ant`, enrollment) grows its uplink JWT by the same amount, about
-/// 4.9 KB for a six-character name, 5.3 KB with the hub's JetStream domain, whose plain JetStream API and KV forms it
+/// 5.0 KB for a six-character name, 5.4 KB with the hub's JetStream domain, whose plain JetStream API and KV forms it
 /// leaves out: no permission is shared between two ants, and none is a pattern matching an ant not yet added.
 #[test]
 fn each_ant_added_grows_the_uplink_by_the_same_measure() {
@@ -156,7 +156,7 @@ fn each_ant_added_grows_the_uplink_by_the_same_measure() {
         assert!(max - min <= 4, "ants of names of one length grow it alike: {growth:?}");
         assert!((least..=most).contains(&max), "{max} bytes per ant, domain {domain:?}");
         let room = (MAX_UPLINK_JWT - jwt.len()) / max + 6;
-        assert!(room >= if domain.is_some() { 47 } else { 51 }, "{room} ants fit");
+        assert!(room >= if domain.is_some() { 47 } else { 50 }, "{room} ants fit");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }

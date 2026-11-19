@@ -257,6 +257,8 @@ and the `args` it takes, so another ant picks it from `ants trail list` and runs
 - **Remove only its own** with `remove_trail`: its tips stay for a trail saved later under that name. A trail a human
   or another ant saved goes only by a human's `ants trail rm`.
 - Saving and removing are refused on a thread a webhook or schedule started, and on a step of a run started there.
+- With authentication, `ants signer` makes each save and removal for the ant: when it does not answer, saving and
+  removing fail until it runs again.
 - **From a dream.** A sage's `trail` finding outlines a trail (name, description, args with examples, phases) for an
   approach repeated across threads. First check `find_trails` with its description: when a saved trail already serves
   it, reject the finding naming that trail. Otherwise write the script from the outline, try it with `run_trail` where

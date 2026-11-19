@@ -85,7 +85,8 @@ pub struct Permissions {
 /// Bump it whenever the permissions of any role change: [`Permissions::for_user`], [`Permissions::for_assistant`], [`Permissions::for_leaf`],
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_host`],
 /// [`Permissions::for_enrollment`],
-/// [`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`], [`Permissions::for_account_holder`],
+/// [`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`], [`Permissions::for_trail_keeper`],
+/// [`Permissions::for_account_holder`],
 /// [`Permissions::for_device_revoker`]
 /// or [`Permissions::with_js_domain`], or
 /// the other claims `ants auth` puts in a

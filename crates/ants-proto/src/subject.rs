@@ -395,6 +395,25 @@ pub fn trail(ant: &UserId) -> String {
 /// Every trail request, of all ants.
 pub const ALL_TRAIL_REQUESTS: &str = "ants.trail.*";
 
+/// Where `ant` asks `ants signer` to save a trail as its own or remove one it saved
+/// ([`SaveTrailRequest`](super::SaveTrailRequest); core NATS, not stored). Only the ant publishes here, and only
+/// `ants signer` answers: no ant writes the saved trails itself.
+pub fn save_trail(ant: &UserId) -> String {
+    format!("ants.savetrail.{ant}")
+}
+
+/// Where the answer to a trail save request of `ant` goes ([`SaveTrailReply`](super::SaveTrailReply); core NATS):
+/// under the ant's reply inboxes ([`inbox_prefix`](super::inbox_prefix)), which only it reads, so a leaf uplink
+/// carries it down with no subject of its own. Only `ants signer` answers.
+pub fn save_trail_reply(ant: &UserId) -> String {
+    format!("{}.savetrail", super::inbox_prefix(ant))
+}
+
+/// Every trail save request, of all ants.
+pub const ALL_SAVE_TRAIL_REQUESTS: &str = "ants.savetrail.*";
+/// Every answer to a trail save request.
+pub const ALL_SAVE_TRAIL_REPLIES: &str = "_INBOX.*.savetrail";
+
 /// Where the daemon of `ant` answers a trail request ([`TrailReply`](super::TrailReply); core NATS).
 pub fn trailed(ant: &UserId) -> String {
     format!("ants.trailed.{ant}")
