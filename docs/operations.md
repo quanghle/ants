@@ -98,15 +98,15 @@ With a [`[nats_server]`](config.md#managed-nats-server) table in its config file
 | `ants_nats_connected` | gauge | `ant` / `user` | NATS connection state (`1` up, `0` down) |
 | `ants_harnesses` | gauge | `ant` | Live harness processes |
 | `ants_memory_low` | gauge | `ant` | `1` while memory is low and the ant caps concurrent harnesses ([config.md](config.md#memory-pressure)), else `0` |
-| `ants_memory_available_bytes` | gauge | | System memory available at the last pool check (absent until read) |
+| `ants_memory_available_bytes` | gauge | — | System memory available at the last pool check (absent until read) |
 | `ants_messages_in_hand`, `ants_prompts_in_flight` | gauge | `ant` | Messages held by daemon; active harness prompts |
 | `ants_prompts_total`, `ants_retries_total`, `ants_dead_letters_total` | counter | `ant` | Prompts started, redelivery retries, dead letters (max-deliveries backstop included in the process running it; `ants dead watch` exports these alone) |
 | `ants_spend_tokens_total`, `ants_spend_cost_total` | counter | `ant` | Reported tokens and cost ([config.md](config.md#spend-report)) |
 | `ants_jetstream_bytes`, `ants_jetstream_limit_bytes` | gauge | `domain`, `store` | Account JetStream storage used and limit ([architecture.md](architecture.md#jetstream-storage)) |
-| `ants_webhook_requests_in_flight` | gauge | | Active HTTP webhook requests |
+| `ants_webhook_requests_in_flight` | gauge | — | Active HTTP webhook requests |
 | `ants_webhook_events_total` | counter | `webhook`, `outcome` | `delivered`, `duplicate`, `refused` (4xx), `failed` (503, request timeout included) |
-| `ants_bridge_sessions`, `ants_bridge_sessions_total` | gauge, counter | | Open and cumulative bridge sessions |
-| `ants_bridge_failures_total` | counter | | Upstream/session failures |
+| `ants_bridge_sessions`, `ants_bridge_sessions_total` | gauge, counter | — | Open and cumulative bridge sessions |
+| `ants_bridge_failures_total` | counter | — | Upstream/session failures |
 | `ants_bridge_bytes_total` | counter | `direction` (`up`, `down`) | Bridge bytes transferred |
 
 ## Footprint

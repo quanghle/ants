@@ -381,7 +381,7 @@ Built-in ACP stdio harnesses live in `crates/ants-daemon/src/harnesses.toml`. No
 | `copilot` | `copilot --acp --allow-all` | `npm install -g @github/copilot` | `copilot login` | `--allow-all` (agent mode, not autopilot) |
 | `claude` | `claude-agent-acp` | `npm install -g @agentclientprotocol/claude-agent-acp` | `claude login` or `ANTHROPIC_API_KEY` | ACP mode `bypassPermissions` |
 | `codex` | `codex-acp` | `npm install -g @agentclientprotocol/codex-acp` | `codex-acp login`, or `CODEX_API_KEY` / `OPENAI_API_KEY` | ACP mode `agent-full-access` (no approvals, no sandbox) |
-| `antigravity` | `agy acp --disable-telemetry --dangerously-skip-permissions` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` (`agy acp --login`) or Gemini API key | `--dangerously-skip-permissions` |
+| `antigravity` | `agy acp --disable-telemetry --dangerously-skip-permissions` | `curl -fsSL https://antigravity.google/cli/install.sh` piped to `bash` | `agy` (`agy acp --login`) or Gemini API key | `--dangerously-skip-permissions` |
 
 **Built-in harnesses run their own tools unasked**, as does every harness of a [native protocol](#harness-protocols). Each built-in starts in its most permissive native setting, so its shell commands, edits and fetches never reach the daemon as tool requests: an ant's `allow` rules, tool approvals by humans or `escalate_to` ants, and [webhook and schedule narrowing](#tool-permissions) do not apply to them. `ants daemon` logs a warning at start (and at the first prompt each webhook or schedule narrows), and `ants doctor` warns (`ant NAME tool permissions`), when an ant on such a harness sets allow rules other than `*`, has `escalate_to` ants, or is the destination of a narrowing webhook or schedule. Checks the daemon makes itself still apply: [prompt limits and spending caps](#prompt-limits-and-spending-caps), and the [branch push](#tool-permissions) of `publish = "draft-pr"`. Run such ants in workdirs and accounts their harness may change freely, or set `tools = "ask"` ([below](#asking-ants-about-tools)).
 
@@ -579,11 +579,11 @@ env = { CODEX_HOME = "/srv/ants/codex" }        # optional: config, credentials 
 - **Sign-in:** at start the translator reads the account (`account/read`); none signed in, where the configured provider needs an OpenAI account, is `auth_required` (`codex login`). A turn the provider refuses with HTTP 401 (a revoked or wrong API key) or a failed token refresh is too, and since `account/read` still finds the stored account, sessions then fail `auth_required` until `auth.json` in `CODEX_HOME` changes (`codex login`; credentials kept in the OS keyring are not watched). `codex app-server` ignores `OPENAI_API_KEY` and `CODEX_API_KEY` in its environment: store a key with `printenv OPENAI_API_KEY | codex login --with-api-key`. `CODEX_HOME` selects the configuration and credentials, `~/.codex` by default.
 - **`mode`** sets each thread's approval policy and sandbox; none asks, codex's OS sandbox being the restriction. Any other value fails loading.
 
-  | `mode` | Approval policy | Sandbox |
-  |---|---|---|
-  | `workspace-write` (default) | `never` | `workspace-write`: writes in the workdir, `$TMPDIR` and `/tmp`; no network unless `sandbox_workspace_write.network_access` |
-  | `read-only` | `never` | `read-only` |
-  | `full-access` | `never` | `danger-full-access`: no sandbox |
+    | `mode` | Approval policy | Sandbox |
+    |---|---|---|
+    | `workspace-write` (default) | `never` | `workspace-write`: writes in the workdir, `$TMPDIR` and `/tmp`; no network unless `sandbox_workspace_write.network_access` |
+    | `read-only` | `never` | `read-only` |
+    | `full-access` | `never` | `danger-full-access`: no sandbox |
 
   Both are sent on every thread start, resume and fork, so `approval_policy` and `sandbox_mode` from `config.toml` or `args` do not apply; `sandbox_workspace_write.*` settings do. What codex still asks (a command or file change approval, more permissions, an MCP elicitation, user input) is declined at once, logged. Under `tools = "ask"`, the approval policy is `on-request` with the mode's sandbox, and a command or file change approval goes to ants as an `execute` or `edit` tool request; the rest is still declined.
 - **Model and effort:** the ant's `model` and `reasoning_effort` (as `model_reasoning_effort`) go with each thread start, resume and fork.
@@ -904,7 +904,7 @@ Tool calls a harness asks about are checked against `allow` (the [built-in harne
 |---|---|
 | `*` | Every tool call |
 | `<kind>` | ACP kind: `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `switch_mode`, `other` |
-| `execute:cargo test*` | Command glob; commands containing `;`, `&`, `\|`, `<`, `>`, `` ` ``, `$(` or newlines never match |
+| `execute:cargo test*` | Command glob; commands containing `;`, `&`, `<`, `>`, `$(`, pipes, backticks or newlines never match |
 | `edit:src/*` | Relative paths inside `<workdir>/src` (or the thread's worktree; never outside it) |
 | `edit:/srv/notes/*` | Absolute path glob |
 | `fetch:https://docs.rs/*` | URL glob (falls back to title) |
