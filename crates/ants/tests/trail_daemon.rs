@@ -53,6 +53,8 @@ mod limits;
 mod nested;
 #[path = "trail_daemon/ratings.rs"]
 mod ratings;
+#[path = "trail_daemon/restore.rs"]
+mod restore;
 #[path = "trail_daemon/save_tools.rs"]
 mod save_tools;
 #[path = "trail_daemon/stored.rs"]

@@ -1,13 +1,19 @@
-//! Restoring runs from their records: at the daemon's start, and to resume one.
+//! Restoring runs from their records: at the daemon's start, again while it lives for those it could not read, and to
+//! resume one.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ants_proto::{PendingCall, QueuedCall, RunId, RunState, TrailFunction, TrailLeg, TrailRun, TrailSession};
 use ants_trail::{Run, RunState as Session};
 use anyhow::{Context as _, Result, anyhow, bail};
 
 use super::{Book, Leg, Slot, Step, Trails, engine_limits, locked, steps};
+
+/// How long the daemon waits before trying the runs left unrestored again, at first and at most.
+const RESTORE_FIRST: Duration = Duration::from_secs(2);
+const RESTORE_MAX: Duration = Duration::from_mins(5);
 
 impl Trails {
     /// The run of `header` as its records hold it: its stored session, given the answers its journal holds beyond it.
@@ -112,25 +118,101 @@ impl Trails {
     }
 
     /// Continue the runs the conductor's index lists, their steps' threads known again before a reply to one may
-    /// arrive. Each restored run gets a pass once [`Trails::serve`] runs.
+    /// arrive. Each restored run gets a pass once [`Trails::serve`] runs. The runs left unrestored, all of them when
+    /// the index cannot be read, are tried again while the daemon lives ([`Trails::restore_again`]), and on demand
+    /// ([`Trails::restored`]).
     pub async fn restore(&self) {
-        let runs = match self.inner.store.runs().await {
-            Ok(runs) => runs,
-            Err(e) => {
-                tracing::warn!(error = format!("{e:#}"), "reading the trail runs to continue");
-                return;
+        if let Err(e) = self.restore_left().await {
+            tracing::warn!(error = format!("{e:#}"), "reading the trail runs to continue");
+        }
+    }
+
+    /// Restore the runs left unrestored: the index's once it is read, those whose records could not be read until
+    /// then. Fails when the index cannot be read.
+    async fn restore_left(&self) -> Result<()> {
+        let left = match &*locked(&self.inner.unrestored) {
+            Unrestored::Index => None,
+            Unrestored::Runs(runs) => Some(runs.clone()),
+        };
+        let runs = match left {
+            Some(runs) => runs,
+            None => {
+                let runs: BTreeSet<RunId> = self.inner.store.runs().await?.into_iter().collect();
+                let mut unrestored = locked(&self.inner.unrestored);
+                if matches!(*unrestored, Unrestored::Index) {
+                    let held = locked(&self.inner.runs);
+                    let left = runs.iter().filter(|run| !held.contains_key(run)).cloned().collect();
+                    *unrestored = Unrestored::Runs(left);
+                }
+                runs
             }
         };
-        for run in runs {
-            if let Err(e) = self.restore_run(&run).await {
+        for run in &runs {
+            if let Err(e) = self.restore_run(run).await {
                 tracing::warn!(run = %run, error = format!("{e:#}"), "continuing a trail run");
             }
         }
-        self.reconcile().await;
+        if !runs.is_empty() {
+            self.reconcile().await;
+        }
+        Ok(())
+    }
+
+    /// Try the runs left unrestored again, waiting longer each time up to [`RESTORE_MAX`], until none is left.
+    pub(super) async fn restore_again(&self) {
+        let mut wait = RESTORE_FIRST;
+        while !self.restored_all() {
+            tokio::time::sleep(wait).await;
+            if let Err(e) = self.restore_left().await {
+                tracing::warn!(error = format!("{e:#}"), "reading the trail runs to continue, again");
+            }
+            wait = (wait * 2).min(RESTORE_MAX);
+        }
+        std::future::pending::<()>().await;
+    }
+
+    fn restored_all(&self) -> bool {
+        matches!(&*locked(&self.inner.unrestored), Unrestored::Runs(runs) if runs.is_empty())
+    }
+
+    /// Whether `run` may be one of the conductor's runs left unrestored: listed in its index, its records not read yet.
+    pub(super) fn unrestored(&self, run: &RunId) -> bool {
+        match &*locked(&self.inner.unrestored) {
+            Unrestored::Index => true,
+            Unrestored::Runs(runs) => runs.contains(run),
+        }
+    }
+
+    /// The run `run` in memory, restored now when it was left unrestored: None when the conductor holds no such run
+    /// unfinished; fails while its records, or the index, cannot be read.
+    pub(super) async fn restored(&self, run: &RunId) -> Result<Option<Arc<Slot>>> {
+        let held = || locked(&self.inner.runs).get(run).cloned();
+        if let Some(slot) = held() {
+            return Ok(Some(slot));
+        }
+        if !self.unrestored(run) {
+            return Ok(None);
+        }
+        let index = matches!(*locked(&self.inner.unrestored), Unrestored::Index);
+        if index {
+            // Boxed: restoring may stop orphaned child runs, which may restore.
+            Box::pin(self.restore_left()).await.context("reading the trail runs to continue")?;
+        } else {
+            self.restore_run(run).await.with_context(|| format!("continuing run {run}"))?;
+        }
+        match held() {
+            Some(slot) => Ok(Some(slot)),
+            None if self.unrestored(run) => Err(anyhow!("run {run} is not continued yet: its records were not read")),
+            None => Ok(None),
+        }
     }
 
     /// Continue run `run` from its records, listed in the index; a run with no header leaves the index.
     pub(super) async fn restore_run(&self, run: &RunId) -> Result<()> {
+        if locked(&self.inner.runs).contains_key(run) {
+            self.mark_restored(run);
+            return Ok(());
+        }
         let store = &self.inner.store;
         let header = match store.header(run).await? {
             // Ended before its end was told: the invitation to rate it and its owner's message, both sent again.
@@ -142,18 +224,50 @@ impl Trails {
                 if header.parent.is_none() && !self.report_end(&header).await {
                     bail!("the message telling the run's end is not stored");
                 }
-                return store.list(run, false).await;
+                store.list(run, false).await?;
+                self.mark_restored(run);
+                return Ok(());
             }
             Some(header) => header,
-            None => return store.list(run, false).await,
+            None => {
+                store.list(run, false).await?;
+                self.mark_restored(run);
+                return Ok(());
+            }
         };
         let slot = self.load(header, false).await?;
         store.list(run, true).await?;
-        locked(&self.inner.runs).insert(run.clone(), slot);
-        self.wake(run);
-        tracing::info!(run = %run, "trail run continued");
+        let inserted = {
+            let mut runs = locked(&self.inner.runs);
+            let vacant = !runs.contains_key(run);
+            if vacant {
+                runs.insert(run.clone(), slot);
+            }
+            vacant
+        };
+        self.mark_restored(run);
+        if inserted {
+            self.wake(run);
+            tracing::info!(run = %run, "trail run continued");
+        }
         Ok(())
     }
+
+    fn mark_restored(&self, run: &RunId) {
+        if let Unrestored::Runs(runs) = &mut *locked(&self.inner.unrestored) {
+            runs.remove(run);
+        }
+    }
+}
+
+/// The conductor's runs its daemon has not continued from their records yet.
+#[derive(Default)]
+pub(super) enum Unrestored {
+    /// All of them: its index is not read yet.
+    #[default]
+    Index,
+    /// Those of its index whose records could not be read yet.
+    Runs(BTreeSet<RunId>),
 }
 
 /// The calls `engine` holds back for room, as its session's record lists them.

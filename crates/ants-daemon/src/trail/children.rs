@@ -256,7 +256,8 @@ impl Trails {
                     tracing::warn!(run = %header.run, child = %child, error = format!("{e:#}"), "reconciling a child run");
                 }
             }
-            let orphaned = header.parent.is_some() && !self.awaited(&header);
+            let orphaned =
+                header.parent.as_ref().is_some_and(|link| !self.unrestored(&link.run)) && !self.awaited(&header);
             if !orphaned || matches!(header.state, RunState::Stopped { .. }) {
                 continue;
             }

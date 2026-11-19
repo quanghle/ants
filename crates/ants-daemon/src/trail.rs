@@ -187,6 +187,8 @@ struct Inner {
     /// a further reply of it is reported on the run's thread rather than prompted. A run's threads are forgotten as it
     /// ends: its [`ants_proto::TrailStepThread`]s tell its steps' threads from then on.
     threads: Mutex<HashMap<ThreadId, Step>>,
+    /// The runs of the conductor's index not continued from their records yet ([`load`]).
+    unrestored: Mutex<load::Unrestored>,
     wake: mpsc::UnboundedSender<RunId>,
     woken: tokio::sync::Mutex<mpsc::UnboundedReceiver<RunId>>,
     /// The run_trail calls waiting on the end of the runs they started ([`EndWait`]).
@@ -343,6 +345,7 @@ impl Trails {
             notes,
             runs: Mutex::default(),
             threads: Mutex::default(),
+            unrestored: Mutex::default(),
             wake,
             woken: tokio::sync::Mutex::new(woken),
             waiters: Mutex::default(),
@@ -767,7 +770,8 @@ impl Trails {
     /// Take `message`, on a thread the conductor knows of no run in memory, when the thread is a step's, as its
     /// [`ants_proto::TrailStepThread`] tells, and the message a notice, an escalation, or a reply of the step's
     /// recipient: one arriving after the run ended, or after a restart, reported on the run's thread. Only a message
-    /// that may be one, replying or answering, is looked up.
+    /// that may be one, replying or answering, is looked up. A message on a step of a run the daemon could not continue
+    /// from its records yet is taken as the run, continued now, takes it; failing while the run cannot be.
     async fn take_late(&self, message: &Envelope, answerer: &UserId) -> Result<bool> {
         let (notice, escalation) = (message.notice.is_some(), message.escalation.is_some());
         let replying = message.in_reply_to.is_some() || message.answer.is_some();
@@ -775,6 +779,10 @@ impl Trails {
             return Ok(false);
         }
         let Some(step) = self.inner.store.step(&message.thread_id).await? else { return Ok(false) };
+        // A step of a run its daemon could not continue yet: taken once the run is, else tried again later.
+        if self.unrestored(&step.run) && self.restored(&step.run).await?.is_some() {
+            return Box::pin(self.take(message)).await;
+        }
         if *answerer != step.to && !notice && !escalation {
             return Ok(false);
         }
@@ -860,15 +868,17 @@ impl Trails {
     pub async fn serve(&self) {
         let mut hearing = std::pin::pin!(self.hear());
         let mut driving = std::pin::pin!(self.drive_all());
+        let mut restoring = std::pin::pin!(self.restore_again());
         tokio::select! {
             () = &mut hearing => {}
             () = &mut driving => {}
+            () = &mut restoring => {}
         }
     }
 
     /// The run `run` in memory, not finished.
     async fn running(&self, run: &RunId) -> Result<Arc<Slot>, String> {
-        if let Some(slot) = locked(&self.inner.runs).get(run).cloned() {
+        if let Some(slot) = self.restored(run).await.map_err(|e| format!("{e:#}"))? {
             return Ok(slot);
         }
         match self.inner.store.header(run).await {
