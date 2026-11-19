@@ -433,15 +433,14 @@ async fn an_event_reaches_its_ant_once_and_a_refused_one_nothing() {
     let forgotten = request(addr, "POST", "/hooks/github", &event, body).await;
     assert_eq!((forgotten.status, forgotten.json()["duplicate"].as_bool()), (200, Some(true)));
 
-    let messages: Vec<Envelope> = stored(&js, &subject::inbox(&p("dev-a"), &github)).await;
+    let messages: Vec<Envelope> = stored(&js, &subject::webhook_inbox(&p("dev-a"), &github)).await;
     let [message] = &messages[..] else { panic!("one message: {messages:?}") };
     assert_eq!((&message.from, &message.to, message.thread_id.as_str()), (&github, &p("dev-a"), thread.as_str()));
     assert_eq!((message.owner.as_ref(), message.webhook), (Some(&p("alice")), true));
     let recorded = owners::Owners::new(js.clone()).recorded(&message.thread_id, &message.to).await.unwrap();
     assert_eq!(recorded, Some(p("alice")), "ants' messages on the thread name its owner as recorded");
     assert_eq!(message.text, format!("issues opened: {}", std::str::from_utf8(body).unwrap()));
-    let marker =
-        seen.get(webhook_marker_key(&github)).await.unwrap().expect("daemons take its messages as a webhook's");
+    let marker = seen.get(webhook_marker_key(&github)).await.unwrap().expect("it publishes its version");
     let marker: ants_proto::Serving = serde_json::from_slice(&marker).unwrap();
     assert_eq!(marker, ants_proto::Serving::here(ants_daemon::colony::machine().await), "it publishes its version");
 }
@@ -483,7 +482,7 @@ async fn a_channel_webhook_mentions_nobody_the_listed_or_the_members() {
         assert!(exposition.lines().any(|l| l == line), "{line} in:\n{exposition}");
     }
     let mentions = |name: &str| {
-        let (js, subject) = (js.clone(), subject::chan(&ops, &p(name)));
+        let (js, subject) = (js.clone(), subject::webhook_chan(&ops, &p(name)));
         async move {
             let posts: Vec<ChannelPost> = stored(&js, &subject).await;
             let [post] = &posts[..] else { panic!("one post: {posts:?}") };

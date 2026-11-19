@@ -21,15 +21,21 @@ async fn a_webhook_posts_as_itself_to_its_destinations_only_and_reads_no_message
     crate::webhook::ensure_bucket(&h_js).await.unwrap();
 
     let (raw, mut errors) = server.watched_with(&hook, &creds).await;
-    for allowed in [subject::inbox(&dev_a, &hook), subject::chan(&ops, &hook), "$KV.ants_webhooks.github.x".to_owned()]
-    {
+    for allowed in [
+        subject::webhook_inbox(&dev_a, &hook),
+        subject::webhook_chan(&ops, &hook),
+        "$KV.ants_webhooks.github.x".to_owned(),
+    ] {
         raw.publish(allowed, "ok".into()).await.unwrap();
     }
     for denied in [
-        subject::inbox(&p("dev-b"), &hook),
-        subject::inbox(&dev_a, &p("dev-b")),
-        subject::chan(&"dev".parse().unwrap(), &hook),
-        "ants.out.inbox.dev-a.github".to_owned(),
+        // The subjects an ant sends on: whatever its marker says, a webhook never passes for an ant.
+        subject::inbox(&dev_a, &hook),
+        subject::chan(&ops, &hook),
+        subject::webhook_inbox(&p("dev-b"), &hook),
+        subject::webhook_inbox(&dev_a, &p("dev-b")),
+        subject::webhook_chan(&"dev".parse().unwrap(), &hook),
+        "ants.out.inbox.dev-a.github.webhook".to_owned(),
         "$KV.ants_channels.ops".to_owned(),
         "$KV.ants_humans.github".to_owned(),
         "$KV.ants_webhooks.gitlab.x".to_owned(),
@@ -67,17 +73,17 @@ async fn a_webhook_posts_as_itself_to_its_destinations_only_and_reads_no_message
     assert!(seen.create(ants_proto::webhook_seen_key(&p("gitlab"), "e1"), "x").await.is_err());
     assert!(seen.get(ants_proto::webhook_seen_key(&p("gitlab"), "e1")).await.is_err());
 
-    // Its marker tells ants it is a webhook; they read no event it delivered, and put no marker of their own.
-    raw.publish(ants_proto::webhook_marker_subject(&hook), "github".into()).await.unwrap();
+    // Its marker, which it empties at will, says only the version it runs. Ants read nothing of the bucket, put no
+    // marker, and never send on a webhook's subjects: an ant never passes for a webhook either.
+    raw.publish(ants_proto::webhook_marker_subject(&hook), "".into()).await.unwrap();
     raw.flush().await.unwrap();
-    let (_, a_js) = server.connect(&dev_a).await;
-    let bucket = a_js.get_stream_no_info(format!("KV_{}", ants_proto::WEBHOOKS_BUCKET)).await.unwrap();
-    let marker = bucket.direct_get_last_for_subject(ants_proto::webhook_marker_subject(&hook)).await.unwrap();
-    assert_eq!(&marker.payload[..], b"github");
     let (a_raw, mut errors) = server.watched(&dev_a).await;
     for denied in [
         "$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.github.x".to_owned(),
+        format!("$JS.API.DIRECT.GET.KV_ants_webhooks.{}", ants_proto::webhook_marker_subject(&hook)),
         ants_proto::webhook_marker_subject(&dev_a),
+        subject::webhook_inbox(&p("dev-b"), &dev_a),
+        subject::webhook_chan(&ops, &dev_a),
     ] {
         a_raw.publish(denied.clone(), "".into()).await.unwrap();
         let v = next_violation(&a_raw, &mut errors).await;

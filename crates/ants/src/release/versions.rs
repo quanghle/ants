@@ -245,16 +245,15 @@ pub async fn serving() -> Vec<u8> {
     serde_json::to_vec(&Serving::here(colony::machine().await)).expect("a serving entry serializes")
 }
 
-/// Put `value` at `key` of `kv` now and every [`SERVING_EVERY`], calling `put` after each put, until dropped. A put
+/// Put `value` at `key` of `kv` now and every [`SERVING_EVERY`], until dropped. A put
 /// that fails is logged and tried again at the next.
-pub async fn keep_putting(kv: DirectKv, key: String, value: Vec<u8>, put: impl Fn()) {
+pub async fn keep_putting(kv: DirectKv, key: String, value: Vec<u8>) {
     let mut every = tokio::time::interval(SERVING_EVERY);
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         every.tick().await;
-        match kv.put(&key, value.clone()).await {
-            Ok(()) => put(),
-            Err(e) => tracing::warn!(key, error = format!("{e:#}"), "publishing the version of ants this runs"),
+        if let Err(e) = kv.put(&key, value.clone()).await {
+            tracing::warn!(key, error = format!("{e:#}"), "publishing the version of ants this runs");
         }
     }
 }

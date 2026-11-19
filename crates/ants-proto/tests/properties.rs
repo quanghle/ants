@@ -178,8 +178,12 @@ proptest! {
         prop_assert_eq!(subject::parse_inbox(&subject::inbox(&to, &from)), Some((to.clone(), from.clone())));
         prop_assert_eq!(subject::parse_notes(&subject::notes(&thread, &from)), Some((thread, from.clone())));
         prop_assert_eq!(subject::parse_chan(&subject::chan(&channel, &from)), Some((channel.clone(), from.clone())));
-        let stored = format!("{}{from}", subject::stored_inbox(&to).strip_suffix('*').unwrap());
-        prop_assert_eq!(subject::parse_stored_inbox(&to, &stored), Some(from.clone()));
+        prop_assert_eq!(subject::parse_inbox(&subject::webhook_inbox(&to, &from)), Some((to.clone(), from.clone())));
+        prop_assert_eq!(subject::parse_chan(&subject::webhook_chan(&channel, &from)), Some((channel.clone(), from.clone())));
+        prop_assert!(subject::is_webhooks(&subject::webhook_inbox(&to, &from)));
+        prop_assert!(!subject::is_webhooks(&subject::inbox(&to, &from)));
+        let stored = format!("{}{from}", subject::stored_inbox(&to).strip_suffix('>').unwrap());
+        prop_assert_eq!(subject::parse_stored_inbox(&to, &stored), Some(subject::inbox(&to, &from)));
         prop_assert_eq!(subject::parse_chanadm(&subject::chanadm(&channel, &from)), Some((channel, from)));
     }
 
@@ -205,8 +209,8 @@ proptest! {
 
     #[test]
     fn stored_inbox_subjects_parse_only_for_their_user(user in user(), other in user(), from in user()) {
-        let stored = format!("{}{from}", subject::stored_inbox(&other).strip_suffix('*').unwrap());
-        prop_assert_eq!(subject::parse_stored_inbox(&user, &stored), (user == other).then_some(from));
+        let stored = format!("{}{from}", subject::stored_inbox(&other).strip_suffix('>').unwrap());
+        prop_assert_eq!(subject::parse_stored_inbox(&user, &stored), (user == other).then(|| subject::inbox(&user, &from)));
     }
 
     #[test]
@@ -228,10 +232,13 @@ proptest! {
             prop_assert!(is_subject_token(part), "{part:?} from {s:?}");
         }
         if !parts.is_empty() {
-            prop_assert_eq!(tokens(&s).len(), 4);
+            let tokens = tokens(&s);
+            prop_assert!(tokens.len() == 4 || tokens.len() == 5 && tokens[4] == subject::WEBHOOK, "{s:?}");
         }
-        if let Some(from) = subject::parse_stored_inbox(&user, &s) {
-            prop_assert_eq!(tokens(&s), vec!["_INBOX", user.as_str(), "stored", from.as_str()]);
+        if let Some(inbox) = subject::parse_stored_inbox(&user, &s) {
+            let (to, from) = subject::parse_inbox(&inbox).expect("an inbox subject");
+            prop_assert_eq!(&to, &user);
+            prop_assert_eq!(&tokens(&s)[..4], &["_INBOX", user.as_str(), "stored", from.as_str()][..]);
         }
     }
 
@@ -294,12 +301,14 @@ proptest! {
             (ants_proto::webhook_marker_key(&ant), vec![a, "webhook"]),
             (ants_proto::webhook_marker_subject(&ant), vec!["$KV", ants_proto::WEBHOOKS_BUCKET, a, "webhook"]),
             // Patterns: their wildcards stand only where these say.
-            (subject::inbox_of(&ant), vec!["ants", "inbox", a, "*"]),
+            (subject::inbox_of(&ant), vec!["ants", "inbox", a, ">"]),
+            (subject::webhook_inbox(&other, &ant), vec!["ants", "inbox", o, a, "webhook"]),
+            (subject::webhook_chan(&channel, &ant), vec!["ants", "chan", c, a, "webhook"]),
             (subject::inbox_from(&ant), vec!["ants", "inbox", "*", a]),
-            (subject::stored_inbox(&ant), vec!["_INBOX", a, "stored", "*"]),
+            (subject::stored_inbox(&ant), vec!["_INBOX", a, "stored", ">"]),
             (subject::notes_of(&thread), vec!["ants", "notes", t, "*"]),
             (subject::notes_from(&ant), vec!["ants", "notes", "*", a]),
-            (subject::chan_room(&channel), vec!["ants", "chan", c, "*"]),
+            (subject::chan_room(&channel), vec!["ants", "chan", c, ">"]),
             (subject::chan_from(&ant), vec!["ants", "chan", "*", a]),
             (subject::chanadm_from(&ant), vec!["ants", "chanadm", "*", a]),
             (subject::status_of(&ant), vec!["ants", "status", a, "*"]),

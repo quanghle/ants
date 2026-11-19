@@ -18,7 +18,6 @@ use serde::Serialize;
 
 use crate::channel::{self, Stored, Wake};
 use crate::records::direct_kv::DirectKv;
-use crate::records::webhooks::Webhooks;
 use crate::stream::reading::{self, Reading};
 
 /// A message waiting for an ant.
@@ -311,15 +310,13 @@ async fn read<T>(
     Ok(found)
 }
 
-/// Which channel posts wake an ant, as its daemon tells them ([`channel::wake`]), with the channels' entries and the
-/// webhooks read once.
+/// Which channel posts wake an ant, as its daemon tells them ([`channel::wake`]), with the channels' entries read
+/// once.
 struct Wakes {
     ant: UserId,
     humans: Humans,
     channels: Option<kv::Store>,
     entries: HashMap<ChannelId, Option<ChannelEntry>>,
-    webhooks: Webhooks,
-    checked: HashMap<UserId, bool>,
 }
 
 impl Wakes {
@@ -333,8 +330,6 @@ impl Wakes {
                 .inspect_err(|e| tracing::debug!("channel posts wake by default, {CHANNELS_BUCKET} unread: {e}"))
                 .ok(),
             entries: HashMap::new(),
-            webhooks: Webhooks::new(js.clone()),
-            checked: HashMap::new(),
         }
     }
 
@@ -354,16 +349,7 @@ impl Wakes {
     /// The `posts` that wake the ant, as messages for it.
     async fn waking(&mut self, posts: Vec<(u64, ChannelPost)>) -> Vec<(u64, Unheld)> {
         let mut woken = Vec::new();
-        for (seq, mut post) in posts {
-            if post.webhook && !self.humans.contains(&post.from) {
-                post.webhook = match self.checked.get(&post.from) {
-                    Some(&webhook) => webhook,
-                    None => {
-                        let webhook = self.webhooks.is_webhook(&post.from).await;
-                        *self.checked.entry(post.from.clone()).or_insert(webhook)
-                    }
-                };
-            }
+        for (seq, post) in posts {
             if !self.entries.contains_key(&post.channel) {
                 let entry = match &self.channels {
                     Some(kv) => match channel::load(kv, &post.channel).await {

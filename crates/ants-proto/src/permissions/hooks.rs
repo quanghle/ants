@@ -18,18 +18,20 @@ pub enum Destination {
 }
 
 impl Destination {
-    /// The subject `webhook` publishes on to reach the destination.
+    /// The subject `webhook` publishes on to reach the destination: one of a webhook's ([`subject::webhook_inbox`],
+    /// [`subject::webhook_chan`]), never one an ant sends on.
     pub fn subject(&self, webhook: &UserId) -> String {
         match self {
-            Self::Ant(ant) => subject::inbox(ant, webhook),
-            Self::Channel(channel) => subject::chan(channel, webhook),
+            Self::Ant(ant) => subject::webhook_inbox(ant, webhook),
+            Self::Channel(channel) => subject::webhook_chan(channel, webhook),
         }
     }
 }
 
 impl Permissions {
-    /// What the credentials of `webhook` allow: delivering its events to `destinations` only, as itself, on
-    /// [`Destination::subject`], remembering the events it delivered, under its own keys of [`WEBHOOKS_BUCKET`]
+    /// What the credentials of `webhook` allow: delivering its events to `destinations` only, as itself and as
+    /// a webhook, on [`Destination::subject`], never on a subject an ant or a human sends on, so it never passes for
+    /// one; remembering the events it delivered, under its own keys of [`WEBHOOKS_BUCKET`]
     /// only, and recording the owner its config names for each thread it starts in an ant's inbox ([`OWNERS_BUCKET`],
     /// under that ant's keys only). It reads the entry of each channel among `destinations`, for the members a
     /// broadcast mentions, and hears its own reply inboxes, for the stream's acks. It asks for its own renewal

@@ -11,7 +11,7 @@ use crate::{
     Quote, Refusal, ThreadId, UserId, parse_mentions, subject,
 };
 #[cfg(doc)]
-use crate::{CHANNELS_BUCKET, HUMANS_BUCKET, WEBHOOK_ALLOW, WEBHOOKS_BUCKET, webhook_marker_key};
+use crate::{CHANNELS_BUCKET, HUMANS_BUCKET, WEBHOOK_ALLOW};
 
 /// A channel's entry in the [`CHANNELS_BUCKET`], under the key of its channel id. Humans write it, and the channel
 /// manager on its owner's requests ([`ChannelEntry::apply`]).
@@ -113,7 +113,7 @@ impl ChannelEntry {
 
     /// Who sends the mention notices of `post` ([`ChannelEntry::notified`]): its author, or for a webhook's post the
     /// channel's [`ChannelEntry::messenger`], since a webhook's credentials publish only to its destination
-    /// ([`ChannelPost::relayed_notice`]). A reader checks [`ChannelPost::webhook`] against the webhook's marker first.
+    /// ([`ChannelPost::relayed_notice`]).
     pub fn notifier(&self, post: &ChannelPost) -> UserId {
         if post.webhook { self.messenger() } else { post.from.clone() }
     }
@@ -238,9 +238,11 @@ pub struct ChannelPost {
     /// reader takes it from a top-level post's author only ([`ChannelPost::thread_creator`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator: Option<UserId>,
-    /// A webhook's post, as `ants webhook serve` marks it: one that mentions nobody goes to the channel's messenger, as
-    /// a human's does ([`ChannelPost::to_triage`]). It is the poster's claim: a daemon takes it only from a sender whose
-    /// marker is in [`WEBHOOKS_BUCKET`] ([`webhook_marker_key`]) or a human, so no ant names a thread's owner with it.
+    /// A webhook's post, as `ants webhook serve` and schedules send it: one that mentions nobody goes to the channel's
+    /// messenger, as a human's does ([`ChannelPost::to_triage`]). It goes on [`subject::webhook_chan`], which no ant's
+    /// credentials publish on, and any other post on [`subject::chan`], which no webhook's do: a reader takes a post
+    /// whose flag disagrees with its subject as forged ([`ChannelPost::check_subject`]), so no ant names a thread's
+    /// owner with it, and no webhook passes for an ant.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
     /// A reply that waits its turn behind the prompt running on its thread, as [`Envelope::queue`]. Never
@@ -449,12 +451,18 @@ impl ChannelPost {
         self.mentions.iter().any(|m| *m != self.from && !humans.contains(m))
     }
 
+    /// The subject the post goes on: [`subject::webhook_chan`] for a webhook's ([`ChannelPost::webhook`]), else
+    /// [`subject::chan`].
     pub fn subject(&self) -> String {
-        subject::chan(&self.channel, &self.from)
+        if self.webhook {
+            subject::webhook_chan(&self.channel, &self.from)
+        } else {
+            subject::chan(&self.channel, &self.from)
+        }
     }
 
     /// Check that the post arrived on its own [`ChannelPost::subject`]. Credentials pin the sender token of a channel
-    /// subject, so a `from` that disagrees with it is forged.
+    /// subject, and whether it is a webhook's, so a `from` or a `webhook` that disagrees with it is forged.
     pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
         if subject == self.subject() {
             return Ok(());

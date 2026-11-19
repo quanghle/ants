@@ -294,11 +294,10 @@ async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
     assert_eq!((&on.creator, &on.owner), (&Some(dev_a.clone()), &Some(bob.clone())));
 }
 
-/// The webhook github, and dev-a, each with its own credentials, start a thread with a post marked as a webhook's
-/// naming alice its owner: bob's post on github's thread keeps alice; on dev-a's, which has no marker, it takes the
-/// thread and keeps dev-a as its creator.
+/// The webhook github, with its own credentials and no marker, starts a thread with a post naming alice its owner:
+/// bob's post on it keeps alice. dev-a cannot post as a webhook: its credentials refuse a webhook's subject.
 #[tokio::test]
-async fn a_post_on_a_thread_an_ant_started_as_a_webhook_counts_it_as_the_ant_s() {
+async fn a_post_on_a_webhook_s_thread_keeps_its_owner_and_no_ant_posts_as_a_webhook() {
     let Some(server) = Server::start() else { return };
     let (alice, bob, dev_a, hook) = (p("alice"), p("bob"), p("dev-a"), p("github"));
     let me =
@@ -324,23 +323,19 @@ async fn a_post_on_a_thread_an_ant_started_as_a_webhook_counts_it_as_the_ant_s()
     )
     .unwrap();
     let (_, h_js) = bus::connect(&server.url, Some(&creds), None, &hook, "test").await.unwrap();
-    let markers =
-        ants_daemon::records::direct_kv::DirectKv::new(&h_js, None, ants_proto::WEBHOOKS_BUCKET).await.unwrap();
-    markers.put(ants_proto::webhook_marker_key(&hook), crate::release::versions::serving().await).await.unwrap();
     let (_, d_js) = server.connect(&dev_a).await;
 
     let owner = Some(alice.clone());
     let real = ChannelPost::new(ops(), hook.clone(), "build red").with_owner(owner.clone()).from_webhook(Vec::new());
     bus::publish_json(&h_js, real.subject(), &real, None).await.unwrap();
     let forged = ChannelPost::new(ops(), dev_a.clone(), "look").with_owner(owner.clone()).from_webhook(Vec::new());
-    bus::publish_json(&d_js, forged.subject(), &forged, None).await.unwrap();
+    assert_eq!(forged.subject(), ants_proto::subject::webhook_chan(&ops(), &dev_a));
+    assert!(bus::publish_json(&d_js, forged.subject(), &forged, None).await.is_err(), "dev-a posts as a webhook");
 
     let as_bob = me(&bob);
     let on = |thread: &ThreadId| compose(&b_js, &as_bob, &humans, ops(), Some(thread.clone()), "ok".to_owned());
     let on_real = on(&real.thread_id).await;
     assert_eq!((on_real.owner, on_real.creator), (owner, None), "the webhook's");
-    let on_forged = on(&forged.thread_id).await;
-    assert_eq!((on_forged.owner, on_forged.creator), (Some(bob.clone()), Some(dev_a.clone())), "dev-a's");
 }
 
 /// alice's post and dev-a's, each with its own credentials, mention bob, a member: bob's inbox gets one notice

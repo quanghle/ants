@@ -8,4 +8,3 @@ pub mod heed;
 pub mod links;
 pub mod owners;
 pub mod reactions;
-pub mod webhooks;

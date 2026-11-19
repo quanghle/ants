@@ -124,9 +124,11 @@ impl Search {
         };
         if kinds.iter().any(|k| matches!(k, Kind::Message | Kind::Escalation | Kind::Mention | Kind::Decision)) {
             add(format!("ants.inbox.{to}.{from}"));
+            add(format!("ants.inbox.{to}.{from}.{}", ants_proto::subject::WEBHOOK));
         }
         if kinds.contains(&Kind::Post) {
             add(format!("ants.chan.{channel}.{from}"));
+            add(format!("ants.chan.{channel}.{from}.{}", ants_proto::subject::WEBHOOK));
         }
         if kinds.contains(&Kind::Note) {
             add(format!("ants.notes.*.{from}"));
@@ -307,7 +309,9 @@ mod tests {
         let filters = |search: Search| search.filters();
         let every = [
             "ants.inbox.*.*",
+            "ants.inbox.*.*.webhook",
             "ants.chan.*.*",
+            "ants.chan.*.*.webhook",
             "ants.notes.*.*",
             "ants.approvals.*",
             "ants.approvals.*.*",
@@ -315,16 +319,31 @@ mod tests {
         ];
         assert_eq!(filters(Search::default()), every);
         let from = Search { from: Some(p("dev-a")), ..Default::default() };
-        let from_dev_a =
-            ["ants.inbox.*.dev-a", "ants.chan.*.dev-a", "ants.notes.*.dev-a", "ants.approvals.dev-a", "ants.dead.*"];
+        let from_dev_a = [
+            "ants.inbox.*.dev-a",
+            "ants.inbox.*.dev-a.webhook",
+            "ants.chan.*.dev-a",
+            "ants.chan.*.dev-a.webhook",
+            "ants.notes.*.dev-a",
+            "ants.approvals.dev-a",
+            "ants.dead.*",
+        ];
         assert_eq!(filters(from), from_dev_a, "a human's decision names no sender");
         let to = Search { to: Some(p("dev-a")), ..Default::default() };
-        let to_dev_a = ["ants.inbox.dev-a.*", "ants.approvals.dev-a", "ants.approvals.dev-a.*", "ants.dead.dev-a"];
+        let to_dev_a = [
+            "ants.inbox.dev-a.*",
+            "ants.inbox.dev-a.*.webhook",
+            "ants.approvals.dev-a",
+            "ants.approvals.dev-a.*",
+            "ants.dead.dev-a",
+        ];
         assert_eq!(filters(to), to_dev_a);
         let channel = Search { channel: Some("ops".parse().unwrap()), ..Default::default() };
-        assert_eq!(filters(channel.clone()), ["ants.inbox.*.*", "ants.chan.ops.*"], "posts and mentions");
+        let posts_and_mentions =
+            ["ants.inbox.*.*", "ants.inbox.*.*.webhook", "ants.chan.ops.*", "ants.chan.ops.*.webhook"];
+        assert_eq!(filters(channel.clone()), posts_and_mentions, "posts and mentions");
         let posts = Search { kinds: [Kind::Post].into(), ..channel };
-        assert_eq!(filters(posts), ["ants.chan.ops.*"]);
+        assert_eq!(filters(posts), ["ants.chan.ops.*", "ants.chan.ops.*.webhook"]);
         let none = Search { to: Some(p("dev-a")), kinds: [Kind::Note].into(), ..Default::default() };
         assert!(filters(none).is_empty(), "a note has no recipient");
     }

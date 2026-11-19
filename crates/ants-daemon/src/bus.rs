@@ -830,8 +830,7 @@ async fn stored_after(
 /// stream, adds its `Nats-Stream` and `Nats-Subject` headers after those, so a message counts only without a reply
 /// subject and with a single value of each: [`STREAM`], and the inbox of `user` from the sender its own subject names.
 fn as_published(mut msg: async_nats::Message, user: &UserId) -> Option<async_nats::Message> {
-    let from = subject::parse_stored_inbox(user, &msg.subject)?;
-    let inbox = subject::inbox(user, &from);
+    let inbox = subject::parse_stored_inbox(user, &msg.subject)?;
     let headers = msg.headers.as_ref()?;
     let single = |name| match headers.get_all(name).collect::<Vec<_>>()[..] {
         [value] => Some(value.as_str()),
