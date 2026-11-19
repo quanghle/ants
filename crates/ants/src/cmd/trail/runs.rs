@@ -176,6 +176,15 @@ fn local(at: DateTime<Utc>) -> String {
     at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string()
 }
 
+/// The trail a run started, `inline` for a script given inline; its route once it went on by goto(), as in
+/// `triage -> fix@patch`.
+fn trail(run: &TrailRun) -> String {
+    if run.route.len() > 1 {
+        return run.route_text();
+    }
+    run.first_trail().map_or_else(|| "inline".to_owned(), ToString::to_string)
+}
+
 pub(crate) fn table(runs: &[TrailRun], now: DateTime<Utc>) -> String {
     let header = ["RUN", "TRAIL", "CONDUCTOR", "OWNER", "STATE", "PHASE", "STEPS", "TURNS", "STARTED", "ENDED"]
         .map(str::to_owned);
@@ -183,7 +192,7 @@ pub(crate) fn table(runs: &[TrailRun], now: DateTime<Utc>) -> String {
         .chain(runs.iter().map(|r| {
             [
                 r.run.to_string(),
-                r.trail().map_or_else(|| "inline".to_owned(), ToString::to_string),
+                trail(r),
                 r.conductor.to_string(),
                 r.owner.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string),
                 state(&r.state).to_owned(),

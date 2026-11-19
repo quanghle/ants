@@ -316,6 +316,12 @@ fn a_run_shows_the_legs_of_its_route_and_the_gotos_it_made() {
     assert!(text.contains("args: {\"branch\":\"main\"}\n"), "the run's input is its first leg's: {text}");
     let row = "  1  goto  dev-a  trail triage at its start  error: the run entered trail triage before\n";
     assert!(text.contains(row), "{text}");
+    let table = runs::table(std::slice::from_ref(&run), now);
+    let row = table.lines().nth(1).unwrap_or_else(|| panic!("{table}"));
+    assert!(
+        row.starts_with(&format!("{}  triage -> release@review  dev-a  ", run.run)),
+        "the trail it started: {table}"
+    );
     let header = serde_json::from_str::<serde_json::Value>(&runs::header_json(&run).unwrap()).unwrap();
     let route = header["route"].as_array().unwrap();
     assert!(route.len() == 2 && route.iter().all(|leg| leg.get("script").is_none()), "{header}");

@@ -154,7 +154,7 @@ async fn read(js: &jetstream::Context, key: &str, seqs: &mut (u64, u64)) -> Resu
 pub(super) async fn follow(js: &jetstream::Context, run: TrailRun, json: bool) -> Result<()> {
     let key = trail_run_key(&run.conductor, &run.run);
     if !json {
-        let trail = run.trail().map_or_else(|| "an inline script".to_owned(), |t| format!("trail {t}"));
+        let trail = run.first_trail().map_or_else(|| "an inline script".to_owned(), |t| format!("trail {t}"));
         println!(
             "following run {} of {trail} on {} (interrupting stops the following, not the run)",
             run.run, run.conductor

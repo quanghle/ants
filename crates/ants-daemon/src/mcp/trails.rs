@@ -156,9 +156,9 @@ fn run_id(run: &str) -> Result<RunId, String> {
     run.trim().parse().map_err(|e| format!("run {run:?}: {e}"))
 }
 
-/// The run's name: its trail's, or an inline script's.
+/// The run's name: the trail it started, or an inline script.
 fn named(header: &TrailRun) -> String {
-    match header.trail() {
+    match header.first_trail() {
         Some(trail) => format!("Run {} of trail {trail}", header.run),
         None => format!("Run {} of an inline script", header.run),
     }

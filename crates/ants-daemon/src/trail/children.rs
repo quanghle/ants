@@ -125,7 +125,7 @@ impl Trails {
         let answer = match &child.state {
             RunState::Done { result } => Answer::Ok(result.clone()),
             RunState::Failed { error, .. } => {
-                let name = child.trail().map_or_else(|| child.run.to_string(), ToString::to_string);
+                let name = child.first_trail().map_or_else(|| child.run.to_string(), ToString::to_string);
                 Answer::Error(format!("trail {name} failed: {error}"))
             }
             RunState::Running | RunState::Waiting | RunState::Stopped { .. } => return Ok(()),
