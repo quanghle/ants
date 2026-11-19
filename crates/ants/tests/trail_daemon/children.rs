@@ -405,3 +405,61 @@ async fn the_child_of_an_untrusted_run_is_untrusted() {
     assert_eq!(lead.result(&run).await, json!("A"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test]
+async fn a_failing_run_stops_its_child() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-child-failing");
+    let mut lead = conductor_with_saved(&server, &dir, &[("echo", ECHO)]).await;
+    let script = r#"
+async def fail():
+    await agent("x", ant="ops")
+    raise ValueError("boom")
+await parallel(trail("echo", args={"say": "a"}), fail())
+"#;
+    let run = lead.start(script, TrailLimits::default()).await;
+    let (first, second) = (lead.step().await, lead.step().await);
+    let (child_step, own) = if first.to == ant("dev") { (first, second) } else { (second, first) };
+    let child = child_step.trail_step.as_ref().unwrap().run.clone();
+    assert_ne!(child, run);
+    assert!(lead.reply(&own, "X").await);
+    let RunState::Failed { error, limit } = lead.ended(&run).await else { panic!("not failed") };
+    assert!(error.contains("ValueError: boom"), "{error}");
+    assert_eq!(limit, None);
+    assert_eq!(lead.header(&child).await.state, RunState::Stopped { by: ant("lead") }, "stopped by its conductor");
+    assert!(lead.reply(&child_step, "late").await, "the stopped child's step's reply is not prompted");
+    assert!(lead.sends_no_step(Duration::from_millis(500)).await);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_grandchild_s_steps_and_turns_are_charged_to_its_parent_and_the_root() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-grandchild");
+    let leaf = r#"
+out = []
+for say in ["a", "b"]:
+    try:
+        out.append(await agent(say, ant="dev"))
+    except RuntimeError as e:
+        out.append(str(e))
+out
+"#;
+    let saved = [("leaf", leaf), ("mid", "await trail(\"leaf\")\n")];
+    let mut lead = conductor_with_saved(&server, &dir, &saved).await;
+    let run = lead.start("await trail(\"mid\")", TrailLimits { steps: 3, ..TrailLimits::default() }).await;
+    let step = lead.step().await;
+    let leaf = step.trail_step.as_ref().unwrap().run.clone();
+    let mid = lead.header(&leaf).await.parent.expect("the leaf is a child").run;
+    assert_eq!(lead.header(&mid).await.parent.map(|parent| parent.run), Some(run.clone()), "two levels deep");
+    assert!(lead.reply(&step, "A").await);
+    // The root's own trail() call, the middle run's and the leaf's step: the leaf's second step is past the root's 3.
+    assert_eq!(lead.result(&run).await, json!(["A", "the run reached its limit of 3 steps"]));
+    let spent = |header: TrailRun| (header.steps, header.turns);
+    assert_eq!(spent(lead.header(&run).await), (3, 1), "the root");
+    assert_eq!(spent(lead.header(&mid).await), (2, 1), "the middle run");
+    assert_eq!(spent(lead.header(&leaf).await), (1, 1), "the leaf");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

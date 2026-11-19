@@ -267,13 +267,55 @@ async fn compute_dump_memory_and_recursion_limits_fail_the_run() {
     assert_eq!(failed_on(&run).1, Some(Limit::Memory));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn the_clock_is_the_runs_and_the_environment_empty() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // The worker, behind a shell script writing down the environment it starts with.
+    let dir = ants_test_support::scratch_dir("trail-env");
+    let (wrapper, env) = (dir.join("worker"), dir.join("env"));
+    let body = format!("#!/bin/sh\n/usr/bin/env > '{}'\nexec '{}' \"$@\"\n", env.display(), env!("CARGO_BIN_EXE_ants"));
+    std::fs::write(&wrapper, body).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
     let script = "import datetime, os\ntry:\n    os.getenv('PATH')\nexcept RuntimeError:\n    r = 'refused'\n[datetime.datetime.now().isoformat(), r]\n";
-    let worker = worker();
     let mut run = run(script, json!(null), Limits::default());
-    run.start(&worker).await.unwrap();
+    run.start(&Worker::new(&wrapper)).await.unwrap();
     assert_eq!(*done(&run), json!(["2023-11-14T22:13:20", "refused"]));
+    let env = std::fs::read_to_string(&env).unwrap();
+    // What the shell itself sets.
+    let shells = ["PWD", "OLDPWD", "SHLVL", "_"];
+    let inherited: Vec<&str> = env
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, _)| name)
+        .filter(|name| !shells.contains(name))
+        .collect();
+    assert!(inherited.is_empty(), "the worker inherits {inherited:?}");
+    assert!(std::env::var_os("PATH").is_some(), "the test's own environment is not empty");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_worker_past_its_allocator_s_cap_is_told_out_of_memory() {
+    // Under Monty's memory limit, the string escaped six times over as the session is dumped passes the cap the worker
+    // sets its allocator, the limit and 4 MiB.
+    let limits = Limits { memory_bytes: 2 << 20, ..Limits::default() };
+    let script = "big = \"\\x01\" * 1500000\nawait agent(\"x\")\n";
+    let request = ants_trail::Request::Start {
+        script: format!("{META}{script}"),
+        entry: None,
+        args: json!(null),
+        limits,
+        clock: 0,
+        seed: 0,
+    };
+    let response = worker().call(&request, std::time::Duration::from_secs(30)).await;
+    assert_eq!(response.unwrap_err(), ants_trail::WorkerError::OutOfMemory, "the worker's exit status tells it");
+
+    let mut run = run(script, json!(null), limits);
+    run.start(&worker()).await.unwrap();
+    assert_eq!(failed_on(&run), ("the trail ran out of memory (2097152 bytes)", Some(Limit::Memory)));
 }
 
 #[tokio::test]

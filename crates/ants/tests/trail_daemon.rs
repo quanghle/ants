@@ -41,12 +41,20 @@ mod children;
 mod ends;
 #[path = "trail_daemon/goto.rs"]
 mod goto;
+#[path = "trail_daemon/guide.rs"]
+mod guide;
+#[path = "trail_guide/host.rs"]
+mod guide_host;
+#[path = "trail_daemon/limits.rs"]
+mod limits;
 #[path = "trail_daemon/nested.rs"]
 mod nested;
 #[path = "trail_daemon/ratings.rs"]
 mod ratings;
 #[path = "trail_daemon/save_tools.rs"]
 mod save_tools;
+#[path = "trail_daemon/stored.rs"]
+mod stored;
 #[path = "trail_daemon/tip_tools.rs"]
 mod tip_tools;
 #[path = "trail_daemon/tips.rs"]

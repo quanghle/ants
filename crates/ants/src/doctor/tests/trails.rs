@@ -299,14 +299,13 @@ async fn the_worker_check_starts_the_worker_as_a_daemon_does() {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
     };
-    // As `ants subprocess` does: refusing a limit of 0 steps, in an empty environment.
-    let answering = worker(
-        "answering",
-        r#"[ "$1" = subprocess ] && [ -z "$HOME" ] && grep -q '"steps":0' && echo '{"refused":{"error":"no"}}'"#,
-    );
-    let check = check_worker(&answering).await;
+    // The ants binary cargo builds beside the test's, for the integration tests.
+    let exe = std::env::current_exe().unwrap();
+    let ants = exe.ancestors().skip(1).map(|dir| dir.join("ants")).find(|ants| ants.is_file());
+    let ants = ants.expect("the ants binary is built beside the test binary, as `cargo test` builds it");
+    let check = check_worker(&ants).await;
     assert_eq!(check.status, Status::Ok, "{check}");
-    let started = format!("`{} subprocess` starts with an empty environment and answers in ", answering.display());
+    let started = format!("`{} subprocess` starts with an empty environment and answers in ", ants.display());
     assert!(check.detail.starts_with(&started), "{check}");
 
     let old = worker("old", "echo \"error: unrecognized subcommand 'subprocess'\" >&2; exit 2");

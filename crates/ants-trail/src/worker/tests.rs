@@ -291,13 +291,40 @@ fn a_session_dumped_past_its_limit_fails() {
 
 #[test]
 fn bad_requests_are_refused_and_foreign_snapshots_unrestorable() {
-    assert!(matches!(serve("{"), Response::Refused { .. }));
+    assert!(matches!(serve("{"), Response::Refused { error } if error.starts_with("unreadable request")));
     let started = start("await agent('x')\n", Limits::default());
-    assert!(matches!(started, Response::Suspended { .. }));
-    let limits = Limits::default();
-    let request = json!({"resume": {"snapshot": {"nope": 1}, "answers": [], "limits": limits, "seed": 7, "steps": 0}});
-    let response = serve(&request.to_string());
-    assert!(matches!(&response, Response::Unrestorable { error } if error.starts_with("unreadable snapshot")));
+    let Response::Suspended { snapshot, .. } = &started else { panic!("not suspended: {started:?}") };
+    let unbounded = Limits { concurrency: 0, ..Limits::default() };
+    let refused = start("await agent('x')\n", unbounded);
+    assert!(matches!(&refused, Response::Refused { error } if error.contains("concurrency")), "{refused:?}");
+    let refused = resume_with(&started, &[], unbounded, 0);
+    assert!(matches!(&refused, Response::Refused { error } if error.contains("concurrency")), "{refused:?}");
+
+    let resume = |snapshot: Value| {
+        let limits = Limits::default();
+        let request = json!({"resume": {"snapshot": snapshot, "answers": [], "limits": limits, "seed": 7, "steps": 1}});
+        serve(&request.to_string())
+    };
+    let own: Value = serde_json::from_str(snapshot.get()).unwrap();
+    assert!(matches!(resume(own.clone()), Response::Suspended { .. }), "the worker's own snapshot is restored");
+    let mut other = own;
+    let suspended = other.as_object_mut().and_then(|o| o.values_mut().next()).and_then(Value::as_object_mut).unwrap();
+    let field = suspended.keys().next().unwrap().clone();
+    suspended.remove(&field);
+    let ended = serde_json::to_value(monty::RunProgress::Complete(monty_types::MontyObject::none())).unwrap();
+    // A snapshot of no Monty session, one of another Monty version's form, lacking a field of this one's, and the form
+    // of a session ended rather than suspended.
+    for (foreign, why) in [
+        (json!({"nope": 1}), "unreadable snapshot"),
+        (other, "unreadable snapshot"),
+        (ended, "the snapshot is not a suspended session"),
+    ] {
+        let response = resume(foreign.clone());
+        assert!(
+            matches!(&response, Response::Unrestorable { error } if error.starts_with(why)),
+            "{foreign}: {response:?}"
+        );
+    }
 }
 
 const WAYPOINTS: &str = r#"meta = {"name": "fix", "description": "", "phases": [], "waypoints": ["triage", "patch"]}
