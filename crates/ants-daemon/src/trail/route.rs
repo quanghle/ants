@@ -69,7 +69,7 @@ impl Trails {
     }
 
     /// End the leg the run of `slot`, `engine`, is on, and go on with `next`: the leg, its run and session. The steps
-    /// of the leg ended are given up once the run's records hold the next.
+    /// of the leg ended are given up once the run's header lists the next.
     async fn go_on(&self, slot: &Slot, engine: &mut Run, next: (TrailLeg, Run, String)) -> Result<()> {
         let (leg, run, session) = next;
         tracing::info!(run = %slot.header().run, trail = ?leg.trail, at = ?leg.at, "a trail run goes on to its next leg");
@@ -81,24 +81,41 @@ impl Trails {
             book.queued.clear();
             book.answers.clear();
             book.broke = None;
-            (book.header.clone(), std::mem::take(&mut book.pending))
+            let dropped = std::mem::take(&mut book.pending);
+            book.left.extend(dropped.iter().cloned());
+            (book.header.clone(), dropped)
         };
         for call in &dropped {
             self.retire(&header.run, call);
         }
         *engine = run;
-        // The header first: a session stored for a leg its header does not list yet would be one no restart finds.
+        // The header first: a session stored for a leg its header does not list yet would be one no restart finds. The
+        // session last: until it is stored, a restart finds the steps left in the session before, and gives them up.
         let stored = async {
-            self.save_header(slot).await?;
+            self.give_up_left(slot).await?;
             self.save_session(slot).await
         };
         let stored = stored.await;
-        self.abandon(&header, &dropped).await;
         if stored.is_ok() {
             self.report_route(&header).await;
         }
         self.wake_starved(&header);
         stored
+    }
+
+    /// Give up the steps of the leg the run of `slot` left, once its stored header lists the next: done again after a
+    /// restart, giving up a step twice withdraws it once and tells it dropped again.
+    pub(super) async fn give_up_left(&self, slot: &Slot) -> Result<()> {
+        if slot.book().left.is_empty() {
+            return Ok(());
+        }
+        self.save_header(slot).await?;
+        let (header, left) = {
+            let mut book = slot.book();
+            (book.header.clone(), std::mem::take(&mut book.left))
+        };
+        self.abandon(&header, &left).await;
+        Ok(())
     }
 }
 

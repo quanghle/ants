@@ -181,6 +181,8 @@ struct Book {
     session: String,
     pending: Vec<PendingCall>,
     queued: Vec<QueuedCall>,
+    /// The steps of the leg the run left by a goto(), still to give up once its stored header lists the next leg.
+    left: Vec<PendingCall>,
     /// Answers whose journal entries are stored, for the next pass to hand the script.
     answers: Vec<(u32, Answer)>,
     /// The limit one of those answers raises for: a child run's, failed on it.
@@ -408,6 +410,7 @@ impl Trails {
             session,
             pending: Vec::new(),
             queued: Vec::new(),
+            left: Vec::new(),
             answers: Vec::new(),
             broke: None,
             late: false,

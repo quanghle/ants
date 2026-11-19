@@ -51,13 +51,23 @@ impl Trails {
         }
         let queued = queued(&engine);
         let session = stored.session;
-        let book =
-            Book { header, session, pending, queued, answers: Vec::new(), broke: None, late: false, starved: false };
+        let book = Book {
+            header,
+            session,
+            pending,
+            queued,
+            left: Vec::new(),
+            answers: Vec::new(),
+            broke: None,
+            late: false,
+            starved: false,
+        };
         Ok(Slot::new(engine, book))
     }
 
     /// The run of `header`, which went on to its last leg before storing that leg's session: the leg starts afresh, and
-    /// the steps of the leg before, which `stored` still lists, are no longer waited on.
+    /// the steps of the leg before, which `stored` still lists, are no longer waited on, and are given up on the run's
+    /// next pass, as the goto() may not have given them up before the daemon stopped.
     fn load_moved(&self, header: TrailRun, stored: TrailSession) -> Result<Arc<Slot>> {
         let leg = header.leg().context("the run has no leg")?.clone();
         let TrailLeg { trail, at, script, args, first_call, .. } = leg;
@@ -74,6 +84,7 @@ impl Trails {
             session,
             pending: Vec::new(),
             queued: Vec::new(),
+            left: stored.pending,
             answers: Vec::new(),
             broke: None,
             late: false,
