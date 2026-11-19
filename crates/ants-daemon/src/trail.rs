@@ -729,9 +729,8 @@ impl Trails {
     /// Take `message`, on the thread of a step to `to` the run `run` no longer waits on, when it is a notice, an
     /// escalation or a further reply of `to`, reporting it on the run's thread.
     async fn take_retired(&self, run: &RunId, to: &UserId, message: &Envelope, answerer: &UserId) -> bool {
-        // The conductor's own message replying to none, as its invitation to rate a run started there, is no reply.
-        let own = message.from == self.inner.ant && message.to == self.inner.ant && message.in_reply_to.is_none();
-        let reply = answerer == to && message.trail_step.is_none() && !own;
+        // The conductor's invitation to rate a run started on the step's thread is no reply.
+        let reply = answerer == to && message.trail_step.is_none() && message.rating_of.is_none();
         if !reply && message.notice.is_none() && message.escalation.is_none() {
             return false;
         }

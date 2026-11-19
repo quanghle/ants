@@ -6,9 +6,11 @@
 //! A step goes on a thread of its own, which the conductor's [`TrailSession`] maps to the call
 //! ([`PendingCall::thread`]). The reply resolving the call carries nothing of the step: the first message on that
 //! thread from the step's recipient ([`PendingCall::to`]), or from the assistant of a human recipient answering for it,
-//! to the conductor that carries no [`TrailStep`], no notice and no escalation answers it ([`PendingCall::answered_by`]). Only the conductor's own records say which threads are
-//! steps, so no other user can answer a call by naming it. A step the conductor sends itself tells its reply apart the
-//! same way: the step carries its [`TrailStep`], the reply none.
+//! to the conductor that carries no [`TrailStep`], no notice, no escalation and no run to rate answers it
+//! ([`PendingCall::answered_by`]). Only the conductor's own records say which threads are steps, so no other user can
+//! answer a call by naming it. A step the conductor sends itself tells its reply apart the same way: the step carries
+//! its [`TrailStep`], the reply none, and the conductor's invitation to rate a run started on the step's thread names
+//! the run ([`Envelope::rating_of`]).
 
 use std::time::Duration;
 
@@ -551,8 +553,9 @@ impl PendingCall {
     }
 
     /// Whether `message`, which passed [`Envelope::check_subject`], answers the call: `answerer` is the step's
-    /// recipient, the message is on the step's thread, and it is neither a step, a notice ([`NoticeKind`]) nor an
-    /// escalation. `answerer` is the message's sender, or the human its [`Envelope::on_behalf_of`] names once the
+    /// recipient, the message is on the step's thread, and it is neither a step, a notice ([`NoticeKind`]), an
+    /// escalation nor an invitation to rate a run ([`Envelope::rating_of`]), as the conductor sends itself on the
+    /// thread of a step to itself that a run started there reports on. `answerer` is the message's sender, or the human its [`Envelope::on_behalf_of`] names once the
     /// conductor honours the sender as that human's assistant, as for an answer to ask_human.
     pub fn answered_by(&self, message: &Envelope, answerer: &UserId) -> bool {
         message.thread_id == self.thread
@@ -560,6 +563,7 @@ impl PendingCall {
             && message.trail_step.is_none()
             && message.notice.is_none()
             && message.escalation.is_none()
+            && message.rating_of.is_none()
     }
 }
 
@@ -892,6 +896,11 @@ mod tests {
             retries: 0,
         };
         assert!(!call.answered_by(&step, &step.from), "the step itself answers nothing");
+        let invitation = Envelope {
+            rating_of: Some(RunId::generate()),
+            ..Envelope::on_thread(step.thread_id.clone(), p("planner"), p("planner"), "rate it")
+        };
+        assert!(!call.answered_by(&invitation, &invitation.from), "an invitation to rate a run answers nothing");
         let reply = step.reply(p("planner"), "thought", crate::Role::Ant).unwrap();
         assert!(call.answered_by(&reply, &reply.from));
     }

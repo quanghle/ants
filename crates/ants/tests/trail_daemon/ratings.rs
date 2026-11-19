@@ -124,6 +124,25 @@ async fn a_run_s_end_invites_its_conductor_to_rate_it_once_unless_a_waited_answe
 }
 
 #[tokio::test]
+async fn the_invitation_to_rate_a_run_started_on_the_thread_of_a_step_to_the_conductor_answers_not_the_step() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let run = lead.start("await agent(\"do it\")\n", TrailLimits::default()).await;
+    let step = lead.step().await;
+    assert_eq!((&step.from, &step.to), (&ant("lead"), &ant("lead")), "a step to the conductor itself");
+    let nested = lead.start_on("1\n", TrailLimits::default(), step.thread_id.clone()).await;
+    assert_eq!(lead.ended(&nested).await, RunState::Done { result: json!(1) });
+    let invited = lead.invitation_of(&nested).await;
+    assert_eq!((&invited.thread_id, invited.rating_of.as_ref()), (&step.thread_id, Some(&nested)));
+    assert!(!lead.trails.take(&invited).await.unwrap(), "the invitation is left to prompt the conductor");
+    assert!(lead.trails.invites(&invited).await, "and lets its turn rate the run");
+    assert!(!lead.header(&run).await.state.finished(), "the step is still waited on");
+    assert!(lead.reply(&step, "done").await, "the conductor's reply answers the step");
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("done") });
+}
+
+#[tokio::test]
 async fn rate_trail_rates_the_saved_trails_a_run_took_and_find_trails_ranks_them_on_matching_tasks() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;
