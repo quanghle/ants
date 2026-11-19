@@ -341,7 +341,7 @@ they may be raised on resume:
 | Wall time from start, stopped time included | 24h | 7d | `--wall`, `wall` | the run fails, waiting or not |
 | Compute of one resume of the script | 10 s | 10 s | none | `TimeoutError`, the run fails; the worker is killed 5 s later |
 | Dumped session, the script's suspended state | 768 KiB | 768 KiB | none | the run fails, naming its size; so does a run whose session record, the dumped session with the calls it waits on, would pass 1 MiB less 8 KiB, before its steps go out |
-| Result or error, in the run's record | 1 MiB less the rest of the record | same | none | a result fails the run, naming its size (a `trail()` call raises with that error); an error is cut to 8000 characters |
+| Result or error, in the run's record | 1 MiB less the rest of the record | same | none | a result fails the run, naming its size (a `trail()` call raises with that error); an error is cut to 8000 characters. The worker's own bounds (a 768 KiB result, a 16 KiB error) mostly apply first; this one catches a result within them that the rest of the record (its pinned scripts, args) leaves no room for |
 | Memory of the script | 64 MiB | 64 MiB | none | `MemoryError`, the run fails |
 | Notes of one resume: the text of `print()`, `log()` and `phase()`, and 16 bytes per note | 64 KiB | 64 KiB | none | the call raises `RuntimeError` naming the cap; a note's text over 4000 bytes is cut, ending with `…` |
 | Arguments of the calls of one resume, as JSON, and 64 bytes per call | 1 MiB | 1 MiB | none | the call raises `RuntimeError` naming the cap |

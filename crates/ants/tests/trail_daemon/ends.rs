@@ -8,7 +8,8 @@ use ants_proto::{PendingCall, TrailRunIndex, trail_runs_index_key};
 use super::*;
 
 /// The most bytes of a run's record.
-const MAX_RECORD: usize = 1024 * 1024 - 8 * 1024;
+/// The most a worker lets a script return (ants-trail's MAX_RESULT).
+const MAX_RESULT: usize = 768 * 1024;
 
 /// Set the largest message the runs bucket takes: -1 for no limit beyond the server's.
 async fn limit_runs(js: &async_nats::jetstream::Context, max: i32) {
@@ -140,19 +141,17 @@ async fn a_run_s_result_or_error_past_its_record_fails_or_is_cut_and_its_owner_i
     let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
     let run = lead.start("phase(\"p\" * 1100000)\n\"x\" * 1100000\n", TrailLimits::default()).await;
     let RunState::Failed { error, limit } = lead.ended(&run).await else { panic!("not failed") };
-    assert_eq!(
-        error,
-        format!("the run's result, 1100002 bytes as JSON, outgrew the {MAX_RECORD} bytes its record holds")
-    );
+    assert_eq!(error, format!("the trail's result has 1100002 bytes of JSON; a result holds at most {MAX_RESULT}"));
     assert_eq!(limit, None, "no raised limit holds a larger record");
     assert_eq!(lead.header(&run).await.phase.map(|phase| phase.chars().count()), Some(1000), "the phase is cut");
     let told = lead.end_message(&run).await;
-    assert!(told.text.contains(" failed (") && told.text.contains("outgrew"), "{}", told.text);
+    assert!(told.text.contains(" failed (") && told.text.contains("holds at most"), "{}", told.text);
     assert!(lead.invitation().await.text.contains(&run.to_string()));
 
     let raising = lead.start("raise ValueError(\"e\" * 1100000)\n", TrailLimits::default()).await;
     let RunState::Failed { error, .. } = lead.ended(&raising).await else { panic!("not failed") };
-    assert_eq!(error.chars().count(), 8000, "the error is cut");
+    // The worker cuts an error at 16 KiB, which the record holds.
+    assert!(error.len() <= 16 * 1024 && error.len() > 15 * 1024, "the error is cut: {} bytes", error.len());
     assert!(error.ends_with('…'));
     lead.end_message(&raising).await;
     eventually("both runs are unlisted", async || listed(&lead.js).await.is_empty()).await;
@@ -175,9 +174,8 @@ r
     let thread = ThreadId::generate();
     let run = lead.start_on(script, TrailLimits::default(), thread).await;
     let RunState::Done { result } = lead.ended(&run).await else { panic!("not done") };
-    let expected = format!(
-        "trail big failed: the run's result, 1100002 bytes as JSON, outgrew the {MAX_RECORD} bytes its record holds"
-    );
+    let expected =
+        format!("trail big failed: the trail's result has 1100002 bytes of JSON; a result holds at most {MAX_RESULT}");
     assert_eq!(result, json!(expected));
     let session = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
     let stored = session.get(trail_session_key(&ant("lead"), &run)).await.unwrap().unwrap();
