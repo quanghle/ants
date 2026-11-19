@@ -446,11 +446,16 @@ impl Trails {
 
     /// Stop a run for `by`: it sends no further step, ignores the replies of the steps it waited on and withdraws
     /// those it sent itself, and its child runs stop too. Returns the steps to other ants they waited on, for `by` to
-    /// withdraw.
+    /// withdraw. A pass in flight ends first, so none gives up steps of the run the stop does not list meanwhile.
     pub async fn stop(&self, run: &RunId, by: &UserId) -> Result<Vec<WaitingStep>, String> {
         let slot = self.running(run).await?;
+        // Held to the end; a run's engine is locked before its children's, never after.
+        let _engine = slot.engine.lock().await;
         let pending = {
             let mut book = slot.book();
+            if book.header.finished() {
+                return Err(format!("run {run} has ended"));
+            }
             if let RunState::Stopped { by } = &book.header.state {
                 return Err(format!("{by} already stopped run {run}"));
             }

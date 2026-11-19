@@ -327,7 +327,9 @@ finished run stays at least 30 days. The full layout is in [architecture.md](arc
   withdraw. An admin's `ants ant stop-trail ANT RUN` has the conductor's daemon stop it by [admin
   order](auth.md#admin-orders): unlike the request, which only a daemon up answers, the order waits for the machine's
   daemon while it is away and is recorded with the admin and time (`ants ant orders ANT`), its result listing the steps
-  in other ants' queues. Ending a parent run stops its still-running children. Wall time keeps running while stopped.
+  in other ants' queues. A stop arriving while the run's script computes waits for the computation to end, and gives up
+  the steps the run then waits on. Ending a parent run stops its still-running children. Wall time keeps running while
+  stopped.
 - **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose record names the limit it failed on, from
   its last stored session, resuming its child runs stopped or failed on a limit too; the steps waited on go out anew, on new threads,
   and so do the calls refused since that session, as one past the run's steps: a run failing on a limit deletes their
