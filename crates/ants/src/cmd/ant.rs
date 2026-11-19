@@ -10,7 +10,7 @@ use clap_complete::engine::ArgValueCandidates;
 
 use crate::admin::settings::{self, Assignment};
 use crate::admin::{mcp, memories, orders, pause, restart, trail};
-use crate::cmd::trail::LimitArgs;
+use crate::cmd::trail::ResumeLimitArgs;
 use crate::cmd::trail::runs::Pick;
 use crate::{ant, avatars, completions, export, sense_id};
 
@@ -210,7 +210,7 @@ pub(crate) enum AntCommand {
         /// The run's id, or a unique start of one among ANT's runs (`ants trail runs --ant ANT`).
         run: Pick,
         #[command(flatten)]
-        limits: LimitArgs,
+        limits: ResumeLimitArgs,
     },
     /// Export ANT to a file another bus imports it from (`ants ant import`): its identity record (id, birth, avatar,
     /// prompts), the settings that make it (whoami, harness, model, reasoning_effort, context, fallback) and its
@@ -302,7 +302,7 @@ pub(crate) async fn run(nats: &crate::connection::Nats<'_>, command: AntCommand)
             trail::stop(nats, trail::Ordered { ant: &ant, run: &run, machine, wait }).await
         }
         AntCommand::ResumeTrail { order: Order { ant, machine, wait }, run, limits } => {
-            trail::resume(nats, trail::Ordered { ant: &ant, run: &run, machine, wait }, limits).await
+            trail::resume(nats, trail::Ordered { ant: &ant, run: &run, machine, wait }, limits.into()).await
         }
         AntCommand::Export { ant, out, seal, config, no_provider } => {
             Box::pin(export::export(nats, &ant, out, seal, config, !no_provider)).await

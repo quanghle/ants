@@ -10,8 +10,8 @@ use ants_proto::{AdminOp, AdminOrder, AdminOutcome, Machine, OrderState, TrailOu
 use anyhow::{Result, bail};
 
 use crate::admin::orders::Admin;
-use crate::cmd::trail::LimitArgs;
 use crate::cmd::trail::runs::{self, Pick};
+use crate::cmd::trail::{LimitArgs, control};
 use crate::connection::Nats;
 
 /// Where an order about a run goes: the run, of `ant`, on `machine`, else the machine that last recorded serving it,
@@ -42,6 +42,9 @@ pub(crate) async fn resume(nats: &Nats<'_>, ordered: Ordered<'_>, limits: LimitA
     let admin = Admin::of(nats)?;
     let (_, js) = nats.connect("ants-ant-resume-trail").await?;
     let header = runs::pick_of(&js, ordered.ant, ordered.run).await?;
+    if let Some(ended) = control::ended(&header.state) {
+        bail!("run {} of {} has ended: {ended}", header.run, header.conductor);
+    }
     let limits = if limits.given() { Some(limits.over(header.limits)?) } else { None };
     let op = AdminOp::ResumeTrail { run: header.run, limits };
     let (order, outcome) = admin.send(&js, ordered.machine, ordered.ant, op, ordered.wait).await?;
