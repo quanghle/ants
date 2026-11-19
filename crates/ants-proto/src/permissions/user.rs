@@ -4,7 +4,7 @@
 use super::human::{
     device_directory_rights, human_notify_rights, human_reaction_rights, human_store_rights, identity_rights,
     machine_record_rights, notify_prefs_rights, outbox_setup_rights, presence_rights, read_marker_rights,
-    thread_rights, trail_rights,
+    rollup_denial_rights, thread_rights, trail_rights,
 };
 use super::{Permissions, ack_subjects, kv_stream, ordered_consumer_subjects};
 use crate::{
@@ -237,6 +237,7 @@ impl Permissions {
         publish.extend(human_reaction_rights(user));
         publish.extend(device_directory_rights(user));
         publish.extend(trail_rights());
+        publish.extend(rollup_denial_rights());
         subscribe.extend([subject::ALL.to_owned(), subject::max_deliveries_advisories()]);
     }
 

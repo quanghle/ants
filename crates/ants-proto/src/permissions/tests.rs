@@ -998,7 +998,12 @@ fn each_ant_writes_only_its_own_identity_and_humans_read_all() {
     );
     assert_eq!(
         identities(&Permissions::for_user(&p("alice"), Role::Human)),
-        ["$JS.API.STREAM.CREATE.KV_ants_identities", "$JS.API.DIRECT.GET.KV_ants_identities", "$KV.ants_identities.*"]
+        [
+            "$JS.API.STREAM.CREATE.KV_ants_identities",
+            "$JS.API.DIRECT.GET.KV_ants_identities",
+            "$KV.ants_identities.*",
+            "$JS.API.STREAM.UPDATE.KV_ants_identities"
+        ]
     );
     // An assistant reads them as its human does, and writes only its own.
     assert_eq!(
@@ -1056,7 +1061,11 @@ fn humans_save_trails_ants_ask_the_keeper_and_each_ant_writes_only_the_runs_it_c
             "$JS.API.STREAM.PURGE.KV_ants_trail_tips",
             "$JS.API.STREAM.CREATE.KV_ants_trail_ratings",
             "$JS.API.STREAM.INFO.KV_ants_trail_ratings",
-            "$JS.API.STREAM.PURGE.KV_ants_trail_ratings"
+            "$JS.API.STREAM.PURGE.KV_ants_trail_ratings",
+            "$JS.API.STREAM.UPDATE.KV_ants_trails",
+            "$JS.API.STREAM.UPDATE.KV_ants_trail_runs",
+            "$JS.API.STREAM.UPDATE.KV_ants_trail_tips",
+            "$JS.API.STREAM.UPDATE.KV_ants_trail_ratings"
         ]
     );
     let may = |perms: &Permissions, s: &str| perms.publish.iter().any(|have| covers(have, s));

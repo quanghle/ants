@@ -53,7 +53,7 @@ pub(crate) async fn hub(nats: &Nats<'_>, identities_restored: bool) -> Result<Ve
         ants_proto::FILES_BUCKET
     ));
     if identities_restored {
-        hub::new_incarnation(&js).await?;
+        hub::new_incarnation(&js, nats.domain).await?;
         lines.push(format!(
             "bucket {} in a new incarnation: no shared settings record signed before verifies; each daemon holding an \
              ant's credentials signs the ant's settings anew within {} s",

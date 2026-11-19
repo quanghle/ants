@@ -480,7 +480,7 @@ async fn a_humans_domain_wildcards_reach_no_further_than_its_plain_rights() {
     let config = r#"{"name":"FOO","subjects":["foo.>"]}"#;
     for (subject, body) in [
         ("$JS.hub.API.STREAM.CREATE.FOO", config),
-        ("$JS.hub.API.STREAM.UPDATE.KV_ants_identities", ""),
+        ("$JS.hub.API.STREAM.UPDATE.KV_ants_reactions", ""),
         ("$JS.hub.API.STREAM.INFO.KV_ants_identities", ""),
         ("$JS.hub.API.CONSUMER.CREATE.KV_ants_sessions", r#"{"stream_name":"KV_ants_sessions","config":{}}"#),
     ] {

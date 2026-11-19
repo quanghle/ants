@@ -110,8 +110,9 @@ impl<'a> Nats<'a> {
     }
 }
 
-/// Create the hub's stream and buckets that are missing, as `ants init` does ([`hub::check`]), saying what was created;
-/// an object already there stays as it is. Those the credentials may not create are reported as needing `ants init`;
+/// Create the hub's stream and buckets that are missing, and deny the rollups of those allowing them, as `ants init`
+/// does ([`hub::check`]), saying what was done; an object already there otherwise stays as it is. Those the credentials
+/// may not fix are reported as needing `ants init`;
 /// those whose stream info the credentials do not get, or that cannot be checked (the hub out of reach), are left
 /// alone. Returns what was created.
 async fn create_missing(js: &async_nats::jetstream::Context, rights: &humans::Rights) -> Vec<hub::Finding> {

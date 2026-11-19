@@ -288,6 +288,31 @@ pub(super) fn human_store_rights(human: &UserId) -> [String; 47] {
     ]
 }
 
+/// Updating the streams of the KV buckets a human creates, as `ants init` does to deny their rollups (a KV bucket is
+/// created allowing them), but those [`human_store_rights`] updates already.
+pub(super) fn rollup_denial_rights() -> Vec<String> {
+    [
+        SESSIONS_BUCKET,
+        ATTEMPTS_BUCKET,
+        CHAINS_BUCKET,
+        WEBHOOKS_BUCKET,
+        THREADS_BUCKET,
+        READ_BUCKET,
+        PRESENCE_BUCKET,
+        NOTIFY_BUCKET,
+        DEVICES_BUCKET,
+        MACHINES_BUCKET,
+        IDENTITIES_BUCKET,
+        TRAILS_BUCKET,
+        TRAIL_RUNS_BUCKET,
+        TRAIL_TIPS_BUCKET,
+        TRAIL_RATINGS_BUCKET,
+    ]
+    .into_iter()
+    .map(|bucket| format!("$JS.API.STREAM.UPDATE.{}", kv_stream(bucket)))
+    .collect()
+}
+
 /// Setting up a leaf's outbox, through the hub's domain or the leaf's own.
 pub(super) fn outbox_setup_rights() -> Vec<String> {
     let mut publish = Vec::new();

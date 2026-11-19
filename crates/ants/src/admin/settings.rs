@@ -834,7 +834,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         assert_eq!((restored.fields.get("model"), restored.by.as_ref()), (Some(&json!("o3")), Some(&alice)));
         assert_eq!(verified_of(&human, &js, &dev_a).await, Some(restored));
 
-        let store = h_js.create_key_value(ants_daemon::hub::identities_config()).await.unwrap();
+        let store = DirectKv::whole(&h_js, None, IDENTITIES_BUCKET).await.unwrap();
         store.delete(ants_proto::INCARNATION_KEY).await.unwrap();
         let Some(SharedRecord::Unverified(_, why)) = shared_of(&human, &js, &dev_a).await.unwrap() else {
             panic!("a record of a bucket without a marker verifies")

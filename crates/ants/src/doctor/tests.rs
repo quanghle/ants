@@ -70,6 +70,29 @@ async fn a_fresh_hub_is_missing_its_stream_until_init() {
     assert!(hub[0].detail.contains("ants_presence, bucket ants_identities not checked"), "{}", hub[0]);
 }
 
+#[tokio::test]
+async fn a_bucket_allowing_rollups_fails_the_hub_check_until_init() {
+    let Some(server) = Server::start() else { return };
+    let alice = "alice".parse::<UserId>().unwrap();
+    let setup = setup(&server, Some(server.creds_as(&alice, Role::Human)));
+    let (_, js) = server.connect_as(&alice, Role::Human).await;
+    let rights = Rights::from_creds(setup.creds.as_deref()).unwrap();
+    hub::init(&js, |s| rights.may_publish(s)).await.unwrap();
+    let stream = js.get_stream(hub::Object::TrailRuns.stream_name()).await.unwrap();
+    let config = jetstream::stream::Config { allow_rollup: true, ..stream.cached_info().config.clone() };
+    js.update_stream(&config).await.unwrap();
+
+    let checks = Box::pin(run(&setup)).await;
+    let hub = named(&checks, "hub");
+    assert_eq!(hub.len(), 1, "{checks:#?}");
+    assert_eq!(hub[0].status, Status::Fail);
+    assert!(hub[0].detail.starts_with("bucket ants_trail_runs allows rollups"), "{}", hub[0]);
+    assert_eq!(hub[0].fix, ["ants init"]);
+    hub::init(&js, |s| rights.may_publish(s)).await.unwrap();
+    let checks = Box::pin(run(&setup)).await;
+    assert_eq!(named(&checks, "hub")[0].status, Status::Ok, "{checks:#?}");
+}
+
 #[test]
 fn a_server_older_than_nats_server_2_15_is_unsupported() {
     assert!(supported_server("2.15.0-beta.1"));

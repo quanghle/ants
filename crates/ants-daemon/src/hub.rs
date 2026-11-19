@@ -1,28 +1,38 @@
 //! The JetStream objects `ants init` sets up on the hub, the `ANTS` stream, the KV buckets and the attachments' store.
-//! [`check`] finds those missing and [`apply`] creates one with this version's configuration; an object already there
-//! is left as it is.
+//! [`check`] finds those missing or allowing rollups and [`apply`] creates one with this version's configuration, or
+//! denies its rollups; an object already there is otherwise left as it is.
 //!
-//! An object whose stream info the credentials do not get, as the presence and identities buckets for every human's, cannot be
-//! checked: [`init`] creates it all the same, which changes nothing when it exists with the same settings. Creating the
-//! identities bucket also writes its incarnation marker when absent ([`mark_incarnation`]).
+//! Every object but the colony bucket ([`Object::denies_rollups`]) denies rollups: a message with a `Nats-Rollup` header removes every other message of its subject or of
+//! the whole stream, so a writer allowed one key of a bucket could otherwise remove the entries of every other writer.
+//! A KV bucket is created allowing them, as async-nats creates every bucket, and denies them by a stream update right
+//! after.
+//!
+//! An object whose stream info the credentials do not get, as the presence and identities buckets for every human's, cannot be checked:
+//! [`init`] creates it all the same, which changes nothing when it exists as this version makes it, and denies the
+//! rollups of one created allowing them. Creating the identities bucket also writes its incarnation marker when absent
+//! ([`mark_incarnation`]), as does `ants init` for one already there as this version makes it if the credentials get
+//! its stream info.
 
 use std::fmt;
 use std::time::Duration;
 
 use ants_proto::{
     ATTACHMENT_CHUNK, ATTACHMENT_HEADROOM, ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, COLONY_TTL,
-    DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, INCARNATION_KEY, LINKS_BUCKET,
-    MACHINES_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET,
-    SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET,
-    TRAIL_RATINGS_BUCKET, TRAIL_RUN_RETENTION, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TrailLimits,
-    WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
+    DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, INCARNATION_KEY, JsDomain,
+    LINKS_BUCKET, MACHINES_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET,
+    READ_BUCKET, SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS,
+    THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUN_RETENTION, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET,
+    TrailLimits, WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
-use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
+use async_nats::jetstream::context::{
+    CreateKeyValueError, CreateStreamError, CreateStreamErrorKind, GetStreamError, GetStreamErrorKind,
+};
 use async_nats::jetstream::stream::DirectGetErrorKind;
 use async_nats::jetstream::{self, ErrorCode, kv, stream};
 
 use crate::bus::{DUPLICATE_WINDOW, RETENTION};
+use crate::records::direct_kv::DirectKv;
 
 /// A JetStream object `ants init` sets up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -160,34 +170,63 @@ impl Object {
         matches!(self, Self::Colony | Self::Channels | Self::Humans | Self::Threads)
     }
 
+    /// Whether the object denies rollups: all but the colony bucket, whose expiry markers nats-server writes as rollups
+    /// and so keeps them allowed. A rollup there removes entries that the next heartbeats put back.
+    pub fn denies_rollups(self) -> bool {
+        self != Self::Colony
+    }
+
     async fn check(self, js: &jetstream::Context) -> Option<Problem> {
         match js.get_stream(self.stream_name()).await {
+            Ok(stream) if stream.cached_info().config.allow_rollup && self.denies_rollups() => {
+                Some(Problem::AllowsRollups)
+            }
             Ok(_) => None,
             Err(e) if not_found(&e) => Some(Problem::Missing),
             Err(e) => Some(Problem::Unchecked(e.to_string())),
         }
     }
 
-    /// Create the object. A watched bucket's room for [`MAX_CONSUMERS`], which a KV configuration cannot hold, follows
-    /// by an update of its stream; the identities bucket's incarnation marker, when absent, by a write
-    /// ([`mark_incarnation`]).
-    async fn create(self, js: &jetstream::Context) -> Result<()> {
+    /// Create the object. A bucket's denial of rollups and a watched bucket's room for [`MAX_CONSUMERS`], which a KV
+    /// configuration cannot hold, follow by an update of its stream; the identities bucket's incarnation marker, when
+    /// absent, by a write ([`mark_incarnation`]). A bucket already there as this version leaves it, which differs from
+    /// its KV configuration, stays as it is, but for the identities bucket's marker when `seen`, the credentials getting
+    /// its stream info.
+    async fn create(self, js: &jetstream::Context, seen: bool) -> Result<()> {
         let store = match self.spec() {
             Spec::Stream(config) => {
                 return js.create_stream(*config).await.map(drop).with_context(|| format!("creating {self}"));
             }
-            Spec::Bucket(config) => js.create_key_value(*config).await.with_context(|| format!("creating {self}"))?,
+            Spec::Bucket(config) => match js.create_key_value(*config).await {
+                Ok(store) => store,
+                Err(e) if exists_otherwise(&e) => {
+                    if let Some(bucket) = self.bucket().filter(|_| self == Self::Identities && seen) {
+                        let store = js.get_key_value(bucket).await.with_context(|| format!("looking up {self}"))?;
+                        mark_incarnation(&store).await?;
+                    }
+                    return Ok(());
+                }
+                Err(e) => return Err(e).with_context(|| format!("creating {self}")),
+            },
         };
         if self == Self::Identities {
-            mark_incarnation(&store, false).await?;
+            mark_incarnation(&store).await?;
         }
+        let mut config = store.stream.cached_info().config.clone();
+        config.allow_rollup = !self.denies_rollups();
         if self.watched() {
-            let mut config = store.stream.cached_info().config.clone();
             config.max_consumers = MAX_CONSUMERS;
-            js.update_stream(&config)
-                .await
-                .with_context(|| format!("giving {self} room for {MAX_CONSUMERS} consumers"))?;
         }
+        js.update_stream(&config).await.with_context(|| format!("updating {self}"))?;
+        Ok(())
+    }
+
+    /// Deny the rollups of the object, its other settings left as they are.
+    async fn deny_rollups(self, js: &jetstream::Context) -> Result<()> {
+        let stream = js.get_stream(self.stream_name()).await.with_context(|| format!("looking up {self}"))?;
+        let mut config = stream.cached_info().config.clone();
+        config.allow_rollup = false;
+        js.update_stream(&config).await.with_context(|| format!("denying the rollups of {self}"))?;
         Ok(())
     }
 }
@@ -211,10 +250,18 @@ fn not_found(e: &GetStreamError) -> bool {
     matches!(e.kind(), GetStreamErrorKind::JetStream(e) if e.error_code() == ErrorCode::STREAM_NOT_FOUND)
 }
 
+/// Whether creating a bucket failed for its stream being there with other settings.
+fn exists_otherwise(e: &CreateKeyValueError) -> bool {
+    let source = std::error::Error::source(e).and_then(|e| e.downcast_ref::<CreateStreamError>());
+    matches!(source.map(CreateStreamError::kind), Some(CreateStreamErrorKind::JetStream(e)) if e.error_code() == ErrorCode::STREAM_NAME_EXIST)
+}
+
 /// What is wrong with an object on the hub.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
     Missing,
+    /// Its stream allows rollups: one message with a `Nats-Rollup` header removes the others of its subject or stream.
+    AllowsRollups,
     /// Its stream info could not be had, for this reason.
     Unchecked(String),
 }
@@ -232,13 +279,14 @@ impl Finding {
         let name = self.object.stream_name();
         match (&self.problem, self.object.spec()) {
             (Problem::Missing, Spec::Stream(_)) => vec![format!("$JS.API.STREAM.CREATE.{name}")],
-            // Creating a bucket first looks up the account's JetStream limits.
-            (Problem::Missing, Spec::Bucket(_)) => {
-                let mut rights = vec!["$JS.API.INFO".to_owned(), format!("$JS.API.STREAM.CREATE.{name}")];
-                if self.object.watched() {
-                    rights.push(format!("$JS.API.STREAM.UPDATE.{name}"));
-                }
-                rights
+            // Creating a bucket first looks up the account's JetStream limits; its rollups are denied by an update.
+            (Problem::Missing, Spec::Bucket(_)) => vec![
+                "$JS.API.INFO".to_owned(),
+                format!("$JS.API.STREAM.CREATE.{name}"),
+                format!("$JS.API.STREAM.UPDATE.{name}"),
+            ],
+            (Problem::AllowsRollups, _) => {
+                vec![format!("$JS.API.STREAM.INFO.{name}"), format!("$JS.API.STREAM.UPDATE.{name}")]
             }
             (Problem::Unchecked(_), _) => Vec::new(),
         }
@@ -246,7 +294,10 @@ impl Finding {
 
     /// What [`apply`] did about it, as `created stream ANTS`.
     pub fn fixed(&self) -> String {
-        format!("created {}", self.object)
+        match self.problem {
+            Problem::AllowsRollups => format!("denied the rollups of {}", self.object),
+            _ => format!("created {}", self.object),
+        }
     }
 }
 
@@ -255,6 +306,11 @@ impl fmt::Display for Finding {
         let object = self.object;
         match &self.problem {
             Problem::Missing => write!(f, "{object} is missing"),
+            Problem::AllowsRollups => write!(
+                f,
+                "{object} allows rollups: one message with a Nats-Rollup header removes the entries of every other \
+                 writer"
+            ),
             Problem::Unchecked(e) => write!(f, "{object} could not be checked: {e}"),
         }
     }
@@ -271,31 +327,33 @@ pub async fn check(js: &jetstream::Context, may: impl Fn(&str) -> bool) -> Vec<F
     futures::future::join_all(checks).await.into_iter().flatten().collect()
 }
 
-/// Fix what `finding` found: create the missing object.
+/// Fix what `finding` found: create the missing object, or deny its rollups.
 pub async fn apply(js: &jetstream::Context, finding: &Finding) -> Result<()> {
     let object = finding.object;
     match &finding.problem {
-        Problem::Missing => Box::pin(object.create(js)).await,
+        Problem::Missing => Box::pin(object.create(js, true)).await,
+        Problem::AllowsRollups => Box::pin(object.deny_rollups(js)).await,
         Problem::Unchecked(e) => bail!("{object} could not be checked: {e}"),
     }
 }
 
-/// `ants init`: check every object and create each one found missing, failing at once when `may` says the credentials
-/// may not (by JetStream API subject), as denied requests would only time out. An object whose stream info they do not
-/// get is created all the same, which changes nothing if it is there with the same settings. Returns what it created
-/// among the objects checked.
+/// `ants init`: check every object, create each one found missing and deny the rollups of each allowing them, failing at
+/// once when `may` says the credentials may not (by JetStream API subject), as denied requests would only time out. An
+/// object whose stream info they do not get is created all the same, which changes nothing if it is there as this
+/// version makes it. Returns what it fixed among the objects checked.
 pub async fn init(js: &jetstream::Context, may: impl Fn(&str) -> bool) -> Result<Vec<Finding>> {
     for object in Object::ALL.into_iter().filter(|object| !may(&object.info_subject())) {
         let unseen = Finding { object, problem: Problem::Missing };
         if let Some(denied) = unseen.rights().into_iter().find(|subject| !may(subject)) {
             bail!("the credentials may neither look up nor create {object} ({denied})");
         }
-        object.create(js).await?;
+        object.create(js, false).await?;
     }
     let findings = check(js, &may).await;
     for finding in &findings {
         if let Some(denied) = finding.rights().into_iter().find(|subject| !may(subject)) {
-            bail!("{finding}, and the credentials may not create it ({denied})");
+            let fix = if finding.problem == Problem::AllowsRollups { "update" } else { "create" };
+            bail!("{finding}, and the credentials may not {fix} it ({denied})");
         }
         apply(js, finding).await?;
     }
@@ -404,37 +462,45 @@ pub fn identities_config() -> kv::Config {
 
 /// Create the identities bucket ([`IDENTITIES_BUCKET`]) as `ants init` does: with its incarnation marker.
 pub async fn create_identities(js: &jetstream::Context) -> Result<()> {
-    Object::Identities.create(js).await
+    Object::Identities.create(js, true).await
 }
 
 /// Start a new incarnation of the identities bucket ([`IDENTITIES_BUCKET`]), creating it if missing: write its marker
 /// anew, so that no shared settings record signed before verifies any more ([`ants_proto::incarnation`]), as after
-/// restoring the bucket from a backup (`ants init --identities-restored`).
-pub async fn new_incarnation(js: &jetstream::Context) -> Result<()> {
-    let store = js.create_key_value(identities_config()).await.context("creating bucket ants_identities")?;
-    mark_incarnation(&store, true).await
+/// restoring the bucket from a backup (`ants init --identities-restored`). `js_domain` is the domain `js` was made for.
+pub async fn new_incarnation(js: &jetstream::Context, js_domain: Option<&JsDomain>) -> Result<()> {
+    Box::pin(Object::Identities.create(js, false)).await?;
+    let identities = DirectKv::new(js, js_domain, IDENTITIES_BUCKET).await?;
+    let value = chrono::Utc::now().to_rfc3339();
+    identities.put(INCARNATION_KEY, value).await.context("writing the incarnation marker of bucket ants_identities")
 }
 
-/// Write the incarnation marker of the identities bucket ([`INCARNATION_KEY`]) when it has none (also when deleted),
-/// or, `anew`, in any case. Read by a direct get naming no subject, which a human's credentials allow.
-async fn mark_incarnation(identities: &kv::Store, anew: bool) -> Result<()> {
+/// The KV bucket of `object`, created as `ants init` does when missing.
+pub async fn ensure_bucket(js: &jetstream::Context, object: Object) -> Result<kv::Store> {
+    let bucket = object.bucket().with_context(|| format!("{object} is no KV bucket"))?;
+    if let Ok(store) = js.get_key_value(bucket).await {
+        return Ok(store);
+    }
+    Box::pin(object.create(js, true)).await?;
+    js.get_key_value(bucket).await.with_context(|| format!("looking up {object}"))
+}
+
+/// Write the incarnation marker of the identities bucket ([`INCARNATION_KEY`]) when it has none (also when deleted).
+/// Read by a direct get naming no subject, which a human's credentials allow.
+async fn mark_incarnation(identities: &kv::Store) -> Result<()> {
     let value = chrono::Utc::now().to_rfc3339().into();
-    let written = if anew {
-        identities.put(INCARNATION_KEY, value).await.map(drop).map_err(anyhow::Error::from)
-    } else {
-        let subject = format!("$KV.{IDENTITIES_BUCKET}.{INCARNATION_KEY}");
-        let last = match identities.stream.direct_get_next_for_subject(subject, None).await {
-            Ok(msg) if !msg.headers.get("KV-Operation").is_some_and(|op| ["DEL", "PURGE"].contains(&op.as_str())) => {
-                return Ok(());
-            }
-            Ok(deleted) => deleted.sequence,
-            Err(e) if e.kind() == DirectGetErrorKind::NotFound => 0,
-            Err(e) => return Err(e).context("reading the incarnation marker of bucket ants_identities"),
-        };
-        match identities.update(INCARNATION_KEY, value, last).await {
-            Err(e) if e.kind() == kv::UpdateErrorKind::WrongLastRevision => Ok(()),
-            written => written.map(drop).map_err(anyhow::Error::from),
+    let subject = format!("$KV.{IDENTITIES_BUCKET}.{INCARNATION_KEY}");
+    let last = match identities.stream.direct_get_next_for_subject(subject, None).await {
+        Ok(msg) if !msg.headers.get("KV-Operation").is_some_and(|op| ["DEL", "PURGE"].contains(&op.as_str())) => {
+            return Ok(());
         }
+        Ok(deleted) => deleted.sequence,
+        Err(e) if e.kind() == DirectGetErrorKind::NotFound => 0,
+        Err(e) => return Err(e).context("reading the incarnation marker of bucket ants_identities"),
+    };
+    let written = match identities.update(INCARNATION_KEY, value, last).await {
+        Err(e) if e.kind() == kv::UpdateErrorKind::WrongLastRevision => Ok(()),
+        written => written.map(drop).map_err(anyhow::Error::from),
     };
     written.context("writing the incarnation marker of bucket ants_identities")
 }
@@ -476,8 +542,9 @@ pub fn read_config() -> kv::Config {
 
 /// The stream of the bucket of thread titles and each human's pinned and archived threads ([`THREADS_BUCKET`]): a KV
 /// bucket of history 1 whose entries never expire, but which takes per-message TTLs, so the delete markers of titles
-/// `ants thread list` prunes go too. It places no markers of its own when one expires. It has room for
-/// [`MAX_CONSUMERS`], one for each ant's done states ([`ants_proto::done_reader`]).
+/// `ants thread list` prunes go too. It places no markers of its own when one expires, and denies rollups, which would
+/// remove others' entries as well. It has room for [`MAX_CONSUMERS`], one for each ant's done states
+/// ([`ants_proto::done_reader`]).
 pub fn threads_config() -> stream::Config {
     stream::Config {
         name: format!("KV_{THREADS_BUCKET}"),
@@ -488,7 +555,6 @@ pub fn threads_config() -> stream::Config {
         storage: stream::StorageType::File,
         num_replicas: 1,
         allow_direct: true,
-        allow_rollup: true,
         deny_delete: true,
         allow_message_ttl: true,
         max_consumers: MAX_CONSUMERS,
@@ -605,6 +671,7 @@ mod tests {
     fn problems(findings: &[Finding]) -> Vec<Object> {
         let missing = |f: &Finding| match &f.problem {
             Problem::Missing => f.object,
+            Problem::AllowsRollups => panic!("{f}"),
             Problem::Unchecked(e) => panic!("{e}"),
         };
         findings.iter().map(missing).collect()
@@ -665,7 +732,78 @@ mod tests {
             let max = kv.stream.cached_info().config.max_consumers;
             assert_eq!(max == MAX_CONSUMERS, object.watched(), "{object} created with room for {max} consumers");
         }
+        for object in Object::ALL {
+            let config = js.get_stream(object.stream_name()).await.unwrap().cached_info().config.clone();
+            assert_eq!(config.allow_rollup, object == Object::Colony, "{object} denies rollups but the colony");
+        }
         assert!(init(&js, |_| true).await.unwrap().is_empty());
+    }
+
+    /// A rollup to one key of a bucket would remove every other key's entry: each bucket refuses it.
+    #[tokio::test]
+    async fn every_bucket_refuses_a_rollup_and_keeps_the_entries_of_others() {
+        let Some(server) = NatsServer::start() else { return };
+        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        init(&js, |_| true).await.unwrap();
+        for object in Object::ALL.into_iter().filter(|o| o.bucket().is_some() && o.denies_rollups()) {
+            let prefix = format!("$KV.{}", object.bucket().unwrap());
+            let before = js.get_stream(object.stream_name()).await.unwrap().cached_info().state.messages;
+            for key in ["a.a.a", "b.b.b"] {
+                js.publish(format!("{prefix}.{key}"), "{}".into()).await.unwrap().await.unwrap();
+            }
+            for rollup in ["all", "sub"] {
+                let mut headers = async_nats::HeaderMap::new();
+                headers.insert("Nats-Rollup", rollup);
+                let sent = js.publish_with_headers(format!("{prefix}.a.a.a"), headers, "".into()).await.unwrap();
+                assert!(sent.await.is_err(), "{object} refuses a rollup of {rollup}");
+            }
+            let state = js.get_stream(object.stream_name()).await.unwrap().cached_info().state.clone();
+            assert_eq!(state.messages, before + 2, "{object} keeps every entry");
+        }
+    }
+
+    /// Buckets created allowing rollups, as by an older version or `nats kv add`, are found and fixed by `ants init`,
+    /// their entries and other settings kept, also those whose stream info the credentials do not get.
+    #[tokio::test]
+    async fn init_denies_the_rollups_of_buckets_created_allowing_them() {
+        let Some(server) = NatsServer::start() else { return };
+        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let legacy = [Object::TrailTips, Object::Presence, Object::Humans];
+        for object in legacy {
+            let Spec::Bucket(config) = object.spec() else { unreachable!() };
+            js.create_key_value(*config).await.unwrap().put("a.b", "{}".into()).await.unwrap();
+        }
+        js.create_stream(stream::Config { allow_rollup: true, ..threads_config() }).await.unwrap();
+        let found = check(&js, |_| true).await;
+        let allowing: Vec<_> = found.iter().filter(|f| f.problem == Problem::AllowsRollups).map(|f| f.object).collect();
+        assert_eq!(allowing, [Object::Humans, Object::Threads, Object::Presence, Object::TrailTips]);
+        let tips = found.iter().find(|f| f.object == Object::TrailTips).unwrap();
+        assert_eq!(
+            tips.to_string(),
+            "bucket ants_trail_tips allows rollups: one message with a Nats-Rollup header removes the entries of every \
+             other writer"
+        );
+        assert_eq!(tips.fixed(), "denied the rollups of bucket ants_trail_tips");
+        assert_eq!(
+            tips.rights(),
+            ["$JS.API.STREAM.INFO.KV_ants_trail_tips", "$JS.API.STREAM.UPDATE.KV_ants_trail_tips"]
+        );
+
+        let denied = init(&js, |s| s != "$JS.API.STREAM.UPDATE.KV_ants_humans").await.unwrap_err();
+        assert!(denied.to_string().starts_with("bucket ants_humans allows rollups"), "{denied}");
+        let human = |s: &str| s != Object::Presence.info_subject();
+        let fixed = init(&js, human).await.unwrap();
+        let fixed: Vec<_> = fixed.iter().filter(|f| f.problem == Problem::AllowsRollups).map(|f| f.object).collect();
+        assert_eq!(fixed, [Object::Humans, Object::Threads, Object::TrailTips], "presence is fixed unseen");
+        assert!(!found.iter().any(|f| f.object == Object::Colony && f.problem == Problem::AllowsRollups));
+        assert!(check(&js, |_| true).await.is_empty(), "{:?}", check(&js, |_| true).await);
+        for object in legacy {
+            let kv = js.get_key_value(object.bucket().unwrap()).await.unwrap();
+            assert!(!kv.stream.cached_info().config.allow_rollup);
+            assert_eq!(kv.get("a.b").await.unwrap().as_deref(), Some(&b"{}"[..]), "{object} keeps its entries");
+        }
+        let humans = js.get_stream(Object::Humans.stream_name()).await.unwrap().cached_info().config.clone();
+        assert_ne!(humans.max_consumers, MAX_CONSUMERS, "other settings stay");
     }
 
     /// Creating the identities bucket marks its incarnation, which a creation again leaves and a deleted marker or
@@ -685,7 +823,7 @@ mod tests {
         init(&js, |s| s != Object::Identities.info_subject()).await.unwrap();
         assert_eq!(incarnation().await.unwrap().as_ref(), Some(&first), "left as it is");
 
-        new_incarnation(&js).await.unwrap();
+        new_incarnation(&js, None).await.unwrap();
         let restored = incarnation().await.unwrap().expect("marked");
         assert_ne!(restored, first);
         js.get_key_value(IDENTITIES_BUCKET).await.unwrap().delete(INCARNATION_KEY).await.unwrap();
@@ -712,8 +850,10 @@ mod tests {
         js.create_key_value(channels_config()).await.unwrap();
 
         let created = init(&js, |_| true).await.unwrap();
-        assert!(created.iter().all(|f| f.object != Object::Stream && f.object != Object::Channels));
-        assert_eq!(created.len(), Object::ALL.len() - 2);
+        assert!(created.iter().all(|f| f.object != Object::Stream));
+        let channels: Vec<_> = created.iter().filter(|f| f.object == Object::Channels).map(|f| &f.problem).collect();
+        assert_eq!(channels, [&Problem::AllowsRollups], "only its rollups denied");
+        assert_eq!(created.len(), Object::ALL.len() - 1);
         let config = js.get_stream(STREAM).await.unwrap().cached_info().config.clone();
         assert_eq!(config.sources.unwrap()[0].name, "OUTBOX", "sources stay");
         let channels = js.get_stream(Object::Channels.stream_name()).await.unwrap().cached_info().config.clone();

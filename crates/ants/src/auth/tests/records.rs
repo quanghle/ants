@@ -403,3 +403,51 @@ async fn humans_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
         "a human purges"
     );
 }
+
+/// One message with a `Nats-Rollup` header to a key an ant may write would remove every other entry of the bucket:
+/// the trail buckets `ants init` creates refuse it, under an ant's rights or a human's, and keep the entries of others.
+#[tokio::test]
+async fn a_rollup_under_an_ant_s_rights_leaves_the_trail_entries_of_others() {
+    use ants_proto::{
+        RunId, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TipId, trail_rating_key,
+        trail_session_key, trail_tip_key,
+    };
+    let Some(server) = Server::start() else { return };
+    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (_h, h_js) = server.connect(&human).await;
+    let rights = crate::people::humans::Rights::from_creds(Some(&server.creds(&human))).unwrap();
+    ants_daemon::hub::init(&h_js, |s| rights.may_publish(s)).await.unwrap();
+    let (_a, a_js) = server.connect(&dev_a).await;
+    let (_b, b_js) = server.connect(&dev_b).await;
+
+    let deploy = "deploy".parse().unwrap();
+    let (run, tip) = (RunId::generate(), TipId::generate());
+    let (rating_a, rating_b) = (trail_rating_key(&deploy, &dev_a, &run), trail_rating_key(&deploy, &dev_b, &run));
+    let keys = [
+        (TRAIL_RUNS_BUCKET, trail_session_key(&dev_a, &run), trail_session_key(&dev_b, &run)),
+        (TRAIL_TIPS_BUCKET, trail_tip_key(&deploy, &dev_a, &tip), trail_tip_key(&deploy, &dev_b, &tip)),
+        (TRAIL_RATINGS_BUCKET, rating_a, rating_b),
+    ];
+    let rollup = async |js: &jetstream::Context, subject: String| {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("Nats-Rollup", "all");
+        js.publish_with_headers(subject, headers, "{}".into()).await.unwrap().await
+    };
+    for (bucket, own, others) in keys {
+        js_put(&b_js, bucket, &others).await;
+        js_put(&a_js, bucket, &own).await;
+        assert!(rollup(&a_js, format!("$KV.{bucket}.{own}")).await.is_err(), "{bucket} refuses dev-a's rollup");
+        let stream = h_js.get_stream(format!("KV_{bucket}")).await.unwrap();
+        assert_eq!(stream.cached_info().state.messages, 2, "{bucket} keeps dev-b's entry and dev-a's");
+    }
+    let saved = DirectKv::whole(&h_js, None, TRAILS_BUCKET).await.unwrap();
+    saved.put("deploy", b"{}".to_vec()).await.unwrap();
+    saved.put("release", b"{}".to_vec()).await.unwrap();
+    assert!(rollup(&h_js, format!("$KV.{TRAILS_BUCKET}.deploy")).await.is_err(), "a saved trail's rollup is refused");
+    assert!(saved.get("release").await.unwrap().is_some(), "the other saved trail stays");
+}
+
+/// Put `{}` under `key` of `bucket` as the user of `js`, by plain KV subject.
+async fn js_put(js: &jetstream::Context, bucket: &str, key: &str) {
+    js.publish(format!("$KV.{bucket}.{key}"), "{}".into()).await.unwrap().await.unwrap();
+}

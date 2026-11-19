@@ -1,5 +1,5 @@
 //! A human's inbox: the messages to the human in the stream, read by message gets ([`Reading::Gets`]), so every device of
-//! the human reads all of them, and its [`ReadMarker`] in [`READ_BUCKET`], shared by those devices, which says which
+//! the human reads all of them, and its [`ReadMarker`] in [`READ_BUCKET`](ants_proto::READ_BUCKET), shared by those devices, which says which
 //! it has read on any of them.
 //!
 //! Showing a message marks it read, unless peeking, for every device at once: the marker is updated with
@@ -16,9 +16,7 @@ use ants_daemon::delivery::unserved;
 use ants_daemon::people::humans::Registry;
 use ants_daemon::records::reactions::{self, Reacted};
 use ants_daemon::stream::reading::{self, Reading};
-use ants_proto::{
-    Acting, Envelope, Question, Questions, READ_BUCKET, ReadMarker, Role, ThreadId, UserId, Uuid, subject,
-};
+use ants_proto::{Acting, Envelope, Question, Questions, ReadMarker, Role, ThreadId, UserId, Uuid, subject};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use async_nats::jetstream::consumer::DeliverPolicy;
@@ -69,10 +67,9 @@ impl Select {
 
 /// The read bucket, created when missing. Entries never expire: a marker says what was read until it moves on.
 pub async fn ensure_bucket(js: &jetstream::Context) -> Result<kv::Store> {
-    if let Ok(store) = js.get_key_value(READ_BUCKET).await {
-        return Ok(store);
-    }
-    js.create_key_value(ants_daemon::hub::read_config()).await.context("creating the read bucket")
+    Box::pin(ants_daemon::hub::ensure_bucket(js, ants_daemon::hub::Object::Read))
+        .await
+        .context("creating the read bucket")
 }
 
 /// A message to the human, unless malformed or forged.
