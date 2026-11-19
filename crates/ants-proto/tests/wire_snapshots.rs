@@ -1551,6 +1551,7 @@ fn trail_ratings() {
             task: "release 2.1 with the migration".to_owned(),
             why: "built and tagged, but the smoke tests needed a rerun".to_owned(),
             script: script_sha256("agent('dev-a', 'build it')"),
+            untrusted: false,
             at: at(6),
         },
     );

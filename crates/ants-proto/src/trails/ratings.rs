@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::{Error, RunId, ThreadId, TrailName, UserId, tip_words, trail_rating_key};
+use crate::{Error, RunId, TRAIL_CLOCK_SKEW, ThreadId, TrailName, UserId, tip_words, trail_rating_key};
 #[cfg(doc)]
 use crate::{TRAIL_RATINGS_BUCKET, script_sha256};
 
@@ -91,6 +91,9 @@ pub struct TrailRating {
     pub why: String,
     /// The [`script_sha256`] of the trail's script the run took.
     pub script: String,
+    /// Whether the run was untrusted: started from a thread a webhook or schedule started, or by a step of such a run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untrusted: bool,
     pub at: DateTime<Utc>,
 }
 
@@ -122,6 +125,11 @@ impl TrailRating {
             return Err(Error::InvalidRating("a script hash is 64 lowercase hex digits".to_owned()));
         }
         Ok(())
+    }
+
+    /// Whether it counts at `now`: dated no more than [`TRAIL_CLOCK_SKEW`] ahead of it.
+    pub fn dated(&self, now: DateTime<Utc>) -> bool {
+        self.at <= now + TRAIL_CLOCK_SKEW
     }
 
     /// Its weight at `now` for a trail whose current script has the hash `script`: half when older than
@@ -216,6 +224,9 @@ pub fn serves(description_matches: bool, counts: &Counts) -> bool {
 pub struct RatingSummary {
     #[serde(flatten)]
     pub counts: Counts,
+    /// How many of them rate untrusted runs ([`TrailRating::untrusted`]).
+    #[serde(default)]
+    pub untrusted: u32,
     /// Latest first.
     pub latest: Vec<TrailRating>,
 }
@@ -223,6 +234,7 @@ pub struct RatingSummary {
 impl RatingSummary {
     pub fn add(&mut self, rating: TrailRating) {
         self.counts.add(rating.outcome);
+        self.untrusted += u32::from(rating.untrusted);
         let at = self.latest.partition_point(|kept| (kept.at, &kept.run) > (rating.at, &rating.run));
         if at < LATEST_RATINGS {
             self.latest.insert(at, rating);
@@ -281,10 +293,11 @@ impl<T> Finder<T> {
         self.trails.insert(name, evidence);
     }
 
-    /// Fold in a rating of a trail added: one of a trail not added is left out, as of a trail since removed.
+    /// Fold in a rating of a trail added: one of a trail not added is left out, as of a trail since removed, and so is
+    /// one dated ahead ([`TrailRating::dated`]).
     pub fn rating(&mut self, rating: TrailRating) {
         let Some(evidence) = self.trails.get_mut(&rating.trail) else { return };
-        if !self.query.matches(&rating.task) {
+        if !rating.dated(self.now) || !self.query.matches(&rating.task) {
             return;
         }
         let weight = rating.weight(evidence.script.as_deref(), self.now);

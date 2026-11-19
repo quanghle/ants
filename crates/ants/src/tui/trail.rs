@@ -117,7 +117,7 @@ pub async fn tips(ctx: &Ctx, args: &TipsArgs) -> Result<Done> {
         if !ctx.me.role.is_human() {
             bail!("retiring a tip needs a human's credentials; those of {} are an ant's", ctx.me.id);
         }
-        let retired = cli_tips::retire(&ctx.js, &args.name, id, &ctx.me.id, now).await?;
+        let retired = cli_tips::retire(&ctx.js, &args.name, id, args.writer.as_ref(), &ctx.me.id, now).await?;
         return Ok(Done { line: cli_tips::retired(&retired, now), ..Done::default() });
     }
     let (board, script) = cli_tips::read(&ctx.js, &args.name).await?;
@@ -599,7 +599,7 @@ mod tests {
         let (alice, lead) = (user("alice"), user("lead"));
         let ctx = human(&server, &alice).await;
         let name: TrailName = "chat-test-review".parse().unwrap();
-        let args = TipsArgs { name: name.clone(), key: None, all: false, retire: None };
+        let args = TipsArgs { name: name.clone(), key: None, all: false, retire: None, writer: None };
         let none = tips(&ctx, &args).await.unwrap();
         assert_eq!((none.line.as_str(), none.page), ("no tips on trail chat-test-review", None));
 

@@ -47,9 +47,10 @@ async fn a_saved_trail_s_steps_carry_its_tips_under_their_key_and_a_retry_sugges
         built.text
     );
     assert!(built.text.contains(": 1 of 2 live tips carried."), "{}", built.text);
-    assert!(
-        built.text.contains(&format!("- {} (tip key \"build\", net votes 0, older script): {}", build.id, build.text))
-    );
+    assert!(built.text.contains(&format!(
+        "- {} by {} (tip key \"build\", net votes 0, older script): {}",
+        build.id, build.writer, build.text
+    )));
     assert!(!built.text.contains(test.id.as_str()), "a tip under another key stays out: {}", built.text);
     assert!(built.text.contains("vote_tip") && built.text.contains("leave_tip"), "a trusted run: {}", built.text);
 

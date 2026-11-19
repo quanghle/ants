@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use ants_proto::{
     FIND_TRAILS_LIMIT, Found, LATEST_RATINGS, MAX_FIND_TRAILS, MAX_RATING_TASK, MAX_RATING_WHY, Query, RatingOutcome,
-    RunState, ThreadId, TrailRun,
+    RunState, ThreadId, TrailName, TrailRun,
 };
 use chrono::{DateTime, Utc};
 use rmcp::handler::server::wrapper::Parameters;
@@ -19,7 +19,7 @@ use serde::Deserialize;
 
 use super::Hub;
 use super::tools::{Tools, text};
-use crate::trail::{RatedTrail, SavedEntry, age, clip};
+use crate::trail::{Rated, RatedTrail, SavedEntry, age, clip};
 
 /// Why rating and finding are refused when the ant conducts no runs.
 const NO_TRAILS: &str = "this ant conducts no trails: the bus keeps no trail runs";
@@ -72,9 +72,9 @@ impl Hub {
         if (header.thread != *thread || uninvited) && !self.trusted(thread, &current).await? {
             return Err(UNTRUSTED.to_owned());
         }
-        let rated = trails.rate(&header, outcome, task, why).await?;
+        let Rated { trails: rated, unsaved } = trails.rate(&header, outcome, task, why).await?;
         tracing::info!(%thread, %run, %outcome, trails = rated.len(), "trail run rated from a tool call");
-        let mut out = rated_text(&header, outcome, task, &rated);
+        let mut out = rated_text(&header, outcome, task, &rated, &unsaved);
         if outcome == RatingOutcome::Worked && header.first_trail().is_none() && !rated.iter().any(|r| r.saved_from) {
             match trails.serving(task, thread).await {
                 Ok(serving) => {
@@ -132,9 +132,20 @@ fn bounded(what: &str, text: &str, max: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// What `rate_trail` tells of rating `run` as `outcome` for `task`, `rated` the trails it rated.
-fn rated_text(run: &TrailRun, outcome: RatingOutcome, task: &str, rated: &[RatedTrail]) -> String {
-    let mut out = if rated.is_empty() {
+/// What `rate_trail` tells of rating `run` as `outcome` for `task`, `rated` the trails it rated and `unsaved` those
+/// the run took that are no longer saved.
+fn rated_text(
+    run: &TrailRun,
+    outcome: RatingOutcome,
+    task: &str,
+    rated: &[RatedTrail],
+    unsaved: &[TrailName],
+) -> String {
+    let unsaved_names = unsaved.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+    let no_longer = if unsaved.len() > 1 { "are no longer saved" } else { "is no longer saved" };
+    let mut out = if rated.is_empty() && !unsaved.is_empty() {
+        format!("Run {} put no rating: trail {unsaved_names}, which it took, {no_longer}.", run.run)
+    } else if rated.is_empty() {
         format!("Run {} ran an inline script: an inline script has no saved trail to rate.", run.run)
     } else {
         let names: Vec<String> = rated
@@ -142,7 +153,11 @@ fn rated_text(run: &TrailRun, outcome: RatingOutcome, task: &str, rated: &[Rated
             .map(|r| if r.saved_from { format!("{} (saved from its script)", r.trail) } else { r.trail.to_string() })
             .collect();
         let plural = if rated.len() > 1 { "trails" } else { "trail" };
-        format!("Rated run {} {outcome} for {plural} {} (task: {task:?}).", run.run, names.join(", "))
+        let mut out = format!("Rated run {} {outcome} for {plural} {} (task: {task:?}).", run.run, names.join(", "));
+        if !unsaved.is_empty() {
+            let _ = write!(out, " Trail {unsaved_names}, which it took too, {no_longer}: not rated.");
+        }
+        out
     };
     let replaced: Vec<(&RatedTrail, RatingOutcome)> =
         rated.iter().filter_map(|r| r.replaced.map(|before| (r, before))).collect();
@@ -182,17 +197,22 @@ fn found_text(query: &str, found: &[Found<SavedEntry>], trusted: bool, now: Date
             Some(rate) => {
                 let total = counts.total();
                 let ratings = if total == 1 { "rating" } else { "ratings" };
+                let untrusted = match trail.matching.untrusted {
+                    0 => String::new(),
+                    n => format!(", {n} of untrusted runs"),
+                };
                 let _ = write!(
                     out,
-                    "\n   {saver}success {:.0}% over {total} {ratings} on matching tasks ({counts})",
+                    "\n   {saver}success {:.0}% over {total} {ratings} on matching tasks ({counts}{untrusted})",
                     rate * 100.0
                 );
             }
         }
         for rating in trail.matching.latest.iter().take(LATEST_RATINGS) {
+            let untrusted = if rating.untrusted { ", an untrusted run's" } else { "" };
             let _ = write!(
                 out,
-                "\n   - {}, {} ago, {:?}: {:?}",
+                "\n   - {}{untrusted}, {} ago, {:?}: {:?}",
                 rating.outcome,
                 age(rating.at, now),
                 rating.task,
@@ -214,7 +234,7 @@ impl Tools {
     #[tool(
         description = "Rate a trail run this ant conducted, once it ended or was stopped: `outcome` worked, partly or \
                        failed for `task`, the task it served in a line, because of `why`, a concrete reason. It rates \
-                       each saved trail the run took and each saved from its script, one rating per run and trail: \
+                       each saved trail the run took that is still saved and each this ant saved from its script, one rating per run and trail: \
                        rating the run again replaces it. A child run a trail() call started is rated by its own id. \
                        Ants choosing a trail with find_trails draw on these ratings, so rate every run. On a thread a \
                        webhook or schedule started, only the run reporting on that thread is rated."
@@ -233,7 +253,8 @@ impl Tools {
                        the task in a few words. Lists at most `limit` (default 5, at most 20) of the trails whose name, \
                        description or rated tasks match, ranked by a draw from each one's ratings on matching tasks: \
                        better-rated trails come first more often, and those not yet rated still get tried. Each comes \
-                       with who saved it, its success on matching tasks and its latest ratings. Run one with \
+                       with who saved it, its success on matching tasks and its latest ratings, those of runs a \
+                       webhook or schedule started marked untrusted. Run one with \
                        run_trail(name: …), then rate the run with rate_trail."
     )]
     async fn find_trails(

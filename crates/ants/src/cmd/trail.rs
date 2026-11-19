@@ -161,6 +161,9 @@ pub(crate) struct TipsArgs {
     /// Retire the tip ID instead, which steps carry and searches find no more. Needs a human's credentials.
     #[arg(long, value_name = "ID", conflicts_with_all = ["key", "all"])]
     pub(crate) retire: Option<TipId>,
+    /// With --retire, the tip's writer: needed only when tips of different writers share the id.
+    #[arg(long, value_name = "ANT", requires = "retire")]
+    pub(crate) writer: Option<UserId>,
 }
 
 /// What a run may spend, each limit at most its maximum ([`TrailLimits::MAX`]).
@@ -297,7 +300,8 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
             let (_, js) = nats.connect("ants-cli").await?;
             let purged = saved::remove(&js, &saved::local_dir()?, &name).await?;
             let rated = ratings::purged(purged.ratings, purged.tips > 0);
-            println!("removed trail {name}{rated}{}", tips::purged(purged.tips));
+            let removed = if purged.trail { "removed trail" } else { "removed what was left of trail" };
+            println!("{removed} {name}{rated}{}", tips::purged(purged.tips));
         }
         TrailCommand::Runs { ant, json } => {
             human(nats, "reading the runs of trails")?;
@@ -328,7 +332,7 @@ async fn show_tips(nats: &Nats<'_>, args: &TipsArgs, json: bool) -> Result<()> {
     }
     let (_, js) = nats.connect("ants-cli").await?;
     if let Some(id) = &args.retire {
-        let retired = tips::retire(&js, &args.name, id, &nats.me.id, Utc::now()).await?;
+        let retired = tips::retire(&js, &args.name, id, args.writer.as_ref(), &nats.me.id, Utc::now()).await?;
         if json {
             println!("{}", serde_json::to_string(&retired)?);
         } else {

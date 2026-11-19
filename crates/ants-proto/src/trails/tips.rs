@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    Error, MAX_TITLE, RunId, TIP_RETIRED, TipId, TrailName, UserId, trail_tip_key, trail_tip_retired_key,
-    trail_tip_vote_key,
+    Error, MAX_TITLE, RunId, TIP_RETIRED, TRAIL_CLOCK_SKEW, TipId, TrailName, UserId, trail_tip_key,
+    trail_tip_retired_key, trail_tip_vote_key,
 };
 #[cfg(doc)]
 use crate::{TRAIL_TIPS_BUCKET, TrailStep};
@@ -299,7 +299,8 @@ pub enum Similarity<'a> {
 }
 
 /// The tips of one trail, with their votes, ranked for a reader. Pure: the time and the current script's
-/// [`script_sha256`] are given.
+/// [`script_sha256`] are given. A tip or a vote dated more than [`TRAIL_CLOCK_SKEW`] ahead of that time counts for
+/// nothing at it. Tips of different writers may share an id: a tip is its writer's and id's.
 #[derive(Debug, Clone)]
 pub struct TipBoard {
     trail: TrailName,
@@ -365,15 +366,37 @@ impl TipBoard {
         self.tips.is_empty()
     }
 
-    /// The tip `id` ranked at `now` for the current script `script`, if the trail has it.
-    pub fn tip(&self, id: &TipId, now: DateTime<Utc>, script: Option<&str>) -> Option<Ranked<'_>> {
-        self.tips.iter().find(|(tip, _)| tip.id == *id).map(|(tip, votes)| rank(tip, votes, now, script))
+    /// The tip `id` of `writer`, or of the one writer having a tip of that id when none is given, ranked at `now` for
+    /// the current script `script`. Without such a tip, the writers of the tips of that id, none when the trail has
+    /// none: more than one when no writer is given and tips of different writers share the id.
+    pub fn tip(
+        &self,
+        id: &TipId,
+        writer: Option<&UserId>,
+        now: DateTime<Utc>,
+        script: Option<&str>,
+    ) -> Result<Ranked<'_>, Vec<&UserId>> {
+        let of_id: Vec<_> = self.dated(now).filter(|(tip, _)| tip.id == *id).collect();
+        let found = match writer {
+            Some(writer) => of_id.iter().find(|(tip, _)| tip.writer == *writer),
+            None if of_id.len() == 1 => of_id.first(),
+            None => None,
+        };
+        match found {
+            Some((tip, votes)) => Ok(rank(tip, votes, now, script)),
+            None => Err(of_id.iter().map(|(tip, _)| &tip.writer).collect()),
+        }
+    }
+
+    /// The tips dated no more than [`TRAIL_CLOCK_SKEW`] ahead of `now`.
+    fn dated(&self, now: DateTime<Utc>) -> impl Iterator<Item = &(TrailTip, Vec<TipVote>)> {
+        self.tips.iter().filter(move |(tip, _)| tip.written_at <= now + TRAIL_CLOCK_SKEW)
     }
 
     /// Every tip ranked at `now` for the current script `script`: the live ones first, in rank order (score, then
     /// last used, then written, latest first, then id), then the retired ones, in rank order too.
     pub fn ranked(&self, now: DateTime<Utc>, script: Option<&str>) -> Vec<Ranked<'_>> {
-        let mut ranked: Vec<Ranked<'_>> = self.tips.iter().map(|(tip, votes)| rank(tip, votes, now, script)).collect();
+        let mut ranked: Vec<Ranked<'_>> = self.dated(now).map(|(tip, votes)| rank(tip, votes, now, script)).collect();
         ranked.sort_by(|a, b| b.status.is_live().cmp(&a.status.is_live()).then_with(|| rank_order(a, b)));
         ranked
     }
@@ -384,7 +407,7 @@ impl TipBoard {
     }
 
     fn live_ranked(&self, now: DateTime<Utc>, script: Option<&str>) -> impl Iterator<Item = Ranked<'_>> {
-        self.tips.iter().map(move |(tip, votes)| rank(tip, votes, now, script)).filter(|r| r.status.is_live())
+        self.dated(now).map(move |(tip, votes)| rank(tip, votes, now, script)).filter(|r| r.status.is_live())
     }
 
     /// The tips a step under `tip_key` with `prompt` may carry, in the order to carry them, each a live tip of a
@@ -472,8 +495,10 @@ impl TipBoard {
     }
 }
 
-/// `tip` with its `votes` ranked at `now` for the current script `script`.
+/// `tip` with its `votes`, oldest first, ranked at `now` for the current script `script`, those dated more than
+/// [`TRAIL_CLOCK_SKEW`] ahead of `now` left out.
 fn rank<'a>(tip: &'a TrailTip, votes: &'a [TipVote], now: DateTime<Utc>, script: Option<&str>) -> Ranked<'a> {
+    let votes = &votes[..votes.partition_point(|vote| vote.at <= now + TRAIL_CLOCK_SKEW)];
     let mut tally = Tally::default();
     for vote in votes {
         match vote.verdict {
@@ -572,11 +597,11 @@ mod tests {
             (&renewed, vote("dev-c", TipVerdict::Stale, 60)),
         ];
         let board = board_retired(&[&by_human, &wronged, &unused, &renewed], &votes, &[(&by_human, "alice", 1)]);
-        let status = |id: &str| board.tip(&id.parse().unwrap(), day(100), None).unwrap().status;
+        let status = |id: &str| board.tip(&id.parse().unwrap(), None, day(100), None).unwrap().status;
         assert_eq!(status("aaaaaaaa"), TipStatus::Retired(Retirement::ByHuman { by: p("alice"), at: day(1) }));
         assert_eq!(status("bbbbbbbb"), TipStatus::Retired(Retirement::VotedWrong));
         assert_eq!(status("cccccccc"), TipStatus::Retired(Retirement::Unused));
-        let renewed = board.tip(&"dddddddd".parse().unwrap(), day(100), None).unwrap();
+        let renewed = board.tip(&"dddddddd".parse().unwrap(), None, day(100), None).unwrap();
         assert_eq!((renewed.status, renewed.last_used), (TipStatus::Live, day(50)), "only a helpful vote renews it");
         assert_eq!(board.live(day(100)), 1);
         assert_eq!(board.live(day(89)), 2, "unused for less than 90 days, a tip lives");
@@ -591,10 +616,10 @@ mod tests {
         let mut claimed = tip("dev-a", "bbbbbbbb", None, "use port 8080", 0);
         claimed.retired = Some(TipRetired { by: p("alice"), at: day(1) });
         let board = board_retired(&[&left, &claimed], &[], &[(&left, "alice", 1)]);
-        let ranked = board.tip(&left.id, day(2), None).unwrap();
+        let ranked = board.tip(&left.id, None, day(2), None).unwrap();
         assert_eq!(ranked.status, TipStatus::Retired(Retirement::ByHuman { by: p("alice"), at: day(1) }));
         assert_eq!(ranked.tip.retired, Some(TipRetired { by: p("alice"), at: day(1) }));
-        let ranked = board.tip(&claimed.id, day(2), None).unwrap();
+        let ranked = board.tip(&claimed.id, None, day(2), None).unwrap();
         assert_eq!(
             (ranked.status, &ranked.tip.retired),
             (TipStatus::Live, &None),
@@ -608,7 +633,7 @@ mod tests {
         ];
         let board = TipBoard::new("deploy".parse().unwrap(), entries);
         assert_eq!(board.len(), 1, "a retirement is no tip");
-        assert!(board.tip(&left.id, day(2), None).unwrap().status.is_live());
+        assert!(board.tip(&left.id, None, day(2), None).unwrap().status.is_live());
     }
 
     #[test]
@@ -647,7 +672,7 @@ mod tests {
         ];
         let board = TipBoard::new("deploy".parse().unwrap(), entries);
         assert_eq!(board.len(), 1);
-        let ranked = board.tip(&left.id, day(1), None).unwrap();
+        let ranked = board.tip(&left.id, None, day(1), None).unwrap();
         assert_eq!(ranked.tally, Tally { helpful: 0, stale: 1, wrong: 0 });
         assert_eq!(ranked.votes.len(), 1);
     }
@@ -727,5 +752,43 @@ mod tests {
         assert_eq!(serde_json::to_value(TipVerdict::Helpful).unwrap(), "helpful");
         assert_eq!(script_sha256("").len(), 64);
         assert_eq!(&script_sha256("")[..8], "e3b0c442");
+    }
+
+    #[test]
+    fn a_tip_or_vote_dated_ahead_of_now_counts_for_nothing_until_then() {
+        let ahead = tip("dev-a", "aaaaaaaa", None, "pin the base image", 10);
+        let left = tip("dev-a", "bbbbbbbb", None, "use port 8080", 0);
+        let votes = [
+            (&left, vote("dev-b", TipVerdict::Helpful, 1)),
+            (&left, vote("dev-c", TipVerdict::Helpful, 500)),
+            (&ahead, vote("dev-b", TipVerdict::Helpful, 10)),
+        ];
+        let board = board(&[&ahead, &left], &votes);
+        assert_eq!(ids(board.ranked(day(5), None)), ["bbbbbbbb"], "a tip dated ahead is no tip yet");
+        assert!(board.tip(&ahead.id, None, day(5), None).unwrap_err().is_empty());
+        let ranked = board.tip(&left.id, None, day(5), None).unwrap();
+        assert_eq!((ranked.tally.helpful, ranked.votes.len(), ranked.last_used), (1, 1, day(1)));
+        let retired = board.tip(&left.id, None, day(200), None).unwrap();
+        assert_eq!(retired.status, TipStatus::Retired(Retirement::Unused), "no vote dated ahead keeps it live");
+        let within = day(10) - TRAIL_CLOCK_SKEW;
+        assert_eq!(board.live(within), 2, "a tip dated within the clock skew counts");
+        assert_eq!(board.live(day(10) - TRAIL_CLOCK_SKEW - TimeDelta::seconds(1)), 1);
+    }
+
+    #[test]
+    fn tips_of_different_writers_sharing_an_id_are_told_apart_by_writer() {
+        let first = tip("dev-a", "aaaaaaaa", None, "pin the base image", 0);
+        let copy = tip("dev-b", "aaaaaaaa", None, "use port 8080", 1);
+        let board = board(&[&first, &copy], &[(&first, vote("dev-c", TipVerdict::Wrong, 1))]);
+        assert_eq!(board.len(), 2);
+        let writers = board.tip(&first.id, None, day(2), None).unwrap_err();
+        assert_eq!(writers, [&p("dev-a"), &p("dev-b")], "an id alone names neither");
+        let ranked = board.tip(&first.id, Some(&p("dev-a")), day(2), None).unwrap();
+        assert_eq!((ranked.tip, ranked.tally.wrong), (&first, 1));
+        let ranked = board.tip(&copy.id, Some(&p("dev-b")), day(2), None).unwrap();
+        assert_eq!((ranked.tip, ranked.tally.wrong), (&copy, 0), "a vote reaches the tip of its key's writer alone");
+        let missing = board.tip(&first.id, Some(&p("dev-c")), day(2), None).unwrap_err();
+        assert_eq!(missing.len(), 2);
+        assert_eq!(board.tip(&first.id, Some(&p("dev-b")), day(0), None).unwrap_err(), [&p("dev-a")]);
     }
 }

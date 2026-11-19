@@ -56,7 +56,7 @@ pub(crate) use invite::invitation;
 pub use invite::{EndWait, rating_hint};
 pub use limits::AskedLimits;
 pub use nested::{refused_on_route, within};
-pub use ratings::{RatedTrail, Ratings, colony_rated};
+pub use ratings::{Rated, RatedTrail, Ratings, colony_rated};
 pub(crate) use report::clip;
 pub use saved::{PreparedSave, SaveFrom, SaveOutcome, SaveTrail, SavedEntry};
 pub(crate) use saved::{age, from_run};

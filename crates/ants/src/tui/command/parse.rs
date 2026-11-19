@@ -62,9 +62,9 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ),
     (
         "trail",
-        "list | show NAME|RUN | tips NAME [--key KEY] [--all] | tips NAME --retire ID | runs | run NAME [@ANT] \
-         [--steps N] [--at-once N] [--turns N] [--wall DUR] [--thread THREAD] [ARGS] | stop RUN | resume RUN \
-         [--steps N] [--at-once N] [--turns N] [--wall DUR]",
+        "list | show NAME|RUN | tips NAME [--key KEY] [--all] | tips NAME --retire ID [--writer ANT] | runs | run \
+         NAME [@ANT] [--steps N] [--at-once N] [--turns N] [--wall DUR] [--thread THREAD] [ARGS] | stop RUN | resume \
+         RUN [--steps N] [--at-once N] [--turns N] [--wall DUR]",
         "list or show saved trails and runs, list or retire a trail's tips, start a run of a saved trail once y \
          confirms it, stop or resume a run",
     ),
@@ -670,9 +670,10 @@ mod tests {
         assert_eq!(trail("/trail stop 0190AB"), Trail::Stop("0190ab".parse().unwrap()));
         let resume = Trail::Resume { run: "0190ab".parse().unwrap(), limits: LimitArgs::default() };
         assert_eq!(trail("/trail resume 0190ab"), resume);
-        let usage = "usage: /trail list | show NAME|RUN | tips NAME [--key KEY] [--all] | tips NAME --retire ID | runs \
-                     | run NAME [@ANT] [--steps N] [--at-once N] [--turns N] [--wall DUR] [--thread THREAD] [ARGS] | \
-                     stop RUN | resume RUN [--steps N] [--at-once N] [--turns N] [--wall DUR]";
+        let usage = "usage: /trail list | show NAME|RUN | tips NAME [--key KEY] [--all] | tips NAME --retire ID \
+                     [--writer ANT] | runs | run NAME [@ANT] [--steps N] [--at-once N] [--turns N] [--wall DUR] \
+                     [--thread THREAD] [ARGS] | stop RUN | resume RUN [--steps N] [--at-once N] [--turns N] [--wall \
+                     DUR]";
         for refused in [
             "/trail",
             "/trail tips",
@@ -695,7 +696,8 @@ mod tests {
         assert!(parse("/trail run review @Lead").is_err());
         assert!(parse("/trail stop review").unwrap_err().contains("hex digits"));
 
-        let tips = |name: &str| TipsArgs { name: name.parse().unwrap(), key: None, all: false, retire: None };
+        let tips =
+            |name: &str| TipsArgs { name: name.parse().unwrap(), key: None, all: false, retire: None, writer: None };
         assert_eq!(trail("/trail tips deploy"), Trail::Tips(tips("deploy")));
         let keyed = TipsArgs { key: Some("build image".to_owned()), all: true, ..tips("deploy") };
         assert_eq!(trail(r#"/trail tips deploy --key "build image" --all"#), Trail::Tips(keyed));

@@ -41,7 +41,7 @@ async fn an_ant_leaves_a_tip_once_another_votes_on_it_and_the_trail_s_board_read
 
     let board = tips.board(&deploy).await.unwrap();
     assert_eq!(board.len(), 1, "only the trail's own tips");
-    let ranked = board.tip(&tip.id, now, Some(&script)).unwrap();
+    let ranked = board.tip(&tip.id, None, now, Some(&script)).unwrap();
     assert_eq!((ranked.tip, ranked.votes), (&tip, &[vote(TipVerdict::Helpful)][..]), "a vote again replaces it");
     assert!(ranked.status.is_live());
 }

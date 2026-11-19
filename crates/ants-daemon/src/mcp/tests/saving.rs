@@ -93,6 +93,7 @@ async fn a_trail_saved_for_a_dream_finding_stands_on_trusted_ground_and_counts_a
         task: served.to_owned(),
         why: "Drafted them.".to_owned(),
         script: script_sha256(&script(served)),
+        untrusted: false,
         at: chrono::Utc::now(),
     };
     ratings.put(&rating).await.unwrap();

@@ -437,9 +437,11 @@ Ants handle tips with three MCP tools ([architecture.md](architecture.md#mcp-too
   a step of a trail still saved leaves tips (not of an inline script, nor of a trail `ants trail rm` or `remove_trail`
   removed while the run went on), and only from a trusted thread: not a thread a webhook or schedule started, nor a
   step of an untrusted run ([Trust](#trust)).
-- **`vote_tip(tip, verdict, reason?, trail?)`**: votes a live tip `helpful`, `stale` (right once, no longer) or
-  `wrong`, with an optional `reason` of up to 300 characters, on the trail of the step being answered or the trail
-  `trail` names. Each ant counts once per tip: voting again replaces its earlier vote. No ant votes on its own tip, nor
+- **`vote_tip(tip, verdict, reason?, trail?, writer?)`**: votes a live tip `helpful`, `stale` (right once, no longer)
+  or `wrong`, with an optional `reason` of up to 300 characters, on the trail of the step being answered or the trail
+  `trail` names. A tip is its writer's and id's: when tips of different writers share the id, `writer` names the one
+  meant, and without it the vote is refused naming the writers. Each ant counts once per tip: voting again replaces its
+  earlier vote. No ant votes on its own tip, nor
   from an untrusted thread. A vote cast answering a step of the tip's trail records the SHA-256 of the step's script.
 - **`trail_tips(trail?, query?, tip_key?, limit?)`**: searches the tips ([Searching](#searching)).
 
@@ -453,13 +455,16 @@ vote was cast on the current one. Tips rank by score, then by last use, latest f
 A tip is retired, out of steps and searches for good, once more ants voted it wrong than helpful, once it was neither
 written nor voted helpful for 90 days, or once a human retired it (`ants trail tips NAME --retire ID`).
 
+Readers take no time ahead of their clock: a tip or a vote dated more than a minute ahead counts for nothing until then,
+so no date set ahead keeps a tip from ageing, retiring or winning a tie.
+
 ### What a step carries
 
 When its trail has live tips, a step's message gets a block of tips after its prompt, before the reply instructions of
 its schema. The block's header marks them as tips from earlier runs of the trail, to verify, not instructions; says how
 many the step carries of how many live tips the trail has; and names `trail_tips` for searching the rest when the step
 runs into trouble. On a trusted run it also names `vote_tip` and `leave_tip`, which an untrusted run's steps cannot
-use. Then come at most 3 tips, adding at most 2 KiB, each with its id, tip key, net votes and an `older script` mark
+use. Then come at most 3 tips, adding at most 2 KiB, each with its id, writer, tip key, net votes and an `older script` mark
 where it applies, its text's further lines indented whatever breaks them and its other control characters left out,
 and a line `End of the tips.` closes the block:
 
@@ -478,7 +483,7 @@ suggests searching them with `trail_tips`, under the step's tip key if it has on
 `trail_tips` searches the live tips of the trail of the step the thread answers, or of the saved trail `trail` names:
 with `tip_key` (by default the step's), that key's tips first, then the trail-wide ones, leaving out other keys'; with
 `query`, only the tips sharing a word with it, in their text or tip key, most shared first; then best ranked first. It
-lists `limit` tips, 10 by default and 50 at most, each with its id, tip key, votes (`+helpful ~stale !wrong`), age,
+lists `limit` tips, 10 by default and 50 at most, each with its id, writer, tip key, votes (`+helpful ~stale !wrong`), age,
 `older script` mark and text, or says that none match. Any thread may read tips, a webhook's included.
 
 ### Tips for humans
@@ -486,9 +491,11 @@ lists `limit` tips, 10 by default and 50 at most, each with its id, tip key, vot
 `ants trail tips NAME` lists a trail's live tips in rank order, `--key KEY` those under one tip key, `--all` the retired
 ones too: each tip's id, tip key, writer, votes, status (`live`, `retired by HUMAN`, `voted wrong` or
 `unused for 90 days`, and `older script` when the trail's saved script differs from the tip's), age and text.
-`--retire ID` retires a tip, naming the human who retired it. It reads a trail's tips whether or not the trail is still
+`--retire ID` retires a tip, naming the human who retired it; `--writer ANT` names its writer when tips of different
+writers share the id. It reads a trail's tips whether or not the trail is still
 saved. In `ants chat`, `/trail tips NAME` shows the same list in the pager. `ants trail rm NAME` removes the trail's
-tips with it, saying how many. `--retire` and `ants trail rm` need human credentials ([cli.md](cli.md#commands)).
+tips with it, saying how many: the trail first, then its tips and ratings, so that none left or put while it goes
+outlives the removal, and run again on a trail removed already, it purges what is left of it. `--retire` and `ants trail rm` need human credentials ([cli.md](cli.md#commands)).
 
 ```sh
 ants trail tips review                  # live tips, best first
@@ -508,8 +515,10 @@ choosing a trail for a task find the saved trails whose runs served such tasks.
 **`rate_trail(run, outcome, task, why)`** rates a run the ant conducted once it ended or was stopped: `outcome` is
 `worked`, `partly` or `failed`; `task` the task the run served, in a line (at most 300 characters), as later searches
 would name it; `why` a concrete reason (at most 500). It rates each saved trail the run took, its route's, with the
-SHA-256 of the script each leg pinned, and each saved trail `save_trail` saved from the run, with that trail's current
-script. One rating per run and trail: rating the run again replaces it, the answer naming the earlier outcome. A child
+SHA-256 of the script each leg pinned, and each saved trail the ant saved from the run with `save_trail`, with that
+trail's current script. A trail the run took that is no longer saved is not rated, the answer saying so, so a rating
+given after `ants trail rm` brings back none it purged. A rating of an untrusted run, one a webhook or schedule
+started ([Trust](#trust)), counts as any other and is marked as an untrusted run's. One rating per run and trail: rating the run again replaces it, the answer naming the earlier outcome. A child
 run is rated by its own id. A run of an inline script rates no trail until its script is saved; when it worked, the
 answer names a saved trail already serving such tasks, else, on a trusted thread, suggests `save_trail`. A `partly` or
 `failed` rating's answer points to `find_trails` for the task.
@@ -525,8 +534,9 @@ as half worked and half failed, a rating older than 90 days or of a script other
 half, and the trails are ranked by a draw from each one's Beta(1 + worked, 1 + failed): proven trails mostly win, and
 those with few ratings get tried. The draws are seeded by the thread and the query, so a search repeated on a thread
 ranks alike. It lists `limit` trails (5 by default, at most 20), each with its description, saver, the share that
-worked over its matching ratings with the counts, or `worth exploring` without any, and its 3 latest matching ratings
-with their outcome, age, task and reason; the description, task and reason show quoted, their line breaks and control
+worked over its matching ratings with the counts, how many of them are untrusted runs', or `worth exploring` without
+any, and its 3 latest matching ratings with their outcome, `an untrusted run's` where it applies, age, task and reason;
+a rating dated more than a minute ahead counts for nothing, here and in every listing, until then; the description, task and reason show quoted, their line breaks and control
 characters escaped, so each stays on its line. On a trusted thread it ends noting that a script of the ant's own runs
 with `run_trail(script: …)` and `save_trail` saves it once it works.
 
