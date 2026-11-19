@@ -975,7 +975,8 @@ fn setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_thr
 }
 
 /// A run conducted by dev-a sends its step to dev-b, both served by one daemon: dev-b's reply comes back through
-/// dev-a's inbox to the run, not to dev-a's harness, and the run's thread shows its notes and its end.
+/// dev-a's inbox to the run, not to dev-a's harness, the run's thread shows its notes and its end, and the end wakes
+/// dev-a once, to rate the run.
 fn a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread() {
     use ants_proto::{
         ThreadId, TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailSource, subject,
@@ -1047,17 +1048,35 @@ fn a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread() {
     let done = format!("Run {started} is done (1 steps, 1 turns):");
     assert!(shown.contains("dev-a -> notes") && shown.contains("phase: asking\n  log: to dev-b"), "{shown}");
     assert!(shown.contains("dev-a -> human") && shown.contains(&done) && shown.contains("stub: "), "{shown}");
+    // The invitation to rate the run, then the stub's answer to it, which goes to the run's owner.
+    let invited = format!("rate_trail(run: \"{started}\"");
+    let start = Instant::now();
+    loop {
+        let shown = run(ants(&["thread", "show", thread.as_str()]));
+        let shown = String::from_utf8_lossy(&shown.stdout).into_owned();
+        if shown.contains("dev-a -> dev-a") && shown.matches(&invited).count() >= 2 {
+            break;
+        }
+        assert!(start.elapsed() < WAIT, "dev-a was not invited to rate the run:\n{shown}\ndaemon log:\n{}", log());
+        std::thread::sleep(Duration::from_millis(200));
+    }
     // A prompt is counted as it ends, which may be after its reply arrived.
     let start = Instant::now();
+    let prompted = |ant: &str, n: u32| format!("ants_prompts_total{{ant=\"{ant}\"}} {n}");
     let exposition = loop {
         let (_, exposition) = get(&metrics, "/metrics");
-        if exposition.lines().any(|l| l == "ants_prompts_total{ant=\"dev-b\"} 1") {
+        if exposition.lines().any(|l| l == prompted("dev-b", 1))
+            && exposition.lines().any(|l| l == prompted("dev-a", 1))
+        {
             break exposition;
         }
         assert!(start.elapsed() < WAIT, "{exposition}");
         std::thread::sleep(Duration::from_millis(50));
     };
-    assert!(!exposition.contains("ants_prompts_total{ant=\"dev-a\"} 1"), "dev-a was prompted: {exposition}");
+    assert!(
+        !exposition.contains(&prompted("dev-a", 2)),
+        "dev-a was prompted by more than the invitation: {exposition}"
+    );
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
 }

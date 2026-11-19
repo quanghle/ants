@@ -70,6 +70,7 @@ mod managers;
 mod messages;
 mod notes;
 mod provider;
+mod ratings;
 mod reactions;
 mod routing;
 mod saving;
@@ -267,8 +268,8 @@ impl Mcp {
     }
 
     /// Reach the ant's trail runs through `trails` for `run_trail`, `trail_status` and `stop_trail`, the trails' tips
-    /// for `leave_tip`, `vote_tip` and `trail_tips`, and the colony's saved trails for `save_trail` and
-    /// `remove_trail`, offered only then.
+    /// for `leave_tip`, `vote_tip` and `trail_tips`, the colony's saved trails for `save_trail` and `remove_trail`,
+    /// and their ratings for `rate_trail` and `find_trails`, offered only then.
     pub fn with_trails(&self, trails: crate::trail::Trails) {
         let _ = self.hub.trails.set(trails);
     }

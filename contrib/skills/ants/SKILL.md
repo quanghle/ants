@@ -178,7 +178,7 @@ A trail is a Python script that a conductor ant's daemon runs to send ants steps
 when the user asks.
 
 ```sh
-ants trail list                                  # saved trails: name, description, phases, who saved each and its run
+ants trail list                                  # saved trails: name, description, phases, who saved each, ratings
 ants trail run triage --args '{"repo": "web"}'   # print what the run may spend; without a terminal, start nothing
 ants trail run triage --args '{"repo": "web"}' --yes  # start it; prints its run id and thread
 ants trail run triage --yes --follow             # also print its steps until it ends, then "done:" and its result
@@ -199,7 +199,13 @@ human puts its questions in the run owner's inbox; answer them with `ants answer
 Ants answering the steps of a saved trail leave tips for its later runs (`leave_tip`), vote on them (`vote_tip`)
 and search them (`trail_tips`) with MCP tools; each step carries the best few. Retire a tip only when the user asks.
 Ants save trails of their own with the `save_trail` MCP tool and remove only those with `remove_trail`; `ants trail
-save` and `ants trail rm` take a human's credentials and act on any trail.
+save` and `ants trail rm` take a human's credentials and act on any trail, `ants trail rm` purging its tips and
+ratings.
+
+- Before writing a trail-shaped script, find a saved trail for the task with the `find_trails` MCP tool, ranked by
+  how its runs served such tasks; `ants trail list` and `ants trail show NAME` show the same ratings.
+- After each run conducted ends, rate it with `rate_trail` (`worked`, `partly` or `failed`, the task, a concrete
+  reason), as the run's end message invites; `ants trail runs` shows each run's ratings in its `RATED` column.
 
 ## Spend
 

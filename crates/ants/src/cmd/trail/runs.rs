@@ -1,15 +1,15 @@
 //! The runs of trails, as their conductors keep them in [`TRAIL_RUNS_BUCKET`]: a human reads every conductor's, by
 //! batched direct gets.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::str::FromStr;
 
 use ants_proto::provider::Starter;
 use ants_proto::{
-    CallAnswer, JournalEntry, PendingCall, QueuedCall, RunId, RunState, StepStage, TRAIL_RUNS_BUCKET, ThreadId,
-    TrailFunction, TrailLeg, TrailRun, TrailSession, TrailStepThread, UserId, Uuid, parse_trail_run_key, trail_run_key,
-    trail_session_key, trail_thread_steps_prefix,
+    CallAnswer, JournalEntry, PendingCall, QueuedCall, RatingOutcome, RunId, RunState, StepStage, TRAIL_RUNS_BUCKET,
+    ThreadId, TrailFunction, TrailLeg, TrailName, TrailRating, TrailRun, TrailSession, TrailStepThread, UserId, Uuid,
+    parse_trail_run_key, trail_run_key, trail_session_key, trail_thread_steps_prefix,
 };
 use anyhow::{Result, bail};
 use async_nats::jetstream;
@@ -42,14 +42,23 @@ pub(super) fn parse<T: serde::de::DeserializeOwned>(key: &str, payload: &[u8]) -
     serde_json::from_slice(payload).inspect_err(|e| tracing::warn!(key, "skipping a malformed run entry: {e}")).ok()
 }
 
+/// The outcome each run's rating gave each trail ([`super::ratings::of_runs`]).
+pub(crate) type Rated = HashMap<RunId, Vec<(TrailName, RatingOutcome)>>;
+
 /// A run's header as `ants trail runs --json` lists it: without its legs' scripts, which `ants trail show RUN --json`
-/// gives.
-pub(super) fn header_json(run: &TrailRun) -> Result<String> {
+/// gives, and with the outcome its ratings gave each trail, `rated`, when it has any.
+pub(super) fn header_json(run: &TrailRun, rated: &Rated) -> Result<String> {
     let mut value = serde_json::to_value(run)?;
     if let Some(legs) = value.get_mut("route").and_then(Value::as_array_mut) {
         for leg in legs.iter_mut().filter_map(Value::as_object_mut) {
             leg.remove("script");
         }
+    }
+    if let Some(rated) = rated.get(&run.run)
+        && let Some(object) = value.as_object_mut()
+    {
+        let ratings = rated.iter().map(|(trail, outcome)| serde_json::json!({"trail": trail, "outcome": outcome}));
+        object.insert("ratings".to_owned(), Value::Array(ratings.collect()));
     }
     Ok(value.to_string())
 }
@@ -63,6 +72,9 @@ pub(super) struct Detail {
     pub(super) journal: Vec<JournalEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) children: Vec<TrailRun>,
+    /// The conductor's ratings of the run, one per trail.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) ratings: Vec<TrailRating>,
 }
 
 /// The run `run`, of whichever conductor keeps it.
@@ -139,7 +151,11 @@ pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detai
     let (pending, queued) = session.map_or_default(|s| (s.pending, s.queued));
     let mut children = list(js, Some(&header.conductor)).await?;
     children.retain(|child| child.parent.as_ref().is_some_and(|parent| parent.run == *run));
-    Ok(Detail { run: header, pending, queued, journal, children })
+    let ratings = super::ratings::of_run(js, &header.conductor, run).await.unwrap_or_else(|e| {
+        tracing::warn!("not reading the run's ratings: {e:#}");
+        Vec::new()
+    });
+    Ok(Detail { run: header, pending, queued, journal, children, ratings })
 }
 
 /// The session the conductor of `run` keeps: the calls the run waits on and those queued. None before its first.
@@ -185,10 +201,12 @@ fn trail(run: &TrailRun) -> String {
     run.first_trail().map_or_else(|| "inline".to_owned(), ToString::to_string)
 }
 
-pub(crate) fn table(runs: &[TrailRun], now: DateTime<Utc>) -> String {
-    let header = ["RUN", "TRAIL", "CONDUCTOR", "OWNER", "STATE", "PHASE", "STEPS", "TURNS", "STARTED", "ENDED"]
-        .map(str::to_owned);
-    let rows: Vec<[String; 10]> = std::iter::once(header)
+/// The runs in columns, with the outcome each one's ratings gave, `rated`.
+pub(crate) fn table(runs: &[TrailRun], rated: &Rated, now: DateTime<Utc>) -> String {
+    let header =
+        ["RUN", "TRAIL", "CONDUCTOR", "OWNER", "STATE", "PHASE", "STEPS", "TURNS", "STARTED", "ENDED", "RATED"]
+            .map(str::to_owned);
+    let rows: Vec<[String; 11]> = std::iter::once(header)
         .chain(runs.iter().map(|r| {
             [
                 r.run.to_string(),
@@ -201,6 +219,7 @@ pub(crate) fn table(runs: &[TrailRun], now: DateTime<Utc>) -> String {
                 format!("{}/{}", r.turns, r.limits.turns),
                 ago(r.started_at, now),
                 r.ended_at.map_or_else(|| "-".to_owned(), |at| ago(at, now)),
+                super::ratings::rated_cell(rated.get(&r.run)),
             ]
         }))
         .collect();
@@ -291,7 +310,7 @@ fn children(children: &[TrailRun]) -> Vec<[String; 4]> {
 
 /// The run's header, limits, route, child runs, pending and queued calls and journal.
 pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
-    let Detail { run: r, pending, queued, journal, children: kids } = detail;
+    let Detail { run: r, pending, queued, journal, children: kids, ratings } = detail;
     let mut out = match r.first_trail() {
         Some(trail) => format!("run {} of trail {trail}\n", r.run),
         None => format!("run {} of an inline script\n", r.run),
@@ -374,6 +393,9 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
     if !journal.is_empty() {
         out.push_str("\njournal:\n");
         out.push_str(&indented(&super::columns(&answered(r, journal))));
+    }
+    if !ratings.is_empty() {
+        out.push_str(&super::ratings::of_run_section(ratings, now));
     }
     out
 }

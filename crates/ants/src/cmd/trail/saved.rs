@@ -1,10 +1,11 @@
 //! Saved trails: the colony's, in [`TRAILS_BUCKET`], and this machine's, the `.py` files of `~/.ants/trails`. A name
 //! both have runs the colony's.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use ants_proto::{RunId, SavedTrail, Saver, TRAILS_BUCKET, TrailName, UserId, Uuid};
+use ants_proto::{RatingSummary, RunId, SavedTrail, Saver, TRAILS_BUCKET, TrailName, UserId, Uuid};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -136,10 +137,18 @@ fn parse(key: &str, payload: &[u8]) -> Option<SavedTrail> {
     checked.inspect_err(|e| tracing::warn!(key, "skipping a saved trail: {e:#}")).ok()
 }
 
-/// Remove the colony's trail `name` and purge its tips, refused when the colony has none of that name; `local` is the
-/// directory of this machine's trails, whose file of that name the refusal names. Returns how many entries of tips and
-/// votes went. The tips go first, so that a failed purge leaves the trail to remove again.
-pub(super) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailName) -> Result<u64> {
+/// What `ants trail rm` purged with a trail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Purged {
+    /// Entries of tips and votes.
+    pub(super) tips: u64,
+    pub(super) ratings: u64,
+}
+
+/// Remove the colony's trail `name` and purge its tips and ratings, refused when the colony has none of that name;
+/// `local` is the directory of this machine's trails, whose file of that name the refusal names. The tips and ratings
+/// go first, so that a failed purge leaves the trail to remove again.
+pub(super) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailName) -> Result<Purged> {
     if latest_in(js, TRAILS_BUCKET, &format!("$KV.{TRAILS_BUCKET}.{name}")).await?.is_empty() {
         let path = self::local(local).into_iter().find_map(|t| match t.source {
             Source::Local { path } if t.name == *name => Some(path),
@@ -152,12 +161,15 @@ pub(super) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailNa
             None => bail!("the colony saved no trail {name}"),
         }
     }
-    let purged = super::tips::purge(js, name)
+    let tips = super::tips::purge(js, name)
         .await
         .with_context(|| format!("purging the tips of trail {name}, which stays saved"))?;
+    let ratings = super::ratings::purge(js, name)
+        .await
+        .with_context(|| format!("purging the ratings of trail {name}, which stays saved"))?;
     let kv = js.get_key_value(TRAILS_BUCKET).await.context("opening ants_trails (`ants init` creates it)")?;
     kv.delete(name.as_str()).await.with_context(|| format!("removing trail {name}"))?;
-    Ok(purged)
+    Ok(Purged { tips, ratings })
 }
 
 /// This machine's trails, the `.py` files of `dir` that pass [`ants_trail::check`], each named by its file's stem as a
@@ -212,23 +224,35 @@ pub(crate) struct Listed {
     /// A local trail of a name the colony has too, whose trail runs instead.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(super) shadowed: bool,
+    /// The ratings of the trail that runs under its name, the colony's of a shadowed one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) ratings: Option<RatingSummary>,
 }
 
 /// The colony's trails, then the local ones, each by name.
 pub(super) fn listing(colony: Vec<SavedTrail>, local: Vec<Trail>) -> Vec<Listed> {
     let names: Vec<TrailName> = colony.iter().map(|t| t.name.clone()).collect();
-    let colony = colony.into_iter().map(|t| Listed { trail: t.into(), shadowed: false });
-    let local = local.into_iter().map(|trail| Listed { shadowed: names.contains(&trail.name), trail });
+    let colony = colony.into_iter().map(|t| Listed { trail: t.into(), shadowed: false, ratings: None });
+    let local = local.into_iter().map(|trail| Listed { shadowed: names.contains(&trail.name), trail, ratings: None });
     colony.chain(local).collect()
 }
 
-/// The listed trails in columns, the run an ant saved one from and their waypoints in columns of their own when a trail
-/// has any.
+/// `listed` with the ratings in `summaries` of the trails that run under their names.
+pub(super) fn rated(mut listed: Vec<Listed>, summaries: &BTreeMap<TrailName, RatingSummary>) -> Vec<Listed> {
+    for entry in listed.iter_mut().filter(|entry| !entry.shadowed) {
+        entry.ratings = summaries.get(&entry.trail.name).cloned();
+    }
+    listed
+}
+
+/// The listed trails in columns, the run an ant saved one from, their waypoints and their ratings (worked/partly/
+/// failed, and the latest reason) in columns of their own when a trail has any.
 pub(crate) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
-    let header = ["NAME", "SOURCE", "SAVED BY", "SAVED", "FROM RUN", "PHASES", "WAYPOINTS", "DESCRIPTION"];
+    let header =
+        ["NAME", "SOURCE", "SAVED BY", "SAVED", "FROM RUN", "PHASES", "WAYPOINTS", "DESCRIPTION", "RATINGS", "LATEST"];
     let rows: Vec<Vec<String>> = listed
         .iter()
-        .map(|Listed { trail, shadowed }| {
+        .map(|Listed { trail, shadowed, ratings }| {
             let (source, by, at, from) = match &trail.source {
                 Source::Colony { saved_by, saved_from, saved_at } => (
                     "colony".to_owned(),
@@ -245,10 +269,12 @@ pub(crate) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
                 |items: &[String]| if items.is_empty() { "-".to_owned() } else { excerpt(&items.join(", "), 40) };
             let description =
                 if trail.description.is_empty() { "-".to_owned() } else { excerpt(&trail.description, 60) };
-            vec![trail.name.to_string(), source, by, at, from, list(&trail.phases), list(&trail.waypoints), description]
+            let [counts, latest] = super::ratings::cells(ratings.as_ref());
+            let (phases, waypoints) = (list(&trail.phases), list(&trail.waypoints));
+            vec![trail.name.to_string(), source, by, at, from, phases, waypoints, description, counts, latest]
         })
         .collect();
-    super::columns(&filled(&header, &["FROM RUN", "WAYPOINTS"], rows))
+    super::columns(&filled(&header, &["FROM RUN", "WAYPOINTS", "RATINGS", "LATEST"], rows))
 }
 
 /// `rows` under `header`, without the `optional` columns that no row fills, all of whose cells are `-`.
@@ -270,6 +296,7 @@ pub(crate) struct Found {
     pub(super) trail: Trail,
     /// The local file of the same name the colony's trail runs instead of.
     pub(super) shadows: Option<PathBuf>,
+    pub(super) ratings: Option<RatingSummary>,
 }
 
 /// The trail `name`: the colony's, else the one of `local`, the directory of this machine's trails.
@@ -281,9 +308,9 @@ pub(super) async fn find(js: &jetstream::Context, local: &Path, name: &TrailName
                 Source::Local { path } => Some(path),
                 Source::Colony { .. } => None,
             });
-            Ok(Found { trail: saved.into(), shadows })
+            Ok(Found { trail: saved.into(), shadows, ratings: None })
         }
-        (None, Some(trail)) => Ok(Found { trail, shadows: None }),
+        (None, Some(trail)) => Ok(Found { trail, shadows: None, ratings: None }),
         (None, None) => {
             bail!("no trail {name}, either in the colony or in {}: `ants trail list` lists them", local.display())
         }
@@ -298,17 +325,20 @@ pub(super) struct Shown<'a> {
     script: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     shadows: Option<&'a Path>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ratings: Option<&'a RatingSummary>,
 }
 
 impl<'a> From<&'a Found> for Shown<'a> {
     fn from(found: &'a Found) -> Self {
-        Self { trail: &found.trail, script: &found.trail.script, shadows: found.shadows.as_deref() }
+        let (trail, shadows, ratings) = (&found.trail, found.shadows.as_deref(), found.ratings.as_ref());
+        Self { trail, script: &trail.script, shadows, ratings }
     }
 }
 
-/// The trail's meta and where it is, then its script.
+/// The trail's meta and where it is, its ratings, then its script.
 pub(crate) fn render(found: &Found, now: DateTime<Utc>) -> String {
-    let Found { trail, shadows } = found;
+    let Found { trail, shadows, ratings } = found;
     let mut out = format!("trail {}\n", trail.name);
     match &trail.source {
         Source::Colony { saved_by, saved_from, saved_at } => {
@@ -334,6 +364,9 @@ pub(crate) fn render(found: &Found, now: DateTime<Utc>) -> String {
     }
     if !trail.waypoints.is_empty() {
         let _ = writeln!(out, "waypoints: {}", trail.waypoints.join(", "));
+    }
+    if let Some(ratings) = ratings.as_ref().filter(|ratings| ratings.counts.total() > 0) {
+        out.push_str(&super::ratings::section(ratings, now));
     }
     out.push('\n');
     out.push_str(&trail.script);

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ants_proto::{PendingCall, QueuedCall, RunId, RunState, TrailFunction, TrailLeg, TrailRun, TrailSession};
 use ants_trail::{Run, RunState as Session};
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 
 use super::{Book, Leg, Slot, Step, Trails, engine_limits, locked, steps};
 
@@ -119,9 +119,16 @@ impl Trails {
 
     pub(super) async fn restore_run(&self, run: &RunId) -> Result<()> {
         let store = &self.inner.store;
-        let header = store.header(run).await?;
-        let Some(header) = header.filter(|header| !header.finished()) else {
-            return store.list(run, false).await;
+        let header = match store.header(run).await? {
+            // Ended before the invitation to rate it was stored.
+            Some(header) if header.finished() => {
+                if !self.invite(&header).await {
+                    bail!("the invitation to rate the ended run is not stored");
+                }
+                return store.list(run, false).await;
+            }
+            Some(header) => header,
+            None => return store.list(run, false).await,
         };
         let slot = self.load(header, false).await?;
         locked(&self.inner.runs).insert(run.clone(), slot);

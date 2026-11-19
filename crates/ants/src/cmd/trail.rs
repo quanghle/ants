@@ -3,12 +3,15 @@
 //!
 //! The saved trails are those of [`ants_proto::TRAILS_BUCKET`], which humans and ants put and remove, and those of
 //! `~/.ants/trails/*.py` on this machine ([`saved`]); the tips are those of [`ants_proto::TRAIL_TIPS_BUCKET`], which
-//! humans retire and purge with their trail ([`tips`]); the runs are the records conductors keep in
+//! humans retire and purge with their trail ([`tips`]); the ratings are those of
+//! [`ants_proto::TRAIL_RATINGS_BUCKET`], which conductors give their runs and humans purge with their trail
+//! ([`ratings`]); the runs are the records conductors keep in
 //! [`ants_proto::TRAIL_RUNS_BUCKET`], which humans read ([`runs`], [`follow`]), and humans ask a run's conductor to
 //! start, stop and resume one ([`control`], [`start`]).
 
 pub(crate) mod control;
 mod follow;
+pub(crate) mod ratings;
 pub(crate) mod runs;
 pub(crate) mod saved;
 pub(crate) mod start;
@@ -261,7 +264,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
             let (_, js) = nats.connect("ants-cli").await?;
             match find(&js, what, nats.me.role.is_human()).await? {
                 Found::Trail(found) if follow => bail!("--follow follows a run; {} is a trail", found.trail.name),
-                Found::Trail(found) if json => println!("{}", serde_json::to_string(&saved::Shown::from(&found))?),
+                Found::Trail(found) if json => println!("{}", serde_json::to_string(&saved::Shown::from(&*found))?),
                 Found::Trail(found) => print!("{}", saved::render(&found, Utc::now())),
                 Found::Run(run) => show_run(nats, &js, run, json, follow).await?,
             }
@@ -288,15 +291,17 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
             human(nats, "removing a trail")?;
             let (_, js) = nats.connect("ants-cli").await?;
             let purged = saved::remove(&js, &saved::local_dir()?, &name).await?;
-            println!("removed trail {name}{}", tips::purged(purged));
+            let rated = ratings::purged(purged.ratings, purged.tips > 0);
+            println!("removed trail {name}{rated}{}", tips::purged(purged.tips));
         }
         TrailCommand::Runs { ant, json } => {
             human(nats, "reading the runs of trails")?;
             let (_, js) = nats.connect("ants-cli").await?;
             let listed = runs::list(&js, ant.as_ref()).await?;
+            let rated = ratings::of_runs(&ratings::read_or_none(&js, ant.as_ref()).await);
             if json {
                 for run in &listed {
-                    println!("{}", runs::header_json(run)?);
+                    println!("{}", runs::header_json(run, &rated)?);
                 }
             } else if listed.is_empty() {
                 match ant {
@@ -304,7 +309,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
                     None => println!("no runs of trails"),
                 }
             } else {
-                println!("{}", runs::table(&listed, Utc::now()));
+                println!("{}", runs::table(&listed, &rated, Utc::now()));
             }
         }
     }
@@ -352,14 +357,15 @@ async fn show_run(nats: &Nats<'_>, js: &jetstream::Context, run: RunId, json: bo
     Ok(())
 }
 
-/// The saved trails `ants trail list` lists: the colony's, then this machine's.
+/// The saved trails `ants trail list` lists: the colony's, then this machine's, with their ratings.
 pub(crate) async fn saved_trails(js: &jetstream::Context) -> Result<Vec<saved::Listed>> {
-    Ok(saved::listing(saved::colony(js).await?, saved::local(&saved::local_dir()?)))
+    let listed = saved::listing(saved::colony(js).await?, saved::local(&saved::local_dir()?));
+    Ok(saved::rated(listed, &ratings::summaries(ratings::read_or_none(js, None).await)))
 }
 
 /// What `ants trail show` found.
 pub(crate) enum Found {
-    Trail(saved::Found),
+    Trail(Box<saved::Found>),
     Run(RunId),
 }
 
@@ -371,7 +377,13 @@ pub(crate) async fn find(js: &jetstream::Context, what: Shown, human: bool) -> R
         Shown::Trail(name) => name,
     };
     let e = match saved::find(js, &saved::local_dir()?, &name).await {
-        Ok(found) => return Ok(Found::Trail(found)),
+        Ok(mut found) => {
+            found.ratings = ratings::of_trail(js, &name).await.unwrap_or_else(|e| {
+                tracing::warn!("not reading the ratings of trail {name}: {e:#}");
+                None
+            });
+            return Ok(Found::Trail(Box::new(found)));
+        }
         Err(e) => e,
     };
     let Some(pick) = name.as_str().parse::<runs::Pick>().ok().filter(|_| human) else { return Err(e) };

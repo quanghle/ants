@@ -51,7 +51,7 @@ fn a_rating_is_checked_against_its_key_and_bounds() {
         TrailRating { why: String::new(), ..good.clone() },
         TrailRating { why: "w".repeat(MAX_RATING_WHY + 1), ..good.clone() },
         TrailRating { script: SHA.to_uppercase(), ..good.clone() },
-        TrailRating { script: SHA[1..].to_owned(), ..good.clone() },
+        TrailRating { script: SHA[1..].to_owned(), ..good },
     ];
     for rating in broken {
         assert!(matches!(rating.check(), Err(Error::InvalidRating(_))), "{rating:?}");

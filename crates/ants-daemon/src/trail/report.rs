@@ -234,7 +234,7 @@ fn end_state(run: &TrailRun, resume: Option<&RunId>) -> Option<String> {
 }
 
 /// `text`, cut to at most `max` characters, the last an ellipsis when cut.
-fn clip(text: &str, max: usize) -> String {
+pub(crate) fn clip(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_owned();
     }

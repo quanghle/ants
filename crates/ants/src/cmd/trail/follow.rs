@@ -184,7 +184,7 @@ pub(super) async fn follow(js: &jetstream::Context, run: TrailRun, json: bool) -
         }
     };
     if json {
-        println!("{}", header_json(&last)?);
+        println!("{}", header_json(&last, &super::runs::Rated::default())?);
     } else if let Ok(result) = &result {
         println!("done: {result}");
     }

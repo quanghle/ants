@@ -9,6 +9,7 @@
 mod children;
 mod control;
 mod driver;
+mod invite;
 mod limits;
 mod load;
 mod ratings;
@@ -47,8 +48,10 @@ use saved::Saved;
 use steps::Taken;
 use store::Store;
 
+pub use invite::{EndWait, rating_hint};
 pub use limits::AskedLimits;
-pub use ratings::{Rated, Ratings};
+pub use ratings::{RatedTrail, Ratings};
+pub(crate) use report::clip;
 pub use saved::{PreparedSave, SaveFrom, SaveOutcome, SaveTrail, SavedEntry};
 pub(crate) use saved::{age, from_run};
 pub use tips::Tips;
@@ -165,6 +168,8 @@ struct Inner {
     threads: Mutex<HashMap<ThreadId, Step>>,
     wake: mpsc::UnboundedSender<RunId>,
     woken: tokio::sync::Mutex<mpsc::UnboundedReceiver<RunId>>,
+    /// The run_trail calls waiting on the end of the runs they started ([`EndWait`]).
+    waiters: Mutex<HashMap<RunId, tokio::sync::oneshot::Sender<TrailRun>>>,
 }
 
 #[derive(Clone)]
@@ -309,6 +314,7 @@ impl Trails {
             threads: Mutex::default(),
             wake,
             woken: tokio::sync::Mutex::new(woken),
+            waiters: Mutex::default(),
         };
         Ok(Self { inner: Arc::new(inner) })
     }
@@ -496,6 +502,7 @@ impl Trails {
             self.save_header(&slot).await
         };
         stored.await.map_err(|e| format!("storing the run: {e:#}"))?;
+        self.hand_end(&slot.header());
         // The steps of a leg the run left by a goto() and has not given up yet, given up once the stored header lists
         // the next leg.
         let left = std::mem::take(&mut slot.book().left);
@@ -680,7 +687,9 @@ impl Trails {
     /// Take `message`, on the thread of a step to `to` the run `run` no longer waits on, when it is a notice, an
     /// escalation or a further reply of `to`, reporting it on the run's thread.
     async fn take_retired(&self, run: &RunId, to: &UserId, message: &Envelope, answerer: &UserId) -> bool {
-        let reply = answerer == to && message.trail_step.is_none();
+        // The conductor's own message replying to none, as its invitation to rate a run started there, is no reply.
+        let own = message.from == self.inner.ant && message.to == self.inner.ant && message.in_reply_to.is_none();
+        let reply = answerer == to && message.trail_step.is_none() && !own;
         if !reply && message.notice.is_none() && message.escalation.is_none() {
             return false;
         }

@@ -111,9 +111,9 @@ both have, the colony's trail runs, so every conductor runs the same trail by th
 
 ```sh
 ants trail save review.py               # check and save for the colony; replaces a trail of that name
-ants trail list                         # the colony's trails, then this machine's
-ants trail show review                  # meta, source and script
-ants trail rm review                    # the colony's only: a local file stays until deleted
+ants trail list                         # the colony's trails, then this machine's, with their ratings
+ants trail show review                  # meta, source, latest ratings and script
+ants trail rm review                    # the colony's only, with its tips and ratings: a local file stays until deleted
 ```
 
 In `ants chat`, `/trail list` and `/trail show NAME` show what `ants trail list` and `ants trail show` print, in the
@@ -144,9 +144,14 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   a saved trail (`name`) or of a script of its own (`script`), with `args`, on the current thread, owned by the thread's
   owner, under `limits` (`{"steps", "at_once", "turns", "wall"}`, as [Limits](#limits) names them; each left out takes
   its default). It returns the run's id at once, or with `wait: true` the run's result or error, waiting up to `timeout`
-  (default `5m`, at most `30m`), else the run's id while the run goes on. `trail_status` tells the ant how a run it
-  conducts stands, or lists those not ended, and `stop_trail` stops one ([Restarts, stops and
-  resumes](#restarts-stops-and-resumes)). The tools are offered only while the bus keeps trail runs.
+  (default `5m`, at most `30m`), else the run's id while the run goes on. A run's end invites the ant to rate it: the
+  waited answer carries the `rate_trail` line, else the end wakes the ant with a message of its own ([The run
+  thread](#the-run-thread), [Rating and finding trails](#rating-and-finding-trails)). For a `script` whose meta
+  description matches saved trails rated worked more often than failed, the answer adds `Saved trails with good records
+  for such tasks: NAME (N worked, N partly, N failed), …; run_trail(name: …) runs one.`, naming up to three.
+  `trail_status` tells the ant how a run it conducts stands (an ended one's with the `rate_trail` line), or lists those
+  not ended, and `stop_trail` stops one ([Restarts, stops and resumes](#restarts-stops-and-resumes)). The tools are
+  offered only while the bus keeps trail runs.
 
   Once an inline script works and its steps will recur, **`save_trail(name, script?, run?, replace?)`** saves it for
   the colony as the ant's: a `script`, or the script of a finished `run` of an inline script the ant conducted (done
@@ -255,6 +260,17 @@ A run reports on the thread it started with, as its conductor:
   the result (cut at 8000 characters, `ants trail show <run>` showing the rest), the error (naming
   `ants trail resume <run>` when a limit was met), or who stopped it and how to resume it; a run of more than one leg
   ends it with a line `route: <route>`.
+- **Rating invitation:** once the run is done or failed, child runs included, the conductor's daemon also messages the
+  conductor itself on the run thread, answering to the run's owner: `[ants] Run <run> of trail <name> ended done (N
+  steps, M turns). Result: …` (or `ended failed (…): <error>`), with the run's args, its route, the call a child run
+  answers, the `rate_trail(run: …)` line ([Rating and finding trails](#rating-and-finding-trails)), for a failed run a
+  `find_trails` line, and `After rating, end the turn with complete: nothing needs a reply.` It wakes the conductor
+  like any message, spending a turn of its budget, and asks no reply, so rating starts no exchange. A `run_trail` call
+  that waited and took the run's end carries the same line in its answer instead, and no message is sent; a stopped
+  run, which may be resumed, gets none. The run stays listed in `<ant>.runs` until the message is sent, and its id is
+  derived from the run and the time it ended, so a daemon restarted in between sends it again as the same message,
+  which the bus keeps once. For a run on an untrusted thread the message is narrowed as the run's steps are, the
+  default webhook rules letting `rate_trail` through ([Trust](#trust)).
 
 `ants trail runs` lists the runs of every conductor, or `--ant CONDUCTOR`'s, each with the trail it started (its route
 once it went on by `goto()`); `ants trail show RUN` prints a run (its id or a unique start of one): state, phase,
@@ -304,7 +320,9 @@ A run takes the trust of the thread it started on (its origin):
   refused (`a run started from a webhook's thread
   runs only saved trails`), a goto to one too (`… goes only to saved trails`), and each step's thread is narrowed to
   the read-only tool rules webhook threads get by default ([config.md](config.md#tool-permissions)). A schedule
-  starting a trail sets no `allow` of its own.
+  starting a trail sets no `allow` of its own. Such a run is rated all the same: on its own thread, `rate_trail` rates
+  that run and no other, and any trusted thread rates any run the ant conducted; every other untrusted thread is
+  refused. `find_trails` reads from any thread.
 
 A run's legs and child runs keep its origin, so a goto or `trail()` never makes a run more trusted.
 
@@ -410,6 +428,44 @@ Each ant writes only its own tips and votes, under keys naming it; a human rewri
 a trail's tips when removing the trail ([auth.md](auth.md#wire-acls-and-verification-invariants)). An ant's
 `remove_trail` purges none.
 
+## Rating and finding trails
+
+Tips tell how to walk a trail; ratings tell which trail to take. Each conductor rates the runs it conducted, and ants
+choosing a trail for a task find the saved trails whose runs served such tasks.
+
+**`rate_trail(run, outcome, task, why)`** rates a run the ant conducted once it ended or was stopped: `outcome` is
+`worked`, `partly` or `failed`; `task` the task the run served, in a line (at most 300 characters), as later searches
+would name it; `why` a concrete reason (at most 500). It rates each saved trail the run took, its route's, with the
+SHA-256 of the script each leg pinned, and each saved trail `save_trail` saved from the run, with that trail's current
+script. One rating per run and trail: rating the run again replaces it, the answer naming the earlier outcome. A child
+run is rated by its own id. A run of an inline script rates no trail until its script is saved; when it worked, the
+answer names a saved trail already serving such tasks, else, on a trusted thread, suggests `save_trail`. A `partly` or
+`failed` rating's answer points to `find_trails` for the task.
+
+**`find_trails(query, limit?)`** lists the saved trails (the colony's and the conductor machine's) for a task: those
+whose name and description match `query`, and those rated on a task matching it. Matching takes the words of each text
+as [tips' search](#searching) does (lowercase, three characters or more, common English words left out), each reduced
+to a stem by a light English stemmer (a plural, `-ing` or `-ed`, then a suffix such as `-ation`, `-ment`, `-ness`, `-er`
+or `-ly`, then a final `e`, each only when three letters or more remain), and a text matches when it shares two of the
+query's stems, or all of them when the query has fewer. Each trail's ratings on matching tasks are counted, a `partly`
+as half worked and half failed, a rating older than 90 days or of a script other than the trail's current one weighing
+half, and the trails are ranked by a draw from each one's Beta(1 + worked, 1 + failed): proven trails mostly win, and
+those with few ratings get tried. The draws are seeded by the thread and the query, so a search repeated on a thread
+ranks alike. It lists `limit` trails (5 by default, at most 20), each with its description, saver, the share that
+worked over its matching ratings with the counts, or `worth exploring` without any, and its 3 latest matching ratings
+with their outcome, age, task and reason; on a trusted thread it ends noting that a script of the ant's own runs with
+`run_trail(script: …)` and `save_trail` saves it once it works.
+
+`ants trail list` adds the columns `RATINGS` (worked/partly/failed) and `LATEST` (the latest reason) when any trail has
+ratings, `ants trail show NAME` the counts and the 3 latest ratings, each with its run, conductor, age, task and
+reason, `ants trail runs` a `RATED` column (each trail's outcome) and `ants trail show RUN` the run's ratings; `--json`
+carries them under `ratings`. In `ants chat`, `/trail list`, `/trail show` and `/trail runs` show the same.
+`ants trail rm NAME` purges the trail's ratings with its tips; an ant's `remove_trail` purges none, so a trail saved
+later under that name inherits them, weighing half as of another script.
+
+Each ant writes only its own ratings, under keys naming it; humans read them all and purge a trail's when removing the
+trail ([auth.md](auth.md#wire-acls-and-verification-invariants)).
+
 ## Storage
 
 | Store | Kept | Holds |
@@ -417,8 +473,9 @@ a trail's tips when removing the trail ([auth.md](auth.md#wire-acls-and-verifica
 | KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, waypoints, script, who saved it (a human or an ant) and when, and the run an ant saved it from. |
 | KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (its route: each leg's trail or inline script, waypoint, args, first call id, start and steps; owner, origin, limits, state (a failed one's broken `limit`), spending, thread, parent run, times), `<ant>.<run>.session` the current leg's dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`, call ids numbered on across legs), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out. |
 | KV `ants_trail_tips` | never expires | The [tips](#tips) left on saved trails and their votes, each under the trail and the ant that wrote it: `<trail>.<writer>.<id>` a tip (trail, id, writer, text, tip key, run, script's SHA-256, time written, and who retired it and when), `<trail>.<voter>.<writer>.<id>` a vote on it (voter, verdict, reason, the SHA-256 of the script voted on, time). |
+| KV `ants_trail_ratings` | never expires | The [ratings](#rating-and-finding-trails) conductors gave saved trails, `<trail>.<conductor>.<run>` one per run and trail: trail, conductor, run, outcome, task, reason, the SHA-256 of the script rated, time. |
 
-`ants init` creates the three buckets, and `ants doctor` checks them. A run's states are `running`, `waiting` (on human
+`ants init` creates the four buckets, and `ants doctor` checks them. A run's states are `running`, `waiting` (on human
 steps only), `stopped`, `done` and `failed`. Its records stay 37 days after their last write: 30 days of keeping plus
 the longest wall time, so a finished run stays at least 30 days. The full layout is in
 [architecture.md](architecture.md#stores-and-subjects).

@@ -193,7 +193,7 @@ async fn humans_retire_tips_whether_their_trail_is_saved_or_not_and_removing_it_
     assert_eq!(error, "trail deploy has no tip cccccccc: `ants trail tips deploy --all` lists them");
 
     let local = dir.join("trails");
-    assert_eq!(saved::remove(&js, &local, &name).await.unwrap(), 3, "two tips and a vote");
+    assert_eq!(saved::remove(&js, &local, &name).await.unwrap().tips, 3, "two tips and a vote");
     assert!(saved::get(&js, &name).await.unwrap().is_none());
     assert!(tips::read(&js, &name).await.unwrap().0.is_empty());
     assert_eq!(tips::read(&js, &"build".parse().unwrap()).await.unwrap().0.len(), 1, "another trail's tips stay");

@@ -190,6 +190,8 @@ const MCP: &[(&str, Chat)] = &[
     ("trail_tips", Slash("trail")),
     ("save_trail", Shown("who saved a trail, and from which run: /trail list, /trail show NAME")),
     ("remove_trail", Shown("the saved trails: /trail list")),
+    ("rate_trail", Shown("a trail's ratings, beside its runs: /trail show NAME, /trail runs")),
+    ("find_trails", Shown("the trails with their ratings: /trail list")),
     ("human_queue", Shown("home: what waits on the human")),
     ("answer_for_human", Slash("answer")),
     ("send_for_human", Shown(SEND)),

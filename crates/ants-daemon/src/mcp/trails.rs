@@ -19,10 +19,10 @@ use super::messages::ask_wait;
 use super::tools::{Tools, text};
 use crate::provider::context::{origin, settled};
 use crate::sync::MutexExt as _;
-use crate::trail::{AskedLimits, RunStatus, StartRun, Trails};
+use crate::trail::{AskedLimits, RunStatus, StartRun, Trails, rating_hint};
 
-/// How often a waiting call looks for the run's end.
-const POLL: Duration = Duration::from_millis(500);
+/// Most saved trails a run of a script points to ([`well_rated`]).
+const WELL_RATED: usize = 3;
 /// Most characters of a result `trail_status` shows.
 const MAX_RESULT: usize = 4000;
 /// Why the trail tools are refused when the ant conducts no runs.
@@ -70,8 +70,10 @@ fn description() -> String {
          thread a webhook started), with `args` as its JSON input and `limits` raising or lowering what it may spend \
          (`steps`, `at_once`, `turns`, `wall`). The run reports on the current thread and answers to the thread's \
          owner, who gets its end there. Returns the run id at once, or with `wait` the run's result or error (waiting \
-         at most `timeout`). trail_status tells how a run stands and stop_trail stops one. Once an inline script works and its steps will \
-         recur, save_trail saves it for every ant to run by name. Write a trail for work \
+         at most `timeout`). trail_status tells how a run stands and stop_trail stops one. Before writing a script, \
+         find_trails finds the saved trails for the task; once a run ends, rate_trail rates it, as its end invites. \
+         Once an inline script works and its steps will recur, save_trail saves it for every ant to run by name. Write \
+         a trail for work \
          whose steps are known in code: fan-outs, pipelines, verification rounds, routes through saved trails.\n\n{}",
         crate::trail::GUIDE
     )
@@ -102,22 +104,43 @@ impl Hub {
             "the thread's origin cannot be read".to_owned()
         })?;
         let origin = settled(stored, origin(&current, None, &self.humans.humans()));
+        let described = match &trail {
+            TrailSource::Script(script) => crate::trail::script_description(script),
+            TrailSource::Saved(_) => None,
+        };
         let start =
             StartRun { trail, args: args.args, owner: current.owner.clone(), origin, thread: thread.clone(), limits };
-        let run = trails.start(start).await?;
+        let Some(wait) = wait else {
+            let run = trails.start(start).await?;
+            tracing::info!(%thread, %run, "trail run started from a tool call");
+            let started = format!(
+                "Started run {run} on thread {thread}; its end goes to the thread's owner there, and invites this \
+                 ant's rating of it."
+            );
+            return Ok(format!("{started}{}", well_rated(trails, described.as_deref()).await));
+        };
+        let mut waiting = trails.start_waited(start).await?;
+        let run = waiting.run().clone();
         tracing::info!(%thread, %run, "trail run started from a tool call");
         let started = format!("Started run {run} on thread {thread}; its end goes to the thread's owner there.");
-        let Some(wait) = wait else { return Ok(started) };
+        let suggested = well_rated(trails, described.as_deref()).await;
+        let unended = |why: String| format!("{started} {why} Its end invites this ant's rating of it.{suggested}");
         let ended = tokio::select! {
-            ended = ended(trails, &run) => ended?,
-            () = tokio::time::sleep(wait) => return Ok(format!("{started} It had not ended after {}.", ants_proto::duration::format(wait))),
-            () = cancelled => return Ok(format!("{started} The wait was cancelled.")),
+            biased;
+            ended = waiting.ended() => ended,
+            () = tokio::time::sleep(wait) => {
+                return Ok(unended(format!("It had not ended after {}.", ants_proto::duration::format(wait))));
+            }
+            () = cancelled => return Ok(unended("The wait was cancelled.".to_owned())),
         };
-        Ok(match ended {
-            RunState::Done { result } => format!("Run {run} is done. Result:\n{result}"),
-            RunState::Failed { error, .. } => format!("Run {run} failed: {error}"),
-            RunState::Stopped { by } => format!("Run {run} was stopped by {by}."),
-            RunState::Running | RunState::Waiting => format!("{started} It is still running."),
+        let Some(header) = ended else { return Ok(unended("Its end cannot be waited on.".to_owned())) };
+        Ok(match &header.state {
+            RunState::Done { result } => {
+                format!("Run {run} is done. Result:\n{result}\n{}{suggested}", rating_hint(&header))
+            }
+            RunState::Failed { error, .. } => format!("Run {run} failed: {error}\n{}{suggested}", rating_hint(&header)),
+            RunState::Stopped { by } => format!("Run {run} was stopped by {by}.{suggested}"),
+            RunState::Running | RunState::Waiting => unended("It is still running.".to_owned()),
         })
     }
 
@@ -238,6 +261,9 @@ fn status_text(status: &RunStatus, now: DateTime<Utc>) -> String {
         let cut = if shown.len() < result.len() { "…" } else { "" };
         let _ = write!(out, "\nResult:\n{shown}{cut}");
     }
+    if header.finished() {
+        let _ = write!(out, "\n{}", rating_hint(header));
+    }
     out
 }
 
@@ -269,15 +295,22 @@ fn listing(runs: &[TrailRun], now: DateTime<Utc>) -> String {
     out
 }
 
-/// The state `run` ended in, once it ends or is stopped.
-async fn ended(trails: &Trails, run: &RunId) -> Result<RunState, String> {
-    loop {
-        let header = trails.run(run).await?.ok_or_else(|| format!("run {run} is gone"))?;
-        if header.state.finished() || matches!(header.state, RunState::Stopped { .. }) {
-            return Ok(header.state);
+/// The line naming the saved trails with good records for tasks as `described`, a script's description, best effort:
+/// nothing without a description, a trail matching it or one reading.
+async fn well_rated(trails: &Trails, described: Option<&str>) -> String {
+    let Some(described) = described else { return String::new() };
+    let found = match trails.well_rated(described, WELL_RATED).await {
+        Ok(found) => found,
+        Err(e) => {
+            tracing::warn!(error = e, "finding the saved trails with good records for a script");
+            return String::new();
         }
-        tokio::time::sleep(POLL).await;
+    };
+    if found.is_empty() {
+        return String::new();
     }
+    let named: Vec<String> = found.iter().map(|(trail, counts)| format!("{trail} ({counts})")).collect();
+    format!("\nSaved trails with good records for such tasks: {}; run_trail(name: …) runs one.", named.join(", "))
 }
 
 #[tool_router(router = trails_router, vis = "pub(super)")]

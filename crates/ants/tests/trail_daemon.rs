@@ -39,6 +39,8 @@ use tokio::task::JoinHandle;
 mod children;
 #[path = "trail_daemon/goto.rs"]
 mod goto;
+#[path = "trail_daemon/ratings.rs"]
+mod ratings;
 #[path = "trail_daemon/save_tools.rs"]
 mod save_tools;
 #[path = "trail_daemon/tip_tools.rs"]
@@ -55,13 +57,14 @@ fn ant(name: &str) -> UserId {
 }
 
 /// A conductor serving its runs, what it sends on `sent`: its steps, and the other messages it sends, which
-/// [`Conductor::step`] puts aside in `told`.
+/// [`Conductor::step`] puts aside in `told`, and in `invited` those inviting itself to rate a run that ended.
 struct Conductor {
     trails: Trails,
     js: async_nats::jetstream::Context,
     client: async_nats::Client,
     sent: mpsc::UnboundedReceiver<Envelope>,
     told: Vec<Envelope>,
+    invited: Vec<Envelope>,
     notes: Arc<MemoryNotes>,
     serving: JoinHandle<()>,
 }
@@ -103,7 +106,9 @@ impl Drop for Conductor {
 /// The buckets `ants init` creates, as the human.
 async fn init(server: &NatsServer) {
     let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "init").await.unwrap();
-    for config in [hub::trails_config(), hub::trail_runs_config(), hub::trail_tips_config()] {
+    for config in
+        [hub::trails_config(), hub::trail_runs_config(), hub::trail_tips_config(), hub::trail_ratings_config()]
+    {
         js.create_key_value(config).await.unwrap();
     }
 }
@@ -173,7 +178,7 @@ async fn conductor_full(
         let trails = trails.clone();
         async move { trails.serve().await }
     });
-    Conductor { trails, js, client, sent, told: Vec::new(), notes, serving }
+    Conductor { trails, js, client, sent, told: Vec::new(), invited: Vec::new(), notes, serving }
 }
 
 fn ants_binary() -> PathBuf {
@@ -216,7 +221,29 @@ impl Conductor {
             if sent.trail_step.is_some() {
                 return sent;
             }
+            self.aside(sent);
+        }
+    }
+
+    /// Put `sent`, no step, aside in `invited` if it invites the conductor to rate a run, else in `told`.
+    fn aside(&mut self, sent: Envelope) {
+        if sent.from == ant("lead") && sent.to == ant("lead") && sent.text.contains("rate_trail(run: ") {
+            self.invited.push(sent);
+        } else {
             self.told.push(sent);
+        }
+    }
+
+    /// The next message inviting the conductor to rate a run.
+    async fn invitation(&mut self) -> Envelope {
+        loop {
+            if !self.invited.is_empty() {
+                return self.invited.remove(0);
+            }
+            let sent =
+                tokio::time::timeout(Duration::from_secs(30), self.sent.recv()).await.expect("a message").unwrap();
+            assert!(sent.trail_step.is_none(), "a step: {sent:?}");
+            self.aside(sent);
         }
     }
 
@@ -228,7 +255,7 @@ impl Conductor {
             if sent.trail_step.is_some() {
                 return false;
             }
-            self.told.push(sent);
+            self.aside(sent);
         }
         true
     }
@@ -242,7 +269,7 @@ impl Conductor {
             let sent =
                 tokio::time::timeout(Duration::from_secs(30), self.sent.recv()).await.expect("a message").unwrap();
             assert!(sent.trail_step.is_none(), "a step: {sent:?}");
-            self.told.push(sent);
+            self.aside(sent);
         }
     }
 
@@ -828,7 +855,7 @@ async fn run_trail_starts_a_saved_or_inline_trail_and_a_webhook_s_thread_runs_on
     let client = mcp_client(&mcp, &asked.thread_id).await;
     let script = format!("{META}args[\"n\"] * 10\n");
     let (ok, text) = run_trail(&client, json!({"script": script, "args": {"n": 4}, "wait": true})).await;
-    assert!(ok && text.ends_with("is done. Result:\n40"), "{text}");
+    assert!(ok && text.contains("is done. Result:\n40\nrate_trail(run: "), "{text}");
     let (ok, text) = run_trail(&client, json!({"name": "count", "args": {"n": 4}})).await;
     assert!(ok && text.starts_with("Started run "), "{text}");
     let run = started(&text);
@@ -857,7 +884,7 @@ async fn run_trail_starts_a_saved_or_inline_trail_and_a_webhook_s_thread_runs_on
     let (ok, text) = run_trail(&client, json!({"script": script, "args": {"n": 1}})).await;
     assert!(!ok && text.contains("only saved trails"), "{text}");
     let (ok, text) = run_trail(&client, json!({"name": "count", "args": {"n": 1}, "wait": true})).await;
-    assert!(ok && text.ends_with("is done. Result:\n2"), "{text}");
+    assert!(ok && text.contains("is done. Result:\n2\n"), "{text}");
 
     let idle = ThreadId::generate();
     let (ok, text) = run_trail(&mcp_client(&mcp, &idle).await, json!({"name": "count"})).await;
@@ -917,7 +944,7 @@ async fn trail_status_and_stop_trail_reach_only_the_runs_the_ant_conducts() {
     assert!(lead.reply(&step, "went").await);
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("went") });
     let (ok, status) = call(&client, "trail_status", json!({"run": run.as_str()})).await;
-    assert!(ok && status.contains(": done.") && status.ends_with("Result:\nwent"), "{status}");
+    assert!(ok && status.contains(": done.") && status.contains("Result:\nwent\nrate_trail(run: "), "{status}");
     let (ok, listed) = call(&client, "trail_status", json!({})).await;
     assert!(ok && listed == "This ant conducts no run that has not ended.", "{listed}");
     std::fs::remove_dir_all(&dir).unwrap();

@@ -139,7 +139,8 @@ pub async fn listed(ctx: &Ctx) -> Result<Done> {
     let going = listed.iter().filter(|run| !run.finished()).count();
     let recorded = if listed.len() == 1 { "1 run".to_owned() } else { format!("{} runs", listed.len()) };
     let line = format!("{recorded} recorded, {going} not over: the pager lists them");
-    let mut page = runs::table(&listed, now);
+    let rated = crate::cmd::trail::ratings::of_runs(&crate::cmd::trail::ratings::read_or_none(&ctx.js, None).await);
+    let mut page = runs::table(&listed, &rated, now);
     let mut trails: Vec<&TrailName> = Vec::new();
     for trail in listed.iter().rev().filter_map(|run| run.trail()) {
         if !trails.contains(&trail) && trails.len() < TIPPED_TRAILS {

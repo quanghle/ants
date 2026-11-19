@@ -219,6 +219,28 @@ A step's message may carry tips from earlier runs of its trail: hints to verify,
   what a live tip says is refused (vote that one helpful instead); one much like live tips needs `force`.
 - Only a step of a saved trail on a trusted run leaves or votes on tips; any thread reads them.
 
+## Finding and rating
+
+Tips tell how to walk a trail; ratings tell which trail to take. Conductors rate their runs, and ants choosing a trail
+draw on those ratings.
+
+- **Find before writing.** Before writing a trail-shaped script, call `find_trails` with the task in a few words
+  (`find_trails(query: "review a pull request")`). It lists the saved trails whose name, description or rated tasks
+  match, each with its saver, its success on matching tasks and its latest ratings, ranked by a draw from those
+  ratings: well-rated trails come first more often, and `worth exploring` ones, not yet rated for such tasks, still
+  get tried. Run a fitting one with `run_trail(name: …)`; write a script only when none fits.
+- **Rate every run conducted.** When a run ends done or failed, the conductor gets a message on the run's thread (or,
+  having waited on it with `run_trail`, the answer) with the `rate_trail` line: call `rate_trail(run, outcome, task,
+  why)` with `worked`, `partly` or `failed`, the task the run served in a line as a later search would name it, and a
+  concrete reason (what it produced, what it missed, which step broke), then end the turn with `complete`. Judge the
+  outcome by the task, not by the run's state: a run done with a useless result failed it. A stopped run may be rated
+  too; a child run a `trail()` call started is rated by its own id.
+- One rating per run and trail: rating the run again replaces it. A run of a saved trail rates that trail and every
+  trail of its route; a run of an inline script rates none until its script is saved with `save_trail`, which then
+  rates the saved trail too.
+- On a thread a webhook or schedule started, `rate_trail` rates only the run reporting on that thread; `find_trails`
+  works on any thread.
+
 ## Saving
 
 Save a trail once an inline script worked and its steps will recur: a one-off stays inline. Generalize it first: move
@@ -1122,7 +1144,9 @@ trail's `name` or a `script` of its own, on its current thread, getting the run'
 result; a `[[schedule]]` entry with `trail =` (and `args =`, a table) starts a saved trail on its `ant` at each firing.
 `run_trail`'s `limits` (`{"steps", "at_once", "turns", "wall"}`) and a schedule's `limits` table set the same limits as
 those flags. `trail_status` tells how a run the ant conducts stands (state, steps and turns spent of its limits, the
-steps it waits on, the result), and `stop_trail` stops one, which only a human resumes. Saved trails are colony-wide,
+steps it waits on, the result), and `stop_trail` stops one, which only a human resumes. `find_trails` finds saved
+trails for a task by their ratings, and `rate_trail` rates a run once it ends ([Finding and
+rating](#finding-and-rating)). Saved trails are colony-wide,
 put and removed only by humans; a conductor's daemon also reads `~/.ants/trails/<name>.py` on its machine, the colony's
 trail winning a name both have. A run started on a thread a webhook or schedule started runs only saved trails, its
 steps narrowed to read-only tools. `ants trail runs`, `show`, `stop` and `resume` manage runs, and an admin's `ants ant

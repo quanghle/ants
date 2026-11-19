@@ -1522,6 +1522,12 @@ fn trails() {
             at: at(5),
         },
     );
+    let limits: TrailLimits = parse(r#"{"steps": 10}"#);
+    assert_eq!(limits, TrailLimits { steps: 10, ..TrailLimits::DEFAULT }, "missing limits take their defaults");
+}
+
+#[test]
+fn trail_ratings() {
     snap(
         "trail_rating",
         &TrailRating {
@@ -1535,8 +1541,6 @@ fn trails() {
             at: at(6),
         },
     );
-    let limits: TrailLimits = parse(r#"{"steps": 10}"#);
-    assert_eq!(limits, TrailLimits { steps: 10, ..TrailLimits::DEFAULT }, "missing limits take their defaults");
 }
 
 #[test]

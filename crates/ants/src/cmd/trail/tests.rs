@@ -1,3 +1,4 @@
+mod ratings;
 mod run;
 mod tips;
 
@@ -150,7 +151,7 @@ async def patch(state):
     let lines: Vec<&str> = table.lines().collect();
     assert!(lines[0].contains("PHASES") && lines[0].contains("WAYPOINTS"), "{table}");
     assert!(lines[1].contains("triage, patch"), "{table}");
-    let found = saved::Found { trail: listed[0].trail.clone(), shadows: None };
+    let found = saved::Found { trail: listed[0].trail.clone(), shadows: None, ratings: None };
     let text = saved::render(&found, now);
     assert!(text.contains("description: Fix it\nwaypoints: triage, patch\n"), "{text}");
 
@@ -189,7 +190,7 @@ fn a_trail_an_ant_saved_shows_the_ant_and_its_run() {
     assert_eq!(json["saved_from"], run.as_str());
     assert!(serde_json::to_value(&listed[1]).unwrap().get("saved_from").is_none());
 
-    let found = saved::Found { trail: by_ant.into(), shadows: None };
+    let found = saved::Found { trail: by_ant.into(), shadows: None, ratings: None };
     let text = saved::render(&found, now);
     let first = text.lines().nth(1).unwrap();
     assert!(
@@ -312,7 +313,14 @@ fn a_child_run_shows_the_call_it_answers_and_a_trail_call_its_child() {
         retries: 0,
     };
     let shown = |run: &TrailRun, pending: Vec<PendingCall>, children: Vec<TrailRun>| {
-        let detail = runs::Detail { run: run.clone(), pending, queued: Vec::new(), journal: Vec::new(), children };
+        let detail = runs::Detail {
+            run: run.clone(),
+            pending,
+            queued: Vec::new(),
+            journal: Vec::new(),
+            children,
+            ratings: Vec::new(),
+        };
         runs::render(&detail, now)
     };
     let text = shown(&child, Vec::new(), Vec::new());
@@ -346,6 +354,7 @@ fn a_run_shows_the_legs_of_its_route_and_the_gotos_it_made() {
         queued: Vec::new(),
         journal: vec![refused],
         children: Vec::new(),
+        ratings: Vec::new(),
     };
     let text = runs::render(&detail, now);
     assert!(text.starts_with(&format!("run {} of trail triage\n", run.run)), "the trail it started: {text}");
@@ -357,13 +366,14 @@ fn a_run_shows_the_legs_of_its_route_and_the_gotos_it_made() {
     assert!(text.contains("args: {\"branch\":\"main\"}\n"), "the run's input is its first leg's: {text}");
     let row = "  1  goto  dev-a  trail triage at its start  error: the run entered trail triage before\n";
     assert!(text.contains(row), "{text}");
-    let table = runs::table(std::slice::from_ref(&run), now);
+    let table = runs::table(std::slice::from_ref(&run), &runs::Rated::default(), now);
     let row = table.lines().nth(1).unwrap_or_else(|| panic!("{table}"));
     assert!(
         row.starts_with(&format!("{}  triage -> release@review  dev-a  ", run.run)),
         "the trail it started: {table}"
     );
-    let header = serde_json::from_str::<serde_json::Value>(&runs::header_json(&run).unwrap()).unwrap();
+    let header =
+        serde_json::from_str::<serde_json::Value>(&runs::header_json(&run, &runs::Rated::default()).unwrap()).unwrap();
     let route = header["route"].as_array().unwrap();
     assert!(route.len() == 2 && route.iter().all(|leg| leg.get("script").is_none()), "{header}");
     let inline = runs::render(&runs::Detail { run: record(&p("dev-a"), None, RunState::Running, now), ..detail }, now);
@@ -376,7 +386,14 @@ fn a_run_failed_on_a_limit_shows_which() {
     let shown = |state| {
         let run = record(&p("dev-a"), Some("release"), state, now);
         runs::render(
-            &runs::Detail { run, pending: Vec::new(), queued: Vec::new(), journal: Vec::new(), children: Vec::new() },
+            &runs::Detail {
+                run,
+                pending: Vec::new(),
+                queued: Vec::new(),
+                journal: Vec::new(),
+                children: Vec::new(),
+                ratings: Vec::new(),
+            },
             now,
         )
     };
@@ -443,11 +460,13 @@ async fn humans_list_and_show_the_runs_conductors_keep() {
     assert_eq!(runs::list(&js, None).await.unwrap(), [done.clone(), waiting.clone()]);
     assert_eq!(runs::list(&js, Some(&dev_a)).await.unwrap(), std::slice::from_ref(&waiting));
     assert!(runs::list(&js, Some(&p("dev-c"))).await.unwrap().is_empty());
-    let header = serde_json::from_str::<serde_json::Value>(&runs::header_json(&waiting).unwrap()).unwrap();
+    let header =
+        serde_json::from_str::<serde_json::Value>(&runs::header_json(&waiting, &runs::Rated::default()).unwrap())
+            .unwrap();
     assert!(header["route"][0].get("script").is_none() && header["run"] == waiting.run.as_str(), "{header}");
-    let table = runs::table(&[done.clone(), waiting.clone()], now);
+    let table = runs::table(&[done.clone(), waiting.clone()], &runs::Rated::default(), now);
     let lines: Vec<&str> = table.lines().collect();
-    assert!(lines[0].starts_with("RUN") && lines[0].ends_with("ENDED"), "{table}");
+    assert!(lines[0].starts_with("RUN") && lines[0].contains("ENDED") && lines[0].ends_with("RATED"), "{table}");
     for cell in [done.run.as_str(), "inline", "dev-b", "alice", "done", "2/", "1h ago", "30m ago"] {
         assert!(lines[1].contains(cell), "{cell}: {table}");
     }

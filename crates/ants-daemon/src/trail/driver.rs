@@ -254,6 +254,7 @@ impl Trails {
     }
 
     /// Store the end of a run, and forget it: its child runs stop, and a child's end answers its parent's call first.
+    /// The run_trail call waiting on it, if any, takes the end, else its conductor gets a message inviting a rating.
     async fn end(&self, slot: &Slot, state: RunState) -> Result<()> {
         let (ended, calls) = {
             let book = slot.book();
@@ -273,7 +274,10 @@ impl Trails {
         }
         self.save_ancestors(&header).await?;
         self.save_header(slot).await?;
-        self.inner.store.list(&header.run, false).await?;
+        // Listed until the invitation to rate the run is given, so that a restart sends it otherwise.
+        if self.hand_end(&header) || self.invite(&header).await {
+            self.inner.store.list(&header.run, false).await?;
+        }
         locked(&self.inner.runs).remove(&header.run);
         self.forget(&header.run);
         for call in pending.iter().filter(|call| call.sent) {

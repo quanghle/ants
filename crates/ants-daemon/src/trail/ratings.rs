@@ -58,10 +58,13 @@ impl Ratings {
     }
 }
 
-/// What rating a run stored.
-pub struct Rated {
-    /// The saved trails rated, each with the outcome of the rating it replaced, if any.
-    pub trails: Vec<(TrailName, Option<RatingOutcome>)>,
+/// A saved trail a run's rating rated.
+pub struct RatedTrail {
+    pub trail: TrailName,
+    /// The outcome of the rating of the run it replaced, if any.
+    pub replaced: Option<RatingOutcome>,
+    /// Whether the trail was saved from the run's script rather than taken by the run.
+    pub saved_from: bool,
 }
 
 /// The saved trails `run` took, each with the [`script_sha256`] of the script its last leg of the trail ran, in the
@@ -90,33 +93,54 @@ impl Trails {
         self.inner.saved.all().await
     }
 
-    /// Rate each saved trail run `run` took, ended or stopped, as `outcome` for `task`, because of `why`: one rating
-    /// per trail, replacing an earlier rating of the run.
-    pub async fn rate(&self, run: &TrailRun, outcome: RatingOutcome, task: &str, why: &str) -> Result<Rated, String> {
+    /// Rate each saved trail run `run` took, ended or stopped, and each the colony saved from its script, as
+    /// `outcome` for `task`, because of `why`: one rating per trail, replacing an earlier rating of the run. A trail
+    /// taken is rated of the script the run ran, one saved from the run of its script now.
+    pub async fn rate(
+        &self,
+        run: &TrailRun,
+        outcome: RatingOutcome,
+        task: &str,
+        why: &str,
+    ) -> Result<Vec<RatedTrail>, String> {
         let at = Utc::now();
-        let ratings: Vec<TrailRating> = route_trails(run)
+        let mut trails: Vec<(TrailName, String, bool)> =
+            route_trails(run).into_iter().map(|(trail, script)| (trail, script, false)).collect();
+        for saved in self.saved_trails().await? {
+            if saved.saved_from.as_ref() == Some(&run.run) && !trails.iter().any(|(name, ..)| *name == saved.name) {
+                trails.push((saved.name, saved.script, true));
+            }
+        }
+        let ratings: Vec<(TrailRating, bool)> = trails
             .into_iter()
-            .map(|(trail, script)| TrailRating {
-                trail,
-                conductor: self.inner.ant.clone(),
-                run: run.run.clone(),
-                outcome,
-                task: task.trim().to_owned(),
-                why: why.trim().to_owned(),
-                script,
-                at,
+            .map(|(trail, script, saved_from)| {
+                let rating = TrailRating {
+                    trail,
+                    conductor: self.inner.ant.clone(),
+                    run: run.run.clone(),
+                    outcome,
+                    task: task.trim().to_owned(),
+                    why: why.trim().to_owned(),
+                    script,
+                    at,
+                };
+                (rating, saved_from)
             })
             .collect();
-        for rating in &ratings {
+        for (rating, _) in &ratings {
             rating.check().map_err(|e| e.to_string())?;
         }
         let store = &self.inner.ratings;
-        let mut rated = Rated { trails: Vec::new() };
-        for rating in ratings {
+        let mut rated = Vec::new();
+        for (rating, saved_from) in ratings {
             let key = rating.key();
             let earlier = store.get(&key).await.map_err(|e| format!("reading rating {key}: {e:#}"))?;
             store.put(&rating).await.map_err(|e| format!("{e:#}"))?;
-            rated.trails.push((rating.trail, earlier.map(|earlier| earlier.outcome)));
+            rated.push(RatedTrail {
+                trail: rating.trail,
+                replaced: earlier.map(|earlier| earlier.outcome),
+                saved_from,
+            });
         }
         Ok(rated)
     }

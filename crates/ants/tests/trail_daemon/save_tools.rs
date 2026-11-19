@@ -57,11 +57,11 @@ async fn an_ant_saves_a_script_or_a_finished_inline_run_s_for_every_ant_to_run_b
     });
     let (other_client, _other_turn) = trusted(&other).await;
     let (ok, text) = run_trail(&other_client, json!({"name": "tenfold", "args": {"n": 4}, "wait": true})).await;
-    assert!(ok && text.ends_with("is done. Result:\n40"), "another ant runs it by name: {text}");
+    assert!(ok && text.contains("is done. Result:\n40\n"), "another ant runs it by name: {text}");
 
     let plus_one = format!("{META}args[\"n\"] + 1\n");
     let (ok, text) = run_trail(&client, json!({"script": plus_one, "args": {"n": 1}, "wait": true})).await;
-    assert!(ok && text.ends_with("is done. Result:\n2"), "{text}");
+    assert!(ok && text.contains("is done. Result:\n2\n"), "{text}");
     let run = ended_run(&text);
     let (ok, text) = save(&client, json!({"name": "plus-one", "run": run.as_str()})).await;
     assert!(ok && text.starts_with(&format!("Saved trail plus-one for the colony as this ant's, from run {run}.")));
