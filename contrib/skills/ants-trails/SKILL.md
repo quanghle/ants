@@ -1146,8 +1146,9 @@ result; a `[[schedule]]` entry with `trail =` (and `args =`, a table) starts a s
 those flags. `trail_status` tells how a run the ant conducts stands (state, steps and turns spent of its limits, the
 steps it waits on, the result), and `stop_trail` stops one, which only a human resumes. `find_trails` finds saved
 trails for a task by their ratings, and `rate_trail` rates a run once it ends ([Finding and
-rating](#finding-and-rating)). Saved trails are colony-wide,
-put and removed only by humans; a conductor's daemon also reads `~/.ants/trails/<name>.py` on its machine, the colony's
+rating](#finding-and-rating)). Saved trails are colony-wide:
+humans put and remove any, and an ant puts and removes its own with `save_trail` and `remove_trail` ([Saving](#saving));
+a conductor's daemon also reads `~/.ants/trails/<name>.py` on its machine, the colony's
 trail winning a name both have. A run started on a thread a webhook or schedule started runs only saved trails, its
 steps narrowed to read-only tools. `ants trail runs`, `show`, `stop` and `resume` manage runs, and an admin's `ants ant
 stop-trail` and `resume-trail` stop and resume one by admin order, which waits for a conductor's daemon while it is
