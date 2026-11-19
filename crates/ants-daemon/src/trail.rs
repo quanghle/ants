@@ -463,11 +463,30 @@ impl Trails {
             pending
         };
         let header = slot.header();
-        let mut waiting = self.stop_children(&pending, by).await;
-        for call in pending.iter().filter(|call| call.function != TrailFunction::Trail) {
+        let mut waiting = self.stop_steps(&header, &pending, by).await;
+        let stored = async {
+            self.save_session(&slot).await?;
+            self.save_header(&slot).await
+        };
+        stored.await.map_err(|e| format!("storing the run: {e:#}"))?;
+        // The steps of a leg the run left by a goto() and has not given up yet, given up once the stored header lists
+        // the next leg.
+        let left = std::mem::take(&mut slot.book().left);
+        waiting.extend(self.stop_steps(&header, &left, by).await);
+        self.report_end(&slot.header()).await;
+        tracing::info!(run = %run, by = %by, "trail run stopped");
+        Ok(waiting)
+    }
+
+    /// Give up `calls`, steps of the run of `header` stopped by `by`: their child runs stop, the replies to them are
+    /// ignored and those the conductor sent itself withdrawn. Returns the steps to other ants, for `by` to withdraw.
+    async fn stop_steps(&self, header: &TrailRun, calls: &[PendingCall], by: &UserId) -> Vec<WaitingStep> {
+        let run = &header.run;
+        let mut waiting = self.stop_children(calls, by).await;
+        for call in calls.iter().filter(|call| call.function != TrailFunction::Trail) {
             self.retire(run, call);
             if call.sent {
-                self.report_step(&header, call, StepStage::Dropped);
+                self.report_step(header, call, StepStage::Dropped);
             }
             if !call.sent || call.function == TrailFunction::Human {
                 continue;
@@ -482,14 +501,7 @@ impl Trails {
                 waiting.push(WaitingStep { to: call.to.clone(), message: call.message });
             }
         }
-        let stored = async {
-            self.save_session(&slot).await?;
-            self.save_header(&slot).await
-        };
-        stored.await.map_err(|e| format!("storing the run: {e:#}"))?;
-        self.report_end(&slot.header()).await;
-        tracing::info!(run = %run, by = %by, "trail run stopped");
-        Ok(waiting)
+        waiting
     }
 
     /// Resume a stopped run, or one failed on a limit, under `limits` when given: from its stored records, with the

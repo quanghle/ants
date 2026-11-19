@@ -211,14 +211,14 @@ async fn a_leg_goes_on_from_its_pinned_script_after_a_restart_or_a_replay() {
     }
 }
 
-#[tokio::test]
-async fn a_restart_after_a_goto_stored_its_next_leg_gives_up_the_steps_of_the_leg_left() {
-    let Some(server) = NatsServer::start() else { return };
-    init(&server).await;
-    let dir = scratch_dir("trail-goto-crash");
+/// A run whose daemon stopped as a goto() stored the run's header with the next leg, before it gave up the leg's
+/// steps: one to the conductor itself, "mine", and one to dev, "yours". Returns the saved trails' directory, the run,
+/// its thread and the two steps.
+async fn left_by_a_goto(server: &NatsServer, dir: &str) -> (PathBuf, RunId, ThreadId, Envelope, Envelope) {
+    let dir = scratch_dir(dir);
     save(&dir, "first", &[], "await parallel(agent(\"mine\"), agent(\"yours\", ant=\"dev\"))\n");
     save(&dir, "second", &[], "await agent(f\"next {args}\", ant=\"dev\")\n");
-    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    let mut lead = conductor_saving(server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
     let thread = ThreadId::generate();
     let run = lead.start_saved("first", human_origin(), TrailLimits::default(), thread.clone()).await;
     let (first, second) = (lead.step().await, lead.step().await);
@@ -238,6 +238,14 @@ async fn a_restart_after_a_goto_stored_its_next_leg_gives_up_the_steps_of_the_le
     let runs = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
     runs.put(trail_run_key(&ant("lead"), &run), serde_json::to_vec(&header).unwrap()).await.unwrap();
     drop(lead);
+    (dir, run, thread, mine, yours)
+}
+
+#[tokio::test]
+async fn a_restart_after_a_goto_stored_its_next_leg_gives_up_the_steps_of_the_leg_left() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let (dir, run, thread, mine, yours) = left_by_a_goto(&server, "trail-goto-crash").await;
 
     let (watcher, _) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "watch").await.unwrap();
     let mut status = watcher.subscribe(subject::status(&ant("lead"), &thread)).await.unwrap();
@@ -263,6 +271,28 @@ async fn a_restart_after_a_goto_stored_its_next_leg_gives_up_the_steps_of_the_le
     assert!(again.reply(&yours, "late").await, "a reply to a step given up is not prompted");
     assert!(again.reply(&next, "done").await);
     assert_eq!(again.result(&run).await, json!("done"));
+    assert!(again.sends_no_step(Duration::from_millis(300)).await);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_stop_before_the_restarted_run_s_first_pass_lists_the_steps_of_the_leg_left() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let (dir, run, _, mine, yours) = left_by_a_goto(&server, "trail-goto-crash-stop").await;
+    let mut again = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    // Not polled yet: the run gets no pass before the stop.
+    again.serving.abort();
+
+    let human = UserId::human();
+    let waiting = again.trails.stop(&run, &human).await.unwrap();
+    let waiting: Vec<_> = waiting.iter().map(|step| (step.to.clone(), step.message)).collect();
+    assert_eq!(waiting, [(ant("dev"), yours.id)], "the step left in another ant's queue is the human's to withdraw");
+    let attempts = ants_daemon::bus::ensure_attempts(&again.js, None, &ant("lead")).await.unwrap();
+    let mark = attempts.get(message_mark_key(&ant("lead"), &mine.id)).await.unwrap().expect("a mark");
+    let mark: MessageMark = serde_json::from_slice(&mark).unwrap();
+    assert!(matches!(&mark, MessageMark::Withdrawn { by, .. } if *by == human), "withdrawn: {mark:?}");
+    assert!(again.reply(&yours, "late").await, "a reply to a step given up is not prompted");
     assert!(again.sends_no_step(Duration::from_millis(300)).await);
     std::fs::remove_dir_all(&dir).unwrap();
 }
