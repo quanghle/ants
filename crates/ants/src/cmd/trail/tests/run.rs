@@ -53,6 +53,24 @@ fn run_takes_a_saved_trail_or_a_py_file_and_json_args() {
 }
 
 #[test]
+fn resume_help_keeps_the_runs_own_limits_and_names_no_default() {
+    use clap::CommandFactory as _;
+    let mut cli = Cli::command();
+    for path in [["trail", "resume"], ["ant", "resume-trail"]] {
+        let command = cli.find_subcommand_mut(path[0]).unwrap().find_subcommand_mut(path[1]).unwrap();
+        for flag in ["steps", "at_once", "turns", "wall"] {
+            let arg = command.get_arguments().find(|arg| arg.get_id() == flag).unwrap();
+            let help = arg.get_help().unwrap().to_string();
+            assert!(help.contains("left out, the run's own limit"), "{path:?} --{flag}: {help}");
+            assert!(!help.contains("default"), "{path:?} --{flag}: {help}");
+        }
+    }
+    let run = cli.find_subcommand_mut("trail").unwrap().find_subcommand_mut("run").unwrap();
+    let steps = run.get_arguments().find(|arg| arg.get_id() == "steps").unwrap();
+    assert!(steps.get_help().unwrap().to_string().contains("50 by default"));
+}
+
+#[test]
 fn limits_given_replace_the_base_within_their_maximum() {
     let base = TrailLimits { steps: 7, ..TrailLimits::DEFAULT };
     assert_eq!(LimitArgs::default().over(base).unwrap(), base);
@@ -338,6 +356,18 @@ async fn humans_stop_and_resume_runs_by_a_unique_start_of_their_id() {
 
     let error = control::stop(&client, &alice, &done).await.unwrap_err().to_string();
     assert_eq!(error, format!("run {} has ended: done", done.run));
+    // No conductor answers yet: a run ended with nothing to resume is refused without asking it.
+    let asked = std::time::Instant::now();
+    let error = control::resume(&client, &alice, &done, None).await.unwrap_err().to_string();
+    assert_eq!(error, format!("run {} has ended: done", done.run));
+    let failed = RunState::Failed { error: "boom".into(), limit: None };
+    let failed = ants_proto::TrailRun { state: failed, ..done.clone() };
+    let error = control::resume(&client, &alice, &failed, None).await.unwrap_err().to_string();
+    assert_eq!(error, format!("run {} has ended: failed, not on a limit", done.run));
+    assert!(asked.elapsed() < control::ANSWER_WAIT, "the conductor was asked");
+    let on_limit = RunState::Failed { error: "out of turns".into(), limit: Some(ants_proto::RunLimit::Turns) };
+    assert!(control::resumable(&ants_proto::TrailRun { state: on_limit, ..done.clone() }).is_ok());
+    assert!(control::resumable(&stopped).is_ok());
     let offline = p("offline");
     let unanswered =
         control::ask(&client, &offline, &alice, TrailAction::Stop { run: waiting.run.clone() }, Duration::ZERO);

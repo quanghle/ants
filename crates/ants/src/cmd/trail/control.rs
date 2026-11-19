@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use ants_proto::{
-    RunId, TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailRun, UserId, WaitingStep,
+    RunId, RunState, TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailRun, UserId, WaitingStep,
 };
 use anyhow::{Result, bail};
 use futures::StreamExt as _;
@@ -101,13 +101,32 @@ pub(super) fn stopped(run: &RunId, conductor: &UserId, waiting: &[WaitingStep]) 
     out
 }
 
-/// Resume `run` as human `by`, under `limits` when given; what `ants trail resume` prints.
+/// How `state` ended with nothing to resume: done, or failed on no limit.
+pub(crate) fn ended(state: &RunState) -> Option<&'static str> {
+    match state {
+        RunState::Done { .. } => Some("done"),
+        RunState::Failed { limit: None, .. } => Some("failed, not on a limit"),
+        _ => None,
+    }
+}
+
+/// Refuse to resume `run` when its record shows it ended with nothing to resume ([`ended`]).
+pub(crate) fn resumable(run: &TrailRun) -> Result<()> {
+    match ended(&run.state) {
+        Some(ended) => bail!("run {} has ended: {ended}", run.run),
+        None => Ok(()),
+    }
+}
+
+/// Resume `run` as human `by`, under `limits` when given; what `ants trail resume` prints. Refused at once for a run
+/// ended with nothing to resume.
 pub(crate) async fn resume(
     client: &async_nats::Client,
     by: &UserId,
     run: &TrailRun,
     limits: Option<TrailLimits>,
 ) -> Result<String> {
+    resumable(run)?;
     let action = TrailAction::Resume { run: run.run.clone(), limits };
     match ask(client, &run.conductor, by, action, ANSWER_WAIT).await? {
         TrailOutcome::Resumed { run: resumed } => {
