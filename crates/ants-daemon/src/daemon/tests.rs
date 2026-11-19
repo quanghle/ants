@@ -68,6 +68,7 @@ struct Bus {
     lifecycle: Option<crate::provider::events::Lifecycle>,
     /// Built-in sense, for an ant using it.
     sense: Option<crate::sense::Sense>,
+    builtin: Option<ants_proto::BuiltinAnt>,
 }
 
 impl Bus {
@@ -125,6 +126,7 @@ impl Bus {
             retry_delay: Duration::from_millis(300),
             lifecycle: None,
             sense: None,
+            builtin: None,
         };
         (bus, replies)
     }
@@ -260,7 +262,7 @@ impl Bus {
             client: &self.client,
             js: &self.js,
             ant: &self.dev,
-            builtin: None,
+            builtin: self.builtin,
             reading: crate::stream::reading::Reading::Consumer,
             machine: "test-machine",
             pool,

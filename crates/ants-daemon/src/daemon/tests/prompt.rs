@@ -72,6 +72,32 @@ async fn review_guidance_reaches_an_ordinary_ant_only_on_the_review_turn() {
 }
 
 #[tokio::test]
+async fn the_messenger_routes_a_human_s_request_but_not_what_it_sent_itself() {
+    let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+    bus.builtin = Some(ants_proto::BuiltinAnt::Messenger);
+    let (launch, _, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (own, asked) = (ThreadId::generate(), ThreadId::generate());
+    let invite = Envelope::on_thread(own.clone(), bus.dev.clone(), bus.dev.clone(), "rate the run");
+    bus::publish_json(&bus.js, invite.subject(), &invite, None).await.unwrap();
+    bus.send(&asked, "deploy the app").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let mut replies = HashMap::new();
+        for _ in 0..2 {
+            let reply = next_envelope(&mut to_human).await;
+            replies.insert(reply.thread_id, reply.text);
+        }
+        let (own, asked) = (&replies[&own], &replies[&asked]);
+        assert!(own.ends_with("rate the run") && !own.contains("[ants] Route this request"), "{own}");
+        assert!(asked.contains("[ants] Route this request") && asked.ends_with("deploy the app"), "{asked}");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+}
+
+#[tokio::test]
 async fn a_human_s_summary_request_is_prompted_as_one_and_the_reply_carries_it_with_its_tokens() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();

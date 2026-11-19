@@ -683,6 +683,8 @@ impl Inbox<'_> {
                         && envelope.provider.is_none()
                         && envelope.trail_step.is_none()
                         && own.is_none()
+                        // Such as the invitation to rate a trail run it conducted, not a request to route.
+                        && envelope.from != *self.ant
                     {
                         Some(DISPATCH_NOTE)
                     } else {
