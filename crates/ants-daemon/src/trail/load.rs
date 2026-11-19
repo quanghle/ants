@@ -12,7 +12,7 @@ use super::{Book, Leg, Slot, Step, Trails, engine_limits, locked, steps};
 impl Trails {
     /// The run of `header` as its records hold it: its stored session, given the answers its journal holds beyond it.
     /// When `resumed`, under the header's limits and without the steps it waited on, which go out anew, but for its
-    /// child runs, which resume with it; else waiting on those steps again.
+    /// child runs, which resume with it, those failed on a limit too; else waiting on those steps again.
     pub(super) async fn load(&self, header: TrailRun, resumed: bool) -> Result<Arc<Slot>> {
         let store = &self.inner.store;
         let run = header.run.clone();
@@ -26,6 +26,11 @@ impl Trails {
         }
         let mut calls: BTreeSet<u32> = session.answered().iter().copied().collect();
         calls.extend(Run::restore(session.clone(), Vec::new()).outstanding().iter().map(|call| call.call));
+        if resumed {
+            for call in self.rerun_children(&run, &stored.pending, session.answered()).await? {
+                calls.remove(&call);
+            }
+        }
         let mut journal = Vec::new();
         for call in calls {
             journal.extend(store.entry(&run, call).await?);

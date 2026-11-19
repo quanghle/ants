@@ -69,6 +69,10 @@ impl Store {
         self.put(trail_call_key(&self.ant, run, entry.call), entry).await
     }
 
+    pub(super) async fn delete_entry(&self, run: &RunId, call: u32) -> Result<()> {
+        self.kv.delete(trail_call_key(&self.ant, run, call)).await
+    }
+
     /// What the conductor keeps of the step thread `thread`.
     pub(super) async fn step(&self, thread: &ThreadId) -> Result<Option<TrailStepThread>> {
         self.get(trail_step_key(&self.ant, thread)).await

@@ -1,7 +1,8 @@
 //! Child runs: a trail() call is answered by a run of the saved trail it names, which the conductor starts as a child
 //! of the calling run ([`TrailParent`]), with its parent's owner and origin, on a thread of its own. Its result answers
 //! the call and its failure raises there; it tells its end on its own thread, sending its owner nothing. Stopping or
-//! ending a run stops its children; resuming it resumes them.
+//! ending a run stops its children; resuming it resumes them, those that failed on a limit too, whose errors no longer
+//! answer their calls.
 //!
 //! A run and its descendants, its tree, share its root's limits: each step and turn a run spends is charged to every
 //! ancestor too, so the root's counters hold the tree's, and each call is checked against them. A child's pass stores
@@ -151,8 +152,8 @@ impl Trails {
         waiting
     }
 
-    /// Resume, for `by`, the child runs answering `calls` of the run of `parent` that are stopped, within the parent's
-    /// limits; one that ended meanwhile answers its call.
+    /// Resume, for `by`, the child runs answering `calls` of the run of `parent` that are stopped or failed on a limit,
+    /// within the parent's limits; one that ended otherwise meanwhile answers its call.
     pub(super) async fn resume_children(&self, parent: &TrailRun, calls: &[PendingCall], by: &UserId) {
         for run in calls.iter().filter_map(PendingCall::child) {
             let child = match self.inner.store.header(&run).await {
@@ -164,7 +165,7 @@ impl Trails {
                 }
             };
             let resumed = match &child.state {
-                RunState::Stopped { .. } => {
+                RunState::Stopped { .. } | RunState::Failed { limit: Some(_), .. } => {
                     let limits = child_limits(parent, child.started_at);
                     Box::pin(self.resume(&run, by, Some(limits))).await
                 }
@@ -175,6 +176,27 @@ impl Trails {
                 tracing::warn!(run = %run, error = e, "resuming a child run");
             }
         }
+    }
+
+    /// The calls among `pending`, those of run `run` its session has not taken an answer to (`answered`), whose child
+    /// runs failed on a limit: resuming the run resumes them, so the error each answered its call with is deleted from
+    /// the run's journal.
+    pub(super) async fn rerun_children(
+        &self,
+        run: &RunId,
+        pending: &[PendingCall],
+        answered: &[u32],
+    ) -> Result<Vec<u32>> {
+        let mut rerun = Vec::new();
+        for call in pending.iter().filter(|call| !answered.contains(&call.call)) {
+            let Some(child) = call.child() else { continue };
+            let header = self.inner.store.header(&child).await?;
+            if header.is_some_and(|child| child.state.failed_on().is_some()) {
+                self.inner.store.delete_entry(run, call.call).await?;
+                rerun.push(call.call);
+            }
+        }
+        Ok(rerun)
     }
 
     /// After a restart: answer the calls whose child runs ended unanswered, continue those whose children the index

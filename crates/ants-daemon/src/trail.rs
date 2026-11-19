@@ -493,7 +493,7 @@ impl Trails {
     }
 
     /// Resume a stopped run, or one failed on a limit, under `limits` when given: from its stored records, with the
-    /// steps it waited on sent anew and its stopped child runs resumed.
+    /// steps it waited on sent anew and its child runs stopped or failed on a limit resumed.
     pub async fn resume(&self, run: &RunId, by: &UserId, limits: Option<TrailLimits>) -> Result<(), String> {
         let stored = |e: anyhow::Error| format!("reading the run: {e:#}");
         let held = locked(&self.inner.runs).get(run).cloned();
