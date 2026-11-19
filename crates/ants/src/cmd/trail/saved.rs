@@ -357,7 +357,7 @@ pub(crate) fn render(found: &Found, now: DateTime<Utc>) -> String {
         let _ = writeln!(out, "runs instead of the local trail of the same name, {}", path.display());
     }
     if !trail.description.is_empty() {
-        let _ = writeln!(out, "description: {}", trail.description);
+        let _ = writeln!(out, "description: {}", one_line(&trail.description, usize::MAX));
     }
     if !trail.phases.is_empty() {
         let _ = writeln!(out, "phases: {}", trail.phases.join(", "));
