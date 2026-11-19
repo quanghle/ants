@@ -1,10 +1,13 @@
 //! The ratings conductors give their runs' saved trails, in [`TRAIL_RATINGS_BUCKET`]: each ant puts only its own, under
 //! keys naming it, and reads every trail's by direct gets naming no subject; and the searches ranking the saved trails
-//! by them ([`Trails::find`]). Nothing is cached: each search reads the bucket anew and folds it as it comes.
+//! by them ([`Trails::find`]). Nothing is cached: each search reads the bucket anew and folds it as it comes, as does
+//! the reading of the colony's saved trails with their ratings counted for a sage's review packet ([`colony_rated`]).
+
+use std::collections::BTreeMap;
 
 use ants_proto::{
-    Counts, Finder, Found, JsDomain, Query, RatingOutcome, TRAIL_RATINGS_BUCKET, ThreadId, TrailName, TrailRating,
-    TrailRun, UserId, script_sha256, serves,
+    Counts, Finder, Found, JsDomain, Query, RatingOutcome, SavedTrail, TRAIL_RATINGS_BUCKET, TRAILS_BUCKET, ThreadId,
+    TrailName, TrailRating, TrailRun, UserId, script_sha256, serves,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -56,6 +59,35 @@ impl Ratings {
             .await
             .context("reading the trail ratings")
     }
+}
+
+/// The colony's saved trails in [`TRAILS_BUCKET`], not this machine's local ones, each with its ratings counted by
+/// outcome, those of trails no longer saved left out. Fails when either bucket cannot be read.
+pub async fn colony_rated(js: &jetstream::Context, js_domain: Option<&JsDomain>) -> Result<Vec<(SavedTrail, Counts)>> {
+    let mut trails = BTreeMap::new();
+    DirectKv::whole(js, js_domain, TRAILS_BUCKET)
+        .await?
+        .scan(">", |key, value| match serde_json::from_slice::<SavedTrail>(value) {
+            Ok(trail) if trail.check_key(key).is_ok() => {
+                trails.insert(trail.name.clone(), (trail, Counts::default()));
+            }
+            _ => tracing::debug!(key, "skipping a saved trail that does not read"),
+        })
+        .await
+        .context("reading the saved trails of the colony")?;
+    DirectKv::whole(js, js_domain, TRAIL_RATINGS_BUCKET)
+        .await?
+        .scan(">", |key, value| match serde_json::from_slice::<TrailRating>(value) {
+            Ok(rating) if rating.check_key(key).is_ok() => {
+                if let Some((_, counts)) = trails.get_mut(&rating.trail) {
+                    counts.add(rating.outcome);
+                }
+            }
+            _ => tracing::debug!(key, "skipping a trail rating that does not read"),
+        })
+        .await
+        .context("reading the trail ratings")?;
+    Ok(trails.into_values().collect())
 }
 
 /// A saved trail a run's rating rated.

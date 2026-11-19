@@ -118,7 +118,7 @@ mod tests {
 
     use super::*;
     use crate::Sense;
-    use crate::dream::{Advice, Evidence, Finding, FindingKind, Judgement, Recipient, Start, Verdict};
+    use crate::dream::{Advice, ColonyTrails, Evidence, Finding, FindingKind, Judgement, Recipient, Start, Verdict};
     use crate::memory::tests::{context, events, human, sense, tool};
     use crate::tools::Handler;
 
@@ -159,8 +159,8 @@ mod tests {
         let writer = context(human());
         let now = writer.at;
         let sage = Recipient::Sage("lead".parse().unwrap());
-        let start =
-            Start { at: now, recipient: sage, threads: vec![], commits: vec![], writer: &writer, vitals: vec![] };
+        let (threads, commits, vitals, trails) = (vec![], vec![], vec![], &ColonyTrails::UNREAD);
+        let start = Start { at: now, recipient: sage, threads, commits, writer: &writer, vitals, trails };
         let begun = dream::begin(&*items, start).await.unwrap().unwrap();
         let mut answered = begun.clone();
         answered.state = State::Fallback;

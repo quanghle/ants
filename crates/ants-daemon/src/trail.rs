@@ -52,7 +52,7 @@ use store::Store;
 pub(crate) use invite::invitation;
 pub use invite::{EndWait, rating_hint};
 pub use limits::AskedLimits;
-pub use ratings::{RatedTrail, Ratings};
+pub use ratings::{RatedTrail, Ratings, colony_rated};
 pub(crate) use report::clip;
 pub use saved::{PreparedSave, SaveFrom, SaveOutcome, SaveTrail, SavedEntry};
 pub(crate) use saved::{age, from_run};

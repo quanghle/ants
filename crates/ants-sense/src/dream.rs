@@ -25,8 +25,9 @@
 //! toward [`MAX_DREAM_WRITES`], and are untrusted while a finding resting on untrusted text is open ([`counted`],
 //! [`untrusted_on`]); persona and skill proposals, and trails saved, are refused on untrusted ground ([`ground`]). A
 //! sage's [`TRAIL`] finding is applied by saving the trail it suggests, which the daemon records on the dream thread
-//! ([`trail_saved`]), counted as a write, and naming it in the verdict's trails. Finishing a dream, or beginning the
-//! next one, writes its diary: an episode memory summarizing its verdicts. Each dream keeps the vital
+//! ([`trail_saved`]), counted as a write, and naming it in the verdict's trails; it holds while the trail stands in the
+//! colony's saved trails the daemon reads ([`ColonyTrails`]), which a sage's packet lists. Finishing a dream, or
+//! beginning the next one, writes its diary: an episode memory summarizing its verdicts. Each dream keeps the vital
 //! signs of the work it reviews, measured by the daemon as it begins ([`Signs`]).
 //!
 //! A sage's own dream covers the reviews it was asked as threads too ([`Covered::review`]), but its packet lists them by
@@ -64,8 +65,9 @@ pub use identity_findings::{
     OWN_AFTER_THREADS, PERSONA_AFTER_THREADS, RELATIONSHIP_AFTER_THREADS, SELF_MODEL_AFTER_THREADS, STALE_ACTIVE_DAYS,
 };
 pub use packet::{
-    Action, Earlier, Identity, MIN_THREAD_BYTES, OUTCOME_DAYS, PACKET_BUDGET, REVIEWING_SHARE, Reader, Section,
-    TRACK_RECORD_DAYS, Thread, VERDICTS_SHARE, compose, finding_line, packet, reviewing, track_record,
+    Action, ColonyTrail, ColonyTrails, Earlier, Identity, MAX_LISTED_DESCRIPTION, MIN_THREAD_BYTES, OUTCOME_DAYS,
+    PACKET_BUDGET, REVIEWING_SHARE, Reader, Section, Standing, TRACK_RECORD_DAYS, TRAILS_SHARE, Thread, VERDICTS_SHARE,
+    compose, finding_line, packet, reviewing, track_record,
 };
 pub use practice_findings::{
     COSTLY_REVIEW_COST_MICROS, COSTLY_REVIEW_TOKENS, COSTLY_REVIEWS, JUDGED_FINDINGS, PRACTICE_DAYS, QUOTED_REASONS,
@@ -605,6 +607,9 @@ pub struct Start<'a> {
     pub writer: &'a CallContext,
     /// The vital signs of the work on each of `threads`.
     pub vitals: Vec<(ThreadId, Signs)>,
+    /// The colony's saved trails, by which the review a sage is asked tells it whether its applied findings naming
+    /// trails hold.
+    pub trails: &'a ColonyTrails,
 }
 
 /// Begin the next dream as `start` says, unless one began within [`DREAM_EVERY_HOURS`]: its findings gathered, the
@@ -642,7 +647,7 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
         }
         let (state, sage, review) = match &start.recipient {
             Recipient::Sage(sage) => {
-                let (outcomes, earlier) = packet::review_history(items, number, ages, sage).await?;
+                let (outcomes, earlier) = packet::review_history(items, number, ages, sage, start.trails).await?;
                 (State::Sent, Some(sage.clone()), Some(Review::new(outcomes, earlier)))
             }
             Recipient::Ant => (State::Fallback, None, None),

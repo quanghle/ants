@@ -59,7 +59,7 @@ async fn a_dream_keeps_the_vital_signs_of_its_period_and_its_packet_shows_them_b
         packet::Thread { signs: finished, ..thread(4, 200, false) },
     ];
     for reader in [ant(), Reader::Sage(on(1).ant)] {
-        let shown = packet(&*items, &third, &reader, &threads).await.unwrap();
+        let shown = packet(&*items, &third, &reader, &threads, &ColonyTrails::UNREAD).await.unwrap();
         let rows = [
             "| | dream 1 | dream 2 | dream 3 |",
             "| threads worked | 1 | 1 | 2 |",
@@ -200,7 +200,7 @@ async fn a_vital_finding_comes_again_while_its_ground_holds_and_rests_once_rejec
     assert_eq!(keys(&first), [("1.1", Some("vitals:cancelled"))]);
     assert_eq!(first.findings[0].kind, FindingKind::Vitals);
     assert!(first.findings[0].text.contains(&format!("3 on thread {}", on(1).thread)), "{:?}", first.findings);
-    let shown = packet(&*items, &first, &ant(), &[]).await.unwrap();
+    let shown = packet(&*items, &first, &ant(), &[], &ColonyTrails::UNREAD).await.unwrap();
     assert!(shown.contains("- 1.1 (vitals): 3 prompts were cancelled by a human"), "{shown}");
 
     let second = begun(&*items, day(1), vec![(on(2).thread, cancelled(4))]).await;

@@ -568,7 +568,7 @@ mod tests {
 
     use super::*;
     use crate::Sense;
-    use crate::dream::{self, Ends, Recipient, Signs, Start};
+    use crate::dream::{self, ColonyTrails, Ends, Recipient, Signs, Start};
     use crate::identity::{self, Growth};
     use crate::items::Values;
     use crate::memory;
@@ -671,6 +671,7 @@ mod tests {
             commits: vec![],
             writer,
             vitals: vec![],
+            trails: &ColonyTrails::UNREAD,
         };
         let prompts = Ends { replied: 2, ..Ends::default() };
         let vitals = vec![(on(1).thread, Signs { threads: 1, prompts, sense_calls: 5, ..Signs::default() })];

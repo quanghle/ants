@@ -112,7 +112,9 @@ dream thread by writing the script, trying it with `run_trail` where a run is sa
 the finding in `finding`, and naming the trail in the `trails` of the finding's `sense_dream` verdict. Such a save
 counts as one of the dream's 20 writes; it is refused when the finding rests on untrusted text ([Trust](#trust)), or
 when a saved trail other than the one saved already serves the task the finding suggests (`find_trails` would show it
-with more ratings worked than failed): the finding is then rejected naming that trail.
+with more ratings worked than failed): the finding is then rejected naming that trail. To spare such findings, the
+sage's packet lists the colony's saved trails, their descriptions and ratings, and the sage's track record counts an
+applied `trail` finding as holding only while its trail stays saved and is rated failed no more often than worked.
 
 A conductor's daemon also finds trails in `~/.ants/trails/<name>.py` on its machine, and the CLI lists and runs the
 `.py` files of the CLI machine's `~/.ants/trails` by the same name, the file's, whatever its meta's `name`. On a name

@@ -192,6 +192,7 @@ impl super::Sense {
             commits: Vec::new(),
             writer: &writer,
             vitals: Vec::new(),
+            trails: &ants_sense::dream::ColonyTrails::read(Vec::new()),
         };
         let begun = dream::begin(&*items, start).await.unwrap().expect("dream 1 begins");
         let review = begun.review.expect("its review is asked").thread;

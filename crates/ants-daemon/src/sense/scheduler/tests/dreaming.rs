@@ -1,7 +1,7 @@
 use ants_proto::{
     ColonyEntry, Envelope, FindingOutcome, FindingVerdict, NoticeKind, ReviewCommit, ReviewOutcomes, ThreadId,
 };
-use ants_sense::dream::{self, Commit, Dream, REVIEW_BEGIN, Review, Signs, Tally, Thread};
+use ants_sense::dream::{self, ColonyTrail, ColonyTrails, Commit, Dream, REVIEW_BEGIN, Review, Signs, Tally, Thread};
 use ants_sense::proposal;
 use chrono::DateTime;
 
@@ -20,6 +20,8 @@ struct Fake {
     reviews: Mutex<Vec<(UserId, Review, String)>>,
     /// Whether sending a review packet fails.
     unsent: std::sync::atomic::AtomicBool,
+    /// The colony's saved trails; none when they cannot be read.
+    trails: Mutex<Option<Vec<ColonyTrail>>>,
 }
 
 impl Dreaming for Fake {
@@ -45,6 +47,11 @@ impl Dreaming for Fake {
     fn colony(&self) -> BoxFuture<'_, Result<Vec<ColonyEntry>>> {
         let entries = self.colony.locked().clone();
         Box::pin(async move { Ok(entries) })
+    }
+
+    fn trails(&self) -> BoxFuture<'_, ColonyTrails> {
+        let trails = self.trails.locked().clone().map_or(ColonyTrails::UNREAD, ColonyTrails::read);
+        Box::pin(async move { trails })
     }
 
     fn review<'a>(&'a self, sage: &'a UserId, dream: &'a Dream, text: String) -> BoxFuture<'a, Result<()>> {
@@ -313,6 +320,10 @@ async fn a_served_sage_reviews_the_packet_on_a_thread_of_its_own_and_its_finding
     let now = Utc::now();
     fake.serve_sage(now);
     fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false), ("hooked-thread", true)]);
+    let counts = ants_proto::Counts { worked: 2, partly: 0, failed: 1 };
+    let trail =
+        ColonyTrail { name: "release-notes".parse().unwrap(), description: "Notes".into(), counts, saved_at: now };
+    *fake.trails.locked() = Some(vec![trail]);
 
     let next = cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap().unwrap();
     assert!(host.requests.locked().is_empty(), "the ant waits for its sage");
@@ -321,7 +332,10 @@ async fn a_served_sage_reviews_the_packet_on_a_thread_of_its_own_and_its_finding
     let (to, review, text) = fake.reviews.locked()[0].clone();
     assert_eq!(to, sage());
     assert!(text.starts_with(&format!("# Review of dream 1 of {}", ant())), "{text}");
-    for part in ["messages no one", "```json", "the work of worked-thread", "### Thread hooked-thread", "c0ffee"] {
+    let listed = "- release-notes (rated 2 worked, 0 partly, 1 failed): Notes";
+    for part in
+        ["messages no one", "```json", "the work of worked-thread", "### Thread hooked-thread", "c0ffee", listed]
+    {
         assert!(text.contains(part), "{part} in {text}");
     }
     cycle(&Sense::new(), &*items, &host, &settings, now + chrono::Duration::hours(1)).await.unwrap();

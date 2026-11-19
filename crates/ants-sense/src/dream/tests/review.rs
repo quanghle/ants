@@ -143,7 +143,7 @@ async fn a_follow_up_is_linked_to_the_earlier_finding_it_follows_and_one_naming_
     assert_eq!(follows, [Some(linked), Some(FollowUp { named: "1.9".into(), finding: None }), None]);
 
     let third = begin(&*items, to_sage(second.next())).await.unwrap().unwrap();
-    let read = track_record(&*items, &third, &sage(), &ant).await.unwrap();
+    let read = track_record(&*items, &third, &sage(), &ant, &ColonyTrails::UNREAD).await.unwrap();
     let text = read.text(read.entries.len());
     let shown = [
         "### Review of dream 2, ",
@@ -368,7 +368,7 @@ async fn a_late_answer_is_offered_in_the_next_dream_and_its_verdicts_reach_the_s
     let record = review_record(&*sage_items, &ant, 1).await.unwrap().unwrap();
     let verdicts: Vec<_> = record.findings.iter().take(3).map(|f| f.verdict).collect();
     assert_eq!(verdicts, [Some(Judgement::Rejected), Some(Judgement::Deferred), None]);
-    let read = track_record(&*items, &third, &sage(), &ant).await.unwrap();
+    let read = track_record(&*items, &third, &sage(), &ant, &ColonyTrails::UNREAD).await.unwrap();
     let text = read.text(read.entries.len());
     let shown = "- 1.1 (lesson): Late lesson\n  Suggested action: Act on Late lesson\n  Verdict: rejected";
     assert!(text.contains(shown), "by the sage's numbering: {text}");

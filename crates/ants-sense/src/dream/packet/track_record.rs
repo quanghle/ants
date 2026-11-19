@@ -1,7 +1,8 @@
 //! The earlier findings section of a sage's review packet: what the sage reading found in the ant's work over its last
 //! [`TRACK_RECORD_DAYS`] active days, the latest reviews first, each finding with its suggested action, the ant's
-//! verdict and reason and, for one applied, what became of what the ant wrote or voted on for it ([`outcome`]) and the
-//! ant's vital signs over the dreams before it was applied and since, side by side ([`Vitals`]); then a tally by kind.
+//! verdict and reason and, for one applied, what became of what the ant wrote or voted on for it ([`outcome`]) and of
+//! the trails it saved for it ([`ColonyTrails`]), and the ant's vital signs over the dreams before it was applied and
+//! since, side by side ([`Vitals`]); then a tally by kind.
 //! The sage keeps nothing between reviews: its record of an ant lives in the ant's dreams and comes back
 //! in each packet, holding the findings of that sage alone. It takes at most a share of the packet's budget
 //! ([`TRACK_RECORD_SHARE`]), the earlier reviews' findings left out first, and shrinks to its tally for room before the
@@ -14,7 +15,7 @@ use std::fmt::Write as _;
 use ants_proto::{FindingOutcome, FindingVerdict, MAX_REVIEW_FINDINGS_BYTES, UserId};
 use chrono::{DateTime, Duration, Utc};
 
-use super::Section;
+use super::{ColonyTrails, Section};
 use crate::dream::reviews::told_reason;
 use crate::dream::vitals::percent;
 use crate::dream::{Dream, Finding, FindingKind, FindingTally, Judgement, Signs, TREND, Verdict, get};
@@ -37,7 +38,9 @@ pub const TRACK_RECORD_SHARE: usize = 8;
 /// findings `sage` gave in the dreams that began within [`TRACK_RECORD_DAYS`] of the ant's active time before
 /// `dream`, each by its id in the sage's record of its review ([`own`]) and with the last verdict on it, in the dream
 /// that offered it or one offering it again, and the chain of follow-ups: a [`FOLLOW_UP`] with the finding it follows,
-/// a finding followed up with its follow-ups. An entry each, the first of each review under the review's heading.
+/// a finding followed up with its follow-ups. An entry each, the first of each review under the review's heading. An
+/// applied finding holds while what was written for it holds and the trails saved for it stand in the colony's saved
+/// `trails` ([`super::Standing::holds`]), by its items alone where those are not known.
 ///
 /// [`FOLLOW_UP`]: crate::dream::FOLLOW_UP
 pub async fn track_record(
@@ -45,6 +48,7 @@ pub async fn track_record(
     dream: &Dream,
     sage: &UserId,
     ant: &UserId,
+    trails: &ColonyTrails,
 ) -> Result<Section, StoreError> {
     let dreams = covered(items, dream).await?;
     let verdicts = last_verdicts(&dreams);
@@ -61,9 +65,11 @@ pub async fn track_record(
         head: format!(
             "\n## Earlier findings of {sage}\n\nWhat {sage} found in the work of {ant} over its last \
              {TRACK_RECORD_DAYS} active days, the latest reviews first: each finding with its suggested action, the \
-             verdict of {ant} and, for one applied, what became of what {ant} wrote or voted on for it and the vital \
-             signs of {ant} over the dreams before it was applied and since, side by side; a follow_up with the \
-             finding it follows, and a finding followed up with its follow-ups.\n"
+             verdict of {ant} and, for one applied, what became of what {ant} wrote or voted on for it, the ratings of \
+             the trails it saved for it and the vital signs of {ant} over the dreams before it was applied and since, \
+             side by side; a follow_up with the finding it follows, and a finding followed up with its follow-ups. An \
+             applied finding still holds while what was written stands and each trail saved for it is still saved, \
+             rated failed no more often than worked.\n"
         ),
         noun: "earlier finding",
         ..Section::default()
@@ -73,14 +79,19 @@ pub async fn track_record(
         for (n, (finding, told_as)) in own(earlier).enumerate() {
             let found = verdicts.get(finding.id.as_str()).copied();
             let verdict = found.map(|(_, verdict)| verdict);
-            let (mut written, mut signs) = (Vec::new(), None);
+            let (mut written, mut saved, mut signs) = (Vec::new(), None, None);
             if let Some((number, applied)) = found.filter(|(_, verdict)| verdict.verdict == Judgement::Applied) {
                 for id in &applied.items {
                     written.push(outcome(items, id, applied.at).await?);
                 }
+                if !applied.trails.is_empty() {
+                    saved = Some(trails.named(&applied.trails));
+                }
                 signs = vitals.around(number).await?;
             }
-            let holds = written.iter().all(|(_, holds)| *holds);
+            let holds = written.iter().all(|(_, holds)| *holds)
+                && saved.as_ref().is_none_or(|(_, holds)| holds.unwrap_or(true));
+            let saved = saved.map(|(line, _)| line);
             tallies.entry(kind(finding)).or_default().add(verdict.map(|verdict| verdict.verdict), holds);
             let mut entry = String::new();
             if n == 0 {
@@ -88,7 +99,8 @@ pub async fn track_record(
                 let _ = write!(entry, "\n### Review of dream {number}, {day}\n\n");
             }
             let again = dream.findings.iter().any(|offered| offered.id == finding.id);
-            entry.push_str(&finding_entry((finding, &told_as), verdict, &written, signs.as_deref(), again));
+            let shown = Shown { written: &written, saved: saved.as_deref(), signs: signs.as_deref() };
+            entry.push_str(&finding_entry((finding, &told_as), verdict, shown, again));
             if let Some(follow_ups) = followed.get(&told_as) {
                 let _ = writeln!(entry, "  Followed up by {}.", follow_ups.join(", "));
             }
@@ -242,11 +254,14 @@ fn own(dream: &Dream) -> impl Iterator<Item = (&Finding, String)> {
 /// What the review of dream `number`, by `ages` of the ant's active time, tells `sage` of its earlier findings for the
 /// ant: a bounded batch of changed outcomes over [`OUTCOME_DAYS`] (oldest first), and follow-up targets over
 /// [`TRACK_RECORD_DAYS`], the same window as the packet's earlier findings. Both use the sage's numbering ([`own`]).
+/// An applied finding naming trails holds as [`track_record`] judges it by the colony's saved `trails`; where those
+/// are not known, as last told, or by its items alone when never told.
 pub(in crate::dream) async fn review_history(
     items: &dyn Items,
     number: u64,
     ages: &memory::Ages,
     sage: &UserId,
+    trails: &ColonyTrails,
 ) -> Result<(Vec<FindingOutcome>, BTreeMap<String, String>), StoreError> {
     let dreams = earlier(items, number, ages, OUTCOME_DAYS).await?;
     let verdicts = last_verdicts(&dreams);
@@ -269,6 +284,10 @@ pub(in crate::dream) async fn review_history(
             let Some(left) = budget else { continue };
             let Some((_, verdict)) = verdicts.get(finding.id.as_str()) else { continue };
             let mut holds = verdict.verdict == Judgement::Applied;
+            if holds && !verdict.trails.is_empty() {
+                let told_holds = told.get(told_as.as_str()).map(|(_, holds)| *holds);
+                holds = trails.named(&verdict.trails).1.or(told_holds).unwrap_or(true);
+            }
             if holds {
                 for id in &verdict.items {
                     if !outcome(items, id, verdict.at).await?.1 {
@@ -298,14 +317,22 @@ pub(in crate::dream) async fn review_history(
     Ok((outcomes, targets))
 }
 
+/// What an entry of the section shows of what became of an applied finding.
+struct Shown<'a> {
+    /// What became of the items written for it, each with whether it holds ([`outcome`]).
+    written: &'a [(String, bool)],
+    /// The line of the trails saved for it, as they stand ([`ColonyTrails`]).
+    saved: Option<&'a str>,
+    /// The line of the vital signs around it ([`Vitals::around`]).
+    signs: Option<&'a str>,
+}
+
 /// `finding` as the section shows it, by the id it was `told_as` in the sage's record of its review, with the last
-/// `verdict` on it, what became of the items `written` for it and the line of the vital `signs` around it; `again` when
-/// the dream of the packet offers it again.
+/// `verdict` on it and what was `shown` of it once applied; `again` when the dream of the packet offers it again.
 fn finding_entry(
     (finding, told_as): (&Finding, &str),
     verdict: Option<&Verdict>,
-    written: &[(String, bool)],
-    signs: Option<&str>,
+    shown: Shown<'_>,
     again: bool,
 ) -> String {
     let follows = finding.advice.as_ref().map_or_default(|advice| {
@@ -327,15 +354,12 @@ fn finding_entry(
         let _ = write!(entry, " (offered again below as {})", finding.id);
     }
     entry.push('\n');
-    if !written.is_empty() {
-        let lines: Vec<_> = written.iter().map(|(line, _)| line.as_str()).collect();
+    if !shown.written.is_empty() {
+        let lines: Vec<_> = shown.written.iter().map(|(line, _)| line.as_str()).collect();
         let _ = writeln!(entry, "  Written: {}", lines.join("; "));
     }
-    if let Some(verdict) = verdict.filter(|verdict| !verdict.trails.is_empty()) {
-        let trails: Vec<_> = verdict.trails.iter().map(ToString::to_string).collect();
-        let _ = writeln!(entry, "  Saved trails: {}.", trails.join(", "));
-    }
-    entry.push_str(signs.unwrap_or_default());
+    entry.push_str(shown.saved.unwrap_or_default());
+    entry.push_str(shown.signs.unwrap_or_default());
     entry
 }
 

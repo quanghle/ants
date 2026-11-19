@@ -593,6 +593,11 @@ most 64 KiB, holds:
   `unanswered`, then their tally (the counts its diary's title gives), at most an eighth of the packet's budget, the
   last findings' verdicts left out first; for the sage, its earlier findings for the ant and what became of them
   (below);
+- for the sage, the trails the colony saved (its `ants_trails` bucket, not a machine's `~/.ants/trails`), each with its
+  name, its ratings (how often its runs were rated worked, partly and failed) and its description, data rather than
+  instructions, the best rated first (by worked plus half of partly against the rest), then the latest saved, at most
+  a sixteenth of the packet's budget, the rest counted as left out, or that they could not be read: so a `trail`
+  finding suggests no trail the colony has, and an approach one of them serves gets a finding naming it instead;
 - the findings, at most 20, each with an id `<dream>.<n>`: those of a sage's answer to the last dream's review come too
   late (**The answer**, below) first, then the findings of the last dream deferred or unanswered that still hold,
   offered again, then what the ant's identity lacks for its work (below), memories with both `helpful` and `stale`
@@ -624,10 +629,10 @@ most 64 KiB, holds:
   content is left out. Sense stores none of it.
 
 A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then the
-vital signs' line for each thread, then the verdicts on the last dream's findings down to their tally, then the sage's
-earlier findings, or a sage's reviews of other ants, down to their tally, then cuts the identity to titles (the
-persona's field names, the records' heads and the skills' names), then leaves out the last findings, counted for the
-next dream.
+vital signs' line for each thread, then the colony's saved trails down to their tally, then the verdicts on the last
+dream's findings down to their tally, then the sage's earlier findings, or a sage's reviews of other ants, down to their
+tally, then cuts the identity to titles (the persona's field names, the records' heads and the skills' names), then
+leaves out the last findings, counted for the next dream.
 
 **The sage's earlier findings:** a sage keeps nothing between reviews, so its packet shows the findings it gave the ant
 in the dreams begun within the ant's last 30 active days (its dormancies not counted), the latest reviews first, those
@@ -637,7 +642,8 @@ packet's own. Each comes with its suggested action and the ant's last verdict an
 the packet offers it again, with the id it is offered by when that differs), and, for one applied, what became of each
 item the verdict names: a memory's status (marked when it changed since the verdict), the days it was read and its
 helpful, stale and wrong votes; a proposal's status; whether a self-model or relationship record was replaced since;
-or that the item is no longer kept; then the trails it names, saved for it.
+or that the item is no longer kept; then the trails it names, saved for it, each with its ratings or that it is no
+longer saved.
 Beside a finding applied come the ant's vital signs (below) of the dream it was given in and up to 4 before, and of up
 to 5 dreams since, the one being reviewed included, side by side: the threads, the prompts cancelled by a human, the
 share of tool calls failed, the tool requests rejected and the tokens a thread; a dream keeping none is left out. They
@@ -647,7 +653,10 @@ a finding followed up the follow-ups made of it (`Followed up by 4.1.`). A follo
 required shows as a plain `follow_up`.
 A tally by kind follows, with a line for all: findings made, applied (and how many of those still hold), rejected,
 deferred and unanswered. An applied finding still holds while every item it names is kept, a memory active, superseded
-or in the status it had at the verdict, a proposal pending or confirmed. The section takes at most an eighth of the
+or in the status it had at the verdict, a proposal pending or confirmed, and every trail it names is still saved in
+the colony and rated failed no more often than worked. When the daemon cannot read the colony's saved trails, the
+section tells so for each trail and the finding holds by its items alone, so unknown ratings count against no sage.
+The section takes at most an eighth of the
 packet's budget, the earlier reviews' findings left out first. The packet an ant reads alone keeps the verdicts on the
 last dream's findings instead.
 
@@ -786,7 +795,8 @@ there as any offered again (the limit of 20 holds); an answer arriving after the
 outcomes last told to that sage (`review_outcomes`). Each changed outcome carries the last verdict,
 the ant's reason for it (`reason`, at most 200 characters, on one line, its secrets redacted, the ant's text and
 untrusted) and, for one applied, whether it still holds, as the earlier findings judge them, over the dreams begun
-within the ant's last 90 active days. The `findings` array takes at most 64 KiB of compact JSON, oldest findings first.
+within the ant's last 90 active days; one naming trails keeps the holding last told while the colony's saved trails
+cannot be read. The `findings` array takes at most 64 KiB of compact JSON, oldest findings first.
 The same batch and eligible ids go on every try; only a batch acknowledged by JetStream (at the hub or the leaf
 outbox) counts as sent. Later reviews include still-eligible changes not yet sent, with their current verdicts and
 outcomes. If needed, checkout metadata or packet text is shortened to fit the bus without changing the batch or ids.

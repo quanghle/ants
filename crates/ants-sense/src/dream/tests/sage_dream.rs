@@ -422,7 +422,7 @@ async fn a_sage_s_dream_lists_its_reviews_by_their_records_and_holds_none_of_the
     assert_eq!(reviews, [true, true, false], "a thread a review record names is a review, whatever its origin");
 
     let threads = [thread(2, 200, true), thread(3, 200, true), thread(4, 200, false)];
-    let text = packet(&*items, &dream, &ant(), &threads).await.unwrap();
+    let text = packet(&*items, &dream, &ant(), &threads, &ColonyTrails::UNREAD).await.unwrap();
     assert!(text.contains(", 1 threads, and the reviews it made of other ants, listed below."), "{text}");
     assert!(text.contains("Ask how the findings of those reviews fared"), "{text}");
     let shown = [

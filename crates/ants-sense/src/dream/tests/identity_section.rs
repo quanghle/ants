@@ -35,7 +35,7 @@ async fn the_identity_shows_the_persona_and_its_proposal_or_that_there_is_none()
     let items: Arc<dyn Items> = kept.clone();
     let writer = on(9);
     let dream = begin(&*items, start(at(12), &writer)).await.unwrap().unwrap();
-    let none = packet(&*items, &dream, &ant(), &[]).await.unwrap();
+    let none = packet(&*items, &dream, &ant(), &[], &ColonyTrails::UNREAD).await.unwrap();
     assert_eq!(
         section(&none),
         "## Identity\n\n### Persona\n\nNo persona yet.\n\n### Self-model\n\nNo self-model yet.\n\n### Relationships \
@@ -47,7 +47,7 @@ async fn the_identity_shows_the_persona_and_its_proposal_or_that_there_is_none()
     values.insert("voice".into(), json!("Plain."));
     values.insert("boundaries".into(), json!("No force pushes."));
     items.write(&[Write::Create { id: persona_id(), kind: PERSONA.into(), values }], "test").await.unwrap();
-    let alone = packet(&*items, &dream, &ant(), &[]).await.unwrap();
+    let alone = packet(&*items, &dream, &ant(), &[], &ColonyTrails::UNREAD).await.unwrap();
     assert!(
         section(&alone).contains("### Persona\n\nVoice: Plain.\nBoundaries: No force pushes.\n\n### Self"),
         "{alone}"
@@ -57,7 +57,7 @@ async fn the_identity_shows_the_persona_and_its_proposal_or_that_there_is_none()
     let proposed = tool(&sense, crate::identity::identity, change, context(human())).await;
     assert!(!proposed.is_error, "{proposed:?}");
     let sage = Reader::Sage(user("dev-a"));
-    let reviewed = packet(&*items, &dream, &sage, &[]).await.unwrap();
+    let reviewed = packet(&*items, &dream, &sage, &[], &ColonyTrails::UNREAD).await.unwrap();
     let identity = section(&reviewed);
     assert!(identity.contains("Boundaries: No force pushes.\n\nProposed: Proposal "), "{identity}");
     assert!(identity.contains("(pending, made 2025-01-01T12:00:00Z"), "{identity}");
@@ -100,7 +100,7 @@ async fn both_readers_see_the_records_of_the_threads_starters_the_skills_and_the
     let dream = begin(&*items, Start { threads, ..start(at(12), &writer) }).await.unwrap().unwrap();
 
     for reader in [ant(), Reader::Sage(user("dev-a"))] {
-        let packet = packet(&*items, &dream, &reader, &[]).await.unwrap();
+        let packet = packet(&*items, &dream, &reader, &[], &ColonyTrails::UNREAD).await.unwrap();
         let identity = section(&packet);
         let parts = [
             "### Self-model\n\n- ",

@@ -6,12 +6,12 @@ use ants_proto::{FindingOutcome, FindingVerdict};
 use super::*;
 use crate::proposal::{PROPOSAL, Proposal};
 
-fn user(name: &str) -> UserId {
+pub(super) fn user(name: &str) -> UserId {
     name.parse().unwrap()
 }
 
 /// A finding of a sage, of `kind`, first offered as `id`.
-fn advised(id: &str, kind: &str, text: &str) -> Finding {
+pub(super) fn advised(id: &str, kind: &str, text: &str) -> Finding {
     let action = format!("Act on {id}.");
     let advice = Advice {
         kind: kind.into(),
@@ -24,18 +24,30 @@ fn advised(id: &str, kind: &str, text: &str) -> Finding {
     Finding { id: id.into(), kind: FindingKind::Sage, text: text.into(), advice: Some(advice), ..finding(1) }
 }
 
-fn verdict(finding: &str, verdict: Judgement, reason: &str, items: &[&ItemId], at: DateTime<Utc>) -> Verdict {
+pub(super) fn verdict(
+    finding: &str,
+    verdict: Judgement,
+    reason: &str,
+    items: &[&ItemId],
+    at: DateTime<Utc>,
+) -> Verdict {
     let items = items.iter().map(|&id| id.clone()).collect();
     Verdict { finding: finding.into(), verdict, reason: reason.into(), items, trails: Vec::new(), at }
 }
 
 /// Dream `number`, begun at `at` with `sage` reviewing, offering `findings` and judged by `verdicts`.
-fn reviewed(number: u64, at: DateTime<Utc>, sage: &str, findings: Vec<Finding>, verdicts: Vec<Verdict>) -> Dream {
+pub(super) fn reviewed(
+    number: u64,
+    at: DateTime<Utc>,
+    sage: &str,
+    findings: Vec<Finding>,
+    verdicts: Vec<Verdict>,
+) -> Dream {
     let since = at - Duration::hours(24);
     Dream { number, at, since, sage: Some(user(sage)), findings, verdicts, ..reviewing(0, 0) }
 }
 
-async fn keep(items: &dyn Items, dream: &Dream) {
+pub(super) async fn keep(items: &dyn Items, dream: &Dream) {
     let put = Write::Put { id: Dream::id(dream.number), kind: DREAM.into(), values: dream.values(), expected: None };
     items.write(&[put], "test").await.unwrap();
 }
@@ -60,7 +72,7 @@ async fn proposed(items: &dyn Items, status: proposal::Status) -> ItemId {
 }
 
 /// The part of `packet` from `heading` to the next heading of its level.
-fn part<'a>(packet: &'a str, heading: &str) -> &'a str {
+pub(super) fn part<'a>(packet: &'a str, heading: &str) -> &'a str {
     let start = packet.find(heading).unwrap_or_else(|| panic!("{heading:?} in {packet}"));
     let rest = &packet[start + heading.len()..];
     &rest[..rest.find("\n## ").unwrap_or(rest.len())]
@@ -122,7 +134,7 @@ async fn a_sage_reads_its_earlier_findings_with_their_verdicts_and_what_became_o
     }
     let current = reviewed(4, now, "sage", vec![advised("3.2", "skill", "A release skill would help.")], Vec::new());
 
-    let read = packet(&*items, &current, &Reader::Sage(user("dev-a")), &[]).await.unwrap();
+    let read = packet(&*items, &current, &Reader::Sage(user("dev-a")), &[], &ColonyTrails::UNREAD).await.unwrap();
     let earlier = part(&read, "\n## Earlier findings of sage\n");
     assert!(!earlier.contains("elder") && !earlier.contains("1.1"), "another sage's findings stay out: {earlier}");
     let entries = [
@@ -158,7 +170,7 @@ async fn a_sage_reads_its_earlier_findings_with_their_verdicts_and_what_became_o
     assert!(read.contains("finding of kind follow_up"), "{read}");
     assert!(!read.contains("## Verdicts on dream"), "{read}");
 
-    let alone = packet(&*items, &current, &ant(), &[]).await.unwrap();
+    let alone = packet(&*items, &current, &ant(), &[], &ColonyTrails::UNREAD).await.unwrap();
     assert!(alone.contains("## Verdicts on dream 3\n\n- 2.3 (sage): applied: Proposed a plainer voice."), "{alone}");
     assert!(!alone.contains("Earlier findings") && !alone.contains("follow_up"), "{alone}");
 }
@@ -203,7 +215,7 @@ async fn a_finding_applied_three_dreams_ago_shows_the_signs_of_the_dreams_before
     }
     let current = dream(7, now, Some(signs(2, 1, (10, 0), 0, 8_000)), Vec::new(), Vec::new());
 
-    let read = packet(&*items, &current, &Reader::Sage(user("dev-a")), &[]).await.unwrap();
+    let read = packet(&*items, &current, &Reader::Sage(user("dev-a")), &[], &ColonyTrails::UNREAD).await.unwrap();
     let record = part(&read, "\n## Earlier findings of sage\n");
     let applied = "- 4.1 (lesson): Ask before a long run.\n  Suggested action: Act on 4.1.\n  Verdict: applied: \
                    Remembered.\n  Signs of dreams 1, 3, 4 before it was applied | 5, 6, 7 since: threads 2, 4, 1 | 3, \
@@ -214,7 +226,7 @@ async fn a_finding_applied_three_dreams_ago_shows_the_signs_of_the_dreams_before
     assert!(read.contains("a few threads make weak evidence"), "the instructions say so: {read}");
 
     let early = dream(5, hours(36), None, Vec::new(), Vec::new());
-    let record = track_record(&*items, &early, &user("sage"), &user("dev-a")).await.unwrap();
+    let record = track_record(&*items, &early, &user("sage"), &user("dev-a"), &ColonyTrails::UNREAD).await.unwrap();
     let text = record.text(record.entries.len());
     assert!(text.contains("before it was applied | none since: threads 2, 4, 1 | none;"), "{text}");
 }
@@ -242,17 +254,17 @@ async fn the_earlier_findings_reach_back_thirty_active_days_the_dormant_ones_not
     keep(&*items, &kept_one).await;
 
     let current = reviewed(3, now, "sage", Vec::new(), Vec::new());
-    let record = track_record(&*items, &current, &user("sage"), &user("dev-a")).await.unwrap();
+    let record = track_record(&*items, &current, &user("sage"), &user("dev-a"), &ColonyTrails::UNREAD).await.unwrap();
     let text = record.text(record.entries.len());
     assert!(text.contains("Ten active days ago.") && !text.contains("Forty active days ago."), "{text}");
     assert!(text.contains("- lesson: 1 made, 0 applied (0 still holding), 0 rejected, 0 deferred, 1 unanswered."));
 
     let card = identity::card(&*items).await.unwrap().unwrap();
     let ages = memory::Ages::new(now, card.dormant(now));
-    let (_, targets) = packet::review_history(&*items, 3, &ages, &user("sage")).await.unwrap();
+    let (_, targets) = packet::review_history(&*items, 3, &ages, &user("sage"), &ColonyTrails::UNREAD).await.unwrap();
     assert_eq!(targets, BTreeMap::from([("2.1".into(), "2.1".into())]));
 
-    let none = track_record(&*items, &current, &user("elder"), &user("dev-a")).await.unwrap();
+    let none = track_record(&*items, &current, &user("elder"), &user("dev-a"), &ColonyTrails::UNREAD).await.unwrap();
     assert!(none.is_empty(), "{none:?}");
     assert_eq!(none.tally, "\nNo findings of elder in the last 30 active days of dev-a.\n");
 }
@@ -276,7 +288,8 @@ async fn the_outcomes_told_the_sage_reach_back_ninety_active_days_the_track_reco
     assert!(!voted.is_error, "{voted:?}");
 
     let ages = memory::Ages::new(now, std::iter::empty());
-    let (told, targets) = packet::review_history(&*items, 3, &ages, &user("sage")).await.unwrap();
+    let (told, targets) =
+        packet::review_history(&*items, 3, &ages, &user("sage"), &ColonyTrails::UNREAD).await.unwrap();
     assert!(targets.is_empty(), "reporting a verdict beyond the window does not grant a follow-up link");
     let undone = FindingOutcome {
         finding: "2.1".into(),
@@ -286,7 +299,7 @@ async fn the_outcomes_told_the_sage_reach_back_ninety_active_days_the_track_reco
     };
     assert_eq!(told, [undone], "followed for {OUTCOME_DAYS} active days, the older not told");
     let current = reviewed(3, now, "sage", Vec::new(), Vec::new());
-    let record = track_record(&*items, &current, &user("sage"), &user("dev-a")).await.unwrap();
+    let record = track_record(&*items, &current, &user("sage"), &user("dev-a"), &ColonyTrails::UNREAD).await.unwrap();
     assert!(record.is_empty(), "the packet shows {TRACK_RECORD_DAYS} active days: {record:?}");
 }
 
@@ -307,12 +320,15 @@ fn over_its_budget_the_earlier_findings_shrink_to_their_tally_before_the_identit
     let reader = Reader::Sage(user("dev-a"));
 
     let long = record(30, 400);
-    let shared = compose(&dream, Earlier::Sage(&long), &[], &reader, &identity, &threads, PACKET_BUDGET);
+    let shared =
+        compose(&dream, Earlier::Sage(&long, &Section::default()), &[], &reader, &identity, &threads, PACKET_BUDGET);
     assert!(shared.contains("- 0.19 (lesson)") && !shared.contains("- 0.20 (lesson)"), "an eighth: {shared}");
     assert!(shared.contains("11 earlier findings left out for room.") && shared.contains("message 3"), "{shared}");
 
     let earlier = record(10, 30);
-    let within = |budget| compose(&dream, Earlier::Sage(&earlier), &[], &reader, &identity, &threads, budget);
+    let within = |budget| {
+        compose(&dream, Earlier::Sage(&earlier, &Section::default()), &[], &reader, &identity, &threads, budget)
+    };
     let whole = within(PACKET_BUDGET);
     assert!(whole.contains("- 0.10 (lesson)") && !whole.contains("earlier findings left out"), "{whole}");
     assert!(whole.find("## Earlier findings").unwrap() < whole.find("## Findings").unwrap(), "{whole}");
@@ -332,22 +348,4 @@ fn over_its_budget_the_earlier_findings_shrink_to_their_tally_before_the_identit
     let titles = within(tally.len() - 1);
     assert!(titles.contains(&identity.titles) && titles.contains(left_out), "{titles}");
     assert!(titles.contains("10 made") && titles.contains("Finding number 5"), "{titles}");
-}
-
-#[tokio::test]
-async fn a_trail_finding_applied_shows_the_sage_the_trails_saved_for_it() {
-    let (_, kept) = sense().await;
-    let items: Arc<dyn Items> = kept.clone();
-    let now = Utc::now();
-    let mut applied = verdict("1.1", Judgement::Applied, "Saved it.", &[], now - Duration::hours(23));
-    applied.trails = vec!["release-notes".parse().unwrap()];
-    let finding = advised("1.1", TRAIL, "Release notes drafted by hand thrice.");
-    keep(&*items, &reviewed(1, now - Duration::hours(24), "sage", vec![finding], vec![applied])).await;
-
-    let current = reviewed(2, now, "sage", Vec::new(), Vec::new());
-    let read = packet(&*items, &current, &Reader::Sage(user("dev-a")), &[]).await.unwrap();
-    let entry = "- 1.1 (trail): Release notes drafted by hand thrice.\n  Suggested action: Act on 1.1.\n  Verdict: \
-                 applied: Saved it.\n  Saved trails: release-notes.\n";
-    assert!(part(&read, "\n## Earlier findings of sage\n").contains(entry), "{read}");
-    assert!(read.contains("A trail finding also holds \"trail\": {\"name\": \"release-notes\""), "{read}");
 }

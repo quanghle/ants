@@ -188,7 +188,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::dream::{Recipient, Start};
+    use crate::dream::{ColonyTrails, Recipient, Start};
     use crate::items::Values;
     use crate::memory::tests::{context, events, human, id_of, sense, tool};
     use crate::store::Write;
@@ -246,6 +246,7 @@ mod tests {
             commits: vec![],
             writer: &writer,
             vitals,
+            trails: &ColonyTrails::UNREAD,
         };
         dream::begin(&*items, start).await.unwrap().unwrap();
         let remember =
@@ -308,6 +309,7 @@ mod tests {
             commits: vec![],
             writer: &writer,
             vitals,
+            trails: &ColonyTrails::UNREAD,
         };
         let yesterday = Utc::now() - chrono::Duration::hours(25);
         dream::begin(&*items, start(yesterday, replied(1))).await.unwrap().unwrap();

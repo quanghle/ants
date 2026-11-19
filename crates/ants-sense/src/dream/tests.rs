@@ -18,7 +18,16 @@ fn ant() -> Reader {
 }
 
 fn start(at: DateTime<Utc>, writer: &CallContext) -> Start<'_> {
-    Start { at, recipient: Recipient::Ant, threads: Vec::new(), commits: Vec::new(), writer, vitals: Vec::new() }
+    let trails = &ColonyTrails::UNREAD;
+    Start {
+        at,
+        recipient: Recipient::Ant,
+        threads: Vec::new(),
+        commits: Vec::new(),
+        writer,
+        vitals: Vec::new(),
+        trails,
+    }
 }
 
 fn review_request(dream: u64) -> ReviewOutcomes {
@@ -118,7 +127,7 @@ async fn findings_gather_what_needs_judging_and_the_open_ones_come_again() {
             ("1.4", FindingKind::Distill, episode.clone(), false),
         ]
     );
-    let shown = packet(&*items, &first, &ant(), &[]).await.unwrap();
+    let shown = packet(&*items, &first, &ant(), &[], &ColonyTrails::UNREAD).await.unwrap();
     assert!(shown.contains("- 1.3 (needs_review, untrusted): Memory"), "{shown}");
     woken(&*items, 1, &on(1).thread).await.unwrap();
     let verdicts = json!({"verdicts": [
@@ -141,7 +150,7 @@ async fn findings_gather_what_needs_judging_and_the_open_ones_come_again() {
         [("1.2", FindingKind::NeedsReview), ("1.4", FindingKind::Distill)],
         "the deferred and unanswered come again, the applied and rejected not, nor the diary to distill"
     );
-    let packet = packet(&*items, &second, &ant(), &[]).await.unwrap();
+    let packet = packet(&*items, &second, &ant(), &[], &ColonyTrails::UNREAD).await.unwrap();
     assert!(packet.contains("## Verdicts on dream 1"), "{packet}");
     assert!(packet.contains("- 1.4 (distill): unanswered"), "{packet}");
     assert!(packet.contains("- 1.2 (needs_review, offered again): Memory"), "{packet}");
@@ -549,6 +558,7 @@ fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
     assert!(!bare.contains("marked undone"), "{bare}");
 }
 
+mod colony_trails;
 mod identity_findings;
 mod identity_section;
 mod review;
