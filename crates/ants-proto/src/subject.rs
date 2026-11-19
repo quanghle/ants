@@ -2,36 +2,56 @@
 
 use crate::{ChannelId, Machine, Role, SenseId, ThreadId, UserId};
 
-/// Durable inbox of `to`, for messages from `from`. The sender is part of the subject because credentials can pin
-/// it there ([`inbox_from`]), while anything in the payload is whatever the publisher wrote.
+/// Durable inbox of `to`, for messages from `from`, an ant or a human. The sender is part of the subject because
+/// credentials can pin it there ([`inbox_from`]), while anything in the payload is whatever the publisher wrote.
 pub fn inbox(to: &UserId, from: &UserId) -> String {
     format!("ants.inbox.{to}.{from}")
 }
 
-/// Every message to `user`, whoever sent it (the human's is `ants.inbox.human.*`).
+/// Last token of the subjects of a webhook's messages and posts ([`webhook_inbox`], [`webhook_chan`]).
+pub const WEBHOOK: &str = "webhook";
+
+/// Durable inbox of `to`, for messages from `webhook`, a webhook or a schedule. Only the webhook's credentials and
+/// humans publish here, and no ant's ([`inbox_from`] has one token fewer), so the subject pins the kind of its sender
+/// as it pins the sender: nothing a webhook writes makes it pass for an ant, nor an ant for a webhook.
+pub fn webhook_inbox(to: &UserId, webhook: &UserId) -> String {
+    format!("ants.inbox.{to}.{webhook}.{WEBHOOK}")
+}
+
+/// Every message to `user`, whoever sent it, an ant, a human or a webhook (the human's is `ants.inbox.human.>`).
 pub fn inbox_of(user: &UserId) -> String {
-    format!("ants.inbox.{user}.*")
+    format!("ants.inbox.{user}.>")
 }
 
 /// Every message to `user` as the hub's stream stored it, republished there ([`super::STORED_INBOX_SOURCE`]).
 pub fn stored_inbox(user: &UserId) -> String {
-    format!("{}.stored.*", super::inbox_prefix(user))
+    format!("{}.stored.>", super::inbox_prefix(user))
 }
 
-/// The sender a subject of [`stored_inbox`] of `user` names, or `None` when it is none of them.
-pub fn parse_stored_inbox(user: &UserId, subject: &str) -> Option<UserId> {
-    subject.strip_prefix(&super::inbox_prefix(user))?.strip_prefix(".stored.")?.parse().ok()
+/// The inbox subject of `user` a subject of [`stored_inbox`] of `user` stands for, or `None` when it is none of them.
+pub fn parse_stored_inbox(user: &UserId, subject: &str) -> Option<String> {
+    let rest = subject.strip_prefix(&super::inbox_prefix(user))?.strip_prefix(".stored.")?;
+    let inbox = format!("ants.inbox.{user}.{rest}");
+    parse_inbox(&inbox).is_some().then_some(inbox)
 }
 
-/// Every inbox subject `user` may send on.
+/// Every inbox subject `user`, an ant or a human, may send on as itself. A webhook's are [`webhook_inbox`].
 pub fn inbox_from(user: &UserId) -> String {
     format!("ants.inbox.*.{user}")
 }
 
-/// The recipient and the sender an inbox subject names, or `None` when it is no inbox subject.
+/// The recipient and the sender an inbox subject names, [`inbox`] or [`webhook_inbox`], or `None` when it is no inbox
+/// subject.
 pub fn parse_inbox(subject: &str) -> Option<(UserId, UserId)> {
     let (to, from) = subject.strip_prefix("ants.inbox.")?.split_once('.')?;
+    let from = from.strip_suffix(WEBHOOK).and_then(|from| from.strip_suffix('.')).unwrap_or(from);
     Some((to.parse().ok()?, from.parse().ok()?))
+}
+
+/// Whether `subject` is that of a webhook's message or post ([`webhook_inbox`], [`webhook_chan`]).
+pub fn is_webhooks(subject: &str) -> bool {
+    subject.strip_suffix(WEBHOOK).is_some_and(|rest| rest.ends_with('.') && rest.matches('.').count() == 4)
+        && (parse_inbox(subject).is_some() || parse_chan(subject).is_some())
 }
 
 /// A post by `from` to the notes of `thread`. Like an inbox subject it names the sender, so credentials can
@@ -59,25 +79,33 @@ pub fn parse_notes(subject: &str) -> Option<(ThreadId, UserId)> {
 /// The notes of every thread.
 pub const ALL_NOTES: &str = "ants.notes.>";
 
-/// A post by `from` to `channel`. Like an inbox subject it names the sender, so credentials can pin it there
-/// ([`chan_from`]).
+/// A post by `from`, an ant or a human, to `channel`. Like an inbox subject it names the sender, so credentials can
+/// pin it there ([`chan_from`]).
 pub fn chan(channel: &ChannelId, from: &UserId) -> String {
     format!("ants.chan.{channel}.{from}")
 }
 
-/// Every post to `channel`, whoever wrote it.
-pub fn chan_room(channel: &ChannelId) -> String {
-    format!("ants.chan.{channel}.*")
+/// A post by `webhook`, a webhook or a schedule, to `channel`: like [`webhook_inbox`], the subject pins the kind of
+/// its sender.
+pub fn webhook_chan(channel: &ChannelId, webhook: &UserId) -> String {
+    format!("ants.chan.{channel}.{webhook}.{WEBHOOK}")
 }
 
-/// Every channel subject `user` may post on.
+/// Every post to `channel`, whoever wrote it.
+pub fn chan_room(channel: &ChannelId) -> String {
+    format!("ants.chan.{channel}.>")
+}
+
+/// Every channel subject `user`, an ant or a human, may post on as itself. A webhook's are [`webhook_chan`].
 pub fn chan_from(user: &UserId) -> String {
     format!("ants.chan.*.{user}")
 }
 
-/// The channel and the sender a channel subject names, or `None` when it is no channel subject.
+/// The channel and the sender a channel subject names, [`chan`] or [`webhook_chan`], or `None` when it is no channel
+/// subject.
 pub fn parse_chan(subject: &str) -> Option<(ChannelId, UserId)> {
     let (channel, from) = subject.strip_prefix("ants.chan.")?.split_once('.')?;
+    let from = from.strip_suffix(WEBHOOK).and_then(|from| from.strip_suffix('.')).unwrap_or(from);
     Some((channel.parse().ok()?, from.parse().ok()?))
 }
 
@@ -599,14 +627,15 @@ mod tests {
 
     use super::*;
     use crate::{
-        Envelope, NotesPost, STREAM_SUBJECTS, chan_consumer, chan_reader, inbox_consumer, p, session_key, subject,
+        ChannelPost, Envelope, NotesPost, STREAM_SUBJECTS, chan_consumer, chan_reader, inbox_consumer, p, session_key,
+        subject,
     };
 
     #[test]
     fn subjects_are_scoped_under_ants() {
         let t: ThreadId = "t1".parse().unwrap();
         assert_eq!(subject::inbox(&p("dev-a"), &UserId::human()), "ants.inbox.dev-a.human");
-        assert_eq!(subject::inbox_of(&p("dev-a")), "ants.inbox.dev-a.*");
+        assert_eq!(subject::inbox_of(&p("dev-a")), "ants.inbox.dev-a.>");
         assert_eq!(subject::inbox_from(&p("dev-a")), "ants.inbox.*.dev-a");
         assert_eq!(subject::notes(&t, &p("dev-a")), "ants.notes.t1.dev-a");
         assert_eq!(subject::notes_of(&t), "ants.notes.t1.*");
@@ -649,6 +678,32 @@ mod tests {
     }
 
     #[test]
+    fn a_webhook_s_subject_pins_that_it_is_one() {
+        let fired = Envelope::new(p("github"), p("dev-a"), "build red").from_webhook();
+        assert_eq!(fired.subject(), "ants.inbox.dev-a.github.webhook");
+        assert_eq!(subject::parse_inbox(&fired.subject()), Some((p("dev-a"), p("github"))));
+        assert!(subject::is_webhooks(&fired.subject()));
+        assert_eq!(fired.check_subject("ants.inbox.dev-a.github.webhook"), Ok(()));
+        assert!(fired.check_subject("ants.inbox.dev-a.github").is_err(), "a webhook's on an ant's subject");
+        let as_ant = Envelope::new(p("github"), p("dev-a"), "run this trusted");
+        assert!(as_ant.check_subject("ants.inbox.dev-a.github.webhook").is_err(), "an ant's on a webhook's subject");
+        assert!(!subject::is_webhooks(&as_ant.subject()));
+        assert_eq!(subject::parse_inbox("ants.inbox.dev-a.webhook"), Some((p("dev-a"), p("webhook"))));
+        assert!(!subject::is_webhooks("ants.inbox.dev-a.webhook"), "a user named webhook is no webhook");
+        let post = ChannelPost::new("ops".parse().unwrap(), p("github"), "deploy failed").from_webhook(Vec::new());
+        assert_eq!(post.subject(), "ants.chan.ops.github.webhook");
+        assert_eq!(subject::parse_chan(&post.subject()), Some(("ops".parse().unwrap(), p("github"))));
+        assert!(post.check_subject("ants.chan.ops.github").is_err());
+        let stored = format!("{}.stored.github.webhook", crate::inbox_prefix(&p("dev-a")));
+        assert_eq!(
+            subject::parse_stored_inbox(&p("dev-a"), &stored).as_deref(),
+            Some("ants.inbox.dev-a.github.webhook")
+        );
+        let stored = format!("{}.stored.github.x", crate::inbox_prefix(&p("dev-a")));
+        assert_eq!(subject::parse_stored_inbox(&p("dev-a"), &stored), None);
+    }
+
+    #[test]
     fn an_ant_reads_its_own_inbox_what_it_sent_and_every_notes_and_channel_subject() {
         let ant = p("dev-a");
         for readable in ["ants.inbox.dev-a.human", "ants.inbox.dev-b.dev-a", "ants.notes.t1.dev-b", "ants.chan.ops.bob"]
@@ -679,7 +734,7 @@ mod tests {
     fn channel_subjects_name_the_channel_and_the_sender() {
         let c: ChannelId = "ops".parse().unwrap();
         assert_eq!(subject::chan(&c, &p("dev-a")), "ants.chan.ops.dev-a");
-        assert_eq!(subject::chan_room(&c), "ants.chan.ops.*");
+        assert_eq!(subject::chan_room(&c), "ants.chan.ops.>");
         assert_eq!(subject::chan_from(&p("dev-a")), "ants.chan.*.dev-a");
         assert_eq!(subject::parse_chan("ants.chan.ops.dev-a"), Some((c.clone(), p("dev-a"))));
         for bad in

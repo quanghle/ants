@@ -97,6 +97,7 @@ pub use identity::{
 };
 pub use ids::{BuiltinAnt, ChannelId, JsDomain, Machine, Reaction, Role, RunId, ThreadId, TipId, TrailName, UserId};
 pub use inbox::{ChannelNotify, ChannelReadMarkers, HeldNotices, NotifyPrefs, ReadMarker};
+pub(crate) use keys::STORAGE_WARNING_PREFIX;
 pub use keys::{
     ANTS_VERSION, Feed, SERVING_EVERY, SPARE_READERS, Serving, TRAIL_RUNS_INDEX, TRAIL_STEPS, assisted_marks_key,
     assisted_owner_key, assisted_reminders_key, assisted_withdrawal_key, attempt_key, chan_consumer, chan_reader,
@@ -108,7 +109,6 @@ pub use keys::{
     thread_spend_key, title_key, trail_call_key, trail_run_key, trail_runs_index_key, trail_runs_subject,
     trail_session_key, trail_step_key, unserved_key, webhook_marker_key, webhook_marker_subject, webhook_seen_key,
 };
-pub(crate) use keys::{STORAGE_WARNING_PREFIX, WEBHOOK_MARKER};
 pub use keys::{
     TIP_RETIRED, TRAIL_STEPS_ON, trail_rating_key, trail_thread_step_key, trail_thread_steps_prefix, trail_tip_key,
     trail_tip_retired_key, trail_tip_vote_key,
@@ -195,13 +195,13 @@ pub const STREAM_SUBJECTS: [&str; 7] = [
 ];
 /// The inbox subjects [`STREAM`] republishes each message it stores on, to [`STORED_INBOX_DESTINATION`]: what it
 /// sources from a leaf's outbox it stores without publishing it on its subject.
-pub const STORED_INBOX_SOURCE: &str = "ants.inbox.*.*";
+pub const STORED_INBOX_SOURCE: &str = "ants.inbox.*.>";
 /// Where [`STREAM`] republishes a stored inbox message: the recipient's reply inboxes ([`subject::stored_inbox`]), which
 /// its credentials already read and no credentials publish to. The headers keep the original subject. The server also
 /// answers a direct get, and delivers a push consumer's messages, there for any client that names the subject, with
 /// headers that client stored: only a message without a reply subject, and with a single `Nats-Stream` and a single
 /// `Nats-Subject` header, the stream's own, is one it republished.
-pub const STORED_INBOX_DESTINATION: &str = "_INBOX.{{wildcard(1)}}.stored.{{wildcard(2)}}";
+pub const STORED_INBOX_DESTINATION: &str = "_INBOX.{{wildcard(1)}}.stored.>";
 /// JetStream stream on a machine's leaf node (in the leaf's own JetStream domain, the machine name) that keeps what
 /// the machine's clients send while the hub's [`STREAM`] is out of reach, under [`subject::outbox`] subjects.
 pub const OUTBOX_STREAM: &str = "ANTS_OUT";
@@ -271,10 +271,10 @@ pub const LINKS_BUCKET: &str = "ants_links";
 /// stream's retention.
 pub const OWNERS_BUCKET: &str = "ants_owners";
 /// KV bucket of the events each webhook delivered, keyed `<webhook>.<hash of the event id>` ([`webhook_seen_key`]),
-/// so a retried event is not delivered again, of each webhook's marker ([`webhook_marker_key`]), which tells
-/// daemons the webhook is one, and of the channel manager's [`Serving`] ([`channel_manager_serving_key`]). Each
-/// webhook writes and reads only its own keys, ants read only the markers, humans the markers and the channel
-/// manager's key; entries expire after [`WEBHOOK_RETENTION`].
+/// so a retried event is not delivered again, of each webhook's marker ([`webhook_marker_key`]), the version
+/// it runs, and of the channel manager's [`Serving`] ([`channel_manager_serving_key`]). Each webhook writes and reads
+/// only its own keys, ants read nothing of it, humans the markers and the channel manager's key; what tells a webhook
+/// from an ant is the subject of its messages ([`subject::webhook_inbox`]), never this bucket; entries expire after [`WEBHOOK_RETENTION`].
 pub const WEBHOOKS_BUCKET: &str = "ants_webhooks";
 /// How long [`WEBHOOKS_BUCKET`] remembers an event.
 pub const WEBHOOK_RETENTION: Duration = Duration::from_hours(7 * 24);
