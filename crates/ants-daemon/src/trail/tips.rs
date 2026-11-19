@@ -106,3 +106,10 @@ impl Tips {
         self.kv.put(&key, value).await.with_context(|| format!("voting on tip {}", tip.key()))
     }
 }
+
+impl super::Trails {
+    /// The script of the trail saved as `name`, which a run of it would take: an error when none is saved so.
+    pub async fn saved_script(&self, name: &TrailName) -> Result<String, String> {
+        self.inner.saved.script(name).await
+    }
+}
