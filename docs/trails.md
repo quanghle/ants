@@ -467,7 +467,8 @@ whose name and description match `query`, and those rated on a task matching it.
 as [tips' search](#searching) does (lowercase, three characters or more, common English words left out), each reduced
 to a stem by a light English stemmer (a plural, `-ing` or `-ed`, then a suffix such as `-ation`, `-ment`, `-ness`, `-er`
 or `-ly`, then a final `e`, each only when three letters or more remain), and a text matches when it shares two of the
-query's stems, or all of them when the query has fewer. Each trail's ratings on matching tasks are counted, a `partly`
+query's stems, or all of them when the query has fewer; a query without such words (as `CI` or `do it`) matches none,
+and `find_trails` refuses it. Each trail's ratings on matching tasks are counted, a `partly`
 as half worked and half failed, a rating older than 90 days or of a script other than the trail's current one weighing
 half, and the trails are ranked by a draw from each one's Beta(1 + worked, 1 + failed): proven trails mostly win, and
 those with few ratings get tried. The draws are seeded by the thread and the query, so a search repeated on a thread

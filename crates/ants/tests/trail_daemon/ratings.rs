@@ -183,6 +183,13 @@ async fn rate_trail_rates_the_saved_trails_a_run_took_and_find_trails_ranks_them
     let serves = "\nSaved trail deploy-web already serves such tasks (1 worked, 1 partly, 0 failed): \
                   run_trail(name: \"deploy-web\") next time.";
     assert!(text.ends_with(serves), "{text}");
+    let (ok, text) = run_trail(&client, json!({"script": described("CI"), "args": {"n": 1}})).await;
+    assert!(ok && text.ends_with("invites this ant's rating of it."), "a description without words names none: {text}");
+    let wordless = started(&text);
+    lead.ended(&wordless).await;
+    let (ok, text) = rate(&client, &wordless, "worked", "CI", "green").await;
+    assert!(ok && text.contains(&format!("\nsave_trail(run: \"{wordless}\", name: …) saves its script")), "{text}");
+    assert!(!text.contains("already serves"), "a task without words is served by none: {text}");
 
     let (ok, text) = run_trail(&client, json!({"script": described("Count up"), "args": {"n": 1}, "wait": true})).await;
     assert!(ok, "{text}");

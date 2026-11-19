@@ -143,15 +143,16 @@ impl Query {
         Self { words: stemmed(text) }
     }
 
-    /// Whether it has no words, matching every text.
+    /// Whether it has no words, matching no text.
     pub fn is_empty(&self) -> bool {
         self.words.is_empty()
     }
 
-    /// Whether `text` shares at least [`RATING_MATCH_WORDS`] of its stemmed words, or all of them when it has fewer.
+    /// Whether `text` shares at least [`RATING_MATCH_WORDS`] of its stemmed words, or all of them when it has fewer:
+    /// never when it has none.
     pub fn matches(&self, text: &str) -> bool {
         let shared = stemmed(text).intersection(&self.words).count();
-        shared >= RATING_MATCH_WORDS.min(self.words.len())
+        !self.is_empty() && shared >= RATING_MATCH_WORDS.min(self.words.len())
     }
 
     /// Whether a trail's name, its words split on `-` and `_`, with its description, matches.

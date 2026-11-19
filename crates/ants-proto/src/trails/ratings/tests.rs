@@ -87,7 +87,8 @@ fn a_query_matches_texts_sharing_two_of_its_stemmed_words_or_all_of_fewer() {
     assert!(Query::new("deploys").matches("deploying the site"));
     assert!(!Query::new("deploys").matches("the site"));
     assert!(Query::new("the").is_empty());
-    assert!(Query::new("the").matches("anything"));
+    assert!(!Query::new("the").matches("the"), "a query without words matches no text");
+    assert!(!Query::new("CI").matches_trail(&name("ci"), "run CI"));
 }
 
 #[test]
@@ -130,8 +131,9 @@ fn trails_match_by_name_description_or_a_rated_task() {
     let mut found = names(&found);
     found.sort_unstable();
     assert_eq!(found, ["checker", "lint", "rust-review"]);
-    let every = finder("", &[("a", ""), ("b", "")]).rank(&ThreadId::generate(), MAX_FIND_TRAILS);
-    assert_eq!(every.len(), 2);
+    let mut wordless = finder("CI", &[("ci", "run CI"), ("b", "")]);
+    wordless.rating(rating("b", RatingOutcome::Worked, "CI", 1));
+    assert!(wordless.rank(&ThreadId::generate(), MAX_FIND_TRAILS).is_empty(), "a query without words finds none");
 }
 
 #[test]
