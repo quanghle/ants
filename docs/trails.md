@@ -202,8 +202,10 @@ and it ends within the wall time its parent has left. The result of its route an
 raises `RuntimeError: trail <name> failed: <error>` there, which the script may catch. A trail already running among
 the calling runs (the caller's current leg, its parent's, and so on) is refused: no trail calls itself.
 
-Stopping or ending a run stops its children, and resuming it resumes them. A child tells its start and end in the notes
-of its own thread, messaging no one; its end note points to resuming its parent.
+Stopping or ending a run stops its children, and resuming it resumes them: those stopped, and those that failed on a
+limit, whose errors then no longer answer their calls, so a run failed on its child's limit resumes under raised limits
+with that child. A child tells its start and end in the notes of its own thread, messaging no one; its end note points
+to resuming its parent.
 
 ## The run thread
 
@@ -321,7 +323,7 @@ finished run stays at least 30 days. The full layout is in [architecture.md](arc
   daemon while it is away and is recorded with the admin and time (`ants ant orders ANT`), its result listing the steps
   in other ants' queues. Ending a parent run stops its still-running children. Wall time keeps running while stopped.
 - **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose record names the limit it failed on, from
-  its last stored session, resuming its stopped child runs too; the steps waited on go out anew, on new threads. Limit flags replace the run's limits they name, within the
+  its last stored session, resuming its child runs stopped or failed on a limit too; the steps waited on go out anew, on new threads. Limit flags replace the run's limits they name, within the
   maxima. A run done, failed otherwise, running or waiting is refused. An admin's `ants ant resume-trail ANT RUN`
   resumes it by admin order the same way, limit flags included.
 

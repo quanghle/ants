@@ -136,7 +136,7 @@ impl Trails {
     /// stopped it and which run to resume; a child run's in the notes of its thread, its parent telling the owner.
     pub(super) async fn report_end(&self, run: &TrailRun) {
         tracing::info!(run = %run.run, state = ?run.state, steps = run.steps, turns = run.turns, "trail run ended");
-        // A child run's error answers its parent's call: none resumes it.
+        // A child run's error answers its parent's call: only its parent's resume resumes it, once failed on a limit.
         let resume = match (&run.parent, &run.state) {
             (None, _) => Some(run.run.clone()),
             (Some(_), RunState::Stopped { by }) => self.stopped_root(run, by),

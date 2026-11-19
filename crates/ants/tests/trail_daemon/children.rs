@@ -214,6 +214,40 @@ async fn stopping_a_run_stops_its_child_and_resuming_it_resumes_the_child() {
 }
 
 #[tokio::test]
+async fn resuming_a_run_failed_on_its_child_s_limit_resumes_the_child() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-child-limit-resume");
+    let each = "out = []\nfor say in [\"a\", \"b\", \"c\"]:\n    out.append(await agent(say, ant=\"dev\"))\nout\n";
+    let mut lead = conductor_with_saved(&server, &dir, &[("each", each)]).await;
+    let limits = TrailLimits { steps: 3, ..TrailLimits::default() };
+    let run = lead.start("await trail(\"each\")", limits).await;
+    let mut child = None;
+    for _ in 0..2 {
+        let step = lead.step().await;
+        child = step.trail_step.as_ref().map(|step| step.run.clone());
+        assert!(lead.reply(&step, &step.text.to_uppercase()).await);
+    }
+    let child = child.unwrap();
+    let RunState::Failed { error, limit } = lead.ended(&run).await else { panic!("not failed") };
+    assert!(
+        error.contains("trail each failed: ") && error.ends_with("the run reached its limit of 3 steps"),
+        "{error}"
+    );
+    assert_eq!(limit, Some(RunLimit::Steps));
+    assert_eq!(lead.header(&child).await.state.failed_on(), Some(RunLimit::Steps));
+
+    let raised = TrailLimits { steps: 10, ..limits };
+    lead.trails.resume(&run, &UserId::human(), Some(raised)).await.unwrap();
+    let step = lead.step().await;
+    assert_eq!((step.text.as_str(), &step.trail_step.as_ref().unwrap().run), ("c", &child), "the child resumes");
+    assert!(lead.reply(&step, "C").await);
+    assert_eq!(lead.result(&run).await, json!(["A", "B", "C"]));
+    assert_eq!(lead.ended(&child).await, RunState::Done { result: json!(["A", "B", "C"]) });
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
 async fn a_daemon_restarted_while_a_child_runs_finishes_both() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;
