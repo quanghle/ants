@@ -57,7 +57,7 @@ these names:
 | `await human(questions)` | One step: asks the run's owner, else the default human, 1 to 4 questions as `ask_human` does; returns the answer's text. |
 | `await trail(name, args=None)` | One step, answered by a child run of the saved trail `name` with `args` as its input; returns its result ([Child runs](#child-runs-trail)). |
 | `await goto(trail=None, at=None, state=None)` | Ends the leg where called and goes on in `trail` (this one without it) at waypoint `at` (its start without it) with `state` as `args`; returns only by raising ([Routes](#routes-goto)). |
-| `phase(title)`, `log(text)`, `print()` | Notes on the run's thread; never wait. |
+| `phase(title)`, `log(text)`, `print()` | Notes on the run's thread; never wait. The record keeps a phase's first 1000 characters. |
 | `args` | The leg's JSON input (`None` without): the run's input on its first leg, the goto's `state` on later ones. |
 | `await parallel(*coroutines)` | All results in argument order once every coroutine has finished (`asyncio.gather`). |
 | `await pipeline(items, *stages)` | Each item through the async stages on its own pace; the last stage's results in item order. |
@@ -289,7 +289,10 @@ A run reports on the thread it started with, as its conductor:
   on the run thread: `Run <run> of trail <name> is done (N steps, M turns):`, naming the trail the run started, with
   the result (cut at 8000 characters, `ants trail show <run>` showing the rest), the error (naming
   `ants trail resume <run>` when a limit was met), or who stopped it and how to resume it; a run of more than one leg
-  ends it with a line `route: <route>`.
+  ends it with a line `route: <route>`. The end of a run done or failed is stored before it is told, a store that
+  fails being tried again; the message is sent again until the outbox takes it, the run staying listed in
+  `<ant>.runs` meanwhile, under an id derived from the run and the time it ended, so a daemon restarted in between
+  sends it again as the same message, which the bus keeps once.
 - **Rating invitation:** once the run is done or failed, child runs included, the conductor's daemon also messages the
   conductor itself on the run thread, answering to the run's owner: `[ants] Run <run> of trail <name> ended done (N
   steps, M turns). Result: …` (or `ended failed (…): <error>`), with the run's args, its route, the call a child run
@@ -324,6 +327,7 @@ they may be raised on resume:
 | Wall time from start, stopped time included | 24h | 7d | `--wall`, `wall` | the run fails, waiting or not |
 | Compute of one resume of the script | 10 s | 10 s | none | `TimeoutError`, the run fails; the worker is killed 5 s later |
 | Dumped session, the script's suspended state | 768 KiB | 768 KiB | none | the run fails, naming its size; so does a run whose session record, the dumped session with the calls it waits on, would pass 1 MiB less 8 KiB, before its steps go out |
+| Result or error, in the run's record | 1 MiB less the rest of the record | same | none | a result fails the run, naming its size (a `trail()` call raises with that error); an error is cut to 8000 characters |
 | Memory of the script | 64 MiB | 64 MiB | none | `MemoryError`, the run fails |
 | Python call depth | 200 | 200 | none | `RecursionError` in the script |
 

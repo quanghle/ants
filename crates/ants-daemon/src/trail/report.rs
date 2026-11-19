@@ -12,6 +12,7 @@ use ants_proto::{
 };
 use ants_trail::{Answer, Event, Meta};
 
+use super::invite::end_id;
 use super::{Trails, steps};
 
 /// Reads of busy notes before a report to them is given up.
@@ -128,8 +129,10 @@ impl Trails {
     }
 
     /// Tell the end of `run` to its owner, else the default human, on the run's thread: its result, its error, or who
-    /// stopped it and which run to resume; a child run's in the notes of its thread, its parent telling the owner.
-    pub(super) async fn report_end(&self, run: &TrailRun) {
+    /// stopped it and which run to resume; a child run's in the notes of its thread, its parent telling the owner. True
+    /// once told: the message stored, under an id derived from the run's end, which a restart sends again as the same
+    /// message, for a run ended done or failed.
+    pub(super) async fn report_end(&self, run: &TrailRun) -> bool {
         tracing::info!(run = %run.run, state = ?run.state, steps = run.steps, turns = run.turns, "trail run ended");
         // A child run's error answers its parent's call: only its parent's resume resumes it, once failed on a limit.
         let resume = match (&run.parent, &run.state) {
@@ -137,15 +140,23 @@ impl Trails {
             (Some(_), RunState::Stopped { by }) => self.stopped_root(run, by),
             (Some(_), _) => None,
         };
-        let Some(text) = end_text(run, resume.as_ref()) else { return };
+        let Some(text) = end_text(run, resume.as_ref()) else { return true };
         if run.parent.is_some() {
-            return self.note(run, &clip(&text, MAX_NOTE), None).await;
+            self.note(run, &clip(&text, MAX_NOTE), None).await;
+            return true;
         }
         let to = self.inner.humans.owner_or_default(run.owner.as_ref());
-        let message =
+        let mut message =
             Envelope::on_thread(run.thread.clone(), self.inner.ant.clone(), to, text).with_owner(run.owner.clone());
-        if let Err(e) = (self.inner.outbox)(message).await {
-            tracing::warn!(run = %run.run, error = format!("{e:#}"), "telling the end of a trail run");
+        if let Some(ended_at) = run.ended_at.filter(|_| run.finished()) {
+            message.id = end_id("trail-end", &run.run, ended_at);
+        }
+        match (self.inner.outbox)(message).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(run = %run.run, error = format!("{e:#}"), "telling the end of a trail run");
+                false
+            }
         }
     }
 

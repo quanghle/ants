@@ -15,6 +15,7 @@ use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use uuid::Uuid;
 
+use super::report::clip;
 use super::{Answer, Slot, Step, Trails, load, locked, steps};
 
 /// How long a pass that failed waits before the next, at first and at most.
@@ -22,6 +23,9 @@ const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_mins(1);
 /// Most bytes of a run's session record, and of its header: NATS's 1 MiB payload, less room for its headers.
 pub const MAX_RECORD: usize = 1024 * 1024 - 8 * 1024;
+/// Most characters of a run's phase, and of its error at its end when its record would not hold it whole.
+const MAX_PHASE: usize = 1000;
+const MAX_ERROR: usize = 8000;
 
 impl Trails {
     /// Drive each run woken, one pass at a time per run, and wake those whose wall time passed.
@@ -112,7 +116,8 @@ impl Trails {
             }
             let header = slot.header();
             if header.finished() {
-                return Ok(());
+                // Ended in memory, its end not stored yet.
+                return self.close(slot).await;
             }
             let progress = if overdue(&header) {
                 if matches!(engine.status(), Status::Running) {
@@ -217,7 +222,7 @@ impl Trails {
             let mut book = slot.book();
             for event in &progress.events {
                 if let Event::Phase(phase) = event {
-                    book.header.phase = Some(phase.clone());
+                    book.header.phase = Some(clip(phase, MAX_PHASE));
                 }
             }
             let (cancelled, pending) =
@@ -256,39 +261,63 @@ impl Trails {
         }
     }
 
-    /// Store the end of a run, and forget it: its child runs stop, and a child's end answers its parent's call first.
-    /// The run_trail call waiting on it, if any, takes the end, else its conductor gets a message inviting a rating.
+    /// End the run of `slot` in `state`, bounded to what its record holds, then store and tell its end ([`Trails::close`]).
     async fn end(&self, slot: &Slot, state: RunState) -> Result<()> {
-        let (ended, calls) = {
-            let book = slot.book();
-            (TrailRun { state: state.clone(), ..book.header.clone() }, book.pending.clone())
-        };
-        self.stop_children(&calls, &self.inner.ant).await;
-        self.answer_parent(&ended).await?;
-        let pending = {
+        {
             let mut book = slot.book();
             book.header.state = state;
             book.header.ended_at = Some(Utc::now());
-            std::mem::take(&mut book.pending)
+            fit_end(&mut book.header);
+        }
+        self.close(slot).await
+    }
+
+    /// Store the end of the run of `slot`, ended in memory, and forget it: its child runs stop, and a child's end
+    /// answers its parent's call first. The run_trail call waiting on it, if any, takes the end, else its conductor gets
+    /// a message inviting a rating; its owner gets the end's message. An error leaves the run in memory, for its next
+    /// pass to close it again: each step here holds when taken again.
+    async fn close(&self, slot: &Slot) -> Result<()> {
+        let (header, calls) = {
+            let book = slot.book();
+            (book.header.clone(), book.pending.clone())
         };
-        let header = slot.header();
-        for call in &pending {
+        self.stop_children(&calls, &self.inner.ant).await;
+        self.answer_parent(&header).await?;
+        for call in &calls {
             self.withdraw_own(&header, call).await;
         }
         self.save_ancestors(&header).await?;
         self.save_header(slot).await?;
-        // Listed until the invitation to rate the run is given, so that a restart sends it otherwise.
-        if self.hand_end(&header) || self.invite(&header).await {
-            self.inner.store.list(&header.run, false).await?;
-        }
+        let pending = std::mem::take(&mut slot.book().pending);
+        let header = slot.header();
+        // Listed until the end is told, so that a restart tells it otherwise.
+        self.tell_end(&header).await;
+        self.inner.store.list(&header.run, false).await?;
         locked(&self.inner.runs).remove(&header.run);
         self.forget(&header.run);
         for call in pending.iter().filter(|call| call.sent) {
             self.report_step(&header, call, StepStage::Dropped);
         }
-        self.report_end(&slot.header()).await;
         self.wake_starved(&header);
         Ok(())
+    }
+
+    /// Tell the end of the run of `header`, stored: to the run_trail call waiting on it, else by the invitation to rate
+    /// it, and to its owner. A message not stored is sent again, under the same id, until it is.
+    async fn tell_end(&self, header: &TrailRun) {
+        let mut invited = self.hand_end(header);
+        let mut told = false;
+        let mut delay = RETRY_FIRST;
+        loop {
+            invited = invited || self.invite(header).await;
+            told = told || self.report_end(header).await;
+            if invited && told {
+                return;
+            }
+            tracing::warn!(run = %header.run, retry_in = ?delay, "telling the end of a trail run");
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(RETRY_MAX);
+        }
     }
 
     /// Make a step of each call handed out that has none yet: a pending call, unsent, or, for a call no step can
@@ -541,6 +570,25 @@ pub(super) fn reserved(call: &PendingCall) -> u32 {
     match call.function {
         TrailFunction::Agent => call.turn_budget,
         TrailFunction::Human | TrailFunction::Trail | TrailFunction::Goto => 0,
+    }
+}
+
+/// Bound the end of the run of `header` to what its record holds: a result too large fails the run, naming its size,
+/// and an error too large is cut.
+fn fit_end(header: &mut TrailRun) {
+    let size = |header: &TrailRun| serde_json::to_vec(header).map_or(usize::MAX, |record| record.len());
+    if size(header) <= MAX_RECORD {
+        return;
+    }
+    match &mut header.state {
+        RunState::Done { result } => {
+            let bytes = serde_json::to_vec(result).map_or(usize::MAX, |result| result.len());
+            let error =
+                format!("the run's result, {bytes} bytes as JSON, outgrew the {MAX_RECORD} bytes its record holds");
+            header.state = RunState::Failed { error, limit: None };
+        }
+        RunState::Failed { error, .. } => *error = clip(error, MAX_ERROR),
+        RunState::Running | RunState::Waiting | RunState::Stopped { .. } => {}
     }
 }
 

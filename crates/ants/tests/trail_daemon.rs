@@ -37,6 +37,8 @@ use tokio::task::JoinHandle;
 
 #[path = "trail_daemon/children.rs"]
 mod children;
+#[path = "trail_daemon/ends.rs"]
+mod ends;
 #[path = "trail_daemon/goto.rs"]
 mod goto;
 #[path = "trail_daemon/ratings.rs"]

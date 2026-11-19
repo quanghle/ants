@@ -130,10 +130,14 @@ impl Trails {
     pub(super) async fn restore_run(&self, run: &RunId) -> Result<()> {
         let store = &self.inner.store;
         let header = match store.header(run).await? {
-            // Ended before the invitation to rate it was stored.
+            // Ended before its end was told: the invitation to rate it and its owner's message, both sent again.
             Some(header) if header.finished() => {
                 if !self.invite(&header).await {
                     bail!("the invitation to rate the ended run is not stored");
+                }
+                // A child run's end is told in the notes of its thread, which a repeat would note twice.
+                if header.parent.is_none() && !self.report_end(&header).await {
+                    bail!("the message telling the run's end is not stored");
                 }
                 return store.list(run, false).await;
             }

@@ -2,7 +2,8 @@
 //! call waiting on the run carries it when that call takes the end ([`Trails::start_waited`]); else the conductor's
 //! daemon sends the conductor itself a message on the run's thread, a child run's included ([`Trails::invite`]). The
 //! run stays in the conductor's index of runs until the message is stored, so a daemon stopped before sends it on its
-//! restart, under the same id, which the bus keeps once. A stopped run invites no rating.
+//! restart, under the same id, which the bus keeps once, as the message telling its owner the end is. A stopped run
+//! invites no rating.
 
 use std::fmt::Write as _;
 
@@ -167,10 +168,15 @@ pub(crate) fn invitation(ant: &UserId, run: &TrailRun) -> Option<Envelope> {
     Some(Envelope { id: invitation_id(&run.run, ended_at), rating_of: Some(run.run.clone()), ..message })
 }
 
-/// The id of the invitation to rate `run`, ended at `ended_at`: the same each time it is sent for that end, so the bus
-/// keeps one, and a UUID v7 of the end's time, as the bus orders messages by.
+/// The id of the invitation to rate `run`, ended at `ended_at`.
 fn invitation_id(run: &RunId, ended_at: chrono::DateTime<chrono::Utc>) -> Uuid {
-    let seed = format!("trail-rating\0{run}\0{}", ended_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
+    end_id("trail-rating", run, ended_at)
+}
+
+/// The id of a message of `kind` telling the end of `run` at `ended_at`: the same each time it is sent for that end, so
+/// the bus keeps one, and a UUID v7 of the end's time, as the bus orders messages by.
+pub(super) fn end_id(kind: &str, run: &RunId, ended_at: chrono::DateTime<chrono::Utc>) -> Uuid {
+    let seed = format!("{kind}\0{run}\0{}", ended_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
     let hash = ring::digest::digest(&ring::digest::SHA256, seed.as_bytes());
     let mut random = [0; 10];
     random.copy_from_slice(&hash.as_ref()[..10]);

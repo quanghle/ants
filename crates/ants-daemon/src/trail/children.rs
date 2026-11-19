@@ -118,16 +118,15 @@ impl Trails {
         }
     }
 
-    /// Answer the call `child`, ended, answers: with its result, or with an error naming its trail and its own. Its
-    /// journal entry is stored when this returns; nothing when its parent no longer waits on it.
+    /// Answer the call `child`, ended, answers: with its result, or with an error naming its trail and its own, or the
+    /// size of a result its parent's journal entry would not hold. Its journal entry is stored when this returns;
+    /// nothing when its parent no longer waits on it.
     pub(super) async fn answer_parent(&self, child: &TrailRun) -> Result<()> {
         let Some(link) = &child.parent else { return Ok(()) };
-        let answer = match &child.state {
+        let name = child.first_trail().map_or_else(|| child.run.to_string(), ToString::to_string);
+        let mut answer = match &child.state {
             RunState::Done { result } => Answer::Ok(result.clone()),
-            RunState::Failed { error, .. } => {
-                let name = child.first_trail().map_or_else(|| child.run.to_string(), ToString::to_string);
-                Answer::Error(format!("trail {name} failed: {error}"))
-            }
+            RunState::Failed { error, .. } => Answer::Error(format!("trail {name} failed: {error}")),
             RunState::Running | RunState::Waiting | RunState::Stopped { .. } => return Ok(()),
         };
         let Some(slot) = locked(&self.inner.runs).get(&link.run).cloned() else { return Ok(()) };
@@ -137,6 +136,16 @@ impl Trails {
             (book.header.clone(), book.pending.iter().find(answered).cloned())
         };
         let Some(pending) = pending else { return Ok(()) };
+        if let Answer::Ok(result) = &answer {
+            let bytes = serde_json::to_vec(result).map_or(usize::MAX, |result| result.len());
+            if bytes.saturating_add(pending.args.to_string().len()) > driver::MAX_RECORD {
+                let max = driver::MAX_RECORD;
+                answer = Answer::Error(format!(
+                    "trail {name} failed: its result, {bytes} bytes as JSON, outgrew the {max} bytes the call's \
+                     journal entry holds"
+                ));
+            }
+        }
         self.resolve_on(&slot, &header, &pending, answer, 0, child.state.failed_on()).await
     }
 
