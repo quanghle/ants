@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use super::{RunArgs, control, follow, runs, saved};
 use crate::colony::{short, since};
 use crate::connection::Nats;
+use crate::text::one_line;
 use crate::threads::thread;
 
 /// The trail `ants trail run` runs: a saved one, by name, or the script of a file.
@@ -154,10 +155,10 @@ pub(crate) fn limits_line(limits: &TrailLimits) -> String {
 pub(crate) fn summary(plan: &Plan, conductor: &UserId, thread: Option<&ThreadId>, limits: &TrailLimits) -> String {
     let mut out = format!("trail {}, {}\n", plan.name, plan.from);
     if !plan.description.is_empty() {
-        let _ = writeln!(out, "  {}", plan.description);
+        let _ = writeln!(out, "  {}", one_line(&plan.description, usize::MAX));
     }
     if !plan.phases.is_empty() {
-        let _ = writeln!(out, "  phases: {}", plan.phases.join(", "));
+        let _ = writeln!(out, "  phases: {}", one_line(&plan.phases.join(", "), usize::MAX));
     }
     let _ = match thread {
         Some(thread) => writeln!(out, "conductor {conductor}, reporting on thread {thread}"),

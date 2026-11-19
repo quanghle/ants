@@ -217,7 +217,7 @@ pub(crate) async fn refuse_untrusted(
     context: &CallContext,
     finding: Option<&str>,
 ) -> Result<(), Answer> {
-    match dream::ground(items, context, finding, false).await? {
+    match dream::ground(items, context, finding, dream::Making::Proposal).await? {
         Some(refused) => Err(Answer::error(refused.code(), refused.text("persona and skills change"))),
         None => Ok(()),
     }

@@ -150,3 +150,28 @@ async fn an_applied_trail_finding_holds_while_its_trail_is_saved_and_rated_faile
     let (changed, _) = packet::review_history(&*items, 3, &ages, &user("sage"), &removed).await.unwrap();
     assert_eq!(changed, [undone], "its trail no longer saved");
 }
+
+#[tokio::test]
+async fn a_trail_finding_told_deferred_then_applied_holds_while_the_colony_s_trails_cannot_be_read() {
+    let (_, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let now = Utc::now();
+    let findings = vec![advised("1.1", TRAIL, "Done by hand thrice.")];
+    let mut applied = verdict("1.1", Judgement::Applied, "Saved it.", &[], now - Duration::hours(23));
+    applied.trails = vec![name("release-notes")];
+    keep(&*items, &reviewed(1, now - Duration::hours(24), "sage", findings, vec![applied])).await;
+    let deferred = FindingOutcome {
+        finding: "1.1".into(),
+        verdict: FindingVerdict::Deferred,
+        holds: false,
+        reason: "Later.".into(),
+    };
+    let mut review = Review::new(vec![deferred], BTreeMap::new());
+    review.sent = true;
+    keep(&*items, &Dream { review: Some(review), ..reviewed(2, now, "sage", Vec::new(), Vec::new()) }).await;
+
+    let ages = memory::Ages::new(now, std::iter::empty());
+    let (told, _) = packet::review_history(&*items, 3, &ages, &user("sage"), &ColonyTrails::UNREAD).await.unwrap();
+    let told: Vec<_> = told.iter().map(|outcome| (outcome.finding.as_str(), outcome.verdict, outcome.holds)).collect();
+    assert_eq!(told, [("1.1", FindingVerdict::Applied, true)], "a deferral told says nothing of holding");
+}

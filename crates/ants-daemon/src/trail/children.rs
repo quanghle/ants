@@ -19,7 +19,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use super::{Leg, Slot, Trails, driver, locked, steps};
+use super::{Book, Leg, Slot, Trails, driver, locked, steps};
 
 /// What a run's tree may still spend, as its root's counters and limits say.
 pub(super) struct Budget {
@@ -109,20 +109,30 @@ impl Trails {
         args: Value,
         limits: &TrailLimits,
     ) -> Result<(TrailLeg, Run, String), String> {
-        let script = self.inner.saved.script(&name).await?;
-        Leg { trail: Some(name), script, at: None, args, first_call: 0 }.prepare(limits)
+        let found = self.inner.saved.script(&name).await?;
+        Leg { trail: Some(name), local: found.local, script: found.script, at: None, args, first_call: 0 }
+            .prepare(limits)
     }
 
-    /// Give back the step counted for a trail() call of the run of `slot` whose child run did not start, to the run and
-    /// its ancestors.
-    pub(super) fn give_back_step(&self, slot: &Slot) {
-        let header = {
+    /// Give back to the run of `slot` and its ancestors the steps `calls` of it counted and never sent ([`unsent`]), as
+    /// those of a pass failing the run, or a trail() call whose child run did not start.
+    pub(super) fn give_back_unsent(&self, slot: &Slot, calls: &[PendingCall]) {
+        let (header, unsent) = {
             let mut book = slot.book();
-            driver::uncount_steps(&mut book.header, 1);
-            book.header.clone()
+            let unsent = unsent(&book, calls);
+            driver::uncount_steps(&mut book.header, unsent);
+            (book.header.clone(), unsent)
         };
-        for ancestor in self.ancestors(&header) {
-            driver::uncount_steps(&mut ancestor.book().header, 1);
+        self.give_back_above(&header, unsent);
+    }
+
+    /// Give back `steps` to the ancestors of the run of `header`.
+    pub(super) fn give_back_above(&self, header: &TrailRun, steps: u32) {
+        if steps == 0 {
+            return;
+        }
+        for ancestor in self.ancestors(header) {
+            driver::uncount_steps(&mut ancestor.book().header, steps);
         }
     }
 
@@ -246,7 +256,8 @@ impl Trails {
                     tracing::warn!(run = %header.run, child = %child, error = format!("{e:#}"), "reconciling a child run");
                 }
             }
-            let orphaned = header.parent.is_some() && !self.awaited(&header);
+            let orphaned =
+                header.parent.as_ref().is_some_and(|link| !self.unrestored(&link.run)) && !self.awaited(&header);
             if !orphaned || matches!(header.state, RunState::Stopped { .. }) {
                 continue;
             }
@@ -361,6 +372,13 @@ impl Trails {
             }
         }
     }
+}
+
+/// The steps `calls`, of the run of `book`, counted and never sent: those not sent but for a call sent anew on resuming,
+/// which counted when it first went out.
+pub(super) fn unsent(book: &Book, calls: &[PendingCall]) -> u32 {
+    let unsent = calls.iter().filter(|call| !call.sent && !book.anew.contains(&call.call)).count();
+    u32::try_from(unsent).unwrap_or(u32::MAX)
 }
 
 /// The saved trail the arguments `args` of a trail() call name, and the input they give its run.

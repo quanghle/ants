@@ -630,7 +630,6 @@ async fn a_schedule_s_trail_firing_is_never_prompted_and_its_failed_start_is_tol
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let [hook, dev_b] = ants(["nightly", "dev-b"]);
-    bus.mark_webhook(&hook).await;
     let start = ants_proto::TrailStart {
         trail: "review".parse().unwrap(),
         args: serde_json::Value::Null,

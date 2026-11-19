@@ -93,6 +93,7 @@ async fn a_trail_saved_for_a_dream_finding_stands_on_trusted_ground_and_counts_a
         task: served.to_owned(),
         why: "Drafted them.".to_owned(),
         script: script_sha256(&script(served)),
+        untrusted: false,
         at: chrono::Utc::now(),
     };
     ratings.put(&rating).await.unwrap();
@@ -104,6 +105,12 @@ async fn a_trail_saved_for_a_dream_finding_stands_on_trusted_ground_and_counts_a
             trail_finding(&trusted, "deploy-check", "Check a deployment of a service before shipping it"),
             trail_finding(&webhook, "triage", "Triage an incoming issue"),
             trail_finding(&trusted, "release-notes", &format!("{served} from its merged pull requests")),
+            {
+                "kind": "lesson",
+                "finding": "Deploys are checked by hand",
+                "evidence": {"threads": [trusted.to_string()]},
+                "action": "Remember it.",
+            },
         ]})
     );
     let dream = sense.reviewed(&user("dev-a"), &user("sage"), &[(trusted, false), (webhook, true)], &answer).await;
@@ -125,6 +132,7 @@ async fn a_trail_saved_for_a_dream_finding_stands_on_trusted_ground_and_counts_a
         (Some("1.2"), "Refused: finding 1.2 rests on untrusted text; trails are saved only on trusted ground."),
         (None, "dream 1 offers untrusted finding 1.2 and no finding of it is named in `finding`"),
         (Some("1.9"), "No dream has a finding \"1.9\"."),
+        (Some("1.4"), "dream 1 offers untrusted finding 1.2 and finding 1.4 is no trail finding"),
         (
             Some("1.3"),
             "Refused: saved trail notes-draft already serves such tasks (1 worked, 0 partly, 0 failed): \

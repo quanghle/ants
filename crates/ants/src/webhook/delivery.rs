@@ -2,17 +2,15 @@
 //! [`WEBHOOKS_BUCKET`], to its ant or to the members of its channel.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ants_daemon::bus;
 use ants_daemon::records::direct_kv::DirectKv;
 use ants_daemon::records::owners;
 use ants_daemon::schedule::Mentions;
-use ants_daemon::sync::MutexExt as _;
 use ants_proto::{
-    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, SERVING_EVERY, ThreadId,
-    TrailStart, UserId, WEBHOOKS_BUCKET, subject, webhook_marker_key,
+    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, ThreadId, TrailStart,
+    UserId, WEBHOOKS_BUCKET, subject, webhook_marker_key,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
@@ -47,11 +45,7 @@ pub(crate) struct Bus {
     js_domain: Option<JsDomain>,
     /// Without stream info, which would list the events of every webhook.
     seen: DirectKv,
-    /// What its marker holds: the version of ants this runs ([`ants_proto::Serving`]).
-    marker: Vec<u8>,
-    /// When it last put its marker.
-    marked: Arc<Mutex<Option<Instant>>>,
-    /// Puts the marker every [`SERVING_EVERY`].
+    /// Puts its marker, the version of ants this runs ([`ants_proto::Serving`]), every [`SERVING_EVERY`](ants_proto::SERVING_EVERY).
     keeper: tokio::task::JoinHandle<()>,
 }
 
@@ -111,14 +105,10 @@ impl Bus {
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(30));
         }
-        let (marker, marked) = (crate::release::versions::serving().await, Arc::new(Mutex::new(None)));
-        let keeping = (seen.clone(), webhook_marker_key(name), marker.clone(), marked.clone());
-        let keeper = tokio::spawn(async move {
-            let (seen, key, marker, marked) = keeping;
-            let put = move || *marked.locked() = Some(Instant::now());
-            crate::release::versions::keep_putting(seen, key, marker, put).await;
-        });
-        Ok(Self { client, js, js_domain: js_domain.cloned(), seen, marker, marked, keeper })
+        let marker = crate::release::versions::serving().await;
+        let keeper =
+            tokio::spawn(crate::release::versions::keep_putting(seen.clone(), webhook_marker_key(name), marker));
+        Ok(Self { client, js, js_domain: js_domain.cloned(), seen, keeper })
     }
 
     /// Deliver `event` as a new thread unless it was delivered already, and return once the hub's stream stored it.
@@ -128,7 +118,6 @@ impl Bus {
         if let Some(seen) = self.seen(&key).await? {
             return Ok(Delivered { thread: Some(seen.thread), duplicate: true });
         }
-        self.mark(from).await?;
         let (subject, payload, thread) = match destination {
             Destination::Ant(ant) => {
                 let message = Envelope::new(from.clone(), ant.clone(), text)
@@ -175,17 +164,6 @@ impl Bus {
             }
         }
         Ok(Delivered { thread: Some(thread), duplicate: false })
-    }
-
-    /// Put the marker of `name` ([`webhook_marker_key`]), unless put in the last [`SERVING_EVERY`]: without it, daemons
-    /// take its messages for an ant's, and answer it in its own inbox.
-    async fn mark(&self, name: &UserId) -> Result<()> {
-        if self.marked.locked().is_some_and(|at| at.elapsed() < SERVING_EVERY) {
-            return Ok(());
-        }
-        self.seen.put(webhook_marker_key(name), self.marker.clone()).await.context("putting the marker")?;
-        *self.marked.locked() = Some(Instant::now());
-        Ok(())
     }
 
     async fn seen(&self, key: &str) -> Result<Option<Seen>> {

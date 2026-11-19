@@ -11,9 +11,8 @@ use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM,
     HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, READ_BUCKET, Role, SESSIONS_BUCKET,
     STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET,
-    TRAILS_BUCKET, UserId, WEBHOOK_MARKER, WEBHOOKS_BUCKET, chan_consumer, chan_reader, dead_reader, done_reader,
-    inbox_consumer, inbox_prefix, notes_consumer, sent_reader, spare_readers, subject, trail_runs_reader,
-    trail_runs_subject,
+    TRAILS_BUCKET, UserId, chan_consumer, chan_reader, dead_reader, done_reader, inbox_consumer, inbox_prefix,
+    notes_consumer, sent_reader, spare_readers, subject, trail_runs_reader, trail_runs_subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -65,8 +64,8 @@ impl Permissions {
     /// consumer, and its reader and the reader's spares), its own replies and the decisions on its own approval requests (live, and as stored), reads the colony
     /// to find ants by capability but writes only its own entry, reads every escalation chain by key but writes only
     /// its own, lists the links to a channel thread ants passed on but records only its own ([`LINKS_BUCKET`]), reads
-    /// the channels, humans and owners buckets but never writes them, reads which users are webhooks (their
-    /// markers in [`WEBHOOKS_BUCKET`], none of their events), asks the channel manager for changes to
+    /// the channels, humans and owners buckets but never writes them, reads nothing of the webhooks bucket,
+    /// asks the channel manager for changes to
     /// a channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and attempts buckets,
     /// except that it reads every ant's daily spend there ([`daily_spend_key`]), to hold the ants of a template to
     /// their pool caps, and every message's mark ([`message_mark_key`]), to tell which of those it sent keep waiting,
@@ -155,7 +154,6 @@ impl Permissions {
         let chains = kv_stream(CHAINS_BUCKET);
         let links = kv_stream(LINKS_BUCKET);
         let owners = kv_stream(OWNERS_BUCKET);
-        let webhooks = kv_stream(WEBHOOKS_BUCKET);
         let sendable = subject::sendable(user, role);
         // The same subjects in the leaf's outbox, for when the hub is out of reach.
         let outbox = sendable.iter().map(|s| subject::outbox(s).expect("an outbox subject"));
@@ -212,8 +210,6 @@ impl Permissions {
         publish.extend([
             // And the owners of single threads.
             format!("$JS.API.DIRECT.GET.{owners}.>"),
-            // And the webhooks' markers, not the events they delivered.
-            format!("$JS.API.DIRECT.GET.{webhooks}.$KV.{WEBHOOKS_BUCKET}.*.{WEBHOOK_MARKER}"),
             // And the saved trails, by direct gets naming no subject, which list them too.
             format!("$JS.API.DIRECT.GET.{}", kv_stream(TRAILS_BUCKET)),
             // And the trails' tips and votes, the same way.

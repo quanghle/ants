@@ -3,8 +3,8 @@
 //! the saved trails for a task by their ratings.
 
 use ants_proto::{
-    RatingOutcome, TRAIL_RATINGS_BUCKET, TrailRating, TrailRunIndex, WEBHOOK_ALLOW, script_sha256, trail_rating_key,
-    trail_runs_index_key,
+    RatingOutcome, TRAIL_RATINGS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TrailRating, TrailRunIndex, WEBHOOK_ALLOW,
+    script_sha256, trail_rating_key, trail_runs_index_key,
 };
 
 use super::*;
@@ -121,6 +121,25 @@ async fn a_run_s_end_invites_its_conductor_to_rate_it_once_unless_a_waited_answe
     );
     eventually("the run is unlisted", async || !listed(&again.js).await.contains(&run)).await;
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn the_invitation_to_rate_a_run_started_on_the_thread_of_a_step_to_the_conductor_answers_not_the_step() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let run = lead.start("await agent(\"do it\")\n", TrailLimits::default()).await;
+    let step = lead.step().await;
+    assert_eq!((&step.from, &step.to), (&ant("lead"), &ant("lead")), "a step to the conductor itself");
+    let nested = lead.start_on("1\n", TrailLimits::default(), step.thread_id.clone()).await;
+    assert_eq!(lead.ended(&nested).await, RunState::Done { result: json!(1) });
+    let invited = lead.invitation_of(&nested).await;
+    assert_eq!((&invited.thread_id, invited.rating_of.as_ref()), (&step.thread_id, Some(&nested)));
+    assert!(!lead.trails.take(&invited).await.unwrap(), "the invitation is left to prompt the conductor");
+    assert!(lead.trails.invites(&invited).await, "and lets its turn rate the run");
+    assert!(!lead.header(&run).await.state.finished(), "the step is still waited on");
+    assert!(lead.reply(&step, "done").await, "the conductor's reply answers the step");
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("done") });
 }
 
 #[tokio::test]
@@ -253,6 +272,13 @@ async fn untrusted_threads_rate_only_their_run(mcp: &Mcp, lead: &mut Conductor, 
     assert!(ok && text.contains("It replaces the earlier rating (failed)."), "a trusted thread rates any: {text}");
     let (ok, text) = call(&untrusted, "find_trails", json!({"query": "deploying web apps"})).await;
     assert!(ok && text.contains("1. deploy-web") && !text.contains("save_trail"), "{text}");
+    let ratings = DirectKv::new(&lead.js, None, TRAIL_RATINGS_BUCKET).await.unwrap();
+    let key = trail_rating_key(&"deploy-web".parse().unwrap(), &ant("lead"), &hooked_run);
+    let stored: TrailRating = serde_json::from_slice(&ratings.get(&key).await.unwrap().unwrap()).unwrap();
+    assert!(stored.untrusted, "a webhook's run is untrusted, whichever thread rates it");
+    let (ok, text) = call(client, "find_trails", json!({"query": "triaging an issue"})).await;
+    assert!(ok && text.contains("1 partly, 0 failed, 1 of untrusted runs)"), "{text}");
+    assert!(text.contains("\n   - partly, an untrusted run's, "), "{text}");
 
     let (ok, text) = run_trail(&untrusted, json!({"name": "deploy-web", "args": {"n": 2}})).await;
     assert!(ok, "{text}");
@@ -264,4 +290,47 @@ async fn untrusted_threads_rate_only_their_run(mcp: &Mcp, lead: &mut Conductor, 
     assert!(!ok && text.contains("only that one"), "another run reporting on the thread: {text}");
     let (ok, text) = rate(&inviting, &hooked_run, "worked", "triaging an issue", "right").await;
     assert!(ok, "{text}");
+}
+
+#[tokio::test]
+async fn rate_trail_rates_no_trail_removed_since_the_run_and_those_still_saved_as_before() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-ratings-removed");
+    let lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let mcp = lead_mcp(&dir, &lead.js, &lead.trails).await;
+    let human = UserId::human();
+    let asked = Envelope::new(human.clone(), ant("lead"), "deploy").with_owner(Some(human.clone()));
+    let (client, _turn) = handling(&mcp, &asked).await;
+    let mut runs = Vec::new();
+    for name in ["deploy-web", "deploy-db"] {
+        let script = described("Deploy the web app");
+        let (ok, text) = call(&client, "save_trail", json!({"name": name, "script": script})).await;
+        assert!(ok, "{text}");
+        let (ok, text) = run_trail(&client, json!({"name": name, "args": {"n": 1}, "wait": true})).await;
+        assert!(ok, "{text}");
+        runs.push(ended_run(&text));
+    }
+
+    // Removed as `ants trail rm` removes it: the trail, then its tips and ratings.
+    let trails = lead.js.get_key_value(TRAILS_BUCKET).await.unwrap();
+    trails.delete("deploy-web").await.unwrap();
+    for bucket in [TRAIL_TIPS_BUCKET, TRAIL_RATINGS_BUCKET] {
+        let stream = lead.js.get_stream(format!("KV_{bucket}")).await.unwrap();
+        stream.purge().filter(format!("$KV.{bucket}.deploy-web.>")).await.unwrap();
+    }
+    let (ok, text) = rate(&client, &runs[0], "worked", "deploying web apps", "it shipped").await;
+    let said = format!("Run {} put no rating: trail deploy-web, which it took, is no longer saved.", runs[0]);
+    assert!(ok && text.starts_with(&said), "{text}");
+    let ratings = DirectKv::new(&lead.js, None, TRAIL_RATINGS_BUCKET).await.unwrap();
+    let key = trail_rating_key(&"deploy-web".parse().unwrap(), &ant("lead"), &runs[0]);
+    assert!(ratings.get(&key).await.unwrap().is_none(), "no rating under the removed name");
+
+    let (ok, text) = rate(&client, &runs[1], "worked", "deploying web apps", "it shipped").await;
+    let rated = format!("Rated run {} worked for trail deploy-db (task: \"deploying web apps\").", runs[1]);
+    assert!(ok && text == rated, "a trail still saved is rated as before: {text}");
+    let key = trail_rating_key(&"deploy-db".parse().unwrap(), &ant("lead"), &runs[1]);
+    let stored: TrailRating = serde_json::from_slice(&ratings.get(&key).await.unwrap().unwrap()).unwrap();
+    assert!(!stored.untrusted, "a human's thread's run is trusted");
+    std::fs::remove_dir_all(&dir).unwrap();
 }

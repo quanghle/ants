@@ -156,18 +156,29 @@ impl<'a> From<&Ranked<'a>> for Json<'a> {
     }
 }
 
-/// Retire the tip `id` of the trail `name` as `by`, a human, at `now`: who retired it and when, put under its
+/// Retire the tip `id` of the trail `name`, `writer`'s when given, as `by`, a human, at `now`: who retired it and when, put under its
 /// [`TrailTip::retired_key`], which its writer cannot undo, so steps carry and searches find it no more. Refused for a tip the trail lacks or one retired already.
 pub(crate) async fn retire(
     js: &jetstream::Context,
     name: &TrailName,
     id: &TipId,
+    writer: Option<&UserId>,
     by: &UserId,
     now: DateTime<Utc>,
 ) -> Result<TrailTip> {
     let (board, _) = read(js, name).await?;
-    let Some(ranked) = board.tip(id, now, None) else {
-        bail!("trail {name} has no tip {id}: `ants trail tips {name} --all` lists them");
+    let ranked = match board.tip(id, writer, now, None) {
+        Ok(ranked) => ranked,
+        Err(writers) if writers.is_empty() => {
+            bail!("trail {name} has no tip {id}: `ants trail tips {name} --all` lists them")
+        }
+        Err(_) if let Some(writer) = writer => {
+            bail!("trail {name} has no tip {id} by {writer}: `ants trail tips {name} --all` lists them")
+        }
+        Err(writers) => {
+            let writers: Vec<String> = writers.iter().map(ToString::to_string).collect();
+            bail!("tips of {} on trail {name} share id {id}: name the tip's writer with --writer", writers.join(", "))
+        }
     };
     match ranked.status {
         TipStatus::Live => {}

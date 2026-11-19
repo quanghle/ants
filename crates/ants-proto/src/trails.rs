@@ -6,9 +6,11 @@
 //! A step goes on a thread of its own, which the conductor's [`TrailSession`] maps to the call
 //! ([`PendingCall::thread`]). The reply resolving the call carries nothing of the step: the first message on that
 //! thread from the step's recipient ([`PendingCall::to`]), or from the assistant of a human recipient answering for it,
-//! to the conductor that carries no [`TrailStep`], no notice and no escalation answers it ([`PendingCall::answered_by`]). Only the conductor's own records say which threads are
-//! steps, so no other user can answer a call by naming it. A step the conductor sends itself tells its reply apart the
-//! same way: the step carries its [`TrailStep`], the reply none.
+//! to the conductor that carries no [`TrailStep`], no notice, no escalation and no run to rate answers it
+//! ([`PendingCall::answered_by`]). Only the conductor's own records say which threads are steps, so no other user can
+//! answer a call by naming it. A step the conductor sends itself tells its reply apart the same way: the step carries
+//! its [`TrailStep`], the reply none, and the conductor's invitation to rate a run started on the step's thread names
+//! the run ([`Envelope::rating_of`]).
 
 use std::time::Duration;
 
@@ -18,6 +20,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::provider::Origin;
+use crate::questions::breaks_line;
 #[cfg(doc)]
 use crate::trail_thread_step_key;
 use crate::{Envelope, Error, MAX_TITLE, RunId, ThreadId, TrailName, UserId, subject};
@@ -39,7 +42,8 @@ pub use saving::{SAVE_TRAIL_REPEAT, SAVE_TRAIL_WAIT, SaveTrailOutcome, SaveTrail
 pub use tips::{
     DEFAULT_TIPS_FOUND, MAX_LIVE_TIPS, MAX_TIP_REASON, MAX_TIP_TEXT, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, MAX_TIPS_FOUND,
     Ranked, Retirement, Similarity, TIP_HALF_LIFE, TIP_RELEVANCE, TIP_RELEVANT_WORDS, TIP_SIMILARITY, TIP_UNUSED,
-    Tally, TipBoard, TipRetired, TipStatus, TipVerdict, TipVote, TrailTip, check_tip_key, script_sha256, tip_words,
+    Tally, TipBoard, TipRetired, TipStatus, TipVerdict, TipVote, TrailTip, check_tip_key, script_sha256, search_words,
+    tip_words,
 };
 
 /// Most bytes a trail's script has: a saved trail's and a run's.
@@ -54,6 +58,9 @@ pub const MAX_TRAIL_PHASES: usize = 32;
 pub const MAX_TRAIL_WAYPOINTS: usize = 32;
 /// How long [`TRAIL_RUNS_BUCKET`] keeps a finished run, at least.
 pub const TRAIL_RUN_RETENTION: Duration = Duration::from_hours(30 * 24);
+/// How far ahead of a reader's clock a tip, a vote or a rating may be dated and still count: one dated further ahead
+/// counts for nothing until then, so no date set ahead keeps a record from ageing.
+pub const TRAIL_CLOCK_SKEW: chrono::TimeDelta = chrono::TimeDelta::minutes(1);
 
 /// What makes a message a trail's step: the run and call it serves ([`Envelope::trail_step`]). Its recipient answers
 /// it with an ordinary reply on the step's thread.
@@ -69,7 +76,8 @@ pub struct TrailStep {
     /// again, with the step on the same thread, for an answer that does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<Value>,
-    /// The saved trail whose script made the call; none for an inline script.
+    /// The saved trail whose script made the call, which tips left answering the step go on; none for an inline script
+    /// or a trail the colony does not save ([`TrailRun::tip_trail`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail: Option<TrailName>,
     /// The [`script_sha256`] of that trail's script, as the run's leg ran it; none without a trail.
@@ -200,9 +208,9 @@ impl SavedTrail {
     }
 
     /// Check the trail's bounds: a name not reading as a run's id, a script of 1 to [`MAX_TRAIL_SCRIPT`] bytes, a
-    /// description of at most [`MAX_TRAIL_DESCRIPTION`] characters, at most [`MAX_TRAIL_PHASES`] phases, each one line
-    /// of 1 to [`MAX_TITLE`] characters, and at most [`MAX_TRAIL_WAYPOINTS`] waypoints, each a name of 1 to
-    /// [`MAX_TITLE`] letters, digits and `_`.
+    /// description of one line of at most [`MAX_TRAIL_DESCRIPTION`] characters, at most [`MAX_TRAIL_PHASES`] phases,
+    /// each one line of 1 to [`MAX_TITLE`] characters (no control characters in either), and at most
+    /// [`MAX_TRAIL_WAYPOINTS`] waypoints, each a name of 1 to [`MAX_TITLE`] letters, digits and `_`.
     pub fn check(&self) -> Result<(), Error> {
         let invalid = |why: String| Err(Error::InvalidTrail { name: self.name.clone(), why });
         if Uuid::try_parse(self.name.as_str()).is_ok() {
@@ -211,13 +219,13 @@ impl SavedTrail {
         if self.script.trim().is_empty() || self.script.len() > MAX_TRAIL_SCRIPT {
             return invalid(format!("a script has 1-{MAX_TRAIL_SCRIPT} bytes"));
         }
-        if self.description.chars().count() > MAX_TRAIL_DESCRIPTION {
-            return invalid(format!("a description has at most {MAX_TRAIL_DESCRIPTION} characters"));
+        if self.description.chars().count() > MAX_TRAIL_DESCRIPTION || self.description.chars().any(breaks_line) {
+            return invalid(format!("a description is one line of at most {MAX_TRAIL_DESCRIPTION} characters"));
         }
         if self.phases.len() > MAX_TRAIL_PHASES {
             return invalid(format!("a trail has at most {MAX_TRAIL_PHASES} phases"));
         }
-        let bad_phase = |p: &str| p.trim().is_empty() || p.contains(['\n', '\r']) || p.chars().count() > MAX_TITLE;
+        let bad_phase = |p: &str| p.trim().is_empty() || p.chars().any(breaks_line) || p.chars().count() > MAX_TITLE;
         if self.phases.iter().any(|p| bad_phase(p)) {
             return invalid(format!("a phase is one line of 1-{MAX_TITLE} characters"));
         }
@@ -377,6 +385,12 @@ impl TrailRun {
         self.leg().and_then(|leg| leg.trail.as_ref())
     }
 
+    /// The trail the run is on when the colony saves it, which its steps' tips are on: none for an inline script, nor
+    /// for a trail only the conductor's machine has ([`TrailLeg::local`]).
+    pub fn tip_trail(&self) -> Option<&TrailName> {
+        self.leg().filter(|leg| !leg.local).and_then(|leg| leg.trail.as_ref())
+    }
+
     /// The saved trail the run started; none for a script given inline.
     pub fn first_trail(&self) -> Option<&TrailName> {
         self.route.first().and_then(|leg| leg.trail.as_ref())
@@ -402,6 +416,10 @@ pub struct TrailLeg {
     /// The saved trail; none for a script given inline, which only a run's first leg is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail: Option<TrailName>,
+    /// Whether that trail is only the conductor's machine's, from its `~/.ants/trails`, the colony saving none of its
+    /// name: its steps take no tips ([`TrailRun::tip_trail`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local: bool,
     /// The waypoint the leg entered the trail at; none for a trail without waypoints, entered at its start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
@@ -507,6 +525,11 @@ pub struct TrailSession {
     /// The calls made beyond the run's concurrency, in order, waiting to be sent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued: Vec<QueuedCall>,
+    /// The calls whose steps went out before the run stopped or failed on a limit, to go out anew since its resume:
+    /// counted against its steps once already, they count no step again. Each leaves the list once its new step goes
+    /// out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anew: Vec<u32>,
 }
 
 impl TrailSession {
@@ -532,7 +555,7 @@ pub struct PendingCall {
     pub sent_at: DateTime<Utc>,
     /// Whether that message is published: the conductor's daemon puts the call before publishing its message, under the
     /// message's id, which the stream deduplicates, and marks it sent after, so its restarted daemon publishes again
-    /// only what it never did. A stopped run's steps are unsent again, to go out anew on resuming.
+    /// only what it never did. A stopped run's steps keep it; on resuming they go out anew, on new threads.
     #[serde(default)]
     pub sent: bool,
     /// The turns the step's thread had left as its last message on it went: what the step spent shows in the answer's
@@ -551,8 +574,9 @@ impl PendingCall {
     }
 
     /// Whether `message`, which passed [`Envelope::check_subject`], answers the call: `answerer` is the step's
-    /// recipient, the message is on the step's thread, and it is neither a step, a notice ([`NoticeKind`]) nor an
-    /// escalation. `answerer` is the message's sender, or the human its [`Envelope::on_behalf_of`] names once the
+    /// recipient, the message is on the step's thread, and it is neither a step, a notice ([`NoticeKind`]), an
+    /// escalation nor an invitation to rate a run ([`Envelope::rating_of`]), as the conductor sends itself on the
+    /// thread of a step to itself that a run started there reports on. `answerer` is the message's sender, or the human its [`Envelope::on_behalf_of`] names once the
     /// conductor honours the sender as that human's assistant, as for an answer to ask_human.
     pub fn answered_by(&self, message: &Envelope, answerer: &UserId) -> bool {
         message.thread_id == self.thread
@@ -560,6 +584,7 @@ impl PendingCall {
             && message.trail_step.is_none()
             && message.notice.is_none()
             && message.escalation.is_none()
+            && message.rating_of.is_none()
     }
 }
 
@@ -855,7 +880,8 @@ mod tests {
             turn_budget: step.turn_budget,
             retries: 0,
         };
-        let session = TrailSession { session: "{}".to_owned(), pending: vec![call], queued: Vec::new() };
+        let session =
+            TrailSession { session: "{}".to_owned(), pending: vec![call], queued: Vec::new(), anew: Vec::new() };
         let reply = step.reply(p("dev-a"), "built", crate::Role::Ant).unwrap();
         assert_eq!(session.answered_by(&reply, &reply.from).map(|c| c.call), Some(1));
         let by_another = step.follow_up(p("dev-b"), p("planner"), "built too");
@@ -892,6 +918,11 @@ mod tests {
             retries: 0,
         };
         assert!(!call.answered_by(&step, &step.from), "the step itself answers nothing");
+        let invitation = Envelope {
+            rating_of: Some(RunId::generate()),
+            ..Envelope::on_thread(step.thread_id.clone(), p("planner"), p("planner"), "rate it")
+        };
+        assert!(!call.answered_by(&invitation, &invitation.from), "an invitation to rate a run answers nothing");
         let reply = step.reply(p("planner"), "thought", crate::Role::Ant).unwrap();
         assert!(call.answered_by(&reply, &reply.from));
     }
@@ -971,7 +1002,10 @@ mod tests {
             SavedTrail { script: " ".to_owned(), ..saved() },
             SavedTrail { script: "x".repeat(MAX_TRAIL_SCRIPT + 1), ..saved() },
             SavedTrail { description: "x".repeat(MAX_TRAIL_DESCRIPTION + 1), ..saved() },
+            SavedTrail { description: "a\nb".to_owned(), ..saved() },
+            SavedTrail { description: "a\u{1b}[8m".to_owned(), ..saved() },
             SavedTrail { phases: vec!["a\nb".to_owned()], ..saved() },
+            SavedTrail { phases: vec!["a\u{1b}]0;title\u{7}".to_owned()], ..saved() },
             SavedTrail { phases: vec!["p".to_owned(); MAX_TRAIL_PHASES + 1], ..saved() },
             SavedTrail { waypoints: vec!["a b".to_owned()], ..saved() },
             SavedTrail { waypoints: vec!["w".to_owned(); MAX_TRAIL_WAYPOINTS + 1], ..saved() },

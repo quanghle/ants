@@ -163,7 +163,7 @@ impl DirectKv {
             }
             Err(e) => return Err(e).with_context(|| format!("reading {key}")),
         };
-        let put = if relayed::stored_relayed(Some(&msg.headers), Read::DirectGet) {
+        let put = if relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::DirectGet) {
             let Some(past) = &self.past else {
                 bail!("reading {key}: its entry is a message a stream relayed, not one its writer put");
             };
@@ -225,7 +225,7 @@ impl DirectKv {
                     let msg = msg.map_err(|e| anyhow!(e))?;
                     got += 1;
                     let Ok(info) = msg.info() else { continue };
-                    if !relayed::stored_relayed(msg.headers.as_ref(), Read::Consumer) {
+                    if !relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::Consumer) {
                         let time = SystemTime::from(info.published);
                         let headers = msg.headers.clone().unwrap_or_default();
                         last = Some(Put { payload: msg.payload.to_vec(), headers, time });
@@ -355,7 +355,10 @@ impl DirectKv {
         }
         let deleted = match self.last(key).await {
             Ok(msg) if is_deleted(&msg.headers) => msg.sequence,
-            Ok(msg) if self.past.is_some() && relayed::stored_relayed(Some(&msg.headers), Read::DirectGet) => {
+            Ok(msg)
+                if self.past.is_some()
+                    && relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::DirectGet) =>
+            {
                 match self.lookup_last(key).await? {
                     (Lookup::Value(_), _) => return Ok(false),
                     (_, last) => last,
@@ -496,7 +499,7 @@ impl DirectKv {
                     Some(status) => bail!("reading {filter} of {bucket}: answered {status} {:?}", msg.description),
                 }
                 got += 1;
-                let relayed = relayed::stored_relayed(msg.headers.as_ref(), Read::DirectGet);
+                let relayed = relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::DirectGet);
                 let msg = StreamMessage::try_from(msg).map_err(|e| anyhow!(e))?;
                 seq = msg.sequence + 1;
                 each(msg, relayed);

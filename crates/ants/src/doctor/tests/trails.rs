@@ -22,6 +22,7 @@ fn record(conductor: &str, state: RunState, hours: i64, now: DateTime<Utc>) -> T
         conductor: p(conductor),
         route: vec![TrailLeg {
             trail: Some("deploy".parse().unwrap()),
+            local: false,
             at: None,
             script: "agent('build')\n".to_owned(),
             args: serde_json::Value::Null,
@@ -86,7 +87,7 @@ fn runs_moving_on_or_over_for_good_are_not_stuck() {
     let raised = record("dev-a", failed("Traceback:\nValueError: the run reached its limit of 50 steps", None), 2, now);
     let mut at_most = record("dev-a", failed("the run reached its limit of 500 steps", Some(RunLimit::Steps)), 2, now);
     at_most.limits.steps = TrailLimits::MAX.steps;
-    let no_flag = record("dev-a", failed("TimeoutError: turn time limit exceeded", Some(RunLimit::Compute)), 2, now);
+    let no_flag = record("dev-a", failed("TimeoutError: feed time limit exceeded", Some(RunLimit::Compute)), 2, now);
     let past_any_wall = record("dev-a", RunState::Stopped { by: p("alice") }, 8 * 24, now);
     let listed = [running.clone(), waiting_on_humans, done, raised, at_most, no_flag, past_any_wall];
     let pending = [(running.run, vec![step("dev-b"), step("dev-a")])];
@@ -239,6 +240,31 @@ fn child_runs_show_only_where_resuming_them_moves_their_parent_on() {
     );
 }
 
+#[test]
+fn a_run_running_or_waiting_past_its_wall_time_names_the_stop_or_the_restart_moving_it_on() {
+    let now = Utc::now();
+    let running = record("dev-a", RunState::Running, 3 * 24, now);
+    let waiting = record("dev-a", RunState::Waiting, 26, now);
+    let failing_now = record("dev-a", RunState::Running, 24, now);
+    let listed = [&running, &waiting, &failing_now].map(Clone::clone);
+
+    let checks = stuck(&listed, &[], &colony(&["dev-a"], now), now);
+    let overdue = |run: &TrailRun, state: &str, past: &str| {
+        warn(
+            format!(
+                "run {} of trail deploy, conducted by dev-a, is still {state} {past} past its wall time of 1d: the \
+                 conductor's daemon does not drive it",
+                run.run
+            ),
+            format!(
+                "ants trail stop {}, or restart the daemon serving dev-a, which continues it from its records",
+                run.run
+            ),
+        )
+    };
+    assert_eq!(shown(&checks), [overdue(&running, "running", "2d"), overdue(&waiting, "waiting", "2h")]);
+}
+
 /// Put `value` under `key` of [`TRAIL_RUNS_BUCKET`], as the conductor owning the key does.
 async fn put(js: &async_nats::jetstream::Context, key: &str, value: &impl serde::Serialize) {
     let payload = serde_json::to_vec(value).unwrap();
@@ -264,7 +290,12 @@ async fn the_runs_check_reads_every_conductor_s_runs_with_a_human_s_credentials(
     let (_, a_js) = server.connect(&dev_a).await;
     let run = record("dev-a", RunState::Running, 1, now);
     put(&a_js, &run.key(), &run).await;
-    let session = TrailSession { session: "opaque".to_owned(), pending: vec![step("dev-b")], queued: Vec::new() };
+    let session = TrailSession {
+        session: "opaque".to_owned(),
+        pending: vec![step("dev-b")],
+        queued: Vec::new(),
+        anew: Vec::new(),
+    };
     put(&a_js, &trail_session_key(&dev_a, &run.run), &session).await;
     let checks = check_runs(Some(&served), now).await;
     assert_eq!(shown(&checks), [(Status::Ok, "no run stuck: 1 kept, 1 unfinished".to_owned(), vec![])]);

@@ -1,5 +1,5 @@
 //! Trails: whether a daemon here can start its `ants subprocess` worker, and the runs of trails stuck: failed on a
-//! limit, stopped, or waiting on ants gone from the colony.
+//! limit, stopped, waiting on ants gone from the colony, or past its wall time.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -18,6 +18,8 @@ use crate::text::one_line;
 
 /// The most stuck runs listed, one check each.
 pub(super) const MAX_LISTED: usize = 10;
+/// How long past its wall time a run its conductor drives fails at most: a pass computing may hold it.
+const OVERDUE_GRACE: Duration = Duration::from_mins(5);
 
 /// The `ants` a daemon here starts as its trail worker: the one the daemon service installed under `home` runs, else
 /// this one.
@@ -95,10 +97,12 @@ pub(super) async fn check_runs(connected: Option<&Connected>, now: DateTime<Utc>
 /// The runs of `listed` stuck, one check each with the command moving it on, given the calls `pending` each running
 /// run waits on and the ants of `colony`: a run stopped, or failed on its steps, turns or wall time, which `ants trail
 /// resume` continues (raising that limit) while its wall time may still grow; a run waiting on steps sent to ants not
-/// in the colony, which `ants trail stop` stops; and a run whose conductor is not in the colony, which no command
-/// moves on until a daemon serves the conductor again. A child run shows stopped only while its running parent waits on
-/// it, and never failed: one stopped along with its parent resumes with it, a failed one's error answered its parent's
-/// call, which only its parent's resume runs again, and one whose parent ended or went on answers nothing once resumed.
+/// in the colony, which `ants trail stop` stops; a run running or waiting past its wall time, which its conductor's
+/// daemon does not drive, which `ants trail stop` stops; and a run whose conductor is not in the colony, which no
+/// command moves on until a daemon serves the conductor again. A child run shows stopped only while its running parent
+/// waits on it, and never failed: one stopped along with its parent resumes with it, a failed one's error answered its
+/// parent's call, which only its parent's resume runs again, and one whose parent ended or went on answers nothing once
+/// resumed.
 pub(super) fn stuck(
     listed: &[TrailRun],
     pending: &[(RunId, Vec<PendingCall>)],
@@ -154,6 +158,9 @@ pub(super) fn stuck(
                     );
                     return Some(Check::warn(check, detail, vec![fix]));
                 }
+                RunState::Running | RunState::Waiting if elapsed > run.limits.wall_time() + OVERDUE_GRACE => {
+                    return Some(overdue(run, &name, elapsed));
+                }
                 RunState::Running => {
                     let calls = pending.iter().find(|(id, _)| *id == run.run).map_or_default(|(_, calls)| &calls[..]);
                     let mut away: Vec<&str> = calls
@@ -198,6 +205,24 @@ pub(super) fn stuck(
         found.push(Check::warn(check, format!("{more} more stuck"), vec!["ants trail runs".to_owned()]));
     }
     found
+}
+
+/// The check of `run`, named `name`, running or waiting `elapsed` after its start, past its wall time: its conductor's
+/// daemon, in the colony, does not drive it.
+fn overdue(run: &TrailRun, name: &str, elapsed: Duration) -> Check {
+    let wall = run.limits.wall_time();
+    let state = if run.state == RunState::Running { "running" } else { "waiting" };
+    let detail = format!(
+        "{name}, conducted by {}, is still {state} {} past its wall time of {}: the conductor's daemon does not drive it",
+        run.conductor,
+        short(elapsed.saturating_sub(wall)),
+        ants_proto::duration::format(wall)
+    );
+    let fix = format!(
+        "ants trail stop {}, or restart the daemon serving {}, which continues it from its records",
+        run.run, run.conductor
+    );
+    Check::warn("trail runs", detail, vec![fix])
 }
 
 /// The flags of `ants trail resume` raising the limit failed `run` broke, its steps, turns or wall time, to twice it

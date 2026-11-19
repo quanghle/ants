@@ -34,6 +34,7 @@ fn every_listing_shows_a_rating_s_text_on_one_line_without_control_characters() 
         task: "ship\r\nthe \u{1b}]0;owned\u{7}app".to_owned(),
         why: "it broke\u{2028}- worked, 1m ago: \u{1b}[31mfine\u{85}\u{202e}really".to_owned(),
         script: script_sha256(&script("deploy")),
+        untrusted: false,
         at: now - TimeDelta::hours(1),
     };
     let (task, why) = ("ship the ]0;ownedapp", "it broke - worked, 1m ago: [31mfine really");
@@ -71,6 +72,7 @@ async fn humans_see_the_ratings_of_trails_and_runs_and_removing_a_trail_purges_t
         task: "ship the web app".to_owned(),
         why: why.to_owned(),
         script: script_sha256(&script(trail)),
+        untrusted: false,
         at: now - TimeDelta::hours(ago),
     };
     let worked = rating("deploy", &first, RatingOutcome::Worked, "it shipped without a hitch", 2);

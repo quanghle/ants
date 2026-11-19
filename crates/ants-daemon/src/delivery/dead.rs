@@ -53,7 +53,6 @@ use crate::delivery::attempts::Notes;
 use crate::escalation::{Escalator, Stuck};
 use crate::people::humans::Registry;
 use crate::records::direct_kv::DirectKv;
-use crate::records::webhooks::Webhooks;
 
 /// How long a dead letter reader left behind by an interrupted read lives on.
 const INACTIVE: Duration = Duration::from_secs(30);
@@ -461,11 +460,10 @@ pub async fn watch(
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let humans = Registry::default();
     let _watching = humans.watch(js.clone(), crate::people::humans::RETRY);
-    let webhooks = Webhooks::new(js.clone());
     // The human's side neither reads nor writes sessions, which its credentials do not allow.
     let sessions = DirectKv::new(js, None, SESSIONS_BUCKET).await?;
     let threads = Threads::new(js.clone(), reader.clone(), sessions).reading(Reading::Gets);
-    let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
+    let claims = Claims { humans: &humans, threads: &threads };
     while let Some(msg) = advisories.next().await {
         let advisory = match serde_json::from_slice::<MaxDeliveries>(&msg.payload) {
             Ok(advisory) => advisory,
@@ -529,10 +527,7 @@ pub async fn bury_undelivered(
             let mut envelope =
                 serde_json::from_slice::<Envelope>(&msg.payload).ok().filter(|e| e.check_subject(&msg.subject).is_ok());
             if let Some(envelope) = envelope.as_mut() {
-                // Unchecked, it is kept as a webhook's naming no owner or creator.
-                if let Err(e) = claims.sender_claims(envelope, seq).await {
-                    tracing::warn!(error = format!("{e:#}"), "checking the claims of an undelivered message");
-                }
+                claims.sender_claims(envelope, seq).await;
             }
             (letter_of(&ant, seq, advisory.deliveries, &error, &msg.payload, envelope.as_ref()), None)
         }

@@ -235,7 +235,7 @@ async fn left_by_a_goto(server: &NatsServer, dir: &str) -> (PathBuf, RunId, Thre
     let script = std::fs::read_to_string(dir.join("second.py")).unwrap();
     let started_at = chrono::Utc::now();
     let (trail, args) = (Some("second".parse().unwrap()), json!("moved"));
-    header.route.push(TrailLeg { trail, at: None, script, args, first_call: 10, started_at, steps: 0 });
+    header.route.push(TrailLeg { trail, local: false, at: None, script, args, first_call: 10, started_at, steps: 0 });
     let runs = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
     runs.put(trail_run_key(&ant("lead"), &run), serde_json::to_vec(&header).unwrap()).await.unwrap();
     drop(lead);

@@ -252,7 +252,6 @@ async fn an_answer_to_a_webhook_goes_to_the_thread_s_owner_or_nowhere() {
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (hook, human) = ("github".parse::<UserId>().unwrap(), UserId::human());
-    bus.mark_webhook(&hook).await;
     let mut to_hook = bus.client.subscribe(subject::inbox_of(&hook)).await.unwrap();
     bus.client.flush().await.unwrap();
     let owned = Envelope::new(hook.clone(), bus.dev.clone(), "build red").with_owner(Some(human.clone()));
@@ -292,7 +291,6 @@ async fn a_run_s_rating_invitation_rates_it_under_a_webhook_s_own_rules() {
     let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch.with_policy(PermissionPolicy::allow_all()), SessionStore::memory(), 2, IDLE);
     let (hook, human) = ("github".parse::<UserId>().unwrap(), UserId::human());
-    bus.mark_webhook(&hook).await;
     let hooked = Envelope::new(hook.clone(), bus.dev.clone(), "build red: ask rate_trail")
         .with_owner(Some(human.clone()))
         .with_allow(Some(vec!["read:*".to_owned()]))

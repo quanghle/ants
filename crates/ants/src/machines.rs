@@ -120,7 +120,7 @@ async fn timed_after(
                 Some(status) => bail!("reading {bucket}: {status} {:?}", msg.description),
             }
             got += 1;
-            let relayed = relayed::stored_relayed(msg.headers.as_ref(), Read::DirectGet);
+            let relayed = relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::DirectGet);
             let msg = jetstream::message::StreamMessage::try_from(msg).map_err(|e| anyhow!(e))?;
             seq = msg.sequence + 1;
             if relayed {

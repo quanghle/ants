@@ -45,12 +45,16 @@ mod goto;
 mod guide;
 #[path = "trail_guide/host.rs"]
 mod guide_host;
+#[path = "trail_daemon/lifecycle.rs"]
+mod lifecycle;
 #[path = "trail_daemon/limits.rs"]
 mod limits;
 #[path = "trail_daemon/nested.rs"]
 mod nested;
 #[path = "trail_daemon/ratings.rs"]
 mod ratings;
+#[path = "trail_daemon/restore.rs"]
+mod restore;
 #[path = "trail_daemon/save_tools.rs"]
 mod save_tools;
 #[path = "trail_daemon/stored.rs"]
@@ -125,6 +129,23 @@ async fn init(server: &NatsServer) {
     }
 }
 
+/// Save `script` as the colony's trail `name`, as the human.
+async fn save_for_colony(server: &NatsServer, name: &str, script: &str) {
+    let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "save").await.unwrap();
+    let trail = ants_proto::SavedTrail {
+        name: name.parse().unwrap(),
+        description: "a test".to_owned(),
+        phases: Vec::new(),
+        waypoints: Vec::new(),
+        script: script.to_owned(),
+        saved_by: ants_proto::Saver::Human { user: UserId::human() },
+        saved_from: None,
+        saved_at: chrono::Utc::now(),
+    };
+    let kv = DirectKv::new(&js, None, ants_proto::TRAILS_BUCKET).await.unwrap();
+    kv.put(name, serde_json::to_vec(&trail).unwrap()).await.unwrap();
+}
+
 /// The conductor `lead`'s daemon, its runs continued, with `worker` as the `ants` binary and `colony` as the colony.
 async fn conductor(server: &NatsServer, worker: &Path, colony: Vec<ColonyEntry>) -> Conductor {
     conductor_full(server, worker, colony, Registry::new(UserId::human()), None).await
@@ -153,13 +174,29 @@ async fn conductor_full(
     humans: Registry,
     trails_dir: Option<PathBuf>,
 ) -> Conductor {
+    conductor_refusing(server, worker, colony, humans, trails_dir, None).await
+}
+
+/// [`conductor_full`], failing to send any message to `refused`.
+async fn conductor_refusing(
+    server: &NatsServer,
+    worker: &Path,
+    colony: Vec<ColonyEntry>,
+    humans: Registry,
+    trails_dir: Option<PathBuf>,
+    refused: Option<UserId>,
+) -> Conductor {
     let lead = ant("lead");
     let (client, js) = ants_daemon::bus::connect(&server.url, None, None, &lead, "conductor").await.unwrap();
     let attempts = ants_daemon::bus::ensure_attempts(&js, None, &lead).await.unwrap();
     let (tx, sent) = mpsc::unbounded_channel();
-    let outbox: ants_daemon::mcp::Outbox = Arc::new(move |envelope| {
+    let outbox: ants_daemon::mcp::Outbox = Arc::new(move |envelope: Envelope| {
         let tx = tx.clone();
+        let refused = refused.as_ref() == Some(&envelope.to);
         Box::pin(async move {
+            if refused {
+                anyhow::bail!("{} is unreachable", envelope.to);
+            }
             tx.send(envelope).unwrap();
             Ok(())
         })
@@ -625,7 +662,8 @@ async fn a_run_past_its_wall_time_fails() {
     assert_eq!(limit, Some(RunLimit::Wall), "the record says which limit failed it");
     let told = lead.told().await;
     assert!(told.text.contains(" failed (1 steps, 0 turns): ") && told.text.contains(&error), "{}", told.text);
-    assert!(told.text.contains("under raised limits"), "{}", told.text);
+    let raise = format!("`ants trail resume {run} --wall DUR` continues it, raising its 1s of wall time (at most 7d).");
+    assert!(told.text.ends_with(&raise), "{}", told.text);
 
     let raised = TrailLimits { wall_secs: 3600, ..limits };
     lead.trails.resume(&run, &UserId::human(), Some(raised)).await.unwrap();
@@ -650,6 +688,7 @@ await parallel(*[agent(prompt + f"f{i}", ant="dev", label=f"f{i}") for i in rang
     let max = ants_daemon::trail::MAX_RECORD;
     assert!(error.contains(&format!(" bytes, past the {max} it holds")), "{error}");
     assert!(lead.sends_no_step(Duration::from_millis(200)).await, "a step went out");
+    assert_eq!(lead.header(&run).await.steps, 0, "the steps of the failed pass never went out");
 
     // A record of the largest size the check lets through fits NATS's payload.
     let (mut stored, _) = lead.session(&run).await;
@@ -661,6 +700,25 @@ await parallel(*[agent(prompt + f"f{i}", ant="dev", label=f"f{i}") for i in rang
     runs.put(trail_session_key(&ant("lead"), &run), serde_json::to_vec(&stored).unwrap()).await.unwrap();
     let back = runs.get(trail_session_key(&ant("lead"), &run)).await.unwrap().unwrap();
     assert_eq!(back.len(), max);
+}
+
+#[tokio::test]
+async fn a_run_failed_on_its_session_size_takes_no_resume() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let run = lead.start("big = \"x\" * 800000\nawait agent(\"go\", ant=\"dev\")\n", TrailLimits::default()).await;
+    let RunState::Failed { limit, .. } = lead.ended(&run).await else { panic!("not failed") };
+    assert_eq!(limit, Some(RunLimit::Session));
+    let told = lead.told().await;
+    assert!(told.text.ends_with("and take the same answers."), "{}", told.text);
+    assert!(!told.text.contains("ants trail resume"), "{}", told.text);
+
+    for limits in [None, Some(TrailLimits::MAX)] {
+        let refused = lead.trails.resume(&run, &UserId::human(), limits).await.unwrap_err();
+        assert!(refused.contains("failed on its session size limit, which this resume does not raise"), "{refused}");
+    }
+    assert!(matches!(lead.header(&run).await.state, RunState::Failed { .. }), "the run stays failed");
 }
 
 /// The next status event on `status` that tells a step.
@@ -694,8 +752,9 @@ log("built")
     assert_eq!(step.passes_on(), Some(&thread), "the step passes the link to the run's thread on");
 
     let notes = lead.notes(&thread, 2).await;
-    assert_eq!(notes[..2], [format!("Run {run} of trail t started: a test"), "phase: one\nlog: asking dev".into()]);
-    assert_eq!(lead.notes.on(&thread)[0].title.as_deref(), Some("trail t: a test"), "the thread's title");
+    let started = format!("Run {run} of an inline script (meta name t) started: a test");
+    assert_eq!(notes[..2], [started, "phase: one\nlog: asking dev".into()]);
+    assert_eq!(lead.notes.on(&thread)[0].title.as_deref(), Some("inline t: a test"), "the thread's title");
     assert!(lead.notes.on(&thread).iter().all(|note| note.from == ant("lead")));
     let (started, stage) = step_status(&mut status).await;
     assert_eq!((&started.ant, &started.thread_id, stage), (&ant("lead"), &thread, StepStage::Started));
@@ -714,6 +773,26 @@ log("built")
     let result = "```json\n{\n  \"built\": \"done\",\n  \"count\": 2\n}\n```";
     assert!(told.text.starts_with(&format!("Run {run}")), "{}", told.text);
     assert!(told.text.ends_with(&format!(" is done (1 steps, 1 turns):\n\n{result}")), "{}", told.text);
+}
+
+#[tokio::test]
+async fn a_run_of_a_trail_saved_under_another_name_than_its_meta_s_is_noted_by_the_saved_name() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-saved-name");
+    std::fs::write(dir.join("release.py"), format!("{META}await agent(\"go\", ant=\"dev\")\n")).unwrap();
+    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    let thread = ThreadId::generate();
+    let run = lead.start_saved("release", children::human_origin(), TrailLimits::default(), thread.clone()).await;
+    let step = lead.step().await;
+
+    let notes = lead.notes(&thread, 1).await;
+    assert_eq!(notes[0], format!("Run {run} of trail release (meta name t) started: a test"));
+    assert_eq!(lead.notes.on(&thread)[0].title.as_deref(), Some("trail release: a test"), "the thread's title");
+    assert!(lead.reply(&step, "gone").await);
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("gone") });
+    assert!(lead.told().await.text.starts_with(&format!("Run {run} of trail release is done")));
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[tokio::test]

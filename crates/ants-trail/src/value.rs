@@ -5,8 +5,10 @@ use monty_types::{MontyObject, ObjectRef};
 use num_bigint::BigInt;
 use serde_json::{Map, Number, Value};
 
-/// Deepest nesting converted, so a deep value cannot overflow the stack.
-const MAX_DEPTH: usize = 128;
+/// Most lists and dicts, arrays and objects in JSON, nested in one value a run takes or makes: its args, a call's
+/// args, an answer and the result. Far enough under the 127 serde_json reads for the levels a worker's request or
+/// response, and the daemon's records, put around such a value.
+pub const MAX_DEPTH: usize = 100;
 /// Most values visited, so a value sharing its parts many times over cannot blow up.
 const MAX_NODES: usize = 1_000_000;
 
@@ -35,10 +37,30 @@ pub(crate) fn from_monty(value: ObjectRef<'_>) -> Result<Value, String> {
     convert(value, 0, &mut nodes)
 }
 
+/// Whether `value` nests at most [`MAX_DEPTH`] arrays and objects; else why not.
+pub fn check_depth(value: &Value) -> Result<(), String> {
+    fn within(value: &Value, room: usize) -> bool {
+        match value {
+            Value::Array(items) => room > 0 && items.iter().all(|item| within(item, room - 1)),
+            Value::Object(map) => room > 0 && map.values().all(|item| within(item, room - 1)),
+            _ => true,
+        }
+    }
+    if within(value, MAX_DEPTH) { Ok(()) } else { Err(too_deep()) }
+}
+
+fn too_deep() -> String {
+    format!("the value nests lists and dicts more than {MAX_DEPTH} deep")
+}
+
+/// `depth` counts the lists and dicts around `value`.
 fn convert(value: ObjectRef<'_>, depth: usize, nodes: &mut usize) -> Result<Value, String> {
     *nodes += 1;
-    if depth > MAX_DEPTH || *nodes > MAX_NODES {
-        return Err("the value is nested too deep or too large".to_owned());
+    if *nodes > MAX_NODES {
+        return Err("the value is too large".to_owned());
+    }
+    if depth >= MAX_DEPTH && matches!(value.type_name(), "list" | "tuple" | "dict") {
+        return Err(too_deep());
     }
     let unsupported = || Err(format!("a {} is not a JSON value", value.type_name()));
     match value.type_name() {
@@ -91,5 +113,20 @@ mod tests {
         assert_eq!(from_monty(list.as_ref()), Err("a set is not a JSON value".to_owned()));
         let keyed = MontyObject::dict([(MontyObject::int(1), MontyObject::none())]);
         assert_eq!(from_monty(keyed.as_ref()), Err("a dict key 1 is not a string".to_owned()));
+    }
+
+    fn nested(depth: usize) -> Value {
+        (0..depth).fold(json!(1), |inner, _| json!([inner]))
+    }
+
+    #[test]
+    fn values_nest_at_most_max_depth_deep() {
+        let deepest = nested(MAX_DEPTH);
+        assert_eq!(check_depth(&deepest), Ok(()));
+        assert_eq!(from_monty(to_monty(&deepest).as_ref()), Ok(deepest));
+        let deeper = nested(MAX_DEPTH + 1);
+        assert_eq!(check_depth(&deeper), Err(too_deep()));
+        assert_eq!(from_monty(to_monty(&deeper).as_ref()), Err(too_deep()));
+        assert_eq!(check_depth(&json!({"a": nested(MAX_DEPTH)})), Err(too_deep()));
     }
 }

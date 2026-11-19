@@ -378,10 +378,9 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
             deliveries: MAX_DELIVER as u64,
         };
         let humans = Registry::default();
-        let webhooks = Webhooks::new(uplinked.hub_js.clone());
         let sessions = bus::ensure_sessions(&uplinked.hub_js, None, &UserId::human()).await.unwrap();
         let threads = Threads::new(uplinked.hub_js.clone(), UserId::human(), sessions);
-        let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
+        let claims = Claims { humans: &humans, threads: &threads };
         let watch = || dead::bury_undelivered(&uplinked.hub_js, &stream, &advisory, &claims);
         // As the hub's stream takes the outbox copy once the uplink is back.
         let dead_id = kept.dead.msg_id();

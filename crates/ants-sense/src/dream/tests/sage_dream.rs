@@ -200,9 +200,13 @@ async fn a_rejected_kind_quotes_the_latest_reasons_given_and_is_then_untrusted()
     assert!(at.is_sorted() && !text.contains("Not borne out"), "the latest {QUOTED_REASONS}: {text}");
 
     woken(&*items, 2, &on(92).thread).await.unwrap();
-    let refused = untrusted(&*items, &on(92), Some("1.1")).await.unwrap();
+    let refused = untrusted(&*items, &on(92), Some("1.1"), Making::Proposal).await.unwrap();
     assert_eq!(refused.as_deref(), Some("finding 1.1 rests on untrusted text"), "no persona or skill proposal on it");
-    assert_eq!(untrusted(&*items, &on(92), Some("2.1")).await.unwrap(), None, "the other findings stay trusted");
+    assert_eq!(
+        untrusted(&*items, &on(92), Some("2.1"), Making::Proposal).await.unwrap(),
+        None,
+        "the other findings stay trusted"
+    );
     assert_eq!(untrusted_on(&*items, &on(92).thread).await.unwrap(), ["1.1"], "the dream's writes are untrusted");
 }
 
@@ -444,5 +448,9 @@ async fn a_sage_s_dream_lists_its_reviews_by_their_records_and_holds_none_of_the
     assert!(text.contains("message 4 of a thread") && !text.contains("(untrusted"), "{text}");
 
     woken(&*items, 1, &on(10).thread).await.unwrap();
-    assert_eq!(untrusted(&*items, &on(10), None).await.unwrap(), None, "the reviews' text is left out");
+    assert_eq!(
+        untrusted(&*items, &on(10), None, Making::Proposal).await.unwrap(),
+        None,
+        "the reviews' text is left out"
+    );
 }

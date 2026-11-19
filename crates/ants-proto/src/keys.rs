@@ -340,19 +340,15 @@ pub fn webhook_seen_key(webhook: &UserId, hash: &str) -> String {
 }
 
 /// Key of the marker of `webhook` in [`WEBHOOKS_BUCKET`], which `ants webhook serve` (or the daemon running the
-/// schedule of that name) puts on connecting, before it delivers, and every [`SERVING_EVERY`] while it runs. Only the
-/// webhook's credentials write it, so a daemon honours [`Envelope::webhook`] only from a sender whose marker is there.
-/// Its value is the [`Serving`] of the process that put it.
+/// schedule of that name) puts on connecting and every [`SERVING_EVERY`] while it runs, for `ants doctor` and the
+/// release checks. Its value is the [`Serving`] of the process that put it. It says nothing of what its sender is: the
+/// subject of a message does ([`subject::webhook_inbox`]).
 pub fn webhook_marker_key(webhook: &UserId) -> String {
-    format!("{webhook}.{WEBHOOK_MARKER}")
+    format!("{webhook}.webhook")
 }
 
-/// Last token of [`webhook_marker_key`]; event keys end in hex digits.
-pub(crate) const WEBHOOK_MARKER: &str = "webhook";
-
 /// Key of the [`Serving`] of `ants channel serve` in [`WEBHOOKS_BUCKET`], put on connecting and every
-/// [`SERVING_EVERY`] while it runs. `channel-manager` is a reserved name, so no webhook writes it, and it ends in
-/// no [`WEBHOOK_MARKER`], so it makes no webhook of the channel manager.
+/// [`SERVING_EVERY`] while it runs. `channel-manager` is a reserved name, so no webhook writes it.
 pub fn channel_manager_serving_key() -> String {
     format!("{}.serve", UserId::channel_manager())
 }

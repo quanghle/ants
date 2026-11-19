@@ -1356,6 +1356,7 @@ fn trail_child_runs() {
         conductor: user("planner"),
         route: vec![TrailLeg {
             trail: Some("review".parse().unwrap()),
+            local: false,
             at: None,
             script: "await agent('review it', ant='dev-a')".to_owned(),
             args: serde_json::json!({"pr": 7}),
@@ -1402,6 +1403,7 @@ fn routed_run() -> TrailRun {
         route: vec![
             TrailLeg {
                 trail: Some("triage".parse().unwrap()),
+                local: false,
                 at: None,
                 script: "await goto('release', at='review', state={'version': '1.2.0'})".to_owned(),
                 args: serde_json::json!({"bug": 7}),
@@ -1411,6 +1413,7 @@ fn routed_run() -> TrailRun {
             },
             TrailLeg {
                 trail: Some("release".parse().unwrap()),
+                local: false,
                 at: Some("review".to_owned()),
                 script: "async def review(state):\n    return await agent(state['version'], ant='dev-a')".to_owned(),
                 args: serde_json::json!({"version": "1.2.0"}),
@@ -1487,14 +1490,11 @@ fn trails() {
                 retries: 1,
             }],
             queued: vec![QueuedCall { call: 4, function: TrailFunction::Human, args: serde_json::json!(["ship it?"]) }],
+            anew: vec![2],
         },
     );
-    let answer = |call, answer| JournalEntry {
-        call,
-        function: TrailFunction::Agent,
-        args: serde_json::json!(["dev-a", "build it"]),
-        answer,
-    };
+    let args = serde_json::json!(["dev-a", "build it"]);
+    let answer = |call, answer| JournalEntry { call, function: TrailFunction::Agent, args: args.clone(), answer };
     let refused = JournalEntry {
         call: 3,
         function: TrailFunction::Goto,
@@ -1551,6 +1551,7 @@ fn trail_ratings() {
             task: "release 2.1 with the migration".to_owned(),
             why: "built and tagged, but the smoke tests needed a rerun".to_owned(),
             script: script_sha256("agent('dev-a', 'build it')"),
+            untrusted: false,
             at: at(6),
         },
     );

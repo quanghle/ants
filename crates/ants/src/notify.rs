@@ -283,7 +283,7 @@ async fn watch(human: &Notified, bus: &HumanBus, links: Option<&Links>) -> Resul
 async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject: &str, payload: &[u8], seq: u64) {
     let config = &human.config;
     let now = Utc::now();
-    let inbox = subject.starts_with(subject::inbox_of(&config.name).trim_end_matches('*'));
+    let inbox = subject::parse_inbox(subject).is_some_and(|(to, _)| to == config.name);
     let notice = if inbox {
         match serde_json::from_slice::<Envelope>(payload) {
             Ok(envelope) if envelope.check_subject(subject).is_ok() && is_recent(&envelope.id, now) => {

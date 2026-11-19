@@ -5,8 +5,7 @@ use crate::{
     ANTS_VERSION, AdminPayload, AntReply, AntRequest, AskedAnt, CancelReply, CancelRequest, ChainEntry, ChannelEntry,
     ChannelId, ChannelOp, DeviceId, ENROLL_INBOX, FILES_STREAM, HumanEntry, Humans, JsDomain, MAX_CHANNEL_DESCRIPTION,
     Machine, QueueRequest, Refusal, Role, SENSE_STREAM, SPARE_READERS, STREAM, Serving, ThreadId, UserId, Uuid,
-    WEBHOOK_MARKER, assisted_owner_key, assisted_withdrawal_key, channel_manager_serving_key, p, spare_readers,
-    subject,
+    assisted_owner_key, assisted_withdrawal_key, p, spare_readers, subject,
 };
 
 #[test]
@@ -503,8 +502,8 @@ fn a_webhook_may_post_only_to_its_destinations_and_keep_only_its_own_events() {
     assert_eq!(
         perms.publish,
         [
-            "ants.inbox.dev-a.github",
-            "ants.chan.ops.github",
+            "ants.inbox.dev-a.github.webhook",
+            "ants.chan.ops.github.webhook",
             "$JS.API.DIRECT.GET.KV_ants_channels.$KV.ants_channels.ops",
             "$JS.API.CONSUMER.INFO.ANTS.inbox-github",
             "$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.github.>",
@@ -514,6 +513,14 @@ fn a_webhook_may_post_only_to_its_destinations_and_keep_only_its_own_events() {
         ]
     );
     assert_eq!(perms.subscribe, ["_INBOX.github.>", "ants.renew.github.reply"]);
+    // Its subjects say it is a webhook, as the issuing human's credentials do: no ant's credentials publish on them,
+    // nor its on an ant's.
+    let ant = Permissions::for_user(&hook, Role::Ant);
+    let webhooks = |subject: &str| subject::is_webhooks(subject);
+    assert!(
+        perms.publish.iter().filter(|s| s.starts_with("ants.")).all(|s| s.starts_with("ants.renew.") || webhooks(s))
+    );
+    assert!(!ant.publish.iter().any(|s| s.ends_with(".webhook") || s.ends_with(".>") && s.starts_with("ants.inbox")));
     let to_channel = Permissions::for_webhook(&hook, &[Destination::Channel("ops".parse().unwrap())]);
     assert!(!to_channel.publish.iter().any(|s| s.contains("ants_owners")), "posts' owners come from the posts");
     let domain: JsDomain = "hub".parse().unwrap();
@@ -623,7 +630,7 @@ fn only_ants_get_spare_readers_pinned_like_their_own() {
     let a = Permissions::for_user(&p("dev-a"), Role::Ant);
     assert_eq!(spare_readers("chanread-dev-a").collect::<Vec<_>>(), ["chanread-dev-a_1", "chanread-dev-a_2"]);
     for (reader, filter) in
-        [("inbox-dev-a", "ants.inbox.dev-a.*"), ("notes-dev-a", "ants.notes.>"), ("chanread-dev-a", "ants.chan.>")]
+        [("inbox-dev-a", "ants.inbox.dev-a.>"), ("notes-dev-a", "ants.notes.>"), ("chanread-dev-a", "ants.chan.>")]
     {
         for spare in spare_readers(reader) {
             for s in [
@@ -734,10 +741,9 @@ fn the_channel_manager_hears_requests_and_writes_channels_only() {
         ]
     );
     assert!(!manager.publish.iter().any(|s| s.starts_with("_INBOX") || s.contains("STREAM.CREATE")));
-    // Humans read its version; ants, which read only markers (`*.webhook`), do not take it for a webhook.
+    // Humans read its version.
     let read = "$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.channel-manager.serve";
     assert!(Permissions::for_user(&UserId::human(), Role::Human).publish.iter().any(|s| s == read));
-    assert!(!channel_manager_serving_key().ends_with(&format!(".{WEBHOOK_MARKER}")));
     let marker = Serving::here("m1");
     let json = serde_json::to_string(&marker).unwrap();
     assert_eq!(json, format!(r#"{{"machine":"m1","version":"{ANTS_VERSION}","perms":{PERMISSIONS_VERSION}}}"#));
@@ -766,7 +772,7 @@ fn every_human_has_the_human_rights_and_only_humans_write_the_humans_bucket() {
         "$JS.API.STREAM.CREATE.KV_ants_humans",
         "$KV.ants_humans.*",
         "$KV.ants_humans.alice.>",
-        "$JS.API.CONSUMER.CREATE.ANTS.inbox-alice.ants.inbox.alice.*",
+        "$JS.API.CONSUMER.CREATE.ANTS.inbox-alice.ants.inbox.alice.>",
         "$JS.API.CONSUMER.CREATE.ANTS.notes-alice.ants.notes.>",
     ] {
         assert!(alice.publish.iter().any(|have| have == s), "{s} missing from {:?}", alice.publish);

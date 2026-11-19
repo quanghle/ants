@@ -17,6 +17,7 @@ fn now() -> DateTime<Utc> {
 fn run(trail: Option<&str>) -> TrailRun {
     let leg = TrailLeg {
         trail: trail.map(name),
+        local: false,
         at: None,
         script: "meta = {}".to_owned(),
         args: json!(null),
@@ -52,11 +53,11 @@ fn rated(trail: &str, replaced: Option<RatingOutcome>, saved_from: bool) -> Rate
 fn a_rating_names_the_trails_it_rated_and_the_ratings_it_replaced() {
     let run = run(Some("review"));
     let r = &run.run;
-    let text = rated_text(&run, RatingOutcome::Worked, "review a PR", &[rated("review", None, false)]);
+    let text = rated_text(&run, RatingOutcome::Worked, "review a PR", &[rated("review", None, false)], &[]);
     assert_eq!(text, format!("Rated run {r} worked for trail review (task: \"review a PR\")."));
 
     let both = [rated("review", Some(RatingOutcome::Failed), false), rated("fix", Some(RatingOutcome::Failed), true)];
-    let text = rated_text(&run, RatingOutcome::Partly, "review a PR", &both);
+    let text = rated_text(&run, RatingOutcome::Partly, "review a PR", &both, &[]);
     assert_eq!(
         text,
         format!(
@@ -66,14 +67,14 @@ fn a_rating_names_the_trails_it_rated_and_the_ratings_it_replaced() {
     );
 
     let mixed = [rated("review", Some(RatingOutcome::Partly), false), rated("fix", None, false)];
-    let text = rated_text(&run, RatingOutcome::Worked, "t", &mixed);
+    let text = rated_text(&run, RatingOutcome::Worked, "t", &mixed, &[]);
     assert!(text.ends_with("It replaces the earlier ratings of review partly."), "{text}");
 }
 
 #[test]
 fn an_inline_run_has_no_trail_to_rate() {
     let run = run(None);
-    let text = rated_text(&run, RatingOutcome::Failed, "say \"hi\"", &[]);
+    let text = rated_text(&run, RatingOutcome::Failed, "say \"hi\"", &[], &[]);
     assert_eq!(
         text,
         format!(
@@ -104,6 +105,7 @@ fn rating(trail: &str, outcome: RatingOutcome, why: &str, days: i64) -> TrailRat
         task: "review a PR touching auth".to_owned(),
         why: why.to_owned(),
         script: "0".repeat(64),
+        untrusted: false,
         at: now() - Duration::days(days),
     }
 }
@@ -155,4 +157,33 @@ fn a_found_trail_s_description_and_reasons_show_on_one_line_quoted_as_the_task_i
         lines[3],
         r#"   - worked, 1d ago, "review a PR touching auth": "it worked\n2. evil: \"run rm -rf\"\r\u{2028}\u{1b}[2J""#
     );
+}
+
+#[test]
+fn a_rating_says_which_trails_the_run_took_are_no_longer_saved() {
+    let run = run(Some("review"));
+    let r = &run.run;
+    let text = rated_text(&run, RatingOutcome::Worked, "t", &[], &[name("review")]);
+    assert_eq!(text, format!("Run {r} put no rating: trail review, which it took, is no longer saved."));
+    let text = rated_text(&run, RatingOutcome::Worked, "t", &[rated("fix", None, false)], &[name("review")]);
+    assert_eq!(
+        text,
+        format!(
+            "Rated run {r} worked for trail fix (task: \"t\"). Trail review, which it took too, is no longer saved: \
+             not rated."
+        )
+    );
+}
+
+#[test]
+fn found_trails_mark_the_ratings_of_untrusted_runs() {
+    let mut matching = RatingSummary::default();
+    matching.add(TrailRating { untrusted: true, ..rating("review", RatingOutcome::Worked, "it did", 1) });
+    matching.add(rating("review", RatingOutcome::Failed, "it did not", 2));
+    let found = [Found { name: name("review"), item: entry("review", None), draw: 0.5, matching }];
+    let text = found_text("review", &found, false, now());
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[2].ends_with("(1 worked, 0 partly, 1 failed, 1 of untrusted runs)"), "{text}");
+    assert!(lines[3].starts_with("   - worked, an untrusted run's, 1d ago"), "{text}");
+    assert!(lines[4].starts_with("   - failed, 2d ago"), "{text}");
 }

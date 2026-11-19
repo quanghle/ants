@@ -2,9 +2,8 @@
 
 use monty::MontyRun;
 use monty_types::{CompileOptions, MontyException, StackFrame};
-use ruff_python_ast::helpers::AwaitVisitor;
-use ruff_python_ast::visitor::Visitor as _;
-use ruff_python_ast::{Expr, Stmt, StmtFunctionDef};
+use ruff_python_ast::visitor::{Visitor, walk_comprehension, walk_expr, walk_stmt};
+use ruff_python_ast::{Comprehension, Expr, Stmt, StmtFor, StmtFunctionDef, StmtWith};
 use ruff_text_size::Ranged as _;
 use serde::{Deserialize, Serialize};
 
@@ -220,15 +219,14 @@ fn waypoints(script: &str, body: &[Stmt], waypoints: &[String]) -> Result<(), St
         }
     }
     let awaits = |stmt: &Stmt| {
-        let mut visitor = AwaitVisitor::default();
+        let mut visitor = StepVisitor::default();
         visitor.visit_stmt(stmt);
         visitor.seen_await
     };
     for stmt in &body[1..] {
         let kept = match stmt {
-            Stmt::Import(_) | Stmt::ImportFrom(_) | Stmt::FunctionDef(_) | Stmt::Pass(_) => true,
-            Stmt::ClassDef(class) => !class.body.iter().any(awaits),
-            Stmt::Assign(_) | Stmt::AnnAssign(_) => !awaits(stmt),
+            Stmt::Import(_) | Stmt::ImportFrom(_) | Stmt::Pass(_) => true,
+            Stmt::FunctionDef(_) | Stmt::ClassDef(_) | Stmt::Assign(_) | Stmt::AnnAssign(_) => !awaits(stmt),
             Stmt::Expr(expr) => matches!(expr.value.as_ref(), Expr::StringLiteral(_)),
             _ => false,
         };
@@ -241,6 +239,51 @@ fn waypoints(script: &str, body: &[Stmt], waypoints: &[String]) -> Result<(), St
         }
     }
     Ok(())
+}
+
+/// Finds an await in what a statement computes where it stands: of a def, its decorators, defaults and annotations,
+/// not its body; of a class, its decorators, bases, keywords and body.
+#[derive(Default)]
+struct StepVisitor {
+    seen_await: bool,
+}
+
+impl<'a> Visitor<'a> for StepVisitor {
+    fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        match stmt {
+            Stmt::FunctionDef(def) => {
+                for decorator in &def.decorator_list {
+                    self.visit_decorator(decorator);
+                }
+                if let Some(type_params) = &def.type_params {
+                    self.visit_type_params(type_params);
+                }
+                self.visit_parameters(&def.parameters);
+                if let Some(returns) = &def.returns {
+                    self.visit_annotation(returns);
+                }
+            }
+            Stmt::With(StmtWith { is_async: true, .. }) | Stmt::For(StmtFor { is_async: true, .. }) => {
+                self.seen_await = true;
+            }
+            _ => walk_stmt(self, stmt),
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        match expr {
+            Expr::Await(_) => self.seen_await = true,
+            _ => walk_expr(self, expr),
+        }
+    }
+
+    fn visit_comprehension(&mut self, comprehension: &'a Comprehension) {
+        if comprehension.is_async {
+            self.seen_await = true;
+        } else {
+            walk_comprehension(self, comprehension);
+        }
+    }
 }
 
 /// Whether a def takes exactly one argument without a default, a positional one.
@@ -384,6 +427,11 @@ pass
             ("for i in range(2):\n    pass", 4),
             ("log('hi')", 4),
             ("class C:\n    x = await agent('a')", 4),
+            ("async def go(state, x=await agent('a')):\n    pass", 4),
+            ("async def go(state, *, x=await agent('a')):\n    pass", 4),
+            ("@deco(await agent('a'))\nasync def go(state):\n    pass", 4),
+            ("@deco(await agent('a'))\nclass C:\n    pass", 4),
+            ("class C:\n    def go(self, x=await agent('a')):\n        pass", 4),
         ] {
             let script = WAYPOINTS.replacen("import json\n", &format!("import json\n{statement}\n"), 1);
             let error = refused(&script);
@@ -391,6 +439,23 @@ pass
                 error.starts_with(&format!("line {line}: a trail with waypoints holds only")),
                 "{statement}: {error}"
             );
+        }
+        for statement in [
+            "def go(x: await agent('a')):\n    pass",
+            "def go(x) -> await agent('a'):\n    pass",
+            "class C(await agent('a')):\n    pass",
+            "class C(metaclass=await agent('a')):\n    pass",
+            "class C:\n    if True:\n        def go(self, x=await agent('a')):\n            pass",
+        ] {
+            let script = WAYPOINTS.replacen("import json\n", &format!("import json\n{statement}\n"), 1);
+            assert!(check(&script).is_err(), "{statement}");
+        }
+        for statement in [
+            "@deco(LIMIT)\nasync def helper(state, x=LIMIT, *, y: int = 2) -> dict:\n    return await agent('a')",
+            "@deco\nclass C:\n    async def go(self, x=[1]):\n        await agent('a')",
+        ] {
+            let script = WAYPOINTS.replacen("import json\n", &format!("import json\n{statement}\n"), 1);
+            assert!(check(&script).is_ok(), "{statement}: {:?}", check(&script));
         }
     }
 }

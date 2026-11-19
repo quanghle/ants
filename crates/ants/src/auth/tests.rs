@@ -10,7 +10,6 @@ use ants_daemon::delivery::dead::{self, Attempt};
 use ants_daemon::people::humans::Registry;
 use ants_daemon::records::direct_kv::DirectKv;
 use ants_daemon::records::owners;
-use ants_daemon::records::webhooks::Webhooks;
 use ants_daemon::secrets::creds::{Finding, Kind as CredsKind};
 use ants_daemon::stream::notes;
 use ants_proto::{

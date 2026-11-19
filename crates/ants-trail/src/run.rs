@@ -10,6 +10,7 @@ use serde_json::value::RawValue;
 use crate::protocol::{Answer, Call, Event, JournalEntry, Limit, Limits, Request, Response};
 use crate::runner::{self, Worker, WorkerError};
 use crate::trail::{self, Meta, TrailError};
+use crate::value::check_depth;
 
 /// How a run stands.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,7 +50,12 @@ pub enum RunError {
     /// The run enters its trail at no waypoint the trail has.
     #[error("{0}")]
     Entry(String),
-    /// The worker gave no response: the run is unchanged and the same call may be retried.
+    /// The run's args are nested deeper than [`crate::MAX_DEPTH`].
+    #[error("the arguments are refused: {0}")]
+    Args(String),
+    /// The worker could not start, crashed, or could not be read: the run is unchanged and the same call may be
+    /// retried. In [`Run::start`] and [`Run::resume`], a worker past its deadline or out of memory, or whose response
+    /// is oversized or unreadable, fails the run instead.
     #[error(transparent)]
     Worker(#[from] WorkerError),
     #[error("the run has already started")]
@@ -180,6 +186,7 @@ impl Run {
         seed: u64,
     ) -> Result<Self, RunError> {
         limits.check().map_err(RunError::Limits)?;
+        check_depth(&args).map_err(RunError::Args)?;
         let meta = trail::check(script)?;
         let entry = meta.entry(entry).map_err(RunError::Entry)?.map(str::to_owned);
         let state = RunState {
@@ -301,11 +308,18 @@ impl Run {
     }
 
     /// Records the host's answer to a call it was handed, in the journal, and frees its concurrency slot. The script
-    /// receives it at the next [`Run::resume`].
+    /// receives it at the next [`Run::resume`]; a value nested deeper than [`crate::MAX_DEPTH`] as an error instead.
     pub fn answer(&mut self, call: u32, answer: Answer) -> Result<JournalEntry, RunError> {
         if self.state.status != Status::Running {
             return Err(RunError::Ended);
         }
+        let answer = match answer {
+            Answer::Ok(value) => match check_depth(&value) {
+                Ok(()) => Answer::Ok(value),
+                Err(e) => Answer::Error(format!("the answer is refused: {e}")),
+            },
+            error @ Answer::Error(_) => error,
+        };
         let index = self.state.outstanding.iter().position(|c| c.call == call).ok_or(RunError::UnknownCall(call))?;
         let Call { call, function, args } = self.state.outstanding.remove(index);
         self.state.answered.push(call);
@@ -442,7 +456,7 @@ impl Run {
                 self.end(Status::Failed { error, limit: Some(Limit::Memory) }, &mut progress);
             }
             // The same request would answer the same.
-            Err(e @ WorkerError::Oversized(_)) => {
+            Err(e @ (WorkerError::Oversized(_) | WorkerError::Protocol(_))) => {
                 self.end(Status::Failed { error: e.to_string(), limit: None }, &mut progress);
             }
             Err(e) => return Err(e.into()),
@@ -586,5 +600,13 @@ mod tests {
         run.start(&fake("run-oom", "exit 65")).await.unwrap();
         let error = format!("the trail ran out of memory ({} bytes)", Limits::DEFAULT_MEMORY_BYTES);
         assert_eq!(*run.status(), Status::Failed { error, limit: Some(Limit::Memory) });
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_response_fails_the_run() {
+        let mut run = run(Limits::default());
+        run.start(&fake("run-garbled", "cat >/dev/null; echo nonsense")).await.unwrap();
+        let Status::Failed { error, limit: None } = run.status() else { panic!("{:?}", run.status()) };
+        assert!(error.starts_with("the worker's response is unreadable: "), "{error}");
     }
 }

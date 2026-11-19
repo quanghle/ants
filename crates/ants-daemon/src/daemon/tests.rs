@@ -262,13 +262,6 @@ impl Bus {
         bus::publish_json(&self.js, envelope.subject(), &envelope, None).await.unwrap();
     }
 
-    /// Put the marker of `hook`, as `ants webhook serve` does before it delivers.
-    async fn mark_webhook(&self, hook: &UserId) {
-        let webhooks = self.js.create_key_value(crate::hub::webhooks_config()).await.unwrap();
-        let marker = serde_json::to_vec(&ants_proto::Serving::here("m")).unwrap();
-        webhooks.put(ants_proto::webhook_marker_key(hook), marker.into()).await.unwrap();
-    }
-
     async fn marked(&self, seq: u64) -> bool {
         self.markers.get(ants_proto::attempt_key(&self.dev, seq)).await.unwrap().is_some()
     }
@@ -317,7 +310,6 @@ impl Bus {
             escalator: &escalator,
             notes: &notes,
             threads: &self.threads,
-            webhooks: &Webhooks::new(self.js.clone()),
             colony: &self.colony,
             humans: &self.humans,
             behalf: Records::new(self.js.clone(), None, self.account.clone()),

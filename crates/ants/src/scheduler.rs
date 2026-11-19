@@ -236,7 +236,7 @@ mod tests {
         schedule.catch_up = true;
 
         let daemons = [tokio::spawn(run(schedule.clone())), tokio::spawn(run(schedule.clone()))];
-        let inbox = subject::inbox(&p("dev-a"), &nightly);
+        let inbox = subject::webhook_inbox(&p("dev-a"), &nightly);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while stored::<Envelope>(&js, &inbox).await.is_empty() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -278,7 +278,7 @@ mod tests {
 
         let next = fire(&a, &schedule, due + TimeDelta::hours(1), false).await.unwrap();
         assert!(!next.duplicate, "the next firing is a new thread");
-        let messages: Vec<Envelope> = stored(&js, &subject::inbox(&p("dev-a"), &nightly)).await;
+        let messages: Vec<Envelope> = stored(&js, &subject::webhook_inbox(&p("dev-a"), &nightly)).await;
         let [message, later] = &messages[..] else { panic!("two messages: {messages:?}") };
         assert_ne!(message.thread_id, later.thread_id);
         assert_eq!((message.text.as_str(), message.webhook), ("check the nightly build", true));
@@ -286,8 +286,7 @@ mod tests {
         assert_eq!(message.allow, schedule.allow, "its threads are narrowed to its rules");
         let recorded = Owners::new(js.clone()).recorded(&message.thread_id, &message.to).await.unwrap();
         assert_eq!(recorded, Some(p("alice")));
-        let marker =
-            seen.get(webhook_marker_key(&nightly)).await.unwrap().expect("daemons take its messages as a webhook's");
+        let marker = seen.get(webhook_marker_key(&nightly)).await.unwrap().expect("it publishes its version");
         let marker: ants_proto::Serving = serde_json::from_slice(&marker).unwrap();
         assert_eq!(marker.version, ants_proto::ANTS_VERSION, "it publishes its version");
     }
@@ -310,7 +309,7 @@ mod tests {
         let due = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
         assert!(!fire(&bus, &schedule, due, false).await.unwrap().duplicate);
         assert!(fire(&bus, &schedule, due, false).await.unwrap().duplicate, "a firing starts one run");
-        let messages: Vec<Envelope> = stored(&js, &subject::inbox(&p("dev-a"), &weekly)).await;
+        let messages: Vec<Envelope> = stored(&js, &subject::webhook_inbox(&p("dev-a"), &weekly)).await;
         let [message] = &messages[..] else { panic!("one message: {messages:?}") };
         assert_eq!((message.trail_start.as_deref(), message.webhook), (Some(&start), true));
         assert_eq!(message.owner.as_ref(), Some(&p("alice")));
@@ -327,7 +326,7 @@ mod tests {
         let bus = Bus::connect(&standup, Some(&creds), &server.url, None, "test").await.unwrap();
         let due = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
         assert!(!fire(&bus, &schedule, due, false).await.unwrap().duplicate);
-        let posts: Vec<ChannelPost> = stored(&js, &subject::chan(&ops, &standup)).await;
+        let posts: Vec<ChannelPost> = stored(&js, &subject::webhook_chan(&ops, &standup)).await;
         let [post] = &posts[..] else { panic!("one post: {posts:?}") };
         assert!(post.webhook && post.owner.is_none() && post.allow.is_none(), "receiving daemons narrow it");
         assert_eq!(post.mentions, [p("dev-a"), p("dev-b")]);

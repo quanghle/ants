@@ -56,9 +56,9 @@ pub(crate) use invite::invitation;
 pub use invite::{EndWait, rating_hint};
 pub use limits::AskedLimits;
 pub use nested::{refused_on_route, within};
-pub use ratings::{RatedTrail, Ratings, colony_rated};
+pub use ratings::{Rated, RatedTrail, Ratings, colony_rated};
 pub(crate) use report::clip;
-pub use saved::{PreparedSave, SaveFrom, SaveOutcome, SaveTrail, SavedEntry};
+pub use saved::{PreparedSave, SaveFrom, SaveOutcome, SaveTrail, SavedEntry, SavedScript};
 pub(crate) use saved::{age, from_run};
 pub(crate) use steps::indented;
 pub use tips::Tips;
@@ -187,12 +187,16 @@ struct Inner {
     /// a further reply of it is reported on the run's thread rather than prompted. A run's threads are forgotten as it
     /// ends: its [`ants_proto::TrailStepThread`]s tell its steps' threads from then on.
     threads: Mutex<HashMap<ThreadId, Step>>,
+    /// The runs of the conductor's index not continued from their records yet ([`load`]).
+    unrestored: Mutex<load::Unrestored>,
     wake: mpsc::UnboundedSender<RunId>,
     woken: tokio::sync::Mutex<mpsc::UnboundedReceiver<RunId>>,
     /// The run_trail calls waiting on the end of the runs they started ([`EndWait`]).
     waiters: Mutex<HashMap<RunId, tokio::sync::oneshot::Sender<TrailRun>>>,
     /// The runs started answering steps, for the replies to the steps to tell what they spent.
     answered: Mutex<nested::Answered>,
+    /// The runs being stopped or resumed, one stop or resume of a run at a time ([`Trails::changing`]).
+    changing: Mutex<HashMap<RunId, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Clone)]
@@ -219,6 +223,9 @@ struct Book {
     queued: Vec<QueuedCall>,
     /// The steps of the leg the run left by a goto(), still to give up once its stored header lists the next leg.
     left: Vec<PendingCall>,
+    /// The calls whose steps counted against the run's steps before it stopped or failed on a limit and go out anew
+    /// since its resume, counting no step again ([`TrailSession::anew`]).
+    anew: Vec<u32>,
     /// Answers whose journal entries are stored, for the next pass to hand the script.
     answers: Vec<(u32, Answer)>,
     /// The limit one of those answers raises for: a child run's, failed on it.
@@ -250,6 +257,8 @@ impl Slot {
 /// A leg to start: a run of `trail`'s script, entered at the waypoint `at`, else at its start.
 struct Leg {
     trail: Option<TrailName>,
+    /// Whether the trail is only this machine's ([`TrailLeg::local`]).
+    local: bool,
     script: String,
     at: Option<String>,
     args: Value,
@@ -260,7 +269,7 @@ struct Leg {
 impl Leg {
     /// The leg, checked to fit, as the run's route records it, its run, and its session as JSON.
     fn prepare(self, limits: &TrailLimits) -> Result<(TrailLeg, Run, String), String> {
-        let Self { trail, script, at, args, first_call } = self;
+        let Self { trail, local, script, at, args, first_call } = self;
         if script.len() > MAX_TRAIL_SCRIPT {
             return Err(format!("the script has {} bytes; a trail takes at most {MAX_TRAIL_SCRIPT}", script.len()));
         }
@@ -273,7 +282,7 @@ impl Leg {
             .numbered_from(first_call);
         let session = serde_json::to_string(engine.state()).map_err(|e| e.to_string())?;
         let at = engine.state().entry().map(str::to_owned);
-        let leg = TrailLeg { trail, at, script, args, first_call, started_at: Utc::now(), steps: 0 };
+        let leg = TrailLeg { trail, local, at, script, args, first_call, started_at: Utc::now(), steps: 0 };
         Ok((leg, engine, session))
     }
 }
@@ -336,10 +345,12 @@ impl Trails {
             notes,
             runs: Mutex::default(),
             threads: Mutex::default(),
+            unrestored: Mutex::default(),
             wake,
             woken: tokio::sync::Mutex::new(woken),
             waiters: Mutex::default(),
             answered: Mutex::default(),
+            changing: Mutex::default(),
         };
         Ok(Self { inner: Arc::new(inner) })
     }
@@ -429,17 +440,18 @@ impl Trails {
     async fn start_as(&self, run: RunId, start: StartRun) -> Result<RunId, String> {
         let StartRun { trail, args, owner, origin, thread, limits, spends_from } = start;
         limits.check().map_err(|e| e.to_string())?;
-        let (name, script) = match trail {
+        let (name, script, local) = match trail {
             TrailSource::Saved(name) => {
-                let script = self.inner.saved.script(&name).await?;
-                (Some(name), script)
+                let found = self.inner.saved.script(&name).await?;
+                (Some(name), found.script, found.local)
             }
             TrailSource::Script(_) if !origin.trusted() => {
                 return Err("a run started from a webhook's thread runs only saved trails".to_owned());
             }
-            TrailSource::Script(script) => (None, script),
+            TrailSource::Script(script) => (None, script, false),
         };
-        let (leg, engine, session) = Leg { trail: name, script, at: None, args, first_call: 0 }.prepare(&limits)?;
+        let (leg, engine, session) =
+            Leg { trail: name, local, script, at: None, args, first_call: 0 }.prepare(&limits)?;
         let now = leg.started_at;
         let header = TrailRun {
             run,
@@ -478,6 +490,7 @@ impl Trails {
             pending: Vec::new(),
             queued: Vec::new(),
             left: Vec::new(),
+            anew: Vec::new(),
             answers: Vec::new(),
             broke: None,
             late: false,
@@ -516,32 +529,41 @@ impl Trails {
     /// those it sent itself, and its child runs stop too. Returns the steps to other ants they waited on, for `by` to
     /// withdraw. A pass in flight ends first, so none gives up steps of the run the stop does not list meanwhile.
     pub async fn stop(&self, run: &RunId, by: &UserId) -> Result<Vec<WaitingStep>, String> {
+        let _changing = self.changing(run).await;
         let slot = self.running(run).await?;
         // Held to the end; a run's engine is locked before its children's, never after.
         let _engine = slot.engine.lock().await;
-        let pending = {
+        let (header, pending) = {
+            // Held from the stopped header's put to its taking effect in memory, so no other put stores the run
+            // running meanwhile.
+            let _held = slot.writes.lock().await;
+            let (stopped, pending) = {
+                let book = slot.book();
+                if book.header.finished() {
+                    return Err(format!("run {run} has ended"));
+                }
+                if let RunState::Stopped { by } = &book.header.state {
+                    return Err(format!("{by} already stopped run {run}"));
+                }
+                let mut stopped = book.header.clone();
+                stopped.state = RunState::Stopped { by: by.clone() };
+                stopped.updated_at = Utc::now();
+                // The steps never sent go out anew on resuming, counted then.
+                driver::uncount_steps(&mut stopped, children::unsent(&book, &book.pending));
+                (stopped, book.pending.clone())
+            };
+            self.inner.store.put_header(&stopped).await.map_err(|e| format!("storing the run: {e:#}"))?;
             let mut book = slot.book();
-            if book.header.finished() {
-                return Err(format!("run {run} has ended"));
-            }
-            if let RunState::Stopped { by } = &book.header.state {
-                return Err(format!("{by} already stopped run {run}"));
-            }
-            book.header.state = RunState::Stopped { by: by.clone() };
-            book.header.updated_at = Utc::now();
-            let pending = book.pending.clone();
-            for call in book.pending.iter_mut().filter(|call| call.function != TrailFunction::Trail) {
-                call.sent = false;
-            }
-            pending
+            let unsent = children::unsent(&book, &book.pending);
+            driver::uncount_steps(&mut book.header, unsent);
+            book.header.state = stopped.state;
+            book.header.updated_at = stopped.updated_at;
+            let header = book.header.clone();
+            drop(book);
+            self.give_back_above(&header, unsent);
+            (header, pending)
         };
-        let header = slot.header();
         let mut waiting = self.stop_steps(&header, &pending, by).await;
-        let stored = async {
-            self.save_session(&slot).await?;
-            self.save_header(&slot).await
-        };
-        stored.await.map_err(|e| format!("storing the run: {e:#}"))?;
         self.hand_end(&slot.header());
         // The steps of a leg the run left by a goto() and has not given up yet, given up once the stored header lists
         // the next leg.
@@ -581,6 +603,7 @@ impl Trails {
     /// Resume a stopped run, or one failed on a limit, under `limits` when given: from its stored records, with the
     /// steps it waited on sent anew and its child runs stopped or failed on a limit resumed.
     pub async fn resume(&self, run: &RunId, by: &UserId, limits: Option<TrailLimits>) -> Result<(), String> {
+        let _changing = self.changing(run).await;
         let stored = |e: anyhow::Error| format!("reading the run: {e:#}");
         let held = locked(&self.inner.runs).get(run).cloned();
         if let Some(slot) = &held {
@@ -590,6 +613,20 @@ impl Trails {
         let header = self.inner.store.header(run).await.map_err(stored)?;
         let mut header = header.ok_or_else(|| format!("{} conducts no run {run}", self.inner.ant))?;
         match &header.state {
+            RunState::Failed { limit: Some(RunLimit::Memory), .. } => {
+                return Err(format!(
+                    "run {run} failed on its memory limit, which no resume raises: restoring the same session and \
+                     taking the same answers, it would fail the same way"
+                ));
+            }
+            RunState::Failed { limit: Some(RunLimit::Session), .. }
+                if !limits.is_some_and(|limits| limits.session_bytes > header.limits.session_bytes) =>
+            {
+                return Err(format!(
+                    "run {run} failed on its session size limit, which this resume does not raise: restoring the \
+                     same session and taking the same answers, it would fail the same way"
+                ));
+            }
             RunState::Stopped { .. } | RunState::Failed { limit: Some(_), .. } => {}
             RunState::Failed { error, limit: None } => {
                 return Err(format!("run {run} failed, not on a limit: {error}"));
@@ -729,9 +766,8 @@ impl Trails {
     /// Take `message`, on the thread of a step to `to` the run `run` no longer waits on, when it is a notice, an
     /// escalation or a further reply of `to`, reporting it on the run's thread.
     async fn take_retired(&self, run: &RunId, to: &UserId, message: &Envelope, answerer: &UserId) -> bool {
-        // The conductor's own message replying to none, as its invitation to rate a run started there, is no reply.
-        let own = message.from == self.inner.ant && message.to == self.inner.ant && message.in_reply_to.is_none();
-        let reply = answerer == to && message.trail_step.is_none() && !own;
+        // The conductor's invitation to rate a run started on the step's thread is no reply.
+        let reply = answerer == to && message.trail_step.is_none() && message.rating_of.is_none();
         if !reply && message.notice.is_none() && message.escalation.is_none() {
             return false;
         }
@@ -748,7 +784,8 @@ impl Trails {
     /// Take `message`, on a thread the conductor knows of no run in memory, when the thread is a step's, as its
     /// [`ants_proto::TrailStepThread`] tells, and the message a notice, an escalation, or a reply of the step's
     /// recipient: one arriving after the run ended, or after a restart, reported on the run's thread. Only a message
-    /// that may be one, replying or answering, is looked up.
+    /// that may be one, replying or answering, is looked up. A message on a step of a run the daemon could not continue
+    /// from its records yet is taken as the run, continued now, takes it; failing while the run cannot be.
     async fn take_late(&self, message: &Envelope, answerer: &UserId) -> Result<bool> {
         let (notice, escalation) = (message.notice.is_some(), message.escalation.is_some());
         let replying = message.in_reply_to.is_some() || message.answer.is_some();
@@ -756,6 +793,10 @@ impl Trails {
             return Ok(false);
         }
         let Some(step) = self.inner.store.step(&message.thread_id).await? else { return Ok(false) };
+        // A step of a run its daemon could not continue yet: taken once the run is, else tried again later.
+        if self.unrestored(&step.run) && self.restored(&step.run).await?.is_some() {
+            return Box::pin(self.take(message)).await;
+        }
         if *answerer != step.to && !notice && !escalation {
             return Ok(false);
         }
@@ -822,10 +863,11 @@ impl Trails {
         Ok(None)
     }
 
-    /// The tips of the saved trail the run of `header` is on, for its steps: none for an inline script, nor, warned of,
-    /// when they cannot be read, the steps then going without.
+    /// The tips of the saved trail the run of `header` is on, for its steps: none for an inline script or a trail the
+    /// colony does not save ([`TrailRun::tip_trail`]), nor, warned of, when they cannot be read, the steps then going
+    /// without.
     async fn step_tips(&self, header: &TrailRun) -> Option<TipBoard> {
-        let trail = header.trail()?;
+        let trail = header.tip_trail()?;
         match self.inner.tips.board(trail).await {
             Ok(board) => Some(board),
             Err(e) => {
@@ -840,15 +882,17 @@ impl Trails {
     pub async fn serve(&self) {
         let mut hearing = std::pin::pin!(self.hear());
         let mut driving = std::pin::pin!(self.drive_all());
+        let mut restoring = std::pin::pin!(self.restore_again());
         tokio::select! {
             () = &mut hearing => {}
             () = &mut driving => {}
+            () = &mut restoring => {}
         }
     }
 
     /// The run `run` in memory, not finished.
     async fn running(&self, run: &RunId) -> Result<Arc<Slot>, String> {
-        if let Some(slot) = locked(&self.inner.runs).get(run).cloned() {
+        if let Some(slot) = self.restored(run).await.map_err(|e| format!("{e:#}"))? {
             return Ok(slot);
         }
         match self.inner.store.header(run).await {
@@ -879,6 +923,13 @@ impl Trails {
         });
     }
 
+    /// Wait for the stop or resume of run `run` under way, if any, and hold off any other until the returned guard drops.
+    async fn changing(&self, run: &RunId) -> Changing {
+        let lock = locked(&self.inner.changing).entry(run.clone()).or_default().clone();
+        let guard = lock.clone().lock_owned().await;
+        Changing { trails: self.clone(), run: run.clone(), lock, guard: Some(guard) }
+    }
+
     async fn save_session(&self, slot: &Slot) -> Result<()> {
         let _held = slot.writes.lock().await;
         let (run, session) = {
@@ -887,6 +938,7 @@ impl Trails {
                 session: book.session.clone(),
                 pending: book.pending.clone(),
                 queued: book.queued.clone(),
+                anew: book.anew.clone(),
             };
             (book.header.run.clone(), session)
         };
@@ -902,5 +954,24 @@ impl Trails {
             book.header.clone()
         };
         self.inner.store.put_header(&header).await
+    }
+}
+
+/// A stop or resume of a run under way ([`Trails::changing`]).
+struct Changing {
+    trails: Trails,
+    run: RunId,
+    lock: Arc<tokio::sync::Mutex<()>>,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for Changing {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        let mut changing = locked(&self.trails.inner.changing);
+        // Held by the map and this alone: no other stop or resume of the run waits.
+        if Arc::strong_count(&self.lock) == 2 {
+            changing.remove(&self.run);
+        }
     }
 }

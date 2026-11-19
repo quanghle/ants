@@ -57,7 +57,8 @@ impl Planned {
     pub fn draw(&self, frame: &mut Frame) {
         let screen = frame.area();
         let between = Rect { y: screen.y + 1, height: screen.height.saturating_sub(2), ..screen };
-        let rows: Vec<Line> = self.summary.lines().map(|line| Line::raw(format!(" {line}"))).collect();
+        let room = usize::from(between.height.saturating_sub(3));
+        let rows: Vec<Line> = fit(&self.summary, room).into_iter().map(|line| Line::raw(format!(" {line}"))).collect();
         let tall = u16::try_from(rows.len()).unwrap_or(u16::MAX).saturating_add(3);
         let area = centered(between, WIDTH.min(between.width), tall);
         let outer = block(" Start a run of a trail? ".to_owned(), true);
@@ -68,6 +69,32 @@ impl Planned {
         let line = " y starts it · another key leaves it unstarted";
         frame.render_widget(Paragraph::new(Line::styled(line, dim())), keys);
     }
+}
+
+/// The rows of `summary` that fit in `room`: its first row, its description, its phases, then the conductor, the
+/// thread and the limits, the description cut first, to a mark saying how many of its rows are not shown, then the
+/// first row and the phases, so the conductor, the thread and the limits are the last to go.
+fn fit(summary: &str, room: usize) -> Vec<String> {
+    let rows: Vec<&str> = summary.lines().collect();
+    if rows.len() <= room {
+        return rows.into_iter().map(str::to_owned).collect();
+    }
+    let mut tail = rows.iter().rposition(|row| row.starts_with("conductor ")).unwrap_or(rows.len());
+    if tail > 1 && rows[tail - 1].starts_with("  phases: ") {
+        tail -= 1;
+    }
+    let head = usize::from(tail > 0);
+    let (described, kept) = (tail - head, rows.len() - tail);
+    let shown = room.saturating_sub(head + kept + 1);
+    let mut out: Vec<String> = Vec::with_capacity(room);
+    if room > head + kept {
+        out.extend(rows[..head + shown].iter().map(|row| (*row).to_owned()));
+        let cut = described - shown;
+        out.push(format!("  … {cut} more {} of the description", if cut == 1 { "line" } else { "lines" }));
+    }
+    let from = rows.len() - (room - out.len()).min(kept);
+    out.extend(rows[from..].iter().map(|row| (*row).to_owned()));
+    out
 }
 
 impl Model {
@@ -117,7 +144,7 @@ pub async fn tips(ctx: &Ctx, args: &TipsArgs) -> Result<Done> {
         if !ctx.me.role.is_human() {
             bail!("retiring a tip needs a human's credentials; those of {} are an ant's", ctx.me.id);
         }
-        let retired = cli_tips::retire(&ctx.js, &args.name, id, &ctx.me.id, now).await?;
+        let retired = cli_tips::retire(&ctx.js, &args.name, id, args.writer.as_ref(), &ctx.me.id, now).await?;
         return Ok(Done { line: cli_tips::retired(&retired, now), ..Done::default() });
     }
     let (board, script) = cli_tips::read(&ctx.js, &args.name).await?;
@@ -263,6 +290,7 @@ mod tests {
     fn first_leg(trail: &TrailName, script: &str) -> TrailLeg {
         TrailLeg {
             trail: Some(trail.clone()),
+            local: false,
             at: None,
             script: script.to_owned(),
             args: json!(null),
@@ -346,6 +374,54 @@ mod tests {
             panic!("no resume")
         };
         assert_eq!((pick.to_string(), limits.steps), ("0190ab".to_owned(), Some(80)));
+    }
+
+    /// A plan of a run of the saved trail `review` described by `description`, in two phases.
+    fn planned_review(description: &str) -> Planned {
+        let plan = start::Plan {
+            name: "review".to_owned(),
+            from: "saved for the colony by alice 1m ago".to_owned(),
+            description: description.to_owned(),
+            phases: vec!["read".to_owned(), "review".to_owned()],
+            source: TrailSource::Saved("review".parse().unwrap()),
+        };
+        let (limits, thread) = (TrailLimits::DEFAULT, ThreadId::generate());
+        let start =
+            start::Start { source: plan.source.clone(), args: json!(null), conductor: user("lead"), thread, limits };
+        Planned { summary: start::summary(&plan, &user("lead"), None, &limits), start }
+    }
+
+    #[test]
+    fn the_box_of_a_run_to_start_cuts_a_long_description_and_keeps_the_conductor_thread_and_limits() {
+        // A saved description is one line; one written over many is shown on one row all the same.
+        let description: Vec<String> = (1..=20).map(|n| format!("line {n} of what the trail does")).collect();
+        let planned = planned_review(&description.join("\n"));
+        let shown = crate::test_support::render::rendered(100, 24, |f| planned.draw(f));
+        for line in [
+            "trail review, saved for the colony by alice",
+            "line 1 of what the trail does line 2 of",
+            "phases: read, review",
+            "conductor lead, reporting on a new thread",
+            "steps:",
+            "at once:",
+            "turns:",
+            "wall time:",
+            "compute:",
+            "y starts it",
+        ] {
+            assert!(shown.contains(line), "{line}: {shown}");
+        }
+        assert!(!shown.contains("of the description"), "{shown}");
+
+        let short = planned_review("Reviews each file");
+        let shown = crate::test_support::render::rendered(100, 24, |f| short.draw(f));
+        assert!(shown.contains("Reviews each file") && !shown.contains("of the description"), "{shown}");
+        let shown = crate::test_support::render::rendered(100, 12, |f| short.draw(f));
+        for line in ["conductor lead", "turns:", "wall time:", "compute:"] {
+            assert!(shown.contains(line), "{line} at 12 rows: {shown}");
+        }
+        let shown = crate::test_support::render::rendered(100, 9, |f| short.draw(f));
+        assert!(shown.contains("compute:") && !shown.contains("conductor"), "the limits go last: {shown}");
     }
 
     #[test]
@@ -599,7 +675,7 @@ mod tests {
         let (alice, lead) = (user("alice"), user("lead"));
         let ctx = human(&server, &alice).await;
         let name: TrailName = "chat-test-review".parse().unwrap();
-        let args = TipsArgs { name: name.clone(), key: None, all: false, retire: None };
+        let args = TipsArgs { name: name.clone(), key: None, all: false, retire: None, writer: None };
         let none = tips(&ctx, &args).await.unwrap();
         assert_eq!((none.line.as_str(), none.page), ("no tips on trail chat-test-review", None));
 

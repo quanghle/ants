@@ -69,7 +69,7 @@ impl Dreams {
                     ),
                 })?;
                 if let Some(refused) =
-                    dream::ground(&*items, &context, finding, true).await.map_err(|e| unreadable(&e))?
+                    dream::ground(&*items, &context, finding, dream::Making::Trail).await.map_err(|e| unreadable(&e))?
                 {
                     return Err(refusal(&refused));
                 }

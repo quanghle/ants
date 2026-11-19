@@ -56,7 +56,7 @@ fn a_human_has_sinks_and_what_to_be_notified_of() {
     ))
     .unwrap();
     assert_eq!(alice.creds.as_deref(), Some(Path::new("/etc/ants/alice.creds")));
-    assert_eq!(alice.subjects(), ["ants.approvals.*", "ants.inbox.alice.*"]);
+    assert_eq!(alice.subjects(), ["ants.approvals.*", "ants.inbox.alice.>"]);
     assert!(alice.wants_request_of(&p("dev-a")) && !alice.wants_request_of(&p("dev-b")));
     let ntfy = Sink::Ntfy { url: NTFY.to_owned(), topic: "alice-ants".to_owned(), token: None };
     let slack = Sink::Slack { url: "https://hooks.slack.com/services/T0/B0/xyz".to_owned() };
@@ -70,13 +70,13 @@ fn a_human_has_sinks_and_what_to_be_notified_of() {
     );
 
     let quiet = human(&format!("name = \"bob\"\napprovals = false\n{NTFY_SINK}url = \"http://ntfy.lan/\"\n")).unwrap();
-    assert_eq!(quiet.subjects(), ["ants.inbox.bob.*"]);
+    assert_eq!(quiet.subjects(), ["ants.inbox.bob.>"]);
     assert!(!quiet.wants_request_of(&p("dev-a")));
     assert_matches!(&quiet.sinks[0].sink, Sink::Ntfy { url, .. } if url == "http://ntfy.lan");
     let every = human(&format!("name = \"bob\"\nescalations = false\n{NTFY_SINK}")).unwrap();
     assert_eq!(every.subjects(), ["ants.approvals.*"]);
     let asked = human(&format!("name = \"bob\"\nescalations = false\nquestions = true\n{NTFY_SINK}")).unwrap();
-    assert_eq!(asked.subjects(), ["ants.approvals.*", "ants.inbox.bob.*"], "questions follow escalations unless set");
+    assert_eq!(asked.subjects(), ["ants.approvals.*", "ants.inbox.bob.>"], "questions follow escalations unless set");
     assert!(every.wants_request_of(&p("dev-b")));
 
     for (text, why) in [
@@ -156,7 +156,7 @@ fn quiet_hours_read_the_wall_clock_of_their_time_zone_across_midnight() {
     }
     let only =
         human(&format!("name = \"bob\"\napprovals = false\nescalations = false\ncompletions = true\n{NTFY_SINK}"));
-    assert_eq!(only.unwrap().subjects(), ["ants.inbox.bob.*"], "completions read the inbox");
+    assert_eq!(only.unwrap().subjects(), ["ants.inbox.bob.>"], "completions read the inbox");
     let none = format!("name = \"bob\"\napprovals = false\nescalations = false\n{NTFY_SINK}");
     assert!(error(&none).contains("nothing to notify"), "{}", error(&none));
 }
@@ -463,7 +463,7 @@ fn a_question_is_its_own_notice_held_back_like_a_completion_unless_bypass_lists_
     let only = "name = \"bob\"\napprovals = false\nescalations = false\nquestions = true\n";
     assert_eq!(
         human(&format!("{only}{NTFY_SINK}")).unwrap().subjects(),
-        ["ants.inbox.bob.*"],
+        ["ants.inbox.bob.>"],
         "questions read the inbox"
     );
 }

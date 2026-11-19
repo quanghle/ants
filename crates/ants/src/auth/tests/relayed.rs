@@ -1,6 +1,7 @@
 //! Messages a stream relayed: an ant stores a message under a key of its own and asks for it by a direct get naming a
 //! reply subject it may not publish to, where the stream sends it with the headers the ant stored. Each reader of such
-//! a subject refuses it.
+//! a subject refuses it. Likewise what the server itself answers such a subject with: the ack of a publish into a
+//! stream, or the status of a direct get finding nothing.
 
 use ants_daemon::bus::relayed;
 use ants_daemon::hub;
@@ -10,7 +11,8 @@ use ants_daemon::trail::keeper;
 use ants_proto::{
     RatingOutcome, Retirement, RunId, SaveTrailRequest, SavedTrail, Saver, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET,
     TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TipBoard, TipRetired, TipStatus, TrailAction, TrailChange, TrailRating,
-    TrailRequest, TrailRunIndex, TrailTip, inbox_consumer, trail_run_key, trail_runs_index_key, trail_runs_reader,
+    TrailRequest, TrailRunIndex, TrailTip, WEBHOOKS_BUCKET, inbox_consumer, trail_run_key, trail_runs_index_key,
+    trail_runs_reader,
 };
 use async_nats::jetstream::consumer::DeliverPolicy;
 
@@ -195,6 +197,15 @@ async fn an_entry_put_before_messages_a_stream_relayed_onto_its_key_is_still_rea
     let genuine = serde_json::to_vec(&trail("agent('build')", Saver::Human { user: human.clone() })).unwrap();
     saved.put("deploy", genuine.clone()).await.unwrap();
     relays_onto(&a, &h, TRAILS_BUCKET, "deploy").await;
+    // And the ack of a publish of the ant's onto it, which the server sends with no header.
+    let deploy = format!("$KV.{TRAILS_BUCKET}.deploy");
+    ack_onto(&a, &format!("$KV.{TRAIL_RUNS_BUCKET}.dev-a.x"), &deploy).await;
+    let request = serde_json::json!({ "last_by_subj": deploy }).to_string();
+    let get = format!("$JS.API.DIRECT.GET.KV_{TRAILS_BUCKET}");
+    crate::test_support::eventually("the ack stored on the trail", async || {
+        h.request(get.clone(), request.clone().into()).await.unwrap().payload.starts_with(br#"{"stream""#)
+    })
+    .await;
     let conductor = DirectKv::whole(&b_js, None, TRAILS_BUCKET).await.unwrap().past_relays();
     assert_eq!(conductor.get("deploy").await.unwrap(), Some(genuine.clone()), "a conductor's daemon");
     assert_eq!(latest(TRAILS_BUCKET, "deploy").await, [("deploy".to_owned(), genuine.clone())], "a human's CLI");
@@ -227,7 +238,7 @@ async fn an_entry_put_before_messages_a_stream_relayed_onto_its_key_is_still_rea
     relays_onto(&a, &h, TRAIL_TIPS_BUCKET, &tip.retired_key()).await;
     let status = |entries: Vec<(String, Vec<u8>)>| {
         let board = TipBoard::new(tip.trail.clone(), entries);
-        board.tip(&tip.id, chrono::Utc::now(), None).map(|ranked| ranked.status)
+        board.tip(&tip.id, None, chrono::Utc::now(), None).map(|ranked| ranked.status).ok()
     };
     let by_human = TipStatus::Retired(Retirement::ByHuman { by: human.clone(), at: retired.at });
     assert_eq!(status(latest(TRAIL_TIPS_BUCKET, "deploy.>").await), Some(by_human.clone()), "a human's CLI");
@@ -245,6 +256,7 @@ async fn an_entry_put_before_messages_a_stream_relayed_onto_its_key_is_still_rea
         why: "it shipped".to_owned(),
         script: "s".to_owned(),
         at: chrono::Utc::now(),
+        untrusted: false,
     };
     let ratings = DirectKv::whole(&b_js, None, TRAIL_RATINGS_BUCKET).await.unwrap().past_relays();
     let rated = serde_json::to_vec(&rating).unwrap();
@@ -267,4 +279,67 @@ async fn an_entry_put_before_messages_a_stream_relayed_onto_its_key_is_still_rea
     let relisted = serde_json::to_vec(&TrailRunIndex::default()).unwrap();
     assert!(runs.update(&index, relisted.clone(), last).await.unwrap(), "its next write expects the relayed one");
     assert_eq!(runs.get(&index).await.unwrap(), Some(relisted));
+}
+
+/// What `client` has the server send onto `onto`: the ack of its publish under `own`, one of its own subjects, as
+/// `{"stream":…,"seq":…}`; returns once the server handled the publish.
+async fn ack_onto(client: &Client, own: &str, onto: &str) {
+    client.publish_with_reply(own.to_owned(), onto.to_owned(), b"{}".to_vec().into()).await.unwrap();
+    client.flush().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_answer_the_server_sent_onto_a_subject_an_ant_or_a_webhook_may_not_publish_is_refused_by_its_reader() {
+    let Some(server) = Server::start() else { return };
+    let (human, dev_a, dev_b, hook) = (UserId::human(), p("dev-a"), p("dev-b"), p("github"));
+    let (h, h_js) = server.connect(&human).await;
+    let (a, _) = server.connect(&dev_a).await;
+    let (_, b_js) = server.connect(&dev_b).await;
+    h_js.create_stream(ants_daemon::hub::trails_config()).await.unwrap();
+    h_js.create_stream(ants_daemon::hub::trail_runs_config()).await.unwrap();
+    crate::webhook::ensure_bucket(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
+    bus::open_stream(&b_js, &dev_b).await.unwrap();
+    let creds = server.dir().join("github.creds");
+    let permissions = Permissions::for_webhook(&hook, &[Destination::Ant(dev_b.clone())]);
+    let kind = crate::credentials::revoke::Kind::Webhook;
+    issue_with(&server.dir().join("auth"), &hook, kind, permissions, &creds).unwrap();
+    let (w, _) = server.watched_with(&hook, &creds).await;
+    let (ant_own, hook_own) = (format!("$KV.{TRAIL_RUNS_BUCKET}.dev-a.x"), format!("$KV.{WEBHOOKS_BUCKET}.github.x"));
+
+    // Another conductor's index of its runs, by an ant: its daemon reads no index of no runs.
+    let index = format!("$KV.{TRAIL_RUNS_BUCKET}.{}", trail_runs_index_key(&dev_b));
+    ack_onto(&a, &ant_own, &index).await;
+    stored(&h, &format!("KV_{TRAIL_RUNS_BUCKET}"), &index).await;
+    let runs = DirectKv::new(&b_js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    assert!(runs.get(trail_runs_index_key(&dev_b)).await.is_err(), "dev-b's daemon refuses it");
+    let listed = crate::machines::latest_in(&h_js, TRAIL_RUNS_BUCKET, &index).await.unwrap();
+    assert!(listed.is_empty(), "a human's CLI skips it");
+
+    // A saved trail, by a webhook: neither a conductor's daemon nor a human's CLI reads one.
+    let saved = format!("$KV.{TRAILS_BUCKET}.deploy");
+    ack_onto(&w, &hook_own, &saved).await;
+    stored(&h, &format!("KV_{TRAILS_BUCKET}"), &saved).await;
+    assert!(DirectKv::whole(&b_js, None, TRAILS_BUCKET).await.unwrap().get("deploy").await.is_err());
+    assert!(crate::machines::latest_in(&h_js, TRAILS_BUCKET, &saved).await.unwrap().is_empty());
+
+    // An inbox, by a webhook: no read back of dev-b's inbox takes the ack for a message from the human.
+    let onto = Envelope::new(human.clone(), dev_b.clone(), "relayed").subject();
+    ack_onto(&w, &hook_own, &onto).await;
+    stored(&h, STREAM, &onto).await;
+    let genuine = Envelope::new(human.clone(), dev_b.clone(), "genuine");
+    bus::publish(&h_js, &genuine).await.unwrap();
+    let inbox = subject::inbox_of(&dev_b);
+    for (js, reader, reading) in
+        [(&b_js, inbox_consumer(&dev_b), Reading::Spare), (&h_js, String::new(), Reading::Gets)]
+    {
+        let mut read = Vec::new();
+        reading::read_back(js, &reader, reading, &inbox, DeliverPolicy::All, |_, _, _, payload| {
+            read.push(serde_json::from_slice::<Envelope>(payload).map(|envelope| envelope.id).ok());
+            std::ops::ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(read, [Some(genuine.id)], "read back by {reading:?}");
+    }
 }
