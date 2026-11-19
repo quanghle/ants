@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     Envelope, JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, NoticeKind, PendingCall, QueuedCall, Role, RunId, RunLimit,
-    RunState, StepStage, ThreadId, TrailFunction, TrailLeg, TrailLimits, TrailName, TrailRun, TrailSession,
+    RunState, StepStage, ThreadId, TipBoard, TrailFunction, TrailLeg, TrailLimits, TrailName, TrailRun, TrailSession,
     TrailSource, TrailStart, UserId, WaitingStep,
 };
 use ants_trail::{Answer, JournalEntry, Limits, Run, Worker};
@@ -725,13 +725,14 @@ impl Trails {
         spent: u32,
     ) -> Result<Option<Answer>> {
         let schema = steps::AgentArgs::of(&pending.args).ok().and_then(|args| args.schema).unwrap_or_default();
-        let again = match reply.reply(self.inner.ant.clone(), steps::again(why, &schema), Role::Ant) {
-            Ok(again) => again.as_step(steps::step(header, pending)),
-            Err(_) => {
-                let error = format!("the reply did not match the schema, with no turns left to ask again: {why}");
-                return Ok(Some(Answer::Error(error)));
-            }
+        let Ok(again) = reply.reply(self.inner.ant.clone(), String::new(), Role::Ant) else {
+            let error = format!("the reply did not match the schema, with no turns left to ask again: {why}");
+            return Ok(Some(Answer::Error(error)));
         };
+        let step = steps::step(header, pending);
+        let tips = self.step_tips(header).await;
+        let tips = tips.and_then(|board| steps::retry_tips(&board, &step, Utc::now()));
+        let again = Envelope { text: steps::again(why, &schema, tips.as_deref()), ..again }.as_step(step);
         let update = |sent: bool| {
             let mut book = slot.book();
             if let Some(call) = book.pending.iter_mut().find(|call| call.call == pending.call) {
@@ -755,6 +756,20 @@ impl Trails {
         self.save_header(slot).await?;
         tracing::info!(run = %header.run, call = pending.call, why, "trail step asked again");
         Ok(None)
+    }
+
+    /// The tips of the saved trail the run of `header` is on, for its steps: none for an inline script, nor, warned of,
+    /// when they cannot be read, the steps then going without.
+    async fn step_tips(&self, header: &TrailRun) -> Option<TipBoard> {
+        let trail = header.trail()?;
+        match self.inner.tips.board(trail).await {
+            Ok(board) => Some(board),
+            Err(e) => {
+                let error = format!("{e:#}");
+                tracing::warn!(run = %header.run, trail = %trail, error, "reading a trail's tips for its steps");
+                None
+            }
+        }
     }
 
     /// Serve the conductor's runs, continued first ([`Trails::restore`]): hear requests and drive runs, never ending.
