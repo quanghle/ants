@@ -16,7 +16,8 @@ use crate::{
 };
 #[cfg(doc)]
 use crate::{
-    JournalEntry, TRAIL_TIPS_BUCKET, TipVote, TrailRun, TrailRunIndex, TrailSession, TrailStepThread, TrailTip,
+    JournalEntry, TRAIL_RATINGS_BUCKET, TRAIL_TIPS_BUCKET, TipVote, TrailRating, TrailRun, TrailRunIndex, TrailSession,
+    TrailStepThread, TrailTip,
 };
 use crate::{
     PERMISSIONS_VERSION, PermissionsVersion, Reaction, RunId, TRAIL_RUNS_BUCKET, ThreadId, TipId, TrailName, UserId,
@@ -455,6 +456,12 @@ pub fn trail_tip_key(trail: &TrailName, writer: &UserId, id: &TipId) -> String {
 /// voter in the writer's place, so one subject confines an ant to its own tips and votes, then the tip's writer and id.
 pub fn trail_tip_vote_key(trail: &TrailName, writer: &UserId, id: &TipId, voter: &UserId) -> String {
     format!("{trail}.{voter}.{writer}.{id}")
+}
+
+/// Key of a [`TrailRating`] in [`TRAIL_RATINGS_BUCKET`]: its trail, then its conductor, so credentials can confine an
+/// ant to its own ratings, then the run rated.
+pub fn trail_rating_key(trail: &TrailName, conductor: &UserId, run: &RunId) -> String {
+    format!("{trail}.{conductor}.{run}")
 }
 
 /// The conductor and run a key of [`trail_run_key`] names, or `None` for any other key of [`TRAIL_RUNS_BUCKET`], as

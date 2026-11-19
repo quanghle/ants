@@ -28,7 +28,9 @@ expression: value
     "other:suggest_thread_title",
     "other:complete",
     "other:ask_human",
-    "other:trail_tips"
+    "other:trail_tips",
+    "other:find_trails",
+    "other:rate_trail"
   ],
   "sent_at": "2025-01-01T12:00:00Z"
 }

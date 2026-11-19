@@ -1,0 +1,14 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "trail": "release",
+  "conductor": "dev-a",
+  "run": "019a7d2f-0000-7000-8000-000000000001",
+  "outcome": "partly",
+  "task": "release 2.1 with the migration",
+  "why": "built and tagged, but the smoke tests needed a rerun",
+  "script": "58f93952fac8f1b84a37b9a5181994a5fe0bc91ebdcbd35083e7715c7ca54a3e",
+  "at": "2025-01-01T12:06:00Z"
+}

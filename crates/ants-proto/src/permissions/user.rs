@@ -10,9 +10,9 @@ use super::{Permissions, ack_subjects, kv_stream, ordered_consumer_subjects};
 use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM,
     HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, READ_BUCKET, Role, SESSIONS_BUCKET,
-    STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, UserId,
-    WEBHOOK_MARKER, WEBHOOKS_BUCKET, chan_consumer, chan_reader, dead_reader, done_reader, inbox_consumer,
-    inbox_prefix, notes_consumer, sent_reader, spare_readers, subject, trail_runs_subject,
+    STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET,
+    TRAILS_BUCKET, UserId, WEBHOOK_MARKER, WEBHOOKS_BUCKET, chan_consumer, chan_reader, dead_reader, done_reader,
+    inbox_consumer, inbox_prefix, notes_consumer, sent_reader, spare_readers, subject, trail_runs_subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -119,7 +119,9 @@ impl Permissions {
     /// start, stop or resume the runs it conducts ([`TrailRequest`], on [`subject::trail`], which the ant alone hears
     /// and answers on [`subject::trailed`]). Every ant and human reads the trails' tips ([`TRAIL_TIPS_BUCKET`]) by
     /// direct gets naming no subject; an ant puts only its own tips and its own votes, under keys naming it; a human
-    /// rewrites any tip, to retire it, and purges a trail's.
+    /// rewrites any tip, to retire it, and purges a trail's. Every ant and human reads the trails' ratings
+    /// ([`TRAIL_RATINGS_BUCKET`]) the same way; an ant puts only its own, under keys naming it, and a human writes none
+    /// but purges a removed trail's.
     ///
     /// Each inbox, notes and channel subject an ant may publish, and its own dead letter and timeline subjects, it may
     /// also publish in its outbox form ([`subject::outbox`]), which only a leaf node's outbox keeps, and so the links it passes on
@@ -211,6 +213,8 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{}", kv_stream(TRAILS_BUCKET)),
             // And the trails' tips and votes, the same way.
             format!("$JS.API.DIRECT.GET.{}", kv_stream(TRAIL_TIPS_BUCKET)),
+            // And the trails' ratings, the same way.
+            format!("$JS.API.DIRECT.GET.{}", kv_stream(TRAIL_RATINGS_BUCKET)),
         ]);
         publish.extend(attachment_rights(user, role));
         publish
@@ -263,6 +267,8 @@ impl Permissions {
             own_runs,
             // Put of its own tips on trails and its own votes on tips.
             format!("$KV.{TRAIL_TIPS_BUCKET}.*.{user}.>"),
+            // Put of its own ratings of the trails its runs took.
+            format!("$KV.{TRAIL_RATINGS_BUCKET}.*.{user}.*"),
             // Exactly its requests subject: an ant cannot answer its own requests one level below.
             subject::approvals(user),
             // Reading the decision stored on one of its requests: a direct get naming the subject in its own

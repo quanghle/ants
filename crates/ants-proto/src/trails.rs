@@ -27,8 +27,13 @@ use crate::{
     trail_session_key, trail_step_key,
 };
 
+mod ratings;
 mod tips;
 
+pub use ratings::{
+    Counts, FIND_TRAILS_LIMIT, Finder, Found, LATEST_RATINGS, MAX_FIND_TRAILS, MAX_RATING_TASK, MAX_RATING_WHY, Query,
+    RATING_FULL_WEIGHT, RATING_MATCH_WORDS, RatingOutcome, RatingSummary, TrailRating, serves, stem,
+};
 pub use tips::{
     DEFAULT_TIPS_FOUND, MAX_LIVE_TIPS, MAX_TIP_REASON, MAX_TIP_TEXT, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, MAX_TIPS_FOUND,
     Ranked, Retirement, Similarity, TIP_HALF_LIFE, TIP_RELEVANCE, TIP_RELEVANT_WORDS, TIP_SIMILARITY, TIP_UNUSED,

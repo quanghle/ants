@@ -14,8 +14,8 @@ use ants_proto::{
     DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, INCARNATION_KEY, LINKS_BUCKET,
     MACHINES_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET,
     SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET,
-    TRAIL_RUN_RETENTION, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TrailLimits, WEBHOOK_RETENTION,
-    WEBHOOKS_BUCKET,
+    TRAIL_RATINGS_BUCKET, TRAIL_RUN_RETENTION, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TrailLimits,
+    WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
@@ -49,13 +49,14 @@ pub enum Object {
     Trails,
     TrailRuns,
     TrailTips,
+    TrailRatings,
     /// The attachments' store ([`FILES_BUCKET`]).
     Files,
 }
 
 impl Object {
     /// Every object, the stream first.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Stream,
         Self::Colony,
         Self::Sessions,
@@ -77,6 +78,7 @@ impl Object {
         Self::Trails,
         Self::TrailRuns,
         Self::TrailTips,
+        Self::TrailRatings,
         Self::Files,
     ];
 
@@ -104,6 +106,7 @@ impl Object {
             Self::Trails => TRAILS_BUCKET,
             Self::TrailRuns => TRAIL_RUNS_BUCKET,
             Self::TrailTips => TRAIL_TIPS_BUCKET,
+            Self::TrailRatings => TRAIL_RATINGS_BUCKET,
         })
     }
 
@@ -145,6 +148,7 @@ impl Object {
             Self::Trails => Spec::Bucket(Box::new(trails_config())),
             Self::TrailRuns => Spec::Bucket(Box::new(trail_runs_config())),
             Self::TrailTips => Spec::Bucket(Box::new(trail_tips_config())),
+            Self::TrailRatings => Spec::Bucket(Box::new(trail_ratings_config())),
         }
     }
 
@@ -460,6 +464,11 @@ pub fn trail_tips_config() -> kv::Config {
     lasting_config(TRAIL_TIPS_BUCKET, "Trail tips and their votes, each written by its ant")
 }
 
+/// The trails' ratings ([`TRAIL_RATINGS_BUCKET`]): a rating lasts until a human purges its trail's.
+pub fn trail_ratings_config() -> kv::Config {
+    lasting_config(TRAIL_RATINGS_BUCKET, "Trail ratings, each written by its run's conductor")
+}
+
 /// The read markers of the humans ([`READ_BUCKET`]).
 pub fn read_config() -> kv::Config {
     lasting_config(READ_BUCKET, "What each human has read of its inbox, on any of its devices")
@@ -629,6 +638,7 @@ mod tests {
             Object::Trails,
             Object::TrailRuns,
             Object::TrailTips,
+            Object::TrailRatings,
             Object::Files,
         ];
         assert_eq!(problems(&check(&js, |_| true).await), left, "the rest is created");
@@ -644,6 +654,7 @@ mod tests {
                 Object::Trails,
                 Object::TrailRuns,
                 Object::TrailTips,
+                Object::TrailRatings,
                 Object::Files
             ]
         );

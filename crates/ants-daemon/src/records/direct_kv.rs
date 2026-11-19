@@ -8,13 +8,13 @@
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{JsDomain, UserId};
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use async_nats::jetstream::context::{PublishError, PublishErrorKind};
 use async_nats::jetstream::message::StreamMessage;
 use async_nats::jetstream::stream::{DirectGetError, DirectGetErrorKind, Stream};
 use async_nats::{HeaderMap, RequestErrorKind, StatusCode};
-use futures::TryStreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 
 /// The header marking a KV delete or purge, and its values.
 const KV_OPERATION: &str = "KV-Operation";
@@ -23,6 +23,11 @@ const DELETED: [&str; 2] = ["DEL", "PURGE"];
 const EXPECTED_LAST_SUBJECT_SEQUENCE: &str = "Nats-Expected-Last-Subject-Sequence";
 /// The header making the stream refuse a message unless its last message has the given sequence.
 const EXPECTED_LAST_SEQUENCE: &str = "Nats-Expected-Last-Sequence";
+/// The header of the messages left of a batched direct get, on the status ending each batch.
+const NUM_PENDING: &str = "Nats-Num-Pending";
+/// Messages a [`DirectKv::scan`] asks for at once, and the bytes they come to at most (a larger message comes alone).
+const BATCH: usize = 256;
+const BATCH_BYTES: usize = 4 << 20;
 /// How often [`DirectKv::put_sequenced`] tries while other keys keep changing.
 const SEQUENCED_TRIES: usize = 10;
 /// The header making the stream remove a message after the given number of seconds, if it allows per-message TTLs.
@@ -301,6 +306,56 @@ impl DirectKv {
             keys.extend(subject.strip_prefix(&prefix).map(str::to_owned));
         }
         Ok(keys)
+    }
+
+    /// Hand `each` the key and value of every entry under the keys matching `filter`, as last put, in the order
+    /// they were put, deleted entries left out: batched direct gets naming no subject, for credentials allowed them
+    /// ([`DirectKv::whole`]). Fails when the bucket does not exist.
+    pub async fn scan(&self, filter: &str, mut each: impl FnMut(&str, &[u8])) -> Result<()> {
+        let (bucket, prefix) = (&self.bucket, self.subject(""));
+        let client = self.js.client();
+        let wait = client.timeout().unwrap_or(Duration::from_secs(10));
+        let inbox = client.new_inbox();
+        let mut replies = client.subscribe(inbox.clone()).await?;
+        let mut seq = 1;
+        loop {
+            let request = serde_json::json!({
+                "seq": seq,
+                "next_by_subj": self.subject(filter),
+                "batch": BATCH,
+                "max_bytes": BATCH_BYTES,
+            });
+            let request = async_nats::Request::new().inbox(inbox.clone()).payload(request.to_string().into());
+            self.js
+                .send_request(format!("DIRECT.GET.KV_{bucket}"), request)
+                .await
+                .with_context(|| format!("reading {filter} of {bucket}"))?;
+            let mut got = 0;
+            loop {
+                let Ok(Some(msg)) = tokio::time::timeout(wait, replies.next()).await else {
+                    bail!("no answer reading {filter} of {bucket} (`ants init` creates it)");
+                };
+                match msg.status {
+                    None => {}
+                    Some(StatusCode::NOT_FOUND) => return Ok(()),
+                    Some(StatusCode::NO_RESPONDERS) => bail!("there is no bucket {bucket}: `ants init` creates it"),
+                    Some(status) if status.as_u16() == 204 => {
+                        let pending = msg.headers.as_ref().and_then(|h| h.get(NUM_PENDING));
+                        if got == 0 || pending.is_some_and(|n| n.as_str() == "0") {
+                            return Ok(());
+                        }
+                        break;
+                    }
+                    Some(status) => bail!("reading {filter} of {bucket}: answered {status} {:?}", msg.description),
+                }
+                got += 1;
+                let msg = StreamMessage::try_from(msg).map_err(|e| anyhow!(e))?;
+                seq = msg.sequence + 1;
+                if let Some(key) = msg.subject.strip_prefix(prefix.as_str()).filter(|_| !is_deleted(&msg.headers)) {
+                    each(key, &msg.payload);
+                }
+            }
+        }
     }
 
     fn subject(&self, key: &str) -> String {

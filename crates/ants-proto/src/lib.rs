@@ -109,7 +109,10 @@ pub use keys::{
     trail_session_key, trail_step_key, unserved_key, webhook_marker_key, webhook_marker_subject, webhook_seen_key,
 };
 pub(crate) use keys::{STORAGE_WARNING_PREFIX, WEBHOOK_MARKER};
-pub use keys::{TRAIL_STEPS_ON, trail_thread_step_key, trail_thread_steps_prefix, trail_tip_key, trail_tip_vote_key};
+pub use keys::{
+    TRAIL_STEPS_ON, trail_rating_key, trail_thread_step_key, trail_thread_steps_prefix, trail_tip_key,
+    trail_tip_vote_key,
+};
 pub use login::{
     BOOTSTRAP_MAX_PAYLOAD, BOOTSTRAP_USER, LOGIN_REPEAT, LOGIN_TTL, LoginAnswer, LoginReply, LoginRequest,
     MAX_REGISTRATIONS, REGISTERED_TAG, tagged_registered,
@@ -165,6 +168,10 @@ pub use trails::{
     MAX_TRAIL_WAYPOINTS, PendingCall, QueuedCall, RunState, SavedTrail, TRAIL_RUN_RETENTION, TrailAction,
     TrailFunction, TrailLeg, TrailLimits, TrailOutcome, TrailParent, TrailReply, TrailRequest, TrailRun, TrailRunIndex,
     TrailSession, TrailSource, TrailStart, TrailStep, TrailStepThread, WaitingStep, leg_entry,
+};
+pub use trails::{
+    Counts, FIND_TRAILS_LIMIT, Finder, Found, LATEST_RATINGS, MAX_FIND_TRAILS, MAX_RATING_TASK, MAX_RATING_WHY, Query,
+    RATING_FULL_WEIGHT, RATING_MATCH_WORDS, RatingOutcome, RatingSummary, TrailRating, serves, stem,
 };
 pub use trails::{
     DEFAULT_TIPS_FOUND, MAX_LIVE_TIPS, MAX_TIP_REASON, MAX_TIP_TEXT, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, MAX_TIPS_FOUND,
@@ -350,6 +357,13 @@ pub const TRAIL_RUNS_BUCKET: &str = "ants_trail_runs";
 /// a trail's tips when removing the trail. Every ant and human reads them all, by direct gets naming no subject
 /// ([`Permissions::for_user`]), which a reader ranks with a [`TipBoard`]. Entries never expire.
 pub const TRAIL_TIPS_BUCKET: &str = "ants_trail_tips";
+/// KV bucket of the trail ratings: each conductor's judgement of whether a run of a saved trail served the task it was
+/// run for, which a search for trails ranks them by ([`Finder`]). Each [`TrailRating`] is keyed by its trail, conductor
+/// and run ([`trail_rating_key`]), so an ant puts only keys naming itself (`$KV.ants_trail_ratings.*.<ant>.*`, one
+/// subject per ant), rating a run again replacing its rating. Every ant and human reads them all, by direct gets naming
+/// no subject ([`Permissions::for_user`]); humans purge a trail's ratings when removing the trail. Entries never
+/// expire.
+pub const TRAIL_RATINGS_BUCKET: &str = "ants_trail_ratings";
 /// Most characters a thread title has.
 pub const MAX_TITLE: usize = 120;
 /// How often a following CLI re-puts its device's [`Presence`].
@@ -360,8 +374,9 @@ pub const PRESENCE_TTL: Duration = Duration::from_secs(30);
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 /// The tool rules a thread a webhook or schedule starts is narrowed to when its config sets no `allow`
 /// ([`Envelope::allow`]): reading files in the workdir, searching, thinking, and the ants tools that talk to other ants,
-/// whose messages carry the narrowing on, ask a human a question, end a turn with no reply, or search a trail's tips.
-pub const WEBHOOK_ALLOW: [&str; 17] = [
+/// whose messages carry the narrowing on, ask a human a question, end a turn with no reply, search a trail's tips,
+/// find saved trails for a task, or rate a run the thread reports on (which the ants MCP server allows only there).
+pub const WEBHOOK_ALLOW: [&str; 19] = [
     "read:*",
     "search",
     "think",
@@ -379,6 +394,8 @@ pub const WEBHOOK_ALLOW: [&str; 17] = [
     "other:complete",
     "other:ask_human",
     "other:trail_tips",
+    "other:find_trails",
+    "other:rate_trail",
 ];
 /// The tool rules the review thread of a dream is narrowed to on the sage's side (requirement ants-x39hk.12.4): reading
 /// files, searching, thinking, and the ants tools that only read; the ants MCP server refuses the others on it, the

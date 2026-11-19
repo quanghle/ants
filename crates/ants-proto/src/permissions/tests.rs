@@ -1029,9 +1029,11 @@ fn humans_save_trails_every_user_reads_and_each_ant_writes_only_the_runs_it_cond
         [
             "$JS.API.DIRECT.GET.KV_ants_trails",
             "$JS.API.DIRECT.GET.KV_ants_trail_tips",
+            "$JS.API.DIRECT.GET.KV_ants_trail_ratings",
             "$JS.API.DIRECT.GET.KV_ants_trail_runs.$KV.ants_trail_runs.dev-a.>",
             "$KV.ants_trail_runs.dev-a.>",
-            "$KV.ants_trail_tips.*.dev-a.>"
+            "$KV.ants_trail_tips.*.dev-a.>",
+            "$KV.ants_trail_ratings.*.dev-a.*"
         ]
     );
     assert_eq!(
@@ -1039,6 +1041,7 @@ fn humans_save_trails_every_user_reads_and_each_ant_writes_only_the_runs_it_cond
         [
             "$JS.API.DIRECT.GET.KV_ants_trails",
             "$JS.API.DIRECT.GET.KV_ants_trail_tips",
+            "$JS.API.DIRECT.GET.KV_ants_trail_ratings",
             "$JS.API.STREAM.CREATE.KV_ants_trails",
             "$JS.API.STREAM.INFO.KV_ants_trails",
             "$KV.ants_trails.*",
@@ -1048,7 +1051,10 @@ fn humans_save_trails_every_user_reads_and_each_ant_writes_only_the_runs_it_cond
             "$JS.API.STREAM.CREATE.KV_ants_trail_tips",
             "$JS.API.STREAM.INFO.KV_ants_trail_tips",
             "$KV.ants_trail_tips.>",
-            "$JS.API.STREAM.PURGE.KV_ants_trail_tips"
+            "$JS.API.STREAM.PURGE.KV_ants_trail_tips",
+            "$JS.API.STREAM.CREATE.KV_ants_trail_ratings",
+            "$JS.API.STREAM.INFO.KV_ants_trail_ratings",
+            "$JS.API.STREAM.PURGE.KV_ants_trail_ratings"
         ]
     );
     let may = |perms: &Permissions, s: &str| perms.publish.iter().any(|have| covers(have, s));
@@ -1101,6 +1107,30 @@ fn each_ant_leaves_its_own_tips_and_votes_and_only_humans_retire_or_purge_them()
     let leaf = ant.with_js_domain(Some(&domain));
     assert!(may(&leaf, "$JS.hub.API.DIRECT.GET.KV_ants_trail_tips"));
     assert!(may(&leaf, &format!("$JS.hub.API.{own_tip}")) && !may(&leaf, &format!("$JS.hub.API.{others_tip}")));
+}
+
+#[test]
+fn each_ant_rates_only_its_own_runs_and_humans_only_purge_ratings() {
+    let may = |perms: &Permissions, s: &str| perms.publish.iter().any(|have| covers(have, s));
+    let run = "019a7d2f-0000-7000-8000-000000000001";
+    let (own, others) =
+        (format!("$KV.ants_trail_ratings.deploy.dev-a.{run}"), format!("$KV.ants_trail_ratings.deploy.dev-b.{run}"));
+    let (deeper, purge) = (format!("{own}.x"), "$JS.API.STREAM.PURGE.KV_ants_trail_ratings");
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    assert!(may(&ant, &own) && may(&ant, "$JS.API.DIRECT.GET.KV_ants_trail_ratings"));
+    for denied in [&others, &deeper, purge] {
+        assert!(!may(&ant, denied), "an ant may publish {denied}");
+    }
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    assert!(may(&human, purge) && !may(&human, &own), "a human purges ratings and writes none");
+    let assistant = Permissions::for_assistant(&p("pa"), &p("alice"));
+    assert!(may(&assistant, &format!("$KV.ants_trail_ratings.deploy.pa.{run}")));
+    for denied in [own.as_str(), purge, "$JS.API.STREAM.CREATE.KV_ants_trail_ratings"] {
+        assert!(!may(&assistant, denied), "an assistant may publish {denied}");
+    }
+    let leaf = ant.with_js_domain(Some(&"hub".parse().unwrap()));
+    assert!(may(&leaf, "$JS.hub.API.DIRECT.GET.KV_ants_trail_ratings"));
+    assert!(may(&leaf, &format!("$JS.hub.API.{own}")) && !may(&leaf, &format!("$JS.hub.API.{others}")));
 }
 
 #[test]

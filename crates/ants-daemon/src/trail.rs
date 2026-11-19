@@ -11,6 +11,7 @@ mod control;
 mod driver;
 mod limits;
 mod load;
+mod ratings;
 mod report;
 mod route;
 mod saved;
@@ -47,6 +48,8 @@ use steps::Taken;
 use store::Store;
 
 pub use limits::AskedLimits;
+pub use ratings::{Rated, Ratings};
+pub use saved::SavedEntry;
 pub use tips::Tips;
 
 /// How to write a trail, in brief, for the tool starting runs to teach.
@@ -147,6 +150,7 @@ struct Inner {
     store: Store,
     saved: Saved,
     tips: Tips,
+    ratings: Ratings,
     humans: Registry,
     colony: Colony,
     outbox: Outbox,
@@ -245,6 +249,11 @@ impl Leg {
     }
 }
 
+/// The description in `script`'s meta, when the script is a trail.
+pub(crate) fn script_description(script: &str) -> Option<String> {
+    ants_trail::check(script).ok().map(|meta| meta.description)
+}
+
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -280,6 +289,7 @@ impl Trails {
         let store = Store::new(&js, js_domain.as_ref(), ant.clone()).await?;
         let saved = Saved::new(&js, js_domain.as_ref(), trails_dir).await;
         let tips = Tips::new(&js, js_domain.as_ref()).await?;
+        let ratings = Ratings::new(&js, js_domain.as_ref(), ant.clone()).await?;
         let (wake, woken) = mpsc::unbounded_channel();
         let inner = Inner {
             ant,
@@ -288,6 +298,7 @@ impl Trails {
             store,
             saved,
             tips,
+            ratings,
             humans,
             colony,
             outbox,

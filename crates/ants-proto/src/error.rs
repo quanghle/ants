@@ -67,4 +67,9 @@ pub enum Error {
     InvalidTip(String),
     #[error("invalid tip vote: {0}")]
     InvalidTipVote(String),
+    /// A trail rating found under another key than its own.
+    #[error("rating {key} found at {at}")]
+    ForeignRating { key: String, at: String },
+    #[error("invalid rating: {0}")]
+    InvalidRating(String),
 }

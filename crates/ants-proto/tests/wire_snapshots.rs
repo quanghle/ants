@@ -1519,6 +1519,19 @@ fn trails() {
             at: at(5),
         },
     );
+    snap(
+        "trail_rating",
+        &TrailRating {
+            trail: "release".parse().unwrap(),
+            conductor: user("dev-a"),
+            run: run(),
+            outcome: RatingOutcome::Partly,
+            task: "release 2.1 with the migration".to_owned(),
+            why: "built and tagged, but the smoke tests needed a rerun".to_owned(),
+            script: script_sha256("agent('dev-a', 'build it')"),
+            at: at(6),
+        },
+    );
     let limits: TrailLimits = parse(r#"{"steps": 10}"#);
     assert_eq!(limits, TrailLimits { steps: 10, ..TrailLimits::DEFAULT }, "missing limits take their defaults");
 }

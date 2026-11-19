@@ -298,9 +298,9 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
 #[tokio::test]
 async fn humans_save_the_trails_ants_read_and_each_ant_keeps_only_the_runs_it_conducts() {
     use ants_proto::{
-        RunId, SavedTrail, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, ThreadId, TrailStepThread,
-        trail_run_key, trail_session_key, trail_thread_step_key, trail_thread_steps_prefix, trail_tip_key,
-        trail_tip_vote_key,
+        RunId, SavedTrail, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, ThreadId,
+        TrailStepThread, trail_rating_key, trail_run_key, trail_session_key, trail_thread_step_key,
+        trail_thread_steps_prefix, trail_tip_key, trail_tip_vote_key,
     };
     let Some(server) = Server::start() else { return };
     let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
@@ -310,6 +310,7 @@ async fn humans_save_the_trails_ants_read_and_each_ant_keeps_only_the_runs_it_co
         ants_daemon::hub::trails_config(),
         ants_daemon::hub::trail_runs_config(),
         ants_daemon::hub::trail_tips_config(),
+        ants_daemon::hub::trail_ratings_config(),
     ];
     for config in configs {
         assert!(a_js.create_key_value(config.clone()).await.is_err(), "only a human creates {}", config.bucket);
@@ -376,4 +377,23 @@ async fn humans_save_the_trails_ants_read_and_each_ant_keeps_only_the_runs_it_co
     let stream = h_js.get_stream(format!("KV_{TRAIL_TIPS_BUCKET}")).await.unwrap();
     stream.purge().filter(&filter).await.unwrap();
     assert!(crate::machines::latest_in(&b_js, TRAIL_TIPS_BUCKET, &filter).await.unwrap().is_empty(), "a human purges");
+
+    let ratings = DirectKv::whole(&a_js, None, TRAIL_RATINGS_BUCKET).await.unwrap();
+    ratings.put(trail_rating_key(&deploy, &dev_a, &run), b"{}".to_vec()).await.unwrap();
+    let forged = trail_rating_key(&deploy, &dev_b, &run);
+    assert!(ratings.put(&forged, b"{}".to_vec()).await.is_err(), "dev-a rates no run of dev-b's");
+    let as_human = DirectKv::whole(&h_js, None, TRAIL_RATINGS_BUCKET).await.unwrap();
+    assert!(as_human.put(&forged, b"{}".to_vec()).await.is_err(), "a human writes no rating");
+    let filter = format!("$KV.{TRAIL_RATINGS_BUCKET}.deploy.>");
+    assert_eq!(
+        crate::machines::latest_in(&b_js, TRAIL_RATINGS_BUCKET, &filter).await.unwrap().len(),
+        1,
+        "ants read all"
+    );
+    let stream = h_js.get_stream(format!("KV_{TRAIL_RATINGS_BUCKET}")).await.unwrap();
+    stream.purge().filter(&filter).await.unwrap();
+    assert!(
+        crate::machines::latest_in(&b_js, TRAIL_RATINGS_BUCKET, &filter).await.unwrap().is_empty(),
+        "a human purges"
+    );
 }
