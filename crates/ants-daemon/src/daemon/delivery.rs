@@ -158,7 +158,10 @@ impl Inbox<'_> {
             }
         };
         Ok(Some(match reply {
-            Reply::Message(message) => {
+            Reply::Message(mut message) => {
+                if let Some(mcp) = self.mcp {
+                    message.trail_spent = Box::pin(mcp.trail_spent(envelope, &message)).await;
+                }
                 let (attachments, left_out) = self.reply_files(thread, |id| message.attachment_handle(id)).await;
                 let text = with_left_out(message.text, left_out);
                 Reply::Message(Box::new(Envelope { title, text, attachments, ..*message }))

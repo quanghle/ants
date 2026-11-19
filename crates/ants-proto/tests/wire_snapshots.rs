@@ -174,6 +174,7 @@ fn envelope() -> Envelope {
             local: Some("/home/dev/app/.git".to_owned()),
         }],
         trail_step: Some(Box::new(trail_step())),
+        trail_spent: Some(TrailSpent { steps: 3, turns: 7 }),
         trail_start: Some(Box::new(TrailStart {
             trail: "nightly-audit".parse().unwrap(),
             args: serde_json::json!({"repo": "app"}),
@@ -227,6 +228,7 @@ fn plain_envelope() -> Envelope {
         notice: None,
         review_commits: Vec::new(),
         trail_step: None,
+        trail_spent: None,
         trail_start: None,
         rating_of: None,
         review_outcomes: None,
@@ -247,6 +249,12 @@ fn trail_step() -> TrailStep {
         trail: Some("release".parse().unwrap()),
         script: Some(script_sha256("agent('dev-a', 'build it')")),
         tip_key: Some("review".to_owned()),
+        bounds: Some(StepBounds {
+            steps: 12,
+            turns: 40,
+            until: at(9),
+            route: vec!["triage".parse().unwrap(), "release".parse().unwrap()],
+        }),
     }
 }
 
@@ -1358,6 +1366,7 @@ fn trail_child_runs() {
         owner: Some(user("alice")),
         thread: other_thread(),
         parent: Some(TrailParent { run: run(), call: 2, origin_thread: thread() }),
+        spends_from: None,
         origin: provider::Origin { by: provider::Starter::Human { user: user("alice") }, channel: Some(channel()) },
         limits: TrailLimits { steps: 20, ..TrailLimits::DEFAULT },
         state: RunState::Running,
@@ -1413,6 +1422,7 @@ fn routed_run() -> TrailRun {
         owner: Some(user("alice")),
         thread: thread(),
         parent: None,
+        spends_from: None,
         origin: provider::Origin { by: provider::Starter::Human { user: user("alice") }, channel: Some(channel()) },
         limits: TrailLimits { steps: 20, ..TrailLimits::DEFAULT },
         state: RunState::Done { result: serde_json::json!({"tag": "v1.2.0"}) },
@@ -1594,4 +1604,15 @@ fn trail_run_limits() {
         [RunLimit::Steps, RunLimit::Turns, RunLimit::Wall, RunLimit::Compute, RunLimit::Session, RunLimit::Memory];
     let failed = limits.map(|limit| RunState::Failed { error: format!("past its {limit} limit"), limit: Some(limit) });
     snap("trail_run_failed_on_limits", &failed.to_vec());
+}
+
+#[test]
+fn trail_run_spending_from_a_step() {
+    let spends_from = SpendsFrom {
+        conductor: user("lead"),
+        run: "019a7d2e-0000-7000-8000-000000000009".parse().unwrap(),
+        call: 4,
+        route: vec!["deploy".parse().unwrap()],
+    };
+    snap("trail_run_spending_from_a_step", &TrailRun { spends_from: Some(spends_from), ..routed_run() });
 }

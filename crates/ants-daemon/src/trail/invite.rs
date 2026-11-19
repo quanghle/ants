@@ -215,6 +215,7 @@ mod tests {
             owner: Some(UserId::human()),
             thread: ThreadId::generate(),
             parent: None,
+            spends_from: None,
             origin: Origin { by: Starter::Human { user: UserId::human() }, channel: None },
             limits: TrailLimits::default(),
             state,

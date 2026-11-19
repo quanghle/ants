@@ -334,6 +334,13 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
     if let Some(parent) = &r.parent {
         let _ = writeln!(out, "child run answering call {} of run {}", parent.call, parent.run);
     }
+    if let Some(from) = &r.spends_from {
+        let _ = writeln!(
+            out,
+            "started answering call {} of run {} of {}, spending from that run's limits",
+            from.call, from.run, from.conductor
+        );
+    }
     let _ = match &r.state {
         RunState::Stopped { by } => writeln!(out, "state: stopped by {by}"),
         RunState::Done { result } => writeln!(out, "state: done, result: {result}"),

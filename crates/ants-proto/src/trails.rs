@@ -79,6 +79,58 @@ pub struct TrailStep {
     /// a tip left answering it goes under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tip_key: Option<String>,
+    /// What a run its recipient starts with `run_trail` while answering it may spend, as the step's run had left when
+    /// the step went; none from a conductor that tells nothing of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<StepBounds>,
+}
+
+/// What a run started with `run_trail` while answering a step may spend ([`TrailStep::bounds`]): what the step's run,
+/// through its root's limits, had left as the step went. Such a run takes at most these as its limits, and what it
+/// spends comes back with the replies to the step ([`TrailSpent`]), charged to the step's run and its ancestors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepBounds {
+    /// Steps the step's run had left, the step itself counted.
+    pub steps: u32,
+    /// Turns the step's run had left, neither spent nor held by its steps waiting for an answer, this one included.
+    pub turns: u32,
+    /// When the step's run fails on its wall time.
+    pub until: DateTime<Utc>,
+    /// The saved trails on the routes of the step's run, its ancestors and the runs they spend from: a run started
+    /// answering the step takes none of them, as no trail calls itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route: Vec<TrailName>,
+}
+
+/// What the runs started with `run_trail` while answering a step spent since the last reply to the step told
+/// ([`Envelope::trail_spent`]), carried by the recipient's reply on the step's thread: the step's conductor charges it to
+/// the step's run and its ancestors, as a child run's steps and turns are.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrailSpent {
+    pub steps: u32,
+    pub turns: u32,
+}
+
+impl TrailSpent {
+    pub fn is_none(&self) -> bool {
+        self.steps == 0 && self.turns == 0
+    }
+}
+
+/// The step a run started with `run_trail` while answering it spends from ([`TrailRun::spends_from`]): the run is
+/// started under the step's [`StepBounds`], and what it spends goes back with the replies to the step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpendsFrom {
+    /// The step's conductor, under whose keys the step's run is kept.
+    pub conductor: UserId,
+    /// The step's run.
+    pub run: RunId,
+    /// The step's call.
+    pub call: u32,
+    /// The step's [`StepBounds::route`]: the run, and its child runs, take none of these trails.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route: Vec<TrailName>,
 }
 
 /// Who saved a trail: a human, with `ants trail save`, or an ant, with its `save_trail` tool.
@@ -286,6 +338,10 @@ pub struct TrailRun {
     /// The run whose trail() call the run answers, as a child run of it: none for a run started otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<TrailParent>,
+    /// The step whose recipient, the run's conductor, started the run with `run_trail` while answering it: the run
+    /// spends from the step's run. None for a run started otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spends_from: Option<SpendsFrom>,
     /// Where that thread came from, as the conductor's daemon settled it: a run from a webhook's thread is untrusted.
     pub origin: Origin,
     pub limits: TrailLimits,
@@ -765,6 +821,7 @@ mod tests {
             trail: None,
             script: None,
             tip_key: None,
+            bounds: None,
         };
         let sent = message.as_step(step.clone());
         let back: Envelope = serde_json::from_value(serde_json::to_value(&sent).unwrap()).unwrap();
@@ -784,6 +841,7 @@ mod tests {
             trail: None,
             script: None,
             tip_key: None,
+            bounds: None,
         });
         let call = PendingCall {
             call: 1,
@@ -819,6 +877,7 @@ mod tests {
             trail: None,
             script: None,
             tip_key: None,
+            bounds: None,
         });
         let call = PendingCall {
             call: 2,

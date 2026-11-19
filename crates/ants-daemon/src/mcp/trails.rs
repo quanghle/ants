@@ -5,7 +5,9 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ants_proto::{RunId, RunState, ThreadId, TrailFunction, TrailName, TrailRun, TrailSource};
+use ants_proto::{
+    Envelope, RunId, RunState, SpendsFrom, ThreadId, TrailFunction, TrailName, TrailRun, TrailSource, TrailSpent,
+};
 use chrono::{DateTime, Utc};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -70,7 +72,9 @@ fn description() -> String {
          thread a webhook started), with `args` as its JSON input and `limits` raising or lowering what it may spend \
          (`steps`, `at_once`, `turns`, `wall`). The run reports on the current thread and answers to the thread's \
          owner, who gets its end there. Returns the run id at once, or with `wait` the run's result or error (waiting \
-         at most `timeout`). trail_status tells how a run stands and stop_trail stops one. Before writing a script, \
+         at most `timeout`). Started while answering a trail step, the run spends from the step's run: its limits are \
+         cut to what that run has left, what it spends counts against that run, and a trail on that run's route is \
+         refused, as no trail calls itself. trail_status tells how a run stands and stop_trail stops one. Before writing a script, \
          find_trails finds the saved trails for the task; once a run ends, rate_trail rates it, as its end invites. \
          Once an inline script works and its steps will recur, save_trail saves it for every ant to run by name. Write \
          a trail for work \
@@ -99,6 +103,7 @@ impl Hub {
         let limits = args.limits.unwrap_or_default().limits().map_err(|e| format!("limits: {e}"))?;
         let current = self.sessions.locked().current.get(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; runs start only while one is")?;
+        let (limits, spends_from) = spending(&current, &trail, limits)?;
         let stored = self.origin_of(thread).await.map_err(|e| {
             tracing::warn!(%thread, error = format!("{e:#}"), "reading the thread's origin for a trail run");
             "the thread's origin cannot be read".to_owned()
@@ -108,21 +113,36 @@ impl Hub {
             TrailSource::Script(script) => crate::trail::script_description(script),
             TrailSource::Saved(_) => None,
         };
-        let start =
-            StartRun { trail, args: args.args, owner: current.owner.clone(), origin, thread: thread.clone(), limits };
+        let spends = spends_from.as_ref().map_or_default(|from| {
+            format!(
+                " It spends from run {} of {}, whose step this thread answers: its limits are {limits}, and what it \
+                 spends counts against that run.",
+                from.run, from.conductor
+            )
+        });
+        let start = StartRun {
+            trail,
+            args: args.args,
+            owner: current.owner.clone(),
+            origin,
+            thread: thread.clone(),
+            limits,
+            spends_from,
+        };
         let Some(wait) = wait else {
             let run = trails.start(start).await?;
             tracing::info!(%thread, %run, "trail run started from a tool call");
             let started = format!(
                 "Started run {run} on thread {thread}; its end goes to the thread's owner there, and invites this \
-                 ant's rating of it."
+                 ant's rating of it.{spends}"
             );
             return Ok(format!("{started}{}", well_rated(trails, described.as_deref()).await));
         };
         let mut waiting = trails.start_waited(start).await?;
         let run = waiting.run().clone();
         tracing::info!(%thread, %run, "trail run started from a tool call");
-        let started = format!("Started run {run} on thread {thread}; its end goes to the thread's owner there.");
+        let started =
+            format!("Started run {run} on thread {thread}; its end goes to the thread's owner there.{spends}");
         let suggested = well_rated(trails, described.as_deref()).await;
         let unended = |why: String| format!("{started} {why} Its end invites this ant's rating of it.{suggested}");
         let ended = tokio::select! {
@@ -173,6 +193,56 @@ impl Hub {
             );
         }
         Ok(out)
+    }
+}
+
+/// The limits of a run asking for `limits`, started with `trail` on a thread handling `current`, and the step it spends
+/// from: when `current` is a step telling its bounds, the limits cut to them, refused for a trail on the step's route.
+fn spending(
+    current: &Envelope,
+    trail: &TrailSource,
+    limits: ants_proto::TrailLimits,
+) -> Result<(ants_proto::TrailLimits, Option<SpendsFrom>), String> {
+    let Some(step) = current.trail_step.as_deref() else { return Ok((limits, None)) };
+    let Some(bounds) = &step.bounds else { return Ok((limits, None)) };
+    if let TrailSource::Saved(name) = trail
+        && let Some(refused) = crate::trail::refused_on_route(name, step, bounds)
+    {
+        return Err(refused);
+    }
+    let limits = crate::trail::within(limits, bounds, Utc::now())?;
+    let from = SpendsFrom {
+        conductor: current.from.clone(),
+        run: step.run.clone(),
+        call: step.call,
+        route: bounds.route.clone(),
+    };
+    Ok((limits, Some(from)))
+}
+
+impl Hub {
+    /// What `reply`, a message going out while a message `current` is handled, tells the runs started answering
+    /// `current` spent since the last reply told: something only when `current` is a trail step and `reply` goes back to
+    /// its conductor on the step's thread.
+    pub(super) async fn trail_spent(&self, current: Option<&Envelope>, reply: &Envelope) -> Option<TrailSpent> {
+        let (current, trails) = (current?, self.trails.get()?);
+        let step = current.trail_step.as_deref()?;
+        let answers = reply.thread_id == current.thread_id
+            && reply.to == current.from
+            && reply.trail_step.is_none()
+            && reply.notice.is_none();
+        if !answers {
+            return None;
+        }
+        trails.spent_answering(&current.from, step).await
+    }
+}
+
+impl super::Mcp {
+    /// What `reply`, the final answer to `incoming`, tells the runs started answering it, a trail step, spent
+    /// ([`Hub::trail_spent`]).
+    pub async fn trail_spent(&self, incoming: &Envelope, reply: &Envelope) -> Option<TrailSpent> {
+        self.hub.trail_spent(Some(incoming), reply).await
     }
 }
 
@@ -249,6 +319,14 @@ fn status_text(status: &RunStatus, now: DateTime<Utc>) -> String {
         ran_since(header, now),
         header.thread
     );
+    if let Some(from) = &header.spends_from {
+        let _ = write!(
+            out,
+            "\nStarted answering call {} of run {} of {}: it spends from that run, which counts what it spent by each \
+             reply to the step.",
+            from.call, from.run, from.conductor
+        );
+    }
     if let RunState::Stopped { .. } = header.state {
         let _ = write!(out, "\nA human resumes it with `ants trail resume {}`.", header.run);
     }

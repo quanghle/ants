@@ -284,6 +284,7 @@ fn record(conductor: &UserId, trail: Option<&str>, state: RunState, started: chr
         owner: Some(p("alice")),
         thread: ThreadId::generate(),
         parent: None,
+        spends_from: None,
         origin: Origin { by: Starter::Human { user: p("alice") }, channel: None },
         limits: TrailLimits::default(),
         state,
@@ -332,6 +333,26 @@ fn a_child_run_shows_the_call_it_answers_and_a_trail_call_its_child() {
     let row = format!("  1  trail  run {}  sent 0s ago  thread {}  trail review\n", child.run, child.thread);
     assert!(text.contains(&row) && !text.contains("child run answering"), "{text}");
     assert!(text.contains(&format!("\nchild runs:\n  {}  review  running  call 1\n", child.run)), "{text}");
+}
+
+#[test]
+fn a_run_started_answering_a_step_shows_the_run_it_spends_from() {
+    let now = Utc::now();
+    let mut run = record(&p("dev-a"), None, RunState::Running, now);
+    let from = RunId::generate();
+    let route = vec!["deploy".parse().unwrap()];
+    run.spends_from = Some(ants_proto::SpendsFrom { conductor: p("lead"), run: from.clone(), call: 2, route });
+    let detail = runs::Detail {
+        run,
+        pending: Vec::new(),
+        queued: Vec::new(),
+        journal: Vec::new(),
+        children: Vec::new(),
+        ratings: Vec::new(),
+    };
+    let text = runs::render(&detail, now);
+    let line = format!("\nstarted answering call 2 of run {from} of lead, spending from that run's limits\n");
+    assert!(text.contains(&line), "{text}");
 }
 
 #[test]

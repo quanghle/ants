@@ -252,7 +252,7 @@ impl Inbox<'_> {
                 tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
             let ran = Box::pin(self.run_prompt(incoming, msg, seq, text, flush)).await;
             if !ran.joined.is_empty() {
-                return self.hand_on(incoming, own, ran, msg, seq, cut_off).await;
+                return Box::pin(self.hand_on(incoming, own, ran, msg, seq, cut_off)).await;
             }
             ran
         };

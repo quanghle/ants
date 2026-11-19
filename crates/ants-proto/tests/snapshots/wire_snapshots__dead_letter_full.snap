@@ -153,7 +153,20 @@ expression: value
       },
       "trail": "release",
       "script": "58f93952fac8f1b84a37b9a5181994a5fe0bc91ebdcbd35083e7715c7ca54a3e",
-      "tip_key": "review"
+      "tip_key": "review",
+      "bounds": {
+        "steps": 12,
+        "turns": 40,
+        "until": "2025-01-01T12:09:00Z",
+        "route": [
+          "triage",
+          "release"
+        ]
+      }
+    },
+    "trail_spent": {
+      "steps": 3,
+      "turns": 7
     },
     "trail_start": {
       "trail": "nightly-audit",

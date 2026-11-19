@@ -108,6 +108,7 @@ async fn a_goto_the_conductor_cannot_follow_raises_where_it_is_called() {
         origin: human_origin(),
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),
+        spends_from: None,
     };
     let run = lead.trails.start(start).await.unwrap();
     let refused = lead.result(&run).await;

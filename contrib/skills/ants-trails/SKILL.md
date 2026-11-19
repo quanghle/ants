@@ -162,13 +162,15 @@ the trail can go on without that item, and log what was lost.
 | Result of the run, as JSON | 768 KiB | the run fails, naming its size |
 | Nested calls | 200 | `RecursionError` in the script |
 
-A run's limits are set when it starts, and each step also counts against the spending caps of the ant that answers
-it. A run's legs share its limits and what it spent, and a goto spends nothing. A child run's steps and turns count
+A run's limits are set when it starts, and each step also counts against the spending caps of the ant that answers it.
+A run's legs share its limits and what it spent, and a goto spends nothing. A child run's steps and turns count
 against the limits of its root run, the one no `trail()` started, and its wall time ends with its parent's. A run
-failed on a limit continues from its stored record with `ants trail resume`; a `TimeoutError` or `MemoryError` the
-script raises itself is no limit, and fails the run as any exception does. Keep the script's own work small: only
-the compute between steps (parsing, sorting, building prompts) counts against the compute limit, and large variables
-(whole files, long lists of replies) count against the session limit at every suspension.
+started with `run_trail` while answering a step spends from the step's run: its limits are cut to what that run has
+left, what it spends counts against that run, and a trail on that run's route is refused. A run failed on a limit
+continues from its stored record with `ants trail resume`; a `TimeoutError` or `MemoryError` the script raises itself
+is no limit, and fails the run as any exception does. Keep the script's own work small: only the compute between steps
+(parsing, sorting, building prompts) counts against the compute limit, and large variables (whole files, long lists of
+replies) count against the session limit at every suspension.
 
 ## Routes
 

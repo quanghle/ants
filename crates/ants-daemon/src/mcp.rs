@@ -441,7 +441,9 @@ impl Hub {
     }
 
     async fn send(&self, envelope: &Envelope) -> Result<(), String> {
-        (self.outbox)(envelope.clone()).await.map_err(|e| format!("not sent: {e:#}"))
+        let current = self.sessions.locked().current.get(&envelope.thread_id).cloned();
+        let trail_spent = self.trail_spent(current.as_ref(), envelope).await;
+        (self.outbox)(Envelope { trail_spent, ..envelope.clone() }).await.map_err(|e| format!("not sent: {e:#}"))
     }
 }
 

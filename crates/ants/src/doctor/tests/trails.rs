@@ -32,6 +32,7 @@ fn record(conductor: &str, state: RunState, hours: i64, now: DateTime<Utc>) -> T
         owner: Some(p("alice")),
         thread: ThreadId::generate(),
         parent: None,
+        spends_from: None,
         origin: Origin { by: Starter::Human { user: p("alice") }, channel: None },
         limits: TrailLimits::default(),
         state,

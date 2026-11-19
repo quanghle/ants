@@ -1,0 +1,66 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "run": "019a7d2f-0000-7000-8000-000000000001",
+  "conductor": "planner",
+  "route": [
+    {
+      "trail": "triage",
+      "script": "await goto('release', at='review', state={'version': '1.2.0'})",
+      "args": {
+        "bug": 7
+      },
+      "first_call": 0,
+      "started_at": "2025-01-01T12:00:00Z",
+      "steps": 2
+    },
+    {
+      "trail": "release",
+      "at": "review",
+      "script": "async def review(state):\n    return await agent(state['version'], ant='dev-a')",
+      "args": {
+        "version": "1.2.0"
+      },
+      "first_call": 3,
+      "started_at": "2025-01-01T12:02:00Z",
+      "steps": 1
+    }
+  ],
+  "owner": "alice",
+  "thread": "019a7d2c-0000-7000-8000-000000000001",
+  "spends_from": {
+    "conductor": "lead",
+    "run": "019a7d2e-0000-7000-8000-000000000009",
+    "call": 4,
+    "route": [
+      "deploy"
+    ]
+  },
+  "origin": {
+    "by": {
+      "kind": "human",
+      "user": "alice"
+    },
+    "channel": "backend"
+  },
+  "limits": {
+    "steps": 20,
+    "concurrency": 4,
+    "turns": 200,
+    "wall_secs": 86400,
+    "compute_ms": 10000,
+    "session_bytes": 786432
+  },
+  "state": "done",
+  "result": {
+    "tag": "v1.2.0"
+  },
+  "phase": "review",
+  "steps": 3,
+  "turns": 5,
+  "started_at": "2025-01-01T12:00:00Z",
+  "updated_at": "2025-01-01T12:09:00Z",
+  "ended_at": "2025-01-01T12:09:00Z"
+}

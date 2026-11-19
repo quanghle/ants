@@ -116,6 +116,7 @@ impl Trails {
             origin,
             thread: thread.clone(),
             limits: *limits,
+            spends_from: None,
         };
         match self.start_as(run, start).await {
             Ok(run) => TrailOutcome::Started { run },

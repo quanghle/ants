@@ -184,6 +184,17 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   not ended, and `stop_trail` stops one ([Restarts, stops and resumes](#restarts-stops-and-resumes)). The tools are
   offered only while the bus keeps trail runs.
 
+  A run an ant starts with `run_trail` while answering a step spends from the step's run: the step carries what that
+  run, through its root's limits, had left as the step went (steps, turns not held by its waiting steps, the end of its
+  wall time) and the saved trails on its route and its ancestors', and the new run takes at most those as its limits,
+  is refused a trail on that route (`trail NAME is on the route of run RUN, whose step this thread answers (ROUTE): …`)
+  and is refused with none of them left. Each reply to the step tells what such runs spent since the last reply told,
+  which the step's conductor counts against the step's run and its ancestors as it counts a child run's; what they
+  spend after the last reply goes untold, within the limits they started under. `run_trail`'s answer names the run it
+  spends from, and so do `trail_status` and `ants trail show` (`started answering call N of run RUN of ANT, spending
+  from that run's limits`). Neither `trail()` nor a run started answering a step takes a trail on the routes it spends
+  from.
+
   Once an inline script works and its steps will recur, **`save_trail(name, script?, run?, replace?, finding?)`** saves
   it for the colony as the ant's: a `script`, or the script of a finished `run` of an inline script the ant conducted
   (done or failed), recorded as the trail's source. A run of a saved trail is refused, as that trail is saved already.
@@ -350,7 +361,9 @@ Each `agent()` step reserves up to 8 of the run's turns as its message's turn bu
 one per re-ask, count against the run's turns, and a run that cannot reserve one fails on its turn limit. Each step
 also counts against the spending caps of the ant answering it. A goto spends nothing and changes no limit: the run's
 legs share its limits, spending and wall time. A child run's steps and turns count against its root run's limits too,
-and its wall time ends with what its parent has left. Keep the script's own work small: only the compute between steps
+and its wall time ends with what its parent has left. A run started with `run_trail` while answering a step takes at
+most what the step's run had left as its limits, and what it spent by each reply to the step counts against the step's
+run and its ancestors ([Starting a run](#starting-a-run)). Keep the script's own work small: only the compute between steps
 counts against the compute limit, and every variable counts against the session's size at each suspension.
 
 ## Trust
@@ -533,7 +546,7 @@ trail ([auth.md](auth.md#wire-acls-and-verification-invariants)).
 | Store | Kept | Holds |
 |---|---|---|
 | KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, waypoints, script, who saved it (a human or an ant) and when, and the run an ant saved it from. |
-| KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (its route: each leg's trail or inline script, waypoint, args, first call id, start and steps; owner, origin, limits, state (a failed one's broken `limit`), spending, thread, parent run, times), `<ant>.<run>.session` the current leg's dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`, call ids numbered on across legs), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread, label?}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out; a `trail()` step, whose thread is its child run's, keeps the latter alone. |
+| KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (its route: each leg's trail or inline script, waypoint, args, first call id, start and steps; owner, origin, limits, state (a failed one's broken `limit`), spending, thread, parent run, the step it spends from, times), `<ant>.<run>.session` the current leg's dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`, call ids numbered on across legs), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread, label?}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out; a `trail()` step, whose thread is its child run's, keeps the latter alone. |
 | KV `ants_trail_tips` | never expires | The [tips](#tips) left on saved trails and their votes, each under the trail and the ant that wrote it: `<trail>.<writer>.<id>` a tip (trail, id, writer, text, tip key, run, script's SHA-256, time written, and who retired it and when), `<trail>.<voter>.<writer>.<id>` a vote on it (voter, verdict, reason, the SHA-256 of the script voted on, time). |
 | KV `ants_trail_ratings` | never expires | The [ratings](#rating-and-finding-trails) conductors gave saved trails, `<trail>.<conductor>.<run>` one per run and trail: trail, conductor, run, outcome, task, reason, the SHA-256 of the script rated, time. |
 

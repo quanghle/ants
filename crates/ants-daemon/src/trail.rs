@@ -13,6 +13,7 @@ mod invite;
 pub mod keeper;
 mod limits;
 mod load;
+mod nested;
 mod ratings;
 mod report;
 mod route;
@@ -31,8 +32,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     Envelope, JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, NoticeKind, PendingCall, QueuedCall, Role, RunId, RunLimit,
-    RunState, StepStage, ThreadId, TipBoard, TrailFunction, TrailLeg, TrailLimits, TrailName, TrailRun, TrailSession,
-    TrailSource, TrailStart, UserId, WaitingStep,
+    RunState, SpendsFrom, StepStage, ThreadId, TipBoard, TrailFunction, TrailLeg, TrailLimits, TrailName, TrailRun,
+    TrailSession, TrailSource, TrailStart, UserId, WaitingStep,
 };
 use ants_trail::{Answer, JournalEntry, Limits, Run, Worker};
 use anyhow::Result;
@@ -54,6 +55,7 @@ pub use driver::MAX_RECORD;
 pub(crate) use invite::invitation;
 pub use invite::{EndWait, rating_hint};
 pub use limits::AskedLimits;
+pub use nested::{refused_on_route, within};
 pub use ratings::{RatedTrail, Ratings, colony_rated};
 pub(crate) use report::clip;
 pub use saved::{PreparedSave, SaveFrom, SaveOutcome, SaveTrail, SavedEntry};
@@ -123,6 +125,9 @@ pub struct StartRun {
     /// The thread the run reports on.
     pub thread: ThreadId,
     pub limits: TrailLimits,
+    /// The step the run is started answering, with `run_trail` on the step's thread: the run spends from the step's
+    /// run, its limits already cut to the step's bounds ([`within`]).
+    pub spends_from: Option<SpendsFrom>,
 }
 
 /// How a run stands ([`Trails::status`]).
@@ -186,6 +191,8 @@ struct Inner {
     woken: tokio::sync::Mutex<mpsc::UnboundedReceiver<RunId>>,
     /// The run_trail calls waiting on the end of the runs they started ([`EndWait`]).
     waiters: Mutex<HashMap<RunId, tokio::sync::oneshot::Sender<TrailRun>>>,
+    /// The runs started answering steps, for the replies to the steps to tell what they spent.
+    answered: Mutex<nested::Answered>,
 }
 
 #[derive(Clone)]
@@ -332,6 +339,7 @@ impl Trails {
             wake,
             woken: tokio::sync::Mutex::new(woken),
             waiters: Mutex::default(),
+            answered: Mutex::default(),
         };
         Ok(Self { inner: Arc::new(inner) })
     }
@@ -380,6 +388,7 @@ impl Trails {
             origin: crate::provider::context::origin(firing, None, &self.inner.humans.humans()),
             thread: firing.thread_id.clone(),
             limits: start.limits,
+            spends_from: None,
         };
         self.start_as(run, start).await
     }
@@ -418,7 +427,7 @@ impl Trails {
     }
 
     async fn start_as(&self, run: RunId, start: StartRun) -> Result<RunId, String> {
-        let StartRun { trail, args, owner, origin, thread, limits } = start;
+        let StartRun { trail, args, owner, origin, thread, limits, spends_from } = start;
         limits.check().map_err(|e| e.to_string())?;
         let (name, script) = match trail {
             TrailSource::Saved(name) => {
@@ -439,6 +448,7 @@ impl Trails {
             owner,
             thread,
             parent: None,
+            spends_from,
             origin,
             limits,
             state: RunState::Running,
@@ -449,8 +459,11 @@ impl Trails {
             updated_at: now,
             ended_at: None,
         };
-        let run = header.run.clone();
+        let (run, spends_from) = (header.run.clone(), header.spends_from.clone());
         self.launch(header, engine, session).await.map_err(|e| format!("storing the run: {e:#}"))?;
+        if let Some(from) = &spends_from {
+            self.answering(&run, from);
+        }
         Ok(run)
     }
 
@@ -496,7 +509,7 @@ impl Trails {
             return Err(format!("{by} is no human of the colony"));
         }
         let origin = Origin { by: Starter::Human { user: by.clone() }, channel: None };
-        self.start(StartRun { trail, args, owner: Some(by.clone()), origin, thread, limits }).await
+        self.start(StartRun { trail, args, owner: Some(by.clone()), origin, thread, limits, spends_from: None }).await
     }
 
     /// Stop a run for `by`: it sends no further step, ignores the replies of the steps it waited on and withdraws
@@ -650,6 +663,7 @@ impl Trails {
             }
             return Ok(true);
         }
+        self.charge_spent(&slot, &header, message.trail_spent.unwrap_or_default());
         let spent = match pending.function {
             TrailFunction::Agent => pending.turn_budget.saturating_sub(message.turn_budget),
             TrailFunction::Human | TrailFunction::Trail | TrailFunction::Goto => 0,
@@ -782,6 +796,7 @@ impl Trails {
         let tips = self.step_tips(header).await;
         let tips = tips.and_then(|board| steps::retry_tips(&board, &step, Utc::now()));
         let again = Envelope { text: steps::again(why, &schema, tips.as_deref()), ..again }.as_step(step);
+        let again = self.bounded(header, again);
         let update = |sent: bool| {
             let mut book = slot.book();
             if let Some(call) = book.pending.iter_mut().find(|call| call.call == pending.call) {

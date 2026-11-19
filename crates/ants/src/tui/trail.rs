@@ -448,6 +448,7 @@ mod tests {
             owner: Some(owner.clone()),
             thread,
             parent: None,
+            spends_from: None,
             origin: Origin { by: Starter::Human { user: owner.clone() }, channel: None },
             limits: TrailLimits::DEFAULT,
             state: RunState::Running,

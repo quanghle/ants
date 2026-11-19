@@ -180,6 +180,7 @@ async fn an_ant_replaces_and_removes_only_the_trails_it_saved_on_trusted_threads
         origin: Origin { by: Starter::Webhook { user: ant("github") }, channel: None },
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),
+        spends_from: None,
     };
     lead.trails.start(start).await.unwrap();
     let step = lead.step().await;

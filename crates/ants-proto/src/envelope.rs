@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     Answer, ApprovalDecision, ApprovalRequest, Attachment, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans,
-    Questions, Role, RunId, Sealed, ThreadId, TrailStart, TrailStep, UserId, subject,
+    Questions, Role, RunId, Sealed, ThreadId, TrailSpent, TrailStart, TrailStep, UserId, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -155,6 +155,11 @@ pub struct Envelope {
     /// [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail_step: Option<Box<TrailStep>>,
+    /// On a reply to a trail step on the step's thread, what the runs its sender started with `run_trail` while
+    /// answering the step spent since its last reply there told ([`TrailSpent`]): the step's conductor charges it to the
+    /// step's run. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail_spent: Option<TrailSpent>,
     /// The trail run a schedule asks its recipient to start, the message's thread the run's: the recipient's daemon
     /// starts it, without a prompt, only from a webhook's message ([`Envelope::webhook`]). Never copied by
     /// [`Envelope::reply`] or [`Envelope::follow_up`].
@@ -438,6 +443,7 @@ impl Envelope {
             notice: None,
             review_commits: Vec::new(),
             trail_step: None,
+            trail_spent: None,
             trail_start: None,
             rating_of: None,
             review_outcomes: None,
@@ -627,6 +633,7 @@ impl Envelope {
             notice: None,
             review_commits: Vec::new(),
             trail_step: None,
+            trail_spent: None,
             trail_start: None,
             rating_of: None,
             review_outcomes: None,

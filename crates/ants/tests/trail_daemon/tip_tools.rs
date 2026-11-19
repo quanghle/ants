@@ -26,10 +26,20 @@ fn saving(name: &str) -> (PathBuf, PathBuf) {
 /// The trails of ant `name`, the machine's saved trails in `saved`, and its MCP server reaching them, its home in
 /// `dir`.
 pub(super) async fn ant_mcp(server: &NatsServer, name: &str, dir: &Path, saved: &Path) -> (Trails, Mcp) {
+    ant_mcp_sending(server, name, dir, saved, Arc::new(|_| Box::pin(async { Ok(()) }))).await
+}
+
+/// [`ant_mcp`], with the ant's messages going to `outbox`.
+pub(super) async fn ant_mcp_sending(
+    server: &NatsServer,
+    name: &str,
+    dir: &Path,
+    saved: &Path,
+    outbox: ants_daemon::mcp::Outbox,
+) -> (Trails, Mcp) {
     let user = ant(name);
     let (client, js) = ants_daemon::bus::connect(&server.url, None, None, &user, name).await.unwrap();
     let attempts = ants_daemon::bus::ensure_attempts(&js, None, &user).await.unwrap();
-    let outbox: ants_daemon::mcp::Outbox = Arc::new(|_| Box::pin(async { Ok(()) }));
     let colony: ants_daemon::mcp::Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
     let notes: Arc<dyn NotesStore> = Arc::new(MemoryNotes::default());
     let humans = Registry::new(UserId::human());
@@ -64,6 +74,7 @@ fn step_to(to: &str, tip_key: Option<&str>, script: &str) -> Envelope {
         trail: Some(deploy()),
         script: Some(script_sha256(script)),
         tip_key: tip_key.map(str::to_owned),
+        bounds: None,
     };
     Envelope::new(ant("lead"), ant(to), "build it").with_owner(Some(UserId::human())).as_step(step)
 }
@@ -108,6 +119,7 @@ async fn leave_tip_is_left_only_answering_a_step_of_a_saved_trail_on_a_trusted_t
         origin: Origin { by, channel: None },
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),
+        spends_from: None,
     };
     let run = lead.trails.start(start(Starter::Human { user: UserId::human() })).await.unwrap();
     let step = lead.step().await;

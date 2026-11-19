@@ -47,6 +47,13 @@ impl Trails {
                 caller.run
             ));
         }
+        let root = self.root(header);
+        if let Some(from) = root.spends_from.as_ref().filter(|from| from.route.contains(&name)) {
+            return Some(format!(
+                "trail {name} is on the route of run {}, whose step run {} spends from: no trail calls itself",
+                from.run, root.run
+            ));
+        }
         self.child_leg(name, args, &child_limits(header, Utc::now())).await.err()
     }
 
@@ -79,6 +86,7 @@ impl Trails {
             owner: parent.owner.clone(),
             thread: call.thread.clone(),
             parent: Some(TrailParent { run: parent.run.clone(), call: call.call, origin_thread }),
+            spends_from: None,
             origin: parent.origin.clone(),
             limits,
             state: RunState::Running,

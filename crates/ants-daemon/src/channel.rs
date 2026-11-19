@@ -249,6 +249,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         notice: None,
         review_commits: Vec::new(),
         trail_step: None,
+        trail_spent: None,
         trail_start: None,
         rating_of: None,
         review_outcomes: None,

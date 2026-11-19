@@ -210,7 +210,7 @@ pub(super) fn step(run: &TrailRun, pending: &PendingCall) -> TrailStep {
     let (label, schema, tip_key) = args.map_or_default(|args| (args.label, args.schema, args.tips));
     let trail = run.trail().cloned();
     let script = trail.as_ref().and(run.leg()).map(|leg| script_sha256(&leg.script));
-    TrailStep { run: run.run.clone(), call: pending.call, label, schema, trail, script, tip_key }
+    TrailStep { run: run.run.clone(), call: pending.call, label, schema, trail, script, tip_key, bounds: None }
 }
 
 /// The message of `pending`, a call of `run`, as first sent: of the same id each time it is made, so a repeat of it is
@@ -327,6 +327,7 @@ mod tests {
             trail: Some("deploy".parse().unwrap()),
             script: Some(script.to_owned()),
             tip_key: tip_key.map(str::to_owned),
+            bounds: None,
         }
     }
 

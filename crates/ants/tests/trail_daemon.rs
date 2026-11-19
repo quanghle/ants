@@ -41,6 +41,8 @@ mod children;
 mod ends;
 #[path = "trail_daemon/goto.rs"]
 mod goto;
+#[path = "trail_daemon/nested.rs"]
+mod nested;
 #[path = "trail_daemon/ratings.rs"]
 mod ratings;
 #[path = "trail_daemon/save_tools.rs"]
@@ -213,6 +215,7 @@ impl Conductor {
             origin: Origin { by: Starter::Human { user: human }, channel: None },
             thread,
             limits,
+            spends_from: None,
         };
         self.trails.start(start).await.unwrap()
     }

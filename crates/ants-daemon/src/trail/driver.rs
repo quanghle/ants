@@ -500,6 +500,7 @@ impl Trails {
                 continue;
             }
             let message = steps::envelope(&header, call, tips.as_ref()).map_err(|e| anyhow!(e))?;
+            let message = self.bounded(&header, message);
             self.inner.store.put_step(&call.thread, &thread).await?;
             (self.inner.outbox)(message).await?;
             if let Some(pending) = slot.book().pending.iter_mut().find(|pending| pending.message == call.message) {
