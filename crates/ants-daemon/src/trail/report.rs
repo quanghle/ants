@@ -7,8 +7,8 @@
 use std::fmt::Write as _;
 
 use ants_proto::{
-    DEFAULT_TURN_BUDGET, Envelope, MAX_TITLE, NotesPost, PendingCall, RunId, RunState, StatusUpdate, StepStage,
-    ThreadId, TrailFunction, TrailRun, UserId,
+    DEFAULT_TURN_BUDGET, Envelope, MAX_TITLE, NotesPost, PendingCall, RunId, RunLimit, RunState, StatusUpdate,
+    StepStage, ThreadId, TrailFunction, TrailLimits, TrailRun, UserId,
 };
 use ants_trail::{Answer, Event, Meta};
 
@@ -24,15 +24,20 @@ const MAX_QUOTE: usize = 1000;
 const MAX_RESULT: usize = 8000;
 
 impl Trails {
-    /// Tell the start of `run`, a run of the trail `meta` describes, in the notes of its thread, suggesting a title
-    /// for the thread.
+    /// Tell the start of `run`, whose script `meta` describes, in the notes of its thread, suggesting a title for the
+    /// thread: the run named by the trail it started as, else as an inline script, the meta's name told when it differs.
     pub(super) async fn report_start(&self, run: &TrailRun, meta: &Meta) {
         let answering = run
             .parent
             .as_ref()
             .map_or_else(String::new, |parent| format!(", answering call {} of run {}", parent.call, parent.run));
-        let text = format!("Run {} of trail {} started{answering}: {}", run.run, meta.name, meta.description);
-        let title: String = format!("trail {}: {}", meta.name, meta.description)
+        let (what, title) = match run.first_trail() {
+            Some(trail) if trail.as_str() == meta.name => (format!("trail {trail}"), format!("trail {trail}")),
+            Some(trail) => (format!("trail {trail} (meta name {})", meta.name), format!("trail {trail}")),
+            None => (format!("an inline script (meta name {})", meta.name), format!("inline {}", meta.name)),
+        };
+        let text = format!("Run {} of {what} started{answering}: {}", run.run, meta.description);
+        let title: String = format!("{title}: {}", meta.description)
             .chars()
             .map(|c| if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') { ' ' } else { c })
             .collect();
@@ -212,13 +217,14 @@ fn end_state(run: &TrailRun, resume: Option<&RunId>) -> Option<String> {
         None => format!("Run {}", run.run),
     };
     let spent = format!("{} steps, {} turns", run.steps, run.turns);
-    let resume = resume.map(|resume| format!("`ants trail resume {resume}` continues it"));
     Some(match (&run.state, resume) {
         (RunState::Running | RunState::Waiting, _) => return None,
-        (RunState::Stopped { by }, Some(resume)) => format!("{name} was stopped by {by} ({spent}); {resume}."),
+        (RunState::Stopped { by }, Some(resume)) => {
+            format!("{name} was stopped by {by} ({spent}); `ants trail resume {resume}` continues it.")
+        }
         (RunState::Stopped { by }, None) => format!("{name} was stopped by {by} ({spent})."),
-        (RunState::Failed { error, limit: Some(_) }, Some(resume)) => {
-            format!("{name} failed ({spent}): {error}\n{resume}, under raised limits.")
+        (RunState::Failed { error, limit: Some(limit) }, Some(resume)) => {
+            format!("{name} failed ({spent}): {error}\n{}", resume_after(&run.limits, *limit, resume))
         }
         (RunState::Failed { error, .. }, _) => format!("{name} failed ({spent}): {error}"),
         (RunState::Done { result }, _) => {
@@ -239,6 +245,48 @@ fn end_state(run: &TrailRun, resume: Option<&RunId>) -> Option<String> {
     })
 }
 
+/// What a resume of `resume` does for a run under `limits` failed on `limit`: the flag raising a limit a flag raises,
+/// unless at its maximum; a compute limit's computation run again; none for the session and memory, which a resume
+/// would break the same way, but the session under a limit below its maximum, which only a request's limits raise.
+fn resume_after(limits: &TrailLimits, limit: RunLimit, resume: &RunId) -> String {
+    let max = TrailLimits::MAX;
+    let raise = |flag: &str, value: String, most: String, at_most: bool| {
+        if at_most {
+            format!("Its {value} are the most a run may take: no resume continues it.")
+        } else {
+            format!("`ants trail resume {resume} {flag}` continues it, raising its {value} (at most {most}).")
+        }
+    };
+    let wall = ants_proto::duration::format;
+    match limit {
+        RunLimit::Steps => {
+            raise("--steps N", format!("{} steps", limits.steps), max.steps.to_string(), limits.steps >= max.steps)
+        }
+        RunLimit::Turns => {
+            raise("--turns N", format!("{} turns", limits.turns), max.turns.to_string(), limits.turns >= max.turns)
+        }
+        RunLimit::Wall => raise(
+            "--wall DUR",
+            format!("{} of wall time", wall(limits.wall_time())),
+            wall(max.wall_time()),
+            limits.wall_secs >= max.wall_secs,
+        ),
+        RunLimit::Compute => format!(
+            "`ants trail resume {resume}` runs the script's computation again under the same compute limit, which no \
+             flag raises: it fails again unless the machine was only busy."
+        ),
+        RunLimit::Session if limits.session_bytes < max.session_bytes => format!(
+            "No flag of `ants trail resume` raises its session size limit of {} bytes (at most {}), and a resume \
+             under the same one would restore the same session and take the same answers.",
+            limits.session_bytes, max.session_bytes
+        ),
+        RunLimit::Session | RunLimit::Memory => format!(
+            "No resume continues it: no flag raises its {limit} limit, and a resume would restore the same session \
+             and take the same answers."
+        ),
+    }
+}
+
 /// `text`, cut to at most `max` characters, the last an ellipsis when cut.
 pub(crate) fn clip(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
@@ -256,5 +304,116 @@ pub(super) fn step_label(step: &PendingCall) -> Option<String> {
         TrailFunction::Agent => steps::AgentArgs::of(&step.args).ok().and_then(|args| args.label),
         TrailFunction::Trail => steps::TrailArgs::of(&step.args).ok().map(|args| format!("trail {}", args.name)),
         TrailFunction::Human | TrailFunction::Goto => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ants_proto::provider::{Origin, Starter};
+    use ants_proto::{TrailLeg, UserId};
+    use chrono::Utc;
+
+    use super::*;
+
+    /// A run of trail deploy failed on `limit` under `limits`, having spent 2 steps and 7 turns.
+    fn failed(limit: RunLimit, limits: TrailLimits) -> TrailRun {
+        let human = UserId::human();
+        let now = Utc::now();
+        TrailRun {
+            run: RunId::generate(),
+            conductor: "lead".parse().unwrap(),
+            route: vec![TrailLeg {
+                trail: Some("deploy".parse().unwrap()),
+                at: None,
+                script: "agent('build')\n".to_owned(),
+                args: serde_json::Value::Null,
+                first_call: 0,
+                started_at: now,
+                steps: 2,
+            }],
+            owner: Some(human.clone()),
+            thread: ThreadId::generate(),
+            parent: None,
+            spends_from: None,
+            origin: Origin { by: Starter::Human { user: human }, channel: None },
+            limits,
+            state: RunState::Failed { error: "the limit".to_owned(), limit: Some(limit) },
+            phase: None,
+            steps: 2,
+            turns: 7,
+            started_at: now,
+            updated_at: now,
+            ended_at: Some(now),
+        }
+    }
+
+    /// The last line of the end's message of `run`, resumed as itself.
+    fn resume_line(run: &TrailRun) -> String {
+        let text = end_text(run, Some(&run.run)).unwrap();
+        assert!(text.starts_with(&format!("Run {} of trail deploy failed (2 steps, 7 turns): the limit\n", run.run)));
+        text.lines().last().unwrap().to_owned()
+    }
+
+    #[test]
+    fn the_end_of_a_run_failed_on_steps_turns_or_wall_time_names_the_flag_raising_it() {
+        let limits = TrailLimits::default();
+        let run = failed(RunLimit::Steps, limits);
+        let resume = format!("`ants trail resume {}", run.run);
+        assert_eq!(resume_line(&run), format!("{resume} --steps N` continues it, raising its 50 steps (at most 500)."));
+        let run = failed(RunLimit::Turns, limits);
+        let resume = format!("`ants trail resume {}", run.run);
+        assert_eq!(
+            resume_line(&run),
+            format!("{resume} --turns N` continues it, raising its 200 turns (at most 2000).")
+        );
+        let run = failed(RunLimit::Wall, limits);
+        let resume = format!("`ants trail resume {}", run.run);
+        let raise = " --wall DUR` continues it, raising its 1d of wall time (at most 7d).";
+        assert_eq!(resume_line(&run), format!("{resume}{raise}"));
+    }
+
+    #[test]
+    fn the_end_of_a_run_at_its_most_steps_turns_or_wall_time_names_no_resume() {
+        let run = failed(RunLimit::Steps, TrailLimits::MAX);
+        assert_eq!(resume_line(&run), "Its 500 steps are the most a run may take: no resume continues it.");
+        let run = failed(RunLimit::Turns, TrailLimits::MAX);
+        assert_eq!(resume_line(&run), "Its 2000 turns are the most a run may take: no resume continues it.");
+        let run = failed(RunLimit::Wall, TrailLimits::MAX);
+        assert_eq!(resume_line(&run), "Its 7d of wall time are the most a run may take: no resume continues it.");
+    }
+
+    #[test]
+    fn the_end_of_a_run_failed_on_compute_says_a_resume_computes_again() {
+        let run = failed(RunLimit::Compute, TrailLimits::default());
+        let line = resume_line(&run);
+        assert!(line.starts_with(&format!("`ants trail resume {}` runs the script's computation again", run.run)));
+        assert!(line.contains("no flag raises") && line.ends_with("unless the machine was only busy."), "{line}");
+    }
+
+    #[test]
+    fn the_end_of_a_run_failed_on_its_session_or_memory_names_no_resume() {
+        for (limit, name) in [(RunLimit::Session, "session size"), (RunLimit::Memory, "memory")] {
+            let line = resume_line(&failed(limit, TrailLimits::default()));
+            let none = format!("No resume continues it: no flag raises its {name} limit, and a resume would restore");
+            assert!(line.starts_with(&none), "{line}");
+            assert!(!line.contains("ants trail resume"), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_end_of_a_run_failed_on_a_session_limit_below_its_maximum_names_no_flag() {
+        let run = failed(RunLimit::Session, TrailLimits { session_bytes: 1024, ..TrailLimits::default() });
+        let line = resume_line(&run);
+        let none = "No flag of `ants trail resume` raises its session size limit of 1024 bytes (at most 786432)";
+        assert!(line.starts_with(none), "{line}");
+    }
+
+    #[test]
+    fn the_end_of_a_child_run_failed_on_a_limit_names_no_resume() {
+        let run = failed(RunLimit::Steps, TrailLimits::default());
+        assert_eq!(
+            end_text(&run, None).unwrap(),
+            format!("Run {} of trail deploy failed (2 steps, 7 turns): the limit", run.run)
+        );
     }
 }

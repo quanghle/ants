@@ -269,8 +269,8 @@ itself, not even through a goto(). A call that starts no child run, refused so o
 one that does not compile, raises `RuntimeError` naming why and counts as no step.
 
 Stopping or ending a run stops its children, and resuming it resumes them: those stopped, and those that failed on a
-limit, whose errors then no longer answer their calls, so a run failed on its child's limit resumes under raised limits
-with that child. A call whose child run left no record starts a child anew, from its start, its error no longer
+limit, whose errors then no longer answer their calls, so a run failed on its child's limit resumes with that child,
+as the run would on that limit of its own. A call whose child run left no record starts a child anew, from its start, its error no longer
 answering the call either. A child tells its start and end in the notes of its own thread, messaging no one; its end
 note points to resuming its parent.
 
@@ -279,7 +279,10 @@ note points to resuming its parent.
 A run reports on the thread it started with, as its conductor:
 
 - **Notes:** the start posts `Run <run> of trail <name> started: <description>` to the thread's notes, suggesting the
-  title `trail <name>: <description>`; a resume posts `Run <run> resumed by <human>.`; each goto taken posts
+  title `trail <name>: <description>`, `<name>` the name the trail is saved under (`(meta name <meta>)` follows it
+  when its meta's `name` differs); a run of an inline script posts
+  `Run <run> of an inline script (meta name <meta>) started: <description>`, suggesting `inline <meta>: <description>`;
+  a resume posts `Run <run> resumed by <human>.`; each goto taken posts
   `route: <route>`, the legs so far, such as `route: triage@classify -> fix@reproduce`. The `phase()`, `log()` and
   `print()` output of each resume of the script becomes one note of `phase: …` and `log: …` lines (at most 4000
   characters). Notices and escalations arriving on a step's thread, and replies the run no longer waits on, are
@@ -301,8 +304,12 @@ A run reports on the thread it started with, as its conductor:
   steps ran lists them all the same, for as long as the run's records are kept.
 - **End message:** once the run is done, failed or stopped, the conductor messages the owner, else the default human,
   on the run thread: `Run <run> of trail <name> is done (N steps, M turns):`, naming the trail the run started, with
-  the result (cut at 8000 characters, `ants trail show <run>` showing the rest), the error (naming
-  `ants trail resume <run>` when a limit was met), or who stopped it and how to resume it; a run of more than one leg
+  the result (cut at 8000 characters, `ants trail show <run>` showing the rest), the error (when a limit was met,
+  followed by what a resume does: for steps, turns or wall time, `ants trail resume <run>` with the flag raising that
+  limit, unless already at its maximum; for compute, that a resume runs the computation again under the same limit,
+  failing again unless the machine was only busy; for the session or memory, that no resume continues it, or for a
+  session size its start set below the maximum, that no flag raises it), or who
+  stopped it and how to resume it; a run of more than one leg
   ends it with a line `route: <route>`. The end of a run done or failed is stored before it is told, a store that
   fails being tried again; the message is sent again until the outbox takes it, the run staying listed in
   `<ant>.runs` meanwhile, under an id derived from the run and the time it ended, so a daemon restarted in between
@@ -355,7 +362,11 @@ does, on no limit, and an error over 16 KiB is cut.
 A run failed on a limit keeps which in its record's `limit`: `steps` (a call past them raised and the script then
 failed), `turns`, `wall`, `compute`, `session` or `memory`; a run failing as its child run failed on one keeps the
 child's. `ants trail show RUN` names it (`state: failed on its turns limit: …`), and a failed run resumes only with one
-([Restarts, stops and resumes](#restarts-stops-and-resumes)).
+other than `memory`, and with `session` only when the resume request's limits raise the run's session size (no flag
+does; a run's session size is below its maximum only when its start request's limits set it so) ([Restarts, stops and
+resumes](#restarts-stops-and-resumes)): a resume restores the same session and takes the same answers, so under the same
+limits it would fail the same way. The compute limit is no flag's either, but a resume computes again, which fails
+again unless the machine was only busy.
 
 Each `agent()` step reserves up to 8 of the run's turns as its message's turn budget; the turns its reply spent, and
 one per re-ask, count against the run's turns, and a run that cannot reserve one fails on its turn limit. Each step
@@ -579,7 +590,9 @@ the longest wall time, so a finished run stays at least 30 days. The full layout
   the steps the run then waits on; the conductor's daemon tells it pending at once, and `ants trail stop` says so when
   the pass outlasts its 15 s wait. Stopping a stopped run again lists the steps still to withdraw. Ending a parent run stops its still-running children. Wall time keeps running while
   stopped.
-- **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose record names the limit it failed on, from
+- **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose record names the limit it failed on (its
+  steps, turns, wall time or compute; one failed on its memory is refused, as is one failed on its session size
+  unless the request raises it), from
   its last stored session, resuming its child runs stopped or failed on a limit too (a child that left no record starts
   anew); the steps waited on go out anew, on new threads,
   and so do the calls refused since that session, as one past the run's steps: a run failing on a limit deletes their

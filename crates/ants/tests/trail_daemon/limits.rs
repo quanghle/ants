@@ -1,5 +1,6 @@
-//! A run failing on compute, session or memory, named in its record, and resumed from it; a stop arriving while the
-//! script computes, and a resume after the conductor's daemon restarted while the run was stopped.
+//! A run failing on compute, session or memory, named in its record, and resumed from it where a resume may continue
+//! it; a stop arriving while the script computes, and a resume after the conductor's daemon restarted while the run was
+//! stopped.
 
 use super::*;
 
@@ -71,7 +72,7 @@ b = await agent("b", ant="ops")
 }
 
 #[tokio::test]
-async fn a_run_past_its_memory_fails_naming_it_and_a_resume_runs_it_again() {
+async fn a_run_past_its_memory_fails_naming_it_and_takes_no_resume() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;
     let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
@@ -91,10 +92,12 @@ len(x)
     let told = lead.told().await;
     assert!(told.text.contains(" failed (") && told.text.contains("MemoryError"), "{}", told.text);
 
-    // No limit raises a script's memory: the resume, which the record's limit allows, fails the same way.
-    lead.trails.resume(&run, &UserId::human(), None).await.unwrap();
-    let (again, limit) = failed(&lead, &run).await;
-    assert_eq!(limit, Some(RunLimit::Memory), "{again}");
+    assert!(told.text.contains("No resume continues it: no flag raises its memory limit"), "{}", told.text);
+
+    // No limit raises a script's memory, so a resume, which would fail the same way, is refused.
+    let refused = lead.trails.resume(&run, &UserId::human(), Some(TrailLimits::MAX)).await.unwrap_err();
+    assert!(refused.contains("failed on its memory limit, which no resume raises"), "{refused}");
+    assert!(matches!(lead.header(&run).await.state, RunState::Failed { .. }), "the run stays failed");
     assert!(lead.sends_no_step(Duration::from_millis(200)).await, "the answered step is not asked again");
 }
 

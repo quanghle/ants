@@ -590,6 +590,20 @@ impl Trails {
         let header = self.inner.store.header(run).await.map_err(stored)?;
         let mut header = header.ok_or_else(|| format!("{} conducts no run {run}", self.inner.ant))?;
         match &header.state {
+            RunState::Failed { limit: Some(RunLimit::Memory), .. } => {
+                return Err(format!(
+                    "run {run} failed on its memory limit, which no resume raises: restoring the same session and \
+                     taking the same answers, it would fail the same way"
+                ));
+            }
+            RunState::Failed { limit: Some(RunLimit::Session), .. }
+                if !limits.is_some_and(|limits| limits.session_bytes > header.limits.session_bytes) =>
+            {
+                return Err(format!(
+                    "run {run} failed on its session size limit, which this resume does not raise: restoring the \
+                     same session and taking the same answers, it would fail the same way"
+                ));
+            }
             RunState::Stopped { .. } | RunState::Failed { limit: Some(_), .. } => {}
             RunState::Failed { error, limit: None } => {
                 return Err(format!("run {run} failed, not on a limit: {error}"));
