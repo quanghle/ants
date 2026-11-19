@@ -17,7 +17,7 @@ use tokio::time::Instant;
 
 use super::runs::{destination, entered, gist, header_json, parse};
 use crate::machines::latest_after;
-use crate::text::excerpt;
+use crate::text::{after_colon, one_line};
 
 /// How often the run's records are read again.
 const POLL: Duration = Duration::from_millis(500);
@@ -45,7 +45,7 @@ impl Follower {
         self.legs = self.legs.max(run.route.len());
         if run.phase != self.phase {
             if let Some(phase) = &run.phase {
-                lines.push(format!("phase: {phase}"));
+                lines.push(format!("phase: {}", one_line(phase, usize::MAX)));
             }
             self.phase.clone_from(&run.phase);
         }
@@ -95,10 +95,10 @@ impl Follower {
         }
         Some(match (entry.function, &entry.answer) {
             (TrailFunction::Goto, CallAnswer::Error(error)) => {
-                format!("call {} to go to {} refused: {}", entry.call, destination(&entry.args), excerpt(error, 200))
+                format!("call {} to go to {} refused: {}", entry.call, destination(&entry.args), one_line(error, 200))
             }
-            (_, CallAnswer::Ok(value)) => format!("step {} answered: {}", entry.call, excerpt(&text(value), 200)),
-            (_, CallAnswer::Error(error)) => format!("step {} failed: {}", entry.call, excerpt(error, 200)),
+            (_, CallAnswer::Ok(value)) => format!("step {} answered: {}", entry.call, one_line(&text(value), 200)),
+            (_, CallAnswer::Error(error)) => format!("step {} failed: {}", entry.call, one_line(error, 200)),
         })
     }
 }
@@ -262,7 +262,7 @@ pub(super) async fn following(mut records: impl Records, run: TrailRun, json: bo
         let id = &last.run;
         match &last.state {
             RunState::Done { result } => break Ok(text(result)),
-            RunState::Failed { error, .. } => break Err(anyhow!("run {id} failed: {error}")),
+            RunState::Failed { error, .. } => break Err(anyhow!("run {id} failed:{}", after_colon(error))),
             RunState::Stopped { by } => {
                 break Err(anyhow!("run {id} was stopped by {by}: `ants trail resume {id}` resumes it"));
             }
@@ -281,7 +281,7 @@ pub(super) async fn following(mut records: impl Records, run: TrailRun, json: bo
     if json {
         println!("{}", header_json(&last, &super::runs::Rated::default())?);
     } else if let Ok(result) = &result {
-        println!("done: {result}");
+        println!("done:{}", after_colon(result));
     }
     result.map(drop)
 }

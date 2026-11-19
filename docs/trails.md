@@ -107,9 +107,13 @@ Args:
 
 `ants trail save FILE` checks a file, without running it, and saves it for the whole colony in `ants_trails` under its
 meta's `name` or `--name`: 1–64 of `a-z`, `0-9` and `-`, not starting with `-`, not a UUID (meta's own `name` may
-also hold capitals and `_`, needing `--name` then). A saved trail's script holds at most 256 KiB, its description 1000
-characters, at most 32 phases of one line of 1–120 characters each, and at most 32 waypoints. Every ant and human reads
-the saved trails.
+also hold capitals and `_`, needing `--name` then). A saved trail's script holds at most 256 KiB, its description one
+line of at most 1000 characters, at most 32 phases of one line of 1–120 characters each (no control characters in a
+description or phase), and at most 32 waypoints. Every ant and human reads the saved trails.
+
+`ants trail` prints the text scripts, ants and savers wrote (descriptions, phases, labels, prompts, answers, results
+and errors) on one line each, a result or error of several lines indented under its own, with control characters and
+those reordering text left out; `--json` gives them as written.
 
 Humans save and remove any trail. An ant saves one with `save_trail` ([Starting a run](#starting-a-run)), from a script
 or from a finished run of an inline script it conducted, under the same checks, and under a name neither the colony nor

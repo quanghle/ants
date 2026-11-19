@@ -35,7 +35,7 @@ pub(super) async fn ask(
             continue;
         }
         match reply.outcome {
-            TrailOutcome::Refused { error } => bail!("{ant} refused: {error}"),
+            TrailOutcome::Refused { error } => bail!("{ant} refused:{}", crate::text::after_colon(&error)),
             stopping @ TrailOutcome::Stopping { .. } => pending = Some(stopping),
             outcome => return Ok(outcome),
         }

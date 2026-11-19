@@ -18,6 +18,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::provider::Origin;
+use crate::questions::breaks_line;
 #[cfg(doc)]
 use crate::trail_thread_step_key;
 use crate::{Envelope, Error, MAX_TITLE, RunId, ThreadId, TrailName, UserId, subject};
@@ -200,9 +201,9 @@ impl SavedTrail {
     }
 
     /// Check the trail's bounds: a name not reading as a run's id, a script of 1 to [`MAX_TRAIL_SCRIPT`] bytes, a
-    /// description of at most [`MAX_TRAIL_DESCRIPTION`] characters, at most [`MAX_TRAIL_PHASES`] phases, each one line
-    /// of 1 to [`MAX_TITLE`] characters, and at most [`MAX_TRAIL_WAYPOINTS`] waypoints, each a name of 1 to
-    /// [`MAX_TITLE`] letters, digits and `_`.
+    /// description of one line of at most [`MAX_TRAIL_DESCRIPTION`] characters, at most [`MAX_TRAIL_PHASES`] phases,
+    /// each one line of 1 to [`MAX_TITLE`] characters (no control characters in either), and at most
+    /// [`MAX_TRAIL_WAYPOINTS`] waypoints, each a name of 1 to [`MAX_TITLE`] letters, digits and `_`.
     pub fn check(&self) -> Result<(), Error> {
         let invalid = |why: String| Err(Error::InvalidTrail { name: self.name.clone(), why });
         if Uuid::try_parse(self.name.as_str()).is_ok() {
@@ -211,13 +212,13 @@ impl SavedTrail {
         if self.script.trim().is_empty() || self.script.len() > MAX_TRAIL_SCRIPT {
             return invalid(format!("a script has 1-{MAX_TRAIL_SCRIPT} bytes"));
         }
-        if self.description.chars().count() > MAX_TRAIL_DESCRIPTION {
-            return invalid(format!("a description has at most {MAX_TRAIL_DESCRIPTION} characters"));
+        if self.description.chars().count() > MAX_TRAIL_DESCRIPTION || self.description.chars().any(breaks_line) {
+            return invalid(format!("a description is one line of at most {MAX_TRAIL_DESCRIPTION} characters"));
         }
         if self.phases.len() > MAX_TRAIL_PHASES {
             return invalid(format!("a trail has at most {MAX_TRAIL_PHASES} phases"));
         }
-        let bad_phase = |p: &str| p.trim().is_empty() || p.contains(['\n', '\r']) || p.chars().count() > MAX_TITLE;
+        let bad_phase = |p: &str| p.trim().is_empty() || p.chars().any(breaks_line) || p.chars().count() > MAX_TITLE;
         if self.phases.iter().any(|p| bad_phase(p)) {
             return invalid(format!("a phase is one line of 1-{MAX_TITLE} characters"));
         }
@@ -971,7 +972,10 @@ mod tests {
             SavedTrail { script: " ".to_owned(), ..saved() },
             SavedTrail { script: "x".repeat(MAX_TRAIL_SCRIPT + 1), ..saved() },
             SavedTrail { description: "x".repeat(MAX_TRAIL_DESCRIPTION + 1), ..saved() },
+            SavedTrail { description: "a\nb".to_owned(), ..saved() },
+            SavedTrail { description: "a\u{1b}[8m".to_owned(), ..saved() },
             SavedTrail { phases: vec!["a\nb".to_owned()], ..saved() },
+            SavedTrail { phases: vec!["a\u{1b}]0;title\u{7}".to_owned()], ..saved() },
             SavedTrail { phases: vec!["p".to_owned(); MAX_TRAIL_PHASES + 1], ..saved() },
             SavedTrail { waypoints: vec!["a b".to_owned()], ..saved() },
             SavedTrail { waypoints: vec!["w".to_owned(); MAX_TRAIL_WAYPOINTS + 1], ..saved() },

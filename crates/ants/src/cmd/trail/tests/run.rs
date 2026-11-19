@@ -141,7 +141,7 @@ fn a_follower_prints_each_change_of_a_run_once() {
         args: json!({}),
         answer: CallAnswer::Ok(json!({"built": true})),
     };
-    assert_eq!(follower.entry(&answered).as_deref(), Some("step 0 answered: {…"));
+    assert_eq!(follower.entry(&answered).as_deref(), Some("step 0 answered: { \"built\": true }"));
     assert_eq!(follower.entry(&answered), None);
     let failed = JournalEntry { call: 1, answer: CallAnswer::Error("no".to_owned()), ..answered };
     assert_eq!(follower.entry(&failed).as_deref(), Some("step 1 failed: no"));
