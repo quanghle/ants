@@ -35,7 +35,10 @@ pub enum WorkerError {
     /// Ended by a signal, as a stack overflow's abort, or with an unexpected status.
     #[error("the worker crashed ({status}): {stderr}")]
     Crashed { status: String, stderr: String },
-    /// Exited normally with no readable response.
+    /// Its exit status or its response could not be read.
+    #[error("cannot read the worker: {0}")]
+    Io(String),
+    /// Exited normally with a response that is no [`Response`]: the same request would bring it again.
     #[error("the worker's response is unreadable: {0}")]
     Protocol(String),
     /// Wrote more than any response to the request takes, in bytes; the rest is not read.
@@ -108,7 +111,7 @@ impl Worker {
         if out.as_ref().is_ok_and(|out| out.len() > most) {
             return Err(WorkerError::Oversized(most));
         }
-        let status = status.map_err(|e| WorkerError::Protocol(e.to_string()))?;
+        let status = status.map_err(|e| WorkerError::Io(e.to_string()))?;
         classify(status, &out.map_err(|e| e.to_string()), &err)
     }
 }
@@ -127,7 +130,7 @@ fn classify(status: ExitStatus, out: &Result<Vec<u8>, String>, err: &[u8]) -> Re
         let stderr = String::from_utf8_lossy(&err[err.len().saturating_sub(STDERR_TAIL)..]).trim().to_owned();
         return Err(WorkerError::Crashed { status: status.to_string(), stderr });
     }
-    let out = out.as_ref().map_err(|e| WorkerError::Protocol(e.clone()))?;
+    let out = out.as_ref().map_err(|e| WorkerError::Io(e.clone()))?;
     serde_json::from_slice(out).map_err(|e| WorkerError::Protocol(e.to_string()))
 }
 

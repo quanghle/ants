@@ -1,7 +1,8 @@
 //! Trail runs driven through real `ants subprocess` workers.
 
 use ants_trail::{
-    Answer, Call, Event, Function, JournalEntry, Limit, Limits, Progress, Run, RunError, RunState, Status, Worker,
+    Answer, Call, Event, Function, JournalEntry, Limit, Limits, MAX_DEPTH, Progress, Run, RunError, RunState, Status,
+    Worker,
 };
 use serde_json::{Value, json};
 
@@ -448,4 +449,65 @@ fn a_run_entering_its_trail_at_no_waypoint_of_it_is_refused() {
     assert!(matches!(&refused, Err(RunError::Entry(why)) if why.contains("no waypoint \"review\"")), "{refused:?}");
     let refused = Run::new(&format!("{META}x = 1\n"), Some("x"), json!(null), Limits::default());
     assert!(matches!(&refused, Err(RunError::Entry(why)) if why.contains("no waypoints")), "{refused:?}");
+}
+
+/// `1` inside `depth` lists.
+fn nested(depth: usize) -> Value {
+    (0..depth).fold(json!(1), |inner, _| json!([inner]))
+}
+
+const DEEP: &str = "deep = 1\nfor _ in range(args['n']):\n    deep = [deep]\n";
+const TOO_DEEP: &str = "the value nests lists and dicts more than 100 deep";
+
+#[tokio::test]
+async fn a_calls_args_nest_at_most_max_depth_deep() {
+    let worker = worker();
+    // The args `{"prompt", "schema"}` nest one level more than their schema.
+    let script = format!("{DEEP}await agent('p', schema=deep)\n");
+    let mut run = run(&script, json!({"n": MAX_DEPTH - 1}), Limits::default());
+    let calls = run.start(&worker).await.unwrap().calls;
+    assert_eq!(calls[0].args["schema"], nested(MAX_DEPTH - 1));
+
+    let mut run = self::run(&script, json!({"n": MAX_DEPTH}), Limits::default());
+    run.start(&worker).await.unwrap();
+    assert!(failed(&run).contains(&format!("TypeError: agent() takes JSON values: {TOO_DEEP}")), "{}", failed(&run));
+}
+
+#[tokio::test]
+async fn a_result_nests_at_most_max_depth_deep() {
+    let worker = worker();
+    let script = format!("{DEEP}deep\n");
+    let mut run = run(&script, json!({"n": MAX_DEPTH}), Limits::default());
+    run.start(&worker).await.unwrap();
+    assert_eq!(*done(&run), nested(MAX_DEPTH));
+
+    let mut run = self::run(&script, json!({"n": MAX_DEPTH + 1}), Limits::default());
+    run.start(&worker).await.unwrap();
+    assert!(failed(&run).contains(TOO_DEEP), "{}", failed(&run));
+}
+
+#[tokio::test]
+async fn an_answer_nests_at_most_max_depth_deep() {
+    let worker = worker();
+    let script = "try:\n    r = await agent('p')\nexcept RuntimeError as e:\n    r = str(e)\nr\n";
+    let mut run = run(script, json!(null), Limits::default());
+    let calls = run.start(&worker).await.unwrap().calls;
+    answer(&mut run, &worker, &calls, "p", nested(MAX_DEPTH)).await;
+    assert_eq!(*done(&run), nested(MAX_DEPTH));
+
+    let mut run = self::run(script, json!(null), Limits::default());
+    let calls = run.start(&worker).await.unwrap().calls;
+    answer(&mut run, &worker, &calls, "p", nested(MAX_DEPTH + 1)).await;
+    assert_eq!(*done(&run), json!(format!("the answer is refused: {TOO_DEEP}")));
+}
+
+#[tokio::test]
+async fn a_runs_args_nest_at_most_max_depth_deep() {
+    let worker = worker();
+    let mut run = run("args\n", nested(MAX_DEPTH), Limits::default());
+    run.start(&worker).await.unwrap();
+    assert_eq!(*done(&run), nested(MAX_DEPTH));
+
+    let refused = Run::new(&format!("{META}args\n"), None, nested(MAX_DEPTH + 1), Limits::default());
+    assert!(matches!(&refused, Err(RunError::Args(why)) if why == TOO_DEEP), "{refused:?}");
 }

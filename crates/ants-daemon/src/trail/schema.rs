@@ -4,8 +4,15 @@
 
 use serde_json::{Map, Value};
 
-/// The JSON of `text`: all of it, else its first fenced block (```` ```json ````, or a bare ```` ``` ````).
+/// The JSON of `text`: all of it, else its first fenced block (```` ```json ````, or a bare ```` ``` ````); refused
+/// when nested deeper than a run takes ([`ants_trail::MAX_DEPTH`]).
 pub(super) fn reply_json(text: &str) -> Result<Value, String> {
+    let value = parsed(text)?;
+    ants_trail::check_depth(&value).map_err(|e| format!("the reply's JSON is refused: {e}"))?;
+    Ok(value)
+}
+
+fn parsed(text: &str) -> Result<Value, String> {
     match serde_json::from_str(text.trim()) {
         Ok(value) => Ok(value),
         Err(e) => match fenced(text) {
