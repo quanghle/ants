@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::colony::{short, since};
 use crate::machines::latest_in;
-use crate::text::{excerpt, one_line};
+use crate::text::one_line;
 
 /// What a trail's name is made of.
 const NAMES: &str = "a trail's name is 1-64 of a-z, 0-9 and '-'";
@@ -266,7 +266,7 @@ pub(crate) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
                 }
             };
             let list =
-                |items: &[String]| if items.is_empty() { "-".to_owned() } else { excerpt(&items.join(", "), 40) };
+                |items: &[String]| if items.is_empty() { "-".to_owned() } else { one_line(&items.join(", "), 40) };
             let description =
                 if trail.description.is_empty() { "-".to_owned() } else { one_line(&trail.description, 60) };
             let [counts, latest] = super::ratings::cells(ratings.as_ref());
@@ -360,7 +360,7 @@ pub(crate) fn render(found: &Found, now: DateTime<Utc>) -> String {
         let _ = writeln!(out, "description: {}", one_line(&trail.description, usize::MAX));
     }
     if !trail.phases.is_empty() {
-        let _ = writeln!(out, "phases: {}", trail.phases.join(", "));
+        let _ = writeln!(out, "phases: {}", one_line(&trail.phases.join(", "), usize::MAX));
     }
     if !trail.waypoints.is_empty() {
         let _ = writeln!(out, "waypoints: {}", trail.waypoints.join(", "));

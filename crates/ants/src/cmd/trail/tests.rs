@@ -1,5 +1,6 @@
 mod ratings;
 mod run;
+mod terminal;
 mod tips;
 
 use std::path::Path;
