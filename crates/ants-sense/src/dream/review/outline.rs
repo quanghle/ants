@@ -13,17 +13,28 @@ use super::clean;
 /// The most characters of a suggested trail's name: a [`TrailName`]'s.
 const MAX_NAME_CHARS: usize = 64;
 /// The most characters of what a suggested trail does.
-const MAX_DESCRIPTION_CHARS: usize = 200;
+pub(in crate::dream) const MAX_DESCRIPTION_CHARS: usize = 200;
 /// The most args of a suggested trail.
-const MAX_ARGS: usize = 8;
+pub(in crate::dream) const MAX_ARGS: usize = 8;
 /// The most characters of an arg's name.
-const MAX_ARG_NAME_CHARS: usize = 40;
+pub(in crate::dream) const MAX_ARG_NAME_CHARS: usize = 40;
 /// The most characters of an arg's example, or of a phase.
-const MAX_PART_CHARS: usize = 120;
+pub(in crate::dream) const MAX_PART_CHARS: usize = 120;
 /// The fewest phases of a suggested trail: one phase is no multi-step approach.
-const MIN_PHASES: usize = 2;
+pub(in crate::dream) const MIN_PHASES: usize = 2;
 /// The most phases of a suggested trail.
-const MAX_PHASES: usize = 8;
+pub(in crate::dream) const MAX_PHASES: usize = 8;
+
+/// The bounds [`Outline::read`] holds an outline to, as a sage's packet tells them.
+pub(in crate::dream) fn bounds() -> String {
+    format!(
+        "a name made 1 to {MAX_NAME_CHARS} of a-z, 0-9 and '-'; a description of at most {MAX_DESCRIPTION_CHARS} \
+         characters; at most {MAX_ARGS} args, each named by 1 to {MAX_ARG_NAME_CHARS} of a-z, 0-9 and '_' (other \
+         characters made '_') with a string, number or boolean example of at most {MAX_PART_CHARS} characters; \
+         {MIN_PHASES} to {MAX_PHASES} phases, each of at most {MAX_PART_CHARS} characters; longer text is cut, and an \
+         outline with more args, fewer or more phases, or args whose names clash, is refused with its finding"
+    )
+}
 
 /// A saved trail, as a sage's finding suggests it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,25 +49,37 @@ pub struct Outline {
 
 impl Outline {
     /// The outline `given` as a sage's answer holds it, `{"name", "description", "args": {"key": "example"},
-    /// "phases": ["…"]}`, the name made a [`TrailName`]: none when any part of it breaks a limit, so it is kept or
-    /// refused whole.
+    /// "phases": ["…"]}`, the name made a [`TrailName`] and each arg's an arg name, an example given as a number or a
+    /// boolean taken as its text, and text past its bounds cut ([`bounds`]): none when it holds no name, description or
+    /// phases, more than [`MAX_ARGS`] args or args whose names clash, or phases fewer than [`MIN_PHASES`] or more than
+    /// [`MAX_PHASES`], so it is kept or refused whole.
     pub fn read(given: &Value) -> Option<Self> {
         let object = given.as_object()?;
         let name = name(object.get("name")?.as_str()?)?;
-        let description = fit(object.get("description")?.as_str()?, MAX_DESCRIPTION_CHARS)?;
+        let description = clean(object.get("description")?.as_str()?, MAX_DESCRIPTION_CHARS)?;
         let args = match object.get("args") {
             None | Some(Value::Null) => BTreeMap::new(),
-            Some(Value::Object(args)) if args.len() <= MAX_ARGS => args
-                .iter()
-                .map(|(key, example)| Some((arg_name(key)?, fit(example.as_str()?, MAX_PART_CHARS)?)))
-                .collect::<Option<_>>()?,
+            Some(Value::Object(given)) if given.len() <= MAX_ARGS => {
+                let mut args = BTreeMap::new();
+                for (key, example) in given {
+                    let example = match example {
+                        Value::String(text) => clean(text, MAX_PART_CHARS)?,
+                        Value::Number(_) | Value::Bool(_) => clean(&example.to_string(), MAX_PART_CHARS)?,
+                        _ => return None,
+                    };
+                    if args.insert(arg_name(key)?, example).is_some() {
+                        return None;
+                    }
+                }
+                args
+            }
             Some(_) => return None,
         };
         let phases = object.get("phases")?.as_array()?;
         if !(MIN_PHASES..=MAX_PHASES).contains(&phases.len()) {
             return None;
         }
-        let phases = phases.iter().map(|phase| fit(phase.as_str()?, MAX_PART_CHARS)).collect::<Option<_>>()?;
+        let phases = phases.iter().map(|phase| clean(phase.as_str()?, MAX_PART_CHARS)).collect::<Option<_>>()?;
         Some(Self { name, description, args, phases })
     }
 
@@ -75,26 +98,27 @@ impl Outline {
 /// The sage's `given` name as a [`TrailName`]: lowercased, each run of other characters than `a-z` and `0-9` made a
 /// `-`, its ends trimmed of `-`, cut to [`MAX_NAME_CHARS`].
 fn name(given: &str) -> Option<TrailName> {
-    let mut name = String::new();
+    normalized(given, '-', MAX_NAME_CHARS).parse().ok()
+}
+
+/// The sage's `key` as an arg's name: lowercased, each run of other characters than `a-z`, `0-9` and `_` made a `_`,
+/// its ends trimmed of `_`, cut to [`MAX_ARG_NAME_CHARS`]; none when nothing is left.
+fn arg_name(key: &str) -> Option<String> {
+    Some(normalized(key, '_', MAX_ARG_NAME_CHARS)).filter(|name| !name.is_empty())
+}
+
+/// `given` lowercased, each run of other characters than `a-z`, `0-9` and `joiner` made one `joiner`, its ends trimmed
+/// of it, cut to `max` characters.
+fn normalized(given: &str, joiner: char, max: usize) -> String {
+    let mut normalized = String::new();
     for c in given.to_lowercase().chars() {
-        if c.is_ascii_lowercase() || c.is_ascii_digit() {
-            name.push(c);
-        } else if !name.ends_with('-') {
-            name.push('-');
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == joiner {
+            normalized.push(c);
+        } else if !normalized.ends_with(joiner) {
+            normalized.push(joiner);
         }
     }
-    let mut name = name.trim_matches('-').to_owned();
-    name.truncate(MAX_NAME_CHARS);
-    name.trim_end_matches('-').parse().ok()
-}
-
-fn arg_name(key: &str) -> Option<String> {
-    let valid = (1..=MAX_ARG_NAME_CHARS).contains(&key.len())
-        && key.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-    valid.then(|| key.to_owned())
-}
-
-/// `text` cleaned ([`clean`]): none when blank or past `max` characters.
-fn fit(text: &str, max: usize) -> Option<String> {
-    clean(text, usize::MAX).filter(|text| text.chars().count() <= max)
+    let mut normalized = normalized.trim_matches(joiner).to_owned();
+    normalized.truncate(max);
+    normalized.trim_end_matches(joiner).to_owned()
 }

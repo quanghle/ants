@@ -310,6 +310,11 @@ impl Finding {
     pub fn about(&self) -> Option<&str> {
         self.key.as_deref()?.split_once(':').map(|(_, about)| about)
     }
+
+    /// Whether it is a sage's [`TRAIL`] finding, suggesting a saved trail.
+    pub fn suggests_trail(&self) -> bool {
+        self.advice.as_ref().is_some_and(|advice| advice.kind == TRAIL)
+    }
 }
 
 /// How the ant judged a finding.
@@ -748,17 +753,27 @@ pub async fn finding(items: &dyn Items, id: &str) -> Result<Option<Finding>, Sto
     Ok(dream.findings.into_iter().chain(late).find(|finding| finding.id == id))
 }
 
-/// Why a persona or skill proposal, or a trail saved, made in `context`, in answer to `finding` if it names one, rests
-/// on untrusted text; none when it does not (requirements ants-x39hk.6.5, ants-x39hk.12.5 and ants-x39hk.12.54). It
-/// does when the thread came from a webhook or asks a review, or when the finding it names is untrusted
-/// ([`Finding::untrusted`]). On the thread of a dream whose packet holds untrusted text, an untrusted finding or the
-/// history of an untrusted thread, it does too unless it names a finding of that dream: one naming none, or a finding
-/// the dream does not hold, may answer the untrusted text. The reviews a sage's dream covers hold none: their text is
-/// left out ([`Covered::untrusted_text`]).
+/// What a write checked against the ant's dreams makes ([`ground`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Making {
+    /// A persona or skill proposal.
+    Proposal,
+    /// A trail saved for the colony: on a dream's thread, one of the dream's [`MAX_DREAM_WRITES`].
+    Trail,
+}
+
+/// Why `making`, in `context`, in answer to `finding` if it names one, rests on untrusted text; none when it does not
+/// (requirements ants-x39hk.6.5, ants-x39hk.12.5 and ants-x39hk.12.54). It does when the thread came from a webhook or
+/// asks a review, or when the finding it names is untrusted ([`Finding::untrusted`]). On the thread of a dream whose
+/// packet holds untrusted text, an untrusted finding or the history of an untrusted thread, it does too unless it names
+/// a finding of that dream, for a trail a [`TRAIL`] finding (decision ants-1wq1r): one naming none, a finding the dream
+/// does not hold or, for a trail, a finding of another kind may answer the untrusted text. The reviews a sage's dream
+/// covers hold none: their text is left out ([`Covered::untrusted_text`]).
 pub async fn untrusted(
     items: &dyn Items,
     context: &CallContext,
     finding: Option<&str>,
+    making: Making,
 ) -> Result<Option<String>, StoreError> {
     if !context.trusted() {
         return Ok(Some("the thread came from a webhook or asks a review".into()));
@@ -774,12 +789,15 @@ pub async fn untrusted(
         if untrusted {
             return Ok(Some(format!("finding {id} rests on untrusted text")));
         }
-        if held.is_some() || dream.is_none() {
+        let answers = held.is_some_and(|held| making == Making::Proposal || held.suggests_trail());
+        if answers || dream.is_none() {
             return Ok(None);
         }
     }
     let Some(dream) = dream else { return Ok(None) };
+    let held = |id: &str| dream.findings.iter().any(|finding| finding.id == id);
     let answers = match finding {
+        Some(id) if held(id) => format!("finding {id} is no trail finding"),
         Some(id) => format!("finding {id} is not one of its findings"),
         None => "no finding of it is named in `finding`".into(),
     };
@@ -826,24 +844,24 @@ impl Refused {
     }
 }
 
-/// Why a write made in `context`, in answer to `finding` if it names one, is refused: the finding is no dream's, it
-/// rests on untrusted text ([`untrusted`]) or, when `writes` counts it toward [`MAX_DREAM_WRITES`], it is on the thread
-/// of the last dream, which made them all. None when it is not.
+/// Why `making`, in `context`, in answer to `finding` if it names one, is refused: the finding is no dream's, it rests
+/// on untrusted text ([`untrusted`]) or, for a trail, one of the dream's writes, it is on the thread of the last dream,
+/// which made its [`MAX_DREAM_WRITES`]. None when it is not.
 pub async fn ground(
     items: &dyn Items,
     context: &CallContext,
     finding: Option<&str>,
-    writes: bool,
+    making: Making,
 ) -> Result<Option<Refused>, StoreError> {
     if let Some(id) = finding
         && self::finding(items, id).await?.is_none()
     {
         return Ok(Some(Refused::NotFound(id.to_owned())));
     }
-    if let Some(why) = untrusted(items, context, finding).await? {
+    if let Some(why) = untrusted(items, context, finding, making).await? {
         return Ok(Some(Refused::Untrusted(why)));
     }
-    if writes
+    if making == Making::Trail
         && let Some((dream, _)) = last(items).await?
         && dream.thread.as_ref() == Some(&context.thread)
         && dream.writes_made() >= MAX_DREAM_WRITES
