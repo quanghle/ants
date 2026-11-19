@@ -20,20 +20,20 @@ scheduling reminders, maintenance and dreams, and making a review's checkouts.
 - **Twelve tools**, served by the ants MCP server as `sense_<tool>`, each answering as brief text or, called with
   `json: true`, as JSON ([MCP tools](architecture.md#mcp-tools)):
 
-  | Tool | Use | Section |
-  |---|---|---|
-  | `sense_brief` | Show the thread's brief again. | [Brief](#brief) |
-  | `sense_remember` | Keep a memory. | [Memories](#memories) |
-  | `sense_recall` | Search the memories; read one, the self-model or a relationship record in full. | [Memories](#memories) |
-  | `sense_vote` | Say whether a memory helped, is stale or is wrong. | [Memories](#memories) |
-  | `sense_checkpoint` | Replace the thread's resume register; without changes, read it and the unacknowledged handoffs. | [Resume registers and handoffs](#resume-registers-and-handoffs) |
-  | `sense_handoff` | Record what the thread did and leaves, as its last write. | [Resume registers and handoffs](#resume-registers-and-handoffs) |
-  | `sense_task` | Keep personal tasks; claim one under a fenced lease. | [Work and reminders](#work-and-reminders) |
-  | `sense_promise` | Record a commitment; keep, break, release or renegotiate it. | [Work and reminders](#work-and-reminders) |
-  | `sense_remind` | Set a time or condition reminder; acknowledge, postpone, renew or drop it. | [Work and reminders](#work-and-reminders) |
-  | `sense_identity` | Show who the ant is, and the versions of the persona and of each record; replace the self-model or a relationship record; propose a change of the persona. | [Identity](#identity), [Self-model and relationships](#self-model-and-relationships), [Persona and skills](#persona-and-skills) |
-  | `sense_skill` | Read the skills; propose a new, changed or removed one. | [Persona and skills](#persona-and-skills) |
-  | `sense_dream` | Answer a dream's findings and finish the dream. | [Dreams](#dreams) |
+    | Tool | Use | Section |
+    |---|---|---|
+    | `sense_brief` | Show the thread's brief again. | [Brief](#brief) |
+    | `sense_remember` | Keep a memory. | [Memories](#memories) |
+    | `sense_recall` | Search the memories; read one, the self-model or a relationship record in full. | [Memories](#memories) |
+    | `sense_vote` | Say whether a memory helped, is stale or is wrong. | [Memories](#memories) |
+    | `sense_checkpoint` | Replace the thread's resume register; without changes, read it and the unacknowledged handoffs. | [Resume registers and handoffs](#resume-registers-and-handoffs) |
+    | `sense_handoff` | Record what the thread did and leaves, as its last write. | [Resume registers and handoffs](#resume-registers-and-handoffs) |
+    | `sense_task` | Keep personal tasks; claim one under a fenced lease. | [Work and reminders](#work-and-reminders) |
+    | `sense_promise` | Record a commitment; keep, break, release or renegotiate it. | [Work and reminders](#work-and-reminders) |
+    | `sense_remind` | Set a time or condition reminder; acknowledge, postpone, renew or drop it. | [Work and reminders](#work-and-reminders) |
+    | `sense_identity` | Show who the ant is, and the versions of the persona and of each record; replace the self-model or a relationship record; propose a change of the persona. | [Identity](#identity), [Self-model and relationships](#self-model-and-relationships), [Persona and skills](#persona-and-skills) |
+    | `sense_skill` | Read the skills; propose a new, changed or removed one. | [Persona and skills](#persona-and-skills) |
+    | `sense_dream` | Answer a dream's findings and finish the dream. | [Dreams](#dreams) |
 
 - **The MCP server's instructions**, naming the `sense_*` tools as the ant's provider's and telling `sense_handoff`
   from ants' own `handoff`: `handoff` sends work to the ant itself on another thread, to run there as its own prompt;
