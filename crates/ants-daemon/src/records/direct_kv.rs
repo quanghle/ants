@@ -122,7 +122,7 @@ impl DirectKv {
             }
             Err(e) => return Err(e).with_context(|| format!("reading {key}")),
         };
-        if relayed::stored_relayed(Some(&msg.headers), Read::DirectGet) {
+        if relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::DirectGet) {
             bail!("reading {key}: its entry is a message a stream relayed, not one its writer put");
         }
         let marked = !marker.is_empty()
@@ -354,7 +354,7 @@ impl DirectKv {
                     Some(status) => bail!("reading {filter} of {bucket}: answered {status} {:?}", msg.description),
                 }
                 got += 1;
-                let relayed = relayed::stored_relayed(msg.headers.as_ref(), Read::DirectGet);
+                let relayed = relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::DirectGet);
                 let msg = StreamMessage::try_from(msg).map_err(|e| anyhow!(e))?;
                 seq = msg.sequence + 1;
                 if relayed {

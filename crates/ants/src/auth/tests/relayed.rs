@@ -1,13 +1,14 @@
 //! Messages a stream relayed: an ant stores a message under a key of its own and asks for it by a direct get naming a
 //! reply subject it may not publish to, where the stream sends it with the headers the ant stored. Each reader of such
-//! a subject refuses it.
+//! a subject refuses it. Likewise what the server itself answers such a subject with: the ack of a publish into a
+//! stream, or the status of a direct get finding nothing.
 
 use ants_daemon::bus::relayed;
 use ants_daemon::stream::reading::{self, Reading};
 use ants_daemon::trail::keeper;
 use ants_proto::{
     RunId, SaveTrailRequest, SavedTrail, Saver, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, TrailAction, TrailChange,
-    TrailRequest, inbox_consumer, trail_run_key,
+    TrailRequest, WEBHOOKS_BUCKET, inbox_consumer, trail_run_key, trail_runs_index_key, webhook_marker_subject,
 };
 use async_nats::jetstream::consumer::DeliverPolicy;
 
@@ -152,5 +153,92 @@ async fn a_message_a_stream_relayed_onto_a_subject_an_ant_may_not_publish_is_ref
         .await
         .unwrap();
         assert_eq!(read, [genuine.id], "read back by {reading:?}");
+    }
+}
+
+/// What `client` has the server send onto `onto`: the ack of its publish under `own`, one of its own subjects, as
+/// `{"stream":…,"seq":…}`; returns once the server handled the publish.
+async fn ack_onto(client: &Client, own: &str, onto: &str) {
+    client.publish_with_reply(own.to_owned(), onto.to_owned(), b"{}".to_vec().into()).await.unwrap();
+    client.flush().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_answer_the_server_sent_onto_a_subject_an_ant_or_a_webhook_may_not_publish_is_refused_by_its_reader() {
+    let Some(server) = Server::start() else { return };
+    let (human, dev_a, dev_b, dev_c, hook) = (UserId::human(), p("dev-a"), p("dev-b"), p("dev-c"), p("github"));
+    let (h, h_js) = server.connect(&human).await;
+    let (a, _) = server.connect(&dev_a).await;
+    let (_, b_js) = server.connect(&dev_b).await;
+    h_js.create_key_value(ants_daemon::hub::trails_config()).await.unwrap();
+    h_js.create_key_value(ants_daemon::hub::trail_runs_config()).await.unwrap();
+    crate::webhook::ensure_bucket(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
+    bus::open_stream(&b_js, &dev_b).await.unwrap();
+    let creds = server.dir().join("github.creds");
+    let permissions = Permissions::for_webhook(&hook, &[Destination::Ant(dev_b.clone())]);
+    let kind = crate::credentials::revoke::Kind::Webhook;
+    issue_with(&server.dir().join("auth"), &hook, kind, permissions, &creds).unwrap();
+    let (w, _) = server.watched_with(&hook, &creds).await;
+    let (ant_own, hook_own) = (format!("$KV.{TRAIL_RUNS_BUCKET}.dev-a.x"), format!("$KV.{WEBHOOKS_BUCKET}.github.x"));
+
+    // Another conductor's index of its runs, by an ant: its daemon reads no index of no runs.
+    let index = format!("$KV.{TRAIL_RUNS_BUCKET}.{}", trail_runs_index_key(&dev_b));
+    ack_onto(&a, &ant_own, &index).await;
+    stored(&h, &format!("KV_{TRAIL_RUNS_BUCKET}"), &index).await;
+    let runs = DirectKv::new(&b_js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    assert!(runs.get(trail_runs_index_key(&dev_b)).await.is_err(), "dev-b's daemon refuses it");
+    let listed = crate::machines::latest_in(&h_js, TRAIL_RUNS_BUCKET, &index).await.unwrap();
+    assert!(listed.is_empty(), "a human's CLI skips it");
+
+    // A saved trail, by a webhook: neither a conductor's daemon nor a human's CLI reads one.
+    let saved = format!("$KV.{TRAILS_BUCKET}.deploy");
+    ack_onto(&w, &hook_own, &saved).await;
+    stored(&h, &format!("KV_{TRAILS_BUCKET}"), &saved).await;
+    assert!(DirectKv::whole(&b_js, None, TRAILS_BUCKET).await.unwrap().get("deploy").await.is_err());
+    assert!(crate::machines::latest_in(&h_js, TRAILS_BUCKET, &saved).await.unwrap().is_empty());
+
+    // A webhook marker, by an ant: dev-c is not taken as a webhook on it.
+    let webhooks = Webhooks::new(b_js.clone());
+    let marker = webhook_marker_subject(&dev_c);
+    assert_eq!(webhooks.marked(&dev_c).await, Ok(false));
+    ack_onto(&a, &ant_own, &marker).await;
+    crate::test_support::eventually("the ack is stored and refused", async || webhooks.marked(&dev_c).await.is_err())
+        .await;
+    let error = webhooks.marked(&dev_c).await.unwrap_err();
+    assert!(error.contains("relayed"), "the marker reads as unreadable, not as a webhook's: {error}");
+
+    // A webhook's own marker, unmarked by an ant: a direct get finding nothing answers its asker's reply subject with a
+    // status, which the stream stores as an empty message.
+    let theirs = webhook_marker_subject(&hook);
+    w.publish(theirs.clone(), "github".into()).await.unwrap();
+    w.flush().await.unwrap();
+    crate::test_support::eventually("the marker is put", async || webhooks.marked(&hook).await == Ok(true)).await;
+    let missing = format!("$JS.API.DIRECT.GET.KV_{TRAIL_RUNS_BUCKET}.$KV.{TRAIL_RUNS_BUCKET}.dev-a.missing");
+    a.publish_with_reply(missing, theirs, "".into()).await.unwrap();
+    a.flush().await.unwrap();
+    crate::test_support::eventually("the status is stored and refused", async || {
+        Webhooks::new(b_js.clone()).marked(&hook).await.is_err_and(|error| error.contains("relayed"))
+    })
+    .await;
+
+    // An inbox, by a webhook: no read back of dev-b's inbox takes the ack for a message from the human.
+    let onto = Envelope::new(human.clone(), dev_b.clone(), "relayed").subject();
+    ack_onto(&w, &hook_own, &onto).await;
+    stored(&h, STREAM, &onto).await;
+    let genuine = Envelope::new(human.clone(), dev_b.clone(), "genuine");
+    bus::publish(&h_js, &genuine).await.unwrap();
+    let inbox = subject::inbox_of(&dev_b);
+    for (js, reader, reading) in
+        [(&b_js, inbox_consumer(&dev_b), Reading::Spare), (&h_js, String::new(), Reading::Gets)]
+    {
+        let mut read = Vec::new();
+        reading::read_back(js, &reader, reading, &inbox, DeliverPolicy::All, |_, _, _, payload| {
+            read.push(serde_json::from_slice::<Envelope>(payload).map(|envelope| envelope.id).ok());
+            std::ops::ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(read, [Some(genuine.id)], "read back by {reading:?}");
     }
 }
