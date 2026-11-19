@@ -25,6 +25,8 @@ use crate::secrets::keystore::{self, Store};
 use crate::stream::reading::{self, Reading};
 use crate::sync::MutexExt as _;
 
+pub mod relayed;
+
 /// How long the stream keeps messages, the sessions bucket a thread's session, and the attempts bucket a marker: a
 /// message can be redelivered for as long as the stream keeps it.
 pub const RETENTION: Duration = Duration::from_hours(30 * 24);
@@ -761,6 +763,7 @@ pub async fn caught_up_inbox(
 
 async fn inbox(client: &async_nats::Client, user: &UserId, read_back: Option<LiveInbox>) -> Result<LiveInbox> {
     let live = client.subscribe(subject::inbox_of(user)).await?;
+    let live = live.filter(|msg| std::future::ready(!relayed::heard_relayed(msg)));
     let stored = client.subscribe(subject::stored_inbox(user)).await?;
     let user = user.clone();
     let stored = stored.filter_map(move |msg| std::future::ready(as_published(msg, &user)));

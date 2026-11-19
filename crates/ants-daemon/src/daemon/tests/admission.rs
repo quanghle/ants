@@ -29,6 +29,37 @@ async fn a_forged_sender_is_dead_lettered_unanswered() {
     assert_eq!(bus.unacked().await, 0);
 }
 
+/// A direct get answered onto the inbox subject stores what the asker stored, with the stream's headers after it, on a
+/// subject the asker may not publish to.
+#[tokio::test]
+async fn a_message_a_stream_relayed_is_dead_lettered_unanswered() {
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let thread = ThreadId::generate();
+    let relayed = Envelope::on_thread(thread.clone(), UserId::human(), bus.dev.clone(), "relayed");
+    let mut headers = async_nats::HeaderMap::new();
+    headers.append(async_nats::header::NATS_STREAM, "KV_ants_trail_runs");
+    headers.append(async_nats::header::NATS_SUBJECT, "$KV.ants_trail_runs.dev-b.x");
+    headers.append(async_nats::header::NATS_SEQUENCE, "1");
+    let payload = serde_json::to_vec(&relayed).unwrap();
+    bus.js.publish_with_headers(relayed.subject(), headers, payload.into()).await.unwrap().await.unwrap();
+    bus.send(&thread, "genuine").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        assert_eq!(next_reply(&mut replies).await, (thread.clone(), "genuine".to_owned()));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().answered, ["genuine"]);
+    let letters = dead::list(&bus.stream).await.unwrap();
+    let [(_, letter)] = letters.as_slice() else { panic!("{letters:?}") };
+    assert!(letter.error.contains("relayed by a stream"), "{}", letter.error);
+    assert_eq!(letter.envelope, None, "a relayed envelope is not replayable");
+    assert_eq!(bus.unacked().await, 0);
+}
+
 #[tokio::test]
 async fn an_approval_decision_is_acked_without_a_prompt() {
     let Some((bus, mut replies)) = Bus::start().await else { return };

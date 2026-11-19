@@ -9,6 +9,7 @@ use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 
 use super::{StartRun, Trails, locked};
+use crate::bus::relayed;
 
 /// How long a failed subscription waits before the next try.
 const RESUBSCRIBE: std::time::Duration = std::time::Duration::from_secs(5);
@@ -46,6 +47,10 @@ impl Trails {
     }
 
     async fn answer(&self, message: async_nats::Message, starting: &tokio::sync::Mutex<()>) {
+        if relayed::heard_relayed(&message) {
+            tracing::warn!(subject = %message.subject, "dropping a trail request a stream relayed");
+            return;
+        }
         let request: TrailRequest = match serde_json::from_slice(&message.payload) {
             Ok(request) => request,
             Err(e) => {

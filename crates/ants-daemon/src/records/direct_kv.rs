@@ -16,6 +16,8 @@ use async_nats::jetstream::stream::{DirectGetError, DirectGetErrorKind, Stream};
 use async_nats::{HeaderMap, RequestErrorKind, StatusCode};
 use futures::{StreamExt as _, TryStreamExt as _};
 
+use crate::bus::relayed::{self, Read};
+
 /// The header marking a KV delete or purge, and its values.
 const KV_OPERATION: &str = "KV-Operation";
 const DELETED: [&str; 2] = ["DEL", "PURGE"];
@@ -120,6 +122,9 @@ impl DirectKv {
             }
             Err(e) => return Err(e).with_context(|| format!("reading {key}")),
         };
+        if relayed::stored_relayed(Some(&msg.headers), Read::DirectGet) {
+            bail!("reading {key}: its entry is a message a stream relayed, not one its writer put");
+        }
         let marked = !marker.is_empty()
             && msg.headers.get(KV_OPERATION).is_some_and(|op| op.as_str() == DELETED[0])
             && msg.payload.as_ref() == marker;
@@ -349,8 +354,13 @@ impl DirectKv {
                     Some(status) => bail!("reading {filter} of {bucket}: answered {status} {:?}", msg.description),
                 }
                 got += 1;
+                let relayed = relayed::stored_relayed(msg.headers.as_ref(), Read::DirectGet);
                 let msg = StreamMessage::try_from(msg).map_err(|e| anyhow!(e))?;
                 seq = msg.sequence + 1;
+                if relayed {
+                    tracing::warn!(subject = %msg.subject, "skipping an entry a stream relayed");
+                    continue;
+                }
                 if let Some(key) = msg.subject.strip_prefix(prefix.as_str()).filter(|_| !is_deleted(&msg.headers)) {
                     each(key, &msg.payload);
                 }

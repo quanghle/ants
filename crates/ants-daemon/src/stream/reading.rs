@@ -17,6 +17,8 @@ use async_nats::jetstream::stream::ConsumerCreateStrictErrorKind;
 use async_nats::jetstream::{self, consumer};
 use futures::StreamExt as _;
 
+use crate::bus::relayed::{self, Read};
+
 /// How long a reader consumer left behind by an interrupted read lives on.
 const INACTIVE: Duration = Duration::from_secs(30);
 /// Messages asked for at once.
@@ -235,6 +237,10 @@ async fn read_through(consumer: &consumer::PullConsumer, mut take: impl Take) ->
             got += 1;
             let Ok(info) = msg.info() else { continue };
             let (seq, stored) = (info.stream_sequence, SystemTime::from(info.published));
+            if relayed::stored_relayed(msg.headers.as_ref(), Read::Consumer) {
+                tracing::warn!(subject = %msg.subject, seq, "skipping a message a stream relayed");
+                continue;
+            }
             let msg = async_nats::Message { reply: None, ..msg.message };
             if take.take(seq, stored, msg).await.is_break() {
                 return Ok(());
@@ -347,9 +353,16 @@ async fn read_by_batches(
                 }
             }
             got += 1;
+            let relayed = relayed::stored_relayed(msg.headers.as_ref(), Read::DirectGet);
             let msg = jetstream::message::StreamMessage::try_from(msg).map_err(|e| anyhow::anyhow!(e))?;
             if msg.sequence > last {
                 return Ok(());
+            }
+            if relayed {
+                let (subject, seq) = (&msg.subject, msg.sequence);
+                tracing::warn!(%subject, seq, "skipping a message a stream relayed");
+                at.after(seq);
+                continue;
             }
             let mut headers = async_nats::HeaderMap::new();
             for (name, values) in msg.headers.iter() {

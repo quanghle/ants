@@ -3,6 +3,7 @@
 
 use std::time::{Duration, SystemTime};
 
+use ants_daemon::bus::relayed::{self, Read};
 use ants_proto::{ACCOUNT_HOLDER_KEY, AccountHolder, MACHINES_BUCKET, Machine, MachineRecord, UserId, subject};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::{StatusCode, jetstream};
@@ -116,8 +117,13 @@ async fn timed_after(
                 Some(status) => bail!("reading {bucket}: {status} {:?}", msg.description),
             }
             got += 1;
+            let relayed = relayed::stored_relayed(msg.headers.as_ref(), Read::DirectGet);
             let msg = jetstream::message::StreamMessage::try_from(msg).map_err(|e| anyhow!(e))?;
             seq = msg.sequence + 1;
+            if relayed {
+                tracing::warn!(subject = %msg.subject, "skipping an entry a stream relayed");
+                continue;
+            }
             let deleted = msg.headers.get("KV-Operation").is_some();
             if let Some(key) = msg.subject.strip_prefix(prefix.as_str()).filter(|_| !deleted) {
                 entries.push((key.to_owned(), msg.payload.to_vec(), SystemTime::from(msg.time).into()));

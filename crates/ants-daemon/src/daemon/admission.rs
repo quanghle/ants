@@ -6,6 +6,7 @@ use anyhow::{Result, bail};
 use async_nats::jetstream::{self, AckKind};
 
 use crate::bus;
+use crate::bus::relayed::{self, Read};
 use crate::channel::{self, Channels, Threads, Wake};
 use crate::people::humans::Registry;
 use crate::records::webhooks::Webhooks;
@@ -183,6 +184,11 @@ impl Inbox<'_> {
     /// ([`NatsApprover::offer`]). An owner that is no human is dropped ([`Registry::human_owner`]), so neither the
     /// escalations nor the messages that follow on from this one name it, and so is a creator that is a human.
     pub(super) async fn admit(&self, msg: &jetstream::Message) -> Option<Incoming> {
+        // Its subject pins no sender when a stream relayed it there ([`relayed`]).
+        if relayed::stored_relayed(msg.headers.as_ref(), Read::Consumer) {
+            self.bury_unanswerable(msg, "relayed by a stream, not published by its sender").await;
+            return None;
+        }
         let mut envelope: Envelope = match serde_json::from_slice(&msg.payload) {
             Ok(e) => e,
             Err(e) => {

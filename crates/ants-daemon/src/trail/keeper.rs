@@ -13,6 +13,7 @@ use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use futures::StreamExt as _;
 
+use crate::bus::relayed;
 use crate::records::direct_kv::{DirectKv, Lookup};
 
 /// Queue group of the processes answering trail saves: one of them takes each request.
@@ -104,6 +105,10 @@ pub async fn serve(client: async_nats::Client, js: jetstream::Context, js_domain
 }
 
 async fn respond(client: &async_nats::Client, kv: &DirectKv, msg: async_nats::Message) {
+    if relayed::heard_relayed(&msg) {
+        tracing::warn!(subject = %msg.subject, "dropping a trail save a stream relayed");
+        return;
+    }
     let request = serde_json::from_slice::<SaveTrailRequest>(&msg.payload)
         .map_err(|e| e.to_string())
         .and_then(|r| r.check_subject(&msg.subject).map(|()| r).map_err(|e| e.to_string()));
