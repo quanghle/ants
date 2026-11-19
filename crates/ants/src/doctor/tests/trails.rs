@@ -1,7 +1,7 @@
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     ColonyEntry, PendingCall, Role, RunId, RunLimit, RunState, TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLeg,
-    TrailLimits, TrailRun, TrailSession, UserId, Uuid, trail_session_key,
+    TrailLimits, TrailParent, TrailRun, TrailSession, UserId, Uuid, trail_session_key,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
@@ -167,6 +167,75 @@ fn stuck_runs_name_the_command_resuming_or_stopping_each() {
     let checks = stuck(&many, &[], &colony(&["dev-a"], now), now);
     assert_eq!(checks.len(), MAX_LISTED + 1);
     assert_eq!(shown(&checks[MAX_LISTED..]), [warn("2 more stuck".to_owned(), "ants trail runs".to_owned())]);
+}
+
+/// A child run of `parent` in `state`, answering its call `call`.
+fn child(parent: &TrailRun, call: u32, state: RunState, now: DateTime<Utc>) -> TrailRun {
+    let mut child = record("dev-a", state, 1, now);
+    child.parent = Some(TrailParent { run: parent.run.clone(), call, origin_thread: parent.thread.clone() });
+    child
+}
+
+/// The trail() call `call` a run waits on `child` to answer.
+fn trail_call(call: u32, child: &TrailRun) -> PendingCall {
+    let message = child.run.to_string().parse().unwrap();
+    PendingCall { call, function: TrailFunction::Trail, to: child.conductor.clone(), message, ..step("dev-a") }
+}
+
+#[test]
+fn child_runs_show_only_where_resuming_them_moves_their_parent_on() {
+    let now = Utc::now();
+    let stopped_by = |by: &str| RunState::Stopped { by: p(by) };
+    let on_steps = || failed("the run reached its limit of 50 steps", Some(RunLimit::Steps));
+
+    let parent = record("dev-a", stopped_by("alice"), 1, now);
+    let with_parent = (1..=3).map(|call| child(&parent, call, stopped_by("alice"), now));
+    let mut listed: Vec<TrailRun> = std::iter::once(parent.clone()).chain(with_parent).collect();
+    let checks = stuck(&listed, &[], &colony(&["dev-a"], now), now);
+    assert_eq!(
+        shown(&checks),
+        [warn(
+            format!("run {} of trail deploy, conducted by dev-a, was stopped by alice 30m ago", parent.run),
+            format!("ants trail resume {}", parent.run)
+        )]
+    );
+
+    let failed_parent = record("dev-a", on_steps(), 1, now);
+    let failed_child = child(&failed_parent, 1, on_steps(), now);
+    let checks = stuck(&[failed_parent.clone(), failed_child], &[], &colony(&["dev-a"], now), now);
+    assert_eq!(checks.len(), 1, "{checks:#?}");
+    assert_eq!(checks[0].fix, [format!("ants trail resume {} --steps 100", failed_parent.run)]);
+
+    let done = record("dev-a", RunState::Done { result: json!("shipped") }, 1, now);
+    let went_on = record("dev-a", RunState::Running, 1, now);
+    let waiting = record("dev-a", RunState::Waiting, 1, now);
+    listed = vec![
+        done.clone(),
+        went_on.clone(),
+        waiting.clone(),
+        child(&done, 1, stopped_by("dev-a"), now),
+        child(&done, 2, on_steps(), now),
+        child(&went_on, 1, stopped_by("dev-a"), now),
+        child(&went_on, 2, stopped_by("alice"), now),
+        child(&went_on, 3, on_steps(), now),
+        child(&waiting, 1, stopped_by("alice"), now),
+        child(&record("dev-a", RunState::Running, 1, now), 1, stopped_by("alice"), now),
+    ];
+    let left_behind = &listed[5];
+    let pending = [(went_on.run.clone(), vec![step("dev-a"), trail_call(1, &listed[3]), trail_call(4, left_behind)])];
+    let checks = stuck(&listed, &pending, &colony(&["dev-a"], now), now);
+    assert_eq!(shown(&checks), [(Status::Ok, "no run stuck: 10 kept, 7 unfinished".to_owned(), vec![])]);
+
+    let awaited = &listed[6];
+    let pending = [(went_on.run, vec![trail_call(2, awaited)])];
+    let checks = stuck(&listed, &pending, &colony(&["dev-a"], now), now);
+    assert_eq!(
+        shown(&checks),
+        [warn(
+            format!("run {} of trail deploy, conducted by dev-a, was stopped by alice 30m ago", awaited.run),
+            format!("ants trail resume {}", awaited.run)
+        )]
+    );
 }
 
 /// Put `value` under `key` of [`TRAIL_RUNS_BUCKET`], as the conductor owning the key does.

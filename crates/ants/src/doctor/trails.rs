@@ -96,7 +96,9 @@ pub(super) async fn check_runs(connected: Option<&Connected>, now: DateTime<Utc>
 /// run waits on and the ants of `colony`: a run stopped, or failed on its steps, turns or wall time, which `ants trail
 /// resume` continues (raising that limit) while its wall time may still grow; a run waiting on steps sent to ants not
 /// in the colony, which `ants trail stop` stops; and a run whose conductor is not in the colony, which no command
-/// moves on until a daemon serves the conductor again.
+/// moves on until a daemon serves the conductor again. A child run shows stopped only while its running parent waits on
+/// it, and never failed: one stopped along with its parent resumes with it, a failed one's error answered its parent's
+/// call, which only its parent's resume runs again, and one whose parent ended or went on answers nothing once resumed.
 pub(super) fn stuck(
     listed: &[TrailRun],
     pending: &[(RunId, Vec<PendingCall>)],
@@ -105,6 +107,11 @@ pub(super) fn stuck(
 ) -> Vec<Check> {
     let check = "trail runs";
     let gone = |ant: &ants_proto::UserId| !colony.iter().any(|entry| entry.ant == *ant);
+    let awaited = |run: &TrailRun| {
+        let Some(link) = &run.parent else { return true };
+        let calls = pending.iter().find(|(id, _)| *id == link.run).map_or_default(|(_, calls)| &calls[..]);
+        calls.iter().any(|call| call.call == link.call && call.child().as_ref() == Some(&run.run))
+    };
     let mut found: Vec<Check> = listed
         .iter()
         .filter_map(|run| {
@@ -116,11 +123,15 @@ pub(super) fn stuck(
             let ago = |at: Option<DateTime<Utc>>| short(since(at.unwrap_or(run.updated_at), now));
             let (detail, fix) = match &run.state {
                 RunState::Stopped { by } => {
+                    if !awaited(run) {
+                        return None;
+                    }
                     let wall = wall_past(&run.limits, elapsed)?;
                     let detail =
                         format!("{name}, conducted by {}, was stopped by {by} {} ago", run.conductor, ago(None));
                     (detail, format!("ants trail resume {}{wall}", run.run))
                 }
+                RunState::Failed { .. } if run.parent.is_some() => return None,
                 RunState::Failed { error, .. } => {
                     let raise = raised(run, elapsed)?;
                     let error = error.lines().rfind(|line| !line.trim().is_empty()).unwrap_or_default();
