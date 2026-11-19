@@ -302,7 +302,7 @@ impl Trails {
                 continue;
             }
             let to = if call.function == Function::Trail {
-                match self.refuse_trail(&header, call) {
+                match self.refuse_trail(&header, call).await {
                     None => Ok(self.inner.ant.clone()),
                     Some(error) => Err(error),
                 }
@@ -445,9 +445,11 @@ impl Trails {
 
 impl Trails {
     /// Start the child run of `call`, a trail() call of the run of `slot`, then mark the call sent; a child that cannot
-    /// start answers the call with why.
+    /// start after all, as one of a trail removed since the call was issued, answers the call with why, its step given
+    /// back.
     async fn publish_child(&self, slot: &Slot, header: &TrailRun, call: &PendingCall) -> Result<()> {
         if let Err(error) = self.start_child(header, call).await? {
+            self.give_back_step(slot);
             return self.resolve(slot, header, call, Answer::Error(error), 0).await;
         }
         let sent = {
@@ -477,6 +479,14 @@ pub(super) fn count_steps(header: &mut TrailRun, steps: u32) {
     header.steps = header.steps.saturating_add(steps);
     if let Some(leg) = header.route.last_mut() {
         leg.steps = leg.steps.saturating_add(steps);
+    }
+}
+
+/// Give back `steps` counted for the run of `header` and the leg it is on, not sent after all.
+pub(super) fn uncount_steps(header: &mut TrailRun, steps: u32) {
+    header.steps = header.steps.saturating_sub(steps);
+    if let Some(leg) = header.route.last_mut() {
+        leg.steps = leg.steps.saturating_sub(steps);
     }
 }
 

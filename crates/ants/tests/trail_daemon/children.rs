@@ -102,6 +102,7 @@ async fn a_trail_calling_itself_an_ancestor_or_no_saved_trail_is_refused() {
         ("itself", caught("trail(\"itself\")")),
         ("ping", "await trail(\"pong\")\n".to_owned()),
         ("pong", caught("trail(\"ping\")")),
+        ("unparsable", "def (\n".to_owned()),
     ];
     let saved: Vec<(&str, &str)> = saved.iter().map(|(name, script)| (*name, script.as_str())).collect();
     let lead = conductor_with_saved(&server, &dir, &saved).await;
@@ -120,9 +121,20 @@ async fn a_trail_calling_itself_an_ancestor_or_no_saved_trail_is_refused() {
     assert!(refused.contains(&format!("trail ping is on the route of run {run}, among the calling runs")), "{refused}");
     assert_eq!(lead.header(&run).await.steps, 1, "the refused call counts as no step");
 
-    let run = lead.start(&caught("trail(\"gone\")"), TrailLimits::default()).await;
+    let script = r#"
+out = []
+for name in ["gone", "unparsable"]:
+    try:
+        out.append(await trail(name))
+    except RuntimeError as e:
+        out.append(str(e))
+out
+"#;
+    let run = lead.start(script, TrailLimits::default()).await;
     let refused = lead.result(&run).await;
-    assert!(refused.as_str().unwrap().contains("no trail is saved as gone"), "{refused}");
+    assert!(refused[0].as_str().unwrap().contains("no trail is saved as gone"), "{refused}");
+    assert!(refused[1].as_str().unwrap().to_lowercase().contains("syntax"), "{refused}");
+    assert_eq!(lead.header(&run).await.steps, 0, "calls starting no child run count as no step");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

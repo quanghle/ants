@@ -201,7 +201,8 @@ labelled `trail <name>`. Its steps and turns count against the limits of the roo
 and it ends within the wall time its parent has left. The result of its route answers the call; a child that fails
 raises `RuntimeError: trail <name> failed: <error>` there, which the script may catch. A trail on the route of a calling
 run (the caller, its parent, and so on up to the root), whichever of its legs entered it, is refused: no trail calls
-itself, not even through a goto().
+itself, not even through a goto(). A call that starts no child run, refused so or naming a trail not saved or
+one that does not compile, raises `RuntimeError` naming why and counts as no step.
 
 Stopping or ending a run stops its children, and resuming it resumes them. A child tells its start and end in the notes
 of its own thread, messaging no one; its end note points to resuming its parent.

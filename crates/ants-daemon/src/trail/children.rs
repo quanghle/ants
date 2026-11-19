@@ -11,11 +11,12 @@
 use std::sync::Arc;
 
 use ants_proto::{
-    MAX_TRAIL_ARGS, PendingCall, RunId, RunState, TrailLimits, TrailName, TrailParent, TrailRun, UserId, WaitingStep,
+    PendingCall, RunId, RunState, TrailLeg, TrailLimits, TrailName, TrailParent, TrailRun, UserId, WaitingStep,
 };
-use ants_trail::{Answer, Call};
+use ants_trail::{Answer, Call, Run};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 
 use super::{Leg, Slot, Trails, driver, locked, steps};
 
@@ -29,28 +30,23 @@ pub(super) struct Budget {
 }
 
 impl Trails {
-    /// Why `call`, a trail() call of the run of `header`, raises before any run starts: its arguments do not fit, or it
-    /// names a trail on the route of the run or of one of its ancestors, any leg of it, which would recurse.
-    pub(super) fn refuse_trail(&self, header: &TrailRun, call: &Call) -> Option<String> {
-        let args = match steps::TrailArgs::of(&call.args) {
-            Ok(args) => args,
+    /// Why `call`, a trail() call of the run of `header`, raises before any run starts, counting no step: it names a
+    /// trail on the route of the run or of one of its ancestors, any leg of it, which would recurse, or a child run that
+    /// cannot start, as of a trail not saved or arguments that do not fit.
+    pub(super) async fn refuse_trail(&self, header: &TrailRun, call: &Call) -> Option<String> {
+        let (name, args) = match trail_args(&call.args) {
+            Ok(called) => called,
             Err(e) => return Some(e),
         };
-        let name: TrailName = match args.name.parse() {
-            Ok(name) => name,
-            Err(e) => return Some(format!("trail() names no trail as {:?}: {e}", args.name)),
-        };
-        let size = serde_json::to_vec(&args.args).map_or(usize::MAX, |args| args.len());
-        if size > MAX_TRAIL_ARGS {
-            return Some(format!("the arguments have {size} bytes of JSON; a run takes at most {MAX_TRAIL_ARGS}"));
-        }
         let ancestors = self.ancestors(header);
         let mut callers = std::iter::once(header.clone()).chain(ancestors.iter().map(|slot| slot.header()));
-        let caller = callers.find(|caller| caller.route.iter().any(|leg| leg.trail.as_ref() == Some(&name)))?;
-        Some(format!(
-            "trail {name} is on the route of run {}, among the calling runs: no trail calls itself",
-            caller.run
-        ))
+        if let Some(caller) = callers.find(|caller| caller.route.iter().any(|leg| leg.trail.as_ref() == Some(&name))) {
+            return Some(format!(
+                "trail {name} is on the route of run {}, among the calling runs: no trail calls itself",
+                caller.run
+            ));
+        }
+        self.child_leg(name, args, &child_limits(header, Utc::now())).await.err()
     }
 
     /// Start the child run answering `call`, a trail() call of the run of `parent`, unless it started already: an
@@ -64,21 +60,12 @@ impl Trails {
             }
             return Ok(Ok(()));
         }
-        let args = match steps::TrailArgs::of(&call.args) {
-            Ok(args) => args,
-            Err(e) => return Ok(Err(e)),
-        };
-        let name: TrailName = match args.name.parse() {
-            Ok(name) => name,
-            Err(e) => return Ok(Err(format!("trail() names no trail as {:?}: {e}", args.name))),
-        };
-        let script = match self.inner.saved.script(&name).await {
-            Ok(script) => script,
+        let (name, args) = match trail_args(&call.args) {
+            Ok(called) => called,
             Err(e) => return Ok(Err(e)),
         };
         let limits = child_limits(parent, Utc::now());
-        let leg = Leg { trail: Some(name), script, at: None, args: args.args, first_call: 0 };
-        let (leg, engine, session) = match leg.prepare(&limits) {
+        let (leg, engine, session) = match self.child_leg(name, args, &limits).await {
             Ok(prepared) => prepared,
             Err(e) => return Ok(Err(e)),
         };
@@ -103,6 +90,31 @@ impl Trails {
         };
         self.launch(header, engine, session).await?;
         Ok(Ok(()))
+    }
+
+    /// The first leg of a child run of the saved trail `name` with `args` as its input under `limits`, its run and its
+    /// session as JSON; or why it cannot start.
+    async fn child_leg(
+        &self,
+        name: TrailName,
+        args: Value,
+        limits: &TrailLimits,
+    ) -> Result<(TrailLeg, Run, String), String> {
+        let script = self.inner.saved.script(&name).await?;
+        Leg { trail: Some(name), script, at: None, args, first_call: 0 }.prepare(limits)
+    }
+
+    /// Give back the step counted for a trail() call of the run of `slot` whose child run did not start, to the run and
+    /// its ancestors.
+    pub(super) fn give_back_step(&self, slot: &Slot) {
+        let header = {
+            let mut book = slot.book();
+            driver::uncount_steps(&mut book.header, 1);
+            book.header.clone()
+        };
+        for ancestor in self.ancestors(&header) {
+            driver::uncount_steps(&mut ancestor.book().header, 1);
+        }
     }
 
     /// Answer the call `child`, ended, answers: with its result, or with an error naming its trail and its own. Its
@@ -308,6 +320,13 @@ impl Trails {
             }
         }
     }
+}
+
+/// The saved trail the arguments `args` of a trail() call name, and the input they give its run.
+fn trail_args(args: &Value) -> Result<(TrailName, Value), String> {
+    let args = steps::TrailArgs::of(args)?;
+    let name = args.name.parse().map_err(|e| format!("trail() names no trail as {:?}: {e}", args.name))?;
+    Ok((name, args.args))
 }
 
 /// The limits of a child run of the run of `parent` started at `at`: the parent's, its wall time cut to what the parent
