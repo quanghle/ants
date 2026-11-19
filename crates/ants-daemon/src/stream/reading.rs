@@ -237,7 +237,7 @@ async fn read_through(consumer: &consumer::PullConsumer, mut take: impl Take) ->
             got += 1;
             let Ok(info) = msg.info() else { continue };
             let (seq, stored) = (info.stream_sequence, SystemTime::from(info.published));
-            if relayed::stored_relayed(msg.headers.as_ref(), Read::Consumer) {
+            if relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::Consumer) {
                 tracing::warn!(subject = %msg.subject, seq, "skipping a message a stream relayed");
                 continue;
             }
@@ -293,9 +293,6 @@ async fn read_by_gets(
 /// Messages asked for at once by a direct get, and the bytes they come to at most (a larger message comes alone).
 const DIRECT_BATCH: usize = 256;
 const DIRECT_BATCH_BYTES: usize = 4 << 20;
-/// The headers a direct get adds to each message, which a read hands on without, as the message was published.
-const DIRECT_HEADERS: [&str; 6] =
-    ["Nats-Stream", "Nats-Subject", "Nats-Sequence", "Nats-Time-Stamp", "Nats-Num-Pending", "Nats-Last-Sequence"];
 const NUM_PENDING: &str = "Nats-Num-Pending";
 
 /// A batched direct get: up to `batch` messages on `next_by_subj`, the first at or after `seq`, or stored at or after
@@ -353,7 +350,7 @@ async fn read_by_batches(
                 }
             }
             got += 1;
-            let relayed = relayed::stored_relayed(msg.headers.as_ref(), Read::DirectGet);
+            let relayed = relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::DirectGet);
             let msg = jetstream::message::StreamMessage::try_from(msg).map_err(|e| anyhow::anyhow!(e))?;
             if msg.sequence > last {
                 return Ok(());
@@ -366,7 +363,7 @@ async fn read_by_batches(
             }
             let mut headers = async_nats::HeaderMap::new();
             for (name, values) in msg.headers.iter() {
-                if !DIRECT_HEADERS.iter().any(|h| AsRef::<str>::as_ref(name).eq_ignore_ascii_case(h)) {
+                if !relayed::DIRECT_HEADERS.iter().any(|h| AsRef::<str>::as_ref(name).eq_ignore_ascii_case(h)) {
                     values.iter().for_each(|value| headers.append(name.clone(), value.clone()));
                 }
             }

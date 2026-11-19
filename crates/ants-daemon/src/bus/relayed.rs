@@ -6,12 +6,25 @@
 //! `Nats-Stream`, `Nats-Subject` and `Nats-Sequence` naming where it was stored, after those its writer stored; a
 //! consumer's delivery, on a reply or deliver subject its creator chose, carries a `$JS.` reply subject. No client
 //! publishes either, so readers of what subjects pin take neither as the message it claims to be.
+//!
+//! The server answers a reply subject in other ways as well, each from inside the account and so into any stream
+//! capturing the subject: a publish into a stream is acked there (`{"stream":…,"seq":…}`, or `{"error":…}`), a
+//! JetStream API request answered (`{"type":"io.nats.jetstream.api.v1.…",…}`), a consumer's ack of a message acked
+//! (an empty message), and a direct get finding nothing told so by a status, which a stream stores as an empty message,
+//! without the status. None carries a header, so a stored message with no header of its own and the payload of such
+//! an answer is taken as the server's, not its writer's; writers store none of those.
 
 use async_nats::header::{NATS_SEQUENCE, NATS_STREAM, NATS_SUBJECT};
 use async_nats::{HeaderMap, HeaderName, Message};
+use serde_json::Value;
 
 /// The headers a stream adds to each message it sends to a direct get's reply subject.
 const STREAM_HEADERS: [HeaderName; 3] = [NATS_STREAM, NATS_SUBJECT, NATS_SEQUENCE];
+/// Every header a direct get adds, a batched one's included.
+pub const DIRECT_HEADERS: [&str; 6] =
+    ["Nats-Stream", "Nats-Subject", "Nats-Sequence", "Nats-Time-Stamp", "Nats-Num-Pending", "Nats-Last-Sequence"];
+/// The fields of a publish's ack, or of its refusal.
+const ACK_FIELDS: [&str; 8] = ["stream", "seq", "domain", "duplicate", "val", "batch", "count", "error"];
 
 /// How a stored message was read back, which tells the headers the read itself added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,15 +41,39 @@ pub fn heard_relayed(msg: &Message) -> bool {
     msg.reply.as_deref().is_some_and(|reply| reply.starts_with("$JS.")) || carries(msg.headers.as_ref(), 0)
 }
 
-/// Whether a stored message whose headers, as read back the way `read` says, are `headers` was stored as a stream sent
-/// it: its headers carry one of the stream's headers more often than the read added them.
-pub fn stored_relayed(headers: Option<&HeaderMap>, read: Read) -> bool {
-    carries(headers, usize::from(read == Read::DirectGet))
+/// Whether a stored message with `headers` and `payload`, read back the way `read` says, was stored as the server or a
+/// stream sent it rather than as its writer put it: its headers carry one of the stream's headers more often than the
+/// read added them, or it carries no header of its own and its payload is one of the server's answers.
+pub fn stored_relayed(headers: Option<&HeaderMap>, payload: &[u8], read: Read) -> bool {
+    carries(headers, usize::from(read == Read::DirectGet)) || (!has_own_header(headers, read) && is_answer(payload))
 }
 
 /// Whether `headers` carry any of the stream's headers more than `added` times.
 fn carries(headers: Option<&HeaderMap>, added: usize) -> bool {
     headers.is_some_and(|headers| STREAM_HEADERS.iter().any(|name| headers.get_all(name.clone()).count() > added))
+}
+
+/// Whether `headers` hold any header the read did not add.
+fn has_own_header(headers: Option<&HeaderMap>, read: Read) -> bool {
+    headers.is_some_and(|headers| {
+        headers.iter().any(|(name, _)| {
+            let name: &str = name.as_ref();
+            read == Read::Consumer || !DIRECT_HEADERS.iter().any(|added| name.eq_ignore_ascii_case(added))
+        })
+    })
+}
+
+/// Whether `payload` is one the server answers a reply subject with: empty (a consumer's ack of an ack), a publish's
+/// ack or refusal, or a JetStream API answer.
+fn is_answer(payload: &[u8]) -> bool {
+    if payload.is_empty() {
+        return true;
+    }
+    let Ok(Value::Object(fields)) = serde_json::from_slice::<Value>(payload) else { return false };
+    let api = fields.get("type").and_then(Value::as_str).is_some_and(|kind| kind.starts_with("io.nats."));
+    let acked = fields.get("stream").is_some_and(Value::is_string);
+    let refused = fields.get("error").is_some_and(|error| error.get("code").is_some());
+    api || ((acked || refused) && fields.keys().all(|field| ACK_FIELDS.contains(&field.as_str())))
 }
 
 #[cfg(test)]
@@ -73,18 +110,51 @@ mod tests {
         assert!(heard_relayed(&message(Some("$JS.ACK.ANTS.notes-dev-a.1.7.7.0.0"), &[])), "a consumer's delivery");
     }
 
+    fn relayed(pairs: &[(&str, &str)], payload: &str, read: Read) -> bool {
+        stored_relayed((!pairs.is_empty()).then(|| headers(pairs)).as_ref(), payload.as_bytes(), read)
+    }
+
+    const GET: [(&str, &str); 4] = [
+        ("Nats-Stream", "KV_ants_trails"),
+        ("Nats-Subject", "$KV.ants_trails.deploy"),
+        ("Nats-Sequence", "7"),
+        ("Nats-Time-Stamp", "2026-11-20T00:00:00Z"),
+    ];
+
     #[test]
     fn a_stored_message_is_relayed_with_more_stream_headers_than_its_read_added() {
-        let read_back = headers(&[("Nats-Stream", "KV_ants_trails"), ("Nats-Subject", "$KV.ants_trails.deploy")]);
-        assert!(!stored_relayed(Some(&read_back), Read::DirectGet), "the get's own");
-        assert!(stored_relayed(Some(&read_back), Read::Consumer), "none of a consumer's");
-        assert!(!stored_relayed(None, Read::Consumer));
-        let forged = headers(&[
+        assert!(!relayed(&GET, "{}", Read::DirectGet), "the get's own");
+        assert!(relayed(&GET, "{}", Read::Consumer), "none of a consumer's");
+        assert!(!relayed(&[], "{}", Read::Consumer));
+        let forged = [
             ("Nats-Stream", "KV_ants_trail_runs"),
             ("Nats-Subject", "$KV.ants_trail_runs.dev-a.x"),
             ("Nats-Stream", "KV_ants_trails"),
             ("Nats-Subject", "$KV.ants_trails.deploy"),
-        ]);
-        assert!(stored_relayed(Some(&forged), Read::DirectGet), "stored as a direct get answered");
+        ];
+        assert!(relayed(&forged, "{}", Read::DirectGet), "stored as a direct get answered");
+    }
+
+    #[test]
+    fn a_stored_message_with_no_header_of_its_own_is_the_servers_with_the_payload_of_an_answer() {
+        for read in [Read::DirectGet, Read::Consumer] {
+            let pairs: &[(&str, &str)] = if read == Read::DirectGet { &GET } else { &[] };
+            assert!(relayed(pairs, r#"{"stream":"KV_ants_trail_runs","seq":2}"#, read), "an ack");
+            assert!(relayed(pairs, r#"{"stream":"ANTS","domain":"hub","seq":2,"duplicate":true}"#, read));
+            assert!(relayed(pairs, r#"{"error":{"code":400,"err_code":10071}}"#, read), "a refusal");
+            let api = r#"{"type":"io.nats.jetstream.api.v1.stream_info_response","total":0}"#;
+            assert!(relayed(pairs, api, read), "a JetStream API answer");
+            assert!(relayed(pairs, "", read), "an ack of an ack, or a status");
+            assert!(!relayed(pairs, r#"{"runs":[]}"#, read), "a record");
+            assert!(!relayed(pairs, r#"{"stream":"x","seq":2,"runs":[]}"#, read), "a record with more");
+            assert!(!relayed(pairs, r#"{"type":"save"}"#, read));
+            assert!(!relayed(pairs, r#"{"error":"no such ant"}"#, read), "a call's answer");
+            assert!(!relayed(pairs, r#"{"seq":2}"#, read));
+            assert!(!relayed(pairs, "not json", read));
+        }
+        let mut own = GET.to_vec();
+        own.push(("KV-Operation", "DEL"));
+        assert!(!relayed(&own, "", Read::DirectGet), "a delete marker");
+        assert!(!relayed(&[("Nats-Msg-Id", "1")], r#"{"stream":"x","seq":1}"#, Read::Consumer), "a header of its own");
     }
 }

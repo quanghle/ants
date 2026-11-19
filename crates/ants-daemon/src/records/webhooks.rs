@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use ants_proto::{UserId, WEBHOOKS_BUCKET, webhook_marker_subject};
-use async_nats::jetstream::{self, stream::DirectGetErrorKind};
+use ants_proto::{UserId, WEBHOOKS_BUCKET, webhook_marker_key};
+use async_nats::jetstream;
 
+use crate::records::direct_kv::{DirectKv, Lookup};
 use crate::sync::MutexExt as _;
 
 /// How long a marker found is trusted before it is read again.
@@ -59,15 +60,12 @@ impl Webhooks {
     }
 
     async fn read(&self, sender: &UserId) -> Result<bool, String> {
-        let bucket = match self.js.get_stream_no_info(format!("KV_{WEBHOOKS_BUCKET}")).await {
-            Ok(bucket) => bucket,
-            Err(e) => return Err(e.to_string()),
-        };
-        match bucket.direct_get_last_for_subject(webhook_marker_subject(sender)).await {
-            // A deleted or purged marker is stored empty.
-            Ok(marker) => Ok(!marker.payload.is_empty()),
-            Err(e) if e.kind() == DirectGetErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e.to_string()),
+        let bucket = DirectKv::new(&self.js, None, WEBHOOKS_BUCKET).await.map_err(|e| format!("{e:#}"))?;
+        match bucket.lookup(webhook_marker_key(sender)).await {
+            Ok(Lookup::Value(marker)) => Ok(!marker.is_empty()),
+            Ok(Lookup::NoValue) => Ok(false),
+            Ok(Lookup::NoBucket) => Err(format!("there is no bucket {WEBHOOKS_BUCKET}")),
+            Err(e) => Err(format!("{e:#}")),
         }
     }
 }

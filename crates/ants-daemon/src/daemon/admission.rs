@@ -185,7 +185,7 @@ impl Inbox<'_> {
     /// escalations nor the messages that follow on from this one name it, and so is a creator that is a human.
     pub(super) async fn admit(&self, msg: &jetstream::Message) -> Option<Incoming> {
         // Its subject pins no sender when a stream relayed it there ([`relayed`]).
-        if relayed::stored_relayed(msg.headers.as_ref(), Read::Consumer) {
+        if relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::Consumer) {
             self.bury_unanswerable(msg, "relayed by a stream, not published by its sender").await;
             return None;
         }
