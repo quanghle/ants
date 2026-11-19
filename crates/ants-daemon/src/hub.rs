@@ -475,6 +475,15 @@ pub async fn new_incarnation(js: &jetstream::Context, js_domain: Option<&JsDomai
     identities.put(INCARNATION_KEY, value).await.context("writing the incarnation marker of bucket ants_identities")
 }
 
+/// Create the KV bucket of `object` as [`init`] does for credentials that do not get its stream info: one already there
+/// as this version leaves it, its rollups denied, stays as it is, and one there allowing them gets them denied.
+pub async fn ensure_unseen_bucket(js: &jetstream::Context, object: Object) -> Result<()> {
+    if object.bucket().is_none() {
+        bail!("{object} is no KV bucket");
+    }
+    Box::pin(object.create(js, false)).await
+}
+
 /// The KV bucket of `object`, created as `ants init` does when missing.
 pub async fn ensure_bucket(js: &jetstream::Context, object: Object) -> Result<kv::Store> {
     let bucket = object.bucket().with_context(|| format!("{object} is no KV bucket"))?;
