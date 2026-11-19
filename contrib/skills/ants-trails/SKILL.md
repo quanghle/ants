@@ -100,8 +100,9 @@ Nothing else of the host is reachable: these names are defined before the script
   several, one line per question, `title: answer`. Set `"free_text": False` to compare the answer with a label.
 - `await trail(name, args=None)`: one step, answered by a child run of the saved trail `name`, started at its start
   with `args` as its input, on a thread of its own spun off the run's, for the run's owner; returns its result. Its
-  steps and turns count against the run's limits. A trail already running among the calling runs is refused: no trail
-  calls itself, directly or through others. A child run that fails raises `RuntimeError: trail <name> failed: …`.
+  steps and turns count against the run's limits. A trail on the route of a calling run, whichever of its legs entered it,
+  is refused: no trail calls itself, directly, through others or through a goto(). A child run that fails raises
+  `RuntimeError: trail <name> failed: …`.
 - `await goto(trail=None, at=None, state=None)`: ends the run's leg here and goes on in the saved trail `trail` (the
   leg's own script without it), at its waypoint `at` (its start, its first waypoint, without it), with `state` as
   `args`. It never returns: a goto taken ends the leg, and one refused raises `RuntimeError` naming why

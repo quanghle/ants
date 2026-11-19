@@ -30,7 +30,7 @@ pub(super) struct Budget {
 
 impl Trails {
     /// Why `call`, a trail() call of the run of `header`, raises before any run starts: its arguments do not fit, or it
-    /// names the trail of the run or of one of its ancestors, which would recurse.
+    /// names a trail on the route of the run or of one of its ancestors, any leg of it, which would recurse.
     pub(super) fn refuse_trail(&self, header: &TrailRun, call: &Call) -> Option<String> {
         let args = match steps::TrailArgs::of(&call.args) {
             Ok(args) => args,
@@ -46,8 +46,11 @@ impl Trails {
         }
         let ancestors = self.ancestors(header);
         let mut callers = std::iter::once(header.clone()).chain(ancestors.iter().map(|slot| slot.header()));
-        let caller = callers.find(|caller| caller.trail() == Some(&name))?;
-        Some(format!("trail {name} already runs among the calling runs, as run {}: no trail calls itself", caller.run))
+        let caller = callers.find(|caller| caller.route.iter().any(|leg| leg.trail.as_ref() == Some(&name)))?;
+        Some(format!(
+            "trail {name} is on the route of run {}, among the calling runs: no trail calls itself",
+            caller.run
+        ))
     }
 
     /// Start the child run answering `call`, a trail() call of the run of `parent`, unless it started already: an

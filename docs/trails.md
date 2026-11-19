@@ -199,8 +199,9 @@ conductor's `~/.ants/trails`; never an inline script), started at its start with
 runs it as the parent's, with the parent's owner and origin, on a spin-off of the parent's thread, the step's thread,
 labelled `trail <name>`. Its steps and turns count against the limits of the root run, the run no other run started,
 and it ends within the wall time its parent has left. The result of its route answers the call; a child that fails
-raises `RuntimeError: trail <name> failed: <error>` there, which the script may catch. A trail already running among
-the calling runs (the caller's current leg, its parent's, and so on) is refused: no trail calls itself.
+raises `RuntimeError: trail <name> failed: <error>` there, which the script may catch. A trail on the route of a calling
+run (the caller, its parent, and so on up to the root), whichever of its legs entered it, is refused: no trail calls
+itself, not even through a goto().
 
 Stopping or ending a run stops its children, and resuming it resumes them. A child tells its start and end in the notes
 of its own thread, messaging no one; its end note points to resuming its parent.

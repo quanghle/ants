@@ -153,7 +153,8 @@ impl<'a> Drive<'a> {
         Self { worker, trails, faults, steps: 0, refused: 0, routes: Vec::new(), children: 0, events: Vec::new() }
     }
 
-    /// Runs `trail` with `args` to its end, `callers` the trails of the runs whose trail() steps it answers.
+    /// Runs `trail` with `args` to its end, `callers` the trails on the routes of the runs whose trail() steps it
+    /// answers.
     async fn run(&mut self, trail: &str, args: Value, callers: &[String]) -> Status {
         let mut leg = trail.to_owned();
         let mut run = self.leg(trail, None, args, 0);
@@ -181,7 +182,7 @@ impl<'a> Drive<'a> {
                 },
                 Function::Trail => {
                     let mut callers = callers.to_vec();
-                    callers.push(leg.clone());
+                    callers.extend(route.iter().map(|(trail, _)| trail.clone()));
                     Box::pin(self.child(&callers, &call)).await
                 }
                 Function::Agent | Function::Human => {
@@ -263,7 +264,7 @@ impl<'a> Drive<'a> {
         }
         let name = args["name"].as_str().unwrap_or_else(|| panic!("{caller}: trail name {}", call.args));
         if callers.iter().any(|caller| caller == name) {
-            return Answer::Error(format!("trail {name} already runs among the calling runs: no trail calls itself"));
+            return Answer::Error(format!("trail {name} is on the route of a calling run: no trail calls itself"));
         }
         self.children += 1;
         match self.run(name, args.get("args").cloned().unwrap_or(Value::Null), callers).await {

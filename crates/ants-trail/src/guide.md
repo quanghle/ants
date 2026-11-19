@@ -9,8 +9,8 @@ the result; the top level then holds only meta, imports, definitions and constan
   reply's text, or with `schema=` (a JSON Schema dict) the reply's JSON, asked for again at most twice on a mismatch.
 - `await human(questions)`: asks the run's owner as ask_human does (1-4 `{"question", "options": [2-9 labels]}`);
   returns the answer's text, for one question the label picked.
-- `await trail(name, args=None)`: one step answered by a child run of saved trail `name` on a spin-off thread (no
-  recursion); returns its result; its steps and turns count against the root run's limits.
+- `await trail(name, args=None)`: one step answered by a child run of saved trail `name` on a spin-off thread (none
+  on a calling run's route); returns its result; its steps and turns count against the root run's limits.
 - `await goto(trail=None, at=None, state=None)`: ends this leg where called (its steps waited on dropped) and goes on
   in saved trail `trail` (this one without it) at waypoint `at` (its start without it), `state` (JSON) its `args`. A
   run enters each (trail, waypoint) once: a goto to one entered before, or to one missing, raises RuntimeError, to

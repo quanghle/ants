@@ -109,17 +109,54 @@ async fn a_trail_calling_itself_an_ancestor_or_no_saved_trail_is_refused() {
     let run = lead.start_saved("itself", human_origin(), TrailLimits::default(), ThreadId::generate()).await;
     let refused = lead.result(&run).await;
     let refused = refused.as_str().unwrap();
-    assert!(refused.contains(&format!("trail itself already runs among the calling runs, as run {run}")), "{refused}");
+    assert!(
+        refused.contains(&format!("trail itself is on the route of run {run}, among the calling runs")),
+        "{refused}"
+    );
 
     let run = lead.start_saved("ping", human_origin(), TrailLimits::default(), ThreadId::generate()).await;
     let refused = lead.result(&run).await;
     let refused = refused.as_str().unwrap();
-    assert!(refused.contains(&format!("trail ping already runs among the calling runs, as run {run}")), "{refused}");
+    assert!(refused.contains(&format!("trail ping is on the route of run {run}, among the calling runs")), "{refused}");
     assert_eq!(lead.header(&run).await.steps, 1, "the refused call counts as no step");
 
     let run = lead.start(&caught("trail(\"gone\")"), TrailLimits::default()).await;
     let refused = lead.result(&run).await;
     assert!(refused.as_str().unwrap().contains("no trail is saved as gone"), "{refused}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_trail_any_leg_of_a_calling_run_went_through_is_refused() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-recursion-route");
+    let caught = |call: &str| format!("try:\n    r = await {call}\nexcept RuntimeError as e:\n    r = str(e)\nr\n");
+    let saved = [
+        ("outer", "await trail(\"inner\")\n".to_owned()),
+        ("inner", "await goto(\"onward\")\n".to_owned()),
+        ("onward", caught("trail(\"outer\")")),
+        ("first", "await goto(\"second\")\n".to_owned()),
+        ("second", caught("trail(\"first\")")),
+    ];
+    let saved: Vec<(&str, &str)> = saved.iter().map(|(name, script)| (*name, script.as_str())).collect();
+    let lead = conductor_with_saved(&server, &dir, &saved).await;
+
+    let run = lead.start_saved("outer", human_origin(), TrailLimits::default(), ThreadId::generate()).await;
+    let refused = lead.result(&run).await;
+    let refused = refused.as_str().unwrap();
+    let recursion = format!("trail outer is on the route of run {run}, among the calling runs: no trail calls itself");
+    assert!(refused.contains(&recursion), "an ancestor's trail, called from a leg a goto() went to: {refused}");
+    assert_eq!(lead.header(&run).await.steps, 1, "the refused call counts as no step");
+
+    let run = lead.start_saved("first", human_origin(), TrailLimits::default(), ThreadId::generate()).await;
+    let refused = lead.result(&run).await;
+    let refused = refused.as_str().unwrap();
+    assert!(
+        refused.contains(&format!("trail first is on the route of run {run}")),
+        "the run's own earlier leg: {refused}"
+    );
+    assert_eq!(lead.header(&run).await.steps, 0);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
