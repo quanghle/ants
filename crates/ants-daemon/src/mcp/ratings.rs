@@ -1,7 +1,8 @@
 //! Rating the runs an ant conducts and finding the colony's saved trails by those ratings ([`crate::trail::Ratings`]):
 //! `rate_trail` rates each saved trail a run took, or was saved from, for the task it served; `find_trails` ranks the
 //! saved trails for a task by a draw from their ratings on matching tasks. A thread a webhook or schedule started
-//! rates only the run reporting on it, the one its run's end invites a rating of; it finds trails as any thread does.
+//! rates only the run reporting on it, the one its run's end invites a rating of, and the turn of that invitation
+//! ([`ants_proto::Envelope::rating_of`]) that run alone; it finds trails as any thread does.
 
 use std::fmt::Write as _;
 
@@ -24,7 +25,8 @@ use crate::trail::{RatedTrail, SavedEntry, age, clip};
 const NO_TRAILS: &str = "this ant conducts no trails: the bus keeps no trail runs";
 /// Why a rating is refused on an untrusted thread.
 const UNTRUSTED: &str = "this thread is untrusted: a webhook or schedule started it, or the trail run whose step it \
-                         answers; from it, only the run reporting on it is rated";
+                         answers; from it, only the run reporting on it is rated, and while an invitation to rate one \
+                         is handled, only that one";
 /// Most characters of a rating's reason `find_trails` quotes.
 const MAX_REASON_SHOWN: usize = 200;
 
@@ -66,7 +68,8 @@ impl Hub {
         if matches!(header.state, RunState::Running | RunState::Waiting) {
             return Err(format!("run {run} has not ended: a run is rated once it ends or is stopped"));
         }
-        if header.thread != *thread && !self.trusted(thread, &current).await? {
+        let uninvited = current.rating_of.as_ref().is_some_and(|invited| *invited != run);
+        if (header.thread != *thread || uninvited) && !self.trusted(thread, &current).await? {
             return Err(UNTRUSTED.to_owned());
         }
         let rated = trails.rate(&header, outcome, task, why).await?;

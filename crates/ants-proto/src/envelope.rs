@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     Answer, ApprovalDecision, ApprovalRequest, Attachment, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans,
-    Questions, Role, Sealed, ThreadId, TrailStart, TrailStep, UserId, subject,
+    Questions, Role, RunId, Sealed, ThreadId, TrailStart, TrailStep, UserId, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -160,6 +160,12 @@ pub struct Envelope {
     /// [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail_start: Option<Box<TrailStart>>,
+    /// The trail run whose end the message invites its conductor to rate, on the conductor's message to itself on the
+    /// run's thread: the conductor's daemon, finding it is that invitation, lets `rate_trail` through the thread's
+    /// narrowed tool rules ([`Envelope::allow`]) for its turn, which rates that run alone. Only the conductor's daemon
+    /// sets it. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating_of: Option<RunId>,
     /// On a message from an ant narrowed to [`REVIEW_ALLOW`], the dream whose review it asks for and what is new
     /// since the sender's last review in the verdicts and outcomes of the recipient's earlier findings for it: the
     /// recipient's daemon tells the recipient's sense, which keeps a record of each review. Never copied by
@@ -433,6 +439,7 @@ impl Envelope {
             review_commits: Vec::new(),
             trail_step: None,
             trail_start: None,
+            rating_of: None,
             review_outcomes: None,
             sent_at: Utc::now(),
         }
@@ -621,6 +628,7 @@ impl Envelope {
             review_commits: Vec::new(),
             trail_step: None,
             trail_start: None,
+            rating_of: None,
             review_outcomes: None,
             sent_at: Utc::now(),
         })

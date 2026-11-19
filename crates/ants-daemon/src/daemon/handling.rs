@@ -82,7 +82,7 @@ impl Inbox<'_> {
         // Taken up before anything is done for it, unless a human withdrew it first (`ants withdraw`).
         let result = match self.take_up(envelope).await {
             Ok(Some(withdrawal)) => self.withdrawn(&incoming, &msg, seq, &withdrawal).await,
-            Ok(None) => self.take(&mut incoming, &msg, seq, attempt).await,
+            Ok(None) => Box::pin(self.take(&mut incoming, &msg, seq, attempt)).await,
             Err(e) => Err(e),
         };
         let Err(e) = result else {
@@ -205,7 +205,7 @@ impl Inbox<'_> {
             Arrival::Quiet => self.done(msg, seq).await?,
             Arrival::DeclineReview => match marker {
                 Some(Marker::Replied(reply)) => self.deliver(incoming, &reply, msg, seq).await?,
-                _ => self.decline_review(incoming, None, "a sage is reviewed by no one", msg, seq).await?,
+                _ => Box::pin(self.decline_review(incoming, None, "a sage is reviewed by no one", msg, seq)).await?,
             },
         }
         self.attempts.finish(&incoming.envelope).await;
@@ -397,9 +397,15 @@ impl Inbox<'_> {
 
     /// Set the tool rules of the message, and of its post, to those its thread is narrowed to: a human's message lifts
     /// the narrowing ([`Ledger::reset`]) and has none, a thread keeps the first rules a message brought it, and a
-    /// webhook's message brings [`WEBHOOK_ALLOW`] when it has none of its own.
+    /// webhook's message brings [`WEBHOOK_ALLOW`] when it has none of its own. A run named as the one the message
+    /// invites a rating of ([`Envelope::rating_of`]) stays only on the conductor's own invitation.
     async fn narrow(&self, incoming: &mut Incoming, sender: Role) -> Result<()> {
         let envelope = &mut incoming.envelope;
+        if envelope.rating_of.is_some()
+            && !matches!(&self.trails, Some(trails) if Box::pin(trails.invites(envelope)).await)
+        {
+            envelope.rating_of = None;
+        }
         let carried = envelope.allow.take();
         if !sender.is_human() {
             let carried = match carried {

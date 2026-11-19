@@ -179,6 +179,7 @@ fn envelope() -> Envelope {
             args: serde_json::json!({"repo": "app"}),
             limits: TrailLimits { steps: 100, wall_secs: 2 * 24 * 3600, ..TrailLimits::DEFAULT },
         })),
+        rating_of: Some(run()),
         review_outcomes: Some(ReviewOutcomes {
             dream: 7,
             findings: vec![
@@ -227,6 +228,7 @@ fn plain_envelope() -> Envelope {
         review_commits: Vec::new(),
         trail_step: None,
         trail_start: None,
+        rating_of: None,
         review_outcomes: None,
         ..envelope()
     }

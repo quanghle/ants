@@ -69,6 +69,8 @@ struct Bus {
     /// Built-in sense, for an ant using it.
     sense: Option<crate::sense::Sense>,
     builtin: Option<ants_proto::BuiltinAnt>,
+    /// The trails dev-a conducts ([`Bus::conduct`]); none: it conducts none.
+    trails: Option<crate::trail::Trails>,
 }
 
 impl Bus {
@@ -127,6 +129,7 @@ impl Bus {
             lifecycle: None,
             sense: None,
             builtin: None,
+            trails: None,
         };
         (bus, replies)
     }
@@ -142,6 +145,36 @@ impl Bus {
         hosting.up(crate::sense::Link::new(self.js.clone(), None, Vec::new(), machine));
         self.sense = Some(sense);
         hosting
+    }
+
+    /// Have dev-a conduct trails, sending nothing of its own.
+    async fn conduct(&mut self) -> crate::trail::Trails {
+        let configs = [
+            crate::hub::trails_config(),
+            crate::hub::trail_runs_config(),
+            crate::hub::trail_tips_config(),
+            crate::hub::trail_ratings_config(),
+        ];
+        for config in configs {
+            self.js.create_key_value(config).await.unwrap();
+        }
+        let conducting = crate::trail::Conducting {
+            js: self.js.clone(),
+            js_domain: None,
+            client: self.client.clone(),
+            ant: self.dev.clone(),
+            worker: std::path::PathBuf::from("ants"),
+            trails_dir: None,
+            humans: Registry::default(),
+            colony: self.colony.clone(),
+            outbox: Arc::new(|_| Box::pin(async { Ok(()) })),
+            attempts: self.markers.clone(),
+            workers: crate::trail::DEFAULT_WORKERS,
+            notes: Arc::new(crate::stream::notes::JetStreamNotes::new(self.js.clone(), self.dev.clone())),
+        };
+        let trails = crate::trail::Trails::new(conducting).await.unwrap();
+        self.trails = Some(trails.clone());
+        trails
     }
 
     /// Send `text` from the human, returning the envelope and its stream sequence.
@@ -308,7 +341,7 @@ impl Bus {
             home: &home,
             lifecycle: self.lifecycle.as_ref(),
             sense: self.sense.as_ref(),
-            trails: None,
+            trails: self.trails.clone(),
         };
         let stop = || {
             let ctrl_c = ctrl_c.clone();

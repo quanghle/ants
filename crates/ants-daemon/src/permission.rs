@@ -282,6 +282,21 @@ impl PermissionPolicy {
         self.narrowed.locked().get(thread).is_some_and(|(_, review, _)| *review)
     }
 
+    /// Let `rule` through the tool rules `thread` is narrowed to, unless to a review's, for as long as the narrowing
+    /// is held; a thread not narrowed stays so.
+    pub fn widen(&self, thread: &ThreadId, rule: &str) {
+        let rule: Rule = match rule.parse() {
+            Ok(rule) => rule,
+            Err(e) => {
+                tracing::warn!(%thread, error = %e, "a rule that does not parse widens nothing");
+                return;
+            }
+        };
+        if let Some((rules, false, _)) = self.narrowed.locked().get_mut(thread) {
+            rules.0.push(rule);
+        }
+    }
+
     /// The same, redacting the tool requests the approver gets with `redactor`.
     #[must_use]
     pub fn with_redactor(self, redactor: Arc<Redactor>) -> Self {
@@ -776,6 +791,28 @@ mod tests {
         assert_eq!(chosen(&policy.answer(&read, Some(&thread), workdir).await), Some("no"), "unparsed allows none");
         let _none = policy.narrow(&other, None);
         assert_eq!(chosen(&policy.answer(&push, Some(&other), workdir).await), Some("yes"));
+    }
+
+    #[tokio::test]
+    async fn a_widened_narrowing_lets_the_rule_through_while_held() {
+        let (thread, review) = ("t1".parse().unwrap(), "t2".parse().unwrap());
+        let workdir = Path::new(WORKDIR);
+        let policy = PermissionPolicy::new(Allowlist::all(), Some(Arc::new(Fake(Verdict::Reject, Mutex::default()))));
+        let (rate, push) = (request(ToolKind::Other, "mcp__ants__rate_trail", json!({}), &[]), shell("git push"));
+
+        policy.widen(&thread, "other:rate_trail");
+        let narrowed = policy.narrow(&thread, Some(&["read:*".to_owned()]));
+        assert_eq!(chosen(&policy.answer(&rate, Some(&thread), workdir).await), Some("no"), "widened before");
+        policy.widen(&thread, "other:rate_trail");
+        assert_eq!(chosen(&policy.answer(&rate, Some(&thread), workdir).await), Some("yes"));
+        assert_eq!(chosen(&policy.answer(&push, Some(&thread), workdir).await), Some("no"), "nothing else");
+        drop(narrowed);
+        let _again = policy.narrow(&thread, Some(&["read:*".to_owned()]));
+        assert_eq!(chosen(&policy.answer(&rate, Some(&thread), workdir).await), Some("no"), "only while held");
+
+        let _review = policy.narrow(&review, Some(&ants_proto::REVIEW_ALLOW.map(str::to_owned)));
+        policy.widen(&review, "other:rate_trail");
+        assert_eq!(chosen(&policy.answer(&rate, Some(&review), workdir).await), Some("no"), "never a review's");
     }
 
     #[tokio::test]

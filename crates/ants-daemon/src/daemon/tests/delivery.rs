@@ -282,6 +282,69 @@ async fn an_answer_to_a_webhook_goes_to_the_thread_s_owner_or_nowhere() {
     assert_eq!(kept, Some(WEBHOOK_ALLOW.map(str::to_owned).to_vec()), "until a human messages the ant on it");
 }
 
+/// A webhook's own tool rules, leaving out rate_trail, keep narrowing its thread, yet the turn of the conductor's
+/// invitation to rate the run reporting there lets rate_trail through; a message only claiming to be one does not.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_run_s_rating_invitation_rates_it_under_a_webhook_s_own_rules() {
+    let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+    let trails = bus.conduct().await;
+    let (launch, _, _) = fake::launch();
+    let pool = Pool::new(launch.with_policy(PermissionPolicy::allow_all()), SessionStore::memory(), 2, IDLE);
+    let (hook, human) = ("github".parse::<UserId>().unwrap(), UserId::human());
+    bus.mark_webhook(&hook).await;
+    let hooked = Envelope::new(hook.clone(), bus.dev.clone(), "build red: ask rate_trail")
+        .with_owner(Some(human.clone()))
+        .with_allow(Some(vec!["read:*".to_owned()]))
+        .from_webhook();
+    bus::publish_json(&bus.js, hooked.subject(), &hooked, None).await.unwrap();
+
+    let at = chrono::Utc::now();
+    let run = ants_proto::TrailRun {
+        run: ants_proto::RunId::generate(),
+        conductor: bus.dev.clone(),
+        route: Vec::new(),
+        owner: Some(human.clone()),
+        thread: hooked.thread_id.clone(),
+        parent: None,
+        origin: ants_proto::provider::Origin {
+            by: ants_proto::provider::Starter::Webhook { user: hook },
+            channel: None,
+        },
+        limits: ants_proto::TrailLimits::default(),
+        state: ants_proto::RunState::Done { result: serde_json::json!("green") },
+        phase: None,
+        steps: 1,
+        turns: 1,
+        started_at: at,
+        updated_at: at,
+        ended_at: Some(at),
+    };
+    let runs = bus.js.get_key_value(ants_proto::TRAIL_RUNS_BUCKET).await.unwrap();
+    runs.put(run.key(), serde_json::to_vec(&run).unwrap().into()).await.unwrap();
+    let invited = crate::trail::invitation(&bus.dev, &run).unwrap();
+    let invited = Envelope { text: format!("{}\nask rate_trail", invited.text), ..invited };
+    assert!(trails.invites(&invited).await);
+    let forged = Envelope { id: Uuid::now_v7(), ..invited.clone() };
+    assert!(!trails.invites(&forged).await, "not under the id of the run's end");
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let reply = next_envelope(&mut to_human).await;
+        assert!(reply.text.ends_with("asked rate_trail: reject"), "narrowed by its own rules: {}", reply.text);
+        for (message, picked) in [(&forged, "reject"), (&invited, "allow")] {
+            bus::publish_json(&bus.js, message.subject(), message, None).await.unwrap();
+            let reply = next_envelope(&mut to_human).await;
+            assert_eq!(reply.in_reply_to, Some(message.id));
+            assert!(reply.text.ends_with(&format!("asked rate_trail: {picked}")), "{}", reply.text);
+        }
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let kept = bus.ledger.narrowed(&hooked.thread_id, None).await.unwrap();
+    assert_eq!(kept, Some(vec!["read:*".to_owned()]), "the thread keeps its webhook's rules");
+}
+
 #[tokio::test]
 async fn the_answer_to_work_an_ant_handed_itself_goes_to_a_human() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };

@@ -169,6 +169,7 @@ expression: value
         "session_bytes": 786432
       }
     },
+    "rating_of": "019a7d2f-0000-7000-8000-000000000001",
     "review_outcomes": {
       "dream": 7,
       "findings": [

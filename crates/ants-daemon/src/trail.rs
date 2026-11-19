@@ -48,6 +48,8 @@ use saved::Saved;
 use steps::Taken;
 use store::Store;
 
+#[cfg(test)]
+pub(crate) use invite::invitation;
 pub use invite::{EndWait, rating_hint};
 pub use limits::AskedLimits;
 pub use ratings::{RatedTrail, Ratings};

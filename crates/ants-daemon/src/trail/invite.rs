@@ -90,6 +90,25 @@ impl Trails {
             }
         }
     }
+
+    /// Whether `message` is an invitation this conductor's daemon sent to rate the run it names
+    /// ([`Envelope::rating_of`]): from the conductor to itself, on the run's thread, under the id of the run's end.
+    pub async fn invites(&self, message: &Envelope) -> bool {
+        let Some(run) = &message.rating_of else { return false };
+        let ant = &self.inner.ant;
+        if message.from != *ant || message.to != *ant {
+            return false;
+        }
+        let header = match self.run(run).await {
+            Ok(Some(header)) => header,
+            Ok(None) => return false,
+            Err(e) => {
+                tracing::warn!(%run, error = e, "reading the run a rating invitation names");
+                return false;
+            }
+        };
+        header.thread == message.thread_id && header.ended_at.is_some_and(|at| invitation_id(run, at) == message.id)
+    }
 }
 
 /// The line inviting the conductor to rate `run`, with, for a failed run, the one pointing to other trails.
@@ -106,8 +125,9 @@ pub fn rating_hint(run: &TrailRun) -> String {
 
 /// The message from `ant` to itself inviting it to rate `run`, its run ended done or failed; None for a run not
 /// ended so. On the run's thread, answering to its owner; narrowed as a webhook's thread is for a run an untrusted
-/// thread started, so that it is rated only there.
-fn invitation(ant: &UserId, run: &TrailRun) -> Option<Envelope> {
+/// thread started, so that it is rated only there; naming the run ([`Envelope::rating_of`]), so that its turn may
+/// rate it whatever tool rules narrow the thread.
+pub(crate) fn invitation(ant: &UserId, run: &TrailRun) -> Option<Envelope> {
     let ended_at = run.ended_at?;
     let name = match run.first_trail() {
         Some(trail) => format!("Run {} of trail {trail}", run.run),
@@ -144,7 +164,7 @@ fn invitation(ant: &UserId, run: &TrailRun) -> Option<Envelope> {
         .with_owner(run.owner.clone())
         .with_origin_thread(run.parent.as_ref().map(|parent| parent.origin_thread.clone()))
         .with_allow(allow);
-    Some(Envelope { id: invitation_id(&run.run, ended_at), ..message })
+    Some(Envelope { id: invitation_id(&run.run, ended_at), rating_of: Some(run.run.clone()), ..message })
 }
 
 /// The id of the invitation to rate `run`, ended at `ended_at`: the same each time it is sent for that end, so the bus
@@ -208,6 +228,7 @@ mod tests {
         assert_eq!((&message.from, &message.to, &message.thread_id), (&lead(), &lead(), &run.thread));
         assert_eq!(message.owner, run.owner);
         assert_eq!(message.allow, None, "a trusted run's invitation is not narrowed");
+        assert_eq!(message.rating_of.as_ref(), Some(&run.run));
         assert_eq!(
             message.text,
             format!(

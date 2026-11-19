@@ -280,7 +280,8 @@ A run reports on the thread it started with, as its conductor:
   run, which may be resumed, gets none. The run stays listed in `<ant>.runs` until the message is sent, and its id is
   derived from the run and the time it ended, so a daemon restarted in between sends it again as the same message,
   which the bus keeps once. For a run on an untrusted thread the message is narrowed as the run's steps are, the
-  default webhook rules letting `rate_trail` through ([Trust](#trust)).
+  default webhook rules letting `rate_trail` through; it names the run it invites a rating of, so its turn lets
+  `rate_trail` through whatever rules narrow the thread, a webhook's own `allow` included ([Trust](#trust)).
 
 `ants trail runs` lists the runs of every conductor, or `--ant CONDUCTOR`'s, each with the trail it started (its route
 once it went on by `goto()`); `ants trail show RUN` prints a run (its id or a unique start of one): state, phase,
@@ -334,7 +335,10 @@ finding): an inline script is
   the read-only tool rules webhook threads get by default ([config.md](config.md#tool-permissions)). A schedule
   starting a trail sets no `allow` of its own. Such a run is rated all the same: on its own thread, `rate_trail` rates
   that run and no other, and any trusted thread rates any run the ant conducted; every other untrusted thread is
-  refused. `find_trails` reads from any thread.
+  refused. The turn of the invitation to rate the run lets `rate_trail` through a webhook's own `allow` leaving it
+  out, and rates that run alone, even with other runs reporting on the thread; the daemon honours an invitation only
+  when it sent it itself, from the ant to itself on the run's thread under the id of the run's end. `find_trails` reads
+  from any thread.
 
 A run's legs and child runs keep its origin, so a goto or `trail()` never makes a run more trusted.
 

@@ -34,6 +34,9 @@ use super::{Inbox, Incoming, Posted, Steered};
 /// How many steers wait at most for the harness to take them into the running prompt.
 const STEERS: usize = 8;
 
+/// The tool rule letting a run's rating invitation rate the run on a narrowed thread ([`Envelope::rating_of`]).
+const RATE_TRAIL: &str = "other:rate_trail";
+
 /// Put before the text of a message whose earlier attempt started and stored no reply.
 const CUT_OFF: &str = "[ants] An earlier attempt at this message was cut off before its reply was stored, so tools it \
 ran may already have taken effect. The session history may show what ran. Check the current state before repeating \
@@ -222,7 +225,7 @@ impl Inbox<'_> {
             self.attempts.start(seq, envelope).await?;
         }
         if let Some(why) = self.unheld_review(incoming) {
-            return self.decline_review(incoming, read, &why, msg, seq).await;
+            return Box::pin(self.decline_review(incoming, read, &why, msg, seq)).await;
         }
 
         tracing::info!(%thread, from = %envelope.from, cut_off, own, "prompting");
@@ -231,7 +234,7 @@ impl Inbox<'_> {
         // A message joining a running prompt takes over the turn of the message it started with.
         let joining = incoming.steered == Steered::Joining;
         self.warn_unnarrowed(incoming);
-        let _narrowed = (!joining).then(|| self.pool.launch().policy().narrow(thread, envelope.allow.as_deref()));
+        let _narrowed = self.narrow_turn(envelope, joining);
         let _turn = self.mcp.filter(|_| !joining).map(|mcp| begin_turn(mcp, incoming, msg));
         let _asking = self.approvals.filter(|_| !joining).map(|approvals| approvals.begin(envelope));
         let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off, own.then_some(spent)).await;
@@ -350,6 +353,18 @@ impl Inbox<'_> {
     fn unheld_review(&self, incoming: &Incoming) -> Option<String> {
         let review = incoming.steered != Steered::Joining && ants_proto::is_review(incoming.envelope.allow.as_deref());
         review.then(|| self.pool.launch().unheld_review()).flatten()
+    }
+
+    /// Narrow the tool rules on the thread of `envelope` to those it carries while the returned guard is held, unless
+    /// it joins a running prompt, whose rules hold. The turn of a run's rating invitation, which the inbox checked
+    /// ([`Envelope::rating_of`]), rates the run whatever the thread's rules.
+    fn narrow_turn(&self, envelope: &Envelope, joining: bool) -> Option<crate::permission::Narrowing> {
+        let policy = self.pool.launch().policy();
+        let narrowed = (!joining).then(|| policy.narrow(&envelope.thread_id, envelope.allow.as_deref()));
+        if envelope.rating_of.is_some() {
+            policy.widen(&envelope.thread_id, RATE_TRAIL);
+        }
+        narrowed
     }
 
     /// Answer a review with a decline explaining `why`, unprompted: its sender then goes on without the review.

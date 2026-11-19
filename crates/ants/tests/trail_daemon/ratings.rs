@@ -219,7 +219,8 @@ async fn rate_trail_rates_the_saved_trails_a_run_took_and_find_trails_ranks_them
 }
 
 /// On a thread a webhook started, `lead` rates only the run reporting on it, `first` being another of its runs, which
-/// the trusted `client` rates; `find_trails` reads from there all the same.
+/// the trusted `client` rates, and while handling the invitation to rate one of the runs reporting there, only that
+/// one; `find_trails` reads from there all the same.
 async fn untrusted_threads_rate_only_their_run(mcp: &Mcp, lead: &mut Conductor, client: &Client, first: &RunId) {
     let hooked = Envelope::new(ant("github"), ant("lead"), "an issue").with_owner(Some(UserId::human())).from_webhook();
     let (untrusted, _hooked) = handling(mcp, &hooked).await;
@@ -242,4 +243,15 @@ async fn untrusted_threads_rate_only_their_run(mcp: &Mcp, lead: &mut Conductor, 
     assert!(ok && text.contains("It replaces the earlier rating (failed)."), "a trusted thread rates any: {text}");
     let (ok, text) = call(&untrusted, "find_trails", json!({"query": "deploying web apps"})).await;
     assert!(ok && text.contains("1. deploy-web") && !text.contains("save_trail"), "{text}");
+
+    let (ok, text) = run_trail(&untrusted, json!({"name": "deploy-web", "args": {"n": 2}})).await;
+    assert!(ok, "{text}");
+    let again = started(&text);
+    lead.ended(&again).await;
+    assert_eq!(invited.rating_of.as_ref(), Some(&hooked_run), "the invitation names its run");
+    let (inviting, _invited) = handling(mcp, &invited).await;
+    let (ok, text) = rate(&inviting, &again, "worked", "triaging an issue", "right").await;
+    assert!(!ok && text.contains("only that one"), "another run reporting on the thread: {text}");
+    let (ok, text) = rate(&inviting, &hooked_run, "worked", "triaging an issue", "right").await;
+    assert!(ok, "{text}");
 }

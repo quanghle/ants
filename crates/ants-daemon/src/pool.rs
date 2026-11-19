@@ -661,15 +661,17 @@ impl Drop for Starting<'_> {
 #[cfg(test)]
 pub(crate) mod fake {
     use std::collections::HashMap;
+    use std::fmt::Write as _;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     use agent_client_protocol::v1::schema::{
         AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, ForkSessionRequest,
         ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest,
-        LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
+        LoadSessionResponse, NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
+        PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
         SessionCapabilities, SessionForkCapabilities, SessionId, SessionNotification, SessionUpdate, StopReason,
-        TextContent, ToolCall, Usage, UsageUpdate,
+        TextContent, ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage, UsageUpdate,
     };
     use agent_client_protocol::v1::{ConnectionTo, Responder};
     use agent_client_protocol::{Agent, Client, DynConnectTo, Error};
@@ -735,7 +737,9 @@ pub(crate) mod fake {
     /// [`Log::limited`] is, prompts start their `tools N`, then stream its text and fail with it, or end with it as
     /// their reply; while [`Log::broken`] is, the handshake fails; while [`Log::takes_images`] is, harnesses starting
     /// take images, which they log; while [`Log::steers`] is, harnesses starting take steers into a running prompt,
-    /// whose reply ends with a line `+ <steer>` for each, though they refuse a steer ending with `refused`. They can load stored sessions.
+    /// whose reply ends with a line `+ <steer>` for each, though they refuse a steer ending with `refused`. `ask TOOL`
+    /// asks permission to run the ants MCP tool TOOL, the reply ending with a line `asked TOOL: <option picked>`. They
+    /// can load stored sessions.
     pub fn launch() -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         launch_with(Sessions::Loadable)
     }
@@ -992,14 +996,33 @@ pub(crate) mod fake {
                 log.locked().cancelled += 1;
                 return responder.respond(PromptResponse::new(StopReason::Cancelled));
             }
+            let mut reply = text.clone();
+            if let Some(tool) = words.windows(2).find(|w| w[0] == "ask").map(|w| w[1]) {
+                let picked = ask(&sender, session, tool).await?;
+                let _ = write!(reply, "\nasked {tool}: {picked}");
+            }
             log.locked().answered.push(text.clone());
             // In two chunks, as harnesses stream a reply.
             sender.send_notification(chunk(session, &format!("{session}: ")))?;
-            sender.send_notification(chunk(session, &text))?;
+            sender.send_notification(chunk(session, &reply))?;
             let tokens = arg("tokens").map(|n| n as u64);
             let usage = tokens.map(|n| Usage::new(n, n, 0));
             responder.respond(PromptResponse::new(StopReason::EndTurn).usage(usage))
         }
+    }
+
+    /// Ask permission to run `tool` of the ants MCP server, as Claude Code titles it: the option the client picked.
+    async fn ask(sender: &ConnectionTo<Client>, session: &SessionId, tool: &str) -> Result<String, Error> {
+        let fields = ToolCallUpdateFields::new().kind(ToolKind::Other).title(format!("mcp__ants__{tool}"));
+        let options = vec![
+            PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
+            PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+        ];
+        let request = RequestPermissionRequest::new(session.clone(), ToolCallUpdate::new("asked", fields), options);
+        Ok(match sender.send_request(request).block_task().await?.outcome {
+            RequestPermissionOutcome::Selected(selected) => selected.option_id.0.to_string(),
+            _ => "cancelled".to_owned(),
+        })
     }
 
     fn chunk(session: &SessionId, text: &str) -> SessionNotification {
