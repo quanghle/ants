@@ -56,7 +56,8 @@ Args:
 A meta may also list `waypoints`, at most 32: the places a run enters the trail ([Routes](#routes)). Each names a
 top-level `async def <name>(args)`, which takes the leg's input and returns the leg's result. A run starts such a
 trail at its first waypoint, and a `goto()` enters it at any. Its top level then holds only the meta, imports,
-definitions and constants, its steps in its waypoints: a top-level `await`, `if`, loop or expression is refused. A
+definitions and constants, its steps in its waypoints: a top-level `await`, `if`, loop or expression is refused, as
+is an `await` in a def's decorators, defaults or annotations or in a class's decorators, bases, keywords or body. A
 waypoint is a function too, which another waypoint may await without leaving its leg.
 
 ```python
