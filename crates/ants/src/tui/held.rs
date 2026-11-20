@@ -337,7 +337,7 @@ impl Page {
             keys: &Self::ids(&items),
             viewport: super::mouse::Viewport::Held,
         };
-        self.list.draw(frame, area, data, shown, focused);
+        self.list.draw(frame, area, &model.ui.mouse, shown, focused);
     }
 }
 

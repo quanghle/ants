@@ -70,10 +70,10 @@ impl Model {
     /// Up while typing: select the latest message or post.
     fn select_latest(&mut self, now: DateTime<Utc>) {
         self.selecting = Some(self.conversation());
-        let data = &self.data;
+        let (data, ui) = (&self.data, &self.ui);
         match self.pages.last_mut() {
             Some(Page::Thread(page)) => page.select(),
-            Some(Page::Channel(page)) => _ = page.key(Key::Home, data, now),
+            Some(Page::Channel(page)) => _ = page.key(Key::Home, data, ui, now),
             Some(Page::Dm(page)) => _ = page.key(Key::Home, data, now),
             _ => {}
         }

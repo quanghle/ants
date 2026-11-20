@@ -91,14 +91,14 @@ pub fn find(buffer: &Buffer, model: &Model) -> Vec<Link> {
     let mut found = Vec::new();
     let mut destinations = Vec::new();
     if let Page::Thread(page) = model.page() {
-        let visible = model.data.mouse.visible_messages();
+        let visible = model.ui.mouse.visible_messages();
         for entry in page.history.entries.iter().filter(|e| visible.contains(&e.seq)) {
             let candidates = links(&entry.text);
             destinations.extend(candidates.iter().map(|(_, url)| url.clone()));
             let mut cells = Vec::new();
             for y in buffer.area.y..buffer.area.bottom() {
                 for x in buffer.area.x..buffer.area.right() {
-                    if model.data.mouse.message_at(Position::new(x, y)) == Some(entry.seq) {
+                    if model.ui.mouse.message_at(Position::new(x, y)) == Some(entry.seq) {
                         cells.push((x, y, buffer[(x, y)].clone()));
                     }
                 }
@@ -236,7 +236,7 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("no label link for message {seq}"));
             assert!(link.cells.first().unwrap().1 < link.cells.last().unwrap().1, "the label wrapped");
-            assert!(link.cells.iter().all(|(x, y, _)| model.data.mouse.message_at(Position::new(*x, *y)) == Some(seq)));
+            assert!(link.cells.iter().all(|(x, y, _)| model.ui.mouse.message_at(Position::new(*x, *y)) == Some(seq)));
         }
         model.overlay(crate::tui::model::Overlay::Help(super::super::help::Help::default()));
         let drawn = terminal.draw(|f| frame::draw(f, &model, at(1))).unwrap();

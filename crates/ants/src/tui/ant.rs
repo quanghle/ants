@@ -290,7 +290,7 @@ impl Page {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
-        let data = &model.data;
+        let (data, mouse) = (&model.data, &model.ui.mouse);
         let entry = data.live.colony.iter().find(|e| e.ant == self.ant);
         let (mark, color) = super::nav::marker(&entry.into_iter().collect::<Vec<_>>(), now);
         let head = data.looks.head(&self.ant);
@@ -321,12 +321,12 @@ impl Page {
         let (width, height) = inner(left);
         let block = style::block(title, focused && self.column == Column::About).title_style(Style::new().fg(color));
         frame.render_widget(self.scroll(Column::About, about(entry, now, width), height, block), left);
-        data.mouse.add(left, super::mouse::Target::AntColumn(0));
+        mouse.add(left, super::mouse::Target::AntColumn(0));
         let (width, height) = inner(right);
         let block = style::block(" now ".to_owned(), focused && self.column == Column::Now);
         let status = wrapped(status(&self.ant, entry, data, now), width);
         frame.render_widget(self.scroll(Column::Now, status, height, block), right);
-        data.mouse.add(right, super::mouse::Target::AntColumn(1));
+        mouse.add(right, super::mouse::Target::AntColumn(1));
         let threads = self.threads.rows(data).len();
         let mut spans = vec![Span::raw(" ")];
         let mut x = tabs.x + 1;
@@ -341,7 +341,7 @@ impl Page {
             let style = if pane == self.pane { style::highlight(focused) } else { style::dim() };
             let label = format!(" {} ({count}) ", pane.label());
             let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
-            data.mouse.add(
+            mouse.add(
                 Rect { x, width: width.min(tabs.right().saturating_sub(x)), ..tabs },
                 super::mouse::Target::AntPane(pane),
             );
@@ -353,10 +353,10 @@ impl Page {
         frame.render_widget(Paragraph::new(Line::from(spans)), tabs);
         match self.pane {
             Pane::Threads => self.threads.draw(frame, pane, model, now, focused),
-            Pane::Queue => self.draw_queue(frame, pane, data, now, focused),
+            Pane::Queue => self.draw_queue(frame, pane, data, mouse, now, focused),
             Pane::Memories => self.memories.draw(frame, pane, &self.ant, focused),
-            Pane::Mcp => self.mcp.draw(frame, pane, &self.ant, focused, data),
-            Pane::Settings => self.settings.draw(frame, pane, &self.ant, now, focused, data),
+            Pane::Mcp => self.mcp.draw(frame, pane, &self.ant, focused, mouse),
+            Pane::Settings => self.settings.draw(frame, pane, &self.ant, now, focused, mouse),
         }
     }
 
@@ -400,7 +400,15 @@ impl Page {
         }
     }
 
-    fn draw_queue(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+    fn draw_queue(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        data: &Data,
+        mouse: &super::mouse::Regions,
+        now: DateTime<Utc>,
+        focused: bool,
+    ) {
         let block = style::block(format!(" waiting for {} ", self.ant), focused);
         let text = match &self.queue {
             Queue::Asking => Some(format!("asking the daemon of {}…", self.ant)),
@@ -441,7 +449,7 @@ impl Page {
             block = block.title_bottom(format!(" and {more} more in the stream "));
         }
         let table = Table::new(rows, widths).header(header).block(block).row_highlight_style(style::highlight(focused));
-        let top = super::mouse::table(data, super::mouse::Viewport::AntQueue, area, selected, waiting.len());
+        let top = super::mouse::table(mouse, super::mouse::Viewport::AntQueue, area, selected, waiting.len());
         let mut state = TableState::default().with_offset(top);
         frame.render_stateful_widget(table, area, &mut state);
     }

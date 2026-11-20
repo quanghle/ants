@@ -141,7 +141,7 @@ impl Model {
         }
         let target: Option<ThreadId> = match conversation {
             Conversation::Thread(thread) => Some(thread.clone()),
-            _ if conversation == data.drafts.here() => self.target().ok(),
+            _ if conversation == self.ui.drafts.here() => self.target().ok(),
             _ => None,
         };
         target.is_none_or(|thread| data.private(&Conversation::Thread(thread), text))
@@ -150,8 +150,8 @@ impl Model {
     /// Add `text`, typed in the conversation shown, to the bar's history as the latest; kept for the run only when
     /// [`Self::sealed`].
     pub fn push_history(&mut self, text: &str) {
-        let private = self.sealed(self.data.drafts.here(), text);
-        self.data.history.push(text, private);
+        let private = self.sealed(self.ui.drafts.here(), text);
+        self.ui.history.push(text, private);
     }
 
     /// Empty the bar into its history, and so the draft of the conversation shown: what Esc twice and Ctrl-C do to a
@@ -160,7 +160,7 @@ impl Model {
         let text = self.bar.text();
         self.push_history(&text);
         self.bar.clear();
-        self.data.history.browsing = None;
+        self.ui.history.browsing = None;
         self.follow_drafts();
         if !text.trim().is_empty() {
             self.bar.set_status("kept in the history: Ctrl-P recalls the text", Tone::Done);
@@ -170,13 +170,13 @@ impl Model {
     /// Note that the bar's `key` at `now` left it holding text, so that another Esc soon empties it.
     pub(super) fn escaped(&mut self, key: Key, now: DateTime<Utc>) {
         if key == Key::Esc && !self.bar.focused && !self.bar.is_empty() {
-            self.data.history.escaped = Some(now);
+            self.ui.history.escaped = Some(now);
         }
     }
 
     /// Take `key` at `now` when it is the second Esc on a bar holding text, emptying it into its history.
     pub fn esc_again(&mut self, key: Key, now: DateTime<Utc>) -> bool {
-        let escaped = self.data.history.escaped.take();
+        let escaped = self.ui.history.escaped.take();
         if key != Key::Esc || self.bar.is_empty() || !escaped.is_some_and(|at| now - at <= ESC_AGAIN) {
             return false;
         }
@@ -187,10 +187,10 @@ impl Model {
     /// Take `key` for the history of the focused bar: Ctrl-P and Ctrl-N recall the texts sent, Ctrl-R searches them,
     /// and a search takes the keys until it ends. Returns false when the key is not the history's.
     pub(super) fn history_key(&mut self, key: Key) -> bool {
-        if self.data.history.searching.is_some() {
+        if self.ui.history.searching.is_some() {
             return self.search_key(key);
         }
-        let history = &mut self.data.history;
+        let history = &mut self.ui.history;
         match key {
             Key::Ctrl('p') => {
                 let at = history.browsing.as_ref().map_or(0, |(at, _)| at + 1);
@@ -223,7 +223,7 @@ impl Model {
     /// Take `key` for the search running: typed text narrows it, Ctrl-R goes to an earlier text, Enter takes the
     /// text found and Esc or Ctrl-G puts back the text before; any other key takes the text found and goes on.
     fn search_key(&mut self, key: Key) -> bool {
-        let history = &mut self.data.history;
+        let history = &mut self.ui.history;
         let Some(Search { query, at, before }) = history.searching.take() else { return false };
         let (query, from) = match key {
             Key::Char(c) => (format!("{query}{c}"), at.unwrap_or(0)),
@@ -263,17 +263,17 @@ impl Model {
             }),
             Err(_) => Kept::default(),
         };
-        let history = &mut self.data.history;
+        let history = &mut self.ui.history;
         history.texts = kept.sent.into_iter().take(KEPT).map(|text| Text { text, private: false }).collect();
         history.file = Some(path);
         for KeptDraft { conversation, text } in kept.drafts {
             let draft = Draft::of(&text, None, None);
-            if conversation == *self.data.drafts.here() {
+            if conversation == *self.ui.drafts.here() {
                 if self.bar.is_empty() {
                     self.bar.swap(draft);
                 }
             } else {
-                self.data.drafts.keep(conversation, draft);
+                self.ui.drafts.keep(conversation, draft);
             }
         }
         self.follow_drafts();
@@ -281,18 +281,18 @@ impl Model {
 
     /// Keep the history and the drafts in the file they were taken from, leaving out those [`Self::sealed`].
     pub fn keep_history(&mut self) {
-        let Some(path) = self.data.history.file.clone() else { return };
-        self.data.history.unsaved = false;
+        let Some(path) = self.ui.history.file.clone() else { return };
+        self.ui.history.unsaved = false;
         if let Err(e) = self.write_history(&path) {
             tracing::debug!("not keeping the bar's history: {e:#}");
         }
     }
 
     fn write_history(&self, path: &Path) -> Result<()> {
-        let data = &self.data;
-        let sent = data.history.texts.iter().filter(|kept| !kept.private).map(|kept| kept.text.clone()).collect();
-        let here = (data.drafts.here(), self.bar.text());
-        let kept = data.drafts.kept().map(|(conversation, draft)| (conversation, draft.text()));
+        let ui = &self.ui;
+        let sent = ui.history.texts.iter().filter(|kept| !kept.private).map(|kept| kept.text.clone()).collect();
+        let here = (ui.drafts.here(), self.bar.text());
+        let kept = ui.drafts.kept().map(|(conversation, draft)| (conversation, draft.text()));
         let drafts = std::iter::once(here)
             .chain(kept)
             .filter(|(conversation, text)| !text.trim().is_empty() && !self.sealed(conversation, text))
@@ -393,7 +393,7 @@ mod tests {
         typed(&mut m, "@dev-a later maybe");
         m.key(Key::Interrupt, at(1));
         assert!(m.bar.is_empty(), "Ctrl-C empties the bar");
-        assert!(!m.data.drafts.holds(m.data.drafts.here()), "and so the draft");
+        assert!(!m.ui.drafts.holds(m.ui.drafts.here()), "and so the draft");
         m.bar.focused = true;
         m.key(Key::Ctrl('p'), at(2));
         assert_eq!(m.bar.text(), "@dev-a later maybe", "Ctrl-P recalls it");

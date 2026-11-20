@@ -99,7 +99,7 @@ impl Model {
         }
         let slash = matches!(command, Ok(Command::Slash(_)));
         // Before the command moves the view, and so what it acts on.
-        let sealed = self.sealed(self.data.drafts.here(), &text);
+        let sealed = self.sealed(self.ui.drafts.here(), &text);
         let route = self.route(&text);
         let done = command.and_then(|command| match command {
             Command::Slash(command) => self.command(command, now),
@@ -116,7 +116,7 @@ impl Model {
                 return None;
             }
         };
-        self.data.history.push(&text, sealed);
+        self.ui.history.push(&text, sealed);
         self.bar.set_text("");
         self.bar.status = None;
         if slash {
@@ -136,8 +136,8 @@ impl Model {
 
     /// Run `job`, which the bar's `text` asked for, with the files staged if it sends a message.
     fn run_job(&mut self, job: Job, text: String, slash: bool) -> Action {
-        let here = self.data.drafts.here().clone();
-        self.data.drafts.sending(&text, here);
+        let here = self.ui.drafts.here().clone();
+        self.ui.drafts.sending(&text, here);
         let job = match job.sends().then(|| self.bar.staged.take(&text)).flatten() {
             Some(files) => {
                 let count = if files.len() == 1 { "1 file".to_owned() } else { format!("{} files", files.len()) };
@@ -264,7 +264,7 @@ impl Model {
             Slash::Notes(text) => run(Job::Notes { thread: self.target()?, text }),
             Slash::React(reaction) => {
                 let message = match self.page() {
-                    Page::Channel(page) => page.post(&self.data).map(|p| p.id),
+                    Page::Channel(page) => page.post(&self.data, &self.ui).map(|p| p.id),
                     _ => None,
                 };
                 run(Job::React { thread: self.target()?, message, reaction })
@@ -371,7 +371,7 @@ impl Model {
     pub fn attachment(&self) -> Option<attachments::Listed> {
         match self.page() {
             Page::Thread(page) => page.attachment().cloned(),
-            Page::Channel(page) => page.attachment(&self.data).cloned(),
+            Page::Channel(page) => page.attachment(&self.data, &self.ui).cloned(),
             _ => None,
         }
     }
@@ -447,7 +447,7 @@ impl Model {
             Page::Thread(page) => Some(page.history.thread.clone()),
             Page::Home(page) => page.thread(data),
             Page::Work(page) => page.thread(data),
-            Page::Channel(page) => page.post(data).map(|p| p.thread.clone()),
+            Page::Channel(page) => page.post(data, &self.ui).map(|p| p.thread.clone()),
             Page::Tree(page) => Some(page.root.clone()),
             Page::Ant(page) => page.thread(data),
             Page::Dm(_) | Page::Search(_) | Page::Credentials(_) | Page::Held(_) => None,
@@ -576,7 +576,7 @@ impl Model {
         self.follow_drafts();
         self.bar.staged.sent(&outcome.text, outcome.result.is_err());
         let note = self.bar.note_sent(&outcome.text);
-        let typed = self.data.drafts.sent(&outcome.text).filter(|typed| typed != self.data.drafts.here());
+        let typed = self.ui.drafts.sent(&outcome.text).filter(|typed| typed != self.ui.drafts.here());
         match outcome.result {
             Ok(mut done) => {
                 self.data.withdrawn.extend(done.withdrew);
@@ -612,7 +612,7 @@ impl Model {
                     && !outcome.text.is_empty()
                 {
                     let draft = Draft::of(&outcome.text, outcome.quoting, note.map(Note::Reply));
-                    self.data.drafts.keep(typed, draft);
+                    self.ui.drafts.keep(typed, draft);
                 } else if self.bar.is_empty() && !outcome.text.is_empty() {
                     self.bar.set_text(&outcome.text);
                     self.bar.quoting = outcome.quoting;

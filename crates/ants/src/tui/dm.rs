@@ -199,7 +199,7 @@ impl Page {
             super::mouse::list(
                 frame,
                 inner,
-                data,
+                &model.ui.mouse,
                 super::mouse::Viewport::Dm(self.with.clone()),
                 rows,
                 selected,

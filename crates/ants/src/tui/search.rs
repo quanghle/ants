@@ -152,7 +152,7 @@ impl Page {
         super::mouse::list(
             frame,
             inner,
-            data,
+            &model.ui.mouse,
             super::mouse::Viewport::Search,
             items,
             self.selected.at(&self.seqs()),

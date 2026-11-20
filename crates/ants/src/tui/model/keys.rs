@@ -401,8 +401,8 @@ impl Model {
             }
             return None;
         }
-        let data = &self.data;
-        let to = self.pages.last_mut()?.key(key, data, now)?;
+        let (data, ui) = (&self.data, &self.ui);
+        let to = self.pages.last_mut()?.key(key, data, ui, now)?;
         self.go(to, now)
     }
 
@@ -470,9 +470,9 @@ impl Model {
             }
             To::Digest => self.home_digest(now),
             To::Tools => {
-                self.data.tools = self.data.tools.next();
-                self.notify(format!("tool calls: {}", self.data.tools.label()), Level::Info, now);
-                Some(Action::KeepTools(self.data.tools))
+                self.ui.tools = self.ui.tools.next();
+                self.notify(format!("tool calls: {}", self.ui.tools.label()), Level::Info, now);
+                Some(Action::KeepTools(self.ui.tools))
             }
             To::Do(action) => self.run(action),
             To::Refused(why) => {
@@ -502,7 +502,7 @@ impl Model {
                 None
             }
             Action::KeepChannelTab(channel, tab) => {
-                channel::keep_tab(&mut self.data.channel_tabs, channel.clone(), tab);
+                channel::keep_tab(&mut self.ui.channel_tabs, channel.clone(), tab);
                 Some(Action::KeepChannelTab(channel, tab))
             }
             Action::Run(Job::ChannelNotify { channel, level }, _) => {

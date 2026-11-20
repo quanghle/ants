@@ -145,7 +145,7 @@ pub(super) fn draw_cards(
     if let Shows::Question(at) = shows
         && let Some(id) = questions[at].asked.id
     {
-        question::mouse_regions(&model.data, block.inner(below), &lines, 0, id);
+        question::mouse_regions(&model.ui.mouse, block.inner(below), &lines, 0, id);
     }
     frame.render_widget(Paragraph::new(lines).block(block), below);
     let room = (width, if pending.is_some() && Some(shows) == pending { rows } else { 0 });

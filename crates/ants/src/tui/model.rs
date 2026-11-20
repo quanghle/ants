@@ -1,6 +1,6 @@
 //! What `ants chat` shows, and how keys and what is read change it, apart from the terminal and the connection: what
-//! is known of the ants ([`Data`]), the nav's selection, the views opened from it, the focus, the help and the latest
-//! notice. Keys and changes return the [`Action`]s the UI then performs.
+//! is known of the ants ([`Data`]), how the views show it ([`Ui`]), the nav's selection, the views opened from it,
+//! the focus, the help and the latest notice. Keys and changes return the [`Action`]s the UI then performs.
 
 use std::collections::{HashMap, HashSet};
 
@@ -149,9 +149,10 @@ const NOTICE_FOR: TimeDelta = TimeDelta::seconds(15);
 const QUIT_WITHIN: TimeDelta = TimeDelta::seconds(1);
 
 /// Everything read of the ants that the views show: what the live feed reads, what the UI reads besides, and what is
-/// worked out of the messages read.
+/// worked out of the messages read. It holds only what the bus and the store tell, the images of attachments among it,
+/// and what the human did here that they are yet to tell (the messages withdrawn, the dead letters cleared); how the
+/// UI shows it, and what is typed, is [`Ui`]'s.
 pub struct Data {
-    pub mouse: super::mouse::Regions,
     pub live: State,
     /// The server, as the header names it.
     pub server: String,
@@ -175,12 +176,8 @@ pub struct Data {
     pub reactions: Reactions,
     /// The tool calls of the threads, heard live or read from their timelines.
     pub calls: timeline::Threads,
-    /// How the thread view shows them, kept on the device.
-    pub tools: timeline::Tools,
     /// The steps of the trail runs reporting on the threads, heard live or read from the runs' records.
     pub steps: steps::Steps,
-    /// The tab chosen in each channel's view, but the default, kept on the device.
-    pub channel_tabs: HashMap<ChannelId, channel::Tab>,
     /// The tool requests settled while the UI runs.
     pub settled: approvals::Settled,
     /// Who of the other humans is online, and the messages with each.
@@ -201,6 +198,19 @@ pub struct Data {
     pub withdrawn: HashSet<Uuid>,
     /// The dead letters replayed or dropped here, by stream sequence: read, though the stream holds them no more.
     pub dead_cleared: HashSet<u64>,
+}
+
+/// The state of the UI that the views read and mark beside [`Data`], when drawn or taking keys: where they were drawn,
+/// how the thread and channel views show, the bar's drafts and history. None of it comes from the bus; the views
+/// themselves, the nav, the focus, the folds and the bar are the [`Model`]'s.
+#[derive(Default)]
+pub struct Ui {
+    /// Where the last frame drew what the mouse can point at, and the viewports' scroll.
+    pub mouse: super::mouse::Regions,
+    /// How the thread view shows the tool calls, kept on the device.
+    pub tools: timeline::Tools,
+    /// The tab chosen in each channel's view, but the default, kept on the device.
+    pub channel_tabs: HashMap<ChannelId, channel::Tab>,
     /// The drafts of the conversations, the bar holding that of the one shown.
     pub drafts: command::Drafts,
     /// The texts sent from the bar, which it recalls.
@@ -357,6 +367,7 @@ pub enum To {
 
 pub struct Model {
     pub data: Data,
+    pub ui: Ui,
     /// The nav's selection.
     pub nav: nav::Item,
     pub focus: Focus,
@@ -392,7 +403,6 @@ pub struct Model {
 impl Model {
     pub fn new(live: State, server: String) -> Self {
         let data = Data {
-            mouse: super::mouse::Regions::default(),
             live,
             server,
             facts: Facts::default(),
@@ -405,9 +415,7 @@ impl Model {
             humans: None,
             reactions: Reactions::new(),
             calls: timeline::Threads::default(),
-            tools: timeline::Tools::default(),
             steps: steps::Steps::default(),
-            channel_tabs: HashMap::new(),
             settled: approvals::Settled::default(),
             people: people::People::default(),
             delegations: tree::Delegations::default(),
@@ -418,12 +426,11 @@ impl Model {
             credentials: credentials::Heard::default(),
             held: held::Held::default(),
             looks: faces::Looks::default(),
-            drafts: command::Drafts::default(),
-            history: command::History::default(),
         };
         let nav = nav::Item::Home;
         Self {
             data,
+            ui: Ui::default(),
             pages: vec![Page::of(&nav)],
             nav,
             focus: Focus::View,
