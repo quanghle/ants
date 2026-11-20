@@ -3,6 +3,7 @@
 //! being the publisher's own. Each human's grant and each assistant's record is read once, when first needed, and
 //! again on a change of a grant or a revocation while a long-running reader follows them ([`Checker::follow`]).
 
+use ants_daemon::bus::relayed::{self, GuardedKv as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -208,8 +209,8 @@ impl Checker {
     }
 
     /// A watch of the keys of `bucket` matching `keys` from now on, unless refused.
-    async fn watch(&self, bucket: &str, keys: &str) -> Option<kv::Watch> {
-        let watch = async { anyhow::Ok(self.js.get_key_value(bucket).await?.watch(keys).await?) };
+    async fn watch(&self, bucket: &str, keys: &str) -> Option<relayed::Watch> {
+        let watch = async { anyhow::Ok(self.js.get_key_value(bucket).await?.guarded_watch(keys).await?) };
         watch.await.inspect_err(|e| tracing::debug!(bucket, "not watching {keys}: {e:#}")).ok()
     }
 
@@ -222,7 +223,7 @@ impl Checker {
         let key = assistant_grant_key(human);
         let value = async {
             let kv = self.js.get_key_value(HUMANS_BUCKET).await?;
-            anyhow::Ok(kv.get(&key).await?)
+            anyhow::Ok(kv.guarded_get(&key).await?)
         };
         let value = value.await.unwrap_or_else(|e| {
             tracing::warn!(%human, "reading the assistant grant: {e:#}");
@@ -236,7 +237,7 @@ impl Checker {
 }
 
 /// The next change `watch` delivers; never without one.
-async fn next(watch: &mut Option<kv::Watch>) -> Option<Result<kv::Entry, kv::WatcherError>> {
+async fn next(watch: &mut Option<relayed::Watch>) -> Option<Result<kv::Entry, kv::WatcherError>> {
     match watch {
         Some(watch) => watch.next().await,
         None => std::future::pending().await,

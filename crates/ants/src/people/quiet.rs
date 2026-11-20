@@ -4,6 +4,7 @@
 //! [`NotifyPrefs`] under the human's key in [`NOTIFY_BUCKET`] and updated with compare-and-set, so devices changing
 //! them at once keep each other's changes. Each hold carries its deadline and ends there on its own.
 
+use ants_daemon::bus::relayed::GuardedKv as _;
 use std::time::Duration;
 
 use ants_proto::{ChannelId, ChannelNotify, NOTIFY_BUCKET, NotifyPrefs, ThreadId, UserId};
@@ -31,7 +32,7 @@ pub async fn ensure_bucket(js: &jetstream::Context) -> Result<kv::Store> {
 
 /// The holds of `human` and their revision, 0 when there are none.
 async fn load(kv: &kv::Store, human: &UserId) -> Result<(NotifyPrefs, u64)> {
-    let Some(entry) = kv.entry(human.as_str()).await.context("reading the snooze and muted threads")? else {
+    let Some(entry) = kv.guarded_entry(human.as_str()).await.context("reading the snooze and muted threads")? else {
         return Ok((NotifyPrefs::default(), 0));
     };
     if entry.operation != kv::Operation::Put {

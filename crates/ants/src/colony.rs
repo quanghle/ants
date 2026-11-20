@@ -1,5 +1,6 @@
 //! `ants colony`: the ants being served, and whether their daemons still beat.
 
+use ants_daemon::bus::relayed::GuardedKv as _;
 use std::time::Duration;
 
 use ants_daemon::records::chains;
@@ -274,7 +275,7 @@ async fn read_unserved(js: &jetstream::Context, ants: &[&UserId]) -> Result<Vec<
     let now = Utc::now();
     let mut warnings = Vec::new();
     for ant in ants {
-        let entry = match kv.get(ant.as_str()).await.with_context(|| format!("reading {ant} in the colony"))? {
+        let entry = match kv.guarded_get(ant.as_str()).await.with_context(|| format!("reading {ant} in the colony"))? {
             Some(value) => {
                 let entry: ColonyEntry = serde_json::from_slice(&value).with_context(|| format!("parsing {ant}"))?;
                 entry.check_key(ant.as_str())?;

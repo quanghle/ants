@@ -11,6 +11,7 @@
 //! attempt, so a request racing a human's transfer of the channel is refused rather than applied to the new owner's
 //! channel. Each change applied is announced in the channel by [`UserId::channel_manager`], mentioning nobody.
 
+use crate::bus::relayed;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -50,8 +51,9 @@ pub async fn serve(
     let kv = js.get_key_value(CHANNELS_BUCKET).await.context(
         "opening the channels bucket; `ants channel create` as a human makes it, then the channel manager can start",
     )?;
-    let mut requests =
-        client.queue_subscribe(subject::ALL_CHANADM, QUEUE.to_owned()).await.context("subscribing to requests")?;
+    let mut requests = relayed::queue_subscribe(&client, subject::ALL_CHANADM, QUEUE.to_owned())
+        .await
+        .context("subscribing to requests")?;
     let mut manager = Manager { client, js, kv, colony, humans, behalf, answered: VecDeque::new() };
     tracing::info!("serving channel management requests");
     while let Some(msg) = requests.next().await {
@@ -258,7 +260,7 @@ impl Admin for NatsAdmin {
             let deadline = tokio::time::Instant::now() + CHANADM_WAIT;
             while tokio::time::Instant::now() < deadline {
                 let next = tokio::time::Instant::now() + CHANADM_REPEAT;
-                let asked = self.client.request(request.subject(), payload.clone().into());
+                let asked = relayed::request(&self.client, request.subject(), payload.clone().into());
                 match tokio::time::timeout(CHANADM_REPEAT, asked).await {
                     Ok(Ok(msg)) => match serde_json::from_slice::<ChannelAdminReply>(&msg.payload) {
                         Ok(reply) if reply.request_id == request.id => return Ok(Some(reply)),

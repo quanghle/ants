@@ -4,6 +4,7 @@
 //! list` counts the unread ones, and `ants chat` does both as its views show them; each channel's notify level
 //! ([`ChannelNotify`]) says which unread posts count.
 
+use ants_daemon::bus::relayed::GuardedKv as _;
 use ants_proto::{ChannelId, ChannelNotify, ChannelReadMarkers, Humans, ReadMarker, UserId, channel_reads_key};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -34,7 +35,7 @@ impl ChannelReads {
 
     /// The markers and their revision, 0 when there are none.
     pub async fn markers(&self) -> Result<(ChannelReadMarkers, u64)> {
-        let Some(entry) = self.kv.entry(&self.key).await.context("reading the channel read markers")? else {
+        let Some(entry) = self.kv.guarded_entry(&self.key).await.context("reading the channel read markers")? else {
             return Ok((ChannelReadMarkers::default(), 0));
         };
         if entry.operation != Operation::Put {

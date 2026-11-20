@@ -3,6 +3,7 @@
 //! again every [`ENROLL_REPEAT`] until the signer answers for the key or the wait ends. Behind a leaf node, the request also
 //! carries the uplink credentials, signed with their key too ([`EnrollRequest::leaf`]), for the signer to renew them.
 
+use crate::bus::relayed;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -45,7 +46,7 @@ pub(super) async fn ask(
         })
         .transpose()?;
     let client = js.client();
-    let mut replies = client.subscribe(subject::enroll_reply(ant)).await?;
+    let mut replies = relayed::subscribe(&client, subject::enroll_reply(ant)).await?;
     let mut request = EnrollRequest::new(ant.clone(), public_key, order.machine.as_str());
     request.enrollment = jwt;
     request.order = Some(Box::new(order.clone()));

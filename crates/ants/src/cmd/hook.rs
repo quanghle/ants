@@ -3,6 +3,7 @@
 //!
 //! [`Permissions::for_observer`]: ants_proto::Permissions::for_observer
 
+use ants_daemon::bus::relayed::{self, GuardedKv as _};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -157,6 +158,13 @@ impl Hook {
                         continue;
                     }
                 };
+                if relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, relayed::Read::Consumer) {
+                    tracing::warn!(subject = %msg.subject, "skipping a message a stream relayed");
+                    if let Err(e) = msg.ack().await {
+                        tracing::warn!("acking {}: {e}", msg.subject);
+                    }
+                    continue;
+                }
                 let slot = slots.clone().acquire_owned().await?;
                 let hook = hook.clone();
                 tokio::spawn(async move {
@@ -169,7 +177,7 @@ impl Hook {
             }
         } else if hook.event == Event::Colony {
             let colony = js.get_key_value(COLONY_BUCKET).await?;
-            let mut entries = colony.watch_all().await?;
+            let mut entries = colony.guarded_watch(">").await?;
             while let Some(entry) = entries.next().await {
                 let entry = entry?;
                 if entry.operation != kv::Operation::Put {
@@ -183,7 +191,7 @@ impl Hook {
                 });
             }
         } else {
-            let mut updates = js.client().subscribe(subject::ALL_STATUS).await?;
+            let mut updates = relayed::subscribe(&js.client(), subject::ALL_STATUS).await?;
             while let Some(msg) = updates.next().await {
                 let slot = slots.clone().acquire_owned().await?;
                 let hook = hook.clone();

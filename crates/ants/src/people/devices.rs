@@ -5,6 +5,7 @@
 //! only from a JWT it verifies itself ([`ants_daemon::people::devices::verify`]), so no human puts a key for another's device, besides the assistants
 //! the humans enrolled as devices by their grants.
 
+use ants_daemon::bus::relayed::GuardedKv as _;
 use std::path::Path;
 use std::time::Duration;
 
@@ -135,7 +136,7 @@ pub async fn record_revocations(url: &str, js_domain: Option<&JsDomain>, dir: &P
     let mut recorded = Vec::new();
     for revocation in revocations {
         let key = revoked_device_key(&revocation.key);
-        if kv.get(&key).await.with_context(|| format!("reading {key} in {DEVICES_BUCKET}"))?.is_some() {
+        if kv.guarded_get(&key).await.with_context(|| format!("reading {key} in {DEVICES_BUCKET}"))?.is_some() {
             continue;
         }
         let record = serde_json::to_vec(&revocation)?;

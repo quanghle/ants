@@ -6,6 +6,7 @@
 //! compare-and-set, so devices reading at the same time each keep the other's marks. Nothing is consumed, so a reply
 //! one device reads still reaches the others following the inbox.
 
+use ants_daemon::bus::relayed::GuardedKv as _;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
@@ -124,7 +125,7 @@ impl Inbox {
 
     /// The marker and its revision, 0 when there is none.
     pub(crate) async fn marker(&self) -> Result<(ReadMarker, u64)> {
-        let Some(entry) = self.kv.entry(self.human.as_str()).await.context("reading the read marker")? else {
+        let Some(entry) = self.kv.guarded_entry(self.human.as_str()).await.context("reading the read marker")? else {
             return Ok((ReadMarker::default(), 0));
         };
         if entry.operation != Operation::Put {
@@ -266,6 +267,7 @@ impl Inbox {
         tokio::pin!(stop);
         // The stream announces each message it stores on the human's own inboxes.
         let client = self.js.client();
+        #[expect(clippy::disallowed_methods, reason = "a wake-up alone: the messages are read from the stream")]
         let mut stored = client.subscribe(subject::stored_inbox(&self.human)).await.context("following the inbox")?;
         if self.start.is_none() {
             // Only what is stored from now on.

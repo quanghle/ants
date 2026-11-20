@@ -1,6 +1,8 @@
 //! Escalations against a real nats-server: kept in `ants_sessions` across a restart, up the chains the colony
 //! publishes or the chains bucket keeps, and to the human once the chains loop.
 
+#![allow(clippy::disallowed_methods, reason = "tests read and hear as they please")]
+
 use std::sync::Arc;
 use std::time::Duration;
 

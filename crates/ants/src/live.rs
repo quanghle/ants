@@ -11,6 +11,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ants_daemon::bus::relayed;
 use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{ApprovalRequest, ColonyEntry, STREAM, StatusEvent, ThreadId, ThreadMarks, UserId, Verdict, subject};
 use anyhow::{Context as _, Result};
@@ -186,7 +187,7 @@ pub struct Feed {
     client: async_nats::Client,
     js: jetstream::Context,
     since: Duration,
-    traffic: async_nats::Subscriber,
+    traffic: relayed::Heard,
     updates: mpsc::UnboundedSender<Update>,
     updated: mpsc::UnboundedReceiver<Update>,
     rereads: tokio::time::Interval,
@@ -218,7 +219,7 @@ pub struct Feed {
 impl Feed {
     /// Follow the ants traffic on `client`, to read the stream from the window `since` on.
     pub async fn new(client: async_nats::Client, js: jetstream::Context, since: Duration) -> Result<Self> {
-        let traffic = client.subscribe(subject::ALL).await.context("following ants traffic")?;
+        let traffic = relayed::subscribe(&client, subject::ALL).await.context("following ants traffic")?;
         let (updates, updated) = mpsc::unbounded_channel();
         Ok(Self {
             client,

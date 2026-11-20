@@ -252,6 +252,7 @@ impl DirectKv {
         }
         let request = serde_json::json!({ "last_by_subj": self.subject(key) }).to_string();
         let subject = format!("{}DIRECT.GET.KV_{}", self.request_api(), self.bucket);
+        #[expect(clippy::disallowed_methods, reason = "a direct get's answer, which the stream sends")]
         let msg = match self.js.client().request(subject, request.into()).await {
             Ok(msg) => msg,
             Err(e) if e.kind() == RequestErrorKind::NoResponders => {
@@ -477,6 +478,7 @@ impl DirectKv {
         let client = self.js.client();
         let wait = client.timeout().unwrap_or(Duration::from_secs(10));
         let inbox = client.new_inbox();
+        #[expect(clippy::disallowed_methods, reason = "direct gets' answers, which the stream sends")]
         let mut replies = client.subscribe(inbox.clone()).await?;
         let mut seq = 1;
         loop {

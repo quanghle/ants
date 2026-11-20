@@ -4,6 +4,8 @@
 //! `stub-adapter` one a config file defines as a harness, it serves ACP on stdio and answers every prompt with
 //! `stub: <prompt>`.
 
+#![allow(clippy::disallowed_methods, reason = "tests read and hear as they please")]
+
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
 use std::path::Path;

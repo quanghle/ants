@@ -13,6 +13,7 @@
 //! to the assistant's acts (`<human>.confirmed`) and its pre-allow rules (`<human>.preallow`), announced as they
 //! change ([`Registry::consents`]).
 
+use crate::bus::relayed::GuardedKv as _;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -225,12 +226,12 @@ impl Registry {
     /// Read the humans of `kv` in place of the known ones, then apply its changes until the watch ends. The watch
     /// starts first, so no change made while the entries are read is missed.
     async fn follow(&self, kv: &kv::Store) -> Result<()> {
-        let mut updates = kv.watch_all().await.context("watching the humans")?;
+        let mut updates = kv.guarded_watch(">").await.context("watching the humans")?;
         let keys: Vec<String> = kv.keys().await.context("listing the humans")?.try_collect().await?;
         let mut humans = self.base();
         let (mut granting, mut consenting) = (Vec::new(), Vec::new());
         for key in keys {
-            let value = kv.get(&key).await.with_context(|| format!("reading human {key}"))?;
+            let value = kv.guarded_get(&key).await.with_context(|| format!("reading human {key}"))?;
             if let Some(human) = assistant_grant_of(&key) {
                 granting.push(human);
                 self.set_grant(&key, value.as_deref());

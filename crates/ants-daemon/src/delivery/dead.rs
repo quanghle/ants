@@ -32,6 +32,7 @@
 //! letters. Advisories are core NATS: one published while no watcher runs is lost, and its message stays in the
 //! stream unnoticed until it expires.
 
+use crate::bus::relayed::{self, Read};
 use std::path::Path;
 use std::time::Duration;
 
@@ -40,6 +41,7 @@ use ants_proto::{
     Uuid, chan_consumer, dead_reader, inbox_consumer, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
+use async_nats::HeaderMap;
 use async_nats::jetstream::message::PublishMessage;
 use async_nats::jetstream::stream::{self, RawMessageErrorKind};
 use async_nats::jetstream::{self, AckKind, consumer};
@@ -333,7 +335,9 @@ async fn read_back(reader: &consumer::PullConsumer, seq: u64) -> Result<Vec<(u64
             let msg = msg.map_err(|e| anyhow!(e))?;
             got += 1;
             let Ok(info) = msg.info() else { continue };
-            if let Some(dead) = letter(&msg.subject, &msg.payload).ok().filter(|dead| dead.stream_seq == seq) {
+            if let Some(dead) =
+                letter(&msg.subject, msg.headers.as_ref(), &msg.payload).ok().filter(|dead| dead.stream_seq == seq)
+            {
                 letters.push((info.stream_sequence, dead));
             }
         }
@@ -453,8 +457,7 @@ pub async fn watch(
     reader: &UserId,
     mut buried: impl FnMut(u64, &DeadLetter),
 ) -> Result<()> {
-    let mut advisories = client
-        .subscribe(subject::max_deliveries_advisories())
+    let mut advisories = relayed::subscribe(client, subject::max_deliveries_advisories())
         .await
         .context("subscribing to max-deliveries advisories")?;
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
@@ -524,8 +527,10 @@ pub async fn bury_undelivered(
                 bail!("message {seq} is on {}, not in the inbox of {ant}", msg.subject);
             }
             // As the daemon does: an envelope whose sender is forged is kept only as a payload.
-            let mut envelope =
-                serde_json::from_slice::<Envelope>(&msg.payload).ok().filter(|e| e.check_subject(&msg.subject).is_ok());
+            let relayed = relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::Consumer);
+            let mut envelope = serde_json::from_slice::<Envelope>(&msg.payload)
+                .ok()
+                .filter(|e| !relayed && e.check_subject(&msg.subject).is_ok());
             if let Some(envelope) = envelope.as_mut() {
                 claims.sender_claims(envelope, seq).await;
             }
@@ -535,9 +540,10 @@ pub async fn bury_undelivered(
             if subject::parse_chan(&msg.subject).is_none() {
                 bail!("message {seq} is on {}, not a channel post", msg.subject);
             }
+            let relayed = relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::Consumer);
             let mut post = serde_json::from_slice::<ChannelPost>(&msg.payload)
                 .ok()
-                .filter(|p| p.check_subject(&msg.subject).is_ok());
+                .filter(|p| !relayed && p.check_subject(&msg.subject).is_ok());
             if let Some(post) = post.as_mut() {
                 let origin = claims.threads.origin(post, seq, &claims.humans.humans()).await.unwrap_or_else(|e| {
                     tracing::warn!(thread = %post.thread_id, error = format!("{e:#}"), "reading the thread's origin");
@@ -575,7 +581,7 @@ async fn find(stream: &stream::Stream, ant: &UserId, seq: u64) -> Result<Option<
             Err(e) => return Err(e).context("reading dead letters"),
         };
         from = msg.sequence + 1;
-        if letter(&msg.subject, &msg.payload).is_ok_and(|dead| dead.stream_seq == seq) {
+        if letter(&msg.subject, Some(&msg.headers), &msg.payload).is_ok_and(|dead| dead.stream_seq == seq) {
             return Ok(Some(msg.sequence));
         }
     }
@@ -631,7 +637,7 @@ pub async fn list<I>(stream: &stream::Stream<I>) -> Result<Vec<(u64, DeadLetter)
             Err(e) => return Err(e).context("reading dead letters"),
         };
         from = msg.sequence + 1;
-        match letter(&msg.subject, &msg.payload) {
+        match letter(&msg.subject, Some(&msg.headers), &msg.payload) {
             Ok(dead) => letters.push((msg.sequence, dead)),
             Err(e) => tracing::warn!(seq = msg.sequence, error = format!("{e:#}"), "skipping unreadable dead letter"),
         }
@@ -644,12 +650,15 @@ pub async fn get<I>(stream: &stream::Stream<I>, seq: u64) -> Result<DeadLetter> 
     if !msg.subject.starts_with("ants.dead.") {
         bail!("message {seq} is on {}, not a dead letter", msg.subject);
     }
-    letter(&msg.subject, &msg.payload).with_context(|| format!("dead letter {seq}"))
+    letter(&msg.subject, Some(&msg.headers), &msg.payload).with_context(|| format!("dead letter {seq}"))
 }
 
-/// The dead letter stored on `subject`. Credentials pin the ant of a dead letter subject, so one naming another
-/// ant is forged.
-fn letter(subject: &str, payload: &[u8]) -> Result<DeadLetter> {
+/// The dead letter stored on `subject` with `headers`, as a consumer or a message get reads it. Credentials pin the
+/// ant of a dead letter subject, so one naming another ant, or one a stream relayed there, is forged.
+fn letter(subject: &str, headers: Option<&HeaderMap>, payload: &[u8]) -> Result<DeadLetter> {
+    if relayed::stored_relayed(headers, payload, Read::Consumer) {
+        bail!("a message a stream relayed onto {subject}, not a dead letter");
+    }
     let dead: DeadLetter = serde_json::from_slice(payload)?;
     if dead.subject() != subject {
         bail!("dead letter of {} arrived on {subject}", dead.ant);

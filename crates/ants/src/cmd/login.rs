@@ -9,6 +9,7 @@
 //! of the GitHub named by `--github-url`, and a JWT is taken only when the account of the bootstrap credentials issued
 //! it to the device's key, for a human of the name asked for.
 
+use ants_daemon::bus::relayed;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -193,7 +194,7 @@ async fn ask(
     login: &Login<'_>,
     stop: impl Future<Output = ()>,
 ) -> Result<String> {
-    let mut replies = client.subscribe(subject::login_reply(&request.name)).await?;
+    let mut replies = relayed::subscribe(client, subject::login_reply(&request.name)).await?;
     let payload = serde_json::to_vec(&request)?;
     let left = (request.expires_at - Utc::now()).to_std().unwrap_or_default();
     let expiry = tokio::time::sleep(left);

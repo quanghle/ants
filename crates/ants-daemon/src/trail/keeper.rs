@@ -138,8 +138,7 @@ pub async fn answer(kv: &DirectKv, runs: Option<&DirectKv>, request: &SaveTrailR
 pub async fn serve(client: async_nats::Client, js: jetstream::Context, js_domain: Option<JsDomain>) -> Result<()> {
     let kv = DirectKv::whole(&js, js_domain.as_ref(), TRAILS_BUCKET).await?.past_relays();
     let runs = DirectKv::whole(&js, js_domain.as_ref(), TRAIL_RUNS_BUCKET).await?.past_relays();
-    let requests = client
-        .queue_subscribe(subject::ALL_SAVE_TRAIL_REQUESTS, QUEUE.to_owned())
+    let requests = relayed::queue_subscribe(&client, subject::ALL_SAVE_TRAIL_REQUESTS, QUEUE.to_owned())
         .await
         .context("subscribing to trail saves")?;
     requests.for_each_concurrent(CONCURRENT, |msg| respond(&client, &kv, &runs, msg)).await;
@@ -192,7 +191,8 @@ pub async fn request_within(
     request: &SaveTrailRequest,
     wait: Duration,
 ) -> Result<Option<SaveTrailOutcome>> {
-    let mut replies = client.subscribe(request.reply_subject()).await.context("subscribing to the answers")?;
+    let mut replies =
+        relayed::subscribe(client, request.reply_subject()).await.context("subscribing to the answers")?;
     let payload = serde_json::to_vec(request)?;
     let deadline = tokio::time::Instant::now() + wait;
     while tokio::time::Instant::now() < deadline {

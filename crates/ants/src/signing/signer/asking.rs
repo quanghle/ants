@@ -2,6 +2,7 @@
 //! ([`ask`]) or to retire one ([`retire`]), repeating the request until an answer comes, and checking the credentials
 //! an approval carries.
 
+use ants_daemon::bus::relayed;
 use std::time::Duration;
 
 use ants_daemon::colony;
@@ -68,7 +69,7 @@ pub async fn ask(
     let Requester { client, jwt, leaf, until, .. } = *requester;
     let claims = auth::verified(jwt).context("the manager's credentials")?;
     let manager: UserId = claims.name.parse().with_context(|| format!("credentials named {}", claims.name))?;
-    let mut replies = client.subscribe(subject::antreq_reply(&manager)).await?;
+    let mut replies = relayed::subscribe(client, subject::antreq_reply(&manager)).await?;
     let public_key = user.public_key();
     let host = colony::machine().await;
     let asked = AskedAnt {
@@ -140,7 +141,7 @@ pub async fn retire(
     let Requester { client, jwt, leaf, until, .. } = *requester;
     let claims = auth::verified(jwt).context("the manager's credentials")?;
     let manager: UserId = claims.name.parse().with_context(|| format!("credentials named {}", claims.name))?;
-    let mut replies = client.subscribe(subject::antreq_reply(&manager)).await?;
+    let mut replies = relayed::subscribe(client, subject::antreq_reply(&manager)).await?;
     let host = colony::machine().await;
     let asked =
         AskedAnt { name: name.clone(), template: template.to_owned(), request: "{}".to_owned(), reason: String::new() };

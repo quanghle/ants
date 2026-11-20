@@ -1,0 +1,18 @@
+# A stream delivers a message stored on one subject onto any other, a reply subject its asker names, past subject
+# permissions (ants_daemon::bus::relayed). These reads would take such a message as what its subject or key claims.
+disallowed-methods = [
+  { path = "async_nats::jetstream::kv::Store::get", reason = "use bus::relayed::GuardedKv::guarded_get" },
+  { path = "async_nats::jetstream::kv::Store::entry", reason = "use bus::relayed::GuardedKv::guarded_entry" },
+  { path = "async_nats::jetstream::kv::Store::entry_for_revision", reason = "takes relayed messages" },
+  { path = "async_nats::jetstream::kv::Store::watch", reason = "use bus::relayed::GuardedKv::guarded_watch" },
+  { path = "async_nats::jetstream::kv::Store::watch_all", reason = "use bus::relayed::GuardedKv::guarded_watch" },
+  { path = "async_nats::jetstream::kv::Store::watch_many", reason = "takes relayed messages" },
+  { path = "async_nats::jetstream::kv::Store::watch_with_history", reason = "takes relayed messages" },
+  { path = "async_nats::jetstream::kv::Store::watch_many_with_history", reason = "takes relayed messages" },
+  { path = "async_nats::jetstream::kv::Store::watch_from_revision", reason = "takes relayed messages" },
+  { path = "async_nats::jetstream::kv::Store::watch_all_from_revision", reason = "takes relayed messages" },
+  { path = "async_nats::jetstream::kv::Store::history", reason = "takes relayed messages" },
+  { path = "async_nats::Client::subscribe", reason = "use bus::relayed::subscribe" },
+  { path = "async_nats::Client::queue_subscribe", reason = "use bus::relayed::queue_subscribe" },
+  { path = "async_nats::Client::request", reason = "use bus::relayed::request" },
+]

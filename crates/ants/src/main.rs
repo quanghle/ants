@@ -4,6 +4,7 @@
     all(any(test, debug_assertions), target_os = "macos"),
     allow(linker_messages, reason = "a debug binary's unwind tables outgrow what ld64 encodes compactly (16 MB)")
 )]
+#![cfg_attr(test, allow(clippy::disallowed_methods, reason = "tests read and hear as they please"))]
 
 // The command line, and how it reaches NATS.
 mod cli;

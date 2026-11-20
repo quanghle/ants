@@ -228,9 +228,13 @@ impl Inbox<'_> {
     /// forged `on_behalf_of` is cleared. No daemon tells the human of an honoured one, as every daemon sees it. A top-level post kept names its thread's owner, a human, and its
     /// creator, an ant ([`ThreadOrigin`]); any other names none until [`Inbox::handle`] reads its thread's.
     pub(super) async fn admit_post(&self, msg: &jetstream::Message, channels: &mut Channels) -> Option<Incoming> {
-        let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
-            .map_err(|e| e.to_string())
-            .and_then(|post| post.check_subject(&msg.subject).map(|()| post).map_err(|e| e.to_string()));
+        let post = if relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::Consumer) {
+            Err("relayed by a stream, not published by its sender".to_owned())
+        } else {
+            serde_json::from_slice::<ChannelPost>(&msg.payload)
+                .map_err(|e| e.to_string())
+                .and_then(|post| post.check_subject(&msg.subject).map(|()| post).map_err(|e| e.to_string()))
+        };
         let mut post = match post {
             Ok(post) => post,
             Err(error) => {
