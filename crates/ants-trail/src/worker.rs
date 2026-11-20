@@ -1,6 +1,7 @@
 //! The `ants subprocess` worker: serves one [`Request`] from stdin with one [`Response`] on stdout, then exits.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::time::Instant;
 
@@ -163,14 +164,7 @@ fn start(script: &str, args: &serde_json::Value, limits: Limits, clock: i64, see
         Ok(run) => run.with_os_policy(policy(clock, seed)),
         Err(e) => return session.failed(e),
     };
-    // A feed, as Monty counts it, is one resume: the host calls answered at once (log(), os.urandom(), a name
-    // lookup) start a new turn of it, not a new feed.
-    let tracker = ResourceTracker::new(ResourceLimits {
-        max_feed_duration: Some(limits.compute()),
-        max_memory: Some(limits.memory_bytes),
-        max_recursion_depth: limits.recursion,
-        ..ResourceLimits::default()
-    });
+    let tracker = ResourceTracker::new(resource_limits(&limits));
     let inputs = vec![
         to_monty(args),
         MontyObject::function("__ants_agent", None),
@@ -187,6 +181,8 @@ fn start(script: &str, args: &serde_json::Value, limits: Limits, clock: i64, see
 
 fn resume(snapshot: &RawValue, answers: Vec<(u32, Answer)>, limits: Limits, seed: u64, steps: u32) -> Response {
     let mut session = Session::new(limits, seed, steps);
+    let limited = with_limits(snapshot, &resource_limits(&limits));
+    let snapshot = limited.as_deref().unwrap_or(snapshot);
     let mut waiting = match serde_json::from_str(snapshot.get()) {
         Ok(RunProgress::ResolveFutures(waiting)) => waiting,
         Ok(_) => return Response::Unrestorable { error: "the snapshot is not a suspended session".to_owned() },
@@ -212,6 +208,35 @@ fn resume(snapshot: &RawValue, answers: Vec<(u32, Answer)>, limits: Limits, seed
         }
     }
     Outcome::Waiting(Box::new(waiting)).respond(session)
+}
+
+/// Monty's limits for a run under `limits`.
+fn resource_limits(limits: &Limits) -> ResourceLimits {
+    // A feed, as Monty counts it, is one resume: the host calls answered at once (log(), os.urandom(), a name
+    // lookup) start a new turn of it, not a new feed.
+    ResourceLimits {
+        max_feed_duration: Some(limits.compute()),
+        max_memory: Some(limits.memory_bytes),
+        max_recursion_depth: limits.recursion,
+        ..ResourceLimits::default()
+    }
+}
+
+/// `snapshot`, a dumped [`RunProgress::ResolveFutures`], with its tracker's limits replaced by `limits`; any other
+/// snapshot as it is, for Monty to refuse.
+///
+/// Monty restores a suspended session's tracker as dumped and lends no mutable one while the session waits, so a
+/// resume's limits go into the dump itself; every other part of it stays as written.
+fn with_limits(snapshot: &RawValue, limits: &ResourceLimits) -> Option<Box<RawValue>> {
+    fn replace(object: &RawValue, path: &[&str], value: Box<RawValue>) -> Option<Box<RawValue>> {
+        let Some((key, rest)) = path.split_first() else { return Some(value) };
+        let mut fields: BTreeMap<String, Box<RawValue>> = serde_json::from_str(object.get()).ok()?;
+        let field = fields.get_mut(*key)?;
+        *field = replace(field, rest, value)?;
+        serde_json::value::to_raw_value(&fields).ok()
+    }
+    let limits = serde_json::value::to_raw_value(limits).ok()?;
+    replace(snapshot, &["ResolveFutures", "heap", "tracker", "limits"], limits)
 }
 
 /// The clock, the timezone and the random seed are fixed by the request, so the same request makes the same calls.
