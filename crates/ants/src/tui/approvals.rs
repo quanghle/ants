@@ -168,7 +168,7 @@ pub fn lines(
     if let Some(always) = request.label(Verdict::AllowAlways).filter(|_| card.settled.is_none()) {
         lines.push(Line::styled(cut(&format!("A always: {always}"), width), style::dim()));
     }
-    let storing = asking.filter(|a| a.storing && same(&a.request, request));
+    let storing = asking.filter(|a| a.storing && a.answers(request));
     let last = match (card.settled, storing) {
         (Some(state), _) => Line::styled(cut(&how(state, &request.ant), width), style::dim()),
         (None, Some(asking)) => Line::styled(asking.storing_what(), Style::new().fg(style::PENDING).bold()),
@@ -211,6 +211,8 @@ pub struct Asking {
     pub storing: bool,
     /// The note to send the ant once the rejection being stored is stored.
     pub note: Option<String>,
+    /// The other requests allowed once with `request` in one batch, in turn after it ([`Asking::allow_all`]).
+    pub batch: Vec<ApprovalRequest>,
     /// The first row of the body shown in full, and how many rows a page scrolls, as last drawn.
     top: Cell<usize>,
     page: Cell<usize>,
@@ -242,6 +244,7 @@ impl Asking {
             full: true,
             storing: false,
             note: None,
+            batch: Vec::new(),
             top: Cell::default(),
             page: Cell::default(),
         }
@@ -254,7 +257,35 @@ impl Asking {
         if let Some(refusal) = live::refusal(&request, &state, verdict) {
             return Err(refusal);
         }
-        Ok(Self { request, state, full: false, storing: true, note: None, top: Cell::default(), page: Cell::default() })
+        Ok(Self {
+            request,
+            state,
+            full: false,
+            storing: true,
+            note: None,
+            batch: Vec::new(),
+            top: Cell::default(),
+            page: Cell::default(),
+        })
+    }
+
+    /// Allow each of `requests`, pending, once, in turn, as one batch being stored: refused for none, or for one not
+    /// offering allow once.
+    pub fn allow_all(mut requests: Vec<ApprovalRequest>) -> Result<Self, String> {
+        if requests.is_empty() {
+            return Err("no tool request to allow".to_owned());
+        }
+        if let Some(refusal) = requests.iter().find_map(|r| live::refusal(r, &State::Pending, Verdict::AllowOnce)) {
+            return Err(refusal);
+        }
+        let mut asking = Self::decide(requests.remove(0), Verdict::AllowOnce)?;
+        asking.batch = requests;
+        Ok(asking)
+    }
+
+    /// Whether `request` is among those being answered.
+    fn answers(&self, request: &ApprovalRequest) -> bool {
+        same(&self.request, request) || self.batch.iter().any(|r| same(r, request))
     }
 
     /// Whether keys go to it rather than to the view: while shown in full.
@@ -311,6 +342,9 @@ impl Asking {
             let id = tools::qualified(&self.request);
             let text = match self.note {
                 Some(_) => format!(" storing the rejection of request {id}, then sending the note…"),
+                None if !self.batch.is_empty() => {
+                    format!(" allowing {} requests of {} once, one by one…", self.batch.len() + 1, self.request.ant)
+                }
                 None => format!(" storing the decision on request {id}…"),
             };
             Line::styled(text, Style::new().fg(style::PENDING).bold())
@@ -319,7 +353,11 @@ impl Asking {
 
     /// What is being stored, said on the request's card.
     fn storing_what(&self) -> &'static str {
-        if self.note.is_some() { "storing the rejection, then sending the note…" } else { "storing the decision…" }
+        match (&self.note, self.batch.is_empty()) {
+            (Some(_), _) => "storing the rejection, then sending the note…",
+            (None, false) => "allowing them once, one by one…",
+            (None, true) => "storing the decision…",
+        }
     }
 }
 
@@ -367,6 +405,21 @@ mod tests {
         assert_eq!(asking.key(Key::Char('A')), Answer::Decide(Verdict::AllowAlways), "allow always needs no more");
         assert!(asking.storing && asking.full && asking.status().is_none());
         assert_eq!(asking.key(Key::Char('r')), Answer::Keep, "one decision at a time");
+    }
+
+    #[test]
+    fn an_allow_all_takes_only_requests_offering_allow_once_and_stores_them_as_one() {
+        assert!(Asking::allow_all(Vec::new()).is_err());
+        let (push, test) =
+            (request("dev-a", "git push", vec![Verdict::AllowOnce]), request("dev-a", "cargo test", vec![]));
+        assert!(
+            matches!(Asking::allow_all(vec![push.clone(), test]), Err(e) if e.contains("allow-once is not offered"))
+        );
+        let test = request("dev-a", "cargo test", vec![Verdict::AllowOnce]);
+        let asking = Asking::allow_all(vec![push.clone(), test.clone()]).unwrap();
+        assert!(asking.storing && asking.request == push && asking.batch == [test.clone()]);
+        assert!(asking.answers(&test) && !asking.answers(&request("dev-a", "ls", vec![])));
+        assert!(asking.status().is_some_and(|l| l.to_string() == " allowing 2 requests of dev-a once, one by one…"));
     }
 
     #[test]

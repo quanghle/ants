@@ -7,6 +7,7 @@ mod state;
 #[cfg(test)]
 mod tests;
 
+use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -85,7 +86,7 @@ pub enum Event {
     Colony(Result<Vec<ColonyEntry>>),
     /// The history of a thread, as [`Feed::load_history`] asked.
     History(ThreadId, Result<Vec<Entry>>),
-    /// The outcome of [`Feed::decide`]: the line saying so, or why the decision was not stored.
+    /// The outcome of [`Feed::decide`] or [`Feed::allow_all`]: the line saying so, or why the decision was not stored.
     Decided(Result<String>),
 }
 
@@ -168,6 +169,57 @@ async fn decide(js: jetstream::Context, request: ApprovalRequest, verdict: Verdi
         && let Ok(Some(suggestion)) = tools::suggestion(&stream, seq, &request).await
     {
         text = format!("{text}; {}", tools::suggestion_text(&request, &suggestion));
+    }
+    Ok(text)
+}
+
+/// Allow each of `requests` once by `by`, in turn, as [`decide`] does, those answered elsewhere first counted; returns
+/// the one line saying how many were allowed, already answered or failed, an error only when none was allowed and some
+/// failed.
+async fn allow_all(js: jetstream::Context, requests: Vec<ApprovalRequest>, by: UserId) -> Result<String> {
+    let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
+    let (mut allowed, mut answered, mut failed) = (0, 0, Vec::new());
+    for request in &requests {
+        let outcome = async {
+            let (seq, request) = tools::find(&stream, &tools::qualified(request)).await?;
+            if tools::state(&js, &stream, seq, &request, Utc::now()).await? != tools::State::Pending {
+                return Ok(false);
+            }
+            match tools::answer_request(&js, &stream, seq, &request, Verdict::AllowOnce, &by, Utc::now()).await {
+                Ok(_) => Ok(true),
+                // Answered elsewhere between the check and the decision, the first decision winning.
+                Err(_) if tools::state(&js, &stream, seq, &request, Utc::now()).await? != tools::State::Pending => {
+                    Ok(false)
+                }
+                Err(e) => Err(e),
+            }
+        };
+        match outcome.await {
+            Ok(true) => allowed += 1,
+            Ok(false) => answered += 1,
+            Err(e) => failed.push(format!("{}: {e:#}", tools::qualified(request))),
+        }
+    }
+    allowed_line(requests.first(), (allowed, answered, failed))
+}
+
+/// The line of [`allow_all`]'s outcome on the requests of `oldest`'s ant and kind: allowed, already answered and
+/// failed, an error when none was allowed and some failed.
+fn allowed_line(
+    oldest: Option<&ApprovalRequest>,
+    (allowed, answered, failed): (usize, usize, Vec<String>),
+) -> Result<String> {
+    let (ant, kind) = oldest.map_or(("", ""), |r| (r.ant.as_str(), r.tool.kind.as_str()));
+    let total = allowed + answered + failed.len();
+    let mut text = format!("allowed once {allowed} of {total} {kind} requests of {ant}");
+    if answered > 0 {
+        let _ = write!(text, "; {answered} answered already");
+    }
+    if !failed.is_empty() {
+        let _ = write!(text, "; {} failed: {}", failed.len(), failed.join("; "));
+        if allowed == 0 {
+            anyhow::bail!(text);
+        }
     }
     Ok(text)
 }
@@ -388,6 +440,12 @@ impl Feed {
     /// Store `verdict` on `request` by `by`, the first decision winning, as `ants tools approve` and `reject` do.
     pub fn decide(&mut self, request: ApprovalRequest, verdict: Verdict, by: UserId) {
         self.decision = Some(decide(self.js.clone(), request, verdict, by).boxed_local());
+    }
+
+    /// Allow each of `requests` once by `by`, in turn, in the one decision slot: the first decision winning per
+    /// request, one outcome for them all ([`Event::Decided`]).
+    pub fn allow_all(&mut self, requests: Vec<ApprovalRequest>, by: UserId) {
+        self.decision = Some(allow_all(self.js.clone(), requests, by).boxed_local());
     }
 
     /// Read again what may have missed changes: the stream, the tool requests and the colony.

@@ -291,6 +291,7 @@ impl Model {
             Some(Page::Tree(page)) => page.disarm(),
             Some(Page::Credentials(page)) => page.disarm(),
             Some(Page::Held(page)) => page.disarm(),
+            Some(Page::Home(page)) => page.disarm(),
             _ => false,
         };
         closed || self.card_key(Key::Esc, now).is_some()
@@ -397,13 +398,7 @@ impl Model {
 
     /// Answer `request` with `verdict` at once, unless another decision is still being stored.
     fn decide(&mut self, request: ApprovalRequest, verdict: Verdict, now: DateTime<Utc>) -> Option<Action> {
-        if let Some(storing) = self.asking.as_ref().filter(|a| a.storing) {
-            let id = crate::tools::qualified(&storing.request);
-            self.notify(
-                format!("storing the decision on request {id}: answer again once it is stored"),
-                Level::Error,
-                now,
-            );
+        if self.still_storing(now) {
             return None;
         }
         match Asking::decide(request, verdict) {
@@ -417,6 +412,36 @@ impl Model {
                 None
             }
         }
+    }
+
+    /// Allow each of `requests` once, in turn, as one batch, unless another decision is still being stored.
+    fn allow_all(&mut self, requests: Vec<ApprovalRequest>, now: DateTime<Utc>) -> Option<Action> {
+        if self.still_storing(now) {
+            return None;
+        }
+        match Asking::allow_all(requests) {
+            Ok(asking) => {
+                let mut requests = vec![asking.request.clone()];
+                requests.extend(asking.batch.iter().cloned());
+                self.asking = Some(asking);
+                Some(Action::AllowAll(requests))
+            }
+            Err(refusal) => {
+                self.notify(refusal, Level::Error, now);
+                None
+            }
+        }
+    }
+
+    /// Whether a decision is still being stored, which the status line then says: one at a time.
+    fn still_storing(&mut self, now: DateTime<Utc>) -> bool {
+        let Some(storing) = self.asking.as_ref().filter(|a| a.storing) else { return false };
+        let text = match storing.batch.len() {
+            0 => format!("storing the decision on request {}", crate::tools::qualified(&storing.request)),
+            n => format!("allowing {} requests of {} once", n + 1, storing.request.ant),
+        };
+        self.notify(format!("{text}: answer again once it is stored"), Level::Error, now);
+        true
     }
 
     fn nav_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
@@ -442,6 +467,11 @@ impl Model {
 
     pub(in crate::tui) fn view_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         if key == Key::Esc {
+            if let Some(Page::Home(page)) = self.pages.last_mut()
+                && page.disarm()
+            {
+                return None;
+            }
             if self.pages.len() > 1 {
                 self.pages.pop();
                 return self.shown_reactions();
@@ -490,6 +520,7 @@ impl Model {
                 None
             }
             To::Ask(request, Some(verdict)) => self.decide(request, verdict, now),
+            To::AllowAll(requests) => self.allow_all(requests, now),
             To::Note(request) => self.note_on(request, now),
             To::Tree(thread) => {
                 self.tree(thread);

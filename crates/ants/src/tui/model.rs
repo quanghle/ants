@@ -97,6 +97,8 @@ pub enum Action {
     Run(Job, String),
     /// Store a decision on a tool request.
     Decide(Box<ApprovalRequest>, Verdict),
+    /// Allow each of the tool requests once, in turn, as one batch.
+    AllowAll(Vec<ApprovalRequest>),
     /// Edit the command bar's text in the editor.
     Edit(String),
     /// Show the text in the pager, else in the editor.
@@ -309,6 +311,8 @@ pub enum To {
     Ask(ApprovalRequest, Option<Verdict>),
     /// The command bar open on a note rejecting a pending tool request.
     Note(ApprovalRequest),
+    /// Allow each of the pending tool requests once, in turn, as one batch.
+    AllowAll(Vec<ApprovalRequest>),
     /// Pick a reaction to the message.
     React(Uuid),
     /// A thread's delegation tree.
