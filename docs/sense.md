@@ -83,8 +83,9 @@ a thread whose origin is of a kind this version of sense does not know.
     ([Work and reminders](#work-and-reminders)).
 - **The growth report:** the view's `growth report` entry counts, from the ant's sense data alone, how its identity
   grew, to judge the thresholds of the identity findings of dreams and of the brief, which it names last:
-  - its threads: done, started again and expired, its active days, who started them (humans, other ants, itself,
-    webhooks, providers, ants asking a review), the 10 repositories of the most, and the prompts it completed;
+  - its threads of work, as the brief's experience counts them ([Identity](#identity)): done, started again and
+    expired, its active days, who started them (humans, other ants, itself, webhooks, providers), the 10 repositories
+    of the most, and the prompts it completed;
   - by week, from Monday (UTC), over the last 8: the threads started and done, the active days, the calls of sense's
     tools that wrote, by tool, and the verdicts given in dreams. Sense keeps no count of calls by tool: a call writing
     nothing (`sense_brief`, a search, any other read, a call changing nothing) leaves none, `sense_recall` reading a
@@ -242,8 +243,11 @@ last expired. Each event changes the record once and a repeat nothing, so a thre
 its start and its end, none per prompt. An end of a thread sense never saw start records nothing. A clone inherits no
 thread record; an export carries them with the log.
 
-The brief's identity counts the ant's experience from its thread records each time it is composed, keeping no counter
-(`ants_sense::thread::experience`):
+The brief's identity counts the ant's experience from the records of its threads of work each time it is composed,
+keeping no counter (`ants_sense::thread::experience`). The threads of dreams and reviews are not work: neither the
+threads a dream names (its own, and the review thread its sage answered on) nor those of reviews asked of the ant as a
+sage (started by an ant asking a review, or named by a review record) count, so a sage shows as no one who started the
+ant's threads. The experience counts:
 
 - the threads, and those marked done;
 - the active days: the UTC days on which a thread started, started again or was marked done. A record keeps only the
@@ -256,8 +260,8 @@ The brief's identity counts the ant's experience from its thread records each ti
 
 An ant with no thread record shows no experience. A dream's packet counts it the same way over the threads active since
 the dream's start (`experience_since`): a thread counts when it started, started again or was marked done since then,
-and only those times count toward its days and tallies. A dream's findings on the identity count it over the threads
-of work alone, those of dreams and reviews left out (`work`, [Dreams](#dreams)).
+and only those times count toward its days and tallies. The growth report and a dream's findings on the identity
+([Dreams](#dreams)) count it the same way.
 
 A sage's identity adds, after the experience, the tally of the reviews it made of other ants, counted from its review
 records each time it is shown ([Dreams](#dreams)): its reviews, the ants reviewed and the day of the last review, and
@@ -679,10 +683,8 @@ those offered again do, whatever a sage answers (**The answer**, below):
   of its own and with no change of it proposed: to write anew as the ant's own, or to keep as it is by rejecting the
   finding.
 
-The threads and active days are the experience's ([Identity](#identity)) over the threads of work alone: neither the
-threads a dream names (its own, and the review thread its sage answered on) nor those of reviews asked of the ant as a
-sage (started by an ant asking a review, or named by a review record) count, so a sage's answers make no
-`no_relationship` finding. A finding offered again takes the text gathered now and goes once its ground is gone: the
+The threads, active days, people and repositories are the experience's ([Identity](#identity)), over the threads of
+work alone, so a sage's answers make no `no_relationship` finding nor count as someone new for `stale_self_model`. A finding offered again takes the text gathered now and goes once its ground is gone: the
 record written, the persona or skill change proposed. Each rests on a count stepped coarsely, its threads (or, for a
 stale self-model, the people and repositories new) rounded down to the threshold doubled any number of times (5, 10, 20
 and on), so a rejected one comes again when that count doubles, not at each thread. The numbers are first guesses, to

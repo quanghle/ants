@@ -166,13 +166,6 @@ impl Sense {
         output
     }
 
-    /// The identity card of `ant` as the cache holds it ([`Sense::items`]), without catching up with the log; none
-    /// before its first use of sense. A reader that must see the log's latest passes [`Sense::synced`]'s items to
-    /// [`identity::card`].
-    pub async fn card(&self, ant: &UserId) -> Result<Option<identity::Card>, StoreError> {
-        identity::card(&*self.items(ant).await?).await
-    }
-
     async fn record_event(&self, event: Event) -> Result<Ack, RpcError> {
         let (card, thread) = (identity::touches_card(&event.kind), thread::record::touches_record(&event.kind));
         if !card && !thread {
