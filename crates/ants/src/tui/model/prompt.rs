@@ -106,11 +106,6 @@ impl Overlay {
             Self::Copy(picker) => picker.draw(frame, &model.data),
         }
     }
-
-    /// Whether text pasted is dropped while it is on top, rather than going on into the bar.
-    fn drops_paste(&self) -> bool {
-        !matches!(self, Self::Log(_))
-    }
 }
 
 impl Model {
@@ -159,9 +154,9 @@ impl Model {
         self.overlays.pop().is_some()
     }
 
-    /// Whether text pasted is dropped: an overlay that takes no paste shows, or a prompt only answered by keys asks.
+    /// Whether text pasted is dropped: an overlay shows, or a prompt only answered by keys asks.
     pub(super) fn drops_paste(&self) -> bool {
-        self.overlays.iter().any(Overlay::drops_paste)
+        !self.overlays.is_empty()
             || matches!(self.prompt, Some(Prompt::Interrupt(_) | Prompt::Drop(_) | Prompt::Start(_)))
     }
 

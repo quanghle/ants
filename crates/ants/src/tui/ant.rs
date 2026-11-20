@@ -134,7 +134,7 @@ impl Page {
     const RESUME_KEYS: &str = "y resume the ant · any other key keeps it paused";
 
     pub fn new(ant: UserId) -> Self {
-        let threads = work::Page::new(Filter { user: Some(ant.clone()), ..Filter::default() });
+        let threads = work::Page::of_ant(ant.clone());
         let (message, queue, memories) = (Selection::default(), Queue::Asking, memories::Page::new());
         let settings = settings::Pane::default();
         let mcp = Box::new(mcp::Page::new());
@@ -685,6 +685,14 @@ mod tests {
         m.key(Key::Char('r'), at(3));
         assert_eq!(m.key(Key::Char('n'), at(3)), None);
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "any other key keeps the harnesses");
+        m.key(Key::Char('r'), at(3));
+        assert_eq!(m.key(Key::Esc, at(3)), None);
+        assert_eq!(m.page().name(), "ant", "Esc first drops the confirmation, as on home");
+        assert!(!screen(&m, 160, 36, at(3)).contains(Page::ARMED_KEYS));
+        assert_eq!(m.key(Key::Char('y'), at(3)), None, "nothing left to confirm");
+        assert_eq!(m.focus, crate::tui::model::Focus::View);
+        m.key(Key::Esc, at(3));
+        assert_eq!(m.focus, crate::tui::model::Focus::Nav, "then Esc goes back");
     }
 
     #[test]

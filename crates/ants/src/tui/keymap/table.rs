@@ -38,7 +38,14 @@ pub const GLOBAL: &[Entry] = &[
         HELP_ONLY,
         always,
     ),
-    Entry::new(&[Key::Esc], "Esc", "back", "back to the previous view, else to the nav", 9, not_selecting),
+    Entry::new(
+        &[Key::Esc],
+        "Esc",
+        "back",
+        "drop the confirmation the view asks for, else back to the previous view, else to the nav",
+        9,
+        not_selecting,
+    ),
     Entry::new(&[Key::Tab], "Tab", "nav/view", "move between the nav and the view", 40, always),
     Entry::new(
         &[Key::Ctrl('k'), Key::Char('/')],
