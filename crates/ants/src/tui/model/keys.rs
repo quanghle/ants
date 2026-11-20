@@ -466,17 +466,9 @@ impl Model {
                 self.pages.push(Page::Credentials(credentials::Page::default()));
                 None
             }
-            To::Do(Action::Credentials(order)) => {
-                self.data.credentials.busy = Some(order.clone());
-                Some(Action::Credentials(order))
-            }
             To::Held => {
                 self.pages.push(Page::Held(held::Page::default()));
                 None
-            }
-            To::Do(Action::Answer(answer)) => {
-                self.data.held.busy = Some(answer.clone());
-                Some(Action::Answer(answer))
             }
             To::Digest => self.home_digest(now),
             To::Tools => {
@@ -484,31 +476,46 @@ impl Model {
                 self.notify(format!("tool calls: {}", self.data.tools.label()), Level::Info, now);
                 Some(Action::KeepTools(self.data.tools))
             }
-            To::Do(Action::Run(Job::Open(listed), text)) => {
-                self.bar.set_status(format!("opening {}…", listed.attachment.name), Tone::Busy);
-                Some(Action::Run(Job::Open(listed), text))
-            }
-            To::Do(Action::Run(Job::Withdraw { edit: Some(_), .. }, _)) if !self.bar.is_empty() => {
-                self.bar.set_status("the bar holds a draft: send or clear it before editing a message", Tone::Error);
-                None
-            }
-            To::Do(Action::KeepChannelTab(channel, tab)) => {
-                channel::keep_tab(&mut self.data.channel_tabs, channel.clone(), tab);
-                Some(Action::KeepChannelTab(channel, tab))
-            }
-            To::Do(Action::Run(Job::ChannelNotify { channel, level }, _)) => {
-                self.bar.set_status("running…", Tone::Busy);
-                Some(self.set_level(channel, level))
-            }
-            To::Do(action @ Action::Run(..)) => {
-                self.bar.set_status("running…", Tone::Busy);
-                Some(action)
-            }
-            To::Do(action) => Some(action),
+            To::Do(action) => self.run(action),
             To::Refused(why) => {
                 self.bar.set_status(why, Tone::Error);
                 None
             }
+        }
+    }
+
+    /// The action a view's key asks for, once marked busy where it is shown and on the bar.
+    fn run(&mut self, action: Action) -> Option<Action> {
+        match action {
+            Action::Credentials(order) => {
+                self.data.credentials.busy = Some(order.clone());
+                Some(Action::Credentials(order))
+            }
+            Action::Answer(answer) => {
+                self.data.held.busy = Some(answer.clone());
+                Some(Action::Answer(answer))
+            }
+            Action::Run(Job::Open(listed), text) => {
+                self.bar.set_status(format!("opening {}…", listed.attachment.name), Tone::Busy);
+                Some(Action::Run(Job::Open(listed), text))
+            }
+            Action::Run(Job::Withdraw { edit: Some(_), .. }, _) if !self.bar.is_empty() => {
+                self.bar.set_status("the bar holds a draft: send or clear it before editing a message", Tone::Error);
+                None
+            }
+            Action::KeepChannelTab(channel, tab) => {
+                channel::keep_tab(&mut self.data.channel_tabs, channel.clone(), tab);
+                Some(Action::KeepChannelTab(channel, tab))
+            }
+            Action::Run(Job::ChannelNotify { channel, level }, _) => {
+                self.bar.set_status("running…", Tone::Busy);
+                Some(self.set_level(channel, level))
+            }
+            action @ Action::Run(..) => {
+                self.bar.set_status("running…", Tone::Busy);
+                Some(action)
+            }
+            action => Some(action),
         }
     }
 }
