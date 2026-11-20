@@ -23,12 +23,9 @@ use super::ACK_TIMEOUT;
 /// human's), as `ants init` does.
 #[cfg(test)]
 pub async fn ensure_bucket(js: &jetstream::Context) -> Result<jetstream::kv::Store> {
-    if let Ok(store) = js.get_key_value(WEBHOOKS_BUCKET).await {
-        return Ok(store);
-    }
-    js.create_key_value(ants_daemon::hub::webhooks_config())
+    Box::pin(ants_daemon::hub::ensure_bucket(js, ants_daemon::hub::Object::Webhooks))
         .await
-        .context("creating the webhooks bucket (with credentials, `ants init` as a human creates it)")
+        .context("opening the webhooks bucket (with credentials, `ants init` as a human creates it)")
 }
 
 /// What [`WEBHOOKS_BUCKET`] keeps of a delivered event.

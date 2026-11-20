@@ -24,6 +24,61 @@ fn a_verdict_answers_only_a_pending_request_offering_it() {
     );
 }
 
+#[test]
+fn an_allow_all_says_in_one_line_how_many_were_allowed_answered_already_or_failed() {
+    let push = request("dev-a", "git push", vec![Verdict::AllowOnce]);
+    let line = |tally| allowed_line(Some(&push), tally);
+    assert_eq!(line((3, 0, Vec::new())).unwrap(), "allowed once 3 of 3 execute requests of dev-a");
+    assert_eq!(line((1, 2, Vec::new())).unwrap(), "allowed once 1 of 3 execute requests of dev-a; 2 answered already");
+    let failed = vec!["dev-a/1: down".to_owned()];
+    assert_eq!(
+        line((1, 0, failed.clone())).unwrap(),
+        "allowed once 1 of 2 execute requests of dev-a; 1 failed: dev-a/1: down"
+    );
+    let none = line((0, 1, failed)).unwrap_err().to_string();
+    assert_eq!(none, "allowed once 0 of 2 execute requests of dev-a; 1 answered already; 1 failed: dev-a/1: down");
+}
+
+#[tokio::test]
+async fn an_allow_all_allows_once_each_request_in_turn_counting_those_answered_elsewhere() {
+    let Some(server) = Server::start() else { return };
+    let (client, js) = server.connect(&UserId::human()).await;
+    bus::ensure_stream(&js).await.unwrap();
+    let (_ant, ant_js) = server.connect(&user("dev-a")).await;
+    let thread = ThreadId::generate();
+    let on = |title: &str| ApprovalRequest {
+        thread_id: thread.clone(),
+        ..request("dev-a", title, vec![Verdict::AllowOnce])
+    };
+    let (push, test, build) = (on("git push"), on("cargo test"), on("cargo build"));
+    for r in [&push, &test, &build] {
+        bus::publish_json(&ant_js, r.subject(), r, None).await.unwrap();
+    }
+    let mut feed = Feed::new(client, js.clone(), Duration::from_hours(1)).await.unwrap();
+    feed.decide(test.clone(), Verdict::Reject, UserId::human());
+    let rejected = until(&mut feed, |e| match e {
+        Event::Decided(outcome) => Some(outcome),
+        _ => None,
+    })
+    .await;
+    assert!(rejected.is_ok(), "{rejected:?}");
+
+    feed.allow_all(vec![push.clone(), test.clone(), build.clone()], UserId::human());
+    let line = until(&mut feed, |e| match e {
+        Event::Decided(outcome) => Some(outcome),
+        _ => None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(line, "allowed once 2 of 3 execute requests of dev-a; 1 answered already");
+    let stream = js.get_stream(STREAM).await.unwrap();
+    for (r, verdict) in [(&push, Verdict::AllowOnce), (&test, Verdict::Reject), (&build, Verdict::AllowOnce)] {
+        let (seq, r) = tools::find(&stream, &tools::qualified(r)).await.unwrap();
+        let state = tools::state(&js, &stream, seq, &r, Utc::now()).await.unwrap();
+        assert!(matches!(state, tools::State::Decided(ref d) if d.verdict == verdict), "{state:?}");
+    }
+}
+
 /// The next event of `feed` that `pick` takes, the others skipped.
 async fn until<T>(feed: &mut Feed, mut pick: impl FnMut(Event) -> Option<T>) -> T {
     let wait = async {

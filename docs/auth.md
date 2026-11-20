@@ -114,7 +114,7 @@ An assistant's daemon also puts its own user JWT there, under `<assistant>.assis
 
 A reader takes a device's key only from a JWT it verifies itself: signed by the account that signed the reader's own credentials, a human's user JWT named for that human, tagged with that device and binding an `ants-xkey:`, unexpired, and with no `revoked.<U...>` record for its user key. It skips and reports (a warning) every other entry of the humans it reads, and never uses its key.
 
-`ants auth revoke`, and `ants auth push` for those not recorded yet, put `revoked.<U...>` (`{key, revoked_at}`) for each revocation in `revoked.json` of a human's, an assistant's or an ant's credentials, or of a key `issued.jsonl` does not know, once the hub applied the pushed account. They use short-lived credentials issued from the account key that may put only those records. When the hub cannot take them, the command fails after the push, and the next `ants auth push` records them. `ants doctor` checks it as **credentials xkey**: no key bound warns with `ants renew` as the fix; a seed missing, unreadable or not that of the JWT's tag fails.
+`ants auth revoke`, and `ants auth push` for those not recorded yet, put `revoked.<U...>` (`{key, revoked_at}`) for each revocation in `revoked.json` of a human's, an assistant's or an ant's credentials, or of a key `issued.jsonl` does not know, once the hub applied the pushed account. They use short-lived credentials issued from the account key that may put only those records. When the hub cannot take them, or has no `ants_devices` bucket yet (`ants init` as a human creates it; these credentials cannot), the command fails after the push, and the next `ants auth push` records them. `ants doctor` checks it as **credentials xkey**: no key bound warns with `ants renew` as the fix; a seed missing, unreadable or not that of the JWT's tag fails.
 
 #### Sealed messages between humans
 
@@ -533,7 +533,7 @@ Credentials a registration granted (a device registered with `ants login`, whose
 
 ## Credentials across upgrades
 
-Each user JWT carries `ants-perms:<n>` (current: `5`), required on every user JWT `ants auth` issues, and live daemons, webhooks, schedules and `ants channel serve` publish their running `ants` and `perms` versions. The version goes up whenever the permissions of a kind of credentials change. Connecting with outdated or soon-to-expire (< 7 d) credentials logs a warning with the exact renewal command (credentials newer than the running ants ask for an upgrade of ants); `ants doctor` (**versions**) verifies that all live services run the current permissions version before rights an older version had are withdrawn by renewing. Leaf uplinks whose members' rights changed need renewal and `ants leaf outbox` too.
+Each user JWT carries `ants-perms:<n>` (current: `6`), required on every user JWT `ants auth` issues, and live daemons, webhooks, schedules and `ants channel serve` publish their running `ants` and `perms` versions. The version goes up whenever the permissions of a kind of credentials change. Connecting with outdated or soon-to-expire (< 7 d) credentials logs a warning with the exact renewal command (credentials newer than the running ants ask for an upgrade of ants); `ants doctor` (**versions**) verifies that all live services run the current permissions version before rights an older version had are withdrawn by renewing. Leaf uplinks whose members' rights changed need renewal and `ants leaf outbox` too.
 
 ## Private keys in the OS credential store
 

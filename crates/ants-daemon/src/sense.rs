@@ -27,7 +27,7 @@ pub use ants_sense::home::DIR;
 pub use ants_sense::{CAPABILITIES, NAME};
 pub use dreams::{Dreams, Grounded, Refusal};
 pub(crate) use scheduler::{Daemon, Dreaming, Serving};
-pub use stores::{Hosting, Link};
+pub use stores::{Hosting, Link, Retrying};
 
 use crate::daemon::Config;
 use crate::profile::identity::Identity;
@@ -84,6 +84,12 @@ impl Sense {
     /// A host connection starts, over which sense reaches the logs of the ants served ([`Hosting`]).
     pub fn hosting(&self) -> Hosting {
         self.stores.hosting()
+    }
+
+    /// The host connection failed and is tried again, until the next starts or the guard drops: meanwhile the events
+    /// of an ant with no cache wait in its queue ([`Retrying`]).
+    pub fn retrying(&self) -> Retrying {
+        self.stores.retrying()
     }
 
     /// The provider registered for the ants whose setting names sense.

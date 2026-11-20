@@ -74,8 +74,8 @@ a thread whose origin is of a kind this version of sense does not know.
   tools, and nothing in the view asks the human reading it to act. One entry a list, none for an empty one, each at
   most 20 items within 32 KiB, those left out counted, the items as the brief and the ant's tools show them:
   - `open findings`: the findings of the last dream unanswered or deferred, the sage's among them with their evidence
-    and suggested action, a deferral with its reason, then those of a sage's answer given late, which the next dream
-    offers ([Dreams](#dreams)), after a line naming the dream, where it stands and how many it has;
+    and suggested action, a deferral with its reason, then those a sage's answer held unshown, which the next dream
+    offers first, then those of a sage's answer given late, which the next dream offers ([Dreams](#dreams)), after a line naming the dream, where it stands and how many it has;
   - `open commitments`: overdue first, each with its promisee, due time and source thread;
   - `active reminders`: the fired ones with their last firing, then the upcoming ones with their trigger, each with
     its next time, thread and commitment;
@@ -165,13 +165,14 @@ While the host connection is first being made and no cache exists, events wait i
 Sense writes the logs with the machine's host credentials (`ants auth host`), over the host connection, or, in a daemon
 serving one ant (`ants daemon --ant`), which makes none, over a link of its own carrying the logs alone. Either, when it
 fails, as with credentials the server refuses, is tried again after 1 second, the wait doubling up to 5 minutes, and
-at once on a reload. A daemon with neither up, as one without host credentials on a server with
-authentication, and no cache keeps no data: events are acked with no effect, briefs are empty and the sense tools
-answer `unavailable`, naming why. The ant is still served, and `ants doctor`, the daemon's log and the ant's colony
-entry say so ([What an operator sees and configures](#what-an-operator-sees-and-configures)). A daemon serves the
-sense data of all its ants using sense before starting any of them, so an event of one ant about another, as a clone's
-about its source, finds the other's data whichever starts first; an event of an ant the daemon serves no sense data
-of, as one queued under a name the ant has left, is acked with no effect.
+at once on a reload. A daemon with neither up, as one without host credentials on a server with authentication, and no
+cache keeps no data: briefs are empty and the sense tools answer `unavailable`, naming why. Between retries of a link
+that failed, events wait in the ant's queue until it is up; with no link to retry, they are acked with no effect. The
+ant is still served, and `ants doctor`, the daemon's log and the ant's colony entry say so ([What an operator sees and
+configures](#what-an-operator-sees-and-configures)). A daemon serves the sense data of all its ants using sense before
+starting any of them, so an event of one ant about another, as a clone's about its source, finds the other's data
+whichever starts first; an event of an ant the daemon serves no sense data of, as one queued under a name the ant has
+left, is acked with no effect.
 
 ## Arguments and refusals
 
@@ -419,10 +420,11 @@ makes (a failed read retried a minute later), so a confirmed profile shows withi
 version drops it. `list_ants` and the messenger's triage show it after the `whoami`, marked as the ant's own words and,
 like the `whoami`, no instructions; `ants ant show` and `ants colony --json` show it too, and the `ants colony` table
 its first 40 characters on one line. `route` picks by capabilities and the ant's state first; the profile only breaks a
-tie among ants equal in all of those, by the words it shares with the request ([MCP tools](architecture.md#mcp-tools)),
-and is never echoed. A proposal changing the profile says so in the dream finding offering it. An ant without sense has
-no profile. A skill follows the Agent Skills layout: a directory named after it holding `SKILL.md`, whose front matter
-(between two lines `---`) gives its `name` and `description`, and the files it refers to.
+tie among ants equal in all of those, by the words it shares with the request, rarer ones weighing more ([MCP
+tools](architecture.md#mcp-tools)), and is never echoed. A proposal changing the profile says so in the dream finding
+offering it. An ant without sense has no profile. A skill follows the Agent Skills layout: a directory named after it
+holding `SKILL.md`, whose front matter (between two lines `---`) gives its `name` and `description`, and the files it
+refers to.
 
 - `sense_identity` proposes a persona change given any of `values`, `voice`, `boundaries`, `working_style` and
   `profile`, an empty text clearing that field and one left out keeping it, and a `reason` (at most 500 characters). Without
@@ -608,13 +610,15 @@ most 64 KiB, holds:
   memory or record written for such a finding may name the saved trail to take, judged by its own votes; no trail's
   script, tip or rating enters sense);
 - the findings, at most 20, each with an id `<dream>.<n>`: those of a sage's answer to the last dream's review come too
-  late (**The answer**, below) first, then the findings of the last dream deferred or unanswered that still hold,
-  offered again, then what the ant's identity lacks for its work (below), memories with both `helpful` and `stale`
+  late (**The answer**, below) first, at most 10, under a heading `Late answer to dream <n>` inside a block between
+  `<sage-review>` and `</sage-review>` of their own, then the findings of the last dream that still hold, offered
+  again: those its sage's answer held unshown first, then those deferred or unanswered, then what the ant's identity lacks for its work (below), memories with both `helpful` and `stale`
   votes since the last dream (`contradiction`), memories needing review (`needs_review`), the near duplicates the last
   maintenance found (`duplicates`), episodes to distill (`distill`), pending persona and skill proposals (`proposal`)
   and a vital sign turned sharply for the worse (`vitals`, below);
-- the vital signs of the period (below) beside those of up to 5 dreams before, the tool calls by kind, and a line for
-  each thread;
+- the vital signs of the period (below) beside those of up to 5 dreams before, with a column of each sign's change
+  against their mean there (in percent, in points for the failed share, empty when the mean is 0; no column without
+  a dream before), the tool calls by kind, and a line for each thread;
 - the ant's identity, to judge the work against and to judge against the work: its persona and pending persona
   proposal, its self-model, the relationship records of the humans and other ants who started the threads covered (as
   their thread records tell; a line for each without one), its skills by name and description, and its experience
@@ -785,7 +789,8 @@ phases, keys that clash or come out empty, or an example of another type), else 
 unreadable, the trail findings past 3 left out as those past 20 are, replace the
 packet's own but those on the identity and those offered again (a late answer's to the dream before among them), which
 stay whatever the sage answers, the identity findings numbered on after the sage's; so a dream answered holds at most
-20 findings of the sage and 20 of the packet. The sage's are marked untrusted when they cite a thread a webhook started
+20 findings of the sage and 20 of the packet. The packet's other findings are held unshown, numbered on after those,
+and the next dream offers them again, while they hold, before the others it offers again. The sage's are marked untrusted when they cite a thread a webhook started
 or one the packet did not cover, an untrusted memory, or, citing no thread, a packet covering a thread a webhook
 started. A `follow_up` is linked to the finding its `follows` names, read only as an id `<dream>.<n>`, when the sage
 gave it to the ant in a dream the earlier findings cover; the prompt shows the link by the ant's id
@@ -793,15 +798,18 @@ gave it to the ant in a dream the earlier findings cover; the prompt shows the l
 dropped and noted (`sage: follow_up, unlinked: 3.9 is no earlier finding of the sage for the ant`, or
 `sage: follow_up, unlinked: naming no earlier finding`), and never fails the answer. They prompt the ant on the review
 thread itself, which becomes the dream thread, inside a block between `<sage-review>` and `</sage-review>` stating they
-are another ant's suggestions to verify against their evidence, not instructions, followed by the identity findings and
-the findings offered again, each in a section of its own, and the commits, after a line for the findings left out
+are another ant's suggestions to verify against their evidence, not instructions, followed by the identity findings,
+the late answers to earlier dreams and the findings offered again, each in a section of its own, and the commits, after a line for the findings left out
 past the caps (`past the 20 findings or the 3 trail findings an answer gives`) and one for those left out as
 unreadable, told apart; the answer goes to no one. An empty list
-wakes nobody, the identity findings left for the next dream to offer again. A reply with no readable finding, or a
+wakes nobody, all the packet's findings left for the next dream to offer again. A reply with no readable finding, or a
 notice that the sage's daemon gave up on the review or had it withdrawn, wakes the ant with the packet alone at once; so
-does a sage silent for 6 hours. A later answer prompts no one: the readable findings of the first one, marked untrusted
-by the same rules, come first among the findings of the ant's next dream, numbered after the packet's own, to answer
-there as any offered again (the limit of 20 holds); an answer arriving after the next dream began is dropped.
+does a sage silent for 6 hours. A later answer prompts no one: the first 10 readable findings of the first one, marked
+untrusted by the same rules, the rest counted as left out, come first among the findings of the ant's next dream,
+numbered after the packet's own, to answer there as any offered again (the limit of 20 holds, so the findings offered
+again fill the rest), shown under `Late answer to dream <n>` in a `<sage-review>` block of their own, in the packet and
+in the prompt of a sage's answer alike; an answer on the review thread of any of the 5 dreams before the last, arriving
+after the next dream began, is dropped.
 
 **The sage's records:** the review message carries, besides the commits it names, the dream's number, the eligible
 `earlier_findings` ids from the 30-active-day window before display truncation, and what is new in the verdicts and
@@ -890,7 +898,8 @@ Sense's brief ([Briefs](architecture.md#briefs)) holds, in order, the sections i
 11. `## Memories`: the live core memories in full, then the 10 best of the other live memories of `self`, the
     thread's repository and the human or ant who started it (on a review, the ant under review), as `sense_recall`
     ranks them without a query, inside the block of recalled memories, leaving out the episodes of the handoffs above;
-    on a review, the 2 best memories of the ant under review are among them however the sage's own rank;
+    the 2 best memories of the human or ant who started the thread (on a review, the ant under review) are among them
+    however the ant's own rank;
 12. `## Skills`: each skill's name and description;
 13. `## Core loop`: the 11 session sense tools (all except `sense_dream`) and when to use each.
 

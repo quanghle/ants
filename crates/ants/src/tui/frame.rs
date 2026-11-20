@@ -186,6 +186,11 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
         if let Some(cursor) = card {
             return keymap::prompt(cursor.keys(), width, false);
         }
+        if let Page::Home(page) = model.page()
+            && let Some(keys) = page.prompt()
+        {
+            return keymap::prompt(&keys, width, true);
+        }
         let (prompt, help) = match model.page() {
             Page::Channel(page) => (page.prompt(), false),
             Page::Ant(page) => (page.prompt(), page.armed().is_some()),

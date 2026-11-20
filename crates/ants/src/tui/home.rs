@@ -150,6 +150,15 @@ impl Item {
         self.request.as_ref().filter(|(_, settled)| settled.is_none() && !self.expanded).map(|(r, _)| r)
     }
 
+    /// The pending requests of its group of the oldest's tool kind, oldest first, which `l` allows once each: none off
+    /// a group, or when the oldest does not offer allow once.
+    pub fn of_kind(&self) -> Option<Vec<ApprovalRequest>> {
+        let oldest = self.requests.first().filter(|_| self.requests.len() > 1)?;
+        let once = |r: &ApprovalRequest| r.options.contains(&Verdict::AllowOnce);
+        once(oldest)
+            .then(|| self.requests.iter().filter(|r| r.tool.kind == oldest.tool.kind && once(r)).cloned().collect())
+    }
+
     /// Whether it stands for a pending tool request of the same ant on the same thread as `other`'s.
     fn groups(&self, other: &Item) -> bool {
         fn pending(i: &Item) -> Option<&ApprovalRequest> {
@@ -331,6 +340,8 @@ pub struct Page {
     room: Cell<Option<(usize, usize)>>,
     /// The request of the card the keys answer, as last drawn.
     carded: Cell<Option<Uuid>>,
+    /// The requests of a group `l` asked to allow once each, which `y` next confirms.
+    armed: Option<Vec<ApprovalRequest>>,
 }
 
 impl Default for Page {
@@ -341,6 +352,7 @@ impl Default for Page {
             answering: None,
             room: Cell::new(None),
             carded: Cell::new(None),
+            armed: None,
         }
     }
 }
@@ -426,12 +438,34 @@ impl Page {
         self.card(data, now).is_some() && self.answering.as_mut().is_some_and(|c| c.paste(text))
     }
 
+    /// The keys of the allow-all `l` asked to confirm, while it waits.
+    pub fn prompt(&self) -> Option<String> {
+        let batch = self.armed.as_ref()?;
+        let oldest = batch.first()?;
+        let (n, what) = (batch.len(), if batch.len() == 1 { "request" } else { "requests" });
+        Some(format!(
+            "y allows once {n} {} {what} of {} on the thread · any other key leaves them waiting",
+            oldest.tool.kind, oldest.ant
+        ))
+    }
+
+    /// Drop the allow-all asked to confirm, if any: whether there was one.
+    pub fn disarm(&mut self) -> bool {
+        self.armed.take().is_some()
+    }
+
     /// Forget the cards' width: the compact pane shows the top request on one line.
     pub fn compacted(&self) {
         self.room.set(None);
     }
 
     pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
+        let armed = self.armed.take();
+        if key == Key::Char('y')
+            && let Some(batch) = armed
+        {
+            return Some(To::AllowAll(batch));
+        }
         let items = self.rows(data, now);
         let at = self.at(&items);
         let selected = items.get(at);
@@ -476,6 +510,13 @@ impl Page {
                 return Some(To::Ask(request, verdict));
             }
             Key::Char('a' | 'A') => return None,
+            Key::Char('l') => {
+                let Some(batch) = selected.and_then(Item::of_kind) else {
+                    return Some(To::Refused("l allows all of a kind on a group of tool requests".to_owned()));
+                };
+                self.armed = Some(batch);
+                return None;
+            }
             Key::Char('n') => return pending.map(To::Note),
             Key::Char('1'..='9') if selected.is_some_and(|i| i.question.is_some()) => {
                 let item = selected?;
@@ -596,7 +637,7 @@ impl Page {
                         approvals::CARD_LINES
                     };
                     let card = card(rows);
-                    let enter = format!("Enter lists all {}", i.requests.len());
+                    let enter = group_keys(i);
                     // Off the card the keys answer, the tool shows on the line before.
                     lines.extend(card.into_iter().skip(usize::from(keyed.is_none())).map(|line| {
                         let mut spans = vec![Span::raw("         ")];
@@ -640,6 +681,15 @@ fn draw_list(
         let offset = u16::try_from(start.saturating_sub(top)).unwrap_or(u16::MAX);
         let area = Rect { y: area.y.saturating_add(offset), height: area.height.saturating_sub(offset), ..area };
         question::mouse_regions(data, area, &lines, top.saturating_sub(start), id);
+    }
+}
+
+/// What a group's card offers past a, A, r and n: `l` allowing all of the oldest's kind, and Enter listing them.
+fn group_keys(i: &Item) -> String {
+    let all = i.requests.len();
+    match i.of_kind() {
+        Some(batch) => format!("l allow {} {} · Enter lists all {all}", batch.len(), batch[0].tool.kind),
+        None => format!("Enter lists all {all}"),
     }
 }
 
@@ -742,7 +792,10 @@ mod tests {
         let screen = shown(&m, at(4));
         assert!(screen.contains("dev-a asks to run 2 tools, the oldest:"), "{screen}");
         assert!(screen.contains("         execute: git push"), "{screen}");
-        assert!(screen.contains("a allow · r reject · n reject with a note · Enter lists all 2"), "{screen}");
+        assert!(
+            screen.contains("a allow · r reject · n reject with a note · l allow 2 execute · Enter lists all 2"),
+            "{screen}"
+        );
 
         assert_eq!(m.key(Key::Enter, at(4)), None);
         assert!(m.asking.is_none(), "Enter lists the group's requests");
@@ -793,6 +846,55 @@ mod tests {
         assert_eq!(items(&m.data, at(6)).len(), 3, "a request decided here keeps no card");
         m.key(Key::End, at(500));
         assert_eq!(m.key(Key::Enter, at(500)), Some(Action::Open(done)));
+    }
+
+    #[test]
+    fn l_asks_to_allow_once_each_request_of_the_oldest_s_kind_in_a_group_and_y_confirms_one_batch() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let on = |title: &str, kind: &str, n: i64| {
+            let mut r =
+                ApprovalRequest { thread_id: thread.clone(), ..request("dev-a", title, vec![Verdict::AllowOnce]) };
+            r.tool.kind = kind.to_owned();
+            r.requested_at = at(n);
+            r
+        };
+        let (push, edit, test) =
+            (on("git push", "execute", 0), on("main.rs", "edit", 1), on("cargo test", "execute", 2));
+        for r in [&push, &edit, &test] {
+            m.data.live.approval(&Update::Pending(r.clone()));
+        }
+        let lone = request("dev-b", "ls", vec![Verdict::AllowOnce]);
+        m.data.live.approval(&Update::Pending(ApprovalRequest { requested_at: at(3), ..lone }));
+        let screen = shown(&m, at(4));
+        assert!(screen.contains("l allow 2 execute · Enter lists all 3"), "{screen}");
+
+        assert_eq!(m.key(Key::Char('l'), at(4)), None);
+        let screen = shown(&m, at(4));
+        assert!(screen.contains("y allows once 2 execute requests of dev-a on the thread"), "{screen}");
+        assert!(m.asking.is_none(), "nothing stored before y");
+        m.key(Key::Esc, at(4));
+        assert!(!shown(&m, at(4)).contains("y allows once"), "Esc drops it");
+        assert_eq!(m.key(Key::Char('y'), at(4)), None, "y alone allows nothing");
+
+        m.key(Key::Char('l'), at(4));
+        assert_eq!(m.key(Key::Char('y'), at(4)), Some(Action::AllowAll(vec![push.clone(), test.clone()])));
+        let asking = m.asking.as_ref().expect("the batch being stored");
+        assert!(asking.storing && asking.request == push && asking.batch == [test], "{asking:?}");
+        assert!(shown(&m, at(4)).contains("allowing them once, one by one…"), "the card says so until stored");
+        assert_eq!(m.key(Key::Char('a'), at(4)), None, "one decision stored at a time");
+        assert!(m.notice_at(at(4)).is_some_and(|n| n.text.contains("answer again once it is stored")));
+        m.take(Event::Approval(Update::Resolved(push, State::Expired)), at(5));
+        assert!(m.asking.is_some(), "word of a request of the batch keeps it storing");
+        let line = "allowed once 1 of 2 execute requests of dev-a; 1 answered already";
+        m.key(Key::Up, at(5));
+        m.take(Event::Decided(Ok(line.to_owned())), at(5));
+        assert!(m.asking.is_none(), "the batch stored ends the answering");
+        assert_eq!(m.notice_at(at(5)).map(|n| n.text.clone()), Some(line.to_owned()), "one combined line");
+
+        m.key(Key::End, at(5));
+        assert_eq!(m.key(Key::Char('l'), at(5)), None, "a lone request is no group");
+        assert!(!shown(&m, at(5)).contains("y allows once"));
     }
 
     fn escalation(seq: u64, thread: &ThreadId, from: &str, to: &str) -> crate::threads::thread::Entry {

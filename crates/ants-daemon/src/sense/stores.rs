@@ -59,6 +59,8 @@ enum Host {
     #[default]
     Off,
     Connecting,
+    /// The link failed and waits to be tried again ([`SenseStores::retrying`]).
+    Retrying,
     Up(Arc<Link>),
 }
 
@@ -155,6 +157,22 @@ impl Drop for Hosting {
     }
 }
 
+/// The host connection failed and is tried again, from [`SenseStores::retrying`] until dropped: the events of an ant
+/// with no cache wait for it rather than being acked with no effect ([`Stores::link_retrying`]).
+pub struct Retrying {
+    stores: Arc<SenseStores>,
+    generation: u64,
+}
+
+impl Drop for Retrying {
+    fn drop(&mut self) {
+        let mut state = self.stores.state();
+        if state.generation == self.generation {
+            state.host = Host::Off;
+        }
+    }
+}
+
 impl SenseStores {
     pub fn new() -> Arc<Self> {
         Arc::default()
@@ -194,6 +212,16 @@ impl SenseStores {
             })
         });
         Hosting { stores: self.clone(), generation, retry }
+    }
+
+    /// The host connection failed and is tried again, replacing any before, until the next starts
+    /// ([`Self::hosting`]) or the guard drops.
+    pub fn retrying(self: &Arc<Self>) -> Retrying {
+        let mut state = self.state();
+        state.generation += 1;
+        state.host = Host::Retrying;
+        *route(&state.route) = None;
+        Retrying { stores: self.clone(), generation: state.generation }
     }
 
     /// The process keeps none of its ants' data, for the reason `why`, as it makes no host connection and sense no link
@@ -291,7 +319,7 @@ impl SenseStores {
         let state = self.state();
         let served = state.ants.get(ant).ok_or_else(|| StoreError::NotKept(format!("{ant} is not served")))?;
         let link = match &state.host {
-            Host::Off | Host::Connecting => None,
+            Host::Off | Host::Connecting | Host::Retrying => None,
             Host::Up(link) => Some(link.clone()),
         };
         let (items, home, creds) = (served.items.clone(), served.home.clone(), served.creds.clone());
@@ -377,6 +405,11 @@ impl Stores for SenseStores {
 
     fn synced<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         self.opened(ant, true)
+    }
+
+    fn link_retrying(&self, ant: &UserId) -> bool {
+        let state = self.state();
+        matches!(state.host, Host::Retrying) && state.ants.contains_key(ant)
     }
 
     fn home(&self, ant: &UserId) -> Option<PathBuf> {

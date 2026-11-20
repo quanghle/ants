@@ -197,7 +197,8 @@ pub async fn run_keeping(host: Host, ants: watch::Receiver<Vec<UserId>>, sense: 
 
 /// Keep the host connection as `host` ([`run_keeping`], sense reaching its ants' data over it) until `ants` closes or
 /// it is dropped. Once it fails, sense keeps none of its ants' data, saying why ([`crate::sense::Sense::unkept`]) until
-/// the connection is up again: it is tried again after 1 s, the wait doubling up to 5 min, and at once when `again` is
+/// the connection is up again, events of an ant with no cache waiting meanwhile ([`crate::sense::Sense::retrying`]): it
+/// is tried again after 1 s, the wait doubling up to 5 min, and at once when `again` is
 /// notified, as on a reload.
 pub async fn keep(host: Host, ants: watch::Receiver<Vec<UserId>>, again: &tokio::sync::Notify) {
     let mut delay = RETRY_FIRST;
@@ -206,6 +207,7 @@ pub async fn keep(host: Host, ants: watch::Receiver<Vec<UserId>>, again: &tokio:
         let Err(e) = Box::pin(run_keeping(host.clone(), ants.clone(), Some(hosting))).await else { return };
         tracing::warn!(error = format!("{e:#}"), retry_in = ?delay, "host connection stopped");
         host.providers.sense().unkept(Some(format!("the host connection stopped: {e:#}")));
+        let _retrying = host.providers.sense().retrying();
         let mut closing = ants.clone();
         tokio::select! {
             () = tokio::time::sleep(delay) => delay = (delay * 2).min(LINK_RETRY_MAX),
@@ -225,7 +227,8 @@ pub async fn run_sense(host: Host, sense: Hosting) -> Result<()> {
 }
 
 /// Keep sense's link of its own as `host` ([`run_sense`]) until dropped. Once it fails, sense keeps none of its ants'
-/// data, saying why ([`crate::sense::Sense::unkept`]) until the link is up again: it is tried again after 1 s, the wait
+/// data, saying why ([`crate::sense::Sense::unkept`]) until the link is up again, events of an ant with no cache waiting
+/// meanwhile ([`crate::sense::Sense::retrying`]): it is tried again after 1 s, the wait
 /// doubling up to 5 min, and at once when `again` is notified, as on a reload.
 pub async fn keep_sense(host: Host, again: &tokio::sync::Notify) {
     let mut delay = RETRY_FIRST;
@@ -234,6 +237,7 @@ pub async fn keep_sense(host: Host, again: &tokio::sync::Notify) {
         let Err(e) = Box::pin(run_sense(host.clone(), hosting)).await else { return };
         tracing::warn!(error = format!("{e:#}"), retry_in = ?delay, "sense's link stopped");
         host.providers.sense().unkept(Some(format!("sense's link with the host credentials stopped: {e:#}")));
+        let _retrying = host.providers.sense().retrying();
         tokio::select! {
             () = tokio::time::sleep(delay) => delay = (delay * 2).min(LINK_RETRY_MAX),
             () = again.notified() => delay = RETRY_FIRST,

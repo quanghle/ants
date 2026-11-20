@@ -48,8 +48,8 @@ pub(super) async fn entries(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec
     .collect())
 }
 
-/// The findings of the last dream unanswered or deferred, a deferral with its reason, then those its sage gave late;
-/// none without any.
+/// The findings of the last dream unanswered or deferred, a deferral with its reason, then those its sage's answer
+/// held unshown, then those its sage gave late; none without any.
 async fn findings(items: &dyn Items) -> Result<Option<MemoryEntry>, StoreError> {
     let Some((dream, _)) = dream::last(items).await? else { return Ok(None) };
     let mut lines = Vec::new();
@@ -61,6 +61,7 @@ async fn findings(items: &dyn Items) -> Result<Option<MemoryEntry>, StoreError> 
         lines.push(line);
     }
     let open = lines.len();
+    lines.extend(dream.held.iter().map(|finding| format!("{}\n  Held unshown.", finding_line(finding, dream.number))));
     let late = dream.review.iter().flat_map(|review| &review.late);
     lines.extend(late.map(|finding| format!("{}\n  Given late.", finding_line(finding, dream.number))));
     let answer = match dream.state {
@@ -74,9 +75,17 @@ async fn findings(items: &dyn Items) -> Result<Option<MemoryEntry>, StoreError> 
         dream.state,
         dream.findings.len()
     );
-    if lines.len() > open {
+    if !dream.held.is_empty() {
+        let _ = write!(
+            head,
+            "; {} held unshown under the sage's answer, which the next dream offers first",
+            dream.held.len()
+        );
+    }
+    if lines.len() > open + dream.held.len() {
         let sage = dream.sage.as_ref().map_or_else(|| "its sage".to_owned(), |sage| format!("sage {sage}"));
-        let _ = write!(head, "; {} given late by {sage}, which the next dream offers", lines.len() - open);
+        let late = lines.len() - open - dream.held.len();
+        let _ = write!(head, "; {late} given late by {sage}, which the next dream offers");
     }
     head.push('.');
     Ok(listed(FINDINGS, head, lines))
@@ -138,7 +147,17 @@ mod tests {
         });
         let kind = if sage { FindingKind::Sage } else { FindingKind::Distill };
         let text = format!("Finding {id}.");
-        Finding { id: id.into(), kind, text, items: vec![], untrusted: false, key: None, count: None, advice }
+        Finding {
+            id: id.into(),
+            kind,
+            text,
+            items: vec![],
+            untrusted: false,
+            key: None,
+            count: None,
+            advice,
+            late: false,
+        }
     }
 
     fn verdict(finding: &str, verdict: Judgement) -> Verdict {
@@ -166,6 +185,7 @@ mod tests {
         answered.findings = vec![finding("1.1", true), finding("1.2", false), finding("1.3", false)];
         answered.verdicts = vec![verdict("1.1", Judgement::Applied), verdict("1.2", Judgement::Deferred)];
         answered.review.as_mut().unwrap().late = vec![finding("1.4", true)];
+        answered.held = vec![finding("1.5", false)];
         items.write(&[begun.change(&answered, 1)], "test").await.unwrap();
         let commitment = json!({"title": "Ship the parser", "promisee": "alice", "due": "2025-01-01T10:00:00Z"});
         let commitment = created(&sense, promise::promise, "promise", commitment).await;
@@ -187,11 +207,14 @@ mod tests {
         assert_eq!(keys, [FINDINGS, COMMITMENTS, REMINDERS, TASKS]);
         let findings = entry(&entries, FINDINGS);
         let head = "Dream 1 (fallback): 2 of 3 findings unanswered or deferred, the ant answering them with \
-                    sense_dream; 1 given late by sage lead, which the next dream offers.\n";
+                    sense_dream; 1 held unshown under the sage's answer, which the next dream offers first; 1 given \
+                    late by sage lead, which the next dream offers.\n";
         assert!(findings.starts_with(head), "{findings}");
         assert!(!findings.contains("1.1"), "an applied finding is not open: {findings}");
         assert!(findings.contains("- 1.2 (distill): Finding 1.2.\n  deferred: deferred for a reason.\n"), "{findings}");
-        assert!(findings.contains("- 1.3 (distill): Finding 1.3.\n- 1.4 (sage: lesson): Finding 1.4."), "{findings}");
+        assert!(
+            findings.contains("- 1.3 (distill): Finding 1.3.\n- 1.5 (distill): Finding 1.5.\n  Held unshown.\n- 1.4")
+        );
         assert!(findings.ends_with("Suggested action: Remember to rebase.\n  Given late."), "{findings}");
         let commitments = entry(&entries, COMMITMENTS);
         assert!(commitments.starts_with(&format!("- {commitment} (revision 1, open, overdue): Ship the parser")));

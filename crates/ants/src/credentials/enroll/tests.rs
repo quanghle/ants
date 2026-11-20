@@ -29,6 +29,17 @@ fn enrollment_in(team: &Path, dir: &Path, ant: &UserId) -> std::path::PathBuf {
     out
 }
 
+/// Run `answer` (an approval or a rejection) again while it hears no enrollment request: a loaded machine may let its
+/// listen pass without the request repeating into it.
+async fn once_heard<T>(mut answer: impl AsyncFnMut() -> Result<T>) -> Result<T> {
+    loop {
+        let answered = answer().await;
+        if !answered.as_ref().is_err_and(|e| format!("{e:#}").contains("no enrollment request for")) {
+            return answered;
+        }
+    }
+}
+
 #[tokio::test]
 async fn enrollment_credentials_ask_only_for_their_ant() {
     let Some(server) = Server::start() else { return };
@@ -80,7 +91,7 @@ async fn an_approval_completes_the_credentials_of_the_asking_key() {
         let heard = approver.pending(None).await.unwrap();
         assert_eq!(heard.len(), 1, "{heard:?}");
         assert_eq!((&heard[0].ant, &heard[0].public_key), (&dev_a, &user.public_key()));
-        approver.approve(&team, &dev_a, None).await.unwrap()
+        once_heard(async || approver.approve(&team, &dev_a, None).await).await.unwrap()
     };
     let (jwt, approved) = Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
     assert_eq!(approved.public_key, user.public_key());
@@ -105,7 +116,7 @@ async fn a_webhook_approval_gives_a_webhooks_credentials_for_its_destination() {
     let to = Destination::Ant(p("dev-a"));
 
     let asking = request(&server.url, &creds, &hook, &user, None, REPEAT, pending());
-    let approving = approver.approve_webhook(&team, &hook, std::slice::from_ref(&to), None);
+    let approving = once_heard(async || approver.approve_webhook(&team, &hook, std::slice::from_ref(&to), None).await);
     let (jwt, key) = Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
     assert_eq!(key.unwrap(), user.public_key());
     let out = server.dir().join("github.creds");
@@ -203,7 +214,7 @@ async fn requests_must_prove_their_enrollment_and_leaf_credentials() {
     assert!(heard.contains(&good), "the proven request is heard");
     assert!(heard.iter().all(|r| *r == good), "{heard:#?}");
 
-    let approving = approver.approve(&team, &dev_a, None);
+    let approving = once_heard(async || approver.approve(&team, &dev_a, None).await);
     let ((), approved) =
         Box::pin(timeout(WAIT * 2, async { tokio::join!(forge(&server, &creds, &good), approving) })).await.unwrap();
     let approved = approved.unwrap_or_else(|e| panic!("{e:#}"));
@@ -230,7 +241,7 @@ async fn an_approval_grants_the_host_credentials_of_the_asking_machine_only() {
         let (user, host) = (KeyPair::new_user(), HostAsk { machine: m(machine), key: KeyPair::new_user() });
         let alongside = Alongside { leaf, host: Some(&host) };
         let asking = request_with(&server.url, &creds, &ant, &user, alongside, REPEAT, pending());
-        let approving = approver.approve_with(&team, &ant, None, grant);
+        let approving = once_heard(async || approver.approve_with(&team, &ant, None, grant).await);
         let (approval, approved) =
             Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
         let (approval, approved) = (approval.unwrap(), approved.unwrap_or_else(|e| panic!("{e:#}")));
@@ -270,10 +281,6 @@ async fn an_approval_grants_the_host_credentials_of_the_asking_machine_only() {
 /// m2's (issued with `--enroll-approver`), and once m1's leaf restarts with the renewed uplink credentials, the
 /// ant reaches the hub and what it keeps in m1's outbox reaches the hub's stream.
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one scenario: an enrollment through a leaf node, then the ant reaching the hub"
-)]
 async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
     use ants_proto::{JsDomain, STREAM, ThreadId};
     use ants_test_support::{NatsServer, free_port};
@@ -341,13 +348,7 @@ async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
     let approver = Approver::connect(&m2_node.url, &team, Some(&domain), Duration::from_millis(1500)).await.unwrap();
     let asking = request(&m1_node.url, &enroll_creds, &dev_c, &user, Some(&m1_leaf), REPEAT, pending());
     let approving = async {
-        loop {
-            match approver.approve(&team, &dev_c, None).await {
-                Ok(approved) => break approved,
-                Err(e) if e.to_string().contains("no enrollment request") => continue,
-                Err(e) => panic!("{e:#}"),
-            }
-        }
+        once_heard(async || approver.approve(&team, &dev_c, None).await).await.unwrap_or_else(|e| panic!("{e:#}"))
     };
     let (approval, approved) = Box::pin(timeout(WAIT * 6, async { tokio::join!(asking, approving) })).await.unwrap();
     let approval = approval.unwrap();
@@ -406,9 +407,9 @@ async fn a_rejection_or_the_expiry_ends_the_request() {
         tokio::join!(first, second)
     };
     let answering = async {
-        let err = approver.approve(&team, &dev_a, None).await.unwrap_err().to_string();
+        let err = once_heard(async || approver.approve(&team, &dev_a, None).await).await.unwrap_err().to_string();
         assert!(err.contains("several machines ask for dev-a"), "{err}");
-        approver.reject(&dev_a, None, Some("unknown machine")).await.unwrap()
+        once_heard(async || approver.reject(&dev_a, None, Some("unknown machine")).await).await.unwrap()
     };
     let ((first_err, second_err), rejected) =
         Box::pin(timeout(WAIT * 2, async { tokio::join!(both, answering) })).await.unwrap();
@@ -501,13 +502,7 @@ async fn an_ant_the_uplink_has_no_room_for_is_neither_signed_nor_recorded() {
         let _ = stop_rx.await;
     });
     let approving = async {
-        // A loaded machine may let a listen pass without the request repeating into it: listen again.
-        let refused = loop {
-            let refused = approver.approve(&team, &dev_x, None).await;
-            if !refused.as_ref().is_err_and(|e| format!("{e:#}").contains("no enrollment request for dev-xx heard")) {
-                break refused;
-            }
-        };
+        let refused = once_heard(async || approver.approve(&team, &dev_x, None).await).await;
         // Long enough for an answer to arrive, had one gone out.
         tokio::time::sleep(REPEAT * 3).await;
         stop_tx.send(()).unwrap();

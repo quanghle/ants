@@ -138,6 +138,11 @@ impl Sense {
         }
     }
 
+    /// Whether the link reaching the log of `ant` waits to be tried again ([`Stores::link_retrying`]).
+    fn link_retrying(&self, ant: &UserId) -> bool {
+        self.stores.as_ref().is_some_and(|stores| stores.link_retrying(ant))
+    }
+
     /// The items of `ant` caught up with its log, as a provider call starts ([`Stores::synced`]).
     pub async fn synced(&self, ant: &UserId) -> Result<Arc<dyn Items>, StoreError> {
         match &self.stores {
@@ -186,6 +191,10 @@ impl Sense {
         };
         match recorded.await {
             Ok(()) => Ok(Ack {}),
+            // Between retries of the link, data kept none of now may be kept moments later: the event is told again.
+            Err(StoreError::NotKept(why)) if self.link_retrying(&event.ant) => {
+                Err(RpcError::unavailable(&format!("the event waits for sense's link: {why}")))
+            }
             // Sense keeps no data of the ant here at all. Data only not open yet is unavailable instead: the event is
             // told again.
             Err(StoreError::NotKept(_)) => Ok(Ack {}),
@@ -195,13 +204,16 @@ impl Sense {
 
     /// Fork the identity of `from`, which `event` cloned, into `clone`'s: before the card notes the event, so the
     /// event delivered again after a failed fork forks again, and not once it has. Nothing to fork when sense keeps no
-    /// data of `from`.
+    /// data of `from`, unless its link waits to be tried again.
     async fn fork(&self, clone: &dyn Items, from: &UserId, event: &Event) -> Result<(), StoreError> {
         if identity::card(clone).await?.is_some_and(|card| card.events.contains(&event.id)) {
             return Ok(());
         }
         let source = match self.synced(from).await {
             Ok(source) => source,
+            Err(StoreError::NotKept(why)) if self.link_retrying(from) => {
+                return Err(StoreError::Unavailable(format!("the fork waits for sense's link: {why}")));
+            }
             Err(StoreError::NotKept(_)) => return Ok(()),
             Err(e) => return Err(e),
         };

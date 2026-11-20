@@ -58,6 +58,48 @@ async fn nothing_is_kept_without_a_host_connection_and_nothing_reached_while_it_
     std::fs::remove_dir_all(&home).unwrap();
 }
 
+/// Between retries of a failed link, an ant with no cache is kept none of, as with no link, but its events wait in its
+/// queue, told again until the link is up, rather than being acked with no effect; its briefs stay empty.
+#[tokio::test]
+async fn events_wait_between_retries_of_the_link_and_are_kept_once_it_is_up() {
+    let Some(server) = NatsServer::start() else { return };
+    let home = scratch_dir("sense-stores-retrying");
+    let stores = SenseStores::new();
+    serve(&stores, &dev_a(), &home);
+    let sense = Sense::with_stores(stores.clone());
+    let failed = stores.hosting();
+    drop(failed);
+    let why = "sense's link with the host credentials stopped: refused";
+    stores.unkept(Some(why.to_owned()));
+    let retrying = stores.retrying();
+    assert!(stores.link_retrying(&dev_a()));
+    assert!(!stores.link_retrying(&"dev-b".parse().unwrap()), "an ant not served is not waited for");
+    let kept = stores.items(&dev_a()).await.err().unwrap();
+    assert!(matches!(&kept, StoreError::NotKept(said) if said == why), "{kept:?}");
+    let event = added("id1");
+    let waiting = sense.event(event.clone()).await.unwrap_err();
+    assert_eq!(waiting.code, ants_proto::provider::RpcError::UNAVAILABLE, "{waiting:?}");
+    assert!(sense.brief(brief_request()).await.unwrap().text.is_empty(), "a brief keeps none");
+    assert!(!home.join(".sense").exists(), "no sense id minted");
+
+    let hosting = stores.hosting();
+    drop(retrying);
+    assert!(!stores.link_retrying(&dev_a()), "the next connection replaces the retry");
+    assert!(matches!(stores.items(&dev_a()).await.err().unwrap(), StoreError::Unavailable(_)), "the guard left it");
+    hosting.up(link(&server).await);
+    stores.unkept(None);
+    sense.event(event).await.unwrap();
+    let card = identity::card(&*stores.items(&dev_a()).await.unwrap()).await.unwrap().unwrap();
+    assert_eq!(card.identities, ["id1".to_owned()]);
+
+    drop(hosting);
+    let retrying = stores.retrying();
+    assert!(stores.items(&dev_a()).await.is_ok(), "the cache serves between retries");
+    drop(retrying);
+    assert!(!stores.link_retrying(&dev_a()));
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
 /// Sense's link of its own, as a daemon serving one ant opens it, reaches the ant's data with none of a host
 /// connection's other duties, writing no machine record; without it the process keeps none of them, saying why.
 #[tokio::test]
