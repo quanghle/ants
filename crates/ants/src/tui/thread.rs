@@ -494,18 +494,8 @@ impl Page {
         if self.listing() {
             return self.waiting_key(key, data, now);
         }
-        if self.card(data, now).is_none() {
-            return self.answering.take().map(|_| None);
-        }
-        let to = self.answering.as_mut()?.key(key, &self.history.thread);
-        match to {
-            None => Some(None),
-            Some(Some(to @ To::Bar(_))) => Some(Some(to)),
-            Some(to) => {
-                self.answering = None;
-                Some(to)
-            }
-        }
+        let shown = self.card(data, now).is_some();
+        question::focused(&mut self.answering, key, shown.then_some(&self.history.thread))
     }
 
     /// Type `text` pasted on the focused question card, if any: whether it took it.
@@ -1877,6 +1867,29 @@ mod tests {
                 assert_eq!(result, Some(Action::Run(job, "/answer after lunch".into())));
             }
         }
+    }
+
+    #[test]
+    fn a_focused_card_keeps_the_focus_through_the_bar_and_a_card_gone_takes_the_key_meant_for_it() {
+        let (mut m, _, [older, newer]) = waiting_model();
+        m.data.live.approvals.clear();
+        m.key(Key::Enter, at(10));
+        m.key(Key::Down, at(10));
+        m.key(Key::Down, at(10));
+        assert_eq!(m.key(Key::Enter, at(10)), None);
+        assert!(m.bar.focused && m.bar.text() == "/answer ", "an empty typed answer goes through the bar");
+        m.key(Key::Esc, at(10));
+        assert!(!m.bar.focused);
+        let shown = waiting_screen(&m, 100, 30);
+        assert!(shown.contains("› type an answer"), "the card keeps the focus: {shown}");
+
+        let mut answer = message(3, &newer.thread_id, "alice", "dev-a", "yes");
+        answer.answer = Some(Answer { question: newer.id.unwrap(), picks: vec![Pick::option(1)] });
+        m.stored(vec![answer], at(10));
+        assert_eq!(m.key(Key::Char('1'), at(10)), None, "a key for the card gone answers no other");
+        m.key(Key::Up, at(10));
+        let job = Job::Answer { thread: older.thread_id, question: older.id.unwrap(), picks: vec![Pick::option(1)] };
+        assert_eq!(m.key(Key::Char('1'), at(10)), Some(Action::Run(job, String::new())), "the next key answers it");
     }
 
     #[test]
