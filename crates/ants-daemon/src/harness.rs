@@ -18,6 +18,8 @@ mod steer;
 pub use catalog::{BUILTIN_HARNESSES, Harnesses, Unset, parse_definitions};
 pub(crate) use definition::validate_env;
 pub use definition::{ContextValue, Harness, Tools, allows_all};
+#[cfg(test)]
+pub(crate) use launch::{Connector, fakes};
 pub use launch::{Launch, McpServers, McpSession};
 pub use mcp::{McpHost, open_mcp, unreported_mcp};
 pub use mcp_sign_in::{McpSignIn, McpSignIns};

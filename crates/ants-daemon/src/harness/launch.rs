@@ -17,7 +17,7 @@ use super::{Harness, McpSignIns, ModelSettings, Skills, skills};
 use crate::permission::PermissionPolicy;
 
 /// Makes the transport to a fresh harness: a process, or an in-process agent in tests.
-pub(super) type Connector = Arc<dyn Fn() -> DynConnectTo<Client> + Send + Sync>;
+pub(crate) type Connector = Arc<dyn Fn() -> DynConnectTo<Client> + Send + Sync>;
 
 /// The MCP servers a session gets.
 pub type McpServers = Arc<dyn Fn(&McpSession<'_>) -> Vec<McpServer> + Send + Sync>;
@@ -275,6 +275,10 @@ fn connector(
     report: Option<Report>,
     skills: Option<Skills>,
 ) -> Connector {
+    #[cfg(test)]
+    if let Some(fake) = fakes::of(&harness.name) {
+        return fake;
+    }
     let (harness, settings) = (harness.clone(), settings.clone());
     Arc::new(move || {
         let offered = skills.as_ref().and_then(skills::offered);
@@ -283,4 +287,35 @@ fn connector(
             None => harness.agent(&env, &settings, report.clone()),
         }
     })
+}
+
+/// In-process harnesses that tests start in place of the processes of the harnesses they name, so a daemon run whole
+/// ([`crate::daemon::run_until`]) prompts them.
+#[cfg(test)]
+pub(crate) mod fakes {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    use super::Connector;
+    use crate::sync::MutexExt as _;
+
+    static FAKES: LazyLock<Mutex<HashMap<String, Connector>>> = LazyLock::new(Mutex::default);
+
+    /// Start `connect` for the harness named `name` until the guard drops.
+    pub(crate) fn install(name: &str, connect: Connector) -> Installed {
+        FAKES.locked().insert(name.to_owned(), connect);
+        Installed(name.to_owned())
+    }
+
+    pub(super) fn of(name: &str) -> Option<Connector> {
+        FAKES.locked().get(name).cloned()
+    }
+
+    pub(crate) struct Installed(String);
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            FAKES.locked().remove(&self.0);
+        }
+    }
 }
