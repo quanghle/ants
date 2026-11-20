@@ -134,7 +134,7 @@ impl Page {
     const RESUME_KEYS: &str = "y resume the ant · any other key keeps it paused";
 
     pub fn new(ant: UserId) -> Self {
-        let threads = work::Page::new(Filter { user: Some(ant.clone()), ..Filter::default() });
+        let threads = work::Page::of_ant(ant.clone());
         let (message, queue, memories) = (Selection::default(), Queue::Asking, memories::Page::new());
         let settings = settings::Pane::default();
         let mcp = Box::new(mcp::Page::new());

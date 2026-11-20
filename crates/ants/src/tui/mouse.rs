@@ -38,8 +38,9 @@ pub enum Target {
 pub enum Viewport {
     Nav,
     Home,
-    /// The work view, and an ant's threads: one for any of them shown.
-    Work,
+    /// A work view, one for each filter.
+    Work(super::work::Filter),
+    AntThreads,
     Channel(ants_proto::ChannelId),
     Dm(ants_proto::UserId),
     Search,
@@ -389,6 +390,25 @@ mod tests {
         assert_eq!(page.mouse_top() + 1, page.mouse_bottom());
         mouse.event(&mut m, MouseEvent { modifiers: KeyModifiers::SHIFT, ..event }, at(1));
         assert_eq!(draw(&m), moved);
+    }
+
+    #[test]
+    fn an_ants_threads_and_the_work_view_stacked_on_it_scroll_apart() {
+        let mut m = test_support::model();
+        let messages = (1..=40)
+            .map(|n| message(n, &ants_proto::ThreadId::generate(), "alice", "dev-a", &format!("task {n:02}")))
+            .collect();
+        m.stored(messages, at(2));
+        m.select(crate::tui::nav::Item::Ant(crate::test_support::live::user("dev-a")));
+        m.focus = Focus::View;
+        let shown = test_support::screen(&m, 160, 36, at(3));
+        assert!(shown.contains("task 40"), "{shown}");
+        m.data.mouse.scroll(&Viewport::AntThreads, 10);
+        assert!(!test_support::screen(&m, 160, 36, at(3)).contains("task 40"), "the ant's threads scrolled");
+        m.key(Key::Char('w'), at(3));
+        assert_eq!(m.page().name(), "work");
+        let shown = test_support::screen(&m, 160, 36, at(3));
+        assert!(shown.contains("task 40"), "the work view keeps its own scroll: {shown}");
     }
 
     #[test]
