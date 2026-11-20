@@ -126,8 +126,9 @@ or from a finished run of an inline script it conducted, under the same checks, 
 the conductor machine's `~/.ants/trails` has a trail of. It replaces only a trail it saved, and only with `replace`, and
 removes only one it saved, with `remove_trail`; it does neither from an untrusted thread ([Trust](#trust)). Ant
 credentials write no saved trail: with authentication, `ants signer` saves and removes them for ants, checking each is
-the ant's own ([auth.md](auth.md)), so both tools need it running. A saved trail records who saved it, a human or an
-ant, and the run an ant saved it from; a human saving under a taken name replaces the trail, an ant's included, and
+the ant's own and that the run it is saved from is a finished run of that script in the ant's own run records
+([auth.md](auth.md)), so both tools need it running. A saved trail records who saved it, a human or an ant, and the run
+an ant saved it from; a human saving under a taken name replaces the trail, an ant's included, and
 becomes its saver.
 
 Trails also come from dreams ([sense.md](sense.md#dreams)): a sage's finding of kind `trail` tells of a multi-step
