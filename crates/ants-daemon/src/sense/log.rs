@@ -96,6 +96,7 @@ impl JetStreamLog {
             |kind, e: &dyn std::fmt::Display| LogError::new(kind, format!("reading sense identity {sense}: {e}"));
         let client = self.js.client();
         let inbox = client.new_inbox();
+        #[expect(clippy::disallowed_methods, reason = "direct gets' answers, which the stream sends")]
         let mut replies = client.subscribe(inbox.clone()).await.map_err(|e| failed(LogErrorKind::Unreachable, &e))?;
         let subject = subject::sense(sense);
         let request = serde_json::json!({

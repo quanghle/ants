@@ -1,6 +1,7 @@
 //! The messages in hand: the inbox loop that takes them in, queues them on their threads and runs each thread's
 //! next one, and lists them for `ants queue`.
 
+use crate::bus::relayed;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Display;
@@ -100,7 +101,8 @@ impl Inbox<'_> {
     /// The requests for the ant's queue, those naming their sender, an assistant's, apart: credentials older than
     /// them allow only the others.
     async fn queue_asks(&self) -> impl Stream<Item = async_nats::Message> + Unpin {
-        let asking = [subject::queue(self.ant), subject::queues_by_of(self.ant)].map(|s| self.client.subscribe(s));
+        let asking =
+            [subject::queue(self.ant), subject::queues_by_of(self.ant)].map(|s| relayed::subscribe(self.client, s));
         match futures::future::try_join_all(asking).await {
             Ok(asks) => futures::stream::select_all(asks).left_stream(),
             Err(e) => {

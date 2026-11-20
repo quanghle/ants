@@ -6,6 +6,7 @@
 //! While the hub is out of reach, the machine's outbox keeps the record until the bucket sources it
 //! ([`link_outbox`]).
 
+use crate::bus::relayed::{self, Read};
 use std::time::Duration;
 
 use ants_proto::{Envelope, LINKS_BUCKET, ThreadId, UserId, link_key, link_outbox, links_to, parse_link_key};
@@ -80,16 +81,16 @@ pub struct Passed {
 
 /// Who passed the link to `thread` on to whom, as the links bucket keeps it: none while there is no bucket.
 pub async fn passed_on(js: &jetstream::Context, thread: &ThreadId) -> Result<Vec<(UserId, UserId)>> {
-    Ok(read(js, thread, true).await?.into_iter().map(|p| (p.from, p.to)).collect())
+    Ok(read(js, thread).await?.into_iter().map(|p| (p.from, p.to)).collect())
 }
 
 /// [`passed_on`], with the thread of each message that passed the link on.
 pub async fn passed(js: &jetstream::Context, thread: &ThreadId) -> Result<Vec<Passed>> {
-    read(js, thread, false).await
+    read(js, thread).await
 }
 
-/// The links to `thread` passed on; with `headers_only`, without the threads they were passed on.
-async fn read(js: &jetstream::Context, thread: &ThreadId, headers_only: bool) -> Result<Vec<Passed>> {
+/// The links to `thread` passed on, read whole: with only its headers, a message a stream relayed could pass for one.
+async fn read(js: &jetstream::Context, thread: &ThreadId) -> Result<Vec<Passed>> {
     let kv = match js.get_key_value(LINKS_BUCKET).await {
         Ok(kv) => kv,
         Err(e) => {
@@ -102,7 +103,6 @@ async fn read(js: &jetstream::Context, thread: &ThreadId, headers_only: bool) ->
         .create_consumer(consumer::push::OrderedConfig {
             deliver_subject: js.client().new_inbox(),
             filter_subject: format!("{}{}", kv.prefix, links_to(thread)),
-            headers_only,
             deliver_policy: consumer::DeliverPolicy::LastPerSubject,
             replay_policy: consumer::ReplayPolicy::Instant,
             ..Default::default()
@@ -119,7 +119,7 @@ async fn read(js: &jetstream::Context, thread: &ThreadId, headers_only: bool) ->
             .with_context(|| format!("the links to thread {thread} ended early"))?
             .map_err(|e| anyhow::anyhow!(e))?;
         let removed = msg.headers.as_ref().and_then(|h| h.get("KV-Operation")).is_some_and(|op| op.as_str() != "PUT");
-        if removed {
+        if removed || relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::Consumer) {
             continue;
         }
         if let Some((from, to)) =

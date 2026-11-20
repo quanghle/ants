@@ -18,6 +18,12 @@ use async_nats::header::{NATS_SEQUENCE, NATS_STREAM, NATS_SUBJECT};
 use async_nats::{HeaderMap, HeaderName, Message};
 use serde_json::Value;
 
+mod heard;
+mod kv;
+
+pub use heard::{Heard, queue_subscribe, request, subscribe};
+pub use kv::{GuardedKv, Watch};
+
 /// The headers a stream adds to each message it sends to a direct get's reply subject.
 const STREAM_HEADERS: [HeaderName; 3] = [NATS_STREAM, NATS_SUBJECT, NATS_SEQUENCE];
 /// Every header a direct get adds, a batched one's included.

@@ -2,6 +2,7 @@
 //! from the streams, its threads' titles, done marks, pins, archives and snoozes (kept with its reminders) in the
 //! threads bucket, and the requests to the daemons of an ant answered over core NATS.
 
+use crate::bus::relayed;
 use std::collections::{BTreeMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
@@ -92,7 +93,7 @@ impl JetStreamStore {
         keep: impl Fn(&T, &str) -> bool,
     ) -> Result<Vec<T>> {
         let client = self.js.client();
-        let mut answers = client.subscribe(reply).await?;
+        let mut answers = relayed::subscribe(&client, reply).await?;
         client.publish(subject, payload.into()).await?;
         client.flush().await?;
         let mut deadline = tokio::time::Instant::now() + ANSWER_WAIT;

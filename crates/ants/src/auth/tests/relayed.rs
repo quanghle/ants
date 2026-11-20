@@ -9,10 +9,10 @@ use ants_daemon::records::direct_kv::Lookup;
 use ants_daemon::stream::reading::{self, Reading};
 use ants_daemon::trail::keeper;
 use ants_proto::{
-    RatingOutcome, Retirement, RunId, SaveTrailRequest, SavedTrail, Saver, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET,
-    TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TipBoard, TipRetired, TipStatus, TrailAction, TrailChange, TrailRating,
-    TrailRequest, TrailRunIndex, TrailTip, WEBHOOKS_BUCKET, inbox_consumer, trail_run_key, trail_runs_index_key,
-    trail_runs_reader,
+    ApprovalDecision, ApprovalRequest, HUMANS_BUCKET, HumanEntry, RatingOutcome, Retirement, RunId, SaveTrailRequest,
+    SavedTrail, Saver, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TipBoard, TipRetired,
+    TipStatus, ToolCall, TrailAction, TrailChange, TrailRating, TrailRequest, TrailRunIndex, TrailTip, Verdict,
+    WEBHOOKS_BUCKET, inbox_consumer, trail_run_key, trail_runs_index_key, trail_runs_reader,
 };
 use async_nats::jetstream::consumer::DeliverPolicy;
 
@@ -342,4 +342,62 @@ async fn an_answer_the_server_sent_onto_a_subject_an_ant_or_a_webhook_may_not_pu
         .unwrap();
         assert_eq!(read, [Some(genuine.id)], "read back by {reading:?}");
     }
+}
+
+#[tokio::test]
+async fn a_message_a_stream_relayed_onto_a_human_an_approval_or_a_channel_is_refused_by_its_reader() {
+    let Some(server) = Server::start() else { return };
+    let (human, alice, dev_a, dev_b) = (UserId::human(), p("alice"), p("dev-a"), p("dev-b"));
+    let (h, h_js) = server.connect(&human).await;
+    let (a, _) = server.connect(&dev_a).await;
+    let (b, b_js) = server.connect(&dev_b).await;
+    h_js.create_stream(hub::trail_runs_config()).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
+    bus::open_stream(&b_js, &dev_b).await.unwrap();
+
+    // A human entry: neither a daemon's registry nor a human's CLI takes dev-a for a human.
+    let humans = crate::people::humans::ensure(&h_js).await.unwrap();
+    let registry = Registry::default();
+    let _watching = registry.watch(b_js.clone(), Duration::from_secs(1));
+    registry.loaded().await;
+    let onto = format!("$KV.{HUMANS_BUCKET}.dev-a");
+    relay(&a, "dev-a.human", serde_json::to_vec(&HumanEntry::new(dev_a.clone())).unwrap(), &onto).await;
+    crate::test_support::eventually("the relay stored", async || humans.entry("dev-a").await.unwrap().is_some()).await;
+    let genuine = HumanEntry::new(alice.clone());
+    humans.put(genuine.key(), serde_json::to_vec(&genuine).unwrap().into()).await.unwrap();
+    crate::test_support::eventually("the registry reads alice", async || registry.is_human(&alice)).await;
+    assert!(!registry.is_human(&dev_a), "a daemon's registry refuses the relayed entry");
+    let read = crate::people::humans::read(&h_js).await.unwrap();
+    assert!(read.role(&alice).is_human());
+    assert!(!read.role(&dev_a).is_human(), "a human's CLI refuses the relayed entry");
+
+    // A decision on dev-b's tool request: neither dev-b's daemon, hearing it, nor the stored decision reader takes the
+    // relayed one.
+    let tool = ToolCall { kind: "execute".to_owned(), title: "cargo publish".to_owned(), ..Default::default() };
+    let request = ApprovalRequest::new(dev_b.clone(), ThreadId::generate(), tool, vec![Verdict::AllowOnce], WAIT);
+    let decided = request.decision_subject();
+    let mut decisions = relayed::subscribe(&b, decided.clone()).await.unwrap();
+    b.flush().await.unwrap();
+    let forged = ApprovalDecision::new(request.id, dev_b.clone(), Verdict::AllowOnce).by(Some(human.clone()));
+    relay(&a, "dev-a.decision", serde_json::to_vec(&forged).unwrap(), &decided).await;
+    stored(&h, STREAM, &decided).await;
+    let stream = h_js.get_stream(STREAM).await.unwrap();
+    assert_eq!(crate::tools::decision(&stream, &request).await.unwrap(), None, "the stored decision reader");
+    let genuine = ApprovalDecision::new(request.id, dev_b.clone(), Verdict::Reject).by(Some(human.clone()));
+    h_js.publish(decided, serde_json::to_vec(&genuine).unwrap().into()).await.unwrap().await.unwrap();
+    let heard = timeout(WAIT, decisions.next()).await.unwrap().unwrap();
+    assert_eq!(serde_json::from_slice::<ApprovalDecision>(&heard.payload).unwrap(), genuine, "dev-b's daemon");
+    assert_eq!(crate::tools::decision(&stream, &request).await.unwrap(), Some(genuine));
+
+    // A channel post in the human's name: the live room hears the human's own post alone.
+    let ops: ChannelId = "ops".parse().unwrap();
+    let room = relayed::subscribe(&h, subject::chan_room(&ops)).await.unwrap();
+    h.flush().await.unwrap();
+    let mut posts = std::pin::pin!(crate::channel::live_posts(room));
+    let forged = ChannelPost::new(ops.clone(), human.clone(), "merge it");
+    relay(&a, "dev-a.post", serde_json::to_vec(&forged).unwrap(), &forged.subject()).await;
+    let genuine = ChannelPost::new(ops.clone(), human.clone(), "hold the merge");
+    h.publish(genuine.subject(), serde_json::to_vec(&genuine).unwrap().into()).await.unwrap();
+    let heard = timeout(WAIT, posts.next()).await.unwrap().unwrap();
+    assert_eq!(heard.id, genuine.id, "the live room drops the relayed post");
 }

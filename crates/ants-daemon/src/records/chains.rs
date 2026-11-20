@@ -2,6 +2,7 @@
 //! so each daemon also puts its ant's `escalate_to` in the KV bucket [`CHAINS_BUCKET`] on start, whose entries
 //! never expire: an escalation climbs past a leader that is offline through the chain kept there.
 
+use crate::bus::relayed::GuardedKv as _;
 use std::sync::Arc;
 
 use ants_proto::{CHAINS_BUCKET, ChainEntry, UserId};
@@ -31,7 +32,7 @@ pub fn jetstream_chains(js: jetstream::Context) -> Chains {
 /// The chain kept for `ant` in `kv`. An entry naming another ant than its key is forged, so it counts as none.
 pub async fn read(kv: &kv::Store, ant: &UserId) -> Result<Option<Vec<UserId>>> {
     let key = ant.as_str();
-    let Some(value) = kv.get(key).await.with_context(|| format!("reading the chain of {ant}"))? else {
+    let Some(value) = kv.guarded_get(key).await.with_context(|| format!("reading the chain of {ant}"))? else {
         return Ok(None);
     };
     let entry: ChainEntry = serde_json::from_slice(&value).with_context(|| format!("parsing the chain of {ant}"))?;

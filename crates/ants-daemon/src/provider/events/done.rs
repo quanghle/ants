@@ -7,6 +7,7 @@
 //! a thread the ant holds a session of. It acks a marking once its event is stored, so one put while the daemon was
 //! down is told once it is back.
 
+use crate::bus::relayed::{self, Read};
 use std::time::Duration;
 
 use ants_proto::{THREADS_BUCKET, ThreadDone, ThreadId, UserId, done_key, done_mark_key, done_reader};
@@ -111,9 +112,13 @@ async fn take(message: &jetstream::Message, lifecycle: &Lifecycle, has_session: 
     }
 }
 
-/// The thread a message of the bucket's stream marks done, and its done state: None for a deleted one, or one that
-/// does not parse or names another thread than its key.
+/// The thread a message of the bucket's stream marks done, and its done state: None for a deleted one, one a stream
+/// relayed, or one that does not parse or names another thread than its key.
 fn marked(message: &jetstream::Message) -> Option<(ThreadId, ThreadDone)> {
+    if relayed::stored_relayed(message.headers.as_ref(), &message.payload, Read::Consumer) {
+        tracing::warn!(subject = %message.subject, "skipping a done state a stream relayed");
+        return None;
+    }
     let removed = message.headers.as_ref().and_then(|h| h.get("KV-Operation")).is_some_and(|op| op.as_str() != "PUT");
     if removed {
         return None;

@@ -1,5 +1,6 @@
 //! The ant's entry in the colony, kept alive by heartbeats.
 
+use crate::bus::relayed::{self, GuardedKv as _};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -326,7 +327,7 @@ enum Claim {
 /// Put `entry` if [`may_start`] allows it, expecting the revision looked at, so of two daemons only one goes ahead.
 async fn claim(kv: &kv::Store, entry: &ColonyEntry) -> Result<Claim> {
     let key = entry.key();
-    let found = kv.entry(key).await.with_context(|| format!("reading {key} in the colony"))?;
+    let found = kv.guarded_entry(key).await.with_context(|| format!("reading {key} in the colony"))?;
     let current = found
         .as_ref()
         .filter(|e| e.operation == kv::Operation::Put)
@@ -372,7 +373,7 @@ const EXPIRY_SLACK: Duration = Duration::from_millis(250);
 pub async fn wait_for_turn(kv: &kv::Store, entry: &mut ColonyEntry, every: Duration) -> Result<u64> {
     let ttl = Some(kv.stream.cached_info().config.max_age).filter(|ttl| !ttl.is_zero()).unwrap_or(COLONY_TTL);
     let key = entry.key().to_owned();
-    let mut changes = match kv.watch(&key).await {
+    let mut changes = match kv.guarded_watch(&key).await {
         Ok(changes) => Some(changes),
         Err(e) => {
             tracing::warn!(ant = key, error = %e, "watching the colony entry; looking at the colony every {every:?}");
@@ -492,7 +493,7 @@ async fn keep_held(
     every: Duration,
     workload: Option<Arc<Workload>>,
     held: watch::Sender<Option<u64>>,
-    mut changes: Option<kv::Watch>,
+    mut changes: Option<relayed::Watch>,
 ) {
     let Some(mut revision) = *held.borrow() else { return };
     let mut ticks = tokio::time::interval(every);
@@ -531,7 +532,7 @@ async fn keep_held(
 }
 
 /// The next change `changes` shows, if any; on an error it stops watching, so only the heartbeats see changes.
-async fn next_change(changes: &mut Option<kv::Watch>) -> Option<kv::Entry> {
+async fn next_change(changes: &mut Option<relayed::Watch>) -> Option<kv::Entry> {
     let Some(watch) = changes else { return std::future::pending().await };
     match watch.next().await {
         Some(Ok(change)) => Some(change),
@@ -593,7 +594,7 @@ impl Registration {
         workload: Option<Arc<Workload>>,
     ) -> Result<Self> {
         let key = entry.key().to_owned();
-        let changes = match kv.watch(&key).await {
+        let changes = match kv.guarded_watch(&key).await {
             Ok(changes) => Some(changes),
             Err(e) => {
                 tracing::warn!(ant = key, error = %e, "watching the colony entry; the heartbeats still notice another daemon");
@@ -656,7 +657,9 @@ pub async fn list_entries(kv: &kv::Store) -> Result<Vec<ColonyEntry>> {
     keys.sort();
     let mut entries = Vec::with_capacity(keys.len());
     for key in keys {
-        let Some(value) = kv.get(&key).await.with_context(|| format!("reading {key} in the colony"))? else { continue };
+        let Some(value) = kv.guarded_get(&key).await.with_context(|| format!("reading {key} in the colony"))? else {
+            continue;
+        };
         match serde_json::from_slice::<ColonyEntry>(&value) {
             Ok(entry) => match entry.check_key(&key) {
                 Ok(()) => entries.push(entry),

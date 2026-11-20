@@ -6,6 +6,7 @@
 //! `enable` and `disable` ([`dedicated`]) create and retire a dedicated assistant ant around the grant. `confirm` and
 //! `allow` ([`consent`]) sign the human's consent to what the assistant decides for it.
 
+use ants_daemon::bus::relayed::GuardedKv as _;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::config::Summary;
@@ -397,7 +398,7 @@ fn describe(grant: &VerifiedGrant) -> String {
 /// The record of `human` stored, unverified; none without one, or without the bucket.
 async fn read(js: &jetstream::Context, human: &UserId) -> Result<Option<AssistantGrant>> {
     let Ok(kv) = js.get_key_value(HUMANS_BUCKET).await else { return Ok(None) };
-    let Some(value) = kv.get(assistant_grant_key(human)).await.context("reading the assistant grant")? else {
+    let Some(value) = kv.guarded_get(&assistant_grant_key(human)).await.context("reading the assistant grant")? else {
         return Ok(None);
     };
     serde_json::from_slice(&value).map(Some).context("a malformed assistant grant")
@@ -434,7 +435,7 @@ async fn put(
     let kv = humans::ensure(js).await?;
     let grant_key = assistant_grant_key(human);
     for _ in 0..CONFLICTS {
-        let stored = kv.entry(&grant_key).await.context("reading the assistant grant")?;
+        let stored = kv.guarded_entry(&grant_key).await.context("reading the assistant grant")?;
         let (revision, before) = match &stored {
             Some(entry) if entry.operation == kv::Operation::Put => {
                 (Some(entry.revision), serde_json::from_slice::<AssistantGrant>(&entry.value).ok())

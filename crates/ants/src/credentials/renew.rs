@@ -13,6 +13,7 @@
 //! The uplink credentials of a leaf node connect as no client: a human's credentials carry their request
 //! (`ants renew LEAF.creds --creds HUMAN.creds`).
 
+use ants_daemon::bus::relayed;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -165,7 +166,7 @@ pub async fn request(
     let carrier_user: UserId =
         carrier_name.parse().with_context(|| format!("{} connect as no client", carrier.display()))?;
     let (client, _) = bus::connect_with(url, Some(carrier), store, None, &carrier_user, "ants-renew").await?;
-    let mut replies = client.subscribe(subject::renew_reply(&finding.name)).await?;
+    let mut replies = relayed::subscribe(&client, subject::renew_reply(&finding.name)).await?;
     let public_key = user.public_key();
     let mut request = RenewRequest::new(&finding.name, &public_key, colony::machine().await);
     request.current = current_jwt;
@@ -343,7 +344,7 @@ impl Approver {
     /// The renewal requests heard, for `name` or for every name: the latest of each name and key, oldest first.
     pub async fn renewals(&self, name: Option<&str>) -> Result<Vec<RenewRequest>> {
         let filter = name.map_or_else(|| subject::ALL_RENEW_REQUESTS.to_owned(), subject::renew);
-        let mut requests = self.client.subscribe(filter).await?;
+        let mut requests = relayed::subscribe(&self.client, filter).await?;
         self.client.flush().await?;
         let mut heard: Vec<RenewRequest> = Vec::new();
         let end = tokio::time::sleep(self.listen);
@@ -445,7 +446,7 @@ pub async fn auto(
     tokio::pin!(stop);
     loop {
         let approver = Approver::connect(url, dir, js_domain, listen).await?;
-        let mut requests = approver.client.subscribe(subject::ALL_RENEW_REQUESTS).await?;
+        let mut requests = relayed::subscribe(&approver.client, subject::ALL_RENEW_REQUESTS).await?;
         approver.client.flush().await?;
         let until = tokio::time::sleep(reconnect);
         tokio::pin!(until);

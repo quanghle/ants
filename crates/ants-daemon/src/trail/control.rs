@@ -24,7 +24,7 @@ impl Trails {
         // Held while a requested start is checked and stored, so one asked again under its request id starts one run.
         let starting = tokio::sync::Mutex::new(());
         loop {
-            let mut requests = match self.inner.client.subscribe(subject.clone()).await {
+            let mut requests = match relayed::subscribe(&self.inner.client, subject.clone()).await {
                 Ok(requests) => requests,
                 Err(e) => {
                     tracing::warn!(error = %e, subject, "hearing trail requests");

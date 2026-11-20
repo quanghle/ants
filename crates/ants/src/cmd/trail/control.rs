@@ -1,6 +1,7 @@
 //! Asking a run's conductor to start, stop or resume it: a [`TrailRequest`] on the conductor's control subject, which
 //! its daemon answers with a [`TrailReply`].
 
+use ants_daemon::bus::relayed;
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -24,7 +25,7 @@ pub(super) async fn ask(
     wait: Duration,
 ) -> Result<TrailOutcome> {
     let request = TrailRequest::new(ant.clone(), by.clone(), action);
-    let mut answers = client.subscribe(request.reply_subject()).await?;
+    let mut answers = relayed::subscribe(client, request.reply_subject()).await?;
     client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
     client.flush().await?;
     let deadline = tokio::time::Instant::now() + wait;

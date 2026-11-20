@@ -24,6 +24,7 @@
 //! from the manager's machine. How many ants a template has is counted from the keys the team issued
 //! ([`revoke::Issued::template`]), live ones only.
 
+use ants_daemon::bus::relayed;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Duration;
@@ -161,10 +162,10 @@ pub async fn serve(
     loop {
         let approver = Approver::connect_signer(url, dir, js_domain, crate::credentials::enroll::LISTEN).await?;
         record_holder(&approver, js_domain, &holder).await;
-        let mut requests = approver.client.subscribe(subject::ALL_ANT_REQUESTS).await?;
-        let mut logins = approver.client.subscribe(subject::ALL_LOGIN_REQUESTS).await?;
-        let mut renewals = approver.client.subscribe(subject::ALL_RENEW_REQUESTS).await?;
-        let mut enrollments = approver.client.subscribe(subject::ALL_ENROLL_REQUESTS).await?;
+        let mut requests = relayed::subscribe(&approver.client, subject::ALL_ANT_REQUESTS).await?;
+        let mut logins = relayed::subscribe(&approver.client, subject::ALL_LOGIN_REQUESTS).await?;
+        let mut renewals = relayed::subscribe(&approver.client, subject::ALL_RENEW_REQUESTS).await?;
+        let mut enrollments = relayed::subscribe(&approver.client, subject::ALL_ENROLL_REQUESTS).await?;
         let answering = reactions::serve(
             approver.client.clone(),
             approver.hub().clone(),
@@ -508,6 +509,10 @@ impl Signer<'_> {
         let stream = approver.hub().get_stream_no_info(STREAM).await.context("opening the ANTS stream")?;
         for waiting in std::mem::take(&mut self.waiting) {
             let decision = match stream.direct_get_last_for_subject(waiting.approval.decision_subject()).await {
+                Ok(msg) if relayed::stored_relayed(Some(&msg.headers), &msg.payload, relayed::Read::DirectGet) => {
+                    tracing::warn!(request = %waiting.approval.id, "ignoring a decision a stream relayed");
+                    None
+                }
                 Ok(msg) => serde_json::from_slice::<ApprovalDecision>(&msg.payload)
                     .ok()
                     .filter(|d| d.request_id == waiting.approval.id && d.ant == waiting.approval.ant),

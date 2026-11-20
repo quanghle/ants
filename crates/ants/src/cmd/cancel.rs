@@ -1,5 +1,6 @@
 //! `ants cancel`: stop the prompt an ant runs on a thread.
 
+use ants_daemon::bus::relayed;
 use std::time::Duration;
 
 use ants_proto::{CancelReply, CancelRequest, ThreadId, UserId};
@@ -35,7 +36,7 @@ pub(crate) async fn cancelled(
     thread: ThreadId,
 ) -> Result<String> {
     let request = CancelRequest::new(ant, thread, me.clone());
-    let answers = client.subscribe(request.reply_subject()).await?;
+    let answers = relayed::subscribe(client, request.reply_subject()).await?;
     client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
     client.flush().await?;
     let (ant, thread) = (&request.ant, &request.thread_id);

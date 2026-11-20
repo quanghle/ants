@@ -319,6 +319,7 @@ async fn read_by_batches(
     let client = js.client();
     let wait = client.timeout().unwrap_or(Duration::from_secs(10));
     let inbox = client.new_inbox();
+    #[expect(clippy::disallowed_methods, reason = "direct gets' answers, which the stream sends")]
     let mut replies = client.subscribe(inbox.clone()).await?;
     while at.seq <= last {
         let request = BatchGet {

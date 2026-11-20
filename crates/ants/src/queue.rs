@@ -1,6 +1,7 @@
 //! `ants queue` and `ants withdraw`: the messages waiting for an ant, and withdrawing one before the ant is prompted
 //! with it.
 
+use ants_daemon::bus::relayed;
 use std::time::Duration;
 
 pub use ants_daemon::delivery::queue::{Waiting, state};
@@ -207,7 +208,7 @@ fn refused(ant: &UserId, message: &Uuid, found: MessageMark, redelivery: bool) -
 /// The answers of the daemons of `ant` to a queue request from `me`, None when none answers.
 async fn ask(client: &async_nats::Client, ant: &UserId, me: &UserId) -> Result<Option<Vec<QueueReply>>> {
     let request = QueueRequest::new(ant.clone(), me.clone());
-    let answers = client.subscribe(request.reply_subject()).await?;
+    let answers = relayed::subscribe(client, request.reply_subject()).await?;
     client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
     client.flush().await?;
     let answers = answers.map(|msg| (msg.subject.to_string(), msg.payload.to_vec()));

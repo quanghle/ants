@@ -47,6 +47,7 @@
 //! Each human's reminders ([`ants_proto::Reminders`]) are checked every [`REMIND_EVERY`]: one process marks those due
 //! pushed with compare-and-set and sends them, neither a snooze nor quiet hours holding them back.
 
+use ants_daemon::bus::relayed::{self, GuardedKv as _};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -268,7 +269,10 @@ async fn watch(human: &Notified, bus: &HumanBus, links: Option<&Links>) -> Resul
             }
         };
         let seq = message.info().map_or_default(|i| i.stream_sequence);
-        if human.first_time(seq) {
+        let relayed = relayed::stored_relayed(message.headers.as_ref(), &message.payload, relayed::Read::Consumer);
+        if relayed {
+            tracing::warn!(human = %human.config.name, subject = %message.subject, "skipping a message a stream relayed");
+        } else if human.first_time(seq) {
             notify(human, bus, links, &message.subject, &message.payload, seq).await;
         }
         if let Err(e) = message.ack().await {
@@ -450,7 +454,7 @@ async fn answer_reactions(human: &UserId, bus: &HumanBus) -> std::convert::Infal
 /// The notices held back from `human` and the revision they were read at, 0 when never stored: none when missing or
 /// deleted, empty counts when malformed.
 async fn load_held(kv: &kv::Store, human: &UserId) -> Result<(Option<HeldNotices>, u64)> {
-    let Some(entry) = kv.entry(held_key(human)).await.context("reading the notices held back")? else {
+    let Some(entry) = kv.guarded_entry(&held_key(human)).await.context("reading the notices held back")? else {
         return Ok((None, 0));
     };
     if entry.operation != kv::Operation::Put {

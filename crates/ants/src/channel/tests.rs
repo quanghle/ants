@@ -191,9 +191,9 @@ async fn the_human_manages_channels_and_reads_them_back() {
     let answer = top.reply(dev_a.clone(), "on it", &[], &Humans::default()).unwrap();
     bus::publish_json(&a_js, answer.subject(), &answer, None).await.unwrap();
     let texts = |posts: Vec<ChannelPost>| posts.into_iter().map(|p| p.text).collect::<Vec<_>>();
-    let next_two = thread_posts(live_posts(following), &top, false).take(2).collect();
+    let next_two = thread_posts(live_posts(following.into()), &top, false).take(2).collect();
     assert_eq!(texts(tokio::time::timeout(Duration::from_secs(2), next_two).await.unwrap()), ["anyone?", "on it"]);
-    let mut waiting = Box::pin(thread_posts(live_posts(waiting), &top, true));
+    let mut waiting = Box::pin(thread_posts(live_posts(waiting.into()), &top, true));
     let next = tokio::time::timeout(Duration::from_secs(2), waiting.next()).await.unwrap().unwrap();
     assert_eq!(next.text, "on it", "waiting skips the poster's own posts");
 

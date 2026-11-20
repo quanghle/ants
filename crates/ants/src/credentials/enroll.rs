@@ -17,6 +17,7 @@
 //! which the approval of the ant grants too, after checks that bind them to the asking machine
 //! ([`Approver::approve_with`]).
 
+use ants_daemon::bus::relayed;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -103,7 +104,7 @@ pub async fn request_with(
     let (enrollment, left) = check_enrollment(&enrollment_jwt, creds, ant)?;
     let (events_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     let (client, _) = bus::connect_watched(url, Some(creds), None, ant, "ants-enroll", events_tx).await?;
-    let replies = client.subscribe(subject::enroll_reply(ant)).await?;
+    let replies = relayed::subscribe(&client, subject::enroll_reply(ant)).await?;
     let public_key = user.public_key();
     let mut request = EnrollRequest::new(ant.clone(), &public_key, colony::machine().await);
     request.enrollment = enrollment_jwt;
@@ -177,7 +178,7 @@ impl Asking<'_> {
     async fn until_answered(
         &self,
         mut request: EnrollRequest,
-        mut replies: async_nats::Subscriber,
+        mut replies: ants_daemon::bus::relayed::Heard,
         repeat: Duration,
     ) -> Result<Approval> {
         let mut uplink: Option<KeyPair> = None;
@@ -491,7 +492,7 @@ impl Approver {
     /// The requests heard, for `ant` or for every ant: the latest of each ant and key, oldest first.
     pub async fn pending(&self, ant: Option<&UserId>) -> Result<Vec<EnrollRequest>> {
         let filter = ant.map_or_else(|| subject::ALL_ENROLL_REQUESTS.to_owned(), subject::enroll);
-        let mut requests = self.client.subscribe(filter).await?;
+        let mut requests = relayed::subscribe(&self.client, filter).await?;
         self.client.flush().await?;
         let mut heard: Vec<EnrollRequest> = Vec::new();
         let end = tokio::time::sleep(self.listen);

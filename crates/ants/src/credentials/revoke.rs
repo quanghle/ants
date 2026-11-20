@@ -8,6 +8,7 @@
 //! users' connections at once. The update reaches every leaf node connected to that server through a system account
 //! uplink (`ants leaf config`), which applies it too and keeps it across restarts.
 
+use ants_daemon::bus::relayed;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write as _;
@@ -733,7 +734,7 @@ pub async fn push(url: &str, dir: &Path) -> Result<Pushed> {
     let client = connect_system(url, dir).await?;
     let server = client.server_info().server_name;
     let inbox = client.new_inbox();
-    let mut answers = client.subscribe(inbox.clone()).await?;
+    let mut answers = relayed::subscribe(&client, inbox.clone()).await?;
     let subject = format!("$SYS.REQ.ACCOUNT.{account}.CLAIMS.UPDATE");
     client.publish_with_reply(subject, inbox, jwt.into()).await.context("asking the server to update the account")?;
     client.flush().await?;
@@ -775,7 +776,7 @@ pub async fn connect_system(url: &str, dir: &Path) -> Result<async_nats::Client>
 /// server's `server.conf`. None without an answer of that server.
 pub async fn keeps_accounts(client: &async_nats::Client) -> Option<bool> {
     let server = client.server_info().server_name;
-    match client.request(LIST_REQUEST, "".into()).await {
+    match relayed::request(client, LIST_REQUEST, "".into()).await {
         Ok(answer) => {
             let answer: serde_json::Value = serde_json::from_slice(&answer.payload).ok()?;
             (answer["server"]["name"] == server.as_str() && answer["data"].is_array()).then_some(true)
