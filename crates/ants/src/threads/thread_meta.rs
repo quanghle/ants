@@ -468,7 +468,7 @@ impl Meta {
             return Ok(false);
         }
         let done = ThreadDone::new(thread.clone(), self.human.clone(), after);
-        self.kv.put(done_key(thread), serde_json::to_vec(&done)?).await.context("storing the done state")?;
+        ants_daemon::provider::events::done::mark(&self.kv, &done).await?;
         Ok(true)
     }
 

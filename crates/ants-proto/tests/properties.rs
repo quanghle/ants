@@ -294,6 +294,7 @@ proptest! {
             (ants_proto::owner_outbox(&thread, &other), vec!["ants", "out", "owners", t, o]),
             (ants_proto::title_key(&thread), vec!["title", t]),
             (ants_proto::done_key(&thread), vec!["done", t]),
+            (ants_proto::done_mark_key(&thread, &message), vec!["done", t, &m]),
             (ants_proto::marks_key(&ant), vec!["marks", a]),
             (ants_proto::assisted_marks_key(&ant, &other), vec!["marks", a, o]),
             (ants_proto::assisted_reminders_key(&ant, &other), vec!["reminders", a, o]),

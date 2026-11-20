@@ -852,7 +852,7 @@ fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archiv
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.title.*",
         "$KV.ants_threads.summary.*",
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.summary.*",
-        "$KV.ants_threads.done.*",
+        "$KV.ants_threads.done.>",
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.done.*",
         "$JS.API.STREAM.CREATE.KV_ants_threads",
     ] {
@@ -877,7 +877,7 @@ fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archiv
         .map(|k| format!("$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.{k}"))
         .into();
     reads.extend([
-        "$JS.API.CONSUMER.CREATE.KV_ants_threads.done-dev-a.$KV.ants_threads.done.*".to_owned(),
+        "$JS.API.CONSUMER.CREATE.KV_ants_threads.done-dev-a.$KV.ants_threads.done.*.*".to_owned(),
         "$JS.API.CONSUMER.MSG.NEXT.KV_ants_threads.done-dev-a".to_owned(),
     ]);
     reads.extend(ack_subjects("KV_ants_threads", "done-dev-a"));

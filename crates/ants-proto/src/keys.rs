@@ -196,6 +196,13 @@ pub fn done_key(thread: &ThreadId) -> String {
     format!("done.{thread}")
 }
 
+/// Key in [`THREADS_BUCKET`] of one marking of `thread` done, `mark` its own id, put with the done state it sets
+/// ([`done_key`]): a key of its own, which no undo or newer mark of the thread replaces before each ant's
+/// [`done_reader`] has heard of it.
+pub fn done_mark_key(thread: &ThreadId, mark: &Uuid) -> String {
+    format!("done.{thread}.{mark}")
+}
+
 /// Key in [`THREADS_BUCKET`] of the pinned and archived threads of `human`: starting with `marks`, so no thread id
 /// or human name collides with a title's key.
 pub fn marks_key(human: &UserId) -> String {
@@ -270,7 +277,8 @@ pub fn chan_consumer(ant: &UserId) -> String {
 }
 
 /// Durable JetStream consumer of [`THREADS_BUCKET`]'s stream an ant's daemon hears of the threads marked done through,
-/// to tell the ant's provider. Its filter is pinned to the done states ([`done_key`]), so it reads no other key.
+/// to tell the ant's provider. Its filter is pinned to the markings of threads done ([`done_mark_key`]), so it reads
+/// no other key.
 pub fn done_reader(ant: &UserId) -> String {
     format!("done-{ant}")
 }

@@ -102,8 +102,8 @@ pub use keys::{
     ANTS_VERSION, Feed, SERVING_EVERY, SPARE_READERS, Serving, TRAIL_ANSWERING, TRAIL_RUNS_INDEX, TRAIL_STEPS,
     assisted_marks_key, assisted_owner_key, assisted_reminders_key, assisted_withdrawal_key, attempt_key,
     chan_consumer, chan_reader, channel_manager_serving_key, channel_manager_serving_subject, channel_reads_key,
-    channel_seen_key, daily_spend_key, dead_reader, done_key, done_reader, escalation_deadlines_key, held_key,
-    inbox_consumer, inbox_prefix, link_key, link_outbox, links_to, marks_key, mention_key, message_mark_key,
+    channel_seen_key, daily_spend_key, dead_reader, done_key, done_mark_key, done_reader, escalation_deadlines_key,
+    held_key, inbox_consumer, inbox_prefix, link_key, link_outbox, links_to, marks_key, mention_key, message_mark_key,
     notes_consumer, notify_consumer, owner_key, owner_outbox, owner_record_id, parse_link_key, parse_reaction_key,
     parse_trail_run_key, reaction_key, reactions_to, reminders_key, sent_reader, session_key, spare_readers,
     storage_warning_key, summary_key, thread_origin_key, thread_spend_key, title_key, trail_answering_key,
@@ -321,7 +321,8 @@ pub const REACTIONS_REPEAT: Duration = Duration::from_secs(2);
 pub const REACTIONS_WAIT: Duration = Duration::from_secs(10);
 /// KV bucket of what humans make of threads: the title of each thread ([`ThreadTitle`], keyed by [`title_key`]), one
 /// for every human, which any human sets, renames or clears, its done state ([`ThreadDone`], keyed by [`done_key`]),
-/// one for every human too, which any human sets or clears, and each human's pinned and archived threads
+/// one for every human too, which any human sets or clears, with each marking of a thread done under a key of its own
+/// ([`done_mark_key`]) for the ants' daemons to hear of, and each human's pinned and archived threads
 /// ([`ThreadMarks`], keyed by [`marks_key`]) and its due times, its reminders and the threads it snoozed on home
 /// ([`Reminders`], keyed by [`reminders_key`]), each shared by its devices and read and written by that human alone
 /// ([`Permissions::for_user`]), with the marks and snoozes its assistant sets for it under keys naming the assistant

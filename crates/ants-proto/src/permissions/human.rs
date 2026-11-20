@@ -157,16 +157,17 @@ pub(super) fn human_reaction_rights(human: &UserId) -> Vec<String> {
 
 /// What a human's credentials need for thread titles, TL;DRs and done states and its pins and archives
 /// ([`THREADS_BUCKET`]): creating the bucket; reading by direct gets, putting and deleting every title, every TL;DR
-/// ([`ThreadSummary`]) and every done state, which any human sets; and reading and writing its own [`ThreadMarks`]
-/// and [`crate::Reminders`] only, so no human reads or changes another's, with those its assistants set for it
-/// ([`assisted_marks_key`], [`assisted_reminders_key`]), which it clears as it marks a thread itself. The keys naming
+/// ([`ThreadSummary`]) and every done state, which any human sets, and putting each marking of a thread done; and
+/// reading and writing its own [`ThreadMarks`] and [`crate::Reminders`] only, so no human reads or changes another's,
+/// with those its assistants set for it ([`assisted_marks_key`], [`assisted_reminders_key`]), which it clears as it
+/// marks a thread itself. The keys naming
 /// the human second ([`marks_key`], [`reminders_key`]) or second of three are all its own, and one pattern each covers
 /// them, to keep the credentials short: no other key of the bucket has a user id there.
 pub(super) fn thread_rights(human: &UserId) -> [String; 12] {
     let threads = kv_stream(THREADS_BUCKET);
     let titles = format!("$KV.{THREADS_BUCKET}.title.*");
     let summaries = format!("$KV.{THREADS_BUCKET}.summary.*");
-    let done = format!("$KV.{THREADS_BUCKET}.done.*");
+    let done = format!("$KV.{THREADS_BUCKET}.done");
     let own = format!("$KV.{THREADS_BUCKET}.*.{human}");
     let assisted = format!("{own}.*");
     [
@@ -176,8 +177,9 @@ pub(super) fn thread_rights(human: &UserId) -> [String; 12] {
         titles,
         format!("$JS.API.DIRECT.GET.{threads}.{summaries}"),
         summaries,
-        format!("$JS.API.DIRECT.GET.{threads}.{done}"),
-        done,
+        format!("$JS.API.DIRECT.GET.{threads}.{done}.*"),
+        // The done states and each marking of a thread done ([`crate::done_mark_key`]).
+        format!("{done}.>"),
         format!("$JS.API.DIRECT.GET.{threads}.{own}"),
         own,
         format!("$JS.API.DIRECT.GET.{threads}.{assisted}"),

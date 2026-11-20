@@ -334,6 +334,17 @@ impl DirectKv {
         Ok(())
     }
 
+    /// [`DirectKv::put`] for `ttl` (at least a second): the stream removes the entry that long after, if it allows
+    /// per-message TTLs, and refuses the put otherwise.
+    pub async fn put_for(&self, key: impl AsRef<str>, value: impl Into<Vec<u8>>, ttl: Duration) -> Result<()> {
+        let key = key.as_ref();
+        let mut headers = HeaderMap::new();
+        headers.insert(TTL, ttl.as_secs().max(1).to_string().as_str());
+        let ack = self.js.publish_with_headers(self.put_subject(key), headers, value.into().into()).await;
+        ack.with_context(|| format!("storing {key}"))?.await.with_context(|| format!("storing {key}"))?;
+        Ok(())
+    }
+
     /// [`DirectKv::put`] as message `id` (`Nats-Msg-Id`): the stream drops a repeat of it within its duplicate window.
     pub async fn put_as(&self, key: impl AsRef<str>, value: impl Into<Vec<u8>>, id: &str) -> Result<()> {
         let key = key.as_ref();
