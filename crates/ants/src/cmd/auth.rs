@@ -20,7 +20,9 @@ use crate::{auth, channel};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AuthCommand {
-    /// Create the team operator and account, and the server.conf that makes nats-server trust them.
+    /// Create the team operator and accounts, and the server.conf that makes nats-server trust them. On a team made
+    /// before the store account, add it and write server.conf again; the hub's streams then move into it with `ants
+    /// auth move-stores`.
     Init {
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
@@ -200,9 +202,9 @@ pub(crate) enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// Back up the team keys (operator, account and system account seeds), server.conf, issued.jsonl and
-    /// revoked.json into FILE, encrypted with a passphrase in the age format (`age -d` decrypts it too) and readable
-    /// by its owner only. Without them no credentials can be issued, renewed or revoked again. The passphrase comes
+    /// Back up the team keys (operator, account, store account and system account seeds), server.conf, issued.jsonl
+    /// and revoked.json into FILE, encrypted with a passphrase in the age format (`age -d` decrypts it too) and
+    /// readable by its owner only. Without them no credentials can be issued, renewed or revoked again. The passphrase comes
     /// from --passphrase-file, else ANTS_BACKUP_PASSPHRASE, else the terminal; `ants doctor` warns until a backup
     /// holds every key issued.
     Backup {
@@ -211,6 +213,25 @@ pub(crate) enum AuthCommand {
         /// Read the passphrase from the first line of this file.
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// Move the streams, buckets and object stores of a stopped nats-server from the team's account, which held
+    /// JetStream before the store account, into the store account, keeping every entry, sequence and consumer. Run
+    /// once per server (the hub, and each leaf node for its outbox) after `ants auth init` added the store account:
+    /// stop the server, give it the new server.conf, move, start it.
+    MoveStores {
+        /// The `store_dir` of the server's jetstream block.
+        #[arg(long, value_name = "DIR")]
+        store_dir: PathBuf,
+        /// The server.conf the server includes (default: the team directory's).
+        #[arg(long, value_name = "FILE")]
+        server_conf: Option<PathBuf>,
+        /// Discard streams the store account already holds under the same names, created by a start on the new
+        /// server.conf before the move.
+        #[arg(long)]
+        replace: bool,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
@@ -391,6 +412,13 @@ pub(crate) async fn run(conn: &Connection<'_>, command: AuthCommand) -> Result<(
             Ok(())
         }
         AuthCommand::Push { dir } => push(conn.nats, domain, &team_dir(dir)?).await,
+        AuthCommand::MoveStores { store_dir, server_conf, replace, dir } => {
+            let server_conf = match server_conf {
+                Some(conf) => conf,
+                None => team_dir(dir)?.join(auth::SERVER_CONF),
+            };
+            move_stores(&store_dir, &server_conf, replace)
+        }
         AuthCommand::Backup { file, passphrase_file, dir } => {
             backup::run_backup(&team_dir(dir)?, &file, passphrase_file.as_deref())
         }
@@ -524,6 +552,15 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
 /// `ants auth init`.
 fn init(dir: Option<PathBuf>) -> Result<()> {
     let dir = team_dir(dir)?;
+    if auth::holds_team(&dir) && !auth::holds_store(&dir) {
+        auth::add_store(&dir)?;
+        println!(
+            "store account added to the team in {0}, which now holds JetStream in place of the team's account; on              the hub, and on each leaf node for its outbox: stop the server, copy {0}/{1} over the one it includes,              run `ants auth move-stores --store-dir DIR` with the store_dir of its jetstream block, then start it.              Leaf nodes also need store uplink credentials: `ants auth leaf`, then `ants leaf config`",
+            dir.display(),
+            auth::SERVER_CONF
+        );
+        return Ok(());
+    }
     auth::init(&dir)?;
     println!(
         "team keys in {0}\ncopy {0}/{1} next to the hub's nats-server configuration and include \"{1}\" from it \
@@ -532,6 +569,24 @@ fn init(dir: Option<PathBuf>) -> Result<()> {
         dir.display(),
         auth::SERVER_CONF
     );
+    Ok(())
+}
+
+/// `ants auth move-stores`.
+fn move_stores(store_dir: &Path, server_conf: &Path, replace: bool) -> Result<()> {
+    let moved = auth::move_stores(store_dir, server_conf, replace)?;
+    if moved.streams.is_empty() {
+        println!("no streams of the team's account in {}: nothing to move", store_dir.display());
+    } else {
+        println!("moved into the store account: {}", moved.streams.join(", "));
+    }
+    if !moved.replaced.is_empty() {
+        println!("discarded for them, as created before the move: {}", moved.replaced.join(", "));
+    }
+    if let Some(left) = moved.left {
+        println!("{} holds more than streams and stays: check it, then remove it", left.display());
+    }
+    println!("start the server again on {}", server_conf.display());
     Ok(())
 }
 

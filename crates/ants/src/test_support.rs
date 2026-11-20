@@ -33,6 +33,12 @@ impl std::ops::Deref for Server {
     }
 }
 
+impl std::ops::DerefMut for Server {
+    fn deref_mut(&mut self) -> &mut NatsServer {
+        &mut self.0
+    }
+}
+
 impl Server {
     /// None when nats-server is not installed.
     pub(crate) fn start() -> Option<Self> {
@@ -46,6 +52,17 @@ impl Server {
             init(&dir.join("auth")).unwrap();
             let store = dir.join("js");
             format!("jetstream {{ store_dir: {store:?}\n{jetstream} }}\ninclude \"auth/{SERVER_CONF}\"\n{extra}")
+        })
+        .map(Self)
+    }
+
+    /// A server trusting a fresh team on the layout from before the store account: the team's account holds
+    /// JetStream itself ([`crate::auth::write_server_conf_before_store`]).
+    pub(crate) fn start_before_store() -> Option<Self> {
+        NatsServer::spawn_with(|dir| {
+            init(&dir.join("auth")).unwrap();
+            crate::auth::write_server_conf_before_store(&dir.join("auth")).unwrap();
+            format!("jetstream {{ store_dir: {:?} }}\ninclude \"auth/{SERVER_CONF}\"\n", dir.join("js"))
         })
         .map(Self)
     }

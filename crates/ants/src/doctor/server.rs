@@ -372,40 +372,9 @@ pub(super) fn consumers(object: hub::Object, count: usize, limit: usize) -> Chec
 pub(super) async fn check_resolver(setup: &Setup, through_leaf: bool) -> Check {
     let check = "hub resolver";
     let conf = setup.team.join(auth::SERVER_CONF);
-    if !auth::holds_team(&setup.team) {
-        let detail = format!(
-            "no team keys in {}: only the team's system account can ask, so run `ants doctor` where `ants auth` runs",
-            setup.team.display()
-        );
-        return Check::skip(check, detail);
-    }
-    if through_leaf {
-        return Check::skip(check, "the CLI connects to the leaf node: point --nats at the hub to check it");
-    }
-    let client = match tokio::time::timeout(NETWORK_TIMEOUT * 2, revoke::connect_system(&setup.nats, &setup.team)).await
-    {
-        Err(_) => return Check::skip(check, format!("{} does not answer", setup.nats)),
-        Ok(Ok(client)) => client,
-        Ok(Err(e)) => {
-            let refused = e.chain().any(|e| {
-                e.downcast_ref::<async_nats::ConnectError>().is_some_and(|e| {
-                    matches!(
-                        e.kind(),
-                        async_nats::ConnectErrorKind::AuthorizationViolation
-                            | async_nats::ConnectErrorKind::Authentication
-                    )
-                })
-            });
-            if !refused {
-                return Check::skip(check, format!("connecting to {} as the system account: {e:#}", setup.nats));
-            }
-            let detail = format!(
-                "{} refuses the team's system account ({e:#}): its server.conf is of another team or lacks \
-                 the team's system account, and `ants auth push` fails",
-                setup.nats
-            );
-            return Check::warn(check, detail, vec![copy_server_conf(&conf, "reload it (SIGHUP)")]);
-        }
+    let client = match connect_hub_system(setup, through_leaf, check).await {
+        Ok(client) => client,
+        Err(check) => return check,
     };
     let server = client.server_info().server_name;
     match tokio::time::timeout(NETWORK_TIMEOUT, revoke::keeps_accounts(&client)).await {
@@ -428,6 +397,126 @@ pub(super) async fn check_resolver(setup: &Setup, through_leaf: bool) -> Check {
             ],
         ),
         _ => Check::skip(check, format!("server {server} did not say how it keeps pushed accounts")),
+    }
+}
+
+/// A connection to the hub as a user of the team's system account, which only the machine holding the team keys can
+/// sign; else the `check` named `check` saying why there is none.
+async fn connect_hub_system(setup: &Setup, through_leaf: bool, check: &str) -> Result<async_nats::Client, Check> {
+    let conf = setup.team.join(auth::SERVER_CONF);
+    if !auth::holds_team(&setup.team) {
+        let detail = format!(
+            "no team keys in {}: only the team's system account can ask, so run `ants doctor` where `ants auth` runs",
+            setup.team.display()
+        );
+        return Err(Check::skip(check, detail));
+    }
+    if through_leaf {
+        return Err(Check::skip(check, "the CLI connects to the leaf node: point --nats at the hub to check it"));
+    }
+    match tokio::time::timeout(NETWORK_TIMEOUT * 2, revoke::connect_system(&setup.nats, &setup.team)).await {
+        Err(_) => Err(Check::skip(check, format!("{} does not answer", setup.nats))),
+        Ok(Ok(client)) => Ok(client),
+        Ok(Err(e)) => {
+            let refused = e.chain().any(|e| {
+                e.downcast_ref::<async_nats::ConnectError>().is_some_and(|e| {
+                    matches!(
+                        e.kind(),
+                        async_nats::ConnectErrorKind::AuthorizationViolation
+                            | async_nats::ConnectErrorKind::Authentication
+                    )
+                })
+            });
+            if !refused {
+                return Err(Check::skip(check, format!("connecting to {} as the system account: {e:#}", setup.nats)));
+            }
+            let detail = format!(
+                "{} refuses the team's system account ({e:#}): its server.conf is of another team or lacks \
+                 the team's system account, and `ants auth push` fails",
+                setup.nats
+            );
+            Err(Check::warn(check, detail, vec![copy_server_conf(&conf, "reload it (SIGHUP)")]))
+        }
+    }
+}
+
+/// Whether the hub keeps the team's streams and buckets in the store account, the only one with JetStream, and the
+/// team's account has none: asked, like [`check_resolver`], as a user of the team's system account.
+pub(super) async fn check_store_account(setup: &Setup, through_leaf: bool) -> Check {
+    let check = "store account";
+    let team = setup.team.display();
+    let conf = setup.team.join(auth::SERVER_CONF);
+    let move_stores = format!(
+        "stop the hub, copy {} over the server.conf it includes, run `ants auth move-stores --store-dir DIR` with \
+         the store_dir of its jetstream block, and start it",
+        conf.display()
+    );
+    if auth::holds_team(&setup.team) && !auth::holds_store(&setup.team) {
+        let detail = format!("the team in {team} has no store account: it was made before there was one");
+        return Check::fail(check, detail, vec![format!("ants auth init --dir {team}"), move_stores]);
+    }
+    let client = match connect_hub_system(setup, through_leaf, check).await {
+        Ok(client) => client,
+        Err(check) if check.status == Status::Skip => return check,
+        Err(refused) => return Check::skip(check, refused.detail),
+    };
+    let server = client.server_info().server_name;
+    let (Ok(account), Ok(store)) = (auth::account_key(&setup.team), auth::store_key(&setup.team)) else {
+        return Check::skip(check, format!("the team keys in {team} do not read"));
+    };
+    let ask = |key: String| account_jetstream(&client, key);
+    let (account, store) = tokio::join!(ask(account), ask(store));
+    match account {
+        Ok(Some(true)) => {
+            let detail = format!(
+                "the team's account holds JetStream on server {server}: it runs a server.conf from before the store \
+                 account, through which no reply subject can name a stored subject"
+            );
+            return Check::fail(check, detail, vec![move_stores]);
+        }
+        Ok(Some(false)) => {}
+        Ok(None) => {
+            let detail =
+                format!("server {server} has not loaded the team's account: no member connected since it started");
+            return Check::skip(check, detail);
+        }
+        Err(e) => return Check::skip(check, format!("server {server} did not tell about the team's account: {e}")),
+    }
+    match store {
+        Ok(Some(true)) => {
+            Check::ok(check, format!("server {server}: the store account holds JetStream, the team's none"))
+        }
+        Ok(Some(false)) => Check::fail(
+            check,
+            format!("the store account has no JetStream on server {server}: its streams and buckets cannot be reached"),
+            vec![format!("check that the hub's nats-server configuration has a jetstream block; {move_stores}")],
+        ),
+        Ok(None) => Check::fail(
+            check,
+            format!("server {server} knows no store account of the team: its streams and buckets cannot be reached"),
+            vec![copy_server_conf(&conf, "restart it")],
+        ),
+        Err(e) => Check::skip(check, format!("server {server} did not tell about the store account: {e}")),
+    }
+}
+
+/// Whether the account `key` has JetStream on the server `client` is connected to as a system account user; None
+/// when the server has not loaded the account.
+async fn account_jetstream(client: &async_nats::Client, key: String) -> Result<Option<bool>, String> {
+    let request = ants_daemon::bus::relayed::request(client, format!("$SYS.REQ.ACCOUNT.{key}.INFO"), "".into());
+    let answer = match tokio::time::timeout(NETWORK_TIMEOUT, request).await {
+        Err(_) => return Err("no answer in time".to_owned()),
+        Ok(Err(e)) => return Err(e.to_string()),
+        Ok(Ok(answer)) => answer,
+    };
+    let answer: serde_json::Value = serde_json::from_slice(&answer.payload).map_err(|e| e.to_string())?;
+    if let Some(enabled) = answer["data"]["jetstream_enabled"].as_bool() {
+        return Ok(Some(enabled));
+    }
+    match answer["error"]["description"].as_str() {
+        Some(error) if error.ends_with("does not exist") => Ok(None),
+        Some(error) => Err(error.to_owned()),
+        None => Err(format!("unexpected answer {answer}")),
     }
 }
 

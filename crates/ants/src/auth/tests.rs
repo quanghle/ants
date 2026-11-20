@@ -39,6 +39,7 @@ mod records;
 mod relayed;
 mod roles;
 mod services;
+mod store;
 mod threads;
 mod uplink;
 

@@ -1,10 +1,10 @@
 //! `ants auth backup` and `ants auth restore`: the team keys in one file encrypted with a passphrase ([`age`]), and
 //! the record of the last backup, which `ants doctor` compares the team directory with ([`state`]).
 //!
-//! The team keys (the operator, account and system account seeds) live in files of the team directory, never in the
-//! OS credential store, which holds only user seeds ([`crate::credentials::keys`]): a backup takes them from there, with
-//! `server.conf`, `issued.jsonl` and `revoked.json`, and a restore writes them back there. Credentials files
-//! (`.creds`) stay out: `ants auth` issues them again.
+//! The team keys (the operator, account, store account and system account seeds) live in files of the team directory,
+//! never in the OS credential store, which holds only user seeds ([`crate::credentials::keys`]): a backup takes them
+//! from there, with `server.conf`, `issued.jsonl` and `revoked.json`, and a restore writes them back there. Credentials
+//! files (`.creds`) stay out: `ants auth` issues them again.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,7 +15,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use nkeys::KeyPair;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{self, ACCOUNT_SEED, OPERATOR_SEED, SERVER_CONF, SYSTEM_SEED};
+use crate::auth::{self, ACCOUNT_SEED, OPERATOR_SEED, SERVER_CONF, STORE_SEED, SYSTEM_SEED};
 use crate::credentials::age;
 use crate::credentials::revoke::{ISSUED, REVOKED};
 
@@ -25,7 +25,7 @@ pub const RECORD: &str = "backup.json";
 pub const PASSPHRASE_ENV: &str = "ANTS_BACKUP_PASSPHRASE";
 const FORMAT: u32 = 1;
 /// The seeds of the team, by file, with the first letter of their public keys.
-const SEEDS: [(&str, char); 3] = [(OPERATOR_SEED, 'O'), (ACCOUNT_SEED, 'A'), (SYSTEM_SEED, 'A')];
+const SEEDS: [(&str, char); 4] = [(OPERATOR_SEED, 'O'), (ACCOUNT_SEED, 'A'), (STORE_SEED, 'A'), (SYSTEM_SEED, 'A')];
 /// The other files of the team directory a backup holds; the last two only once there.
 const FILES: [&str; 3] = [SERVER_CONF, ISSUED, REVOKED];
 
@@ -49,6 +49,9 @@ pub struct Record {
     pub file: PathBuf,
     /// The public key of the team's account.
     pub account: String,
+    /// The public key of the store account; empty in the record of a backup made before there was one.
+    #[serde(default)]
+    pub store: String,
     /// The entries of `issued.jsonl` it holds.
     pub issued: usize,
     /// The SHA-256 of the `revoked.json` it holds, in hex; empty without one.
@@ -185,7 +188,7 @@ pub fn state(dir: &Path) -> Result<State> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(State::None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    if record.account != auth::account_key(dir)? {
+    if record.account != auth::account_key(dir)? || !auth::store_key(dir).is_ok_and(|key| key == record.store) {
         return Ok(State::None);
     }
     let issued = entries(read_optional(&dir.join(ISSUED))?.as_deref());
@@ -205,6 +208,9 @@ impl Record {
             at: contents.created_at,
             file,
             account: contents.account.clone(),
+            store: text(STORE_SEED)
+                .and_then(|seed| KeyPair::from_seed(seed.trim()).ok())
+                .map_or_default(|key| key.public_key()),
             issued: entries(text(ISSUED)),
             revoked: digest(text(REVOKED)),
         }
@@ -249,8 +255,8 @@ fn digest(text: Option<&str>) -> String {
     })
 }
 
-/// Fail unless `contents` holds the seeds of an operator, the account it names and a system account, and the
-/// server.conf, and only files of a team directory.
+/// Fail unless `contents` holds the seeds of an operator, the account it names, a store account and a system account,
+/// and the server.conf, and only files of a team directory.
 fn check_contents(contents: &Contents) -> Result<()> {
     for name in contents.files.keys() {
         if !SEEDS.iter().any(|(seed, _)| seed == name) && !FILES.contains(&name.as_str()) {
@@ -401,7 +407,7 @@ mod tests {
         assert_eq!(e.downcast_ref::<Refused>(), Some(&Refused::WrongPassphrase), "{e:#}");
         assert!(!elsewhere.exists());
         restore(&elsewhere, &file, PASS, Existing::Refuse).unwrap();
-        for name in [OPERATOR_SEED, ACCOUNT_SEED, SYSTEM_SEED, SERVER_CONF, ISSUED] {
+        for name in [OPERATOR_SEED, ACCOUNT_SEED, STORE_SEED, SYSTEM_SEED, SERVER_CONF, ISSUED] {
             assert_eq!(fs::read(elsewhere.join(name)).unwrap(), fs::read(dir.join(name)).unwrap(), "{name}");
         }
         assert_eq!(mode(&elsewhere.join(ACCOUNT_SEED)), 0o600);
@@ -448,6 +454,10 @@ mod tests {
         assert_eq!(state(&dir).unwrap(), State::Behind { record: record.clone(), issued: 1, revoked: false });
         revoke::revoke(&dir, Some("dev-a"), &[]).unwrap();
         assert_eq!(state(&dir).unwrap(), State::Behind { record, issued: 1, revoked: true });
+        let store = fs::read_to_string(dir.join(STORE_SEED)).unwrap();
+        auth::write_secret(&dir.join(STORE_SEED), &auth::seed(&KeyPair::new_account()).unwrap()).unwrap();
+        assert_eq!(state(&dir).unwrap(), State::None, "another store account");
+        auth::write_secret(&dir.join(STORE_SEED), &store).unwrap();
         fs::remove_file(dir.join(ACCOUNT_SEED)).unwrap();
         fs::remove_file(dir.join(SYSTEM_SEED)).unwrap();
         auth::init(&dir).unwrap();

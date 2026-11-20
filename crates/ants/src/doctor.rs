@@ -23,7 +23,7 @@ use self::ants::{
 };
 use self::credentials::{check_backup, check_cli_creds};
 use self::leaf_node::{Leaf, check_leaf};
-use self::server::{check_resolver, check_storage, reach};
+use self::server::{check_resolver, check_storage, check_store_account, reach};
 use self::services::{check_services, check_webhooks};
 pub use self::trails::trail_worker;
 use self::trails::{check_runs, check_worker};
@@ -132,8 +132,8 @@ pub struct Setup {
 
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
 /// buckets, the versions of ants running across the team, the JetStream storage, each ant's credentials, harness,
-/// workdir and reactions responder, the trail worker and the runs of trails stuck, the hub's account resolver, the
-/// team keys' backup, the leaf node and outbox, the installed services, the webhooks' config file and notification
+/// workdir and reactions responder, the trail worker and the runs of trails stuck, the hub's account resolver and store
+/// account, the team keys' backup, the leaf node and outbox, the installed services, the webhooks' config file and notification
 /// sinks, and the Dev Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
@@ -197,6 +197,8 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.push(worker);
     checks.extend(check_runs(connected.as_ref(), chrono::Utc::now()).await);
     checks.push(resolver);
+    // After the CLI's connection, which has the hub load the team's account if no member connected yet.
+    checks.push(check_store_account(setup, through_leaf).await);
     checks.extend(check_backup(&setup.team));
     let human = identity.as_ref().map(|i| &i.me).filter(|me| me.role.is_human() && !me.id.is_human());
     checks.extend(check_leaf(setup, leaf, ants, human, connected.as_ref(), managed, now).await);
