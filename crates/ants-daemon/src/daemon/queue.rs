@@ -1,7 +1,7 @@
 //! The messages in hand: the inbox loop that takes them in, queues them on their threads and runs each thread's
 //! next one, and lists them for `ants queue`.
 
-use crate::bus::relayed;
+use crate::bus::{self, relayed};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Display;
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use ants_proto::{ConsumerPlace, QueueRequest, QueuedMessage, State, StatusUpdate, ThreadId, Uuid, subject};
 use anyhow::Result;
-use async_nats::jetstream::{self, AckKind};
+use async_nats::jetstream;
 use futures::future::{FusedFuture as _, FutureExt as _};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
@@ -18,7 +18,7 @@ use crate::monitoring::status;
 
 use super::control::{Cancel, Why};
 use super::handling::Handled;
-use super::{EVICT_EVERY, InHand, Inbox, Incoming, Steered, is_post, nak, sleep_until, stream_seq};
+use super::{EVICT_EVERY, InHand, Inbox, Incoming, Steered, is_post, sleep_until, stream_seq};
 
 /// The messages of one thread in hand: one in flight at most, and those joining its prompt, the rest waiting their
 /// turn.
@@ -100,10 +100,9 @@ pub(super) enum Place {
 impl Inbox<'_> {
     /// The requests for the ant's queue, those naming their sender, an assistant's, apart.
     async fn queue_asks(&self) -> impl Stream<Item = async_nats::Message> + Unpin {
-        let asking =
-            [subject::queue(self.ant), subject::queues_by_of(self.ant)].map(|s| relayed::subscribe(self.client, s));
-        match futures::future::try_join_all(asking).await {
-            Ok(asks) => futures::stream::select_all(asks).left_stream(),
+        let subjects = [subject::queue(self.ant), subject::queues_by_of(self.ant)];
+        match relayed::subscribe_all(self.client, subjects).await {
+            Ok(asks) => asks.left_stream(),
             Err(e) => {
                 tracing::warn!(error = %e, "serving without ants queue");
                 futures::stream::pending().right_stream()
@@ -143,7 +142,7 @@ impl Inbox<'_> {
             // Every fallback was turned away lately: the first to be tried again lets the messages on.
             let now = tokio::time::Instant::now();
             let fallback_up =
-                self.failover.next_up(now).filter(|_| self.outage().is_some() && self.fallback(now).is_none());
+                self.holds.failover.next_up(now).filter(|_| self.outage().is_some() && self.fallback(now).is_none());
             let mut ready = None;
             tokio::select! {
                 () = &mut shutdown => break,
@@ -194,7 +193,7 @@ impl Inbox<'_> {
             let now = tokio::time::Instant::now();
             let pause = paused.borrow_and_update().clone();
             let held = pause.is_some()
-                || self.throttle.is_held() && !self.throttle.is_quota_held()
+                || self.holds.throttle.is_held() && !self.holds.throttle.is_quota_held()
                 || self.outage().is_some() && self.fallback(now).is_none();
             self.workload.set_paused(pause);
             for thread in ready.into_iter().flatten().filter(|_| !held) {
@@ -214,7 +213,7 @@ impl Inbox<'_> {
         let mut waiting: Vec<_> = threads.into_values().flat_map(|t| t.waiting).map(|(_, msg)| msg).collect();
         waiting.sort_by_key(stream_seq);
         for msg in &waiting {
-            nak(msg, None).await;
+            bus::nak(msg, None).await;
         }
         if !running.is_empty() {
             tracing::info!(prompts = running.len(), "finishing prompts in flight; Ctrl-C again stops now");
@@ -261,7 +260,7 @@ impl Inbox<'_> {
                 t.queued.insert(message);
                 status::publish(self.client, self.ant, &thread, StatusUpdate::Queued { message, ahead });
             }
-            if self.sign_in.is_out() && self.fallback(tokio::time::Instant::now()).is_none() {
+            if self.holds.sign_in.is_out() && self.fallback(tokio::time::Instant::now()).is_none() {
                 status::state(self.client, self.ant, &thread, State::SignedOut);
             }
         }
@@ -279,11 +278,11 @@ impl Inbox<'_> {
         if matches!(first, Some(Steered::Interrupted | Steered::Ahead)) {
             return Some(Steered::Ahead);
         }
-        if self.steers.takes(thread) {
+        if self.running.steers.takes(thread) {
             return Some(Steered::Joining);
         }
         let cancel = Cancel { by: envelope.from.clone(), why: Why::Steer };
-        self.cancels.cancel(thread, cancel).then_some(Steered::Interrupted)
+        self.running.cancels.cancel(thread, cancel).then_some(Steered::Interrupted)
     }
 
     /// Whether `incoming` steers the prompt running on its thread rather than wait its turn: a human's message, or
@@ -356,9 +355,7 @@ impl Inbox<'_> {
 /// Tell the server the messages waiting in hand are still being worked on, so it does not redeliver them.
 async fn ack_progress(threads: &HashMap<ThreadId, Thread>) {
     for (_, msg) in threads.values().flat_map(|t| &t.waiting) {
-        if let Err(e) = msg.ack_with(AckKind::Progress).await {
-            tracing::warn!(error = %e, "progress ack");
-        }
+        bus::progress(msg).await;
     }
 }
 

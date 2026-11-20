@@ -314,12 +314,12 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
     let mut first = fetch(2).await;
     let (mut held, mut last) = (first.remove(0), first.remove(0));
     for _ in 1..MAX_ATTEMPTS {
-        last.ack_with(AckKind::Nak(None)).await.unwrap();
+        last.ack_with(async_nats::jetstream::AckKind::Nak(None)).await.unwrap();
         last = fetch(1).await.remove(0);
     }
     assert_eq!(last.info().unwrap().delivered, MAX_ATTEMPTS);
     for msg in [&mut held, &mut last] {
-        msg.ack_with(AckKind::Nak(None)).await.unwrap();
+        msg.ack_with(async_nats::jetstream::AckKind::Nak(None)).await.unwrap();
     }
 
     let buried = &bus.buried;

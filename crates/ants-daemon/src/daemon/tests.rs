@@ -1,25 +1,33 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use ants_proto::{
-    ChannelEntry, ChannelId, DEFAULT_TURN_BUDGET, EscalationReason, Hold, Humans, LimitKind, Pick, PromptEnd,
-    QueueRequest, QueuedMessage, Role, State, StatusEvent, StatusUpdate, Uuid, WEBHOOK_ALLOW,
+    Attachment, AttachmentHandle, ChannelEntry, ChannelId, ChannelPost, DEFAULT_TURN_BUDGET, EscalationReason, Hold,
+    Humans, JsDomain, LimitKind, Pick, PromptEnd, QueueRequest, QueuedMessage, Role, State, StatusEvent, StatusUpdate,
+    ThreadId, Uuid, WEBHOOK_ALLOW,
 };
 use ants_test_support::{NatsServer as Server, free_port};
 use async_nats::jetstream::consumer::PullConsumer;
+use futures::stream::StreamExt as _;
 use rmcp::model::CallToolResult;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use super::delivery::reply_id;
-use super::prompt::prompt_text;
+use super::prompt::text::prompt_text;
 use super::*;
 use crate::admin::restart::Restarted;
 use crate::channel;
 use crate::delivery::attempts::Reply;
 use crate::delivery::dead;
+use crate::escalation::{self, Chain};
+use crate::limits::caps::Caps;
+use crate::pause;
+use crate::permission::PermissionPolicy;
 use crate::pool::fake;
 use crate::sync::MutexExt as _;
+use crate::worktrees::Worktrees;
 
 mod admission;
 mod control;
@@ -291,9 +299,7 @@ impl Bus {
             reading: crate::stream::reading::Reading::Consumer,
             machine: "test-machine",
             pool,
-            cancels: Cancels::default(),
-            steers: Default::default(),
-            unnarrowed: Unnarrowed::default(),
+            running: Running::default(),
             restarts: &self.restarts,
             attempts: &self.attempts,
             answered: &self.answered,
@@ -314,20 +320,21 @@ impl Bus {
             colony: &self.colony,
             humans: &self.humans,
             behalf: Records::new(self.js.clone(), None, self.account.clone()),
-            retry_delay: self.retry_delay,
-            progress_every,
-            timeline_every: Duration::from_millis(300),
-            sign_in: SignIn::default(),
-            sign_in_every: Duration::from_millis(300),
-            mcp_sign_ins: super::mcp_sign_in::Untold::default(),
-            breaker: Breaker::default(),
-            throttle: Throttle::default(),
-            backoffs: Backoffs {
-                rate_limit: ratelimit::Backoff { first: Duration::from_millis(100), max: Duration::from_millis(300) },
-                quota: ratelimit::Backoff { first: Duration::from_millis(200), max: Duration::from_millis(400) },
+            pacing: Pacing {
+                retry_delay: self.retry_delay,
+                progress_every,
+                timeline_every: Duration::from_millis(300),
+                sign_in_every: Duration::from_millis(300),
+                backoffs: Backoffs {
+                    rate_limit: ratelimit::Backoff {
+                        first: Duration::from_millis(100),
+                        max: Duration::from_millis(300),
+                    },
+                    quota: ratelimit::Backoff { first: Duration::from_millis(200), max: Duration::from_millis(400) },
+                },
+                fallback_retry: Duration::from_millis(300),
             },
-            failover: crate::limits::fallback::Failover::default(),
-            fallback_retry: Duration::from_millis(300),
+            holds: super::holds::Holds::default(),
             identity: self.identity.as_ref(),
             home: &home,
             lifecycle: self.lifecycle.as_ref(),

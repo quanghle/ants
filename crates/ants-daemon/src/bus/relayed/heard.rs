@@ -8,6 +8,7 @@ use async_nats::subject::ToSubject;
 use async_nats::{
     Client, Message, Request, RequestError, RequestErrorKind, SubscribeError, Subscriber, UnsubscribeError,
 };
+use futures::stream::SelectAll;
 use futures::{Stream, StreamExt as _};
 use hyper::body::Bytes;
 
@@ -50,6 +51,15 @@ fn warn(msg: &Message) {
 #[expect(clippy::disallowed_methods, reason = "the guarded subscription itself")]
 pub async fn subscribe(client: &Client, subject: impl ToSubject) -> Result<Heard, SubscribeError> {
     client.subscribe(subject).await.map(Heard)
+}
+
+/// [`subscribe`] to each of `subjects`, hearing them as one stream.
+pub async fn subscribe_all<S: ToSubject>(
+    client: &Client,
+    subjects: impl IntoIterator<Item = S>,
+) -> Result<SelectAll<Heard>, SubscribeError> {
+    let heard = futures::future::try_join_all(subjects.into_iter().map(|s| subscribe(client, s))).await?;
+    Ok(futures::stream::select_all(heard))
 }
 
 /// [`Client::queue_subscribe`], hearing only what clients published.

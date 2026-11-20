@@ -7,22 +7,37 @@ use ants_proto::State;
 
 use crate::bus;
 use crate::harness::{self, SignedOut};
-use crate::limits::breaker::{self, StartFailed};
-use crate::limits::fallback::{OnFallback, OutageNotice};
-use crate::limits::ratelimit::{self, Limited};
-use crate::limits::signin;
+use crate::limits::breaker::{self, Breaker, StartFailed};
+use crate::limits::fallback::{Failover, OnFallback, OutageNotice};
+use crate::limits::ratelimit::{self, Limited, Throttle};
+use crate::limits::signin::{self, SignIn};
 use crate::monitoring::status;
 
-use super::{Inbox, Incoming};
+use super::{Inbox, Incoming, mcp_sign_in};
+
+/// What holds the messages while the ant's own harness cannot answer, and the sign-ins to MCP servers to tell.
+#[derive(Default)]
+pub(super) struct Holds {
+    /// Whether the harness is signed out, holding the messages.
+    pub(super) sign_in: SignIn,
+    /// Whether the harness keeps failing to start, holding the messages.
+    pub(super) breaker: Breaker,
+    /// Whether messages wait out a provider limit.
+    pub(super) throttle: Throttle,
+    /// Which fallbacks answer while the harness is signed out, out of quota or failing to start.
+    pub(super) failover: Failover,
+    /// The sign-ins to MCP servers the harness's sessions made as they opened, until told.
+    pub(super) mcp_sign_ins: mcp_sign_in::Untold,
+}
 
 impl Inbox<'_> {
     /// Why the ant's own harness cannot answer now, if it cannot: messages go to a fallback meanwhile, if one is up.
     pub(super) fn outage(&self) -> Option<&'static str> {
-        if self.sign_in.is_out() {
+        if self.holds.sign_in.is_out() {
             Some("signed out")
-        } else if self.breaker.is_open() {
+        } else if self.holds.breaker.is_open() {
             Some("failing to start")
-        } else if self.throttle.is_quota_held() {
+        } else if self.holds.throttle.is_quota_held() {
             Some("out of quota")
         } else {
             None
@@ -32,16 +47,16 @@ impl Inbox<'_> {
     /// The fallback messages go to at `now`: the first not passed over, while the ant's own harness cannot answer.
     pub(super) fn fallback(&self, now: tokio::time::Instant) -> Option<usize> {
         self.outage()?;
-        self.failover.pick(self.pool.fallback_count(), now)
+        self.holds.failover.pick(self.pool.fallback_count(), now)
     }
 
     /// How long the fallback `e` came from is passed over, when it turned the prompt away: signed out, limited or
     /// failing to start.
     fn turned_away(&self, e: &anyhow::Error) -> Option<Duration> {
         if let Some(limited) = e.downcast_ref::<Limited>() {
-            return Some(limited.retry_after.unwrap_or(self.fallback_retry));
+            return Some(limited.retry_after.unwrap_or(self.pacing.fallback_retry));
         }
-        (e.is::<SignedOut>() || e.is::<StartFailed>()).then_some(self.fallback_retry)
+        (e.is::<SignedOut>() || e.is::<StartFailed>()).then_some(self.pacing.fallback_retry)
     }
 
     /// Where a notice of an outage `incoming` met goes, naming `fallbacks`.
@@ -58,7 +73,7 @@ impl Inbox<'_> {
 
     /// The ant's own harness answers again: no fallback serves.
     fn back_on_own(&self) {
-        if self.failover.clear() {
+        if self.holds.failover.clear() {
             tracing::info!("the harness answers again; fallbacks stand down");
         }
         self.workload.set_fallback(None);
@@ -70,8 +85,8 @@ impl Inbox<'_> {
     pub(super) async fn wait_for_sign_in(&self, incoming: &Incoming, signed_out: &SignedOut) {
         let thread = &incoming.envelope.thread_id;
         status::state(self.client, self.ant, thread, State::SignedOut);
-        let tell = self.sign_in.out();
-        if let Some(since) = self.sign_in.out_since() {
+        let tell = self.holds.sign_in.out();
+        if let Some(since) = self.holds.sign_in.out_since() {
             let sign_in = signed_out.sign_in.clone();
             self.workload.set_signed_out(Some(ants_proto::SignInNeeded { since, sign_in }));
         }
@@ -81,11 +96,11 @@ impl Inbox<'_> {
         };
         tracing::warn!(%thread, error = %signed_out, "harness signed out; messages wait until it is signed in");
         let fallbacks = self.pool.fallbacks();
-        let notice = signin::notice(&self.outage_notice(incoming, &fallbacks), signed_out, self.sign_in_every);
+        let notice = signin::notice(&self.outage_notice(incoming, &fallbacks), signed_out, self.pacing.sign_in_every);
         let id = format!("sign-in-{}-{since}", self.ant);
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human to sign the harness in");
-            self.sign_in.untold();
+            self.holds.sign_in.untold();
         }
     }
 
@@ -93,12 +108,12 @@ impl Inbox<'_> {
     /// signed-out state and let the messages go on.
     pub(super) async fn signed_in(&self) {
         loop {
-            tokio::time::sleep(self.sign_in_every).await;
+            tokio::time::sleep(self.pacing.sign_in_every).await;
             let checked = harness::handshake(self.pool.launch()).await;
             match checked.readiness {
                 harness::Readiness::Ready { agent } => {
                     tracing::info!(%agent, "harness signed in; answering the waiting messages");
-                    self.sign_in.back();
+                    self.holds.sign_in.back();
                     self.workload.set_signed_out(None);
                     if self.outage().is_none() {
                         self.back_on_own();
@@ -122,7 +137,7 @@ impl Inbox<'_> {
     pub(super) async fn wait_out_limit(&self, incoming: &Incoming, limited: &Limited) {
         let thread = &incoming.envelope.thread_id;
         status::state(self.client, self.ant, thread, State::Idle);
-        let hold = self.throttle.hit(limited, &self.backoffs);
+        let hold = self.holds.throttle.hit(limited, &self.pacing.backoffs);
         self.workload.set_limited(Some(hold.shown.clone()));
         let until = hold.shown.until;
         if !hold.tell {
@@ -131,12 +146,12 @@ impl Inbox<'_> {
         }
         tracing::warn!(%thread, error = %limited, %until, "provider quota exhausted; messages wait");
         let fallbacks = self.pool.fallbacks();
-        let max = self.backoffs.quota.max;
+        let max = self.pacing.backoffs.quota.max;
         let notice = ratelimit::notice(&self.outage_notice(incoming, &fallbacks), limited, &hold.shown, max);
         let id = format!("quota-{}-{}", self.ant, hold.shown.since.timestamp_millis());
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human of the exhausted quota");
-            self.throttle.untold();
+            self.holds.throttle.untold();
         }
     }
 
@@ -154,12 +169,12 @@ impl Inbox<'_> {
         }
         tracing::warn!(%thread, error = %failed, "harness keeps failing to start; messages wait until a check starts it");
         let fallbacks = self.pool.fallbacks();
-        let mut notice = breaker::notice(&self.outage_notice(incoming, &fallbacks), failed, self.sign_in_every);
+        let mut notice = breaker::notice(&self.outage_notice(incoming, &fallbacks), failed, self.pacing.sign_in_every);
         self.redactor.redact_string(&mut notice.text);
         let id = format!("harness-{}-{}", self.ant, hold.shown.since.timestamp_millis());
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human the harness fails to start");
-            self.breaker.untold();
+            self.holds.breaker.untold();
         }
     }
 
@@ -167,7 +182,7 @@ impl Inbox<'_> {
     /// says it is signed out or limited, then clear the colony entry's failing state and let the messages go on.
     pub(super) async fn repaired(&self) {
         loop {
-            tokio::time::sleep(self.sign_in_every).await;
+            tokio::time::sleep(self.pacing.sign_in_every).await;
             match harness::probe(self.pool.launch()).await {
                 Ok(()) => tracing::info!("harness started; answering the waiting messages"),
                 Err(e) if e.is::<SignedOut>() || e.is::<Limited>() => {
@@ -176,11 +191,11 @@ impl Inbox<'_> {
                 Err(e) => {
                     let error = format!("{e:#}");
                     tracing::warn!(error, "harness still fails to start; messages wait");
-                    self.workload.set_failing(self.breaker.still_failing(&self.redactor.redact(&error)));
+                    self.workload.set_failing(self.holds.breaker.still_failing(&self.redactor.redact(&error)));
                     continue;
                 }
             }
-            self.breaker.closed();
+            self.holds.breaker.closed();
             self.workload.set_failing(None);
             if self.outage().is_none() {
                 self.back_on_own();
@@ -192,9 +207,9 @@ impl Inbox<'_> {
     /// Wait until the backoff of the provider limit passes, then clear the colony entry's limit and let the messages
     /// go on.
     pub(super) async fn limit_passed(&self) {
-        while let Some(until) = self.throttle.until() {
+        while let Some(until) = self.holds.throttle.until() {
             tokio::time::sleep_until(until).await;
-            if self.throttle.lift() {
+            if self.holds.throttle.lift() {
                 break;
             }
         }
@@ -210,13 +225,13 @@ impl Inbox<'_> {
         let thread = &arrived.envelope.thread_id;
         tracing::warn!(%thread, error = format!("{e:#}"), "fallback turned the message away; passing it over");
         let now = tokio::time::Instant::now();
-        self.failover.down(on.index, now + retry);
+        self.holds.failover.down(on.index, now + retry);
         if e.is::<StartFailed>() {
             self.attempts.release(&arrived.envelope).await;
         }
         if let Some(outage) = self.outage()
             && self.fallback(now).is_none()
-            && self.failover.exhausted()
+            && self.holds.failover.exhausted()
         {
             self.tell_fallbacks_passed_over(e, on, arrived, outage, now).await;
         }
@@ -244,7 +259,7 @@ impl Inbox<'_> {
         };
         let detail: Vec<String> = e.chain().map(ToString::to_string).filter(|c| *c != on.to_string()).collect();
         let detail = self.redactor.redact(&detail.join(": ")).into_owned();
-        let next = self.failover.next_up(now).map(|at| {
+        let next = self.holds.failover.next_up(now).map(|at| {
             chrono::Utc::now() + chrono::Duration::from_std(at.saturating_duration_since(now)).unwrap_or_default()
         });
         let own = self.pool.launch().harness_name();
@@ -254,7 +269,7 @@ impl Inbox<'_> {
         let id = format!("fallbacks-{}-{}", self.ant, chrono::Utc::now().timestamp_millis());
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human every fallback is turned away");
-            self.failover.untold();
+            self.holds.failover.untold();
         }
     }
 
@@ -264,7 +279,7 @@ impl Inbox<'_> {
             self.back_on_own();
             return None;
         };
-        let since = self.failover.served();
+        let since = self.holds.failover.served();
         self.workload.set_fallback(Some(ants_proto::ServingFallback { name: name.clone(), since }));
         let why = self.outage().unwrap_or("unavailable");
         let own = self.pool.launch().harness_name();

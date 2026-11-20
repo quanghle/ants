@@ -3,8 +3,9 @@
 
 use ants_proto::DeadLetter;
 use anyhow::Result;
-use async_nats::jetstream::{self, AckKind};
+use async_nats::jetstream;
 
+use crate::bus;
 use crate::delivery::dead::{self, Burial};
 
 use super::{Inbox, Incoming, MAX_DELIVER};
@@ -25,9 +26,7 @@ impl Inbox<'_> {
             Err(e) => {
                 // Never redelivered, dead letter or not.
                 tracing::warn!(error = format!("{e:#}"), "dead-lettering");
-                if let Err(e) = msg.ack_with(AckKind::Term).await {
-                    tracing::warn!(error = %e, "terminating the message");
-                }
+                bus::term(msg).await;
             }
         }
     }
@@ -83,7 +82,7 @@ impl Inbox<'_> {
     /// Every `retry_delay`, finish the burial of each dead letter kept in the machine's outbox on its message's last
     /// delivery once the hub is in reach ([`dead::finish`]): no redelivery comes to do it. Runs until dropped.
     pub(super) async fn finish_buried(&self) {
-        let mut every = tokio::time::interval(self.retry_delay);
+        let mut every = tokio::time::interval(self.pacing.retry_delay);
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             every.tick().await;

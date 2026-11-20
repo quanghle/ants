@@ -3,14 +3,14 @@
 
 use ants_proto::{Acting, ChannelPost, Envelope, Humans, ThreadId, ThreadOrigin, UserId};
 use anyhow::Result;
-use async_nats::jetstream::{self, AckKind};
+use async_nats::jetstream;
 
 use crate::bus;
 use crate::bus::relayed::{self, Read};
 use crate::channel::{self, Channels, Threads, Wake};
 use crate::people::humans::Registry;
 
-use super::{Inbox, Incoming, OWNER_LANDS_WITHIN, Posted, STREAM_SOURCE, Steered, nak, stream_seq};
+use super::{Inbox, Incoming, OWNER_LANDS_WITHIN, Posted, STREAM_SOURCE, Steered, stream_seq};
 
 /// What stored state checks the claims of an inbox message against, for the ant's daemon and for the human's side
 /// that buries what the daemon could not ([`dead::bury_undelivered`]).
@@ -239,9 +239,7 @@ impl Inbox<'_> {
             Ok(post) => post,
             Err(error) => {
                 tracing::warn!(subject = %msg.subject, error, "dropping a channel post");
-                if let Err(e) = msg.ack_with(AckKind::Term).await {
-                    tracing::warn!(error = %e, "terminating the channel post");
-                }
+                bus::term(msg).await;
                 return None;
             }
         };
@@ -312,7 +310,7 @@ impl Inbox<'_> {
             }
             Err(e) => {
                 tracing::warn!(channel = %post.channel, error = format!("{e:#}"), "notifying the humans mentioned");
-                nak(msg, Some(self.retry_delay)).await;
+                bus::nak(msg, Some(self.pacing.retry_delay)).await;
                 false
             }
         }
@@ -380,7 +378,7 @@ impl Inbox<'_> {
             }
             Err(e) => {
                 tracing::warn!(error = format!("{e:#}"), "keeping a reply to ask_ant");
-                nak(msg, Some(self.retry_delay)).await;
+                bus::nak(msg, Some(self.pacing.retry_delay)).await;
                 true
             }
         }

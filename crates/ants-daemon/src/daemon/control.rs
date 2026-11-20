@@ -86,10 +86,9 @@ impl Inbox<'_> {
     /// Answer the humans' cancel requests ([`CancelRequest`]) for as long as the daemon serves, cancelling the prompt
     /// running on the thread each one names, and the assistants' for their humans, which may withdraw a message instead.
     pub(super) async fn hear_cancels(&self) {
-        let subscribe = [subject::cancel_of(self.ant), subject::cancels_by_of(self.ant)]
-            .map(|s| relayed::subscribe(self.client, s));
-        let mut requests = match futures::future::try_join_all(subscribe).await {
-            Ok(requests) => futures::stream::select_all(requests),
+        let subjects = [subject::cancel_of(self.ant), subject::cancels_by_of(self.ant)];
+        let mut requests = match relayed::subscribe_all(self.client, subjects).await {
+            Ok(requests) => requests,
             Err(e) => {
                 tracing::warn!(error = %e, "serving without ants cancel");
                 return std::future::pending().await;
@@ -120,8 +119,10 @@ impl Inbox<'_> {
                     }
                 }
             } else {
-                let cancelled =
-                    self.cancels.cancel(&request.thread_id, Cancel { by: request.by.clone(), why: Why::Cancel });
+                let cancelled = self
+                    .running
+                    .cancels
+                    .cancel(&request.thread_id, Cancel { by: request.by.clone(), why: Why::Cancel });
                 if !cancelled {
                     tracing::info!(thread = %request.thread_id, by = %request.by, "no prompt to cancel");
                 }
@@ -177,7 +178,7 @@ impl Inbox<'_> {
             }
             None => {
                 let cancel = Cancel { by: by.clone(), why: Why::CancelFor(human.clone()) };
-                let cancelled = self.cancels.cancel(thread, cancel);
+                let cancelled = self.running.cancels.cancel(thread, cancel);
                 tracing::info!(%thread, %by, %human, cancelled, "cancel request of an assistant for its human");
                 let text = format!(
                     "[ants] {by}, as the assistant of {human}, cancelled the prompt of {ant} on thread {thread} for \
@@ -205,7 +206,7 @@ impl Inbox<'_> {
             let restarting = self.pool.restart();
             let cancel = Cancel { by: request.by.clone(), why: Why::Restart };
             let cancelled = if request.now {
-                restarting.working.iter().filter(|thread| self.cancels.cancel(thread, cancel.clone())).count()
+                restarting.working.iter().filter(|thread| self.running.cancels.cancel(thread, cancel.clone())).count()
             } else {
                 0
             };

@@ -17,7 +17,7 @@ use super::burial::Letter;
 use super::delivery::reply_id;
 use super::queue::{Place, Retry, queued_message};
 use super::steering::Requeue;
-use super::{InHand, Inbox, Incoming, MAX_ATTEMPTS, MAX_DELIVER, nak};
+use super::{Handling, InHand, Inbox, Incoming, MAX_ATTEMPTS, MAX_DELIVER};
 
 /// Who withdrew a message before the ant was prompted with it.
 struct Withdrawal {
@@ -74,21 +74,21 @@ impl Inbox<'_> {
         self.thread_origin(&mut incoming, seq).await;
         self.sender_claims(&mut incoming, seq).await;
         self.owner_landed(&incoming, &msg).await;
-        if self.settled_before(&incoming, &msg, seq).await {
+        if self.settled_before(Handling { incoming: &incoming, msg: &msg, seq }).await {
             return (thread, Handled::Done);
         }
         let envelope = &incoming.envelope;
         let attempt = Attempt::of(delivered, MAX_ATTEMPTS);
         // Taken up before anything is done for it, unless a human withdrew it first (`ants withdraw`).
         let result = match self.take_up(envelope).await {
-            Ok(Some(withdrawal)) => self.withdrawn(&incoming, &msg, seq, &withdrawal).await,
+            Ok(Some(withdrawal)) => self.withdrawn(Handling { incoming: &incoming, msg: &msg, seq }, &withdrawal).await,
             Ok(None) => Box::pin(self.take(&mut incoming, &msg, seq, attempt)).await,
             Err(e) => Err(e),
         };
         let Err(e) = result else {
-            self.sign_in.settled();
-            self.throttle.settled();
-            self.breaker.settled();
+            self.holds.sign_in.settled();
+            self.holds.throttle.settled();
+            self.holds.breaker.settled();
             return (thread, Handled::Done);
         };
         if e.is::<Requeue>() {
@@ -99,24 +99,24 @@ impl Inbox<'_> {
         }
         match e.downcast_ref::<StartFailed>() {
             Some(failed) => {
-                if let Some(hold) = self.breaker.failed(&thread, &self.redactor.redact(&failed.detail)) {
+                if let Some(hold) = self.holds.breaker.failed(&thread, &self.redactor.redact(&failed.detail)) {
                     self.attempts.release(&arrived.envelope).await;
                     self.wait_for_repair(&arrived, failed, hold).await;
                     return (thread, Handled::Broken(Box::new((arrived, msg))));
                 }
             }
-            None => self.breaker.settled(),
+            None => self.holds.breaker.settled(),
         }
         if let Some(signed_out) = e.downcast_ref::<SignedOut>() {
             self.wait_for_sign_in(&arrived, signed_out).await;
             return (thread, Handled::SignedOut(Box::new((arrived, msg))));
         }
-        self.sign_in.settled();
+        self.holds.sign_in.settled();
         if let Some(limited) = e.downcast_ref::<Limited>() {
             self.wait_out_limit(&arrived, limited).await;
             return (thread, Handled::Limited(Box::new((arrived, msg))));
         }
-        self.throttle.settled();
+        self.holds.throttle.settled();
         tracing::error!(%thread, error = format!("{e:#}"), "handling message");
         status::state(self.client, self.ant, &thread, State::Failed);
         // A failed last attempt, or an overdue one that failed to send its recorded reply: no delivery follows.
@@ -137,12 +137,12 @@ impl Inbox<'_> {
         {
             self.attempts.retrying(&incoming.envelope, None).await;
         }
-        nak(&msg, Some(self.retry_delay)).await;
+        bus::nak(&msg, Some(self.pacing.retry_delay)).await;
         self.metrics.retried();
         let retry = (delivered < MAX_DELIVER).then(|| Retry {
             seq,
             // Redelivery may lag behind the delay; past this the thread goes on without the message.
-            until: tokio::time::Instant::now() + self.retry_delay * 3,
+            until: tokio::time::Instant::now() + self.pacing.retry_delay * 3,
             queued: queued_message(&arrived, &msg, Place::Retry),
         });
         (thread, retry.map_or(Handled::Done, Handled::Retry))
@@ -150,7 +150,7 @@ impl Inbox<'_> {
 
     /// Finish `incoming`, the message at stream sequence `seq`, if an earlier delivery of it settled it already: its
     /// reply or dead letter is stored. True if so.
-    async fn settled_before(&self, incoming: &Incoming, msg: &jetstream::Message, seq: u64) -> bool {
+    async fn settled_before(&self, Handling { incoming, msg, seq }: Handling<'_>) -> bool {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
         if self.answered.has(envelope).await {
@@ -197,15 +197,17 @@ impl Inbox<'_> {
             }
             return Ok(());
         }
-        match self.arrived(incoming).await? {
+        let arrival = self.arrived(incoming).await?;
+        let h = Handling { incoming, msg, seq };
+        match arrival {
             Arrival::Prompt => {
                 self.thread_started(incoming).await;
-                Box::pin(self.answer(incoming, msg, seq, marker)).await?;
+                Box::pin(self.answer(h, marker)).await?;
             }
             Arrival::Quiet => self.done(msg, seq).await?,
             Arrival::DeclineReview => match marker {
-                Some(Marker::Replied(reply)) => self.deliver(incoming, &reply, msg, seq).await?,
-                _ => Box::pin(self.decline_review(incoming, None, "a sage is reviewed by no one", msg, seq)).await?,
+                Some(Marker::Replied(reply)) => self.deliver(h, &reply).await?,
+                _ => Box::pin(self.decline_review(h, None, "a sage is reviewed by no one")).await?,
             },
         }
         self.attempts.finish(&incoming.envelope).await;
@@ -251,13 +253,7 @@ impl Inbox<'_> {
     /// unless no reply can go to it: a webhook's goes to the thread's owner, and one to an ant out of turns, or to a
     /// channel post, to the human who withdrew it. The human an assistant withdrew a message for by a record of its own
     /// is told too, unless the notice goes to it.
-    async fn withdrawn(
-        &self,
-        incoming: &Incoming,
-        msg: &jetstream::Message,
-        seq: u64,
-        withdrawal: &Withdrawal,
-    ) -> Result<()> {
+    async fn withdrawn(&self, Handling { incoming, msg, seq }: Handling<'_>, withdrawal: &Withdrawal) -> Result<()> {
         let (by, on_behalf_of) = (&withdrawal.by, withdrawal.on_behalf_of.as_ref());
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;

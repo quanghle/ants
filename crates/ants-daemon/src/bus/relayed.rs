@@ -21,7 +21,7 @@ use serde_json::Value;
 mod heard;
 mod kv;
 
-pub use heard::{Heard, queue_subscribe, request, subscribe};
+pub use heard::{Heard, queue_subscribe, request, subscribe, subscribe_all};
 pub use kv::{GuardedKv, Watch};
 
 /// The headers a stream adds to each message it sends to a direct get's reply subject.

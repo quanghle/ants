@@ -5,6 +5,11 @@ use serde_json::json;
 
 use super::*;
 
+#[test]
+fn the_rating_tool_is_named_as_its_constant() {
+    assert!(super::super::own_names().contains(RATE_TRAIL));
+}
+
 fn name(trail: &str) -> TrailName {
     trail.parse().unwrap()
 }
