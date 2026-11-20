@@ -14,7 +14,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
-use super::model::{Data, Key, To};
+use super::model::{Data, Key, Model, To};
 use super::select::{Selection, step};
 use super::style::{self, ago};
 use crate::people::sealed::State;
@@ -161,7 +161,7 @@ impl Page {
         Self { with, selected: Selection::default() }
     }
 
-    pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
+    pub fn key(&mut self, key: Key, data: &Data, _: DateTime<Utc>) -> Option<To> {
         let dms = shown(data, &self.with);
         let threads: Vec<ThreadId> = dms.iter().map(|dm| dm.thread.clone()).collect();
         let at = self.selected.at(&threads);
@@ -174,7 +174,8 @@ impl Page {
         None
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+    pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
+        let data = &model.data;
         let state = match data.people.online(&self.with) {
             Some(true) => " · online",
             Some(false) => " · away",

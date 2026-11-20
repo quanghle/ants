@@ -226,13 +226,7 @@ impl Model {
             return false;
         }
         let data = &self.data;
-        let closed = match self.pages.last_mut() {
-            Some(Page::Thread(page)) => page.find_key(Key::Esc),
-            Some(Page::Ant(page)) => page.write(Key::Esc).is_some(),
-            Some(Page::Channel(page)) => page.write(Key::Esc, data).is_some(),
-            _ => false,
-        };
-        closed || self.pages.last_mut().is_some_and(Page::disarm) || self.card_key(Key::Esc, now).is_some()
+        self.pages.last_mut().is_some_and(|page| page.close(data)) || self.card_key(Key::Esc, now).is_some()
     }
 
     /// Take `text` pasted: into the prompt or the draft being typed, on one line, else into the bar, focused for it,
@@ -410,18 +404,7 @@ impl Model {
             return None;
         }
         let data = &self.data;
-        let to = match self.pages.last_mut()? {
-            Page::Home(page) => page.key(key, data, now),
-            Page::Work(page) => page.key(key, data),
-            Page::Channel(page) => page.key(key, data),
-            Page::Thread(page) => page.key(key, data, now),
-            Page::Dm(page) => page.key(key, data),
-            Page::Search(page) => page.key(key),
-            Page::Tree(page) => page.key(key, data, now),
-            Page::Ant(page) => page.key(key, data),
-            Page::Credentials(page) => page.key(key, data),
-            Page::Held(page) => page.key(key, data),
-        }?;
+        let to = self.pages.last_mut()?.key(key, data, now)?;
         self.go(to, now)
     }
 

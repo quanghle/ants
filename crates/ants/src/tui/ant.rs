@@ -24,7 +24,7 @@ use super::exec::Job;
 use super::markdown;
 use super::mcp;
 use super::memories;
-use super::model::{Action, Data, Key, To};
+use super::model::{Action, Data, Key, Model, To};
 use super::select::{PAGE, Selection, step};
 use super::settings;
 use super::style::{self, ago};
@@ -213,7 +213,7 @@ impl Page {
         }
     }
 
-    pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
+    pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
         match (key, self.armed.take()) {
             (Key::Char('r'), _) => {
                 self.armed.arm(Some(Armed::Restart));
@@ -267,7 +267,7 @@ impl Page {
             _ => {}
         }
         match self.pane {
-            Pane::Threads => return self.threads.key(key, data),
+            Pane::Threads => return self.threads.key(key, data, now),
             Pane::Settings => {
                 self.settings.key(key);
                 return None;
@@ -289,7 +289,8 @@ impl Page {
         None
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+    pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
+        let data = &model.data;
         let entry = data.live.colony.iter().find(|e| e.ant == self.ant);
         let (mark, color) = super::nav::marker(&entry.into_iter().collect::<Vec<_>>(), now);
         let head = data.looks.head(&self.ant);
@@ -351,7 +352,7 @@ impl Page {
         spans.push(Span::styled("←→", style::dim()));
         frame.render_widget(Paragraph::new(Line::from(spans)), tabs);
         match self.pane {
-            Pane::Threads => self.threads.draw(frame, pane, data, now, focused),
+            Pane::Threads => self.threads.draw(frame, pane, model, now, focused),
             Pane::Queue => self.draw_queue(frame, pane, data, now, focused),
             Pane::Memories => self.memories.draw(frame, pane, &self.ant, focused),
             Pane::Mcp => self.mcp.draw(frame, pane, &self.ant, focused, data),

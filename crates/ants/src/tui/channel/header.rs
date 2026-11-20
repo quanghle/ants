@@ -235,7 +235,7 @@ mod tests {
 
     fn shown(m: &Model, width: u16, height: u16) -> String {
         let Page::Channel(page) = m.page() else { panic!("not the channel") };
-        rendered(width, height, |f| page.draw(f, f.area(), &m.data, at(61), true))
+        rendered(width, height, |f| page.draw(f, f.area(), m, at(61), true))
     }
 
     #[test]

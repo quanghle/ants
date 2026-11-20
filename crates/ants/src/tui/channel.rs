@@ -16,7 +16,7 @@ use ratatui::widgets::Paragraph;
 use super::attach;
 use super::command::Conversation;
 use super::exec::Job;
-use super::model::{Action, Data, Key, To};
+use super::model::{Action, Data, Key, Model, To};
 use super::select::{PAGE, Selection, step};
 use super::style::{self, ago};
 use crate::channel::reads::Unread;
@@ -229,7 +229,7 @@ impl Page {
         post.attachments.get(self.mark.at(post.id, post.attachments.len()))
     }
 
-    pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
+    pub fn key(&mut self, key: Key, data: &Data, _: DateTime<Utc>) -> Option<To> {
         let at = self.at(data);
         let to = match key {
             Key::Char('o') => {
@@ -267,7 +267,8 @@ impl Page {
         None
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+    pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
+        let data = &model.data;
         let rows = header::rows(frame.area());
         let [head, tabs_row, area] =
             Layout::vertical([Constraint::Length(rows), Constraint::Length(1), Constraint::Min(1)]).areas(area);
@@ -452,7 +453,7 @@ mod tests {
         };
         let screen = |m: &Model| {
             let View::Channel(page) = m.page() else { panic!("not the channel") };
-            rendered(130, 30, |f| page.draw(f, f.area(), &m.data, at(4), true))
+            rendered(130, 30, |f| page.draw(f, f.area(), m, at(4), true))
         };
         assert_eq!(page(&m), (Tab::All, vec![asked.thread_id.clone(), idle.thread_id]));
         let shown = screen(&m);

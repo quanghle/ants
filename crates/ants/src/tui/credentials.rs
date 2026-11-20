@@ -22,7 +22,7 @@ use ratatui::text::{Line, Span, Text};
 use tokio::time::Instant;
 
 use super::listed::{Listed, Shown};
-use super::model::{Action, Data, Key, To};
+use super::model::{Action, Data, Key, Model, To};
 use super::style::{self, ago};
 use crate::credentials::enroll::{self, Approver};
 use crate::credentials::renew;
@@ -225,14 +225,15 @@ impl Page {
         asked.iter().map(Asked::id).collect()
     }
 
-    pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
+    pub fn key(&mut self, key: Key, data: &Data, _: DateTime<Utc>) -> Option<To> {
         let heard = &data.credentials;
         let asked = |at: usize, reject| heard.asked.get(at).and_then(|a| a.order(reject));
         let order = self.list.key(key, &Self::ids(&heard.asked), heard.busy.is_some(), asked)?;
         Some(To::Do(Action::Credentials(order)))
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+    pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
+        let data = &model.data;
         let heard = &data.credentials;
         let mut about = Vec::new();
         match &heard.holder {

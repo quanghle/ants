@@ -19,7 +19,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
-use super::model::{Data, Key, To};
+use super::model::{Data, Key, Model, To};
 use super::select::{PAGE, Selection};
 use super::style::{self, ago};
 use crate::live::maybe;
@@ -113,7 +113,7 @@ impl Page {
         self.matches().iter().map(|e| e.seq).collect()
     }
 
-    pub fn key(&mut self, key: Key) -> Option<To> {
+    pub fn key(&mut self, key: Key, _: &Data, _: DateTime<Utc>) -> Option<To> {
         let seqs = self.seqs();
         if key == Key::Enter {
             let e = self.matches().get(self.selected.at(&seqs))?;
@@ -126,7 +126,8 @@ impl Page {
         None
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+    pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
+        let data = &model.data;
         let title = match &self.found {
             Some(Ok((entries, omitted))) if *omitted > 0 => {
                 format!(" search {} · latest {} matches, {omitted} earlier left out ", self.query, entries.len())
@@ -242,16 +243,16 @@ mod tests {
         let (thread, other) = (ThreadId::generate(), ThreadId::generate());
         let search = parse("deploy", at(10)).unwrap();
         let mut page = Page::new("deploy".to_owned(), &search);
-        assert_eq!(page.key(Key::Enter), None, "nothing to open while searching");
+        let m = crate::tui::test_support::model();
+        assert_eq!(page.key(Key::Enter, &m.data, at(70)), None, "nothing to open while searching");
         let first = message(1, &thread, "alice", "dev-a", "Please\ndeploy the API");
         let second = message(2, &other, "dev-a", "alice", "deployed");
         page.found(Ok((vec![first.clone(), second.clone()], 0)));
-        let data = &crate::tui::test_support::model().data;
-        let row = page.row(&page.matches()[1], data, at(70)).to_string();
+        let row = page.row(&page.matches()[1], &m.data, at(70)).to_string();
         assert!(row.starts_with(&format!("{:<24} alice", thread.to_string()[..23].to_owned() + "…")), "{row}");
         assert!(row.ends_with("1m ago  deploy the API"), "{row}");
-        assert_eq!(page.key(Key::Enter), Some(To::Message(other, second.id.unwrap())));
-        page.key(Key::End);
-        assert_eq!(page.key(Key::Enter), Some(To::Message(thread, first.id.unwrap())));
+        assert_eq!(page.key(Key::Enter, &m.data, at(70)), Some(To::Message(other, second.id.unwrap())));
+        page.key(Key::End, &m.data, at(70));
+        assert_eq!(page.key(Key::Enter, &m.data, at(70)), Some(To::Message(thread, first.id.unwrap())));
     }
 }

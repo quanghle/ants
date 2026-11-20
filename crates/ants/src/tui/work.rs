@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use super::command::Conversation;
-use super::model::{Data, Key, To};
+use super::model::{Data, Key, Model, To};
 use super::select::{PAGE, Selection, step};
 use super::style::{self, ago};
 use crate::threads::thread::{Entry, Kind};
@@ -421,7 +421,7 @@ impl Page {
         self.selected.at(&threads(rows))
     }
 
-    pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
+    pub fn key(&mut self, key: Key, data: &Data, _: DateTime<Utc>) -> Option<To> {
         let rows = self.rows(data);
         let at = self.at(&rows);
         let to = match key {
@@ -440,7 +440,8 @@ impl Page {
         None
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+    pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
+        let data = &model.data;
         let rows = self.rows(data);
         let block = style::block(format!(" {} ({}) ", self.filter.title(), rows.len()), focused);
         if rows.is_empty() {
@@ -945,7 +946,7 @@ mod tests {
         m.data.cards.tldr.insert(thread, tldr);
         let page = Page::new(Filter::default());
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
-        terminal.draw(|f| page.draw(f, f.area(), &m.data, at(62), true)).unwrap();
+        terminal.draw(|f| page.draw(f, f.area(), &m, at(62), true)).unwrap();
         let buffer = terminal.backend().buffer();
         let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
         let shown = cells.chunks(120).map(<[&str]>::concat).collect::<Vec<_>>().join("\n");
@@ -976,7 +977,7 @@ mod tests {
         let title = "deploy the site to production then update the docs";
         m.stored(vec![message(1, &thread, "alice", "dev-a", title)], at(1));
         let page = Page::new(Filter::default());
-        let shown = crate::test_support::render::rendered(80, 24, |f| page.draw(f, f.area(), &m.data, at(2), true));
+        let shown = crate::test_support::render::rendered(80, 24, |f| page.draw(f, f.area(), &m, at(2), true));
         let row = shown.lines().find(|l| l.contains(&title[..30])).unwrap_or_default();
         assert!(row.contains("deploy the site to production th…") && row.contains("dev-a"), "{shown}");
     }
@@ -995,7 +996,7 @@ mod tests {
         let shown = |m: &Model| {
             let View::Work(page) = m.page() else { panic!("not the work view") };
             let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
-            terminal.draw(|f| page.draw(f, f.area(), &m.data, at(3), true)).unwrap();
+            terminal.draw(|f| page.draw(f, f.area(), m, at(3), true)).unwrap();
             let cells: Vec<&str> =
                 terminal.backend().buffer().content.iter().map(ratatui::buffer::Cell::symbol).collect();
             cells.concat()

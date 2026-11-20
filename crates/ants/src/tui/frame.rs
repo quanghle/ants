@@ -44,18 +44,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let focused = model.focus == Focus::View && !model.bar.focused;
     let data = &model.data;
     data.mouse.add(view, super::mouse::Target::View);
-    match model.page() {
-        Page::Home(page) => page.draw(frame, view, model, now, focused),
-        Page::Work(page) => page.draw(frame, view, data, now, focused),
-        Page::Channel(page) => page.draw(frame, view, data, now, focused),
-        Page::Thread(page) => page.draw(frame, view, model, now, focused),
-        Page::Dm(page) => page.draw(frame, view, data, now, focused),
-        Page::Search(page) => page.draw(frame, view, data, now, focused),
-        Page::Tree(page) => page.draw(frame, view, data, now, focused),
-        Page::Ant(page) => page.draw(frame, view, data, now, focused),
-        Page::Credentials(page) => page.draw(frame, view, data, now, focused),
-        Page::Held(page) => page.draw(frame, view, data, now, focused),
-    }
+    model.page().draw(frame, view, model, now, focused);
     model.bar.draw(frame, bar, &model.completions(), &model.bar_title(), &model.enter_hint());
     let completions = model.completions();
     if !completions.is_empty() {
@@ -155,21 +144,8 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
         if let Some(cursor) = card {
             return keymap::prompt(cursor.keys(), width, false);
         }
-        if let Page::Home(page) = model.page()
-            && let Some(keys) = page.prompt()
-        {
-            return keymap::prompt(&keys, width, true);
-        }
-        let (prompt, help) = match model.page() {
-            Page::Channel(page) => (page.prompt(), false),
-            Page::Ant(page) => (page.prompt(), page.armed().is_some()),
-            Page::Tree(page) => (page.prompt(), true),
-            Page::Credentials(page) => (page.prompt(), true),
-            Page::Held(page) => (page.prompt(), true),
-            _ => (None, false),
-        };
-        if let Some(keys) = prompt {
-            return keymap::prompt(keys, width, help);
+        if let Some(keys) = model.page().prompt() {
+            return keymap::prompt(&keys, width, model.page().armed());
         }
     }
     keymap::footer(model, now, width)

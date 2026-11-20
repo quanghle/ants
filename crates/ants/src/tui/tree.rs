@@ -29,7 +29,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::armed::Armed;
-use super::model::{Action, Data, Key, Level, To};
+use super::model::{Action, Data, Key, Level, Model, To};
 use super::select::{PAGE, Selection, step};
 use super::style;
 use super::work::ThreadState;
@@ -455,7 +455,8 @@ impl Page {
         None
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+    pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
+        let data = &model.data;
         let tree = self.tree(data, now);
         let at = self.at(&tree);
         let width = usize::from(area.width.saturating_sub(2));

@@ -18,7 +18,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 
 use super::listed::{Listed, Shown};
-use super::model::{Action, Data, Key, To};
+use super::model::{Action, Data, Key, Model, To};
 use super::style::{self, ago};
 use crate::live::maybe;
 use crate::tools::{self, HeldAct};
@@ -259,7 +259,7 @@ impl Page {
         items.iter().map(Item::id).collect()
     }
 
-    pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
+    pub fn key(&mut self, key: Key, data: &Data, _: DateTime<Utc>) -> Option<To> {
         let held = &data.held;
         let items = items(data);
         let asked = |at: usize, deny| {
@@ -270,7 +270,8 @@ impl Page {
         Some(To::Do(Action::Answer(answer)))
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+    pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
+        let data = &model.data;
         let held = &data.held;
         let items = items(data);
         let read = match &held.read {
