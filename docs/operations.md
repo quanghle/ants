@@ -44,6 +44,24 @@ The top-level `auto_update` of `~/.ants/config.toml` ([config.md](config.md)) le
 
 The first poll comes within 10 minutes of the start, then about every 24 hours (± 1 hour, at random, so a team's machines do not poll together). Only stable releases count and an older release is never installed. A failed poll or install logs a warning and is retried after 1 hour, doubling up to 24 hours. A change to `auto_update` takes effect on a daemon restart. With `auto_update` on, `ants doctor` asks GitHub for the latest release too.
 
+### Moving the streams into the store account
+
+A team made before the store account kept its streams, KV buckets and object stores in the team's account; the store account ([transport.md](transport.md)) is now the only one with JetStream, and a server on the new `server.conf` finds none of them until they move. The move is a one-time step per server (the hub, and each leaf node for its outbox), on the files of the stopped server, so every entry keeps its sequence (and KV revision), timestamp and headers, and every durable consumer its position:
+
+```sh
+ants auth init                                    # on the machine holding the team keys: adds store.nk, rewrites server.conf
+# stop the server (systemctl --user stop ants-nats, or the ants daemon running it)
+cp ~/.config/ants/auth/server.conf /etc/nats/     # over the server.conf the server includes
+ants auth move-stores --store-dir /var/lib/ants/js --server-conf /etc/nats/server.conf
+# start the server again
+ants auth push --nats URL                         # leaf nodes connected through the system account uplink apply it
+```
+
+- **What moves:** `<store_dir>/jetstream/<team account>/streams/*` into `<store_dir>/jetstream/<store account>/streams/`, the accounts' keys read from the `server.conf` given (default: the team directory's). `--store-dir` is the `store_dir` of the server's `jetstream` block; with no stream of the team's account there, nothing moves.
+- **Streams created since:** a server started on the new `server.conf` before the move creates empty streams and buckets in the store account; the move then refuses, naming them, and `--replace` discards them for the team account's. Run it before any writes to them matter.
+- **Leaf nodes:** each also needs `leaf-<machine>.store.creds` (`ants auth leaf`, then `ants leaf config`); its outbox (`ANTS_OUT`) moves like the hub's streams, with `--store-dir` the leaf's `jetstream` directory beside `leaf.conf`.
+- **Checks:** `ants doctor` on the machine holding the team keys fails `store account` while the team has no store account or the hub's team account holds JetStream, and passes once the store account holds it.
+
 ## Services
 
 `ants setup` installs single-machine `nats` and `daemon` units (the `daemon` unit alone with `--managed-nats`). For multi-machine hubs, workers, and tunnels, `scripts/install-units.sh` renders and starts `contrib/launchd/` (`~/Library/LaunchAgents`) or `contrib/systemd/` (`~/.config/systemd/user`) units:

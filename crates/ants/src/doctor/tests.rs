@@ -11,7 +11,7 @@ use ants_proto::{Machine, PERMISSIONS_VERSION, Role, STREAM, UserId};
 
 use super::colony::{avatars, drift, harness_versions};
 use super::credentials::{check_key, check_xkey};
-use super::server::{consumer_limit, consumers, storage_check, supported_server};
+use super::server::{check_store_account, consumer_limit, consumers, storage_check, supported_server};
 use super::transports::leafnode_info;
 use super::*;
 use crate::avatars::{Depth, Faces};
@@ -612,6 +612,50 @@ async fn the_hub_resolver_check_warns_of_a_hub_keeping_pushed_accounts_in_memory
         let none = Setup { team: hub.dir().join("no-team"), ..other };
         assert_eq!(check_resolver(&none, false).await.status, Status::Skip);
     }
+}
+
+/// The store account check fails on a hub whose team's account holds JetStream, as before the store account, and
+/// passes once its streams are moved into the store account; a team without a store account fails it locally.
+#[tokio::test]
+async fn the_store_account_check_fails_until_the_hub_keeps_jetstream_in_the_store_account() {
+    let Some(mut hub) = Server::start_before_store() else { return };
+    let setup = |hub: &Server| Setup {
+        nats: hub.url.clone(),
+        creds: None,
+        js_domain: None,
+        config: hub.dir().join("no-config.toml"),
+        leaf_config: hub.dir().join("no-leaf.conf"),
+        hub_config: hub.dir().join("no-nats.conf"),
+        harnesses: false,
+        team: hub.dir().join("auth"),
+        webhooks: hub.dir().join("no-webhooks.toml"),
+        home: None,
+        worker: None,
+    };
+    let check = check_store_account(&setup(&hub), false).await;
+    assert_eq!(check.status, Status::Skip, "no member connected yet: {check}");
+    let human = UserId::human();
+    let (client, _js) = hub.connect(&human).await;
+    let check = check_store_account(&setup(&hub), false).await;
+    assert_eq!(check.status, Status::Fail, "{check}");
+    assert!(check.detail.contains("the team's account holds JetStream"), "{check}");
+    assert!(check.fix[0].contains("ants auth move-stores --store-dir DIR"), "{check}");
+    assert_eq!(check_store_account(&setup(&hub), true).await.status, Status::Skip, "through the leaf node");
+
+    drop(client);
+    hub.stop();
+    let team = hub.dir().join("auth");
+    auth::write_server_conf(&team, &std::collections::BTreeMap::new()).unwrap();
+    auth::move_stores(&hub.dir().join("js"), &team.join(auth::SERVER_CONF), false).unwrap();
+    hub.start_again();
+    let (_client, _js) = hub.connect(&human).await;
+    let check = check_store_account(&setup(&hub), false).await;
+    assert_eq!(check.status, Status::Ok, "{check}");
+
+    std::fs::remove_file(team.join(auth::STORE_SEED)).unwrap();
+    let check = check_store_account(&setup(&hub), false).await;
+    assert_eq!(check.status, Status::Fail, "{check}");
+    assert!(check.detail.contains("has no store account") && check.fix[0].starts_with("ants auth init"), "{check}");
 }
 
 #[test]

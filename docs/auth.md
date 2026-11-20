@@ -4,6 +4,7 @@
 
 ```sh
 ants auth init                                          # writes operator.nk, store.nk, account.nk, system.nk, server.conf
+                                                        # (on a team without store.nk: adds it, rewrites server.conf)
 ants auth user human --js-domain hub                    # human.creds ("human" always gets Role::Human)
 ants auth user alice --human --js-domain hub            # alice.creds (human role, new device ID)
 ants auth user alice --human --admin --js-domain hub    # alice.creds (human role and admin role)
@@ -70,13 +71,15 @@ A host may only put its own record (`$KV.ants_machines.<machine>`), never the `_
 
 ## Backing up the team keys
 
-Keep an off-machine backup of the team directory (`operator.nk`, `account.nk`, `system.nk`, `server.conf`, `issued.jsonl`, `revoked.json`; `.creds` files are omitted):
+Keep an off-machine backup of the team directory (`operator.nk`, `account.nk`, `store.nk`, `system.nk`, `server.conf`, `issued.jsonl`, `revoked.json`; `.creds` files are omitted):
 
 ```sh
 ants auth backup /media/usb/ants-team.age               # prompts for passphrase twice
 ANTS_BACKUP_PASSPHRASE=... ants auth backup team.age    # or --passphrase-file FILE
 ants auth restore team.age --dir ~/.config/ants/auth    # --force replaces existing team files
 ```
+
+A backup made before `ants auth init` added the store account lacks `store.nk` and restores nothing; `ants doctor` warns until a new backup holds it.
 
 Backups use ASCII-armored [age](https://age-encryption.org) passphrase encryption (scrypt work factor 18 + ChaCha20-Poly1305, mode `0600`), compatible with `age -d` and `age -p`. Team keys always stay on disk (never in the OS credential store). `backup.json` records the last backup's issued-key count and revocation digest so `ants doctor` warns when new keys or revocations are unbacked-up. Restoring an older backup loses revocations made since: re-revoke those keys and run `ants auth push`.
 
@@ -548,7 +551,7 @@ ants keys remove ~/.ants/dev-a.creds                                   # delete 
 
 `ants keys remove` prints `ants auth revoke --key K --earlier` for the key K of each file removed, to run on the machine holding the team keys: it revokes those credentials and the live keys they were renewed from.
 
-`ants add --store-key`, `ants auth user --store-key`, and `ants auth channel-manager --store-key` write new seeds straight into the store without touching disk (printing the approved JWT if `ants add --enroll --store-key` fails so `--jwt` can finish later). `ants keys store` refuses leaf uplink credentials (read by `nats-server`), team keys (`operator.nk`, `account.nk`, `system.nk`), and ephemeral in-memory keys.
+`ants add --store-key`, `ants auth user --store-key`, and `ants auth channel-manager --store-key` write new seeds straight into the store without touching disk (printing the approved JWT if `ants add --enroll --store-key` fails so `--jwt` can finish later). `ants keys store` refuses leaf uplink credentials (read by `nats-server`), team keys (`operator.nk`, `account.nk`, `store.nk`, `system.nk`), and ephemeral in-memory keys.
 
 Platform notes (where no unlocked store is available, keep `0600` file-backed `.creds`):
 

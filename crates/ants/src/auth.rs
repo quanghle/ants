@@ -42,6 +42,7 @@ pub use self::issuing::{
 };
 #[cfg(test)]
 pub use self::issuing::{issue, issue_with, sign_device};
+pub use self::relocate::move_stores;
 pub use self::renewal::{Renewed, renew, renew_registered};
 pub(crate) use self::short_lived::retired_consumer_creds;
 pub use self::short_lived::{approver_creds, issue_bootstrap, issue_enrollment, revoker_creds, signer_creds};
@@ -52,6 +53,7 @@ pub use self::uplink::{
 mod claims;
 mod files;
 mod issuing;
+mod relocate;
 mod renewal;
 mod short_lived;
 mod store;
@@ -97,6 +99,9 @@ struct Keys {
 
 impl Keys {
     fn load(dir: &Path) -> Result<Self> {
+        if holds_team(dir) && !holds_store(dir) {
+            bail!("the team in {} has no store account: `ants auth init` adds it", dir.display());
+        }
         Ok(Self {
             operator: load(&dir.join(OPERATOR_SEED))?,
             system: load(&dir.join(SYSTEM_SEED))?,
@@ -126,6 +131,20 @@ pub fn init(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Add the store account to the team in `dir`, made before there was one, and write its `server.conf` again with the
+/// revocations still in effect ([`revoke::apply`]), the operator JWT kept.
+pub fn add_store(dir: &Path) -> Result<()> {
+    if !holds_team(dir) || !dir.join(ACCOUNT_SEED).is_file() {
+        bail!("no team in {}", dir.display());
+    }
+    if holds_store(dir) {
+        bail!("{} already holds a team with a store account", dir.display());
+    }
+    write_secret(&dir.join(STORE_SEED), &seed(&KeyPair::new_account())?)?;
+    revoke::apply(dir)?;
+    Ok(())
+}
+
 /// An account's public key and JWT, as `ants auth push` sends it.
 pub type AccountJwt = (String, String);
 
@@ -149,6 +168,35 @@ pub fn write_server_conf(dir: &Path, revocations: &BTreeMap<String, u64>) -> Res
 /// Whether `dir` holds the keys of a team, those of its system account included.
 pub fn holds_team(dir: &Path) -> bool {
     dir.join(SYSTEM_SEED).is_file()
+}
+
+/// Whether the team in `dir` has its store account.
+pub fn holds_store(dir: &Path) -> bool {
+    dir.join(STORE_SEED).is_file()
+}
+
+/// The public key of the store account in `dir`.
+pub fn store_key(dir: &Path) -> Result<String> {
+    Ok(load(&dir.join(STORE_SEED))?.public_key())
+}
+
+/// The public keys of the team's account and of the store account a `server.conf` of `ants auth init` preloads, by
+/// their names; the store account's None in one written before there was one.
+pub fn preloaded_accounts(server_conf: &str) -> Result<(String, Option<String>)> {
+    let (mut account, mut store) = (None, None);
+    for line in server_conf.lines() {
+        let Some((key, jwt)) = line.trim().split_once(": ") else { continue };
+        let Ok(claims) = verified(jwt) else { continue };
+        if claims.sub != key {
+            continue;
+        }
+        match claims.name.as_str() {
+            TEAM => account = Some(claims.sub),
+            STORE => store = Some(claims.sub),
+            _ => {}
+        }
+    }
+    Ok((account.context("no account of the team preloaded: not a server.conf of `ants auth init`")?, store))
 }
 
 /// The public key of the team's account in `dir`.
@@ -341,6 +389,31 @@ fn account_jwt(keys: &Keys, revocations: &BTreeMap<String, u64>) -> Result<Strin
         nats["revocations"] = json!(revocations);
     }
     jwt(&keys.operator, &keys.account.public_key(), TEAM, nats, None)
+}
+
+/// Write the `server.conf` of the team in `dir` as `ants auth init` wrote it before the store account: the team's
+/// account holding JetStream itself, and no store account.
+#[cfg(test)]
+pub(crate) fn write_server_conf_before_store(dir: &Path) -> Result<()> {
+    let keys = Keys::load(dir)?;
+    let nats = json!({
+        "limits": limits(true),
+        "default_permissions": { "pub": {}, "sub": {} },
+        "type": "account",
+        "version": 2,
+    });
+    let account_jwt = jwt(&keys.operator, &keys.account.public_key(), TEAM, nats, None)?;
+    let conf = server_conf(&keys, None, &BTreeMap::new())?;
+    let conf: String = conf
+        .lines()
+        .filter(|line| !line.trim_start().starts_with(&keys.store.public_key()))
+        .map(|line| match line.trim_start().strip_prefix(&format!("{}: ", keys.account.public_key())) {
+            Some(_) => format!("  {}: {account_jwt}\n", keys.account.public_key()),
+            None => format!("{line}\n"),
+        })
+        .collect();
+    fs::write(dir.join(SERVER_CONF), conf)?;
+    Ok(())
 }
 
 #[cfg(test)]
