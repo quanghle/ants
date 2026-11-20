@@ -38,7 +38,7 @@ pub mod thread;
 mod tools;
 pub mod view;
 
-pub use tools::{Answer, MAX_TOOLS, TOOLS, ToolSpec};
+pub use tools::{Answer, DreamWrite, MAX_TOOLS, TOOLS, ToolSpec};
 
 use store::{Items, StoreError, Stores};
 
@@ -67,13 +67,9 @@ pub struct Sense {
 struct Ant {
     /// Sent when a call changed the ant's items, waking its schedule.
     changed: tokio::sync::watch::Sender<()>,
-    /// Taken by each write on a dream thread, counted toward [`dream::MAX_DREAM_WRITES`].
+    /// Taken by each write on a dream thread, counted toward [`dream::MAX_DREAM_WRITES`], from the check of the cap
+    /// until counted, so concurrent writes cannot pass the cap together.
     dream_writes: Arc<tokio::sync::Mutex<()>>,
-}
-
-/// The turn of an ant's writes on a dream thread ([`Sense::dream_turn`]), held until dropped.
-pub struct DreamTurn {
-    _turn: tokio::sync::OwnedMutexGuard<()>,
 }
 
 /// Directories supplied by the daemon, never taken from a tool's arguments.
@@ -109,13 +105,6 @@ impl Sense {
 
     fn ant(&self, ant: &UserId) -> Arc<Ant> {
         self.ants.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(ant.clone()).or_default().clone()
-    }
-
-    /// Take the turn of the writes of `ant` on a dream thread, counted toward [`dream::MAX_DREAM_WRITES`]: one written
-    /// outside its tools ([`dream::trail_saved`]) holds it from the check of the cap ([`dream::ground`]) until counted,
-    /// so concurrent writes cannot pass the cap together.
-    pub async fn dream_turn(&self, ant: &UserId) -> DreamTurn {
-        DreamTurn { _turn: self.ant(ant).dream_writes.clone().lock_owned().await }
     }
 
     /// The changes of the items of `ant`. Subscribe before reading triggers, so a change during the
@@ -304,8 +293,8 @@ impl Provider for Sense {
         };
         Box::pin(async move {
             let answer = self.changing(&call.context.ant, async {
-                if dream::COUNTED.contains(&spec.name) {
-                    dream::counted(self, spec.handler, &call).await
+                if spec.dream.is_some() {
+                    dream::counted(self, spec, &call).await
                 } else {
                     (spec.handler)(self, &call).await
                 }

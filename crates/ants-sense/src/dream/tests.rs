@@ -4,8 +4,10 @@ use ants_proto::provider::{CallContext, Event, EventKind, Format, Output, Provid
 use serde_json::json;
 
 use super::*;
+use crate::Sense;
 use crate::memory::tests::{Kept, context, events, human, memory, sense, tool};
 use crate::memory::{Memory, Votes};
+use crate::tools::Answer;
 
 fn on(thread: u8) -> CallContext {
     let thread = format!("019a7d2c-0000-7000-8000-0000000000{thread:02}").parse().unwrap();

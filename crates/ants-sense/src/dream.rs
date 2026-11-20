@@ -40,20 +40,19 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
 
-use ants_proto::provider::{CallContext, ToolCall};
+use ants_proto::provider::CallContext;
 use ants_proto::{ReviewOutcomes, ThreadId, TrailName, UserId};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::Sense;
 use crate::identity;
 use crate::items::{ItemId, ItemValues, Revision, Values};
 use crate::memory::{self, MAX_BODY_BYTES, MAX_TITLE_CHARS, MEMORY, Memory, MemoryItem, MemoryKind, Scope, Status};
 use crate::proposal;
 use crate::store::{Items, StoreError, Write, read_modify_write};
-use crate::tools::{Answer, Handler};
 
+mod count;
 mod identity_findings;
 mod packet;
 mod practice_findings;
@@ -62,6 +61,9 @@ pub(crate) mod reviews;
 mod tool;
 mod vitals;
 
+use count::capped;
+pub(crate) use count::counted;
+pub use count::{TrailGround, TrailRefused, trail_saved};
 pub use identity_findings::{
     OWN_AFTER_THREADS, PERSONA_AFTER_THREADS, RELATIONSHIP_AFTER_THREADS, SELF_MODEL_AFTER_THREADS, STALE_ACTIVE_DAYS,
 };
@@ -105,9 +107,6 @@ pub const MAX_FINDINGS: usize = 20;
 pub const DROPPED_ANSWER_DREAMS: u64 = 5;
 /// The most writes through sense's tools a dream thread makes ([`counted`]).
 pub const MAX_DREAM_WRITES: usize = 20;
-/// The tools whose writes on a dream thread count toward [`MAX_DREAM_WRITES`]: those writing memories, and
-/// `sense_identity` when it replaces a record ([`writes`]).
-pub const COUNTED: &[&str] = &["remember", "vote", "identity"];
 /// The days of the ant's active time a rejected finding rests unless what it is about changes ([`Rested`]).
 pub const REST_DAYS: i64 = 14;
 
@@ -890,38 +889,6 @@ pub async fn ground(
     Ok(None)
 }
 
-/// Record trail `name` saved in `context`, in answer to `finding` if it names one, when on the thread of the last
-/// dream: counted toward its [`MAX_DREAM_WRITES`]. Returns the dream's number and the writes it made; none on another
-/// thread, recording nothing.
-pub async fn trail_saved(
-    items: &dyn Items,
-    context: &CallContext,
-    name: &TrailName,
-    finding: Option<&str>,
-) -> Result<Option<(u64, usize)>, StoreError> {
-    read_modify_write(|| async move {
-        let Some((mut dream, revision)) = last(items).await? else { return Ok(None) };
-        if dream.thread.as_ref() != Some(&context.thread) {
-            return Ok(None);
-        }
-        let finding = finding.map(str::to_owned);
-        dream.trails.push(SavedTrail { name: name.clone(), finding, at: context.at });
-        let mut values = Values::new();
-        values.insert("trails".into(), json!(dream.trails));
-        items.change(&Dream::id(dream.number), values, Some(revision), BY).await?;
-        Ok(Some((dream.number, dream.writes_made())))
-    })
-    .await
-}
-
-/// The refusal of a write on the thread of dream `number`, which made its [`MAX_DREAM_WRITES`].
-fn capped(number: u64) -> String {
-    format!(
-        "Dream {number} made its {MAX_DREAM_WRITES} writes, the most a dream makes: answer the findings left with \
-         sense_dream as deferred, so the next dream offers them again."
-    )
-}
-
 /// A finding gathered for a dream, before it is numbered.
 ///
 /// A finding is about its items, or about a subject without items, and may rest on a count: [`Gathered::key`] names
@@ -1174,85 +1141,6 @@ fn diary(dream: &Dream, context: &CallContext) -> Memory {
     }
     let title: String = title.chars().take(MAX_TITLE_CHARS).collect();
     Memory::new(MemoryKind::Episode, Scope::Own, title, body, context)
-}
-
-/// Whether `call`, of a tool of [`COUNTED`], writes a memory or a record: a `sense_identity` call writes one only
-/// with `self_model` or `relationship`.
-fn writes(call: &ToolCall) -> bool {
-    call.name != "identity"
-        || ["self_model", "relationship"].iter().any(|record| call.arguments.get(*record).is_some_and(|v| !v.is_null()))
-}
-
-/// Answer `call` of a tool writing memories or records with `handler`, counting it toward [`MAX_DREAM_WRITES`] when
-/// made on the last dream's thread, refused past them. A memory or record written there while a finding resting on
-/// untrusted text is open is stored as untrusted, as quoting outside content: the thread cannot tell which finding a
-/// write answers.
-pub(crate) async fn counted(sense: &Sense, handler: Handler, call: &ToolCall) -> Answer {
-    if !writes(call) {
-        return handler(sense, call).await;
-    }
-    let thread = &call.context.thread;
-    let Ok(items) = sense.items(&call.context.ant).await else { return handler(sense, call).await };
-    let on_thread = |dream: &Dream| dream.thread.as_ref() == Some(thread);
-    if !matches!(last(&*items).await, Ok(Some((dream, _))) if on_thread(&dream)) {
-        return handler(sense, call).await;
-    }
-    // One write of a dream thread of the ant at a time, so concurrent calls cannot pass the cap together.
-    let ant = sense.ant(&call.context.ant);
-    let _turn = ant.dream_writes.lock().await;
-    let dream = match last(&*items).await {
-        Ok(Some((dream, _))) if on_thread(&dream) => dream,
-        _ => return handler(sense, call).await,
-    };
-    if dream.writes_made() >= MAX_DREAM_WRITES {
-        return Answer::error("dream_cap", capped(dream.number));
-    }
-    let untrusted: Vec<_> = dream.untrusted_open().map(|finding| finding.id.as_str()).collect();
-    let quotable = matches!(call.name.as_str(), "remember" | "identity");
-    let mut answer = if !untrusted.is_empty() && quotable && !call.arguments.contains_key("quotes") {
-        let mut quoting = call.clone();
-        quoting.arguments.insert("quotes".into(), json!("external"));
-        let mut answer = handler(sense, &quoting).await;
-        if !answer.is_error {
-            let _ = write!(
-                answer.text,
-                "\nStored as untrusted: dream {} holds untrusted findings still open ({}).",
-                dream.number,
-                untrusted.join(", ")
-            );
-        }
-        answer
-    } else {
-        handler(sense, call).await
-    };
-    if answer.is_error {
-        return answer;
-    }
-    let Some(written) = answer.json["id"].as_str().and_then(|id| id.parse::<ItemId>().ok()) else { return answer };
-    match count_write(&*items, dream.number, written).await {
-        Ok(writes) => {
-            let _ = write!(answer.text, "\nDream {}: {writes} of {MAX_DREAM_WRITES} writes made.", dream.number);
-            answer.json["dream_writes"] = json!(writes);
-        }
-        Err(e) => {
-            let _ = write!(answer.text, "\nWarning: this write did not count toward dream {}: {e}.", dream.number);
-        }
-    }
-    answer
-}
-
-/// Count a write of `id` on the thread of dream `number`; returns the writes made ([`Dream::writes_made`]).
-async fn count_write(items: &dyn Items, number: u64, id: ItemId) -> Result<usize, StoreError> {
-    let id = &id;
-    read_modify_write(|| async move {
-        let (mut dream, revision) = get(items, number).await?.ok_or_else(|| StoreError::NotFound(Dream::id(number)))?;
-        dream.writes.push(id.clone());
-        let mut values = Values::new();
-        values.insert("writes".into(), json!(dream.writes));
-        items.change(&Dream::id(number), values, Some(revision), BY).await?;
-        Ok(dream.writes_made())
-    })
-    .await
 }
 
 #[cfg(test)]
