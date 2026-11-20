@@ -21,6 +21,8 @@ use super::Hub;
 use super::tools::{Tools, text};
 use crate::trail::{Rated, RatedTrail, SavedEntry, age, clip};
 
+/// The name of the tool rating a trail run, which a narrowed thread's tool rules allow for a run's rating invitation.
+pub const RATE_TRAIL: &str = "rate_trail";
 /// Why rating and finding are refused when the ant conducts no runs.
 const NO_TRAILS: &str = "this ant conducts no trails: the bus keeps no trail runs";
 /// Why a rating is refused on an untrusted thread.

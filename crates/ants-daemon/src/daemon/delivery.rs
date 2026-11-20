@@ -7,7 +7,6 @@ use ants_proto::{
     NoReplyWhy, NotesPost, Role, State, ThreadId, Timeline, TimelineEntry, UserId, Uuid,
 };
 use anyhow::Result;
-use async_nats::jetstream;
 
 use crate::bus;
 use crate::channel::{Context, Earlier};
@@ -16,7 +15,7 @@ use crate::escalation::{self, Route};
 use crate::monitoring::status;
 use crate::stream::notes;
 
-use super::{Inbox, Incoming};
+use super::{Handling, Inbox, Incoming};
 
 impl Inbox<'_> {
     /// Whether `incoming` is another ant's reply to a message or post the ant sent, which is prompted but not answered
@@ -65,12 +64,10 @@ impl Inbox<'_> {
     /// ack prompts again, told it was cut off.
     pub(super) async fn end_unanswered(
         &self,
-        incoming: &Incoming,
+        Handling { incoming, msg, seq }: Handling<'_>,
         (why, reason): (NoReplyWhy, Option<String>),
         text: String,
         limit: Option<&String>,
-        msg: &jetstream::Message,
-        seq: u64,
     ) -> Result<()> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
@@ -95,19 +92,17 @@ impl Inbox<'_> {
     /// kind of reply it is: `None` when the answer went up the chain or nowhere instead, and the message is done with.
     pub(super) async fn reply_for(
         &self,
-        incoming: &Incoming,
+        h @ Handling { incoming, msg, seq }: Handling<'_>,
         read: Option<Context>,
         text: String,
         limit: Option<&String>,
-        msg: &jetstream::Message,
-        seq: u64,
     ) -> Result<Option<Reply>> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
         let title = self.mcp.and_then(|mcp| mcp.take_title(thread));
         let reply = match (&incoming.post, read) {
             (Some(posted), Some(read)) => {
-                let Some(post) = self.post_reply(incoming, &posted.post, read, &text, msg, seq).await? else {
+                let Some(post) = self.post_reply(h, &posted.post, read, &text).await? else {
                     return Ok(None);
                 };
                 Reply::Post(post)
@@ -143,7 +138,7 @@ impl Inbox<'_> {
                 let mut reply = envelope.reply(self.ant.clone(), text, self.humans.sender_role(envelope))?;
                 match escalation::route(self.ant, envelope).map(|(_, route)| route) {
                     Some(Route::Notes) => {
-                        let Some(post) = self.notes_reply(incoming, reply.text, title.clone(), msg, seq).await? else {
+                        let Some(post) = self.notes_reply(h, reply.text, title.clone()).await? else {
                             return Ok(None);
                         };
                         Reply::Notes(post)
@@ -180,12 +175,10 @@ impl Inbox<'_> {
     /// `None` when the thread's turn budget is spent, the escalation carrying the answer, and the message is done with.
     async fn post_reply(
         &self,
-        incoming: &Incoming,
+        Handling { incoming, msg, seq }: Handling<'_>,
         post: &ChannelPost,
         read: Context,
         text: &str,
-        msg: &jetstream::Message,
-        seq: u64,
     ) -> Result<Option<ChannelPost>> {
         // Other members' replies stored during the prompt spent the thread's turns too.
         let humans = self.humans.humans();
@@ -215,11 +208,9 @@ impl Inbox<'_> {
     /// `None` when the notes are out of turns, the escalation carrying the answer, and the message is done with.
     async fn notes_reply(
         &self,
-        incoming: &Incoming,
+        Handling { incoming, msg, seq }: Handling<'_>,
         text: String,
         title: Option<String>,
-        msg: &jetstream::Message,
-        seq: u64,
     ) -> Result<Option<NotesPost>> {
         let thread = &incoming.envelope.thread_id;
         let (store, budget) = (self.notes, incoming.envelope.turn_budget);
@@ -274,13 +265,7 @@ impl Inbox<'_> {
     /// post it also notes that the posts on its thread up to it were shown, and of an answer to a review an ant asked,
     /// the findings it gives and what its thread spent in all, by the ledger, in the ant's sense
     /// ([`crate::sense::Sense::review_given`]).
-    pub(super) async fn deliver(
-        &self,
-        incoming: &Incoming,
-        reply: &Reply,
-        msg: &jetstream::Message,
-        seq: u64,
-    ) -> Result<()> {
+    pub(super) async fn deliver(&self, Handling { incoming, msg, seq }: Handling<'_>, reply: &Reply) -> Result<()> {
         let request = &incoming.envelope;
         // Store the reply before acking: a crash in between redelivers rather than loses the message. A post to thread
         // notes is in the notes already.

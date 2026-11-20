@@ -15,7 +15,7 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use super::delivery::reply_id;
-use super::prompt::prompt_text;
+use super::prompt::text::prompt_text;
 use super::*;
 use crate::admin::restart::Restarted;
 use crate::channel;

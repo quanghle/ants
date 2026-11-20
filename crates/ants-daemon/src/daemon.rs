@@ -50,13 +50,14 @@ mod mcp_sign_in;
 mod prompt;
 mod queue;
 mod redacting;
+mod review;
 mod settings;
 mod setup;
 mod steering;
 
 pub use admission::Claims;
 use control::Cancels;
-use incoming::{InHand, Incoming, Posted, Steered};
+use incoming::{Handling, InHand, Incoming, Posted, Steered};
 use prompt::Unnarrowed;
 pub use settings::{
     Config, Connection, HarnessSettings, Policy, Pooling, Presence, Spending, Storage, WorktreeSettings,

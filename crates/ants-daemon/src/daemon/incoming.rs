@@ -5,6 +5,14 @@ use async_nats::jetstream;
 
 pub(super) type InHand = (Incoming, jetstream::Message);
 
+/// A message being handled: what it says, as it arrived on the stream, and its stream sequence.
+#[derive(Clone, Copy)]
+pub(super) struct Handling<'a> {
+    pub(super) incoming: &'a Incoming,
+    pub(super) msg: &'a jetstream::Message,
+    pub(super) seq: u64,
+}
+
 /// A message to answer: one in the inbox, or a channel post that wakes the ant, read as a message from its author
 /// ([`crate::channel::as_envelope`]).
 #[derive(Clone)]

@@ -461,7 +461,7 @@ async fn members_woken_by_one_post_spend_the_thread_s_turns_together() {
 
 #[tokio::test]
 async fn an_ant_s_reply_to_the_ant_s_own_message_is_prompted_but_not_answered_back_even_out_of_turns() {
-    use super::super::prompt::own_reply_note;
+    use super::super::prompt::text::own_reply_note;
     use ants_proto::{NoReplyWhy, TimelineEntry};
 
     let Some((bus, mut to_human)) = Bus::start().await else { return };
@@ -555,7 +555,7 @@ async fn complete_ends_the_turn_on_an_ant_s_message_with_no_reply_but_not_on_a_h
 
 #[tokio::test]
 async fn a_member_s_answers_to_an_ant_s_replies_to_its_own_post_are_not_posted() {
-    use super::super::prompt::own_reply_note;
+    use super::super::prompt::text::own_reply_note;
     use ants_proto::{NoReplyWhy, TimelineEntry};
 
     let Some((bus, _)) = Bus::start().await else { return };
