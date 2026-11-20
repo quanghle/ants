@@ -134,7 +134,7 @@ impl Inbox<'_> {
     /// Run `work`, a prompt answering `incoming`, telling the owner of its thread, else the default human, of the
     /// sign-ins to MCP servers the thread's sessions could not make: as they come, and once it is done.
     pub(super) async fn telling_mcp_sign_ins<T>(&self, incoming: &Incoming, work: impl Future<Output = T>) -> T {
-        let mut added = self.mcp_sign_ins.subscribe();
+        let mut added = self.holds.mcp_sign_ins.subscribe();
         tokio::pin!(work);
         let done = loop {
             tokio::select! {
@@ -148,13 +148,13 @@ impl Inbox<'_> {
 
     async fn tell_mcp_sign_ins(&self, incoming: &Incoming) {
         let thread = &incoming.envelope.thread_id;
-        for (store, sign_in) in self.mcp_sign_ins.take(thread) {
+        for (store, sign_in) in self.holds.mcp_sign_ins.take(thread) {
             let Some(text) = text(self.ant, self.machine, &sign_in) else { continue };
             let notice = self.outage_notice(incoming, &[]).with_text(text).as_notice(NoticeKind::McpSignIn);
             if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, None).await {
                 let server = sign_in.server();
                 tracing::warn!(%thread, server, error = format!("{e:#}"), "telling a human of an MCP server's sign-in");
-                self.mcp_sign_ins.not_told(&store, &sign_in);
+                self.holds.mcp_sign_ins.not_told(&store, &sign_in);
             }
         }
     }

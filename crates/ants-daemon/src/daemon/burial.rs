@@ -83,7 +83,7 @@ impl Inbox<'_> {
     /// Every `retry_delay`, finish the burial of each dead letter kept in the machine's outbox on its message's last
     /// delivery once the hub is in reach ([`dead::finish`]): no redelivery comes to do it. Runs until dropped.
     pub(super) async fn finish_buried(&self) {
-        let mut every = tokio::time::interval(self.retry_delay);
+        let mut every = tokio::time::interval(self.pacing.retry_delay);
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             every.tick().await;

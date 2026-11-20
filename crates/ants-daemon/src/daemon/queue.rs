@@ -143,7 +143,7 @@ impl Inbox<'_> {
             // Every fallback was turned away lately: the first to be tried again lets the messages on.
             let now = tokio::time::Instant::now();
             let fallback_up =
-                self.failover.next_up(now).filter(|_| self.outage().is_some() && self.fallback(now).is_none());
+                self.holds.failover.next_up(now).filter(|_| self.outage().is_some() && self.fallback(now).is_none());
             let mut ready = None;
             tokio::select! {
                 () = &mut shutdown => break,
@@ -194,7 +194,7 @@ impl Inbox<'_> {
             let now = tokio::time::Instant::now();
             let pause = paused.borrow_and_update().clone();
             let held = pause.is_some()
-                || self.throttle.is_held() && !self.throttle.is_quota_held()
+                || self.holds.throttle.is_held() && !self.holds.throttle.is_quota_held()
                 || self.outage().is_some() && self.fallback(now).is_none();
             self.workload.set_paused(pause);
             for thread in ready.into_iter().flatten().filter(|_| !held) {
@@ -261,7 +261,7 @@ impl Inbox<'_> {
                 t.queued.insert(message);
                 status::publish(self.client, self.ant, &thread, StatusUpdate::Queued { message, ahead });
             }
-            if self.sign_in.is_out() && self.fallback(tokio::time::Instant::now()).is_none() {
+            if self.holds.sign_in.is_out() && self.fallback(tokio::time::Instant::now()).is_none() {
                 status::state(self.client, self.ant, &thread, State::SignedOut);
             }
         }
@@ -279,11 +279,11 @@ impl Inbox<'_> {
         if matches!(first, Some(Steered::Interrupted | Steered::Ahead)) {
             return Some(Steered::Ahead);
         }
-        if self.steers.takes(thread) {
+        if self.running.steers.takes(thread) {
             return Some(Steered::Joining);
         }
         let cancel = Cancel { by: envelope.from.clone(), why: Why::Steer };
-        self.cancels.cancel(thread, cancel).then_some(Steered::Interrupted)
+        self.running.cancels.cancel(thread, cancel).then_some(Steered::Interrupted)
     }
 
     /// Whether `incoming` steers the prompt running on its thread rather than wait its turn: a human's message, or

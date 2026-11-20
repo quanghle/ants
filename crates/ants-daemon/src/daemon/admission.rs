@@ -312,7 +312,7 @@ impl Inbox<'_> {
             }
             Err(e) => {
                 tracing::warn!(channel = %post.channel, error = format!("{e:#}"), "notifying the humans mentioned");
-                nak(msg, Some(self.retry_delay)).await;
+                nak(msg, Some(self.pacing.retry_delay)).await;
                 false
             }
         }
@@ -380,7 +380,7 @@ impl Inbox<'_> {
             }
             Err(e) => {
                 tracing::warn!(error = format!("{e:#}"), "keeping a reply to ask_ant");
-                nak(msg, Some(self.retry_delay)).await;
+                nak(msg, Some(self.pacing.retry_delay)).await;
                 true
             }
         }

@@ -394,7 +394,7 @@ impl Inbox<'_> {
             && envelope.allow.as_deref().is_some_and(|allow| !crate::harness::allows_all(allow))
             && !ants_proto::is_review(envelope.allow.as_deref())
             && launch.bypasses_permissions()
-            && self.unnarrowed.first(&envelope.from)
+            && self.running.unnarrowed.first(&envelope.from)
         {
             tracing::warn!(
                 thread = %envelope.thread_id,
@@ -450,7 +450,7 @@ impl Inbox<'_> {
         let carried = incoming.attached().into_iter().map(|(handle, _)| handle).collect();
         let (joined, outcome) = tokio::sync::oneshot::channel();
         let join = Join { envelope: envelope.clone(), carried, stored, text, joined };
-        if !self.steers.join(join) {
+        if !self.running.steers.join(join) {
             return Some(Joined::Refused);
         }
         self.acking(msg, outcome).await.ok()
@@ -805,7 +805,7 @@ impl Inbox<'_> {
         let (mut stop_tx, mut reached) = (Some(stop_tx), None);
         let (progress_tx, mut streamed) = tokio::sync::mpsc::channel(status::BUFFER);
         let mut status = Status::new(self.client, self.ant, thread, self.redactor);
-        let every = self.timeline_every;
+        let every = self.pacing.timeline_every;
         let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut calls = crate::monitoring::timeline::Collector::new(self.ant, thread, envelope.id, self.redactor);
@@ -831,7 +831,7 @@ impl Inbox<'_> {
         let mut joins = None;
         let mut taking = futures::stream::FuturesUnordered::new();
         let mut joined = Vec::new();
-        let (cancellable, mut cancel) = self.cancels.register(thread);
+        let (cancellable, mut cancel) = self.running.cancels.register(thread);
         let (mut cancelled_by, mut cut_by_cancel) = (None, false);
         let prompting = self.metrics.prompting();
         let fallback = self.fallback(tokio::time::Instant::now());
@@ -857,7 +857,7 @@ impl Inbox<'_> {
                         crate::monitoring::timeline::store(self.js, record);
                     }
                 }
-                Ok(()) = &mut ready => joins = Some(self.steers.register(thread)),
+                Ok(()) = &mut ready => joins = Some(self.running.steers.register(thread)),
                 Some(join) = next_join(&mut joins) => taking.extend(steer(&steer_tx, join)),
                 Some((took, join)) = futures::StreamExt::next(&mut taking) => self.took(took, join, &mut joined),
                 Some(by) = cancel.recv(), if cancelled_by.is_none() => {

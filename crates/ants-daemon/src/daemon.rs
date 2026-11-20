@@ -19,11 +19,9 @@ use crate::delivery::dead::Buried;
 use crate::delivery::unserved;
 use crate::escalation::Escalator;
 use crate::harness::PromptLimits;
-use crate::limits::breaker::Breaker;
 use crate::limits::caps::Ledger;
-use crate::limits::fallback::Failover;
-use crate::limits::ratelimit::{self, Backoffs, Throttle};
-use crate::limits::signin::{self, SignIn};
+use crate::limits::ratelimit::{self, Backoffs};
+use crate::limits::signin;
 use crate::mcp::{Colony, Mcp};
 use crate::people::behalf::Records;
 use crate::people::humans::Registry;
@@ -204,9 +202,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         reading: *reading,
         machine: &entry.machine,
         pool: &pool,
-        cancels: Cancels::default(),
-        steers: steering::Steers::default(),
-        unnarrowed: Unnarrowed::default(),
+        running: Running::default(),
         restarts,
         attempts: &Attempts::new(attempts_kv, config.ant.clone()),
         answered: &answered,
@@ -227,17 +223,8 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         colony,
         humans: &humans,
         behalf: Records::new(js.clone(), config.connection.js_domain.clone(), account()),
-        retry_delay: RETRY_DELAY,
-        progress_every: PROGRESS_EVERY,
-        timeline_every: TIMELINE_EVERY,
-        sign_in: SignIn::default(),
-        sign_in_every: signin::CHECK_EVERY,
-        mcp_sign_ins: services.mcp_sign_ins.clone(),
-        breaker: Breaker::default(),
-        throttle: Throttle::default(),
-        backoffs: ratelimit::BACKOFFS,
-        failover: Failover::default(),
-        fallback_retry: crate::limits::fallback::RETRY_AFTER,
+        pacing: Pacing::default(),
+        holds: holds::Holds { mcp_sign_ins: services.mcp_sign_ins.clone(), ..holds::Holds::default() },
         identity: identity.as_ref(),
         home: &config.storage.home,
         lifecycle: lifecycle.as_ref(),
@@ -433,6 +420,46 @@ pub async fn stop_signal() -> std::io::Result<()> {
     }
 }
 
+/// How often the inbox acks, retries, stores and checks; tests shorten them.
+struct Pacing {
+    /// How long a message that failed waits before it is tried again.
+    retry_delay: Duration,
+    /// Period of the progress acks of the messages in hand.
+    progress_every: Duration,
+    /// How often at most a prompt's tool-call timeline is stored while it runs.
+    timeline_every: Duration,
+    /// How often a signed-out harness, or one failing to start, is checked.
+    sign_in_every: Duration,
+    /// How long messages wait out a provider limit.
+    backoffs: Backoffs,
+    /// How long a fallback that turned a message away is passed over, unless its provider limit says.
+    fallback_retry: Duration,
+}
+
+impl Default for Pacing {
+    fn default() -> Self {
+        Self {
+            retry_delay: RETRY_DELAY,
+            progress_every: PROGRESS_EVERY,
+            timeline_every: TIMELINE_EVERY,
+            sign_in_every: signin::CHECK_EVERY,
+            backoffs: ratelimit::BACKOFFS,
+            fallback_retry: crate::limits::fallback::RETRY_AFTER,
+        }
+    }
+}
+
+/// The prompts running, and what the inbox keeps of them.
+#[derive(Default)]
+struct Running {
+    /// The prompts running, for `ants cancel`.
+    cancels: Cancels,
+    /// The prompts running that take messages joining them.
+    steers: steering::Steers,
+    /// The senders whose narrowing the harness, running its tools unasked, was warned not to apply.
+    unnarrowed: Unnarrowed,
+}
+
 struct Inbox<'a> {
     client: &'a async_nats::Client,
     js: &'a jetstream::Context,
@@ -443,12 +470,8 @@ struct Inbox<'a> {
     /// The machine its notices name, as its colony entry does.
     machine: &'a str,
     pool: &'a Pool,
-    /// The prompts running, for `ants cancel`.
-    cancels: Cancels,
-    /// The prompts running that take messages joining them.
-    steers: steering::Steers,
-    /// The senders whose narrowing the harness, running its tools unasked, was warned not to apply.
-    unnarrowed: Unnarrowed,
+    /// The prompts running, and what the inbox keeps of them.
+    running: Running,
     /// Where admin orders to restart the ant's harnesses arrive.
     restarts: &'a Restarts,
     attempts: &'a Attempts,
@@ -483,25 +506,10 @@ struct Inbox<'a> {
     humans: &'a Registry,
     /// The assistants' records, against which an `on_behalf_of` is checked with the grants of `humans`.
     behalf: Records,
-    retry_delay: Duration,
-    progress_every: Duration,
-    /// How often at most a prompt's tool-call timeline is stored while it runs.
-    timeline_every: Duration,
-    /// Whether the harness is signed out, holding the messages.
-    sign_in: SignIn,
-    /// How often a signed-out harness, or one failing to start, is checked.
-    sign_in_every: Duration,
-    /// The sign-ins to MCP servers the harness's sessions made as they opened, until told.
-    mcp_sign_ins: mcp_sign_in::Untold,
-    /// Whether the harness keeps failing to start, holding the messages.
-    breaker: Breaker,
-    /// Whether messages wait out a provider limit.
-    throttle: Throttle,
-    backoffs: Backoffs,
-    /// Which fallbacks answer while the harness is signed out, out of quota or failing to start.
-    failover: Failover,
-    /// How long a fallback that turned a message away is passed over, unless its provider limit says.
-    fallback_retry: Duration,
+    /// How often the inbox acks, retries, stores and checks.
+    pacing: Pacing,
+    /// What holds the messages while the ant's own harness cannot answer, and the sign-ins to tell.
+    holds: holds::Holds,
     /// The ant's identity record, which counts each prompt completed; None when it cannot be read.
     identity: Option<&'a Identity>,
     /// The ant's home, where a clone's copy of its threads' history is ([`crate::stream::history::cloned`]).
@@ -518,7 +526,7 @@ struct Inbox<'a> {
 
 impl Inbox<'_> {
     fn progress(&self) -> tokio::time::Interval {
-        tokio::time::interval_at(tokio::time::Instant::now() + self.progress_every, self.progress_every)
+        tokio::time::interval_at(tokio::time::Instant::now() + self.pacing.progress_every, self.pacing.progress_every)
     }
 
     /// Wait for `work`, telling the server meanwhile that `msg` is still being worked on.

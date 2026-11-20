@@ -86,9 +86,9 @@ impl Inbox<'_> {
             Err(e) => Err(e),
         };
         let Err(e) = result else {
-            self.sign_in.settled();
-            self.throttle.settled();
-            self.breaker.settled();
+            self.holds.sign_in.settled();
+            self.holds.throttle.settled();
+            self.holds.breaker.settled();
             return (thread, Handled::Done);
         };
         if e.is::<Requeue>() {
@@ -99,24 +99,24 @@ impl Inbox<'_> {
         }
         match e.downcast_ref::<StartFailed>() {
             Some(failed) => {
-                if let Some(hold) = self.breaker.failed(&thread, &self.redactor.redact(&failed.detail)) {
+                if let Some(hold) = self.holds.breaker.failed(&thread, &self.redactor.redact(&failed.detail)) {
                     self.attempts.release(&arrived.envelope).await;
                     self.wait_for_repair(&arrived, failed, hold).await;
                     return (thread, Handled::Broken(Box::new((arrived, msg))));
                 }
             }
-            None => self.breaker.settled(),
+            None => self.holds.breaker.settled(),
         }
         if let Some(signed_out) = e.downcast_ref::<SignedOut>() {
             self.wait_for_sign_in(&arrived, signed_out).await;
             return (thread, Handled::SignedOut(Box::new((arrived, msg))));
         }
-        self.sign_in.settled();
+        self.holds.sign_in.settled();
         if let Some(limited) = e.downcast_ref::<Limited>() {
             self.wait_out_limit(&arrived, limited).await;
             return (thread, Handled::Limited(Box::new((arrived, msg))));
         }
-        self.throttle.settled();
+        self.holds.throttle.settled();
         tracing::error!(%thread, error = format!("{e:#}"), "handling message");
         status::state(self.client, self.ant, &thread, State::Failed);
         // A failed last attempt, or an overdue one that failed to send its recorded reply: no delivery follows.
@@ -137,12 +137,12 @@ impl Inbox<'_> {
         {
             self.attempts.retrying(&incoming.envelope, None).await;
         }
-        nak(&msg, Some(self.retry_delay)).await;
+        nak(&msg, Some(self.pacing.retry_delay)).await;
         self.metrics.retried();
         let retry = (delivered < MAX_DELIVER).then(|| Retry {
             seq,
             // Redelivery may lag behind the delay; past this the thread goes on without the message.
-            until: tokio::time::Instant::now() + self.retry_delay * 3,
+            until: tokio::time::Instant::now() + self.pacing.retry_delay * 3,
             queued: queued_message(&arrived, &msg, Place::Retry),
         });
         (thread, retry.map_or(Handled::Done, Handled::Retry))
