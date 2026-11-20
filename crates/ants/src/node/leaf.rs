@@ -10,7 +10,12 @@
 //! it from there. It trusts the team's operator through the same `server.conf` as the hub, so it checks local clients
 //! against their own credentials, and its uplink carries the credentials of `ants auth leaf`.
 //!
-//! A second uplink, to the same hub URLs, joins the leaf's system account to the hub's with the system account
+//! JetStream lives in the team's store account, on the leaf as on the hub, so a second uplink, to the same hub URLs,
+//! joins the leaf's store account to the hub's with the store account credentials `ants auth leaf` writes beside the
+//! uplink's: it carries only the hub's sourcing of the outbox, in the machine's domain, so a client's request to the
+//! hub's domain takes the first uplink alone.
+//!
+//! A third uplink joins the leaf's system account to the hub's with the system account
 //! credentials `ants auth leaf` writes beside the uplink's: allowed only to hear updates of the team's account and
 //! answer them, it brings the leaf every account `ants auth push` sends the hub, revocations included. The leaf keeps
 //! accounts in a `full` resolver of its own, so the last one pushed outlives restarts with an older `server.conf`.
@@ -300,6 +305,8 @@ fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
 struct Accounts {
     creds: PathBuf,
     account: String,
+    /// The store account's credentials and the account, for the second uplink.
+    store: (PathBuf, String),
     server_conf: PathBuf,
     /// The system account's credentials and the account, for a second uplink.
     system: Option<(PathBuf, String)>,
@@ -320,6 +327,14 @@ impl Accounts {
                 creds.display()
             );
         }
+        let store = existing(
+            &crate::auth::leaf_store_creds(&creds),
+            "store account credentials (`ants auth leaf` writes them)",
+        )?;
+        let store_account = leaf_account(&store, scheme)?;
+        if store_account == account || !trust.contains(&store_account) {
+            bail!("{} are not for the store account of {}", store.display(), server_conf.display());
+        }
         let system = match leaf.system_creds {
             Some(path) => {
                 let path = existing(path, "system account credentials (`ants auth leaf` writes them)")?;
@@ -334,12 +349,12 @@ impl Accounts {
             }
             None => None,
         };
-        Ok(Self { creds, account, server_conf, system })
+        Ok(Self { creds, account, store: (store, store_account), server_conf, system })
     }
 }
 
-/// The `remotes` of the leaf node: the uplink to `uplinks` with `accounts`' credentials, then the system account's,
-/// with TLS when `secure`.
+/// The `remotes` of the leaf node: the uplink to `uplinks` with `accounts`' credentials, then the store account's and
+/// the system account's, with TLS when `secure`.
 fn remotes(leaf: &Leaf, uplinks: &[Uplink], secure: bool, accounts: &Accounts) -> Result<String> {
     let urls: Vec<String> = uplinks.iter().map(|u| quote(&u.url())).collect();
     let mut transport = String::new();
@@ -366,6 +381,7 @@ fn remotes(leaf: &Leaf, uplinks: &[Uplink], secure: bool, accounts: &Accounts) -
     };
     // The uplink comes first: `read_uplink` takes the first credentials.
     let mut remotes = remote(&accounts.account, &accounts.creds);
+    remotes += &remote(&accounts.store.1, &accounts.store.0);
     if let Some((creds, account)) = &accounts.system {
         remotes += &remote(account, creds);
     }

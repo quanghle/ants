@@ -1,5 +1,6 @@
 //! A leaf node's uplink credentials: issued for the machine's ants and humans, checked, extended to an ant added and
-//! shrunk to one removed, with the system account credentials of the leaf's second uplink.
+//! shrunk to one removed, with the store account credentials of the leaf's second uplink and the system account
+//! credentials of its third.
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +15,8 @@ use super::files::{creds, load, seed, write_secret};
 use super::issuing::webhook_permissions;
 use super::short_lived::signer_permissions;
 use super::{
-    ACCOUNT_SEED, MAX_CONTROL_LINE, MAX_UPLINK_JWT, SYSTEM_SEED, assistants, check_not_reserved, leaf_role, members,
+    ACCOUNT_SEED, MAX_CONTROL_LINE, MAX_UPLINK_JWT, STORE_SEED, SYSTEM_SEED, assistants, check_not_reserved, leaf_role,
+    members,
 };
 use crate::credentials::revoke::{self, Issued, Kind};
 use crate::node::members::EnrollApprover;
@@ -26,8 +28,8 @@ use crate::node::members::EnrollApprover;
 /// machine ([`webhook_permissions`]), plus [`EnrollApprover::With`] what `ants enroll` and `ants signer` on the machine
 /// need ([`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`],
 /// [`Permissions::for_trail_keeper`]), and connect only as a leaf
-/// node, not as a client. Also writes the system account credentials of the leaf's second uplink beside them
-/// ([`leaf_system_creds`]).
+/// node, not as a client. Also writes the store account credentials of the leaf's second uplink beside them
+/// ([`leaf_store_creds`]), and the system account credentials of its third ([`leaf_system_creds`]).
 ///
 /// nats-server applies a leaf user's permissions from the leaf's side, as for a client: publish limits what the leaf
 /// sends to the hub, subscribe what the hub sends to the leaf (the hub swaps them internally).
@@ -68,7 +70,26 @@ pub fn issue_leaf(
     let issued = Issued::new(&user.public_key(), &name, Kind::Leaf, None)?;
     let members = crate::node::members::Members::new(members, webhooks, approver);
     revoke::record(dir, &Issued { members: Some(members), ..issued })?;
+    issue_leaf_store(dir, machine, &leaf_store_creds(out))?;
     issue_leaf_system(dir, machine, &account.public_key(), &leaf_system_creds(out))
+}
+
+/// Where [`issue_leaf`] writes the store account credentials of a leaf node whose uplink credentials are at `uplink`:
+/// beside them, `leaf-<machine>.store.creds` for `leaf-<machine>.creds`.
+pub fn leaf_store_creds(uplink: &Path) -> PathBuf {
+    uplink.with_extension("store.creds")
+}
+
+/// Write to `out` the credentials of the store account for the uplink of `machine`'s leaf node that binds the leaf's
+/// JetStream to the hub's, for the hub's sourcing of the machine's outbox ([`Permissions::for_leaf_store`]); they
+/// connect only as a leaf node.
+fn issue_leaf_store(dir: &Path, machine: &Machine, out: &Path) -> Result<()> {
+    let store = load(&dir.join(STORE_SEED))?;
+    let user = KeyPair::new_user();
+    let only_leaf = json!({ "allowed_connection_types": LEAF_CONNECTIONS });
+    let permissions = Permissions::for_leaf_store(machine);
+    let jwt = user_jwt(&store, &user.public_key(), &leaf_user(machine), permissions, only_leaf, None)?;
+    write_secret(out, &creds(&jwt, &seed(&user)?))
 }
 
 /// Where [`issue_leaf`] writes the system account credentials of a leaf node whose uplink credentials are at

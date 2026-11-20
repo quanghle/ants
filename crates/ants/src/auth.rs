@@ -1,5 +1,10 @@
-//! Team credentials for NATS decentralized auth: one operator, one account holding the ants stream, and one user per
-//! ant or human whose JWT carries the permissions of [`Permissions::for_user`] in its role.
+//! Team credentials for NATS decentralized auth: one operator, the team's account, and one user per ant or human whose
+//! JWT carries the permissions of [`Permissions::for_user`] in its role.
+//!
+//! The streams, KV buckets and object stores live in an account of their own, the store account, the only one with
+//! JetStream. It exports as services the JetStream API and every subject they store, and as streams the reply inboxes
+//! JetStream delivers to; the team's account imports them under the same names ([`store`]). So no subject a user
+//! names as a reply, which the server answers in the team's account, is a stored one.
 //!
 //! The operator and account seeds stay in the team directory on the machine that issues credentials. The server
 //! needs only `server.conf`; each machine gets the `.creds` file of the ants it runs, and its leaf node the uplink
@@ -40,20 +45,25 @@ pub use self::issuing::{issue, issue_with, sign_device};
 pub use self::renewal::{Renewed, renew, renew_registered};
 pub(crate) use self::short_lived::retired_consumer_creds;
 pub use self::short_lived::{approver_creds, issue_bootstrap, issue_enrollment, revoker_creds, signer_creds};
-pub use self::uplink::{check_leaf, extend_leaf, issue_leaf, leaf_system_creds, leaf_user, shrink_leaf};
+pub use self::uplink::{
+    check_leaf, extend_leaf, issue_leaf, leaf_store_creds, leaf_system_creds, leaf_user, shrink_leaf,
+};
 
 mod claims;
 mod files;
 mod issuing;
 mod renewal;
 mod short_lived;
+mod store;
 mod uplink;
 
 pub(crate) const OPERATOR_SEED: &str = "operator.nk";
 pub(crate) const ACCOUNT_SEED: &str = "account.nk";
+pub(crate) const STORE_SEED: &str = "store.nk";
 pub(crate) const SYSTEM_SEED: &str = "system.nk";
 pub const SERVER_CONF: &str = "server.conf";
 const TEAM: &str = "ants";
+const STORE: &str = "ants-store";
 /// `max_control_line` of the servers that include [`SERVER_CONF`], hub and leaf nodes alike: a user JWT grows with the
 /// length of its user's name and of the JetStream domain, which may each take 64 characters, and the longest, an
 /// ant's, takes about 29 KB then.
@@ -77,37 +87,63 @@ pub fn team_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-/// Create the operator and account in `dir` and write the `server.conf` that trusts them.
+/// The keys of a team: its operator, system account, store account and the team's account.
+struct Keys {
+    operator: KeyPair,
+    system: KeyPair,
+    store: KeyPair,
+    account: KeyPair,
+}
+
+impl Keys {
+    fn load(dir: &Path) -> Result<Self> {
+        Ok(Self {
+            operator: load(&dir.join(OPERATOR_SEED))?,
+            system: load(&dir.join(SYSTEM_SEED))?,
+            store: load(&dir.join(STORE_SEED))?,
+            account: load(&dir.join(ACCOUNT_SEED))?,
+        })
+    }
+}
+
+/// Create the operator and accounts in `dir` and write the `server.conf` that trusts them.
 pub fn init(dir: &Path) -> Result<()> {
     if dir.join(ACCOUNT_SEED).exists() {
         bail!("{} already holds a team", dir.display());
     }
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let operator = KeyPair::new_operator();
-    let account = KeyPair::new_account();
-    let system = KeyPair::new_account();
-    write_secret(&dir.join(OPERATOR_SEED), &seed(&operator)?)?;
-    write_secret(&dir.join(SYSTEM_SEED), &seed(&system)?)?;
-    write_secret(&dir.join(ACCOUNT_SEED), &seed(&account)?)?;
-    fs::write(dir.join(SERVER_CONF), server_conf(&operator, None, &system, &account, &BTreeMap::new())?)?;
+    let keys = Keys {
+        operator: KeyPair::new_operator(),
+        system: KeyPair::new_account(),
+        store: KeyPair::new_account(),
+        account: KeyPair::new_account(),
+    };
+    write_secret(&dir.join(OPERATOR_SEED), &seed(&keys.operator)?)?;
+    write_secret(&dir.join(SYSTEM_SEED), &seed(&keys.system)?)?;
+    write_secret(&dir.join(STORE_SEED), &seed(&keys.store)?)?;
+    write_secret(&dir.join(ACCOUNT_SEED), &seed(&keys.account)?)?;
+    fs::write(dir.join(SERVER_CONF), server_conf(&keys, None, &BTreeMap::new())?)?;
     Ok(())
 }
 
+/// An account's public key and JWT, as `ants auth push` sends it.
+pub type AccountJwt = (String, String);
+
 /// Write the `server.conf` of the team in `dir` again, its account revoking each user key of `revocations` issued
-/// at or before its time (seconds since the epoch). Returns the account's public key and JWT.
-pub fn write_server_conf(dir: &Path, revocations: &BTreeMap<String, u64>) -> Result<(String, String)> {
-    let operator = load(&dir.join(OPERATOR_SEED))?;
-    let system = load(&dir.join(SYSTEM_SEED))?;
-    let account = load(&dir.join(ACCOUNT_SEED))?;
+/// at or before its time (seconds since the epoch). Returns the store account's public key and JWT, then the team
+/// account's, the order in which a server takes them: the team's account imports from the store's.
+pub fn write_server_conf(dir: &Path, revocations: &BTreeMap<String, u64>) -> Result<[AccountJwt; 2]> {
+    let keys = Keys::load(dir)?;
     let path = dir.join(SERVER_CONF);
     // nats-server reloads no change of the trusted operator, so the operator JWT already there stays.
     let earlier = fs::read_to_string(&path).unwrap_or_default();
     let operator_jwt = earlier.lines().find_map(|line| line.strip_prefix("operator: ")).filter(|jwt| {
-        verified(jwt).is_ok_and(|claims| claims.sub == operator.public_key() && claims.iss == operator.public_key())
+        let operator = keys.operator.public_key();
+        verified(jwt).is_ok_and(|claims| claims.sub == operator && claims.iss == operator)
     });
-    fs::write(&path, server_conf(&operator, operator_jwt, &system, &account, revocations)?)
+    fs::write(&path, server_conf(&keys, operator_jwt, revocations)?)
         .with_context(|| format!("writing {}", path.display()))?;
-    Ok((account.public_key(), account_jwt(&operator, &account, revocations)?))
+    Ok([(keys.store.public_key(), store_jwt(&keys)?), (keys.account.public_key(), account_jwt(&keys, revocations)?)])
 }
 
 /// Whether `dir` holds the keys of a team, those of its system account included.
@@ -236,13 +272,8 @@ pub fn check_not_reserved(user: &UserId) -> Result<()> {
 }
 
 /// The `server.conf` of the team, with `operator_jwt` if given, else a new one.
-fn server_conf(
-    operator: &KeyPair,
-    operator_jwt: Option<&str>,
-    system: &KeyPair,
-    account: &KeyPair,
-    revocations: &BTreeMap<String, u64>,
-) -> Result<String> {
+fn server_conf(keys: &Keys, operator_jwt: Option<&str>, revocations: &BTreeMap<String, u64>) -> Result<String> {
+    let Keys { operator, system, store, account } = keys;
     let operator_jwt = match operator_jwt {
         Some(jwt) => jwt.to_owned(),
         None => jwt(
@@ -258,7 +289,6 @@ fn server_conf(
     let system_limits = json!({ "conn": -1, "leaf": -1, "subs": -1, "data": -1, "payload": -1, "wildcards": true });
     let system_claims = json!({ "limits": system_limits, "type": "account", "version": 2 });
     let system_jwt = jwt(operator, &system.public_key(), "SYS", system_claims, None)?;
-    let account_jwt = account_jwt(operator, account, revocations)?;
     Ok(format!(
         "# Written by `ants auth init`. Include it from the server configuration: include \"{SERVER_CONF}\"\n\
          # Credentials carry their permissions in the CONNECT line, longer than the 4 KB nats-server allows by default.\n\
@@ -266,19 +296,43 @@ fn server_conf(
          operator: {operator_jwt}\n\
          system_account: {system}\n\
          resolver: MEMORY\n\
-         resolver_preload: {{\n  {system}: {system_jwt}\n  {account}: {account_jwt}\n}}\n",
+         resolver_preload: {{\n  {system}: {system_jwt}\n  {store}: {store_jwt}\n  {account}: {account_jwt}\n}}\n",
         system = system.public_key(),
+        store = store.public_key(),
+        store_jwt = store_jwt(keys)?,
         account = account.public_key(),
+        account_jwt = account_jwt(keys, revocations)?,
     ))
 }
 
-/// The JWT of the team's account, revoking the user keys of `revocations` issued at or before their time.
-fn account_jwt(operator: &KeyPair, account: &KeyPair, revocations: &BTreeMap<String, u64>) -> Result<String> {
+/// The limits of an account, with JetStream if `jetstream`, else without.
+fn limits(jetstream: bool) -> serde_json::Value {
+    let storage = if jetstream { -1 } else { 0 };
+    json!({
+        "subs": -1, "data": -1, "payload": -1, "imports": -1, "exports": -1, "wildcards": true,
+        "conn": -1, "leaf": -1,
+        "mem_storage": storage, "disk_storage": storage, "streams": storage, "consumer": storage,
+    })
+}
+
+/// The JWT of the store account: JetStream, exporting what the team's account imports ([`store`]).
+fn store_jwt(keys: &Keys) -> Result<String> {
+    let nats = json!({
+        "limits": limits(true),
+        "exports": store::exports(),
+        "default_permissions": { "pub": {}, "sub": {} },
+        "type": "account",
+        "version": 2,
+    });
+    jwt(&keys.operator, &keys.store.public_key(), STORE, nats, None)
+}
+
+/// The JWT of the team's account, without JetStream of its own, importing the store account's, and revoking the user
+/// keys of `revocations` issued at or before their time.
+fn account_jwt(keys: &Keys, revocations: &BTreeMap<String, u64>) -> Result<String> {
     let mut nats = json!({
-        "limits": {
-            "subs": -1, "data": -1, "payload": -1, "imports": -1, "exports": -1, "wildcards": true,
-            "conn": -1, "leaf": -1, "mem_storage": -1, "disk_storage": -1, "streams": -1, "consumer": -1,
-        },
+        "limits": limits(false),
+        "imports": store::imports(&keys.store.public_key()),
         "default_permissions": { "pub": {}, "sub": {} },
         "type": "account",
         "version": 2,
@@ -286,7 +340,7 @@ fn account_jwt(operator: &KeyPair, account: &KeyPair, revocations: &BTreeMap<Str
     if !revocations.is_empty() {
         nats["revocations"] = json!(revocations);
     }
-    jwt(operator, &account.public_key(), TEAM, nats, None)
+    jwt(&keys.operator, &keys.account.public_key(), TEAM, nats, None)
 }
 
 #[cfg(test)]

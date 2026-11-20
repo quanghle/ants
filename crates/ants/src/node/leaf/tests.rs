@@ -97,7 +97,7 @@ fn rejects_what_would_not_make_a_working_local_leaf() {
 
     let system = auth::leaf_system_creds(&creds);
     let text = render(&Leaf { system_creds: Some(&system), ..leaf(&tcp, &creds, &server_conf) }, &dir).unwrap();
-    assert_eq!(text.matches("urls: [\"nats-leaf://127.0.0.1:7422\"]").count(), 2, "{text}");
+    assert_eq!(text.matches("urls: [\"nats-leaf://127.0.0.1:7422\"]").count(), 3, "uplink, store and system: {text}");
     let jwt = normalize(&dir).unwrap().join("jwt");
     let resolver = format!("resolver {{ type: full, dir: {}, interval: \"10s\" }}", quote(&jwt.to_string_lossy()));
     assert!(text.contains(&resolver), "{text}");

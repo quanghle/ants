@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{AttachmentHandle, HUMANS_BUCKET, Humans, INTAKE_STREAM, STREAM, link_outbox, owner_outbox};
 use crate::{
     Error, FILES_BUCKET, LINKS_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET, TRAIL_RUNS_INDEX, TRAIL_STEPS,
-    TRAIL_STEPS_ON, inbox_prefix, subject,
+    TRAIL_STEPS_ON, subject,
 };
 
 /// Whether `s` is safe as one NATS subject token and as a JetStream consumer name.
@@ -221,12 +221,6 @@ impl Machine {
     /// flag on the hub: `$JSC.R.<domain>.<account hash>.<stream>.`, then the consumer and a unique token.
     pub fn source_replies(&self) -> String {
         format!("$JSC.R.{self}.*.{OUTBOX_STREAM}")
-    }
-
-    /// Inbox prefix of the connection of `human` that sets up the machine's outbox (`ants leaf outbox`): the leaf node
-    /// answers on it, so it is the machine's own, apart from the replies of any other request of that human.
-    pub fn setup_inbox(&self, human: &UserId) -> String {
-        format!("{}.leaf.{self}", inbox_prefix(human))
     }
 
     /// What the hub's [`STREAM`] admits from the machine's outbox for `user` in `role`, as pairs of an

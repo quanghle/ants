@@ -1,7 +1,8 @@
 //! Messages a stream relayed: an ant stores a message under a key of its own and asks for it by a direct get naming a
-//! reply subject it may not publish to, where the stream sends it with the headers the ant stored. Each reader of such
-//! a subject refuses it. Likewise what the server itself answers such a subject with: the ack of a publish into a
-//! stream, or the status of a direct get finding nothing.
+//! reply subject it may not publish to, where the stream sends it with the headers the ant stored. Likewise what the
+//! server itself answers such a subject with: the ack of a publish into a stream, or the status of a direct get finding
+//! nothing. The answer reaches the subject in the team's account, never the store account's, so no stream stores it;
+//! each reader hearing such a subject live refuses it.
 
 use ants_daemon::bus::relayed;
 use ants_daemon::hub;
@@ -29,29 +30,32 @@ async fn relay(ant: &Client, key: &str, payload: Vec<u8>, onto: &str) {
     ant.flush().await.unwrap();
 }
 
-/// Returns once `stream` stored a message on `subject`, as a human gets it.
-async fn stored(human: &Client, stream: &str, subject: &str) {
+/// How long the server is given to store what it would of a relay.
+const SETTLE: Duration = Duration::from_millis(500);
+
+/// The last message `stream` stores on `subject`, as a human gets it, once `SETTLE` passed: none for a stored subject
+/// only relays reached.
+async fn last_stored(human: &Client, stream: &str, subject: &str) -> Option<Vec<u8>> {
+    tokio::time::sleep(SETTLE).await;
     let request = serde_json::json!({ "last_by_subj": subject }).to_string();
-    let get = format!("$JS.API.DIRECT.GET.{stream}");
-    crate::test_support::eventually(&format!("{stream} stores {subject}"), async || {
-        human.request(get.clone(), request.clone().into()).await.unwrap().status.is_none()
-    })
-    .await;
+    let answer = human.request(format!("$JS.API.DIRECT.GET.{stream}"), request.into()).await.unwrap();
+    answer.status.is_none().then(|| answer.payload.to_vec())
 }
 
-/// What `ant` relays onto `key` of `bucket`, three messages; returns once the stream stored the last, as a human gets
-/// it.
+/// Fails if `stream` stored a message on `subject`, as a human gets it.
+async fn not_stored(human: &Client, stream: &str, subject: &str) {
+    assert_eq!(last_stored(human, stream, subject).await, None, "{stream} stored {subject}");
+}
+
+/// What `ant` relays onto `key` of `bucket`, three messages; returns once the stream would have stored them, failing
+/// if its last message there is one of them.
 async fn relays_onto(ant: &Client, human: &Client, bucket: &str, key: &str) {
     let onto = format!("$KV.{bucket}.{key}");
     for n in 0..3 {
         relay(ant, &format!("dev-a.relay{n}"), format!("{{\"relay\":{n}}}").into_bytes(), &onto).await;
     }
-    let request = serde_json::json!({ "last_by_subj": onto }).to_string();
-    let get = format!("$JS.API.DIRECT.GET.KV_{bucket}");
-    crate::test_support::eventually(&format!("the last relay onto {onto}"), async || {
-        human.request(get.clone(), request.clone().into()).await.unwrap().payload.as_ref() == br#"{"relay":2}"#
-    })
-    .await;
+    let last = last_stored(human, &format!("KV_{bucket}"), &onto).await;
+    assert!(!last.is_some_and(|last| last.starts_with(br#"{"relay""#)), "a relay stored on {onto}");
 }
 
 fn trail(script: &str, saved_by: Saver) -> SavedTrail {
@@ -83,11 +87,8 @@ async fn a_message_a_stream_relayed_onto_a_subject_an_ant_may_not_publish_is_ref
     // A saved trail: neither `ants trail show` nor a conductor's daemon takes the relayed one as the human's.
     let forged = trail("agent('rm -rf')", Saver::Human { user: human.clone() });
     relay(&a, "dev-a.trail", serde_json::to_vec(&forged).unwrap(), &format!("$KV.{TRAILS_BUCKET}.deploy")).await;
-    stored(&h, &format!("KV_{TRAILS_BUCKET}"), &format!("$KV.{TRAILS_BUCKET}.deploy")).await;
-    let shown = crate::machines::latest_in(&h_js, TRAILS_BUCKET, &format!("$KV.{TRAILS_BUCKET}.deploy")).await;
-    assert!(shown.unwrap().is_empty(), "a human's CLI skips it");
+    not_stored(&h, &format!("KV_{TRAILS_BUCKET}"), &format!("$KV.{TRAILS_BUCKET}.deploy")).await;
     let conductor = DirectKv::whole(&b_js, None, TRAILS_BUCKET).await.unwrap();
-    assert!(conductor.get("deploy").await.is_err(), "a conductor's daemon refuses it");
     let genuine = trail("agent('build')", Saver::Human { user: human.clone() });
     saved.put("deploy", serde_json::to_vec(&genuine).unwrap()).await.unwrap();
     let read: SavedTrail = serde_json::from_slice(&conductor.get("deploy").await.unwrap().unwrap()).unwrap();
@@ -98,12 +99,8 @@ async fn a_message_a_stream_relayed_onto_a_subject_an_ant_may_not_publish_is_ref
     let theirs = trail_run_key(&dev_b, &run);
     relay(&a, "dev-a.run", b"{}".to_vec(), &format!("$KV.{TRAIL_RUNS_BUCKET}.{theirs}")).await;
     let stream = format!("KV_{TRAIL_RUNS_BUCKET}");
-    stored(&h, &stream, &format!("$KV.{TRAIL_RUNS_BUCKET}.{theirs}")).await;
+    not_stored(&h, &stream, &format!("$KV.{TRAIL_RUNS_BUCKET}.{theirs}")).await;
     let runs = DirectKv::new(&b_js, None, TRAIL_RUNS_BUCKET).await.unwrap();
-    assert!(runs.get(&theirs).await.is_err(), "dev-b's daemon refuses it");
-    let filter = format!("$KV.{TRAIL_RUNS_BUCKET}.{theirs}");
-    let listed = crate::machines::latest_in(&h_js, TRAIL_RUNS_BUCKET, &filter).await.unwrap();
-    assert!(listed.is_empty(), "a human's CLI skips it");
     runs.put(&theirs, b"{\"genuine\":true}".to_vec()).await.unwrap();
     assert_eq!(runs.get(&theirs).await.unwrap().as_deref(), Some(&b"{\"genuine\":true}"[..]), "dev-b's own put");
 
@@ -155,7 +152,7 @@ async fn a_message_a_stream_relayed_onto_a_subject_an_ant_may_not_publish_is_ref
     let relayed_message = Envelope::new(human.clone(), dev_b.clone(), "relayed");
     let onto = relayed_message.subject();
     relay(&a, "dev-a.inbox", serde_json::to_vec(&relayed_message).unwrap(), &onto).await;
-    stored(&h, STREAM, &onto).await;
+    not_stored(&h, STREAM, &onto).await;
     let genuine = Envelope::new(human.clone(), dev_b.clone(), "genuine");
     bus::publish(&h_js, &genuine).await.unwrap();
     let first = timeout(WAIT, live.next()).await.unwrap().unwrap();
@@ -192,7 +189,7 @@ async fn an_entry_put_before_messages_a_stream_relayed_onto_its_key_is_still_rea
     };
 
     // A saved trail: a conductor's daemon and a human's CLI read the human's, and an ant's relay onto a name saved
-    // none keeps no one from saving it.
+    // none keeps no one from saving it: no relay is stored.
     let saved = DirectKv::whole(&h_js, None, TRAILS_BUCKET).await.unwrap().past_relays();
     let genuine = serde_json::to_vec(&trail("agent('build')", Saver::Human { user: human.clone() })).unwrap();
     saved.put("deploy", genuine.clone()).await.unwrap();
@@ -200,12 +197,8 @@ async fn an_entry_put_before_messages_a_stream_relayed_onto_its_key_is_still_rea
     // And the ack of a publish of the ant's onto it, which the server sends with no header.
     let deploy = format!("$KV.{TRAILS_BUCKET}.deploy");
     ack_onto(&a, &format!("$KV.{TRAIL_RUNS_BUCKET}.dev-a.x"), &deploy).await;
-    let request = serde_json::json!({ "last_by_subj": deploy }).to_string();
-    let get = format!("$JS.API.DIRECT.GET.KV_{TRAILS_BUCKET}");
-    crate::test_support::eventually("the ack stored on the trail", async || {
-        h.request(get.clone(), request.clone().into()).await.unwrap().payload.starts_with(br#"{"stream""#)
-    })
-    .await;
+    let last = last_stored(&h, &format!("KV_{TRAILS_BUCKET}"), &deploy).await;
+    assert_eq!(last.as_ref(), Some(&genuine), "the ack is not stored on the trail");
     let conductor = DirectKv::whole(&b_js, None, TRAILS_BUCKET).await.unwrap().past_relays();
     assert_eq!(conductor.get("deploy").await.unwrap(), Some(genuine.clone()), "a conductor's daemon");
     assert_eq!(latest(TRAILS_BUCKET, "deploy").await, [("deploy".to_owned(), genuine.clone())], "a human's CLI");
@@ -310,23 +303,19 @@ async fn an_answer_the_server_sent_onto_a_subject_an_ant_or_a_webhook_may_not_pu
     // Another conductor's index of its runs, by an ant: its daemon reads no index of no runs.
     let index = format!("$KV.{TRAIL_RUNS_BUCKET}.{}", trail_runs_index_key(&dev_b));
     ack_onto(&a, &ant_own, &index).await;
-    stored(&h, &format!("KV_{TRAIL_RUNS_BUCKET}"), &index).await;
+    not_stored(&h, &format!("KV_{TRAIL_RUNS_BUCKET}"), &index).await;
     let runs = DirectKv::new(&b_js, None, TRAIL_RUNS_BUCKET).await.unwrap();
-    assert!(runs.get(trail_runs_index_key(&dev_b)).await.is_err(), "dev-b's daemon refuses it");
-    let listed = crate::machines::latest_in(&h_js, TRAIL_RUNS_BUCKET, &index).await.unwrap();
-    assert!(listed.is_empty(), "a human's CLI skips it");
+    assert_eq!(runs.get(trail_runs_index_key(&dev_b)).await.unwrap(), None, "dev-b's daemon reads no index");
 
     // A saved trail, by a webhook: neither a conductor's daemon nor a human's CLI reads one.
     let saved = format!("$KV.{TRAILS_BUCKET}.deploy");
     ack_onto(&w, &hook_own, &saved).await;
-    stored(&h, &format!("KV_{TRAILS_BUCKET}"), &saved).await;
-    assert!(DirectKv::whole(&b_js, None, TRAILS_BUCKET).await.unwrap().get("deploy").await.is_err());
-    assert!(crate::machines::latest_in(&h_js, TRAILS_BUCKET, &saved).await.unwrap().is_empty());
+    not_stored(&h, &format!("KV_{TRAILS_BUCKET}"), &saved).await;
 
     // An inbox, by a webhook: no read back of dev-b's inbox takes the ack for a message from the human.
     let onto = Envelope::new(human.clone(), dev_b.clone(), "relayed").subject();
     ack_onto(&w, &hook_own, &onto).await;
-    stored(&h, STREAM, &onto).await;
+    not_stored(&h, STREAM, &onto).await;
     let genuine = Envelope::new(human.clone(), dev_b.clone(), "genuine");
     bus::publish(&h_js, &genuine).await.unwrap();
     let inbox = subject::inbox_of(&dev_b);
@@ -362,7 +351,8 @@ async fn a_message_a_stream_relayed_onto_a_human_an_approval_or_a_channel_is_ref
     registry.loaded().await;
     let onto = format!("$KV.{HUMANS_BUCKET}.dev-a");
     relay(&a, "dev-a.human", serde_json::to_vec(&HumanEntry::new(dev_a.clone())).unwrap(), &onto).await;
-    crate::test_support::eventually("the relay stored", async || humans.entry("dev-a").await.unwrap().is_some()).await;
+    tokio::time::sleep(SETTLE).await;
+    assert!(humans.entry("dev-a").await.unwrap().is_none(), "the relay is not stored");
     let genuine = HumanEntry::new(alice.clone());
     humans.put(genuine.key(), serde_json::to_vec(&genuine).unwrap().into()).await.unwrap();
     crate::test_support::eventually("the registry reads alice", async || registry.is_human(&alice)).await;
@@ -380,7 +370,7 @@ async fn a_message_a_stream_relayed_onto_a_human_an_approval_or_a_channel_is_ref
     b.flush().await.unwrap();
     let forged = ApprovalDecision::new(request.id, dev_b.clone(), Verdict::AllowOnce).by(Some(human.clone()));
     relay(&a, "dev-a.decision", serde_json::to_vec(&forged).unwrap(), &decided).await;
-    stored(&h, STREAM, &decided).await;
+    not_stored(&h, STREAM, &decided).await;
     let stream = h_js.get_stream(STREAM).await.unwrap();
     assert_eq!(crate::tools::decision(&stream, &request).await.unwrap(), None, "the stored decision reader");
     let genuine = ApprovalDecision::new(request.id, dev_b.clone(), Verdict::Reject).by(Some(human.clone()));

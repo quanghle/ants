@@ -118,6 +118,7 @@ pub(crate) async fn run(conn: &Connection<'_>, command: LeafCommand) -> Result<(
             let old = std::fs::read_to_string(&out).ok();
             leaf::write(&config, &out)?;
             ants_daemon::secrets::creds::warn(&creds);
+            ants_daemon::secrets::creds::warn(&auth::leaf_store_creds(&creds));
             system_creds.as_deref().map(ants_daemon::secrets::creds::warn);
             let new = std::fs::read_to_string(&out).with_context(|| format!("reading {}", out.display()))?;
             let taken = leaf::take(&out, old.as_deref(), &new, |action| natsd::apply(&out, action));
@@ -160,7 +161,7 @@ pub(crate) async fn run(conn: &Connection<'_>, command: LeafCommand) -> Result<(
                 );
             }
             let set = change.apply(&machine, kept, || anyhow::anyhow!("no members of {machine}"))?;
-            let leaf = outbox::connect(conn.nats, conn.creds, &nats.me.id, &machine).await?;
+            let leaf = outbox::connect(conn.nats, conn.creds, &nats.me.id).await?;
             outbox::admit(&leaf, &js, &machine, &set.roles()).await?;
             outbox::sourced(&js, &machine, outbox::SOURCE_WAIT).await?;
             println!("outbox of {machine} ready; the hub takes from it what its members send ({set})");

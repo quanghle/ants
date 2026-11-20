@@ -678,7 +678,12 @@ fn leaf_creds(
     })?;
     let approver = EnrollApprover::from(set.enroll_approver);
     auth::issue_leaf(&dir, &machine, &set.roles(), &set.webhooks, approver, domain, &out)?;
-    println!("{}\n{}\nmembers of {machine}: {set}", out.display(), auth::leaf_system_creds(&out).display());
+    println!(
+        "{}\n{}\n{}\nmembers of {machine}: {set}",
+        out.display(),
+        auth::leaf_store_creds(&out).display(),
+        auth::leaf_system_creds(&out).display()
+    );
     Ok(())
 }
 

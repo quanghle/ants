@@ -3,7 +3,7 @@
 `ants auth` manages decentralized NATS NKey/JWT credentials in `~/.config/ants/auth` (`--dir` / `ANTS_AUTH_DIR`; keep `*.nk` seeds private):
 
 ```sh
-ants auth init                                          # writes operator.nk, account.nk, system.nk, server.conf
+ants auth init                                          # writes operator.nk, store.nk, account.nk, system.nk, server.conf
 ants auth user human --js-domain hub                    # human.creds ("human" always gets Role::Human)
 ants auth user alice --human --js-domain hub            # alice.creds (human role, new device ID)
 ants auth user alice --human --admin --js-domain hub    # alice.creds (human role and admin role)
@@ -37,7 +37,8 @@ ants auth push --nats wss://hub.example/nats                # push account JWT t
 
 `ants auth revoke NAME` revokes all keys for `NAME` in `issued.jsonl` (plus matching `.creds` files in `--dir`), updates
 `revoked.json` and `server.conf` (revoking JWTs for those keys issued at or before the revocation timestamp while
-leaving newer keys valid), and pushes the updated account via `$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE` to close
+leaving newer keys valid), and pushes the store account and the updated team account via
+`$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE` to close
 revoked connections immediately. Revoking an ant or assistant by name also deletes its identity record from
 `ants_identities` once the account is pushed (with `--no-push` the record stays; `--key` and `--device` revocations keep
 it). Adding the ant again under the name creates a new record with a new `id`. With the earlier home and built-in
@@ -533,7 +534,7 @@ Credentials a registration granted (a device registered with `ants login`, whose
 
 ## Credentials across upgrades
 
-Each user JWT carries `ants-perms:<n>` (current: `6`), required on every user JWT `ants auth` issues, and live daemons, webhooks, schedules and `ants channel serve` publish their running `ants` and `perms` versions. The version goes up whenever the permissions of a kind of credentials change. Connecting with outdated or soon-to-expire (< 7 d) credentials logs a warning with the exact renewal command (credentials newer than the running ants ask for an upgrade of ants); `ants doctor` (**versions**) verifies that all live services run the current permissions version before rights an older version had are withdrawn by renewing. Leaf uplinks whose members' rights changed need renewal and `ants leaf outbox` too.
+Each user JWT carries `ants-perms:<n>` (current: `7`), required on every user JWT `ants auth` issues, and live daemons, webhooks, schedules and `ants channel serve` publish their running `ants` and `perms` versions. The version goes up whenever the permissions of a kind of credentials change. Connecting with outdated or soon-to-expire (< 7 d) credentials logs a warning with the exact renewal command (credentials newer than the running ants ask for an upgrade of ants); `ants doctor` (**versions**) verifies that all live services run the current permissions version before rights an older version had are withdrawn by renewing. Leaf uplinks whose members' rights changed need renewal and `ants leaf outbox` too.
 
 ## Private keys in the OS credential store
 
