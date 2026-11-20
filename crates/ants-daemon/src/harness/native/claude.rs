@@ -14,7 +14,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -30,6 +29,7 @@ use serde_json::{Value, json};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot, watch};
 
+use super::io::{older, probe_version};
 use super::{
     Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates, approve,
     based_id, context_overflow, cost_base, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited,
@@ -205,27 +205,18 @@ impl Native for Claude {
 
 /// The version of the CLI, from `--version`; fails for one older than [`MIN_VERSION`].
 async fn version(cli: &Cli) -> Result<String, Error> {
-    let mut command = tokio::process::Command::new(cli.program());
-    command.arg("--version").envs(cli.env()).stdin(Stdio::null()).kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    let program = cli.program().display();
-    let output = match tokio::time::timeout(Duration::from_secs(30), command.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => return Err(failed(format!("{}: starting {program}: {e}", cli.name()))),
-        Err(_) => return Err(failed(format!("{}: {program} --version did not answer within 30s", cli.name()))),
-    };
+    let output = probe_version(cli).await?;
     let text = String::from_utf8_lossy(&output.stdout);
     let version = text.split_whitespace().next().unwrap_or_default();
-    let parts: Vec<u64> = version.split('.').map_while(|part| part.parse().ok()).collect();
-    if parts.len() != 3 {
+    if version.split('.').map_while(|part| part.parse::<u64>().ok()).count() != 3 {
         return Err(failed(format!(
-            "{}: {program} --version printed {:?}, not a Claude Code version",
+            "{}: {} --version printed {:?}, not a Claude Code version",
             cli.name(),
+            cli.program().display(),
             text.trim()
         )));
     }
-    if parts[..] < MIN_VERSION[..] {
+    if older(version, MIN_VERSION) {
         let [major, minor, patch] = MIN_VERSION;
         return Err(failed(format!(
             "{}: Claude Code {version} is older than {major}.{minor}.{patch}, the first version protocol claude runs",
