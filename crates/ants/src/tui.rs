@@ -725,6 +725,12 @@ impl Chat {
                 self.model.data.settled.deciding(&request);
                 self.feed.decide(*request, verdict, self.model.data.me().clone());
             }
+            Action::AllowAll(requests) => {
+                for request in &requests {
+                    self.model.data.settled.deciding(request);
+                }
+                self.feed.allow_all(requests, self.model.data.me().clone());
+            }
             Action::Edit(text) => self.handover = Some(Handover::Edit(text)),
             Action::Page(text) => self.handover = Some(Handover::Page(text)),
             Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),

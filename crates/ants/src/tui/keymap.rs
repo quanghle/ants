@@ -352,6 +352,15 @@ const HOME: &[Entry] = &[
         4,
         home_pending,
     ),
+    Entry::new(
+        &[Key::Char('l')],
+        "l",
+        "allow all",
+        "allow once each request of the selected group of the oldest's tool kind, once y confirms",
+        4,
+        home_group,
+    ),
+    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the allow-all l asked for", 1, home_armed),
     Entry::new(DIGITS, "1-9", "answer", "answer the selected question by number", 5, home_question),
     Entry::new(
         &[Key::Enter],
@@ -856,6 +865,14 @@ fn home_selected(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> 
 
 fn home_pending(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
     check(home_item(model, now).is_some_and(|i| i.pending().is_some()), "no tool request waits")
+}
+
+fn home_group(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
+    check(home_item(model, now).is_some_and(|i| i.of_kind().is_some()), "no group of tool requests selected")
+}
+
+fn home_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
+    check(matches!(model.page(), Page::Home(page) if page.prompt().is_some()), "no allow-all asked for")
 }
 
 fn home_reply(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
