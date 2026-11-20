@@ -161,7 +161,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
         match (&loaded, &setup.worker) {
             (None, _) => Check::skip("trail worker", "no config file read: no daemon here conducts runs"),
             (Some(_), None) => Check::skip("trail worker", "no ants executable found to start as the worker"),
-            (Some(_), Some(program)) => check_worker(program).await,
+            (Some(_), Some(program)) => check_worker(program, ants_trail::GRACE).await,
         }
     };
     let ((reached, connected), ants_checked, resolver, reactions, trail_saves, update, worker) =

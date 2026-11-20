@@ -501,8 +501,13 @@ async fn an_ant_the_uplink_has_no_room_for_is_neither_signed_nor_recorded() {
         let _ = stop_rx.await;
     });
     let approving = async {
-        while approver.pending(None).await.unwrap().is_empty() {}
-        let refused = approver.approve(&team, &dev_x, None).await;
+        // A loaded machine may let a listen pass without the request repeating into it: listen again.
+        let refused = loop {
+            let refused = approver.approve(&team, &dev_x, None).await;
+            if !refused.as_ref().is_err_and(|e| format!("{e:#}").contains("no enrollment request for dev-xx heard")) {
+                break refused;
+            }
+        };
         // Long enough for an answer to arrive, had one gone out.
         tokio::time::sleep(REPEAT * 3).await;
         stop_tx.send(()).unwrap();
