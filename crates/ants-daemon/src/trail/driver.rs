@@ -5,10 +5,10 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use ants_proto::{
-    DEFAULT_TURN_BUDGET, PendingCall, RunId, RunLimit, RunState, StepStage, ThreadId, TrailFunction, TrailRun,
-    TrailSession, TrailStepThread, lines, one_line,
+    CallAnswer, DEFAULT_TURN_BUDGET, JournalEntry, PendingCall, RunId, RunLimit, RunState, StepStage, ThreadId,
+    TrailFunction, TrailRun, TrailSession, TrailStepThread, lines, one_line,
 };
-use ants_trail::{Call, Event, Function, JournalEntry, Limit, Progress, Run, RunError, Status, WorkerError};
+use ants_trail::{Call, Event, Progress, Run, RunError, Status, WorkerError};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
@@ -16,7 +16,7 @@ use futures::stream::{FuturesUnordered, StreamExt as _};
 use uuid::Uuid;
 
 use super::report::clip;
-use super::{Answer, Slot, Step, Trails, load, locked, steps};
+use super::{Slot, Step, Trails, load, locked, steps};
 
 /// How long a pass that failed waits before the next, at first and at most.
 pub(super) const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -136,7 +136,7 @@ impl Trails {
             match engine.status().clone() {
                 Status::Done { result } => return self.end(slot, RunState::Done { result }).await,
                 Status::Failed { error, limit } => {
-                    let limit = limit.map(run_limit).or(broke);
+                    let limit = limit.or(broke);
                     if limit.is_some() {
                         self.forget_refusals(&header.run, &engine).await?;
                     }
@@ -220,7 +220,7 @@ impl Trails {
                 Ok(progress)
             }
             Err(RunError::Worker(e @ (WorkerError::ComputeLimit(_) | WorkerError::OutOfMemory))) => {
-                let limit = if e == WorkerError::OutOfMemory { Limit::Memory } else { Limit::Compute };
+                let limit = if e == WorkerError::OutOfMemory { RunLimit::Memory } else { RunLimit::Compute };
                 Ok(engine.fail_on(Some(limit), format!("replaying the run's journal: {e}")))
             }
             Err(RunError::Worker(e @ (WorkerError::Oversized(_) | WorkerError::Protocol(_)))) => {
@@ -370,7 +370,7 @@ impl Trails {
                 issued.broke = Some(RunLimit::Steps);
                 continue;
             }
-            let to = if call.function == Function::Trail {
+            let to = if call.function == TrailFunction::Trail {
                 match self.refuse_trail(&header, call).await {
                     None => Ok(self.inner.ant.clone()),
                     Some(error) => Err(error),
@@ -386,11 +386,11 @@ impl Trails {
                 }
             };
             let turn_budget = match call.function {
-                Function::Agent => DEFAULT_TURN_BUDGET.min(turns),
-                Function::Human => DEFAULT_TURN_BUDGET,
-                Function::Trail | Function::Goto => 0,
+                TrailFunction::Agent => DEFAULT_TURN_BUDGET.min(turns),
+                TrailFunction::Human => DEFAULT_TURN_BUDGET,
+                TrailFunction::Trail | TrailFunction::Goto => 0,
             };
-            if turn_budget == 0 && call.function == Function::Agent {
+            if turn_budget == 0 && call.function == TrailFunction::Agent {
                 if self.holds_turns(&header) {
                     slot.book().starved = true;
                 } else {
@@ -398,12 +398,12 @@ impl Trails {
                 }
                 continue;
             }
-            if call.function == Function::Agent {
+            if call.function == TrailFunction::Agent {
                 turns -= turn_budget;
             }
             let pending = PendingCall {
                 call: call.call,
-                function: steps::function(call.function),
+                function: call.function,
                 args: call.args.clone(),
                 to,
                 thread: ThreadId::generate(),
@@ -413,7 +413,7 @@ impl Trails {
                 turn_budget,
                 retries: 0,
             };
-            if call.function != Function::Trail {
+            if call.function != TrailFunction::Trail {
                 if let Err(error) = steps::envelope(&header, &pending, None) {
                     issued.answers.push(self.raise(&header.run, call, error).await?);
                     continue;
@@ -421,7 +421,7 @@ impl Trails {
                 locked(&self.inner.threads).insert(pending.thread.clone(), Step::Live(header.run.clone()));
             }
             made += 1;
-            if call.function == Function::Agent {
+            if call.function == TrailFunction::Agent {
                 granted.push((pending.call, pending.thread.clone()));
             }
             if counted {
@@ -453,7 +453,7 @@ impl Trails {
         call: &Call,
         colony: &mut Option<Vec<ants_proto::ColonyEntry>>,
     ) -> Result<Result<ants_proto::UserId, String>> {
-        if call.function == Function::Human {
+        if call.function == TrailFunction::Human {
             let asked = crate::mcp::asked_questions(call.args.clone()).map(|_| ());
             return Ok(asked.map(|()| self.inner.humans.owner_or_default(header.owner.as_ref())));
         }
@@ -488,7 +488,7 @@ impl Trails {
             call: call.call,
             function: call.function,
             args: call.args.clone(),
-            answer: Answer::Error(error),
+            answer: CallAnswer::Error(error),
         };
         self.inner.store.put_entry(run, &entry).await?;
         Ok(entry)
@@ -502,7 +502,7 @@ impl Trails {
     async fn forget_refusals(&self, run: &RunId, engine: &Run) -> Result<()> {
         let store = &self.inner.store;
         let Some(stored) = store.session(run).await? else { return Ok(()) };
-        let session: ants_trail::RunState = serde_json::from_str(&stored.session)?;
+        let session: ants_trail::Session = serde_json::from_str(&stored.session)?;
         let pending = stored.pending.iter().map(|call| call.call);
         let mut kept: HashSet<u32> = session.answered().iter().copied().chain(pending).collect();
         kept.extend(Run::restore(session, Vec::new()).outstanding().iter().map(|call| call.call));
@@ -565,7 +565,7 @@ impl Trails {
     async fn publish_child(&self, slot: &Slot, header: &TrailRun, call: &PendingCall) -> Result<()> {
         if let Err(error) = self.start_child(header, call).await? {
             self.give_back_unsent(slot, std::slice::from_ref(call));
-            return self.resolve(slot, header, call, Answer::Error(error), 0).await;
+            return self.resolve(slot, header, call, CallAnswer::Error(error), 0).await;
         }
         let sent = {
             let mut book = slot.book();
@@ -621,16 +621,6 @@ fn retry_or_fail(slot: &Slot, engine: &mut Run, e: WorkerError, doing: &'static 
         }
     }
     Err(anyhow!(e).context(doing))
-}
-
-/// The limit of a run's record that `limit`, of its script's worker, is.
-fn run_limit(limit: Limit) -> RunLimit {
-    match limit {
-        Limit::Steps => RunLimit::Steps,
-        Limit::Compute => RunLimit::Compute,
-        Limit::Session => RunLimit::Session,
-        Limit::Memory => RunLimit::Memory,
-    }
 }
 
 /// The turns a pending step may still spend.

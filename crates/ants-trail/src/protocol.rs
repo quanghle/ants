@@ -1,8 +1,10 @@
 //! What the runner and an `ants subprocess` worker exchange: one JSON [`Request`] on the worker's stdin, one JSON
-//! [`Response`] on its stdout. Also the calls, answers, events and journal entries a [`Run`](crate::Run) hands its host.
+//! [`Response`] on its stdout. Also the calls and events a [`Run`](crate::Run) hands its host; its answers and journal
+//! entries are ants-proto's [`CallAnswer`] and [`JournalEntry`](ants_proto::JournalEntry), as the journal stores them.
 
 use std::time::Duration;
 
+use ants_proto::{CallAnswer, RunLimit, TrailFunction};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 
@@ -76,80 +78,13 @@ impl Default for Limits {
     }
 }
 
-/// The limit of [`Limits`] a failed run broke ([`Response::Failed`], [`Status::Failed`](crate::Status::Failed)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Limit {
-    /// A call past [`Limits::steps`] raised, and the script failed in the same request.
-    Steps,
-    /// The script computed past [`Limits::compute_ms`] between two suspensions.
-    Compute,
-    /// The dumped session passed [`Limits::dump_bytes`].
-    Session,
-    /// The script's heap passed [`Limits::memory_bytes`].
-    Memory,
-}
-
-/// A host function the script calls, suspending until the host answers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Function {
-    /// `agent(prompt, ant=, capability=, schema=, label=, tips=)`: args `{"prompt", "ant"?, "capability"?, "schema"?,
-    /// "label"?, "tips"?}`, the keyword arguments given as None left out.
-    Agent,
-    /// `human(questions)`: args `{"questions"}`.
-    Human,
-    /// `trail(name, args=None)`: args `{"name", "args"?}`, answered by a run of the trail saved as `name`.
-    Trail,
-    /// `goto(trail=None, at=None, state=None)`: args `{"trail"?, "at"?, "state"?}`. No step: the host ends the run's
-    /// leg there and goes on in a run of the next leg ([`crate::Run::numbered_from`]), or answers the call with an
-    /// error naming why not.
-    Goto,
-}
-
-impl Function {
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Agent => "agent",
-            Self::Human => "human",
-            Self::Trail => "trail",
-            Self::Goto => "goto",
-        }
-    }
-
-    /// Whether a call of the function is a step, counted against the step and concurrency limits.
-    #[must_use]
-    pub fn is_step(self) -> bool {
-        self != Self::Goto
-    }
-}
-
 /// A call the script made that the host performs: a step, or a goto.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Call {
     /// The call's id, unique within the run: Monty's, past the ids of the run's earlier legs.
     pub call: u32,
-    pub function: Function,
+    pub function: TrailFunction,
     pub args: Value,
-}
-
-/// The host's answer to a call: its result, or an error raised in the script (as RuntimeError) where the call is
-/// awaited.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Answer {
-    Ok(Value),
-    Error(String),
-}
-
-/// An answered call, as the journal keeps it: `{"call", "function", "args", "answer": {"ok": …} | {"error": …}}`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct JournalEntry {
-    pub call: u32,
-    pub function: Function,
-    pub args: Value,
-    pub answer: Answer,
 }
 
 /// What the script reported without waiting: `phase(title)`, and `log(text)` or `print()` output.
@@ -182,7 +117,7 @@ pub enum Request {
     /// each followed by the script running until it waits again.
     Resume {
         snapshot: Box<RawValue>,
-        answers: Vec<(u32, Answer)>,
+        answers: Vec<(u32, CallAnswer)>,
         limits: Limits,
         seed: u64,
         /// Steps the leg made so far, against `limits.steps`.
@@ -223,7 +158,7 @@ pub enum Response {
         events: Vec<Event>,
         /// The limit the script broke, failing on it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        limit: Option<Limit>,
+        limit: Option<RunLimit>,
     },
     /// The request could not be served: unreadable, or under limits the worker does not take.
     Refused { error: String },

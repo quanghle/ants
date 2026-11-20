@@ -3,11 +3,12 @@
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ants_proto::{CallAnswer, JournalEntry, RunLimit};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
 
-use crate::protocol::{Answer, Call, Event, JournalEntry, Limit, Limits, Request, Response};
+use crate::protocol::{Call, Event, Limits, Request, Response};
 use crate::runner::{self, Worker, WorkerError};
 use crate::trail::{self, Meta, TrailError};
 use crate::value::check_depth;
@@ -25,7 +26,7 @@ pub enum Status {
         error: String,
         /// The limit that stopped it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        limit: Option<Limit>,
+        limit: Option<RunLimit>,
     },
 }
 
@@ -79,7 +80,7 @@ pub enum RunError {
 /// Everything a run needs to continue in another process, but its journal (see [`Run::restore`]). A run is one leg of
 /// a trail run: a goto() ends it, and the host goes on in a run of the next leg ([`Run::numbered_from`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunState {
+pub struct Session {
     script: String,
     /// The waypoint the run enters its trail at; none for a trail without waypoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,7 +109,7 @@ pub struct RunState {
     status: Status,
 }
 
-impl RunState {
+impl Session {
     #[must_use]
     pub fn meta(&self) -> &Meta {
         &self.meta
@@ -160,7 +161,7 @@ impl RunState {
 /// elsewhere with [`Run::restore`].
 #[derive(Debug, Clone)]
 pub struct Run {
-    state: RunState,
+    state: Session,
     /// In the order of `state.answered`.
     journal: Vec<JournalEntry>,
 }
@@ -189,7 +190,7 @@ impl Run {
         check_depth(&args).map_err(RunError::Args)?;
         let meta = trail::check(script)?;
         let entry = meta.entry(entry).map_err(RunError::Entry)?.map(str::to_owned);
-        let state = RunState {
+        let state = Session {
             script: script.to_owned(),
             entry,
             args,
@@ -211,7 +212,7 @@ impl Run {
     }
 
     /// The run, not started, with its call ids from `first` on: a leg following another, numbered from that one's
-    /// [`RunState::next_call`], so call ids are unique across a trail run's legs.
+    /// [`Session::next_call`], so call ids are unique across a trail run's legs.
     #[must_use]
     pub fn numbered_from(mut self, first: u32) -> Self {
         self.state.first_call = first;
@@ -222,7 +223,7 @@ impl Run {
     /// Continues a run from its stored state and journal, in any order. Journal entries the state does not know yet,
     /// stored before a crash of the host, count as answers not sent to the session yet.
     #[must_use]
-    pub fn restore(mut state: RunState, journal: Vec<JournalEntry>) -> Self {
+    pub fn restore(mut state: Session, journal: Vec<JournalEntry>) -> Self {
         let order = |call: u32| state.answered.iter().position(|&c| c == call).unwrap_or(usize::MAX);
         let mut journal = journal;
         journal.sort_by_key(|entry| (order(entry.call), entry.call));
@@ -241,7 +242,7 @@ impl Run {
     /// with the run's input, clock and seed, and answers each call from the journal in order. Fails naming the first
     /// call the script makes otherwise than the journal holds.
     pub async fn replay(
-        state: RunState,
+        state: Session,
         journal: Vec<JournalEntry>,
         worker: &Worker,
     ) -> Result<(Self, Progress), RunError> {
@@ -309,16 +310,16 @@ impl Run {
 
     /// Records the host's answer to a call it was handed, in the journal, and frees its concurrency slot. The script
     /// receives it at the next [`Run::resume`]; a value nested deeper than [`crate::MAX_DEPTH`] as an error instead.
-    pub fn answer(&mut self, call: u32, answer: Answer) -> Result<JournalEntry, RunError> {
+    pub fn answer(&mut self, call: u32, answer: CallAnswer) -> Result<JournalEntry, RunError> {
         if self.state.status != Status::Running {
             return Err(RunError::Ended);
         }
         let answer = match answer {
-            Answer::Ok(value) => match check_depth(&value) {
-                Ok(()) => Answer::Ok(value),
-                Err(e) => Answer::Error(format!("the answer is refused: {e}")),
+            CallAnswer::Ok(value) => match check_depth(&value) {
+                Ok(()) => CallAnswer::Ok(value),
+                Err(e) => CallAnswer::Error(format!("the answer is refused: {e}")),
             },
-            error @ Answer::Error(_) => error,
+            error @ CallAnswer::Error(_) => error,
         };
         let index = self.state.outstanding.iter().position(|c| c.call == call).ok_or(RunError::UnknownCall(call))?;
         let Call { call, function, args } = self.state.outstanding.remove(index);
@@ -355,7 +356,7 @@ impl Run {
     }
 
     /// Records an answer and resumes the run: [`Run::answer`] then [`Run::resume`].
-    pub async fn resolve(&mut self, worker: &Worker, call: u32, answer: Answer) -> Result<Progress, RunError> {
+    pub async fn resolve(&mut self, worker: &Worker, call: u32, answer: CallAnswer) -> Result<Progress, RunError> {
         self.answer(call, answer)?;
         self.resume(worker).await
     }
@@ -366,7 +367,7 @@ impl Run {
     }
 
     /// Fails the run on `limit`, as [`Run::fail`] does.
-    pub fn fail_on(&mut self, limit: Option<Limit>, error: impl Into<String>) -> Progress {
+    pub fn fail_on(&mut self, limit: Option<RunLimit>, error: impl Into<String>) -> Progress {
         let mut progress = Progress::default();
         if self.state.status == Status::Running {
             self.end(Status::Failed { error: error.into(), limit }, &mut progress);
@@ -375,7 +376,7 @@ impl Run {
     }
 
     #[must_use]
-    pub fn state(&self) -> &RunState {
+    pub fn state(&self) -> &Session {
         &self.state
     }
 
@@ -426,7 +427,7 @@ impl Run {
     }
 
     /// The journal's answers from the `from`th on, by the session's call ids.
-    fn answers(&self, from: usize) -> Vec<(u32, Answer)> {
+    fn answers(&self, from: usize) -> Vec<(u32, CallAnswer)> {
         let first = self.state.first_call;
         self.journal[from..].iter().map(|e| (e.call.saturating_sub(first), e.answer.clone())).collect()
     }
@@ -448,12 +449,12 @@ impl Run {
             Err(WorkerError::ComputeLimit(_)) => {
                 let most = self.state.limits.compute();
                 let error = format!("the trail ran past its compute limit of {most:?}");
-                self.end(Status::Failed { error, limit: Some(Limit::Compute) }, &mut progress);
+                self.end(Status::Failed { error, limit: Some(RunLimit::Compute) }, &mut progress);
             }
             Err(WorkerError::OutOfMemory) => {
                 let most = self.state.limits.memory_bytes;
                 let error = format!("the trail ran out of memory ({most} bytes)");
-                self.end(Status::Failed { error, limit: Some(Limit::Memory) }, &mut progress);
+                self.end(Status::Failed { error, limit: Some(RunLimit::Memory) }, &mut progress);
             }
             // The same request would answer the same.
             Err(e @ (WorkerError::Oversized(_) | WorkerError::Protocol(_))) => {
@@ -590,7 +591,7 @@ mod tests {
         run.start(&fake("run-slow", "exec sleep 30")).await.unwrap();
         assert!(started.elapsed() < GRACE + Duration::from_secs(2));
         let error = "the trail ran past its compute limit of 1ms".to_owned();
-        assert_eq!(*run.status(), Status::Failed { error, limit: Some(Limit::Compute) });
+        assert_eq!(*run.status(), Status::Failed { error, limit: Some(RunLimit::Compute) });
         assert!(matches!(run.resume(&fake("run-slow", "exit 1")).await, Err(RunError::Ended)));
     }
 
@@ -599,7 +600,7 @@ mod tests {
         let mut run = run(Limits::default());
         run.start(&fake("run-oom", "exit 65")).await.unwrap();
         let error = format!("the trail ran out of memory ({} bytes)", Limits::DEFAULT_MEMORY_BYTES);
-        assert_eq!(*run.status(), Status::Failed { error, limit: Some(Limit::Memory) });
+        assert_eq!(*run.status(), Status::Failed { error, limit: Some(RunLimit::Memory) });
     }
 
     #[tokio::test]

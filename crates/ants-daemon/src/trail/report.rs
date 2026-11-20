@@ -7,10 +7,10 @@
 use std::fmt::Write as _;
 
 use ants_proto::{
-    DEFAULT_TURN_BUDGET, Envelope, MAX_TITLE, NotesPost, PendingCall, RunId, RunLimit, RunState, StatusUpdate,
-    StepStage, ThreadId, TrailFunction, TrailLimits, TrailRun, UserId,
+    CallAnswer, DEFAULT_TURN_BUDGET, Envelope, MAX_TITLE, NotesPost, PendingCall, RunId, RunLimit, RunState,
+    StatusUpdate, StepStage, ThreadId, TrailFunction, TrailLimits, TrailRun, UserId,
 };
-use ants_trail::{Answer, Event, Meta};
+use ants_trail::{Event, Meta};
 
 use super::invite::end_id;
 use super::{Trails, steps};
@@ -108,8 +108,8 @@ impl Trails {
     }
 
     /// Tell `step` answered with `answer`.
-    pub(super) fn report_answered(&self, run: &TrailRun, step: &PendingCall, answer: &Answer) {
-        let stage = if matches!(answer, Answer::Error(_)) { StepStage::Failed } else { StepStage::Answered };
+    pub(super) fn report_answered(&self, run: &TrailRun, step: &PendingCall, answer: &CallAnswer) {
+        let stage = if matches!(answer, CallAnswer::Error(_)) { StepStage::Failed } else { StepStage::Answered };
         self.report_step(run, step, stage);
     }
 

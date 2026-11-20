@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::time::Instant;
 
-use ants_proto::{MAX_STEP_LABEL, one_line};
+use ants_proto::{CallAnswer, MAX_STEP_LABEL, RunLimit, TrailFunction, one_line};
 use monty::{FunctionCall, OsCall, RunProgress};
 use monty_types::{
     DateTimeSource, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, OsFunctionCall,
@@ -14,7 +14,7 @@ use monty_types::{
 };
 use serde_json::value::RawValue;
 
-use crate::protocol::{Answer, Call, Event, Function, Limit, Limits, Request, Response};
+use crate::protocol::{Call, Event, Limits, Request, Response};
 use crate::trail;
 use crate::value::{from_monty, to_monty};
 
@@ -180,7 +180,7 @@ fn start(script: &str, args: &serde_json::Value, limits: Limits, clock: i64, see
     session.drive(progress).respond(session)
 }
 
-fn resume(snapshot: &RawValue, answers: Vec<(u32, Answer)>, limits: Limits, seed: u64, steps: u32) -> Response {
+fn resume(snapshot: &RawValue, answers: Vec<(u32, CallAnswer)>, limits: Limits, seed: u64, steps: u32) -> Response {
     let mut session = Session::new(limits, seed, steps);
     let limited = with_limits(snapshot, &resource_limits(&limits));
     let snapshot = limited.as_deref().unwrap_or(snapshot);
@@ -195,8 +195,8 @@ fn resume(snapshot: &RawValue, answers: Vec<(u32, Answer)>, limits: Limits, seed
             continue;
         }
         let result = match answer {
-            Answer::Ok(value) => ExtFunctionResult::Return(to_monty(&value)),
-            Answer::Error(message) => {
+            CallAnswer::Ok(value) => ExtFunctionResult::Return(to_monty(&value)),
+            CallAnswer::Error(message) => {
                 ExtFunctionResult::Error(MontyException::new(ExcType::RuntimeError, Some(message)))
             }
         };
@@ -280,7 +280,7 @@ impl Outcome {
                         error: format!("the dumped session of {size} bytes passes the limit of {most} bytes"),
                         calls,
                         events,
-                        limit: Some(Limit::Session),
+                        limit: Some(RunLimit::Session),
                     };
                 }
                 match RawValue::from_string(snapshot) {
@@ -309,7 +309,7 @@ struct Session {
     resumed: Instant,
     /// The limit the script broke, should it fail: one of time or memory it failed on, else the steps once a call
     /// past them raised.
-    limit: Option<Limit>,
+    limit: Option<RunLimit>,
 }
 
 /// The notes of the current resume: what `print()` wrote not yet turned into events, and the bytes of notes written.
@@ -380,17 +380,17 @@ impl Session {
     /// of the script's own comes from: its innermost frame then hides the caret, as CPython's traceback of a `raise`.
     /// Past that, the time limit is told by the time the resume took, the memory limit by Monty's message naming the
     /// request's limit, which tell them from the errors Monty's builtins raise.
-    fn broke(&self, exception: &MontyException) -> Option<Limit> {
+    fn broke(&self, exception: &MontyException) -> Option<RunLimit> {
         if exception.traceback().last().is_some_and(|frame| frame.hide_caret) {
             return None;
         }
         match exception.exc_type() {
-            ExcType::TimeoutError if self.resumed.elapsed() >= self.limits.compute() => Some(Limit::Compute),
+            ExcType::TimeoutError if self.resumed.elapsed() >= self.limits.compute() => Some(RunLimit::Compute),
             ExcType::MemoryError => {
                 let message = exception.message()?.strip_prefix("memory limit exceeded: ")?;
                 let (used, limit) = message.strip_suffix(" bytes")?.split_once(" bytes > ")?;
                 let (used, limit) = (used.parse::<usize>().ok()?, limit.parse::<usize>().ok()?);
-                (limit == self.limits.memory_bytes && used > limit).then_some(Limit::Memory)
+                (limit == self.limits.memory_bytes && used > limit).then_some(RunLimit::Memory)
             }
             _ => None,
         }
@@ -426,10 +426,10 @@ impl Session {
 
     fn call(&mut self, call: FunctionCall) -> Result<RunProgress, MontyException> {
         let function = match call.function_name.as_str() {
-            "__ants_agent" => Some(Function::Agent),
-            "__ants_human" => Some(Function::Human),
-            "__ants_trail" => Some(Function::Trail),
-            "__ants_goto" => Some(Function::Goto),
+            "__ants_agent" => Some(TrailFunction::Agent),
+            "__ants_human" => Some(TrailFunction::Human),
+            "__ants_trail" => Some(TrailFunction::Trail),
+            "__ants_goto" => Some(TrailFunction::Goto),
             "__ants_phase" | "__ants_log" => {
                 let phase = call.function_name == "__ants_phase";
                 let text = call.args.arg(0).and_then(|a| a.as_str()).unwrap_or_default().to_owned();
@@ -447,7 +447,7 @@ impl Session {
         let result = match function {
             None => ExtFunctionResult::NotFound(call.function_name.clone()),
             Some(function) if function.is_step() && self.steps >= self.limits.steps => {
-                self.limit = Some(Limit::Steps);
+                self.limit = Some(RunLimit::Steps);
                 ExtFunctionResult::Error(MontyException::new(
                     ExcType::RuntimeError,
                     Some(format!("the run reached its limit of {} steps", self.limits.steps)),
@@ -475,7 +475,7 @@ impl Session {
     }
 
     /// Counts a call's arguments against the [`CALL_BYTES`] of the current resume, refusing them past it.
-    fn charge(&mut self, function: Function, args: &serde_json::Value) -> Result<(), String> {
+    fn charge(&mut self, function: TrailFunction, args: &serde_json::Value) -> Result<(), String> {
         let size = serde_json::to_vec(args).map_or(usize::MAX, |args| args.len());
         let called = self.called.saturating_add(size).saturating_add(CALL_COST);
         if called > CALL_BYTES {
@@ -520,8 +520,8 @@ impl Session {
 /// `args` of an agent() call with its label made one line cut to [`MAX_STEP_LABEL`] characters, left out when
 /// nothing is left of it; the arguments of other calls as they are. Cleaned here, a call is the same in a replay as
 /// in the journal that keeps it.
-fn labelled(function: Function, mut args: serde_json::Value) -> serde_json::Value {
-    let Some(fields) = args.as_object_mut().filter(|_| function == Function::Agent) else { return args };
+fn labelled(function: TrailFunction, mut args: serde_json::Value) -> serde_json::Value {
+    let Some(fields) = args.as_object_mut().filter(|_| function == TrailFunction::Agent) else { return args };
     if let Some(label) = fields.get("label").and_then(serde_json::Value::as_str) {
         let label = one_line(label, MAX_STEP_LABEL);
         if label.is_empty() {
@@ -534,8 +534,8 @@ fn labelled(function: Function, mut args: serde_json::Value) -> serde_json::Valu
 }
 
 /// Why a goto's arguments are refused: a state of more than [`MAX_STATE`] bytes of JSON.
-fn oversized(function: Function, args: &serde_json::Value) -> Option<String> {
-    let state = args.get("state").filter(|_| function == Function::Goto)?;
+fn oversized(function: TrailFunction, args: &serde_json::Value) -> Option<String> {
+    let state = args.get("state").filter(|_| function == TrailFunction::Goto)?;
     let size = serde_json::to_vec(state).map_or(usize::MAX, |state| state.len());
     (size > MAX_STATE).then(|| format!("goto()'s state has {size} bytes of JSON; a leg takes at most {MAX_STATE}"))
 }

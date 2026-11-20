@@ -1,10 +1,9 @@
 //! A call's step: the message carrying it to its recipient, and the answer a reply to it gives the call.
 
 use ants_proto::{
-    Envelope, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, PendingCall, Ranked, TipBoard, TrailFunction, TrailRun, TrailStep,
-    WEBHOOK_ALLOW, check_tip_key, script_sha256,
+    CallAnswer, Envelope, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, PendingCall, Ranked, TipBoard, TrailFunction, TrailRun,
+    TrailStep, WEBHOOK_ALLOW, check_tip_key, script_sha256,
 };
-use ants_trail::{Answer, Function};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
@@ -69,24 +68,6 @@ pub(super) struct GotoArgs {
 impl GotoArgs {
     pub(super) fn of(args: &Value) -> Result<Self, String> {
         serde_json::from_value(args.clone()).map_err(|e| format!("goto() takes a trail and a waypoint by name: {e}"))
-    }
-}
-
-pub(super) fn function(function: Function) -> TrailFunction {
-    match function {
-        Function::Agent => TrailFunction::Agent,
-        Function::Human => TrailFunction::Human,
-        Function::Trail => TrailFunction::Trail,
-        Function::Goto => TrailFunction::Goto,
-    }
-}
-
-pub(super) fn engine_function(function: TrailFunction) -> Function {
-    match function {
-        TrailFunction::Agent => Function::Agent,
-        TrailFunction::Human => Function::Human,
-        TrailFunction::Trail => Function::Trail,
-        TrailFunction::Goto => Function::Goto,
     }
 }
 
@@ -243,7 +224,7 @@ pub(super) fn envelope(run: &TrailRun, pending: &PendingCall, tips: Option<&TipB
 
 /// What a reply gives a call.
 pub(super) enum Taken {
-    Answer(Answer),
+    Answer(CallAnswer),
     /// The reply does not match the call's schema, for this reason: ask again.
     Again(String),
 }
@@ -252,17 +233,17 @@ pub(super) enum Taken {
 /// text, or with a schema its JSON, asked for again at most [`MAX_RETRIES`] times while it does not match.
 pub(super) fn taken(pending: &PendingCall, reply: &Envelope) -> Taken {
     if pending.function == TrailFunction::Human {
-        return Taken::Answer(Answer::Ok(Value::String(human_answer(pending, reply))));
+        return Taken::Answer(CallAnswer::Ok(Value::String(human_answer(pending, reply))));
     }
     let Some(schema) = AgentArgs::of(&pending.args).ok().and_then(|args| args.schema) else {
-        return Taken::Answer(Answer::Ok(Value::String(reply.text.clone())));
+        return Taken::Answer(CallAnswer::Ok(Value::String(reply.text.clone())));
     };
     match schema::reply_json(&reply.text).and_then(|value| schema::check(&schema, &value).map(|()| value)) {
-        Ok(value) => Taken::Answer(Answer::Ok(value)),
+        Ok(value) => Taken::Answer(CallAnswer::Ok(value)),
         Err(why) if pending.retries < MAX_RETRIES => Taken::Again(why),
         Err(why) => {
             let asked = pending.retries + 1;
-            Taken::Answer(Answer::Error(format!("the reply did not match the schema, asked {asked} times: {why}")))
+            Taken::Answer(CallAnswer::Error(format!("the reply did not match the schema, asked {asked} times: {why}")))
         }
     }
 }

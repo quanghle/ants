@@ -31,11 +31,11 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
-    Envelope, JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, NoticeKind, PendingCall, QueuedCall, Role, RunId, RunLimit,
-    RunState, SpendsFrom, StepStage, ThreadId, TipBoard, TrailFunction, TrailLeg, TrailLimits, TrailName, TrailRun,
-    TrailSession, TrailSource, TrailStart, UserId, WaitingStep,
+    CallAnswer, Envelope, JournalEntry, JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, NoticeKind, PendingCall,
+    QueuedCall, Role, RunId, RunLimit, RunState, SpendsFrom, StepStage, ThreadId, TipBoard, TrailFunction, TrailLeg,
+    TrailLimits, TrailName, TrailRun, TrailSession, TrailSource, TrailStart, UserId, WaitingStep,
 };
-use ants_trail::{Answer, JournalEntry, Limits, Run, Worker};
+use ants_trail::{Limits, Run, Worker};
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::Value;
@@ -218,7 +218,7 @@ struct Slot {
 /// What a run's records hold.
 struct Book {
     header: TrailRun,
-    /// The session as last stored: [`ants_trail::RunState`] as JSON.
+    /// The session as last stored: [`ants_trail::Session`] as JSON.
     session: String,
     pending: Vec<PendingCall>,
     queued: Vec<QueuedCall>,
@@ -228,7 +228,7 @@ struct Book {
     /// since its resume, counting no step again ([`TrailSession::anew`]).
     anew: Vec<u32>,
     /// Answers whose journal entries are stored, for the next pass to hand the script.
-    answers: Vec<(u32, Answer)>,
+    answers: Vec<(u32, CallAnswer)>,
     /// The limit one of those answers raises for: a child run's, failed on it.
     broke: Option<RunLimit>,
     /// Whether the wall time passed with the run woken for it.
@@ -722,7 +722,7 @@ impl Trails {
                 && message.in_reply_to == Some(pending.message);
             if withdrawn {
                 let error = format!("{} never answered: the step's message was withdrawn from its queue", pending.to);
-                self.resolve(&slot, &header, &pending, Answer::Error(error), 0).await?;
+                self.resolve(&slot, &header, &pending, CallAnswer::Error(error), 0).await?;
             }
             return Ok(true);
         }
@@ -752,7 +752,7 @@ impl Trails {
         slot: &Slot,
         header: &TrailRun,
         pending: &PendingCall,
-        answer: Answer,
+        answer: CallAnswer,
         spent: u32,
     ) -> Result<()> {
         self.resolve_on(slot, header, pending, answer, spent, None).await
@@ -765,17 +765,12 @@ impl Trails {
         slot: &Slot,
         header: &TrailRun,
         pending: &PendingCall,
-        answer: Answer,
+        answer: CallAnswer,
         spent: u32,
         broke: Option<RunLimit>,
     ) -> Result<()> {
         let run = &header.run;
-        let entry = JournalEntry {
-            call: pending.call,
-            function: steps::engine_function(pending.function),
-            args: pending.args.clone(),
-            answer,
-        };
+        let entry = JournalEntry { call: pending.call, function: pending.function, args: pending.args.clone(), answer };
         self.inner.store.put_entry(run, &entry).await?;
         {
             let mut book = slot.book();
@@ -872,11 +867,11 @@ impl Trails {
         reply: &Envelope,
         why: &str,
         spent: u32,
-    ) -> Result<Option<Answer>> {
+    ) -> Result<Option<CallAnswer>> {
         let schema = steps::AgentArgs::of(&pending.args).ok().and_then(|args| args.schema).unwrap_or_default();
         let Ok(again) = reply.reply(self.inner.ant.clone(), String::new(), Role::Ant) else {
             let error = format!("the reply did not match the schema, with no turns left to ask again: {why}");
-            return Ok(Some(Answer::Error(error)));
+            return Ok(Some(CallAnswer::Error(error)));
         };
         let step = steps::step(header, pending);
         let tips = self.step_tips(header).await;

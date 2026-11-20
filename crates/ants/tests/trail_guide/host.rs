@@ -1,7 +1,8 @@
 //! What the tests running the trail examples of contrib/skills/ants-trails/SKILL.md and docs/trails.md share: the
 //! examples, and a fake host's answers to their steps.
 
-use ants_trail::{Answer, Call, Function};
+use ants_proto::{CallAnswer, TrailFunction};
+use ants_trail::Call;
 use serde_json::{Map, Value, json};
 
 pub const GUIDE: &str = include_str!("../../../../contrib/skills/ants-trails/SKILL.md");
@@ -78,10 +79,10 @@ fn fake(schema: &Value, name: &str, seed: u64) -> Value {
 }
 
 /// The fake host's answer to a step, after checking the step is one the real host takes.
-pub fn answer(example: &str, call: &Call) -> Answer {
+pub fn answer(example: &str, call: &Call) -> CallAnswer {
     let args = call.args.as_object().unwrap_or_else(|| panic!("{example}: step args {}", call.args));
     match call.function {
-        Function::Agent => {
+        TrailFunction::Agent => {
             for key in args.keys() {
                 assert!(
                     ["prompt", "ant", "capability", "schema", "label", "tips"].contains(&key.as_str()),
@@ -97,7 +98,7 @@ pub fn answer(example: &str, call: &Call) -> Answer {
                 ants_proto::check_tip_key(key).unwrap_or_else(|e| panic!("{example}: tips {key:?}: {e}"));
             }
             let label = args.get("label").and_then(Value::as_str).unwrap_or("step");
-            Answer::Ok(match args.get("schema") {
+            CallAnswer::Ok(match args.get("schema") {
                 Some(schema) => {
                     assert!(schema.is_object(), "{example}: schema {schema}");
                     fake(schema, label, hash(0, prompt))
@@ -105,7 +106,7 @@ pub fn answer(example: &str, call: &Call) -> Answer {
                 None => json!(format!("reply to {label}")),
             })
         }
-        Function::Human => {
+        TrailFunction::Human => {
             let questions = args["questions"].as_array().unwrap_or_else(|| panic!("{example}: {}", call.args));
             assert!((1..=4).contains(&questions.len()), "{example}: {} questions", questions.len());
             let lines: Vec<(String, String)> = questions
@@ -125,11 +126,11 @@ pub fn answer(example: &str, call: &Call) -> Answer {
                     (title, labels[0].to_owned())
                 })
                 .collect();
-            Answer::Ok(json!(match lines.as_slice() {
+            CallAnswer::Ok(json!(match lines.as_slice() {
                 [(_, label)] => label.clone(),
                 lines => lines.iter().map(|(title, label)| format!("{title}: {label}")).collect::<Vec<_>>().join("\n"),
             }))
         }
-        Function::Trail | Function::Goto => unreachable!("{example}: the route answers {:?}", call.function),
+        TrailFunction::Trail | TrailFunction::Goto => unreachable!("{example}: the route answers {:?}", call.function),
     }
 }

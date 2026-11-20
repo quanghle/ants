@@ -1,6 +1,6 @@
 //! Trails: Python scripts that orchestrate ants, run by [Monty](https://github.com/pydantic/monty) in one-shot
 //! `ants subprocess` workers. No NATS: the daemon drives a [`Run`], performs the calls it hands out and stores its
-//! [`RunState`] and journal.
+//! [`Session`] and journal.
 //!
 //! A run's session lives between steps as a snapshot, Monty's serde form as JSON. Each start or resume spawns a
 //! fresh worker ([`Worker`]) with an empty environment, under the run's compute limit; the worker restores the
@@ -13,8 +13,8 @@ mod trail;
 mod value;
 pub mod worker;
 
-pub use protocol::{Answer, Call, Event, Function, JournalEntry, Limit, Limits, Request, Response};
-pub use run::{Progress, Run, RunError, RunState, Status};
+pub use protocol::{Call, Event, Limits, Request, Response};
+pub use run::{Progress, Run, RunError, Session, Status};
 pub use runner::{GRACE, Worker, WorkerError, deadline};
 pub use trail::{Meta, SCRIPT_NAME, TrailError, check};
 pub use value::{MAX_DEPTH, check_depth};

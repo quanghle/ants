@@ -12,9 +12,10 @@
 use std::sync::Arc;
 
 use ants_proto::{
-    PendingCall, RunId, RunState, TrailLeg, TrailLimits, TrailName, TrailParent, TrailRun, UserId, WaitingStep,
+    CallAnswer, PendingCall, RunId, RunState, TrailLeg, TrailLimits, TrailName, TrailParent, TrailRun, UserId,
+    WaitingStep,
 };
-use ants_trail::{Answer, Call, Run};
+use ants_trail::{Call, Run};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -147,8 +148,8 @@ impl Trails {
         let Some(link) = &child.parent else { return Ok(()) };
         let name = child.first_trail().map_or_else(|| child.run.to_string(), ToString::to_string);
         let mut answer = match &child.state {
-            RunState::Done { result } => Answer::Ok(result.clone()),
-            RunState::Failed { error, .. } => Answer::Error(format!("trail {name} failed: {error}")),
+            RunState::Done { result } => CallAnswer::Ok(result.clone()),
+            RunState::Failed { error, .. } => CallAnswer::Error(format!("trail {name} failed: {error}")),
             RunState::Running | RunState::Waiting | RunState::Stopped { .. } => return Ok(()),
         };
         let Some(slot) = locked(&self.inner.runs).get(&link.run).cloned() else { return Ok(()) };
@@ -158,11 +159,11 @@ impl Trails {
             (book.header.clone(), book.pending.iter().find(answered).cloned())
         };
         let Some(pending) = pending else { return Ok(()) };
-        if let Answer::Ok(result) = &answer {
+        if let CallAnswer::Ok(result) = &answer {
             let bytes = serde_json::to_vec(result).map_or(usize::MAX, |result| result.len());
             if bytes.saturating_add(pending.args.to_string().len()) > driver::MAX_RECORD {
                 let max = driver::MAX_RECORD;
-                answer = Answer::Error(format!(
+                answer = CallAnswer::Error(format!(
                     "trail {name} failed: its result, {bytes} bytes as JSON, outgrew the {max} bytes the call's \
                      journal entry holds"
                 ));
@@ -251,7 +252,7 @@ impl Trails {
                     Ok(Some(ended)) if ended.finished() => self.answer_parent(&ended).await,
                     Ok(Some(_)) => self.restore_run(&child).await,
                     Ok(None) => {
-                        let lost = Answer::Error(format!("the child run {child} is lost"));
+                        let lost = CallAnswer::Error(format!("the child run {child} is lost"));
                         self.resolve(&slot, &header, call, lost, 0).await
                     }
                     Err(e) => Err(e),

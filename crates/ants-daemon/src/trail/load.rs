@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_proto::{PendingCall, QueuedCall, RunId, RunState, TrailFunction, TrailLeg, TrailRun, TrailSession};
-use ants_trail::{Run, RunState as Session};
+use ants_trail::{Run, Session};
 use anyhow::{Context as _, Result, anyhow, bail};
 
-use super::{Book, HOLDING, Leg, Slot, Step, Trails, engine_limits, locked, steps};
+use super::{Book, HOLDING, Leg, Slot, Step, Trails, engine_limits, locked};
 
 /// How long the daemon waits before trying the runs left unrestored again, at first and at most.
 const RESTORE_FIRST: Duration = Duration::from_secs(2);
@@ -298,7 +298,5 @@ pub(super) enum Unrestored {
 /// The calls `engine` holds back for room, as its session's record lists them.
 pub(super) fn queued(engine: &Run) -> Vec<QueuedCall> {
     let queued = engine.queued().iter();
-    queued
-        .map(|call| QueuedCall { call: call.call, function: steps::function(call.function), args: call.args.clone() })
-        .collect()
+    queued.map(|call| QueuedCall { call: call.call, function: call.function, args: call.args.clone() }).collect()
 }

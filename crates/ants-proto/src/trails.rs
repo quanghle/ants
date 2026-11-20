@@ -545,10 +545,33 @@ impl RunState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrailFunction {
+    /// `agent(prompt, ant=, capability=, schema=, label=, tips=)`: args `{"prompt", "ant"?, "capability"?, "schema"?,
+    /// "label"?, "tips"?}`, the keyword arguments given as None left out.
     Agent,
+    /// `human(questions)`: args `{"questions"}`.
     Human,
+    /// `trail(name, args=None)`: args `{"name", "args"?}`, answered by a run of the trail saved as `name`.
     Trail,
+    /// `goto(trail=None, at=None, state=None)`: args `{"trail"?, "at"?, "state"?}`. No step: the conductor ends the
+    /// run's leg there and goes on in a run of the next leg, or answers the call with an error naming why not.
     Goto,
+}
+
+impl TrailFunction {
+    /// The function's name in the script.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Human => "human",
+            Self::Trail => "trail",
+            Self::Goto => "goto",
+        }
+    }
+
+    /// Whether a call of the function is a step, counted against the step and concurrency limits.
+    pub fn is_step(self) -> bool {
+        self != Self::Goto
+    }
 }
 
 /// A run's suspended session in [`TRAIL_RUNS_BUCKET`], under [`trail_session_key`]: the interpreter's dumped state and

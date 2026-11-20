@@ -1,8 +1,8 @@
-use ants_proto::MAX_STEP_LABEL;
+use ants_proto::{CallAnswer, MAX_STEP_LABEL, RunLimit, TrailFunction};
 use serde_json::{Value, json};
 
 use super::{CALL_BYTES, MAX_ERROR, MAX_NOTE, MAX_RESULT, NOTE_BYTES, serve};
-use crate::protocol::{Answer, Call, Event, Function, Limit, Limits, Request, Response};
+use crate::protocol::{Call, Event, Limits, Request, Response};
 
 const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": []}\n";
 
@@ -31,13 +31,13 @@ fn enter(script: &str, entry: &str, state: Value) -> Response {
     serve(&serde_json::to_string(&request).unwrap())
 }
 
-fn resume_with(response: &Response, answers: &[(u32, Answer)], limits: Limits, steps: u32) -> Response {
+fn resume_with(response: &Response, answers: &[(u32, CallAnswer)], limits: Limits, steps: u32) -> Response {
     let Response::Suspended { snapshot, .. } = response else { panic!("not suspended: {response:?}") };
     let request = Request::Resume { snapshot: snapshot.clone(), answers: answers.to_vec(), limits, seed: 7, steps };
     serve(&serde_json::to_string(&request).unwrap())
 }
 
-fn resume(response: &Response, answers: &[(u32, Answer)], steps: u32) -> Response {
+fn resume(response: &Response, answers: &[(u32, CallAnswer)], steps: u32) -> Response {
     resume_with(response, answers, Limits::default(), steps)
 }
 
@@ -60,7 +60,7 @@ fn error(response: Response) -> String {
 }
 
 /// The error of a failed response, and the limit it failed on.
-fn failed(response: Response) -> (String, Option<Limit>) {
+fn failed(response: Response) -> (String, Option<RunLimit>) {
     match response {
         Response::Failed { error, limit, .. } => (error, limit),
         other => panic!("not failed: {other:?}"),
@@ -80,10 +80,10 @@ fn call_ids_do_not_depend_on_how_answers_are_batched() {
     let started = start(FAN_OUT, Limits::default());
     let first = calls(&started);
     assert_eq!(first.len(), 3);
-    assert_eq!(first[0].function, Function::Agent);
+    assert_eq!(first[0].function, TrailFunction::Agent);
     assert_eq!(first[0].args, json!({"prompt": "first a"}));
 
-    let answers = [(first[2].call, Answer::Ok(json!("C"))), (first[0].call, Answer::Ok(json!("A")))];
+    let answers = [(first[2].call, CallAnswer::Ok(json!("C"))), (first[0].call, CallAnswer::Ok(json!("A")))];
     let batched = resume(&started, &answers, 3);
     let one = resume(&started, &answers[..1], 3);
     let two = resume(&one, &answers[1..], 4);
@@ -143,7 +143,7 @@ fn an_error_answer_raises_where_the_call_is_awaited() {
     let script = "try:\n    await agent('x')\nexcept RuntimeError as e:\n    r = str(e)\nr\n";
     let started = start(script, Limits::default());
     let call = calls(&started)[0].call;
-    assert_eq!(result(resume(&started, &[(call, Answer::Error("no ant".to_owned()))], 1)), json!("no ant"));
+    assert_eq!(result(resume(&started, &[(call, CallAnswer::Error("no ant".to_owned()))], 1)), json!("no ant"));
 }
 
 #[test]
@@ -174,11 +174,11 @@ fn a_timeout_or_memory_error_of_the_script_breaks_no_limit() {
     let limits = Limits { compute_ms: 200, ..Limits::default() };
     let (error, limit) = failed(start("while True:\n    pass\n", limits));
     assert!(error.contains("TimeoutError"), "{error}");
-    assert_eq!(limit, Some(Limit::Compute));
+    assert_eq!(limit, Some(RunLimit::Compute));
     let limits = Limits { memory_bytes: 1024 * 1024, ..Limits::default() };
     let (error, limit) = failed(start("x = 'a' * (8 * 1024 * 1024)\n", limits));
     assert!(error.contains("MemoryError"), "{error}");
-    assert_eq!(limit, Some(Limit::Memory));
+    assert_eq!(limit, Some(RunLimit::Memory));
 }
 
 #[test]
@@ -189,12 +189,12 @@ fn a_resume_computes_and_allocates_under_its_own_limits_not_those_of_the_dumped_
     for started_under in [tight, loose] {
         let started = start(script, started_under);
         let call = calls(&started)[0].call;
-        let answer = [(call, Answer::Ok(json!(3_000_000)))];
+        let answer = [(call, CallAnswer::Ok(json!(3_000_000)))];
         let (error, limit) = failed(resume_with(&started, &answer, tight, 1));
-        assert_eq!(limit, Some(Limit::Compute), "{error}");
+        assert_eq!(limit, Some(RunLimit::Compute), "{error}");
         let (error, limit) =
             failed(resume_with(&started, &answer, Limits { compute_ms: loose.compute_ms, ..tight }, 1));
-        assert_eq!(limit, Some(Limit::Memory), "{error}");
+        assert_eq!(limit, Some(RunLimit::Memory), "{error}");
         assert_eq!(result(resume_with(&started, &answer, loose, 1)), 8 * 1024 * 1024);
     }
 }
@@ -235,7 +235,7 @@ fn notes_are_cut_and_bounded_per_resume() {
         "for i in range(12):\n    log('a' * 3000)\nawait agent('x')\nfor i in range(12):\n    log('b' * 3000)\n'end'\n";
     let started = start(script, Limits::default());
     let call = calls(&started)[0].call;
-    let Response::Done { events, .. } = resume(&started, &[(call, Answer::Ok(json!(1)))], 1) else {
+    let Response::Done { events, .. } = resume(&started, &[(call, CallAnswer::Ok(json!(1)))], 1) else {
         panic!("not done")
     };
     assert_eq!(events.len(), 12);
@@ -270,14 +270,14 @@ fn the_call_past_the_step_limit_raises() {
     let limits = Limits { steps: 1, ..Limits::default() };
     let started = start(script, limits);
     let call = calls(&started)[0].call;
-    let done = resume_with(&started, &[(call, Answer::Ok(json!(1)))], limits, 1);
+    let done = resume_with(&started, &[(call, CallAnswer::Ok(json!(1)))], limits, 1);
     assert_eq!(result(done), json!("the run reached its limit of 1 steps"));
 
     let started = start("for i in range(5):\n    await agent(str(i))\n", limits);
     let call = calls(&started)[0].call;
-    let (error, limit) = failed(resume_with(&started, &[(call, Answer::Ok(json!(1)))], limits, 1));
+    let (error, limit) = failed(resume_with(&started, &[(call, CallAnswer::Ok(json!(1)))], limits, 1));
     assert!(error.ends_with("RuntimeError: the run reached its limit of 1 steps"), "{error}");
-    assert_eq!(limit, Some(Limit::Steps), "the run failed on its steps");
+    assert_eq!(limit, Some(RunLimit::Steps), "the run failed on its steps");
 }
 
 #[test]
@@ -287,9 +287,9 @@ fn a_trail_call_is_a_step_counted_against_the_limit() {
     let started = start(script, limits);
     let first = calls(&started);
     assert_eq!(first.len(), 1);
-    assert_eq!(first[0].function, Function::Trail);
+    assert_eq!(first[0].function, TrailFunction::Trail);
     assert_eq!(first[0].args, json!({"name": "review", "args": {"pr": 7}}));
-    let done = resume_with(&started, &[(first[0].call, Answer::Ok(json!("ok")))], limits, 1);
+    let done = resume_with(&started, &[(first[0].call, CallAnswer::Ok(json!("ok")))], limits, 1);
     assert_eq!(result(done), json!(["ok", "the run reached its limit of 1 steps"]));
 
     let started = start("await trail('lint')\n", Limits::default());
@@ -302,10 +302,10 @@ fn a_goto_is_a_call_past_the_step_limit_and_its_state_is_bounded() {
     let limits = Limits { steps: 1, ..Limits::default() };
     let started = start(script, limits);
     let call = calls(&started)[0].call;
-    let moved = resume_with(&started, &[(call, Answer::Ok(json!("A")))], limits, 1);
+    let moved = resume_with(&started, &[(call, CallAnswer::Ok(json!("A")))], limits, 1);
     let goto = calls(&moved);
-    assert_eq!((goto[0].function, &goto[0].args), (Function::Goto, &json!({"trail": "fix", "state": "A"})));
-    let done = resume_with(&moved, &[(goto[0].call, Answer::Error("no trail fix".to_owned()))], limits, 1);
+    assert_eq!((goto[0].function, &goto[0].args), (TrailFunction::Goto, &json!({"trail": "fix", "state": "A"})));
+    let done = resume_with(&moved, &[(goto[0].call, CallAnswer::Error("no trail fix".to_owned()))], limits, 1);
     let oversized = "goto()'s state has 70002 bytes of JSON; a leg takes at most 65536";
     assert_eq!(result(done), json!(["no trail fix", oversized]));
 }
@@ -320,7 +320,7 @@ fn a_step_argument_json_cannot_hold_raises_type_error() {
 fn a_session_dumped_past_its_limit_fails() {
     let limits = Limits { dump_bytes: 1024, ..Limits::default() };
     let (error, limit) = failed(start("await agent('x')\n", limits));
-    assert_eq!(limit, Some(Limit::Session));
+    assert_eq!(limit, Some(RunLimit::Session));
     assert!(
         error.starts_with("the dumped session of ") && error.ends_with("passes the limit of 1024 bytes"),
         "{error}"
@@ -383,9 +383,9 @@ fn a_start_at_a_waypoint_runs_its_top_level_then_awaits_only_it_with_the_state()
     let started = enter(WAYPOINTS, "patch", json!({"bug": 7}));
     let first = calls(&started);
     assert_eq!(first.iter().map(|c| &c.args).collect::<Vec<_>>(), [&json!({"prompt": "patch 7"})]);
-    let done = resume(&started, &[(first[0].call, Answer::Ok(json!("fixed")))], 1);
+    let done = resume(&started, &[(first[0].call, CallAnswer::Ok(json!("fixed")))], 1);
     assert_eq!(result(done), json!([{"bug": 7}, "fixed"]));
-    let raised = resume(&started, &[(first[0].call, Answer::Ok(json!("raise")))], 1);
+    let raised = resume(&started, &[(first[0].call, CallAnswer::Ok(json!("raise")))], 1);
     let error = error(raised);
     assert!(error.contains("File \"trail.py\", line 10, in patch"), "{error}");
 }

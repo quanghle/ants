@@ -5,8 +5,8 @@
 //! it can take another exit: one to a trail or waypoint that does not exist, to one the run entered before, or, for a
 //! run an untrusted thread started, to an inline script.
 
-use ants_proto::{TrailLeg, TrailName, TrailRun};
-use ants_trail::{Call, Function, Run};
+use ants_proto::{TrailFunction, TrailLeg, TrailName, TrailRun};
+use ants_trail::{Call, Run};
 use anyhow::Result;
 
 use super::{Leg, Slot, Trails, driver, steps};
@@ -16,7 +16,7 @@ impl Trails {
     /// raising in the script, until one starts the next leg. Whether there was one, for the run to compute again.
     pub(super) async fn take_gotos(&self, slot: &Slot, engine: &mut Run) -> Result<bool> {
         let mut gotos: Vec<Call> =
-            engine.outstanding().iter().filter(|call| call.function == Function::Goto).cloned().collect();
+            engine.outstanding().iter().filter(|call| call.function == TrailFunction::Goto).cloned().collect();
         gotos.sort_by_key(|call| call.call);
         let header = slot.header();
         for call in &gotos {

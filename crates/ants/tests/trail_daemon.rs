@@ -928,7 +928,7 @@ async fn a_reply_after_the_run_ended_is_noted_on_its_thread_not_prompted() {
 }
 
 impl Conductor {
-    /// The stored session of `run`, ants_trail's run state, as JSON.
+    /// The stored session of `run`, ants_trail's [`ants_trail::Session`], as JSON.
     async fn session(&self, run: &RunId) -> (TrailSession, Value) {
         let runs = DirectKv::new(&self.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
         let stored = runs.get(trail_session_key(&ant("lead"), run)).await.unwrap().unwrap();

@@ -182,15 +182,6 @@ pub(crate) fn state(state: &RunState) -> &'static str {
     }
 }
 
-pub(super) fn function(function: TrailFunction) -> &'static str {
-    match function {
-        TrailFunction::Agent => "agent",
-        TrailFunction::Human => "human",
-        TrailFunction::Trail => "trail",
-        TrailFunction::Goto => "goto",
-    }
-}
-
 fn ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     format!("{} ago", short(since(at, now)))
 }
@@ -392,7 +383,7 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
             .map(|c| {
                 [
                     c.call.to_string(),
-                    function(c.function).to_owned(),
+                    c.function.name().to_owned(),
                     c.child().map_or_else(|| format!("to {}", c.to), |child| format!("run {child}")),
                     format!("sent {}", ago(c.sent_at, now)),
                     format!("thread {}", c.thread),
@@ -405,7 +396,7 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
     if !queued.is_empty() {
         out.push_str("\nqueued calls:\n");
         let rows: Vec<[String; 3]> =
-            queued.iter().map(|c| [c.call.to_string(), function(c.function).to_owned(), gist(&c.args)]).collect();
+            queued.iter().map(|c| [c.call.to_string(), c.function.name().to_owned(), gist(&c.args)]).collect();
         out.push_str(&indented(&super::columns(&rows)));
     }
     if !journal.is_empty() {
@@ -435,7 +426,7 @@ fn answered(run: &TrailRun, journal: &[JournalEntry]) -> Vec<[String; 5]> {
                 TrailFunction::Trail | TrailFunction::Goto => run.conductor.to_string(),
             };
             let gist = if e.function == TrailFunction::Goto { destination(&e.args) } else { gist(&e.args) };
-            [e.call.to_string(), function(e.function).to_owned(), whom, gist, answer]
+            [e.call.to_string(), e.function.name().to_owned(), whom, gist, answer]
         })
         .collect()
 }
