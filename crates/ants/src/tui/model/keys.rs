@@ -548,6 +548,7 @@ impl Model {
                 self.bar.focused = true;
                 None
             }
+            To::Forward => self.go(To::Bar("/forward @".to_owned()), now),
             To::Tldr(thread) => self.tldr(thread),
             To::Credentials => {
                 self.pages.push(Page::Credentials(credentials::Page::default()));

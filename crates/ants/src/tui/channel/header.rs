@@ -203,45 +203,26 @@ fn told(event: &Event, data: &Data, now: DateTime<Utc>) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{ChannelPost, HumanEntry, Humans};
+    use ants_proto::ChannelPost;
 
     use super::*;
-    use crate::test_support::colony::entry;
     use crate::test_support::live::{at, user};
-    use crate::test_support::render::rendered;
-    use crate::tui::model::{Model, Page};
-    use crate::tui::reads::Read;
-    use crate::tui::test_support::{model, post};
+    use crate::tui::model::Model;
+    use crate::tui::test_support::{channel_screen, post};
 
-    /// Alice's model showing #ops, which dev-a owns, with dev-m its messenger and bob and carol in it, after bob
-    /// opened a thread on it.
+    /// Alice's model showing #ops, dev-a in the colony, after bob opened a thread on it.
     fn ops() -> Model {
+        let description = "Deploys, outages and the on-call rota of the production site.";
+        let mut m = crate::tui::test_support::ops(description, &["dev-a"]);
         let ops: ChannelId = "ops".parse().unwrap();
-        let mut m = model();
-        let entry = ChannelEntry {
-            members: ["alice", "dev-a", "bob", "dev-m"].map(user).to_vec(),
-            messenger: Some(user("dev-m")),
-            owner: Some(user("dev-a")),
-            description: Some("Deploys, outages and the on-call rota of the production site.".to_owned()),
-            ..ChannelEntry::new(ops.clone())
-        };
-        let humans = Humans::from_entries(["alice", "bob"].map(|h| (h, HumanEntry::new(user(h)))));
-        m.read(Read::Directory(Ok((vec![entry], humans))), at(0));
-        m.data.live.colony(vec![self::entry("dev-a", 60, 5, at(0))], at(0));
-        m.stored(vec![post(1, &ChannelPost::new(ops.clone(), user("bob"), "the site is down"))], at(1));
-        m.select(nav::Item::Channel(ops));
+        m.stored(vec![post(1, &ChannelPost::new(ops, user("bob"), "the site is down"))], at(1));
         m
-    }
-
-    fn shown(m: &Model, width: u16, height: u16) -> String {
-        let Page::Channel(page) = m.page() else { panic!("not the channel") };
-        rendered(width, height, |f| page.draw(f, f.area(), &m.data, at(61), true))
     }
 
     #[test]
     fn the_header_shows_the_channel_its_members_and_its_activity_side_by_side() {
         let m = ops();
-        let shown = shown(&m, 130, 30);
+        let shown = channel_screen(&m, 130, 30);
         let lines: Vec<&str> = shown.lines().collect();
         assert!(lines[0].contains("#ops · notify humans") && lines[0].contains("members 4"), "{shown}");
         assert!(lines[0].contains("activity"), "{shown}");
@@ -255,7 +236,7 @@ mod tests {
     fn the_header_is_one_line_on_a_narrow_or_short_screen() {
         let m = ops();
         for (width, height) in [(99, 30), (130, 23)] {
-            let shown = shown(&m, width, height);
+            let shown = channel_screen(&m, width, height);
             let first = shown.lines().next().unwrap();
             assert_eq!(first, "#ops · notify humans · 4 members · 1m bob new thread the site is down", "{shown}");
             assert!(shown.lines().nth(1).unwrap().starts_with("‹ all 1"), "{shown}");

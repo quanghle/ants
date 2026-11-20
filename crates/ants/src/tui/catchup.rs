@@ -523,7 +523,7 @@ mod tests {
     use super::*;
     use crate::test_support::live::{at, message, user};
     use crate::tui::model::Page;
-    use crate::tui::test_support::model;
+    use crate::tui::test_support::{model, screen};
     use crate::tui::thread;
 
     #[test]
@@ -537,10 +537,6 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(load(&path).tools, Tools::Collapsed, "an unreadable file keeps nothing");
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    fn shown(m: &Model, now: DateTime<Utc>) -> String {
-        crate::test_support::render::rendered(140, 30, |f| crate::tui::frame::draw(f, m, now))
     }
 
     /// A thread alice gave dev-a, which dev-a answered at `seq` + 1.
@@ -562,11 +558,11 @@ mod tests {
         assert!(line.contains("1 finished · 0 stuck · 0 waiting · $? spent today · s opens the digest"), "{line}");
 
         assert_eq!(m.key(Key::Char('s'), at(30)), Some(Action::Summarise(Ask::Digest(at(10)))));
-        assert!(shown(&m, at(30)).contains("asking for a digest…"));
+        assert!(screen(&m, 140, 30, at(30)).contains("asking for a digest…"));
         let got = Got::Digest { by: user("messenger"), text: "Two deploys **landed**.".into(), tokens: 42 };
         m.summarised(Summarised { ask: Ask::Digest(at(10)), result: Ok(got), warnings: Vec::new() }, at(31));
-        let screen = shown(&m, at(31));
-        assert!(screen.contains("messenger · 42 tokens") && screen.contains("Two deploys landed."), "{screen}");
+        let shown = screen(&m, 140, 30, at(31));
+        assert!(shown.contains("messenger · 42 tokens") && shown.contains("Two deploys landed."), "{shown}");
         assert_eq!(m.key(Key::Char('j'), at(31)), None);
         assert!(m.catchup.shown(), "j scrolls");
         assert_eq!(m.key(Key::Esc, at(31)), None);
@@ -589,7 +585,7 @@ mod tests {
         m.key(Key::Up, at(3));
         assert_eq!(m.key(Key::Char('S'), at(3)), Some(asked));
         assert_eq!(m.key(Key::Char('S'), at(3)), None, "asked for once at a time");
-        assert!(shown(&m, at(3)).contains("TL;DR  asking for one…"));
+        assert!(screen(&m, 140, 30, at(3)).contains("TL;DR  asking for one…"));
         let tldr = ThreadSummary {
             thread_id: thread.clone(),
             text: "Deployed to staging.".into(),
@@ -601,11 +597,11 @@ mod tests {
         };
         let ask = Ask::Tldr { thread: thread.clone(), ahead: false };
         m.summarised(Summarised { ask, result: Ok(Got::Tldr(tldr)), warnings: Vec::new() }, at(4));
-        let screen = shown(&m, at(64));
-        assert!(screen.contains("TL;DR (messenger, 1m ago, S asks for a new one)"), "{screen}");
-        assert!(screen.contains("Deployed to staging."), "{screen}");
+        let shown = screen(&m, 140, 30, at(64));
+        assert!(shown.contains("TL;DR (messenger, 1m ago, S asks for a new one)"), "{shown}");
+        assert!(shown.contains("Deployed to staging."), "{shown}");
         m.stored(vec![message(3, &thread, "dev-a", "alice", "and to prod")], at(65));
-        assert!(shown(&m, at(65)).contains("TL;DR (messenger, 1m ago, stale, S asks"));
+        assert!(screen(&m, 140, 30, at(65)).contains("TL;DR (messenger, 1m ago, stale, S asks"));
     }
 
     #[test]

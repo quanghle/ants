@@ -475,12 +475,8 @@ mod tests {
     use super::*;
     use crate::test_support::live::{at, user};
     use crate::tools::Update;
-    use crate::tui::model::{Focus, Model};
-    use crate::tui::test_support::model;
-
-    fn screen(m: &Model, now: DateTime<Utc>) -> String {
-        crate::test_support::render::rendered(140, 30, |f| crate::tui::frame::draw(f, m, now))
-    }
+    use crate::tui::model::Focus;
+    use crate::tui::test_support::{model, screen};
 
     fn order(op: AdminOp, ant: &str, sent: i64) -> AdminOrder {
         let order =
@@ -493,7 +489,7 @@ mod tests {
         let mut m = model();
         let (pause, restart) = (order(AdminOp::Pause, "dev-a", 1), order(AdminOp::Restart { now: false }, "dev-b", 2));
         assert_eq!(m.data.held.take(Event::Read(Ok(vec![pause.clone(), restart.clone()])), at(3)), None);
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 140, 30, at(3));
         assert!(
             shown.contains(
                 "2 orders of pa wait for confirmation: pause of dev-a on m1, restart of dev-b on m1 · o lists"
@@ -504,14 +500,14 @@ mod tests {
         m.focus = Focus::View;
         m.key(Key::Char('o'), at(3));
         assert_eq!(m.page().name(), "held for confirmation");
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 140, 30, at(3));
         assert!(shown.contains("pa ordered pause of dev-a on m1") && shown.contains("expires in 6d23h"), "{shown}");
         assert!(shown.contains(&format!("m1/dev-a/{} · a confirm · r deny", pause.id)), "{shown}");
         assert!(shown.contains("a confirm · r deny · Esc back · ↑↓ select"), "{shown}");
 
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "y alone gives no answer");
         m.key(Key::Char('a'), at(3));
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 140, 30, at(3));
         let confirm = Answer { held: Item::Order(Box::new(pause.clone())), answer: ActAnswer::Confirm };
         assert!(shown.contains(&format!("y to {}", confirm.describe())) && shown.contains(Page::ARMED_KEYS), "{shown}");
         m.key(Key::Char('n'), at(3));
@@ -525,9 +521,9 @@ mod tests {
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "one answer at a time");
 
         m.held(Event::Done(Box::new(deny), Ok("denied: pa's order … is refused".to_owned())), at(4));
-        assert!(screen(&m, at(4)).contains("denied: pa's order … is refused"), "the outcome is a notice");
+        assert!(screen(&m, 140, 30, at(4)).contains("denied: pa's order … is refused"), "the outcome is a notice");
         assert!(m.data.held.busy.is_none());
-        let shown = screen(&m, at(4));
+        let shown = screen(&m, 140, 30, at(4));
         assert!(shown.contains("denied, to be refused"), "{shown}");
         m.key(Key::Char('r'), at(4));
         assert_eq!(m.key(Key::Char('y'), at(4)), None, "an order answered is not answered again");
@@ -545,7 +541,7 @@ mod tests {
         m.held(Event::Read(Ok(vec![pause])), at(6));
         assert!(m.data.held.answered.is_empty(), "the order the daemon decided goes");
         m.key(Key::Esc, at(6));
-        let shown = screen(&m, at(6));
+        let shown = screen(&m, 140, 30, at(6));
         assert!(shown.contains("1 order of pa waits for confirmation: pause of dev-a on m1 · o lists them"), "{shown}");
     }
 
@@ -578,7 +574,7 @@ mod tests {
             [Item::Order(Box::new(pause.clone())), decision.clone()],
             "bob's is for bob to answer"
         );
-        let shown = screen(&m, at(6));
+        let shown = screen(&m, 140, 30, at(6));
         let line = "2 orders and decisions of pa wait for confirmation: pause of dev-b on m1, allow-once on dev-a's \
                     execute";
         assert!(shown.contains(line), "{shown}");
@@ -586,19 +582,19 @@ mod tests {
 
         m.focus = Focus::View;
         m.key(Key::Char('o'), at(6));
-        let shown = screen(&m, at(6));
+        let shown = screen(&m, 140, 30, at(6));
         assert!(shown.contains("tool    pa chose allow-once on dev-a's execute: git push"), "{shown}");
         assert!(shown.contains("expires in 4m56s"), "{shown}");
         assert!(shown.contains(&format!("dev-a/{} · a confirm · r deny", push.id)), "{shown}");
         m.key(Key::Down, at(6));
         m.key(Key::Char('r'), at(6));
         let deny = Answer { held: decision.clone(), answer: ActAnswer::Deny };
-        let shown = screen(&m, at(6));
+        let shown = screen(&m, 140, 30, at(6));
         let described = format!("deny pa's allow-once on request dev-a/{} (execute: git push)", push.id);
         assert!(shown.contains(&format!("y to {described}")), "{shown}");
         assert_eq!(m.key(Key::Char('y'), at(6)), Some(Action::Answer(deny.clone())));
         m.held(Event::Done(Box::new(deny), Ok("denied".to_owned())), at(7));
-        let shown = screen(&m, at(7));
+        let shown = screen(&m, 140, 30, at(7));
         assert!(shown.contains("denied, to be dropped"), "{shown}");
         m.key(Key::Char('a'), at(7));
         assert_eq!(m.key(Key::Char('y'), at(7)), None, "a decision answered is not answered again");

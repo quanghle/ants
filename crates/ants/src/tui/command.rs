@@ -653,13 +653,7 @@ mod tests {
     use crate::tui::acts::Change;
     use crate::tui::exec::Done;
     use crate::tui::reads::Read;
-    use crate::tui::test_support::model;
-
-    fn typed(m: &mut Model, text: &str) {
-        for c in text.chars() {
-            m.key(if c == '\n' { Key::Newline } else { Key::Char(c) }, at(0));
-        }
-    }
+    use crate::tui::test_support::{model, typed};
 
     #[test]
     fn a_paste_goes_into_the_bar_whole_its_line_breaks_new_lines_rather_than_enter() {

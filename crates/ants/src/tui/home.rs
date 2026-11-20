@@ -527,7 +527,7 @@ impl Page {
                 };
             }
             Key::Char('r') => return thread().map(To::Reply),
-            Key::Char('f') => return thread().map(|_| To::Bar("/forward @".to_owned())),
+            Key::Char('f') => return thread().map(|_| To::Forward),
             Key::Char('g') => {
                 let stuck = selected.filter(|i| i.why == Why::Stuck)?;
                 let job = Job::Grant { thread: stuck.thread.clone(), text: GRANT.to_owned() };
@@ -732,7 +732,7 @@ mod tests {
     use crate::threads::thread::Parser;
     use crate::tools::{State, Update};
     use crate::tui::model::Action;
-    use crate::tui::test_support::model;
+    use crate::tui::test_support::{model, screen};
 
     #[test]
     fn a_due_reminder_is_a_home_item_opening_its_message_until_done() {
@@ -786,19 +786,19 @@ mod tests {
             "the ant's two requests on the thread one group"
         );
         assert_eq!(waiting(&m.data, at(4)).len(), 3);
-        let screen = shown(&m, at(4));
-        assert!(screen.contains("dev-a asks to run 2 tools, the oldest:"), "{screen}");
-        assert!(screen.contains("         execute: git push"), "{screen}");
+        let shown = screen(&m, 140, 30, at(4));
+        assert!(shown.contains("dev-a asks to run 2 tools, the oldest:"), "{shown}");
+        assert!(shown.contains("         execute: git push"), "{shown}");
         assert!(
-            screen.contains("a allow · r reject · n reject with a note · l allow 2 execute · Enter lists all 2"),
-            "{screen}"
+            shown.contains("a allow · r reject · n reject with a note · l allow 2 execute · Enter lists all 2"),
+            "{shown}"
         );
 
         assert_eq!(m.key(Key::Enter, at(4)), None);
         assert!(m.asking.is_none(), "Enter lists the group's requests");
-        let screen = shown(&m, at(4));
+        let shown = screen(&m, 140, 30, at(4));
         let expected = "pa chose allow-once for alice: o lists it";
-        assert!(screen.contains("dev-a asks to run 2 tools") && screen.contains("Enter collapses"), "{screen}");
+        assert!(shown.contains("dev-a asks to run 2 tools") && shown.contains("Enter collapses"), "{shown}");
         let crate::tui::model::Page::Home(home) = m.page() else { panic!("home") };
         let rows: Vec<(Id, bool)> =
             home.rows(&m.data, at(4)).into_iter().map(|i| (i.id(), i.text.ends_with(&expected))).collect();
@@ -818,11 +818,11 @@ mod tests {
         m.key(Key::Down, at(4));
         assert_eq!(m.key(Key::Char('r'), at(4)), None, "a card not drawn yet shows its request in full");
         m.key(Key::Esc, at(4));
-        shown(&m, at(4));
+        screen(&m, 140, 30, at(4));
         assert_eq!(m.key(Key::Char('r'), at(4)), Some(Action::Decide(Box::new(second.clone()), Verdict::Reject)));
-        assert!(shown(&m, at(4)).contains("storing the decision…"), "the card says so until stored");
+        assert!(screen(&m, 140, 30, at(4)).contains("storing the decision…"), "the card says so until stored");
         m.key(Key::Up, at(4));
-        shown(&m, at(4));
+        screen(&m, 140, 30, at(4));
         assert_eq!(m.key(Key::Char('a'), at(4)), None, "one decision stored at a time");
         assert!(m.notice_at(at(4)).is_some_and(|n| n.text.contains("answer again once it is stored")));
         m.take(Event::Decided(Ok("rejected".to_owned())), at(5));
@@ -863,22 +863,25 @@ mod tests {
         }
         let lone = request("dev-b", "ls", vec![Verdict::AllowOnce]);
         m.data.live.approval(&Update::Pending(ApprovalRequest { requested_at: at(3), ..lone }));
-        let screen = shown(&m, at(4));
-        assert!(screen.contains("l allow 2 execute · Enter lists all 3"), "{screen}");
+        let shown = screen(&m, 140, 30, at(4));
+        assert!(shown.contains("l allow 2 execute · Enter lists all 3"), "{shown}");
 
         assert_eq!(m.key(Key::Char('l'), at(4)), None);
-        let screen = shown(&m, at(4));
-        assert!(screen.contains("y allows once 2 execute requests of dev-a on the thread"), "{screen}");
+        let shown = screen(&m, 140, 30, at(4));
+        assert!(shown.contains("y allows once 2 execute requests of dev-a on the thread"), "{shown}");
         assert!(m.asking.is_none(), "nothing stored before y");
         m.key(Key::Esc, at(4));
-        assert!(!shown(&m, at(4)).contains("y allows once"), "Esc drops it");
+        assert!(!screen(&m, 140, 30, at(4)).contains("y allows once"), "Esc drops it");
         assert_eq!(m.key(Key::Char('y'), at(4)), None, "y alone allows nothing");
 
         m.key(Key::Char('l'), at(4));
         assert_eq!(m.key(Key::Char('y'), at(4)), Some(Action::AllowAll(vec![push.clone(), test.clone()])));
         let asking = m.asking.as_ref().expect("the batch being stored");
         assert!(asking.storing && asking.request == push && asking.batch == [test], "{asking:?}");
-        assert!(shown(&m, at(4)).contains("allowing them once, one by one…"), "the card says so until stored");
+        assert!(
+            screen(&m, 140, 30, at(4)).contains("allowing them once, one by one…"),
+            "the card says so until stored"
+        );
         assert_eq!(m.key(Key::Char('a'), at(4)), None, "one decision stored at a time");
         assert!(m.notice_at(at(4)).is_some_and(|n| n.text.contains("answer again once it is stored")));
         m.take(Event::Approval(Update::Resolved(push, State::Expired)), at(5));
@@ -891,7 +894,7 @@ mod tests {
 
         m.key(Key::End, at(5));
         assert_eq!(m.key(Key::Char('l'), at(5)), None, "a lone request is no group");
-        assert!(!shown(&m, at(5)).contains("y allows once"));
+        assert!(!screen(&m, 140, 30, at(5)).contains("y allows once"));
     }
 
     fn escalation(seq: u64, thread: &ThreadId, from: &str, to: &str) -> crate::threads::thread::Entry {
@@ -921,18 +924,18 @@ mod tests {
         let mut m = model();
         let push = running(&command);
         m.data.live.approvals = vec![push.clone()];
-        let screen = crate::test_support::render::rendered(100, 30, |f| crate::tui::frame::draw(f, &m, at(0)));
-        assert!(screen.contains("dev-a asks to run:"), "{screen}");
-        assert!(words.iter().all(|w| screen.matches(w.as_str()).count() == 1), "the command shown once: {screen}");
-        assert!(!screen.contains("more line"), "{screen}");
+        let shown = crate::test_support::render::rendered(100, 30, |f| crate::tui::frame::draw(f, &m, at(0)));
+        assert!(shown.contains("dev-a asks to run:"), "{shown}");
+        assert!(words.iter().all(|w| shown.matches(w.as_str()).count() == 1), "the command shown once: {shown}");
+        assert!(!shown.contains("more line"), "{shown}");
         assert_eq!(m.key(Key::Char('a'), at(0)), Some(Action::Decide(Box::new(push), Verdict::AllowOnce)));
 
         let words: Vec<String> = (0..500).map(|n| format!("w{n:03}")).collect();
         let mut m = model();
         let long = running(&format!("echo {}", words.join(" ")));
         m.data.live.approvals = vec![long.clone()];
-        let screen = crate::test_support::render::rendered(100, 30, |f| crate::tui::frame::draw(f, &m, at(0)));
-        assert!(screen.contains("more lines: Enter shows them"), "{screen}");
+        let shown = crate::test_support::render::rendered(100, 30, |f| crate::tui::frame::draw(f, &m, at(0)));
+        assert!(shown.contains("more lines: Enter shows them"), "{shown}");
         assert_eq!(m.key(Key::Char('a'), at(0)), None);
         assert!(m.asking.as_ref().is_some_and(|a| a.full), "a shows the request in full");
         assert_eq!(m.key(Key::Char('a'), at(0)), Some(Action::Decide(Box::new(long), Verdict::AllowOnce)));
@@ -945,21 +948,17 @@ mod tests {
         let push = running(&command);
         let mut m = model();
         m.data.live.approvals = vec![push.clone()];
-        let screen = crate::test_support::render::rendered(100, 30, |f| crate::tui::frame::draw(f, &m, at(0)));
-        assert!(words.iter().all(|w| screen.contains(w.as_str())), "whole on a tall screen: {screen}");
+        let shown = crate::test_support::render::rendered(100, 30, |f| crate::tui::frame::draw(f, &m, at(0)));
+        assert!(words.iter().all(|w| shown.contains(w.as_str())), "whole on a tall shown: {shown}");
         assert_eq!(m.key(Key::Char('a'), at(0)), Some(Action::Decide(Box::new(push.clone()), Verdict::AllowOnce)));
         for height in [16, 9, 6] {
             let mut m = model();
             m.data.live.approvals = vec![push.clone()];
-            let screen = crate::test_support::render::rendered(100, height, |f| crate::tui::frame::draw(f, &m, at(0)));
-            assert!(!screen.contains("w059"), "{screen}");
-            assert_eq!(m.key(Key::Char('a'), at(0)), None, "{screen}");
-            assert!(m.asking.as_ref().is_some_and(|a| a.full), "a shows the request in full: {screen}");
+            let shown = crate::test_support::render::rendered(100, height, |f| crate::tui::frame::draw(f, &m, at(0)));
+            assert!(!shown.contains("w059"), "{shown}");
+            assert_eq!(m.key(Key::Char('a'), at(0)), None, "{shown}");
+            assert!(m.asking.as_ref().is_some_and(|a| a.full), "a shows the request in full: {shown}");
         }
-    }
-
-    fn shown(m: &crate::tui::model::Model, now: DateTime<Utc>) -> String {
-        crate::test_support::render::rendered(140, 30, |f| crate::tui::frame::draw(f, m, now))
     }
 
     #[test]
@@ -974,10 +973,10 @@ mod tests {
         m.stored(vec![escalation(1, &stuck, "dev-a", "alice"), question.clone()], at(2));
         let whys: Vec<Why> = items(&m.data, at(3)).into_iter().map(|i| i.why).collect();
         assert_eq!(whys, [Why::Question, Why::Stuck]);
-        let screen = shown(&m, at(3));
-        assert!(screen.contains("question Which retry policy?"), "{screen}");
-        assert!(screen.contains("         1 exponential  2 fixed 5s "), "{screen}");
-        assert!(screen.contains("1-9 answer · r reply · d done · z snooze · Enter choose"), "{screen}");
+        let shown = screen(&m, 140, 30, at(3));
+        assert!(shown.contains("question Which retry policy?"), "{shown}");
+        assert!(shown.contains("         1 exponential  2 fixed 5s "), "{shown}");
+        assert!(shown.contains("1-9 answer · r reply · d done · z snooze · Enter choose"), "{shown}");
 
         assert_eq!(m.key(Key::Char('3'), at(3)), None, "no third option");
         let answer = |pick| Job::Answer { thread: asked.clone(), question: question.id.unwrap(), picks: vec![pick] };
@@ -986,18 +985,18 @@ mod tests {
 
         assert_eq!(m.key(Key::Enter, at(3)), None);
         assert_eq!(m.page().name(), "home", "Enter focuses the card");
-        let screen = shown(&m, at(3));
-        assert!(screen.contains("› 1 exponential") && screen.contains("  2 fixed 5s"), "{screen}");
-        assert!(screen.contains("↑↓ move · Enter pick · 1-9 answer · Esc leave"), "{screen}");
+        let shown = screen(&m, 140, 30, at(3));
+        assert!(shown.contains("› 1 exponential") && shown.contains("  2 fixed 5s"), "{shown}");
+        assert!(shown.contains("↑↓ move · Enter pick · 1-9 answer · Esc leave"), "{shown}");
         m.key(Key::Down, at(3));
         assert_eq!(m.key(Key::Enter, at(3)), option(2), "Enter picks the highlighted option");
-        assert!(!shown(&m, at(3)).contains("› "), "the card leaves the focus once answered");
+        assert!(!screen(&m, 140, 30, at(3)).contains("› "), "the card leaves the focus once answered");
 
         m.key(Key::Enter, at(3));
         assert_eq!(m.key(Key::Esc, at(3)), None);
-        assert!(!shown(&m, at(3)).contains("› "), "Esc leaves the card");
+        assert!(!screen(&m, 140, 30, at(3)).contains("› "), "Esc leaves the card");
         assert_eq!(m.key(Key::Down, at(3)), None);
-        assert!(shown(&m, at(3)).contains("stuck    help"), "and ↑↓ move between the items again");
+        assert!(screen(&m, 140, 30, at(3)).contains("stuck    help"), "and ↑↓ move between the items again");
         m.key(Key::Home, at(3));
 
         m.key(Key::Enter, at(3));
@@ -1006,7 +1005,10 @@ mod tests {
         }
         assert_eq!(m.key(Key::Char('q'), at(3)), None, "q types rather than quits");
         m.paste("/later", at(3));
-        assert!(shown(&m, at(3)).contains("› type an answer: q/later▏"), "keys and pastes type on the last row");
+        assert!(
+            screen(&m, 140, 30, at(3)).contains("› type an answer: q/later▏"),
+            "keys and pastes type on the last row"
+        );
         let typed = Some(Action::Run(answer(ants_proto::Pick::Typed("q/later".into())), String::new()));
         assert_eq!(m.key(Key::Enter, at(3)), typed);
         m.key(Key::Enter, at(3));
@@ -1015,7 +1017,10 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(3)), None);
         assert!(m.bar.focused && m.bar.text() == "/answer ", "an empty typed answer goes through the bar");
         m.key(Key::Esc, at(3));
-        assert!(shown(&m, at(3)).contains("› type an answer"), "the card keeps the focus once the bar leaves");
+        assert!(
+            screen(&m, 140, 30, at(3)).contains("› type an answer"),
+            "the card keeps the focus once the bar leaves"
+        );
         m.key(Key::Esc, at(5));
 
         assert_eq!(m.key(Key::Char('r'), at(3)), Some(Action::Open(asked.clone())), "r replies on the thread");
@@ -1044,15 +1049,15 @@ mod tests {
         let (ship, tag) = (Question::new("Ship it?", &options, false), Question::new("Tag it?", &options, true));
         question.question = Some(Questions::new(vec![ship.unwrap().headed("Ship"), tag.unwrap()]).unwrap());
         m.stored(vec![question.clone()], at(1));
-        let screen = shown(&m, at(2));
-        assert!(screen.contains("dev-b: Ship it? (+1 more)"), "{screen}");
-        assert!(screen.contains("         Ship: 1 yes  2 no · Q2: 1 yes  2 no"), "{screen}");
+        let shown = screen(&m, 140, 30, at(2));
+        assert!(shown.contains("dev-b: Ship it? (+1 more)"), "{shown}");
+        assert!(shown.contains("         Ship: 1 yes  2 no · Q2: 1 yes  2 no"), "{shown}");
 
         assert_eq!(m.key(Key::Char('2'), at(2)), None, "a digit picks for the first question");
-        let screen = shown(&m, at(2));
-        assert!(screen.contains("Ship ✓  [Q2]  Submit") && screen.contains("Tag it?"), "{screen}");
+        let shown = screen(&m, 140, 30, at(2));
+        assert!(shown.contains("Ship ✓  [Q2]  Submit") && shown.contains("Tag it?"), "{shown}");
         assert_eq!(m.key(Key::Char('1'), at(2)), None, "and for the next");
-        assert!(shown(&m, at(2)).contains("  Q2: yes"), "the last tab shows every pick");
+        assert!(screen(&m, 140, 30, at(2)).contains("  Q2: yes"), "the last tab shows every pick");
         let picks = vec![Pick::option(2), Pick::option(1)];
         let job = Job::Answer { thread: asked, question: question.id.unwrap(), picks };
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, String::new())), "one answer to both");
@@ -1079,8 +1084,8 @@ mod tests {
         assert!(m.bar.focused && m.bar.text() == "/answer ", "an empty typed answer goes through the bar");
         m.key(Key::Esc, at(3));
         assert!(!m.bar.focused);
-        let screen = shown(&m, at(3));
-        assert!(screen.contains("› type an answer"), "the card keeps the focus: {screen}");
+        let shown = screen(&m, 140, 30, at(3));
+        assert!(shown.contains("› type an answer"), "the card keeps the focus: {shown}");
 
         let mut answer = message(3, &focused.thread_id, "alice", "dev-b", "yes");
         answer.answer =
@@ -1116,9 +1121,9 @@ mod tests {
         );
         let whys: Vec<Why> = items(&m.data, at(5)).into_iter().map(|i| i.why).collect();
         assert_eq!(whys, [Why::Stuck, Why::Finished]);
-        let screen = shown(&m, at(5));
-        assert!(screen.contains("g grant · x cancel · d done · z snooze · Enter open"), "{screen}");
-        assert!(screen.contains("r follow up · d mark done · z snooze · Enter review"), "{screen}");
+        let shown = screen(&m, 140, 30, at(5));
+        assert!(shown.contains("g grant · x cancel · d done · z snooze · Enter open"), "{shown}");
+        assert!(shown.contains("r follow up · d mark done · z snooze · Enter review"), "{shown}");
 
         let grant = Job::Grant { thread: stuck.clone(), text: GRANT.into() };
         assert_eq!(m.key(Key::Char('g'), at(5)), Some(Action::Run(grant, String::new())));
@@ -1128,7 +1133,7 @@ mod tests {
         assert_eq!(m.key(Key::Char('d'), at(5)), Some(Action::Change(stuck.clone(), Change::Done(true), last)));
 
         assert_eq!(m.key(Key::Char('z'), at(5)), None);
-        assert!(shown(&m, at(5)).contains("for (at most 7d): 1h"), "the footer asks how long");
+        assert!(screen(&m, 140, 30, at(5)).contains("for (at most 7d): 1h"), "the footer asks how long");
         let snooze = Change::Snooze(Some(at(5 + 3600)));
         assert_eq!(m.key(Key::Enter, at(5)), Some(Action::Change(stuck.clone(), snooze, last)));
         let whys: Vec<Why> = items(&m.data, at(6)).into_iter().map(|i| i.why).collect();
@@ -1192,12 +1197,9 @@ mod tests {
         );
         let found: Vec<(Why, Vec<(Why, usize)>)> = items(&m.data, at(5)).into_iter().map(|i| (i.why, i.also)).collect();
         assert_eq!(found, [(Why::Question, vec![(Why::Stuck, 1), (Why::Mention, 2)])]);
-        let screen = shown(&m, at(5));
-        assert!(screen.contains("question help · stuck · 2 mentions"), "{screen}");
-        assert!(
-            screen.contains("1-9 answer · r reply · d done · z snooze · Enter choose"),
-            "the top reason's: {screen}"
-        );
+        let shown = screen(&m, 140, 30, at(5));
+        assert!(shown.contains("question help · stuck · 2 mentions"), "{shown}");
+        assert!(shown.contains("1-9 answer · r reply · d done · z snooze · Enter choose"), "the top reason's: {shown}");
         let picks = vec![ants_proto::Pick::option(1)];
         let job = Job::Answer { thread: busy.clone(), question: question.id.unwrap(), picks };
         assert_eq!(m.key(Key::Char('1'), at(5)), Some(Action::Run(job, String::new())));
@@ -1242,7 +1244,7 @@ mod tests {
             let mut opening = message(1, &done, "alice", "dev-a", "deploy");
             opening.owner = Some(user("alice"));
             m.stored(vec![opening, message(2, &done, "dev-a", "alice", "deployed")], at(2));
-            shown(&m, at(3));
+            screen(&m, 140, 30, at(3));
             assert_eq!(selected(&m), Some(done.clone()), "the finished thread on top");
             m
         };
@@ -1251,16 +1253,16 @@ mod tests {
 
         let mut m = finished();
         m.data.live.approval(&Update::Pending(push.clone()));
-        let screen = shown(&m, at(3));
-        let (approve, below) = (screen.find("│▌approve "), screen.find("│ finished "));
-        assert!(approve.zip(below).is_some_and(|(a, f)| a < f), "{screen}");
+        let shown = screen(&m, 140, 30, at(3));
+        let (approve, below) = (shown.find("│▌approve "), shown.find("│ finished "));
+        assert!(approve.zip(below).is_some_and(|(a, f)| a < f), "{shown}");
         assert_eq!(selected(&m), Some(asked), "the request listed after the first draw selected on top");
         assert_eq!(m.key(Key::Char('a'), at(3)), Some(Action::Decide(Box::new(push.clone()), Verdict::AllowOnce)));
 
         let mut m = finished();
         m.key(Key::Home, at(3));
         m.data.live.approval(&Update::Pending(push));
-        shown(&m, at(3));
+        screen(&m, 140, 30, at(3));
         assert_eq!(selected(&m), Some(done), "moved by a key, it stays with its item");
     }
 
@@ -1273,7 +1275,7 @@ mod tests {
         m.stored(vec![opening, message(2, &done, "dev-a", "alice", "deployed")], at(2));
         m.stored(vec![message(3, &stuck, "alice", "dev-b", "review"), escalation(4, &stuck, "dev-b", "alice")], at(4));
         m.key(Key::End, at(5));
-        assert!(shown(&m, at(5)).contains("r follow up · d mark done"), "the finished thread selected");
+        assert!(screen(&m, 140, 30, at(5)).contains("r follow up · d mark done"), "the finished thread selected");
 
         m.stored(vec![message(6, &other, "alice", "dev-c", "build"), escalation(7, &other, "dev-c", "alice")], at(7));
         let whys: Vec<Why> = items(&m.data, at(8)).into_iter().map(|i| i.why).collect();
@@ -1302,14 +1304,14 @@ mod tests {
         answer.suggested_title = Some("Site deploy".to_owned());
         m.stored(vec![opening, answer], at(2));
         assert_eq!(m.data.title(&done), "Site deploy");
-        assert!(shown(&m, at(3)).contains("Site deploy"));
+        assert!(screen(&m, 140, 30, at(3)).contains("Site deploy"));
 
         m.data.cards.titles.insert(done.clone(), "Release 1.2".to_owned());
         m.data.cards.titles.insert(unlisted.clone(), "[sealed]".to_owned());
         assert_eq!(m.data.title(&done), "Release 1.2");
         assert_eq!(m.data.title(&unlisted), "[sealed]", "even without a message read");
-        let screen = shown(&m, at(3));
-        assert!(screen.contains("Release 1.2") && !screen.contains("Site deploy"), "{screen}");
+        let shown = screen(&m, 140, 30, at(3));
+        assert!(shown.contains("Release 1.2") && !shown.contains("Site deploy"), "{shown}");
     }
 
     #[test]
@@ -1330,9 +1332,9 @@ mod tests {
             items(&m.data, at(6)).into_iter().map(|i| (i.why, i.thread, i.text)).collect();
         assert_eq!(found[1..], [(Why::Message, asked.clone(), "bob: lunch?".to_owned())]);
         assert_eq!(found[0].0, Why::Stuck);
-        let screen = shown(&m, at(6));
-        assert!(screen.contains("message"), "{screen}");
-        assert!(screen.contains("r reply · d done · z snooze · Enter open"), "{screen}");
+        let shown = screen(&m, 140, 30, at(6));
+        assert!(shown.contains("message"), "{shown}");
+        assert!(shown.contains("r reply · d done · z snooze · Enter open"), "{shown}");
 
         m.key(Key::End, at(6));
         let last = m.data.live.summary(&asked).unwrap().last_reopening;

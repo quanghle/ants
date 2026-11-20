@@ -235,12 +235,8 @@ mod tests {
     use crate::threads::thread_meta::Marking;
     use crate::tui::exec::Job;
     use crate::tui::model::{Focus, Page};
-    use crate::tui::test_support::model;
+    use crate::tui::test_support::{model, typed};
     use crate::tui::thread;
-
-    fn typed(m: &mut Model, text: &str) -> Option<Action> {
-        text.chars().map(|c| m.key(Key::Char(c), at(1))).last().flatten()
-    }
 
     fn on_thread() -> (Model, ThreadId) {
         let thread = ThreadId::generate();

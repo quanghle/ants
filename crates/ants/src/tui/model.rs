@@ -53,7 +53,7 @@ pub enum Key {
     Newline,
     /// Ctrl-C.
     Interrupt,
-    /// Ctrl and another key, for the views to come (Ctrl-K, Ctrl-X).
+    /// Ctrl and another key: Ctrl-F, Ctrl-L, Ctrl-X and the like.
     Ctrl(char),
     /// Alt and a character: Alt-B, Alt-F and Alt-D in the command bar.
     Alt(char),
@@ -333,6 +333,8 @@ pub enum To {
     Unread(ThreadId, Option<u64>),
     /// The command bar, open on this text.
     Bar(String),
+    /// The command bar, open on `/forward @` to forward the thread to the ant typed.
+    Forward,
     /// The command bar, focused on its draft for the view shown.
     Write,
     /// Ask for a new TL;DR of the thread.
