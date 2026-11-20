@@ -13,15 +13,12 @@ use data_encoding::BASE64URL_NOPAD;
 use futures::TryStreamExt as _;
 use serde_json::Value;
 
-/// The humans bucket, created when missing and the credentials allow it (a human's). Entries never expire: a human
-/// stays one until removed.
+/// The humans bucket, created as `ants init` does when missing and the credentials allow it (a human's). Entries
+/// never expire: a human stays one until removed.
 pub async fn ensure(js: &jetstream::Context) -> Result<kv::Store> {
-    if let Ok(store) = js.get_key_value(HUMANS_BUCKET).await {
-        return Ok(store);
-    }
-    js.create_key_value(ants_daemon::hub::humans_config())
+    Box::pin(ants_daemon::hub::ensure_bucket(js, ants_daemon::hub::Object::Humans))
         .await
-        .context("creating the humans bucket (with credentials, `ants init` as a human creates it)")
+        .context("opening the humans bucket (with credentials, `ants init` as a human creates it)")
 }
 
 /// Who the CLI acts as: the user its credentials name, a human or an ant, or `human` without credentials.

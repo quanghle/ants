@@ -222,6 +222,8 @@ async fn revoking_a_retired_ant_cleans_up_only_its_channel_and_done_consumers() 
     let colony = bus::ensure_colony(&human, COLONY_TTL).await.unwrap();
     let channel_stream = bus::ensure_stream(&human).await.unwrap();
     let done_stream = human.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
+    // Where the revocations are recorded.
+    ants_daemon::hub::ensure_bucket(&human, ants_daemon::hub::Object::Devices).await.unwrap();
 
     let first = server.creds_in(&dev_a, domain);
     let first_key = read_creds(&first).unwrap().1.public_key();

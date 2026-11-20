@@ -129,9 +129,9 @@ impl Permissions {
     }
 
     /// What the short-lived credentials `ants auth revoke` and `ants auth push` issue themselves from the account key
-    /// allow, to say in [`DEVICES_BUCKET`] which keys of humans' credentials are revoked: creating the bucket, reading
-    /// and putting the revocation records ([`subject::revoked_devices`]) and nothing else of it, with the replies of
-    /// its JetStream requests under [`ENROLL_INBOX`]. No other credentials put a revocation record. They also delete
+    /// allow, to say in [`DEVICES_BUCKET`] (which `ants init` creates) which keys of humans' credentials are revoked:
+    /// reading and putting the revocation records ([`subject::revoked_devices`]) and nothing else of it, with the
+    /// replies of its JetStream requests under [`ENROLL_INBOX`]. No other credentials put a revocation record. They also delete
     /// the identity record and shared settings of an ant revoked whole ([`IDENTITIES_BUCKET`]), first reading the
     /// identity record and preserving its growth by sense id.
     pub fn for_device_revoker() -> Self {
@@ -144,7 +144,6 @@ impl Permissions {
             publish: vec![
                 "$JS.API.INFO".to_owned(),
                 format!("$JS.API.STREAM.INFO.{devices}"),
-                format!("$JS.API.STREAM.CREATE.{devices}"),
                 format!("$JS.API.DIRECT.GET.{devices}.{revoked}"),
                 revoked,
                 format!("$JS.API.DIRECT.GET.{identities}.{records}"),
