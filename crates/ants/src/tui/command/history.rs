@@ -312,12 +312,8 @@ mod tests {
     use super::*;
     use crate::test_support::live::{at, message, user};
     use crate::tui::model::Page;
-    use crate::tui::test_support::model;
+    use crate::tui::test_support::{model, typed};
     use crate::tui::{dm, thread};
-
-    fn typed(m: &mut Model, text: &str) {
-        text.chars().for_each(|c| _ = m.key(Key::Char(c), at(1)));
-    }
 
     fn sent(m: &mut Model, text: &str) {
         m.bar.focused = true;

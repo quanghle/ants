@@ -612,13 +612,9 @@ mod tests {
     use crate::test_support::colony::entry;
     use crate::test_support::live::{at, message, user};
     use crate::tui::input::{Typed, exercise};
-    use crate::tui::model::{Action, Model};
+    use crate::tui::model::Action;
     use crate::tui::nav;
-    use crate::tui::test_support::model;
-
-    fn screen(m: &Model, now: DateTime<Utc>) -> String {
-        crate::test_support::render::rendered(160, 36, |f| crate::tui::frame::draw(f, m, now))
-    }
+    use crate::tui::test_support::{model, screen};
 
     fn waiting(thread: &ThreadId, from: &str, ahead: usize) -> Waiting {
         Waiting {
@@ -663,7 +659,7 @@ mod tests {
         m.data.cards.today = Some(vec![(user("dev-a"), Spent { tokens: 1234, cost: 0.42 })]);
         m.select(nav::Item::Ant(user("dev-a")));
         assert_eq!(m.page().name(), "ant");
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 160, 36, at(3));
         assert!(shown.contains("{.~.} dev-a · live, signed-out"), "without colour, the face: {shown}");
         assert!(shown.contains("machine      m1") && shown.contains("gpt-5, effort high"), "{shown}");
         assert!(shown.contains("capabilities rust, review"), "{shown}");
@@ -686,7 +682,7 @@ mod tests {
         m.key(Key::Esc, at(3));
         m.focus = crate::tui::model::Focus::View;
         assert_eq!(m.key(Key::Char('r'), at(3)), None);
-        assert!(screen(&m, at(3)).contains(Page::ARMED_KEYS), "r asks first");
+        assert!(screen(&m, 160, 36, at(3)).contains(Page::ARMED_KEYS), "r asks first");
         assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Run(restart(false), String::new())));
         m.key(Key::Char('r'), at(3));
         assert_eq!(m.key(Key::Char('!'), at(3)), Some(Action::Run(restart(true), String::new())));
@@ -715,34 +711,34 @@ mod tests {
         m.select(nav::Item::Ant(user("dev-a")));
         m.focus = crate::tui::model::Focus::View;
         let tabs = |shown: &str| shown.lines().position(|l| l.contains("threads (0)")).unwrap();
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 160, 36, at(3));
         assert_eq!(tabs(&shown), 15, "the box keeps the 12 rows of the about column: {shown}");
         assert!(shown.contains("whoami       word01") && !shown.contains("word40"), "{shown}");
         assert!(shown.contains("[ ] 5 more lines") && shown.contains("[ ] 4 more lines"), "{shown}");
 
         m.key(Key::Char(']'), at(3));
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 160, 36, at(3));
         assert!(!shown.contains("machine      m1") && shown.contains("[ ] 4 more lines"), "{shown}");
         assert!(
             shown.contains("nothing holds dev-a back") && shown.matches("[ ] 4 more lines").count() == 2,
             "{shown}"
         );
         (0..10).for_each(|_| _ = m.key(Key::Char(']'), at(3)));
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 160, 36, at(3));
         assert!(shown.contains("word40") && shown.contains("[ ] 5 lines above"), "kept within: {shown}");
         m.key(Key::Char('['), at(3));
-        assert!(screen(&m, at(3)).contains("[ ] 1 more line "), "{}", screen(&m, at(3)));
+        assert!(screen(&m, 160, 36, at(3)).contains("[ ] 1 more line "), "{}", screen(&m, 160, 36, at(3)));
 
         m.key(Key::Char('\\'), at(3));
         m.key(Key::Char(']'), at(3));
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 160, 36, at(3));
         assert!(!shown.contains("nothing holds dev-a back") && shown.contains("[ ] 3 more lines"), "{shown}");
         assert!(shown.contains("[ ] 1 more line "), "the about column stays: {shown}");
         assert_eq!(tabs(&shown), 15);
 
         m.select(nav::Item::Ant(user("dev-b")));
         m.select(nav::Item::Ant(user("dev-a")));
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 160, 36, at(3));
         assert!(shown.contains("[ ] 5 more lines") && shown.contains("[ ] 4 more lines"), "scrolled back: {shown}");
     }
 
@@ -763,7 +759,7 @@ mod tests {
             other => other,
         };
         assert_eq!(m.key(Key::Char('p'), at(3)), None, "p asks first");
-        assert!(screen(&m, at(3)).contains("y pause the ant · any other key keeps it working"));
+        assert!(screen(&m, 160, 36, at(3)).contains("y pause the ant · any other key keeps it working"));
         assert_eq!(m.key(Key::Char('j'), at(3)), None);
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "any other key kept it working");
         m.key(Key::Char('p'), at(3));
@@ -771,9 +767,9 @@ mod tests {
         dev.paused = Some(ants_proto::Paused { since: at(3), by: None });
         m.data.live.colony(vec![dev], at(3));
         m.key(Key::Char('p'), at(4));
-        assert!(screen(&m, at(4)).contains("y resume the ant · any other key keeps it paused"));
+        assert!(screen(&m, 160, 36, at(4)).contains("y resume the ant · any other key keeps it paused"));
         assert_eq!(sent(m.key(Key::Char('y'), at(4))), pause(false));
-        assert!(screen(&m, at(4)).contains("paused"), "{}", screen(&m, at(4)));
+        assert!(screen(&m, 160, 36, at(4)).contains("paused"), "{}", screen(&m, 160, 36, at(4)));
     }
 
     #[test]
@@ -784,14 +780,14 @@ mod tests {
         m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(2));
         m.select(nav::Item::Ant(user("dev-a")));
         m.key(Key::Right, at(3));
-        assert!(screen(&m, at(3)).contains("asking the daemon of dev-a…"));
+        assert!(screen(&m, 160, 36, at(3)).contains("asking the daemon of dev-a…"));
         assert_eq!(m.ant_shown(), Some(user("dev-a")));
         m.ant_event(Event::Queue(user("dev-b"), Queue::Unanswered));
         m.ant_event(Event::Queue(user("dev-a"), Queue::Unanswered));
-        assert!(screen(&m, at(3)).contains("no daemon serving dev-a answered within 5s"));
+        assert!(screen(&m, 160, 36, at(3)).contains("no daemon serving dev-a answered within 5s"));
         let queued = vec![waiting(&thread, "alice", 0), waiting(&thread, "bob", 1)];
         m.ant_event(Event::Queue(user("dev-a"), Queue::Read(queued, 3)));
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 160, 36, at(3));
         assert!(shown.contains("queue (5)") && shown.contains("and 3 more in the stream"), "{shown}");
         assert!(shown.contains("next") && shown.contains("1 ahead"), "{shown}");
         assert!(shown.contains("Enter open · Esc back · ↑↓ message · ←→ pane"), "{shown}");
@@ -808,7 +804,7 @@ mod tests {
         m.key(Key::Left, at(3));
         assert_eq!(m.memories_wanted(), None, "not on the settings pane");
         m.key(Key::Left, at(3));
-        assert!(screen(&m, at(3)).contains("asking the daemon of dev-a for its memories…"));
+        assert!(screen(&m, 160, 36, at(3)).contains("asking the daemon of dev-a for its memories…"));
         assert_eq!(m.memories_wanted(), Some((user("dev-a"), 1)));
         let memories = Memories {
             core: CoreMemories { whoami: Some("A tester.".to_owned()), ..CoreMemories::default() },
@@ -823,7 +819,7 @@ mod tests {
             ..Memories::default()
         };
         m.memories_event(memories::Event(user("dev-a"), 1, Ok(memories)));
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 160, 36, at(3));
         assert!(shown.contains("memories (1)") && shown.contains("memories of dev-a · read-only"), "{shown}");
         assert!(shown.contains("A tester.") && shown.contains("── AGENTS.md (9 B)"), "{shown}");
         assert!(shown.contains("Esc back · ↑↓ scroll · ←→ pane"), "{shown}");
@@ -834,9 +830,9 @@ mod tests {
         assert_eq!(m.key(Key::Char('R'), at(3)), Some(Action::Refresh));
         assert_eq!(m.memories_wanted(), Some((user("dev-a"), 2)));
         m.memories_event(memories::Event(user("dev-a"), 1, Err("late".to_owned())));
-        assert!(screen(&m, at(3)).contains("asking the daemon"), "an earlier asking's answer is dropped");
+        assert!(screen(&m, 160, 36, at(3)).contains("asking the daemon"), "an earlier asking's answer is dropped");
         m.memories_event(memories::Event(user("dev-a"), 2, Err("no admin role".to_owned())));
-        assert!(screen(&m, at(3)).contains("reading the memories: no admin role"));
+        assert!(screen(&m, 160, 36, at(3)).contains("reading the memories: no admin role"));
     }
 
     #[test]
@@ -845,10 +841,10 @@ mod tests {
         m.data.live.colony(vec![entry("dev-a", 60, 2, at(2))], at(2));
         m.select(nav::Item::Ant(user("dev-a")));
         m.key(Key::Left, at(3));
-        assert!(screen(&m, at(3)).contains("settings ("), "an ACP harness reports no MCP servers: no mcp tab");
-        assert!(!screen(&m, at(3)).contains("mcp ("));
+        assert!(screen(&m, 160, 36, at(3)).contains("settings ("), "an ACP harness reports no MCP servers: no mcp tab");
+        assert!(!screen(&m, 160, 36, at(3)).contains("mcp ("));
         m.key(Key::Left, at(3));
-        assert!(screen(&m, at(3)).contains("memories of dev-a"));
+        assert!(screen(&m, 160, 36, at(3)).contains("memories of dev-a"));
         m.key(Key::Right, at(3));
 
         let acp = entry("dev-a", 60, 2, at(2));
@@ -856,7 +852,7 @@ mod tests {
         m.key(Key::Left, at(3));
         let wanted = m.mcp_wanted().unwrap();
         assert_eq!((wanted.ant, wanted.asked, wanted.sign), (user("dev-a"), 1, None));
-        assert!(screen(&m, at(3)).contains("asking the daemon of dev-a for its MCP servers…"));
+        assert!(screen(&m, 160, 36, at(3)).contains("asking the daemon of dev-a for its MCP servers…"));
         let servers = vec![
             McpServerState::new("ants", McpStatus::Connected, None, Some("session")).with_tools(Some(12)),
             McpServerState::new("github", McpStatus::NeedsAuth, Some("unauthorized"), None),
@@ -869,19 +865,19 @@ mod tests {
             read_at: at(3),
         };
         m.mcp_event(mcp::Event::Read(user("dev-a"), 1, Ok(report)));
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 160, 36, at(3));
         assert!(shown.contains("mcp (2)") && shown.contains("12 tools") && shown.contains("needs_auth"), "{shown}");
 
         m.focus = crate::tui::model::Focus::View;
         m.key(Key::Down, at(3));
         m.key(Key::Char('s'), at(3));
         assert_eq!(m.mcp_wanted().unwrap().sign, Some((1, "github".to_owned(), None)));
-        assert!(screen(&m, at(3)).contains("asking the harness to sign in…"));
+        assert!(screen(&m, 160, 36, at(3)).contains("asking the harness to sign in…"));
         let url = "https://github.com/login/oauth/authorize?client_id=x".to_owned();
         let github = McpServerState::new("github", McpStatus::NeedsAuth, None, None);
         let signing = McpSignIn { server: github, authorization_url: Some(url.clone()), expires_at: Some(at(13)) };
         m.mcp_event(mcp::Event::Signed(user("dev-a"), 1, Ok(signing)));
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 160, 36, at(3));
         assert!(shown.contains(&url) && shown.contains("y copies it"), "{shown}");
         assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Copy(url)));
 
@@ -890,22 +886,28 @@ mod tests {
             Typed::Key(key) => _ = m.key(key, at(3)),
             Typed::Paste(text) => m.paste(text, at(3)),
         });
-        assert!(screen(&m, at(3)).contains(&format!("address: X▏{}", &want[1..])), "the address edits as the bar does");
+        assert!(
+            screen(&m, 160, 36, at(3)).contains(&format!("address: X▏{}", &want[1..])),
+            "the address edits as the bar does"
+        );
         m.key(Key::End, at(3));
         m.key(Key::Ctrl('u'), at(3));
         let callback = "http://127.0.0.1:4100/callback?code=abc&state=r";
         for c in callback.chars() {
             m.key(Key::Char(c), at(3));
         }
-        assert!(screen(&m, at(3)).contains(&format!("address: {callback}")));
+        assert!(screen(&m, 160, 36, at(3)).contains(&format!("address: {callback}")));
         m.key(Key::Enter, at(3));
         assert_eq!(m.mcp_wanted().unwrap().sign, Some((2, "github".to_owned(), Some(callback.to_owned()))));
         m.mcp_event(mcp::Event::Signed(user("dev-a"), 1, Err("late".to_owned())));
-        assert!(screen(&m, at(3)).contains("handing the address over…"), "an earlier sign-in's answer is dropped");
+        assert!(
+            screen(&m, 160, 36, at(3)).contains("handing the address over…"),
+            "an earlier sign-in's answer is dropped"
+        );
         let github = McpServerState::new("github", McpStatus::Connected, None, None).with_tools(Some(40));
         let signed = McpSignIn { server: github, authorization_url: None, expires_at: None };
         m.mcp_event(mcp::Event::Signed(user("dev-a"), 2, Ok(signed)));
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 160, 36, at(3));
         assert!(shown.contains("now connected") && shown.contains("40 tools"), "{shown}");
         assert_eq!(m.mcp_wanted().unwrap().sign, None);
     }

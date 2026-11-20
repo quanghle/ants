@@ -421,11 +421,7 @@ mod tests {
     use crate::tui::input::{Typed, exercise};
     use crate::tui::model::Focus;
     use crate::tui::nav;
-    use crate::tui::test_support::model;
-
-    fn screen(m: &super::super::model::Model) -> String {
-        crate::test_support::render::rendered(160, 36, |f| crate::tui::frame::draw(f, m, at(3)))
-    }
+    use crate::tui::test_support::{model, screen};
 
     fn reading() -> Reading {
         let mut fields = serde_json::Map::new();
@@ -465,10 +461,10 @@ mod tests {
         m.focus = Focus::View;
         m.key(Key::Left, at(3));
         assert_eq!(m.settings_shown(), Some((user("dev-a"), true)), "the pane asks for a read");
-        assert!(screen(&m).contains("reading the settings of dev-a…"));
+        assert!(screen(&m, 160, 36, at(3)).contains("reading the settings of dev-a…"));
         m.settings_event(Event::Read(user("dev-a"), Ok(reading())));
         assert_eq!(m.settings_shown(), Some((user("dev-a"), false)));
-        let shown = screen(&m);
+        let shown = screen(&m, 160, 36, at(3));
         assert!(shown.contains("settings (2)") && shown.contains("config.toml on m1, read 2s ago"), "{shown}");
         assert!(shown.contains("env.API_TOKEN = \"[redacted]\"  (secret)"), "{shown}");
         assert!(shown.contains("model = \"gpt-5\""), "{shown}");
@@ -478,7 +474,7 @@ mod tests {
 
         m.key(Key::Down, at(3));
         m.key(Key::Enter, at(3));
-        assert!(screen(&m).contains("model = \"gpt-5\"▏"), "a change of the field selected");
+        assert!(screen(&m, 160, 36, at(3)).contains("model = \"gpt-5\"▏"), "a change of the field selected");
         for _ in 0.."\"gpt-5\"".len() {
             m.key(Key::Backspace, at(3));
         }
@@ -496,23 +492,23 @@ mod tests {
             value: Some(json!("o3")),
         };
         assert_eq!(op, AdminOp::Set { changes: vec![expected] });
-        assert!(screen(&m).contains("sending…"));
+        assert!(screen(&m, 160, 36, at(3)).contains("sending…"));
         let id = Uuid::now_v7();
         m.settings_event(Event::Sent(
             user("dev-a"),
             Sent::Refused(id, "model changed since the order was sent".to_owned()),
         ));
-        assert!(screen(&m).contains(&format!("order {id} refused: model changed")));
+        assert!(screen(&m, 160, 36, at(3)).contains(&format!("order {id} refused: model changed")));
 
         m.key(Key::Up, at(3));
         m.key(Key::Enter, at(3));
-        assert!(screen(&m).contains("env.API_TOKEN = ▏"), "a secret is not shown to change");
+        assert!(screen(&m, 160, 36, at(3)).contains("env.API_TOKEN = ▏"), "a secret is not shown to change");
         m.key(Key::Esc, at(3));
         assert_eq!(m.page().name(), "ant", "Esc drops the change alone");
         m.key(Key::Char('n'), at(3));
         "nope".chars().for_each(|c| _ = m.key(Key::Char(c), at(3)));
         assert_eq!(m.key(Key::Enter, at(3)), None);
-        assert!(screen(&m).contains("\"nope\" sets nothing"), "{}", screen(&m));
+        assert!(screen(&m, 160, 36, at(3)).contains("\"nope\" sets nothing"), "{}", screen(&m, 160, 36, at(3)));
         m.key(Key::Esc, at(3));
         assert_eq!(m.key(Key::Char('R'), at(3)), Some(Action::Refresh));
         assert_eq!(m.settings_shown(), Some((user("dev-a"), true)));
@@ -531,7 +527,11 @@ mod tests {
             Typed::Key(key) => _ = m.key(key, at(3)),
             Typed::Paste(text) => m.paste(text, at(3)),
         });
-        assert!(screen(&m).contains(&format!("│{}▏{}", &want[..1], &want[1..])), "{}", screen(&m));
+        assert!(
+            screen(&m, 160, 36, at(3)).contains(&format!("│{}▏{}", &want[..1], &want[1..])),
+            "{}",
+            screen(&m, 160, 36, at(3))
+        );
         assert_eq!(m.page().name(), "ant", "keys go to the change");
     }
 }

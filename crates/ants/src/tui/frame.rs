@@ -215,12 +215,8 @@ mod tests {
     use crate::test_support::live::{at, message, user};
     use crate::tui::fold;
     use crate::tui::model::{Action, Key};
-    use crate::tui::test_support::model;
+    use crate::tui::test_support::{model, screen};
     use crate::tui::{ant, people};
-
-    fn screen(m: &Model, now: DateTime<Utc>) -> String {
-        crate::test_support::render::rendered(120, 32, |f| draw(f, m, now))
-    }
 
     #[test]
     fn the_screen_shows_who_where_the_nav_the_view_and_its_keys() {
@@ -228,7 +224,7 @@ mod tests {
         let mut m = model();
         m.data.live.colony(vec![entry("dev-a", 60, 5, at(0))], at(0));
         m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
-        let shown = screen(&m, at(2));
+        let shown = screen(&m, 120, 32, at(2));
         assert!(shown.contains(" ants · alice@hub:4222 · home · ● connected"), "{shown}");
         assert!(shown.contains("Work 1"), "{shown}");
         assert!(!shown.contains("waiting on ant 1"), "the states fold off work: {shown}");
@@ -237,17 +233,17 @@ mod tests {
         assert!(shown.contains(" Esc back · ↑↓ select · s digest · c creds · o held · Tab nav/view"), "{shown}");
 
         m.select(nav::Item::Work(None));
-        assert!(screen(&m, at(2)).contains("waiting on ant 1"), "and show on it");
+        assert!(screen(&m, 120, 32, at(2)).contains("waiting on ant 1"), "and show on it");
         m.key(Key::Enter, at(2));
-        let shown = screen(&m, at(2));
+        let shown = screen(&m, 120, 32, at(2));
         assert!(shown.contains(" · deploy the site · ● connected"), "the header names the thread: {shown}");
         assert!(shown.contains("waiting on ant") && shown.contains("reading the thread…"), "{shown}");
 
         m.data.live.link(false, at(3));
-        let shown = screen(&m, at(30));
+        let shown = screen(&m, 120, 32, at(30));
         assert!(shown.contains("○ disconnected 27s, reconnecting"), "{shown}");
         m.key(Key::Char('?'), at(3));
-        let shown = screen(&m, at(30));
+        let shown = screen(&m, 120, 32, at(30));
         assert!(shown.contains(crate::tui::help::CLOSE), "{shown}");
     }
 
@@ -267,7 +263,7 @@ mod tests {
         let mut m = model();
         m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
         m.select(nav::Item::Work(None));
-        screen(&m, at(2));
+        screen(&m, 120, 32, at(2));
         m.key(Key::Enter, at(2));
         let (wide, shown) = conversation(&m, 80);
         assert_eq!(wide, 78, "{shown}");
@@ -319,7 +315,7 @@ mod tests {
             assert!(!cut(&shown) && shown.contains('…'), "{shown}");
         }
         m.select(nav::Item::Work(None));
-        screen(&m, at(2));
+        screen(&m, 120, 32, at(2));
         m.key(Key::Enter, at(2));
         let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(2)));
         assert!(
@@ -334,13 +330,13 @@ mod tests {
         let mut m = model();
         let push = crate::test_support::live::request("dev-a", "git push", vec![ants_proto::Verdict::AllowOnce]);
         m.data.live.approvals = vec![push.clone()];
-        let shown = screen(&m, at(0));
+        let shown = screen(&m, 120, 32, at(0));
         assert!(
             shown.contains("approve") && shown.contains("dev-a asks to run:") && shown.contains("execute: git push"),
             "{shown}"
         );
         m.key(Key::Enter, at(0));
-        let shown = screen(&m, at(0));
+        let shown = screen(&m, 120, 32, at(0));
         assert!(shown.contains(&format!(" Tool request {} ", crate::tools::qualified(&push))), "{shown}");
         assert!(
             shown.contains("a allow · r reject · n reject with a note · Enter open its thread · Esc back"),
@@ -349,7 +345,7 @@ mod tests {
         m.key(Key::Esc, at(0));
         let decide = crate::tui::model::Action::Decide(Box::new(push), ants_proto::Verdict::AllowOnce);
         assert_eq!(m.key(Key::Char('a'), at(0)), Some(decide));
-        let shown = screen(&m, at(0));
+        let shown = screen(&m, 120, 32, at(0));
         assert!(shown.contains("storing the decision…"), "{shown}");
     }
 
@@ -357,41 +353,41 @@ mod tests {
     fn with_no_thread_read_home_says_what_to_type_and_the_bar_what_enter_does() {
         let mut m = model();
         m.stored(vec![], at(0));
-        let shown = screen(&m, at(0));
+        let shown = screen(&m, 120, 32, at(0));
         assert!(shown.contains("@ant and a text") && shown.contains("Ctrl-K and a text"), "{shown}");
         assert!(shown.contains("Enter asks the assistant or the messenger · / commands · @ ant"), "{shown}");
         let thread = ThreadId::generate();
         m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
-        let shown = screen(&m, at(2));
+        let shown = screen(&m, 120, 32, at(2));
         assert!(shown.contains("nothing waits on a human") && !shown.contains("@ant and a text"), "{shown}");
         m.select(nav::Item::Work(None));
-        screen(&m, at(2));
+        screen(&m, 120, 32, at(2));
         m.key(Key::Enter, at(2));
-        assert!(screen(&m, at(2)).contains("Enter replies on the thread · / commands"));
+        assert!(screen(&m, 120, 32, at(2)).contains("Enter replies on the thread · / commands"));
         m.select(nav::Item::Channel("ops".parse().unwrap()));
-        assert!(screen(&m, at(2)).contains("Enter starts a thread in #ops · / commands"));
+        assert!(screen(&m, 120, 32, at(2)).contains("Enter starts a thread in #ops · / commands"));
     }
 
     #[test]
     fn the_command_bar_shows_its_hint_then_its_text_status_and_keys() {
         let mut m = model();
-        let shown = screen(&m, at(0));
+        let shown = screen(&m, 120, 32, at(0));
         assert!(shown.contains("/ commands · @ ant · # channel"), "{shown}");
         m.key(Key::Char('@'), at(0));
-        let shown = screen(&m, at(0));
+        let shown = screen(&m, 120, 32, at(0));
         assert!(shown.contains("@bob") && shown.contains("human"), "{shown}");
         assert!(shown.contains("↑↓ select · Tab/Enter complete · Esc close the list"), "{shown}");
         for c in "dev-a".chars() {
             m.key(Key::Char(c), at(0));
         }
         m.key(Key::Enter, at(0));
-        let shown = screen(&m, at(0));
+        let shown = screen(&m, 120, 32, at(0));
         assert!(shown.contains("@dev-a"), "{shown}");
         assert!(shown.contains("nothing to send to @dev-a"), "{shown}");
         assert!(shown.contains("Enter send · Ctrl-J new line"), "{shown}");
         m.key(Key::Ctrl('u'), at(0));
         m.key(Key::Char('/'), at(0));
-        let shown = screen(&m, at(0));
+        let shown = screen(&m, 120, 32, at(0));
         assert!(shown.contains("/goto       THREAD|#channel|@user"), "{shown}");
         assert!(shown.contains("↑↓ select · Enter run · Tab complete · Esc close"), "{shown}");
     }
@@ -402,10 +398,10 @@ mod tests {
         let bob = user("bob");
         m.stored(vec![message(1, &ThreadId::generate(), "alice", "dev-a", "deploy the site")], at(0));
         m.people(people::Event::Online(Ok([bob.clone()].into())), at(0));
-        assert!(screen(&m, at(1)).contains("● bob"));
+        assert!(screen(&m, 120, 32, at(1)).contains("● bob"));
 
         m.select(nav::Item::Person(bob));
-        let shown = screen(&m, at(1));
+        let shown = screen(&m, 120, 32, at(1));
         assert!(shown.contains(" bob · online "), "{shown}");
         assert!(shown.contains("no messages with bob yet: type one"), "{shown}");
         assert!(shown.contains("a-z write · ↑ select · Enter open"), "{shown}");

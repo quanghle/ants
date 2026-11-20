@@ -1,17 +1,26 @@
-//! Fixtures the tests of the full-screen views share: a model, channel posts, tool calls and images.
+//! Fixtures the tests of the full-screen views share: a model, channel posts, tool calls and images, the screen drawn,
+//! keys pressed and text typed, and a channel shown.
 
 use std::io::Cursor;
 use std::time::Duration;
 
-use ants_proto::{ChannelPost, HumanEntry, Humans, ReadMarker, StatusEvent, StatusUpdate, ThreadId, Uuid, subject};
+use ants_proto::{
+    ChannelEntry, ChannelId, ChannelPost, HumanEntry, Humans, ReadMarker, StatusEvent, StatusUpdate, ThreadId, Uuid,
+    subject,
+};
+use chrono::{DateTime, Utc};
 use image::{DynamicImage, ImageFormat, RgbImage};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
 
 use super::images::encode;
-use super::model::Model;
+use super::model::{Action, Focus, Key, Model, Page};
+use super::reads::Read;
+use super::{frame, nav};
 use crate::live::State;
+use crate::test_support::colony::entry;
 use crate::test_support::live::{at, message, user};
+use crate::test_support::render::rendered;
 use crate::threads::thread::{Entry, Kind, Parser, ToolCall};
 
 /// The model of alice, with bob a human too and nothing read yet.
@@ -86,4 +95,45 @@ pub(super) fn png(width: u32, height: u32) -> Vec<u8> {
 /// The image in `bytes` encoded as halfblocks, at 10 by 20 pixels a cell.
 pub(super) fn halfblocks(bytes: &[u8]) -> Protocol {
     encode(&Picker::halfblocks(), bytes).unwrap()
+}
+
+/// The screen `m` draws at `now` on a terminal `width` by `height`.
+pub(super) fn screen(m: &Model, width: u16, height: u16, now: DateTime<Utc>) -> String {
+    rendered(width, height, |f| frame::draw(f, m, now))
+}
+
+/// Press `keys` in turn at second 1: where the last one led.
+pub(super) fn keys(m: &mut Model, keys: impl IntoIterator<Item = Key>) -> Option<Action> {
+    keys.into_iter().fold(None, |_, key| m.key(key, at(1)))
+}
+
+/// Type `text` at second 1, a line break as Shift-Enter: where its last key led.
+pub(super) fn typed(m: &mut Model, text: &str) -> Option<Action> {
+    keys(m, text.chars().map(|c| if c == '\n' { Key::Newline } else { Key::Char(c) }))
+}
+
+/// Alice's model showing #ops, described as `description`, which dev-a owns, with dev-m its messenger, bob a member
+/// and carol a human not in it; the ants of `colony` in the colony.
+pub(super) fn ops(description: &str, colony: &[&str]) -> Model {
+    let ops: ChannelId = "ops".parse().unwrap();
+    let mut m = model();
+    let channel = ChannelEntry {
+        members: ["alice", "dev-a", "bob", "dev-m"].map(user).to_vec(),
+        messenger: Some(user("dev-m")),
+        owner: Some(user("dev-a")),
+        description: Some(description.to_owned()),
+        ..ChannelEntry::new(ops.clone())
+    };
+    let humans = Humans::from_entries(["alice", "bob", "carol"].map(|h| (h, HumanEntry::new(user(h)))));
+    m.read(Read::Directory(Ok((vec![channel], humans))), at(0));
+    m.data.live.colony(colony.iter().map(|a| entry(a, 60, 5, at(0))).collect(), at(0));
+    m.select(nav::Item::Channel(ops));
+    m.focus = Focus::View;
+    m
+}
+
+/// The channel page `m` shows, drawn on a terminal `width` by `height` at second 61.
+pub(super) fn channel_screen(m: &Model, width: u16, height: u16) -> String {
+    let Page::Channel(page) = m.page() else { panic!("not the channel") };
+    rendered(width, height, |f| page.draw(f, f.area(), &m.data, at(61), true))
 }

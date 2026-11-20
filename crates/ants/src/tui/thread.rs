@@ -491,7 +491,7 @@ impl Page {
             }
             Key::Char('u') => return Some(To::Unread(self.history.thread.clone(), self.selection().map(|e| e.seq))),
             Key::Char('S') => return Some(To::Tldr(self.history.thread.clone())),
-            Key::Char('f') => return Some(To::Bar("/forward @".to_owned())),
+            Key::Char('f') => return Some(To::Forward),
             Key::Char('T') => return Some(To::Tools),
             Key::Char('o') => {
                 let listed = self.attachment()?.clone();

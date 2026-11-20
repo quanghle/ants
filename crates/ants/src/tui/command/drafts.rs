@@ -121,13 +121,9 @@ mod tests {
     use crate::test_support::live::{at, message};
     use crate::tui::exec::{Job, Outcome};
     use crate::tui::model::{Action, Key};
-    use crate::tui::test_support::model;
+    use crate::tui::test_support::{model, typed};
     use crate::tui::work::Filter;
     use crate::tui::{thread, work};
-
-    fn typed(m: &mut Model, text: &str) {
-        text.chars().for_each(|c| _ = m.key(Key::Char(c), at(1)));
-    }
 
     fn show(m: &mut Model, thread: &ThreadId) {
         m.pages.truncate(1);

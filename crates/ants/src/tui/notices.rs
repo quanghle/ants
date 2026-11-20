@@ -97,11 +97,7 @@ mod tests {
     use super::*;
     use crate::test_support::live::at;
     use crate::tui::model::{Action, Level};
-    use crate::tui::test_support::model;
-
-    fn screen(m: &crate::tui::model::Model, width: u16, height: u16) -> String {
-        crate::test_support::render::rendered(width, height, |f| crate::tui::frame::draw(f, m, at(9)))
-    }
+    use crate::tui::test_support::{model, screen};
 
     #[test]
     fn n_lists_the_notices_of_the_run_latest_first_each_in_full_with_its_time() {
@@ -111,7 +107,7 @@ mod tests {
         m.key(Key::Down, at(2));
         m.notify("tool calls: none", Level::Info, at(3));
         assert_eq!(m.key(Key::Char('N'), at(4)), None);
-        let shown = screen(&m, 80, 24);
+        let shown = screen(&m, 80, 24, at(9));
         let (latest, earlier) = (shown.find("tool calls: none").unwrap(), shown.find("✗ the daemon").unwrap());
         assert!(latest < earlier, "the latest first: {shown}");
         let time = |t| at(t).with_timezone(&chrono::Local).format("%H:%M:%S").to_string();

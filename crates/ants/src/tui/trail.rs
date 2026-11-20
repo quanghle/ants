@@ -276,11 +276,7 @@ mod tests {
     use crate::test_support::live::{at, message, user};
     use crate::tui::exec::Outcome;
     use crate::tui::model::{Focus, Page};
-    use crate::tui::test_support::model;
-
-    fn screen(m: &Model) -> String {
-        crate::test_support::render::rendered(110, 30, |f| crate::tui::frame::draw(f, m, at(2)))
-    }
+    use crate::tui::test_support::{model, screen};
 
     fn done(result: Done) -> Outcome {
         Outcome { result: Ok(result), text: String::new(), quoting: None }
@@ -334,7 +330,7 @@ mod tests {
             || Done { line: "trail review".to_owned(), planned: Some(Box::new(planned.clone())), ..Done::default() };
 
         assert_eq!(m.outcome(done(plan_done())), None);
-        let shown = screen(&m);
+        let shown = screen(&m, 110, 30, at(2));
         for line in
             ["Start a run of a trail?", "trail review, saved for the colony by alice", "the run may spend at most:"]
         {
@@ -342,12 +338,15 @@ mod tests {
         }
         assert!(shown.contains(" start the run? y start · Esc not started"), "{shown}");
         assert_eq!(m.key(Key::Char('x'), at(2)), None);
-        assert!(m.starting.is_none() && !screen(&m).contains("Start a run"), "another key leaves it unstarted");
+        assert!(
+            m.starting.is_none() && !screen(&m, 110, 30, at(2)).contains("Start a run"),
+            "another key leaves it unstarted"
+        );
 
         m.outcome(done(plan_done()));
         assert_eq!(m.key(Key::Char('?'), at(2)), None);
         assert!(
-            screen(&m).contains("start the run its summary shows, then show its thread"),
+            screen(&m, 110, 30, at(2)).contains("start the run its summary shows, then show its thread"),
             "the help lists its keys"
         );
         m.key(Key::Esc, at(2));

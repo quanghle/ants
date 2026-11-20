@@ -521,13 +521,9 @@ impl Io {
 mod tests {
     use super::*;
     use crate::test_support::live::{at, user};
-    use crate::tui::model::{Focus, Model};
+    use crate::tui::model::Focus;
     use crate::tui::nav;
-    use crate::tui::test_support::model;
-
-    fn screen(m: &Model, now: DateTime<Utc>) -> String {
-        crate::test_support::render::rendered(140, 30, |f| crate::tui::frame::draw(f, m, now))
-    }
+    use crate::tui::test_support::{model, screen};
 
     fn enrolling(ant: &str, key: &str) -> Asked {
         Asked::Enroll(EnrollRequest {
@@ -554,25 +550,25 @@ mod tests {
         m.data.credentials.holder = Some(Holder::Here(PathBuf::from("/team")));
         let heard = vec![enrolling("dev-c", "UCKEYOFDEVC00"), renewing("dev-a", "UAKEYOFDEVA00")];
         assert_eq!(m.data.credentials.take(Event::Heard(Ok(heard)), at(3)), None);
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 140, 30, at(3));
         assert!(shown.contains("2 asking for credentials: dev-c (enroll), dev-a (renewal) · c lists them"), "{shown}");
 
         m.select(nav::Item::Ant(user("dev-a")));
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 140, 30, at(3));
         assert!(shown.contains("dev-a asks for its credentials renewed from host laptop"), "{shown}");
 
         m.select(nav::Item::Home);
         m.focus = Focus::View;
         m.key(Key::Char('c'), at(3));
         assert_eq!(m.page().name(), "credentials");
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 140, 30, at(3));
         assert!(shown.contains("enroll  dev-c asks to enroll from host m2, key UCKEYOFDEVC0…"), "{shown}");
         assert!(shown.contains("a approve · r reject") && shown.contains("a renew"), "{shown}");
         assert!(shown.contains("a approve · r reject · Esc back · ↑↓ select"), "{shown}");
 
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "y alone confirms nothing");
         m.key(Key::Char('a'), at(3));
-        let shown = screen(&m, at(3));
+        let shown = screen(&m, 140, 30, at(3));
         assert!(
             shown.contains("y to approve dev-c for key UCKEYOFDEVC0…") && shown.contains(Page::ARMED_KEYS),
             "{shown}"
@@ -582,12 +578,12 @@ mod tests {
         m.key(Key::Char('r'), at(3));
         let reject = Order::Reject(user("dev-c"), "UCKEYOFDEVC00".to_owned());
         assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Credentials(reject.clone())));
-        assert!(screen(&m, at(3)).contains("reject dev-c for key UCKEYOFDEVC0……"), "the order runs");
+        assert!(screen(&m, 140, 30, at(3)).contains("reject dev-c for key UCKEYOFDEVC0……"), "the order runs");
         m.key(Key::Char('a'), at(3));
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "one order at a time");
 
         m.credentials(Event::Done(reject, Ok("dev-c rejected".to_owned())), at(4));
-        assert!(screen(&m, at(4)).contains("dev-c rejected"), "the outcome is a notice");
+        assert!(screen(&m, 140, 30, at(4)).contains("dev-c rejected"), "the outcome is a notice");
         assert_eq!(m.data.credentials.asked, [renewing("dev-a", "UAKEYOFDEVA00")], "the request answered goes");
         assert!(m.data.credentials.busy.is_none());
         m.key(Key::Char('r'), at(4));
@@ -605,14 +601,14 @@ mod tests {
         m.data.credentials.holder = Some(Holder::Elsewhere("not in /home/a/.config/ants/auth".to_owned()));
         m.focus = Focus::View;
         m.key(Key::Char('c'), at(1));
-        let shown = screen(&m, at(1));
+        let shown = screen(&m, 140, 30, at(1));
         assert!(
             shown.contains("The team's account key is not on this machine (not in /home/a/.config/ants/auth)"),
             "{shown}"
         );
         assert!(shown.contains("`ants enroll approve ANT`") && shown.contains("where `ants auth init` ran"), "{shown}");
         assert_eq!(m.key(Key::Char('a'), at(1)), None);
-        assert!(!screen(&m, at(1)).contains("y to"), "nothing to answer");
+        assert!(!screen(&m, 140, 30, at(1)).contains("y to"), "nothing to answer");
         assert_eq!(m.data.credentials.line(), None, "home says nothing of an unknown machine");
 
         let recorded = AccountHolder {
@@ -622,14 +618,14 @@ mod tests {
             updated_at: at(1),
         };
         m.credentials(Event::Recorded(Some(recorded)), at(1));
-        let shown = screen(&m, at(1) + chrono::Duration::minutes(3));
+        let shown = screen(&m, 140, 30, at(1) + chrono::Duration::minutes(3));
         assert!(
             shown.contains("approve them on machine keybox (host keybox.lan), as `ants signer` there recorded 3m ago"),
             "{shown}"
         );
         assert!(!shown.contains("auth init"), "{shown}");
         m.key(Key::Esc, at(1));
-        let shown = screen(&m, at(1));
+        let shown = screen(&m, 140, 30, at(1));
         assert!(
             shown.contains("requests for credentials are answered on machine keybox, where the team's account key is"),
             "{shown}"

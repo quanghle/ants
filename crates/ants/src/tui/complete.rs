@@ -187,16 +187,10 @@ mod tests {
     use crate::tui::channel;
     use crate::tui::model::Key;
     use crate::tui::reads::Read;
-    use crate::tui::test_support::model;
+    use crate::tui::test_support::{model, typed};
 
     fn words(m: &Model) -> Vec<String> {
         m.completions().into_iter().map(|c| c.word).collect()
-    }
-
-    fn typed(m: &mut Model, text: &str) {
-        for c in text.chars() {
-            m.key(Key::Char(c), at(0));
-        }
     }
 
     fn team() -> Model {

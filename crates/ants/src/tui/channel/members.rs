@@ -355,47 +355,19 @@ fn change(field: Field, text: &str, channel: &ChannelId, data: &Data) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::HumanEntry;
-
     use super::*;
-    use crate::test_support::colony::entry;
     use crate::test_support::live::{at, user};
-    use crate::test_support::render::rendered;
     use crate::tui::command::Tone;
     use crate::tui::exec::{Done, Outcome};
     use crate::tui::input::{Typed, exercise};
     use crate::tui::model::{Model, Page};
     use crate::tui::nav;
     use crate::tui::reads::Read;
-    use crate::tui::test_support::model;
+    use crate::tui::test_support::{channel_screen, keys, model, typed};
 
-    /// Alice's model showing #ops, which dev-a owns, with dev-m its messenger, bob a member and carol not; dev-b is in
-    /// the colony too.
+    /// Alice's model showing #ops, dev-a, dev-b and dev-m in the colony.
     fn ops() -> Model {
-        let ops: ChannelId = "ops".parse().unwrap();
-        let mut m = model();
-        let entry = ChannelEntry {
-            members: ["alice", "dev-a", "bob", "dev-m"].map(user).to_vec(),
-            messenger: Some(user("dev-m")),
-            owner: Some(user("dev-a")),
-            description: Some("Deploys and outages.".to_owned()),
-            ..ChannelEntry::new(ops.clone())
-        };
-        let humans = Humans::from_entries(["alice", "bob", "carol"].map(|h| (h, HumanEntry::new(user(h)))));
-        m.read(Read::Directory(Ok((vec![entry], humans))), at(0));
-        let colony = ["dev-a", "dev-b", "dev-m"].map(|a| self::entry(a, 60, 5, at(0)));
-        m.data.live.colony(colony.to_vec(), at(0));
-        m.select(nav::Item::Channel(ops));
-        m.focus = crate::tui::model::Focus::View;
-        m
-    }
-
-    fn keys(m: &mut Model, keys: impl IntoIterator<Item = Key>) -> Option<Action> {
-        keys.into_iter().fold(None, |_, key| m.key(key, at(1)))
-    }
-
-    fn typed(m: &mut Model, text: &str) -> Option<Action> {
-        keys(m, text.chars().map(Key::Char))
+        crate::tui::test_support::ops("Deploys and outages.", &["dev-a", "dev-b", "dev-m"])
     }
 
     fn editor(m: &Model) -> Option<&Editor> {
@@ -575,25 +547,20 @@ mod tests {
         assert!(!m.bar.focused && editor(&m).is_some(), "the editor stays");
         let entry = ChannelEntry { members: vec![user("alice")], ..m.data.channels[0].clone() };
         m.read(Read::Directory(Ok((vec![entry], m.data.humans.clone().unwrap()))), at(2));
-        let shown = shown(&m, 130, 30);
+        let shown = channel_screen(&m, 130, 30);
         assert!(shown.lines().nth(2).unwrap().contains("+ add"), "the rows follow the entry read back: {shown}");
         let done = Done { line: "#ops: removed bob".to_owned(), ..Done::default() };
         m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None });
         assert_eq!(status(&m), ("#ops: removed bob".to_owned(), Tone::Done));
     }
 
-    fn shown(m: &Model, width: u16, height: u16) -> String {
-        let Page::Channel(page) = m.page() else { panic!("not the channel") };
-        rendered(width, height, |f| page.draw(f, f.area(), &m.data, at(61), true))
-    }
-
     #[test]
     fn the_editor_covers_the_members_pane_or_under_a_one_line_header_the_top_of_the_view() {
         let mut m = ops();
-        let before = shown(&m, 130, 30);
+        let before = channel_screen(&m, 130, 30);
         assert!(before.lines().nth(4).unwrap().contains("M manage"), "{before}");
         keys(&mut m, [Key::Up, Key::Char('M'), Key::Char('a'), Key::Char('c')]);
-        let shown = self::shown(&m, 130, 30);
+        let shown = channel_screen(&m, 130, 30);
         let lines: Vec<&str> = shown.lines().collect();
         let left = lines[0].chars().collect::<String>().split("manage #ops").next().unwrap().chars().count();
         assert!(left > 30 && left < 60, "over the members pane: {shown}");
@@ -604,7 +571,7 @@ mod tests {
         assert!(lines[9].contains("description") && lines[9].contains("Deploys and outages."), "{shown}");
 
         for (width, height) in [(80, 30), (130, 12)] {
-            let shown = self::shown(&m, width, height);
+            let shown = channel_screen(&m, width, height);
             let lines: Vec<&str> = shown.lines().collect();
             assert!(lines[0].starts_with("#ops · notify"), "the header in one line: {shown}");
             assert!(lines[1].starts_with("┌ manage #ops"), "at the top of the view: {shown}");

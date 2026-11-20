@@ -2,9 +2,9 @@ use ants_proto::ThreadId;
 
 use super::*;
 use crate::test_support::live::{at, message};
+use crate::tui::fold;
 use crate::tui::model::{Focus, Page};
-use crate::tui::test_support::model;
-use crate::tui::{fold, frame};
+use crate::tui::test_support::{model, screen};
 
 /// The keys taken in the body of the function `name` of `source`: each `Key::` variant matched or compared, the
 /// characters of `Key::Char` and `Key::Ctrl`, `'1'..='9'` as the nine digits.
@@ -180,10 +180,6 @@ fn the_digit_range_and_quoted_backslash_are_read() {
     assert_eq!(taken(source, "key"), want);
 }
 
-fn screen(m: &Model) -> String {
-    crate::test_support::render::rendered(80, 24, |f| frame::draw(f, m, at(2)))
-}
-
 #[test]
 fn at_80x24_every_row_scrolls_into_view_over_how_to_close_the_help() {
     let thread = ThreadId::generate();
@@ -195,7 +191,7 @@ fn at_80x24_every_row_scrolls_into_view_over_how_to_close_the_help() {
     let rows = lines(&m, at(2), 78);
     let mut seen = Vec::new();
     for _ in 0..rows.len() {
-        let shown = screen(&m);
+        let shown = screen(&m, 80, 24, at(2));
         let close = shown.lines().nth(21).expect("the help's last row");
         assert!(close.contains(CLOSE), "{shown}");
         seen.push(shown);

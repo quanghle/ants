@@ -427,7 +427,7 @@ impl Page {
         let to = match key {
             Key::Enter => return rows.get(at).map(|(t, _)| To::Thread(t.clone())),
             Key::Char('S') => return rows.get(at).map(|(t, _)| To::Tldr(t.clone())),
-            Key::Char('f') => return rows.get(at).map(|_| To::Bar("/forward @".to_owned())),
+            Key::Char('f') => return rows.get(at).map(|_| To::Forward),
             Key::Char('z') => return rows.get(at).map(|(t, _)| To::Snooze(t.clone())),
             Key::Char('u') => return rows.get(at).map(|(t, _)| To::Unread(t.clone(), None)),
             Key::Char('b') => return rows.get(at).map(|(t, _)| To::Remind(t.clone(), None)),
