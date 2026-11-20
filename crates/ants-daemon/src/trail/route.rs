@@ -5,18 +5,18 @@
 //! it can take another exit: one to a trail or waypoint that does not exist, to one the run entered before, or, for a
 //! run an untrusted thread started, to an inline script.
 
-use ants_proto::{TrailLeg, TrailName, TrailRun};
-use ants_trail::{Call, Function, Run};
+use ants_proto::{GotoArgs, TrailFunction, TrailLeg, TrailName, TrailRun};
+use ants_trail::{Call, Run};
 use anyhow::Result;
 
-use super::{Leg, Slot, Trails, driver, steps};
+use super::{Leg, Slot, Trails, driver};
 
 impl Trails {
     /// Take the goto() calls the run of `slot`, `engine`, waits on, in call order: each refused is answered with why,
     /// raising in the script, until one starts the next leg. Whether there was one, for the run to compute again.
     pub(super) async fn take_gotos(&self, slot: &Slot, engine: &mut Run) -> Result<bool> {
         let mut gotos: Vec<Call> =
-            engine.outstanding().iter().filter(|call| call.function == Function::Goto).cloned().collect();
+            engine.outstanding().iter().filter(|call| call.function == TrailFunction::Goto).cloned().collect();
         gotos.sort_by_key(|call| call.call);
         let header = slot.header();
         for call in &gotos {
@@ -38,7 +38,7 @@ impl Trails {
     /// The leg `call`, a goto() of the run of `header`, `engine`, leads to, its run and its session as JSON; or why the
     /// conductor refuses it.
     async fn next_leg(&self, header: &TrailRun, engine: &Run, call: &Call) -> Result<(TrailLeg, Run, String), String> {
-        let args = steps::GotoArgs::of(&call.args)?;
+        let args = GotoArgs::of(&call.args)?;
         let current = header.leg().ok_or("the run is on no leg")?;
         let (trail, script, local) = match args.trail {
             None => (current.trail.clone(), current.script.clone(), current.local),

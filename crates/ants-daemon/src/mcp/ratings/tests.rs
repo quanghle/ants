@@ -1,5 +1,5 @@
-use ants_proto::provider::{Origin, Starter};
-use ants_proto::{RatingSummary, RunId, Saver, TrailLeg, TrailLimits, TrailName, TrailRating, UserId};
+use ants_proto::{RatingSummary, RunId, Saver, TrailName, TrailRating};
+use ants_test_support::trail_run;
 use chrono::{Duration, TimeZone as _};
 use serde_json::json;
 
@@ -20,35 +20,7 @@ fn now() -> DateTime<Utc> {
 
 /// A run, done, of `trail`, or of an inline script for none.
 fn run(trail: Option<&str>) -> TrailRun {
-    let leg = TrailLeg {
-        trail: trail.map(name),
-        local: false,
-        at: None,
-        script: "meta = {}".to_owned(),
-        args: json!(null),
-        first_call: 0,
-        started_at: now(),
-        steps: 1,
-    };
-    TrailRun {
-        run: RunId::generate(),
-        conductor: "lead".parse().unwrap(),
-        route: vec![leg],
-        owner: Some(UserId::human()),
-        thread: ThreadId::generate(),
-        parent: None,
-        spends_from: None,
-        grants: Vec::new(),
-        origin: Origin { by: Starter::Human { user: UserId::human() }, channel: None },
-        limits: TrailLimits::default(),
-        state: RunState::Done { result: json!(1) },
-        phase: None,
-        steps: 1,
-        turns: 1,
-        started_at: now(),
-        updated_at: now(),
-        ended_at: Some(now()),
-    }
+    trail_run(&"lead".parse().unwrap(), trail, RunState::Done { result: json!(1) }, now())
 }
 
 fn rated(trail: &str, replaced: Option<RatingOutcome>, saved_from: bool) -> RatedTrail {

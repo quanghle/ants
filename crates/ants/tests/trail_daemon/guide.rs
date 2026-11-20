@@ -2,8 +2,8 @@
 //! name to its end, the conductor following their gotos and trail() calls and refusing those it cannot follow, the
 //! fake host of `trail_guide` answering their steps.
 
-use ants_proto::{TrailFunction, TrailName, trail_call_key};
-use ants_trail::{Answer, Call, Function, JournalEntry};
+use ants_proto::{CallAnswer, JournalEntry, TrailFunction, TrailName, trail_call_key};
+use ants_trail::Call;
 
 use super::guide_host::{DOCS, GUIDE, answer, examples};
 use super::*;
@@ -25,19 +25,15 @@ impl Conductor {
         let marks = step.trail_step.as_ref().unwrap();
         let pending = self.session(&marks.run).await.0.pending;
         let call = pending.into_iter().find(|call| call.call == marks.call).expect("the step's call is pending");
-        let function = match call.function {
-            TrailFunction::Agent => Function::Agent,
-            TrailFunction::Human => Function::Human,
-            function => panic!("a step of {function:?}"),
-        };
-        Call { call: call.call, function, args: call.args }
+        assert!(matches!(call.function, TrailFunction::Agent | TrailFunction::Human), "a step of {:?}", call.function);
+        Call { call: call.call, function: call.function, args: call.args }
     }
 
     /// The step's answer from the fake host: its recipient's reply, or the human's.
     async fn answer_step(&self, example: &str, step: &Envelope) {
         let call = self.step_call(step).await;
-        let Answer::Ok(value) = answer(example, &call) else { unreachable!("the fake host fails no step") };
-        let taken = if call.function == Function::Human {
+        let CallAnswer::Ok(value) = answer(example, &call) else { unreachable!("the fake host fails no step") };
+        let taken = if call.function == TrailFunction::Human {
             let asked = step.asks().expect("a human step asks questions");
             let picks = asked.questions.iter().map(|_| Pick::option(1)).collect();
             self.trails.take(&Envelope::answering(step, UserId::human(), picks).unwrap()).await.unwrap()
@@ -61,7 +57,8 @@ impl Conductor {
                 continue;
             }
             let entry: JournalEntry = serde_json::from_slice(&runs.get(&key).await.unwrap().unwrap()).unwrap();
-            refused += usize::from(entry.function == Function::Goto && matches!(entry.answer, Answer::Error(_)));
+            refused +=
+                usize::from(entry.function == TrailFunction::Goto && matches!(entry.answer, CallAnswer::Error(_)));
         }
         refused
     }

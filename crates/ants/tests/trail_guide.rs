@@ -5,7 +5,8 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use ants_trail::{Answer, Call, Event, Function, Limits, Progress, Run, Status, Worker};
+use ants_proto::{CallAnswer, TrailFunction};
+use ants_trail::{Call, Event, Limits, Progress, Run, Status, Worker};
 use serde_json::Value;
 
 use host::{DOCS, GUIDE, answer, examples, hash};
@@ -49,12 +50,12 @@ impl<'a> Drive<'a> {
         self.take(&run, progress, &mut calls);
         // A goto first, as the conductor takes them before sending steps; then the newest step first: an example must
         // not depend on the order its steps are answered in.
-        while let Some(call) = match calls.iter().position(|call| call.function == Function::Goto) {
+        while let Some(call) = match calls.iter().position(|call| call.function == TrailFunction::Goto) {
             Some(goto) => calls.remove(goto),
             None => calls.pop_back(),
         } {
             let answer = match call.function {
-                Function::Goto => match self.goto(&leg, &route, &run, &call) {
+                TrailFunction::Goto => match self.goto(&leg, &route, &run, &call) {
                     Ok((trail, next)) => {
                         route.push((trail.clone(), next.state().entry().map(str::to_owned)));
                         (leg, run) = (trail, next);
@@ -63,17 +64,17 @@ impl<'a> Drive<'a> {
                         self.take(&run, progress, &mut calls);
                         continue;
                     }
-                    Err(why) => Answer::Error(why),
+                    Err(why) => CallAnswer::Error(why),
                 },
-                Function::Trail => {
+                TrailFunction::Trail => {
                     let mut callers = callers.to_vec();
                     callers.extend(route.iter().map(|(trail, _)| trail.clone()));
                     Box::pin(self.child(&callers, &call)).await
                 }
-                Function::Agent | Function::Human => {
+                TrailFunction::Agent | TrailFunction::Human => {
                     self.steps += 1;
                     if self.faults.is_some_and(|seed| hash(seed, &call.args.to_string()).is_multiple_of(3)) {
-                        Answer::Error(FAILED.to_owned())
+                        CallAnswer::Error(FAILED.to_owned())
                     } else {
                         answer(&leg, &call)
                     }
@@ -141,7 +142,7 @@ impl<'a> Drive<'a> {
 
     /// The answer to `call`, a trail() of the run of the last of `callers`: the result of a child run of the example it
     /// names, or why it fails.
-    async fn child(&mut self, callers: &[String], call: &Call) -> Answer {
+    async fn child(&mut self, callers: &[String], call: &Call) -> CallAnswer {
         let caller = callers.last().map_or("", String::as_str);
         let args = call.args.as_object().unwrap_or_else(|| panic!("{caller}: trail args {}", call.args));
         for key in args.keys() {
@@ -149,12 +150,12 @@ impl<'a> Drive<'a> {
         }
         let name = args["name"].as_str().unwrap_or_else(|| panic!("{caller}: trail name {}", call.args));
         if callers.iter().any(|caller| caller == name) {
-            return Answer::Error(format!("trail {name} is on the route of a calling run: no trail calls itself"));
+            return CallAnswer::Error(format!("trail {name} is on the route of a calling run: no trail calls itself"));
         }
         self.children += 1;
         match self.run(name, args.get("args").cloned().unwrap_or(Value::Null), callers).await {
-            Status::Done { result } => Answer::Ok(result),
-            Status::Failed { error, .. } => Answer::Error(format!("trail {name} failed: {error}")),
+            Status::Done { result } => CallAnswer::Ok(result),
+            Status::Failed { error, .. } => CallAnswer::Error(format!("trail {name} failed: {error}")),
             Status::Running => panic!("{name}: a child run that never ended"),
         }
     }

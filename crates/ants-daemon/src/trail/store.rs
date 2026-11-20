@@ -5,11 +5,10 @@
 //! runs it started answering it ([`TrailAnswering`]).
 
 use ants_proto::{
-    JsDomain, RunId, TRAIL_RUNS_BUCKET, ThreadId, TrailAnswering, TrailRun, TrailRunIndex, TrailSession,
+    JournalEntry, JsDomain, RunId, TRAIL_RUNS_BUCKET, ThreadId, TrailAnswering, TrailRun, TrailRunIndex, TrailSession,
     TrailStepThread, UserId, trail_answering_key, trail_call_key, trail_run_key, trail_runs_index_key,
     trail_runs_reader, trail_session_key, trail_step_key, trail_thread_step_key,
 };
-use ants_trail::JournalEntry;
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use serde::Serialize;

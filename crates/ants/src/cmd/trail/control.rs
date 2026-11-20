@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use ants_proto::{
-    RunId, RunState, TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailRun, UserId, WaitingStep,
+    RunId, TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailRun, Unresumable, UserId, WaitingStep,
 };
 use anyhow::{Result, bail};
 use futures::StreamExt as _;
@@ -69,7 +69,7 @@ pub(super) async fn stop_within(
     wait: Duration,
 ) -> Result<String> {
     if run.finished() {
-        bail!("run {} has ended: {}", run.run, super::runs::state(&run.state));
+        bail!("run {} has ended: {}", run.run, run.state.name());
     }
     let action = TrailAction::Stop { run: run.run.clone() };
     match ask(client, &run.conductor, by, action, wait).await? {
@@ -102,18 +102,18 @@ pub(super) fn stopped(run: &RunId, conductor: &UserId, waiting: &[WaitingStep]) 
     out
 }
 
-/// How `state` ended with nothing to resume: done, or failed on no limit.
-pub(crate) fn ended(state: &RunState) -> Option<&'static str> {
-    match state {
-        RunState::Done { .. } => Some("done"),
-        RunState::Failed { limit: None, .. } => Some("failed, not on a limit"),
+/// How `run` ended with nothing to resume ([`Unresumable::ended`]): done, or failed on no limit.
+pub(crate) fn ended(run: &TrailRun) -> Option<&'static str> {
+    match run.state.resumable(&run.limits, None) {
+        Err(Unresumable::Done) => Some("done"),
+        Err(Unresumable::Failed(_)) => Some("failed, not on a limit"),
         _ => None,
     }
 }
 
 /// Refuse to resume `run` when its record shows it ended with nothing to resume ([`ended`]).
 pub(crate) fn resumable(run: &TrailRun) -> Result<()> {
-    match ended(&run.state) {
+    match ended(run) {
         Some(ended) => bail!("run {} has ended: {ended}", run.run),
         None => Ok(()),
     }

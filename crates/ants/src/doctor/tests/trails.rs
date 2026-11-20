@@ -1,8 +1,9 @@
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
-    ColonyEntry, PendingCall, Role, RunId, RunLimit, RunState, TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLeg,
+    ColonyEntry, PendingCall, Role, RunLimit, RunState, TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLeg,
     TrailLimits, TrailParent, TrailRun, TrailSession, UserId, Uuid, trail_session_key,
 };
+use ants_test_support::{trail_leg, trail_run};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
 
@@ -17,33 +18,17 @@ fn p(id: &str) -> UserId {
 /// A run of trail deploy that `conductor` conducts, in `state`, started `hours` before `now` and updated 30 minutes
 /// before it.
 fn record(conductor: &str, state: RunState, hours: i64, now: DateTime<Utc>) -> TrailRun {
+    let started = now - TimeDelta::hours(hours);
+    let leg = TrailLeg { script: "agent('build')\n".to_owned(), steps: 0, ..trail_leg(Some("deploy"), started) };
     TrailRun {
-        run: RunId::generate(),
-        conductor: p(conductor),
-        route: vec![TrailLeg {
-            trail: Some("deploy".parse().unwrap()),
-            local: false,
-            at: None,
-            script: "agent('build')\n".to_owned(),
-            args: serde_json::Value::Null,
-            first_call: 0,
-            started_at: now - TimeDelta::hours(hours),
-            steps: 0,
-        }],
+        route: vec![leg],
         owner: Some(p("alice")),
-        thread: ThreadId::generate(),
-        parent: None,
-        spends_from: None,
-        grants: Vec::new(),
         origin: Origin { by: Starter::Human { user: p("alice") }, channel: None },
-        limits: TrailLimits::default(),
-        state,
-        phase: None,
         steps: 2,
         turns: 7,
-        started_at: now - TimeDelta::hours(hours),
         updated_at: now - TimeDelta::minutes(30),
         ended_at: None,
+        ..trail_run(&p(conductor), Some("deploy"), state, started)
     }
 }
 

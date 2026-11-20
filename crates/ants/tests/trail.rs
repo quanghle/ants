@@ -1,9 +1,7 @@
 //! Trail runs driven through real `ants subprocess` workers.
 
-use ants_trail::{
-    Answer, Call, Event, Function, JournalEntry, Limit, Limits, MAX_DEPTH, Progress, Run, RunError, RunState, Status,
-    Worker,
-};
+use ants_proto::{CallAnswer, JournalEntry, RunLimit, TrailFunction};
+use ants_trail::{Call, Event, Limits, MAX_DEPTH, Progress, Run, RunError, Session, Status, Worker};
 use serde_json::{Value, json};
 
 const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": [\"one\"]}\n";
@@ -36,7 +34,7 @@ fn failed(run: &Run) -> &str {
 }
 
 /// The error of a failed run, and the limit it failed on.
-fn failed_on(run: &Run) -> (&str, Option<Limit>) {
+fn failed_on(run: &Run) -> (&str, Option<RunLimit>) {
     match run.status() {
         Status::Failed { error, limit } => (error, *limit),
         other => panic!("not failed: {other:?}"),
@@ -44,7 +42,7 @@ fn failed_on(run: &Run) -> (&str, Option<Limit>) {
 }
 
 async fn answer(run: &mut Run, worker: &Worker, calls: &[Call], prompt: &str, value: Value) -> Progress {
-    run.resolve(worker, call(calls, prompt).call, Answer::Ok(value)).await.unwrap()
+    run.resolve(worker, call(calls, prompt).call, CallAnswer::Ok(value)).await.unwrap()
 }
 
 const FAN_OUT: &str = r#"
@@ -74,8 +72,8 @@ async fn a_fan_out_moves_each_item_on_as_its_answer_arrives() {
     let progress = answer(&mut run, &worker, &calls, "then C", json!("c done")).await;
     assert!(progress.calls.is_empty());
 
-    run.answer(call(&calls, "first a").call, Answer::Ok(json!("A"))).unwrap();
-    run.answer(call(&calls, "first b").call, Answer::Ok(json!("B"))).unwrap();
+    run.answer(call(&calls, "first a").call, CallAnswer::Ok(json!("A"))).unwrap();
+    run.answer(call(&calls, "first b").call, CallAnswer::Ok(json!("B"))).unwrap();
     let progress = run.resume(&worker).await.unwrap();
     assert_eq!(prompts(&progress.calls), ["then A", "then B"]);
     calls.extend(progress.calls);
@@ -90,9 +88,9 @@ async fn a_fan_out_moves_each_item_on_as_its_answer_arrives() {
         run.journal()[0],
         JournalEntry {
             call: call(&calls, "first c").call,
-            function: Function::Agent,
+            function: TrailFunction::Agent,
             args: json!({"prompt": "first c"}),
-            answer: Answer::Ok(json!("C")),
+            answer: CallAnswer::Ok(json!("C")),
         }
     );
 }
@@ -115,14 +113,14 @@ await pipeline(args, draft, review)
 
     let progress = answer(&mut run, &worker, &calls, "draft b", json!("B")).await;
     assert_eq!(progress.calls.len(), 1);
-    assert_eq!(progress.calls[0].function, Function::Human);
+    assert_eq!(progress.calls[0].function, TrailFunction::Human);
     assert_eq!(progress.calls[0].args, json!({"questions": ["review B"]}));
     let review_b = progress.calls[0].call;
 
     let progress = answer(&mut run, &worker, &calls, "draft a", json!("A")).await;
     let review_a = progress.calls[0].call;
-    run.resolve(&worker, review_a, Answer::Ok(json!("A ok"))).await.unwrap();
-    run.resolve(&worker, review_b, Answer::Ok(json!("B ok"))).await.unwrap();
+    run.resolve(&worker, review_a, CallAnswer::Ok(json!("A ok"))).await.unwrap();
+    run.resolve(&worker, review_b, CallAnswer::Ok(json!("B ok"))).await.unwrap();
     assert_eq!(*done(&run), json!(["A ok", "B ok"]));
 }
 
@@ -140,20 +138,20 @@ await parallel(item("a"), item("b"))
     let worker = worker();
     let mut caught = run(script, json!(null), Limits::default());
     let calls = caught.start(&worker).await.unwrap().calls;
-    caught.resolve(&worker, calls[0].call, Answer::Error("no such ant".to_owned())).await.unwrap();
-    caught.resolve(&worker, calls[1].call, Answer::Ok(json!("fine"))).await.unwrap();
+    caught.resolve(&worker, calls[0].call, CallAnswer::Error("no such ant".to_owned())).await.unwrap();
+    caught.resolve(&worker, calls[1].call, CallAnswer::Ok(json!("fine"))).await.unwrap();
     assert_eq!(*done(&caught), json!(["a failed: no such ant", "fine"]));
 
     let uncaught = "await parallel(agent('a'), agent('b'))\n";
     let mut run = run(uncaught, json!(null), Limits::default());
     let calls = run.start(&worker).await.unwrap().calls;
-    let progress = run.resolve(&worker, calls[1].call, Answer::Error("no such ant".to_owned())).await.unwrap();
+    let progress = run.resolve(&worker, calls[1].call, CallAnswer::Error("no such ant".to_owned())).await.unwrap();
     assert_eq!(progress.cancelled, [calls[0].call]);
     let error = failed(&run);
     // A gathered coroutine's traceback starts in it, here in the prelude's agent().
     assert!(error.contains("File \"<prelude>\", line 5, in agent"), "{error}");
     assert!(error.ends_with("RuntimeError: no such ant"), "{error}");
-    assert!(matches!(run.answer(calls[0].call, Answer::Ok(json!(1))), Err(RunError::Ended)));
+    assert!(matches!(run.answer(calls[0].call, CallAnswer::Ok(json!(1))), Err(RunError::Ended)));
 }
 
 #[tokio::test]
@@ -162,7 +160,7 @@ async fn a_script_raising_fails_the_run_with_its_traceback() {
     let worker = worker();
     let mut run = run(script, json!(null), Limits::default());
     let calls = run.start(&worker).await.unwrap().calls;
-    run.resolve(&worker, calls[0].call, Answer::Ok(json!(1))).await.unwrap();
+    run.resolve(&worker, calls[0].call, CallAnswer::Ok(json!(1))).await.unwrap();
     let error = failed(&run);
     assert!(error.starts_with("Traceback (most recent call last):"), "{error}");
     assert!(error.contains("File \"trail.py\", line 3, in <module>"), "{error}");
@@ -178,20 +176,20 @@ async fn a_run_continues_in_a_fresh_run_from_its_stored_state() {
     let then_a = progress.calls[0].clone();
     let stored = serde_json::to_string(first.state()).unwrap();
     // Answered, its entry stored, but the host stopped before the run's state was stored again.
-    let entry = first.answer(call(&calls, "first b").call, Answer::Ok(json!("B"))).unwrap();
+    let entry = first.answer(call(&calls, "first b").call, CallAnswer::Ok(json!("B"))).unwrap();
     let mut journal: Vec<JournalEntry> = first.journal().to_vec();
     drop(first);
     journal.reverse();
 
-    let state: RunState = serde_json::from_str(&stored).unwrap();
+    let state: Session = serde_json::from_str(&stored).unwrap();
     let mut second = Run::restore(state, journal);
     assert_eq!(second.journal().last(), Some(&entry));
     assert_eq!(second.outstanding(), std::slice::from_ref(&then_a));
     let progress = second.resume(&worker).await.unwrap();
     assert_eq!(prompts(&progress.calls), ["then B"]);
     let then_b = progress.calls[0].call;
-    second.resolve(&worker, then_a.call, Answer::Ok(json!(1))).await.unwrap();
-    second.resolve(&worker, then_b, Answer::Ok(json!(2))).await.unwrap();
+    second.resolve(&worker, then_a.call, CallAnswer::Ok(json!(1))).await.unwrap();
+    second.resolve(&worker, then_b, CallAnswer::Ok(json!(2))).await.unwrap();
     assert_eq!(*done(&second), json!([1, 2]));
 }
 
@@ -203,15 +201,15 @@ async fn the_step_limit_raises_on_the_call_past_it() {
     for _ in 0..2 {
         let calls = run.outstanding().to_vec();
         let progress = match calls.first() {
-            Some(call) => run.resolve(&worker, call.call, Answer::Ok(json!(0))).await.unwrap(),
+            Some(call) => run.resolve(&worker, call.call, CallAnswer::Ok(json!(0))).await.unwrap(),
             None => run.start(&worker).await.unwrap(),
         };
         assert_eq!(progress.calls.len(), 1);
     }
     let call = run.outstanding()[0].call;
-    run.resolve(&worker, call, Answer::Ok(json!(0))).await.unwrap();
+    run.resolve(&worker, call, CallAnswer::Ok(json!(0))).await.unwrap();
     assert!(failed(&run).ends_with("RuntimeError: the run reached its limit of 2 steps"), "{}", failed(&run));
-    assert_eq!(failed_on(&run).1, Some(Limit::Steps));
+    assert_eq!(failed_on(&run).1, Some(RunLimit::Steps));
 }
 
 #[tokio::test]
@@ -227,7 +225,7 @@ async fn calls_past_the_concurrency_limit_wait_for_a_free_slot() {
     assert_eq!(run.queued().len(), 3);
     let mut answered = Vec::new();
     while let Some(next) = calls.pop() {
-        let progress = run.resolve(&worker, next.call, Answer::Ok(json!(next.args["prompt"]))).await.unwrap();
+        let progress = run.resolve(&worker, next.call, CallAnswer::Ok(json!(next.args["prompt"]))).await.unwrap();
         answered.push(next.args["prompt"].as_str().unwrap().to_owned());
         calls.extend(progress.calls);
         assert!(run.outstanding().len() <= 2);
@@ -244,13 +242,13 @@ async fn compute_dump_memory_and_recursion_limits_fail_the_run() {
             "while True:\n    pass\n",
             Limits { compute_ms: 300, ..Limits::default() },
             "TimeoutError: feed time limit exceeded",
-            Some(Limit::Compute),
+            Some(RunLimit::Compute),
         ),
         (
             "x = await agent('a')\n",
             Limits { dump_bytes: 1024, ..Limits::default() },
             "passes the limit of 1024 bytes",
-            Some(Limit::Session),
+            Some(RunLimit::Session),
         ),
         ("def f(n):\n    return f(n + 1)\nf(0)\n", Limits::default(), "RecursionError", None),
         (
@@ -271,7 +269,7 @@ async fn compute_dump_memory_and_recursion_limits_fail_the_run() {
     let mut run = run(script, json!(null), Limits { memory_bytes: 8 << 20, ..Limits::default() });
     run.start(&worker).await.unwrap();
     assert!(failed(&run).starts_with("MemoryError: memory limit exceeded"), "{}", failed(&run));
-    assert_eq!(failed_on(&run).1, Some(Limit::Memory));
+    assert_eq!(failed_on(&run).1, Some(RunLimit::Memory));
 }
 
 /// A script computing in stretches of `STRETCH` iterations, each followed by `between`, `count` times (or forever),
@@ -312,7 +310,7 @@ async fn host_calls_answered_at_once_do_not_restart_the_compute_limit() {
         let took = started.elapsed();
         let (error, limit) = failed_on(&run);
         assert!(error.contains("TimeoutError"), "{between}: {error}");
-        assert_eq!(limit, Some(Limit::Compute), "{between}");
+        assert_eq!(limit, Some(RunLimit::Compute), "{between}");
         // The limit, a stretch and the worker's start, with room for a slow machine.
         assert!(took < compute + std::time::Duration::from_secs(3), "{between}: {took:?}");
     }
@@ -346,7 +344,7 @@ async fn each_answer_of_one_request_computes_within_the_limit_on_its_own() {
         let mut run = run(&item(count), json!(null), limits);
         run.start(&worker).await.unwrap();
         for call in run.outstanding().to_vec() {
-            run.answer(call.call, Answer::Ok(json!("go"))).unwrap();
+            run.answer(call.call, CallAnswer::Ok(json!("go"))).unwrap();
         }
         let started = std::time::Instant::now();
         run.resume(&worker).await.unwrap();
@@ -355,7 +353,7 @@ async fn each_answer_of_one_request_computes_within_the_limit_on_its_own() {
             assert_eq!(done(&run), &json!([0, 1, 2, 3]), "each answer has the limit to itself");
         } else {
             // The first answer computing forever fails the request on the limit, not on four of them.
-            assert_eq!(failed_on(&run).1, Some(Limit::Compute));
+            assert_eq!(failed_on(&run).1, Some(RunLimit::Compute));
             assert!(took < compute + std::time::Duration::from_secs(3), "{took:?}");
         }
     }
@@ -409,7 +407,7 @@ async fn a_worker_past_its_allocator_s_cap_is_told_out_of_memory() {
 
     let mut run = run(script, json!(null), limits);
     run.start(&worker()).await.unwrap();
-    assert_eq!(failed_on(&run), ("the trail ran out of memory (2097152 bytes)", Some(Limit::Memory)));
+    assert_eq!(failed_on(&run), ("the trail ran out of memory (2097152 bytes)", Some(RunLimit::Memory)));
 }
 
 #[tokio::test]
@@ -440,7 +438,7 @@ async fn a_replay_rebuilds_the_session_from_the_journal() {
     let (mut replayed, progress) = Run::replay(run.state().clone(), run.journal().to_vec(), &worker).await.unwrap();
     assert_eq!(progress, Progress::default());
     assert_eq!(replayed.outstanding(), std::slice::from_ref(&then_a));
-    replayed.resolve(&worker, then_a.call, Answer::Ok(json!("a done"))).await.unwrap();
+    replayed.resolve(&worker, then_a.call, CallAnswer::Ok(json!("a done"))).await.unwrap();
     assert_eq!(*done(&replayed), json!(["a done", "b done"]));
 }
 
@@ -462,7 +460,12 @@ async fn a_replay_names_the_call_that_diverges_from_the_journal() {
     );
 
     let mut journal = run.journal().to_vec();
-    journal.push(JournalEntry { call: 99, function: Function::Human, args: json!({}), answer: Answer::Ok(json!(1)) });
+    journal.push(JournalEntry {
+        call: 99,
+        function: TrailFunction::Human,
+        args: json!({}),
+        answer: CallAnswer::Ok(json!(1)),
+    });
     let Err(RunError::Diverged(error)) = Run::replay(run.state().clone(), journal, &worker).await else {
         panic!("a call never made diverges");
     };
@@ -490,7 +493,7 @@ async fn a_trail_with_waypoints_starts_at_its_first() {
     assert_eq!(run.state().entry(), Some("triage"));
     let calls = run.start(&worker).await.unwrap().calls;
     assert_eq!(prompts(&calls), ["triage a crash"]);
-    run.resolve(&worker, calls[0].call, Answer::Ok(json!("a bug"))).await.unwrap();
+    run.resolve(&worker, calls[0].call, CallAnswer::Ok(json!("a bug"))).await.unwrap();
     assert_eq!(*done(&run), json!("a bug"));
 }
 
@@ -503,11 +506,11 @@ async fn a_run_entered_at_a_waypoint_replays_from_its_journal() {
     let then = answer(&mut run, &worker, &calls, "plan 7", json!("swap")).await.calls;
     assert_eq!(prompts(&then), ["patch swap"]);
 
-    let stored: RunState = serde_json::from_str(&serde_json::to_string(run.state()).unwrap()).unwrap();
+    let stored: Session = serde_json::from_str(&serde_json::to_string(run.state()).unwrap()).unwrap();
     let (mut replayed, progress) = Run::replay(stored, run.journal().to_vec(), &worker).await.unwrap();
     assert_eq!(progress, Progress::default());
     assert_eq!(replayed.outstanding(), then.as_slice());
-    replayed.resolve(&worker, then[0].call, Answer::Ok(json!("patched"))).await.unwrap();
+    replayed.resolve(&worker, then[0].call, CallAnswer::Ok(json!("patched"))).await.unwrap();
     assert_eq!(*done(&replayed), json!("patched"));
 }
 
@@ -518,8 +521,8 @@ async fn a_goto_takes_no_concurrency_slot_and_the_next_leg_numbers_its_calls_pas
     let script = "await parallel(agent('a'), agent('b'), goto(at='patch', state={'bug': 7}))\n";
     let mut first = run(script, json!(null), limits);
     let calls = first.start(&worker).await.unwrap().calls;
-    let functions: Vec<Function> = calls.iter().map(|call| call.function).collect();
-    assert_eq!(functions, [Function::Agent, Function::Goto], "the goto goes out past the busy slot");
+    let functions: Vec<TrailFunction> = calls.iter().map(|call| call.function).collect();
+    assert_eq!(functions, [TrailFunction::Agent, TrailFunction::Goto], "the goto goes out past the busy slot");
     assert_eq!(calls[1].args, json!({"at": "patch", "state": {"bug": 7}}));
     let next = first.state().next_call();
     assert!(first.queued().iter().chain(&calls).all(|call| call.call < next));
@@ -532,7 +535,7 @@ async fn a_goto_takes_no_concurrency_slot_and_the_next_leg_numbers_its_calls_pas
     assert_eq!(leg.journal()[0].call, next);
     let (mut replayed, _) = Run::replay(leg.state().clone(), leg.journal().to_vec(), &worker).await.unwrap();
     assert_eq!(replayed.outstanding(), then.as_slice(), "a replay numbers the leg's calls as the leg did");
-    replayed.resolve(&worker, then[0].call, Answer::Ok(json!("patched"))).await.unwrap();
+    replayed.resolve(&worker, then[0].call, CallAnswer::Ok(json!("patched"))).await.unwrap();
     assert_eq!(*done(&replayed), json!("patched"));
 }
 

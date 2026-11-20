@@ -1,94 +1,31 @@
 //! A call's step: the message carrying it to its recipient, and the answer a reply to it gives the call.
 
 use ants_proto::{
-    Envelope, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, PendingCall, Ranked, TipBoard, TrailFunction, TrailRun, TrailStep,
-    WEBHOOK_ALLOW, check_tip_key, script_sha256,
+    AgentArgs, CallAnswer, Envelope, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, PendingCall, Ranked, TipBoard, TrailFunction,
+    TrailRun, TrailStep, UserId, WEBHOOK_ALLOW, script_sha256,
 };
-use ants_trail::{Answer, Function};
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::schema;
 
+/// Whether `message`, which passed [`Envelope::check_subject`], answers `call`: `answerer` is the step's recipient,
+/// the message is on the step's thread, and it is neither a step, a notice ([`ants_proto::NoticeKind`]), an escalation
+/// nor an invitation to rate a run ([`Envelope::rating_of`]), as the conductor sends itself on the thread of a step to
+/// itself that a run started there reports on. `answerer` is the message's sender, or the human its
+/// [`Envelope::on_behalf_of`] names once the conductor honours the sender as that human's assistant, as for an answer
+/// to ask_human.
+pub(super) fn answered_by(call: &PendingCall, message: &Envelope, answerer: &UserId) -> bool {
+    message.thread_id == call.thread
+        && *answerer == call.to
+        && message.trail_step.is_none()
+        && message.notice.is_none()
+        && message.escalation.is_none()
+        && message.rating_of.is_none()
+}
+
 /// How many times a reply not matching its schema is asked for again before the call raises in the script.
 pub(super) const MAX_RETRIES: u32 = 2;
-
-/// The arguments of an agent() call, as the engine hands them out.
-#[derive(Deserialize)]
-pub(super) struct AgentArgs {
-    pub(super) prompt: String,
-    #[serde(default)]
-    pub(super) ant: Option<String>,
-    #[serde(default)]
-    pub(super) capability: Option<String>,
-    #[serde(default)]
-    pub(super) schema: Option<Value>,
-    #[serde(default)]
-    pub(super) label: Option<String>,
-    /// The tip key naming the tips the step carries first and a tip left answering it goes under.
-    #[serde(default)]
-    pub(super) tips: Option<String>,
-}
-
-impl AgentArgs {
-    pub(super) fn of(args: &Value) -> Result<Self, String> {
-        let args: Self = serde_json::from_value(args.clone()).map_err(|e| format!("agent() takes a prompt: {e}"))?;
-        if let Some(key) = &args.tips {
-            check_tip_key(key).map_err(|e| format!("agent() names no tip key as {key:?}: {e}"))?;
-        }
-        Ok(args)
-    }
-}
-
-/// The arguments of a trail() call, as the engine hands them out.
-#[derive(Deserialize)]
-pub(super) struct TrailArgs {
-    pub(super) name: String,
-    #[serde(default)]
-    pub(super) args: Value,
-}
-
-impl TrailArgs {
-    pub(super) fn of(args: &Value) -> Result<Self, String> {
-        serde_json::from_value(args.clone()).map_err(|e| format!("trail() takes a name: {e}"))
-    }
-}
-
-/// The arguments of a goto() call, as the engine hands them out.
-#[derive(Deserialize)]
-pub(super) struct GotoArgs {
-    #[serde(default)]
-    pub(super) trail: Option<String>,
-    #[serde(default)]
-    pub(super) at: Option<String>,
-    #[serde(default)]
-    pub(super) state: Value,
-}
-
-impl GotoArgs {
-    pub(super) fn of(args: &Value) -> Result<Self, String> {
-        serde_json::from_value(args.clone()).map_err(|e| format!("goto() takes a trail and a waypoint by name: {e}"))
-    }
-}
-
-pub(super) fn function(function: Function) -> TrailFunction {
-    match function {
-        Function::Agent => TrailFunction::Agent,
-        Function::Human => TrailFunction::Human,
-        Function::Trail => TrailFunction::Trail,
-        Function::Goto => TrailFunction::Goto,
-    }
-}
-
-pub(super) fn engine_function(function: TrailFunction) -> Function {
-    match function {
-        TrailFunction::Agent => Function::Agent,
-        TrailFunction::Human => Function::Human,
-        TrailFunction::Trail => Function::Trail,
-        TrailFunction::Goto => Function::Goto,
-    }
-}
 
 /// The text of an agent() step: its prompt, then its `tips` block ([`tips_block`]), if any, and with a schema, how to
 /// reply.
@@ -243,7 +180,7 @@ pub(super) fn envelope(run: &TrailRun, pending: &PendingCall, tips: Option<&TipB
 
 /// What a reply gives a call.
 pub(super) enum Taken {
-    Answer(Answer),
+    Answer(CallAnswer),
     /// The reply does not match the call's schema, for this reason: ask again.
     Again(String),
 }
@@ -252,17 +189,17 @@ pub(super) enum Taken {
 /// text, or with a schema its JSON, asked for again at most [`MAX_RETRIES`] times while it does not match.
 pub(super) fn taken(pending: &PendingCall, reply: &Envelope) -> Taken {
     if pending.function == TrailFunction::Human {
-        return Taken::Answer(Answer::Ok(Value::String(human_answer(pending, reply))));
+        return Taken::Answer(CallAnswer::Ok(Value::String(human_answer(pending, reply))));
     }
     let Some(schema) = AgentArgs::of(&pending.args).ok().and_then(|args| args.schema) else {
-        return Taken::Answer(Answer::Ok(Value::String(reply.text.clone())));
+        return Taken::Answer(CallAnswer::Ok(Value::String(reply.text.clone())));
     };
     match schema::reply_json(&reply.text).and_then(|value| schema::check(&schema, &value).map(|()| value)) {
-        Ok(value) => Taken::Answer(Answer::Ok(value)),
+        Ok(value) => Taken::Answer(CallAnswer::Ok(value)),
         Err(why) if pending.retries < MAX_RETRIES => Taken::Again(why),
         Err(why) => {
             let asked = pending.retries + 1;
-            Taken::Answer(Answer::Error(format!("the reply did not match the schema, asked {asked} times: {why}")))
+            Taken::Answer(CallAnswer::Error(format!("the reply did not match the schema, asked {asked} times: {why}")))
         }
     }
 }
@@ -286,6 +223,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn p(s: &str) -> UserId {
+        s.parse().unwrap()
+    }
 
     fn day(n: i64) -> DateTime<Utc> {
         "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap() + TimeDelta::days(n)
@@ -441,5 +382,74 @@ mod tests {
         assert!(unkeyed.ends_with("search them with trail_tips."), "{unkeyed}");
         assert_eq!(retry_tips(&board, &step(Some("build"), "old"), day(91)), None, "no live tips");
         assert!(again("bad", &json!({}), None).starts_with("The reply does not match the schema: bad. Reply with"));
+    }
+
+    #[test]
+    fn only_the_recipients_reply_on_the_steps_thread_answers_a_call() {
+        let step = Envelope::new(p("planner"), p("dev-a"), "build it").as_step(TrailStep {
+            run: RunId::generate(),
+            call: 1,
+            label: None,
+            schema: None,
+            trail: None,
+            script: None,
+            tip_key: None,
+            bounds: None,
+        });
+        let call = PendingCall {
+            call: 1,
+            function: TrailFunction::Agent,
+            args: json!(["dev-a", "build it"]),
+            to: p("dev-a"),
+            thread: step.thread_id.clone(),
+            message: step.id,
+            sent_at: step.sent_at,
+            sent: true,
+            turn_budget: step.turn_budget,
+            retries: 0,
+        };
+        let reply = step.reply(p("dev-a"), "built", ants_proto::Role::Ant).unwrap();
+        assert!(answered_by(&call, &reply, &reply.from));
+        let by_another = step.follow_up(p("dev-b"), p("planner"), "built too");
+        let elsewhere = Envelope::new(p("dev-a"), p("planner"), "built");
+        let notice = reply.clone().as_notice(ants_proto::NoticeKind::SignedOut);
+        let forged = reply.as_step(*step.trail_step.unwrap());
+        for other in [by_another, elsewhere, notice, forged] {
+            assert!(!answered_by(&call, &other, &other.from), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_self_step_is_told_from_its_reply() {
+        let step = Envelope::new(p("planner"), p("planner"), "think").as_step(TrailStep {
+            run: RunId::generate(),
+            call: 2,
+            label: None,
+            schema: None,
+            trail: None,
+            script: None,
+            tip_key: None,
+            bounds: None,
+        });
+        let call = PendingCall {
+            call: 2,
+            function: TrailFunction::Agent,
+            args: json!(null),
+            to: p("planner"),
+            thread: step.thread_id.clone(),
+            message: step.id,
+            sent_at: step.sent_at,
+            sent: true,
+            turn_budget: step.turn_budget,
+            retries: 0,
+        };
+        assert!(!answered_by(&call, &step, &step.from), "the step itself answers nothing");
+        let invitation = Envelope {
+            rating_of: Some(RunId::generate()),
+            ..Envelope::on_thread(step.thread_id.clone(), p("planner"), p("planner"), "rate it")
+        };
+        assert!(!answered_by(&call, &invitation, &invitation.from), "an invitation to rate a run answers nothing");
+        let reply = step.reply(p("planner"), "thought", ants_proto::Role::Ant).unwrap();
+        assert!(answered_by(&call, &reply, &reply.from));
     }
 }

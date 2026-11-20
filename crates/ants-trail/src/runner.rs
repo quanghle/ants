@@ -213,7 +213,7 @@ pub(crate) mod tests {
         // A session at its limit, the calls of one resume at theirs, notes at theirs, escaped at worst.
         let session = format!("[\"{}\"]", "s".repeat(crate::Limits::MAX_DUMP_BYTES - 4));
         let args = serde_json::json!({"prompt": "p".repeat(crate::worker::CALL_BYTES - 64 - 13)});
-        let calls = vec![crate::Call { call: u32::MAX, function: crate::Function::Agent, args }];
+        let calls = vec![crate::Call { call: u32::MAX, function: ants_proto::TrailFunction::Agent, args }];
         let events = vec![crate::Event::Log("\u{1}".repeat(crate::worker::NOTE_BYTES - 16))];
         let snapshot = serde_json::value::RawValue::from_string(session).unwrap();
         let largest = Response::Suspended { snapshot, calls, pending: vec![u32::MAX], events };
