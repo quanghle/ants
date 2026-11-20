@@ -152,8 +152,9 @@ impl Hub {
         }
         if board.live(now) >= MAX_LIVE_TIPS {
             return Err(format!(
-                "trail {trail} has {MAX_LIVE_TIPS} live tips, the most a trail keeps: vote stale or wrong with \
-                 vote_tip on those no longer right, or ask a human to retire some"
+                "trail {trail} has {MAX_LIVE_TIPS} live tips, the most a trail keeps: vote wrong with vote_tip \
+                 on those no longer right, a tip voted wrong more often than helpful retiring, or ask a human to retire \
+                 some"
             ));
         }
         let tip = TrailTip {

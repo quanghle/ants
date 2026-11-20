@@ -594,8 +594,10 @@ most 64 KiB, holds:
   last findings' verdicts left out first; for the sage, its earlier findings for the ant and what became of them
   (below);
 - for the sage, the trails the colony saved (its `ants_trails` bucket, not a machine's `~/.ants/trails`), each with its
-  name, its ratings (how often its runs were rated worked, partly and failed) and its description, data rather than
-  instructions, the best rated first (by worked plus half of partly against the rest), then the latest saved, at most
+  name, its ratings (how often its runs were rated worked, partly and failed) and its description on one line, cut at
+  300 characters, data rather than instructions, the best rated first (by the mean of Beta(1 + worked + partly/2, 1 +
+  failed + partly/2), so a trail not yet rated ranks at one half, above one rated 1 worked and 2 failed), then the
+  latest saved, at most
   a sixteenth of the packet's budget, the rest counted as left out, or that they could not be read: so a `trail`
   finding suggests no trail the colony has, and an approach one of them serves gets a finding naming it instead (a
   memory or record written for such a finding may name the saved trail to take, judged by its own votes; no trail's
@@ -710,7 +712,7 @@ findings and before `vitals`:
   each with the ant and finding: the reviewed ants' text, so one quoting any, offered first or again, is untrusted,
   the sage's other findings staying trusted;
 - `undone_findings`: 3 applied findings or more undone since (a memory written for one voted wrong or stale, a
-  proposal rejected), as told over the last 14 active days, naming at most 5;
+  proposal rejected, a trail saved for one removed or rated failed more often than worked), as told over the last 14 active days, naming at most 5;
 - `unlinked_follow_ups`: at least 10 follow-ups of known link status answered over the last 14 active days, at least
   7 in 10 unlinked. Plain follow-ups recorded before link status was tracked do not count;
 - `unanswered_reviews`: an ant reviewed within the last 14 active days that left half or more of the findings of its
