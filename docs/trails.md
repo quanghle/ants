@@ -217,6 +217,7 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   Once an inline script works and its steps will recur, **`save_trail(name, script?, run?, replace?, finding?)`** saves
   it for the colony as the ant's: a `script`, or the script of a finished `run` of an inline script the ant conducted
   (done or failed), recorded as the trail's source. A run of a saved trail is refused, as that trail is saved already.
+  A save rates nothing: a `rate_trail` of the source run made after it rates the saved trail too, as the answer says.
   The script is checked as `ants trail save` checks a file, not run, and every ant then runs it by name. A name a human
   or another ant saved is refused, so a changed copy goes under a new name; the ant's own is replaced only with
   `replace: true`. On a dream's thread, `finding` names the dream finding the save answers
@@ -600,7 +601,9 @@ reason, `ants trail runs` a `RATED` column (each trail's outcome) and `ants trai
 carries them under `ratings`, and every listing shows a rating's task and reason on one line, as tips' text, control
 characters left out. In `ants chat`, `/trail list`, `/trail show` and `/trail runs` show the same.
 `ants trail rm NAME` purges the trail's ratings with its tips; an ant's `remove_trail` purges none, so a trail saved
-later under that name inherits them, weighing half as of another script.
+later under that name inherits them. `find_trails` weighs them half, as of another script; a sage's review packet,
+and the track record judging whether a sage's applied trail finding holds, count every rating under the name whole,
+those of an earlier script, of a trail of the name removed before and older than 90 days included.
 
 Each ant writes only its own ratings, under keys naming it; humans read them all and purge a trail's when removing the
 trail ([auth.md](auth.md#wire-acls-and-verification-invariants)).
@@ -611,7 +614,7 @@ trail ([auth.md](auth.md#wire-acls-and-verification-invariants)).
 |---|---|---|
 | KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, waypoints, script, who saved it (a human or an ant) and when, and the run an ant saved it from. |
 | KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (its route: each leg's trail or inline script, waypoint, args, first call id, start and steps; owner, origin, limits, state (a failed one's broken `limit`), spending, the grants its steps hold or whose runs told spending, thread, parent run, the step it spends from and its grant, times), `<ant>.<run>.session` the current leg's dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`, call ids numbered on across legs), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread, label?}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out; a `trail()` step, whose thread is its child run's, keeps the latter alone. An ant answering a step keeps `<ant>.answering.<thread>`, the runs it started answering the step on that thread. |
-| KV `ants_trail_tips` | never expires | The [tips](#tips) left on saved trails and their votes, each under the trail and the ant that wrote it: `<trail>.<writer>.<id>` a tip (trail, id, writer, text, tip key, run, script's SHA-256, time written, and who retired it and when), `<trail>.<voter>.<writer>.<id>` a vote on it (voter, verdict, reason, the SHA-256 of the tip's text it judged, the SHA-256 of the script voted on, time). |
+| KV `ants_trail_tips` | never expires | The [tips](#tips) left on saved trails and their votes, each under the trail and the ant that wrote it: `<trail>.<writer>.<id>` a tip (trail, id, writer, text, tip key, run, script's SHA-256, time written), `<trail>.<voter>.<writer>.<id>` a vote on it (voter, verdict, reason, the SHA-256 of the tip's text it judged, the SHA-256 of the script voted on, time), `<trail>._retired.<writer>.<id>` a human's retirement of it (the human, time), a key no ant writes. |
 | KV `ants_trail_ratings` | never expires | The [ratings](#rating-and-finding-trails) conductors gave saved trails, `<trail>.<conductor>.<run>` one per run and trail: trail, conductor, run, outcome, task, reason, the SHA-256 of the script rated, time. |
 
 `ants init` creates the four buckets, and `ants doctor` checks them. Each bucket keeps every message of a key, not
