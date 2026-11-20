@@ -128,6 +128,16 @@ mod tests {
     }
 
     #[test]
+    fn a_paste_while_the_notices_show_is_dropped() {
+        let mut m = model();
+        m.notify("tool calls: none", Level::Info, at(1));
+        m.key(Key::Char('N'), at(2));
+        m.paste("hello", at(2));
+        assert_eq!((m.bar.text(), m.bar.focused), (String::new(), false), "the bar takes none of it");
+        assert!(!m.overlays.is_empty(), "the notices still show");
+    }
+
+    #[test]
     fn only_the_latest_notices_are_kept() {
         let mut m = model();
         for i in 0..=KEPT {
