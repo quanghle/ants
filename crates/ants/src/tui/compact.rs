@@ -89,6 +89,9 @@ fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>, width: u
     if model.quitting_at(now) {
         return Line::styled(format!("      {}", super::frame::QUIT_AGAIN), Style::new().fg(style::INFO));
     }
+    if let Some(line) = model.prompt_line() {
+        return line;
+    }
     if let Some(notice) = model.notice_at(now) {
         let mut line = style::notice(&notice.text, notice.level == Level::Error, width.saturating_sub(5));
         line.spans.insert(0, Span::raw("     "));
@@ -96,12 +99,6 @@ fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>, width: u
     }
     if let Some(line) = model.asking.as_ref().and_then(super::approvals::Asking::status) {
         return line;
-    }
-    if let Some(confirm) = &model.interrupting {
-        return confirm.line();
-    }
-    if let Some(prompt) = &model.snoozing {
-        return prompt.line(&model.data);
     }
     let Some(top) = items.first() else {
         let keys = Span::styled(format!("   {KEYS}"), style::dim());

@@ -16,15 +16,13 @@ use super::acts::{Acted, Change};
 use super::approvals::{self, Asking};
 use super::command::{self, Bar, Tone};
 use super::exec::{Job, Quoted};
-use super::help::Help;
-use super::interrupt::Confirm;
 use super::notices;
-use super::react::{self, Picker};
+use super::react;
 use super::reads::{Levels, Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
-    ant, cards, catchup, channel, credentials, dead, dm, faces, fold, held, home, images, mcp, memories, nav, people,
-    search, settings, snooze, steps, thread, timeline, trail, tree, work,
+    ant, cards, catchup, channel, credentials, dm, faces, fold, held, home, images, mcp, memories, nav, people, search,
+    settings, steps, thread, timeline, tree, work,
 };
 use crate::live::{self, State};
 use crate::text::excerpt;
@@ -32,7 +30,11 @@ use crate::threads::thread::Entry;
 use crate::tools::Update;
 
 mod keys;
+mod page;
+mod prompt;
 mod typing;
+
+pub use prompt::{Overlay, Prompt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -360,28 +362,17 @@ pub struct Model {
     pub focus: Focus,
     /// The nav's view, then those opened from it, the shown one last; never empty.
     pub pages: Vec<Page>,
-    /// The help, while shown.
-    pub help: Option<Help>,
+    /// What shows over the whole screen, the latest on top.
+    pub overlays: Vec<Overlay>,
     /// The latest notice: an error until a key is pressed, else for [`NOTICE_FOR`].
     pub notice: Option<Notice>,
     /// The notices of the run, the earliest first, [`notices::KEPT`] at most.
     pub notices: Vec<Notice>,
-    /// The notices listed over the view, `N`.
-    pub log: Option<notices::Log>,
     pub bar: Bar,
     /// The tool request being answered.
     pub asking: Option<Asking>,
-    /// The reaction being picked.
-    pub picking: Option<Picker>,
-    pub copying: Option<super::clipboard::Picker>,
-    /// The cancel waiting for y while an ant runs a tool call.
-    pub interrupting: Option<Confirm>,
-    /// The dead letter `/dead drop` picked, waiting for y.
-    pub dropping: Option<dead::Letter>,
-    /// The run of a trail `/trail run` planned, waiting for y to start.
-    pub starting: Option<trail::Planned>,
-    /// How long to snooze a thread from home, or when to be reminded of it, being asked.
-    pub snoozing: Option<snooze::Prompt>,
+    /// The prompt in the footer taking the keys.
+    pub prompt: Option<Prompt>,
     /// The catch-up summaries: the span home's first line counts, the TL;DRs asked for, the digest.
     pub catchup: catchup::Catchup,
     /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
@@ -436,18 +427,12 @@ impl Model {
             pages: vec![Page::of(&nav)],
             nav,
             focus: Focus::View,
-            help: None,
+            overlays: Vec::new(),
             notice: None,
             notices: Vec::new(),
-            log: None,
             bar: Bar::default(),
             asking: None,
-            picking: None,
-            copying: None,
-            interrupting: None,
-            dropping: None,
-            starting: None,
-            snoozing: None,
+            prompt: None,
             catchup: catchup::Catchup::default(),
             compact: false,
             fold: fold::Fold::default(),
@@ -1024,9 +1009,9 @@ mod tests {
     fn q_closes_the_help_without_quitting_however_fast_it_comes_again() {
         let mut m = model();
         assert_eq!(m.key(Key::Char('?'), at(0)), None);
-        assert!(m.help.is_some());
+        assert!(m.help().is_some());
         assert_eq!(m.key(Key::Char('q'), at(0)), None, "q closes the help first");
-        assert!(m.help.is_none());
+        assert!(m.help().is_none());
         let soon = at(0) + TimeDelta::milliseconds(600);
         assert_eq!(m.key(Key::Char('q'), soon), None, "a q right after does nothing");
         assert_eq!(m.key(Key::Char('q'), soon + TimeDelta::milliseconds(600)), None, "nor one right after that");
@@ -1038,7 +1023,7 @@ mod tests {
         let mut m = model();
         m.key(Key::Char('?'), at(0));
         assert_eq!(m.key(Key::Interrupt, at(0)), None, "Ctrl-C closes the help");
-        assert!(m.help.is_none());
+        assert!(m.help().is_none());
         m.bar.set_text("draft");
         assert_eq!(m.key(Key::Char('q'), at(2)), None, "q quits with an empty bar only");
         assert_eq!(m.bar.text(), "draft");

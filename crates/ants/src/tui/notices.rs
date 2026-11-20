@@ -117,13 +117,13 @@ mod tests {
         assert!(shown.contains("           reason "), "none of it cut: {shown}");
         assert!(shown.contains(CLOSE), "{shown}");
         assert_eq!(m.key(Key::Char('j'), at(5)), None, "other keys do nothing");
-        assert!(m.log.is_some());
+        assert!(m.overlays.iter().any(|o| matches!(o, crate::tui::model::Overlay::Log(_))));
         assert_eq!(m.key(Key::Char('q'), at(5)), None, "q closes the notices");
-        assert!(m.log.is_none());
+        assert!(m.overlays.is_empty());
         assert_eq!(m.key(Key::Char('q'), at(5)), None, "and does not quit right after");
         m.key(Key::Char('N'), at(9));
         assert_eq!(m.key(Key::Interrupt, at(9)), None);
-        assert!(m.log.is_none(), "Ctrl-C closes them too");
+        assert!(m.overlays.is_empty(), "Ctrl-C closes them too");
         assert_eq!(m.key(Key::Char('q'), at(9)), Some(Action::Quit));
     }
 

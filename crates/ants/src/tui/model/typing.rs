@@ -13,7 +13,7 @@ impl Model {
     pub fn typing(&self) -> bool {
         let here = self.conversation();
         self.focus == Focus::View
-            && self.starting.is_none()
+            && !self.prompt.as_ref().is_some_and(super::Prompt::covers)
             && here != Conversation::None
             && !matches!(self.page(), Page::Thread(page) if page.listing())
             && self.selecting.as_ref() != Some(&here)
@@ -41,12 +41,12 @@ impl Model {
             Key::Char(_) => self.write(key, now),
             Key::Enter | Key::Backspace | Key::Delete if !self.bar.is_empty() => self.write(key, now),
             Key::Up => {
-                self.select_latest();
+                self.select_latest(now);
                 Some(None)
             }
             // The latest post or message of a channel or a DM is the first listed.
             Key::End if !thread => {
-                self.select_latest();
+                self.select_latest(now);
                 self.selecting = None;
                 Some(None)
             }
@@ -68,13 +68,13 @@ impl Model {
     }
 
     /// Up while typing: select the latest message or post.
-    fn select_latest(&mut self) {
+    fn select_latest(&mut self, now: DateTime<Utc>) {
         self.selecting = Some(self.conversation());
         let data = &self.data;
         match self.pages.last_mut() {
             Some(Page::Thread(page)) => page.select(),
-            Some(Page::Channel(page)) => _ = page.key(Key::Home, data),
-            Some(Page::Dm(page)) => _ = page.key(Key::Home, data),
+            Some(Page::Channel(page)) => _ = page.key(Key::Home, data, now),
+            Some(Page::Dm(page)) => _ = page.key(Key::Home, data, now),
             _ => {}
         }
     }

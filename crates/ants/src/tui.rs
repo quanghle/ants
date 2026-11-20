@@ -9,6 +9,7 @@
 mod acts;
 mod ant;
 mod approvals;
+mod armed;
 mod attach;
 mod cards;
 mod catchup;
@@ -32,6 +33,7 @@ mod images;
 mod input;
 mod interrupt;
 mod keymap;
+mod listed;
 mod markdown;
 mod mcp;
 mod memories;
@@ -62,6 +64,7 @@ mod thread;
 mod timeline;
 mod trail;
 mod tree;
+mod watched;
 mod work;
 
 use std::io::IsTerminal as _;
@@ -82,6 +85,7 @@ use self::exec::Exec;
 use self::model::{Action, Key, Level, Model};
 use self::reads::Reads;
 use self::search::Searches;
+use self::watched::Watched;
 use crate::auth::team_dir;
 use crate::credentials::enroll;
 use crate::live::{self, Feed, Screen};
@@ -224,9 +228,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
         let mut screen = Screen::open_telling_keys_apart()?;
         let _interaction = terminal::Session::open(cli.mouse);
         let images = cli.inline_images.then(|| images::Io::new(images::picker(), js.clone(), feed.keyring()));
-        let chat = Chat {
-            feed,
-            reads,
+        let watched = Watched {
             acts,
             people,
             searches,
@@ -242,6 +244,11 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
             summaries,
             images,
             looks,
+        };
+        let chat = Chat {
+            feed,
+            reads,
+            watched,
             exec: Exec::new(ctx),
             model,
             handover: None,
@@ -353,30 +360,7 @@ struct Chat {
     feed: Feed,
     reads: Reads,
     exec: Exec,
-    acts: Acts,
-    people: people::Io,
-    searches: Searches,
-    trees: tree::Io,
-    /// The reads of the steps of the runs reporting on the thread shown.
-    steps: steps::Io,
-    /// The reads of the shown ant's queue.
-    ants: ant::Io,
-    /// The reads of the shown ant's memories.
-    memories: memories::Io,
-    /// The reads and sign-ins of the shown ant's MCP servers.
-    mcp: mcp::Io,
-    /// The reads of the shown ant's settings and orders, and the orders sent.
-    settings: settings::Io,
-    /// The credentials asked for, where the team's account key is.
-    credentials: credentials::Io,
-    /// The admin orders of the human's assistant held for its consent.
-    held: held::Io,
-    cards: cards::Io,
-    summaries: catchup::Io,
-    /// The images drawn, with `[cli]` `inline_images` on.
-    images: Option<images::Io>,
-    /// The reads of the ants' identity records, for their avatars.
-    looks: faces::Io,
+    watched: Watched,
     model: Model,
     /// What to hand the terminal over to next.
     handover: Option<Handover>,
@@ -430,7 +414,7 @@ impl Chat {
             .update(&home::waiting(&self.model.data, Utc::now()), &mut std::io::stdout())
             .context("announcing waiting items")?;
         *dirty |= self.held_log(logged);
-        self.cards.threads(&self.model.data.live.order);
+        self.watched.cards.threads(&self.model.data.live.order);
         *dirty |= self.animate(started);
         *dirty |= self.spin(*drawn);
         if *dirty || drawn.elapsed() >= REDRAW {
@@ -504,7 +488,7 @@ impl Chat {
                 self.attention.resumed();
                 dirty = true;
             }
-            self.watch();
+            self.watched.watch(&mut self.model);
         }
     }
 
@@ -530,77 +514,13 @@ impl Chat {
             }
             outcome = self.exec.next() => {
                 // A title set through the bar shows once read back.
-                self.cards.refresh();
+                self.watched.cards.refresh();
                 if outcome.result.as_ref().is_ok_and(|done| done.channel.is_some()) {
                     self.reads.read_directory();
                 }
                 self.model.outcome(outcome).into_iter().collect()
             }
-            acted = self.acts.next() => {
-                if matches!(acted, acts::Acted::Changed(..)) {
-                    // Home shows done states and snoozes: read them back at once.
-                    self.cards.refresh();
-                }
-                self.model.acted(acted, Utc::now());
-                Vec::new()
-            }
-            event = self.people.next() => {
-                self.model.people(event, Utc::now());
-                Vec::new()
-            }
-            found = self.searches.next() => {
-                self.model.found(found);
-                Vec::new()
-            }
-            read = self.cards.next() => {
-                self.model.cards(read, Utc::now());
-                // TL;DRs ahead of time follow what was read.
-                self.model.ahead(Utc::now()).into_iter().collect()
-            }
-            summarised = self.summaries.next() => {
-                self.model.summarised(summarised, Utc::now());
-                self.model.ahead(Utc::now()).into_iter().collect()
-            }
-            event = self.trees.next() => {
-                self.model.tree_event(event, Utc::now());
-                Vec::new()
-            }
-            read = self.steps.next() => {
-                self.model.steps_read(read, Utc::now());
-                Vec::new()
-            }
-            event = self.ants.next() => {
-                self.model.ant_event(event);
-                Vec::new()
-            }
-            event = self.memories.next() => {
-                self.model.memories_event(event);
-                Vec::new()
-            }
-            event = self.mcp.next() => {
-                self.model.mcp_event(event);
-                Vec::new()
-            }
-            event = self.settings.next() => {
-                self.model.settings_event(event);
-                Vec::new()
-            }
-            event = self.credentials.next() => {
-                self.model.credentials(event, Utc::now());
-                Vec::new()
-            }
-            event = self.held.next() => {
-                self.model.held(event, Utc::now());
-                Vec::new()
-            }
-            identities = self.looks.next() => {
-                self.model.data.looks.set(identities);
-                Vec::new()
-            }
-            (handle, image) = next_image(self.images.as_mut()) => {
-                self.model.data.images.insert(handle, image);
-                Vec::new()
-            }
+            event = self.watched.next() => self.model.view_event(event, Utc::now()),
         }
     }
 
@@ -621,10 +541,7 @@ impl Chat {
 
     /// Have the images drawn again, after the terminal was handed over.
     fn redraw_images(&mut self) {
-        if let Some(images) = &mut self.images {
-            images.reset();
-            self.model.data.images.clear();
-        }
+        self.watched.redraw_images(&mut self.model);
     }
 
     /// Tell of a warning the progress log held since it was `logged`, whether one shows.
@@ -638,24 +555,6 @@ impl Chat {
         let Some(warning) = warning else { return false };
         self.model.notify(warning, Level::Error, Utc::now());
         true
-    }
-
-    /// Follow what the views show: the open thread's state and the steps of the runs reporting there, the delegation
-    /// tree's links and spend, the ant's queue, the images.
-    fn watch(&mut self) {
-        self.acts.watch(self.model.open().cloned());
-        self.trees.watch(self.model.tree_shown());
-        self.steps.watch(self.model.steps_wanted());
-        self.ants.watch(self.model.ant_shown());
-        self.memories.watch(self.model.memories_wanted());
-        self.mcp.watch(self.model.mcp_wanted());
-        let (shown, unread) = self.model.settings_shown().unzip();
-        self.settings.watch(shown, unread.unwrap_or(false));
-        if let Some(images) = &mut self.images {
-            let wanted = images::wanted(&self.model);
-            images.want(&wanted);
-            self.model.data.images.retain(&wanted);
-        }
     }
 
     /// Act on the keys pressed, setting `dirty` when the screen is to be drawn again; breaks on quitting.
@@ -709,7 +608,7 @@ impl Chat {
                 if change == acts::Change::Done(true) {
                     self.reads.mark_read(thread.clone());
                 }
-                self.acts.change(thread, change, last);
+                self.watched.acts.change(thread, change, last);
             }
             Action::Copy(text) => {
                 if self.clipboard.is_some() {
@@ -736,7 +635,7 @@ impl Chat {
             Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::React(message, reaction, remove) => self.reads.react(message, reaction, remove),
-            Action::Settings(ask) => self.settings.ask(ask),
+            Action::Settings(ask) => self.watched.settings.ask(ask),
             Action::KeepTools(tools) => {
                 if let Err(e) = catchup::state_path().and_then(|path| catchup::keep(&path, |kept| kept.tools = tools)) {
                     self.model.notify(format!("keeping how tool calls show: {e:#}"), Level::Error, Utc::now());
@@ -753,21 +652,21 @@ impl Chat {
                     self.model.notify(format!("keeping what folds: {e:#}"), Level::Error, Utc::now());
                 }
             }
-            Action::Search(search) => self.searches.start(search),
-            Action::Summarise(ask) => self.summaries.ask(ask),
+            Action::Search(search) => self.watched.searches.start(search),
+            Action::Summarise(ask) => self.watched.summaries.ask(ask),
             Action::CancelSubtree(prompts) => {
                 let text = format!("asking {} ants to cancel their prompts…", prompts.len());
                 self.model.notify(text, Level::Info, Utc::now());
-                self.trees.cancel(prompts);
+                self.watched.trees.cancel(prompts);
             }
             Action::Credentials(order) => {
-                if !self.credentials.order(order) {
+                if !self.watched.credentials.order(order) {
                     self.model.data.credentials.busy = None;
                     self.model.notify("another answer to a request runs", Level::Error, Utc::now());
                 }
             }
             Action::Answer(answer) => {
-                if !self.held.answer(answer) {
+                if !self.watched.held.answer(answer) {
                     self.model.data.held.busy = None;
                     self.model.notify("another answer to what is held runs", Level::Error, Utc::now());
                 }
@@ -775,31 +674,13 @@ impl Chat {
             Action::Refresh => {
                 self.feed.refresh();
                 self.reads.refresh();
-                self.acts.refresh();
-                self.people.refresh();
-                self.trees.refresh();
-                self.steps.refresh();
-                self.ants.refresh();
-                self.credentials.refresh();
-                self.held.refresh();
-                self.cards.refresh();
-                self.looks.refresh();
+                self.watched.refresh();
                 if let Some(thread) = self.model.open_thread() {
                     self.feed.load_history(thread, true);
                 }
             }
         }
         ControlFlow::Continue(())
-    }
-}
-
-/// The next image encoded, when images are drawn; pending otherwise.
-async fn next_image(
-    images: Option<&mut images::Io>,
-) -> (ants_proto::AttachmentHandle, Option<ratatui_image::protocol::Protocol>) {
-    match images {
-        Some(images) => images.next().await,
-        None => std::future::pending().await,
     }
 }
 

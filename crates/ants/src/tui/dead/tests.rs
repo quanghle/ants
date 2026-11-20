@@ -35,9 +35,9 @@ fn dead_replays_the_stuck_thread_s_dead_letter_or_drops_it_once_y_confirms() {
     assert_eq!(run(&mut m, "/dead replay"), replay, "home's stuck item");
     assert_eq!(run(&mut m, "/dead drop"), None);
     let asks = "dead letter 2 (\"build it\"): y drops it unreplayed; any other key keeps it";
-    assert_eq!(m.dropping.as_ref().map(|l| l.line().to_string()), Some(format!(" {asks}")));
+    assert_eq!(m.prompt_line().map(|l| l.to_string()), Some(format!(" {asks}")));
     assert_eq!(m.key(Key::Char('n'), at(9)), None);
-    assert!(m.dropping.is_none(), "any other key keeps it");
+    assert!(m.prompt.is_none(), "any other key keeps it");
     run(&mut m, "/dead drop");
     assert_eq!(m.key(Key::Char('y'), at(9)), Some(Action::Run(Job::DeadDrop(2), String::new())));
     assert_eq!(m.bar.status.as_ref().unwrap().text, "dropping dead letter 2…");

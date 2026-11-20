@@ -263,9 +263,9 @@ mod tests {
         let mut model = test_support::model();
         model.bar.focused = true;
         model.bar.set_text("unsent");
-        model.help = Some(super::super::help::Help::default());
+        model.overlay(crate::tui::model::Overlay::Help(super::super::help::Help::default()));
         assert_eq!(model.key(super::super::model::Key::Ctrl('z'), at(1)), Some(super::super::model::Action::Suspend));
         assert_eq!(model.bar.text(), "unsent");
-        assert!(model.help.is_some());
+        assert!(model.help().is_some());
     }
 }

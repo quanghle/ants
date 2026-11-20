@@ -74,12 +74,12 @@ fn q_is_written_in_a_conversation_and_a_question_mark_on_an_empty_bar_shows_the_
     let thread = ThreadId::generate();
     let mut m = opened(&thread);
     m.key(Key::Char('?'), at(3));
-    assert!(m.help.is_some() && m.bar.is_empty(), "not written");
+    assert!(m.help().is_some() && m.bar.is_empty(), "not written");
     m.key(Key::Esc, at(3));
     assert_eq!(m.key(Key::Char('q'), at(3)), None);
     m.key(Key::Char('?'), at(3));
     assert_eq!(m.bar.text(), "q?", "written");
-    assert!(m.help.is_none());
+    assert!(m.help().is_none());
 }
 
 #[test]

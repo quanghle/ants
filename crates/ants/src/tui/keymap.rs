@@ -12,7 +12,7 @@ use ratatui::text::Line;
 
 use super::ant;
 use super::approvals::Asking;
-use super::model::{Focus, Key, Model, Page};
+use super::model::{Focus, Key, Model, Page, Prompt};
 
 mod table;
 mod when;
@@ -146,7 +146,7 @@ pub fn views(model: &Model) -> Vec<View> {
     if model.asking.as_ref().is_some_and(Asking::takes_keys) {
         return vec![View::Request];
     }
-    if model.starting.is_some() {
+    if model.prompt.as_ref().is_some_and(Prompt::covers) {
         return vec![View::Start];
     }
     if model.focus == Focus::Nav {

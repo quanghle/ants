@@ -141,7 +141,7 @@ pub(super) const HOME: &[Entry] = &[
         4,
         home_group,
     ),
-    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the allow-all l asked for", 1, home_armed),
+    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the allow-all l asked for", 1, armed),
     Entry::new(DIGITS, "1-9", "answer", "answer the selected question by number", 5, home_question),
     Entry::new(
         &[Key::Enter],
@@ -403,7 +403,7 @@ pub(super) const TREE: &[Entry] = &[
     Entry::new(UP_DOWN, "↑↓", "select", "select a thread of the tree", 10, always),
     Entry::new(&[Key::Enter], "Enter", "open", "open the selected thread", 5, always),
     Entry::new(&[Key::Char('x')], "x", "cancel subtree", "cancel every prompt in the selected subtree", 11, always),
-    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the cancel x asked for", 1, tree_armed),
+    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the cancel x asked for", 1, armed),
     Entry::new(PAGES, "PgUp PgDn", "page", "move the selection further", 92, always),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
@@ -420,7 +420,7 @@ pub(super) const ANT: &[Entry] = &[
         "confirm",
         "confirm what r or p asked for: a restart after the prompts running, the pause or the resume",
         1,
-        ant_armed,
+        armed,
     ),
     Entry::new(
         &[Key::Char('!')],
@@ -469,7 +469,7 @@ pub(super) const CREDENTIALS: &[Entry] = &[
     Entry::new(UP_DOWN, "↑↓", "select", "select a request", 10, always),
     Entry::new(&[Key::Char('a')], "a", "approve", "approve or renew the selected request, once y confirms", 5, always),
     Entry::new(&[Key::Char('r')], "r", "reject", "reject the selected request, once y confirms", 6, always),
-    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the order a or r asked for", 1, page_armed),
+    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the order a or r asked for", 1, armed),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
 
@@ -477,7 +477,7 @@ pub(super) const HELD: &[Entry] = &[
     Entry::new(UP_DOWN, "↑↓", "select", "select an order or a decision", 10, always),
     Entry::new(&[Key::Char('a')], "a", "confirm", "confirm the selected order or decision, once y confirms", 5, always),
     Entry::new(&[Key::Char('r')], "r", "deny", "deny the selected order or decision, once y confirms", 6, always),
-    Entry::new(&[Key::Char('y')], "y", "confirm", "give the answer a or r asked for", 1, page_armed),
+    Entry::new(&[Key::Char('y')], "y", "confirm", "give the answer a or r asked for", 1, armed),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
 

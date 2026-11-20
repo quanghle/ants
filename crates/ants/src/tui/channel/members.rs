@@ -19,6 +19,7 @@ use crate::tui::complete::{self, Candidate, Pick};
 use crate::tui::exec::Job;
 use crate::tui::input::Input;
 use crate::tui::model::{Action, Data, Key, To};
+use crate::tui::select::step;
 use crate::tui::style;
 
 /// Most completions shown under the row typed in.
@@ -85,10 +86,6 @@ impl Editor {
         let at = self.at(entry);
         match key {
             Key::Esc => return Edited::Closed,
-            Key::Up | Key::Char('k') => self.at = at.saturating_sub(1),
-            Key::Down | Key::Char('j') => self.at = (at + 1).min(entry.members.len() + FIELDS.len() - 1),
-            Key::Home => self.at = 0,
-            Key::End => self.at = usize::MAX,
             Key::Char('a' | '@') => {
                 self.at = entry.members.len();
                 self.start(Field::Add, entry);
@@ -108,7 +105,11 @@ impl Editor {
                 };
                 return Edited::To(Box::new(run(channel, change)));
             }
-            _ => {}
+            _ => {
+                if let Some(to) = step(key, at, None) {
+                    self.at = to.min(entry.members.len() + FIELDS.len() - 1);
+                }
+            }
         }
         Edited::Kept
     }

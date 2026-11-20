@@ -19,7 +19,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
-use super::model::{Data, Key, To};
+use super::model::{Data, Key, Model, To};
+use super::select::{PAGE, Selection};
 use super::style::{self, ago};
 use crate::live::maybe;
 use crate::people::sealed::Keyring;
@@ -81,12 +82,13 @@ pub struct Page {
     /// The matches newest first and how many earlier ones were left out, or why the search failed; none while it runs.
     pub found: Option<Result<(Vec<Entry>, usize), String>>,
     grep: Option<String>,
-    selected: usize,
+    /// The match selected, by its stream sequence.
+    selected: Selection<u64>,
 }
 
 impl Page {
     pub fn new(query: String, search: &Search) -> Self {
-        Self { query, found: None, grep: search.grep.clone(), selected: 0 }
+        Self { query, found: None, grep: search.grep.clone(), selected: Selection::default() }
     }
 
     /// Take the matches found, given oldest first.
@@ -107,29 +109,25 @@ impl Page {
         }
     }
 
-    pub fn key(&mut self, key: Key) -> Option<To> {
-        let count = self.matches().len();
-        self.selected = match key {
-            Key::Enter => {
-                let e = self.matches().get(self.selected)?;
-                return Some(match e.id {
-                    Some(id) => To::Message(e.thread_id.clone(), id),
-                    None => To::Thread(e.thread_id.clone()),
-                });
-            }
-            Key::Up | Key::Char('k') => self.selected.saturating_sub(1),
-            Key::Down | Key::Char('j') => self.selected + 1,
-            Key::PageUp => self.selected.saturating_sub(10),
-            Key::PageDown => self.selected + 10,
-            Key::Home => 0,
-            Key::End => usize::MAX,
-            _ => return None,
+    fn seqs(&self) -> Vec<u64> {
+        self.matches().iter().map(|e| e.seq).collect()
+    }
+
+    pub fn key(&mut self, key: Key, _: &Data, _: DateTime<Utc>) -> Option<To> {
+        let seqs = self.seqs();
+        if key == Key::Enter {
+            let e = self.matches().get(self.selected.at(&seqs))?;
+            return Some(match e.id {
+                Some(id) => To::Message(e.thread_id.clone(), id),
+                None => To::Thread(e.thread_id.clone()),
+            });
         }
-        .min(count.saturating_sub(1));
+        self.selected.step(key, &seqs, Some(PAGE));
         None
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+    pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
+        let data = &model.data;
         let title = match &self.found {
             Some(Ok((entries, omitted))) if *omitted > 0 => {
                 format!(" search {} · latest {} matches, {omitted} earlier left out ", self.query, entries.len())
@@ -151,7 +149,15 @@ impl Page {
         let items: Vec<Text> = self.matches().iter().map(|e| Text::from(self.row(e, data, now))).collect();
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        super::mouse::list(frame, inner, data, "search", items, self.selected, focused);
+        super::mouse::list(
+            frame,
+            inner,
+            data,
+            super::mouse::Viewport::Search,
+            items,
+            self.selected.at(&self.seqs()),
+            focused,
+        );
     }
 
     /// A match: where it was, who sent it, how long ago, and its line matching the text, else its first.
@@ -172,7 +178,7 @@ impl Page {
 }
 
 /// The matches of a search, oldest first, and how many earlier ones were left out.
-type Found = Result<(Vec<Entry>, usize)>;
+pub type Found = Result<(Vec<Entry>, usize)>;
 
 /// The search running, at most one: a new one replaces it.
 pub struct Searches {
@@ -245,16 +251,16 @@ mod tests {
         let (thread, other) = (ThreadId::generate(), ThreadId::generate());
         let search = parse("deploy", at(10)).unwrap();
         let mut page = Page::new("deploy".to_owned(), &search);
-        assert_eq!(page.key(Key::Enter), None, "nothing to open while searching");
+        let m = crate::tui::test_support::model();
+        assert_eq!(page.key(Key::Enter, &m.data, at(70)), None, "nothing to open while searching");
         let first = message(1, &thread, "alice", "dev-a", "Please\ndeploy the API");
         let second = message(2, &other, "dev-a", "alice", "deployed");
         page.found(Ok((vec![first.clone(), second.clone()], 0)));
-        let data = &crate::tui::test_support::model().data;
-        let row = page.row(&page.matches()[1], data, at(70)).to_string();
+        let row = page.row(&page.matches()[1], &m.data, at(70)).to_string();
         assert!(row.starts_with(&format!("{:<24} alice", thread.to_string()[..23].to_owned() + "…")), "{row}");
         assert!(row.ends_with("1m ago  deploy the API"), "{row}");
-        assert_eq!(page.key(Key::Enter), Some(To::Message(other, second.id.unwrap())));
-        page.key(Key::End);
-        assert_eq!(page.key(Key::Enter), Some(To::Message(thread, first.id.unwrap())));
+        assert_eq!(page.key(Key::Enter, &m.data, at(70)), Some(To::Message(other, second.id.unwrap())));
+        page.key(Key::End, &m.data, at(70));
+        assert_eq!(page.key(Key::Enter, &m.data, at(70)), Some(To::Message(thread, first.id.unwrap())));
     }
 }

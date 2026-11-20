@@ -18,6 +18,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use super::input::Input;
 use super::model::{Action, Key};
+use super::select::step;
 use super::style;
 use crate::live::maybe;
 
@@ -177,11 +178,7 @@ impl Page {
                 }
                 return None;
             }
-            Key::Up | Key::Char('k') => self.selected.saturating_sub(1),
-            Key::Down | Key::Char('j') => self.selected + 1,
-            Key::Home => 0,
-            Key::End => last,
-            _ => return None,
+            _ => step(key, self.selected, None)?,
         }
         .min(last);
         None
@@ -257,7 +254,7 @@ impl Page {
             raw = end;
         }
         let (start, end) = ranges.get(self.selected).copied().unwrap_or_default();
-        let top = data.mouse.top("ant-mcp", area, self.selected, start, end, lines.len());
+        let top = data.mouse.top(super::mouse::Viewport::AntMcp, area, self.selected, start, end, lines.len());
         for (at, (start, end)) in ranges.into_iter().enumerate() {
             let from = start.max(top);
             let to = end.min(top + usize::from(area.height));

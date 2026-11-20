@@ -19,6 +19,7 @@ use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
 
 use super::input::Input;
 use super::model::{Action, Key};
+use super::select::step;
 use super::style::{self, ago};
 use crate::admin::orders::{self, Listed};
 use crate::admin::settings::{self, Assignment, Reading};
@@ -97,10 +98,6 @@ impl Pane {
     pub fn key(&mut self, key: Key) {
         let fields = self.fields();
         match key {
-            Key::Up | Key::Char('k') => self.at = self.at.saturating_sub(1),
-            Key::Down | Key::Char('j') => self.at = (self.at + 1).min(fields.len().saturating_sub(1)),
-            Key::Home => self.at = 0,
-            Key::End => self.at = fields.len().saturating_sub(1),
             Key::Enter => {
                 let Some((field, value, secret)) = fields.get(self.at) else { return };
                 let field = ants_daemon::config::edit::field_text(field);
@@ -112,7 +109,11 @@ impl Pane {
                 self.draft = Some(Input::default());
                 self.drop_failure();
             }
-            _ => {}
+            _ => {
+                if let Some(to) = step(key, self.at, None) {
+                    self.at = to.min(fields.len().saturating_sub(1));
+                }
+            }
         }
     }
 
@@ -266,7 +267,15 @@ impl Pane {
             .collect();
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        super::mouse::list(frame, inner, data, "ant-settings", items, self.at, focused && self.draft.is_none());
+        super::mouse::list(
+            frame,
+            inner,
+            data,
+            super::mouse::Viewport::AntSettings,
+            items,
+            self.at,
+            focused && self.draft.is_none(),
+        );
     }
 }
 

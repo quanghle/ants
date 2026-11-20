@@ -10,7 +10,7 @@ use ratatui::text::Line;
 
 use super::command::{Dead, Tone};
 use super::exec::Job;
-use super::model::{Action, Key, Model, Page};
+use super::model::{Action, Key, Model, Page, Prompt};
 use crate::text::excerpt;
 use crate::threads::thread::{Entry, Kind};
 
@@ -36,6 +36,15 @@ impl Letter {
         };
         let text = format!(" {letter}: y drops it unreplayed; any other key keeps it");
         Line::styled(text, Style::new().fg(Color::Yellow))
+    }
+
+    /// Take `key`: `y` drops it, another key keeps it.
+    pub fn key(self, key: Key, model: &mut Model) -> Option<Action> {
+        if key != Key::Char('y') {
+            return None;
+        }
+        model.bar.set_status(format!("dropping dead letter {}…", self.seq), Tone::Busy);
+        Some(Action::Run(Job::DeadDrop(self.seq), String::new()))
     }
 }
 
@@ -77,20 +86,10 @@ impl Model {
         match dead {
             Dead::Replay(seq) => Ok(Some(Action::Run(Job::DeadReplay(self.letter(seq)?.seq), String::new()))),
             Dead::Drop(seq) => {
-                self.dropping = Some(self.letter(seq)?);
+                self.prompt = Some(Prompt::Drop(self.letter(seq)?));
                 Ok(None)
             }
         }
-    }
-
-    /// Take `key` while a drop waits for `y`.
-    pub fn drop_key(&mut self, key: Key) -> Option<Action> {
-        let letter = self.dropping.take()?;
-        if key != Key::Char('y') {
-            return None;
-        }
-        self.bar.set_status(format!("dropping dead letter {}…", letter.seq), Tone::Busy);
-        Some(Action::Run(Job::DeadDrop(letter.seq), String::new()))
     }
 }
 

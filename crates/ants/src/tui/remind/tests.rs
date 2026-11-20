@@ -12,13 +12,13 @@ fn b_asks_when_and_sets_the_reminder_with_its_note_at_once() {
     for c in "2h look again".chars() {
         m.key(Key::Char(c), at(0));
     }
-    let line = m.snoozing.as_ref().unwrap().line(&m.data).to_string();
+    let line = m.prompt_line().unwrap().to_string();
     assert!(line.contains("remind of") && line.contains("2h look again"), "{line}");
     let reminder =
         Reminder { at: at(0), due: at(7200), message: Some(message), note: "look again".into(), pushed: false };
     let set = Action::Change(thread.clone(), Change::Remind(Some(reminder.clone())), 0);
     assert_eq!(m.key(Key::Enter, at(0)), Some(set));
-    assert!(m.snoozing.is_none());
+    assert!(m.prompt.is_none());
     assert_eq!(m.data.cards.reminders.remind.get(&thread), Some(&reminder), "set at once");
     assert_eq!(m.set_reminder(thread.clone(), None), Action::Change(thread, Change::Remind(None), 0));
     assert!(m.data.cards.reminders.remind.is_empty(), "cleared at once");

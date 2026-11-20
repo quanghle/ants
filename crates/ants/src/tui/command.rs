@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 
 use super::approvals::Asking;
 use super::exec::{Job, Outcome, Quoted};
-use super::model::{Action, Focus, Key, Model, Page};
+use super::model::{Action, Focus, Key, Model, Page, Prompt};
 use super::{attach, complete, nav, snooze, thread};
 use crate::messages::{attachments, forward};
 use crate::people::quiet;
@@ -593,7 +593,7 @@ impl Model {
                 let text = std::iter::once(done.line).chain(done.warnings).collect::<Vec<_>>().join(" · ");
                 self.bar.set_status(text, tone);
                 if let Some(planned) = done.planned {
-                    self.starting = Some(*planned);
+                    self.prompt = Some(Prompt::Start(*planned));
                 }
                 if let Some(page) = done.page {
                     return Some(Action::Page(page));
@@ -665,9 +665,9 @@ mod tests {
         m.paste("so\n", at(0));
         assert_eq!(m.bar.text(), "q\nnow    please\nso\ndone", "pasted at the cursor, Home going to its line's start");
         m.key(Key::Esc, at(0));
-        m.help = Some(crate::tui::help::Help::default());
+        m.overlay(crate::tui::model::Overlay::Help(crate::tui::help::Help::default()));
         m.paste("q", at(0));
-        assert!(m.help.is_some() && !m.bar.focused, "help takes no paste");
+        assert!(m.help().is_some() && !m.bar.focused, "help takes no paste");
     }
 
     #[test]

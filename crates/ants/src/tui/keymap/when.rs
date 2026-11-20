@@ -57,10 +57,6 @@ pub(super) fn home_group(model: &Model, now: DateTime<Utc>) -> Result<(), &'stat
     check(home_item(model, now).is_some_and(|i| i.of_kind().is_some()), "no group of tool requests selected")
 }
 
-pub(super) fn home_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
-    check(matches!(model.page(), Page::Home(page) if page.prompt().is_some()), "no allow-all asked for")
-}
-
 pub(super) fn home_reply(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
     match home_item(model, now) {
         None => Err("nothing selected"),
@@ -182,14 +178,6 @@ pub(super) fn post_attachments(model: &Model, _: DateTime<Utc>) -> Result<(), &'
     }
 }
 
-pub(super) fn tree_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
-    check(matches!(model.page(), Page::Tree(page) if page.prompt().is_some()), "no cancel asked for")
-}
-
-pub(super) fn ant_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
-    check(matches!(model.page(), Page::Ant(page) if page.armed().is_some()), "no restart or pause asked for")
-}
-
 pub(super) fn ant_restart_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
     let armed = matches!(model.page(), Page::Ant(page) if page.armed() == Some(super::ant::Armed::Restart));
     check(armed, "no restart asked for")
@@ -199,11 +187,7 @@ pub(super) fn mcp_signing(model: &Model, _: DateTime<Utc>) -> Result<(), &'stati
     check(matches!(model.page(), Page::Ant(page) if page.mcp.signing()), "no sign-in under way")
 }
 
-pub(super) fn page_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
-    let armed = match model.page() {
-        Page::Credentials(page) => page.prompt().is_some(),
-        Page::Held(page) => page.prompt().is_some(),
-        _ => false,
-    };
-    check(armed, "nothing asked for")
+/// Whether the view waits for the `y` confirming what one of its keys asked for.
+pub(super) fn armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
+    check(model.page().armed(), "nothing asked for")
 }

@@ -7,7 +7,7 @@ use ratatui::text::Line;
 
 use super::command::Tone;
 use super::exec::Job;
-use super::model::{Action, Key, Model};
+use super::model::{Action, Key, Model, Prompt};
 
 /// A cancel waiting for `y` while an ant runs a tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +24,14 @@ impl Confirm {
         let text = format!(" {} is running a tool call, {}: {what}", self.ant, self.tool);
         Line::styled(text, Style::new().fg(Color::Yellow))
     }
+
+    /// Take `key`: `y` cancels, another key keeps the prompt running.
+    pub fn key(self, key: Key, model: &mut Model) -> Option<Action> {
+        if key != Key::Char('y') {
+            return None;
+        }
+        model.interrupted(self.thread)
+    }
 }
 
 impl Model {
@@ -32,19 +40,10 @@ impl Model {
         let progress = self.data.live.progress.get(&thread);
         let tool = progress.and_then(|p| p.status.tools().next().map(|(ant, tool)| (ant.clone(), tool.to_owned())));
         if let Some((ant, tool)) = tool {
-            self.interrupting = Some(Confirm { thread, ant, tool });
+            self.prompt = Some(Prompt::Interrupt(Confirm { thread, ant, tool }));
             return None;
         }
         self.interrupted(thread)
-    }
-
-    /// Take `key` while a cancel waits for `y`.
-    pub fn confirm_key(&mut self, key: Key) -> Option<Action> {
-        let confirm = self.interrupting.take()?;
-        if key != Key::Char('y') {
-            return None;
-        }
-        self.interrupted(confirm.thread)
     }
 
     fn interrupted(&mut self, thread: ThreadId) -> Option<Action> {
@@ -103,11 +102,11 @@ mod tests {
 
         m.take(live::Event::Status(tool(&thread, "dev-b", "c1", Some("git push"), "in_progress", 4)), at(4));
         assert_eq!(m.key(Key::Char('x'), at(4)), None);
-        let line = m.interrupting.as_ref().map(|c| c.line().to_string());
+        let line = m.prompt_line().map(|l| l.to_string());
         let asks = "dev-b is running a tool call, git push: y cancels the prompt; any other key keeps it running";
         assert_eq!(line.as_deref().map(str::trim), Some(asks));
         assert_eq!(m.key(Key::Char('n'), at(5)), None);
-        assert_eq!(m.interrupting, None, "any other key drops it");
+        assert!(m.prompt.is_none(), "any other key drops it");
         m.key(Key::Char('x'), at(5));
         assert_eq!(m.key(Key::Char('y'), at(5)), cancel(&["dev-b"]));
 

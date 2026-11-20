@@ -12,14 +12,14 @@ use chrono::{DateTime, Local, Utc};
 
 use super::acts::Change;
 use super::exec::{Ctx, Done};
-use super::model::{Action, Model};
+use super::model::{Action, Model, Prompt};
 use super::snooze;
 use crate::threads::remind;
 
 impl Model {
     /// `b` on `thread`, or on `message` on it: ask when to be reminded of it.
     pub fn remind(&mut self, thread: ThreadId, message: Option<Uuid>) -> Option<Action> {
-        self.snoozing = Some(snooze::Prompt::remind(thread, message));
+        self.prompt = Some(Prompt::Snooze(snooze::Prompt::remind(thread, message)));
         None
     }
 

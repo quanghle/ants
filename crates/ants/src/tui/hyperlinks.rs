@@ -238,7 +238,7 @@ mod tests {
             assert!(link.cells.first().unwrap().1 < link.cells.last().unwrap().1, "the label wrapped");
             assert!(link.cells.iter().all(|(x, y, _)| model.data.mouse.message_at(Position::new(*x, *y)) == Some(seq)));
         }
-        model.help = Some(super::super::help::Help::default());
+        model.overlay(crate::tui::model::Overlay::Help(super::super::help::Help::default()));
         let drawn = terminal.draw(|f| frame::draw(f, &model, at(1))).unwrap();
         assert!(find(drawn.buffer, &model).is_empty(), "hidden message labels must not link the help");
     }

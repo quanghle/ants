@@ -14,7 +14,7 @@ use ratatui::text::Line;
 use super::acts::Change;
 use super::home;
 use super::input::Input;
-use super::model::{Action, Data, Key, Model};
+use super::model::{self, Action, Data, Key, Model};
 use super::style;
 
 /// How long a snooze lasts unless edited.
@@ -65,6 +65,32 @@ impl Prompt {
     fn until(&self, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
         duration(&self.text.text()).map(|d| now + d)
     }
+
+    /// Take `key` while the footer asks how long to snooze: what is done, and the prompt if it still asks.
+    pub fn key(mut self, key: Key, model: &mut Model, now: DateTime<Utc>) -> (Option<Self>, Option<Action>) {
+        match key {
+            Key::Esc => return (None, None),
+            Key::Enter if let Some(message) = self.remind => {
+                match model.remind_as(self.thread.clone(), message, &self.text.text(), now) {
+                    Ok(action) => return (None, Some(action)),
+                    Err(error) => self.error = Some(error),
+                }
+            }
+            Key::Enter => match self.until(now) {
+                Ok(until) => return (None, Some(model.set_snooze(self.thread, Some(until), now))),
+                Err(error) => self.error = Some(error),
+            },
+            key => {
+                if !self.edited && matches!(key, Key::Char(_)) {
+                    self.text = Input::default();
+                }
+                if self.text.key(key) {
+                    (self.edited, self.error) = (true, None);
+                }
+            }
+        }
+        (Some(self), None)
+    }
 }
 
 /// How long snoozing for `text`, a duration such as `1h`, lasts; `1h` for an empty one.
@@ -90,7 +116,7 @@ impl Model {
         if home::snoozed(&self.data, now).contains_key(&thread) {
             return Some(self.set_snooze(thread, None, now));
         }
-        self.snoozing = Some(Prompt::new(thread));
+        self.prompt = Some(model::Prompt::Snooze(Prompt::new(thread)));
         None
     }
 
@@ -103,41 +129,6 @@ impl Model {
         }
         let last = self.data.live.summary(&thread).map_or(0, |s| s.last_reopening);
         Action::Change(thread, Change::Snooze(until), last)
-    }
-
-    /// Take `key` while the footer asks how long to snooze.
-    pub fn snooze_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
-        let prompt = self.snoozing.as_mut()?;
-        match key {
-            Key::Esc => self.snoozing = None,
-            Key::Enter if let Some(message) = prompt.remind => {
-                let (thread, text) = (prompt.thread.clone(), prompt.text.text());
-                match self.remind_as(thread, message, &text, now) {
-                    Ok(action) => {
-                        self.snoozing = None;
-                        return Some(action);
-                    }
-                    Err(error) => self.snoozing.as_mut()?.error = Some(error),
-                }
-            }
-            Key::Enter => match prompt.until(now) {
-                Ok(until) => {
-                    let thread = prompt.thread.clone();
-                    self.snoozing = None;
-                    return Some(self.set_snooze(thread, Some(until), now));
-                }
-                Err(error) => prompt.error = Some(error),
-            },
-            key => {
-                if !prompt.edited && matches!(key, Key::Char(_)) {
-                    prompt.text = Input::default();
-                }
-                if prompt.text.key(key) {
-                    (prompt.edited, prompt.error) = (true, None);
-                }
-            }
-        }
-        None
     }
 }
 
@@ -154,7 +145,7 @@ mod tests {
         let mut m = model();
         assert_eq!(m.snooze(thread.clone(), at(0)), None);
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Change(thread.clone(), Change::Snooze(Some(at(3600))), 0)));
-        assert!(m.snoozing.is_none());
+        assert!(m.prompt.is_none());
         assert!(m.data.cards.snoozed.get(&thread, at(1)).is_some(), "off home at once");
 
         assert_eq!(m.snooze(thread.clone(), at(1)), Some(Action::Change(thread.clone(), Change::Snooze(None), 0)));
@@ -165,14 +156,14 @@ mod tests {
             m.key(Key::Char(c), at(0));
         }
         assert_eq!(m.key(Key::Enter, at(0)), None);
-        let line = m.snoozing.as_ref().unwrap().line(&m.data);
+        let line = m.prompt_line().unwrap();
         assert!(line.to_string().contains("too long: at most 7d"), "{line}");
         m.key(Key::Backspace, at(0));
         m.key(Key::Backspace, at(0));
         m.key(Key::Char('0'), at(0));
         assert_eq!(m.key(Key::Enter, at(0)), None, "zero refused");
         m.key(Key::Esc, at(0));
-        assert!(m.snoozing.is_none(), "Esc keeps it on home");
+        assert!(m.prompt.is_none(), "Esc keeps it on home");
     }
 
     #[test]
@@ -186,8 +177,9 @@ mod tests {
                 Typed::Key(key) => _ = m.key(key, at(0)),
                 Typed::Paste(text) => m.paste(text, at(0)),
             });
-            assert_eq!(m.snoozing.as_ref().unwrap().text.text(), want, "remind: {remind}");
-            assert!(m.snoozing.as_ref().unwrap().line(&m.data).to_string().contains(": X▏a b hi ·"));
+            let Some(model::Prompt::Snooze(prompt)) = &m.prompt else { panic!("the prompt") };
+            assert_eq!(prompt.text.text(), want, "remind: {remind}");
+            assert!(m.prompt_line().unwrap().to_string().contains(": X▏a b hi ·"));
         }
     }
 }

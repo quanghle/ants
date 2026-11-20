@@ -14,8 +14,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
-use super::model::{Data, Key, To};
-use super::select::Selection;
+use super::model::{Data, Key, Model, To};
+use super::select::{Selection, step};
 use super::style::{self, ago};
 use crate::people::sealed::State;
 use crate::threads::thread::{Entry, Kind};
@@ -161,24 +161,21 @@ impl Page {
         Self { with, selected: Selection::default() }
     }
 
-    pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
+    pub fn key(&mut self, key: Key, data: &Data, _: DateTime<Utc>) -> Option<To> {
         let dms = shown(data, &self.with);
         let threads: Vec<ThreadId> = dms.iter().map(|dm| dm.thread.clone()).collect();
         let at = self.selected.at(&threads);
         let to = match key {
             Key::Enter => return dms.get(at).map(|dm| To::Thread(dm.thread.clone())),
             Key::Char('n') => return Some(To::Write),
-            Key::Up | Key::Char('k') => at.saturating_sub(1),
-            Key::Down | Key::Char('j') => at + 1,
-            Key::Home => 0,
-            Key::End => usize::MAX,
-            _ => return None,
+            _ => step(key, at, None)?,
         };
         self.selected.select(&threads, to);
         None
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+    pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
+        let data = &model.data;
         let state = match data.people.online(&self.with) {
             Some(true) => " · online",
             Some(false) => " · away",
@@ -199,7 +196,15 @@ impl Page {
             let selected = self.selected.at(&dms.iter().map(|dm| dm.thread.clone()).collect::<Vec<_>>());
             let inner = block.inner(area);
             frame.render_widget(block, area);
-            super::mouse::list(frame, inner, data, &format!("dm:{}", self.with), rows, selected, focused);
+            super::mouse::list(
+                frame,
+                inner,
+                data,
+                super::mouse::Viewport::Dm(self.with.clone()),
+                rows,
+                selected,
+                focused,
+            );
         }
     }
 }

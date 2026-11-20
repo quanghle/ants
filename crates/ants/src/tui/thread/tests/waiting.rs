@@ -217,7 +217,7 @@ fn the_waiting_list_keeps_composition_and_uses_its_own_help_and_palette_keys() {
     assert!(m.asking.is_none(), "a hidden request is not answered");
     assert_eq!(crate::tui::keymap::views(&m), vec![crate::tui::keymap::View::Pending]);
     m.key(Key::Char('?'), at(10));
-    assert!(m.help.is_some());
+    assert!(m.help().is_some());
     m.key(Key::Esc, at(10));
     for close in [Key::Esc, Key::Char('q'), Key::Interrupt, Key::Ctrl('l')] {
         assert_eq!(m.key(close, at(10)), None);

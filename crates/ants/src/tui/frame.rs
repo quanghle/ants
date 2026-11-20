@@ -44,18 +44,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let focused = model.focus == Focus::View && !model.bar.focused;
     let data = &model.data;
     data.mouse.add(view, super::mouse::Target::View);
-    match model.page() {
-        Page::Home(page) => page.draw(frame, view, model, now, focused),
-        Page::Work(page) => page.draw(frame, view, data, now, focused),
-        Page::Channel(page) => page.draw(frame, view, data, now, focused),
-        Page::Thread(page) => page.draw(frame, view, model, now, focused),
-        Page::Dm(page) => page.draw(frame, view, data, now, focused),
-        Page::Search(page) => page.draw(frame, view, data, now, focused),
-        Page::Tree(page) => page.draw(frame, view, data, now, focused),
-        Page::Ant(page) => page.draw(frame, view, data, now, focused),
-        Page::Credentials(page) => page.draw(frame, view, data, now, focused),
-        Page::Held(page) => page.draw(frame, view, data, now, focused),
-    }
+    model.page().draw(frame, view, model, now, focused);
     model.bar.draw(frame, bar, &model.completions(), &model.bar_title(), &model.enter_hint());
     let completions = model.completions();
     if !completions.is_empty() {
@@ -82,33 +71,14 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         data.mouse.add(frame.area(), super::mouse::Target::Overlay);
     }
     catchup::draw_digest(frame, model, now);
-    if let Some(planned) = &model.starting {
-        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
-        planned.draw(frame);
-    }
-    if let Some(help) = &model.help {
-        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
-        help.draw(frame, model, now);
-    }
-    if let Some(log) = &model.log {
-        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
-        log.draw(frame, &model.notices);
-    }
-    if let Some(copying) = &model.copying {
-        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
-        copying.draw(frame, data);
-    }
+    model.draw_over(frame, now);
 }
 
 /// The error the footer shows, wrapped, if one waits for a key and no prompt takes the footer.
 fn error_shown(model: &Model, now: DateTime<Utc>) -> Option<&Notice> {
-    let prompt = model.quitting_at(now)
-        || model.picking.is_some()
-        || model.interrupting.is_some()
-        || model.dropping.is_some()
-        || model.starting.is_some();
+    let prompt = model.quitting_at(now) || model.prompt.is_some();
     let error = model.notice_at(now).filter(|n| n.level == Level::Error);
-    error.filter(|_| !prompt && model.snoozing.is_none())
+    error.filter(|_| !prompt)
 }
 
 /// Who the UI runs as, on which server, the place shown, and the connection.
@@ -136,20 +106,8 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
     if model.quitting_at(now) {
         return style::notice(QUIT_AGAIN, false, width);
     }
-    if let Some(picker) = &model.picking {
-        return picker.line();
-    }
-    if let Some(confirm) = &model.interrupting {
-        return confirm.line();
-    }
-    if let Some(letter) = &model.dropping {
-        return letter.line();
-    }
-    if let Some(planned) = &model.starting {
-        return planned.line();
-    }
-    if let Some(prompt) = &model.snoozing {
-        return prompt.line(&model.data);
+    if let Some(line) = model.prompt_line() {
+        return line;
     }
     if let Some(notice) = model.notice_at(now) {
         return style::notice(&notice.text, notice.level == Level::Error, width);
@@ -186,21 +144,8 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
         if let Some(cursor) = card {
             return keymap::prompt(cursor.keys(), width, false);
         }
-        if let Page::Home(page) = model.page()
-            && let Some(keys) = page.prompt()
-        {
-            return keymap::prompt(&keys, width, true);
-        }
-        let (prompt, help) = match model.page() {
-            Page::Channel(page) => (page.prompt(), false),
-            Page::Ant(page) => (page.prompt(), page.armed().is_some()),
-            Page::Tree(page) => (page.prompt(), true),
-            Page::Credentials(page) => (page.prompt(), true),
-            Page::Held(page) => (page.prompt(), true),
-            _ => (None, false),
-        };
-        if let Some(keys) = prompt {
-            return keymap::prompt(keys, width, help);
+        if let Some(keys) = model.page().prompt() {
+            return keymap::prompt(&keys, width, model.page().armed());
         }
     }
     keymap::footer(model, now, width)

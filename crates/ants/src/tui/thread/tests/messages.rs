@@ -28,14 +28,14 @@ fn reactions_show_under_each_message_and_plus_reacts_or_takes_one_back() {
     m.pages.push(crate::tui::model::Page::Thread(page));
     m.key(Key::Home, at(2));
     assert_eq!(m.key(Key::Char('+'), at(2)), None);
-    let footer = m.picking.as_ref().unwrap().line().to_string();
+    let footer = m.prompt_line().unwrap().to_string();
     assert!(footer.contains("👍 thumbsup") && footer.contains("Esc close"), "{footer}");
     for c in "eyes".chars() {
         m.key(Key::Char(c), at(2));
     }
     let eyes: ants_proto::Reaction = "eyes".parse().unwrap();
     assert_eq!(m.key(Key::Enter, at(2)), Some(Action::React(first, eyes.clone(), true)), "alice takes it back");
-    assert!(m.picking.is_none());
+    assert!(m.prompt.is_none());
     m.key(Key::Char('+'), at(2));
     assert_eq!(m.key(Key::Enter, at(2)), Some(Action::React(first, "thumbsup".parse().unwrap(), false)));
 
