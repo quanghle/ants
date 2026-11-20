@@ -683,7 +683,8 @@ workers = 4
 ```
 
 A worker that cannot start, crashes, or whose exit status or output cannot be read is tried again, the run unchanged,
-after 1 s and up to 1 min apart. A worker past its compute or memory limit, one writing a response larger than its request
+after 1 s and up to 1 min apart; a run whose workers crash 3 times in a row, as a stack overflow's abort brings again,
+fails, its owner told. A worker past its compute or memory limit, one writing a response larger than its request
 takes, or one that exits normally with a response the daemon cannot read, fails the run, as the same request would bring the same again.
 
 `ants doctor` starts the worker of the daemon service's `ants`, else its own, as a daemon does, with a request it

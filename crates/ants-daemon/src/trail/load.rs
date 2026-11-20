@@ -84,6 +84,7 @@ impl Trails {
             broke: None,
             late: false,
             starved: false,
+            crashes: 0,
         };
         Ok(Slot::new(engine, book))
     }
@@ -113,6 +114,7 @@ impl Trails {
             broke: None,
             late: false,
             starved: false,
+            crashes: 0,
         };
         Ok(Slot::new(engine, book))
     }

@@ -520,6 +520,32 @@ async fn a_failing_worker_is_retried() {
 }
 
 #[tokio::test]
+async fn a_worker_crashing_again_and_again_fails_the_run_and_tells_its_owner() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-crashing-worker");
+    let worker = dir.join("worker");
+    let tries = dir.join("tries");
+    let wrapper = format!("#!/bin/sh\necho x >>{tries:?}\necho 'stack overflow' >&2\nkill -ABRT $$\n");
+    std::fs::write(&worker, wrapper).unwrap();
+    std::process::Command::new("chmod").arg("+x").arg(&worker).status().unwrap();
+
+    let mut lead = conductor(&server, &worker, Vec::new()).await;
+    let run = lead.start(r#"await agent("go", ant="dev")"#, TrailLimits::default()).await;
+    let RunState::Failed { error, limit: None } = lead.ended(&run).await else { panic!("the run fails") };
+    assert!(error.contains("crashed") && error.contains("stack overflow"), "{error}");
+    assert!(error.ends_with("(3 times in a row)"), "{error}");
+    assert_eq!(std::fs::read_to_string(&tries).unwrap().lines().count(), 3, "tried three times");
+    let told = lead.told().await;
+    assert!(
+        told.text.contains(" failed (0 steps, 0 turns): ") && told.text.contains("stack overflow"),
+        "{}",
+        told.text
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
 async fn a_stopped_run_gives_up_its_steps_and_resumes_with_fresh_ones() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;

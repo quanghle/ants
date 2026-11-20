@@ -26,6 +26,9 @@ pub const MAX_RECORD: usize = 1024 * 1024 - 8 * 1024;
 /// Most characters of a run's phase, and of its error at its end when its record would not hold it whole.
 const MAX_PHASE: usize = 1000;
 const MAX_ERROR: usize = 8000;
+/// Workers of a run that may crash in a row, the run unchanged, before it fails: a crash the same request brings
+/// again, as a stack overflow's abort, would otherwise be tried until the run's wall time.
+const MAX_CRASHES: u32 = 3;
 
 impl Trails {
     /// Drive each run woken, one pass at a time per run, and wake those whose wall time passed.
@@ -127,7 +130,7 @@ impl Trails {
             } else if matches!(header.state, RunState::Stopped { .. }) {
                 return Ok(());
             } else {
-                self.compute(&mut engine).await?
+                self.compute(slot, &mut engine).await?
             };
             self.progressed(slot, &progress).await;
             match engine.status().clone() {
@@ -189,14 +192,17 @@ impl Trails {
     }
 
     /// Let the script compute in a worker, once one of the daemon's is free: an error leaving the run unchanged is
-    /// returned, for the pass to be tried again; any other fails the run. A session the worker cannot restore, as
+    /// returned, for the pass to be tried again, up to [`MAX_CRASHES`] crashes in a row; any other fails the run. A session the worker cannot restore, as
     /// one another Monty version dumped, is rebuilt from the run's journal ([`Run::replay`]).
-    async fn compute(&self, engine: &mut Run) -> Result<Progress> {
+    async fn compute(&self, slot: &Slot, engine: &mut Run) -> Result<Progress> {
         let _computing = super::computing().acquire().await?;
         match engine.resume(&self.inner.worker).await {
-            Ok(progress) => Ok(progress),
-            Err(RunError::Worker(e)) => Err(anyhow!(e).context("running the trail's worker")),
-            Err(RunError::Unrestorable(why)) => self.replay(engine, &why).await,
+            Ok(progress) => {
+                slot.book().crashes = 0;
+                Ok(progress)
+            }
+            Err(RunError::Worker(e)) => retry_or_fail(slot, engine, e, "running the trail's worker"),
+            Err(RunError::Unrestorable(why)) => self.replay(slot, engine, &why).await,
             Err(e) => Ok(engine.fail(e.to_string())),
         }
     }
@@ -204,11 +210,12 @@ impl Trails {
     /// Rebuild `engine`'s session by running its script again from its start, with the run's clock and seed, and
     /// answering its calls from its journal, which holds every answered call of the run; a script making a call
     /// otherwise than its journal entry fails the run, naming the call.
-    async fn replay(&self, engine: &mut Run, why: &str) -> Result<Progress> {
+    async fn replay(&self, slot: &Slot, engine: &mut Run, why: &str) -> Result<Progress> {
         tracing::info!(why, "replaying a trail run's journal to rebuild its session");
         let replayed = Run::replay(engine.state().clone(), engine.journal().to_vec(), &self.inner.worker).await;
         match replayed {
             Ok((replayed, progress)) => {
+                slot.book().crashes = 0;
                 *engine = replayed;
                 Ok(progress)
             }
@@ -219,7 +226,7 @@ impl Trails {
             Err(RunError::Worker(e @ (WorkerError::Oversized(_) | WorkerError::Protocol(_)))) => {
                 Ok(engine.fail(format!("replaying the run's journal: {e}")))
             }
-            Err(RunError::Worker(e)) => Err(anyhow!(e).context("replaying the trail's journal")),
+            Err(RunError::Worker(e)) => retry_or_fail(slot, engine, e, "replaying the trail's journal"),
             Err(e) => Ok(engine.fail(e.to_string())),
         }
     }
@@ -593,6 +600,22 @@ pub(super) fn uncount_steps(header: &mut TrailRun, steps: u32) {
     if let Some(leg) = header.route.last_mut() {
         leg.steps = leg.steps.saturating_sub(steps);
     }
+}
+
+/// Hand back `e`, a worker's failure leaving `engine` unchanged, for the pass to be tried again; the run fails instead
+/// on its [`MAX_CRASHES`]th worker crashing in a row.
+fn retry_or_fail(slot: &Slot, engine: &mut Run, e: WorkerError, doing: &'static str) -> Result<Progress> {
+    if matches!(e, WorkerError::Crashed { .. }) {
+        let crashes = {
+            let mut book = slot.book();
+            book.crashes = book.crashes.saturating_add(1);
+            book.crashes
+        };
+        if crashes >= MAX_CRASHES {
+            return Ok(engine.fail(format!("{doing}: {e} ({crashes} times in a row)")));
+        }
+    }
+    Err(anyhow!(e).context(doing))
 }
 
 /// The limit of a run's record that `limit`, of its script's worker, is.

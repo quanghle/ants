@@ -234,6 +234,8 @@ struct Book {
     late: bool,
     /// Whether a call waits for turns the steps of other runs of its tree hold.
     starved: bool,
+    /// The run's workers that crashed in a row.
+    crashes: u32,
 }
 
 impl Slot {
@@ -500,6 +502,7 @@ impl Trails {
             broke: None,
             late: false,
             starved: false,
+            crashes: 0,
         };
         let slot = Slot::new(engine, book);
         // Listed before its header is stored: a run listed with no header is dropped from the index at the next start.
