@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::dream::{self, Dream, Finding, Judgement, State, Verdict};
-use crate::items::{Item, ItemId, Values};
+use crate::items::{Item, ItemId, ItemValues, Values};
 use crate::store::{Items, StoreError, Write, read_modify_write};
 use crate::tools::{Answer, MAX_REASON_CHARS};
 
@@ -112,14 +112,11 @@ pub struct Proposal {
     pub decided: Option<Decided>,
 }
 
-impl Proposal {
-    fn values(&self) -> Values {
-        match serde_json::to_value(self) {
-            Ok(Value::Object(values)) => values,
-            _ => unreachable!("a proposal is an object"),
-        }
-    }
+impl ItemValues for Proposal {
+    const KIND: &str = PROPOSAL;
+}
 
+impl Proposal {
     /// When a dream may offer it and the ant confirm it: [`CONFIRM_AFTER_HOURS`] after it was made.
     pub fn ripe(&self) -> DateTime<Utc> {
         self.writer.at + Duration::hours(CONFIRM_AFTER_HOURS)
@@ -138,7 +135,7 @@ impl ProposalItem {
         if item.kind != PROPOSAL {
             return None;
         }
-        let proposal = serde_json::from_value(Value::Object(item.values.clone())).ok()?;
+        let proposal = Proposal::of(&item).ok()?;
         Some(Self { item, proposal })
     }
 

@@ -24,7 +24,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::recall::{HALF_LIFE_DAYS, HELPFUL_WEIGHT, MAX_HELPFUL, STALE_WEIGHT};
 use super::{
@@ -32,7 +32,7 @@ use super::{
     jaccard, recheck_citations, words,
 };
 use crate::identity::{self, Dormancy};
-use crate::items::{ItemId, Values};
+use crate::items::{ItemId, ItemValues, Values};
 use crate::store::{Items, StoreError, Write, read_modify_write};
 
 /// The kind of the item recording the last maintenance run ([`Maintenance`]).
@@ -114,13 +114,8 @@ pub struct Maintenance {
     pub citations_marked: usize,
 }
 
-impl Maintenance {
-    fn values(&self) -> Values {
-        match serde_json::to_value(self) {
-            Ok(Value::Object(values)) => values,
-            _ => unreachable!("a maintenance run is an object"),
-        }
-    }
+impl ItemValues for Maintenance {
+    const KIND: &str = "maintenance record";
 }
 
 /// Ages up to a time in an ant's active time: the time but its dormancies ([`identity::Card::dormant`]).
@@ -185,9 +180,7 @@ pub async fn last_maintenance(items: &dyn Items) -> Result<Option<Maintenance>, 
 
 async fn record(items: &dyn Items) -> Result<Option<(Maintenance, u64)>, StoreError> {
     let Some(item) = items.get(&record_id()).await? else { return Ok(None) };
-    let run = serde_json::from_value(Value::Object(item.values))
-        .map_err(|e| StoreError::Unavailable(format!("unreadable maintenance record: {e}")))?;
-    Ok(Some((run, item.revision)))
+    Ok(Some((Maintenance::of(&item)?, item.revision)))
 }
 
 /// When maintenance is due next: [`MAINTENANCE_EVERY_HOURS`] after the last run; none before the first, due now.

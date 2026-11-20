@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::brief::Listing;
-use crate::items::{Item, ItemId, Values, changed, readable, stamp};
+use crate::items::{Item, ItemId, ItemValues, changed, readable, stamp};
 use crate::sanitize::{Limit, Lines, sanitize};
 use crate::store::{Items, StoreError, Write};
+use crate::tools::refused_as;
 use crate::{Answer, Sense, remind};
 
 pub const KIND: &str = "promise";
@@ -85,18 +86,11 @@ pub struct Earlier {
     pub reason: Option<String>,
 }
 
+impl ItemValues for Promise {
+    const KIND: &str = KIND;
+}
+
 impl Promise {
-    /// The commitment `item` holds.
-    pub fn of(item: &Item) -> Result<Self, StoreError> {
-        serde_json::from_value(Value::Object(item.values.clone()))
-            .map_err(|error| StoreError::Unavailable(format!("invalid commitment {}: {error}", item.id)))
-    }
-
-    /// The values of its item, null for those it lacks.
-    pub fn values(&self) -> Values {
-        crate::items::values_of(self)
-    }
-
     /// Whether it is open past its due time.
     pub fn overdue(&self, now: DateTime<Utc>) -> bool {
         self.status == Status::Open && self.due <= now
@@ -364,11 +358,7 @@ fn answer(item: Item, now: DateTime<Utc>) -> Result<Answer, Answer> {
 
 /// The refusal of a call, showing the commitment found at another revision.
 fn refused(error: impl Into<Answer>) -> Answer {
-    let mut answer = error.into();
-    if answer.json["current"]["kind"] == KIND {
-        answer.json["promise"] = answer.json["current"].clone();
-    }
-    answer
+    refused_as(error, KIND, "promise")
 }
 
 #[cfg(test)]

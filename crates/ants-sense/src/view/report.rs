@@ -33,7 +33,7 @@ use crate::dream::{
 };
 use crate::fork::INHERITED;
 use crate::identity::{Card, card};
-use crate::items::Item;
+use crate::items::{Item, ItemValues, readable};
 use crate::memory::{MEMORY, Memory, MemoryKind, Status, Trust};
 use crate::persona::{self, PERSONA};
 use crate::proposal::{self, Confirmation, PROPOSAL, Proposal, ProposalItem, time};
@@ -92,7 +92,10 @@ impl Data {
             worked: experience(items, ant, usize::MAX).await?,
             own,
             calls: calls::calls(items, since).await?,
-            memories: items.list(MEMORY, usize::MAX).await?.iter().filter_map(Memory::of).collect(),
+            memories: readable(items.list(MEMORY, usize::MAX).await?, Memory::of)
+                .into_iter()
+                .map(|(_, memory)| memory)
+                .collect(),
             dreams: dreams(items).await?,
             rested: rested(items).await?,
             reviews: review_tally(items, TOP).await?,

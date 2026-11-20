@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::brief::Listing;
-use crate::items::{Item, ItemId, Values, changed, readable, stamp, values_of};
+use crate::items::{Item, ItemId, ItemValues, changed, readable, stamp};
 use crate::store::{Items, StoreError, Write, read_modify_write};
 use crate::{Answer, Sense};
 
@@ -145,6 +145,10 @@ pub struct Delivered {
     pub at: DateTime<Utc>,
 }
 
+impl ItemValues for Reminder {
+    const KIND: &str = KIND;
+}
+
 impl Reminder {
     /// A new active reminder of `trigger`, first due at `first_due`, made by the call of `writer` from the thread's
     /// working directory `workdir`.
@@ -180,17 +184,6 @@ impl Reminder {
             observation: None,
             check_started: None,
         }
-    }
-
-    /// The reminder `item` holds.
-    pub fn of(item: &Item) -> Result<Self, StoreError> {
-        serde_json::from_value(Value::Object(item.values.clone()))
-            .map_err(|error| StoreError::Unavailable(format!("invalid reminder {}: {error}", item.id)))
-    }
-
-    /// The values of its item, null for those it lacks.
-    pub fn values(&self) -> Values {
-        values_of(self)
     }
 
     /// Whether it expired: past its expiry with no firing pending.
@@ -642,7 +635,7 @@ pub(crate) async fn write_creations(
     if added == 0 {
         return Ok(items.write(writes, by).await?);
     }
-    let guard = &ItemId::named("reminder-quota", "active");
+    let guard = &ItemId::named(Quota::KIND, "active");
     // Only a conflict on the quota is decided again: one on the writes given is the caller's to answer.
     read_modify_write(|| async move {
         let quota = items.get(guard).await?;
@@ -655,8 +648,8 @@ pub(crate) async fn write_creations(
         let mut batch = writes.to_vec();
         batch.push(Write::Put {
             id: guard.clone(),
-            kind: "reminder-quota".into(),
-            values: values_of(&Quota { generation: revision + 1 }),
+            kind: Quota::KIND.into(),
+            values: Quota { generation: revision + 1 }.values(),
             expected: Some(revision),
         });
         match items.write(&batch, by).await {
@@ -674,9 +667,13 @@ pub(crate) async fn write_creations(
 }
 
 /// The guard serializing the writes adding active reminders: each such write counts a generation more.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Quota {
     generation: u64,
+}
+
+impl ItemValues for Quota {
+    const KIND: &str = "reminder-quota";
 }
 
 /// The changes resuming the reminders paused while the ant was dormant, from `since` to `until`: each active one

@@ -100,6 +100,15 @@ impl From<StoreError> for Answer {
     }
 }
 
+/// The refusal of a call, `error`: one showing an item of `kind` found at another revision shows it as `name` too.
+pub(crate) fn refused_as(error: impl Into<Answer>, kind: &str, name: &str) -> Answer {
+    let mut answer = error.into();
+    if answer.json["current"]["kind"] == kind {
+        answer.json[name] = answer.json["current"].clone();
+    }
+    answer
+}
+
 pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "brief",

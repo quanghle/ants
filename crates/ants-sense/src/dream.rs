@@ -44,11 +44,11 @@ use ants_proto::provider::{CallContext, ToolCall};
 use ants_proto::{ReviewOutcomes, ThreadId, TrailName, UserId};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::Sense;
 use crate::identity;
-use crate::items::{ItemId, Revision, Values};
+use crate::items::{ItemId, ItemValues, Revision, Values};
 use crate::memory::{self, MAX_BODY_BYTES, MAX_TITLE_CHARS, MEMORY, Memory, MemoryItem, MemoryKind, Scope, Status};
 use crate::proposal;
 use crate::store::{Items, StoreError, Write, read_modify_write};
@@ -413,6 +413,14 @@ struct Record {
     rested: Vec<Rested>,
 }
 
+impl ItemValues for Record {
+    const KIND: &str = "record of the last dream";
+}
+
+impl ItemValues for Dream {
+    const KIND: &str = DREAM;
+}
+
 /// A dream, as its item holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dream {
@@ -474,22 +482,10 @@ impl Dream {
         })
     }
 
-    fn values(&self) -> Values {
-        match serde_json::to_value(self) {
-            Ok(Value::Object(values)) => values,
-            _ => unreachable!("a dream is an object"),
-        }
-    }
-
     /// The write changing it, at `revision`, into `after`.
     pub(crate) fn change(&self, after: &Self, revision: u64) -> Write {
         let values = crate::items::changed(&self.values(), after.values());
         Write::Change { id: Self::id(after.number), values, expected: Some(revision) }
-    }
-
-    fn of(item: &crate::items::Item) -> Result<Self, StoreError> {
-        serde_json::from_value(Value::Object(item.values.clone()))
-            .map_err(|e| StoreError::Unavailable(format!("unreadable dream {}: {e}", item.id)))
     }
 
     /// Whether the ant is to be woken on a new dream thread at `now` with the packet alone: at once without a sage,
@@ -598,9 +594,7 @@ fn record_id() -> ItemId {
 /// The record of the last dream and the revision of its item; none before the first.
 async fn record(items: &dyn Items) -> Result<Option<(Record, u64)>, StoreError> {
     let Some(item) = items.get(&record_id()).await? else { return Ok(None) };
-    let record = serde_json::from_value(Value::Object(item.values))
-        .map_err(|e| StoreError::Unavailable(format!("unreadable record of the last dream: {e}")))?;
-    Ok(Some((record, item.revision)))
+    Ok(Some((Record::of(&item)?, item.revision)))
 }
 
 /// Dream `number` and the revision of its item.
@@ -713,7 +707,7 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
             expected: Some(0),
         });
         let expected = Some(record.map_or(0, |(_, revision)| revision));
-        let values = crate::items::values_of(&Record { number, rested });
+        let values = Record { number, rested }.values();
         writes.push(Write::Put { id: record_id(), kind: DREAMS.into(), values, expected });
         items.write(&writes, BY).await?;
         Ok(Some(dream))

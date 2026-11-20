@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::items::{Item, ItemId, Values};
+use crate::items::{Item, ItemId, ItemValues};
 use crate::store::{Items, StoreError, Write};
 
 mod citations;
@@ -309,6 +309,10 @@ impl Access {
     }
 }
 
+impl ItemValues for Memory {
+    const KIND: &str = MEMORY;
+}
+
 impl Memory {
     /// A new active memory of `kind` in `scope`, with its body's digest, written by the call of `context`: untrusted
     /// when its thread came from a webhook. `title` and `body` are taken as given: sanitized and within their limits.
@@ -339,19 +343,6 @@ impl Memory {
         Write::Create { id, kind: MEMORY.into(), values: self.values() }
     }
 
-    /// The memory `item` holds; none when it holds none.
-    pub fn of(item: &Item) -> Option<Self> {
-        (item.kind == MEMORY).then(|| serde_json::from_value(Value::Object(item.values.clone())).ok()).flatten()
-    }
-
-    /// Its values, as its item holds them.
-    pub fn values(&self) -> Values {
-        match serde_json::to_value(self) {
-            Ok(Value::Object(values)) => values,
-            _ => unreachable!("a memory is an object"),
-        }
-    }
-
     /// The bytes it takes of [`CORE_BUDGET`]: its title's and its body's.
     pub fn core_bytes(&self) -> usize {
         self.title.len() + self.body.len()
@@ -379,7 +370,8 @@ pub struct MemoryItem {
 impl MemoryItem {
     /// The memory `item` holds; none when it holds none.
     pub fn of(item: Item) -> Option<Self> {
-        Memory::of(&item).map(|memory| Self { item, memory })
+        let memory = (item.kind == MEMORY).then(|| Memory::of(&item).ok()).flatten()?;
+        Some(Self { item, memory })
     }
 
     pub fn id(&self) -> &ItemId {

@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::*;
 use crate::Sense;
 use crate::cache::Cache;
-use crate::items::{ItemId, Values};
+use crate::items::{ItemId, ItemValues, Values};
 use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
 use crate::memory::{Memory, VOTE};
 use crate::records::RELATIONSHIP;

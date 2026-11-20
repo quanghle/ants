@@ -23,7 +23,7 @@ use uuid::Uuid;
 use super::packet::{commits, finding_line, late_answers, trail_applied};
 use super::{BY, Covered, Dream, Finding, FindingKind, MAX_DREAM_WRITES, MAX_FINDINGS, State, last};
 use crate::items::{ItemId, Values};
-use crate::memory::{Memory, Trust};
+use crate::memory::{MemoryItem, Trust};
 use crate::sanitize::{Limit, sanitize_title};
 use crate::store::{Items, StoreError, read_modify_write};
 
@@ -465,7 +465,7 @@ async fn sage_findings(
         };
         for id in &cited.memories {
             if !untrusted_text && let Some(item) = items.get(id).await? {
-                untrusted_text = Memory::of(&item).is_some_and(|memory| memory.trust == Trust::Untrusted);
+                untrusted_text = MemoryItem::of(item).is_some_and(|found| found.memory.trust == Trust::Untrusted);
             }
         }
         let mut advice = advice.clone();

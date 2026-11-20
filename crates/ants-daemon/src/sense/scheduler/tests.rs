@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ants_proto::SenseId;
 use ants_proto::provider::{BoxFuture, CallContext, Format, Origin, Provider as _, Starter, ToolCall, Woken};
 use ants_sense::cache::Cache;
-use ants_sense::items::ItemId;
+use ants_sense::items::{ItemId, ItemValues};
 use ants_sense::log::{
     AccountVerifier, AntLog, AppendError, EventLog, LogError, MemoryLog, NoRevocations, Stored, Unsigned,
 };

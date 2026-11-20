@@ -11,12 +11,10 @@ use ants_proto::ThreadId;
 use ants_proto::provider::{Event, EventKind, Origin};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
-use crate::cache::CacheError;
 use crate::identity::BY;
-use crate::items::{Item, ItemId, Values};
+use crate::items::{ItemId, ItemValues};
 use crate::store::{Items, StoreError, read_modify_write};
 
 /// The kind of a thread's record.
@@ -48,20 +46,11 @@ pub struct Record {
     pub events: Vec<Uuid>,
 }
 
+impl ItemValues for Record {
+    const KIND: &str = KIND;
+}
+
 impl Record {
-    /// The record `item` holds.
-    pub fn of(item: &Item) -> Result<Self, StoreError> {
-        Ok(serde_json::from_value(Value::Object(item.values.clone())).map_err(CacheError::from)?)
-    }
-
-    /// The values of its item.
-    pub fn values(&self) -> Values {
-        match serde_json::to_value(self) {
-            Ok(Value::Object(values)) => values,
-            _ => unreachable!("a record is an object"),
-        }
-    }
-
     /// The record of `thread` started by `event`, from `origin` in `repo`.
     fn started(thread: &ThreadId, origin: &Origin, repo: Option<&String>, event: &Event) -> Self {
         Self {
