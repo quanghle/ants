@@ -5,7 +5,8 @@
 //! answered with nothing readable, to the ant itself on a new dream thread with the packet alone
 //! ([`Dream::wake_due`]). The sage's findings prompt the ant on the review thread inside a marked block
 //! ([`answered`]); an answer without findings wakes nobody, and the findings of one come after the ant was woken with
-//! the packet alone are offered in the next dream ([`Review::late`]).
+//! the packet alone are offered in the next dream ([`Review::late`]), up to [`MAX_LATE_FINDINGS`], in a marked block
+//! of their own. The packet's findings a sage's answer leaves unshown are held for the next dream ([`Dream::held`]).
 //!
 //! sense runs no model: it only gathers what a review judges and records what the ant decides. Each dream is an item of
 //! kind [`DREAM`], numbered, the last one named by a record of kind [`DREAMS`], so a daemon taking over dreams no sooner.
@@ -74,8 +75,8 @@ pub use practice_findings::{
     REJECTED_FINDINGS, RELATIONSHIP_AFTER_REVIEWS, UNANSWERED_PERCENT, UNANSWERED_REVIEWS, UNDONE_FINDINGS,
 };
 pub use review::{
-    Advice, Evidence, FOLLOW_UP, FollowUp, MAX_TRAIL_FINDINGS, Outline, Parsed, REVIEW_BEGIN, REVIEW_END, Review,
-    Reviewed, TRAIL, answered, parse, review_sent, untrusted_on,
+    Advice, Evidence, FOLLOW_UP, FollowUp, MAX_LATE_FINDINGS, MAX_TRAIL_FINDINGS, Outline, Parsed, REVIEW_BEGIN,
+    REVIEW_END, Review, Reviewed, TRAIL, answered, parse, review_sent, untrusted_on,
 };
 pub use reviews::{
     AntTally, FindingTally, KindTally, REVIEW, ReviewCost, ReviewRecord, ReviewSpend, ReviewTally, ReviewedFinding,
@@ -99,6 +100,9 @@ pub const IDLE_MINUTES: i64 = 30;
 pub const SAGE_TIMEOUT_HOURS: i64 = 6;
 /// The most findings a dream gathers, and the most a sage's answer gives.
 pub const MAX_FINDINGS: usize = 20;
+/// The dreams before the last on whose review thread a sage's answer is dropped, having come after the next dream
+/// began.
+pub const DROPPED_ANSWER_DREAMS: u64 = 5;
 /// The most writes through sense's tools a dream thread makes ([`counted`]).
 pub const MAX_DREAM_WRITES: usize = 20;
 /// The tools whose writes on a dream thread count toward [`MAX_DREAM_WRITES`]: those writing memories, and
@@ -298,6 +302,15 @@ pub struct Finding {
     /// A sage's finding: its own kind, its evidence and the action it suggests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advice: Option<Advice>,
+    /// Whether it is a sage's finding of an answer come after the ant was woken with the packet alone
+    /// ([`Review::late`]): the dreams offering it show it in a block of its own, as the late answer to the dream that
+    /// gave it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub late: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl Finding {
@@ -430,6 +443,11 @@ pub struct Dream {
     /// The trails saved on the dream thread ([`trail_saved`]), each counted as a write.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trails: Vec<SavedTrail>,
+    /// The packet's own findings a sage's answer left unshown, neither on the identity nor offered again
+    /// ([`review::answered`]), numbered after those it keeps: unanswered, the next dream offers them again before the
+    /// others it offers again ([`Dream::again`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<Finding>,
     /// Its diary episode, once written.
     pub diary: Option<ItemId>,
     /// The vital signs of the work it reviews, as the daemon measured them when it began: none for a dream before
@@ -544,6 +562,12 @@ impl Dream {
         self.findings
             .iter()
             .filter(|finding| self.verdict(&finding.id).is_none_or(|verdict| verdict.verdict == Judgement::Deferred))
+    }
+
+    /// The findings the next dream offers again while they hold: those held unshown first ([`Dream::held`]), then
+    /// those deferred or unanswered.
+    pub fn again(&self) -> impl Iterator<Item = &Finding> {
+        self.held.iter().chain(self.open())
     }
 
     /// The findings with a key to rest: those the ant rejected, and those on a sage's practice it applied, whose ground
@@ -678,6 +702,7 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
             verdicts: Vec::new(),
             writes: Vec::new(),
             trails: Vec::new(),
+            held: Vec::new(),
             diary: None,
             vitals: Some(Signs::sum(start.vitals.iter().map(|(_, signs)| signs))),
         };
@@ -750,7 +775,7 @@ pub async fn finding(items: &dyn Items, id: &str) -> Result<Option<Finding>, Sto
     let Some(number) = id.split_once('.').and_then(|(number, _)| number.parse().ok()) else { return Ok(None) };
     let Some((dream, _)) = get(items, number).await? else { return Ok(None) };
     let late = dream.review.into_iter().flat_map(|review| review.late);
-    Ok(dream.findings.into_iter().chain(late).find(|finding| finding.id == id))
+    Ok(dream.findings.into_iter().chain(dream.held).chain(late).find(|finding| finding.id == id))
 }
 
 /// What a write checked against the ant's dreams makes ([`ground`]).
@@ -947,16 +972,17 @@ impl Gathered {
     }
 }
 
-/// The findings of dream `number`, beginning as `start` says after `previous`: the findings of the sage's answer to
-/// the review of `previous` come after the ant was woken with the packet alone ([`Review::late`]), the open findings of
-/// `previous` that still hold, then the packet's own on what they do not cover yet, those on the identity of the ant
-/// first ([`identity_findings`]), which stay whatever a sage answers as the open ones do ([`review::answered`]), then
-/// those on memories and proposals, then those on its practice as a sage from the records of the `reviews` it made
-/// ([`practice_findings`]), then those on the vital signs of the work ([`vitals`]), up to [`MAX_FINDINGS`]. An ant both
-/// worked with and reviewed has one finding on its relationship record, the identity's, telling of both. An open
-/// finding on the identity, the practice or the vital signs holds while its ground does, taking the text, count and
-/// trust gathered now. One of the `rested` stays out while what it is about is unchanged and the ant was active less
-/// than [`REST_DAYS`] since the verdict, as `ages` counts; `rested` keeps those resting on.
+/// The findings of dream `number`, beginning as `start` says after `previous`: the findings of the sage's answer to the
+/// review of `previous` come after the ant was woken with the packet alone ([`Review::late`]), at most
+/// [`MAX_LATE_FINDINGS`], the findings of `previous` held unshown under its sage's answer and its open findings, those
+/// that still hold ([`Dream::again`]), then the packet's own on what they do not cover yet, those on the identity of
+/// the ant first ([`identity_findings`]), which stay whatever a sage answers as the open ones do
+/// ([`review::answered`]), then those on memories and proposals, then those on its practice as a sage from the records
+/// of the `reviews` it made ([`practice_findings`]), then those on the vital signs of the work ([`vitals`]), up to
+/// [`MAX_FINDINGS`]. An ant both worked with and reviewed has one finding on its relationship record, the identity's,
+/// telling of both. An open finding on the identity, the practice or the vital signs holds while its ground does,
+/// taking the text, count and trust gathered now. One of the `rested` stays out while what it is about is unchanged and
+/// the ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts; `rested` keeps those resting on.
 async fn findings(
     items: &dyn Items,
     previous: Option<&Dream>,
@@ -981,7 +1007,7 @@ async fn findings(
     let vital = vitals::gather(&start.vitals, &vitals::trend(items, number).await?);
     let late = previous.and_then(|previous| previous.review.as_ref()).map(|review| review.late.iter());
     let mut found: Vec<Finding> = late.into_iter().flatten().cloned().collect();
-    for open in previous.into_iter().flat_map(Dream::open) {
+    for open in previous.into_iter().flat_map(Dream::again) {
         let mut open = open.clone();
         let holds = match open.kind {
             FindingKind::Sage => true,
@@ -1036,6 +1062,7 @@ async fn findings(
             key: Some(key),
             count: gathered.count,
             advice: None,
+            late: false,
         });
     }
     found.truncate(MAX_FINDINGS);

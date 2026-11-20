@@ -4,8 +4,9 @@
 //! finding it follows ([`FollowUp`]), linked when it is one of the sage's earlier findings for the ant. They become the
 //! dream's findings, with
 //! the packet's on the identity and those carried from earlier dreams, which stay whatever the sage answers ([`kept`]),
-//! and prompt the ant on the review thread inside a marked block ([`REVIEW_BEGIN`]) as another ant's suggestions to
-//! verify against their evidence, not instructions. A finding resting on a thread of untrusted origin, or on an
+//! the packet's other findings held unshown for the next dream to offer again first ([`Dream::held`]), and prompt the
+//! ant on the review thread inside a marked block ([`REVIEW_BEGIN`]) as another ant's suggestions to verify against
+//! their evidence, not instructions. A finding resting on a thread of untrusted origin, or on an
 //! untrusted memory, is marked untrusted ([`Finding::untrusted`]); what the ant writes on the thread while one is open
 //! is untrusted too ([`untrusted_on`]). A [`TRAIL`] finding suggests a saved trail ([`Outline`]).
 
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use super::packet::{commits, finding_line, trail_applied};
+use super::packet::{commits, finding_line, late_answers, trail_applied};
 use super::{BY, Covered, Dream, Finding, FindingKind, MAX_DREAM_WRITES, MAX_FINDINGS, State, last};
 use crate::items::{ItemId, Values};
 use crate::memory::{Memory, Trust};
@@ -45,6 +46,10 @@ pub const TRAIL: &str = "trail";
 
 /// The most [`TRAIL`] findings an answer gives: each asks the ant to write, try and save a script in one dream.
 pub const MAX_TRAIL_FINDINGS: usize = 3;
+
+/// The most findings of an answer come after the ant was woken with the packet alone the next dream offers
+/// ([`Review::late`]): half its [`MAX_FINDINGS`], so the findings it offers again fill the rest.
+pub const MAX_LATE_FINDINGS: usize = MAX_FINDINGS / 2;
 
 /// The most characters of a finding's kind, in the sage's words.
 const MAX_KIND_CHARS: usize = 40;
@@ -336,11 +341,12 @@ pub enum Reviewed {
 
 /// Take message `message` from `sage` on `thread`, holding `text`, or none when the sage's daemon failed to answer, as
 /// the answer to the review of the last dream: none when it is no such answer. Readable findings become the dream's,
-/// marked untrusted when they rest on untrusted text, with those it keeps ([`kept`]), and prompt the ant; an answer
-/// without findings wakes nobody, what it keeps left for the next dream to offer again; an unreadable one falls back to
-/// the packet alone. The readable findings of the first answer come after the ant was woken with the packet alone are
-/// kept, marked the same, for the next dream to offer ([`Review::late`]); one come after the next dream began is no
-/// answer to the last dream's review. The same answer taken again gives the same.
+/// marked untrusted when they rest on untrusted text, with those it keeps ([`kept`]), and prompt the ant, the packet's
+/// other findings held unshown ([`Dream::held`]); an answer without findings wakes nobody, all the packet's findings
+/// left for the next dream to offer again; an unreadable one falls back to the packet alone. The first
+/// [`MAX_LATE_FINDINGS`] readable findings of the first answer come after the ant was woken with the packet alone are
+/// kept, marked the same and late, for the next dream to offer ([`Review::late`]), the rest counted as left out; one
+/// come after the next dream began is no answer to the last dream's review. The same answer taken again gives the same.
 pub async fn answered(
     items: &dyn Items,
     sage: &UserId,
@@ -370,8 +376,11 @@ pub async fn answered(
             let own = dream.findings.iter().filter(|finding| finding.dream() == dream.number);
             let past = own.filter_map(|finding| finding.id.split_once('.')?.1.parse().ok()).max().unwrap_or(0);
             review.answer = Some(message);
-            review.late = sage_findings(items, &dream, &review, past, &late.findings).await?;
-            (review.over, review.unreadable) = (late.over, late.unreadable);
+            let taken = &late.findings[..late.findings.len().min(MAX_LATE_FINDINGS)];
+            review.late = sage_findings(items, &dream, &review, past, taken).await?;
+            review.late.iter_mut().for_each(|finding| finding.late = true);
+            review.over = late.over + late.findings.len() - taken.len();
+            review.unreadable = late.unreadable;
             let taken = review.late.len();
             let mut values = Values::new();
             values.insert("review".into(), json!(review));
@@ -381,9 +390,8 @@ pub async fn answered(
         review.answer = Some(message);
         let reviewed = match parsed {
             Some(parsed) if !parsed.findings.is_empty() => {
-                let mut findings = sage_findings(items, &dream, &review, 0, &parsed.findings).await?;
-                findings.extend(kept(&dream, findings.len()));
-                dream.findings = findings;
+                let findings = sage_findings(items, &dream, &review, 0, &parsed.findings).await?;
+                (dream.findings, dream.held) = kept(&dream, findings);
                 dream.state = State::Answered;
                 dream.thread = Some(thread.clone());
                 (review.over, review.unreadable) = (parsed.over, parsed.unreadable);
@@ -391,7 +399,7 @@ pub async fn answered(
                 Reviewed::Prompt(prompt(&dream, sage))
             }
             Some(parsed) if parsed.whole() => {
-                dream.findings = kept(&dream, 0);
+                (dream.findings, dream.held) = kept(&dream, Vec::new());
                 dream.state = State::Answered;
                 dream.review = Some(review);
                 Reviewed::Quiet
@@ -406,6 +414,7 @@ pub async fn answered(
         values.insert("state".into(), json!(dream.state));
         values.insert("thread".into(), json!(dream.thread));
         values.insert("findings".into(), json!(dream.findings));
+        values.insert("held".into(), json!(dream.held));
         values.insert("review".into(), json!(dream.review));
         items.change(&Dream::id(dream.number), values, Some(revision), BY).await?;
         Ok(Some(reviewed))
@@ -413,16 +422,23 @@ pub async fn answered(
     .await
 }
 
-/// The findings of `dream` its sage's answer keeps after `after` findings of its own, whatever it answers (decision
-/// ants-93klj): the packet's on the identity, numbered on from the sage's, then those offered again, the late findings
-/// of the dream before among them ([`Review::late`]).
-fn kept(dream: &Dream, after: usize) -> Vec<Finding> {
-    let this = |finding: &Finding| finding.dream() == dream.number;
-    let identity = dream.findings.iter().filter(|finding| this(finding) && finding.kind.identity());
-    let identity = identity
-        .enumerate()
-        .map(|(n, finding)| Finding { id: format!("{}.{}", dream.number, after + n + 1), ..finding.clone() });
-    identity.chain(dream.findings.iter().filter(|finding| !this(finding)).cloned()).collect()
+/// The findings of `dream` once its sage answered with `sage`'s findings, and those it holds unshown, whatever it
+/// answers (decisions ants-93klj and ants-ka0wi): the sage's, then the packet's on the identity, numbered on from the
+/// sage's, then those offered again, the late findings of the dream before among them ([`Review::late`]); held, the
+/// packet's other findings, numbered on from those, for the next dream to offer again first ([`Dream::held`]).
+fn kept(dream: &Dream, sage: Vec<Finding>) -> (Vec<Finding>, Vec<Finding>) {
+    let this = |finding: &&Finding| finding.dream() == dream.number;
+    let (identity, other): (Vec<_>, Vec<_>) = dream.findings.iter().filter(this).partition(|f| f.kind.identity());
+    let mut n = sage.len();
+    let mut renumbered = |finding: &Finding| {
+        n += 1;
+        Finding { id: format!("{}.{n}", dream.number), ..finding.clone() }
+    };
+    let mut findings = sage;
+    findings.extend(identity.into_iter().map(&mut renumbered));
+    findings.extend(dream.findings.iter().filter(|finding| !this(finding)).cloned());
+    let held = other.into_iter().map(renumbered).collect();
+    (findings, held)
 }
 
 /// The sage's `given` findings as findings of `dream`, numbered past `past`: untrusted when one cites a thread of
@@ -465,13 +481,15 @@ async fn sage_findings(
             key: None,
             count: None,
             advice: Some(advice),
+            late: false,
         });
     }
     Ok(findings)
 }
 
 /// The prompt of `dream`'s findings, answered by `sage`: its own inside the marked block, then the packet's on the
-/// identity, those carried from earlier dreams and the commits the review named.
+/// identity, the late answers to earlier dreams, each in a marked block of its own, those carried from earlier dreams
+/// and the commits the review named.
 fn prompt(dream: &Dream, sage: &UserId) -> String {
     let (this, carried): (Vec<_>, Vec<_>) = dream.findings.iter().partition(|finding| finding.dream() == dream.number);
     let (own, identity): (Vec<_>, Vec<_>) = this.into_iter().partition(|finding| finding.kind == FindingKind::Sage);
@@ -507,6 +525,11 @@ fn prompt(dream: &Dream, sage: &UserId) -> String {
         for finding in identity {
             let _ = writeln!(text, "{}", finding_line(finding, dream.number));
         }
+    }
+    let (late, carried): (Vec<_>, Vec<_>) = carried.into_iter().partition(|finding| finding.late);
+    if !late.is_empty() {
+        text.push('\n');
+        late_answers(&mut text, &late, dream.number, "##");
     }
     if !carried.is_empty() {
         text.push_str("\n## Findings offered again\n\n");

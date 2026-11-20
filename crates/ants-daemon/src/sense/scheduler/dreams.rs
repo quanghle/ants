@@ -187,8 +187,8 @@ async fn review(
 /// findings in their marked block; false to ack it unprompted, as an answer without findings, a late one, whose
 /// findings the next dream offers, or one that leaves the ant to be woken with the packet alone. A notice that the
 /// sage gave up on the review or had it withdrawn leaves the ant to the packet alone; any other one waits for the
-/// answer. A reply of the sage to the review of the dream before the last, come after the next dream began, is dropped:
-/// acked unprompted.
+/// answer. A reply of the sage to the review of one of the [`dream::DROPPED_ANSWER_DREAMS`] dreams before the last,
+/// come after the next dream began, is dropped: acked unprompted.
 pub(crate) async fn review_answer(
     sense: &ants_sense::Sense,
     items: &dyn Items,
@@ -200,13 +200,17 @@ pub(crate) async fn review_answer(
             && dream.review.as_ref().is_some_and(|review| review.thread == envelope.thread_id)
     };
     if !reviewing(&last) {
-        let before = match last.number - 1 {
-            number if number > 0 && envelope.in_reply_to.is_some() => dream::get(items, number).await?,
-            _ => None,
-        };
-        if let Some((before, _)) = before.filter(|(before, _)| reviewing(before)) {
-            tracing::info!(sage = %envelope.from, dream = before.number, "the sage's answer came after the next dream began: dropped");
-            return Ok(Some(false));
+        if envelope.in_reply_to.is_none() {
+            return Ok(None);
+        }
+        let earlier = last.number.saturating_sub(dream::DROPPED_ANSWER_DREAMS).max(1)..last.number;
+        for number in earlier.rev() {
+            if let Some((before, _)) = dream::get(items, number).await?
+                && reviewing(&before)
+            {
+                tracing::info!(sage = %envelope.from, dream = before.number, "the sage's answer came after the next dream began: dropped");
+                return Ok(Some(false));
+            }
         }
         return Ok(None);
     }
