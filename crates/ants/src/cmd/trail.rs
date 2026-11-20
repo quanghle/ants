@@ -366,7 +366,7 @@ async fn show_tips(nats: &Nats<'_>, args: &TipsArgs, json: bool) -> Result<()> {
         }
         return Ok(());
     }
-    let (board, script) = tips::read(&js, &args.name).await?;
+    let (board, script) = tips::listing(&js, &args.name).await?;
     let now = Utc::now();
     if json {
         for tip in &tips::listed(&board, args, script.as_deref(), now) {

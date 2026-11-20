@@ -47,6 +47,29 @@ async fn a_run_past_its_compute_limit_fails_naming_it_and_a_resume_computes_agai
 }
 
 #[tokio::test]
+async fn a_run_failing_on_a_limit_on_two_resumes_in_a_row_keeps_the_answers_of_its_steps() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let run = lead.start(COUNTING, TrailLimits { compute_ms: 100, ..TrailLimits::default() }).await;
+    let a = lead.step().await;
+    assert!(lead.reply(&a, COUNT).await);
+    assert_eq!(failed(&lead, &run).await.1, Some(RunLimit::Compute));
+    for _ in 0..2 {
+        lead.trails.resume(&run, &UserId::human(), None).await.unwrap();
+        let (error, limit) = failed(&lead, &run).await;
+        assert_eq!(limit, Some(RunLimit::Compute), "{error}");
+    }
+
+    // A third resume under a limit the run fits computes past the answer of a, which goes out no more.
+    lead.trails.resume(&run, &UserId::human(), Some(TrailLimits::default())).await.unwrap();
+    let b = lead.step().await;
+    assert_eq!(b.text, format!("b {COUNT}"));
+    assert!(lead.reply(&b, "B").await);
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("B") });
+}
+
+#[tokio::test]
 async fn a_run_past_its_compute_limit_resumes_under_a_raised_one_to_its_end() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;

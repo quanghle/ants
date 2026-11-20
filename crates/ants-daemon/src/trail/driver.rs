@@ -495,15 +495,17 @@ impl Trails {
     }
 
     /// Delete the journal entries of the calls the run `run`, `engine`, failed on a limit, refused since its session was
-    /// stored, as one past its steps: those that session neither took an answer to nor lists a step for. Resuming the
-    /// run restores that session, whose script makes those calls anew, and a restart would take such an entry for the
-    /// answer to its call sent anew.
+    /// stored, as one past its steps: those that session neither took an answer to, nor waits on, nor lists a step
+    /// for. Resuming the run restores that session, whose script makes those calls anew, and a restart would take such
+    /// an entry for the answer to its call sent anew. A call the session waits on keeps its entry though no step lists
+    /// it, as a step answered before a resume, which stored the session it restored.
     async fn forget_refusals(&self, run: &RunId, engine: &Run) -> Result<()> {
         let store = &self.inner.store;
         let Some(stored) = store.session(run).await? else { return Ok(()) };
         let session: ants_trail::RunState = serde_json::from_str(&stored.session)?;
         let pending = stored.pending.iter().map(|call| call.call);
-        let kept: HashSet<u32> = session.answered().iter().copied().chain(pending).collect();
+        let mut kept: HashSet<u32> = session.answered().iter().copied().chain(pending).collect();
+        kept.extend(Run::restore(session, Vec::new()).outstanding().iter().map(|call| call.call));
         for entry in engine.journal().iter().filter(|entry| !kept.contains(&entry.call)) {
             store.delete_entry(run, entry.call).await?;
         }
@@ -640,7 +642,8 @@ pub(super) fn reserved(call: &PendingCall) -> u32 {
 }
 
 /// Bound the end of the run of `header` to what its record holds: a result too large fails the run, naming its size,
-/// and an error too large is cut.
+/// and an error too large is cut, to [`MAX_ERROR`] characters, then, on a record near its room, as one whose route
+/// filled it, to what fits, the run's phase dropped last.
 fn fit_end(header: &mut TrailRun) {
     let size = |header: &TrailRun| serde_json::to_vec(header).map_or(usize::MAX, |record| record.len());
     if size(header) <= MAX_RECORD {
@@ -655,6 +658,23 @@ fn fit_end(header: &mut TrailRun) {
         }
         RunState::Failed { error, .. } => *error = clip(error, MAX_ERROR),
         RunState::Running | RunState::Waiting | RunState::Stopped { .. } => {}
+    }
+    loop {
+        let over = size(header).saturating_sub(MAX_RECORD);
+        if over == 0 {
+            return;
+        }
+        match &mut header.state {
+            RunState::Failed { error, .. } if !error.is_empty() => {
+                // Its characters cut in the share its bytes as JSON are over, and again while it does not fit.
+                let chars = error.chars().count();
+                let bytes = serde_json::to_vec(error).map_or(usize::MAX, |error| error.len());
+                let keep = (chars.saturating_mul(bytes.saturating_sub(over)) / bytes).min(chars - 1);
+                *error = if keep == 0 { String::new() } else { clip(error, keep) };
+            }
+            _ if header.phase.take().is_some() => {}
+            _ => return,
+        }
     }
 }
 
@@ -688,4 +708,96 @@ fn waiting_or_running(pending: &[PendingCall], engine: &Run) -> RunState {
         && pending.len() == engine.outstanding().len()
         && pending.iter().all(|call| call.function == TrailFunction::Human);
     if humans_only { RunState::Waiting } else { RunState::Running }
+}
+
+#[cfg(test)]
+mod tests {
+    use ants_proto::provider::{Origin, Starter};
+    use ants_proto::{TrailLeg, TrailLimits, UserId};
+
+    use super::*;
+
+    /// A run of one leg ended in `state`, its leg's script padded for its record to have `size` bytes as it ran.
+    fn ended(size: usize, state: RunState) -> TrailRun {
+        let now = Utc::now();
+        let human = UserId::human();
+        let mut header = TrailRun {
+            run: RunId::generate(),
+            conductor: "lead".parse().unwrap(),
+            route: vec![TrailLeg {
+                trail: Some("deploy".parse().unwrap()),
+                local: false,
+                at: None,
+                script: String::new(),
+                args: serde_json::Value::Null,
+                first_call: 0,
+                started_at: now,
+                steps: 1,
+            }],
+            owner: Some(human.clone()),
+            thread: ThreadId::generate(),
+            parent: None,
+            spends_from: None,
+            grants: Vec::new(),
+            origin: Origin { by: Starter::Human { user: human }, channel: None },
+            limits: TrailLimits::default(),
+            state: RunState::Running,
+            phase: None,
+            steps: 1,
+            turns: 1,
+            started_at: now,
+            updated_at: now,
+            ended_at: Some(now),
+        };
+        let bare = serde_json::to_vec(&header).unwrap().len();
+        header.route[0].script = "#".repeat(size - bare);
+        assert_eq!(serde_json::to_vec(&header).unwrap().len(), size);
+        header.state = state;
+        header
+    }
+
+    fn size(header: &TrailRun) -> usize {
+        serde_json::to_vec(header).unwrap().len()
+    }
+
+    #[test]
+    fn an_end_that_fits_its_record_is_kept_whole() {
+        let error = "e".repeat(MAX_ERROR * 2);
+        let mut header = ended(1000, RunState::Failed { error: error.clone(), limit: None });
+        fit_end(&mut header);
+        assert_eq!(header.state, RunState::Failed { error, limit: None });
+    }
+
+    #[test]
+    fn a_result_outgrowing_the_record_fails_the_run_naming_its_size() {
+        let result = serde_json::Value::String("r".repeat(300 * 1024));
+        let bytes = serde_json::to_vec(&result).unwrap().len();
+        let mut header = ended(MAX_RECORD - 200 * 1024, RunState::Done { result });
+        fit_end(&mut header);
+        let error = format!("the run's result, {bytes} bytes as JSON, outgrew the {MAX_RECORD} bytes its record holds");
+        assert_eq!(header.state, RunState::Failed { error, limit: None });
+        assert!(size(&header) <= MAX_RECORD);
+    }
+
+    #[test]
+    fn an_error_outgrowing_the_record_is_cut() {
+        let error = "e".repeat(16 * 1024);
+        let mut header = ended(MAX_RECORD - 10 * 1024, RunState::Failed { error, limit: Some(RunLimit::Steps) });
+        fit_end(&mut header);
+        let RunState::Failed { error, limit } = &header.state else { panic!("not failed") };
+        assert_eq!((error.chars().count(), *limit), (MAX_ERROR, Some(RunLimit::Steps)));
+        assert!(error.ends_with('…'));
+        assert!(size(&header) <= MAX_RECORD);
+    }
+
+    #[test]
+    fn an_end_with_a_phase_on_a_record_near_its_room_still_fits() {
+        let error = "\u{1}".repeat(16 * 1024);
+        let mut header = ended(MAX_RECORD - 2 * 1024, RunState::Failed { error, limit: None });
+        header.phase = Some("p".repeat(MAX_PHASE));
+        fit_end(&mut header);
+        assert!(size(&header) <= MAX_RECORD, "{} bytes", size(&header));
+        let RunState::Failed { error, .. } = &header.state else { panic!("not failed") };
+        assert!(error.starts_with('\u{1}') && error.ends_with('…'), "what fits of the error is kept");
+    }
 }

@@ -1,5 +1,5 @@
-//! Delivering answers: the title and files a turn attached, a webhook's answer, replies on channel threads, and what a
-//! review's thread spent noted with the answer in the sage's sense.
+//! Delivering answers: the title and files a turn attached, what the runs started answering a step spent, a webhook's
+//! answer, replies on channel threads, and what a review's thread spent noted with the answer in the sage's sense.
 
 use super::*;
 
@@ -343,6 +343,60 @@ async fn a_run_s_rating_invitation_rates_it_under_a_webhook_s_own_rules() {
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     let kept = bus.ledger.narrowed(&hooked.thread_id, None).await.unwrap();
     assert_eq!(kept, Some(vec!["read:*".to_owned()]), "the thread keeps its webhook's rules");
+}
+
+/// The reply answering a step of another conductor's run tells what the runs started answering it spent.
+#[tokio::test]
+async fn the_reply_to_a_step_tells_what_the_runs_started_answering_it_spent() {
+    use ants_proto::{RunId, StepBounds, TrailStep};
+
+    let Some((mut bus, _to_human)) = Bus::start().await else { return };
+    let trails = bus.conduct().await;
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let home = bus._server.dir().join("spent");
+    std::fs::create_dir_all(&home).unwrap();
+    let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
+    let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await.unwrap();
+    mcp.with_trails(trails);
+    bus.mcp = Some(mcp);
+    let [lead] = ants(["lead"]);
+    let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
+    let bounds =
+        StepBounds { steps: 5, turns: 50, until: chrono::Utc::now() + chrono::TimeDelta::hours(1), route: vec![] };
+    let step = TrailStep {
+        run: RunId::generate(),
+        call: 1,
+        label: None,
+        schema: None,
+        trail: None,
+        script: None,
+        tip_key: None,
+        bounds: Some(bounds),
+    };
+    let asked =
+        Envelope::new(lead.clone(), bus.dev.clone(), "hold: build it").with_owner(Some(UserId::human())).as_step(step);
+    bus::publish_json(&bus.js, asked.subject(), &asked, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the step's prompt to run", || log.locked().prompted == 1).await;
+        let script =
+            "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": []}\nawait agent(\"x\", ant=\"x\")\n";
+        let started =
+            call_tool(bus.mcp.as_ref().unwrap(), &asked.thread_id, "run_trail", serde_json::json!({"script": script}))
+                .await;
+        assert_ne!(started.is_error, Some(true), "{started:?}");
+        gate.add_permits(1);
+        let reply = next_envelope(&mut to_lead).await;
+        assert_eq!((&reply.thread_id, reply.in_reply_to), (&asked.thread_id, Some(asked.id)));
+        let spent = reply.trail_spent.expect("the reply tells what was spent");
+        assert_eq!((spent.steps, spent.turns), (0, 0), "the run sent no step yet: {spent:?}");
+        assert!(spent.running <= 1, "one run started answering the step: {spent:?}");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
 }
 
 #[tokio::test]
