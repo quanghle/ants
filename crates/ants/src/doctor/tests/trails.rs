@@ -335,13 +335,15 @@ async fn the_worker_check_starts_the_worker_as_a_daemon_does() {
     let exe = std::env::current_exe().unwrap();
     let ants = exe.ancestors().skip(1).map(|dir| dir.join("ants")).find(|ants| ants.is_file());
     let ants = ants.expect("the ants binary is built beside the test binary, as `cargo test` builds it");
-    let check = check_worker(&ants).await;
+    // A daemon allows GRACE; a debug build started on a loaded machine may take longer.
+    let deadline = Duration::from_mins(1);
+    let check = check_worker(&ants, deadline).await;
     assert_eq!(check.status, Status::Ok, "{check}");
     let started = format!("`{} subprocess` starts with an empty environment and answers in ", ants.display());
     assert!(check.detail.starts_with(&started), "{check}");
 
     let old = worker("old", "echo \"error: unrecognized subcommand 'subprocess'\" >&2; exit 2");
-    let check = check_worker(&old).await;
+    let check = check_worker(&old, deadline).await;
     assert_eq!(check.status, Status::Fail, "{check}");
     assert!(check.detail.ends_with("crashed (exit status: 2): error: unrecognized subcommand 'subprocess'"), "{check}");
     let fix = format!(
@@ -350,7 +352,7 @@ async fn the_worker_check_starts_the_worker_as_a_daemon_does() {
         old.display()
     );
     assert_eq!(check.fix, [fix]);
-    let check = check_worker(&dir.join("missing")).await;
+    let check = check_worker(&dir.join("missing"), deadline).await;
     assert_eq!(check.status, Status::Fail, "{check}");
     assert!(check.detail.contains("cannot start the worker"), "{check}");
     std::fs::remove_dir_all(dir).unwrap();

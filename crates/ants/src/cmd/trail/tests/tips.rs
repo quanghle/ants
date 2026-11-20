@@ -244,3 +244,27 @@ async fn humans_retire_tips_whether_their_trail_is_saved_or_not_and_removing_it_
     assert_eq!(error, "the colony saved no trail deploy");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn tips_of_a_trail_only_this_machine_s_files_hold_are_refused_as_no_colony_trail_s() {
+    let Some(server) = Server::start() else { return };
+    let dir = ants_test_support::scratch_dir("trail-tips-local");
+    let local = dir.join("trails");
+    std::fs::create_dir_all(&local).unwrap();
+    let alice = p("alice");
+    let js = human(&server, &alice).await;
+    write(&local, "solo.py", &script("solo"));
+    let saved = saved::read(&write(&local, "deploy.py", &script("deploy")), None, &alice, Utc::now()).unwrap();
+    saved::put(&js, &saved).await.unwrap();
+
+    let error = tips::listing_in(&js, &local, &"solo".parse().unwrap()).await.unwrap_err().to_string();
+    let file = local.join("solo.py");
+    let refused =
+        format!("trail solo is not a colony trail, only this machine's file {}: tips are left", file.display());
+    assert!(error.starts_with(&refused), "{error}");
+    let (board, script) = tips::listing_in(&js, &local, &"deploy".parse().unwrap()).await.unwrap();
+    assert!(board.is_empty() && script.is_some(), "the colony's trail, which a local file shadows, takes tips");
+    let (board, script) = tips::listing_in(&js, &local, &"gone".parse().unwrap()).await.unwrap();
+    assert!(board.is_empty() && script.is_none(), "tips outlive a trail no longer saved");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

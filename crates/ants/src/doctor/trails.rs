@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use ants_proto::{
     ColonyEntry, PendingCall, RunId, RunLimit, RunState, TRAIL_RUNS_BUCKET, TrailFunction, TrailLimits, TrailRun,
 };
-use ants_trail::{GRACE, Limits, Request, Response, Worker};
+use ants_trail::{Limits, Request, Response, Worker};
 use chrono::{DateTime, Utc};
 
 use super::{Check, Connected, NETWORK_TIMEOUT};
@@ -29,8 +29,9 @@ pub fn trail_worker(home: Option<PathBuf>) -> Option<PathBuf> {
 }
 
 /// Whether `program` starts as `ants subprocess` with the empty environment a daemon gives it, and answers within
-/// [`GRACE`] a request it refuses before running anything: a run of no script under a limit of 0 steps.
-pub(super) async fn check_worker(program: &Path) -> Check {
+/// `deadline` (a daemon allows [`ants_trail::GRACE`]) a request it refuses before running anything: a run of no
+/// script under a limit of 0 steps.
+pub(super) async fn check_worker(program: &Path, deadline: Duration) -> Check {
     let check = "trail worker";
     let shown = program.display();
     let probe = Request::Start {
@@ -48,7 +49,7 @@ pub(super) async fn check_worker(program: &Path) -> Check {
         )]
     };
     let started = Instant::now();
-    match Worker::new(program).call(&probe, GRACE).await {
+    match Worker::new(program).call(&probe, deadline).await {
         Ok(Response::Refused { .. }) => Check::ok(
             check,
             format!(

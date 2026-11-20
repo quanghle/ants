@@ -152,8 +152,9 @@ impl Hub {
         }
         if board.live(now) >= MAX_LIVE_TIPS {
             return Err(format!(
-                "trail {trail} has {MAX_LIVE_TIPS} live tips, the most a trail keeps: vote stale or wrong with \
-                 vote_tip on those no longer right, or ask a human to retire some"
+                "trail {trail} has {MAX_LIVE_TIPS} live tips, the most a trail keeps: vote wrong with vote_tip \
+                 on those no longer right, a tip voted wrong more often than helpful retiring, or ask a human to retire \
+                 some"
             ));
         }
         let tip = TrailTip {
@@ -279,9 +280,17 @@ fn trail_of(named: Option<&str>, step: Option<&TrailStep>) -> Result<TrailName, 
     }
 }
 
-/// The [`script_sha256`] of the script saved as `trail`: an error when no trail is saved so.
+/// The [`script_sha256`] of the script the colony saved as `trail`: an error when no trail is saved so, or only this
+/// machine's files hold it, as such a trail takes no tips.
 async fn saved_sha(trails: &Trails, trail: &TrailName) -> Result<String, String> {
-    trails.saved_script(trail).await.map(|saved| script_sha256(&saved.script))
+    let saved = trails.saved_script(trail).await?;
+    if saved.local {
+        return Err(format!(
+            "trail {trail} is not a colony trail, only this machine's files: tips are left only on the trails the \
+             colony saves"
+        ));
+    }
+    Ok(script_sha256(&saved.script))
 }
 
 fn verdict(verdict: &str) -> Result<TipVerdict, String> {

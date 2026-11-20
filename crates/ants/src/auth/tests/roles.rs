@@ -519,3 +519,31 @@ async fn ordered_consumers_of_a_bucket_are_recreated_under_a_name() {
         }
     }
 }
+
+/// Every role that creates the notify, devices or humans bucket gets its stream info, so it finds the bucket as
+/// `ants init` left it, rollups denied, and never sends the create its KV configuration no longer matches: a human
+/// for all three, an ant for the humans, and the revoker putting a revocation record in the devices bucket.
+#[tokio::test]
+async fn the_buckets_ants_init_made_open_under_every_role_that_creates_them() {
+    let Some(server) = Server::start() else { return };
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let creds = server.creds_as(&alice, Role::Human);
+    let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+    let rights = crate::people::humans::Rights::from_creds(Some(&creds)).unwrap();
+    ants_daemon::hub::init(&js, |s| rights.may_publish(s)).await.unwrap();
+
+    crate::people::quiet::ensure_bucket(&js).await.unwrap();
+    crate::people::humans::ensure(&js).await.unwrap();
+    let own = crate::people::devices::Own::from_creds(Some(&creds)).unwrap().unwrap();
+    crate::people::devices::publish(&js, &own).await.unwrap();
+    let (_, ant_js) = server.connect_as(&dev_a, Role::Ant).await;
+    crate::people::humans::ensure(&ant_js).await.unwrap();
+    let team = server.dir().join("auth");
+    crate::credentials::revoke::revoke(&team, None, &[nkeys::KeyPair::new_user().public_key()]).unwrap();
+    assert_eq!(crate::people::devices::record_revocations(&server.url, None, &team).await.unwrap().len(), 1);
+
+    for bucket in [ants_proto::NOTIFY_BUCKET, ants_proto::HUMANS_BUCKET, ants_proto::DEVICES_BUCKET] {
+        let stream = js.get_stream(format!("KV_{bucket}")).await.unwrap();
+        assert!(!stream.cached_info().config.allow_rollup, "{bucket} denies rollups");
+    }
+}

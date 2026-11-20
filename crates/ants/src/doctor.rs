@@ -161,7 +161,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
         match (&loaded, &setup.worker) {
             (None, _) => Check::skip("trail worker", "no config file read: no daemon here conducts runs"),
             (Some(_), None) => Check::skip("trail worker", "no ants executable found to start as the worker"),
-            (Some(_), Some(program)) => check_worker(program).await,
+            (Some(_), Some(program)) => check_worker(program, ants_trail::GRACE).await,
         }
     };
     let ((reached, connected), ants_checked, resolver, reactions, trail_saves, update, worker) =
@@ -175,8 +175,16 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let host = loaded.as_ref().map(|l| &l.host);
     checks.extend(host.map(|host| check_host(host, ants, &hostname, now)));
     let colony = connected.as_ref().and_then(|c| c.colony.as_ref().ok()).map_or_default(Vec::as_slice);
-    let unset = config::HostSettings::default();
-    checks.extend(check_sense_kept(host.unwrap_or(&unset), ants, &hostname, colony, chrono::Utc::now()));
+    // Without a config file read, the host settings an ant described by flags goes by.
+    let unread;
+    let kept_host = match host {
+        Some(host) => host,
+        None => {
+            unread = config::Summary::load(&setup.config).map_or_default(|s| s.host);
+            &unread
+        }
+    };
+    checks.extend(check_sense_kept(kept_host, ants, &hostname, colony, chrono::Utc::now()));
     checks.extend(host.and_then(|host| check_machine_name(host, &hostname)));
     checks.extend(check_shared_workdirs(ants, &setup.config));
     checks.extend(check_sense_logs(ants));
@@ -239,9 +247,11 @@ fn check_config(path: &Path, checks: &mut Vec<Check>) -> Option<config::Loaded> 
                 .iter()
                 .map(|left| {
                     format!(
-                        "; the built-in {}, without credentials at {} here, is left to another machine",
-                        left.ant.name,
-                        left.creds.display()
+                        "; the built-in {name}, without credentials at {} here, is left to another machine, unless \
+                         served with credentials kept elsewhere: ants daemon --config {} --ant {name} --creds CREDS",
+                        left.creds.display(),
+                        path.display(),
+                        name = left.ant.name,
                     )
                 })
                 .collect();

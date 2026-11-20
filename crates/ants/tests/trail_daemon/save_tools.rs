@@ -65,6 +65,7 @@ async fn an_ant_saves_a_script_or_a_finished_inline_run_s_for_every_ant_to_run_b
     let run = ended_run(&text);
     let (ok, text) = save(&client, json!({"name": "plus-one", "run": run.as_str()})).await;
     assert!(ok && text.starts_with(&format!("Saved trail plus-one for the colony as this ant's, from run {run}.")));
+    assert!(text.contains(&format!("A rate_trail of run {run} made from now on rates trail plus-one too")), "{text}");
     let trail = colony_trail(&lead.js, "plus-one").await.unwrap();
     assert_eq!((trail.script.as_str(), trail.saved_from.as_ref()), (plus_one.as_str(), Some(&run)));
 

@@ -164,7 +164,14 @@ fn saved_text(outcome: &SaveOutcome) -> String {
         _ => String::new(),
     };
     let name = &trail.name;
-    match replaced {
+    let rate = match &trail.saved_from {
+        Some(run) => format!(
+            " A rate_trail of run {run} made from now on rates trail {name} too: rate the run again, replacing its \
+             earlier rating, for the saved trail to start rated."
+        ),
+        None => String::new(),
+    };
+    let saved = match replaced {
         None => format!(
             "Saved trail {name} for the colony as this ant's{}{failed}. Every ant runs it by name with run_trail; this \
              ant replaces it only with `replace` or removes it with remove_trail, and humans replace or remove any \
@@ -178,7 +185,8 @@ fn saved_text(outcome: &SaveOutcome) -> String {
             from_run(before),
             source(trail)
         ),
-    }
+    };
+    saved + &rate
 }
 
 /// Where the script of `trail` came from.

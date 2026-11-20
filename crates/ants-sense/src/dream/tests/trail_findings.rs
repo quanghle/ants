@@ -62,6 +62,10 @@ fn a_trail_finding_suggests_a_saved_trail_its_outline_kept_or_refused_whole() {
         with("args", json!({"base-branch": "main", "base_branch": "dev"})),
         with("args", json!({"--": "x"})),
         with("args", json!({"paths": ["a", "b"]})),
+        with("args", json!(["repo", "since"])),
+        with("description", json!(42)),
+        with("phases", json!(["Read the issue", 2])),
+        with("phases", json!("Read the issue; fix it")),
     ];
     let parsed = parse(&fenced(&broken)).unwrap();
     assert_eq!((parsed.findings.len(), parsed.unreadable), (0, broken.len()), "{parsed:?}");
@@ -279,4 +283,62 @@ async fn a_trail_saved_counts_as_a_dream_write_and_none_is_saved_past_the_cap() 
     assert_eq!(ground(&*items, &on(1), None, Making::Proposal).await.unwrap(), None, "a proposal is no counted write");
     assert_eq!(ground(&*items, &on(2), None, Making::Trail).await.unwrap(), None, "other threads save freely");
     assert!(sense.call_tool(remember(1, MAX_DREAM_WRITES)).await.unwrap().is_error, "the trail took the last write");
+}
+
+#[tokio::test]
+async fn a_late_answer_s_trail_findings_are_offered_by_the_next_dream_and_a_trail_is_saved_for_one_there() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let (writer, now) = (on(9), Utc::now());
+    let threads = vec![
+        Covered { thread: on(1).thread, untrusted: false, review: false },
+        Covered { thread: on(2).thread, untrusted: true, review: false },
+    ];
+    let start_at = |at| Start { recipient: Recipient::Sage(sage()), threads: threads.clone(), ..start(at, &writer) };
+    let first = begin(&*items, start_at(now)).await.unwrap().unwrap();
+    woken(&*items, 1, &on(1).thread).await.unwrap();
+    let mut lesson = trail("Rebase first", 1, json!(null));
+    lesson["kind"] = json!("lesson");
+    let given = fenced(&[trail("Notes by hand", 1, outline()), trail("Deploys by hand", 2, outline()), lesson]);
+    let review = first.review.unwrap().thread;
+    let late = answered(&*items, &sage(), &review, uuid::Uuid::now_v7(), Some(&given)).await.unwrap();
+    assert_eq!(late, Some(Reviewed::Late(3)));
+    let (first, _) = get(&*items, 1).await.unwrap().unwrap();
+    let kept_late = &first.review.as_ref().unwrap().late;
+    let marked: Vec<_> = kept_late.iter().map(|finding| (finding.id.as_str(), finding.untrusted)).collect();
+    assert_eq!(marked, [("1.1", false), ("1.2", true), ("1.3", false)], "marked as the answer's findings are");
+    assert_eq!(kept_late[0].advice.as_ref().unwrap().trail.as_ref().unwrap().name, named("release-notes"));
+
+    let second = begin(&*items, Start { recipient: Recipient::Ant, ..start_at(now + Duration::hours(25)) }).await;
+    let second = second.unwrap().unwrap();
+    let offered: Vec<_> = second.findings.iter().take(3).map(|finding| finding.id.as_str()).collect();
+    assert_eq!(offered, ["1.1", "1.2", "1.3"], "the next dream offers them first");
+    let read = compose(&second, Earlier::Last(Some(&first)), &[], &ant(), &Identity::default(), &[], PACKET_BUDGET);
+    assert!(read.contains("\n  Suggested trail: release-notes: Draft the release notes"), "{read}");
+    assert!(read.contains("A trail finding is applied by writing the script it outlines"), "{read}");
+    assert!(read.contains("A trail finding marked untrusted outlines a script"), "{read}");
+
+    woken(&*items, 2, &on(3).thread).await.unwrap();
+    assert_eq!(ground(&*items, &on(3), Some("1.1"), Making::Trail).await.unwrap(), None);
+    let refused = ground(&*items, &on(3), Some("1.3"), Making::Trail).await.unwrap().unwrap();
+    let why = "Refused: dream 2 offers untrusted finding 1.2 and finding 1.3 is no trail finding; trails are saved \
+               only on trusted ground.";
+    assert_eq!(refused.text("trails are saved"), why, "a trusted finding of another kind");
+    assert_eq!(trail_saved(&*items, &on(3), &named("release-notes"), Some("1.1")).await.unwrap(), Some((2, 1)));
+    let verdicts = json!({"verdicts": [
+        {"finding": "1.1", "verdict": "applied", "reason": "Saved it.", "trails": ["release-notes"]},
+        {"finding": "1.3", "verdict": "rejected", "reason": "Rebased already."},
+    ]});
+    let judged = tool(&sense, dream, verdicts, on(3)).await;
+    assert!(!judged.is_error, "{judged:?}");
+
+    let third = begin(&*items, Start { recipient: Recipient::Ant, ..start_at(now + Duration::hours(50)) }).await;
+    let third = third.unwrap().unwrap();
+    let open: Vec<_> = third.findings.iter().filter(|finding| finding.dream() == 1).map(|f| f.id.as_str()).collect();
+    assert_eq!(open, ["1.2"], "the one left unanswered is offered again");
+    woken(&*items, 3, &on(4).thread).await.unwrap();
+    let refused = ground(&*items, &on(4), Some("1.3"), Making::Trail).await.unwrap().unwrap();
+    let why = "Refused: dream 3 offers untrusted finding 1.2 and finding 1.3 is not one of its findings; trails are \
+               saved only on trusted ground.";
+    assert_eq!(refused.text("trails are saved"), why, "a trusted finding of another dream");
 }

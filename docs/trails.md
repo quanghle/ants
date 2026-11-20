@@ -217,6 +217,7 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   Once an inline script works and its steps will recur, **`save_trail(name, script?, run?, replace?, finding?)`** saves
   it for the colony as the ant's: a `script`, or the script of a finished `run` of an inline script the ant conducted
   (done or failed), recorded as the trail's source. A run of a saved trail is refused, as that trail is saved already.
+  A save rates nothing: a `rate_trail` of the source run made after it rates the saved trail too, as the answer says.
   The script is checked as `ants trail save` checks a file, not run, and every ant then runs it by name. A name a human
   or another ant saved is refused, so a changed copy goes under a new name; the ant's own is replaced only with
   `replace: true`. On a dream's thread, `finding` names the dream finding the save answers
@@ -323,18 +324,17 @@ A run reports on the thread it started with, as its conductor:
   journal (`answered`, or `failed` for an error) and, while it goes on, the calls its session waits on (`started`); a
   step otherwise is `dropped`, as is one sent anew on a new thread after a resume. A run's thread opened after its
   steps ran lists them all the same, for as long as the run's records are kept.
-- **End message:** once the run is done, failed or stopped, the conductor messages the owner, else the default human,
-  on the run thread: `Run <run> of trail <name> is done (N steps, M turns):`, naming the trail the run started, with
-  the result (cut at 8000 characters, `ants trail show <run>` showing the rest), the error (when a limit was met,
-  followed by what a resume does: for steps, turns or wall time, `ants trail resume <run>` with the flag raising that
-  limit, unless already at its maximum; for compute, that a resume runs the computation again under the same limit,
-  failing again unless the machine was only busy; for the session or memory, that no resume continues it, or for a
-  session size its start set below the maximum, that no flag raises it), or who
-  stopped it and how to resume it; a run of more than one leg
-  ends it with a line `route: <route>`. The end of a run done or failed is stored before it is told, a store that
-  fails being tried again; the message is sent again until the outbox takes it, the run staying listed in
-  `<ant>.runs` meanwhile, under an id derived from the run and the time it ended, so a daemon restarted in between
-  sends it again as the same message, which the bus keeps once.
+- **End message:** once the run is done, failed or stopped, the conductor messages the owner, else the default human, on
+  the run thread: `Run <run> of trail <name> is done (N steps, M turns):`, naming the trail the run started (`Run <run>
+  of an inline script` for an inline one), with the result (cut at 8000 characters, `ants trail show <run>` showing the
+  rest), the error (when a limit was met, followed by what a resume does: for steps, turns or wall time, `ants trail
+  resume <run>` with the flag raising that limit, unless already at its maximum; for compute, that a resume runs the
+  computation again under the same limit, failing again unless the machine was only busy; for the session or memory,
+  that no resume continues it, or for a session size its start set below the maximum, that no flag raises it), or who
+  stopped it and how to resume it; a run of more than one leg ends it with a line `route: <route>`. The end of a run
+  done or failed is stored before it is told, a store that fails being tried again; the message is sent again until the
+  outbox takes it, the run staying listed in `<ant>.runs` meanwhile, under an id derived from the run and the time it
+  ended, so a daemon restarted in between sends it again as the same message, which the bus keeps once.
 - **Rating invitation:** once the run is done or failed, child runs included, the conductor's daemon also messages the
   conductor itself on the run thread, answering to the run's owner: `[ants] Run <run> of trail <name> ended done (N
   steps, M turns). Result: …` (or `ended failed (…): <error>`), with the run's args, its route, the call a child run
@@ -369,7 +369,7 @@ they may be raised on resume:
 | Wall time from start, stopped time included | 24h | 7d | `--wall`, `wall` | the run fails, waiting or not |
 | Compute of one resume of the script | 10 s | 10 s | none | `TimeoutError`, the run fails; the worker is killed 5 s later |
 | Dumped session, the script's suspended state | 768 KiB | 768 KiB | none | the run fails, naming its size; so does a run whose session record, the dumped session with the calls it waits on, would pass 1 MiB less 8 KiB, before its steps go out |
-| Result or error, in the run's record | 1 MiB less the rest of the record | same | none | a result fails the run, naming its size (a `trail()` call raises with that error); an error is cut to 8000 characters. The worker's own bounds (a 768 KiB result, a 16 KiB error) mostly apply first; this one catches a result within them that the rest of the record (its pinned scripts, args) leaves no room for |
+| Result or error, in the run's record | 1 MiB less the rest of the record | same | none | a result fails the run, naming its size (a `trail()` call raises with that error); an error is cut to 8000 characters, then on a record near its room to what fits, its phase dropped last. The worker's own bounds (a 768 KiB result, a 16 KiB error) mostly apply first; this one catches a result within them that the rest of the record (its pinned scripts, args) leaves no room for |
 | Memory of the script | 64 MiB | 64 MiB | none | `MemoryError`, the run fails |
 | Notes of one resume: the text of `print()`, `log()` and `phase()`, and 16 bytes per note | 64 KiB | 64 KiB | none | the call raises `RuntimeError` naming the cap; a note's text over 4000 bytes is cut, ending with `…` |
 | Arguments of the calls of one resume, as JSON, and 64 bytes per call | 1 MiB | 1 MiB | none | the call raises `RuntimeError` naming the cap |
@@ -532,23 +532,25 @@ suggests searching them with `trail_tips`, under the step's tip key if it has on
 
 ### Searching
 
-`trail_tips` searches the live tips of the trail of the step the thread answers, or of the saved trail `trail` names:
-with `tip_key` (by default the step's), that key's tips first, then the trail-wide ones, leaving out other keys'; with
-`query`, only the tips sharing a word with it, in their text or tip key, most shared first; then best ranked first. Its
-words are lowercased, common English words left out: a query of no other word (`what should it do`) is refused as
-having no searchable word. It lists `limit` tips, 10 by default and 50 at most, each with its id, writer, tip key, votes
-(`+helpful ~stale !wrong`), age, `older script` mark and text, or says that none match. Any thread may read tips, a webhook's included.
+`trail_tips` searches the live tips of the trail of the step the thread answers, or of the saved trail `trail` names
+(refused for a name only the machine's `~/.ants/trails` holds, as no colony trail): with `tip_key` (by default the
+step's), that key's tips first, then the trail-wide ones, leaving out other keys'; with `query`, only the tips sharing a
+word with it, in their text or tip key, most shared first; then best ranked first. Its words are lowercased, common
+English words left out: a query of no other word (`what should it do`) is refused as having no searchable word. It lists
+`limit` tips, 10 by default and 50 at most, each with its id, writer, tip key, votes (`+helpful ~stale !wrong`), age,
+`older script` mark and text, or says that none match. Any thread may read tips, a webhook's included.
 
 ### Tips for humans
 
 `ants trail tips NAME` lists a trail's live tips in rank order, `--key KEY` those under one tip key, `--all` the retired
-ones too: each tip's id, tip key, writer, votes, status (`live`, `retired by HUMAN`, `voted wrong` or
-`unused for 90 days`, and `older script` when the trail's saved script differs from the tip's), age and text.
-`--retire ID` retires a tip, naming the human who retired it; `--writer ANT` names its writer when tips of different
-writers share the id. It reads a trail's tips whether or not the trail is still
-saved. In `ants chat`, `/trail tips NAME` shows the same list in the pager. `ants trail rm NAME` removes the trail's
-tips with it, saying how many: the trail first, then its tips and ratings, so that none left or put while it goes
-outlives the removal, and run again on a trail removed already, it purges what is left of it. `--retire` and `ants trail rm` need human credentials ([cli.md](cli.md#commands)).
+ones too: each tip's id, tip key, writer, votes, status (`live`, `retired by HUMAN`, `voted wrong` or `unused for 90
+days`, and `older script` when the trail's saved script differs from the tip's), age and text. `--retire ID` retires a
+tip, naming the human who retired it; `--writer ANT` names its writer when tips of different writers share the id. It
+reads a trail's tips whether or not the trail is still saved, but refuses a trail only this machine's `~/.ants/trails`
+holds, which takes no tips. In `ants chat`, `/trail tips NAME` shows the same list in the pager. `ants trail rm NAME`
+removes the trail's tips with it, saying how many: the trail first, then its tips and ratings, so that none left or put
+while it goes outlives the removal, and run again on a trail removed already, it purges what is left of it. `--retire`
+and `ants trail rm` need human credentials ([cli.md](cli.md#commands)).
 
 ```sh
 ants trail tips review                  # live tips, best first
@@ -600,7 +602,9 @@ reason, `ants trail runs` a `RATED` column (each trail's outcome) and `ants trai
 carries them under `ratings`, and every listing shows a rating's task and reason on one line, as tips' text, control
 characters left out. In `ants chat`, `/trail list`, `/trail show` and `/trail runs` show the same.
 `ants trail rm NAME` purges the trail's ratings with its tips; an ant's `remove_trail` purges none, so a trail saved
-later under that name inherits them, weighing half as of another script.
+later under that name inherits them. `find_trails` weighs them half, as of another script; a sage's review packet,
+and the track record judging whether a sage's applied trail finding holds, count every rating under the name whole,
+those of an earlier script, of a trail of the name removed before and older than 90 days included.
 
 Each ant writes only its own ratings, under keys naming it; humans read them all and purge a trail's when removing the
 trail ([auth.md](auth.md#wire-acls-and-verification-invariants)).
@@ -611,7 +615,7 @@ trail ([auth.md](auth.md#wire-acls-and-verification-invariants)).
 |---|---|---|
 | KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, waypoints, script, who saved it (a human or an ant) and when, and the run an ant saved it from. |
 | KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (its route: each leg's trail or inline script, waypoint, args, first call id, start and steps; owner, origin, limits, state (a failed one's broken `limit`), spending, the grants its steps hold or whose runs told spending, thread, parent run, the step it spends from and its grant, times), `<ant>.<run>.session` the current leg's dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`, call ids numbered on across legs), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread, label?}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out; a `trail()` step, whose thread is its child run's, keeps the latter alone. An ant answering a step keeps `<ant>.answering.<thread>`, the runs it started answering the step on that thread. |
-| KV `ants_trail_tips` | never expires | The [tips](#tips) left on saved trails and their votes, each under the trail and the ant that wrote it: `<trail>.<writer>.<id>` a tip (trail, id, writer, text, tip key, run, script's SHA-256, time written, and who retired it and when), `<trail>.<voter>.<writer>.<id>` a vote on it (voter, verdict, reason, the SHA-256 of the tip's text it judged, the SHA-256 of the script voted on, time). |
+| KV `ants_trail_tips` | never expires | The [tips](#tips) left on saved trails and their votes, each under the trail and the ant that wrote it: `<trail>.<writer>.<id>` a tip (trail, id, writer, text, tip key, run, script's SHA-256, time written), `<trail>.<voter>.<writer>.<id>` a vote on it (voter, verdict, reason, the SHA-256 of the tip's text it judged, the SHA-256 of the script voted on, time), `<trail>._retired.<writer>.<id>` a human's retirement of it (the human, time), a key no ant writes. |
 | KV `ants_trail_ratings` | never expires | The [ratings](#rating-and-finding-trails) conductors gave saved trails, `<trail>.<conductor>.<run>` one per run and trail: trail, conductor, run, outcome, task, reason, the SHA-256 of the script rated, time. |
 
 `ants init` creates the four buckets, and `ants doctor` checks them. Each bucket keeps every message of a key, not

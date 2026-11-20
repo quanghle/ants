@@ -1,6 +1,6 @@
 //! `ants thread`: the threads in the ANTS stream, across inboxes (both ways), channel posts, notes, escalations, tool
-//! requests and their decisions, dead letters, and the tool calls, rejections and prompts ended with no reply ants
-//! stored on their timelines.
+//! requests and their decisions, dead letters, and the tool calls, rejections, prompts ended with no reply and prompt
+//! ends ants stored on their timelines.
 //!
 //! Read back by a human by message gets (batched direct gets, [`Reading::Gets`]), so nothing is consumed or acked
 //! and no consumer is left behind. Only notes subjects name their thread, so a read goes through every message stored
@@ -14,7 +14,8 @@ use std::time::{Duration, SystemTime};
 
 use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{
-    DecidedBy, Mark, NoReplyWhy, ThreadId, ThreadMarks, Timeline, TimelineEntry, Timelines, UserId, Uuid, subject,
+    DecidedBy, Mark, NoReplyWhy, ThreadId, ThreadMarks, Timeline, TimelineEnd, TimelineEntry, Timelines, UserId, Uuid,
+    subject,
 };
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream::{self, consumer};
@@ -82,6 +83,18 @@ pub struct NoReply {
     pub reason: Option<String>,
 }
 
+/// How a prompt of an ant ended and what it took, from its timeline, as a [`Kind::Ended`] entry has it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PromptEnded {
+    /// The message whose prompt ended so.
+    pub message: Uuid,
+    #[serde(flatten)]
+    pub end: TimelineEnd,
+}
+
+// The cost is read from JSON, which has no NaN.
+impl Eq for PromptEnded {}
+
 /// A tool request that was rejected or expired, as a [`Kind::Rejected`] entry has it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolRejection {
@@ -102,11 +115,11 @@ pub struct ToolRejection {
 pub enum Activity {
     /// Only the messages.
     None,
-    /// The prompts ended with no reply sent.
-    NoReplies,
+    /// The prompts ended with no reply sent, and how every prompt ended.
+    Ends,
     /// The tool calls and the prompts ended with no reply sent.
     Calls,
-    /// The tool calls, rejected tool requests and prompts ended with no reply sent.
+    /// The tool calls, rejected tool requests, prompts ended with no reply sent, and how every prompt ended.
     All,
 }
 
@@ -318,8 +331,8 @@ fn marked_start<'a>(threads: impl Iterator<Item = &'a ThreadId>) -> Option<consu
 
 /// Every message stored on `thread`, in stream order, with the reactions to each: read from `since` ago, else from the
 /// thread's start when its id is time-ordered, else from all the stream keeps. With `activity`, what its ants stored on
-/// their timelines too, each entry once as its latest record has it. A call is placed by when it started, and a
-/// rejection or end by when its record was made. Sealed messages are opened with `keyring`, which looks up a sending
+/// their timelines too, each entry once as its latest record has it, every prompt end kept. A call is placed by when it
+/// started, and a rejection or end by when its record was made. Sealed messages are opened with `keyring`, which looks up a sending
 /// device added since it was loaded.
 pub async fn history(
     js: &jetstream::Context,
@@ -342,12 +355,13 @@ pub async fn history_with(
     let mut entries = Vec::new();
     let mut timelines = Timelines::default();
     let mut seqs = HashMap::new();
+    let mut end_seqs = Vec::new();
     let start = show_start(thread, since);
     reading::read_back_awaiting(js, "", Reading::Gets, subject::ALL, start, async |seq, stored, msg| {
         let (subject, payload) = (msg.subject.as_str(), &msg.payload[..]);
         if let Some((on, _)) = subject::parse_timeline(subject) {
             if activity != Activity::None && on == *thread {
-                add_timeline(&mut timelines, &mut seqs, seq, subject, payload, activity);
+                add_timeline(&mut timelines, &mut seqs, &mut end_seqs, seq, subject, payload, activity);
             }
         } else if let Some(entry) = parser.read(seq, stored.into(), subject, payload).await
             && entry.thread_id == *thread
@@ -376,6 +390,9 @@ pub async fn history_with(
             .iter()
             .map(|end| Entry::no_reply(seq(&end.ant, TimelineKey::NoReply(end.message)), end));
         entries.extend(ends);
+        if matches!(activity, Activity::Ends | Activity::All) {
+            entries.extend(timelines.ends().iter().zip(&end_seqs).map(|(end, &seq)| Entry::ended(seq, end)));
+        }
         entries.sort_by_key(|e| e.stored_at);
     }
     let ids: Vec<Uuid> = entries.iter().filter_map(|e| e.id).collect();
@@ -403,10 +420,12 @@ pub fn timeline_entries(seq: u64, subject: &str, payload: &[u8]) -> Vec<Entry> {
     calls.chain(timelines.no_replies().iter().map(|end| Entry::no_reply(seq, end))).collect()
 }
 
-/// Merge the timeline record stored at `seq` on `subject`, noting it as the last of each entry to be shown.
+/// Merge the timeline record stored at `seq` on `subject`, noting it as the last of each entry to be shown, and as
+/// the record of each prompt end it holds, in the order [`Timelines::ends`] keeps them.
 fn add_timeline(
     timelines: &mut Timelines,
     seqs: &mut HashMap<(UserId, TimelineKey), u64>,
+    end_seqs: &mut Vec<u64>,
     seq: u64,
     subject: &str,
     payload: &[u8],
@@ -431,8 +450,10 @@ fn add_timeline(
         })
         .collect();
     let ant = record.ant.clone();
+    let ends = record.entries.iter().filter(|e| matches!(e, TimelineEntry::Ended(_))).count();
     if timelines.add(subject, record) {
         seqs.extend(keys.into_iter().map(|key| ((ant.clone(), key), seq)));
+        end_seqs.extend(std::iter::repeat_n(seq, ends));
     } else {
         tracing::debug!(seq, subject, "skipping a timeline record its subject does not name");
     }
@@ -452,7 +473,8 @@ pub async fn last_activity(js: &jetstream::Context, thread: &ThreadId) -> Result
 }
 
 /// `ants thread show THREAD`: every message stored on the thread `pick` picks, in the order the stream stored them,
-/// the prompts its ants ended with no reply sent, and unless `no_tools` the tool calls and rejected requests.
+/// the prompts its ants ended with no reply sent, how each prompt ended, and unless `no_tools` the tool calls and
+/// rejected requests.
 pub async fn show(nats: &Nats<'_>, pick: Pick, since: Option<Duration>, json: bool, no_tools: bool) -> Result<()> {
     let auto_archive = crate::defaults::auto_archive()?;
     let js = connect(nats).await?;
@@ -460,7 +482,7 @@ pub async fn show(nats: &Nats<'_>, pick: Pick, since: Option<Duration>, json: bo
     let keyring = sealed::Keyring::load(nats, &js).await.map(Arc::new);
     let behalf = Arc::new(crate::people::behalf::Checker::new(nats, &js));
     let parser = Parser::opening(keyring).checking(Some(behalf.clone()));
-    let activity = if no_tools { Activity::NoReplies } else { Activity::All };
+    let activity = if no_tools { Activity::Ends } else { Activity::All };
     let entries = history_with(&js, thread, since, activity, parser).await?;
     let sealed = entries.iter().any(|e| e.sealed.is_some());
     let suggested = entries.iter().find_map(|e| Some((e.from.as_ref()?, e.suggested_title.as_deref()?)));

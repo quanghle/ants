@@ -155,6 +155,25 @@ async fn sense_s_own_link_comes_back_after_failing_without_a_reload() {
     up.await.expect("the link comes back without a reload").unwrap();
 }
 
+#[tokio::test]
+async fn the_host_connection_comes_back_after_failing_without_a_reload() {
+    let Some(server) = crate::test_support::Server::start() else { return };
+    let (creds, machine) = (server.dir().join("host.creds"), "m1".parse::<Machine>().unwrap());
+    let nats = server.url.clone();
+    let providers = Providers::default();
+    let host = Host::quietly(Some(machine.clone()), None, nats, Some(creds.clone()), None, [true].into_iter()).unwrap();
+    let host = Host { providers: providers.clone(), ..host };
+    let mut unkept = providers.sense().why_unkept();
+    let mut links = Links::new(providers.clone());
+    links.reconcile(Some((host, vec![])), None);
+    let failed = tokio::time::timeout(Duration::from_secs(30), unkept.wait_for(Option::is_some));
+    let why = failed.await.expect("the connection fails without its credentials").unwrap().clone().unwrap();
+    assert!(why.contains("the host connection stopped"), "{why}");
+    crate::auth::issue_host(&server.dir().join("auth"), &machine, None, &creds).unwrap();
+    let up = tokio::time::timeout(Duration::from_secs(30), unkept.wait_for(Option::is_none));
+    up.await.expect("the connection comes back without a reload").unwrap();
+}
+
 #[test]
 fn flags_override_the_picked_ant() {
     let all = vec![ant("dev-a"), ant("dev-b")];
@@ -203,6 +222,21 @@ fn flags_override_the_picked_ant() {
     assert_eq!(pick(added.clone(), &[], &args("--ant lead-a"), path).unwrap(), added);
     let err = pick(added, &[], &args("--ant lead-a --max-daily-cost 99"), path).unwrap_err().to_string();
     assert!(err.contains("ant lead-a was added from template worker"), "{err}");
+}
+
+#[test]
+fn an_ant_described_by_flags_takes_its_provider_from_them() {
+    use ants_daemon::provider::Setting;
+    let missing = here().join("no-such-config.toml");
+    let listed = |line: &str| ants(&args(line), &missing, "box.local", None).unwrap().ants.remove(0);
+    let sensed = listed("--ant dev-a --harness copilot");
+    assert_eq!((sensed.provider, sensed.provider_setting), (None, Setting::Sense));
+    let bare = listed("--ant dev-a --harness copilot --provider none");
+    assert_eq!((bare.provider.as_deref(), bare.provider_setting), (Some("none"), Setting::None));
+    assert!(Cmd::try_parse_from(["daemon", "--ant", "dev-a", "--provider", "other"]).is_err());
+    let line = format!("--config {} --ant dev-a --provider none", missing.display());
+    let err = ants(&args(&line), &missing, "box.local", None).unwrap_err().to_string();
+    assert!(err.contains("--provider is for an ant described by flags"), "{err}");
 }
 
 #[test]

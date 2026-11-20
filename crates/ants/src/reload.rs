@@ -1,11 +1,12 @@
 //! When `ants daemon` and `ants webhook serve` reload their config file: on SIGHUP, at once after an admin order
 //! edited it ([`Triggers::edits`]) or the shared settings of an ant changed ([`Triggers::watch_shared`]), and once an edit of the file, or of the daemon's drop-in harness files, settled. The file is polled, its modification time, length and inode
 //! compared every [`CHECK_EVERY`] on the process's own runtime, with no watcher thread, and so are the drop-in files
-//! ([`ants_daemon::config::dropin_files`]) listed by name and the daemon's credentials files of the built-in ants
-//! ([`Triggers::watch_creds`]); a change counts once two checks in a row find them the same.
+//! ([`ants_daemon::config::dropin_files`]) listed by name, the daemon's credentials files of the built-in ants
+//! ([`Triggers::watch_creds`]) and the machine's host credentials files the config's lookup tries
+//! ([`Triggers::host_creds`]); a change counts once two checks in a row find them the same.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
@@ -45,6 +46,34 @@ struct Found {
     file: Option<FileId>,
     dropins: Vec<(PathBuf, FileId)>,
     creds: Vec<Option<FileId>>,
+    host: Vec<Candidate>,
+}
+
+/// A file at a path, or none there.
+type Candidate = (PathBuf, Option<FileId>);
+
+/// The machine's host credentials files a load of the config looked for
+/// ([`ants_daemon::config::HostSettings::creds_candidates`]), each as found then, for the next check to watch from;
+/// clones share them.
+#[derive(Debug, Clone, Default)]
+pub struct HostCreds(Arc<Mutex<Option<Vec<Candidate>>>>);
+
+impl HostCreds {
+    /// Watch `candidates` from now on, as they are now, a load of the config having just looked for them.
+    pub fn watch(&self, candidates: Vec<PathBuf>) {
+        let found = candidates
+            .into_iter()
+            .map(|path| {
+                let id = FileId::of(&path).ok();
+                (path, id)
+            })
+            .collect();
+        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(found);
+    }
+
+    fn take(&self) -> Option<Vec<Candidate>> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+    }
 }
 
 /// A config file, a directory of drop-in files, and credentials files, checked for changes.
@@ -53,6 +82,7 @@ struct Watched {
     path: PathBuf,
     dropins: Option<PathBuf>,
     creds: Vec<PathBuf>,
+    host: HostCreds,
     /// The files as last loaded.
     loaded: Found,
     /// The files as the last check found them.
@@ -62,7 +92,7 @@ struct Watched {
 impl Watched {
     fn new(path: PathBuf, dropins: Option<PathBuf>) -> Self {
         let (creds, loaded, seen) = (Vec::new(), Found::default(), Found::default());
-        let mut watched = Self { path, dropins, creds, loaded, seen };
+        let mut watched = Self { path, dropins, creds, host: HostCreds::default(), loaded, seen };
         watched.loading();
         watched
     }
@@ -75,12 +105,22 @@ impl Watched {
             .filter_map(|path| FileId::of(&path).ok().map(|id| (path, id)))
             .collect();
         let creds = self.creds.iter().map(|path| FileId::of(path).ok()).collect();
-        Found { file: FileId::of(&self.path).ok(), dropins, creds }
+        let host = self.loaded.host.iter().map(|(path, _)| (path.clone(), FileId::of(path).ok())).collect();
+        Found { file: FileId::of(&self.path).ok(), dropins, creds, host }
+    }
+
+    /// Watch the host credentials files a load of the config looked for since the last check, as it found them.
+    fn rebase_host(&mut self) {
+        if let Some(host) = self.host.take() {
+            self.seen.host.clone_from(&host);
+            self.loaded.host = host;
+        }
     }
 
     /// Why to reload, where the files are other than the ones loaded and unchanged since the last check: an edit
     /// still being written waits for a later check. The files found count as loaded then.
     fn settled(&mut self) -> Option<Trigger> {
+        self.rebase_host();
         let now = self.found();
         let settled = now != self.loaded && now == self.seen;
         let config = (&now.file, &now.dropins) != (&self.loaded.file, &self.loaded.dropins);
@@ -94,6 +134,7 @@ impl Watched {
 
     /// Count the files found now as loaded, as a reload by SIGHUP reads them.
     fn loading(&mut self) {
+        self.rebase_host();
         self.loaded = self.found();
         self.seen.clone_from(&self.loaded);
     }
@@ -109,7 +150,8 @@ pub enum Trigger {
     Edited,
     /// The shared settings of an ant changed ([`ants_daemon::profile::shared`]).
     Shared,
-    /// Credentials files of the built-in ants came, went or changed, and settled ([`Triggers::watch_creds`]).
+    /// Credentials files of the built-in ants or of the machine's host came, went or changed, and settled
+    /// ([`Triggers::watch_creds`], [`Triggers::host_creds`]).
     Credentials,
 }
 
@@ -120,7 +162,7 @@ impl Trigger {
             Trigger::Changed => "the config changed",
             Trigger::Edited => "an admin order edited the config",
             Trigger::Shared => "the shared settings of an ant changed",
-            Trigger::Credentials => "the credentials of a built-in ant changed",
+            Trigger::Credentials => "the credentials of a built-in ant or the host changed",
         }
     }
 }
@@ -166,6 +208,13 @@ impl Triggers {
     pub fn watch_creds(&mut self, creds: Vec<PathBuf>) {
         self.file.creds = creds;
         self.file.loading();
+    }
+
+    /// Where each load of the config tells the host credentials files it looked for ([`HostCreds::watch`]), to reload
+    /// as well once one of them comes, goes or changes and settles, as the built-in ants the machine serves depend on
+    /// whether the server takes credentials, and the host connection on them.
+    pub fn host_creds(&self) -> HostCreds {
+        self.file.host.clone()
     }
 
     /// Wait for the next reason to reload. Cancel-safe, for `tokio::select!`.
@@ -301,6 +350,29 @@ mod tests {
         std::fs::write(&path, "harness = \"copilot\"\n").unwrap();
         std::fs::remove_file(&sage).unwrap();
         assert_eq!((file.settled(), file.settled()), (None, Some(Trigger::Changed)), "with the config, a change of it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_host_credentials_looked_for_count_coming_going_or_changing_and_not_a_new_lookup() {
+        let dir = ants_test_support::scratch_dir("reload-host-creds");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        let (host, named) = (dir.join("host.creds"), dir.join("host-box.creds"));
+        let mut file = Watched::new(path, None);
+        let looked = file.host.clone();
+        looked.watch(vec![host.clone(), named.clone()]);
+        assert_eq!((file.settled(), file.settled()), (None, None), "neither exists");
+        std::fs::write(&named, "issued").unwrap();
+        assert_eq!((file.settled(), file.settled()), (None, Some(Trigger::Credentials)), "the fallback copied in");
+        std::fs::write(&host, "issued").unwrap();
+        assert_eq!((file.settled(), file.settled()), (None, Some(Trigger::Credentials)), "host.creds copied in");
+        looked.watch(vec![host.clone(), dir.join("host-other.creds")]);
+        assert_eq!((file.settled(), file.settled()), (None, None), "a lookup elsewhere read what it found");
+        std::fs::remove_file(&named).unwrap();
+        assert_eq!((file.settled(), file.settled()), (None, None), "no longer looked for");
+        std::fs::remove_file(&host).unwrap();
+        assert_eq!((file.settled(), file.settled()), (None, Some(Trigger::Credentials)), "removed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

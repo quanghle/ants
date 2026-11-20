@@ -214,7 +214,7 @@ fn end_text(run: &TrailRun, resume: Option<&RunId>) -> Option<String> {
 fn end_state(run: &TrailRun, resume: Option<&RunId>) -> Option<String> {
     let name = match run.first_trail() {
         Some(trail) => format!("Run {} of trail {trail}", run.run),
-        None => format!("Run {}", run.run),
+        None => format!("Run {} of an inline script", run.run),
     };
     let spent = format!("{} steps, {} turns", run.steps, run.turns);
     Some(match (&run.state, resume) {
@@ -416,6 +416,16 @@ mod tests {
         assert_eq!(
             end_text(&run, None).unwrap(),
             format!("Run {} of trail deploy failed (2 steps, 7 turns): the limit", run.run)
+        );
+    }
+
+    #[test]
+    fn the_end_of_an_inline_run_names_it_an_inline_script() {
+        let mut run = failed(RunLimit::Steps, TrailLimits::default());
+        run.route[0].trail = None;
+        assert_eq!(
+            end_text(&run, None).unwrap(),
+            format!("Run {} of an inline script failed (2 steps, 7 turns): the limit", run.run)
         );
     }
 }

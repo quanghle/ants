@@ -448,3 +448,32 @@ async fn a_sage_s_dream_lists_its_reviews_by_their_records_and_holds_none_of_the
         "the reviews' text is left out"
     );
 }
+
+#[tokio::test]
+async fn an_applied_trail_finding_undone_since_counts_among_the_undone_findings_its_causes_told() {
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let (ant, now) = ("dev-b".parse::<UserId>().unwrap(), Utc::now());
+    let said = now - Duration::hours(25);
+    let evidence = json!({"files": ["src/lib.rs:1"]});
+    let outline = json!({"name": "release-notes", "description": "Draft the release notes.",
+                         "phases": ["List the merged pull requests", "Draft the notes"]});
+    let findings = json!({"findings": [
+        {"kind": "lesson", "finding": "Rebase first.", "evidence": evidence, "action": "Act."},
+        {"kind": "mistake", "finding": "Wrong branch.", "evidence": evidence, "action": "Act."},
+        {"kind": "trail", "finding": "Notes by hand thrice.", "evidence": {"threads": [on(3).thread.to_string()]},
+         "action": "Save it as a trail.", "trail": outline},
+    ]});
+    let answer = format!("Reviewed.\n\n```json\n{findings:#}\n```");
+    let first = review_request(1);
+    assert!(review_received(&*items, &ant, &on(1).thread, &first, said).await.unwrap());
+    assert!(review_answered(&*items, &ant, &on(1).thread, &first, &answer, None, said).await.unwrap());
+    let undone = [(Applied, false), (Applied, false), (Applied, false)];
+    review(&*items, ("dev-b", 2, 2), &told(1, &undone), &[], now - Duration::hours(1)).await;
+
+    let reviews = review_records(&*items, usize::MAX).await.unwrap();
+    let gathered = crate::dream::practice_findings::gather(&*items, &reviews, &memory::Ages::new(now, [])).await;
+    let text = &gathered.unwrap()[0].text;
+    assert!(text.contains("1.1 lesson of dev-b, 1.2 mistake of dev-b, 1.3 trail of dev-b."), "{text}");
+    assert!(text.contains("a trail saved for one removed or rated failed more often than worked"), "{text}");
+}

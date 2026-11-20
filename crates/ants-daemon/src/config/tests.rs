@@ -691,6 +691,26 @@ fn the_top_level_machine_names_the_host_where_the_host_table_names_none() {
 }
 
 #[test]
+fn the_host_credentials_candidates_are_those_looked_up_whether_they_exist_or_not() {
+    let home = ants_test_support::scratch_dir("config-host-candidates").canonicalize().unwrap();
+    let path = home.join("config.toml");
+    let candidates = |text: &str| Summary::parse(text, &path, &home).unwrap().host.creds_candidates("gen-4f2a.local");
+    let auth = home.join(".config/ants/auth");
+    let creds = |names: &[&str]| names.iter().map(|name| auth.join(name)).collect::<Vec<_>>();
+    assert_eq!(candidates(""), creds(&["host.creds", "host-gen-4f2a.creds"]), "no auth directory yet");
+    assert_eq!(
+        candidates("machine = \"dev-vm1\""),
+        creds(&["host.creds", "host-dev-vm1.creds", "host-gen-4f2a.creds"])
+    );
+    assert_eq!(
+        candidates("machine = \"dev-vm1\"\n[host]\nmachine = \"box\""),
+        creds(&["host.creds", "host-box.creds"])
+    );
+    assert_eq!(candidates("[host]\ncreds = \"h.creds\""), Vec::<std::path::PathBuf>::new(), "named, none looked up");
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
 fn rejects_bad_files() {
     let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
     let twice = err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"");
@@ -984,7 +1004,9 @@ fn appending_keeps_the_file_as_it_was_and_checks_it() {
     assert_eq!(summary.creds_of(&"dev-a".parse().unwrap()), Some(Some(dir.join("ants/keys/dev-a.creds").as_path())));
     assert_eq!(summary.creds_of(&"dev-b".parse().unwrap()), Some(None));
     assert_eq!(summary.creds_of(&"dev-c".parse().unwrap()), None);
-    assert_eq!(Summary::load(&dir.join("none.toml")).unwrap(), Summary::default());
+    let none = Summary::load(&dir.join("none.toml")).unwrap();
+    assert!(none.host.looked_in.is_some(), "a missing file looks for the host credentials where they belong");
+    assert_eq!(Summary { host: HostSettings { looked_in: None, ..none.host.clone() }, ..none }, Summary::default());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

@@ -3,8 +3,8 @@
 //! over the last [`WEEKS`] weeks and the [`TOP`] people and repositories of the most threads, so it stays small however
 //! long the ant works:
 //!
-//! - its threads, from their records ([`crate::thread::record`]): done, started again, expired, its active days, who
-//!   started them and where, and the prompts it completed;
+//! - its threads of work, from their records ([`crate::thread::experience::work_records`]): done, started again,
+//!   expired, its active days, who started them and where, and the prompts it completed;
 //! - by week: the threads started and done, the active days, the calls of sense's tools that wrote
 //!   ([`crate::thread::calls`]) and the verdicts given in dreams;
 //! - its memories by kind and status, with their votes and reads in full;
@@ -41,8 +41,8 @@ use crate::records::{self, RELATIONSHIP, RecordItem};
 use crate::skill::{SKILL, Skill};
 use crate::store::{Items, StoreError};
 use crate::thread::calls::{self, Calls, week};
-use crate::thread::experience::{Experience, experience, experience_since};
-use crate::thread::record::{self, Record};
+use crate::thread::experience::{Experience, experience, experience_since, work_records};
+use crate::thread::record::Record;
 
 /// The key of the report's entry.
 pub const KEY: &str = "growth report";
@@ -88,7 +88,7 @@ impl Data {
         let skills = items.list(SKILL, usize::MAX).await?;
         Ok(Self {
             card: card(items).await?,
-            records: record::records(items, usize::MAX).await?,
+            records: work_records(items).await?,
             worked: experience(items, ant, usize::MAX).await?,
             own,
             calls: calls::calls(items, since).await?,
@@ -200,7 +200,6 @@ fn threads(text: &mut String, data: &Data) {
             ("by other ants", started(&|by| matches!(by, Starter::Ant { .. }) && !own(by))),
             ("by itself", started(&own)),
             ("by webhooks", started(&|by| matches!(by, Starter::Webhook { .. }))),
-            ("by ants asking a review", started(&|by| matches!(by, Starter::Review { .. }))),
             ("by providers", started(&|by| matches!(by, Starter::Provider { .. }))),
         ]);
         let _ = writeln!(text, "  Started {by}.");

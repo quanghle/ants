@@ -687,7 +687,8 @@ mod tests {
     }
 
     fn spent(ant: &str, thread: &ThreadId, cost: f64) -> ThreadReport {
-        ThreadReport { ant: user(ant), thread: thread.clone(), spent: Spent { tokens: 1000, cost }, caps: None }
+        let spent = Spent { tokens: 1000, cost };
+        ThreadReport { ant: user(ant), thread: thread.clone(), spent, total: spent, caps: None }
     }
 
     /// alice asks dev-a on `root`; dev-a asks reviewer there, and tester on `spun`, a thread spun off `root`.

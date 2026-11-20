@@ -175,3 +175,57 @@ async fn a_trail_finding_told_deferred_then_applied_holds_while_the_colony_s_tra
     let told: Vec<_> = told.iter().map(|outcome| (outcome.finding.as_str(), outcome.verdict, outcome.holds)).collect();
     assert_eq!(told, [("1.1", FindingVerdict::Applied, true)], "a deferral told says nothing of holding");
 }
+
+#[test]
+fn a_saved_trail_holds_unrated_or_rated_partly_alone_and_not_once_rated_failed_more_often_than_worked() {
+    let saved = |worked, partly, failed| Standing::Saved(Counts { worked, partly, failed }).holds();
+    assert_eq!(saved(0, 0, 0), Some(true), "no rating yet");
+    assert_eq!(saved(0, 3, 0), Some(true), "rated partly alone");
+    assert_eq!(saved(1, 2, 1), Some(true));
+    assert_eq!(saved(0, 2, 1), Some(false));
+    assert_eq!((Standing::Removed.holds(), Standing::Unknown.holds()), (Some(false), None));
+}
+
+#[tokio::test]
+async fn a_verdict_naming_items_and_trails_holds_while_both_hold() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let doubted = store(&kept, &lesson("Retry the flaky job")).await;
+    let used = store(&kept, &lesson("Run the linter first")).await;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let judged = Utc::now();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let voted = tool(&sense, memory::vote, json!({"id": doubted, "vote": "wrong"}), on(2)).await;
+    assert!(!voted.is_error, "{voted:?}");
+    let now = Utc::now();
+
+    let mut findings = Vec::new();
+    let mut verdicts = Vec::new();
+    for (n, (memory, trail)) in
+        [(&used, "release-notes"), (&doubted, "release-notes"), (&used, "gone")].into_iter().enumerate()
+    {
+        let id = format!("1.{}", n + 1);
+        findings.push(advised(&id, TRAIL, "Done by hand thrice."));
+        let mut applied = verdict(&id, Judgement::Applied, "Saved it and remembered.", &[memory], judged);
+        applied.trails = vec![name(trail)];
+        verdicts.push(applied);
+    }
+    keep(&*items, &reviewed(1, now - Duration::hours(24), "sage", findings, verdicts)).await;
+    let trails = ColonyTrails::read(vec![saved("release-notes", "Draft the release notes.", (2, 0, 1), now)]);
+
+    let current = reviewed(2, now, "sage", Vec::new(), Vec::new());
+    let read = packet(&*items, &current, &Reader::Sage(user("dev-a")), &[], &trails).await.unwrap();
+    let record = part(&read, "\n## Earlier findings of sage\n");
+    for shown in [
+        "  Verdict: applied: Saved it and remembered.\n  Written: memory ",
+        "  Saved trails: release-notes (rated 2 worked, 0 partly, 1 failed).\n",
+        "  Saved trails: gone (no longer saved).\n",
+        "- trail: 3 made, 3 applied (1 still holding),",
+    ] {
+        assert!(record.contains(shown), "{shown} in {record}");
+    }
+    let ages = memory::Ages::new(now, std::iter::empty());
+    let (told, _) = packet::review_history(&*items, 2, &ages, &user("sage"), &trails).await.unwrap();
+    let holds: Vec<_> = told.iter().map(|outcome| (outcome.finding.as_str(), outcome.holds)).collect();
+    assert_eq!(holds, [("1.1", true), ("1.2", false), ("1.3", false)], "its memory voted wrong, its trail removed");
+}

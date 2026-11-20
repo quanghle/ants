@@ -248,3 +248,92 @@ impl Trails {
         Ok(found)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ants_proto::RunId;
+    use ants_test_support::NatsServer;
+    use chrono::{DateTime, Duration};
+
+    use super::*;
+    use crate::bus;
+
+    fn trail(name: &str, description: &str) -> SavedTrail {
+        SavedTrail {
+            name: name.parse().unwrap(),
+            description: description.to_owned(),
+            phases: Vec::new(),
+            waypoints: Vec::new(),
+            script: "agent('build')".to_owned(),
+            saved_by: Saver::Human { user: UserId::human() },
+            saved_from: None,
+            saved_at: Utc::now(),
+        }
+    }
+
+    fn rating(trail: &str, outcome: RatingOutcome, at: DateTime<Utc>) -> TrailRating {
+        TrailRating {
+            trail: trail.parse().unwrap(),
+            conductor: "dev-a".parse().unwrap(),
+            run: RunId::generate(),
+            outcome,
+            task: "deploy the site".to_owned(),
+            why: "it did".to_owned(),
+            script: script_sha256("an older script"),
+            untrusted: false,
+            at,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_colony_s_saved_trails_are_read_with_every_rating_of_a_saved_one_counted_whole() {
+        let Some(server) = NatsServer::start() else { return };
+        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let missing = colony_rated(&js, None).await.unwrap_err();
+        assert!(format!("{missing:#}").contains("reading the saved trails of the colony"), "{missing:#}");
+        js.create_stream(crate::hub::trails_config()).await.unwrap();
+        let unrated = colony_rated(&js, None).await.unwrap_err();
+        assert!(format!("{unrated:#}").contains("reading the trail ratings"), "{unrated:#}");
+        js.create_stream(crate::hub::trail_ratings_config()).await.unwrap();
+        assert!(colony_rated(&js, None).await.unwrap().is_empty());
+
+        let trails = DirectKv::whole(&js, None, TRAILS_BUCKET).await.unwrap();
+        for saved in [trail("deploy", "Deploy the site."), trail("notes", ""), trail("gone", "")] {
+            trails.put(saved.name.as_str(), serde_json::to_vec(&saved).unwrap()).await.unwrap();
+        }
+        trails.put("broken", b"not a trail".to_vec()).await.unwrap();
+        trails.put("elsewhere", serde_json::to_vec(&trail("deploy", "Under another key.")).unwrap()).await.unwrap();
+        let ratings = DirectKv::whole(&js, None, TRAIL_RATINGS_BUCKET).await.unwrap();
+        let (now, old) = (Utc::now(), Utc::now() - Duration::days(120));
+        for rated in [
+            rating("deploy", RatingOutcome::Worked, now),
+            rating("deploy", RatingOutcome::Worked, old),
+            rating("deploy", RatingOutcome::Partly, now),
+            rating("deploy", RatingOutcome::Failed, now + Duration::hours(1)),
+            rating("gone", RatingOutcome::Failed, now),
+            rating("never-saved", RatingOutcome::Worked, now),
+        ] {
+            ratings.put(rated.key(), serde_json::to_vec(&rated).unwrap()).await.unwrap();
+        }
+        let misplaced = rating("deploy", RatingOutcome::Failed, now);
+        ratings
+            .put(format!("deploy.dev-a.{}", RunId::generate()), serde_json::to_vec(&misplaced).unwrap())
+            .await
+            .unwrap();
+        ratings.put(format!("deploy.dev-b.{}", RunId::generate()), b"not a rating".to_vec()).await.unwrap();
+        trails.delete("gone").await.unwrap();
+
+        let read = colony_rated(&js, None).await.unwrap();
+        let counted: Vec<_> =
+            read.iter().map(|(trail, counts)| (trail.name.as_str(), trail.description.as_str(), *counts)).collect();
+        assert_eq!(
+            counted,
+            [
+                ("deploy", "Deploy the site.", Counts { worked: 2, partly: 1, failed: 0 }),
+                ("notes", "", Counts::default())
+            ],
+            "an older script's and an old rating counted whole; one dated ahead, a removed trail's and entries that do \
+             not read left out"
+        );
+    }
+}

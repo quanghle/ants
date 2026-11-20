@@ -30,6 +30,7 @@ mod holds;
 mod outbox;
 mod prompt;
 mod queue;
+mod served;
 
 const WAIT: Duration = Duration::from_secs(10);
 const IDLE: Duration = Duration::from_secs(60);

@@ -300,6 +300,53 @@ async fn a_sages_answer_keeps_the_identity_findings_of_the_packet_numbered_after
 }
 
 #[tokio::test]
+async fn a_sage_answering_in_time_keeps_the_late_findings_of_the_dream_before_with_the_identity_ones() {
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let thread = sent(&*items).await;
+    let (first, _) = get(&*items, 1).await.unwrap().unwrap();
+    woken(&*items, 1, &on(3).thread).await.unwrap();
+    let cited = json!({"threads": [on(1).thread.to_string()]});
+    let given: Vec<_> =
+        (1..=MAX_FINDINGS - 2).map(|n| finding("lesson", &format!("Late {n}"), cited.clone())).collect();
+    let late = answered(&*items, &sage(), &thread, uuid::Uuid::now_v7(), Some(&fenced(&given))).await.unwrap();
+    assert_eq!(late, Some(Reviewed::Late(MAX_FINDINGS - 2)));
+    let alice = Starter::Human { user: "alice".parse().unwrap() };
+    started(&*items, 20..25, &alice, "github.com/o/r", first.at - Duration::days(10)).await;
+
+    let writer = on(9);
+    let to_sage = Start { recipient: Recipient::Sage(sage()), ..start(first.at + Duration::hours(24), &writer) };
+    let second = begin(&*items, to_sage).await.unwrap().unwrap();
+    let late_ids: Vec<_> = (1..=MAX_FINDINGS - 2).map(|n| (format!("1.{n}"), FindingKind::Sage)).collect();
+    let identity = [("2.1".to_owned(), FindingKind::NoPersona), ("2.2".to_owned(), FindingKind::NoSelfModel)];
+    let offered: Vec<_> = second.findings.iter().map(|finding| (finding.id.clone(), finding.kind)).collect();
+    assert_eq!(offered, [late_ids.as_slice(), &identity].concat(), "the late first, the identity's to the cap");
+    review_sent(&*items, 2).await.unwrap();
+
+    let answer = fenced(&[finding("lesson", "Test first", cited.clone()), finding("mistake", "Pushed red", cited)]);
+    let next = second.review.unwrap().thread;
+    let Some(Reviewed::Prompt(prompt)) =
+        answered(&*items, &sage(), &next, uuid::Uuid::now_v7(), Some(&answer)).await.unwrap()
+    else {
+        panic!("findings prompt the ant");
+    };
+    let (dream, _) = last(&*items).await.unwrap().unwrap();
+    let kinds: Vec<_> = dream.findings.iter().map(|finding| (finding.id.clone(), finding.kind)).collect();
+    let sage_own = [("2.1".to_owned(), FindingKind::Sage), ("2.2".to_owned(), FindingKind::Sage)];
+    let identity = [("2.3".to_owned(), FindingKind::NoPersona), ("2.4".to_owned(), FindingKind::NoSelfModel)];
+    assert_eq!(kinds, [sage_own.as_slice(), &identity, &late_ids].concat(), "the sage's, then all the packet offered");
+    let after = prompt.split_once(REVIEW_END).unwrap().1;
+    let (identity_section, again) = after.split_once("## Findings offered again\n\n").unwrap();
+    assert!(identity_section.contains("## Findings on the identity\n\n- 2.3 (no_persona)"), "{prompt}");
+    assert!(identity_section.contains("- 2.4 (no_self_model)") && !identity_section.contains("- 1."), "{prompt}");
+    assert!(again.starts_with("- 1.1 (sage: lesson, offered again): Late 1\n"), "{prompt}");
+    assert!(
+        again.contains(&format!("- 1.{0} (sage: lesson, offered again): Late {0}\n", MAX_FINDINGS - 2)),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
 async fn a_late_answer_is_offered_in_the_next_dream_and_its_verdicts_reach_the_sages_record() {
     let (sense, kept) = sense().await;
     let items: Arc<dyn Items> = kept.clone();

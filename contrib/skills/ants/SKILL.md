@@ -83,7 +83,7 @@ as read, on every device of the human, including replies and notices from other 
 ants watch dev-a <thread>   # live state, streamed thoughts and reply, tool calls and plan of dev-a on <thread>
 ants watch                  # all live traffic; escalations show level, reason, stuck ant/thread, leader and visited
 ants notes <thread>         # passive shared board for <thread>; posts there wake nobody
-ants thread show <thread>   # the thread's whole stored history; reads without consuming anything
+ants thread show <thread>   # the thread's whole stored history, with how each prompt ended; reads without consuming anything
 ants thread list --grep foo # threads of the last 24h with a message mentioning foo
 ```
 
@@ -212,7 +212,7 @@ ratings.
 ```sh
 ants spend                     # tokens and cost of each ant over the last 7 UTC days, against the config's caps
 ants spend dev-a --days 30     # one ant over 30 days
-ants spend --thread <thread>   # what each ant spent on one thread since a human's last message there
+ants spend --thread <thread>   # what each ant spent on one thread since a human's last message there, and in all
 ```
 
 Harnesses report differently: Claude and `copilot-sdk` report tokens and USD cost, Codex and native `antigravity`

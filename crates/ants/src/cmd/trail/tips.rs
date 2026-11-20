@@ -3,6 +3,7 @@
 //! and removing a saved trail purges its tips ([`purge`]).
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 use ants_proto::{
     MAX_TIP_TEXT, Ranked, Retirement, TRAIL_TIPS_BUCKET, TipBoard, TipId, TipRetired, TipStatus, TipVote, TrailName,
@@ -27,6 +28,30 @@ pub(crate) async fn read(js: &jetstream::Context, name: &TrailName) -> Result<(T
     let entries = latest_in(js, TRAIL_TIPS_BUCKET, &format!("$KV.{TRAIL_TIPS_BUCKET}.{name}.>")).await?;
     let script = super::saved::get(js, name).await?.map(|saved| script_sha256(&saved.script));
     Ok((TipBoard::new(name.clone(), entries), script))
+}
+
+/// [`read`] for listing the tips of the trail `name`: refused when the colony saves no such trail and only this
+/// machine's file holds it, as such a trail takes no tips.
+pub(crate) async fn listing(js: &jetstream::Context, name: &TrailName) -> Result<(TipBoard, Option<String>)> {
+    listing_in(js, &super::saved::local_dir()?, name).await
+}
+
+/// [`listing`], `local` the directory of this machine's trails.
+pub(super) async fn listing_in(
+    js: &jetstream::Context,
+    local: &Path,
+    name: &TrailName,
+) -> Result<(TipBoard, Option<String>)> {
+    let (board, script) = read(js, name).await?;
+    let file = local.join(format!("{name}.py"));
+    if script.is_none() && file.is_file() {
+        bail!(
+            "trail {name} is not a colony trail, only this machine's file {}: tips are left only on the trails the \
+             colony saves",
+            file.display()
+        );
+    }
+    Ok((board, script))
 }
 
 /// The tips of `board` `args` lists at `now` for the current script `script`: the live ones in rank order, then with

@@ -27,6 +27,10 @@ pub struct DaemonArgs {
     /// place of the config file's `metrics` (default: off).
     #[arg(long, env = "ANTS_METRICS", value_name = "ADDR")]
     metrics: Option<SocketAddr>,
+    /// Provider of the ant described by flags: `sense` (default) or `none`, serving it without memories, tasks or
+    /// brief. An ant picked from the config file takes the file's `provider`.
+    #[arg(long, value_parser = [ants_daemon::provider::SENSE, ants_daemon::provider::NONE])]
+    provider: Option<String>,
     #[command(flatten)]
     pub(super) options: AntOptions,
     #[command(flatten)]
@@ -313,6 +317,10 @@ fn select(
             if ant.creds.is_none() {
                 ant.creds = creds.map(Path::to_path_buf);
             }
+            if let Some(provider) = &args.provider {
+                ant.provider_setting = ants_daemon::provider::Setting::named(provider, &Default::default())?;
+                ant.provider = Some(provider.clone());
+            }
             let summary = Summary::load(default_path)?;
             if ant.harness.is_none() {
                 ant.harness = summary.harness;
@@ -336,6 +344,9 @@ fn select(
             })
         }
         Source::File(path) => {
+            if args.provider.is_some() {
+                bail!("--provider is for an ant described by flags; set `provider` in {} instead", path.display());
+            }
             let mut loaded = config::load(&path)?;
             if let Some(creds) = creds {
                 loaded.credit(args.ant.as_ref(), creds).with_context(|| format!("config {}", path.display()))?;

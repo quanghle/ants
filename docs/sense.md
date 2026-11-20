@@ -83,8 +83,9 @@ a thread whose origin is of a kind this version of sense does not know.
     ([Work and reminders](#work-and-reminders)).
 - **The growth report:** the view's `growth report` entry counts, from the ant's sense data alone, how its identity
   grew, to judge the thresholds of the identity findings of dreams and of the brief, which it names last:
-  - its threads: done, started again and expired, its active days, who started them (humans, other ants, itself,
-    webhooks, providers, ants asking a review), the 10 repositories of the most, and the prompts it completed;
+  - its threads of work, as the brief's experience counts them ([Identity](#identity)): done, started again and
+    expired, its active days, who started them (humans, other ants, itself, webhooks, providers), the 10 repositories
+    of the most, and the prompts it completed;
   - by week, from Monday (UTC), over the last 8: the threads started and done, the active days, the calls of sense's
     tools that wrote, by tool, and the verdicts given in dreams. Sense keeps no count of calls by tool: a call writing
     nothing (`sense_brief`, a search, any other read, a call changing nothing) leaves none, `sense_recall` reading a
@@ -107,7 +108,8 @@ a thread whose origin is of a kind this version of sense does not know.
   no host credentials on a server with authentication. It names the fixes: `ants auth host MACHINE`, or
   `provider = "none"` for an ant meant to go without. It fails too for each ant whose live colony entry on the machine
   says why sense keeps none of its data (`sense_unkept`), as one `ants daemon --ant` serves from flags, with no config
-  file.
+  file; where the machine's host credentials are present now, the fix it names is a reload of the daemon (SIGHUP),
+  which links with them.
 - **Sense keeping none of the ant's data:** the daemon warns once per ant as it starts, and the ant's colony entry
   carries why (`sense_unkept`) until sense keeps the data again, which `ants colony` and `ants ant show` show; the ant
   is still served, without memories, tasks or brief, as one whose external provider is down is. It still answers other
@@ -161,9 +163,9 @@ While the machine's host connection is down:
 
 While the host connection is first being made and no cache exists, events wait in the ant's queue and briefs fail.
 Sense writes the logs with the machine's host credentials (`ants auth host`), over the host connection, or, in a daemon
-serving one ant (`ants daemon --ant`), which makes none, over a link of its own carrying the logs alone. That link,
-when it fails, as with credentials the server refuses, is tried again after 1 second, the wait doubling up to 5
-minutes, and at once on a reload. A daemon with neither up, as one without host credentials on a server with
+serving one ant (`ants daemon --ant`), which makes none, over a link of its own carrying the logs alone. Either, when it
+fails, as with credentials the server refuses, is tried again after 1 second, the wait doubling up to 5 minutes, and
+at once on a reload. A daemon with neither up, as one without host credentials on a server with
 authentication, and no cache keeps no data: events are acked with no effect, briefs are empty and the sense tools
 answer `unavailable`, naming why. The ant is still served, and `ants doctor`, the daemon's log and the ant's colony
 entry say so ([What an operator sees and configures](#what-an-operator-sees-and-configures)). A daemon serves the
@@ -242,8 +244,11 @@ last expired. Each event changes the record once and a repeat nothing, so a thre
 its start and its end, none per prompt. An end of a thread sense never saw start records nothing. A clone inherits no
 thread record; an export carries them with the log.
 
-The brief's identity counts the ant's experience from its thread records each time it is composed, keeping no counter
-(`ants_sense::thread::experience`):
+The brief's identity counts the ant's experience from the records of its threads of work each time it is composed,
+keeping no counter (`ants_sense::thread::experience`). The threads of dreams and reviews are not work: neither the
+threads a dream names (its own, and the review thread its sage answered on) nor those of reviews asked of the ant as a
+sage (started by an ant asking a review, or named by a review record) count, so a sage shows as no one who started the
+ant's threads. The experience counts:
 
 - the threads, and those marked done;
 - the active days: the UTC days on which a thread started, started again or was marked done. A record keeps only the
@@ -256,8 +261,8 @@ The brief's identity counts the ant's experience from its thread records each ti
 
 An ant with no thread record shows no experience. A dream's packet counts it the same way over the threads active since
 the dream's start (`experience_since`): a thread counts when it started, started again or was marked done since then,
-and only those times count toward its days and tallies. A dream's findings on the identity count it over the threads
-of work alone, those of dreams and reviews left out (`work`, [Dreams](#dreams)).
+and only those times count toward its days and tallies. The growth report and a dream's findings on the identity
+([Dreams](#dreams)) count it the same way.
 
 A sage's identity adds, after the experience, the tally of the reviews it made of other ants, counted from its review
 records each time it is shown ([Dreams](#dreams)): its reviews, the ants reviewed and the day of the last review, and
@@ -594,8 +599,10 @@ most 64 KiB, holds:
   last findings' verdicts left out first; for the sage, its earlier findings for the ant and what became of them
   (below);
 - for the sage, the trails the colony saved (its `ants_trails` bucket, not a machine's `~/.ants/trails`), each with its
-  name, its ratings (how often its runs were rated worked, partly and failed) and its description, data rather than
-  instructions, the best rated first (by worked plus half of partly against the rest), then the latest saved, at most
+  name, its ratings (how often its runs were rated worked, partly and failed) and its description on one line, cut at
+  300 characters, data rather than instructions, the best rated first (by the mean of Beta(1 + worked + partly/2, 1 +
+  failed + partly/2), so a trail not yet rated ranks at one half, above one rated 1 worked and 2 failed), then the
+  latest saved, at most
   a sixteenth of the packet's budget, the rest counted as left out, or that they could not be read: so a `trail`
   finding suggests no trail the colony has, and an approach one of them serves gets a finding naming it instead (a
   memory or record written for such a finding may name the saved trail to take, judged by its own votes; no trail's
@@ -679,10 +686,8 @@ those offered again do, whatever a sage answers (**The answer**, below):
   of its own and with no change of it proposed: to write anew as the ant's own, or to keep as it is by rejecting the
   finding.
 
-The threads and active days are the experience's ([Identity](#identity)) over the threads of work alone: neither the
-threads a dream names (its own, and the review thread its sage answered on) nor those of reviews asked of the ant as a
-sage (started by an ant asking a review, or named by a review record) count, so a sage's answers make no
-`no_relationship` finding. A finding offered again takes the text gathered now and goes once its ground is gone: the
+The threads, active days, people and repositories are the experience's ([Identity](#identity)), over the threads of
+work alone, so a sage's answers make no `no_relationship` finding nor count as someone new for `stale_self_model`. A finding offered again takes the text gathered now and goes once its ground is gone: the
 record written, the persona or skill change proposed. Each rests on a count stepped coarsely, its threads (or, for a
 stale self-model, the people and repositories new) rounded down to the threshold doubled any number of times (5, 10, 20
 and on), so a rejected one comes again when that count doubles, not at each thread. The numbers are first guesses, to
@@ -710,7 +715,7 @@ findings and before `vitals`:
   each with the ant and finding: the reviewed ants' text, so one quoting any, offered first or again, is untrusted,
   the sage's other findings staying trusted;
 - `undone_findings`: 3 applied findings or more undone since (a memory written for one voted wrong or stale, a
-  proposal rejected), as told over the last 14 active days, naming at most 5;
+  proposal rejected, a trail saved for one removed or rated failed more often than worked), as told over the last 14 active days, naming at most 5;
 - `unlinked_follow_ups`: at least 10 follow-ups of known link status answered over the last 14 active days, at least
   7 in 10 unlinked. Plain follow-ups recorded before link status was tracked do not count;
 - `unanswered_reviews`: an ant reviewed within the last 14 active days that left half or more of the findings of its

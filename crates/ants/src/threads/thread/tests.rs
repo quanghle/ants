@@ -857,7 +857,7 @@ async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
     assert_eq!(line["tool"]["status"], "failed");
     assert_eq!(line["tool"]["duration_ms"], 840);
     assert_eq!(line["tool"]["message"], ask.id.to_string());
-    let without = history(&js, &ask.thread_id, None, Activity::NoReplies, None).await.unwrap();
+    let without = history(&js, &ask.thread_id, None, Activity::Ends, None).await.unwrap();
     let kinds: Vec<_> = without.iter().map(|e| e.kind).collect();
     assert_eq!(kinds, [Kind::Message, Kind::Message, Kind::NoReply], "--no-tools keeps the ends with no reply");
     let messages = history(&js, &ask.thread_id, None, Activity::None, None).await.unwrap();
@@ -932,9 +932,74 @@ async fn a_thread_shows_rejected_and_expired_tool_requests_once() {
         line["rejected"],
         serde_json::json!({"message": ask.id, "request": expired.request, "tool_kind": "read", "by": "expiry"})
     );
-    let without = history(&js, &ask.thread_id, None, Activity::NoReplies, None).await.unwrap();
+    let without = history(&js, &ask.thread_id, None, Activity::Ends, None).await.unwrap();
     assert_eq!(without.len(), 1, "--no-tools omits rejections: {without:?}");
     assert!(!<Kind as clap::ValueEnum>::value_variants().contains(&Kind::Rejected));
+}
+
+#[tokio::test]
+async fn a_thread_shows_how_each_run_of_a_prompt_ended() {
+    use std::collections::BTreeMap;
+
+    use ants_proto::{CallCount, PromptEnd, TimelineEnd};
+
+    let Some(server) = crate::test_support::Server::start() else { return };
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+    let (_, ant_js) = server.connect_as(&dev_a, ants_proto::Role::Ant).await;
+    ants_daemon::bus::ensure_stream(&js).await.unwrap();
+    let ask = Envelope::new(alice.clone(), dev_a.clone(), "build it");
+    js.publish(ask.subject(), json(&ask).into()).await.unwrap().await.unwrap();
+    let failed = TimelineEnd {
+        how: PromptEnd::Failed,
+        duration_ms: 4200,
+        tokens: 0,
+        cost: 0.0,
+        asked: 0,
+        rebuilt: false,
+        calls: BTreeMap::new(),
+        sense_calls: 0,
+    };
+    let calls = [("execute", CallCount { calls: 3, failed: 1 }), ("other", CallCount { calls: 2, failed: 0 })];
+    let replied = TimelineEnd {
+        how: PromptEnd::Replied,
+        duration_ms: 65_000,
+        tokens: 1200,
+        cost: 0.42,
+        asked: 1,
+        rebuilt: true,
+        calls: calls.into_iter().map(|(kind, n)| (kind.to_owned(), n)).collect(),
+        sense_calls: 2,
+    };
+    let mut seqs = Vec::new();
+    for end in [failed, replied] {
+        let record = Timeline::new(dev_a.clone(), ask.thread_id.clone(), ask.id, vec![TimelineEntry::Ended(end)], 0);
+        seqs.push(ant_js.publish(record.subject(), json(&record).into()).await.unwrap().await.unwrap().sequence);
+    }
+
+    let shown = history(&js, &ask.thread_id, None, Activity::All, None).await.unwrap();
+    let kinds: Vec<_> = shown.iter().map(|e| (e.kind, e.seq)).collect();
+    assert_eq!(kinds, [(Kind::Message, 1), (Kind::Ended, seqs[0]), (Kind::Ended, seqs[1])]);
+    let text = render(&shown);
+    assert!(text.contains("\n  ⎿ "), "{text}");
+    assert!(text.contains(" dev-a  ended: failed · 4.2s\n"), "{text}");
+    let replied = " dev-a  ended: replied · 1m5s · 1200 tokens · $0.42 · calls execute 3 (1 failed), other 2 · 2 sense \
+                   calls · 1 tool request asked · session rebuilt\n";
+    assert!(text.ends_with(replied), "{text}");
+    let line = serde_json::to_value(&shown[2]).unwrap();
+    assert_eq!(line["kind"], "ended");
+    assert_eq!(
+        line["ended"],
+        serde_json::json!({
+            "message": ask.id, "how": "replied", "duration_ms": 65_000, "tokens": 1200, "cost": 0.42, "asked": 1,
+            "rebuilt": true, "calls": {"execute": {"calls": 3, "failed": 1}, "other": {"calls": 2}}, "sense_calls": 2,
+        })
+    );
+    let without = history(&js, &ask.thread_id, None, Activity::Ends, None).await.unwrap();
+    assert_eq!(without.len(), 3, "--no-tools keeps the ends: {without:?}");
+    let live = history(&js, &ask.thread_id, None, Activity::Calls, None).await.unwrap();
+    assert_eq!(live.len(), 1, "{live:?}");
+    assert!(!<Kind as clap::ValueEnum>::value_variants().contains(&Kind::Ended));
 }
 
 #[test]

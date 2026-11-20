@@ -169,7 +169,8 @@ fn issue_host(machine: &Machine) -> String {
 /// (`ants daemon` serves them without it, whole file or one ant (`--ant`) alike); and of the others whose live colony
 /// entries among `colony` as of `now` say so ([`ColonyEntry::sense_unkept`]), on the machine as `hostname` or `host`'s
 /// top-level `machine` names it, as an ant `ants daemon --ant` serves from its flags alone, with no config file.
-/// Nothing where sense keeps the data of them all.
+/// Nothing where sense keeps the data of them all. With `host`'s credentials present, the fix is a reload of the
+/// daemon, which links with them then, rather than issuing them.
 pub(super) fn check_sense_kept(
     host: &config::HostSettings,
     ants: &[Ant],
@@ -202,7 +203,18 @@ pub(super) fn check_sense_kept(
     if details.is_empty() {
         return None;
     }
-    let mut fix = vec![issue_host(&host.machine_or(hostname))];
+    let mut fix = vec![match &host.creds {
+        Some(path) => {
+            use crate::service::{Action, Service, manual};
+            format!(
+                "reload `ants daemon` with SIGHUP, or its service ({}), for sense to link with the host credentials \
+                 at {}",
+                manual(Service::Daemon, Action::Reload),
+                path.display()
+            )
+        }
+        None => issue_host(&host.machine_or(hostname)),
+    }];
     if uncredentialed {
         fix.push(
             "provider = \"none\" in the [[ant]] table of an ant meant to go without, or at the top of the config file \

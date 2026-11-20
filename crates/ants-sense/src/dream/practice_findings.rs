@@ -6,7 +6,7 @@
 //!   over the last [`PRACTICE_DAYS`] active days, at least [`JUDGED_FINDINGS`] of them, one finding each, quoting the
 //!   reasons of up to [`QUOTED_REASONS`] of the latest rejected, the reviewed ants' text: untrusted when it quotes any;
 //! - [`UNDONE_FINDINGS`] applied findings or more undone since, as told over the same days: a memory written for one
-//!   voted wrong or stale, a proposal rejected;
+//!   voted wrong or stale, a proposal rejected, a trail saved for one removed or rated failed more often than worked;
 //! - at least [`UNLINKED_FINDINGS`] in every [`FOLLOW_UP_FINDINGS`] follow-ups unlinked over those days;
 //! - an ant reviewed within those days that left [`UNANSWERED_PERCENT`] percent or more of the findings of its last
 //!   [`UNANSWERED_REVIEWS`] reviews with findings unanswered, its latest review left out, as the verdicts on it come
@@ -161,7 +161,8 @@ fn undone(reviews: &[ReviewRecord], recent: &dyn Fn(Option<DateTime<Utc>>) -> bo
     }
     let text = format!(
         "{n} findings given other ants were applied and then undone, as told over the last {PRACTICE_DAYS} active \
-         days (a memory written for one voted wrong or stale, a proposal rejected): {}. Keep what that teaches of the \
+         days (a memory written for one voted wrong or stale, a proposal rejected, a trail saved for one removed or \
+         rated failed more often than worked): {}. Keep what that teaches of the \
          findings that last, as {ANSWERS}.",
         named.join(", ")
     );

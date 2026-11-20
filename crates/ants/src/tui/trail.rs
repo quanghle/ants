@@ -147,7 +147,7 @@ pub async fn tips(ctx: &Ctx, args: &TipsArgs) -> Result<Done> {
         let retired = cli_tips::retire(&ctx.js, &args.name, id, args.writer.as_ref(), &ctx.me.id, now).await?;
         return Ok(Done { line: cli_tips::retired(&retired, now), ..Done::default() });
     }
-    let (board, script) = cli_tips::read(&ctx.js, &args.name).await?;
+    let (board, script) = cli_tips::listing(&ctx.js, &args.name).await?;
     let line = cli_tips::summary(&board, args, script.as_deref(), now);
     if cli_tips::listed(&board, args, script.as_deref(), now).is_empty() {
         return Ok(Done { line, ..Done::default() });

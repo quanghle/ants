@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use super::text::took;
-use super::{NoReply, ToolCall, ToolRejection};
+use super::{NoReply, PromptEnded, ToolCall, ToolRejection};
 use crate::messages::attachments;
 use crate::people::sealed;
 
@@ -42,6 +42,9 @@ pub enum Kind {
     /// A rejected or expired tool request from an ant's timeline records: not a message, so not searched.
     #[value(skip)]
     Rejected,
+    /// How a prompt of an ant ended and what it took, from its timeline records: not a message, so not searched.
+    #[value(skip)]
+    Ended,
 }
 
 impl Kind {
@@ -58,12 +61,13 @@ impl Kind {
             Self::Tool => "tool",
             Self::NoReply => "no reply",
             Self::Rejected => "rejected",
+            Self::Ended => "ended",
         }
     }
 
     /// Whether an entry of the kind comes from an ant's timeline records rather than a stored message.
     pub fn on_timeline(self) -> bool {
-        matches!(self, Self::Tool | Self::NoReply | Self::Rejected)
+        matches!(self, Self::Tool | Self::NoReply | Self::Rejected | Self::Ended)
     }
 
     /// Whether an entry of the kind is a message, channel post or note, which reopens a thread marked done
@@ -170,6 +174,9 @@ pub struct Entry {
     /// A rejected or expired tool request, its title the text and the requesting ant the sender.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected: Option<Box<ToolRejection>>,
+    /// How a prompt ended and what it took, its ant the sender.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended: Option<Box<PromptEnded>>,
     /// The ant-to-ant turns an inbox message, channel post or notes post leaves on its thread.
     #[serde(skip)]
     pub turns: Option<u32>,
@@ -233,6 +240,7 @@ impl Entry {
             tool: None,
             no_reply: None,
             rejected: None,
+            ended: None,
             turns: None,
             webhook: false,
             provider: None,
@@ -296,6 +304,16 @@ impl Entry {
             text: rejection.title.clone(),
             rejected: Some(Box::new(rejected)),
             ..Self::new(seq, merged.at, Kind::Rejected, merged.thread_id.clone())
+        }
+    }
+
+    /// The entry of how a prompt ended, from the timeline record stored at `seq`.
+    pub(super) fn ended(seq: u64, merged: &ants_proto::MergedEnd) -> Self {
+        let ended = PromptEnded { message: merged.message, end: merged.end.clone() };
+        Self {
+            from: Some(merged.ant.clone()),
+            ended: Some(Box::new(ended)),
+            ..Self::new(seq, merged.at, Kind::Ended, merged.thread_id.clone())
         }
     }
 
