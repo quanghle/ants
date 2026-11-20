@@ -221,3 +221,80 @@ async fn a_resume_tried_again_after_its_records_were_stored_half_way_counts_each
     assert_eq!(lead.header(&run).await.steps, 2);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Leave `run` of `lead`, its two steps stored sent, stored but not listed, as a daemon stopped between storing its
+/// header and listing it leaves it, and restart the conductor.
+async fn unlisted(lead: Conductor, run: &RunId, server: &NatsServer, dir: &Path) -> Conductor {
+    eventually("the steps are stored sent", async || {
+        let pending = lead.session(run).await.0.pending;
+        pending.len() == 2 && pending.iter().all(|call| call.sent)
+    })
+    .await;
+    let runs = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    drop(lead);
+    let index = serde_json::to_vec(&TrailRunIndex { runs: Vec::new() }).unwrap();
+    runs.put(trail_runs_index_key(&ant("lead")), index).await.unwrap();
+    let again = conductor_saving(server, &ants_binary(), Vec::new(), Some(dir.to_owned())).await;
+    assert!(again.trails.unfinished().is_empty(), "the index lists no run");
+    again
+}
+
+#[tokio::test]
+async fn a_run_its_firing_continues_beside_a_resume_or_a_stop_of_it_is_continued_once_and_keeps_the_stop() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-fired-beside");
+    let meta = json!({"name": "fan", "description": "a test", "phases": []});
+    std::fs::write(dir.join("fan.py"), format!("meta = {meta}\n{FAN_OUT}\n")).unwrap();
+    let start = TrailStart { trail: "fan".parse().unwrap(), args: Value::Null, limits: TrailLimits::DEFAULT };
+    let firing = Envelope::new(ant("nightly"), ant("lead"), "Scheduled run of trail.")
+        .with_owner(Some(UserId::human()))
+        .from_webhook()
+        .starting(Some(start.clone()));
+    let human = UserId::human();
+    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    let run = lead.trails.start_fired(&firing, &start).await.unwrap();
+    fan_out_steps(&mut lead).await;
+    lead.trails.stop(&run, &human).await.unwrap();
+
+    // The firing, delivered again, continues the stopped run while a resume of it is under way.
+    let mut again = unlisted(lead, &run, &server, &dir).await;
+    let (fired, resumed) =
+        tokio::join!(again.trails.start_fired(&firing, &start), again.trails.resume(&run, &human, None));
+    assert_eq!(fired, Ok(run.clone()));
+    assert_eq!(resumed, Ok(()));
+    assert_eq!(again.trails.unfinished().len(), 1);
+    assert_eq!(again.trails.status(&run).await.unwrap().header.state, RunState::Running);
+    fan_out_steps(&mut again).await;
+    assert_eq!(again.header(&run).await.steps, 2, "the steps sent anew count once");
+
+    // The firing, delivered again, continues the running run while a stop of it is under way: the stop is refused, or
+    // the run stays stopped.
+    let mut third = unlisted(again, &run, &server, &dir).await;
+    let stop = async {
+        tokio::task::yield_now().await;
+        third.trails.stop(&run, &human).await
+    };
+    let (fired, stopped) = tokio::join!(third.trails.start_fired(&firing, &start), stop);
+    assert_eq!(fired, Ok(run.clone()));
+    assert_eq!(third.trails.unfinished().len(), 1);
+    let state = third.trails.status(&run).await.unwrap().header.state;
+    match stopped {
+        Ok(_) => {
+            assert_eq!(state, RunState::Stopped { by: human.clone() });
+            assert_eq!(third.header(&run).await.state, state, "stored stopped");
+            assert!(third.sends_no_step(Duration::from_secs(1)).await, "a stopped run sends no step");
+        }
+        Err(error) => {
+            assert_eq!(error, format!("lead conducts no run {run}"));
+            assert_eq!(state, RunState::Running);
+            third.trails.stop(&run, &human).await.unwrap();
+        }
+    }
+    third.trails.resume(&run, &human, None).await.unwrap();
+    let (first, second) = fan_out_steps(&mut third).await;
+    assert!(third.reply(&first, &first.text.to_uppercase()).await);
+    assert!(third.reply(&second, &second.text.to_uppercase()).await);
+    assert_eq!(third.ended(&run).await, RunState::Done { result: json!(["A", "B"]) });
+    std::fs::remove_dir_all(&dir).unwrap();
+}
