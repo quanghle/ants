@@ -1,3 +1,6 @@
+//! Admin payloads ([`AdminPayload`]): the bytes of an admin order or outcome too large to carry inline, stored by
+//! reference as chunks in [`FILES_STREAM`].
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

@@ -1,3 +1,6 @@
+//! When a reminder fires ([`Trigger`]): at a time, after a delay, daily or weekly at a UTC clock time, or on a
+//! condition; its validation, its schema in the `sense_remind` tool, and its first and next firing times.
+
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

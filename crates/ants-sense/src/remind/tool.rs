@@ -1,3 +1,6 @@
+//! The `sense_remind` tool: creating, listing, showing, acknowledging, postponing, dropping and renewing an ant's
+//! reminders, each change guarded by the reminder's revision.
+
 use crate::sanitize::{Limit, Lines, sanitize};
 
 use super::*;

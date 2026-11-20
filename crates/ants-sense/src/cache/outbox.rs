@@ -1,3 +1,8 @@
+//! The cache's offline outbox: local writes the log has not yet acknowledged ([`Pending`]), kept in the `outbox`
+//! table and applied over the confirmed items, which `confirmed_items` keeps a copy of while any are pending. A
+//! rebuild restores that copy and overlays the outbox again; the first entry a remote revision invalidates stops the
+//! overlay and is recorded as the pending conflict instead of being dropped.
+
 use serde::{Deserialize, Serialize};
 
 use super::*;
