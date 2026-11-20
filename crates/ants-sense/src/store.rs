@@ -834,6 +834,13 @@ pub trait Stores: Send + Sync {
         })
     }
 
+    /// Whether the link reaching the log of `ant`, served, failed and waits to be tried again, so that data kept none of
+    /// now ([`StoreError::NotKept`]) may be kept once it is up: an event then waits for it ([`crate::Sense`]).
+    fn link_retrying(&self, ant: &UserId) -> bool {
+        let _ = ant;
+        false
+    }
+
     /// The export of `ant`'s sense data, to take to another bus ([`crate::export`]).
     fn export<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<SenseExport, StoreError>> {
         Box::pin(std::future::ready(Err(StoreError::NotKept(format!("no export of {ant}")))))
