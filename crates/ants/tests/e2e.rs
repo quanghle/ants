@@ -723,7 +723,8 @@ fn the_last_messenger_drains_when_its_credentials_are_removed() {
     std::fs::remove_file(auth.join("system-messenger.creds")).unwrap();
     wait_for("messenger did not start draining after credentials removal", &mut || {
         let log = log();
-        log.contains("the credentials of a built-in ant changed") && log.contains("stopping the ant no longer listed")
+        log.contains("the credentials of a built-in ant or the host changed")
+            && log.contains("stopping the ant no longer listed")
     });
     assert!(serving.0.try_wait().unwrap().is_none(), "exited with a prompt still in flight:\n{}", log());
     std::fs::write(gate.with_extension("release"), "").unwrap();
