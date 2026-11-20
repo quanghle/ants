@@ -8,7 +8,7 @@
 //! ant on the review thread inside a marked block ([`REVIEW_BEGIN`]) as another ant's suggestions to verify against
 //! their evidence, not instructions. A finding resting on a thread of untrusted origin, or on an
 //! untrusted memory, is marked untrusted ([`Finding::untrusted`]); what the ant writes on the thread while one is open
-//! is untrusted too ([`untrusted_on`]). A [`TRAIL`] finding suggests a saved trail ([`Outline`]).
+//! is untrusted too ([`Dream::untrusted_open`]). A [`TRAIL`] finding suggests a saved trail ([`Outline`]).
 
 pub(in crate::dream) mod outline;
 
@@ -17,12 +17,12 @@ use std::fmt::Write as _;
 
 use ants_proto::{FindingOutcome, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use super::packet::{commits, finding_line, late_answers, trail_applied};
-use super::{BY, Covered, Dream, Finding, FindingKind, MAX_DREAM_WRITES, MAX_FINDINGS, State, last};
-use crate::items::{ItemId, Values};
+use super::{Covered, Dream, Finding, FindingKind, MAX_DREAM_WRITES, MAX_FINDINGS, State, last, rewrite};
+use crate::items::ItemId;
 use crate::memory::{MemoryItem, Trust};
 use crate::sanitize::{Limit, sanitize_title};
 use crate::store::{Items, StoreError, read_modify_write};
@@ -356,7 +356,8 @@ pub async fn answered(
 ) -> Result<Option<Reviewed>, StoreError> {
     let parsed = &text.and_then(parse);
     read_modify_write(|| async move {
-        let Some((mut dream, revision)) = last(items).await? else { return Ok(None) };
+        let Some((before, revision)) = last(items).await? else { return Ok(None) };
+        let mut dream = before.clone();
         let Some(mut review) = dream.review.clone().filter(|review| review.thread == *thread) else { return Ok(None) };
         if dream.sage.as_ref() != Some(sage) {
             return Ok(None);
@@ -382,9 +383,8 @@ pub async fn answered(
             review.over = late.over + late.findings.len() - taken.len();
             review.unreadable = late.unreadable;
             let taken = review.late.len();
-            let mut values = Values::new();
-            values.insert("review".into(), json!(review));
-            items.change(&Dream::id(dream.number), values, Some(revision), BY).await?;
+            dream.review = Some(review);
+            rewrite(items, &before, &dream, revision).await?;
             return Ok(Some(Reviewed::Late(taken)));
         }
         review.answer = Some(message);
@@ -410,13 +410,7 @@ pub async fn answered(
                 Reviewed::Fallback
             }
         };
-        let mut values = Values::new();
-        values.insert("state".into(), json!(dream.state));
-        values.insert("thread".into(), json!(dream.thread));
-        values.insert("findings".into(), json!(dream.findings));
-        values.insert("held".into(), json!(dream.held));
-        values.insert("review".into(), json!(dream.review));
-        items.change(&Dream::id(dream.number), values, Some(revision), BY).await?;
+        rewrite(items, &before, &dream, revision).await?;
         Ok(Some(reviewed))
     })
     .await
@@ -564,26 +558,6 @@ pub(in crate::dream) fn left_out(over: usize, unreadable: usize) -> String {
 
 /// Note that the review of dream `number` was sent to the sage.
 pub async fn review_sent(items: &dyn Items, number: u64) -> Result<(), StoreError> {
-    read_modify_write(|| async move {
-        let gone = || StoreError::NotFound(Dream::id(number));
-        let (mut dream, revision) = super::get(items, number).await?.ok_or_else(gone)?;
-        let Some(review) = dream.review.as_mut().filter(|review| !review.sent) else { return Ok(()) };
-        review.sent = true;
-        let mut values = Values::new();
-        values.insert("review".into(), json!(dream.review));
-        items.change(&Dream::id(number), values, Some(revision), BY).await?;
-        Ok(())
-    })
-    .await
-}
-
-/// The ids of the open findings resting on untrusted text of the last dream when `thread` is its dream thread: what a
-/// write there answers may rest on them, so it is untrusted, and `sense_identity` and `sense_skill` refuse proposals
-/// made there but in answer to a trusted finding of the dream ([`super::untrusted`]). Empty on any other thread.
-pub async fn untrusted_on(items: &dyn Items, thread: &ThreadId) -> Result<Vec<String>, StoreError> {
-    let Some((dream, _)) = last(items).await? else { return Ok(Vec::new()) };
-    if dream.thread.as_ref() != Some(thread) {
-        return Ok(Vec::new());
-    }
-    Ok(dream.untrusted_open().map(|finding| finding.id.clone()).collect())
+    let sent = |dream: &mut Dream| dream.review.iter_mut().for_each(|review| review.sent = true);
+    super::update(items, number, sent).await.map(drop)
 }

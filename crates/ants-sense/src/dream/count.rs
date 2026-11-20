@@ -10,7 +10,7 @@ use ants_proto::provider::{CallContext, ToolCall};
 use ants_proto::{TrailName, UserId};
 use serde_json::json;
 
-use super::{BY, Dream, MAX_DREAM_WRITES, Making, Refused, SavedTrail, get, ground, last};
+use super::{Dream, MAX_DREAM_WRITES, Making, Refused, SavedTrail, ground, last, rewrite, update};
 use crate::items::ItemId;
 use crate::store::{Items, StoreError, read_modify_write};
 use crate::tools::{Answer, ToolSpec};
@@ -73,16 +73,8 @@ pub(crate) async fn counted(sense: &Sense, spec: &ToolSpec, call: &ToolCall) -> 
 
 /// Count a write of `id` on the thread of dream `number`; returns the writes made ([`Dream::writes_made`]).
 async fn count_write(items: &dyn Items, number: u64, id: ItemId) -> Result<usize, StoreError> {
-    let id = &id;
-    read_modify_write(|| async move {
-        let (mut dream, revision) = get(items, number).await?.ok_or_else(|| StoreError::NotFound(Dream::id(number)))?;
-        dream.writes.push(id.clone());
-        let mut values = crate::items::Values::new();
-        values.insert("writes".into(), json!(dream.writes));
-        items.change(&Dream::id(number), values, Some(revision), BY).await?;
-        Ok(dream.writes_made())
-    })
-    .await
+    let (dream, ()) = update(items, number, |dream| dream.writes.push(id.clone())).await?;
+    Ok(dream.writes_made())
 }
 
 /// Record trail `name` saved in `context`, in answer to `finding` if it names one, when on the thread of the last
@@ -95,15 +87,14 @@ pub async fn trail_saved(
     finding: Option<&str>,
 ) -> Result<Option<(u64, usize)>, StoreError> {
     read_modify_write(|| async move {
-        let Some((mut dream, revision)) = last(items).await? else { return Ok(None) };
-        if dream.thread.as_ref() != Some(&context.thread) {
+        let Some((before, revision)) = last(items).await? else { return Ok(None) };
+        if before.thread.as_ref() != Some(&context.thread) {
             return Ok(None);
         }
+        let mut dream = before.clone();
         let finding = finding.map(str::to_owned);
         dream.trails.push(SavedTrail { name: name.clone(), finding, at: context.at });
-        let mut values = crate::items::Values::new();
-        values.insert("trails".into(), json!(dream.trails));
-        items.change(&Dream::id(dream.number), values, Some(revision), BY).await?;
+        rewrite(items, &before, &dream, revision).await?;
         Ok(Some((dream.number, dream.writes_made())))
     })
     .await

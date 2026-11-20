@@ -5,6 +5,7 @@ use serde_json::json;
 
 use super::*;
 use crate::Sense;
+use crate::items::Values;
 use crate::memory::tests::{Kept, context, events, human, memory, sense, tool};
 use crate::memory::{Memory, Votes};
 use crate::tools::Answer;
@@ -560,6 +561,15 @@ fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
     );
     assert!(bare.contains("started by alice\n\nmessage 1 of a thread\n"), "no lines without actions: {bare}");
     assert!(!bare.contains("marked undone"), "{bare}");
+}
+
+/// The ids of the open findings resting on untrusted text of the last dream when `thread` is its dream thread.
+async fn untrusted_on(items: &dyn Items, thread: &ThreadId) -> Result<Vec<String>, StoreError> {
+    let Some((dream, _)) = last(items).await? else { return Ok(Vec::new()) };
+    if dream.thread.as_ref() != Some(thread) {
+        return Ok(Vec::new());
+    }
+    Ok(dream.untrusted_open().map(|finding| finding.id.clone()).collect())
 }
 
 mod colony_trails;
