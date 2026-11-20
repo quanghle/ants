@@ -359,7 +359,7 @@ pub async fn ensure_colony(js: &jetstream::Context, ttl: Duration) -> Result<kv:
     if let Ok(store) = js.get_key_value(COLONY_BUCKET).await {
         return Ok(store);
     }
-    js.create_key_value(hub::colony_config(ttl))
+    hub::create_colony(js, ttl)
         .await
         .context("creating the colony bucket (with credentials, `ants init` as the human creates it)")
 }

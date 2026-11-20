@@ -60,6 +60,8 @@ async fn entries_refresh_leave_and_expire() {
     let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
     let ttl = Duration::from_secs(2);
     let kv = bus::ensure_colony(&js, ttl).await.unwrap();
+    let config = js.get_stream("KV_ants_colony").await.unwrap().cached_info().config.clone();
+    assert!(!config.allow_rollup, "the colony is created denying rollups");
     let beat = Duration::from_millis(300);
 
     // Heartbeats outlive the TTL, then a clean stop removes the entry at once.
@@ -203,8 +205,8 @@ async fn the_builtin_messenger_waits_for_another_daemons_messenger() {
     b.abort();
 }
 
-/// The colony leaves a marker when an entry expires, so a daemon waiting for its turn takes over soon after the expiry,
-/// without looking at the colony in between.
+/// A daemon waiting for its turn reckons when the entry expires from its last put, the colony leaving no marker of an
+/// expiry, so it takes over soon after the expiry, without looking at the colony every `every`.
 #[tokio::test]
 async fn a_waiting_daemon_takes_over_as_soon_as_the_entry_expires() {
     let Some(server) = Server::start() else { return };
@@ -217,10 +219,36 @@ async fn a_waiting_daemon_takes_over_as_soon_as_the_entry_expires() {
     drop(there.unwrap());
     let mut here = entry_on("messenger", "here");
     let every = Duration::from_secs(60);
-    // How soon nats-server expires the entry varies; any takeover well before `every` came from the marker.
+    // How soon nats-server expires the entry varies; any takeover well before `every` came from the reckoning.
     tokio::time::timeout(ttl * 10, colony::wait_for_turn(&kv, &mut here, every)).await.expect("took over").unwrap();
     let took = put_at.elapsed();
     assert!(took >= ttl - Duration::from_millis(500), "took over before the entry expired: {took:?}");
+    assert_eq!(read(&kv, "messenger").await.unwrap().instance, here.instance);
+}
+
+/// While heartbeats keep the entry, a waiting daemon reckons its expiry anew from each put its watch shows, and takes
+/// over soon after the last one's.
+#[tokio::test]
+async fn a_waiting_daemon_takes_over_soon_after_the_last_heartbeat() {
+    let Some(server) = Server::start() else { return };
+    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let ttl = Duration::from_secs(2);
+    let kv = bus::ensure_colony(&js, ttl).await.unwrap();
+
+    let there = Registration::start(kv.clone(), entry_on("messenger", "there"), Duration::from_millis(300)).await;
+    let mut here = entry_on("messenger", "here");
+    let waiting = tokio::spawn({
+        let kv = kv.clone();
+        async move { colony::wait_for_turn(&kv, &mut here, Duration::from_secs(60)).await.map(|_| here) }
+    });
+    tokio::time::sleep(ttl * 2).await;
+    assert!(!waiting.is_finished(), "waits while the heartbeats come");
+    drop(there.unwrap());
+    let stopped = Instant::now();
+    let here = tokio::time::timeout(ttl * 5, waiting).await.expect("took over").unwrap().unwrap();
+    let took = stopped.elapsed();
+    assert!(took >= ttl - Duration::from_millis(500), "took over before the entry expired: {took:?}");
+    assert!(took < ttl * 3, "took over long after the entry expired: {took:?}");
     assert_eq!(read(&kv, "messenger").await.unwrap().instance, here.instance);
 }
 
