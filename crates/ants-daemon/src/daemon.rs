@@ -308,7 +308,8 @@ enum Served {
 /// For an assistant's credentials, keeps their record for readers of what it does for its human and lets its tools
 /// act for the human ([`Mcp::with_assisting`]), opening and sealing the human's sealed messages with the ant's sealing
 /// key when it has one ([`crate::secrets::sealing::AssistantSealing`]).
-async fn assist(mcp: &Mcp, config: &Config, js: &async_nats::jetstream::Context, humans: &Registry) {
+async fn assist(mcp: &Mcp, bus: Bus<'_>) {
+    let Bus { config, js, humans, .. } = bus;
     let Some(creds) = &config.connection.creds else { return };
     let js_domain = &config.connection.js_domain;
     let human = match crate::people::behalf::keep_record(js, js_domain.as_ref(), &config.ant, creds).await {
@@ -367,6 +368,8 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
     let account = || crate::people::humans::account(config.connection.creds.as_deref());
     let humans = Registry::new(config.policy.human.clone()).verifying_grants(account());
     let _watching = humans.watch(js.clone(), crate::people::humans::RETRY);
+    let shared = Bus { config, client: &client, js: &js, humans: &humans, providers };
+    let (services, launch) = services(shared, allow, &entry.machine).await?;
     let Services {
         redactor,
         approver,
@@ -378,20 +381,17 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         escalator,
         identity,
         lifecycle,
-        mcp,
-        launch,
-        mcp_sign_ins,
-    } = services(config, &client, &js, &humans, allow, &entry.machine, providers).await?;
+        ..
+    } = &services;
     let stream = bus::open_stream(&js, &config.ant).await?;
-    let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(reading);
-    let storage = storage_watcher(config, &js, &sessions_kv);
-    let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
-    let attempts_kv = bus::ensure_attempts(&js, config.connection.js_domain.as_ref(), &config.ant).await?;
-    let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
-    let _waking = wake::serve(providers, &config.ant, &js, outbox.clone(), sessions.clone(), attempts_kv.clone()).await;
+    let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(*reading);
+    let storage = storage_watcher(config, &js, sessions_kv);
+    let sessions = SessionStore::kv(sessions_kv.clone(), config.ant.clone());
+    let (outbox, attempts_kv) = (services.outbox.clone(), services.attempts_kv.clone());
+    let _waking = wake::serve(providers, &config.ant, &js, outbox, sessions.clone(), attempts_kv.clone()).await;
     let (answered, buried) = delivery_marks(&config.storage.home).await;
     let pool = harness_pool(config, launch, sessions, &workload).await.with_lifecycle(lifecycle.clone());
-    let publisher = publisher(config, &js, &redactor, &pool).await;
+    let publisher = publisher(config, &js, redactor, &pool).await;
     let (messages, channels) = inbox_messages(&js, &stream, config).await?;
     let sense = providers.sense_of(&config.provider);
     let registration = enter_colony(&js, entry.clone(), claimed, &workload, sense).await?;
@@ -400,30 +400,30 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         js: &js,
         ant: &config.ant,
         builtin: config.presence.builtin,
-        reading,
+        reading: *reading,
         machine: &entry.machine,
         pool: &pool,
         cancels: Cancels::default(),
         steers: steering::Steers::default(),
         unnarrowed: Unnarrowed::default(),
         restarts,
-        attempts: &Attempts::new(attempts_kv.clone(), config.ant.clone()),
+        attempts: &Attempts::new(attempts_kv, config.ant.clone()),
         answered: &answered,
         buried: &buried,
-        mcp: Some(&mcp),
-        approvals: Some(&approver),
+        mcp: Some(&services.mcp),
+        approvals: Some(approver),
         publisher: publisher.as_ref(),
-        redactor: &redactor,
+        redactor,
         workload: &workload,
         pause: &config.pause,
         drift: &config.drift,
         metrics,
         limits: config.harness.limits,
-        ledger: &ledger,
-        escalator: &escalator,
+        ledger,
+        escalator,
         notes: notes.as_ref(),
         threads: &threads,
-        colony: &colony,
+        colony,
         humans: &humans,
         behalf: Records::new(js.clone(), config.connection.js_domain.clone(), account()),
         retry_delay: RETRY_DELAY,
@@ -431,7 +431,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         timeline_every: TIMELINE_EVERY,
         sign_in: SignIn::default(),
         sign_in_every: signin::CHECK_EVERY,
-        mcp_sign_ins,
+        mcp_sign_ins: services.mcp_sign_ins.clone(),
         breaker: Breaker::default(),
         throttle: Throttle::default(),
         backoffs: ratelimit::BACKOFFS,
@@ -441,7 +441,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         home: &config.storage.home,
         lifecycle: lifecycle.as_ref(),
         sense,
-        trails: trails(config, &client, &js, &humans, &mcp, outbox, attempts_kv, notes.clone()).await,
+        trails: trails(shared, &services).await,
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     forget_if_retired(&served, config, &js, retired_before).await;
@@ -463,17 +463,8 @@ async fn growth(config: &Config, identity: Option<&Identity>, providers: &Provid
 
 /// The trails the ant conducts, their runs continued from their records and `mcp` serving `run_trail` for them; None,
 /// with a warning, when the bus keeps no runs.
-#[expect(clippy::too_many_arguments, reason = "the services a conductor writes through, each built by serve")]
-async fn trails(
-    config: &Config,
-    client: &async_nats::Client,
-    js: &async_nats::jetstream::Context,
-    humans: &Registry,
-    mcp: &Mcp,
-    outbox: crate::mcp::Outbox,
-    attempts: crate::records::direct_kv::DirectKv,
-    notes: std::sync::Arc<dyn NotesStore>,
-) -> Option<Trails> {
+async fn trails(bus: Bus<'_>, services: &Services) -> Option<Trails> {
+    let Bus { config, client, js, humans, .. } = bus;
     let conducting = crate::trail::Conducting {
         js: js.clone(),
         js_domain: config.connection.js_domain.clone(),
@@ -483,10 +474,10 @@ async fn trails(
         trails_dir: crate::config::home_dir().ok().map(|home| home.join(".ants").join("trails")),
         humans: humans.clone(),
         colony: crate::mcp::jetstream_colony(js.clone()),
-        outbox,
-        attempts,
+        outbox: services.outbox.clone(),
+        attempts: services.attempts_kv.clone(),
         workers: config.pooling.trail_workers,
-        notes,
+        notes: services.notes.clone(),
         // Without credentials the server is open, with no `ants signer` to answer.
         saves: match config.connection.creds {
             Some(_) => crate::trail::SaveThrough::Signer,
@@ -496,7 +487,7 @@ async fn trails(
     match Trails::new(conducting).await {
         Ok(trails) => {
             trails.restore().await;
-            mcp.with_trails(trails.clone());
+            services.mcp.with_trails(trails.clone());
             Some(trails)
         }
         Err(e) => {
@@ -573,43 +564,51 @@ async fn take_turn(
     Ok(Some((entry, Some(revision))))
 }
 
+/// The daemon's ways to the bus and what it shares with every service it sets up, as [`serve`] has them.
+#[derive(Clone, Copy)]
+struct Bus<'a> {
+    config: &'a Config,
+    client: &'a async_nats::Client,
+    js: &'a jetstream::Context,
+    humans: &'a Registry,
+    /// The providers of the process, among which the ant's.
+    providers: &'a Providers,
+}
+
 /// What the ant's inbox serves with on the bus, besides its harness pool, in the order [`services`] builds it.
 struct Services {
     redactor: std::sync::Arc<Redactor>,
     approver: NatsApprover,
     colony: Colony,
+    /// Where the ant's MCP tools, its trails and its wakes send messages, redacted.
+    outbox: crate::mcp::Outbox,
     reading: Reading,
     notes: std::sync::Arc<RedactingNotes<crate::stream::notes::JetStreamNotes>>,
     sessions_kv: crate::records::direct_kv::DirectKv,
+    /// The attempts of the messages in hand, also those of the trails' steps.
+    attempts_kv: crate::records::direct_kv::DirectKv,
     ledger: std::sync::Arc<Ledger>,
     escalator: std::sync::Arc<Escalator>,
     identity: Option<Identity>,
     /// Where the ant's lifecycle events go, when its provider takes them and its identity record could be read.
     lifecycle: Option<Lifecycle>,
     mcp: Mcp,
-    /// How the harnesses start, with the ant's MCP server and its tool requests going to `approver`, and the
-    /// sign-ins to MCP servers of their sessions going to `mcp_sign_ins`.
-    launch: Launch,
+    /// The sign-ins to MCP servers of the harnesses' sessions.
     mcp_sign_ins: mcp_sign_in::Untold,
 }
 
 /// Set up the ant's redactor, approvals, notes, spending ledger, escalator and records, and start its MCP server, its
-/// provider among `providers` taking tool calls naming `machine` for the machine serving the ant.
-async fn services(
-    config: &Config,
-    client: &async_nats::Client,
-    js: &jetstream::Context,
-    humans: &Registry,
-    allow: Allowlist,
-    machine: &str,
-    providers: &Providers,
-) -> Result<Services> {
+/// provider among the bus's taking tool calls naming `machine` for the machine serving the ant; with how the harnesses
+/// start, with the ant's MCP server and their tool requests going to its approver, and the sign-ins to MCP servers of
+/// their sessions going to its `mcp_sign_ins`.
+async fn services(bus: Bus<'_>, allow: Allowlist, machine: &str) -> Result<(Services, Launch)> {
+    let Bus { config, js, humans, providers, .. } = bus;
     let redactor = std::sync::Arc::new(redactor(config.policy.redact, &config.harness));
     let colony = crate::mcp::jetstream_colony(js.clone());
     let account = crate::people::humans::account(config.connection.creds.as_deref());
     let records = Records::new(js.clone(), config.connection.js_domain.clone(), account);
     let assistants = AssistantFirst::with_records(humans.clone(), colony.clone(), records);
-    let approver = approver(&config.ant, &config.policy, client, js, humans).with_assistants(assistants.clone());
+    let approver = approver(bus).with_assistants(assistants.clone());
     let policy =
         PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone()))).with_redactor(redactor.clone());
     let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
@@ -617,8 +616,9 @@ async fn services(
     let notes = crate::stream::notes::JetStreamNotes::new(js.clone(), config.ant.clone()).reading(reading);
     let notes = std::sync::Arc::new(RedactingNotes { notes, redactor: redactor.clone() });
     let sessions_kv = bus::ensure_sessions(js, config.connection.js_domain.as_ref(), &config.ant).await?;
+    let attempts_kv = bus::ensure_attempts(js, config.connection.js_domain.as_ref(), &config.ant).await?;
     let ledger = ledger(&config.ant, &config.spending, &sessions_kv);
-    let escalator = escalator(config, js, &colony, humans, &ledger, &redactor, assistants);
+    let escalator = escalator(bus, &colony, &ledger, &redactor, assistants);
     let (identity, identity_id) = ant_records(config, js).await;
     let sense = providers.sense_of(&config.provider);
     if let Some(sense) = sense {
@@ -634,14 +634,14 @@ async fn services(
     let mut mcp = Mcp::start(
         config.ant.clone(),
         &config.storage.home,
-        outbox,
+        outbox.clone(),
         colony.clone(),
         notes.clone(),
         humans.clone(),
         Some(escalator.clone()),
     )
     .await?;
-    connect_mcp(&mut mcp, config, client, js, &redactor, humans, providers).await?;
+    connect_mcp(&mut mcp, bus, &redactor).await?;
     if let Some(sense) = sense {
         mcp.with_dreams(sense.dreams());
     }
@@ -654,21 +654,23 @@ async fn services(
     if let Some(sense) = sense {
         launch = launch.with_skills(sense.skills(&config.storage.home));
     }
-    Ok(Services {
+    let services = Services {
         redactor,
         approver,
         colony,
+        outbox,
         reading,
         notes,
         sessions_kv,
+        attempts_kv,
         ledger,
         escalator,
         identity,
         lifecycle,
         mcp,
-        launch,
         mcp_sign_ins,
-    })
+    };
+    Ok((services, launch))
 }
 
 /// Wait while the ant's identity record is marked moved, so no daemon starts a moved ant: false when `stop` comes
@@ -713,14 +715,10 @@ async fn ant_records(config: &Config, js: &jetstream::Context) -> (Option<Identi
 }
 
 /// The ant's approver of tool requests, which the permission policy asks for calls its allowlist does not cover.
-fn approver(
-    ant: &UserId,
-    settings: &Policy,
-    client: &async_nats::Client,
-    js: &jetstream::Context,
-    humans: &Registry,
-) -> NatsApprover {
-    NatsApprover::new(client.clone(), js.clone(), ant.clone(), settings.approval_timeout)
+fn approver(bus: Bus<'_>) -> NatsApprover {
+    let Bus { config, client, js, humans, .. } = bus;
+    let settings = &config.policy;
+    NatsApprover::new(client.clone(), js.clone(), config.ant.clone(), settings.approval_timeout)
         .with_chain(settings.escalation.clone())
         .with_humans(humans.clone())
 }
@@ -769,14 +767,13 @@ fn ledger(ant: &UserId, spending: &Spending, sessions: &crate::records::direct_k
 
 /// The ant's escalator, sending what it cannot settle up its chain.
 fn escalator(
-    config: &Config,
-    js: &jetstream::Context,
+    bus: Bus<'_>,
     colony: &Colony,
-    humans: &Registry,
     ledger: &std::sync::Arc<Ledger>,
     redactor: &std::sync::Arc<Redactor>,
     assistants: AssistantFirst,
 ) -> std::sync::Arc<Escalator> {
+    let Bus { config, js, humans, .. } = bus;
     let escalator = Escalator::new(
         config.ant.clone(),
         config.policy.escalation.clone(),
@@ -794,15 +791,8 @@ fn escalator(
 
 /// Give the ant's MCP server its live inbox, its ways to the bus and its provider among `providers`, and an
 /// assistant's the human it acts for.
-async fn connect_mcp(
-    mcp: &mut Mcp,
-    config: &Config,
-    client: &async_nats::Client,
-    js: &jetstream::Context,
-    redactor: &std::sync::Arc<Redactor>,
-    humans: &Registry,
-    providers: &Providers,
-) -> Result<()> {
+async fn connect_mcp(mcp: &mut Mcp, bus: Bus<'_>, redactor: &std::sync::Arc<Redactor>) -> Result<()> {
+    let Bus { config, client, js, providers, .. } = bus;
     mcp.listen(bus::live_inbox(client, &config.ant).await?);
     let channels = crate::mcp::jetstream_channels(js.clone(), config.connection.js_domain.clone());
     mcp.with_channels(redacting_posts(channels, redactor.clone()));
@@ -822,7 +812,7 @@ async fn connect_mcp(
     if let Some(provider) = providers.of(&config.ant).await {
         mcp.with_provider(provider);
     }
-    assist(mcp, config, js, humans).await;
+    assist(mcp, bus).await;
     Ok(())
 }
 
