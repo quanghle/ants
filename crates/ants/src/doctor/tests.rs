@@ -707,6 +707,11 @@ fn sense_keeping_none_of_the_data_of_an_ant_its_colony_entry_names_fails_without
     host.top_machine = Some("other.local".to_owned());
     let failed = check_sense_kept(&host, &[], "box.local", &colony[1..], now).unwrap();
     assert!(failed.detail.contains("entry of dev-c "), "the config's machine names this one too: {failed}");
+    host.creds = Some(PathBuf::from("host.creds"));
+    let failed = check_sense_kept(&host, &[], "box.local", &colony[1..], now).unwrap();
+    assert!(failed.fix[0].starts_with("reload `ants daemon` with SIGHUP"), "host credentials now here: {failed}");
+    assert!(failed.fix[0].ends_with("with the host credentials at host.creds") && failed.fix.len() == 1, "{failed}");
+    host.creds = None;
     let ant =
         Ant { creds: Some(PathBuf::from("dev-a.creds")), ..Ant::new("dev-a".parse().unwrap(), PathBuf::from("/w")) };
     let failed = check_sense_kept(&host, &[ant], "box.local", &colony[..1], now).unwrap();
@@ -1401,7 +1406,12 @@ fn a_config_leaving_every_ant_to_another_machine_fails_naming_the_builtin_ones()
     let some = check("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n");
     assert_eq!(some.status, Status::Ok, "{some}");
     assert!(some.detail.contains(" lists dev-a; the built-in system-messenger, without credentials at"), "{some}");
-    assert!(some.detail.ends_with("system-sage.creds here, is left to another machine"), "{some}");
+    let served = format!(
+        "system-sage.creds here, is left to another machine, unless served with credentials kept elsewhere: ants \
+         daemon --config {} --ant system-sage --creds CREDS",
+        config.display()
+    );
+    assert!(some.detail.ends_with(&served), "{some}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

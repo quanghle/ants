@@ -107,7 +107,8 @@ a thread whose origin is of a kind this version of sense does not know.
   no host credentials on a server with authentication. It names the fixes: `ants auth host MACHINE`, or
   `provider = "none"` for an ant meant to go without. It fails too for each ant whose live colony entry on the machine
   says why sense keeps none of its data (`sense_unkept`), as one `ants daemon --ant` serves from flags, with no config
-  file.
+  file; where the machine's host credentials are present now, the fix it names is a reload of the daemon (SIGHUP),
+  which links with them.
 - **Sense keeping none of the ant's data:** the daemon warns once per ant as it starts, and the ant's colony entry
   carries why (`sense_unkept`) until sense keeps the data again, which `ants colony` and `ants ant show` show; the ant
   is still served, without memories, tasks or brief, as one whose external provider is down is. It still answers other

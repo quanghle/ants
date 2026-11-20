@@ -206,6 +206,21 @@ fn flags_override_the_picked_ant() {
 }
 
 #[test]
+fn an_ant_described_by_flags_takes_its_provider_from_them() {
+    use ants_daemon::provider::Setting;
+    let missing = here().join("no-such-config.toml");
+    let listed = |line: &str| ants(&args(line), &missing, "box.local", None).unwrap().ants.remove(0);
+    let sensed = listed("--ant dev-a --harness copilot");
+    assert_eq!((sensed.provider, sensed.provider_setting), (None, Setting::Sense));
+    let bare = listed("--ant dev-a --harness copilot --provider none");
+    assert_eq!((bare.provider.as_deref(), bare.provider_setting), (Some("none"), Setting::None));
+    assert!(Cmd::try_parse_from(["daemon", "--ant", "dev-a", "--provider", "other"]).is_err());
+    let line = format!("--config {} --ant dev-a --provider none", missing.display());
+    let err = ants(&args(&line), &missing, "box.local", None).unwrap_err().to_string();
+    assert!(err.contains("--provider is for an ant described by flags"), "{err}");
+}
+
+#[test]
 fn the_file_wins_over_global_flags() {
     let mut bare = ant("dev-a");
     bare.nats = None;
