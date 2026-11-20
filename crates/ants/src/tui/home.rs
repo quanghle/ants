@@ -425,6 +425,16 @@ impl Page {
         (item.question.as_ref()?.0 == cursor.question).then(|| (cursor, item.thread.clone()))
     }
 
+    /// The focused card's question on the selected thread, else the thread's latest waiting question; never a newer
+    /// question in place of one answered elsewhere while its typed answer was being composed.
+    pub fn question<'a>(&self, data: &'a Data) -> Option<&'a super::work::Asked> {
+        let thread = self.thread(data)?;
+        match &self.answering {
+            Some(cursor) => data.asked(&thread, cursor.question),
+            None => data.question(&thread),
+        }
+    }
+
     /// Take `key` on the focused question card, if any: where it leads, if anywhere.
     pub fn card_key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<Option<To>> {
         let thread = self.card(data, now).map(|(_, thread)| thread);
@@ -1096,6 +1106,34 @@ mod tests {
             picks: vec![ants_proto::Pick::option(1)],
         };
         assert_eq!(m.key(Key::Char('1'), at(4)), Some(Action::Run(job, String::new())), "the next key answers it");
+    }
+
+    #[test]
+    fn a_typed_answer_on_home_goes_to_the_focused_card_not_a_newer_question() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let asking = |seq, text: &str| {
+            let mut asks = message(seq, &thread, "dev-b", "alice", text);
+            asks.question = Some(ants_proto::Question::new(text, &["yes".into(), "no".into()], true).unwrap().into());
+            asks
+        };
+        let first = asking(1, "Ship?");
+        m.stored(vec![first.clone()], at(2));
+        m.key(Key::Enter, at(3));
+        m.key(Key::Down, at(3));
+        m.key(Key::Down, at(3));
+        assert_eq!(m.key(Key::Enter, at(3)), None);
+        assert_eq!(m.bar.text(), "/answer ");
+        m.stored(vec![asking(2, "Tag?")], at(3));
+        for c in "later".chars() {
+            m.key(Key::Char(c), at(3));
+        }
+        let job = crate::tui::exec::Job::Answer {
+            thread: thread.clone(),
+            question: first.id.unwrap(),
+            picks: vec![ants_proto::Pick::Typed("later".into())],
+        };
+        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Run(job, "/answer later".into())));
     }
 
     #[test]

@@ -306,6 +306,11 @@ impl Data {
         self.facts.get(thread)?.questions.last()
     }
 
+    /// The question to the human asked in the message `id` on the thread, while it has no answer yet.
+    pub fn asked(&self, thread: &ThreadId, id: Uuid) -> Option<&Asked> {
+        self.facts.get(thread)?.questions.iter().find(|q| q.id == id)
+    }
+
     /// Whether an ant answered the human on a thread the human owns and nobody marked done, and is done with it: the
     /// human's turn.
     pub fn finished(&self, thread: &ThreadId) -> bool {

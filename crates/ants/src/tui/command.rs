@@ -490,6 +490,7 @@ impl Model {
         let thread = self.target()?;
         let asked = match self.page() {
             Page::Thread(page) => page.question(&self.data, now).map(|(id, asked)| (id, asked.clone())),
+            Page::Home(page) => page.question(&self.data).map(|asked| (asked.id, asked.question.clone())),
             _ => self.data.question(&thread).map(|asked| (asked.id, asked.question.clone())),
         };
         let me = self.data.me();
