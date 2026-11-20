@@ -38,6 +38,7 @@ pub(crate) enum BridgeCommand {
     },
     /// On a worker: listen locally and carry each connection to the hub's `ants bridge serve`. The machine's leaf
     /// node then uses the uplink nats-leaf://127.0.0.1:7422.
+    #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: brackets mark optional parts")]
     Connect {
         /// The bridge's URL, https://host[:port]/path, as the hub's reverse proxy mounts it.
         url: String,

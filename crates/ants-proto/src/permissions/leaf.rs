@@ -106,7 +106,7 @@ impl Permissions {
     /// consumers that read it, to look up and reset its durable [`OUTBOX_CONSUMER`], and flow control. The leaf
     /// delivers the outbox under [`Machine::deliver_prefix`] and answers under [`Machine::source_replies`] and, for a
     /// request a client of the hub made through the team account's import, under the reply subject the import gave it
-    /// (`_R_.…`, [`SERVICE_REPLIES`]). nats-server carries a reply across a leaf connection only if the leaf may
+    /// (`_R_.…`, `SERVICE_REPLIES`). nats-server carries a reply across a leaf connection only if the leaf may
     /// publish it: the interest behind it reaches the leaf only then.
     ///
     /// Nothing else crosses: the hub's JetStream domain stays on the leaf's other uplink ([`Self::for_leaf`]), so a

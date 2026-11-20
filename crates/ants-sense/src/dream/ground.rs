@@ -19,11 +19,12 @@ pub enum Making {
 
 /// Why `making`, in `context`, in answer to `finding` if it names one, rests on untrusted text; none when it does not
 /// (requirements ants-x39hk.6.5, ants-x39hk.12.5 and ants-x39hk.12.54). It does when the thread came from a webhook or
-/// asks a review, or when the finding it names is untrusted ([`Finding::untrusted`]). On the thread of a dream whose
-/// packet holds untrusted text, an untrusted finding or the history of an untrusted thread, it does too unless it names
-/// a finding of that dream, for a trail a [`TRAIL`] finding (decision ants-1wq1r): one naming none, a finding the dream
-/// does not hold or, for a trail, a finding of another kind may answer the untrusted text. The reviews a sage's dream
-/// covers hold none: their text is left out ([`Covered::untrusted_text`]).
+/// asks a review, or when the finding it names is untrusted ([`Finding::untrusted`](super::Finding::untrusted)). On the
+/// thread of a dream whose packet holds untrusted text, an untrusted finding or the history of an untrusted thread, it
+/// does too unless it names a finding of that dream, for a trail a [`TRAIL`](super::TRAIL) finding (decision
+/// ants-1wq1r): one naming none, a finding the dream does not hold or, for a trail, a finding of another kind may
+/// answer the untrusted text. The reviews a sage's dream covers hold none: their text is left out
+/// ([`Covered::untrusted_text`]).
 pub async fn untrusted(
     items: &dyn Items,
     context: &CallContext,

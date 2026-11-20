@@ -1,4 +1,4 @@
-//! A run's records in [`TRAIL_RUNS_BUCKET`](crate::TRAIL_RUNS_BUCKET): its header, limits and state, its session
+//! A run's records in [`TRAIL_RUNS_BUCKET`]: its header, limits and state, its session
 //! and journal, its conductor's index of runs, and its steps' threads.
 
 use std::time::Duration;

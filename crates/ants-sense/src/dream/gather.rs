@@ -171,15 +171,16 @@ impl Gathered {
 
 /// The findings of dream `number`, beginning as `start` says after `previous`: the findings of the sage's answer to the
 /// review of `previous` come after the ant was woken with the packet alone ([`Review::late`]), at most
-/// [`MAX_LATE_FINDINGS`], the findings of `previous` held unshown under its sage's answer and its open findings, those
-/// that still hold ([`Dream::again`]), then the packet's own on what they do not cover yet, those on the identity of
-/// the ant first ([`identity_findings`]), which stay whatever a sage answers as the open ones do
-/// ([`review::answered`]), then those on memories and proposals, then those on its practice as a sage from the records
-/// of the `reviews` it made ([`practice_findings`]), then those on the vital signs of the work ([`vitals`]), up to
-/// [`MAX_FINDINGS`]. An ant both worked with and reviewed has one finding on its relationship record, the identity's,
-/// telling of both. An open finding on the identity, the practice or the vital signs holds while its ground does,
-/// taking the text, count and trust gathered now. One of the `rested` stays out while what it is about is unchanged and
-/// the ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts; `rested` keeps those resting on.
+/// [`MAX_LATE_FINDINGS`](super::review::MAX_LATE_FINDINGS), the findings of `previous` held unshown under its sage's
+/// answer and its open findings, those that still hold ([`Dream::again`]), then the packet's own on what they do not
+/// cover yet, those on the identity of the ant first ([`identity_findings`]), which stay whatever a sage answers as the
+/// open ones do ([`review::answered`]), then those on memories and proposals, then those on its practice as a sage from
+/// the records of the `reviews` it made ([`practice_findings`]), then those on the vital signs of the work
+/// ([`vitals`]), up to [`MAX_FINDINGS`]. An ant both worked with and reviewed has one finding on its relationship
+/// record, the identity's, telling of both. An open finding on the identity, the practice or the vital signs holds
+/// while its ground does, taking the text, count and trust gathered now. One of the `rested` stays out while what it is
+/// about is unchanged and the ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts; `rested`
+/// keeps those resting on.
 async fn findings(
     items: &dyn Items,
     previous: Option<&Dream>,

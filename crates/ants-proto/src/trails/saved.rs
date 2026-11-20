@@ -1,4 +1,4 @@
-//! Saved trails, in [`TRAILS_BUCKET`](crate::TRAILS_BUCKET).
+//! Saved trails, in [`TRAILS_BUCKET`].
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

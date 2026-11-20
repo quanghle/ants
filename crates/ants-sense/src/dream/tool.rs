@@ -211,7 +211,8 @@ async fn verdicts(items: &dyn Items, dream: &Dream, given: Vec<GivenVerdict>) ->
 }
 
 /// The trails `given` as saved for `finding` of `dream` by a verdict of `verdict`, checked: each saved on the dream's
-/// thread naming that finding or none ([`super::trail_saved`]), and only with [`Judgement::Applied`].
+/// thread naming that finding or none ([`trail_saved`](super::count::trail_saved)), and only with
+/// [`Judgement::Applied`].
 fn saved(dream: &Dream, finding: &str, verdict: Judgement, given: Vec<String>) -> Result<Vec<TrailName>, Answer> {
     if !given.is_empty() && verdict != Judgement::Applied {
         return Err(Answer::invalid(format!("Finding {finding}: trails are named only with applied.")));

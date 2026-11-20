@@ -18,7 +18,7 @@ const PING_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Connect to NATS as `user`. `url` may be `nats://`, `tls://`, `ws://` or `wss://`, so the same binary works over a
 /// dev tunnel, a reverse proxy or a direct WebSocket endpoint. `creds` is a `.creds` file from `ants auth user`, and
-/// `js_domain` the hub's JetStream domain, if it has one (see [`jetstream`]). Credentials outdated or expiring soon
+/// `js_domain` the hub's JetStream domain, if it has one (see [`jetstream()`]). Credentials outdated or expiring soon
 /// get a warning naming the command that renews them ([`crate::secrets::creds::warn`]).
 pub async fn connect(
     url: &str,

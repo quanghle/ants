@@ -25,7 +25,7 @@ use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use async_nats::jetstream::consumer::{AckPolicy, PullConsumer, pull};
 use chrono::{DateTime, Utc};
-use futures::StreamExt as _;
+use futures::{FutureExt as _, StreamExt as _};
 use serde_json::Value;
 use tokio::sync::Notify;
 
@@ -240,7 +240,7 @@ async fn handle(
                 let outcome = match taken {
                     Taken::Order { order, machine, ant } => {
                         let stored_at = stored_at.unwrap_or_else(|_| Utc::now());
-                        let deciding = decide(js, outcomes, stores, orders, &msg.subject, &order, stored_at);
+                        let deciding = decide(js, outcomes, stores, orders, &msg.subject, &order, stored_at).boxed();
                         let mut outcome = bus::in_progress(msg, PROGRESS, deciding).await?;
                         (outcome.machine, outcome.ant) = (machine, ant);
                         outcome

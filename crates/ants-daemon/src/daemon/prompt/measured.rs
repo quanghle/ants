@@ -34,7 +34,7 @@ pub(in crate::daemon) struct Measured {
 
 impl Measured {
     /// The measures of the prompt for `message`, beginning now or when told through the sender returned
-    /// ([`Prompt::began`]).
+    /// ([`Prompt::began`](crate::harness::Prompt::began)).
     pub(super) fn new(message: Uuid) -> (Self, tokio::sync::oneshot::Sender<tokio::time::Instant>) {
         let (tx, harnessed) = tokio::sync::oneshot::channel();
         let (began, took) = (tokio::time::Instant::now(), std::time::Duration::ZERO);

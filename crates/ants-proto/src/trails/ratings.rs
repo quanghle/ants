@@ -140,7 +140,7 @@ impl TrailRating {
     }
 }
 
-/// The words a search looks for: those of [`tip_words`], each [`stem`]med.
+/// The words a search looks for: those of [`tip_words`], each [`stem()`]med.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Query {
     words: BTreeSet<String>,

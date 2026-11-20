@@ -1,5 +1,5 @@
-//! Which channel posts a human has read, on any of its devices: its [`ChannelReadMarkers`] under
-//! [`channel_reads_key`] in [`READ_BUCKET`], beside its inbox's read marker, updated with compare-and-set so devices
+//! Which channel posts a human has read, on any of its devices: its [`ChannelReadMarkers`] under [`channel_reads_key`]
+//! in [`READ_BUCKET`](ants_proto::READ_BUCKET), beside its inbox's read marker, updated with compare-and-set so devices
 //! marking at the same time each keep the other's marks. `ants channel read` marks the posts it prints, `ants channel
 //! list` counts the unread ones, and `ants chat` does both as its views show them; each channel's notify level
 //! ([`ChannelNotify`]) says which unread posts count.

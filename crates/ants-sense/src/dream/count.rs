@@ -116,7 +116,7 @@ fn made(number: u64, writes: usize) -> String {
 /// Why a trail is not saved ([`Sense::ground_trail`]).
 #[derive(Debug)]
 pub enum TrailRefused {
-    /// [`ground`] refused it.
+    /// [`ground()`] refused it.
     Refused(Refused),
     /// The call's context cannot be known, for the reason given.
     NoContext(String),
@@ -163,8 +163,8 @@ pub struct TrailGround {
 
 impl Sense {
     /// Whether `ant` may save a trail in `context`, the call's context or why it is not known, in answer to `finding`
-    /// if it names one ([`ground`]): refused when the finding is no dream's, rests on untrusted text, or the save is on
-    /// the thread of a dream that made its writes. Sense keeping none of the ant's data, a save naming no finding
+    /// if it names one ([`ground()`]): refused when the finding is no dream's, rests on untrusted text, or the save is
+    /// on the thread of a dream that made its writes. Sense keeping none of the ant's data, a save naming no finding
     /// passes; one naming a finding is refused as none is found.
     pub async fn ground_trail(
         &self,

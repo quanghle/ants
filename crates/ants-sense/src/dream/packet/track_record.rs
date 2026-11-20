@@ -40,7 +40,7 @@ pub const TRACK_RECORD_SHARE: usize = 8;
 /// that offered it or one offering it again, and the chain of follow-ups: a [`FOLLOW_UP`] with the finding it follows,
 /// a finding followed up with its follow-ups. An entry each, the first of each review under the review's heading. An
 /// applied finding holds while what was written for it holds and the trails saved for it stand in the colony's saved
-/// `trails` ([`super::Standing::holds`]), by its items alone where those are not known.
+/// `trails` ([`Standing::holds`](super::colony_trails::Standing::holds)), by its items alone where those are not known.
 ///
 /// [`FOLLOW_UP`]: crate::dream::FOLLOW_UP
 pub async fn track_record(

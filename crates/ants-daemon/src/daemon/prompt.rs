@@ -518,8 +518,9 @@ impl Inbox<'_> {
     }
 
     /// Escalate the thread for `reason` up its origin chain, in the end to its owner, else the default human
-    /// ([`Escalator::escalate`]): `why` it needs a decision, and the message or post it was on, and an `unposted`
-    /// answer. Its message id, from the stream sequence `seq` of the message, keeps a redelivery from escalating twice.
+    /// ([`Escalator::escalate`](crate::escalation::Escalator::escalate)): `why` it needs a decision, and the message or
+    /// post it was on, and an `unposted` answer. Its message id, from the stream sequence `seq` of the message, keeps a
+    /// redelivery from escalating twice.
     pub(super) async fn escalate(
         &self,
         incoming: &Incoming,

@@ -1,5 +1,5 @@
 //! Changes to the config file's text that leave the text around as it is, comments included: an entry appended, an
-//! allow rule added, an ant's table removed, each checked to load before the file is written whole ([`write`]); and
+//! allow rule added, an ant's table removed, each checked to load before the file is written whole ([`write()`]); and
 //! the template an ant's entry names ([`template_of`]).
 
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use super::{home_dir, parse, toml_string};
 /// missing. The text already there stays as it is, comments included; the file must still parse ([`parse`]) with the
 /// entry, or nothing is written.
 ///
-/// [`entry`]: super::entry
+/// [`entry`]: fn@super::entry
 pub fn append(path: &Path, entry: &str) -> Result<()> {
     let old = match std::fs::read_to_string(path) {
         Ok(text) => text,

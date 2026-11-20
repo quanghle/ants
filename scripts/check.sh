@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Run the checks of CI's check and deny jobs (.github/workflows/ci.yml) locally: formatting, lints, the test suite
-# twice (as is and with nats-server 2.16's v2 ack and flow control subjects), cargo-deny and, with --footprint, the
-# release build and the idle footprint check, all with lint warnings fatal.
+# Run the checks of CI's check and deny jobs (.github/workflows/ci.yml) locally: formatting, lints, rustdoc, the test
+# suite twice (as is and with nats-server 2.16's v2 ack and flow control subjects), cargo-deny and, with --footprint,
+# the release build and the idle footprint check, all with lint and rustdoc warnings fatal.
 #
 #   scripts/check.sh               # every check but the release build and footprint; stops at the first failure
 #   scripts/check.sh --footprint   # also `cargo build --release` and scripts/footprint.sh
@@ -60,6 +60,7 @@ footprint_unmeasurable() {
 
 run cargo fmt --all --check
 run cargo clippy --all-targets
+run env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 run env ANTS_REQUIRE_TOOLS=$require_tools ANTS_TEST_JS_ACK_FC_V2=0 cargo test
 run env ANTS_REQUIRE_TOOLS=$require_tools ANTS_TEST_JS_ACK_FC_V2=1 cargo test
 

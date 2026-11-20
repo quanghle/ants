@@ -103,8 +103,8 @@ pub async fn ensure_links(js: &jetstream::Context) -> Result<kv::Store> {
     ensure_kept(js, hub::Object::Links).await
 }
 
-/// The bucket of the owners of message threads ([`OWNERS_BUCKET`]), created when missing and the credentials allow it
-/// (the human's), as [`hub::owners_config`] describes it.
+/// The bucket of the owners of message threads ([`OWNERS_BUCKET`](ants_proto::OWNERS_BUCKET)), created when missing and
+/// the credentials allow it (the human's), as [`hub::owners_config`] describes it.
 pub async fn ensure_owners(js: &jetstream::Context) -> Result<()> {
     if js.get_stream(crate::records::owners::owners_stream()).await.is_ok() {
         return Ok(());

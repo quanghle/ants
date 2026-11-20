@@ -186,7 +186,7 @@ pub fn title_key(thread: &ThreadId) -> String {
     format!("title.{thread}")
 }
 
-/// Key in [`THREADS_BUCKET`] of the TL;DR of `thread` ([`ThreadSummary`]).
+/// Key in [`THREADS_BUCKET`] of the TL;DR of `thread` ([`ThreadSummary`](crate::ThreadSummary)).
 pub fn summary_key(thread: &ThreadId) -> String {
     format!("summary.{thread}")
 }
@@ -433,8 +433,8 @@ pub fn trail_step_key(conductor: &UserId, thread: &ThreadId) -> String {
 /// [`RunId`] is.
 pub const TRAIL_ANSWERING: &str = "answering";
 
-/// Key of the [`TrailAnswering`] of the runs `ant` started with `run_trail` while answering the step on `thread`, in
-/// [`TRAIL_RUNS_BUCKET`].
+/// Key of the [`TrailAnswering`](crate::TrailAnswering) of the runs `ant` started with `run_trail` while answering the
+/// step on `thread`, in [`TRAIL_RUNS_BUCKET`].
 pub fn trail_answering_key(ant: &UserId, thread: &ThreadId) -> String {
     format!("{ant}.{TRAIL_ANSWERING}.{thread}")
 }
