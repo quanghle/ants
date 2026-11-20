@@ -1919,7 +1919,7 @@ mod tests {
         assert!(m.asking.is_none(), "a hidden request is not answered");
         assert_eq!(crate::tui::keymap::views(&m), vec![crate::tui::keymap::View::Pending]);
         m.key(Key::Char('?'), at(10));
-        assert!(m.help.is_some());
+        assert!(m.help().is_some());
         m.key(Key::Esc, at(10));
         for close in [Key::Esc, Key::Char('q'), Key::Interrupt, Key::Ctrl('l')] {
             assert_eq!(m.key(close, at(10)), None);
@@ -1974,14 +1974,14 @@ mod tests {
         m.pages.push(super::super::model::Page::Thread(page));
         m.key(Key::Home, at(2));
         assert_eq!(m.key(Key::Char('+'), at(2)), None);
-        let footer = m.picking.as_ref().unwrap().line().to_string();
+        let footer = m.prompt_line().unwrap().to_string();
         assert!(footer.contains("👍 thumbsup") && footer.contains("Esc close"), "{footer}");
         for c in "eyes".chars() {
             m.key(Key::Char(c), at(2));
         }
         let eyes: ants_proto::Reaction = "eyes".parse().unwrap();
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::React(first, eyes.clone(), true)), "alice takes it back");
-        assert!(m.picking.is_none());
+        assert!(m.prompt.is_none());
         m.key(Key::Char('+'), at(2));
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::React(first, "thumbsup".parse().unwrap(), false)));
 

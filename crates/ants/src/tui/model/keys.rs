@@ -4,12 +4,12 @@
 use ants_proto::{ApprovalRequest, Verdict};
 use chrono::{DateTime, Utc};
 
-use super::{Action, Focus, Key, Level, Model, Page, QUIT_WITHIN, To};
+use super::{Action, Focus, Key, Level, Model, Overlay, Page, Prompt, QUIT_WITHIN, To};
 use crate::tui::approvals::{Answer, Asking};
 use crate::tui::command::{Note, Tone};
 use crate::tui::exec::Job;
 use crate::tui::help::Help;
-use crate::tui::react::{self, Pick, Picker};
+use crate::tui::react::Picker;
 use crate::tui::{channel, credentials, held, nav, notices, thread, work};
 
 impl Model {
@@ -17,14 +17,14 @@ impl Model {
         if key == Key::Ctrl('z') {
             return Some(Action::Suspend);
         }
-        let choosing_copy = self.copying.is_some();
+        let choosing_copy = self.copying().is_some();
         let action = self.dispatch(key, now);
         self.settle();
         if !choosing_copy
             && let Some(Action::Copy(text)) = &action
             && let Some(picker) = crate::tui::clipboard::Picker::new(text)
         {
-            self.copying = Some(picker);
+            self.overlay(Overlay::Copy(picker));
             return None;
         }
         action
@@ -43,7 +43,7 @@ impl Model {
         if key == Key::Char('q') && self.overlaid() {
             self.closed_by_q = Some(now);
         }
-        if self.asking.as_ref().is_some_and(Asking::takes_keys) && self.help.is_none() {
+        if self.asking.as_ref().is_some_and(Asking::takes_keys) && self.help().is_none() {
             return self.answer(key, now);
         }
         if self.compact {
@@ -52,17 +52,11 @@ impl Model {
         if let Some(taken) = self.overlay_key(key) {
             return taken;
         }
-        if self.interrupting.is_some() || self.dropping.is_some() {
-            return self.confirm_key(key).or_else(|| self.drop_key(key));
+        if self.catchup.shown() {
+            return self.digest_key(key);
         }
-        if self.starting.is_some() {
-            return self.start_key(key);
-        }
-        if self.snoozing.is_some() {
-            return self.snooze_key(key, now);
-        }
-        if self.picking.is_some() {
-            return self.reaction_key(key);
+        if let Some(taken) = self.prompt_key(key, now) {
+            return taken;
         }
         if let Some(action) = self.fold_key(key, now) {
             return Some(action);
@@ -110,11 +104,11 @@ impl Model {
                 None
             }
             Key::Char('?') => {
-                self.help = Some(Help::default());
+                self.overlay(Overlay::Help(Help::default()));
                 None
             }
             Key::Char('N') => {
-                self.log = Some(notices::Log::default());
+                self.overlay(Overlay::Log(notices::Log::default()));
                 None
             }
             Key::Char('R') => self.reread(),
@@ -129,22 +123,6 @@ impl Model {
                 Focus::Nav => self.nav_key(key, now),
                 Focus::View => self.view_key(key, now),
             },
-        }
-    }
-
-    fn reaction_key(&mut self, key: Key) -> Option<Action> {
-        match self.picking.as_mut()?.key(key) {
-            Pick::Typing => None,
-            Pick::Close => {
-                self.picking = None;
-                None
-            }
-            Pick::React(message, reaction) => {
-                self.picking = None;
-                let reacted = self.data.reactions.get(&message).map_or(&[][..], Vec::as_slice);
-                let remove = react::reacted(reacted, self.data.me(), &reaction);
-                Some(Action::React(message, reaction, remove))
-            }
         }
     }
 
@@ -173,41 +151,10 @@ impl Model {
         Some(Action::Refresh)
     }
 
-    /// Take `key` in the help, the notices or the digest, if one is shown.
-    fn overlay_key(&mut self, key: Key) -> Option<Option<Action>> {
-        if let Some(copying) = &mut self.copying {
-            if matches!(key, Key::Esc | Key::Char('q')) {
-                self.copying = None;
-                return Some(None);
-            }
-            let action = copying.key(key);
-            if action.is_some() {
-                self.copying = None;
-            }
-            return Some(action);
-        }
-        if let Some(help) = &mut self.help {
-            if !help.key(key) {
-                self.help = None;
-            }
-            return Some(None);
-        }
-        if let Some(log) = &mut self.log {
-            if !log.key(key) {
-                self.log = None;
-            }
-            return Some(None);
-        }
-        self.catchup.shown().then(|| self.digest_key(key))
-    }
-
     /// Whether the help, the notices, the digest or a tool request in full covers the view.
     fn overlaid(&self) -> bool {
-        self.help.is_some()
-            || self.copying.is_some()
-            || self.log.is_some()
+        self.covered()
             || self.catchup.shown()
-            || self.starting.is_some()
             || self.asking.as_ref().is_some_and(Asking::takes_keys)
             || matches!(self.page(), Page::Thread(page) if page.listing())
     }
@@ -246,7 +193,7 @@ impl Model {
     /// Close what is open, the topmost first: the help or the notices, the digest, a tool request in full, a prompt, the
     /// bar's list or the palette, or what the view asks, finds or has being written. Whether anything was.
     fn close(&mut self, now: DateTime<Utc>) -> bool {
-        if self.copying.take().is_some() || self.help.take().is_some() || self.log.take().is_some() {
+        if self.close_overlay() {
             return true;
         }
         if let Some(digest) = self.catchup.digest.as_mut().filter(|d| d.shown) {
@@ -257,12 +204,7 @@ impl Model {
             self.answer(Key::Esc, now);
             return true;
         }
-        if self.picking.take().is_some()
-            || self.interrupting.take().is_some()
-            || self.dropping.take().is_some()
-            || self.starting.take().is_some()
-            || self.snoozing.take().is_some()
-        {
+        if self.prompt.take().is_some() {
             return true;
         }
         if self.bar.focused && !self.completions().is_empty() {
@@ -305,24 +247,15 @@ impl Model {
         let text = pasted(text);
         if text.is_empty()
             || self.compact
-            || self.help.is_some()
-            || self.copying.is_some()
+            || self.drops_paste()
             || self.catchup.shown()
-            || self.interrupting.is_some()
-            || self.dropping.is_some()
-            || self.starting.is_some()
             || self.asking.as_ref().is_some_and(Asking::takes_keys)
             || (!self.bar.focused && matches!(self.page(), Page::Thread(page) if page.listing()))
         {
             return;
         }
         let line = text.replace(['\n', '\t'], " ");
-        if self.snoozing.is_some() {
-            line.chars().for_each(|c| _ = self.snooze_key(Key::Char(c), now));
-            return;
-        }
-        if let Some(picker) = &mut self.picking {
-            line.chars().for_each(|c| _ = picker.key(Key::Char(c)));
+        if self.prompt_paste(&line, now) {
             return;
         }
         if !self.bar.focused
@@ -512,7 +445,7 @@ impl Model {
                 None
             }
             To::React(message) => {
-                self.picking = Some(Picker::new(message));
+                self.prompt = Some(Prompt::React(Picker::new(message)));
                 None
             }
             To::Ask(request, None) => {

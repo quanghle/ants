@@ -10,7 +10,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
-use super::model::{Action, Data, Focus, Key, Model, Page};
+use super::model::{Action, Data, Focus, Key, Model, Page, Prompt};
 use super::{ant, channel, nav, style};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,7 +190,7 @@ impl Mouse {
             return None;
         }
         // The box of a run to start takes keys alone: a wheel over it would leave the run unstarted as another key.
-        if model.starting.is_some() && model.help.is_none() {
+        if model.prompt.as_ref().is_some_and(Prompt::covers) && model.overlays.is_empty() {
             return None;
         }
         let point = Position::new(event.column, event.row);
@@ -227,7 +227,7 @@ impl Mouse {
                 Some(Action::KeepChannelTab(channel, tab))
             }
             Target::Copy(at) => {
-                model.copying.as_mut()?.selected = at;
+                model.copying()?.selected = at;
                 if again { model.key(Key::Enter, now) } else { None }
             }
             Target::Message(seq) => {
@@ -397,7 +397,7 @@ mod tests {
         let text = (0..100).map(|n| format!("line {n}\n")).collect::<String>();
         page.history.loaded(&id, Ok(vec![message(1, &id, "alice", "dev-a", &text)])).unwrap();
         m.pages.push(Page::Thread(page));
-        m.help = Some(super::super::help::Help::default());
+        m.overlay(crate::tui::model::Overlay::Help(super::super::help::Help::default()));
         let render = |m: &Model| crate::test_support::render::rendered(80, 25, |f| frame::draw(f, m, at(1)));
         let before = render(&m);
         let Page::Thread(page) = m.page() else { panic!("thread") };
@@ -407,7 +407,7 @@ mod tests {
         assert_ne!(render(&m), before);
         let Page::Thread(page) = m.page() else { panic!("thread") };
         assert_eq!(page.mouse_top(), top);
-        assert!(m.help.is_some());
+        assert!(m.help().is_some());
     }
 
     #[test]
@@ -423,18 +423,24 @@ mod tests {
             thread: ants_proto::ThreadId::generate(),
             limits: TrailLimits::DEFAULT,
         };
-        m.starting = Some(super::super::trail::Planned { summary: "trail review\n".to_owned(), start: start.clone() });
+        m.prompt = Some(crate::tui::model::Prompt::Start(super::super::trail::Planned {
+            summary: "trail review\n".to_owned(),
+            start: start.clone(),
+        }));
         draw(&m);
         let mut mouse = Mouse::default();
         let at_box = |kind| MouseEvent { kind, column: 60, row: 15, modifiers: KeyModifiers::NONE };
         for kind in [MouseEventKind::ScrollDown, MouseEventKind::ScrollUp, MouseEventKind::Down(MouseButton::Left)] {
             assert_eq!(mouse.event(&mut m, at_box(kind), at(1)), None);
-            assert!(m.starting.is_some(), "{kind:?} leaves the run waiting");
+            assert!(matches!(m.prompt, Some(crate::tui::model::Prompt::Start(_))), "{kind:?} leaves the run waiting");
         }
         m.key(Key::Char('?'), at(1));
         draw(&m);
         assert_eq!(mouse.event(&mut m, at_box(MouseEventKind::ScrollDown), at(1)), None);
-        assert!(m.help.is_some() && m.starting.is_some(), "the wheel scrolls the help over the box");
+        assert!(
+            m.help().is_some() && matches!(m.prompt, Some(crate::tui::model::Prompt::Start(_))),
+            "the wheel scrolls the help over the box"
+        );
         m.key(Key::Esc, at(1));
         let Some(Action::Run(super::super::exec::Job::TrailStart(asked), _)) = m.key(Key::Char('y'), at(1)) else {
             panic!("y starts the run")

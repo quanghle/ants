@@ -13,7 +13,7 @@ impl Model {
     pub fn typing(&self) -> bool {
         let here = self.conversation();
         self.focus == Focus::View
-            && self.starting.is_none()
+            && !self.prompt.as_ref().is_some_and(super::Prompt::covers)
             && here != Conversation::None
             && !matches!(self.page(), Page::Thread(page) if page.listing())
             && self.selecting.as_ref() != Some(&here)
@@ -174,12 +174,12 @@ mod tests {
         let thread = ThreadId::generate();
         let mut m = opened(&thread);
         m.key(Key::Char('?'), at(3));
-        assert!(m.help.is_some() && m.bar.is_empty(), "not written");
+        assert!(m.help().is_some() && m.bar.is_empty(), "not written");
         m.key(Key::Esc, at(3));
         assert_eq!(m.key(Key::Char('q'), at(3)), None);
         m.key(Key::Char('?'), at(3));
         assert_eq!(m.bar.text(), "q?", "written");
-        assert!(m.help.is_none());
+        assert!(m.help().is_none());
     }
 
     #[test]

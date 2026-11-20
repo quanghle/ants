@@ -209,13 +209,13 @@ mod tests {
     #[test]
     fn the_picker_edits_what_is_typed_as_the_bar_does() {
         let mut m = crate::tui::test_support::model();
-        m.picking = Some(Picker::new(Uuid::now_v7()));
+        m.prompt = Some(crate::tui::model::Prompt::React(Picker::new(Uuid::now_v7())));
         let now = crate::test_support::live::at(0);
         let want = exercise(|typed| match typed {
             Typed::Key(key) => _ = m.key(key, now),
             Typed::Paste(text) => m.paste(text, now),
         });
-        let picker = m.picking.as_ref().unwrap();
+        let Some(crate::tui::model::Prompt::React(picker)) = &m.prompt else { panic!("the picker") };
         assert_eq!(picker.typed.text(), want);
         assert!(picker.line().to_string().starts_with(" react X▏a b hi "), "{}", picker.line());
     }

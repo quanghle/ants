@@ -10,7 +10,7 @@ use ratatui::text::Line;
 
 use super::command::{Dead, Tone};
 use super::exec::Job;
-use super::model::{Action, Key, Model, Page};
+use super::model::{Action, Key, Model, Page, Prompt};
 use crate::text::excerpt;
 use crate::threads::thread::{Entry, Kind};
 
@@ -36,6 +36,15 @@ impl Letter {
         };
         let text = format!(" {letter}: y drops it unreplayed; any other key keeps it");
         Line::styled(text, Style::new().fg(Color::Yellow))
+    }
+
+    /// Take `key`: `y` drops it, another key keeps it.
+    pub fn key(self, key: Key, model: &mut Model) -> Option<Action> {
+        if key != Key::Char('y') {
+            return None;
+        }
+        model.bar.set_status(format!("dropping dead letter {}…", self.seq), Tone::Busy);
+        Some(Action::Run(Job::DeadDrop(self.seq), String::new()))
     }
 }
 
@@ -77,20 +86,10 @@ impl Model {
         match dead {
             Dead::Replay(seq) => Ok(Some(Action::Run(Job::DeadReplay(self.letter(seq)?.seq), String::new()))),
             Dead::Drop(seq) => {
-                self.dropping = Some(self.letter(seq)?);
+                self.prompt = Some(Prompt::Drop(self.letter(seq)?));
                 Ok(None)
             }
         }
-    }
-
-    /// Take `key` while a drop waits for `y`.
-    pub fn drop_key(&mut self, key: Key) -> Option<Action> {
-        let letter = self.dropping.take()?;
-        if key != Key::Char('y') {
-            return None;
-        }
-        self.bar.set_status(format!("dropping dead letter {}…", letter.seq), Tone::Busy);
-        Some(Action::Run(Job::DeadDrop(letter.seq), String::new()))
     }
 }
 
@@ -133,9 +132,9 @@ mod tests {
         assert_eq!(run(&mut m, "/dead replay"), replay, "home's stuck item");
         assert_eq!(run(&mut m, "/dead drop"), None);
         let asks = "dead letter 2 (\"build it\"): y drops it unreplayed; any other key keeps it";
-        assert_eq!(m.dropping.as_ref().map(|l| l.line().to_string()), Some(format!(" {asks}")));
+        assert_eq!(m.prompt_line().map(|l| l.to_string()), Some(format!(" {asks}")));
         assert_eq!(m.key(Key::Char('n'), at(9)), None);
-        assert!(m.dropping.is_none(), "any other key keeps it");
+        assert!(m.prompt.is_none(), "any other key keeps it");
         run(&mut m, "/dead drop");
         assert_eq!(m.key(Key::Char('y'), at(9)), Some(Action::Run(Job::DeadDrop(2), String::new())));
         assert_eq!(m.bar.status.as_ref().unwrap().text, "dropping dead letter 2…");

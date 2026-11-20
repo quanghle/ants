@@ -82,33 +82,14 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         data.mouse.add(frame.area(), super::mouse::Target::Overlay);
     }
     catchup::draw_digest(frame, model, now);
-    if let Some(planned) = &model.starting {
-        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
-        planned.draw(frame);
-    }
-    if let Some(help) = &model.help {
-        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
-        help.draw(frame, model, now);
-    }
-    if let Some(log) = &model.log {
-        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
-        log.draw(frame, &model.notices);
-    }
-    if let Some(copying) = &model.copying {
-        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
-        copying.draw(frame, data);
-    }
+    model.draw_over(frame, now);
 }
 
 /// The error the footer shows, wrapped, if one waits for a key and no prompt takes the footer.
 fn error_shown(model: &Model, now: DateTime<Utc>) -> Option<&Notice> {
-    let prompt = model.quitting_at(now)
-        || model.picking.is_some()
-        || model.interrupting.is_some()
-        || model.dropping.is_some()
-        || model.starting.is_some();
+    let prompt = model.quitting_at(now) || model.prompt.is_some();
     let error = model.notice_at(now).filter(|n| n.level == Level::Error);
-    error.filter(|_| !prompt && model.snoozing.is_none())
+    error.filter(|_| !prompt)
 }
 
 /// Who the UI runs as, on which server, the place shown, and the connection.
@@ -136,20 +117,8 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
     if model.quitting_at(now) {
         return style::notice(QUIT_AGAIN, false, width);
     }
-    if let Some(picker) = &model.picking {
-        return picker.line();
-    }
-    if let Some(confirm) = &model.interrupting {
-        return confirm.line();
-    }
-    if let Some(letter) = &model.dropping {
-        return letter.line();
-    }
-    if let Some(planned) = &model.starting {
-        return planned.line();
-    }
-    if let Some(prompt) = &model.snoozing {
-        return prompt.line(&model.data);
+    if let Some(line) = model.prompt_line() {
+        return line;
     }
     if let Some(notice) = model.notice_at(now) {
         return style::notice(&notice.text, notice.level == Level::Error, width);

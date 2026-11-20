@@ -133,7 +133,7 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
         ("settings.rs", "key", &[View::Settings]),
         ("credentials.rs", "key", &[View::Credentials]),
         ("held.rs", "key", &[View::Held]),
-        ("trail.rs", "start_key", &[View::Start]),
+        ("trail.rs", "key", &[View::Start]),
     ];
     let source = |file: &str| match file {
         "model/keys.rs" => include_str!("../model/keys.rs"),
@@ -215,10 +215,10 @@ fn esc_q_or_question_mark_close_the_help_and_other_keys_do_nothing() {
         m.key(Key::Char('?'), at(0));
         for key in [Key::Char('x'), Key::Enter, Key::Tab, Key::Char('R'), Key::Down, Key::PageDown] {
             assert_eq!(m.key(key, at(0)), None, "{key:?}");
-            assert!(m.help.is_some(), "{key:?} keeps the help");
+            assert!(m.help().is_some(), "{key:?} keeps the help");
         }
         assert_eq!(m.key(close, at(0)), None);
-        assert!(m.help.is_none(), "{close:?} closes the help");
+        assert!(m.help().is_none(), "{close:?} closes the help");
     }
 }
 

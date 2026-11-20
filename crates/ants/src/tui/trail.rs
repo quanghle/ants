@@ -20,7 +20,7 @@ use super::command::Tone;
 use super::exec::{Ctx, Done, Job};
 use super::help::{Help, centered};
 use super::keymap::{self, View};
-use super::model::{Action, Key, Model};
+use super::model::{Action, Key, Model, Overlay};
 use super::style::{block, dim};
 use crate::cmd::send;
 use crate::cmd::trail::runs::{self, Pick};
@@ -97,20 +97,20 @@ fn fit(summary: &str, room: usize) -> Vec<String> {
     out
 }
 
-impl Model {
-    /// Take `key` while a run planned waits: `y` starts it, `?` shows the help and another key leaves it unstarted.
-    pub fn start_key(&mut self, key: Key) -> Option<Action> {
+impl Planned {
+    /// Take `key` while the run waits: `y` starts it, `?` shows the help and another key leaves it unstarted. The run
+    /// still planned, if it waits on.
+    pub fn key(self, key: Key, model: &mut Model) -> (Option<Self>, Option<Action>) {
         if key == Key::Char('?') {
-            self.help = Some(Help::default());
-            return None;
+            model.overlay(Overlay::Help(Help::default()));
+            return (Some(self), None);
         }
-        let planned = self.starting.take()?;
         if key != Key::Char('y') {
-            self.bar.set_status("the run is not started", Tone::Done);
-            return None;
+            model.bar.set_status("the run is not started", Tone::Done);
+            return (None, None);
         }
-        self.bar.set_status(format!("asking {} to start the run…", planned.start.conductor), Tone::Busy);
-        Some(Action::Run(Job::TrailStart(Box::new(planned.start)), String::new()))
+        model.bar.set_status(format!("asking {} to start the run…", self.start.conductor), Tone::Busy);
+        (None, Some(Action::Run(Job::TrailStart(Box::new(self.start)), String::new())))
     }
 }
 
@@ -342,7 +342,7 @@ mod tests {
         }
         assert!(shown.contains(" start the run? y start · Esc not started"), "{shown}");
         assert_eq!(m.key(Key::Char('x'), at(2)), None);
-        assert!(m.starting.is_none() && !screen(&m).contains("Start a run"), "another key leaves it unstarted");
+        assert!(m.prompt.is_none() && !screen(&m).contains("Start a run"), "another key leaves it unstarted");
 
         m.outcome(done(plan_done()));
         assert_eq!(m.key(Key::Char('?'), at(2)), None);
@@ -351,7 +351,10 @@ mod tests {
             "the help lists its keys"
         );
         m.key(Key::Esc, at(2));
-        assert!(m.help.is_none() && m.starting.is_some(), "the run waits on after the help");
+        assert!(
+            m.help().is_none() && matches!(m.prompt, Some(crate::tui::model::Prompt::Start(_))),
+            "the run waits on after the help"
+        );
         let Some(Action::Run(Job::TrailStart(asked), _)) = m.key(Key::Char('y'), at(2)) else { panic!("no start") };
         assert_eq!(*asked, start);
         let started = Done { line: "started run".to_owned(), open: Some(start.thread.clone()), ..Done::default() };

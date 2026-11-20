@@ -11,7 +11,7 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 
 use super::approvals::Asking;
-use super::model::{Focus, Key, Model, Page};
+use super::model::{Focus, Key, Model, Page, Prompt};
 use super::{ant, home, question};
 
 /// Whether an entry can act on `model` at the time given: `Err` says why not, as "no thread selected".
@@ -136,7 +136,7 @@ pub fn views(model: &Model) -> Vec<View> {
     if model.asking.as_ref().is_some_and(Asking::takes_keys) {
         return vec![View::Request];
     }
-    if model.starting.is_some() {
+    if model.prompt.as_ref().is_some_and(Prompt::covers) {
         return vec![View::Start];
     }
     if model.focus == Focus::Nav {
