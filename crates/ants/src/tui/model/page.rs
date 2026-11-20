@@ -7,15 +7,15 @@ use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
-use super::{Data, Key, Model, Page, To};
+use super::{Data, Key, Model, Page, To, Ui};
 
 impl Page {
     /// Take `key`: where it leads, if anywhere.
-    pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
+    pub fn key(&mut self, key: Key, data: &Data, ui: &Ui, now: DateTime<Utc>) -> Option<To> {
         match self {
             Self::Home(page) => page.key(key, data, now),
             Self::Work(page) => page.key(key, data, now),
-            Self::Channel(page) => page.key(key, data, now),
+            Self::Channel(page) => page.key(key, data, ui, now),
             Self::Thread(page) => page.key(key, data, now),
             Self::Dm(page) => page.key(key, data, now),
             Self::Search(page) => page.key(key, data, now),

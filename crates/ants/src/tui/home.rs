@@ -21,7 +21,7 @@ use super::approvals;
 use super::armed::Armed;
 use super::command::{Conversation, GRANT};
 use super::exec::Job;
-use super::model::{Action, Data, Key, Model, To};
+use super::model::{Action, Data, Key, Model, To, Ui};
 use super::select::{Selection, step};
 use super::style::{self, ago};
 use super::{catchup, question};
@@ -563,7 +563,7 @@ impl Page {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
-        let data = &model.data;
+        let (data, ui) = (&model.data, &model.ui);
         let block = style::block(format!(" Home ({}) ", items(data, now).len()), focused);
         let items = self.rows(data, now);
         let inner = block.inner(area);
@@ -599,7 +599,7 @@ impl Page {
                     i.request.as_ref().filter(|(_, settled)| at == selected && settled.is_none() && !i.expanded);
                 let text = keyed.map_or_else(|| i.text.clone(), |(request, _)| asker(data, i, request));
                 let mut lines = vec![
-                    style::clip(heading(data, i, width, now), full),
+                    style::clip(heading(data, ui, i, width, now), full),
                     style::clip(
                         Line::from(
                             [Span::raw("         ")]
@@ -663,14 +663,14 @@ impl Page {
             .collect();
         self.room.set(Some(room));
         self.carded.set(carded);
-        draw_list(frame, area, data, rows, selected, focused, cursor.map(|c| c.question));
+        draw_list(frame, area, &ui.mouse, rows, selected, focused, cursor.map(|c| c.question));
     }
 }
 
 fn draw_list(
     frame: &mut Frame,
     area: Rect,
-    data: &Data,
+    mouse: &super::mouse::Regions,
     rows: Vec<Text<'static>>,
     selected: usize,
     focused: bool,
@@ -680,11 +680,11 @@ fn draw_list(
         let start: usize = rows.iter().take(selected).map(|row| row.lines.len()).sum();
         (id, start, rows[selected].lines.clone())
     });
-    let top = super::mouse::list(frame, area, data, super::mouse::Viewport::Home, rows, selected, focused);
+    let top = super::mouse::list(frame, area, mouse, super::mouse::Viewport::Home, rows, selected, focused);
     if let Some((id, start, lines)) = question_lines {
         let offset = u16::try_from(start.saturating_sub(top)).unwrap_or(u16::MAX);
         let area = Rect { y: area.y.saturating_add(offset), height: area.height.saturating_sub(offset), ..area };
-        question::mouse_regions(data, area, &lines, top.saturating_sub(start), id);
+        question::mouse_regions(mouse, area, &lines, top.saturating_sub(start), id);
     }
 }
 
@@ -699,8 +699,8 @@ fn group_keys(i: &Item) -> String {
 
 /// The first line of item `i`'s row: its reason, its thread's title cut to leave `width` columns to the draft's
 /// mark, the other reasons' badges and its age.
-fn heading(data: &Data, i: &Item, width: usize, now: DateTime<Utc>) -> Line<'static> {
-    let mut after: Vec<Span> = data.drafts.mark(&Conversation::Thread(i.thread.clone())).into_iter().collect();
+fn heading(data: &Data, ui: &Ui, i: &Item, width: usize, now: DateTime<Utc>) -> Line<'static> {
+    let mut after: Vec<Span> = ui.drafts.mark(&Conversation::Thread(i.thread.clone())).into_iter().collect();
     for (why, n) in &i.also {
         after.push(Span::styled(" · ", style::dim()));
         after.push(Span::styled(why.badge(*n), Style::new().fg(why.color())));

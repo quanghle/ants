@@ -456,7 +456,7 @@ impl Page {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
-        let data = &model.data;
+        let (data, mouse) = (&model.data, &model.ui.mouse);
         let tree = self.tree(data, now);
         let at = self.at(&tree);
         let width = usize::from(area.width.saturating_sub(2));
@@ -506,12 +506,11 @@ impl Page {
         lines.push(Line::from(vec![Span::styled("total  ", style::dim()), Span::raw(total.join(" · "))]));
         let height = usize::from(area.height.saturating_sub(2));
         let inner = style::block(String::new(), focused).inner(area);
-        let top = data.mouse.top(super::mouse::Viewport::Tree, inner, selected, selected, selected + 1, lines.len());
+        let top = mouse.top(super::mouse::Viewport::Tree, inner, selected, selected, selected + 1, lines.len());
         for n in 0..tree.nodes.len() {
             let row = n + 1;
             if row >= top && row < top + height {
-                data.mouse
-                    .add(Rect { y: inner.y + (row - top) as u16, height: 1, ..inner }, super::mouse::Target::Row(n));
+                mouse.add(Rect { y: inner.y + (row - top) as u16, height: 1, ..inner }, super::mouse::Target::Row(n));
             }
         }
         let title = format!(" delegation tree · {} ", data.title(&self.root));

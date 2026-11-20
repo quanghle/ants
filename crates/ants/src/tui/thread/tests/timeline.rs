@@ -207,7 +207,7 @@ fn a_runs_steps_show_where_they_started_and_enter_opens_the_thread_of_the_one_se
     let failed = format!("◆ step 2 review part 2 → dev-c · failed · thread {second}");
     assert!(row("│   Run 0198c4ab started") < row(&answered) && row(&answered) < row(&failed), "{shown}");
     assert!(row(&failed) < row("│   Run 0198c4ab is done"), "each before the next message stored: {shown}");
-    m.data.tools = Tools::None;
+    m.ui.tools = Tools::None;
     assert!(screen(&page, &m, 110, at(10)).contains(&failed), "steps are no tool calls");
 
     assert_eq!(page.key(Key::Up, &m.data, at(10)), None);

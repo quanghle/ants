@@ -68,7 +68,15 @@ impl List {
         items(page, data, now).len()
     }
 
-    pub(super) fn draw(&self, frame: &mut Frame, area: Rect, page: &Page, data: &Data, now: DateTime<Utc>) {
+    pub(super) fn draw(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        page: &Page,
+        data: &Data,
+        regions: &mouse::Regions,
+        now: DateTime<Utc>,
+    ) {
         let items = items(page, data, now);
         let block = style::block(format!(" Waiting ({}) ", items.len()), true).title_bottom(keymap::prompt(
             "Enter open · Esc close · ↑↓ select",
@@ -84,7 +92,7 @@ impl List {
         }
         let selected = self.selected.drawn(&items.iter().map(Item::id).collect::<Vec<_>>());
         let rows = items.iter().map(|item| Text::from(item.line(usize::from(inner.width.saturating_sub(1))))).collect();
-        mouse::list(frame, inner, data, mouse::Viewport::ThreadWaiting, rows, selected, true);
+        mouse::list(frame, inner, regions, mouse::Viewport::ThreadWaiting, rows, selected, true);
     }
 }
 

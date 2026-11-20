@@ -156,14 +156,14 @@ pub(super) fn thread_attachments(model: &Model, _: DateTime<Utc>) -> Result<(), 
 
 pub(super) fn post_selected(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
     match model.page() {
-        Page::Channel(page) => check(page.post(&model.data).is_some(), "no post selected"),
+        Page::Channel(page) => check(page.post(&model.data, &model.ui).is_some(), "no post selected"),
         _ => Err("no channel open"),
     }
 }
 
 pub(super) fn post_attachment(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
     match model.page() {
-        Page::Channel(page) => check(page.attachment(&model.data).is_some(), "no attachment marked"),
+        Page::Channel(page) => check(page.attachment(&model.data, &model.ui).is_some(), "no attachment marked"),
         _ => Err("no channel open"),
     }
 }
@@ -171,7 +171,7 @@ pub(super) fn post_attachment(model: &Model, _: DateTime<Utc>) -> Result<(), &'s
 pub(super) fn post_attachments(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
     match model.page() {
         Page::Channel(page) => {
-            let several = page.post(&model.data).is_some_and(|p| p.attachments.len() > 1);
+            let several = page.post(&model.data, &model.ui).is_some_and(|p| p.attachments.len() > 1);
             check(several, "no other attachment")
         }
         _ => Err("no channel open"),

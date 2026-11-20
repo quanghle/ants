@@ -100,7 +100,7 @@ impl Model {
     /// Have the bar hold the draft of the conversation shown, keeping that of the one it held.
     pub fn follow_drafts(&mut self) {
         let here = self.conversation();
-        let drafts = &mut self.data.drafts;
+        let drafts = &mut self.ui.drafts;
         if drafts.here != here {
             let draft = drafts.kept.remove(&here).unwrap_or_default();
             let left = self.bar.swap(draft);
@@ -139,13 +139,13 @@ mod tests {
         show(&mut m, &a);
         m.bar.focused = true;
         typed(&mut m, "ship it");
-        assert!(m.data.drafts.holds(&Conversation::Thread(a.clone())));
+        assert!(m.ui.drafts.holds(&Conversation::Thread(a.clone())));
         show(&mut m, &b);
         assert!(m.bar.is_empty(), "thread B shows its own draft");
         assert_eq!(m.bar_title(), "reply on \"docs\"");
         m.bar.focused = true;
         assert_eq!(m.key(Key::Enter, at(1)), None, "nothing to send on B");
-        assert!(m.data.drafts.holds(&Conversation::Thread(a.clone())) && !m.data.drafts.holds(&Conversation::None));
+        assert!(m.ui.drafts.holds(&Conversation::Thread(a.clone())) && !m.ui.drafts.holds(&Conversation::None));
         m.pages.push(Page::Work(work::Page::new(Filter::default())));
         m.follow_drafts();
         let shown = crate::test_support::render::rendered(120, 32, |f| crate::tui::frame::draw(f, &m, at(1)));

@@ -140,7 +140,7 @@ impl Picker {
         None
     }
 
-    pub fn draw(&self, frame: &mut Frame, data: &super::model::Data) {
+    pub fn draw(&self, frame: &mut Frame, mouse: &super::mouse::Regions) {
         let area = help::centered(frame.area(), 76, u16::try_from(self.choices.len() + 3).unwrap_or(u16::MAX));
         let block = style::block(" Copy: Up/Down select; Enter copy; Esc close ".to_owned(), true);
         let inner = block.inner(area);
@@ -151,7 +151,7 @@ impl Picker {
             let line = Line::raw(label.clone());
             let line = if row == self.selected { line.patch_style(style::highlight(true)) } else { line };
             let area = Rect { y: inner.y + (row - top) as u16, height: 1, ..inner };
-            data.mouse.add(area, super::mouse::Target::Copy(row));
+            mouse.add(area, super::mouse::Target::Copy(row));
             frame.render_widget(Paragraph::new(line), area);
         }
     }

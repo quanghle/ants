@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use super::command::Conversation;
-use super::model::{Data, Key, Model, To};
+use super::model::{Data, Key, Model, To, Ui};
 use super::mouse::Viewport;
 use super::select::{PAGE, Selection, step};
 use super::style::{self, ago};
@@ -455,7 +455,7 @@ impl Page {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
-        let data = &model.data;
+        let (data, ui) = (&model.data, &model.ui);
         let rows = self.rows(data);
         let block = style::block(format!(" {} ({}) ", self.filter.title(), rows.len()), focused);
         if rows.is_empty() {
@@ -476,7 +476,7 @@ impl Page {
             .iter()
             .enumerate()
             .map(|(n, (thread, state))| {
-                let row = row(data, thread, *state, snoozed.contains_key(thread), now, &columns);
+                let row = row(data, ui, thread, *state, snoozed.contains_key(thread), now, &columns);
                 if n == at { row.style(style::highlight(focused)) } else { row }
             })
             .collect();
@@ -490,9 +490,9 @@ impl Page {
             width: list.width.saturating_sub(2),
             height: list.height.saturating_sub(3),
         };
-        let top = data.mouse.top(self.viewport.clone(), inner, at, at, at + 1, rows.len());
+        let top = ui.mouse.top(self.viewport.clone(), inner, at, at, at + 1, rows.len());
         for n in top..rows.len().min(top + usize::from(inner.height)) {
-            data.mouse.add(Rect { y: inner.y + (n - top) as u16, height: 1, ..inner }, super::mouse::Target::Row(n));
+            ui.mouse.add(Rect { y: inner.y + (n - top) as u16, height: 1, ..inner }, super::mouse::Target::Row(n));
         }
         let mut state = TableState::default().with_offset(top);
         frame.render_stateful_widget(table, list, &mut state);
@@ -591,6 +591,7 @@ fn columns(width: u16) -> Vec<(Column, u16)> {
 /// The thread's row in the work view, marked when a snooze holds it off home, in `columns`.
 fn row(
     data: &Data,
+    ui: &Ui,
     thread: &ThreadId,
     state: ThreadState,
     snoozed: bool,
@@ -606,7 +607,7 @@ fn row(
     let spend = data.cards.spent(thread).map_or_else(|| "-".to_owned(), |s| dollars(s.cost));
     let age = summary.map_or_else(String::new, |s| ago(s.last_at, now));
     let mut title = vec![Span::raw(data.title(thread))];
-    title.extend(data.drafts.mark(&Conversation::Thread(thread.clone())));
+    title.extend(ui.drafts.mark(&Conversation::Thread(thread.clone())));
     if snoozed {
         title.push(Span::styled(" · snoozed", style::dim()));
     }

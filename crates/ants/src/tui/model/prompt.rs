@@ -103,7 +103,7 @@ impl Overlay {
         match self {
             Self::Help(help) => help.draw(frame, model, now),
             Self::Log(log) => log.draw(frame, &model.notices),
-            Self::Copy(picker) => picker.draw(frame, &model.data),
+            Self::Copy(picker) => picker.draw(frame, &model.ui.mouse),
         }
     }
 }
@@ -178,11 +178,11 @@ impl Model {
     /// Draw a prompt's box, then the overlays, the latest on top, each over the whole screen as the mouse sees it.
     pub(in crate::tui) fn draw_over(&self, frame: &mut Frame, now: DateTime<Utc>) {
         if let Some(prompt) = self.prompt.as_ref().filter(|p| p.covers()) {
-            self.data.mouse.add(frame.area(), crate::tui::mouse::Target::Overlay);
+            self.ui.mouse.add(frame.area(), crate::tui::mouse::Target::Overlay);
             prompt.draw(frame);
         }
         for overlay in &self.overlays {
-            self.data.mouse.add(frame.area(), crate::tui::mouse::Target::Overlay);
+            self.ui.mouse.add(frame.area(), crate::tui::mouse::Target::Overlay);
             overlay.draw(frame, self, now);
         }
     }

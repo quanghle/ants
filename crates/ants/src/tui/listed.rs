@@ -9,7 +9,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::armed::Armed;
-use super::model::{Data, Key};
+use super::model::Key;
 use super::mouse::Viewport;
 use super::select::Selection;
 use super::style;
@@ -69,7 +69,14 @@ impl<K: PartialEq + Clone, T> Listed<K, T> {
         None
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, shown: Shown<K, T>, focused: bool) {
+    pub fn draw(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        mouse: &super::mouse::Regions,
+        shown: Shown<K, T>,
+        focused: bool,
+    ) {
         let block = style::block(shown.title, focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -91,6 +98,6 @@ impl<K: PartialEq + Clone, T> Listed<K, T> {
         let [top, list] = Layout::vertical([Constraint::Max(tall), Constraint::Min(0)]).areas(inner);
         frame.render_widget(Paragraph::new(about).wrap(Wrap { trim: false }), top);
         let selected = self.selected.at(shown.keys);
-        super::mouse::list(frame, list, data, shown.viewport, shown.rows, selected, focused);
+        super::mouse::list(frame, list, mouse, shown.viewport, shown.rows, selected, focused);
     }
 }

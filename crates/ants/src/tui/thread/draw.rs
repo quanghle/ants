@@ -18,9 +18,9 @@ use crate::tui::{catchup, images, work};
 
 impl Page {
     pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
-        let data = &model.data;
+        let (data, ui) = (&model.data, &model.ui);
         if let Some(list) = &self.listing {
-            list.draw(frame, area, self, data, now);
+            list.draw(frame, area, self, data, &ui.mouse, now);
             return;
         }
         let thread = &self.history.thread;
@@ -69,7 +69,7 @@ impl Page {
         let calls = data.calls.get(thread).map_or(&[][..], |c| c.calls());
         let ends = data.calls.get(thread).map_or(&[][..], |c| c.ends());
         let timed = Timed { calls, ends, steps: data.steps.of(thread) };
-        let rows = rows(&self.history.entries, timed, data.tools, busy, |u| data.is_human(u));
+        let rows = rows(&self.history.entries, timed, ui.tools, busy, |u| data.is_human(u));
         let held = self.held();
         let (picks, range) = self.lay(&mut lines, &shown, &rows);
         let height = usize::from(area.height);
@@ -81,7 +81,7 @@ impl Page {
         self.spinning.set(shown.spun.get());
         let below = |(picked, start, _): &&Spot| matches!(picked, Picked::Message(_)) && *start >= top + height;
         let newer = picks.iter().filter(below).count();
-        message_hits(data, &picks, area, top, height);
+        message_hits(&ui.mouse, &picks, area, top, height);
         *self.laid.borrow_mut() = Laid { height, lines: lines.len(), rows: picks, found };
         let block = match newer {
             0 => block,
@@ -168,7 +168,7 @@ impl Page {
     }
 }
 
-fn message_hits(data: &Data, rows: &[Spot], area: Rect, top: usize, height: usize) {
+fn message_hits(mouse: &crate::tui::mouse::Regions, rows: &[Spot], area: Rect, top: usize, height: usize) {
     for (picked, start, end) in rows {
         let from = (*start).max(top);
         let to = (*end).min(top + height);
@@ -177,7 +177,7 @@ fn message_hits(data: &Data, rows: &[Spot], area: Rect, top: usize, height: usiz
                 Picked::Message(seq) => crate::tui::mouse::Target::Message(*seq),
                 Picked::Step(thread) => crate::tui::mouse::Target::Step(thread.clone()),
             };
-            data.mouse.add(Rect { y: area.y + (from - top) as u16, height: (to - from) as u16, ..area }, target);
+            mouse.add(Rect { y: area.y + (from - top) as u16, height: (to - from) as u16, ..area }, target);
         }
     }
 }

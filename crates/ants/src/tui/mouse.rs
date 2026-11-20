@@ -10,7 +10,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
-use super::model::{Action, Data, Focus, Key, Model, Page, Prompt};
+use super::model::{Action, Focus, Key, Model, Page, Prompt};
 use super::{ant, channel, nav, style};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,7 +136,7 @@ impl Regions {
 pub fn list(
     frame: &mut Frame,
     area: Rect,
-    data: &Data,
+    mouse: &Regions,
     id: Viewport,
     rows: Vec<Text<'static>>,
     selected: usize,
@@ -155,20 +155,19 @@ pub fn list(
         ranges.push((start, lines.len()));
     }
     let (start, end) = ranges.get(selected).copied().unwrap_or_default();
-    let top = data.mouse.top(id, area, selected, start, end, lines.len());
+    let top = mouse.top(id, area, selected, start, end, lines.len());
     for (at, (start, end)) in ranges.into_iter().enumerate() {
         let from = start.max(top);
         let to = end.min(top + usize::from(area.height));
         if from < to {
-            data.mouse
-                .add(Rect { y: area.y + (from - top) as u16, height: (to - from) as u16, ..area }, Target::Row(at));
+            mouse.add(Rect { y: area.y + (from - top) as u16, height: (to - from) as u16, ..area }, Target::Row(at));
         }
     }
     frame.render_widget(Paragraph::new(lines).scroll((u16::try_from(top).unwrap_or(u16::MAX), 0)), area);
     top
 }
 
-pub fn completions(data: &Data, bar: Rect, count: usize, selected: usize, palette: bool) {
+pub fn completions(mouse: &Regions, bar: Rect, count: usize, selected: usize, palette: bool) {
     let rows = if palette { 10 } else { 8 };
     let selected = selected.min(count.saturating_sub(1));
     let top = (selected + 1).saturating_sub(rows);
@@ -180,23 +179,23 @@ pub fn completions(data: &Data, bar: Rect, count: usize, selected: usize, palett
         height,
     };
     for row in 0..height.saturating_sub(2) {
-        data.mouse.add(
+        mouse.add(
             Rect { x: area.x + 1, y: area.y + 1 + row, width: area.width.saturating_sub(2), height: 1 },
             Target::Completion { at: top + usize::from(row), palette },
         );
     }
 }
 
-pub fn table(data: &Data, id: Viewport, area: Rect, selected: usize, total: usize) -> usize {
+pub fn table(mouse: &Regions, id: Viewport, area: Rect, selected: usize, total: usize) -> usize {
     let inner = Rect {
         x: area.x + 1,
         y: area.y + 2,
         width: area.width.saturating_sub(2),
         height: area.height.saturating_sub(3),
     };
-    let top = data.mouse.top(id, inner, selected, selected, selected + 1, total);
+    let top = mouse.top(id, inner, selected, selected, selected + 1, total);
     for row in top..total.min(top + usize::from(inner.height)) {
-        data.mouse.add(Rect { y: inner.y + (row - top) as u16, height: 1, ..inner }, Target::Row(row));
+        mouse.add(Rect { y: inner.y + (row - top) as u16, height: 1, ..inner }, Target::Row(row));
     }
     top
 }
@@ -216,7 +215,7 @@ impl Mouse {
             return None;
         }
         let point = Position::new(event.column, event.row);
-        let target = model.data.mouse.hit(point)?;
+        let target = model.ui.mouse.hit(point)?;
         let by = match event.kind {
             MouseEventKind::ScrollUp => -1,
             MouseEventKind::ScrollDown => 1,
@@ -245,7 +244,7 @@ impl Mouse {
             Target::ChannelTab(tab) => {
                 let Page::Channel(page) = model.page() else { return None };
                 let channel = page.channel.clone();
-                model.data.channel_tabs.insert(channel.clone(), tab);
+                model.ui.channel_tabs.insert(channel.clone(), tab);
                 Some(Action::KeepChannelTab(channel, tab))
             }
             Target::Copy(at) => {
@@ -321,7 +320,7 @@ impl Mouse {
     ) -> Option<Action> {
         self.last = None;
         if matches!(target, Target::Nav(_)) {
-            model.data.mouse.scroll(&Viewport::Nav, by);
+            model.ui.mouse.scroll(&Viewport::Nav, by);
             return None;
         }
         if let Target::AntColumn(column) = target {
@@ -338,7 +337,7 @@ impl Mouse {
         if matches!(target, Target::Overlay | Target::Copy(_)) {
             return model.key(if by < 0 { Key::Up } else { Key::Down }, now);
         }
-        if model.data.mouse.wheel(point, by) {
+        if model.ui.mouse.wheel(point, by) {
             return None;
         }
         if let Some(Page::Thread(page)) = model.pages.last_mut() {
@@ -360,7 +359,7 @@ mod tests {
     }
 
     fn click(model: &Model, target: &Target) -> MouseEvent {
-        let hits = model.data.mouse.hits.borrow();
+        let hits = model.ui.mouse.hits.borrow();
         let (area, _) =
             hits.iter().rev().find(|(_, hit)| hit == target).unwrap_or_else(|| panic!("no hit for {target:?}"));
         MouseEvent {
@@ -403,7 +402,7 @@ mod tests {
         m.focus = Focus::View;
         let shown = test_support::screen(&m, 160, 36, at(3));
         assert!(shown.contains("task 40"), "{shown}");
-        m.data.mouse.scroll(&Viewport::AntThreads, 10);
+        m.ui.mouse.scroll(&Viewport::AntThreads, 10);
         assert!(!test_support::screen(&m, 160, 36, at(3)).contains("task 40"), "the ant's threads scrolled");
         m.key(Key::Char('w'), at(3));
         assert_eq!(m.page().name(), "work");
@@ -494,11 +493,11 @@ mod tests {
         let mut m = test_support::model();
         let render = |m: &Model| {
             crate::test_support::render::rendered(20, 3, |f| {
-                m.data.mouse.clear();
+                m.ui.mouse.clear();
                 list(
                     f,
                     f.area(),
-                    &m.data,
+                    &m.ui.mouse,
                     Viewport::Search,
                     vec![Text::from("first-a\nfirst-b"), Text::from("second-a\nsecond-b")],
                     0,
@@ -511,7 +510,7 @@ mod tests {
         assert_eq!(Mouse::default().event(&mut m, event, at(1)), None);
         let shown = render(&m);
         assert!(shown.lines().next().unwrap().contains("first-b"), "{shown}");
-        assert_eq!(m.data.mouse.views.borrow()[&Viewport::Search].selected, Some(0));
+        assert_eq!(m.ui.mouse.views.borrow()[&Viewport::Search].selected, Some(0));
     }
 
     #[test]

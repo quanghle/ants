@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::command::Conversation;
-use super::model::Data;
+use super::model::{Data, Ui};
 use super::style;
 use super::work::ThreadState;
 use crate::channel::reads::Unread;
@@ -107,6 +107,7 @@ pub(super) fn unread(data: &Data, channel: &ChannelId) -> Unread {
 fn line(
     item: &Item,
     data: &Data,
+    ui: &Ui,
     counts: &std::collections::HashMap<ThreadState, usize>,
     now: DateTime<Utc>,
 ) -> Line<'static> {
@@ -136,7 +137,7 @@ fn line(
             if unread.other > 0 {
                 spans.push(Span::styled(format!(" ·{}", unread.other), style::dim()));
             }
-            spans.extend(data.drafts.mark(&Conversation::Channel(channel.clone())));
+            spans.extend(ui.drafts.mark(&Conversation::Channel(channel.clone())));
             Line::from(spans)
         }
         Item::Ant(ant) => {
@@ -151,14 +152,14 @@ fn line(
         }
         Item::Person(person) => {
             let mut line = super::people::nav_line(data, person);
-            line.spans.extend(data.drafts.mark(&Conversation::Person(person.clone())));
+            line.spans.extend(ui.drafts.mark(&Conversation::Person(person.clone())));
             line
         }
     }
 }
 
-pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: &Item, now: DateTime<Utc>, focused: bool) {
-    data.mouse.add(area, super::mouse::Target::Nav(selected.clone()));
+pub fn draw(frame: &mut Frame, area: Rect, data: &Data, ui: &Ui, selected: &Item, now: DateTime<Utc>, focused: bool) {
+    ui.mouse.add(area, super::mouse::Target::Nav(selected.clone()));
     let counts = data.counts();
     let mut lines = Vec::new();
     let mut section = None;
@@ -170,7 +171,7 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: &Item, now: Da
             lines.push(Line::raw(""));
             lines.push(Line::styled(section.unwrap_or_default(), style::dim().add_modifier(Modifier::BOLD)));
         }
-        let mut line = line(&item, data, &counts, now);
+        let mut line = line(&item, data, ui, &counts, now);
         if item == *selected {
             at = lines.len();
             line = line.patch_style(style::highlight(focused));
@@ -180,11 +181,10 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: &Item, now: Da
     }
     let height = usize::from(area.height.saturating_sub(2));
     let inner = style::block(String::new(), focused).inner(area);
-    let top = data.mouse.top(super::mouse::Viewport::Nav, inner, at, at, at + 1, lines.len());
+    let top = ui.mouse.top(super::mouse::Viewport::Nav, inner, at, at, at + 1, lines.len());
     for (row, item) in hits {
         if row >= top && row < top + height {
-            data.mouse
-                .add(Rect { y: inner.y + (row - top) as u16, height: 1, ..inner }, super::mouse::Target::Nav(item));
+            ui.mouse.add(Rect { y: inner.y + (row - top) as u16, height: 1, ..inner }, super::mouse::Target::Nav(item));
         }
     }
     let paragraph = Paragraph::new(lines)
@@ -232,8 +232,9 @@ mod tests {
         let ops = ChannelEntry { members: vec![user("alice")], ..ChannelEntry::new("ops".parse().unwrap()) };
         m.read(Read::Directory(Ok((vec![ops], Humans::default()))), at(0));
         let rows = |selected: &Item| {
-            let shown =
-                crate::test_support::render::rendered(30, 20, |f| draw(f, f.area(), &m.data, selected, at(0), true));
+            let shown = crate::test_support::render::rendered(30, 20, |f| {
+                draw(f, f.area(), &m.data, &m.ui, selected, at(0), true);
+            });
             let rows: Vec<String> =
                 shown.lines().map(|l| l.trim_matches(|c: char| c == '│' || c == ' ').to_owned()).collect();
             let row = |name: &str| rows.iter().position(|r| r == name).unwrap();

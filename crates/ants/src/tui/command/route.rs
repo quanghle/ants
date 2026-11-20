@@ -137,7 +137,7 @@ impl Model {
 
     /// What the bar's title says Enter does with the text as it stands.
     pub fn bar_title(&self) -> String {
-        if let Some(searching) = self.data.history.searching() {
+        if let Some(searching) = self.ui.history.searching() {
             return searching;
         }
         match &self.bar.noting {

@@ -184,7 +184,7 @@ impl Pane {
         ant: &UserId,
         now: DateTime<Utc>,
         focused: bool,
-        data: &super::model::Data,
+        mouse: &super::mouse::Regions,
     ) {
         let orders = match &self.reading {
             Some(Ok(reading)) => &reading.orders[reading.orders.len().saturating_sub(ORDERS_SHOWN)..],
@@ -193,7 +193,7 @@ impl Pane {
         let tall = u16::try_from(orders.len().max(1) + 2).unwrap_or(u16::MAX);
         let [fields, below, input] =
             Layout::vertical([Constraint::Min(3), Constraint::Length(tall), Constraint::Length(3)]).areas(area);
-        self.draw_fields(frame, fields, ant, now, focused, data);
+        self.draw_fields(frame, fields, ant, now, focused, mouse);
         let items: Vec<ListItem> = if orders.is_empty() {
             vec![ListItem::new(Line::styled(format!("no admin orders to {ant}"), style::dim()))]
         } else {
@@ -227,7 +227,7 @@ impl Pane {
         ant: &UserId,
         now: DateTime<Utc>,
         focused: bool,
-        data: &super::model::Data,
+        mouse: &super::mouse::Regions,
     ) {
         let reading = match &self.reading {
             None => Err(format!("reading the settings of {ant}…")),
@@ -270,7 +270,7 @@ impl Pane {
         super::mouse::list(
             frame,
             inner,
-            data,
+            mouse,
             super::mouse::Viewport::AntSettings,
             items,
             self.at,

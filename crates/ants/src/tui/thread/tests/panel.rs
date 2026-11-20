@@ -25,16 +25,16 @@ fn the_view_shows_the_timeline_with_running_calls_and_a_panel_beside_it() {
     assert!(shown.contains("Run(cargo test) · running 41s"), "its latest call under it: {shown}");
     assert!(shown.contains("      ⎿ ● dev-b  Ran 1 command · 0ms "), "a finished turn on a line: {shown}");
     assert!(!shown.contains("read migrations"), "{shown}");
-    m.data.tools = Tools::All;
+    m.ui.tools = Tools::All;
     let shown = screen(&page, &m, 110, at(47));
     assert!(shown.contains("  ⎿ ● Run(read migrations) · 0ms "), "{shown}");
-    m.data.tools = Tools::None;
+    m.ui.tools = Tools::None;
     let shown = screen(&page, &m, 110, at(47));
     assert!(!shown.contains("Ran 1") && !shown.contains("running 41s"), "{shown}");
     assert!(shown.contains("only in worker/retry.rs"), "{shown}");
     let brief = "│working · dev-a dev-b · 8 turns left · $0.00 · 0 tokens";
     assert!(shown.contains(brief) && !shown.contains("STATE"), "the panel folded on a line: {shown}");
-    m.data.tools = Tools::Collapsed;
+    m.ui.tools = Tools::Collapsed;
     let shown = screen(&page, &m, 140, at(47));
     for field in ["STATE", "OWNER", "ANTS", "dev-a ◐", "dev-b", "SPEND  $0.00 · 0 tokens", "FROM   ask by alice"] {
         assert!(shown.contains(field), "{field}: {shown}");

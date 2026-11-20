@@ -203,7 +203,7 @@ impl Page {
         Some(None)
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, ant: &UserId, focused: bool, data: &super::model::Data) {
+    pub fn draw(&self, frame: &mut Frame, area: Rect, ant: &UserId, focused: bool, mouse: &super::mouse::Regions) {
         let signing = self.signing.as_ref().map(|s| self.signing_lines(s));
         let inner = usize::from(area.width.saturating_sub(2)).max(1);
         let tall = signing.as_ref().map_or(0, |lines| {
@@ -219,7 +219,7 @@ impl Page {
             State::Failed(e) => vec![Line::raw(format!("reading the MCP servers: {e}"))],
             State::Read(report) => self.server_lines(report, focused),
         };
-        let (lines, top) = self.mouse_lines(data, block.inner(servers), lines);
+        let (lines, top) = self.mouse_lines(mouse, block.inner(servers), lines);
         let paragraph = Paragraph::new(lines).block(block).scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
         frame.render_widget(paragraph, servers);
         if let (Some(signing), Some(lines)) = (&self.signing, signing) {
@@ -231,7 +231,7 @@ impl Page {
 
     fn mouse_lines(
         &self,
-        data: &super::model::Data,
+        mouse: &super::mouse::Regions,
         area: Rect,
         raw: Vec<Line<'static>>,
     ) -> (Vec<Line<'static>>, usize) {
@@ -254,12 +254,12 @@ impl Page {
             raw = end;
         }
         let (start, end) = ranges.get(self.selected).copied().unwrap_or_default();
-        let top = data.mouse.top(super::mouse::Viewport::AntMcp, area, self.selected, start, end, lines.len());
+        let top = mouse.top(super::mouse::Viewport::AntMcp, area, self.selected, start, end, lines.len());
         for (at, (start, end)) in ranges.into_iter().enumerate() {
             let from = start.max(top);
             let to = end.min(top + usize::from(area.height));
             if from < to {
-                data.mouse.add(
+                mouse.add(
                     Rect { y: area.y + (from - top) as u16, height: (to - from) as u16, ..area },
                     super::mouse::Target::Row(at),
                 );

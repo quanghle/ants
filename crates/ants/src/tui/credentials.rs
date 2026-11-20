@@ -297,7 +297,7 @@ impl Page {
             keys: &Self::ids(&heard.asked),
             viewport: super::mouse::Viewport::Credentials,
         };
-        self.list.draw(frame, area, data, shown, focused);
+        self.list.draw(frame, area, &model.ui.mouse, shown, focused);
     }
 }
 

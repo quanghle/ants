@@ -16,7 +16,7 @@ use ratatui::widgets::Paragraph;
 use super::attach;
 use super::command::Conversation;
 use super::exec::Job;
-use super::model::{Action, Data, Key, Model, To};
+use super::model::{Action, Data, Key, Model, To, Ui};
 use super::select::{PAGE, Selection, step};
 use super::style::{self, ago};
 use crate::channel::reads::Unread;
@@ -199,51 +199,51 @@ impl Page {
     }
 
     /// The tab chosen, as kept on the device.
-    pub fn tab(&self, data: &Data) -> Tab {
-        data.channel_tabs.get(&self.channel).copied().unwrap_or_default()
+    pub fn tab(&self, ui: &Ui) -> Tab {
+        ui.channel_tabs.get(&self.channel).copied().unwrap_or_default()
     }
 
     /// The channel's top-level posts shown, newest first: those of the threads the tab chosen lists.
-    fn posts<'d>(&self, data: &'d Data) -> impl Iterator<Item = &'d Post> {
-        let tab = self.tab(data);
+    fn posts<'d>(&self, data: &'d Data, ui: &Ui) -> impl Iterator<Item = &'d Post> {
+        let tab = self.tab(ui);
         data.feeds.posts(&self.channel).filter(move |p| tab.lists(&p.thread, data))
     }
 
     /// The selected post.
-    pub fn post<'d>(&self, data: &'d Data) -> Option<&'d Post> {
-        self.posts(data).nth(self.at(data))
+    pub fn post<'d>(&self, data: &'d Data, ui: &Ui) -> Option<&'d Post> {
+        self.posts(data, ui).nth(self.at(data, ui))
     }
 
-    fn ids(&self, data: &Data) -> Vec<Uuid> {
-        self.posts(data).map(|p| p.id).collect()
+    fn ids(&self, data: &Data, ui: &Ui) -> Vec<Uuid> {
+        self.posts(data, ui).map(|p| p.id).collect()
     }
 
     /// Where the selected post is among the channel's.
-    fn at(&self, data: &Data) -> usize {
-        self.selected.at(&self.ids(data))
+    fn at(&self, data: &Data, ui: &Ui) -> usize {
+        self.selected.at(&self.ids(data, ui))
     }
 
     /// The attachment `o` opens of the selected post.
-    pub fn attachment<'d>(&self, data: &'d Data) -> Option<&'d Listed> {
-        let post = self.post(data)?;
+    pub fn attachment<'d>(&self, data: &'d Data, ui: &Ui) -> Option<&'d Listed> {
+        let post = self.post(data, ui)?;
         post.attachments.get(self.mark.at(post.id, post.attachments.len()))
     }
 
-    pub fn key(&mut self, key: Key, data: &Data, _: DateTime<Utc>) -> Option<To> {
-        let at = self.at(data);
+    pub fn key(&mut self, key: Key, data: &Data, ui: &Ui, _: DateTime<Utc>) -> Option<To> {
+        let at = self.at(data, ui);
         let to = match key {
             Key::Char('o') => {
-                let listed = self.attachment(data)?.clone();
+                let listed = self.attachment(data, ui)?.clone();
                 return Some(To::Do(Action::Run(Job::Open(Box::new(listed)), String::new())));
             }
             Key::Char(']') => {
-                let post = self.post(data)?;
+                let post = self.post(data, ui)?;
                 self.mark.next(post.id, post.attachments.len());
                 return None;
             }
-            Key::Enter => return self.post(data).map(|p| To::Thread(p.thread.clone())),
+            Key::Enter => return self.post(data, ui).map(|p| To::Thread(p.thread.clone())),
             Key::Left | Key::Right => {
-                let tab = self.tab(data).moved(if key == Key::Left { -1 } else { 1 });
+                let tab = self.tab(ui).moved(if key == Key::Left { -1 } else { 1 });
                 self.selected = Selection::default();
                 return Some(To::Do(Action::KeepChannelTab(self.channel.clone(), tab)));
             }
@@ -263,23 +263,23 @@ impl Page {
             }
             _ => step(key, at, Some(PAGE))?,
         };
-        self.selected.select(&self.ids(data), to);
+        self.selected.select(&self.ids(data, ui), to);
         None
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
-        let data = &model.data;
+        let (data, ui) = (&model.data, &model.ui);
         let rows = header::rows(frame.area());
         let [head, tabs_row, area] =
             Layout::vertical([Constraint::Length(rows), Constraint::Length(1), Constraint::Min(1)]).areas(area);
         header::draw(frame, head, data, &self.channel, now);
-        let tab = self.tab(data);
+        let tab = self.tab(ui);
         let counts = tabs::counts(data.feeds.posts(&self.channel).map(|p| &p.thread), data);
         let tabs = tabs::line(tab, &counts, usize::from(tabs_row.width), focused);
         let mut x = tabs_row.x;
         for span in &tabs.spans {
             if let Some(tab) = Tab::ALL.into_iter().find(|t| span.content.starts_with(&format!("{} ", t.label()))) {
-                data.mouse.add(
+                ui.mouse.add(
                     Rect {
                         x,
                         width: u16::try_from(span.width()).unwrap_or(u16::MAX).min(tabs_row.right().saturating_sub(x)),
@@ -291,7 +291,7 @@ impl Page {
             x = x.saturating_add(u16::try_from(span.width()).unwrap_or(u16::MAX));
         }
         frame.render_widget(Paragraph::new(tabs), tabs_row);
-        let posts: Vec<&Post> = self.posts(data).collect();
+        let posts: Vec<&Post> = self.posts(data, ui).collect();
         let block = style::block(format!(" #{} · {} ", self.channel, tab.label()), focused);
         if posts.is_empty() {
             let text = match (data.live.stored_at, tab) {
@@ -306,7 +306,7 @@ impl Page {
             self.draw_editor(frame, head, tabs_row.union(area), data, now);
             return;
         }
-        let selected = self.at(data);
+        let selected = self.at(data, ui);
         let items: Vec<Text> = posts
             .iter()
             .enumerate()
@@ -314,7 +314,7 @@ impl Page {
                 let marked = (at == selected).then(|| self.mark.at(p.id, p.attachments.len()));
                 let inner = usize::from(area.width.saturating_sub(3));
                 Text::from(
-                    post_lines(p, data, now, marked).into_iter().map(|l| style::clip(l, inner)).collect::<Vec<_>>(),
+                    post_lines(p, data, ui, now, marked).into_iter().map(|l| style::clip(l, inner)).collect::<Vec<_>>(),
                 )
             })
             .collect();
@@ -323,7 +323,7 @@ impl Page {
         super::mouse::list(
             frame,
             inner,
-            data,
+            &ui.mouse,
             super::mouse::Viewport::Channel(self.channel.clone()),
             items,
             selected,
@@ -356,7 +356,7 @@ fn next_level(level: ChannelNotify) -> ChannelNotify {
 
 /// A post: its author and age, its first line, its attachments, `marked` the one `o` opens, then its thread's state,
 /// its replies and reactions.
-fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize>) -> Vec<Line<'static>> {
+fn post_lines(post: &Post, data: &Data, ui: &Ui, now: DateTime<Utc>, marked: Option<usize>) -> Vec<Line<'static>> {
     let first = post.text.lines().next().unwrap_or_default();
     let face = post.from.parse().ok().and_then(|from| data.face(&from));
     let mut head: Vec<Span<'static>> = face.into_iter().flatten().collect();
@@ -365,7 +365,7 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize
         Span::styled(format!(" {} ", ago(post.at, now)), style::dim()),
         Span::raw(crate::text::excerpt(first, 200)),
     ]);
-    head.extend(data.drafts.mark(&Conversation::Thread(post.thread.clone())));
+    head.extend(ui.drafts.mark(&Conversation::Thread(post.thread.clone())));
     let mut lines = vec![Line::from(head)];
     lines.extend(attach::lines(&post.attachments, marked, "  "));
     let state = data.state(&post.thread);
@@ -421,9 +421,9 @@ mod tests {
         let watched = vec![second.id, first.id];
         m.read(super::super::reads::Read::Reactions(watched, [(second.id, vec![reacted])].into()), at(4));
         let View::Channel(page) = m.page() else { panic!("not the channel") };
-        let shown: Vec<String> = post_lines(m.data.feeds.posts(&ops).nth(1).unwrap(), &m.data, at(64), None)
+        let shown: Vec<String> = post_lines(m.data.feeds.posts(&ops).nth(1).unwrap(), &m.data, &m.ui, at(64), None)
             .into_iter()
-            .chain(post_lines(m.data.feeds.posts(&ops).next().unwrap(), &m.data, at(64), None))
+            .chain(post_lines(m.data.feeds.posts(&ops).next().unwrap(), &m.data, &m.ui, at(64), None))
             .map(|l| l.to_string())
             .collect();
         assert_eq!(
@@ -457,7 +457,7 @@ mod tests {
         m.select(nav::Item::Channel(ops.clone()));
         let page = |m: &Model| {
             let View::Channel(page) = m.page() else { panic!("not the channel") };
-            (page.tab(&m.data), page.posts(&m.data).map(|p| p.thread.clone()).collect::<Vec<_>>())
+            (page.tab(&m.ui), page.posts(&m.data, &m.ui).map(|p| p.thread.clone()).collect::<Vec<_>>())
         };
         let screen = |m: &Model| {
             let View::Channel(page) = m.page() else { panic!("not the channel") };
@@ -473,12 +473,12 @@ mod tests {
         let kept = |tab| Some(Action::KeepChannelTab(ops.clone(), tab));
         assert_eq!(m.key(Key::Right, at(4)), kept(Tab::WaitingOnMe));
         assert_eq!(page(&m), (Tab::WaitingOnMe, vec![asked.thread_id]));
-        let badge = post_lines(m.data.feeds.posts(&ops).nth(1).unwrap(), &m.data, at(4), None).remove(1);
+        let badge = post_lines(m.data.feeds.posts(&ops).nth(1).unwrap(), &m.data, &m.ui, at(4), None).remove(1);
         assert_eq!(badge.to_string(), "  waiting on me  ↳ 1 reply · last 0s ago");
         assert_eq!(badge.spans[1].style.fg, Some(ThreadState::WaitingOnMe.color()), "coloured by its state");
 
         assert_eq!(m.key(Key::Left, at(4)), kept(Tab::All));
-        assert!(m.data.channel_tabs.is_empty(), "the default is kept as none");
+        assert!(m.ui.channel_tabs.is_empty(), "the default is kept as none");
         assert_eq!(m.key(Key::Left, at(4)), kept(Tab::Archived), "round from the first tab to the last");
         assert_eq!(page(&m), (Tab::Archived, vec![archived.thread_id.clone()]));
         m.select(nav::Item::Home);
@@ -508,7 +508,7 @@ mod tests {
         m.select(nav::Item::Channel(ops.clone()));
         let shown = |m: &crate::tui::model::Model| {
             let View::Channel(page) = m.page() else { panic!("not the channel") };
-            page.posts(&m.data).map(|p| p.thread.clone()).collect::<Vec<_>>()
+            page.posts(&m.data, &m.ui).map(|p| p.thread.clone()).collect::<Vec<_>>()
         };
         let unread = |m: &crate::tui::model::Model| {
             let hidden = |t: &ThreadId| m.data.live.hidden(t);

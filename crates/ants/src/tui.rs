@@ -291,8 +291,8 @@ fn appearance(model: &mut Model) -> Result<ants_daemon::config::CliDefaults> {
 /// Set `model` as the previous `ants chat` on the device left it, by what `kept` keeps.
 fn restore(model: &mut Model, kept: catchup::ChatState) {
     model.catchup.since = kept.ended;
-    model.data.tools = kept.tools;
-    model.data.channel_tabs = kept.channel_tabs;
+    model.ui.tools = kept.tools;
+    model.ui.channel_tabs = kept.channel_tabs;
     model.fold.folds = kept.folds;
 }
 
@@ -420,7 +420,7 @@ impl Chat {
         if *dirty || drawn.elapsed() >= REDRAW {
             self.model.look(Utc::now());
             self.model.follow_drafts();
-            if self.model.data.history.unsaved() {
+            if self.model.ui.history.unsaved() {
                 self.model.keep_history();
             }
             let frame = terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;
