@@ -120,6 +120,45 @@ fn every_waiting_row_scrolls_into_a_narrow_list_and_an_empty_list_answers_nothin
 }
 
 #[test]
+fn the_waiting_list_steps_by_row_by_half_its_height_and_to_either_end() {
+    let (mut m, [request, _], _) = waiting_model();
+    if let crate::tui::model::Page::Thread(page) = m.pages.last_mut().unwrap() {
+        page.history.entries.clear();
+    }
+    m.data.live.approvals = (0..12)
+        .map(|n| {
+            let mut request = ApprovalRequest { id: Uuid::now_v7(), requested_at: at(n), ..request.clone() };
+            request.tool.title = format!("command-{n:02}");
+            request
+        })
+        .collect();
+    m.key(Key::Ctrl('l'), at(10));
+    let mut opened = |key| {
+        let shown = waiting_screen(&m, 100, 20);
+        assert!(shown.contains("Waiting (12)"), "{shown}");
+        m.key(key, at(10));
+        m.key(Key::Enter, at(10));
+        let title = m.asking.as_ref().unwrap().request.tool.title.clone();
+        m.key(Key::Esc, at(10));
+        title
+    };
+    let steps = [
+        (Key::Up, "command-00"),
+        (Key::Char('j'), "command-01"),
+        (Key::Down, "command-02"),
+        (Key::Char('k'), "command-01"),
+        (Key::PageDown, "command-07"),
+        (Key::PageUp, "command-01"),
+        (Key::End, "command-11"),
+        (Key::Down, "command-11"),
+        (Key::Home, "command-00"),
+    ];
+    for (key, title) in steps {
+        assert_eq!(opened(key), title, "{key:?}");
+    }
+}
+
+#[test]
 fn a_listed_questions_typed_answer_stays_on_that_question_and_refuses_one_answered_elsewhere() {
     for settled in [false, true] {
         let (mut m, _, [older, _]) = waiting_model();
@@ -168,7 +207,7 @@ fn a_focused_card_keeps_the_focus_through_the_bar_and_a_card_gone_takes_the_key_
     assert!(m.bar.focused && m.bar.text() == "/answer ", "an empty typed answer goes through the bar");
     m.key(Key::Esc, at(10));
     assert!(!m.bar.focused);
-    let shown = waiting_screen(&m, 100, 30);
+    let shown = waiting_screen(&m, 100, 20);
     assert!(shown.contains("› type an answer"), "the card keeps the focus: {shown}");
 
     let mut answer = message(3, &newer.thread_id, "alice", "dev-a", "yes");

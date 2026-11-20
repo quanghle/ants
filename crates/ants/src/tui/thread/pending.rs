@@ -111,7 +111,7 @@ impl Page {
         let ids: Vec<_> = items.iter().map(Item::id).collect();
         let at = list.selected.at(&ids);
         let half = (list.height.get() / 2).max(1);
-        let to = match key {
+        match key {
             Key::Esc | Key::Char('q') | Key::Ctrl('l') => {
                 self.listing = None;
                 return Some(None);
@@ -127,15 +127,8 @@ impl Page {
                     None => None,
                 });
             }
-            Key::Up | Key::Char('k') => at.saturating_sub(1),
-            Key::Down | Key::Char('j') => at.saturating_add(1),
-            Key::PageUp => at.saturating_sub(half),
-            Key::PageDown => at.saturating_add(half),
-            Key::Home => 0,
-            Key::End => usize::MAX,
-            _ => return Some(None),
-        };
-        self.listing.as_mut()?.selected.select(&ids, to);
+            _ => _ = self.listing.as_mut()?.selected.step(key, &ids, Some(half)),
+        }
         Some(None)
     }
 }

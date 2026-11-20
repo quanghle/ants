@@ -10,7 +10,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
-use super::super::{model::Key, style};
+use super::super::{model::Key, select::step, style};
 use super::text::{asked, wrapped};
 use super::{Asking, how};
 use crate::tools::{self, State};
@@ -84,15 +84,7 @@ fn body(asking: &Asking, now: DateTime<Utc>) -> Vec<Line<'static>> {
 
 /// Where `key` scrolls the body from `top`, `page` rows showing: none for a key that does not scroll.
 pub(super) fn scrolled(key: Key, top: usize, page: usize) -> Option<usize> {
-    Some(match key {
-        Key::Up | Key::Char('k') => top.saturating_sub(1),
-        Key::Down | Key::Char('j') => top.saturating_add(1),
-        Key::PageUp => top.saturating_sub(page.max(1)),
-        Key::PageDown => top.saturating_add(page.max(1)),
-        Key::Home => 0,
-        Key::End => usize::MAX,
-        _ => return None,
-    })
+    step(key, top, Some(page.max(1)))
 }
 
 /// The request being answered in full over the screen.
@@ -175,5 +167,17 @@ mod tests {
         assert_eq!(asking.key(Key::Home), Answer::Keep);
         assert_eq!(draw(&asking), first, "Home goes back to the top");
         assert_eq!(asking.key(Key::Char('a')), Answer::Decide(Verdict::AllowOnce), "the keys still answer");
+    }
+
+    #[test]
+    fn the_body_scrolls_by_row_by_the_rows_showing_and_to_either_end() {
+        assert_eq!(scrolled(Key::Up, 0, 8), Some(0));
+        assert_eq!(scrolled(Key::Char('j'), 3, 8), Some(4));
+        assert_eq!(scrolled(Key::Char('k'), 3, 8), Some(2));
+        assert_eq!(scrolled(Key::PageDown, 3, 8), Some(11));
+        assert_eq!(scrolled(Key::PageUp, 3, 8), Some(0));
+        assert_eq!(scrolled(Key::PageDown, 3, 0), Some(4), "a page is a row at least");
+        assert_eq!((scrolled(Key::Home, 3, 8), scrolled(Key::End, 3, 8)), (Some(0), Some(usize::MAX)));
+        assert_eq!(scrolled(Key::Char('a'), 3, 8), None);
     }
 }

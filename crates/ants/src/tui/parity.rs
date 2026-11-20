@@ -240,7 +240,7 @@ fn fail_on(problems: &[String]) {
         problems.is_empty(),
         "ants chat parity (crates/ants/src/tui/parity.rs):\n{}\n\nA row says where ants chat has it: Slash(\"name\") \
          for slash commands of COMMANDS (crates/ants/src/tui/command/parse.rs), Press(View, Key, \"short\") for a key \
-         of the key table (crates/ants/src/tui/keymap.rs), Shown(\"…\") naming the view or pane, Exempt(\"why ants \
+         of the key table (crates/ants/src/tui/keymap/table.rs), Shown(\"…\") naming the view or pane, Exempt(\"why ants \
          chat has none\"), or Missing(\"ants-…\") naming the bd issue of the gap.",
         problems.join("\n")
     );

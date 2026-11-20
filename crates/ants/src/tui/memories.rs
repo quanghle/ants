@@ -13,6 +13,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::model::Key;
+use super::select::{PAGE, step};
 use super::style;
 use crate::live::maybe;
 
@@ -89,16 +90,8 @@ impl Page {
             State::Read(text, _) => u16::try_from(text.lines().count()).unwrap_or(u16::MAX),
             _ => 0,
         };
-        self.scroll = match key {
-            Key::Up | Key::Char('k') => self.scroll.saturating_sub(1),
-            Key::Down | Key::Char('j') => self.scroll + 1,
-            Key::PageUp => self.scroll.saturating_sub(10),
-            Key::PageDown => self.scroll.saturating_add(10),
-            Key::Home => 0,
-            Key::End => u16::MAX,
-            _ => return,
-        }
-        .min(lines.saturating_sub(1));
+        let Some(to) = step(key, usize::from(self.scroll), Some(PAGE)) else { return };
+        self.scroll = u16::try_from(to).unwrap_or(u16::MAX).min(lines.saturating_sub(1));
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, ant: &UserId, focused: bool) {
@@ -158,5 +151,32 @@ impl Io {
             }
             .boxed_local(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_memories_scroll_by_row_by_page_and_to_either_end_within_their_lines() {
+        let mut page = Page::new();
+        page.state = State::Read((0..30).map(|n| format!("line {n}\n")).collect(), 30);
+        let steps = [
+            (Key::Up, 0),
+            (Key::Char('j'), 1),
+            (Key::Down, 2),
+            (Key::Char('k'), 1),
+            (Key::PageDown, 11),
+            (Key::PageUp, 1),
+            (Key::End, 29),
+            (Key::Down, 29),
+            (Key::Char('x'), 29),
+            (Key::Home, 0),
+        ];
+        for (key, scroll) in steps {
+            page.key(key);
+            assert_eq!(page.scroll, scroll, "{key:?}");
+        }
     }
 }
