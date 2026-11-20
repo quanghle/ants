@@ -338,7 +338,7 @@ async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
     let (m2_node, _) = spawn_leaf(&m2, &[(human.clone(), Role::Human)], EnrollApprover::With);
     let (_a, a_js) = bus::connect(&m1_node.url, Some(&creds(&dev_a)), Some(&domain), &dev_a, "test").await.unwrap();
     eventually("m1 reaches the hub", async || bus::open_stream(&a_js, &dev_a).await.is_ok()).await;
-    let setup = crate::node::outbox::connect(&hub.url, Some(&creds(&human)), &human, &m1).await.unwrap();
+    let setup = crate::node::outbox::connect(&hub.url, Some(&creds(&human)), &human).await.unwrap();
     crate::node::outbox::admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
 
     let enroll_creds = enrollment_in(&team, hub.dir(), &dev_c);

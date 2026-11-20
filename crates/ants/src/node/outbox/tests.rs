@@ -111,7 +111,7 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
 
     // Before the outbox exists, a publish that cannot reach the hub fails outright.
     outbox_missing_fails(&b_js).await;
-    let setup = super::connect(&hub.url, Some(&creds(&human)), &human, &m1).await.unwrap();
+    let setup = super::connect(&hub.url, Some(&creds(&human)), &human).await.unwrap();
     admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
     sourced(&h_js, &m1, Duration::from_secs(5)).await.unwrap();
     let found = sourcing(&h_js, &m1, &on_m1).await.unwrap();
@@ -122,7 +122,7 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     let alice_creds = hub.dir().join("alice.creds");
     auth::issue(&team, &alice, Role::Human, Some(&domain), &alice_creds).unwrap();
     let (_alice, alice_js) = bus::connect(&hub.url, Some(&alice_creds), Some(&domain), &alice, "test").await.unwrap();
-    let setup = super::connect(&leaf_node.url, Some(&alice_creds), &alice, &m1).await.unwrap();
+    let setup = super::connect(&leaf_node.url, Some(&alice_creds), &alice).await.unwrap();
     admit(&setup, &alice_js, &m1, &on_m1).await.unwrap();
 
     // Stored directly, and a copy of it in the outbox is dropped as a duplicate.
@@ -340,7 +340,7 @@ async fn a_post_waiter_reads_back_what_never_comes_live() {
     let (h_leaf, h_leaf_js) = connect(&leaf_node.url, &human).await;
     let (a_leaf, a_leaf_js) = connect(&leaf_node.url, &dev_a).await;
     eventually("the leaf reaches the hub", async || bus::open_stream(&a_leaf_js, &dev_a).await.is_ok()).await;
-    let setup = super::connect(&hub.url, Some(&hub.dir().join("human.creds")), &human, &m1).await.unwrap();
+    let setup = super::connect(&hub.url, Some(&hub.dir().join("human.creds")), &human).await.unwrap();
     admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
     sourced(&h_js, &m1, Duration::from_secs(5)).await.unwrap();
 
@@ -446,7 +446,7 @@ async fn a_hub_without_js_api_reply_v2_is_reported() {
     })
     .unwrap();
 
-    let setup = super::connect(&hub.url, Some(&human_creds), &human, &m1).await.unwrap();
+    let setup = super::connect(&hub.url, Some(&human_creds), &human).await.unwrap();
     eventually("the leaf reaches the hub", async || admit(&setup, &h_js, &m1, &on_m1).await.is_ok()).await;
     let error = sourced(&h_js, &m1, Duration::from_secs(3)).await.unwrap_err().to_string();
     assert!(error.contains("feature_flags { js_api_reply_v2: true }"), "{error}");
@@ -645,7 +645,7 @@ async fn an_outbox_goes_on_after_a_restart_at_once_through_its_durable_consumer(
         "include \"leaf.conf\"\n".to_owned()
     })
     .unwrap();
-    let setup = super::connect(&hub.url, Some(&human_creds), &human, &m1).await.unwrap();
+    let setup = super::connect(&hub.url, Some(&human_creds), &human).await.unwrap();
     eventually("the leaf reaches the hub", async || admit(&setup, &h_js, &m1, &on_m1).await.is_ok()).await;
     sourced(&h_js, &m1, SOURCE_WAIT).await.unwrap();
     let keep = async |js: &Context, text: &str| {

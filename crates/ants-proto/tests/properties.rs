@@ -352,12 +352,11 @@ proptest! {
     }
 
     #[test]
-    fn machine_subjects_hold_the_machine_as_one_token(machine in machine(), human in user(), ant in user()) {
+    fn machine_subjects_hold_the_machine_as_one_token(machine in machine(), ant in user()) {
         let m = machine.as_str();
         prop_assert_eq!(tokens(&machine.api_prefix()), vec!["$JS", m, "API"]);
         prop_assert_eq!(tokens(&machine.deliver_prefix()), vec!["$JS", "S", m]);
         prop_assert_eq!(tokens(&machine.source_replies()), vec!["$JSC", "R", m, "*", ants_proto::OUTBOX_STREAM]);
-        prop_assert_eq!(tokens(&machine.setup_inbox(&human)), vec!["_INBOX", human.as_str(), "leaf", m]);
         prop_assert_eq!(tokens(&subject::intake(&machine)), vec!["ants", "in", m, ">"]);
         for role in [Role::Human, Role::Ant] {
             for inbox in [true, false] {

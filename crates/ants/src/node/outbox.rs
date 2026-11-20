@@ -54,12 +54,12 @@ pub const SOURCE_WAIT: Duration = Duration::from_secs(10);
 /// every second, and nats-server checks its sources this often.
 const STALE: Duration = Duration::from_secs(10);
 
-/// Connect as `human` to set up the outbox of `machine`, with the machine's own inbox prefix
-/// ([`Machine::setup_inbox`]): the leaf node may answer there and nowhere else.
-pub async fn connect(url: &str, creds: Option<&Path>, human: &UserId, machine: &Machine) -> Result<async_nats::Client> {
+/// Connect as `human` to set up the outbox of `machine` on its leaf node, through the hub: the leaf node answers
+/// through the store account's uplink, on the reply subject the team account's service import gave the request.
+pub async fn connect(url: &str, creds: Option<&Path>, human: &UserId) -> Result<async_nats::Client> {
     ants_daemon::bus::check_url(url)?;
     let mut options =
-        async_nats::ConnectOptions::new().name("ants-cli").custom_inbox_prefix(machine.setup_inbox(human));
+        async_nats::ConnectOptions::new().name("ants-cli").custom_inbox_prefix(ants_proto::inbox_prefix(human));
     if let Some(path) = creds {
         options = ants_daemon::bus::authenticate(options, path, ants_daemon::secrets::keystore::os())?;
     }

@@ -527,13 +527,13 @@ pub fn standing_approval(issued: &[Issued], name: &str, github: u64) -> Option<G
 }
 
 /// Drop the revocations whose credentials have all expired, and write the `server.conf` of `dir` with the rest.
-/// Returns the account's public key and JWT.
-pub fn apply(dir: &Path) -> Result<(String, String)> {
+/// Returns the public keys and JWTs of the accounts to push, in order ([`auth::write_server_conf`]).
+pub fn apply(dir: &Path) -> Result<[auth::AccountJwt; 2]> {
     apply_at(dir, auth::now()?)
 }
 
 /// [`apply`] at `now`, in seconds since the epoch.
-fn apply_at(dir: &Path, now: u64) -> Result<(String, String)> {
+fn apply_at(dir: &Path, now: u64) -> Result<[auth::AccountJwt; 2]> {
     let mut all = revoked(dir)?;
     let before = all.len();
     all.retain(|r| !r.expired(now));
@@ -725,16 +725,31 @@ pub struct Pushed {
     pub kept: Option<bool>,
 }
 
-/// Send the team's account JWT, with its revocations, to the server at `url`, as a user of the system account signed
-/// with its key in `dir`; the server, and every leaf node connected to it through a system account uplink, closes the
-/// connections of users revoked since. Fails unless the server applies it.
+/// Send the JWTs of the team's store account and account, with its revocations, to the server at `url`, as a user of
+/// the system account signed with its key in `dir`; the server, and every leaf node connected to it through a system
+/// account uplink, closes the connections of users revoked since. Fails unless the server applies both.
 pub async fn push(url: &str, dir: &Path) -> Result<Pushed> {
     ants_daemon::bus::check_url(url)?;
-    let (account, jwt) = apply(dir)?;
+    let accounts = apply(dir)?;
     let client = connect_system(url, dir).await?;
     let server = client.server_info().server_name;
+    let mut others = Vec::new();
+    for (account, jwt) in accounts {
+        others = update(&client, &server, &account, jwt).await?;
+    }
+    Ok(Pushed { kept: keeps_accounts(&client).await, server, others })
+}
+
+/// Send `jwt`, that of `account`, through `client`, connected to `server`; the other servers that answered, each with
+/// the error it gave, if any. Fails unless `server` applies it.
+async fn update(
+    client: &async_nats::Client,
+    server: &str,
+    account: &str,
+    jwt: String,
+) -> Result<Vec<(String, Option<String>)>> {
     let inbox = client.new_inbox();
-    let mut answers = relayed::subscribe(&client, inbox.clone()).await?;
+    let mut answers = relayed::subscribe(client, inbox.clone()).await?;
     let subject = format!("$SYS.REQ.ACCOUNT.{account}.CLAIMS.UPDATE");
     client.publish_with_reply(subject, inbox, jwt.into()).await.context("asking the server to update the account")?;
     client.flush().await?;
@@ -752,7 +767,7 @@ pub async fn push(url: &str, dir: &Path) -> Result<Pushed> {
     match pushed {
         None => bail!("no answer from server {server}"),
         Some(Some(error)) => bail!("server {server}: {error}"),
-        Some(None) => Ok(Pushed { kept: keeps_accounts(&client).await, server, others }),
+        Some(None) => Ok(others),
     }
 }
 
