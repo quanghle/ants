@@ -778,11 +778,7 @@ fn enrollment() {
             signature: "c2lnLWVucm9sbA".to_owned(),
             leaf: Some(enroll_leaf()),
             order: None,
-            host_creds: Some(EnrollHost {
-                machine: machine(),
-                public_key: "UHOST".to_owned(),
-                signature: "c2lnLWhvc3Q".to_owned(),
-            }),
+            host_creds: Some(EnrollHost { machine: machine(), public_key: "UHOST".to_owned() }),
         },
     );
     snap("enroll_leaf", &enroll_leaf());

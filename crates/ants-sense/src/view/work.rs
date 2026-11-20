@@ -134,7 +134,6 @@ mod tests {
             evidence: Evidence { files: vec!["src/lib.rs:3".into()], ..Evidence::default() },
             action: "Remember to rebase.".into(),
             follows: None,
-            follows_missing: false,
             trail: None,
         });
         let kind = if sage { FindingKind::Sage } else { FindingKind::Distill };

@@ -136,13 +136,6 @@ impl Cache {
             0 => {
                 db.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"))?;
             }
-            2 => {
-                db.execute_batch(
-                    "BEGIN; CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, operation TEXT NOT NULL UNIQUE, entry TEXT NOT NULL);
-                     CREATE TABLE confirmed_items (id TEXT PRIMARY KEY, item TEXT NOT NULL) WITHOUT ROWID;
-                     PRAGMA user_version = 3; COMMIT;",
-                )?;
-            }
             SCHEMA_VERSION => {
                 let check: String = db.pragma_query_value(None, "quick_check", |row| row.get(0))?;
                 if check != "ok" {

@@ -66,9 +66,8 @@ pub struct EnrollRequest {
 }
 
 /// The host credentials of its machine ([`crate::host_user`]) an enrollment request asks for too: the machine's name
-/// and the public key of the user NKey generated for them, whose seed stays there, with the enrollment key's
-/// `signature` of [`EnrollRequest::host_signed`], base64url without padding. The request's own signature leaves them
-/// out, so an approver that knows nothing of them still approves the ant alone.
+/// and the public key of the user NKey generated for them, whose seed stays there, signed with the rest of the
+/// request ([`EnrollRequest::signed`]).
 ///
 /// The machine's name binds to the asking machine thus: the enrollment key signs it with the whole request; through a
 /// leaf node it must be the leaf's machine, which the uplink key's signature proves; a machine with a leaf node gets
@@ -79,7 +78,6 @@ pub struct EnrollHost {
     pub machine: Machine,
     /// The host's public NKey, `U...`.
     pub public_key: String,
-    pub signature: String,
 }
 
 /// The leaf node of an asking machine ([`EnrollRequest::leaf`]): its machine name, the user JWT of its uplink
@@ -107,23 +105,16 @@ impl EnrollRequest {
         }
     }
 
-    /// What the enrollment key signs for the host credentials asked for too ([`EnrollRequest::host_creds`]): what
-    /// [`EnrollRequest::signed`] holds, then the machine and the host's key; None when none are asked for.
-    pub fn host_signed(&self) -> Option<Vec<u8>> {
-        let host = self.host_creds.as_ref()?;
-        let mut signed = self.signed();
-        signed.extend_from_slice(format!("\nants-enroll-host\n{}\n{}", host.machine, host.public_key).as_bytes());
-        Some(signed)
-    }
-
-    /// What the enrollment key and the leaf's uplink key sign: every field but the signatures, one per line, and the
-    /// id of the order last when there is one (the order is signed by its admin), so requests without one sign what
-    /// they did before orders existed.
+    /// What the enrollment key and the leaf's uplink key sign: every field but the signatures, one per line, each
+    /// empty when absent: of the order its id alone (the order is signed by its admin), of the host credentials asked
+    /// for the machine and the host's key.
     pub fn signed(&self) -> Vec<u8> {
         let sent_at = self.sent_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         let (machine, leaf) = self.leaf.as_ref().map_or(("", ""), |l| (l.machine.as_str(), l.jwt.as_str()));
-        let order = self.order.as_ref().map(|o| o.id.to_string());
-        let mut fields = vec![
+        let order = self.order.as_ref().map_or_else(String::new, |o| o.id.to_string());
+        let (host_machine, host_key) =
+            self.host_creds.as_ref().map_or(("", ""), |h| (h.machine.as_str(), h.public_key.as_str()));
+        [
             "ants-enroll",
             self.ant.as_str(),
             &self.public_key,
@@ -132,11 +123,12 @@ impl EnrollRequest {
             machine,
             leaf,
             &self.host,
-        ];
-        if let Some(order) = &order {
-            fields.push(order);
-        }
-        fields.join("\n").into_bytes()
+            &order,
+            host_machine,
+            host_key,
+        ]
+        .join("\n")
+        .into_bytes()
     }
 
     pub fn subject(&self) -> String {
@@ -255,14 +247,11 @@ impl RenewRequest {
     }
 
     /// What the key of the credentials renewed signs: every field but the signature, one per line, the encryption
-    /// key last and only when asked for, so requests without one sign what they did before it existed.
+    /// key empty when none is asked for.
     pub fn signed(&self) -> Vec<u8> {
         let sent_at = self.sent_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-        let mut lines = vec!["ants-renew", &self.name, &self.public_key, &sent_at, &self.current, &self.host];
-        if let Some(xkey) = &self.xkey {
-            lines.push(xkey.as_str());
-        }
-        lines.join("\n").into_bytes()
+        let xkey = self.xkey.as_ref().map_or("", DeviceKey::as_str);
+        ["ants-renew", &self.name, &self.public_key, &sent_at, &self.current, &self.host, xkey].join("\n").into_bytes()
     }
 
     pub fn subject(&self) -> String {
@@ -351,13 +340,14 @@ mod tests {
     }
 
     #[test]
-    fn a_request_carrying_an_order_signs_its_id_last() {
+    fn a_request_carrying_an_order_signs_its_id() {
         let mut request = EnrollRequest::new(p("dev-a"), "UKEY", "m1");
         let bare = request.signed();
+        assert!(bare.ends_with(b"\nm1\n\n\n"), "no order nor host credentials: empty lines");
         let order = AdminOrder::new(p("alice"), "m1".parse().unwrap(), p("dev-a"), crate::AdminOp::Retire, "j");
         request.order = Some(Box::new(order.clone()));
         let signed = request.signed();
-        assert_eq!(signed, [bare, format!("\n{}", order.id).into_bytes()].concat());
+        assert!(signed.ends_with(format!("\nm1\n{}\n\n", order.id).as_bytes()), "{signed:?}");
         let back: EnrollRequest = serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
         assert_eq!(back.signed(), signed, "the same bytes after the wire");
         request.order = Some(Box::new(AdminOrder::new(p("alice"), order.machine, p("dev-a"), order.op, "j")));
@@ -365,17 +355,15 @@ mod tests {
     }
 
     #[test]
-    fn host_credentials_asked_for_are_signed_apart_from_the_request() {
+    fn host_credentials_asked_for_are_signed_with_the_request() {
         let mut request = EnrollRequest::new(p("dev-a"), "UKEY", "macbook");
         let bare = request.signed();
-        assert_eq!(request.host_signed(), None);
-        let host = EnrollHost { machine: "m1".parse().unwrap(), public_key: "UHOST".into(), signature: String::new() };
+        let host = EnrollHost { machine: "m1".parse().unwrap(), public_key: "UHOST".into() };
         request.host_creds = Some(host);
-        assert_eq!(request.signed(), bare, "an approver knowing nothing of them checks what it did");
-        let signed = request.host_signed().unwrap();
-        assert_eq!(signed, [bare, b"\nants-enroll-host\nm1\nUHOST".to_vec()].concat());
+        let signed = request.signed();
+        assert_eq!(signed, [&bare[..bare.len() - 2], b"\nm1\nUHOST"].concat(), "after the empty order line");
         let back: EnrollRequest = serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
-        assert_eq!(back.host_signed().unwrap(), signed, "the same bytes after the wire");
+        assert_eq!(back.signed(), signed, "the same bytes after the wire");
         for change in [
             |r: &mut EnrollRequest| r.host_creds.as_mut().unwrap().machine = "m2".parse().unwrap(),
             |r: &mut EnrollRequest| r.host_creds.as_mut().unwrap().public_key = "UOTHER".into(),
@@ -384,11 +372,8 @@ mod tests {
         ] {
             let mut changed = request.clone();
             change(&mut changed);
-            assert_ne!(changed.host_signed().unwrap(), signed);
+            assert_ne!(changed.signed(), signed);
         }
-        let old: EnrollRequest =
-            serde_json::from_str(&serde_json::to_string(&EnrollRequest::new(p("dev-a"), "U", "h")).unwrap()).unwrap();
-        assert_eq!(old.host_creds, None);
     }
 
     #[test]

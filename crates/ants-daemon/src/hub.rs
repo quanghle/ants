@@ -219,13 +219,11 @@ impl Object {
         Ok(())
     }
 
-    /// Deny the rollups of the object, its other settings left as they are but for the expiry markers a colony bucket
-    /// of an older version places, which a stream denying rollups cannot.
+    /// Deny the rollups of the object, its other settings left as they are.
     async fn deny_rollups(self, js: &jetstream::Context) -> Result<()> {
         let stream = js.get_stream(self.stream_name()).await.with_context(|| format!("looking up {self}"))?;
         let mut config = stream.cached_info().config.clone();
         config.allow_rollup = false;
-        config.subject_delete_marker_ttl = None;
         js.update_stream(&config).await.with_context(|| format!("denying the rollups of {self}"))?;
         Ok(())
     }
@@ -798,14 +796,14 @@ mod tests {
         }
     }
 
-    /// Buckets created allowing rollups, as by an older version or `nats kv add`, are found and fixed by `ants init`,
+    /// Buckets created allowing rollups, as by `nats kv add`, are found and fixed by `ants init`,
     /// their entries and other settings kept, also those whose stream info the credentials do not get.
     #[tokio::test]
     async fn init_denies_the_rollups_of_buckets_created_allowing_them() {
         let Some(server) = NatsServer::start() else { return };
         let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-        let legacy = [Object::TrailTips, Object::Presence, Object::Humans];
-        for object in legacy {
+        let allowing_rollups = [Object::TrailTips, Object::Presence, Object::Humans];
+        for object in allowing_rollups {
             match object.spec() {
                 Spec::Bucket(config) => drop(js.create_key_value(*config).await.unwrap()),
                 Spec::Stream(config) => {
@@ -837,42 +835,13 @@ mod tests {
         let fixed: Vec<_> = fixed.iter().filter(|f| f.problem == Problem::AllowsRollups).map(|f| f.object).collect();
         assert_eq!(fixed, [Object::Humans, Object::Threads, Object::TrailTips], "presence is fixed unseen");
         assert!(check(&js, |_| true).await.is_empty(), "{:?}", check(&js, |_| true).await);
-        for object in legacy {
+        for object in allowing_rollups {
             let kv = js.get_key_value(object.bucket().unwrap()).await.unwrap();
             assert!(!kv.stream.cached_info().config.allow_rollup);
             assert_eq!(kv.get("a.b").await.unwrap().as_deref(), Some(&b"{}"[..]), "{object} keeps its entries");
         }
         let humans = js.get_stream(Object::Humans.stream_name()).await.unwrap().cached_info().config.clone();
         assert_ne!(humans.max_consumers, MAX_CONSUMERS, "other settings stay");
-    }
-
-    /// A colony bucket made by an older version places expiry markers, so allows rollups: `ants init` denies them and
-    /// drops its markers, its entries kept, and an ant's rollup is refused from then on.
-    #[tokio::test]
-    async fn init_denies_the_rollups_of_a_colony_placing_expiry_markers() {
-        let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-        let older = kv::Config { limit_markers: Some(COLONY_TTL), ..colony_config(COLONY_TTL) };
-        let colony = js.create_key_value(older).await.unwrap();
-        assert!(colony.stream.cached_info().config.allow_rollup, "nats-server allows rollups with expiry markers");
-        for ant in ["dev-a", "dev-b"] {
-            colony.put(ant, "{}".into()).await.unwrap();
-        }
-        let found = check(&js, |s| s == Object::Colony.info_subject()).await;
-        assert_eq!(
-            found.iter().map(|f| (f.object, &f.problem)).collect::<Vec<_>>(),
-            [(Object::Colony, &Problem::AllowsRollups)]
-        );
-        let fixed = init(&js, |_| true).await.unwrap();
-        assert!(fixed.iter().any(|f| f.object == Object::Colony && f.problem == Problem::AllowsRollups));
-        let config = js.get_stream(Object::Colony.stream_name()).await.unwrap().cached_info().config.clone();
-        assert!(!config.allow_rollup);
-        assert_eq!(config.subject_delete_marker_ttl, None);
-        let mut headers = async_nats::HeaderMap::new();
-        headers.insert("Nats-Rollup", "all");
-        let sent = js.publish_with_headers(format!("$KV.{COLONY_BUCKET}.dev-a"), headers, "{}".into()).await.unwrap();
-        assert!(sent.await.is_err(), "dev-a's rollup is refused");
-        assert_eq!(colony.get("dev-b").await.unwrap().as_deref(), Some(&b"{}"[..]), "dev-b's entry stays");
     }
 
     /// Creating the identities bucket marks its incarnation, which a creation again leaves and a deleted marker or

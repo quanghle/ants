@@ -152,9 +152,6 @@ pub struct Advice {
     /// Of a [`FOLLOW_UP`], the earlier finding it follows, as the sage named it: none when it named none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follows: Option<FollowUp>,
-    /// The sage did not give a readable target for a follow-up. Absent in older findings that did not ask for one.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub follows_missing: bool,
     /// Of a [`TRAIL`], the saved trail it suggests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail: Option<Outline>,
@@ -183,8 +180,7 @@ impl Advice {
                 Some(id) => format!(" of {id}"),
                 None => format!(", unlinked: {} is no earlier finding of the sage for the ant", follows.named),
             },
-            None if self.follows_missing => ", unlinked: naming no earlier finding".into(),
-            None => String::new(),
+            None => ", unlinked: naming no earlier finding".into(),
         }
     }
 }
@@ -274,7 +270,6 @@ fn finding_of(given: &Value) -> Option<(String, Advice)> {
     let evidence = evidence_of(object.get("evidence")?.as_object()?);
     let follows = object.get("follows").filter(|_| kind == FOLLOW_UP).and_then(Value::as_str).and_then(finding_id);
     let follows = follows.map(|named| FollowUp { named, finding: None });
-    let follows_missing = kind == FOLLOW_UP && follows.is_none();
     let trail = if kind == TRAIL {
         if evidence.threads.is_empty() {
             return None;
@@ -283,7 +278,7 @@ fn finding_of(given: &Value) -> Option<(String, Advice)> {
     } else {
         None
     };
-    (!evidence.is_empty()).then_some((finding, Advice { kind, evidence, action, follows, follows_missing, trail }))
+    (!evidence.is_empty()).then_some((finding, Advice { kind, evidence, action, follows, trail }))
 }
 
 /// `text` as a finding's id, `<dream>.<n>`: none when it is none.

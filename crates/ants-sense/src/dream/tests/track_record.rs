@@ -13,14 +13,7 @@ pub(super) fn user(name: &str) -> UserId {
 /// A finding of a sage, of `kind`, first offered as `id`.
 pub(super) fn advised(id: &str, kind: &str, text: &str) -> Finding {
     let action = format!("Act on {id}.");
-    let advice = Advice {
-        kind: kind.into(),
-        evidence: Evidence::default(),
-        action,
-        follows: None,
-        follows_missing: false,
-        trail: None,
-    };
+    let advice = Advice { kind: kind.into(), evidence: Evidence::default(), action, follows: None, trail: None };
     Finding { id: id.into(), kind: FindingKind::Sage, text: text.into(), advice: Some(advice), ..finding(1) }
 }
 

@@ -86,7 +86,7 @@ pub struct ReviewedFinding {
     /// none when the request does not name it as eligible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follows: Option<String>,
-    /// A follow-up whose target was missing or ineligible. An older record may have neither a link nor this mark.
+    /// A follow-up whose target was missing or ineligible.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unlinked: bool,
     /// The ant's last verdict on it, once told; none while unanswered.

@@ -54,17 +54,3 @@ fn pending_writes_prevent_replacing_a_corrupt_missing_or_different_log_cache() {
     assert!(!file.exists(), "a pending cache is not silently replaced");
     std::fs::remove_dir_all(home).unwrap();
 }
-
-#[test]
-fn the_previous_cache_schema_is_migrated_without_losing_its_built_position() {
-    let home = ants_test_support::scratch_dir("sense-cache-migrate");
-    let mut cache = Cache::open(&home).unwrap();
-    cache.reset(&SenseId::new(), "one").unwrap();
-    let built = cache.built().unwrap();
-    cache.db.execute_batch("DROP TABLE outbox; DROP TABLE confirmed_items; PRAGMA user_version = 2;").unwrap();
-    drop(cache);
-    let cache = Cache::open(&home).unwrap();
-    assert_eq!(cache.built().unwrap(), built);
-    assert_eq!(cache.pending().unwrap().len(), 0);
-    std::fs::remove_dir_all(home).unwrap();
-}

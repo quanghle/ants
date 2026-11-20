@@ -250,10 +250,6 @@ async fn the_sages_record_and_tally_use_the_requests_eligible_targets_even_befor
 
     let second = review_request(2);
     assert!(review_answered(&*items, &ant, &on(2).thread, &second, &findings(&["lesson"]), None, sent).await.unwrap());
-    let item = review_id(&ant, 2);
-    let mut legacy = review_record(&*items, &ant, 2).await.unwrap().unwrap();
-    legacy.findings[0].kind = "follow_up".into();
-    items.put(&item, REVIEW, legacy.values(), None, "test").await.unwrap();
 
     let another = "dev-b".parse().unwrap();
     let other_request = ReviewOutcomes { earlier_findings: vec!["2.1".into()], ..review_request(4) };
@@ -266,14 +262,14 @@ async fn the_sages_record_and_tally_use_the_requests_eligible_targets_even_befor
     assert_eq!(counts(tally.by_ant[0].findings), (1, 3));
     assert_eq!(counts(tally.by_ant[1].findings), (1, 0));
     assert_eq!(counts(tally.by_kind[0].findings), (2, 3));
-    assert_eq!(tally.by_kind[0].findings.made, 6, "a legacy follow-up counts by kind but not by link status");
+    assert_eq!(tally.by_kind[0].findings.made, 5, "every follow-up counts by link status");
 
     let dream = begin(&*items, start(now, &writer)).await.unwrap().unwrap();
     let listed = crate::dream::reviewing(&*items, &dream).await.unwrap();
     let text = listed.text(listed.entries.len());
     for line in [
         "- 3.1 follow_up of 2.1: unanswered\n- 3.2 follow_up, unlinked: unanswered\n",
-        "- 2.1 follow_up: unanswered\n  Followed up by 3.1.\n",
+        "- 2.1 lesson: unanswered\n  Followed up by 3.1.\n",
         "follow-ups: 1 linked, 3 unlinked",
     ] {
         assert!(text.contains(line), "{line}: {text}");
