@@ -279,7 +279,8 @@ pub(super) fn gather(threads: &[(ThreadId, Signs)], trend: &[(u64, Signs)]) -> V
 }
 
 /// The vital-signs section of the packet of dream `number`, of `signs`, appended to `text`: beside the `trend` of the
-/// dreams before, then the tool calls by kind, then, with `per_thread`, a line for each of `threads`.
+/// dreams before, with a column of each sign's change against its mean there ([`Row::change`]) when there is a dream
+/// before, then the tool calls by kind, then, with `per_thread`, a line for each of `threads`.
 pub(super) fn section<'a>(
     text: &mut String,
     number: u64,
@@ -294,8 +295,12 @@ pub(super) fn section<'a>(
     for (number, _) in &columns {
         let _ = write!(text, " dream {number} |");
     }
+    let changed = !trend.is_empty();
+    if changed {
+        text.push_str(" change |");
+    }
     text.push_str("\n|---|");
-    text.push_str(&"---:|".repeat(columns.len()));
+    text.push_str(&"---:|".repeat(columns.len() + usize::from(changed)));
     text.push('\n');
     for row in ROWS {
         let cells: Vec<_> = columns.iter().map(|(_, signs)| row.cell(signs)).collect();
@@ -305,6 +310,10 @@ pub(super) fn section<'a>(
         let _ = write!(text, "| {} |", row.label);
         for cell in &cells {
             let _ = write!(text, " {} |", if cell.is_empty() { "0" } else { cell });
+        }
+        if changed {
+            let change = (row.measure)(signs).zip(row.mean(trend)).and_then(|(now, mean)| row.change(now, mean));
+            let _ = write!(text, " {} |", change.unwrap_or_default());
         }
         text.push('\n');
     }
@@ -393,6 +402,12 @@ impl Row {
         }
     }
 
+    /// Its mean over the dreams of `trend` that measure it; none when none does.
+    fn mean(&self, trend: &[(u64, Signs)]) -> Option<f64> {
+        let before: Vec<_> = trend.iter().filter_map(|(_, signs)| (self.measure)(signs)).collect();
+        (!before.is_empty()).then(|| before.iter().sum::<f64>() / before.len() as f64)
+    }
+
     /// The change of `now` against `mean`: in points for a share, else in percent of the mean; none from a mean of
     /// zero.
     fn change(&self, now: f64, mean: f64) -> Option<String> {
@@ -415,8 +430,7 @@ pub fn changes(signs: &Signs, trend: &[(u64, Signs)]) -> Option<String> {
     let mut parts = Vec::new();
     for row in ROWS {
         let Some(now) = (row.measure)(signs) else { continue };
-        let before: Vec<_> = trend.iter().filter_map(|(_, signs)| (row.measure)(signs)).collect();
-        let mean = (!before.is_empty()).then(|| before.iter().sum::<f64>() / before.len() as f64);
+        let mean = row.mean(trend);
         if now == 0.0 && mean.is_none_or(|mean| mean == 0.0) {
             continue;
         }

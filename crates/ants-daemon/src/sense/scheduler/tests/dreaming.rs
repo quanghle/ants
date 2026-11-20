@@ -429,7 +429,23 @@ async fn without_findings_nobody_wakes_and_without_an_answer_the_ant_dreams_on_t
         Some(false),
         "dropped after the next dream began"
     );
+    for day in 2..=dream::DROPPED_ANSWER_DREAMS + 1 {
+        let at = day_later + chrono::Duration::hours(25 * (day as i64 - 1));
+        fake.colony.locked()[0].heartbeat_at = at;
+        let worked = format!("thread-{day}");
+        fake.set(Some(at - chrono::Duration::hours(1)), &[(worked.as_str(), false)]);
+        for _woken_then_begun in 0..2 {
+            cycle(&Sense::new(), &*items, &host, &settings, at).await.unwrap();
+        }
+        let number = last(&*items).await.unwrap().number;
+        assert_eq!(number, day + 1);
+        let mut older = reply(&review, &format!("```json\n{pinned}\n```"));
+        let taken = review_answer(&sense, &*items, &mut older).await.unwrap();
+        let dropped = (number - 1 <= dream::DROPPED_ANSWER_DREAMS).then_some(false);
+        assert_eq!(taken, dropped, "an answer to the review of dream 1 in dream {number}");
+    }
 
+    let woken = host.requests.locked().len();
     let items = open(SharedLog::default(), SenseId::new()).await;
     fake.set(Some(now - chrono::Duration::hours(1)), &[("worked-thread", false)]);
     cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap();
@@ -437,7 +453,7 @@ async fn without_findings_nobody_wakes_and_without_an_answer_the_ant_dreams_on_t
     let mut gave_up = Envelope { notice: Some(NoticeKind::GaveUp), ..reply(&review, "gave up") };
     assert_eq!(review_answer(&sense, &*items, &mut gave_up).await.unwrap(), Some(false));
     cycle(&Sense::new(), &*items, &host, &settings, now + chrono::Duration::minutes(1)).await.unwrap();
-    assert_eq!(host.requests.locked().len(), 2, "a sage giving up leaves the ant the packet at once");
+    assert_eq!(host.requests.locked().len(), woken + 1, "a sage giving up leaves the ant the packet at once");
 }
 
 #[tokio::test(start_paused = true)]

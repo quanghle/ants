@@ -61,16 +61,16 @@ async fn a_dream_keeps_the_vital_signs_of_its_period_and_its_packet_shows_them_b
     for reader in [ant(), Reader::Sage(on(1).ant)] {
         let shown = packet(&*items, &third, &reader, &threads, &ColonyTrails::UNREAD).await.unwrap();
         let rows = [
-            "| | dream 1 | dream 2 | dream 3 |",
-            "| threads worked | 1 | 1 | 2 |",
-            "| prompts replied | 4 | 3 | 3 |",
-            "| prompts cancelled by a human | 0 | 0 | 1 |",
-            "| prompts cut by a cap | 0 | 0 | 1 |",
-            "| time in prompts | 1m 00s | 0 | 12m 34s |",
-            "| tool calls | 10 | 10 | 12 |",
-            "| tool calls failed | 1 (10%) | 0 | 3 (25%) |",
-            "| cost | 0 | 0 | 1.70 |",
-            "| tool requests rejected | 0 | 0 | 1 |",
+            "| | dream 1 | dream 2 | dream 3 | change |\n|---|---:|---:|---:|---:|\n",
+            "| threads worked | 1 | 1 | 2 | +100% |",
+            "| prompts replied | 4 | 3 | 3 | -14% |",
+            "| prompts cancelled by a human | 0 | 0 | 1 |  |",
+            "| prompts cut by a cap | 0 | 0 | 1 |  |",
+            "| time in prompts | 1m 00s | 0 | 12m 34s | +2413% |",
+            "| tool calls | 10 | 10 | 12 | +20% |",
+            "| tool calls failed | 1 (10%) | 0 | 3 (25%) | +20 points |",
+            "| cost | 0 | 0 | 1.70 |  |",
+            "| tool requests rejected | 0 | 0 | 1 |  |",
             "\nTool calls by kind: execute 8 (3 failed), read 4.\n",
         ];
         let lines = [
@@ -99,7 +99,8 @@ fn a_packet_leaves_out_the_vital_signs_by_thread_after_the_threads() {
     ];
     let compose = |budget| compose(&dream, Earlier::Last(None), &[], &ant(), &Identity::default(), &threads, budget);
     let whole = compose(PACKET_BUDGET);
-    assert!(whole.contains("\nBy thread:\n") && whole.contains("| prompts replied | 2 |"), "{whole}");
+    assert!(whole.contains("\nBy thread:\n") && whole.contains("| prompts replied | 2 |\n"), "{whole}");
+    assert!(whole.contains("| | dream 1 |\n|---|---:|\n"), "no change column without a dream before: {whole}");
     let least = compose(0);
     assert!(!least.contains("By thread:") && least.contains("| prompts replied | 2 |"), "{least}");
     let bare = compose(least.len() + 200);

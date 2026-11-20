@@ -328,6 +328,7 @@ fn finding(n: usize) -> Finding {
         key: None,
         count: None,
         advice: None,
+        late: false,
     }
 }
 
@@ -364,6 +365,7 @@ fn reviewing(threads: u8, findings: usize) -> Dream {
         verdicts: Vec::new(),
         writes: Vec::new(),
         trails: Vec::new(),
+        held: Vec::new(),
         diary: None,
         vitals: None,
     }

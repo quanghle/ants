@@ -263,6 +263,7 @@ async fn offer(items: &dyn Items, dream: &Dream, offered: &[(&str, bool)]) {
         key: None,
         count: None,
         advice: None,
+        late: false,
     }));
     let mut values = Values::new();
     values.insert("findings".into(), json!(findings));
