@@ -16,7 +16,6 @@ expression: value
   },
   "host_creds": {
     "machine": "studio",
-    "public_key": "UHOST",
-    "signature": "c2lnLWhvc3Q"
+    "public_key": "UHOST"
   }
 }

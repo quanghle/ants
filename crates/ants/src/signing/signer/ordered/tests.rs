@@ -106,14 +106,11 @@ async fn ask_full(
     let asking = async {
         loop {
             request.sent_at = chrono::Utc::now();
-            request.signature = auth::sign(&signer, &request.signed()).unwrap();
             if let Some((machine, host_key)) = host {
                 let public_key = host_key.public_key();
-                let machine = machine.parse().unwrap();
-                request.host_creds = Some(EnrollHost { machine, public_key, signature: String::new() });
-                let signature = auth::sign(&signer, &request.host_signed().unwrap()).unwrap();
-                request.host_creds.as_mut().unwrap().signature = signature;
+                request.host_creds = Some(EnrollHost { machine: machine.parse().unwrap(), public_key });
             }
+            request.signature = auth::sign(&signer, &request.signed()).unwrap();
             if let Some(key) = &leaf {
                 let signature = auth::sign(key, &request.signed()).unwrap();
                 request.leaf.as_mut().unwrap().signature = signature;

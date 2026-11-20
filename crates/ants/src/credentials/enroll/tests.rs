@@ -169,8 +169,9 @@ async fn requests_must_prove_their_enrollment_and_leaf_credentials() {
     let with_host = |signer: &KeyPair| {
         let mut request = good.clone();
         let public_key = KeyPair::new_user().public_key();
-        request.host_creds = Some(EnrollHost { machine: m1.clone(), public_key, signature: String::new() });
-        request.host_creds.as_mut().unwrap().signature = auth::sign(signer, &request.host_signed().unwrap()).unwrap();
+        request.host_creds = Some(EnrollHost { machine: m1.clone(), public_key });
+        request.leaf.as_mut().unwrap().signature = auth::sign(&leaf_key, &request.signed()).unwrap();
+        request.signature = auth::sign(signer, &request.signed()).unwrap();
         request
     };
     let host_by_stranger = with_host(&stranger);

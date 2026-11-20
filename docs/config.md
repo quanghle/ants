@@ -223,8 +223,6 @@ An ant's role settings and core memories are the ant's, the same on whichever ma
 
 On an authenticated server a daemon serves each built-in only where its credentials are present. Issue them with `ants auth builtin messenger` or `ants auth builtin sage` on the machine holding the team keys, then copy `system-messenger.creds` or `system-sage.creds` to `~/.config/ants/auth/` on the serving machine. Credentials appearing or disappearing take effect on [reload](#precedence-and-reload). `ants daemon --config FILE --ant system-sage --creds system-sage.creds` can select a built-in left to another machine. A file leaving every ant elsewhere serves nothing: `ants daemon` refuses to start and `ants doctor` fails its `config` line. On an unauthenticated server, built-ins connect as no one, like the other ants in the file. `messenger = false` disables local hosting, not routing to `system-messenger`.
 
-When upgrading from the old built-in IDs, issue new credentials rather than renaming the old files. Remove or update explicit `sage = "sage"` and `summary_ant = "messenger"` settings that were meant to select the built-ins. Clear any channel override that was meant to select the old built-in with `ants channel set CHANNEL --default-messenger`. Keep explicit assignments that name ordinary ants.
-
 ## The sage
 
 An ant's `sage` names the ant that reviews it: `"system-sage"` (the built-in and default), another ant, or `"none"`, which turns its reviews off. The top-level `sage` applies when the ant omits the setting, and always for an ant added from a template. It is a shared setting ([Shared settings](#shared-settings)), so `ants ant set dev-a sage=lead` changes it on every machine. The reviewer can run on another machine.

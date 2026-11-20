@@ -73,7 +73,6 @@ struct ThreadSpend {
     tokens: u64,
     cost: f64,
     /// What the thread spent in all, which a fresh allowance leaves alone, unlike `tokens` and `cost`.
-    #[serde(default)]
     total: Spent,
     /// The thread's escalation, from when it first went anywhere until a human's message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1067,16 +1066,6 @@ mod tests {
             channel: None,
             question: None,
         }
-    }
-
-    #[tokio::test]
-    async fn spend_stored_before_escalations_still_loads() {
-        let store = Store::Memory(Arc::default());
-        let old = serde_json::json!({"session": "s1", "reading": 0.5, "tokens": 0, "cost": 0.5});
-        store.put(thread_spend_key(&ant(), &thread(1)), &old).await.unwrap();
-        let ledger = Ledger::with_store(store, ant(), Caps { thread_cost: Some(0.5), ..Caps::default() });
-        assert_eq!(ledger.pending(&thread(1)).await.unwrap(), None);
-        assert!(ledger.reached_on(&thread(1), DAY).await.unwrap().is_some());
     }
 
     #[tokio::test]

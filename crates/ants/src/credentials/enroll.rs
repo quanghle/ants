@@ -244,9 +244,8 @@ async fn refused(events: &mut tokio::sync::mpsc::UnboundedReceiver<Event>) -> St
     std::future::pending().await
 }
 
-/// Sign `request` with the enrollment key and, for a machine behind `leaf`, with the leaf's uplink key, read again so
-/// that the request carries the latest uplink credentials, and the `host` credentials asked for with the enrollment key;
-/// returns the uplink key.
+/// Sign `request`, asking for the `host` credentials too, with the enrollment key and, for a machine behind `leaf`, with
+/// the leaf's uplink key, read again so that the request carries the latest uplink credentials; returns the uplink key.
 fn sign_request(
     request: &mut EnrollRequest,
     enrollment_key: &KeyPair,
@@ -254,6 +253,8 @@ fn sign_request(
     host: Option<&HostAsk>,
 ) -> Result<Option<KeyPair>> {
     let mut uplink = None;
+    request.host_creds =
+        host.map(|host| EnrollHost { machine: host.machine.clone(), public_key: host.key.public_key() });
     if let Some(leaf) = leaf {
         let (jwt, key) = auth::read_creds(&leaf.creds).context("the leaf node's uplink credentials")?;
         request.leaf = Some(EnrollLeaf { machine: leaf.machine.clone(), jwt, signature: String::new() });
@@ -262,15 +263,6 @@ fn sign_request(
         uplink = Some(key);
     }
     request.signature = auth::sign(enrollment_key, &request.signed())?;
-    request.host_creds = host.map(|host| EnrollHost {
-        machine: host.machine.clone(),
-        public_key: host.key.public_key(),
-        signature: String::new(),
-    });
-    if let Some(signed) = request.host_signed() {
-        let signature = auth::sign(enrollment_key, &signed)?;
-        request.host_creds.as_mut().expect("the host just set").signature = signature;
-    }
     Ok(uplink)
 }
 
@@ -481,10 +473,6 @@ impl Approver {
             }
             auth::check_signature(&uplink.sub, &signed, &leaf.signature)
                 .with_context(|| format!("the uplink credentials of {}", leaf.machine))?;
-        }
-        if let (Some(host), Some(signed)) = (&request.host_creds, request.host_signed()) {
-            auth::check_signature(&enrollment.sub, &signed, &host.signature)
-                .with_context(|| format!("the host credentials of {} asked for", host.machine))?;
         }
         Ok(())
     }

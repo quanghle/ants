@@ -100,14 +100,8 @@ async fn recurring_unlinked_follow_ups_gather_a_trusted_practice_finding_that_re
     let (ant, now) = ("dev-b".parse::<UserId>().unwrap(), Utc::now());
     let field = "unlinked_follow_ups";
     let said = now - Duration::hours(48);
-    let legacy = answer_of(&["follow_up"; 10]);
     let first = review_request(1);
-    assert!(review_answered(&*items, &ant, &on(1).thread, &first, &legacy, None, said).await.unwrap());
-    let mut old = review_record(&*items, &ant, 1).await.unwrap().unwrap();
-    for finding in &mut old.findings {
-        finding.unlinked = false;
-    }
-    items.put(&review_id(&ant, 1), REVIEW, old.values(), None, "test").await.unwrap();
+    assert!(review_answered(&*items, &ant, &on(1).thread, &first, &answer_of(&["lesson"]), None, said).await.unwrap());
 
     let make = |follows: Option<&str>| {
         json!({"kind": "follow_up", "follows": follows, "finding": "Check.", "action": "Act.",
@@ -117,7 +111,7 @@ async fn recurring_unlinked_follow_ups_gather_a_trusted_practice_finding_that_re
     let findings: Vec<_> = (0..6).map(|_| make(None)).chain((0..3).map(|_| make(Some("1.1")))).collect();
     let answer_text = json!(findings).to_string();
     assert!(review_answered(&*items, &ant, &on(2).thread, &request, &answer_text, None, said).await.unwrap());
-    assert!(found(&*items, field, now).await.is_empty(), "legacy follow-ups don't supply a tenth classified finding");
+    assert!(found(&*items, field, now).await.is_empty(), "nine follow-ups are too few");
 
     let answer_text = json!([make(Some("1.9"))]).to_string();
     let request = ReviewOutcomes { dream: 3, ..request };

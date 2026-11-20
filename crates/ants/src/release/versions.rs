@@ -202,13 +202,6 @@ pub async fn running(js: &jetstream::Context, may: impl Fn(&str) -> bool, now: D
     }
 
     let manager = channel_manager_serving_subject();
-    if !may(&format!("$JS.API.DIRECT.GET.{stream_name}.{manager}")) {
-        running.unseen.push(
-            "the credentials may not read the channel manager's version: renew them (`ants auth user NAME --human`)"
-                .to_owned(),
-        );
-        return Ok(running);
-    }
     match last(&stream, &manager).await? {
         Some((value, at)) if fresh(at, now) => match serde_json::from_slice::<Serving>(&value) {
             Ok(serving) => running.components.push(Component::of_serving("the channel manager", serving)),

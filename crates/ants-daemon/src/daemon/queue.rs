@@ -98,8 +98,7 @@ pub(super) enum Place {
 }
 
 impl Inbox<'_> {
-    /// The requests for the ant's queue, those naming their sender, an assistant's, apart: credentials older than
-    /// them allow only the others.
+    /// The requests for the ant's queue, those naming their sender, an assistant's, apart.
     async fn queue_asks(&self) -> impl Stream<Item = async_nats::Message> + Unpin {
         let asking =
             [subject::queue(self.ant), subject::queues_by_of(self.ant)].map(|s| relayed::subscribe(self.client, s));

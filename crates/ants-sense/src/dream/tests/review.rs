@@ -99,14 +99,10 @@ async fn a_follow_up_is_linked_to_the_earlier_finding_it_follows_and_one_naming_
     let first = fenced(&[
         finding("lesson", "Pin the toolchain", cited.clone()),
         finding("mistake", "Retries", cited.clone()),
-        finding("follow_up", "An older follow-up", cited.clone()),
+        finding("follow_up", "A follow-up naming nothing", cited.clone()),
     ]);
     let reviewed = answered(&*items, &sage(), &thread, uuid::Uuid::now_v7(), Some(&first)).await.unwrap();
     assert!(matches!(reviewed, Some(Reviewed::Prompt(_))), "{reviewed:?}");
-    let (first, revision) = get(&*items, 1).await.unwrap().unwrap();
-    let mut legacy = first.clone();
-    legacy.findings[2].advice.as_mut().unwrap().follows_missing = false;
-    items.write(&[first.change(&legacy, revision)], "test").await.unwrap();
 
     let covered = vec![Covered { thread: on(1).thread, untrusted: false, review: false }];
     let to_sage = |at| Start { recipient: Recipient::Sage(sage()), threads: covered.clone(), ..start(at, &writer) };
@@ -154,7 +150,7 @@ async fn a_follow_up_is_linked_to_the_earlier_finding_it_follows_and_one_naming_
         "- 1.1 (lesson): Pin the toolchain\n  Suggested action: Act on Pin the toolchain\n  Verdict: unanswered \
          (offered again below)\n- 1.2 (mistake): Retries\n",
         "  Followed up by 2.1.\n",
-        "- 1.3 (follow_up): An older follow-up\n",
+        "- 1.3 (follow_up, unlinked: naming no earlier finding): A follow-up naming nothing\n",
         "### Tally",
     ];
     let at: Vec<_> = shown.iter().map(|line| text.find(line).unwrap_or_else(|| panic!("{line:?} in {text}"))).collect();
