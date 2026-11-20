@@ -4,6 +4,8 @@
 use ratatui::style::{Color, Modifier, Style, Stylize as _};
 use ratatui::text::{Line, Span};
 
+use super::{Page, Scroll};
+use crate::tui::model::Key;
 use crate::tui::style::dim;
 
 #[derive(Debug, Default)]
@@ -95,6 +97,80 @@ fn restyle(line: &mut Line<'static>, ranges: &[(usize, usize, bool)]) {
         }
     }
     line.spans = spans;
+}
+
+impl Page {
+    /// Take `key` for finding text in the conversation: Ctrl-F starts asking for it in the footer, where typing changes
+    /// it, Enter and Shift-Enter step to the next and previous match and another key stops asking; then n and N step,
+    /// Ctrl-F asks again and Esc ends it. Whether it took `key`.
+    pub fn find_key(&mut self, key: Key) -> bool {
+        if self.listing() || self.answering.is_some() {
+            return false;
+        }
+        let Some(find) = &mut self.find else {
+            if key == Key::Ctrl('f') {
+                self.find = Some(Find { asking: true, ..Find::default() });
+            }
+            return key == Key::Ctrl('f');
+        };
+        match key {
+            Key::Ctrl('f') => find.asking = true,
+            Key::Esc => self.find = None,
+            Key::Char(c) if find.asking => {
+                find.text.push(c);
+                find.at = None;
+            }
+            Key::Backspace if find.asking => {
+                find.text.pop();
+                find.at = None;
+            }
+            Key::Enter if find.asking => self.step_find(true),
+            Key::Newline if find.asking => self.step_find(false),
+            Key::Char('n') => self.step_find(true),
+            Key::Char('N') => self.step_find(false),
+            _ => {
+                find.asking = false;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether the footer asks for the text to find, which typing changes.
+    pub fn finding(&self) -> bool {
+        !self.listing() && self.answering.is_none() && self.find.as_ref().is_some_and(|f| f.asking)
+    }
+
+    /// The footer while finding text in the conversation.
+    pub fn find_footer(&self) -> Option<Line<'static>> {
+        if self.listing() || self.answering.is_some() {
+            return None;
+        }
+        Some(self.find.as_ref()?.footer(self.laid.borrow().found.len()))
+    }
+
+    /// Step to the next match drawn last, or with `down` false the previous one, scrolling it into view by line.
+    fn step_find(&mut self, down: bool) {
+        let laid = self.laid.borrow();
+        let (found, top, height) = (&laid.found, self.top.get(), laid.height);
+        let Some(find) = self.find.as_mut().filter(|_| !found.is_empty()) else { return };
+        let n = found.len();
+        let at = match find.at.map(|at| at % n) {
+            Some(at) if down => (at + 1) % n,
+            Some(at) => (at + n - 1) % n,
+            None if down => found.iter().position(|&line| line >= top).unwrap_or(0),
+            None => found.iter().rposition(|&line| line < top + height).unwrap_or(n - 1),
+        };
+        find.at = Some(at);
+        let line = found[at];
+        if line < top || line >= top + height {
+            let top = line.saturating_sub(height / 2).min(laid.lines.saturating_sub(height));
+            self.top.set(top);
+            self.scroll.set(Scroll::At(top));
+        }
+        drop(laid);
+        self.at = None;
+    }
 }
 
 #[cfg(test)]
