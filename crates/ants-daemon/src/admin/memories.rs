@@ -6,9 +6,10 @@
 //! - Harness memories: the files matching the `memory_files` globs of the ant's harness, relative to its workdir or
 //!   under `~`, and the bd memories of the database `BD_DB` names in its environment (its `env`, its harness's, the
 //!   daemon's), as `bd memories --json` lists them.
-//! - Provider memories: the memories view of the ant's provider ([`crate::provider::of`]), when it serves one and the
-//!   order names the ant's identity, read after the core memories, so they come before the harness's in the caps. A
-//!   provider failing or slower than [`PROVIDER_TIMEOUT`] is noted in [`ProviderMemories::error`], not a refusal.
+//! - Provider memories: the memories view of the ant's provider ([`crate::provider::Providers::of`]), when it serves
+//!   one and the order names the ant's identity, read after the core memories, so they come before the harness's in the
+//!   caps. A provider failing or slower than [`PROVIDER_TIMEOUT`] is noted in [`ProviderMemories::error`], not a
+//!   refusal.
 //!
 //! A file is read only if, its symbolic links resolved, it still matches one of the globs, their own links resolved,
 //! and lies under the ant's workdir, its home or the home directory: a link out of those paths is named in

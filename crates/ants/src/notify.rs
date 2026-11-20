@@ -377,7 +377,7 @@ async fn replies_due(human: &Notified, bus: &HumanBus) -> std::convert::Infallib
     std::future::pending().await
 }
 
-/// Relay `notice`, held back from `human` by `why`, to its stand-in ([`relayed`]) when `human` is away: no device of
+/// Relay `notice`, held back from `human` by `why`, to its stand-in ([`relayed()`]) when `human` is away: no device of
 /// its sinks follows what the notice is about. The relay is stored once, whichever process of `human` relays it.
 async fn relay(human: &Human, bus: &HumanBus, notice: &Notice, why: &str, seq: u64) {
     let Some(relay) = relayed(human, notice, why, |user| bus.humans.is_human(user)) else { return };
@@ -401,7 +401,7 @@ async fn relay(human: &Human, bus: &HumanBus, notice: &Notice, why: &str, seq: u
     }
 }
 
-/// The watch of the messages `human` sends ([`unserved`]), when it takes escalations.
+/// The watch of the messages `human` sends ([`unserved`](ants_daemon::delivery::unserved)), when it takes escalations.
 async fn unserved_watch(human: &Human, js: &jetstream::Context, js_domain: Option<&JsDomain>) -> Option<Watch> {
     if !human.escalations {
         return None;

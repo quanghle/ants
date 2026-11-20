@@ -57,53 +57,52 @@ impl Permissions {
     ///
     /// Any ant may write to every inbox, the notes of every thread and every channel, but only as itself (the sender is
     /// the last token of inbox, notes and channel subjects). It speaks only for itself on status, approvals and dead
-    /// letters, reads back only its own dead letters (through its own [`dead_reader`]) and the messages it sent (through
-    /// its own [`sent_reader`]), reads only its own inbox
-    /// (consumer and its spares, and live), the notes of every thread (live, and from the stream
-    /// through its own notes consumer and its spares), every channel (live, and from the stream through its own channel
-    /// consumer, and its reader and the reader's spares), its own replies and the decisions on its own approval requests (live, and as stored), reads the colony
-    /// to find ants by capability but writes only its own entry, reads every escalation chain by key but writes only
-    /// its own, lists the links to a channel thread ants passed on but records only its own ([`LINKS_BUCKET`]), reads
-    /// the channels, humans and owners buckets but never writes them, reads nothing of the webhooks bucket,
-    /// asks the channel manager for changes to
-    /// a channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and attempts buckets,
-    /// except that it reads every ant's daily spend there ([`daily_spend_key`]), to hold the ants of a template to
-    /// their pool caps, and every message's mark ([`message_mark_key`]), to tell which of those it sent keep waiting,
-    /// and reads and writes the shared notes of the storage warnings ([`storage_warning_key`]), of the usage it reads in
-    /// the account's JetStream info. Every user lists the streams, with their sizes and no subject stored. Of
-    /// these and the owners bucket it gets no stream info, which lists every key of a bucket (so the threads of other
-    /// ants): it reads single keys by direct gets. Nor does it get the stream's info, which lists every subject stored,
-    /// so who messages whom: it finds the stream through the info of its own inbox consumer. The filter of each of its consumers is
-    /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
-    /// has none in that subject, so no ant may create one. A human (a CLI user; [`Role::Human`], whatever its
-    /// name) also watches all ants traffic, decides approval requests, sends admin orders to any machine
-    /// ([`subject::admin_order`]), which a daemon carries out only when an admin signed them, asks for and withdraws the
-    /// messages waiting in an ant's queue ([`QueueRequest`], [`message_mark_key`]: with its own [`unserved_key`]s, the only keys of the
-    /// attempts bucket it writes or reads),
-    /// reads every ant's thread and daily spend in the
-    /// sessions bucket ([`thread_spend_key`], [`daily_spend_key`]) but none of its other keys there, may create the
-    /// stream and the colony, sessions,
-    /// attempts, channels, humans, chains, links and owners buckets, writes the channels, humans and owners buckets
-    /// (the owners also in its outbox form, [`owner_outbox`]), reads the version the channel manager runs
-    /// ([`channel_manager_serving_key`]), reads the stream's messages by sequence, one at a time or in batches of
-    /// direct gets, and removes dead letters by sequence; its own read markers in [`READ_BUCKET`], and no other's,
-    /// say which replies and channel posts it has read on any of its devices ([`read_marker_rights`]), and its own
-    /// keys in [`PRESENCE_BUCKET`] where its devices read, reading every human's there ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
-    /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which it
-    /// puts and removes only its own ([`human_reaction_rights`]), while an ant only asks for those ([`subject::reactions`],
-    /// [`subject::react`]); it sets every thread's title, TL;DR and done state and its own pinned,
-    /// archived and snoozed threads, no other human's ([`thread_rights`]), while an ant only reads, one key at a time,
-    /// a thread's title and done state and a human's own [`Reminders`](crate::Reminders) entry (its snoozes and reminder notes), and
-    /// hears of every thread marked done through its own consumer ([`done_reader`]), which it deletes, with its channel
-    /// consumer ([`chan_consumer`]), as its retirement stops it, nothing else of [`THREADS_BUCKET`], and of
-    /// [`READ_BUCKET`] and [`NOTIFY_BUCKET`] only a human's inbox [`ReadMarker`] and [`NotifyPrefs`], to stop reminding
-    /// a human of an escalation it heeded; it reads every device's encryption key in
-    /// [`DEVICES_BUCKET`] and puts only its own devices' ([`device_directory_rights`]). A human may send under
-    /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
-    /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
-    /// stores the dead letters of the messages they name, on any ant's dead letter subject. Every user writes the
-    /// attachments of the messages it sends only, under its own name, and an ant reads only those of the messages it
-    /// reads, by direct gets; a human reads them all and may create their store ([`attachment_rights`]).
+    /// letters, reads back only its own dead letters (through its own [`dead_reader`]) and the messages it sent
+    /// (through its own [`sent_reader`]), reads only its own inbox (consumer and its spares, and live), the notes of
+    /// every thread (live, and from the stream through its own notes consumer and its spares), every channel (live, and
+    /// from the stream through its own channel consumer, and its reader and the reader's spares), its own replies and
+    /// the decisions on its own approval requests (live, and as stored), reads the colony to find ants by capability
+    /// but writes only its own entry, reads every escalation chain by key but writes only its own, lists the links to a
+    /// channel thread ants passed on but records only its own ([`LINKS_BUCKET`]), reads the channels, humans and owners
+    /// buckets but never writes them, reads nothing of the webhooks bucket, asks the channel manager for changes to a
+    /// channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and
+    /// attempts buckets, except that it reads every ant's daily spend there ([`daily_spend_key`]), to hold the ants of
+    /// a template to their pool caps, and every message's mark ([`message_mark_key`]), to tell which of those it sent
+    /// keep waiting, and reads and writes the shared notes of the storage warnings ([`storage_warning_key`]), of the
+    /// usage it reads in the account's JetStream info. Every user lists the streams, with their sizes and no subject
+    /// stored. Of these and the owners bucket it gets no stream info, which lists every key of a bucket (so the threads
+    /// of other ants): it reads single keys by direct gets. Nor does it get the stream's info, which lists every
+    /// subject stored, so who messages whom: it finds the stream through the info of its own inbox consumer. The filter
+    /// of each of its consumers is part of the subject that creates it, so none can be pointed at another inbox: a
+    /// consumer with several filters has none in that subject, so no ant may create one. A human (a CLI user;
+    /// [`Role::Human`], whatever its name) also watches all ants traffic, decides approval requests, sends admin orders
+    /// to any machine ([`subject::admin_order`]), which a daemon carries out only when an admin signed them, asks for
+    /// and withdraws the messages waiting in an ant's queue ([`QueueRequest`], [`message_mark_key`]: with its own
+    /// [`unserved_key`]s, the only keys of the attempts bucket it writes or reads), reads every ant's thread and daily
+    /// spend in the sessions bucket ([`thread_spend_key`], [`daily_spend_key`]) but none of its other keys there, may
+    /// create the stream and the colony, sessions, attempts, channels, humans, chains, links and owners buckets, writes
+    /// the channels, humans and owners buckets (the owners also in its outbox form, [`owner_outbox`]), reads the
+    /// version the channel manager runs ([`channel_manager_serving_key`]), reads the stream's messages by sequence, one
+    /// at a time or in batches of direct gets, and removes dead letters by sequence; its own read markers in
+    /// [`READ_BUCKET`], and no other's, say which replies and channel posts it has read on any of its devices
+    /// (`read_marker_rights`), and its own keys in [`PRESENCE_BUCKET`] where its devices read, reading every human's
+    /// there (`presence_rights`), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its
+    /// notifications, and its own [`HeldNotices`] there what was held back (`notify_prefs_rights`), and it reads every
+    /// reaction ([`REACTIONS_BUCKET`]), of which it puts and removes only its own (`human_reaction_rights`), while an
+    /// ant only asks for those ([`subject::reactions`], [`subject::react`]); it sets every thread's title, TL;DR and
+    /// done state and its own pinned, archived and snoozed threads, no other human's (`thread_rights`), while an ant
+    /// only reads, one key at a time, a thread's title and done state and a human's own [`Reminders`](crate::Reminders)
+    /// entry (its snoozes and reminder notes), and hears of every thread marked done through its own consumer
+    /// ([`done_reader`]), which it deletes, with its channel consumer ([`chan_consumer`]), as its retirement stops it,
+    /// nothing else of [`THREADS_BUCKET`], and of [`READ_BUCKET`] and [`NOTIFY_BUCKET`] only a human's inbox
+    /// [`ReadMarker`] and [`NotifyPrefs`], to stop reminding a human of an escalation it heeded; it reads every
+    /// device's encryption key in [`DEVICES_BUCKET`] and puts only its own devices' (`device_directory_rights`). A
+    /// human may send under any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes
+    /// any sequence, so it would expose every inbox. So only a human hears the max-deliveries advisories of the
+    /// stream's consumers and stores the dead letters of the messages they name, on any ant's dead letter subject.
+    /// Every user writes the attachments of the messages it sends only, under its own name, and an ant reads only those
+    /// of the messages it reads, by direct gets; a human reads them all and may create their store
+    /// (`attachment_rights`).
     ///
     /// An ant stores the tool-call timeline of its own work ([`subject::timeline_from`]) and reads back its own only,
     /// through its own [`sent_reader`] filtering only those, for its dreams' review packets; a human reads every
@@ -111,7 +110,7 @@ impl Permissions {
     ///
     /// An ant creates and updates its own identity record in [`IDENTITIES_BUCKET`] ([`subject::identity`]), no other's,
     /// and reads every ant's, which say nothing secret; a human reads every ant's and sets their avatars and colours
-    /// ([`identity_rights`]).
+    /// (`identity_rights`).
     ///
     /// Every ant and human reads the saved trails ([`TRAILS_BUCKET`]) by direct gets naming no subject, and a human puts
     /// and deletes any. A trail's key is its name, so no subject can name its saver: an ant writes none, but asks
@@ -119,7 +118,7 @@ impl Permissions {
     /// [`subject::save_trail`]), which writes only new trails and replaces or removes only those the ant saved
     /// ([`crate::Saver`], [`Permissions::for_trail_keeper`]). An ant gets, puts and deletes only the records of the trail runs it conducts
     /// ([`trail_runs_subject`]), and reads one back past messages a stream relayed onto it through its own consumer
-    /// ([`trail_runs_reader`]); a human reads every run's and writes none ([`trail_rights`]), but asks an ant's daemon to
+    /// ([`trail_runs_reader`]); a human reads every run's and writes none (`trail_rights`), but asks an ant's daemon to
     /// start, stop or resume the runs it conducts ([`TrailRequest`], on [`subject::trail`], which the ant alone hears
     /// and answers on [`subject::trailed`]). Every ant and human reads the trails' tips ([`TRAIL_TIPS_BUCKET`]) by
     /// direct gets naming no subject; an ant puts only its own tips and its own votes, under keys naming it; a human

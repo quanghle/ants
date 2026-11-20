@@ -71,7 +71,7 @@ pub(super) fn trail_rights() -> [String; 13] {
 }
 
 /// What a human's credentials need for what it read ([`READ_BUCKET`]): creating the bucket and reading and writing its
-/// own [`ReadMarker`] and [`ChannelReadMarkers`] only, by key, so no human reads or moves another's.
+/// own [`ReadMarker`](crate::ReadMarker) and [`ChannelReadMarkers`] only, by key, so no human reads or moves another's.
 pub(super) fn read_marker_rights(human: &UserId) -> [String; 6] {
     let read = kv_stream(READ_BUCKET);
     let marker = subject::read_marker(human);
@@ -158,11 +158,11 @@ pub(super) fn human_reaction_rights(human: &UserId) -> Vec<String> {
 /// What a human's credentials need for thread titles, TL;DRs and done states and its pins and archives
 /// ([`THREADS_BUCKET`]): creating the bucket; reading by direct gets, putting and deleting every title, every TL;DR
 /// ([`ThreadSummary`]) and every done state, which any human sets, and putting each marking of a thread done; and
-/// reading and writing its own [`ThreadMarks`] and [`crate::Reminders`] only, so no human reads or changes another's,
-/// with those its assistants set for it ([`assisted_marks_key`], [`assisted_reminders_key`]), which it clears as it
-/// marks a thread itself. The keys naming
-/// the human second ([`marks_key`], [`reminders_key`]) or second of three are all its own, and one pattern each covers
-/// them, to keep the credentials short: no other key of the bucket has a user id there.
+/// reading and writing its own [`ThreadMarks`](crate::ThreadMarks) and [`crate::Reminders`] only, so no human reads or
+/// changes another's, with those its assistants set for it ([`assisted_marks_key`], [`assisted_reminders_key`]), which
+/// it clears as it marks a thread itself. The keys naming the human second ([`marks_key`], [`reminders_key`]) or second
+/// of three are all its own, and one pattern each covers them, to keep the credentials short: no other key of the
+/// bucket has a user id there.
 pub(super) fn thread_rights(human: &UserId) -> [String; 12] {
     let threads = kv_stream(THREADS_BUCKET);
     let titles = format!("$KV.{THREADS_BUCKET}.title.*");

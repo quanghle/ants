@@ -3,13 +3,13 @@
 //! an item of kind [`PROPOSAL`] holding the whole version proposed, its reason and the revision of its target it was
 //! made from. A target has at most one pending proposal, a new one superseding it.
 //!
-//! A dream beginning [`CONFIRM_AFTER_HOURS`] or more after the proposal offers it as a finding
-//! ([`crate::dream::proposals`]), and the ant decides it there with `sense_dream` ([`decide`]): applied confirms it,
-//! putting its version into its target, rejected discards it and deferred leaves it pending, offered again by the next
-//! dream. A proposal whose target changed meanwhile is confirmed no more. Every version stays in the target's revisions,
-//! each with its reason. Proposals on a thread of untrusted origin, in answer to untrusted findings, or naming none of
-//! the findings of the dream on whose thread they are made when its packet holds untrusted text, are refused
-//! ([`crate::dream::untrusted`]).
+//! A dream beginning [`CONFIRM_AFTER_HOURS`] or more after the proposal offers it as a finding (`proposals` of
+//! [`crate::dream`]), and the ant decides it there with `sense_dream` ([`decide`]): applied confirms it, putting its
+//! version into its target, rejected discards it and deferred leaves it pending, offered again by the next dream. A
+//! proposal whose target changed meanwhile is confirmed no more. Every version stays in the target's revisions, each
+//! with its reason. Proposals on a thread of untrusted origin, in answer to untrusted findings, or naming none of the
+//! findings of the dream on whose thread they are made when its packet holds untrusted text, are refused (`untrusted`
+//! of [`crate::dream`]).
 
 use std::fmt::Write as _;
 
@@ -208,7 +208,7 @@ pub async fn of_target(items: &dyn Items, target: &ItemId) -> Result<Vec<Proposa
 }
 
 /// Refuse a proposal made in `context` in answer to `finding`, if given, when it rests on untrusted text
-/// ([`dream::untrusted`]) or names a finding no dream has ([`dream::ground`]).
+/// (`untrusted` of [`dream`]) or names a finding no dream has ([`dream::ground`]).
 pub(crate) async fn refuse_untrusted(
     items: &dyn Items,
     context: &CallContext,

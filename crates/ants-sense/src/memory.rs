@@ -1,9 +1,9 @@
 //! Memories: what an ant keeps of its work, each an item of kind [`MEMORY`] whose values are a [`Memory`]. A memory
 //! is never overwritten or deleted: a new one supersedes it ([`Status::Superseded`], linked both ways), so its chain
-//! can be read back ([`chain`]). Core memories ([`core`]) appear in every brief, within [`CORE_BUDGET`].
+//! can be read back ([`chain`]). Core memories ([`core()`]) appear in every brief, within [`CORE_BUDGET`].
 //!
-//! [`remember`] answers `sense_remember`, [`recall`] `sense_recall` (ranked by [`score`]) and [`vote`] `sense_vote`;
-//! [`maintain`] is the daemon's daily maintenance.
+//! [`remember()`] answers `sense_remember`, [`recall()`] `sense_recall` (ranked by [`score`]) and [`vote()`]
+//! `sense_vote`; [`maintain()`] is the daemon's daily maintenance.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -196,7 +196,7 @@ pub enum Status {
     Superseded,
     /// Voted wrong.
     Wrong,
-    /// Voted stale, its citations changed since it was written, or faded with disuse ([`maintain`]): to check again.
+    /// Voted stale, its citations changed since it was written, or faded with disuse ([`maintain()`]): to check again.
     NeedsReview,
     /// Left needing review, untouched, until maintenance retired it ([`RETIRE_AFTER_DAYS`]).
     Retired,

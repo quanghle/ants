@@ -164,7 +164,7 @@ impl Record<'_> {
 }
 
 /// The answers of `human` to its assistant's recent acts, signed by a device of the human. See the
-/// [module docs](self).
+/// docs of the `consent` module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Confirmations {
     pub human: UserId,

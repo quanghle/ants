@@ -34,7 +34,7 @@ pub fn issue_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permission
     issue_device(dir, user, kind, permissions, None, out).map(drop)
 }
 
-/// [`issue_with`], with a human's credentials for a new device labelled `label`, whose id and new encryption key their
+/// `issue_with`, with a human's credentials for a new device labelled `label`, whose id and new encryption key their
 /// user JWT carries ([`DeviceId::tag`], [`DeviceKey::tag`]) and the registry records, the key's seed in the file after
 /// the NKey seed. Returns the device id, for a human's.
 pub fn issue_device(
@@ -241,7 +241,7 @@ pub fn sign_host(dir: &Path, machine: &Machine, js_domain: Option<&JsDomain>, pu
 }
 
 /// Sign the user JWT of `user` in `role` for `public_key`, a user NKey generated on another machine, with the
-/// permissions [`issue`] gives. The seed stays where it was generated; its `.creds` file is the JWT plus that seed.
+/// permissions `issue` gives. The seed stays where it was generated; its `.creds` file is the JWT plus that seed.
 pub fn sign_user(
     dir: &Path,
     user: &UserId,

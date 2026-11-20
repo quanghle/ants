@@ -41,6 +41,7 @@ pub(crate) struct Ants<C: Subcommand> {
     /// Unset, the config file's `[cli]` `creds` apply, except to `ants daemon` and `ants add`. To `ants daemon` they
     /// are the credentials of the ant --ant names, else of the file's one [[ant]] where it sets none.
     /// A human's also create the hub's stream and buckets that are missing on connecting, as `ants init` does.
+    #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: brackets name config tables")]
     #[arg(long, global = true, env = "ANTS_CREDS")]
     pub(crate) creds: Option<PathBuf>,
 
@@ -227,6 +228,7 @@ pub(crate) enum Command {
     /// Stop the prompt ANT is running on THREAD, as a prompt limit does: its daemon cancels the prompt and replies on
     /// the thread with the partial output and an [ants] notice, and the message counts as answered. Messages waiting
     /// behind it on the thread still run. Needs a human's credentials.
+    #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: [ants] heads a notice")]
     Cancel {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,
@@ -304,12 +306,14 @@ pub(crate) enum Command {
     /// messages each ant reads, and the renewal requests (`ants renew`) of devices registered with `ants login`,
     /// renewing them while their grant holds; every [registration] sweep, revokes those whose GitHub users left the
     /// policy's organizations and teams.
+    #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: brackets name config tables")]
     Signer(signer::SignerArgs),
     /// Register a device of a human with a GitHub sign-in: generate its NKey here, ask `ants signer` on the hub with
     /// the team's bootstrap credentials, show GitHub's device login page and the code to enter there, and wait for
     /// the credentials or a refusal (repeating the request every 5 s, for up to 15 min, until Ctrl-C). Then write
     /// ~/.config/ants/auth/NAME.creds and set `creds` and `nats` of [cli] in the config file when [cli] names no
     /// credentials. A refusal, an expiry or Ctrl-C leaves no key and no file.
+    #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: brackets name config tables")]
     Login(login::LoginArgs),
     /// Renew credentials over NATS: generate a new user NKey here, ask for the credentials of the file renewed for it,
     /// signed with their key, and wait for `ants enroll renew NAME` on the machine holding the account key (or, for

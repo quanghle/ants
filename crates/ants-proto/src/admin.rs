@@ -62,14 +62,14 @@ pub const ASSISTANT_ORDER_KINDS: [&str; 6] = ["set", "pause", "resume", "restart
 pub const ORDER_SIGNING_CONTEXT: &str = "ants-admin-order";
 
 /// An admin's order to the daemon of `machine` about `ant`, signed by the admin's credentials. See the
-/// [module docs](self).
+/// docs of the `admin` module.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminOrder {
     /// A version 7 UUID, the key of the order's outcome and its `Nats-Msg-Id`.
     pub id: Uuid,
     /// The admin, as its user JWT names it; for an order of an assistant, the assistant.
     pub admin: UserId,
-    /// The human an assistant sent the order for, whose consent it waits for. See the [module docs](self).
+    /// The human an assistant sent the order for, whose consent it waits for. See the docs of the `admin` module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<UserId>,
     /// The machine whose daemon serves the ant, or is to serve it ([`AdminOp::Add`]).
@@ -131,11 +131,11 @@ pub enum AdminOp {
     /// ([`Settings`]).
     ReadSettings,
     /// Read the MCP servers the ant's harness runs and how each stands, which the outcome's `result` carries
-    /// ([`McpReport`]).
+    /// ([`McpReport`](crate::McpReport)).
     ReadMcp,
     /// Sign the ant's harness in to its MCP server `server` with OAuth, the outcome's `result` carrying the address to
-    /// open in a browser ([`McpSignIn`]); with `callback`, hand the harness waiting the address the browser came back
-    /// to, which a browser on another machine than the ant's cannot reach.
+    /// open in a browser ([`McpSignIn`](crate::McpSignIn)); with `callback`, hand the harness waiting the address the
+    /// browser came back to, which a browser on another machine than the ant's cannot reach.
     McpSignIn {
         server: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

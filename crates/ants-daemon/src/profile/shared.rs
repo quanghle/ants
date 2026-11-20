@@ -10,7 +10,7 @@
 //! which only the machines serving the ant hold ([`Signer`]); a daemon whose team has credentials applies only a record
 //! so signed, and writes its config's settings over any other ([`read`], [`refresh`]). It refuses a record signed with
 //! revoked credentials, and one the ant signed that was put back after it was replaced: stored at another stream
-//! sequence, or in another incarnation of the bucket ([`incarnation`]), than the ones it was signed for ([`write`],
+//! sequence, or in another incarnation of the bucket ([`incarnation`]), than the ones it was signed for ([`write()`],
 //! [`SharedSettings::verify`]); over a replay it writes back the settings it kept. In a bucket without an incarnation
 //! marker, as one not created by `ants init`, it applies and writes none.
 

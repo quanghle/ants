@@ -74,7 +74,7 @@ pub fn write(leaf: &Leaf, out: &Path) -> Result<()> {
     fs::write(&out, text).with_context(|| format!("writing {}", out.display()))
 }
 
-/// The machine name and uplink credentials of the leaf node configuration at `path`, as [`write`] writes it.
+/// The machine name and uplink credentials of the leaf node configuration at `path`, as [`write()`] writes it.
 pub fn read_uplink(path: &Path) -> Result<(Machine, PathBuf)> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let machine =
@@ -82,7 +82,7 @@ pub fn read_uplink(path: &Path) -> Result<(Machine, PathBuf)> {
     Ok((machine, PathBuf::from(value(&text, path, "credentials")?)))
 }
 
-/// The address the leaf node of the configuration at `path`, as [`write`] writes it, listens on for local clients.
+/// The address the leaf node of the configuration at `path`, as [`write()`] writes it, listens on for local clients.
 pub fn read_listen(path: &Path) -> Result<String> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     value(&text, path, "listen")
@@ -97,7 +97,7 @@ fn value(text: &str, path: &Path, key: &str) -> Result<String> {
     serde_json::from_str(line.trim()).with_context(|| format!("{}: unreadable {key}", path.display()))
 }
 
-/// How a running leaf node takes the configuration `new` in place of `old`, both as [`write`] writes them. A reload
+/// How a running leaf node takes the configuration `new` in place of `old`, both as [`write()`] writes them. A reload
 /// (SIGHUP) adds and drops remotes, a remote being its URLs, account and credentials, and changes their TLS settings;
 /// nats-server refuses it for any other change, the proxy of a kept remote included, which needs a restart, as does a
 /// first configuration.
@@ -171,7 +171,7 @@ pub fn take(out: &Path, old: Option<&str>, new: &str, apply: impl FnOnce(Action)
     }
 }
 
-/// Have the leaf node of the configuration at `path`, as [`write`] writes it, connect its uplink again, to send the
+/// Have the leaf node of the configuration at `path`, as [`write()`] writes it, connect its uplink again, to send the
 /// uplink credentials just renewed in their file. nats-server reads that file at each connect, but a reload keeps the
 /// connection of an unchanged remote, and a restart would cut every local connection too. So the remote's credentials
 /// path switches between two spellings of the same file, with and without `./` (`.\` on Windows) before its name: a remote being its

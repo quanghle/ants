@@ -48,7 +48,7 @@ pub fn assistant_grant_of(key: &str) -> Option<UserId> {
 }
 
 /// That `human` designates `assistant` as its assistant, or none any more, signed by a device of the human. See the
-/// [module docs](self).
+/// docs of the `grant` module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssistantGrant {
     pub human: UserId,

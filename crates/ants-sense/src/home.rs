@@ -1,7 +1,7 @@
 //! The layout of an ant's sense files in its home, all in its `.sense` directory ([`DIR`]) and named here alone
 //! ([`Home`]): the ant's sense id and earlier names, the only ones an export of the home carries
 //! ([`Home::left_out`]); the cache of its log and the marker of writes pending in it; the chain status; the skill files;
-//! and the marker of an import awaited. The files written whole are written through [`write`].
+//! and the marker of an import awaited. The files written whole are written through [`write()`].
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};

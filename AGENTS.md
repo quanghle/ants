@@ -57,6 +57,11 @@ skipped checks.
 
 - `cargo fmt --all --check`, `cargo clippy --all-targets`, `cargo test`, all with `CARGO_BUILD_WARNINGS=deny` as in
   CI, so any lint warning fails.
+- `cargo doc --workspace --no-deps --document-private-items` with `RUSTDOCFLAGS=-D warnings`, so a broken or
+  ambiguous doc link or stray HTML in a doc comment fails. Clap help text is shown as written, not as markdown: its
+  `<dir>` placeholders pass (`ants` expects `rustdoc::invalid_html_tags`), and an arg whose help names a config table
+  in brackets expects `rustdoc::broken_intra_doc_links`. ants-daemon and ants-sense expect
+  `rustdoc::private_intra_doc_links`, their docs being read with their private items.
 - Tests needing `nats-server` skip when it is not on PATH; `ANTS_REQUIRE_TOOLS=1` makes them fail instead. The script
   sets it when `nats-server` is on PATH.
 - `ANTS_TEST_JS_ACK_FC_V2=1` runs the test servers with nats-server 2.16's v2 ack and flow control subjects; CI and

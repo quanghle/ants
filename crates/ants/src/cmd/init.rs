@@ -1,4 +1,4 @@
-//! `ants init`: create what the hub lacks, as [`hub`] does, and say what was done.
+//! `ants init`: create what the hub lacks, as [`hub()`] does, and say what was done.
 
 use ants_daemon::hub;
 use anyhow::{Context as _, Result};

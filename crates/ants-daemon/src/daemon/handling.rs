@@ -214,11 +214,12 @@ impl Inbox<'_> {
         Ok(())
     }
 
-    /// Mark `envelope` as started right before handling it ([`Attempts::take_up`]), unless it was withdrawn first: by
-    /// a human (`ants withdraw`), by an assistant for its human through a daemon of the ant ([`Self::cancel_for`]), or
-    /// by the assistant of the message's human, its sender or the one it was sent for, under a key of the assistant's
-    /// own while no daemon answered ([`crate::delivery::attempts::record_withdrawal`]), honoured as a cancel request is: while the
-    /// human's grant names the assistant.
+    /// Mark `envelope` as started right before handling it
+    /// ([`Attempts::take_up`](crate::delivery::attempts::Attempts::take_up)), unless it was withdrawn first: by a human
+    /// (`ants withdraw`), by an assistant for its human through a daemon of the ant ([`Self::cancel_for`]), or by the
+    /// assistant of the message's human, its sender or the one it was sent for, under a key of the assistant's own
+    /// while no daemon answered ([`crate::delivery::attempts::record_withdrawal`]), honoured as a cancel request is:
+    /// while the human's grant names the assistant.
     async fn take_up(&self, envelope: &Envelope) -> Result<Option<Withdrawal>> {
         let held = match self.attempts.take_up(envelope).await? {
             TakenUp::Withdrawn { by, on_behalf_of, held } => {
@@ -304,17 +305,17 @@ impl Inbox<'_> {
         self.done(msg, seq).await
     }
 
-    /// Note the message the ant is about to answer with its escalator: a human's ends the thread's escalation and
-    /// gives the thread a fresh allowance, and the escalation leader's answer gives the thread a fresh budget and
-    /// allowance once per level ([`Escalator::arrived`]). The leader's reply that does so on a thread the ant got
-    /// stuck on in a channel is answered in that channel, with the fresh budget: the thread's turns come from its posts.
-    /// The message takes the tool rules its thread is narrowed to ([`Inbox::narrow`]). A review an ant asks of the ant,
-    /// its sage, goes to the ant's sense ([`crate::sense::Sense::review_received`]), unless a live ant names the asking
-    /// ant as its own sage: a sage is reviewed by no one, so the daemon answers with a decline.
-    /// Returns how to handle the message: a member's notice that it sent the ant's escalation higher is the
-    /// daemon's alone ([`Escalator::took_climb`]), and so is the sage's answer to the review of a dream, unless its
-    /// findings prompt the ant ([`crate::sense::Sense::review_answer`]), and so is a schedule's firing that starts a
-    /// trail run ([`Self::start_scheduled`]).
+    /// Note the message the ant is about to answer with its escalator: a human's ends the thread's escalation and gives
+    /// the thread a fresh allowance, and the escalation leader's answer gives the thread a fresh budget and allowance
+    /// once per level ([`Escalator::arrived`](crate::escalation::Escalator::arrived)). The leader's reply that does so
+    /// on a thread the ant got stuck on in a channel is answered in that channel, with the fresh budget: the thread's
+    /// turns come from its posts. The message takes the tool rules its thread is narrowed to ([`Inbox::narrow`]). A
+    /// review an ant asks of the ant, its sage, goes to the ant's sense ([`crate::sense::Sense::review_received`]),
+    /// unless a live ant names the asking ant as its own sage: a sage is reviewed by no one, so the daemon answers with
+    /// a decline. Returns how to handle the message: a member's notice that it sent the ant's escalation higher is the
+    /// daemon's alone ([`Escalator::took_climb`](crate::escalation::Escalator::took_climb)), and so is the sage's
+    /// answer to the review of a dream, unless its findings prompt the ant ([`crate::sense::Sense::review_answer`]),
+    /// and so is a schedule's firing that starts a trail run ([`Self::start_scheduled`]).
     async fn arrived(&self, incoming: &mut Incoming) -> Result<Arrival> {
         if let Some(trails) = &self.trails
             && incoming.post.is_none()
@@ -392,9 +393,10 @@ impl Inbox<'_> {
     }
 
     /// Set the tool rules of the message, and of its post, to those its thread is narrowed to: a human's message lifts
-    /// the narrowing ([`Ledger::reset`]) and has none, a thread keeps the first rules a message brought it, and a
-    /// webhook's message brings [`WEBHOOK_ALLOW`] when it has none of its own. A run named as the one the message
-    /// invites a rating of ([`Envelope::rating_of`]) stays only on the conductor's own invitation.
+    /// the narrowing ([`Ledger::reset`](crate::limits::caps::Ledger::reset)) and has none, a thread keeps the first
+    /// rules a message brought it, and a webhook's message brings [`WEBHOOK_ALLOW`] when it has none of its own. A run
+    /// named as the one the message invites a rating of ([`Envelope::rating_of`]) stays only on the conductor's own
+    /// invitation.
     async fn narrow(&self, incoming: &mut Incoming, sender: Role) -> Result<()> {
         let envelope = &mut incoming.envelope;
         if envelope.rating_of.is_some()

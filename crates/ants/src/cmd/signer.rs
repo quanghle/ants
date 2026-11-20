@@ -16,10 +16,12 @@ use crate::signing::signer;
 pub(crate) struct SignerArgs {
     /// Config file whose [[ant_template]] tables are the policy; the rest of it is ignored
     /// (default: ~/.ants/config.toml).
+    #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: brackets name config tables")]
     #[arg(long, env = "ANTS_CONFIG")]
     pub(crate) config: Option<PathBuf>,
     /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting,
     /// or on a registration (`ants login`) outside the [registration] table, at most until its request expires.
+    #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: brackets name config tables")]
     #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "15m")]
     pub(crate) approval_timeout: Duration,
     /// Team directory holding the signing keys (default: ~/.config/ants/auth).

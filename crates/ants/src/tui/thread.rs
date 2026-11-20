@@ -2,18 +2,20 @@
 //! latest at the bottom, beside a side panel with what else is known of it (its work card).
 //!
 //! The timeline interleaves, in the order stored, the thread's messages, posts, notes, escalations and tool requests
-//! with the tool calls of its ants: those running now as their status updates tell ([`timeline::Calls::status`]), and
-//! those stored on their timelines ([`timeline::Calls::stored`]); and with the steps of the trail runs reporting on it
+//! with the tool calls of its ants: those running now as their status updates tell
+//! ([`timeline::Calls::status`](super::timeline::Calls::status)), and those stored on their timelines
+//! ([`timeline::Calls::stored`](super::timeline::Calls::stored)); and with the steps of the trail runs reporting on it
 //! ([`super::steps`]), each placed before the first message stored after it started. The keys select a step as they
-//! select a message, and Enter opens the step's thread. Messages between a human and an ant, and posts, are the top level; a message from one ant to another nests
-//! a level under the sender, and the receiver's calls and reply nest under that message, unless the receiver nests the
-//! sender already (a reply). Messages, posts and notes render as markdown, their attachments listed under them, images
-//! drawn under their lines when on ([`images`]). Opened from a search, the view selects the message found and holds it
-//! at its top until moved. The thread's tool requests show as cards under the conversation ([`approvals`]), a, A or r
-//! answering the oldest pending one and Enter showing it in full; its questions after them ([`question`]), 1-9
-//! answering the latest one waiting and Enter, once no tool request waits, focusing its card. Each message shows the
-//! reactions to it under it, live, and `+` reacts to the one selected ([`react`]). `>` opens the command bar to reply
-//! to the selected message, quoting it and @mentioning its author when an ant; a message quoting another shows
+//! select a message, and Enter opens the step's thread. Messages between a human and an ant, and posts, are the top
+//! level; a message from one ant to another nests a level under the sender, and the receiver's calls and reply nest
+//! under that message, unless the receiver nests the sender already (a reply). Messages, posts and notes render as
+//! markdown, their attachments listed under them, images drawn under their lines when on ([`images`](super::images)).
+//! Opened from a search, the view selects the message found and holds it at its top until moved. The thread's tool
+//! requests show as cards under the conversation ([`approvals`]), a, A or r answering the oldest pending one and Enter
+//! showing it in full; its questions after them ([`question`]), 1-9 answering the latest one waiting and Enter, once no
+//! tool request waits, focusing its card. Each message shows the reactions to it under it, live, and `+` reacts to the
+//! one selected ([`Reads::react`](super::reads::Reads::react)). `>` opens the command bar to reply to the selected
+//! message, quoting it and @mentioning its author when an ant; a message quoting another shows
 //! `↪ replying to <author>: <excerpt>` above its text.
 
 use std::cell::{Cell, RefCell};

@@ -18,9 +18,9 @@ impl Permissions {
     /// watches all ants traffic, so its human's home queue, reads the stream and the buckets a human reads, sets
     /// titles, TL;DRs and done states, puts its own reactions and read markers, and reads every attachment and every
     /// device's encryption key. Of its human's own keys it reads, by direct gets, never writes, the read markers
-    /// ([`read_marker_rights`]) and the markers of messages kept waiting ([`unserved_key`]), so it sees what its human
+    /// (`read_marker_rights`) and the markers of messages kept waiting ([`unserved_key`]), so it sees what its human
     /// has read and set aside. It keeps no pins, archives or snoozed threads of its own: it reads its human's
-    /// ([`thread_rights`]) and writes only those it sets for the human, under keys naming it ([`assisted_marks_key`],
+    /// (`thread_rights`) and writes only those it sets for the human, under keys naming it ([`assisted_marks_key`],
     /// [`assisted_reminders_key`]), never the human's own, which readers take in only while the human's grant names it.
     ///
     /// It reads the stream back by direct gets, as a human does, so it holds none of an ant's reader consumers but its

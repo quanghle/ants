@@ -536,7 +536,7 @@ pub async fn answer(
     answer_request(js, stream, seq, &request, verdict, &UserId::human(), now).await
 }
 
-/// Answer `request`, stored at stream sequence `seq`, as [`answer`] does, as the human `by`.
+/// Answer `request`, stored at stream sequence `seq`, as `answer` does, as the human `by`.
 pub async fn answer_request(
     js: &jetstream::Context,
     stream: &Stream,

@@ -1,11 +1,11 @@
 //! Self-service registration of humans' devices, answered by `ants signer`: a machine running `ants login` asks with
-//! the team's public bootstrap credentials ([`LoginRequest`] on [`subject::login`]), the signer runs a GitHub device
-//! flow for it ([`Github`]), tells the machine where to sign in, reads who signed in, and signs a human's credentials
-//! for the request's key when the GitHub user falls under the signer's `[registration]` policy and may hold the name
-//! asked for ([`binding`]). A user outside the policy waits for the humans: the signer asks them with an approval
-//! request of the reserved user [`UserId::signer`], and signs once one allows it. The approval stands for that user
-//! and name until every key of the name is revoked ([`revoke::standing_approval`]), so the user's other devices sign
-//! at once.
+//! the team's public bootstrap credentials ([`LoginRequest`] on [`subject::login`](ants_proto::subject::login)), the
+//! signer runs a GitHub device flow for it ([`Github`]), tells the machine where to sign in, reads who signed in, and
+//! signs a human's credentials for the request's key when the GitHub user falls under the signer's `[registration]`
+//! policy and may hold the name asked for ([`binding`]). A user outside the policy waits for the humans: the signer
+//! asks them with an approval request of the reserved user [`UserId::signer`], and signs once one allows it. The
+//! approval stands for that user and name until every key of the name is revoked ([`revoke::standing_approval`]), so
+//! the user's other devices sign at once.
 //!
 //! Requests are core NATS messages and stored nowhere: the machine repeats its request every
 //! [`ants_proto::LOGIN_REPEAT`] until an answer settles it, and the signer answers each repeat of a key with what it

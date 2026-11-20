@@ -465,7 +465,7 @@ async fn smoke_test(staged: &Path, release: &Release) -> Result<()> {
 }
 
 /// Rename `staged` over `exe` in one step. Windows does not replace a running executable, so one there is first
-/// renamed aside to `<exe>.old`, which [`remove_old`] deletes on a later run.
+/// renamed aside to `<exe>.old`, which `remove_old` deletes on a later run.
 fn replace(staged: &Path, exe: &Path) -> Result<()> {
     if cfg!(windows) && exe.exists() {
         let old = old_path(exe);

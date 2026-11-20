@@ -54,10 +54,10 @@ pub struct ReviewRecord {
     /// The findings of the answer, in their order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<ReviewedFinding>,
-    /// The readable findings of the answer left out past its caps ([`super::Parsed::over`]).
+    /// The readable findings of the answer left out past its caps ([`Parsed::over`](super::review::Parsed::over)).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub over: usize,
-    /// The findings of the answer left out as unreadable ([`super::Parsed::unreadable`]).
+    /// The findings of the answer left out as unreadable ([`Parsed::unreadable`](super::review::Parsed::unreadable)).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub unreadable: usize,
     /// What the review thread spent by the answer, when the sage's daemon knew.
@@ -81,8 +81,8 @@ pub struct ReviewedFinding {
     pub id: String,
     /// Its kind, in the sage's words.
     pub kind: String,
-    /// Of a [`super::FOLLOW_UP`], the id of the earlier finding it follows, as the sage named it ([`super::FollowUp`]):
-    /// none when the request does not name it as eligible.
+    /// Of a [`super::FOLLOW_UP`], the id of the earlier finding it follows, as the sage named it
+    /// ([`FollowUp`](super::review::FollowUp)): none when the request does not name it as eligible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follows: Option<String>,
     /// A follow-up whose target was missing or ineligible.

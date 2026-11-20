@@ -13,7 +13,7 @@ use crate::people::humans::Registry;
 use super::{Inbox, Incoming, OWNER_LANDS_WITHIN, Posted, STREAM_SOURCE, Steered, stream_seq};
 
 /// What stored state checks the claims of an inbox message against, for the ant's daemon and for the human's side
-/// that buries what the daemon could not ([`dead::bury_undelivered`]).
+/// that buries what the daemon could not ([`dead::bury_undelivered`](crate::delivery::dead::bury_undelivered)).
 pub struct Claims<'a> {
     /// Who is a human.
     pub humans: &'a Registry,
@@ -152,10 +152,11 @@ impl Claims<'_> {
 }
 
 impl Inbox<'_> {
-    /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, a reply to an
-    /// `ask_ant` call is handed over, and so is an approval decision, which is acked and never prompted with
-    /// ([`NatsApprover::offer`]). An owner that is no human is dropped ([`Registry::human_owner`]), so neither the
-    /// escalations nor the messages that follow on from this one name it, and so is a creator that is a human.
+    /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, a reply to an `ask_ant`
+    /// call is handed over, and so is an approval decision, which is acked and never prompted with
+    /// ([`NatsApprover::offer`](crate::approvals::NatsApprover::offer)). An owner that is no human is dropped
+    /// ([`Registry::human_owner`]), so neither the escalations nor the messages that follow on from this one name it,
+    /// and so is a creator that is a human.
     pub(super) async fn admit(&self, msg: &jetstream::Message) -> Option<Incoming> {
         // Its subject pins no sender when a stream relayed it there ([`relayed`]).
         if relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::Consumer) {

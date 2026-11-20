@@ -1,6 +1,6 @@
 //! [`AdminOp::ExportProvider`] and [`AdminOp::ImportProvider`]: move what the ant's provider holds of it
-//! ([`crate::provider::of`]) with `ants ant export` and `ants ant import`, which reach the provider only through the
-//! daemon serving the ant.
+//! ([`crate::provider::Providers::of`]) with `ants ant export` and `ants ant import`, which reach the provider only
+//! through the daemon serving the ant.
 //!
 //! An export goes to the attachments' store ([`payload`]), as it may be far larger than an outcome holds; the outcome
 //! says where ([`ProviderExport`]). Like a read of memories, an export is refused as stale once it waited longer

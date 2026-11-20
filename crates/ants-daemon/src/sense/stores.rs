@@ -98,7 +98,8 @@ struct Context {
 pub struct Link {
     js: jetstream::Context,
     js_domain: Option<JsDomain>,
-    /// The accounts whose ants sign events ([`AccountVerifier`]); none on a server without authentication.
+    /// The accounts whose ants sign events ([`AccountVerifier`](ants_sense::log::AccountVerifier)); none on a server
+    /// without authentication.
     accounts: Vec<String>,
     machine: Machine,
     log: tokio::sync::OnceCell<JetStreamLog>,

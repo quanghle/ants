@@ -30,7 +30,7 @@ pub async fn publish(js: &jetstream::Context, envelope: &Envelope) -> Result<Sto
 /// leaf node's uplink is down) or none answers in time, store it in the leaf node's outbox instead, under
 /// [`subject::outbox`], for the hub to source once the uplink is back. Both copies carry `msg_id`, so the hub's stream
 /// keeps one if the first publish did land after all, as long as the second arrives within its duplicate window
-/// ([`DUPLICATE_WINDOW`]).
+/// ([`DUPLICATE_WINDOW`](super::DUPLICATE_WINDOW)).
 /// When no stream captures `subject` though the hub's JetStream answers ([`uncaptured`]), the error, or the warning
 /// for a message kept in the outbox, names `ants init` as the fix; the warning comes once per kind of subject.
 pub async fn store<T: serde::Serialize>(
@@ -85,11 +85,11 @@ pub async fn store_acked<T: serde::Serialize>(
     Ok(None)
 }
 
-/// After a publish found no stream capturing its subject: whether the hub's JetStream answers all the same, so the
-/// hub is in reach and its `ANTS` stream is missing, as when no `ants init` with a human's credentials has run yet.
-/// Out of the hub's reach (a leaf node's uplink is down),
-/// false. It asks for the info of the connection's own inbox consumer, as [`reach_jetstream`] does, which every
-/// user's credentials allow; the user is the one the connection's reply inboxes are named after ([`inbox_prefix`]).
+/// After a publish found no stream capturing its subject: whether the hub's JetStream answers all the same, so the hub
+/// is in reach and its `ANTS` stream is missing, as when no `ants init` with a human's credentials has run yet. Out of
+/// the hub's reach (a leaf node's uplink is down), false. It asks for the info of the connection's own inbox consumer,
+/// as [`reach_jetstream`] does, which every user's credentials allow; the user is the one the connection's reply
+/// inboxes are named after ([`inbox_prefix`](ants_proto::inbox_prefix)).
 pub async fn uncaptured(js: &jetstream::Context) -> bool {
     let inbox = js.client().new_inbox();
     let Some(user) = inbox.strip_prefix("_INBOX.").and_then(|rest| rest.split('.').next()?.parse::<UserId>().ok())

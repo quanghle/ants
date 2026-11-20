@@ -98,6 +98,7 @@ pub(crate) enum AuthCommand {
     Host {
         /// Machine name, as the daemon's [host] table names it, else its config's top-level machine, else the first
         /// label of its host name: letters, digits, '-' and '_'.
+        #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: brackets name config tables")]
         machine: Machine,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
@@ -326,6 +327,7 @@ pub(crate) struct UserArgs {
     assistant_of: Option<UserId>,
     /// With --github: the signer's config file, whose [registration] table names the GitHub API and the token to
     /// look the user up with (default: ~/.ants/config.toml; github.com, with no token, without the table).
+    #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: brackets name config tables")]
     #[arg(long, env = "ANTS_CONFIG")]
     config: Option<PathBuf>,
 }
