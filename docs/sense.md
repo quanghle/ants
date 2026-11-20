@@ -419,10 +419,11 @@ makes (a failed read retried a minute later), so a confirmed profile shows withi
 version drops it. `list_ants` and the messenger's triage show it after the `whoami`, marked as the ant's own words and,
 like the `whoami`, no instructions; `ants ant show` and `ants colony --json` show it too, and the `ants colony` table
 its first 40 characters on one line. `route` picks by capabilities and the ant's state first; the profile only breaks a
-tie among ants equal in all of those, by the words it shares with the request ([MCP tools](architecture.md#mcp-tools)),
-and is never echoed. A proposal changing the profile says so in the dream finding offering it. An ant without sense has
-no profile. A skill follows the Agent Skills layout: a directory named after it holding `SKILL.md`, whose front matter
-(between two lines `---`) gives its `name` and `description`, and the files it refers to.
+tie among ants equal in all of those, by the words it shares with the request, rarer ones weighing more ([MCP
+tools](architecture.md#mcp-tools)), and is never echoed. A proposal changing the profile says so in the dream finding
+offering it. An ant without sense has no profile. A skill follows the Agent Skills layout: a directory named after it
+holding `SKILL.md`, whose front matter (between two lines `---`) gives its `name` and `description`, and the files it
+refers to.
 
 - `sense_identity` proposes a persona change given any of `values`, `voice`, `boundaries`, `working_style` and
   `profile`, an empty text clearing that field and one left out keeping it, and a `reason` (at most 500 characters). Without
