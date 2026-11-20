@@ -674,5 +674,5 @@ fn codex_prompts_carry_texts_and_images() {
         ]
     );
     assert_eq!(version("ants/0.171.0-alpha.7 (Mac OS 27.2.1; arm64)").as_deref(), Some("0.171.0-alpha.7"));
-    assert!(!older("0.171.0-alpha.7") && !older("1.0.0") && older("0.168.9"));
+    assert!(!older("0.171.0-alpha.7", MIN_VERSION) && !older("1.0.0", MIN_VERSION) && older("0.168.9", MIN_VERSION));
 }

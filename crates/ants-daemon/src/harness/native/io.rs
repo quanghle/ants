@@ -86,6 +86,36 @@ impl Cli {
     }
 }
 
+/// How long a CLI's `--version` has to answer.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run the CLI's `--version`, without the definition's arguments: what it printed.
+pub(crate) async fn probe_version(cli: &Cli) -> Result<std::process::Output, Error> {
+    let bare = Cli { args: Vec::new(), ..cli.clone() };
+    let program = cli.program().display();
+    match tokio::time::timeout(VERSION_TIMEOUT, bare.command(["--version"]).output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(super::failed(format!("{}: starting {program}: {e}", cli.name()))),
+        Err(_) => {
+            Err(super::failed(format!("{}: {program} --version did not answer within {VERSION_TIMEOUT:?}", cli.name())))
+        }
+    }
+}
+
+/// Whether dotted `version` is older than `oldest`, comparing the leading numbers of its first three parts (split at
+/// `.` and `-`), a missing one counting as 0.
+pub(crate) fn older(version: &str, oldest: [u64; 3]) -> bool {
+    let parts = version.split(['.', '-']).take(3).map(|part| {
+        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u64>().unwrap_or_default()
+    });
+    let mut numbers = [0; 3];
+    for (number, part) in numbers.iter_mut().zip(parts) {
+        *number = part;
+    }
+    numbers < oldest
+}
+
 /// Log the lines of a process's stderr and keep their tail, reading to its end: a pipe closed early would fail the
 /// process's next write. Bytes that are not UTF-8 are replaced; a line longer than [`STDERR_TAIL`] is taken in pieces.
 async fn drain(stderr: impl AsyncRead + Unpin, name: String, tail: Arc<Mutex<VecDeque<u8>>>) {

@@ -292,11 +292,6 @@ impl Cli {
         &self.args
     }
 
-    /// The environment [`Self::command`] adds to the daemon's.
-    pub(crate) fn env(&self) -> &BTreeMap<String, String> {
-        &self.env
-    }
-
     /// The value environment variable `name` has for the CLI, unless unset or empty.
     pub(crate) fn var(&self, name: &str) -> Option<String> {
         let value = self.env.get(name).cloned().or_else(|| std::env::var(name).ok());

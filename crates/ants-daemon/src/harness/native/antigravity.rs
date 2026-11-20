@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
+use super::io::{older, probe_version};
 use super::{
     Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates,
     context_overflow, deny_approval, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out,
@@ -63,9 +64,6 @@ const NOT_SIGNED_IN: &str = "authentication failed or timed out";
 
 /// The environment variable agy reads a Gemini API key from, used with model provider `gemini`.
 const API_KEY: &str = "GEMINI_API_KEY";
-
-/// How long `agy --version` may take.
-const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) struct Antigravity {
     cli: Cli,
@@ -153,21 +151,13 @@ impl Native for Antigravity {
 
 /// agy's version, which `agy --version` prints, if it is one this speaks to.
 async fn version(cli: &Cli) -> Result<String, Error> {
-    let bare = Cli { args: Vec::new(), ..cli.clone() };
-    let run = tokio::time::timeout(VERSION_TIMEOUT, bare.command(["--version"]).output()).await;
-    let output = match run {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => return Err(failed(format!("{}: starting {}: {e}", cli.name(), cli.program().display()))),
-        Err(_) => {
-            return Err(failed(format!("{}: agy --version did not answer within {VERSION_TIMEOUT:?}", cli.name())));
-        }
-    };
+    let output = probe_version(cli).await?;
     let printed = String::from_utf8_lossy(&output.stdout);
-    let found = printed.split_whitespace().find_map(|word| {
+    let found = printed.split_whitespace().find(|word| {
         let parts: Option<Vec<u64>> = word.split('.').map(|part| part.parse().ok()).collect();
-        parts.filter(|parts| parts.len() >= 2).map(|parts| (word.to_owned(), parts))
+        parts.is_some_and(|parts| parts.len() >= 2)
     });
-    let Some((version, parts)) = found else {
+    let Some(version) = found else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(failed(format!(
             "{}: agy --version printed no version: {} {}",
@@ -176,14 +166,14 @@ async fn version(cli: &Cli) -> Result<String, Error> {
             stderr.trim()
         )));
     };
-    if parts.as_slice() < OLDEST.as_slice() {
+    if older(version, OLDEST) {
         let [major, minor, patch] = OLDEST;
         return Err(failed(format!(
             "agy {version} is older than {major}.{minor}.{patch}, the first whose headless stream-json protocol \
              antigravity speaks; update agy (agy update)"
         )));
     }
-    Ok(version)
+    Ok(version.to_owned())
 }
 
 /// A flag of agy's command line, with or without its `=value`: agy takes `-name` and `--name`.

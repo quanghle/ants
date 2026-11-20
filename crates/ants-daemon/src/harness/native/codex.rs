@@ -26,6 +26,7 @@ use serde_json::{Map, Value, json};
 use tokio::process::ChildStdin;
 use tokio::sync::mpsc;
 
+use super::io::older;
 use super::{
     Cli, Credentials, Harness, Incoming, Info, Native, NativeSession, Open, Process, Rpc, Setting, Updates, approve,
     context_overflow, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited, signed_out,
@@ -264,19 +265,6 @@ fn version(user_agent: &str) -> Option<String> {
     version.starts_with(|c: char| c.is_ascii_digit()).then(|| version.to_owned())
 }
 
-/// Whether `version` is older than [`MIN_VERSION`], comparing the leading numbers of its parts.
-fn older(version: &str) -> bool {
-    let parts = version.split(['.', '-']).take(3).map(|part| {
-        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
-        digits.parse::<u64>().unwrap_or_default()
-    });
-    let mut numbers = [0; 3];
-    for (number, part) in numbers.iter_mut().zip(parts) {
-        *number = part;
-    }
-    numbers < MIN_VERSION
-}
-
 /// The approval policy and sandbox mode of `mode`, None when it is no mode of the protocol.
 fn permissions(mode: Option<&str>) -> Option<(&'static str, &'static str)> {
     let mode = mode.unwrap_or(MODES[0].0);
@@ -364,7 +352,7 @@ impl Codex {
         let Some(version) = version(user_agent) else {
             return Err(failed(format!("codex app-server named no version in its user agent {user_agent:?}")));
         };
-        if older(&version) {
+        if older(&version, MIN_VERSION) {
             let [major, minor, patch] = MIN_VERSION;
             return Err(failed(format!(
                 "codex {version} is older than {major}.{minor}.{patch}, the first version protocol codex runs"
