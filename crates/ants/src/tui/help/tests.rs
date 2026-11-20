@@ -109,7 +109,7 @@ fn the_fold_keys_have_rows_in_the_table() {
 
 #[test]
 fn every_key_a_view_takes_has_a_row_in_the_table() {
-    let views: [(&str, &str, &[View]); 24] = [
+    let views: [(&str, &str, &[View]); 22] = [
         ("model/keys.rs", "nav_key", &[View::Nav]),
         ("thread/find.rs", "find_key", &[View::Thread]),
         ("command/bar.rs", "key", &[View::Bar]),
@@ -118,7 +118,6 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
         ("command/history.rs", "search_key", &[View::Bar]),
         ("complete.rs", "complete_key", &[View::Bar]),
         ("approvals.rs", "key", &[View::Request]),
-        ("approvals/full.rs", "scrolled", &[View::Request]),
         ("home.rs", "key", &[View::Home]),
         ("work.rs", "key", &[View::Work]),
         ("channel.rs", "key", &[View::Channel]),
@@ -128,7 +127,6 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
         ("search.rs", "key", &[View::Search]),
         ("tree.rs", "key", &[View::Tree]),
         ("ant.rs", "key", &[View::Ant, View::AntQueue]),
-        ("memories.rs", "key", &[View::Memories]),
         ("mcp.rs", "key", &[View::Mcp]),
         ("settings.rs", "key", &[View::Settings]),
         ("listed.rs", "key", &[View::Credentials]),
@@ -142,7 +140,6 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
         "command/history.rs" => include_str!("../command/history.rs"),
         "complete.rs" => include_str!("../complete.rs"),
         "approvals.rs" => include_str!("../approvals.rs"),
-        "approvals/full.rs" => include_str!("../approvals/full.rs"),
         "home.rs" => include_str!("../home.rs"),
         "work.rs" => include_str!("../work.rs"),
         "channel.rs" => include_str!("../channel.rs"),
@@ -153,7 +150,6 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
         "search.rs" => include_str!("../search.rs"),
         "tree.rs" => include_str!("../tree.rs"),
         "ant.rs" => include_str!("../ant.rs"),
-        "memories.rs" => include_str!("../memories.rs"),
         "mcp.rs" => include_str!("../mcp.rs"),
         "settings.rs" => include_str!("../settings.rs"),
         "listed.rs" => include_str!("../listed.rs"),
@@ -166,6 +162,19 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
         for key in keys {
             let row = views.iter().flat_map(|v| keymap::entries(*v)).any(|e| e.keys.contains(&key));
             assert!(row, "{file}: {key:?} has no row in the key table for {views:?}");
+        }
+    }
+}
+
+#[test]
+fn every_key_the_shared_stepping_takes_has_a_row_in_the_views_that_scroll_or_select_by_it() {
+    let source = include_str!("../select.rs");
+    let keys = taken(&source[source.find("pub fn step(key").expect("select::step")..], "step");
+    assert!(!keys.is_empty(), "select.rs: no keys read");
+    for view in [View::Request, View::Pending, View::Memories] {
+        for key in &keys {
+            let row = keymap::entries(view).iter().any(|e| e.keys.contains(key));
+            assert!(row, "select::step: {key:?} has no row in the key table for {view:?}");
         }
     }
 }

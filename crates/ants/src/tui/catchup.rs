@@ -30,6 +30,7 @@ use super::command::Tone;
 use super::home::{self, Why};
 use super::markdown;
 use super::model::{Action, Data, Key, Level, Model};
+use super::select::{PAGE, step};
 use super::style::{self, ago};
 use super::timeline::Tools;
 use super::work;
@@ -303,20 +304,17 @@ impl Model {
         Action::Summarise(Ask::Digest(since))
     }
 
-    /// The keys while the digest shows: j/k scroll, s asks again, any other closes it.
+    /// The keys while the digest shows: j/k scroll, s asks again, any other closes it. End closes it too, the digest
+    /// keeping no count of its rows to stop at.
     pub fn digest_key(&mut self, key: Key) -> Option<Action> {
         let digest = self.catchup.digest.as_mut()?;
-        match key {
-            Key::Down | Key::Char('j') => digest.top = digest.top.saturating_add(1),
-            Key::Up | Key::Char('k') => digest.top = digest.top.saturating_sub(1),
-            Key::PageDown => digest.top = digest.top.saturating_add(10),
-            Key::PageUp => digest.top = digest.top.saturating_sub(10),
-            Key::Home => digest.top = 0,
-            Key::Char('s') if digest.got.is_some() => {
-                let since = digest.since;
-                return Some(self.ask_digest(since));
-            }
-            _ => digest.shown = false,
+        if key == Key::Char('s') && digest.got.is_some() {
+            let since = digest.since;
+            return Some(self.ask_digest(since));
+        }
+        match step(key, usize::from(digest.top), Some(PAGE)).filter(|_| key != Key::End) {
+            Some(top) => digest.top = u16::try_from(top).unwrap_or(u16::MAX),
+            None => digest.shown = false,
         }
         None
     }
@@ -574,6 +572,31 @@ mod tests {
         let action = m.digest(Some("2h"), at(7200)).unwrap();
         assert_eq!(action, Action::Summarise(Ask::Digest(at(0))));
         assert!(m.digest(Some("soon"), at(7200)).is_err());
+    }
+
+    #[test]
+    fn the_digest_scrolls_by_row_and_by_page_back_to_its_top_and_end_closes_it() {
+        let mut m = model();
+        m.digest(Some("2h"), at(7200)).unwrap();
+        let steps = [
+            (Key::Up, 0),
+            (Key::Char('j'), 1),
+            (Key::Down, 2),
+            (Key::Char('k'), 1),
+            (Key::PageDown, 11),
+            (Key::PageUp, 1),
+            (Key::Home, 0),
+        ];
+        for (key, top) in steps {
+            assert_eq!(m.digest_key(key), None);
+            let digest = m.catchup.digest.as_ref().unwrap();
+            assert!(digest.shown && digest.top == top, "{key:?}: {digest:?}");
+        }
+        for key in [Key::End, Key::Char('s'), Key::Esc] {
+            m.catchup.digest.as_mut().unwrap().shown = true;
+            assert_eq!(m.digest_key(key), None, "s asks again only once a digest came");
+            assert!(!m.catchup.digest.as_ref().unwrap().shown, "{key:?} closes it");
+        }
     }
 
     #[test]
