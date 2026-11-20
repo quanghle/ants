@@ -8,12 +8,12 @@ use std::fmt::Write as _;
 
 use ants_proto::{
     CallAnswer, DEFAULT_TURN_BUDGET, Envelope, MAX_TITLE, NotesPost, PendingCall, RunId, RunLimit, RunState,
-    StatusUpdate, StepStage, ThreadId, TrailFunction, TrailLimits, TrailRun, UserId,
+    StatusUpdate, StepStage, ThreadId, TrailLimits, TrailRun, UserId,
 };
 use ants_trail::{Event, Meta};
 
+use super::Trails;
 use super::invite::end_id;
-use super::{Trails, steps};
 
 /// Reads of busy notes before a report to them is given up.
 const NOTE_TRIES: usize = 5;
@@ -99,7 +99,7 @@ impl Trails {
         let update = StatusUpdate::Step {
             run: run.run.clone(),
             call: step.call,
-            label: step_label(step),
+            label: step.function.label(&step.args),
             to: step.to.clone(),
             step_thread: step.thread.clone(),
             stage,
@@ -258,19 +258,24 @@ fn resume_after(limits: &TrailLimits, limit: RunLimit, resume: &RunId) -> String
         }
     };
     let wall = ants_proto::duration::format;
+    if let Some(flag) = limit.raised_by() {
+        let (value, most, at_most, takes) = match limit {
+            RunLimit::Steps => {
+                (format!("{} steps", limits.steps), max.steps.to_string(), limits.steps >= max.steps, "N")
+            }
+            RunLimit::Turns => {
+                (format!("{} turns", limits.turns), max.turns.to_string(), limits.turns >= max.turns, "N")
+            }
+            _ => (
+                format!("{} of wall time", wall(limits.wall_time())),
+                wall(max.wall_time()),
+                limits.wall_secs >= max.wall_secs,
+                "DUR",
+            ),
+        };
+        return raise(&format!("{flag} {takes}"), value, most, at_most);
+    }
     match limit {
-        RunLimit::Steps => {
-            raise("--steps N", format!("{} steps", limits.steps), max.steps.to_string(), limits.steps >= max.steps)
-        }
-        RunLimit::Turns => {
-            raise("--turns N", format!("{} turns", limits.turns), max.turns.to_string(), limits.turns >= max.turns)
-        }
-        RunLimit::Wall => raise(
-            "--wall DUR",
-            format!("{} of wall time", wall(limits.wall_time())),
-            wall(max.wall_time()),
-            limits.wall_secs >= max.wall_secs,
-        ),
         RunLimit::Compute => format!(
             "`ants trail resume {resume}` runs the script's computation again under the same compute limit, which no \
              flag raises: it fails again unless the machine was only busy."
@@ -280,7 +285,7 @@ fn resume_after(limits: &TrailLimits, limit: RunLimit, resume: &RunId) -> String
              under the same one would restore the same session and take the same answers.",
             limits.session_bytes, max.session_bytes
         ),
-        RunLimit::Session | RunLimit::Memory => format!(
+        _ => format!(
             "No resume continues it: no flag raises its {limit} limit, and a resume would restore the same session \
              and take the same answers."
         ),
@@ -295,16 +300,6 @@ pub(crate) fn clip(text: &str, max: usize) -> String {
     let mut clipped: String = text.chars().take(max.saturating_sub(1)).collect();
     clipped.push('…');
     clipped
-}
-
-/// The label of `step` its `step` status updates and its marker carry: an agent() step's `label`, `trail NAME` for a
-/// trail() step.
-pub(super) fn step_label(step: &PendingCall) -> Option<String> {
-    match step.function {
-        TrailFunction::Agent => steps::AgentArgs::of(&step.args).ok().and_then(|args| args.label),
-        TrailFunction::Trail => steps::TrailArgs::of(&step.args).ok().map(|args| format!("trail {}", args.name)),
-        TrailFunction::Human | TrailFunction::Goto => None,
-    }
 }
 
 #[cfg(test)]

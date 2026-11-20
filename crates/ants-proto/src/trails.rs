@@ -30,10 +30,12 @@ use crate::{
     trail_session_key, trail_step_key,
 };
 
+mod calls;
 mod ratings;
 mod saving;
 mod tips;
 
+pub use calls::{AgentArgs, GotoArgs, TrailArgs};
 pub use ratings::{
     Counts, FIND_TRAILS_LIMIT, Finder, Found, LATEST_RATINGS, MAX_FIND_TRAILS, MAX_RATING_TASK, MAX_RATING_WHY, Query,
     RATING_FULL_WEIGHT, RATING_MATCH_WORDS, RatingOutcome, RatingSummary, TrailRating, serves, stem,
@@ -537,6 +539,55 @@ impl RunState {
             _ => None,
         }
     }
+
+    /// The state in a word: `running`, `waiting`, `stopped`, `done` or `failed`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Stopped { .. } => "stopped",
+            Self::Done { .. } => "done",
+            Self::Failed { .. } => "failed",
+        }
+    }
+
+    /// Whether a resume continues a run in this state under `limits`, raised to `raised` when given: a stopped run, or
+    /// one failed on a limit, but on its memory limit, which no resume raises, or on its session size limit unless
+    /// `raised` raises it. Either would restore the same session, take the same answers and fail the same way.
+    pub fn resumable(&self, limits: &TrailLimits, raised: Option<&TrailLimits>) -> Result<(), Unresumable<'_>> {
+        match self {
+            Self::Failed { limit: Some(RunLimit::Memory), .. } => Err(Unresumable::Broke(RunLimit::Memory)),
+            Self::Failed { limit: Some(RunLimit::Session), .. }
+                if !raised.is_some_and(|raised| raised.session_bytes > limits.session_bytes) =>
+            {
+                Err(Unresumable::Broke(RunLimit::Session))
+            }
+            Self::Stopped { .. } | Self::Failed { limit: Some(_), .. } => Ok(()),
+            Self::Failed { error, limit: None } => Err(Unresumable::Failed(error)),
+            Self::Done { .. } => Err(Unresumable::Done),
+            Self::Running | Self::Waiting => Err(Unresumable::NotStopped),
+        }
+    }
+}
+
+/// Why no resume continues a run ([`RunState::resumable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unresumable<'a> {
+    /// The run is done.
+    Done,
+    /// The run failed, not on a limit, with this error.
+    Failed(&'a str),
+    /// The run failed on this limit, which the resume does not raise.
+    Broke(RunLimit),
+    /// The run is running or waiting.
+    NotStopped,
+}
+
+impl Unresumable<'_> {
+    /// Whether the run ended with nothing to resume: done, or failed on no limit.
+    pub fn ended(&self) -> bool {
+        matches!(self, Self::Done | Self::Failed(_))
+    }
 }
 
 /// Who answers a call of the script: an ant, by a step sent to it, a human, by a question on a step, or a child run of
@@ -860,6 +911,20 @@ pub enum RunLimit {
     Session,
     /// The script's heap outgrew the memory a script has.
     Memory,
+}
+
+impl RunLimit {
+    /// The flag of `ants trail resume` raising the limit: its steps, turns and wall time. None raises the compute
+    /// limit, run again as it is, nor the memory limit; only a resume's own limits raise the session size limit
+    /// ([`RunState::resumable`]).
+    pub fn raised_by(self) -> Option<&'static str> {
+        match self {
+            Self::Steps => Some("--steps"),
+            Self::Turns => Some("--turns"),
+            Self::Wall => Some("--wall"),
+            Self::Compute | Self::Session | Self::Memory => None,
+        }
+    }
 }
 
 impl std::fmt::Display for RunLimit {

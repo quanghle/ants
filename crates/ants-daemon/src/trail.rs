@@ -31,9 +31,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
-    CallAnswer, Envelope, JournalEntry, JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, NoticeKind, PendingCall,
+    AgentArgs, CallAnswer, Envelope, JournalEntry, JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, NoticeKind, PendingCall,
     QueuedCall, Role, RunId, RunLimit, RunState, SpendsFrom, StepStage, ThreadId, TipBoard, TrailFunction, TrailLeg,
-    TrailLimits, TrailName, TrailRun, TrailSession, TrailSource, TrailStart, UserId, WaitingStep,
+    TrailLimits, TrailName, TrailRun, TrailSession, TrailSource, TrailStart, Unresumable, UserId, WaitingStep,
 };
 use ants_trail::{Limits, Run, Worker};
 use anyhow::Result;
@@ -155,9 +155,7 @@ pub struct Waited {
 
 impl Waited {
     fn of(call: &PendingCall) -> Self {
-        let label = (call.function == TrailFunction::Agent)
-            .then(|| steps::AgentArgs::of(&call.args).ok().and_then(|args| args.label))
-            .flatten();
+        let label = (call.function == TrailFunction::Agent).then(|| call.function.label(&call.args)).flatten();
         Self { call: call.call, function: call.function, to: call.to.clone(), label, sent: call.sent }
     }
 }
@@ -629,27 +627,20 @@ impl Trails {
         }
         let header = self.inner.store.header(run).await.map_err(stored)?;
         let mut header = header.ok_or_else(|| format!("{} conducts no run {run}", self.inner.ant))?;
-        match &header.state {
-            RunState::Failed { limit: Some(RunLimit::Memory), .. } => {
-                return Err(format!(
-                    "run {run} failed on its memory limit, which no resume raises: restoring the same session and \
-                     taking the same answers, it would fail the same way"
-                ));
-            }
-            RunState::Failed { limit: Some(RunLimit::Session), .. }
-                if !limits.is_some_and(|limits| limits.session_bytes > header.limits.session_bytes) =>
-            {
-                return Err(format!(
+        if let Err(why) = header.state.resumable(&header.limits, limits.as_ref()) {
+            return Err(match why {
+                Unresumable::Broke(RunLimit::Session) => format!(
                     "run {run} failed on its session size limit, which this resume does not raise: restoring the \
                      same session and taking the same answers, it would fail the same way"
-                ));
-            }
-            RunState::Stopped { .. } | RunState::Failed { limit: Some(_), .. } => {}
-            RunState::Failed { error, limit: None } => {
-                return Err(format!("run {run} failed, not on a limit: {error}"));
-            }
-            RunState::Done { .. } => return Err(format!("run {run} is done")),
-            RunState::Running | RunState::Waiting => return Err(format!("run {run} is not stopped")),
+                ),
+                Unresumable::Broke(limit) => format!(
+                    "run {run} failed on its {limit} limit, which no resume raises: restoring the same session and \
+                     taking the same answers, it would fail the same way"
+                ),
+                Unresumable::Failed(error) => format!("run {run} failed, not on a limit: {error}"),
+                Unresumable::Done => format!("run {run} is done"),
+                Unresumable::NotStopped => format!("run {run} is not stopped"),
+            });
         }
         if let Some(limits) = limits {
             limits.check().map_err(|e| e.to_string())?;
@@ -868,7 +859,7 @@ impl Trails {
         why: &str,
         spent: u32,
     ) -> Result<Option<CallAnswer>> {
-        let schema = steps::AgentArgs::of(&pending.args).ok().and_then(|args| args.schema).unwrap_or_default();
+        let schema = AgentArgs::of(&pending.args).ok().and_then(|args| args.schema).unwrap_or_default();
         let Ok(again) = reply.reply(self.inner.ant.clone(), String::new(), Role::Ant) else {
             let error = format!("the reply did not match the schema, with no turns left to ask again: {why}");
             return Ok(Some(CallAnswer::Error(error)));

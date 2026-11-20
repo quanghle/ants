@@ -49,7 +49,7 @@ impl Follower {
             }
             self.phase.clone_from(&run.phase);
         }
-        let state = super::runs::state(&run.state);
+        let state = run.state.name();
         if self.state != Some(state) && !run.finished() {
             match &run.state {
                 RunState::Running if self.state.is_some() => lines.push("running".to_owned()),
@@ -69,7 +69,7 @@ impl Follower {
                 && !self.sent.contains_key(&call.call)
                 && self.queued.insert(call.call)
             {
-                lines.push(format!("step {} queued: {}", call.call, gist(&call.args)));
+                lines.push(format!("step {} queued: {}", call.call, gist(call.function, &call.args)));
             }
         }
         for call in session.pending.iter().filter(|call| call.sent && !self.answered.contains(&call.call)) {
@@ -105,11 +105,11 @@ impl Follower {
 
 fn sent(call: &PendingCall) -> String {
     match call.function {
-        TrailFunction::Agent => format!("step {} sent to {}: {}", call.call, call.to, gist(&call.args)),
-        TrailFunction::Human => format!("step {} asks {}: {}", call.call, call.to, gist(&call.args)),
+        TrailFunction::Agent => format!("step {} sent to {}: {}", call.call, call.to, gist(call.function, &call.args)),
+        TrailFunction::Human => format!("step {} asks {}: {}", call.call, call.to, gist(call.function, &call.args)),
         TrailFunction::Trail => match call.child() {
-            Some(child) => format!("step {} runs {} as run {child}", call.call, gist(&call.args)),
-            None => format!("step {} runs {}", call.call, gist(&call.args)),
+            Some(child) => format!("step {} runs {} as run {child}", call.call, gist(call.function, &call.args)),
+            None => format!("step {} runs {}", call.call, gist(call.function, &call.args)),
         },
         TrailFunction::Goto => format!("call {} goes to {}", call.call, destination(&call.args)),
     }

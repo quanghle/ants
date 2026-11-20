@@ -1,75 +1,16 @@
 //! A call's step: the message carrying it to its recipient, and the answer a reply to it gives the call.
 
 use ants_proto::{
-    CallAnswer, Envelope, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, PendingCall, Ranked, TipBoard, TrailFunction, TrailRun,
-    TrailStep, WEBHOOK_ALLOW, check_tip_key, script_sha256,
+    AgentArgs, CallAnswer, Envelope, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, PendingCall, Ranked, TipBoard, TrailFunction,
+    TrailRun, TrailStep, WEBHOOK_ALLOW, script_sha256,
 };
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::schema;
 
 /// How many times a reply not matching its schema is asked for again before the call raises in the script.
 pub(super) const MAX_RETRIES: u32 = 2;
-
-/// The arguments of an agent() call, as the engine hands them out.
-#[derive(Deserialize)]
-pub(super) struct AgentArgs {
-    pub(super) prompt: String,
-    #[serde(default)]
-    pub(super) ant: Option<String>,
-    #[serde(default)]
-    pub(super) capability: Option<String>,
-    #[serde(default)]
-    pub(super) schema: Option<Value>,
-    #[serde(default)]
-    pub(super) label: Option<String>,
-    /// The tip key naming the tips the step carries first and a tip left answering it goes under.
-    #[serde(default)]
-    pub(super) tips: Option<String>,
-}
-
-impl AgentArgs {
-    pub(super) fn of(args: &Value) -> Result<Self, String> {
-        let args: Self = serde_json::from_value(args.clone()).map_err(|e| format!("agent() takes a prompt: {e}"))?;
-        if let Some(key) = &args.tips {
-            check_tip_key(key).map_err(|e| format!("agent() names no tip key as {key:?}: {e}"))?;
-        }
-        Ok(args)
-    }
-}
-
-/// The arguments of a trail() call, as the engine hands them out.
-#[derive(Deserialize)]
-pub(super) struct TrailArgs {
-    pub(super) name: String,
-    #[serde(default)]
-    pub(super) args: Value,
-}
-
-impl TrailArgs {
-    pub(super) fn of(args: &Value) -> Result<Self, String> {
-        serde_json::from_value(args.clone()).map_err(|e| format!("trail() takes a name: {e}"))
-    }
-}
-
-/// The arguments of a goto() call, as the engine hands them out.
-#[derive(Deserialize)]
-pub(super) struct GotoArgs {
-    #[serde(default)]
-    pub(super) trail: Option<String>,
-    #[serde(default)]
-    pub(super) at: Option<String>,
-    #[serde(default)]
-    pub(super) state: Value,
-}
-
-impl GotoArgs {
-    pub(super) fn of(args: &Value) -> Result<Self, String> {
-        serde_json::from_value(args.clone()).map_err(|e| format!("goto() takes a trail and a waypoint by name: {e}"))
-    }
-}
 
 /// The text of an agent() step: its prompt, then its `tips` block ([`tips_block`]), if any, and with a schema, how to
 /// reply.

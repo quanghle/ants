@@ -165,7 +165,7 @@ pub use timeline::{
     MergedCall, MergedEnd, MergedNoReply, MergedRejection, NoReplyWhy, PromptEnd, TIMELINE_EVERY, Timeline,
     TimelineCall, TimelineEnd, TimelineEntry, TimelineRejection, Timelines,
 };
-pub use trails::RunLimit;
+pub use trails::{AgentArgs, GotoArgs, RunLimit, TrailArgs, Unresumable};
 pub use trails::{
     CallAnswer, JournalEntry, MAX_STEP_LABEL, MAX_TRAIL_ARGS, MAX_TRAIL_DESCRIPTION, MAX_TRAIL_PHASES,
     MAX_TRAIL_SCRIPT, MAX_TRAIL_WAYPOINTS, PendingCall, QueuedCall, RunState, SavedTrail, Saver, SpendsFrom,

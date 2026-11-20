@@ -212,7 +212,7 @@ pub(super) fn stuck(
 /// daemon, in the colony, does not drive it.
 fn overdue(run: &TrailRun, name: &str, elapsed: Duration) -> Check {
     let wall = run.limits.wall_time();
-    let state = if run.state == RunState::Running { "running" } else { "waiting" };
+    let state = run.state.name();
     let detail = format!(
         "{name}, conducted by {}, is still {state} {} past its wall time of {}: the conductor's daemon does not drive it",
         run.conductor,
@@ -232,21 +232,18 @@ fn overdue(run: &TrailRun, name: &str, elapsed: Duration) -> Check {
 fn raised(run: &TrailRun, elapsed: Duration) -> Option<String> {
     let (limits, max) = (&run.limits, TrailLimits::MAX);
     let doubled = |value: u32, most: u32| (value < most).then(|| value.saturating_mul(2).min(most));
-    match run.state.failed_on()? {
-        RunLimit::Wall => {
-            let wall = wall_needed(limits.wall_time(), elapsed)?;
-            Some(format!(" --wall {}", ants_proto::duration::format(wall)))
-        }
-        RunLimit::Turns => {
-            let needed = wall_past(limits, elapsed)?;
-            doubled(limits.turns, max.turns).map(|turns| format!(" --turns {turns}{needed}"))
-        }
-        RunLimit::Steps => {
-            let needed = wall_past(limits, elapsed)?;
-            doubled(limits.steps, max.steps).map(|steps| format!(" --steps {steps}{needed}"))
-        }
-        RunLimit::Compute | RunLimit::Session | RunLimit::Memory => None,
+    let limit = run.state.failed_on()?;
+    let flag = limit.raised_by()?;
+    if limit == RunLimit::Wall {
+        let wall = wall_needed(limits.wall_time(), elapsed)?;
+        return Some(format!(" {flag} {}", ants_proto::duration::format(wall)));
     }
+    let needed = wall_past(limits, elapsed)?;
+    let raised = match limit {
+        RunLimit::Turns => doubled(limits.turns, max.turns),
+        _ => doubled(limits.steps, max.steps),
+    };
+    raised.map(|value| format!(" {flag} {value}{needed}"))
 }
 
 /// The `--wall` flag a run under `limits` needs to resume `elapsed` after its start: none while its wall time is

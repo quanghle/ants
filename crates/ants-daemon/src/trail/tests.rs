@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::schema::{check, reply_json};
-use super::steps::AgentArgs;
+use ants_proto::AgentArgs;
 
 #[test]
 fn reply_json_takes_the_whole_text_or_its_first_fenced_block() {
@@ -56,7 +56,7 @@ fn an_agent_call_s_tip_key_is_one_line() {
     let args = AgentArgs::of(&json!({"prompt": "fix it", "tips": "fix the build"})).unwrap();
     assert_eq!(args.tips.as_deref(), Some("fix the build"));
     for bad in ["", "two\nlines"] {
-        let e = AgentArgs::of(&json!({"prompt": "fix it", "tips": bad})).err().expect("refused");
+        let e = AgentArgs::of(&json!({"prompt": "fix it", "tips": bad})).expect_err("refused");
         assert!(e.starts_with("agent() names no tip key as "), "{e}");
     }
 }

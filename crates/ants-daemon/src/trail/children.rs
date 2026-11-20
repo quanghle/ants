@@ -12,15 +12,15 @@
 use std::sync::Arc;
 
 use ants_proto::{
-    CallAnswer, PendingCall, RunId, RunState, TrailLeg, TrailLimits, TrailName, TrailParent, TrailRun, UserId,
-    WaitingStep,
+    CallAnswer, PendingCall, RunId, RunState, TrailArgs, TrailLeg, TrailLimits, TrailName, TrailParent, TrailRun,
+    UserId, WaitingStep,
 };
 use ants_trail::{Call, Run};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use super::{Book, Leg, Slot, Trails, driver, locked, nested, steps};
+use super::{Book, Leg, Slot, Trails, driver, locked, nested};
 
 /// What a run's tree may still spend, as its root's counters and limits say.
 pub(super) struct Budget {
@@ -395,7 +395,7 @@ pub(super) fn unsent(book: &Book, calls: &[PendingCall]) -> u32 {
 
 /// The saved trail the arguments `args` of a trail() call name, and the input they give its run.
 fn trail_args(args: &Value) -> Result<(TrailName, Value), String> {
-    let args = steps::TrailArgs::of(args)?;
+    let args = TrailArgs::of(args)?;
     let name = args.name.parse().map_err(|e| format!("trail() names no trail as {:?}: {e}", args.name))?;
     Ok((name, args.args))
 }

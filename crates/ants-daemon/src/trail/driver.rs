@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use ants_proto::{
-    CallAnswer, DEFAULT_TURN_BUDGET, JournalEntry, PendingCall, RunId, RunLimit, RunState, StepStage, ThreadId,
-    TrailFunction, TrailRun, TrailSession, TrailStepThread, lines, one_line,
+    AgentArgs, CallAnswer, DEFAULT_TURN_BUDGET, JournalEntry, PendingCall, RunId, RunLimit, RunState, StepStage,
+    ThreadId, TrailFunction, TrailRun, TrailSession, TrailStepThread, lines, one_line,
 };
 use ants_trail::{Call, Event, Progress, Run, RunError, Status, WorkerError};
 use anyhow::{Result, anyhow};
@@ -457,7 +457,7 @@ impl Trails {
             let asked = crate::mcp::asked_questions(call.args.clone()).map(|_| ());
             return Ok(asked.map(|()| self.inner.humans.owner_or_default(header.owner.as_ref())));
         }
-        let args = match steps::AgentArgs::of(&call.args) {
+        let args = match AgentArgs::of(&call.args) {
             Ok(args) => args,
             Err(e) => return Ok(Err(e)),
         };
@@ -533,7 +533,7 @@ impl Trails {
                 call: call.call,
                 to: call.to.clone(),
                 run_thread: header.thread.clone(),
-                label: super::report::step_label(call),
+                label: call.function.label(&call.args),
             };
             if call.function == TrailFunction::Trail {
                 // A trail() step sends no message: its thread, the child run's, keeps no step key.

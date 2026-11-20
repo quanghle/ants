@@ -7,9 +7,9 @@ use std::str::FromStr;
 
 use ants_proto::provider::Starter;
 use ants_proto::{
-    CallAnswer, JournalEntry, PendingCall, QueuedCall, RatingOutcome, RunId, RunState, StepStage, TRAIL_RUNS_BUCKET,
-    ThreadId, TrailFunction, TrailLeg, TrailName, TrailRating, TrailRun, TrailSession, TrailStepThread, UserId, Uuid,
-    parse_trail_run_key, trail_run_key, trail_session_key, trail_thread_steps_prefix,
+    CallAnswer, GotoArgs, JournalEntry, PendingCall, QueuedCall, RatingOutcome, RunId, RunState, StepStage,
+    TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLeg, TrailName, TrailRating, TrailRun, TrailSession,
+    TrailStepThread, UserId, Uuid, parse_trail_run_key, trail_run_key, trail_session_key, trail_thread_steps_prefix,
 };
 use anyhow::{Result, bail};
 use async_nats::jetstream;
@@ -171,17 +171,6 @@ pub(crate) async fn session(js: &jetstream::Context, run: &TrailRun) -> Result<O
     Ok(latest_in(js, TRAIL_RUNS_BUCKET, &session).await?.iter().find_map(|(k, v)| parse(k, v)))
 }
 
-/// The run's state in a word.
-pub(crate) fn state(state: &RunState) -> &'static str {
-    match state {
-        RunState::Running => "running",
-        RunState::Waiting => "waiting",
-        RunState::Stopped { .. } => "stopped",
-        RunState::Done { .. } => "done",
-        RunState::Failed { .. } => "failed",
-    }
-}
-
 fn ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     format!("{} ago", short(since(at, now)))
 }
@@ -211,7 +200,7 @@ pub(crate) fn table(runs: &[TrailRun], rated: &Rated, now: DateTime<Utc>) -> Str
                 trail(r),
                 r.conductor.to_string(),
                 r.owner.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string),
-                state(&r.state).to_owned(),
+                r.state.name().to_owned(),
                 r.phase.as_deref().map_or_else(|| "-".to_owned(), |p| one_line(p, 30)),
                 format!("{}/{}", r.steps, r.limits.steps),
                 format!("{}/{}", r.turns, r.limits.turns),
@@ -224,24 +213,23 @@ pub(crate) fn table(runs: &[TrailRun], rated: &Rated, now: DateTime<Utc>) -> Str
     super::columns(&rows)
 }
 
-/// What a call asks, in short: its label, else its prompt or questions, or the trail it runs.
-pub(super) fn gist(args: &Value) -> String {
-    if let Some(trail) = args.get("name").and_then(Value::as_str) {
-        return one_line(&format!("trail {trail}"), 60);
-    }
-    let text = ["label", "prompt", "questions"]
-        .iter()
-        .find_map(|key| args.get(key))
-        .map_or_else(|| args.to_string(), |value| value.as_str().map_or_else(|| value.to_string(), str::to_owned));
+/// What a call of `function` with `args` asks, in short: its label ([`TrailFunction::label`]), else its prompt or
+/// questions.
+pub(super) fn gist(function: TrailFunction, args: &Value) -> String {
+    let text = function.label(args).unwrap_or_else(|| {
+        ["prompt", "questions"]
+            .iter()
+            .find_map(|key| args.get(key))
+            .map_or_else(|| args.to_string(), |value| value.as_str().map_or_else(|| value.to_string(), str::to_owned))
+    });
     one_line(&text, 60)
 }
 
 /// Where a goto() call asks to go: its trail, else the run's own, at its waypoint, else the trail's start.
 pub(super) fn destination(args: &Value) -> String {
-    let trail =
-        args.get("trail").and_then(Value::as_str).map_or_else(|| "the same trail".to_owned(), |t| format!("trail {t}"));
-    let at =
-        args.get("at").and_then(Value::as_str).map_or_else(|| "its start".to_owned(), |at| format!("waypoint {at}"));
+    let GotoArgs { trail, at, .. } = GotoArgs::of(args).unwrap_or_default();
+    let trail = trail.map_or_else(|| "the same trail".to_owned(), |t| format!("trail {t}"));
+    let at = at.map_or_else(|| "its start".to_owned(), |at| format!("waypoint {at}"));
     one_line(&format!("{trail} at {at}"), 60)
 }
 
@@ -301,7 +289,7 @@ fn children(children: &[TrailRun]) -> Vec<[String; 4]> {
         .iter()
         .map(|child| {
             let call = child.parent.as_ref().map_or_default(|parent| format!("call {}", parent.call));
-            [child.run.to_string(), child.route_text(), state(&child.state).to_owned(), call]
+            [child.run.to_string(), child.route_text(), child.state.name().to_owned(), call]
         })
         .collect()
 }
@@ -341,7 +329,7 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
             writeln!(out, "state: failed on its {limit} limit:{}", after_colon(error))
         }
         RunState::Failed { error, limit: None } => writeln!(out, "state: failed:{}", after_colon(error)),
-        other => writeln!(out, "state: {}", state(other)),
+        other => writeln!(out, "state: {}", other.name()),
     };
     if let Some(phase) = &r.phase {
         let _ = writeln!(out, "phase: {}", one_line(phase, usize::MAX));
@@ -387,7 +375,7 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
                     c.child().map_or_else(|| format!("to {}", c.to), |child| format!("run {child}")),
                     format!("sent {}", ago(c.sent_at, now)),
                     format!("thread {}", c.thread),
-                    gist(&c.args),
+                    gist(c.function, &c.args),
                 ]
             })
             .collect();
@@ -395,8 +383,8 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
     }
     if !queued.is_empty() {
         out.push_str("\nqueued calls:\n");
-        let rows: Vec<[String; 3]> =
-            queued.iter().map(|c| [c.call.to_string(), c.function.name().to_owned(), gist(&c.args)]).collect();
+        let row = |c: &QueuedCall| [c.call.to_string(), c.function.name().to_owned(), gist(c.function, &c.args)];
+        let rows: Vec<[String; 3]> = queued.iter().map(row).collect();
         out.push_str(&indented(&super::columns(&rows)));
     }
     if !journal.is_empty() {
@@ -425,7 +413,7 @@ fn answered(run: &TrailRun, journal: &[JournalEntry]) -> Vec<[String; 5]> {
                 TrailFunction::Human => run.owner.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string),
                 TrailFunction::Trail | TrailFunction::Goto => run.conductor.to_string(),
             };
-            let gist = if e.function == TrailFunction::Goto { destination(&e.args) } else { gist(&e.args) };
+            let gist = if e.function == TrailFunction::Goto { destination(&e.args) } else { gist(e.function, &e.args) };
             [e.call.to_string(), e.function.name().to_owned(), whom, gist, answer]
         })
         .collect()
@@ -520,11 +508,7 @@ pub(super) fn staged(
         });
         let label = marker.label.clone().or_else(|| {
             let (function, args) = args?;
-            match function {
-                TrailFunction::Agent => args.get("label")?.as_str().map(str::to_owned),
-                TrailFunction::Trail => args.get("name")?.as_str().map(|name| format!("trail {name}")),
-                TrailFunction::Human | TrailFunction::Goto => None,
-            }
+            function.label(args)
         });
         Step {
             run: marker.run.clone(),

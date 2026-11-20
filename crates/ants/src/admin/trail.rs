@@ -29,7 +29,7 @@ pub(crate) async fn stop(nats: &Nats<'_>, ordered: Ordered<'_>) -> Result<()> {
     let (_, js) = nats.connect("ants-ant-stop-trail").await?;
     let header = runs::pick_of(&js, ordered.ant, ordered.run).await?;
     if header.finished() {
-        bail!("run {} of {} has ended: {}", header.run, header.conductor, runs::state(&header.state));
+        bail!("run {} of {} has ended: {}", header.run, header.conductor, header.state.name());
     }
     let op = AdminOp::StopTrail { run: header.run };
     let (order, outcome) = admin.send(&js, ordered.machine, ordered.ant, op, ordered.wait).await?;
@@ -42,7 +42,7 @@ pub(crate) async fn resume(nats: &Nats<'_>, ordered: Ordered<'_>, limits: LimitA
     let admin = Admin::of(nats)?;
     let (_, js) = nats.connect("ants-ant-resume-trail").await?;
     let header = runs::pick_of(&js, ordered.ant, ordered.run).await?;
-    if let Some(ended) = control::ended(&header.state) {
+    if let Some(ended) = control::ended(&header) {
         bail!("run {} of {} has ended: {ended}", header.run, header.conductor);
     }
     let limits = if limits.given() { Some(limits.over(header.limits)?) } else { None };
