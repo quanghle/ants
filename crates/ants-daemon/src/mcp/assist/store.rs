@@ -187,7 +187,7 @@ impl HumanStore for JetStreamStore {
     }
 
     fn put_done(&self, done: ThreadDone) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move { self.threads().await?.put(done_key(&done.thread_id), serde_json::to_vec(&done)?).await })
+        Box::pin(async move { crate::provider::events::done::mark(&self.threads().await?, &done).await })
     }
 
     fn marks(&self, human: UserId) -> BoxFuture<'_, Result<ThreadMarks>> {
