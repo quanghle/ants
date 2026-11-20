@@ -23,8 +23,6 @@ mod saved;
 mod schema;
 mod steps;
 mod store;
-#[cfg(test)]
-mod tests;
 mod tips;
 
 use std::collections::HashMap;

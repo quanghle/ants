@@ -78,3 +78,20 @@ impl TrailFunction {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::AgentArgs;
+
+    #[test]
+    fn an_agent_call_s_tip_key_is_one_line() {
+        let args = AgentArgs::of(&json!({"prompt": "fix it", "tips": "fix the build"})).unwrap();
+        assert_eq!(args.tips.as_deref(), Some("fix the build"));
+        for bad in ["", "two\nlines"] {
+            let e = AgentArgs::of(&json!({"prompt": "fix it", "tips": bad})).expect_err("refused");
+            assert!(e.starts_with("agent() names no tip key as "), "{e}");
+        }
+    }
+}

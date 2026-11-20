@@ -1,6 +1,5 @@
-use ants_proto::provider::{Origin, Starter};
-use ants_proto::{RunState, ThreadId, TrailLeg, TrailLimits};
-use ants_test_support::NatsServer;
+use ants_proto::{RunState, TrailLeg};
+use ants_test_support::{NatsServer, trail_leg, trail_run};
 use chrono::Utc;
 use serde_json::json;
 
@@ -95,35 +94,9 @@ async fn the_keeper_writes_an_ant_s_own_trails_only() {
 
 /// A finished run of an inline script `script`, conducted by `conductor`.
 fn run(conductor: &str, script: &str, state: RunState) -> TrailRun {
-    let leg = TrailLeg {
-        trail: None,
-        local: false,
-        at: None,
-        script: script.to_owned(),
-        args: json!(null),
-        first_call: 0,
-        started_at: Utc::now(),
-        steps: 1,
-    };
-    TrailRun {
-        run: RunId::generate(),
-        conductor: p(conductor),
-        route: vec![leg],
-        owner: Some(UserId::human()),
-        thread: ThreadId::generate(),
-        parent: None,
-        spends_from: None,
-        grants: Vec::new(),
-        origin: Origin { by: Starter::Human { user: UserId::human() }, channel: None },
-        limits: TrailLimits::default(),
-        state,
-        phase: None,
-        steps: 1,
-        turns: 1,
-        started_at: Utc::now(),
-        updated_at: Utc::now(),
-        ended_at: Some(Utc::now()),
-    }
+    let now = Utc::now();
+    let leg = TrailLeg { script: script.to_owned(), ..trail_leg(None, now) };
+    TrailRun { route: vec![leg], ended_at: Some(now), ..trail_run(&p(conductor), None, state, now) }
 }
 
 /// A trail records a run as its source only from the saving ant's own record of that run: finished, of an inline

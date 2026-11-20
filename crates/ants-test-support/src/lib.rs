@@ -1,9 +1,11 @@
 //! Test helpers shared by the ants crates (dev-dependency only): external tools, a throwaway nats-server, a scripted
-//! stub CLI ([`StubCli`]) and waits for a condition ([`eventually`]).
+//! stub CLI ([`StubCli`]), waits for a condition ([`eventually`]) and sample records ([`trail_run`]).
 //!
 //! A test that needs `nats-server` skips when the tool is not on PATH, unless [`REQUIRE_TOOLS`] is set to `1`
 //! (CI sets it), where it fails instead, so a broken install cannot pass as skipped tests. Under [`JS_ACK_FC_V2`]`=1`
 //! every test nats-server uses the JetStream ack and flow control subjects nats-server 2.16 uses by default.
+
+mod trails;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -11,6 +13,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
+
+pub use trails::{trail_leg, trail_run};
 
 /// Environment variable that turns a missing tool into a test failure.
 pub const REQUIRE_TOOLS: &str = "ANTS_REQUIRE_TOOLS";

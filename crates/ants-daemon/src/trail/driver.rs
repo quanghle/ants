@@ -702,43 +702,17 @@ fn waiting_or_running(pending: &[PendingCall], engine: &Run) -> RunState {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::provider::{Origin, Starter};
-    use ants_proto::{TrailLeg, TrailLimits, UserId};
+    use ants_proto::TrailLeg;
+    use ants_test_support::{trail_leg, trail_run};
 
     use super::*;
 
     /// A run of one leg ended in `state`, its leg's script padded for its record to have `size` bytes as it ran.
     fn ended(size: usize, state: RunState) -> TrailRun {
         let now = Utc::now();
-        let human = UserId::human();
-        let mut header = TrailRun {
-            run: RunId::generate(),
-            conductor: "lead".parse().unwrap(),
-            route: vec![TrailLeg {
-                trail: Some("deploy".parse().unwrap()),
-                local: false,
-                at: None,
-                script: String::new(),
-                args: serde_json::Value::Null,
-                first_call: 0,
-                started_at: now,
-                steps: 1,
-            }],
-            owner: Some(human.clone()),
-            thread: ThreadId::generate(),
-            parent: None,
-            spends_from: None,
-            grants: Vec::new(),
-            origin: Origin { by: Starter::Human { user: human }, channel: None },
-            limits: TrailLimits::default(),
-            state: RunState::Running,
-            phase: None,
-            steps: 1,
-            turns: 1,
-            started_at: now,
-            updated_at: now,
-            ended_at: Some(now),
-        };
+        let leg = TrailLeg { script: String::new(), ..trail_leg(Some("deploy"), now) };
+        let run = trail_run(&"lead".parse().unwrap(), Some("deploy"), RunState::Running, now);
+        let mut header = TrailRun { route: vec![leg], ended_at: Some(now), ..run };
         let bare = serde_json::to_vec(&header).unwrap().len();
         header.route[0].script = "#".repeat(size - bare);
         assert_eq!(serde_json::to_vec(&header).unwrap().len(), size);

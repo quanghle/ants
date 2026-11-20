@@ -304,44 +304,19 @@ pub(crate) fn clip(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::provider::{Origin, Starter};
-    use ants_proto::{TrailLeg, UserId};
+    use ants_proto::TrailLeg;
+    use ants_test_support::{trail_leg, trail_run};
     use chrono::Utc;
 
     use super::*;
 
     /// A run of trail deploy failed on `limit` under `limits`, having spent 2 steps and 7 turns.
     fn failed(limit: RunLimit, limits: TrailLimits) -> TrailRun {
-        let human = UserId::human();
         let now = Utc::now();
-        TrailRun {
-            run: RunId::generate(),
-            conductor: "lead".parse().unwrap(),
-            route: vec![TrailLeg {
-                trail: Some("deploy".parse().unwrap()),
-                local: false,
-                at: None,
-                script: "agent('build')\n".to_owned(),
-                args: serde_json::Value::Null,
-                first_call: 0,
-                started_at: now,
-                steps: 2,
-            }],
-            owner: Some(human.clone()),
-            thread: ThreadId::generate(),
-            parent: None,
-            spends_from: None,
-            grants: Vec::new(),
-            origin: Origin { by: Starter::Human { user: human }, channel: None },
-            limits,
-            state: RunState::Failed { error: "the limit".to_owned(), limit: Some(limit) },
-            phase: None,
-            steps: 2,
-            turns: 7,
-            started_at: now,
-            updated_at: now,
-            ended_at: Some(now),
-        }
+        let state = RunState::Failed { error: "the limit".to_owned(), limit: Some(limit) };
+        let leg = TrailLeg { script: "agent('build')\n".to_owned(), steps: 2, ..trail_leg(Some("deploy"), now) };
+        let run = trail_run(&"lead".parse().unwrap(), Some("deploy"), state, now);
+        TrailRun { route: vec![leg], limits, steps: 2, turns: 7, ..run }
     }
 
     /// The last line of the end's message of `run`, resumed as itself.

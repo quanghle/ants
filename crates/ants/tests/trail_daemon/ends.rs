@@ -1,5 +1,6 @@
-//! A run's end: stored even when its first put fails, bounded to what its record holds, and told to its owner at least
-//! once, under an id derived from the run and its end.
+//! What a run tells: its reports on its thread, its phase and step labels, notices and late replies on its steps'
+//! threads; and its end, stored even when its first put fails, bounded to what its record holds, and told to its
+//! owner at least once, under an id derived from the run and its end.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -221,4 +222,163 @@ async fn a_run_s_end_message_is_sent_again_until_stored_and_once_more_on_a_resta
     assert_eq!(again.invitation().await.id, invited.id);
     assert_eq!(again.ends_sent(&run, Duration::from_millis(500)).await, (0, 0), "each sent once");
     eventually("the run is unlisted again", async || !listed(&again.js).await.contains(&run)).await;
+}
+
+#[tokio::test]
+async fn a_run_s_phase_and_step_labels_are_stored_on_one_line_and_its_error_without_control_characters() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let script = r#"
+phase("one\nstate: done, result: \"forged\"\x1b]0;title\x07")
+await agent("go", ant="dev", label="the\r\ngo\x1b[8m")
+raise ValueError("bad\x1b[2J\nstate: done")
+"#;
+    let run = lead.start(script, TrailLimits::default()).await;
+    let step = lead.step().await;
+    assert_eq!(step.trail_step.as_ref().unwrap().label.as_deref(), Some("the go[8m"));
+    let header = lead.header(&run).await;
+    assert_eq!(header.phase.as_deref(), Some(r#"one state: done, result: "forged"]0;title"#));
+    let (session, _) = lead.session(&run).await;
+    assert_eq!(session.pending[0].args["label"], "the go[8m");
+    assert!(lead.reply(&step, "ok").await);
+    let RunState::Failed { error, .. } = lead.ended(&run).await else { panic!("not failed") };
+    assert!(error.ends_with("ValueError: bad[2J\nstate: done"), "{error}");
+    assert!(!error.chars().any(|c| c.is_control() && c != '\n'), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_run_reports_on_its_thread_and_tells_its_owner_the_result() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let thread = ThreadId::generate();
+    let mut status = lead.client.subscribe(subject::status(&ant("lead"), &thread)).await.unwrap();
+    let script = r#"
+phase("one")
+log("asking dev")
+built = await agent("build it", ant="dev", label="build")
+log("built")
+{"built": built, "count": 2}
+"#;
+    let run = lead.start_on(script, TrailLimits::default(), thread.clone()).await;
+    let step = lead.step().await;
+    assert_eq!(step.origin_thread.as_ref(), Some(&thread), "the step's thread is spun off the run's");
+    assert_eq!(step.passes_on(), Some(&thread), "the step passes the link to the run's thread on");
+
+    let notes = lead.notes(&thread, 2).await;
+    let started = format!("Run {run} of an inline script (meta name t) started: a test");
+    assert_eq!(notes[..2], [started, "phase: one\nlog: asking dev".into()]);
+    assert_eq!(lead.notes.on(&thread)[0].title.as_deref(), Some("inline t: a test"), "the thread's title");
+    assert!(lead.notes.on(&thread).iter().all(|note| note.from == ant("lead")));
+    let (started, stage) = step_status(&mut status).await;
+    assert_eq!((&started.ant, &started.thread_id, stage), (&ant("lead"), &thread, StepStage::Started));
+    let StatusUpdate::Step { run: of, call, label, to, step_thread, .. } = started.update else { unreachable!() };
+    let sent = step.trail_step.as_ref().unwrap();
+    assert_eq!((of, call, label.as_deref()), (run.clone(), sent.call, Some("build")));
+    assert_eq!((to, step_thread), (ant("dev"), step.thread_id.clone()));
+
+    assert!(lead.reply(&step, "done").await);
+    assert_eq!(step_status(&mut status).await.1, StepStage::Answered);
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!({"built": "done", "count": 2}) });
+    assert_eq!(lead.notes(&thread, 3).await[2], "log: built");
+    let told = lead.told().await;
+    assert_eq!((&told.from, &told.to, &told.thread_id), (&ant("lead"), &UserId::human(), &thread));
+    assert_eq!(told.owner, Some(UserId::human()));
+    let result = "```json\n{\n  \"built\": \"done\",\n  \"count\": 2\n}\n```";
+    assert!(told.text.starts_with(&format!("Run {run}")), "{}", told.text);
+    assert!(told.text.ends_with(&format!(" is done (1 steps, 1 turns):\n\n{result}")), "{}", told.text);
+}
+
+#[tokio::test]
+async fn a_run_of_a_trail_saved_under_another_name_than_its_meta_s_is_noted_by_the_saved_name() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-saved-name");
+    std::fs::write(dir.join("release.py"), format!("{META}await agent(\"go\", ant=\"dev\")\n")).unwrap();
+    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    let thread = ThreadId::generate();
+    let run = lead.start_saved("release", children::human_origin(), TrailLimits::default(), thread.clone()).await;
+    let step = lead.step().await;
+
+    let notes = lead.notes(&thread, 1).await;
+    assert_eq!(notes[0], format!("Run {run} of trail release (meta name t) started: a test"));
+    assert_eq!(lead.notes.on(&thread)[0].title.as_deref(), Some("trail release: a test"), "the thread's title");
+    assert!(lead.reply(&step, "gone").await);
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("gone") });
+    assert!(lead.told().await.text.starts_with(&format!("Run {run} of trail release is done")));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_notice_on_a_step_thread_is_noted_on_the_run_thread_and_a_withdrawn_step_fails() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let thread = ThreadId::generate();
+    let mut status = lead.client.subscribe(subject::status(&ant("lead"), &thread)).await.unwrap();
+    let script = r#"
+async def go():
+    try:
+        return await agent("go", ant="dev")
+    except RuntimeError as e:
+        return str(e)
+await go()
+"#;
+    let run = lead.start_on(script, TrailLimits::default(), thread.clone()).await;
+    let step = lead.step().await;
+    let notice = step.reply(ant("dev"), "[ants] dev is out of quota.", Role::Ant).unwrap().as_notice(NoticeKind::Quota);
+    assert!(lead.trails.take(&notice).await.unwrap(), "a notice prompts no conductor");
+    let call = step.trail_step.as_ref().unwrap().call;
+    let noted = |kind: &str, text: &str| {
+        format!("A {kind} notice from dev on the thread {} of step {call} to dev, run {run}:\n{text}", step.thread_id)
+    };
+    assert_eq!(lead.notes(&thread, 2).await[1], noted("quota", "[ants] dev is out of quota."));
+    assert!(!lead.header(&run).await.finished(), "the step is still waited on");
+
+    let human = Envelope::on_thread(step.thread_id.clone(), UserId::human(), ant("lead"), "how goes it?");
+    assert!(!lead.trails.take(&human).await.unwrap(), "a human's message on a step's thread is prompted");
+
+    let withdrawn = step.reply(ant("dev"), "[ants] Withdrawn.", Role::Ant).unwrap().as_notice(NoticeKind::Withdrawn);
+    assert!(lead.trails.take(&withdrawn).await.unwrap());
+    let RunState::Done { result } = lead.ended(&run).await else { panic!("not done") };
+    assert!(result.as_str().unwrap().contains("dev never answered: the step's message was withdrawn"), "{result}");
+    assert_eq!(lead.notes(&thread, 3).await[2], noted("withdrawn", "[ants] Withdrawn."));
+    assert_eq!(step_status(&mut status).await.1, StepStage::Started);
+    assert_eq!(step_status(&mut status).await.1, StepStage::Failed);
+}
+
+#[tokio::test]
+async fn a_reply_after_the_run_ended_is_noted_on_its_thread_not_prompted() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let thread = ThreadId::generate();
+    let run = lead.start_on(r#"await agent("a", ant="dev")"#, TrailLimits::default(), thread.clone()).await;
+    let step = lead.step().await;
+    let runs = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    let marker = runs.get(trail_thread_step_key(&ant("lead"), &thread, &step.thread_id)).await.unwrap();
+    let marker: TrailStepThread = serde_json::from_slice(&marker.expect("kept under the run's thread")).unwrap();
+    let call = step.trail_step.as_ref().unwrap().call;
+    assert_eq!((marker.run, marker.call, marker.run_thread), (run.clone(), call, thread.clone()));
+    assert!(lead.reply(&step, "A").await);
+    lead.ended(&run).await;
+    let late = |text: &str| step.reply(ant("dev"), text, Role::Ant).unwrap();
+    assert!(lead.trails.take(&late("A, again")).await.unwrap(), "a reply after the end prompts no conductor");
+    let noted = |text: &str| {
+        let (thread, call) = (&step.thread_id, step.trail_step.as_ref().unwrap().call);
+        format!(
+            "A reply from dev on the thread {thread} of step {call} to dev, which the run no longer waits on, run {run}:\n{text}"
+        )
+    };
+    assert_eq!(lead.notes(&thread, 2).await[1], noted("A, again"));
+    let plain = Envelope::on_thread(step.thread_id.clone(), ant("dev"), ant("lead"), "something else");
+    assert!(!lead.trails.take(&plain).await.unwrap(), "a message replying to nothing is prompted");
+    let other = late("not mine").reply(ant("ops"), "neither mine", Role::Ant).unwrap();
+    assert!(!lead.trails.take(&other).await.unwrap(), "a reply of another ant on the step's thread is prompted");
+    drop(lead);
+
+    let again = conductor(&server, &ants_binary(), Vec::new()).await;
+    assert!(again.trails.take(&late("A, once more")).await.unwrap(), "after a restart too");
+    assert_eq!(again.notes(&thread, 1).await[0], noted("A, once more"));
 }

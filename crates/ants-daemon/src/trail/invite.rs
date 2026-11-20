@@ -187,7 +187,8 @@ pub(super) fn end_id(kind: &str, run: &RunId, ended_at: chrono::DateTime<chrono:
 #[cfg(test)]
 mod tests {
     use ants_proto::provider::{Origin, Starter};
-    use ants_proto::{ThreadId, TrailLeg, TrailLimits, TrailParent};
+    use ants_proto::{ThreadId, TrailLeg, TrailParent};
+    use ants_test_support::{trail_leg, trail_run};
     use chrono::{TimeZone as _, Utc};
     use serde_json::json;
 
@@ -199,34 +200,13 @@ mod tests {
 
     fn ended(state: RunState) -> TrailRun {
         let at = Utc.with_ymd_and_hms(2026, 11, 19, 8, 0, 0).unwrap();
-        let leg = TrailLeg {
-            trail: Some("review".parse().unwrap()),
-            local: false,
-            at: None,
-            script: "meta = {}".to_owned(),
-            args: json!({"pr": 7}),
-            first_call: 0,
-            started_at: at,
-            steps: 3,
-        };
+        let leg = TrailLeg { args: json!({"pr": 7}), steps: 3, ..trail_leg(Some("review"), at) };
         TrailRun {
-            run: RunId::generate(),
-            conductor: lead(),
             route: vec![leg],
-            owner: Some(UserId::human()),
-            thread: ThreadId::generate(),
-            parent: None,
-            spends_from: None,
-            grants: Vec::new(),
-            origin: Origin { by: Starter::Human { user: UserId::human() }, channel: None },
-            limits: TrailLimits::default(),
-            state,
-            phase: None,
             steps: 3,
             turns: 4,
-            started_at: at,
-            updated_at: at,
             ended_at: Some(at + chrono::Duration::milliseconds(1500)),
+            ..trail_run(&lead(), Some("review"), state, at)
         }
     }
 

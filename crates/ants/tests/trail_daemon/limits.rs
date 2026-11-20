@@ -1,6 +1,6 @@
-//! A run failing on compute, session or memory, named in its record, and resumed from it where a resume may continue
-//! it; a stop arriving while the script computes, and a resume after the conductor's daemon restarted while the run was
-//! stopped.
+//! A run failing on its wall time, compute, session or memory, named in its record, and resumed from it where a
+//! resume may continue it; a stop arriving while the script computes, and a resume after the conductor's daemon
+//! restarted while the run was stopped.
 
 use super::*;
 
@@ -215,4 +215,82 @@ async fn a_run_stopped_before_its_daemon_restarted_resumes_from_its_record() {
     assert!(fresh.id != b.id && fresh.thread_id != b.thread_id, "sent anew on a fresh thread");
     assert!(again.reply(&fresh, "B").await);
     assert_eq!(again.ended(&run).await, RunState::Done { result: json!("AB") });
+}
+
+#[tokio::test]
+async fn a_run_past_its_wall_time_fails() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let limits = TrailLimits { wall_secs: 1, ..TrailLimits::default() };
+    let run = lead.start(r#"await agent("never answered", ant="dev")"#, limits).await;
+    lead.step().await;
+    let mut state = RunState::Running;
+    eventually_within(Duration::from_secs(10), "the run fails", async || {
+        state = lead.header(&run).await.state;
+        state.finished()
+    })
+    .await;
+    let RunState::Failed { error, limit } = state else { panic!("not failed: {state:?}") };
+    assert!(error.contains("wall time"), "{error}");
+    assert_eq!(limit, Some(RunLimit::Wall), "the record says which limit failed it");
+    let told = lead.told().await;
+    assert!(told.text.contains(" failed (1 steps, 0 turns): ") && told.text.contains(&error), "{}", told.text);
+    let raise = format!("`ants trail resume {run} --wall DUR` continues it, raising its 1s of wall time (at most 7d).");
+    assert!(told.text.ends_with(&raise), "{}", told.text);
+
+    let raised = TrailLimits { wall_secs: 3600, ..limits };
+    lead.trails.resume(&run, &UserId::human(), Some(raised)).await.unwrap();
+    let step = lead.step().await;
+    assert!(lead.reply(&step, "answered").await);
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("answered") }, "resumed past its wall time");
+}
+
+#[tokio::test]
+async fn a_fan_out_whose_record_would_pass_the_payload_fails_on_its_session_before_a_step() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let limits = TrailLimits { steps: 500, ..TrailLimits::default() };
+    let script = r#"
+prompt = "x" * 990
+await parallel(*[agent(prompt + f"f{i}", ant="dev", label=f"f{i}") for i in range(250)])
+"#;
+    let run = lead.start(script, limits).await;
+    let RunState::Failed { error, limit } = lead.ended(&run).await else { panic!("not failed") };
+    assert_eq!(limit, Some(RunLimit::Session), "{error}");
+    let max = ants_daemon::trail::MAX_RECORD;
+    assert!(error.contains(&format!(" bytes, past the {max} it holds")), "{error}");
+    assert!(lead.sends_no_step(Duration::from_millis(200)).await, "a step went out");
+    assert_eq!(lead.header(&run).await.steps, 0, "the steps of the failed pass never went out");
+
+    // A record of the largest size the check lets through fits NATS's payload.
+    let (mut stored, _) = lead.session(&run).await;
+    stored.session = String::new();
+    let size = serde_json::to_vec(&stored).unwrap().len();
+    stored.session = "x".repeat(max - size);
+    assert_eq!(serde_json::to_vec(&stored).unwrap().len(), max);
+    let runs = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    runs.put(trail_session_key(&ant("lead"), &run), serde_json::to_vec(&stored).unwrap()).await.unwrap();
+    let back = runs.get(trail_session_key(&ant("lead"), &run)).await.unwrap().unwrap();
+    assert_eq!(back.len(), max);
+}
+
+#[tokio::test]
+async fn a_run_failed_on_its_session_size_takes_no_resume() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let run = lead.start("big = \"x\" * 800000\nawait agent(\"go\", ant=\"dev\")\n", TrailLimits::default()).await;
+    let RunState::Failed { limit, .. } = lead.ended(&run).await else { panic!("not failed") };
+    assert_eq!(limit, Some(RunLimit::Session));
+    let told = lead.told().await;
+    assert!(told.text.ends_with("and take the same answers."), "{}", told.text);
+    assert!(!told.text.contains("ants trail resume"), "{}", told.text);
+
+    for limits in [None, Some(TrailLimits::MAX)] {
+        let refused = lead.trails.resume(&run, &UserId::human(), limits).await.unwrap_err();
+        assert!(refused.contains("failed on its session size limit, which this resume does not raise"), "{refused}");
+    }
+    assert!(matches!(lead.header(&run).await.state, RunState::Failed { .. }), "the run stays failed");
 }

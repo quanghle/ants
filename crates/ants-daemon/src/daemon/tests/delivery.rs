@@ -298,27 +298,15 @@ async fn a_run_s_rating_invitation_rates_it_under_a_webhook_s_own_rules() {
     bus::publish_json(&bus.js, hooked.subject(), &hooked, None).await.unwrap();
 
     let at = chrono::Utc::now();
+    let done = ants_proto::RunState::Done { result: serde_json::json!("green") };
     let run = ants_proto::TrailRun {
-        run: ants_proto::RunId::generate(),
-        conductor: bus.dev.clone(),
         route: Vec::new(),
-        owner: Some(human.clone()),
         thread: hooked.thread_id.clone(),
-        parent: None,
-        spends_from: None,
-        grants: Vec::new(),
         origin: ants_proto::provider::Origin {
             by: ants_proto::provider::Starter::Webhook { user: hook },
             channel: None,
         },
-        limits: ants_proto::TrailLimits::default(),
-        state: ants_proto::RunState::Done { result: serde_json::json!("green") },
-        phase: None,
-        steps: 1,
-        turns: 1,
-        started_at: at,
-        updated_at: at,
-        ended_at: Some(at),
+        ..ants_test_support::trail_run(&bus.dev, None, done, at)
     };
     let runs = bus.js.get_key_value(ants_proto::TRAIL_RUNS_BUCKET).await.unwrap();
     runs.put(run.key(), serde_json::to_vec(&run).unwrap().into()).await.unwrap();
