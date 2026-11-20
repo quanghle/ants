@@ -3,8 +3,9 @@
 
 use ants_proto::DeadLetter;
 use anyhow::Result;
-use async_nats::jetstream::{self, AckKind};
+use async_nats::jetstream;
 
+use crate::bus;
 use crate::delivery::dead::{self, Burial};
 
 use super::{Inbox, Incoming, MAX_DELIVER};
@@ -25,9 +26,7 @@ impl Inbox<'_> {
             Err(e) => {
                 // Never redelivered, dead letter or not.
                 tracing::warn!(error = format!("{e:#}"), "dead-lettering");
-                if let Err(e) = msg.ack_with(AckKind::Term).await {
-                    tracing::warn!(error = %e, "terminating the message");
-                }
+                bus::term(msg).await;
             }
         }
     }

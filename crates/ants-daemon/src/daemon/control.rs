@@ -86,10 +86,9 @@ impl Inbox<'_> {
     /// Answer the humans' cancel requests ([`CancelRequest`]) for as long as the daemon serves, cancelling the prompt
     /// running on the thread each one names, and the assistants' for their humans, which may withdraw a message instead.
     pub(super) async fn hear_cancels(&self) {
-        let subscribe = [subject::cancel_of(self.ant), subject::cancels_by_of(self.ant)]
-            .map(|s| relayed::subscribe(self.client, s));
-        let mut requests = match futures::future::try_join_all(subscribe).await {
-            Ok(requests) => futures::stream::select_all(requests),
+        let subjects = [subject::cancel_of(self.ant), subject::cancels_by_of(self.ant)];
+        let mut requests = match relayed::subscribe_all(self.client, subjects).await {
+            Ok(requests) => requests,
             Err(e) => {
                 tracing::warn!(error = %e, "serving without ants cancel");
                 return std::future::pending().await;

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use ants_proto::{BuiltinAnt, Envelope, Role, TIMELINE_EVERY, UserId, subject};
 use anyhow::Result;
-use async_nats::jetstream::{self, AckKind};
+use async_nats::jetstream;
 use futures::stream::Stream;
 
 use crate::admin::restart::Restarts;
@@ -532,18 +532,7 @@ impl Inbox<'_> {
 
     /// Wait for `work`, telling the server meanwhile that `msg` is still being worked on.
     async fn acking<T>(&self, msg: &jetstream::Message, work: impl Future<Output = T>) -> T {
-        tokio::pin!(work);
-        let mut progress = self.progress();
-        loop {
-            tokio::select! {
-                done = &mut work => return done,
-                _ = progress.tick() => {
-                    if let Err(e) = msg.ack_with(AckKind::Progress).await {
-                        tracing::warn!(error = %e, "progress ack");
-                    }
-                }
-            }
-        }
+        bus::in_progress(msg, self.pacing.progress_every, work).await
     }
 }
 
@@ -619,12 +608,6 @@ async fn sleep_until(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
-    }
-}
-
-async fn nak(msg: &jetstream::Message, delay: Option<Duration>) {
-    if let Err(e) = msg.ack_with(AckKind::Nak(delay)).await {
-        tracing::warn!(error = %e, "nak");
     }
 }
 

@@ -22,8 +22,8 @@ use ants_proto::{
     OrderState, STREAM, TrailAction, UserId, Uuid, admin_consumer, admin_outcome_key, revoked_device_key, subject,
 };
 use anyhow::{Context as _, Result};
+use async_nats::jetstream;
 use async_nats::jetstream::consumer::{AckPolicy, PullConsumer, pull};
-use async_nats::jetstream::{self, AckKind};
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use serde_json::Value;
@@ -50,7 +50,8 @@ pub mod trail;
 
 /// How long an order may stay in hand unacked before the stream delivers it again.
 const ACK_WAIT: Duration = Duration::from_secs(60);
-/// How often an order in hand for long tells the stream so ([`in_progress`]).
+/// How often an order in hand tells the stream so, so that an order taking longer than [`ACK_WAIT`] (an ant to stop,
+/// the signer to answer) is not delivered again meanwhile.
 const PROGRESS: Duration = Duration::from_secs(20);
 /// How long before the stream delivers again an order whose outcome could not be stored.
 const RETRY_ORDER: Duration = Duration::from_secs(5);
@@ -211,9 +212,7 @@ async fn take(js: &jetstream::Context, js_domain: Option<&JsDomain>, orders: &Or
                     subject = %msg.subject, error = format!("{e:#}"), retry_in = ?RETRY_ORDER,
                     "recording an admin order's outcome failed"
                 );
-                if let Err(e) = msg.ack_with(AckKind::Nak(Some(RETRY_ORDER))).await {
-                    tracing::debug!(error = %e, "naking the order; the stream delivers it again after its ack wait");
-                }
+                bus::nak(&msg, Some(RETRY_ORDER)).await;
             }
         }
     }
@@ -242,7 +241,7 @@ async fn handle(
                     Taken::Order { order, machine, ant } => {
                         let stored_at = stored_at.unwrap_or_else(|_| Utc::now());
                         let deciding = decide(js, outcomes, stores, orders, &msg.subject, &order, stored_at);
-                        let mut outcome = in_progress(msg, deciding).await?;
+                        let mut outcome = bus::in_progress(msg, PROGRESS, deciding).await?;
                         (outcome.machine, outcome.ant) = (machine, ant);
                         outcome
                     }
@@ -295,23 +294,6 @@ async fn record(outcomes: &DirectKv, key: &str, outcome: &AdminOutcome) -> Resul
                 tokio::time::sleep(RETRY_FIRST).await;
             }
             recorded => return recorded,
-        }
-    }
-}
-
-/// `work` on the order in `msg`, telling the stream every [`PROGRESS`] that it is in hand, so that an order taking
-/// longer than [`ACK_WAIT`] (an ant to stop, the signer to answer) is not delivered again meanwhile.
-async fn in_progress<T>(msg: &jetstream::Message, work: impl Future<Output = T>) -> T {
-    tokio::pin!(work);
-    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS, PROGRESS);
-    loop {
-        tokio::select! {
-            done = &mut work => return done,
-            _ = ticks.tick() => {
-                if let Err(e) = msg.ack_with(AckKind::Progress).await {
-                    tracing::debug!(error = %e, "telling the stream the order is in hand");
-                }
-            }
         }
     }
 }

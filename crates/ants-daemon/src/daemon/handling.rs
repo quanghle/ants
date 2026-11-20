@@ -17,7 +17,7 @@ use super::burial::Letter;
 use super::delivery::reply_id;
 use super::queue::{Place, Retry, queued_message};
 use super::steering::Requeue;
-use super::{Handling, InHand, Inbox, Incoming, MAX_ATTEMPTS, MAX_DELIVER, nak};
+use super::{Handling, InHand, Inbox, Incoming, MAX_ATTEMPTS, MAX_DELIVER};
 
 /// Who withdrew a message before the ant was prompted with it.
 struct Withdrawal {
@@ -137,7 +137,7 @@ impl Inbox<'_> {
         {
             self.attempts.retrying(&incoming.envelope, None).await;
         }
-        nak(&msg, Some(self.pacing.retry_delay)).await;
+        bus::nak(&msg, Some(self.pacing.retry_delay)).await;
         self.metrics.retried();
         let retry = (delivered < MAX_DELIVER).then(|| Retry {
             seq,

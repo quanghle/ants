@@ -9,7 +9,7 @@ use ants_proto::{
     SummaryRequest, UserId,
 };
 use anyhow::Result;
-use async_nats::jetstream::{self, AckKind};
+use async_nats::jetstream;
 
 use crate::bus;
 use crate::channel::{Context, Earlier};
@@ -485,11 +485,7 @@ impl Inbox<'_> {
                         reached = Some(cap);
                     }
                 }
-                _ = progress.tick() => {
-                    if let Err(e) = msg.ack_with(AckKind::Progress).await {
-                        tracing::warn!(error = %e, "progress ack");
-                    }
-                }
+                _ = progress.tick() => bus::progress(msg).await,
             }
         };
         while let Ok(update) = streamed.try_recv() {
