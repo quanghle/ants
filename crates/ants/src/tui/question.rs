@@ -287,12 +287,20 @@ impl Cursor {
     }
 }
 
-/// Take `key` on the card `focus` holds the cursor of, of questions asked on `thread`: where it leads, if the card
-/// takes it, the focus ending once it leaves.
-pub fn focused(focus: &mut Option<Cursor>, key: Key, thread: &ThreadId) -> Option<Option<To>> {
-    let Some(to) = focus.as_mut()?.key(key, thread) else { return Some(None) };
-    *focus = None;
-    Some(to)
+/// Take `key` on the card `focus` holds the cursor of, of questions asked on `thread` while the card still shows,
+/// `None` once it is gone: where it leads, if the card takes it. A card gone takes the key, meant for it rather than
+/// for whatever shows now, and ends the focus; the card keeps it while the bar takes its answer, and ends it once
+/// it leaves for anywhere else.
+pub fn focused(focus: &mut Option<Cursor>, key: Key, thread: Option<&ThreadId>) -> Option<Option<To>> {
+    let Some(thread) = thread else { return focus.take().map(|_| None) };
+    match focus.as_mut()?.key(key, thread) {
+        None => Some(None),
+        Some(Some(to @ To::Bar(_))) => Some(Some(to)),
+        Some(to) => {
+            *focus = None;
+            Some(to)
+        }
+    }
 }
 
 /// What a card the keys answer shows of `questions`, asked in the message `id`, at most `width` wide: with several, a

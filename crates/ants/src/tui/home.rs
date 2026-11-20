@@ -426,11 +426,8 @@ impl Page {
 
     /// Take `key` on the focused question card, if any: where it leads, if anywhere.
     pub fn card_key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<Option<To>> {
-        let Some((_, thread)) = self.card(data, now) else {
-            self.answering = None;
-            return None;
-        };
-        question::focused(&mut self.answering, key, &thread)
+        let thread = self.card(data, now).map(|(_, thread)| thread);
+        question::focused(&mut self.answering, key, thread.as_ref())
     }
 
     /// Type `text` pasted on the focused question card, if any: whether it took it.
@@ -1018,6 +1015,8 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(3)), None);
         assert!(m.bar.focused && m.bar.text() == "/answer ", "an empty typed answer goes through the bar");
         m.key(Key::Esc, at(3));
+        assert!(shown(&m, at(3)).contains("› type an answer"), "the card keeps the focus once the bar leaves");
+        m.key(Key::Esc, at(5));
 
         assert_eq!(m.key(Key::Char('r'), at(3)), Some(Action::Open(asked.clone())), "r replies on the thread");
         assert!(m.bar.focused);
@@ -1057,6 +1056,44 @@ mod tests {
         let picks = vec![Pick::option(2), Pick::option(1)];
         let job = Job::Answer { thread: asked, question: question.id.unwrap(), picks };
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, String::new())), "one answer to both");
+    }
+
+    #[test]
+    fn a_focused_card_keeps_the_focus_through_the_bar_and_a_card_gone_takes_the_key_meant_for_it() {
+        let (first, second) = (ThreadId::generate(), ThreadId::generate());
+        let mut m = model();
+        let asking = |seq, thread: &ThreadId, text: &str| {
+            let mut asks = message(seq, thread, "dev-b", "alice", text);
+            asks.question = Some(ants_proto::Question::new(text, &["yes".into(), "no".into()], true).unwrap().into());
+            asks
+        };
+        let questions = [asking(1, &first, "Ship?"), asking(2, &second, "Tag?")];
+        m.stored(questions.to_vec(), at(2));
+        let selected = items(&m.data, at(3)).into_iter().next().unwrap().thread;
+        let [focused, other] = if selected == first { questions } else { [questions[1].clone(), questions[0].clone()] };
+
+        m.key(Key::Enter, at(3));
+        m.key(Key::Down, at(3));
+        m.key(Key::Down, at(3));
+        assert_eq!(m.key(Key::Enter, at(3)), None);
+        assert!(m.bar.focused && m.bar.text() == "/answer ", "an empty typed answer goes through the bar");
+        m.key(Key::Esc, at(3));
+        assert!(!m.bar.focused);
+        let screen = shown(&m, at(3));
+        assert!(screen.contains("› type an answer"), "the card keeps the focus: {screen}");
+
+        let mut answer = message(3, &focused.thread_id, "alice", "dev-b", "yes");
+        answer.answer =
+            Some(ants_proto::Answer { question: focused.id.unwrap(), picks: vec![ants_proto::Pick::option(1)] });
+        m.stored(vec![answer], at(3));
+        assert_eq!(items(&m.data, at(4))[0].thread, other.thread_id, "the other question is selected now");
+        assert_eq!(m.key(Key::Char('1'), at(4)), None, "a key for the card gone answers no other");
+        let job = crate::tui::exec::Job::Answer {
+            thread: other.thread_id.clone(),
+            question: other.id.unwrap(),
+            picks: vec![ants_proto::Pick::option(1)],
+        };
+        assert_eq!(m.key(Key::Char('1'), at(4)), Some(Action::Run(job, String::new())), "the next key answers it");
     }
 
     #[test]
