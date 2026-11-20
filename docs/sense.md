@@ -890,7 +890,8 @@ Sense's brief ([Briefs](architecture.md#briefs)) holds, in order, the sections i
 11. `## Memories`: the live core memories in full, then the 10 best of the other live memories of `self`, the
     thread's repository and the human or ant who started it (on a review, the ant under review), as `sense_recall`
     ranks them without a query, inside the block of recalled memories, leaving out the episodes of the handoffs above;
-    on a review, the 2 best memories of the ant under review are among them however the sage's own rank;
+    the 2 best memories of the human or ant who started the thread (on a review, the ant under review) are among them
+    however the ant's own rank;
 12. `## Skills`: each skill's name and description;
 13. `## Core loop`: the 11 session sense tools (all except `sense_dream`) and when to use each.
 

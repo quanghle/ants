@@ -1,10 +1,10 @@
-//! The brief (requirements ants-x39hk.8.1 and ants-x39hk.8.6): what an ant reads first in each session, and again on
+//! The brief (requirements ants-x39hk.8.8, ants-x39hk.8.9 and ants-x39hk.8.6): what an ant reads first in each session, and again on
 //! demand with `sense_brief`. Its sections come in a fixed order ([`sections`]): warnings when the ant's log is
 //! broken or over its size limit ([`SIZE_LIMIT`]), the identity with the experience counted from the ant's thread
 //! records ([`thread::experience`]), the persona, the self-model, the thread's resume register, the unacknowledged
 //! handoffs, open commitments, fired and upcoming reminders, claimed and ready tasks, the relationship records of the
-//! thread's participants, the core and top memories (on a review, [`REVIEWED_MEMORIES`] of them kept for memories of
-//! the ant under review), the skills index, and the core loop of tools.
+//! thread's participants, the core and top memories ([`STARTER_MEMORIES`] of them kept for memories of the human or
+//! ant who started the thread, or of the ant under review on a review), the skills index, and the core loop of tools.
 //!
 //! The brief stays within its byte budget ([`fit`]), cutting what other calls show before the ant's identity
 //! ([`Order`]): memories and skills are shortened to their titles first, then the work sections, memories and skills
@@ -15,7 +15,7 @@
 use std::fmt::Write as _;
 
 use ants_proto::UserId;
-use ants_proto::provider::{BRIEF_BUDGET, BoxFuture, CallContext, Starter, ToolCall};
+use ants_proto::provider::{BRIEF_BUDGET, BoxFuture, CallContext, ToolCall};
 use serde_json::json;
 
 use crate::dream::{self, ReviewTally};
@@ -34,9 +34,9 @@ use crate::{Answer, Sense, persona, promise, remind, task};
 pub const MAX_HANDOFFS: usize = 5;
 /// The most memories past the core ones a brief shows.
 pub const TOP_MEMORIES: usize = 10;
-/// The top memories a review's brief keeps for memories of the ant under review, when it has them, however the sage's
-/// own rank.
-pub const REVIEWED_MEMORIES: usize = 2;
+/// The top memories a brief keeps for memories of the scope of the thread's starter (on a review, the ant under
+/// review), when it has them, however the ant's own rank.
+pub const STARTER_MEMORIES: usize = 2;
 /// What the line ending a cut section starts with, the tool call showing the rest after it.
 pub const MORE: &str = "… more: ";
 /// What the line telling the ant of its return starts with.
@@ -461,8 +461,8 @@ async fn work_sections(items: &dyn Items, context: &CallContext) -> Result<Vec<S
     .collect())
 }
 
-/// The core memories, then the top memories of the thread's scopes but the `episodes` of the handoffs shown, a
-/// review's keeping room for those of the ant under review ([`top_memories`]).
+/// The core memories, then the top memories of the thread's scopes but the `episodes` of the handoffs shown, keeping
+/// room for those of the thread's starter ([`top_memories`]; on a review, the ant under review).
 async fn memories_section(
     items: &dyn Items,
     context: &CallContext,
@@ -471,15 +471,12 @@ async fn memories_section(
     let core = memory::core(items).await?;
     let mut scopes = vec![Scope::Own];
     scopes.extend(thread_repo(context));
-    scopes.extend(participants(context));
+    let starter = participants(context).into_iter().next();
+    scopes.extend(starter.clone());
     let shown = |ranked: &Ranked| ranked.found.memory.core || episodes.contains(ranked.found.id());
     let mut ranked = memory::top(items, &scopes, usize::MAX, context.at).await?;
     ranked.retain(|ranked| !shown(ranked));
-    let reviewed = match &context.origin.by {
-        Starter::Review { user } => Some(Scope::Ant(user.clone())),
-        _ => None,
-    };
-    let top = top_memories(ranked, reviewed.as_ref());
+    let top = top_memories(ranked, starter.as_ref());
     if core.is_empty() && top.is_empty() {
         return Ok(None);
     }
@@ -507,15 +504,15 @@ async fn memories_section(
     Ok(Some(section))
 }
 
-/// The best [`TOP_MEMORIES`] of `ranked`, the best first, holding the best [`REVIEWED_MEMORIES`] of scope `reviewed`
+/// The best [`TOP_MEMORIES`] of `ranked`, the best first, holding the best [`STARTER_MEMORIES`] of scope `starter`
 /// however the others rank.
-fn top_memories(ranked: Vec<Ranked>, reviewed: Option<&Scope>) -> Vec<Ranked> {
-    let of_reviewed = |ranked: &Ranked| reviewed == Some(&ranked.found.memory.scope);
-    let mut held = ranked.iter().filter(|ranked| of_reviewed(ranked)).take(REVIEWED_MEMORIES).count();
+fn top_memories(ranked: Vec<Ranked>, starter: Option<&Scope>) -> Vec<Ranked> {
+    let of_starter = |ranked: &Ranked| starter == Some(&ranked.found.memory.scope);
+    let mut held = ranked.iter().filter(|ranked| of_starter(ranked)).take(STARTER_MEMORIES).count();
     let mut others = TOP_MEMORIES - held;
     let mut top = Vec::new();
     for ranked in ranked {
-        let room = if held > 0 && of_reviewed(&ranked) { &mut held } else { &mut others };
+        let room = if held > 0 && of_starter(&ranked) { &mut held } else { &mut others };
         if *room > 0 {
             *room -= 1;
             top.push(ranked);

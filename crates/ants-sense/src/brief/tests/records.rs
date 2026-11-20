@@ -80,26 +80,49 @@ async fn a_review_s_brief_shows_what_the_sage_keeps_of_the_ant_under_review_alon
     position(&of_c, "Cite the commit");
 }
 
-#[tokio::test]
-async fn a_review_s_brief_keeps_room_for_memories_of_the_ant_under_review_among_many_lessons() {
+/// The brief `brief` reads of a sense holding more of the ant's own lessons than a brief shows, all ranking above the
+/// notes of `scope`, with the count of those notes and of the lessons it shows.
+async fn crowded<F: Future<Output = String>>(scope: &str, brief: impl FnOnce(Sense) -> F) -> (String, usize, usize) {
     let (sense, _) = sense().await;
     for n in 0..TOP_MEMORIES + 2 {
         let (title, body) = (format!("Lesson {n}"), format!("Rule {n}."));
         let lesson = json!({"kind": "lesson", "title": title, "body": body, "importance": 5, "force": true});
         call(&sense, memory::remember, THREAD, lesson).await;
     }
-    for importance in 1..=REVIEWED_MEMORIES + 1 {
-        let title = format!("dev-b note {importance}");
-        let mut fact = json!({"kind": "fact", "scope": "ant:dev-b", "title": title, "body": title, "force": true});
+    for importance in 1..=STARTER_MEMORIES + 1 {
+        let title = format!("{scope} note {importance}");
+        let mut fact = json!({"kind": "fact", "scope": scope, "title": title, "body": title, "force": true});
         fact["importance"] = json!(importance);
         call(&sense, memory::remember, THREAD, fact).await;
     }
-
-    let brief = review(&sense, "dev-b").await;
+    let brief = brief(sense).await;
     let shown = |prefix: &str| brief.lines().filter(|line| line.starts_with("- ") && line.contains(prefix)).count();
-    assert_eq!(shown("): dev-b note"), REVIEWED_MEMORIES, "{brief}");
-    assert!(!brief.contains("dev-b note 1"), "only the best of them: {brief}");
-    assert_eq!(shown("): Lesson"), TOP_MEMORIES - REVIEWED_MEMORIES, "{brief}");
-    let notes = position(&brief, "dev-b note");
-    assert!(position(&brief, "): Lesson") < notes, "in rank order: {brief}");
+    let (notes, lessons) = (shown(&format!("): {scope} note")), shown("): Lesson"));
+    (brief, notes, lessons)
+}
+
+fn assert_kept(brief: &str, scope: &str, notes: usize, lessons: usize) {
+    assert_eq!(notes, STARTER_MEMORIES, "{brief}");
+    assert!(!brief.contains(&format!("{scope} note 1")), "only the best of them: {brief}");
+    assert_eq!(lessons, TOP_MEMORIES - STARTER_MEMORIES, "{brief}");
+    assert!(position(brief, "): Lesson") < position(brief, &format!("{scope} note")), "in rank order: {brief}");
+}
+
+#[tokio::test]
+async fn a_brief_keeps_room_for_memories_of_the_thread_s_starter_among_many_lessons() {
+    let (brief, notes, lessons) =
+        crowded("human:alice", |sense| async move { session_brief(&sense, 8_000).await }).await;
+    assert_kept(&brief, "human:alice", notes, lessons);
+}
+
+#[tokio::test]
+async fn a_brief_keeps_no_room_for_memories_of_others_than_the_thread_s_starter() {
+    let (brief, notes, lessons) = crowded("human:bob", |sense| async move { session_brief(&sense, 8_000).await }).await;
+    assert_eq!((notes, lessons), (0, TOP_MEMORIES), "{brief}");
+}
+
+#[tokio::test]
+async fn a_review_s_brief_keeps_room_for_memories_of_the_ant_under_review_among_many_lessons() {
+    let (brief, notes, lessons) = crowded("ant:dev-b", |sense| async move { review(&sense, "dev-b").await }).await;
+    assert_kept(&brief, "ant:dev-b", notes, lessons);
 }
