@@ -388,7 +388,9 @@ other than `memory`, and with `session` only when the resume request's limits ra
 does; a run's session size is below its maximum only when its start request's limits set it so) ([Restarts, stops and
 resumes](#restarts-stops-and-resumes)): a resume restores the same session and takes the same answers, so under the same
 limits it would fail the same way. The compute limit is no flag's either, but a resume computes again, which fails
-again unless the machine was only busy.
+again unless the machine was only busy or the resume request's limits raise the run's compute (a run's compute is
+below its maximum only when its start request's limits set it so): the restored session computes under the resume's
+limits, not those it was dumped with.
 
 Each `agent()` step reserves up to 8 of the run's turns as its message's turn budget; the turns its reply spent, and
 one per re-ask, count against the run's turns, and a run that cannot reserve one fails on its turn limit. Each step

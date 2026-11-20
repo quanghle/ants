@@ -169,6 +169,24 @@ fn a_timeout_or_memory_error_of_the_script_breaks_no_limit() {
 }
 
 #[test]
+fn a_resume_computes_and_allocates_under_its_own_limits_not_those_of_the_dumped_session() {
+    let script = "n = await agent('x')\nwhile n > 0:\n    n -= 1\nbig = 'a' * (8 * 1024 * 1024)\nlen(big)\n";
+    let tight = Limits { compute_ms: 100, memory_bytes: 1024 * 1024, ..Limits::default() };
+    let loose = Limits { compute_ms: Limits::MAX_COMPUTE_MS, ..Limits::default() };
+    for started_under in [tight, loose] {
+        let started = start(script, started_under);
+        let call = calls(&started)[0].call;
+        let answer = [(call, Answer::Ok(json!(3_000_000)))];
+        let (error, limit) = failed(resume_with(&started, &answer, tight, 1));
+        assert_eq!(limit, Some(Limit::Compute), "{error}");
+        let (error, limit) =
+            failed(resume_with(&started, &answer, Limits { compute_ms: loose.compute_ms, ..tight }, 1));
+        assert_eq!(limit, Some(Limit::Memory), "{error}");
+        assert_eq!(result(resume_with(&started, &answer, loose, 1)), 8 * 1024 * 1024);
+    }
+}
+
+#[test]
 fn print_past_its_cap_fails_naming_it_and_breaks_no_limit() {
     let cap = format!("print() passes the {NOTE_BYTES} bytes print(), log() and phase() may write in one resume");
     for script in
