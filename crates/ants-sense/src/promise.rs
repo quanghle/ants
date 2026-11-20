@@ -106,7 +106,7 @@ pub async fn open(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<(Item, Pr
 }
 
 /// Whether an open commitment, commitment `id` alone when given, is past its due time.
-pub async fn overdue(items: &dyn Items, id: Option<&ItemId>, now: DateTime<Utc>) -> Result<bool, StoreError> {
+pub(crate) async fn overdue(items: &dyn Items, id: Option<&ItemId>, now: DateTime<Utc>) -> Result<bool, StoreError> {
     let open = open(items, now).await?;
     Ok(open.iter().any(|(item, promise)| id.is_none_or(|id| *id == item.id) && promise.overdue(now)))
 }

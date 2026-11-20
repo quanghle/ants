@@ -25,6 +25,20 @@ mod trigger;
 pub use condition::{Condition, FileEvent, IssueState, PrState, SenseEvent};
 pub use trigger::Trigger;
 
+/// Whether sense `event` holds at `now` among `items`, of item `id` alone when given: the observation of a
+/// [`Condition::Sense`].
+pub async fn sense_condition(
+    items: &dyn Items,
+    event: SenseEvent,
+    id: Option<&ItemId>,
+    now: DateTime<Utc>,
+) -> Result<bool, StoreError> {
+    match event {
+        SenseEvent::CommitmentOverdue => crate::promise::overdue(items, id, now).await,
+        SenseEvent::LeaseExpired => crate::task::lease_expired(items, id, now).await,
+    }
+}
+
 pub const KIND: &str = "reminder";
 /// The most reminders active at once, commitments' included.
 pub const MAX_ACTIVE: usize = 50;

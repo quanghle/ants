@@ -6,9 +6,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use ants_proto::ToolCall;
-use ants_sense::remind::{Condition, FileEvent, IssueState, PrState, SenseEvent};
+use ants_sense::remind::{self, Condition, FileEvent, IssueState, PrState};
 use ants_sense::store::Items;
-use ants_sense::{promise, task};
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -121,10 +120,7 @@ async fn probe(condition: &Condition, previous: Option<&Value>, context: &Contex
             (fired, json!(fired), "command exited successfully")
         }
         Condition::Sense { event, id } => {
-            let fired = match event {
-                SenseEvent::CommitmentOverdue => promise::overdue(context.items, id.as_ref(), context.now).await?,
-                SenseEvent::LeaseExpired => task::lease_expired(context.items, id.as_ref(), context.now).await?,
-            };
+            let fired = remind::sense_condition(context.items, *event, id.as_ref(), context.now).await?;
             (fired, json!(fired), "sense event condition matched")
         }
     };

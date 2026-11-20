@@ -142,7 +142,7 @@ async fn cycle(
     }
     let due = if undelivered.is_none() { remind::due(items, now).await? } else { Vec::new() };
     for due in due {
-        let at = now + chrono::Duration::from_std(started.elapsed()).expect("a bounded check");
+        let at = since(now, started);
         let firing = if due.condition.is_some() {
             match remind::reserve_condition(items, &due.id, at).await? {
                 Some(check) => probe(sense, items, settings, &check).await?,
@@ -158,7 +158,7 @@ async fn cycle(
             break;
         }
     }
-    let now = now + chrono::Duration::from_std(started.elapsed()).expect("a bounded check");
+    let now = since(now, started);
     if let Some(run) = memory::maintain(items, Some(&settings.workdir), now).await? {
         let changes = run.changes.len();
         tracing::info!(ant = %settings.ant, changes, clusters = run.duplicates.len(), "sense maintenance ran");
@@ -211,7 +211,7 @@ async fn probe(
         conditions::Context { workdir: &workdir, env: &settings.env, allow: &settings.allow, items, now: check.at };
     let started = tokio::time::Instant::now();
     let result = conditions::evaluate(&check.condition, check.observation.as_ref(), &context).await;
-    let now = check.at + chrono::Duration::from_std(started.elapsed()).expect("a bounded check");
+    let now = since(check.at, started);
     let (matched, reason, observation) = match result {
         Ok(observed) => (observed.fired, observed.reason, Some(observed.value)),
         Err(error) => {
@@ -220,6 +220,11 @@ async fn probe(
         }
     };
     Ok(remind::complete_condition(items, check, now, matched, reason, observation).await?)
+}
+
+/// `at`, moved on by the time elapsed since `started`.
+fn since(at: DateTime<Utc>, started: tokio::time::Instant) -> DateTime<Utc> {
+    at + chrono::Duration::from_std(started.elapsed()).expect("a bounded check")
 }
 
 async fn deliver(items: &dyn Items, host: &dyn Host, ant: &UserId, firing: &Firing) -> Result<()> {

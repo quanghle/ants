@@ -18,15 +18,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::provider::BoxFuture;
-use ants_proto::{AntIdentity, JsDomain, Machine, SenseId, UserId};
+use ants_proto::{JsDomain, Machine, SenseId, UserId};
 use ants_sense::cache::Cache;
 use ants_sense::export::{self, SenseExport};
 use ants_sense::home::Home;
-use ants_sense::identity::{self, Growth};
-use ants_sense::log::{
-    AccountVerifier, AntLog, AppendError, Event, EventLog, LogError, LogErrorKind, Revocations, Signature, Signer,
-    Stored, Verifier, VerifyError,
-};
+use ants_sense::identity;
+use ants_sense::log::{AntLog, EventLog, LogErrorKind};
 use ants_sense::store::{Items, Store, StoreError, Stores, is_offline};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
@@ -483,80 +480,6 @@ async fn import(
     export::import_done(home).map_err(|e| unavailable(e.into()))
 }
 
-/// Have the home of `ant`, `home`, keep a sense id when it keeps none: the one its identity `record` names, or a new
-/// one the record then names, unless another daemon named one first. Nothing when it keeps one, which [`settle`]
-/// settles against the record once opened.
-async fn take_named(ant: &UserId, home: &Path, record: &Identity) -> Result<(), StoreError> {
-    let unavailable = |e: anyhow::Error| StoreError::Unavailable(format!("naming the sense identity of {ant}: {e:#}"));
-    if identity::read_id(home).map_err(|e| unavailable(e.into()))?.is_some() || Home::new(home).has_pending_writes() {
-        return Ok(());
-    }
-    let minted = SenseId::new();
-    let named = record.name_sense(&minted, None).await.map_err(unavailable)?;
-    let sense = named.and_then(|record| record.sense).unwrap_or(minted);
-    identity::keep_id(home, &sense).map_err(|e| unavailable(e.into()))
-}
-
-/// Settle the sense id of `items`, those of `ant` whose home is `home`, against its identity `record`, naming it there
-/// when the record names none, the record then starting from the growth the card and the hub kept of an earlier one,
-/// as after a revoke and re-add, and noting the record's on the card: whether it is settled, false when the record
-/// cannot be read, or the card when the record names no sense id, so that a later call settles it; refused when the
-/// record names another sense id, with how to settle that.
-async fn settle(
-    stores: &SenseStores,
-    ant: &UserId,
-    home: &Path,
-    record: &Identity,
-    items: &dyn Items,
-) -> Result<bool, StoreError> {
-    let sense = items.sense().await;
-    let unsettled = |e: &dyn std::fmt::Display| {
-        tracing::warn!(%ant, error = format!("{e:#}"), "naming the sense identity in the ant's identity record");
-        Ok(false)
-    };
-    let stored = match identity::card(items).await {
-        Ok(card) => {
-            let earlier = card.and_then(|card| card.growth).map(|growth| (growth.born, growth.prompts));
-            match record.resume_sense(&sense, earlier).await {
-                Ok(stored) => stored,
-                Err(e) => return unsettled(&e),
-            }
-        }
-        // Only a record naming no sense id yet starts from the card's growth.
-        Err(e) => match record.read().await {
-            Ok(Some(stored)) if stored.sense.is_some() => Some(stored),
-            Ok(_) => {
-                return if stores.state().warned_unreadable_cards.insert(sense) { unsettled(&e) } else { Ok(false) };
-            }
-            Err(e) => return unsettled(&e),
-        },
-    };
-    match stored.as_ref().and_then(|stored| stored.sense.as_ref()) {
-        Some(named) if *named != sense => Err(StoreError::Unavailable(format!(
-            "the home of {ant} ({}) keeps sense identity {sense} and its identity record names {named}: `ants ant \
-             sense-id {ant} --take home` on this machine keeps the home's, `--take record` the record's",
-            home.display()
-        ))),
-        _ => {
-            if let Some(stored) = &stored
-                && let Err(e) = note_growth(ant, items, stored).await
-            {
-                tracing::warn!(%ant, error = format!("{e:#}"), "noting the ant's growth on its card");
-            }
-            Ok(true)
-        }
-    }
-}
-
-/// Note on the card of `ant` in `items` the birth and the prompt count its identity `record` holds, when the record
-/// names their sense id, so a record made again for the ant starts from them ([`settle`]).
-pub(super) async fn note_growth(ant: &UserId, items: &dyn Items, record: &AntIdentity) -> Result<(), StoreError> {
-    if record.sense.as_ref() != Some(&items.sense().await) {
-        return Ok(());
-    }
-    identity::record_growth(items, ant, Growth { born: record.born, prompts: record.prompts }).await.map(drop)
-}
-
 /// The items of `ant`, whose home is `home`, under the sense id it keeps, minted there first if it has none when
 /// `mint`, signed with its credentials at `creds`, over `link`; its events under the earlier names its home lists are
 /// its own.
@@ -617,102 +540,12 @@ async fn open(
     Ok(Arc::new(tokio::sync::Mutex::new(store)))
 }
 
-fn route(route: &Route) -> std::sync::MutexGuard<'_, Option<Arc<Link>>> {
-    route.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-}
+mod host;
+mod identify;
 
-fn connected(route_: &Route) -> Result<Arc<Link>, LogError> {
-    let link = route(route_).clone().ok_or_else(|| LogError::unreachable("hub unavailable: no host connection"))?;
-    if link.js.client().connection_state() != async_nats::connection::State::Connected {
-        return Err(LogError::unreachable("hub unavailable: host disconnected"));
-    }
-    Ok(link)
-}
-
-struct HostLog {
-    route: Route,
-    incarnation: String,
-    accounts: Vec<String>,
-}
-
-impl HostLog {
-    async fn log(&self) -> Result<JetStreamLog, LogError> {
-        let link = connected(&self.route)?;
-        if link.accounts != self.accounts {
-            return Err(LogError::refused("host authentication accounts changed; cached sense writes retained"));
-        }
-        let log = link.log.get_or_try_init(|| JetStreamLog::open(&link.js)).await?;
-        if log.incarnation() != self.incarnation {
-            return Err(LogError::incarnation("sense stream incarnation changed; cached sense writes retained"));
-        }
-        Ok(log.clone())
-    }
-}
-
-impl EventLog for HostLog {
-    async fn append(&self, sense: &SenseId, payload: Vec<u8>, expected_last: u64) -> Result<u64, AppendError> {
-        self.log().await?.append(sense, payload, expected_last).await
-    }
-
-    async fn read_after(&self, sense: &SenseId, after: u64, limit: usize) -> Result<Vec<Stored>, LogError> {
-        self.log().await?.read_after(sense, after, limit).await
-    }
-
-    async fn last_sequence(&self, sense: &SenseId) -> Result<u64, LogError> {
-        self.log().await?.last_sequence(sense).await
-    }
-
-    fn incarnation(&self) -> &str {
-        &self.incarnation
-    }
-}
-
-struct HostSigner {
-    signer: AntSigner,
-    ant: UserId,
-    accounts: Vec<String>,
-}
-
-impl Signer for HostSigner {
-    fn sign(&self, bytes: &[u8]) -> Result<Option<Signature>, String> {
-        let signature = self.signer.sign(bytes)?;
-        if self.accounts.is_empty() {
-            return Ok(signature);
-        }
-        let signature = signature.ok_or("no signing credentials")?;
-        let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
-        let user = ants_proto::verify_user_jwt(&signature.credentials, self.accounts.iter().map(String::as_str), now)
-            .map_err(|error| error.to_string())?;
-        if user.id != self.ant {
-            return Err(format!("credentials belong to {}, not {}", user.id, self.ant));
-        }
-        user.check_signature(bytes, &signature.signature).map_err(|error| error.to_string())?;
-        Ok(Some(signature))
-    }
-}
-
-struct HostVerifier(Route);
-
-impl Verifier for HostVerifier {
-    async fn verify(&self, event: &Event, stored_at: chrono::DateTime<chrono::Utc>) -> Result<(), VerifyError> {
-        let link = connected(&self.0).map_err(|error| VerifyError::Unavailable(error.to_string()))?;
-        AccountVerifier::new(link.accounts.clone(), HostRevocations(link)).verify(event, stored_at).await
-    }
-}
-
-struct HostRevocations(Arc<Link>);
-
-impl Revocations for HostRevocations {
-    async fn revoked_at(&self, key: &str) -> Result<Option<u64>, String> {
-        self.0
-            .revocations
-            .get_or_try_init(|| DeviceRevocations::new(&self.0.js, self.0.js_domain.as_ref()))
-            .await
-            .map_err(|error| format!("{error:#}"))?
-            .revoked_at(key)
-            .await
-    }
-}
+use host::{HostLog, HostSigner, HostVerifier, route};
+pub(super) use identify::note_growth;
+use identify::{settle, take_named};
 
 #[cfg(test)]
 mod tests;

@@ -190,7 +190,11 @@ pub async fn claimed(
 }
 
 /// Whether a task in progress, task `id` alone when given, is past its lease.
-pub async fn lease_expired(items: &dyn Items, id: Option<&ItemId>, now: DateTime<Utc>) -> Result<bool, StoreError> {
+pub(crate) async fn lease_expired(
+    items: &dyn Items,
+    id: Option<&ItemId>,
+    now: DateTime<Utc>,
+) -> Result<bool, StoreError> {
     Ok(list(items, usize::MAX).await?.iter().any(|found| {
         id.is_none_or(|id| id == found.id())
             && found.task.status == Status::InProgress

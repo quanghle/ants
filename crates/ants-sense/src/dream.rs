@@ -46,7 +46,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::identity;
-use crate::items::{ItemId, ItemValues, Revision};
+use crate::items::{ItemId, ItemValues, Revision, readable};
 use crate::memory::{self, MAX_BODY_BYTES, MAX_TITLE_CHARS, MEMORY, Memory, MemoryItem, MemoryKind, Scope, Status};
 use crate::proposal;
 use crate::store::{Items, StoreError, Write, read_modify_write};
@@ -402,6 +402,19 @@ pub async fn last(items: &dyn Items) -> Result<Option<(Dream, u64)>, StoreError>
         Some((record, _)) => get(items, record.number).await,
         None => Ok(None),
     }
+}
+
+/// Every dream, the first first; one unreadable left out with a warning.
+pub async fn all(items: &dyn Items) -> Result<Vec<Dream>, StoreError> {
+    let found = items.list(DREAM, usize::MAX).await?;
+    let mut dreams: Vec<Dream> = readable(found, Dream::of).into_iter().map(|(_, dream)| dream).collect();
+    dreams.sort_by_key(|dream| dream.number);
+    Ok(dreams)
+}
+
+/// How many findings rest with the record of the last dream ([`Rested`]); none before the first.
+pub async fn rested_count(items: &dyn Items) -> Result<usize, StoreError> {
+    Ok(record(items).await?.map_or(0, |(record, _)| record.rested.len()))
 }
 
 /// Where the review of a dream beginning at `at` after `previous` starts: the previous one's beginning, else a day
