@@ -19,7 +19,7 @@ fn token(answer: &Answer) -> u64 {
 
 #[tokio::test]
 async fn task_claim_uses_the_claim_event_sequence_and_heartbeat_keeps_that_fence() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     let id = create(&sense, "ship", 1).await;
     items.create("memory", Values::new(), "other").await.unwrap();
     let claim = invoke(&sense, json!({"action": "claim", "id": id, "revision": 1})).await;
@@ -54,7 +54,7 @@ async fn task_claim_uses_the_claim_event_sequence_and_heartbeat_keeps_that_fence
 
 #[tokio::test]
 async fn task_invalid_or_missing_tokens_and_status_bypasses_never_write() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     let id = create(&sense, "ship", 1).await;
     let claim = invoke(&sense, json!({"action": "claim", "id": id})).await;
     let fence = token(&claim);
@@ -111,7 +111,7 @@ async fn task_invalid_or_missing_tokens_and_status_bypasses_never_write() {
 
 #[tokio::test]
 async fn task_cross_thread_reclaim_requires_strictly_more_than_ten_minutes_after_expiry() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     let id = create(&sense, "ship", 1).await;
     let claim = invoke(&sense, json!({"action": "claim", "id": id})).await;
     let first = token(&claim);
@@ -151,7 +151,7 @@ async fn task_cross_thread_reclaim_requires_strictly_more_than_ten_minutes_after
 
 #[tokio::test]
 async fn task_only_ready_tasks_can_be_claimed_and_cas_guards_racing_claims_and_blocker_reopens() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     let blocker = create(&sense, "blocker", 2).await;
     let id = create(&sense, "ship", 1).await;
     let updated = invoke(
@@ -238,7 +238,7 @@ impl EventLog for SwitchLog {
 async fn task_offline_claims_never_queue_and_acknowledged_claims_survive_post_append_disconnect() {
     let online = Arc::new(AtomicBool::new(true));
     let drop_after_append = Arc::new(AtomicBool::new(false));
-    let (sense, items) = setup_log(SwitchLog {
+    let (sense, items) = fixture(SwitchLog {
         online: online.clone(),
         drop_after_append: drop_after_append.clone(),
         ..SwitchLog::default()
@@ -279,7 +279,7 @@ async fn task_offline_claims_never_queue_and_acknowledged_claims_survive_post_ap
 async fn a_task_call_syncs_the_log_once_and_is_refused_offline() {
     let (online, reads) = (Arc::new(AtomicBool::new(true)), Arc::new(AtomicUsize::new(0)));
     let (sense, items) =
-        setup_log(SwitchLog { online: online.clone(), reads: reads.clone(), ..SwitchLog::default() }).await;
+        fixture(SwitchLog { online: online.clone(), reads: reads.clone(), ..SwitchLog::default() }).await;
     for arguments in [json!({"action": "create", "title": "ship"}), json!({"action": "ready"})] {
         let before = reads.load(Ordering::SeqCst);
         let result = sense.call_tool(call("t1", arguments)).await.unwrap();

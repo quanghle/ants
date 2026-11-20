@@ -55,6 +55,7 @@ security-framework = { version = "3.7.0", default-features = false }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [dev-dependencies]
+ants-sense = { workspace = true, features = ["test-support"] }
 ants-test-support.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 

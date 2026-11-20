@@ -4,8 +4,9 @@ use ants_proto::provider::{CallContext, Format, Output, Starter};
 use serde_json::json;
 
 use super::*;
-use crate::memory::tests::{Kept, context, human, lesson, memory, ok, sense, tool};
+use crate::memory::tests::{lesson, memory, ok};
 use crate::store::Items;
+use crate::testing::{Kept, context, human, sense, tool};
 
 fn in_thread(thread: &str) -> CallContext {
     CallContext { thread: thread.parse().unwrap(), ..context(human()) }

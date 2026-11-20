@@ -64,34 +64,23 @@ mod tests {
 
     use ants_proto::SenseId;
     use ants_proto::provider::BoxFuture;
-    use ants_sense::cache::Cache;
+
     use ants_sense::items::Values;
-    use ants_sense::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
+    use ants_sense::log::MemoryLog;
     use ants_sense::persona::{PERSONA, PROFILE, persona_id};
-    use ants_sense::store::{Store, StoreError, Stores, Write};
+    use ants_sense::store::{StoreError, Stores, Write};
+    use ants_sense::testing::{self, One};
     use ants_test_support::eventually_within;
     use serde_json::json;
 
     use super::*;
-
-    struct One(Arc<dyn Items>);
-
-    impl Stores for One {
-        fn items<'a>(&'a self, _: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
-            Box::pin(async { Ok(self.0.clone()) })
-        }
-    }
 
     fn ant() -> UserId {
         "dev-profile".parse().unwrap()
     }
 
     async fn items() -> Arc<dyn Items> {
-        let verifier = AccountVerifier::new(vec![], NoRevocations);
-        let log =
-            AntLog::new(MemoryLog::default(), Unsigned, verifier, SenseId::new(), ant(), "m1".parse().unwrap(), None)
-                .unwrap();
-        Arc::new(tokio::sync::Mutex::new(Store::open(log, Cache::in_memory().unwrap()).await.unwrap()))
+        Arc::new(testing::store(MemoryLog::default(), SenseId::new(), ant()).await)
     }
 
     /// Confirm a persona holding `profile`, as a dream does.

@@ -1,63 +1,14 @@
 use std::sync::Arc;
 
-use ants_proto::provider::{CallContext, Format, Origin, Starter};
+use ants_proto::provider::{CallContext, Starter};
 use ants_proto::{SenseId, UserId};
 
 use super::*;
-use crate::cache::Cache;
 use crate::items::Values;
-use crate::log::{
-    AccountVerifier, AntLog, AppendError, EventLog, LogError, MemoryLog, NoRevocations, Stored, Unsigned,
-};
-use crate::store::{Store, Stores};
-
-struct One(Arc<dyn Items>);
-
-#[derive(Clone, Default)]
-struct SharedLog(Arc<MemoryLog>);
-
-impl EventLog for SharedLog {
-    async fn append(&self, sense: &SenseId, payload: Vec<u8>, expected: u64) -> Result<u64, AppendError> {
-        self.0.append(sense, payload, expected).await
-    }
-
-    async fn read_after(&self, sense: &SenseId, after: u64, limit: usize) -> Result<Vec<Stored>, LogError> {
-        self.0.read_after(sense, after, limit).await
-    }
-
-    async fn last_sequence(&self, sense: &SenseId) -> Result<u64, LogError> {
-        self.0.last_sequence(sense).await
-    }
-
-    fn incarnation(&self) -> &str {
-        self.0.incarnation()
-    }
-}
-
-impl Stores for One {
-    fn items<'a>(&'a self, _: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
-        Box::pin(async { Ok(self.0.clone()) })
-    }
-}
-
-async fn setup() -> (Sense, Arc<dyn Items>) {
-    let items = open_store(SharedLog::default(), SenseId::new()).await;
-    (Sense::with_stores(Arc::new(One(items.clone()))), items)
-}
+use crate::testing::{self, One, SharedLog, context, fixture, human, store};
 
 async fn open_store(log: SharedLog, sense: SenseId) -> Arc<dyn Items> {
-    let log = AntLog::new(
-        log,
-        Unsigned,
-        AccountVerifier::new(vec![], NoRevocations),
-        sense,
-        "dev-a".parse().unwrap(),
-        "m1".parse().unwrap(),
-        None,
-    )
-    .unwrap();
-    let store = Store::open(log, Cache::in_memory().unwrap()).await.unwrap();
-    Arc::new(tokio::sync::Mutex::new(store))
+    Arc::new(store(log, sense, "dev-a".parse().unwrap()).await)
 }
 
 fn now() -> DateTime<Utc> {
@@ -65,22 +16,9 @@ fn now() -> DateTime<Utc> {
 }
 
 fn call(at: DateTime<Utc>, arguments: Value) -> ToolCall {
-    ToolCall {
-        name: "remind".into(),
-        arguments: arguments.as_object().unwrap().clone(),
-        context: CallContext {
-            ant: "dev-a".parse().unwrap(),
-            identity: "0f1e".into(),
-            thread: "t1".parse().unwrap(),
-            origin: Origin { by: Starter::Human { user: "alice".parse().unwrap() }, channel: None },
-            harness: "copilot".into(),
-            model: None,
-            machine: "m1".into(),
-            repo: None,
-            at,
-        },
-        format: Format::Json,
-    }
+    let context =
+        CallContext { thread: "t1".parse().unwrap(), model: None, machine: "m1".into(), at, ..context(human()) };
+    testing::call("remind", arguments, context)
 }
 
 async fn create(sense: &Sense, trigger: Value) -> ItemId {
@@ -118,7 +56,7 @@ async fn pending_delivery_survives_restart_retries_and_confirmation_retries() {
 
 #[tokio::test]
 async fn a_malformed_reminder_hides_itself_alone_from_listings() {
-    let (sense, items) = setup().await;
+    let (sense, items) = fixture(SharedLog::default()).await;
     let good = create(&sense, json!({"kind":"at","at":now()})).await;
     let malformed = Values::from_iter([("status".to_owned(), json!("active")), ("title".to_owned(), json!(5))]);
     items.write(&[Write::Create { id: ItemId::new(), kind: KIND.into(), values: malformed }], "t1").await.unwrap();
@@ -138,7 +76,7 @@ async fn a_malformed_reminder_hides_itself_alone_from_listings() {
 
 #[tokio::test]
 async fn refires_are_hour_apart_capped_at_three_and_snooze_uses_a_new_id() {
-    let (sense, items) = setup().await;
+    let (sense, items) = fixture(SharedLog::default()).await;
     let id = create(&sense, json!({"kind":"after","seconds":60})).await;
     let first_due = now() + Duration::minutes(1);
     assert!(due(&*items, now()).await.unwrap().is_empty());
@@ -163,7 +101,7 @@ async fn refires_are_hour_apart_capped_at_three_and_snooze_uses_a_new_id() {
 
 #[tokio::test]
 async fn recurring_utc_deadlines_advance_after_ack_or_exhaustion_and_persist() {
-    let (sense, items) = setup().await;
+    let (sense, items) = fixture(SharedLog::default()).await;
     let id = create(&sense, json!({"kind":"daily","time":"13:15","timezone":"UTC"})).await;
     let at = now() + Duration::minutes(75);
     assert_eq!(next_due(&*items, now()).await.unwrap(), Some(at));
@@ -184,7 +122,7 @@ async fn recurring_utc_deadlines_advance_after_ack_or_exhaustion_and_persist() {
 
 #[tokio::test]
 async fn condition_reservations_fence_probes_and_persist_backoff_and_expiry() {
-    let (sense, items) = setup().await;
+    let (sense, items) = fixture(SharedLog::default()).await;
     let id = create(&sense, json!({"kind":"condition","condition":{"kind":"bd","id":"bd-1","state":"closed"}})).await;
     let check = reserve_condition(&*items, &id, now()).await.unwrap().unwrap();
     assert!(matches!(check.condition, Condition::Bd { .. }));
@@ -242,7 +180,7 @@ async fn condition_reservation_survives_takeover_and_rejects_an_earlier_probe() 
 
 #[tokio::test]
 async fn matched_conditions_retry_stably_and_snooze_does_not_recheck_the_condition() {
-    let (sense, items) = setup().await;
+    let (sense, items) = fixture(SharedLog::default()).await;
     let id =
         create(&sense, json!({"kind":"condition","condition":{"kind":"file","path":"result","event":"changed"}})).await;
     let baseline = json!({"digest":"first"});
@@ -261,7 +199,7 @@ async fn matched_conditions_retry_stably_and_snooze_does_not_recheck_the_conditi
 
 #[tokio::test]
 async fn active_limit_includes_promises_and_renewals_and_resolution_releases_a_slot() {
-    let (sense, items) = setup().await;
+    let (sense, items) = fixture(SharedLog::default()).await;
     let mut ids = Vec::new();
     for _ in 0..MAX_ACTIVE {
         ids.push(create(&sense, json!({"kind":"after","seconds":60})).await);
@@ -307,7 +245,7 @@ async fn active_limit_includes_promises_and_renewals_and_resolution_releases_a_s
 
 #[tokio::test]
 async fn a_trigger_giving_no_time_to_fire_at_is_refused_as_invalid() {
-    let (sense, items) = setup().await;
+    let (sense, items) = fixture(SharedLog::default()).await;
     let end = DateTime::<Utc>::MAX_UTC - Duration::hours(1);
     let late = remind(&sense, &call(end, json!({"title":"too late","trigger":{"kind":"after","seconds":7200}}))).await;
     assert_eq!(late.json["error"], "invalid_trigger", "{late:?}");
@@ -345,7 +283,7 @@ async fn renewal_preserves_a_time_triggers_original_deadline_and_trusted_workdir
         }
     }
 
-    let (sense, items) = setup().await;
+    let (sense, items) = fixture(SharedLog::default()).await;
     let sense = sense.with_workdirs(Arc::new(Workdir));
     let at = now() + Duration::days(60);
     let id = create(&sense, json!({"kind":"at","at":at})).await;
@@ -362,7 +300,7 @@ async fn renewal_preserves_a_time_triggers_original_deadline_and_trusted_workdir
 
 #[tokio::test]
 async fn bad_triggers_are_refused_with_one_terminal_period() {
-    let (sense, _) = setup().await;
+    let (sense, _) = fixture(SharedLog::default()).await;
     for trigger in [
         json!({"kind":"daily","time":"25:00","timezone":"UTC"}),
         json!({"kind":"weekly","time":"12:00","weekday":"monday","timezone":"UTC"}),
@@ -380,7 +318,7 @@ async fn bad_triggers_are_refused_with_one_terminal_period() {
 
 #[tokio::test]
 async fn only_trusted_origins_can_create_or_change_command_triggers() {
-    let (sense, _) = setup().await;
+    let (sense, _) = fixture(SharedLog::default()).await;
     let command = json!({"kind":"condition","condition":{"kind":"command","command":"true"}});
     let file = json!({"kind":"condition","condition":{"kind":"file","path":"result","event":"appeared"}});
     let command_id = create(&sense, command.clone()).await;
@@ -422,7 +360,7 @@ async fn only_trusted_origins_can_create_or_change_command_triggers() {
 
 #[tokio::test]
 async fn stale_revisions_return_the_current_reminder_even_after_acknowledgement() {
-    let (sense, items) = setup().await;
+    let (sense, items) = fixture(SharedLog::default()).await;
     let id = create(&sense, json!({"kind":"at","at":now()})).await;
     let current = get(&*items, &id).await.unwrap();
     let stale =
@@ -457,7 +395,7 @@ async fn captured_workdir_provenance_and_source_context_survive_mutations() {
         }
     }
 
-    let (sense, items) = setup().await;
+    let (sense, items) = fixture(SharedLog::default()).await;
     let sense = sense.with_workdirs(Arc::new(Workdir));
     let id = create(&sense, json!({"kind":"after","seconds":60})).await;
     let source = call(now(), json!({})).context;

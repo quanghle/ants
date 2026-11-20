@@ -558,9 +558,10 @@ mod tests {
     use crate::identity::{self, Growth};
     use crate::items::Values;
     use crate::memory;
-    use crate::memory::tests::{context, human, id_of, sense, tool};
+    use crate::memory::tests::id_of;
     use crate::skill::skill_id;
     use crate::store::Write;
+    use crate::testing::{context, human, sense, tool};
     use crate::thread::record::record_event;
     use crate::tools::{Answer, Handler};
     use serde_json::Value;

@@ -5,8 +5,9 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::{Value, json};
 
 use super::*;
-use crate::memory::tests::{context, human, id_of, lesson, memory, ok, sense, tool};
+use crate::memory::tests::{id_of, lesson, memory, ok};
 use crate::memory::{Memory, MemoryKind, Trust, Votes, remember, vote};
+use crate::testing::{context, human, sense, tool};
 
 fn at(days_before: i64) -> DateTime<Utc> {
     context(human()).at - Duration::days(days_before)

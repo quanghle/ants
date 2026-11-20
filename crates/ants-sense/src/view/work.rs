@@ -128,7 +128,7 @@ mod tests {
     use super::*;
     use crate::Sense;
     use crate::dream::{Advice, ColonyTrails, Evidence, Finding, FindingKind, Judgement, Recipient, Start, Verdict};
-    use crate::memory::tests::{context, events, human, sense, tool};
+    use crate::testing::{context, events, human, sense, tool};
     use crate::tools::Handler;
 
     async fn created(sense: &Sense, handler: Handler, field: &str, arguments: Value) -> String {

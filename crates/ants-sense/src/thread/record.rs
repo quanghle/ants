@@ -133,9 +133,9 @@ mod tests {
 
     use super::*;
     use crate::Sense;
-    use crate::cache::Cache;
-    use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
-    use crate::store::{Store, Stores};
+
+    use crate::log::MemoryLog;
+    use crate::store::Stores;
 
     const THREAD: &str = "019a7d2c-0000-7000-8000-000000000001";
 
@@ -149,12 +149,8 @@ mod tests {
     }
 
     async fn sense() -> (Sense, Arc<dyn Items>) {
-        let verifier = AccountVerifier::new(vec![], NoRevocations);
-        let ant = "dev-a".parse().unwrap();
-        let log =
-            AntLog::new(MemoryLog::default(), Unsigned, verifier, SenseId::new(), ant, "m1".parse().unwrap(), None);
-        let store = Store::open(log.unwrap(), Cache::in_memory().unwrap()).await.unwrap();
-        let items: Arc<dyn Items> = Arc::new(tokio::sync::Mutex::new(store));
+        let items: Arc<dyn Items> =
+            Arc::new(crate::testing::store(MemoryLog::default(), SenseId::new(), "dev-a".parse().unwrap()).await);
         (Sense::with_stores(Arc::new(Kept(Ok(items.clone())))), items)
     }
 

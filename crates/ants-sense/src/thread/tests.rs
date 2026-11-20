@@ -1,50 +1,11 @@
-use std::sync::Arc;
-
-use ants_proto::provider::{Format, Origin, Starter};
-use ants_proto::{SenseId, UserId};
+use ants_proto::provider::Starter;
 
 use super::*;
-use crate::cache::Cache;
-use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
 use crate::memory::WRITER;
-use crate::store::{Store, Stores};
-
-/// The items of one ant, the same at each call.
-struct One(Arc<dyn Items>);
-
-impl Stores for One {
-    fn items<'a>(&'a self, _ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
-        let items = self.0.clone();
-        Box::pin(async move { Ok(items) })
-    }
-}
-
-async fn sense() -> (Sense, Arc<dyn Items>) {
-    let verifier = AccountVerifier::new(vec![], NoRevocations);
-    let ant = "dev-a".parse().unwrap();
-    let log = AntLog::new(MemoryLog::default(), Unsigned, verifier, SenseId::new(), ant, "m1".parse().unwrap(), None);
-    let store = Store::open(log.unwrap(), Cache::in_memory().unwrap()).await.unwrap();
-    let items: Arc<dyn Items> = Arc::new(tokio::sync::Mutex::new(store));
-    (Sense::with_stores(Arc::new(One(items.clone()))), items)
-}
+use crate::testing::{self, context, human, sense};
 
 fn call(name: &str, thread: &str, arguments: Value) -> ToolCall {
-    ToolCall {
-        name: name.to_owned(),
-        arguments: arguments.as_object().unwrap().clone(),
-        context: CallContext {
-            ant: "dev-a".parse().unwrap(),
-            identity: "0f1e".into(),
-            thread: thread.parse().unwrap(),
-            origin: Origin { by: Starter::Human { user: "alice".parse().unwrap() }, channel: None },
-            harness: "copilot".into(),
-            model: Some("gpt".into()),
-            machine: "studio".into(),
-            repo: None,
-            at: "2025-01-01T12:00:00Z".parse().unwrap(),
-        },
-        format: Format::Json,
-    }
+    testing::call(name, arguments, CallContext { thread: thread.parse().unwrap(), ..context(human()) })
 }
 
 async fn checkpointed(sense: &Sense, thread: &str, arguments: Value) -> Answer {

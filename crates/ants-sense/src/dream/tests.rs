@@ -6,8 +6,9 @@ use serde_json::json;
 use super::*;
 use crate::Sense;
 use crate::items::Values;
-use crate::memory::tests::{Kept, context, events, human, memory, sense, tool};
+use crate::memory::tests::memory;
 use crate::memory::{Memory, Votes};
+use crate::testing::{Kept, context, events, human, sense, tool};
 use crate::tools::Answer;
 
 fn on(thread: u8) -> CallContext {

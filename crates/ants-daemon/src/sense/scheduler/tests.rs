@@ -4,13 +4,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ants_proto::SenseId;
 use ants_proto::provider::{BoxFuture, CallContext, Format, Origin, Provider as _, Starter, ToolCall, Woken};
-use ants_sense::cache::Cache;
 use ants_sense::items::{ItemId, ItemValues};
-use ants_sense::log::{
-    AccountVerifier, AntLog, AppendError, EventLog, LogError, MemoryLog, NoRevocations, Stored, Unsigned,
-};
+use ants_sense::log::EventLog;
 use ants_sense::persona::{PERSONA, PROFILE, persona_id};
-use ants_sense::store::{Store, Stores, Write};
+use ants_sense::store::{Stores, Write};
+use ants_sense::testing::SharedLog;
 use serde_json::{Value, json};
 
 use super::*;
@@ -33,39 +31,8 @@ impl Stores for One {
     }
 }
 
-#[derive(Clone, Default)]
-struct SharedLog(Arc<MemoryLog>);
-
-impl EventLog for SharedLog {
-    async fn append(&self, sense: &SenseId, payload: Vec<u8>, expected: u64) -> Result<u64, AppendError> {
-        self.0.append(sense, payload, expected).await
-    }
-
-    async fn read_after(&self, sense: &SenseId, after: u64, limit: usize) -> Result<Vec<Stored>, LogError> {
-        self.0.read_after(sense, after, limit).await
-    }
-
-    async fn last_sequence(&self, sense: &SenseId) -> Result<u64, LogError> {
-        self.0.last_sequence(sense).await
-    }
-
-    fn incarnation(&self) -> &str {
-        self.0.incarnation()
-    }
-}
-
 async fn open(log: SharedLog, sense: SenseId) -> Arc<dyn Items> {
-    let log = AntLog::new(
-        log,
-        Unsigned,
-        AccountVerifier::new(vec![], NoRevocations),
-        sense,
-        ant(),
-        "m1".parse().unwrap(),
-        None,
-    )
-    .unwrap();
-    Arc::new(tokio::sync::Mutex::new(Store::open(log, Cache::in_memory().unwrap()).await.unwrap()))
+    Arc::new(ants_sense::testing::store(log, sense, ant()).await)
 }
 
 async fn setup() -> (Arc<Sense>, Arc<One>) {

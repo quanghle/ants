@@ -1,75 +1,18 @@
 use std::sync::Arc;
 
-use ants_proto::SenseId;
-use ants_proto::provider::{BoxFuture, CallContext, Format, Origin, Output, Starter, ToolCall};
+use ants_proto::provider::{CallContext, Format, Output, Starter};
 use serde_json::{Value, json};
 
 use super::*;
 use crate::Sense;
-use crate::cache::Cache;
 use crate::items::ITEMS_EVENT;
-use crate::log::{AccountVerifier, AntLog, Event, EventLog, MemoryLog, NoRevocations, Unsigned};
-use crate::store::{Store, Stores};
-use crate::tools::{Answer, Handler};
+use crate::testing::{Kept, context, events, human, sense, tool};
+use crate::tools::Answer;
 
 mod citations;
 
-pub(crate) type Kept = tokio::sync::Mutex<Store<MemoryLog, Unsigned, AccountVerifier<NoRevocations>>>;
-
-/// The one store of every ant.
-struct One(Arc<Kept>);
-
-impl Stores for One {
-    fn items<'a>(&'a self, _ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
-        let items: Arc<dyn Items> = self.0.clone();
-        Box::pin(std::future::ready(Ok(items)))
-    }
-}
-
-pub(crate) async fn sense() -> (Sense, Arc<Kept>) {
-    let verifier = AccountVerifier::new(vec![], NoRevocations);
-    let ant = "dev-a".parse().unwrap();
-    let log = AntLog::new(MemoryLog::default(), Unsigned, verifier, SenseId::new(), ant, "m1".parse().unwrap(), None);
-    let store = Store::open(log.unwrap(), Cache::in_memory().unwrap()).await.unwrap();
-    let store = Arc::new(tokio::sync::Mutex::new(store));
-    (Sense::with_stores(Arc::new(One(store.clone()))), store)
-}
-
-/// The events of the log of `store`.
-pub(crate) async fn events(store: &Kept) -> Vec<Event> {
-    let store = store.lock().await;
-    let sense = store.log().chain().sense().clone();
-    let stored = store.log().log().read_after(&sense, 0, 1_000).await.unwrap();
-    stored.iter().map(|stored| stored.event().unwrap()).collect()
-}
-
-pub(crate) fn context(by: Starter) -> CallContext {
-    CallContext {
-        ant: "dev-a".parse().unwrap(),
-        identity: "0f1e".into(),
-        thread: "019a7d2c-0000-7000-8000-000000000001".parse().unwrap(),
-        origin: Origin { by, channel: None },
-        harness: "copilot".into(),
-        model: Some("gpt".into()),
-        machine: "studio".into(),
-        repo: None,
-        at: "2025-01-01T12:00:00Z".parse().unwrap(),
-    }
-}
-
-pub(crate) fn human() -> Starter {
-    Starter::Human { user: "alice".parse().unwrap() }
-}
-
 async fn call(sense: &Sense, by: Starter, arguments: Value) -> Answer {
     tool(sense, remember, arguments, context(by)).await
-}
-
-/// The answer of `handler`, as JSON, to a call of `context` with `arguments`.
-pub(crate) async fn tool(sense: &Sense, handler: Handler, arguments: Value, context: CallContext) -> Answer {
-    let arguments = arguments.as_object().unwrap().clone();
-    let call = ToolCall { name: "tool".into(), arguments, context, format: Format::Json };
-    handler(sense, &call).await
 }
 
 pub(crate) fn id_of(answer: &Answer) -> ItemId {

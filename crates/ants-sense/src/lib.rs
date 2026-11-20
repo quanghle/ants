@@ -34,6 +34,8 @@ pub mod sanitize;
 pub mod skill;
 pub mod store;
 pub mod task;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 pub mod thread;
 mod tools;
 pub mod view;

@@ -1,6 +1,5 @@
-use ants_sense::cache::Cache;
-use ants_sense::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
-use ants_sense::store::Store;
+use ants_sense::log::MemoryLog;
+use ants_sense::testing;
 
 use super::*;
 
@@ -9,17 +8,7 @@ fn parse(condition: Value) -> Condition {
 }
 
 async fn items() -> impl Items {
-    let log = AntLog::new(
-        MemoryLog::default(),
-        Unsigned,
-        AccountVerifier::new(vec![], NoRevocations),
-        ants_proto::SenseId::new(),
-        "dev-a".parse().unwrap(),
-        "m1".parse().unwrap(),
-        None,
-    )
-    .unwrap();
-    tokio::sync::Mutex::new(Store::open(log, Cache::in_memory().unwrap()).await.unwrap())
+    testing::store(MemoryLog::default(), ants_proto::SenseId::new(), "dev-a".parse().unwrap()).await
 }
 
 #[tokio::test]

@@ -200,9 +200,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::cache::Cache;
-    use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
-    use crate::store::Store;
+
+    use crate::log::MemoryLog;
+
     use crate::thread::record::record_event;
 
     fn day(day: u32, hour: u32) -> DateTime<Utc> {
@@ -223,17 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_experience_counts_the_threads_their_days_and_who_started_them_where() {
-        let verifier = AccountVerifier::new(vec![], NoRevocations);
-        let log = AntLog::new(
-            MemoryLog::default(),
-            Unsigned,
-            verifier,
-            SenseId::new(),
-            name("dev-a"),
-            "m1".parse().unwrap(),
-            None,
-        );
-        let items = tokio::sync::Mutex::new(Store::open(log.unwrap(), Cache::in_memory().unwrap()).await.unwrap());
+        let items = crate::testing::store(MemoryLog::default(), SenseId::new(), name("dev-a")).await;
         assert_eq!(experience(&items, &name("dev-a"), 3).await.unwrap(), None, "no record, no experience");
 
         let (alice, r, s) = (|| Starter::Human { user: name("alice") }, Some("github.com/o/r"), Some("github.com/o/s"));

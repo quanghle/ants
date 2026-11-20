@@ -190,8 +190,9 @@ mod tests {
     use super::*;
     use crate::dream::{ColonyTrails, Recipient, Start};
     use crate::items::Values;
-    use crate::memory::tests::{context, events, human, id_of, sense, tool};
+    use crate::memory::tests::id_of;
     use crate::store::Write;
+    use crate::testing::{context, events, human, sense, tool};
 
     fn of(ant: &str) -> AntRef {
         AntRef { ant: ant.parse().unwrap(), identity: "0f1e".into() }

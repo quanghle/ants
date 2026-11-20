@@ -240,8 +240,8 @@ mod tests {
 
     use super::*;
     use crate::identity::identity;
-    use crate::memory::tests::{context, human, sense, tool};
     use crate::proposal::tests::error;
+    use crate::testing::{context, human, sense, tool};
 
     #[tokio::test]
     async fn a_proposal_is_checked_and_shown_with_the_persona() {

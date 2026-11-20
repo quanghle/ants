@@ -1,69 +1,25 @@
-use std::sync::Arc;
-
-use ants_proto::provider::{BoxFuture, Format, Origin, Starter, ToolCall};
-use ants_proto::{SenseId, UserId};
+use ants_proto::provider::Starter;
 use serde_json::json;
 
 use super::*;
 use crate::Sense;
-use crate::cache::Cache;
 use crate::identity::identity;
-use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
 use crate::memory::{self, MEMORY, RECALLED_BEGIN};
-use crate::store::{Store, Stores};
+use crate::testing::{self, context, human, sense};
 use crate::tools::Handler;
 
-/// The items of one ant, the same at each call.
-struct One(Arc<dyn Items>);
-
-impl Stores for One {
-    fn items<'a>(&'a self, _ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
-        let items = self.0.clone();
-        Box::pin(async move { Ok(items) })
-    }
-}
-
-async fn sense() -> (Sense, Arc<dyn Items>) {
-    let verifier = AccountVerifier::new(vec![], NoRevocations);
-    let ant = "dev-a".parse().unwrap();
-    let log = AntLog::new(MemoryLog::default(), Unsigned, verifier, SenseId::new(), ant, "m1".parse().unwrap(), None);
-    let store = Store::open(log.unwrap(), Cache::in_memory().unwrap()).await.unwrap();
-    let items: Arc<dyn Items> = Arc::new(tokio::sync::Mutex::new(store));
-    (Sense::with_stores(Arc::new(One(items.clone()))), items)
-}
-
-fn context(by: Starter) -> CallContext {
-    CallContext {
-        ant: "dev-a".parse().unwrap(),
-        identity: "0f1e".into(),
-        thread: "019a7d2c-0000-7000-8000-000000000001".parse().unwrap(),
-        origin: Origin { by, channel: None },
-        harness: "copilot".into(),
-        model: Some("gpt".into()),
-        machine: "studio".into(),
-        repo: None,
-        at: "2025-01-01T12:00:00Z".parse().unwrap(),
-    }
-}
-
-fn alice() -> Starter {
-    Starter::Human { user: "alice".parse().unwrap() }
-}
-
 async fn tool(sense: &Sense, handler: Handler, by: Starter, arguments: Value) -> Answer {
-    let arguments = arguments.as_object().unwrap().clone();
-    let call = ToolCall { name: "tool".into(), arguments, context: context(by), format: Format::Json };
-    handler(sense, &call).await
+    testing::tool(sense, handler, arguments, context(by)).await
 }
 
 async fn saved(sense: &Sense, arguments: Value) -> Answer {
-    let answer = tool(sense, identity, alice(), arguments).await;
+    let answer = tool(sense, identity, human(), arguments).await;
     assert!(!answer.is_error, "{answer:?}");
     answer
 }
 
 async fn refused(sense: &Sense, arguments: Value, code: &str) -> Answer {
-    let answer = tool(sense, identity, alice(), arguments).await;
+    let answer = tool(sense, identity, human(), arguments).await;
     assert!(answer.is_error, "{answer:?}");
     assert_eq!(answer.json["error"], code, "{answer:?}");
     answer
@@ -97,7 +53,7 @@ async fn remember_refuses_a_record_naming_sense_identity() {
     let (sense, items) = sense().await;
     for kind in [SELF_MODEL, RELATIONSHIP] {
         let record = json!({"kind": kind, "scope": "human:bob", "title": "Bob", "body": "Fast."});
-        let answer = tool(&sense, memory::remember, alice(), record).await;
+        let answer = tool(&sense, memory::remember, human(), record).await;
         assert_eq!(answer.json["error"], "invalid_arguments", "{answer:?}");
         assert!(answer.text.contains("sense_identity"), "{}", answer.text);
     }
@@ -158,21 +114,21 @@ async fn recall_reads_a_record_by_id_and_lists_the_relationships_of_the_people_s
     let me = saved(&sense, json!({"self_model": "Careful.", "title": "Me"})).await;
 
     let id = me.json["id"].as_str().unwrap();
-    let answer = tool(&sense, memory::recall, alice(), json!({"id": id})).await;
+    let answer = tool(&sense, memory::recall, human(), json!({"id": id})).await;
     assert!(!answer.is_error, "{answer:?}");
     assert!(answer.text.starts_with(RECALLED_BEGIN), "{}", answer.text);
     assert!(answer.text.contains("(self_model, self), trust self, revision 1\nMe\nCareful."), "{}", answer.text);
     assert_eq!(answer.json["record"]["kind"], SELF_MODEL);
-    let answer = tool(&sense, memory::recall, alice(), json!({"id": id, "history": true})).await;
+    let answer = tool(&sense, memory::recall, human(), json!({"id": id, "history": true})).await;
     assert!(answer.text.contains("sense_identity with history and who self"), "{answer:?}");
 
-    let answer = tool(&sense, memory::recall, alice(), json!({})).await;
+    let answer = tool(&sense, memory::recall, human(), json!({})).await;
     assert!(
         answer.text.contains("Wants tests first.") && !answer.text.contains("Wants docs first."),
         "{}",
         answer.text
     );
-    let answer = tool(&sense, memory::recall, alice(), json!({"with": ["bob"]})).await;
+    let answer = tool(&sense, memory::recall, human(), json!({"with": ["bob"]})).await;
     let scopes: Vec<_> = answer.json["relationships"].as_array().unwrap().iter().map(|r| r["scope"].clone()).collect();
     assert_eq!(scopes, [json!("human:alice"), json!("human:bob")]);
 }
@@ -180,7 +136,7 @@ async fn recall_reads_a_record_by_id_and_lists_the_relationships_of_the_people_s
 #[tokio::test]
 async fn identity_history_lists_every_revision_of_a_record_the_newest_first() {
     let (sense, _) = sense().await;
-    let history = |who: &str| tool(&sense, identity, alice(), json!({"history": true, "who": who}));
+    let history = |who: &str| tool(&sense, identity, human(), json!({"history": true, "who": who}));
     let none = history("self").await;
     assert_eq!(none.text, "No revision of the self-model yet.");
     assert_eq!(none.json["versions"], json!([]));

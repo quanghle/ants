@@ -3,8 +3,8 @@ use std::sync::Arc;
 use serde_json::{Map, json};
 
 use super::*;
-use crate::memory::tests::{context, human, sense, tool};
 use crate::proposal::tests::{dream_on, error, judge, offered, proposal_id, status};
+use crate::testing::{context, human, sense, tool};
 
 const CONTENT: &str =
     "---\nname: release\ndescription: \"Cut a release: tag, notes, publish.\"\n---\n# Release\nRun it.\n";
