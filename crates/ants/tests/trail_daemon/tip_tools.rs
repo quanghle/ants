@@ -195,6 +195,8 @@ async fn a_step_of_a_trail_only_its_conductor_s_machine_has_invites_no_tips_and_
     let (ok, text) = call(&client, "leave_tip", json!({"text": "Tag the release once built"})).await;
     assert!(!ok && text.contains("the colony saves no trail deploy, only this machine's files"), "{text}");
     assert_eq!(neighbour_trails.tips().board(&deploy()).await.unwrap().len(), 1, "no tip left");
+    let (ok, text) = call(&client, "trail_tips", json!({"trail": "deploy"})).await;
+    assert!(!ok && text.contains("trail deploy is not a colony trail, only this machine's files"), "{text}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -272,6 +274,8 @@ async fn trail_tips_lists_the_live_tips_of_the_step_s_trail_and_tip_key_or_of_a_
     let (dir, saved) = saving("tip-tools-search");
     let (trails, dev) = ant_mcp(&server, "dev", &dir, &saved).await;
     let script = format!("{META}{DEPLOY}");
+    save_for_colony(&server, "deploy", &script).await;
+    save_for_colony(&server, "empty", &format!("{META}1\n")).await;
     let now = chrono::Utc::now();
     let tip = |tip_key: Option<&str>, text: &str, script: &str| TrailTip {
         trail: deploy(),

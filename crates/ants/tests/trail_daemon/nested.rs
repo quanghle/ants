@@ -310,3 +310,144 @@ async fn a_stopped_run_answering_a_step_tells_what_it_spent_until_the_notice_goe
     assert_eq!(header.grants[0].spent, spent);
     serving.abort();
 }
+
+#[tokio::test]
+async fn a_nested_run_s_trail_call_on_the_route_of_its_step_s_run_is_refused_and_send_message_tells_the_spent() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-nested-route");
+    let saved = dir.join("saved");
+    std::fs::create_dir_all(&saved).unwrap();
+    std::fs::write(saved.join("deploy.py"), format!("{META}{DEPLOY}")).unwrap();
+    let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(saved.clone())).await;
+    let (outbox, mut dev_sent) = channel_outbox();
+    let (dev_trails, dev) = ant_mcp_sending(&server, "dev", &dir, &saved, outbox).await;
+    let serving = serve(&dev_trails);
+
+    let start = StartRun {
+        trail: TrailSource::Saved("deploy".parse().unwrap()),
+        args: Value::Null,
+        owner: Some(UserId::human()),
+        origin: Origin { by: Starter::Human { user: UserId::human() }, channel: None },
+        thread: ThreadId::generate(),
+        limits: TrailLimits::default(),
+        spends_from: None,
+    };
+    let root = lead.trails.start(start).await.unwrap();
+    let step = lead.step().await;
+    let _held = dev.begin(&step);
+    let client = mcp_client(&dev, &step.thread_id).await;
+    let script =
+        format!("{META}try:\n    await trail(\"deploy\")\nexcept RuntimeError as e:\n    result = str(e)\nresult\n");
+    let (ok, text) = call(&client, "run_trail", json!({"script": script})).await;
+    assert!(ok, "{text}");
+    let nested = started(&text);
+    let ended = loop {
+        let header = dev_trails.run(&nested).await.unwrap().unwrap();
+        if header.finished() {
+            break header;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let RunState::Done { result } = &ended.state else { panic!("not done: {:?}", ended.state) };
+    let refused = format!("trail deploy is on the route of run {root}, whose step run {nested} spends from");
+    assert!(result.as_str().unwrap().contains(&refused), "{result}");
+    assert_eq!(ended.steps, 0, "a refused trail() call counts no step");
+
+    // A reply sent with send_message on the step's thread tells what the runs answering the step spent.
+    let (ok, text) = call(&client, "send_message", json!({"to": "lead", "text": "built"})).await;
+    assert!(ok, "{text}");
+    let reply = loop {
+        let sent = tokio::time::timeout(Duration::from_secs(30), dev_sent.recv()).await.unwrap().unwrap();
+        if sent.text == "built" {
+            break sent;
+        }
+    };
+    assert_eq!((&reply.to, &reply.thread_id), (&ant("lead"), &step.thread_id));
+    assert_eq!(reply.trail_spent, Some(TrailSpent { steps: 0, turns: 0, running: 0 }));
+    serving.abort();
+}
+
+/// The next message `sent` carries: a step, else a `run_spent` notice.
+async fn next_sent(sent: &mut mpsc::UnboundedReceiver<Envelope>, step: bool) -> Envelope {
+    loop {
+        let out = tokio::time::timeout(Duration::from_secs(30), sent.recv()).await.unwrap().unwrap();
+        let wanted = if step { out.trail_step.is_some() } else { out.notice == Some(NoticeKind::RunSpent) };
+        if wanted {
+            return out;
+        }
+    }
+}
+
+/// The grant `step` carries.
+fn grant(step: &Envelope) -> ants_proto::StepBounds {
+    step.trail_step.as_deref().unwrap().bounds.clone().unwrap()
+}
+
+#[tokio::test]
+async fn a_run_started_answering_a_step_of_a_nested_run_is_bound_by_both_grants_and_charges_the_outermost_run() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-nested-twice");
+    let saved = dir.join("saved");
+    std::fs::create_dir_all(&saved).unwrap();
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let (outbox, mut dev_sent) = channel_outbox();
+    let (dev_trails, dev) = ant_mcp_sending(&server, "dev", &dir, &saved, outbox).await;
+    let (outbox, mut ops_sent) = channel_outbox();
+    let (ops_trails, ops) = ant_mcp_sending(&server, "ops", &dir, &saved, outbox).await;
+    let serving = [serve(&dev_trails), serve(&ops_trails)];
+
+    let limits = TrailLimits { steps: 10, ..TrailLimits::default() };
+    let root = lead.start("await agent(\"fan out\", ant=\"dev\")\n", limits).await;
+    let outer = lead.step().await;
+    assert_eq!((grant(&outer).steps, grant(&outer).turns), (9, 192), "all but the step itself and its turn budget");
+    let _outer_held = dev.begin(&outer);
+    let client = mcp_client(&dev, &outer.thread_id).await;
+    let script = format!("{META}await agent(\"go\", ant=\"ops\")\n");
+    let (ok, text) = call(&client, "run_trail", json!({"script": script})).await;
+    assert!(ok, "{text}");
+    let middle = started(&text);
+    let header = dev_trails.run(&middle).await.unwrap().unwrap();
+    assert_eq!((header.limits.steps, header.limits.turns), (9, 192), "cut to the outer step's grant");
+
+    let inner = next_sent(&mut dev_sent, true).await;
+    assert_eq!(inner.to, ant("ops"));
+    assert_eq!((grant(&inner).steps, grant(&inner).turns), (8, 184), "out of what the middle run has left");
+    let (inner_until, outer_until) = (grant(&inner).until, grant(&outer).until);
+    let second = chrono::TimeDelta::seconds(1);
+    assert!(inner_until <= outer_until + second, "within the outer step's wall time, to the second: {inner_until}");
+    let _inner_held = ops.begin(&inner);
+    let client = mcp_client(&ops, &inner.thread_id).await;
+    let (ok, text) =
+        call(&client, "run_trail", json!({"script": format!("{META}{FOUR}"), "limits": {"steps": 100}})).await;
+    assert!(ok, "{text}");
+    let last = started(&text);
+    let header = ops_trails.run(&last).await.unwrap().unwrap();
+    assert_eq!((header.limits.steps, header.limits.turns), (8, 184), "cut to the inner step's grant");
+    assert_eq!(header.spends_from.unwrap().run, middle);
+
+    // Its four steps, answered by x, are charged to the middle run as the inner step's notice and reply tell them.
+    for _ in 0..4 {
+        let step = next_sent(&mut ops_sent, true).await;
+        assert!(ops_trails.take(&step.reply(ant("x"), "done", Role::Ant).unwrap()).await.unwrap());
+    }
+    let notice = next_sent(&mut ops_sent, false).await;
+    assert_eq!((&notice.to, &notice.thread_id), (&ant("dev"), &inner.thread_id));
+    assert_eq!(notice.trail_spent, Some(TrailSpent { steps: 4, turns: 4, running: 0 }));
+    assert!(dev_trails.take(&notice).await.unwrap());
+    let mut reply = inner.reply(ant("ops"), "went", Role::Ant).unwrap();
+    reply.trail_spent = ops.trail_spent(&inner, &reply).await;
+    assert!(dev_trails.take(&reply).await.unwrap());
+
+    // The middle run's end tells the outermost run's conductor all it spent, the last run's steps among them.
+    let notice = next_sent(&mut dev_sent, false).await;
+    assert_eq!((&notice.to, &notice.thread_id), (&ant("lead"), &outer.thread_id));
+    let spent = notice.trail_spent.unwrap();
+    assert_eq!((spent.steps, spent.running), (5, 0), "its own step and the last run's four: {spent:?}");
+    assert!(lead.trails.take(&notice).await.unwrap());
+    assert_eq!(lead.header(&root).await.steps, 6, "the outermost run's step and the five below it");
+    for serving in serving {
+        serving.abort();
+    }
+}

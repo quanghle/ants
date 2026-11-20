@@ -1047,7 +1047,7 @@ fn a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread() {
         assert!(start.elapsed() < WAIT, "the run did not end:\n{shown}\ndaemon log:\n{}", log());
         std::thread::sleep(Duration::from_millis(200));
     };
-    let done = format!("Run {started} is done (1 steps, 1 turns):");
+    let done = format!("Run {started} of an inline script is done (1 steps, 1 turns):");
     assert!(shown.contains("dev-a -> notes") && shown.contains("phase: asking\n  log: to dev-b"), "{shown}");
     assert!(shown.contains("dev-a -> human") && shown.contains(&done) && shown.contains("stub: "), "{shown}");
     // The invitation to rate the run, then the stub's answer to it, which goes to the run's owner.
