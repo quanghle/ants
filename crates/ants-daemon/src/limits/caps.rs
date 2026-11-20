@@ -327,8 +327,14 @@ pub async fn day_spent(kv: &DirectKv, ant: &UserId, day: &str) -> Result<Option<
 /// What `ant` spent on `thread` since a human's last message on it, read from [`ants_proto::SESSIONS_BUCKET`]; None
 /// when nothing is stored.
 pub async fn thread_spent(kv: &DirectKv, ant: &UserId, thread: &ThreadId) -> Result<Option<Spent>> {
+    Ok(thread_spent_and_total(kv, ant, thread).await?.map(|(since, _)| since))
+}
+
+/// What `ant` spent on `thread` since a human's last message on it, then in all ([`Ledger::thread_total`]), read from
+/// [`ants_proto::SESSIONS_BUCKET`]; None when nothing is stored.
+pub async fn thread_spent_and_total(kv: &DirectKv, ant: &UserId, thread: &ThreadId) -> Result<Option<(Spent, Spent)>> {
     let spent: Option<ThreadSpend> = read(kv, thread_spend_key(ant, thread)).await?;
-    Ok(spent.map(|s| Spent { tokens: s.tokens, cost: s.cost }))
+    Ok(spent.map(|s| (Spent { tokens: s.tokens, cost: s.cost }, s.total)))
 }
 
 async fn read<T: for<'de> Deserialize<'de>>(kv: &DirectKv, key: String) -> Result<Option<T>> {

@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ants_proto::{Answered, DecidedBy, NoReplyWhy, Pick, UserId};
+use ants_proto::{Answered, DecidedBy, NoReplyWhy, Pick, PromptEnd, TimelineEnd, UserId};
 use chrono::{DateTime, Utc};
 
 use super::entry::{Entry, Kind};
@@ -81,7 +81,8 @@ pub(super) fn state(thread: &Summary) -> Option<&'static str> {
 
 /// The entries of a thread as `ants thread show` prints them: each message a block, its heading ([`heading`]) then
 /// its text, attachments and the reactions to it indented under it, a blank line between blocks. Tool calls, rejected
-/// tool requests and prompts ended with no reply sent are compact lines under it, the first joined to it by `⎿`. A
+/// tool requests, prompts ended with no reply sent and prompt ends are compact lines under it, the first joined to it by
+/// `⎿`. A
 /// question shows its options numbered, whether a typed answer is taken, and the answers to it among `entries` or
 /// how to answer it; an answer, the question and the option it picks.
 pub fn render(entries: &[Entry]) -> String {
@@ -108,6 +109,11 @@ pub fn render(entries: &[Entry]) -> String {
         if let Some(rejected) = &e.rejected {
             under = true;
             let _ = writeln!(out, "{lead}{at} {ant}  {}", rejection(rejected, first));
+            continue;
+        }
+        if let Some(ended) = &e.ended {
+            under = true;
+            let _ = writeln!(out, "{lead}{at} {ant}  {}", prompt_end(&ended.end));
             continue;
         }
         if e.no_reply.is_some() {
@@ -150,6 +156,51 @@ fn rejection(rejected: &ToolRejection, title: &str) -> String {
         ),
     };
     format!("{name}{args} · request {} {how}", rejected.request)
+}
+
+/// How a prompt ended and what it took: `ended: replied · 1m5s · 1200 tokens · $0.42 · calls execute 3 (1 failed), read
+/// 2 · 1 sense call · 1 tool request asked · session rebuilt`.
+fn prompt_end(end: &TimelineEnd) -> String {
+    let how = match end.how {
+        PromptEnd::Replied => "replied",
+        PromptEnd::NoReply => "no reply",
+        PromptEnd::Cancelled => "cancelled",
+        PromptEnd::Capped => "cut by a cap",
+        PromptEnd::Failed => "failed",
+        PromptEnd::Unknown => "unknown",
+    };
+    let mut parts = vec![format!("ended: {how}"), took(end.duration_ms)];
+    if end.tokens > 0 {
+        parts.push(format!("{} tokens", end.tokens));
+    }
+    if end.cost > 0.0 {
+        parts.push(format!("${:.2}", end.cost));
+    }
+    if !end.calls.is_empty() {
+        let calls: Vec<String> = end
+            .calls
+            .iter()
+            .map(|(kind, n)| match n.failed {
+                0 => format!("{kind} {}", n.calls),
+                failed => format!("{kind} {} ({failed} failed)", n.calls),
+            })
+            .collect();
+        parts.push(format!("calls {}", calls.join(", ")));
+    }
+    match end.sense_calls {
+        0 => {}
+        1 => parts.push("1 sense call".to_owned()),
+        n => parts.push(format!("{n} sense calls")),
+    }
+    match end.asked {
+        0 => {}
+        1 => parts.push("1 tool request asked".to_owned()),
+        n => parts.push(format!("{n} tool requests asked")),
+    }
+    if end.rebuilt {
+        parts.push("session rebuilt".to_owned());
+    }
+    parts.join(" · ")
 }
 
 /// How a tool call ended after its label: ` · 35ms`, ` · failed after 4.0s`, ` · in progress`.

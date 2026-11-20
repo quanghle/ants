@@ -58,13 +58,15 @@ pub struct AntReport {
     pub caps: Option<Caps>,
 }
 
-/// What an ant spent on one thread since a human's last message on it.
+/// What an ant spent on one thread since a human's last message on it, and in all.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ThreadReport {
     pub ant: UserId,
     pub thread: ThreadId,
     #[serde(flatten)]
     pub spent: Spent,
+    /// What it spent on the thread in all, whatever humans' messages there gave it fresh allowances.
+    pub total: Spent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caps: Option<Caps>,
 }
@@ -176,7 +178,7 @@ async fn threads_of(js: &jetstream::Context, kv: &DirectKv, ant: &UserId) -> Res
     Ok(threads)
 }
 
-/// What `ant`, or each ant on it, spent on `thread` since a human's last message there.
+/// What `ant`, or each ant on it, spent on `thread` since a human's last message there, and in all.
 pub async fn thread(
     js: &jetstream::Context,
     kv: &DirectKv,
@@ -187,9 +189,9 @@ pub async fn thread(
     let mut reports = Vec::new();
     for key in keys(js, &format!("{}.{thread}.spend", ant.map_or("*", UserId::as_str))).await? {
         let Some((ant, thread)) = parse_thread_key(&key) else { continue };
-        if let Some(spent) = caps::thread_spent(kv, &ant, &thread).await? {
+        if let Some((spent, total)) = caps::thread_spent_and_total(kv, &ant, &thread).await? {
             let caps = caps.get(&ant).copied();
-            reports.push(ThreadReport { ant, thread, spent, caps });
+            reports.push(ThreadReport { ant, thread, spent, total, caps });
         }
     }
     Ok(reports)
@@ -309,7 +311,8 @@ pub fn ant_tables(report: &AntReport) -> String {
     out
 }
 
-/// One row per ant on the thread, against its thread caps.
+/// One row per ant on the thread: what it spent since a human's last message there, against its thread caps, then in
+/// all.
 pub fn thread_table(reports: &[ThreadReport]) -> String {
     let rows = reports
         .iter()
@@ -320,10 +323,12 @@ pub fn thread_table(reports: &[ThreadReport]) -> String {
                 r.thread.to_string(),
                 tokens(r.spent.tokens, caps.thread_tokens),
                 cost(r.spent.cost, caps.thread_cost),
+                r.total.tokens.to_string(),
+                format!("{:.2}", r.total.cost),
             ]
         })
         .collect();
-    layout(&["ANT", "THREAD", "TOKENS", "COST"], rows)
+    layout(&["ANT", "THREAD", "TOKENS", "COST", "TOTAL_TOKENS", "TOTAL_COST"], rows)
 }
 
 fn in_days(days: u32) -> String {
@@ -459,9 +464,18 @@ mod tests {
         let idle = AntReport { threads: Some(Vec::new()), ..capped };
         assert!(ant_tables(&idle).ends_with("no thread has spent anything since a human's last message on it"));
 
-        let on_thread =
-            ThreadReport { ant: p("dev-a"), thread: "t1".parse().unwrap(), spent: spent(30, 0.5), caps: Some(caps) };
-        assert_eq!(thread_table(&[on_thread]), "ANT    THREAD  TOKENS  COST\ndev-a  t1      30      0.50/2.00");
+        let on_thread = ThreadReport {
+            ant: p("dev-a"),
+            thread: "t1".parse().unwrap(),
+            spent: spent(30, 0.5),
+            total: spent(80, 1.25),
+            caps: Some(caps),
+        };
+        assert_eq!(
+            thread_table(&[on_thread]),
+            "ANT    THREAD  TOKENS  COST       TOTAL_TOKENS  TOTAL_COST\n\
+             dev-a  t1      30      0.50/2.00  80            1.25"
+        );
     }
 
     /// Spend as the daemons store it, read with the human's credentials.
@@ -511,8 +525,14 @@ mod tests {
         assert_eq!((nobody[0].total, nobody[0].threads.as_deref()), (Spent::default(), Some(&[][..])));
 
         let on_t1 = thread(&h_js, &kv, None, &t1, &caps).await.unwrap();
-        let got: Vec<(&str, Spent)> = on_t1.iter().map(|r| (r.ant.as_str(), r.spent)).collect();
-        assert_eq!(got, [("dev-a", spent(100, 0.0)), ("dev-b", spent(7, 0.0))]);
+        let got: Vec<(&str, Spent, Spent)> = on_t1.iter().map(|r| (r.ant.as_str(), r.spent, r.total)).collect();
+        assert_eq!(got, [("dev-a", spent(100, 0.0), spent(100, 0.0)), ("dev-b", spent(7, 0.0), spent(7, 0.0))]);
+        ledger.reset(&t1).await.unwrap();
+        ledger.record_on(&t1, &Spend::Tokens(20), &days[0]).await.unwrap();
+        let on_t1 = thread(&h_js, &kv, Some(&dev_a), &t1, &caps).await.unwrap();
+        assert_eq!((on_t1[0].spent, on_t1[0].total), (spent(20, 0.0), spent(120, 0.0)), "a human's message");
+        let line = serde_json::to_value(&on_t1[0]).unwrap();
+        assert_eq!((&line["tokens"], &line["total"]), (&20.into(), &serde_json::json!({"tokens": 120, "cost": 0.0})));
         assert_eq!(thread(&h_js, &kv, Some(&dev_b), &t1, &caps).await.unwrap().len(), 1);
 
         // The human reads spend, not the ants' sessions.
