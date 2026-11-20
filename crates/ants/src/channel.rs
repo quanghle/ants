@@ -337,7 +337,7 @@ pub fn thread_posts<S: futures::Stream<Item = ChannelPost>>(
 }
 
 /// The posts `room`, a subscription to a channel, receives. Forged posts are dropped with a warning.
-pub fn live_posts(room: async_nats::Subscriber) -> impl futures::Stream<Item = ChannelPost> {
+pub fn live_posts(room: ants_daemon::bus::relayed::Heard) -> impl futures::Stream<Item = ChannelPost> {
     room.filter_map(|msg| {
         let post = match serde_json::from_slice::<ChannelPost>(&msg.payload) {
             Ok(post) => match post.check_subject(&msg.subject) {
@@ -366,7 +366,7 @@ const SEEN: usize = 1024;
 /// stored it; for a post kept in the machine's outbox, the read-back looks for it from [`CLOCK_SLACK`] before it was
 /// sent, and takes only what the stream stores after it.
 pub fn caught_up_posts(
-    room: async_nats::Subscriber,
+    room: ants_daemon::bus::relayed::Heard,
     js: &jetstream::Context,
     reader: &Me,
     post: &ChannelPost,

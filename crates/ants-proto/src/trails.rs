@@ -52,6 +52,8 @@ pub const MAX_TRAIL_SCRIPT: usize = 256 * 1024;
 pub const MAX_TRAIL_ARGS: usize = 64 * 1024;
 /// Most characters a saved trail's description has.
 pub const MAX_TRAIL_DESCRIPTION: usize = 1000;
+/// Most characters of a step's label ([`TrailStep::label`]), an ellipsis marking a cut aside.
+pub const MAX_STEP_LABEL: usize = 200;
 /// Most phases a saved trail names.
 pub const MAX_TRAIL_PHASES: usize = 32;
 /// Most waypoints a saved trail names.

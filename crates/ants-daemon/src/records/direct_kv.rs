@@ -252,6 +252,7 @@ impl DirectKv {
         }
         let request = serde_json::json!({ "last_by_subj": self.subject(key) }).to_string();
         let subject = format!("{}DIRECT.GET.KV_{}", self.request_api(), self.bucket);
+        #[expect(clippy::disallowed_methods, reason = "a direct get's answer, which the stream sends")]
         let msg = match self.js.client().request(subject, request.into()).await {
             Ok(msg) => msg,
             Err(e) if e.kind() == RequestErrorKind::NoResponders => {
@@ -330,6 +331,17 @@ impl DirectKv {
     pub async fn put(&self, key: impl AsRef<str>, value: impl Into<Vec<u8>>) -> Result<()> {
         let key = key.as_ref();
         let ack = self.js.publish(self.put_subject(key), value.into().into()).await;
+        ack.with_context(|| format!("storing {key}"))?.await.with_context(|| format!("storing {key}"))?;
+        Ok(())
+    }
+
+    /// [`DirectKv::put`] for `ttl` (at least a second): the stream removes the entry that long after, if it allows
+    /// per-message TTLs, and refuses the put otherwise.
+    pub async fn put_for(&self, key: impl AsRef<str>, value: impl Into<Vec<u8>>, ttl: Duration) -> Result<()> {
+        let key = key.as_ref();
+        let mut headers = HeaderMap::new();
+        headers.insert(TTL, ttl.as_secs().max(1).to_string().as_str());
+        let ack = self.js.publish_with_headers(self.put_subject(key), headers, value.into().into()).await;
         ack.with_context(|| format!("storing {key}"))?.await.with_context(|| format!("storing {key}"))?;
         Ok(())
     }
@@ -466,6 +478,7 @@ impl DirectKv {
         let client = self.js.client();
         let wait = client.timeout().unwrap_or(Duration::from_secs(10));
         let inbox = client.new_inbox();
+        #[expect(clippy::disallowed_methods, reason = "direct gets' answers, which the stream sends")]
         let mut replies = client.subscribe(inbox.clone()).await?;
         let mut seq = 1;
         loop {

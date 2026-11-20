@@ -98,6 +98,11 @@ impl TrailTip {
         trail_tip_retired_key(&self.trail, &self.writer, &self.id)
     }
 
+    /// The SHA-256 of its text, in lowercase hex: the text a vote on it judged ([`TipVote::text`]).
+    pub fn text_sha256(&self) -> String {
+        script_sha256(&self.text)
+    }
+
     /// The key of `voter`'s vote on it ([`trail_tip_vote_key`]).
     pub fn vote_key(&self, voter: &UserId) -> String {
         trail_tip_vote_key(&self.trail, &self.writer, &self.id, voter)
@@ -171,13 +176,17 @@ impl FromStr for TipVerdict {
 }
 
 /// An ant's vote on a tip in [`TRAIL_TIPS_BUCKET`], under the tip's [`TrailTip::vote_key`] for the voter: voting
-/// again replaces it. Readers should treat unknown fields as additions, not errors.
+/// again replaces it. It counts only for the text it judged ([`TipVote::text`]). Readers should treat unknown fields
+/// as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipVote {
     pub voter: UserId,
     pub verdict: TipVerdict,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The [`TrailTip::text_sha256`] of the tip's text it judged: a tip its writer puts again with other text keeps
+    /// none of the votes cast on the earlier one.
+    pub text: String,
     /// The [`script_sha256`] of the script of the step the voter answered, when it voted answering a step of the
     /// tip's trail: a helpful vote with the current script's shows the tip still holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -187,11 +196,15 @@ pub struct TipVote {
 
 impl TipVote {
     /// Check what a reader takes from the bucket: the vote is stored under the key of its voter's vote on `tip`
-    /// ([`TrailTip::vote_key`]) and within the bounds of [`TipVote::check`].
+    /// ([`TrailTip::vote_key`]), judged `tip`'s text ([`TipVote::text`]) and is within the bounds of
+    /// [`TipVote::check`].
     pub fn check_key(&self, tip: &TrailTip, key: &str) -> Result<(), Error> {
         let own = tip.vote_key(&self.voter);
         if key != own {
             return Err(Error::ForeignTip { kind: "vote", key: own, at: key.to_owned() });
+        }
+        if self.text != tip.text_sha256() {
+            return Err(Error::InvalidTipVote(format!("the vote at {key} judged another text than the tip's")));
         }
         self.check()
     }
@@ -316,8 +329,8 @@ pub struct TipBoard {
 impl TipBoard {
     /// The board of `trail` from the last value of each key of [`TRAIL_TIPS_BUCKET`] under `<trail>.>`, keys without
     /// the bucket's subject prefix. An entry that does not read as a tip, a vote or a retirement under its key, or is
-    /// of another trail, is skipped, as are a writer's vote on its own tip and the votes and retirements of no tip
-    /// found. A tip is retired by a human only as its retirement's key says, whatever its record says; an entry under
+    /// of another trail, is skipped, as are a writer's vote on its own tip, the votes and retirements of no tip
+    /// found, and the votes that judged another text than the tip's ([`TipVote::text`]). A tip is retired by a human only as its retirement's key says, whatever its record says; an entry under
     /// that key that does not read as a retirement retires it all the same, as by the user `human` when it was written.
     pub fn new<K: AsRef<str>, V: AsRef<[u8]>>(trail: TrailName, entries: impl IntoIterator<Item = (K, V)>) -> Self {
         let mut tips = Vec::new();
@@ -568,21 +581,30 @@ mod tests {
     }
 
     fn vote(voter: &str, verdict: TipVerdict, at: i64) -> TipVote {
-        TipVote { voter: p(voter), verdict, reason: None, script: None, at: day(at) }
+        TipVote { voter: p(voter), verdict, reason: None, text: String::new(), script: None, at: day(at) }
+    }
+
+    /// `vote` judging `tip`'s text.
+    fn on(tip: &TrailTip, vote: TipVote) -> TipVote {
+        TipVote { text: tip.text_sha256(), ..vote }
     }
 
     fn board(tips: &[&TrailTip], votes: &[(&TrailTip, TipVote)]) -> TipBoard {
         board_retired(tips, votes, &[])
     }
 
-    /// The board of `tips` with `votes`, each of `retired` retired by a human on a day.
+    /// The board of `tips` with `votes`, each judging its tip's text unless it names one, each of `retired` retired
+    /// by a human on a day.
     fn board_retired(
         tips: &[&TrailTip],
         votes: &[(&TrailTip, TipVote)],
         retired: &[(&TrailTip, &str, i64)],
     ) -> TipBoard {
         let tips = tips.iter().map(|tip| (tip.key(), serde_json::to_vec(tip).unwrap()));
-        let votes = votes.iter().map(|(tip, vote)| (tip.vote_key(&vote.voter), serde_json::to_vec(vote).unwrap()));
+        let votes = votes.iter().map(|(tip, vote)| {
+            let vote = if vote.text.is_empty() { on(tip, vote.clone()) } else { vote.clone() };
+            (tip.vote_key(&vote.voter), serde_json::to_vec(&vote).unwrap())
+        });
         let retired = retired.iter().map(|(tip, by, at)| {
             (tip.retired_key(), serde_json::to_vec(&TipRetired { by: p(by), at: day(*at) }).unwrap())
         });
@@ -701,13 +723,18 @@ mod tests {
         let missing = tip("dev-a", "bbbbbbbb", None, "gone", 0);
         let mut elsewhere = tip("dev-a", "cccccccc", None, "another trail", 0);
         elsewhere.trail = "build".parse().unwrap();
-        let forged = vote("dev-c", TipVerdict::Wrong, 1);
+        let forged = on(&left, vote("dev-c", TipVerdict::Wrong, 1));
+        let own = on(&left, vote("dev-a", TipVerdict::Helpful, 1));
+        let stale = on(&left, vote("dev-b", TipVerdict::Stale, 1));
         let entries = [
             (left.key(), serde_json::to_vec(&left).unwrap()),
-            (left.vote_key(&p("dev-a")), serde_json::to_vec(&vote("dev-a", TipVerdict::Helpful, 1)).unwrap()),
-            (left.vote_key(&p("dev-b")), serde_json::to_vec(&vote("dev-b", TipVerdict::Stale, 1)).unwrap()),
+            (left.vote_key(&p("dev-a")), serde_json::to_vec(&own).unwrap()),
+            (left.vote_key(&p("dev-b")), serde_json::to_vec(&stale).unwrap()),
             (left.vote_key(&p("dev-b")).replace("dev-b", "dev-d"), serde_json::to_vec(&forged).unwrap()),
-            (missing.vote_key(&p("dev-b")), serde_json::to_vec(&vote("dev-b", TipVerdict::Helpful, 1)).unwrap()),
+            (
+                missing.vote_key(&p("dev-b")),
+                serde_json::to_vec(&on(&missing, vote("dev-b", TipVerdict::Helpful, 1))).unwrap(),
+            ),
             (format!("deploy.dev-b.{}", elsewhere.id), serde_json::to_vec(&elsewhere).unwrap()),
             ("deploy.dev-a.dddddddd".to_owned(), b"not json".to_vec()),
         ];
@@ -716,6 +743,32 @@ mod tests {
         let ranked = board.tip(&left.id, None, day(1), None).unwrap();
         assert_eq!(ranked.tally, Tally { helpful: 0, stale: 1, wrong: 0 });
         assert_eq!(ranked.votes.len(), 1);
+    }
+
+    #[test]
+    fn a_tip_its_writer_puts_again_with_other_text_keeps_none_of_the_votes_on_the_first() {
+        let left = tip("dev-a", "aaaaaaaa", Some("build"), "cache the deps", 0);
+        let other = tip("dev-a", "bbbbbbbb", Some("build"), "pin the toolchain", 0);
+        let votes = [
+            (&left, vote("dev-b", TipVerdict::Helpful, 1)),
+            (&left, vote("dev-c", TipVerdict::Helpful, 1)),
+            (&other, vote("dev-b", TipVerdict::Helpful, 1)),
+        ];
+        let first = board(&[&left, &other], &votes);
+        assert_eq!(ids(first.carried(Some("build"), "", day(2), None)), ["aaaaaaaa", "bbbbbbbb"]);
+        let rewritten = TrailTip { text: "skip the tests".to_owned(), ..left.clone() };
+        let entries = votes.iter().map(|(tip, vote)| (tip.vote_key(&vote.voter), on(tip, vote.clone())));
+        let entries = entries
+            .map(|(key, vote)| (key, serde_json::to_vec(&vote).unwrap()))
+            .chain([&rewritten, &other].map(|tip| (tip.key(), serde_json::to_vec(tip).unwrap())));
+        let board = TipBoard::new("deploy".parse().unwrap(), entries);
+        let ranked = board.tip(&left.id, None, day(2), None).unwrap();
+        assert_eq!(ranked.tip.text, "skip the tests");
+        assert_eq!((ranked.tally, ranked.votes.len(), ranked.score), (Tally::default(), 0, 0.0));
+        assert_eq!(ids(board.carried(Some("build"), "", day(2), None)), ["bbbbbbbb", "aaaaaaaa"], "nor ranks on them");
+        let revoted = (&rewritten, vote("dev-b", TipVerdict::Wrong, 2));
+        let board = self::board(&[&rewritten], &[revoted]);
+        assert_eq!(board.tip(&left.id, None, day(2), None).unwrap().tally.wrong, 1, "a vote on the new text counts");
     }
 
     #[test]
@@ -787,9 +840,11 @@ mod tests {
         }
         assert!(check_tip_key(&"k".repeat(MAX_TITLE)).is_ok());
         assert!(check_tip_key(&"k".repeat(MAX_TITLE + 1)).is_err());
-        let mut voted = vote("dev-b", TipVerdict::Wrong, 0);
+        let mut voted = on(&left, vote("dev-b", TipVerdict::Wrong, 0));
         assert!(voted.check_key(&left, "deploy.dev-b.dev-a.aaaaaaaa").is_ok());
         assert!(matches!(voted.check_key(&left, "deploy.dev-c.dev-a.aaaaaaaa"), Err(Error::ForeignTip { .. })));
+        let rewritten = TrailTip { text: "cache nothing".to_owned(), ..left };
+        assert!(matches!(voted.check_key(&rewritten, "deploy.dev-b.dev-a.aaaaaaaa"), Err(Error::InvalidTipVote(_))));
         voted.reason = Some("x".repeat(MAX_TIP_REASON + 1));
         assert!(matches!(voted.check(), Err(Error::InvalidTipVote(_))));
         assert_eq!("stale".parse::<TipVerdict>().unwrap(), TipVerdict::Stale);

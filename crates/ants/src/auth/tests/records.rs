@@ -295,6 +295,26 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
     serving.abort();
 }
 
+/// `ants signer` reads every run's records, to check the run an ant names as a trail's source, and writes none.
+#[tokio::test]
+async fn ants_signer_reads_the_runs_ants_save_trails_from() {
+    use ants_proto::{RunId, TRAIL_RUNS_BUCKET, trail_session_key};
+    let Some(server) = Server::start() else { return };
+    let dev_a = p("dev-a");
+    let (_a, a_js) = server.connect(&dev_a).await;
+    let (_h, h_js) = server.connect(&UserId::human()).await;
+    h_js.create_stream(ants_daemon::hub::trail_runs_config()).await.unwrap();
+    let key = trail_session_key(&dev_a, &RunId::generate());
+    DirectKv::new(&a_js, None, TRAIL_RUNS_BUCKET).await.unwrap().put(&key, b"{}".to_vec()).await.unwrap();
+    let approver =
+        crate::credentials::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, WAIT)
+            .await
+            .unwrap();
+    let keeper = DirectKv::whole(approver.hub(), None, TRAIL_RUNS_BUCKET).await.unwrap().past_relays();
+    assert_eq!(keeper.get(&key).await.unwrap().as_deref(), Some(&b"{}"[..]));
+    assert!(keeper.put(&key, b"{}".to_vec()).await.is_err(), "the signer writes no run");
+}
+
 #[tokio::test]
 async fn humans_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
     use ants_proto::{

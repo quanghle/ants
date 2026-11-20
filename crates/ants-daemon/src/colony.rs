@@ -1,5 +1,6 @@
 //! The ant's entry in the colony, kept alive by heartbeats.
 
+use crate::bus::relayed::{self, GuardedKv as _};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -317,8 +318,8 @@ pub fn may_start(current: Option<&ColonyEntry>, ours: &ColonyEntry) -> bool {
 enum Claim {
     /// The entry was put, at this revision.
     Put(u64),
-    /// Another daemon's entry is there.
-    Held { machine: String, instance: String },
+    /// Another daemon's entry is there, put this long ago by the server's clock against this machine's.
+    Held { machine: String, instance: String, age: Duration },
     /// The entry changed between the look and the put.
     Raced,
 }
@@ -326,13 +327,17 @@ enum Claim {
 /// Put `entry` if [`may_start`] allows it, expecting the revision looked at, so of two daemons only one goes ahead.
 async fn claim(kv: &kv::Store, entry: &ColonyEntry) -> Result<Claim> {
     let key = entry.key();
-    let found = kv.entry(key).await.with_context(|| format!("reading {key} in the colony"))?;
+    let found = kv.guarded_entry(key).await.with_context(|| format!("reading {key} in the colony"))?;
     let current = found
         .as_ref()
         .filter(|e| e.operation == kv::Operation::Put)
         .and_then(|e| serde_json::from_slice::<ColonyEntry>(&e.value).ok());
     if let Some(other) = current.filter(|c| !may_start(Some(c), entry)) {
-        return Ok(Claim::Held { machine: other.machine, instance: other.instance });
+        let put_at = found.as_ref().and_then(|e| i64::try_from(e.created.unix_timestamp_nanos()).ok());
+        let age = put_at.map_or(Duration::ZERO, |at| {
+            (Utc::now() - DateTime::from_timestamp_nanos(at)).to_std().unwrap_or_default()
+        });
+        return Ok(Claim::Held { machine: other.machine, instance: other.instance, age });
     }
     let value = serde_json::to_vec(entry)?.into();
     let put = match &found {
@@ -352,17 +357,23 @@ async fn claim(kv: &kv::Store, entry: &ColonyEntry) -> Result<Claim> {
     }
 }
 
-/// How often [`wait_for_turn`] looks at the colony when a watch shows the entry's expiry: only in case the watch
-/// misses it.
+/// How often at most [`wait_for_turn`] looks at the colony when a watch shows the entry's deletion and its puts: only
+/// in case the watch misses one.
 pub const LOOK_AGAIN: Duration = Duration::from_secs(60);
+
+/// How long after an entry is due to expire [`wait_for_turn`] looks at it, nats-server removing it a little late.
+const EXPIRY_SLACK: Duration = Duration::from_millis(250);
 
 /// Wait until [`may_start`] allows `entry`, then put `entry`, started now, and return the revision put, for [`hold`].
 /// The put expects the entry it looked at, so of two daemons starting at once only one goes ahead; the other waits on.
-/// It looks again as soon as a watch of the entry shows it deleted or expired (the bucket leaves a marker of an
-/// expired entry), and otherwise only every [`LOOK_AGAIN`]; every `every` when it has no watch.
+/// It looks again as soon as a watch of the entry shows it deleted, and as soon as the entry is due to expire, the
+/// bucket's max age after its last put: the bucket leaves no marker of an expired entry ([`crate::hub::colony_config`]).
+/// The last put is the one the watch showed last, timed by this machine's clock alone, or, for the entry first looked
+/// at, the server's time of the put. Otherwise it looks every [`LOOK_AGAIN`]; every `every` when it has no watch.
 pub async fn wait_for_turn(kv: &kv::Store, entry: &mut ColonyEntry, every: Duration) -> Result<u64> {
+    let ttl = Some(kv.stream.cached_info().config.max_age).filter(|ttl| !ttl.is_zero()).unwrap_or(COLONY_TTL);
     let key = entry.key().to_owned();
-    let mut changes = match kv.watch(&key).await {
+    let mut changes = match kv.guarded_watch(&key).await {
         Ok(changes) => Some(changes),
         Err(e) => {
             tracing::warn!(ant = key, error = %e, "watching the colony entry; looking at the colony every {every:?}");
@@ -373,17 +384,16 @@ pub async fn wait_for_turn(kv: &kv::Store, entry: &mut ColonyEntry, every: Durat
     loop {
         let now = Utc::now();
         (entry.started_at, entry.heartbeat_at) = (now, now);
+        let most = if changes.is_some() { every.max(LOOK_AGAIN) } else { every };
         let mut wait = every;
         match claim(kv, entry).await {
             Ok(Claim::Put(revision)) => return Ok(revision),
-            Ok(Claim::Held { machine, instance }) => {
+            Ok(Claim::Held { machine, instance, age }) => {
                 if waiting_for.as_ref() != Some(&instance) {
                     tracing::info!(ant = key, machine, "waiting while another daemon serves it");
                     waiting_for = Some(instance);
                 }
-                if changes.is_some() {
-                    wait = every.max(LOOK_AGAIN);
-                }
+                wait = most.min(ttl.saturating_sub(age) + EXPIRY_SLACK);
             }
             Ok(Claim::Raced) => {
                 tracing::info!(ant = key, "colony entry changed; looking again");
@@ -397,8 +407,10 @@ pub async fn wait_for_turn(kv: &kv::Store, entry: &mut ColonyEntry, every: Durat
             tokio::select! {
                 () = &mut look_again => break,
                 change = next_change(&mut changes) => match change {
-                    Some(change) if change.operation == kv::Operation::Put => {}
-                    // Deleted or expired, or the watch ended: look now.
+                    Some(change) if change.operation == kv::Operation::Put => {
+                        look_again.as_mut().reset(tokio::time::Instant::now() + most.min(ttl + EXPIRY_SLACK));
+                    }
+                    // Deleted, or the watch ended: look now.
                     _ => break,
                 },
             }
@@ -481,7 +493,7 @@ async fn keep_held(
     every: Duration,
     workload: Option<Arc<Workload>>,
     held: watch::Sender<Option<u64>>,
-    mut changes: Option<kv::Watch>,
+    mut changes: Option<relayed::Watch>,
 ) {
     let Some(mut revision) = *held.borrow() else { return };
     let mut ticks = tokio::time::interval(every);
@@ -520,7 +532,7 @@ async fn keep_held(
 }
 
 /// The next change `changes` shows, if any; on an error it stops watching, so only the heartbeats see changes.
-async fn next_change(changes: &mut Option<kv::Watch>) -> Option<kv::Entry> {
+async fn next_change(changes: &mut Option<relayed::Watch>) -> Option<kv::Entry> {
     let Some(watch) = changes else { return std::future::pending().await };
     match watch.next().await {
         Some(Ok(change)) => Some(change),
@@ -582,7 +594,7 @@ impl Registration {
         workload: Option<Arc<Workload>>,
     ) -> Result<Self> {
         let key = entry.key().to_owned();
-        let changes = match kv.watch(&key).await {
+        let changes = match kv.guarded_watch(&key).await {
             Ok(changes) => Some(changes),
             Err(e) => {
                 tracing::warn!(ant = key, error = %e, "watching the colony entry; the heartbeats still notice another daemon");
@@ -645,7 +657,9 @@ pub async fn list_entries(kv: &kv::Store) -> Result<Vec<ColonyEntry>> {
     keys.sort();
     let mut entries = Vec::with_capacity(keys.len());
     for key in keys {
-        let Some(value) = kv.get(&key).await.with_context(|| format!("reading {key} in the colony"))? else { continue };
+        let Some(value) = kv.guarded_get(&key).await.with_context(|| format!("reading {key} in the colony"))? else {
+            continue;
+        };
         match serde_json::from_slice::<ColonyEntry>(&value) {
             Ok(entry) => match entry.check_key(&key) {
                 Ok(()) => entries.push(entry),

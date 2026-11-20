@@ -4,6 +4,7 @@
 //! a thread of its own, its text the entries; the ant's reply is the summary. Such threads are left out of the lists
 //! of threads and of the inbox.
 
+use ants_daemon::bus::relayed;
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::time::Duration;
@@ -109,8 +110,7 @@ pub async fn ask(nats: &Nats<'_>, js: &jetstream::Context, envelope: &Envelope) 
         tracing::warn!("{warning}");
     }
     let status = if progress::wanted(me.role.is_human()) {
-        client
-            .subscribe(subject::status(&envelope.to, &envelope.thread_id))
+        relayed::subscribe(&client, subject::status(&envelope.to, &envelope.thread_id))
             .await
             .inspect_err(|e| tracing::debug!("showing no progress: {e}"))
             .ok()

@@ -1,6 +1,7 @@
 //! The team's humans: the KV bucket [`HUMANS_BUCKET`], which only humans' credentials write and ants read, and the
 //! human the CLI acts as ([`Me`]), which registers itself there when it connects ([`register`]).
 
+use ants_daemon::bus::relayed::GuardedKv as _;
 use std::path::Path;
 
 use ants_daemon::stream::reading::Reading;
@@ -145,7 +146,7 @@ pub async fn register(js: &jetstream::Context, me: &Me) -> Result<bool> {
         return Ok(false);
     }
     let kv = ensure(js).await?;
-    if found.is_none() && kv.get(me.id.as_str()).await?.is_some_and(|payload| registered(&payload)) {
+    if found.is_none() && kv.guarded_get(me.id.as_str()).await?.is_some_and(|payload| registered(&payload)) {
         return Ok(false);
     }
     let entry = HumanEntry::new(me.id.clone());
@@ -174,7 +175,7 @@ pub(crate) async fn read(js: &jetstream::Context) -> Result<Humans> {
     let keys: Vec<String> = kv.keys().await.context("listing the humans")?.try_collect().await?;
     let mut entries = Vec::with_capacity(keys.len());
     for key in keys.into_iter().filter(|key| !key.contains('.')) {
-        let Some(value) = kv.get(&key).await.with_context(|| format!("reading human {key}"))? else { continue };
+        let Some(value) = kv.guarded_get(&key).await.with_context(|| format!("reading human {key}"))? else { continue };
         match serde_json::from_slice::<HumanEntry>(&value) {
             Ok(entry) => entries.push((key, entry)),
             Err(e) => tracing::warn!(key, error = %e, "skipping a malformed human entry"),

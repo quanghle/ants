@@ -39,6 +39,7 @@
 //! `ants tools list --follow` and `ants inbox --follow` follow the requests alike ([`follow`]); the inbox also shows
 //! how each ends.
 
+use ants_daemon::bus::relayed::{self, GuardedKv as _, Read};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -113,6 +114,10 @@ pub async fn requests(stream: &Stream) -> Result<Vec<(u64, ApprovalRequest)>> {
             Err(e) => return Err(e).context("reading tool requests"),
         };
         from = msg.sequence + 1;
+        if relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::Consumer) {
+            tracing::warn!(seq = msg.sequence, "skipping a tool request a stream relayed");
+            continue;
+        }
         match serde_json::from_slice::<ApprovalRequest>(&msg.payload) {
             Ok(request) => match request.check_subject(&msg.subject) {
                 Ok(()) => requests.push((msg.sequence, request)),
@@ -127,7 +132,8 @@ pub async fn requests(stream: &Stream) -> Result<Vec<(u64, ApprovalRequest)>> {
 /// `ants_chains`, else none.
 async fn chain_of(js: &jetstream::Context, ant: &UserId) -> Result<Vec<UserId>> {
     if let Ok(kv) = js.get_key_value(COLONY_BUCKET).await
-        && let Some(value) = kv.get(ant.as_str()).await.with_context(|| format!("reading {ant} in the colony"))?
+        && let Some(value) =
+            kv.guarded_get(ant.as_str()).await.with_context(|| format!("reading {ant} in the colony"))?
     {
         match serde_json::from_slice::<ColonyEntry>(&value).map_err(anyhow::Error::from).and_then(|entry| {
             entry.check_key(ant.as_str())?;
@@ -211,6 +217,9 @@ async fn ant_decisions(
         if until.is_some_and(|until| msg.sequence >= until) {
             break;
         }
+        if relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::Consumer) {
+            continue;
+        }
         let Ok(envelope) = serde_json::from_slice::<Envelope>(&msg.payload) else { continue };
         let Some(decision) = &envelope.approval else { continue };
         // The subject pins the sender; the ant takes decisions on its own requests from its own chain only.
@@ -273,7 +282,7 @@ impl Consent {
 
 /// The record under `key` in the humans bucket `kv`; none when missing or malformed.
 pub(crate) async fn record<T: serde::de::DeserializeOwned>(kv: &jetstream::kv::Store, key: &str) -> Result<Option<T>> {
-    let value = kv.get(key).await.with_context(|| format!("reading {key} in {HUMANS_BUCKET}"))?;
+    let value = kv.guarded_get(key).await.with_context(|| format!("reading {key} in {HUMANS_BUCKET}"))?;
     Ok(value.and_then(|v| serde_json::from_slice(&v).ok()))
 }
 
@@ -329,6 +338,9 @@ async fn decisions(stream: &Stream, request: &ApprovalRequest) -> Result<(Option
         };
         last = msg.sequence;
         match serde_json::from_slice::<ApprovalDecision>(&msg.payload) {
+            Ok(_) if relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::Consumer) => {
+                tracing::warn!(seq = msg.sequence, "ignoring a decision a stream relayed");
+            }
             Ok(d) if d.request_id == request.id && d.ant == request.ant => return Ok((Some(d), last)),
             // The ant ignores these too, so the request is still open.
             _ => tracing::warn!(seq = msg.sequence, "ignoring a malformed decision"),
@@ -622,7 +634,8 @@ pub async fn suggestion(stream: &Stream, seq: u64, request: &ApprovalRequest) ->
         };
         from = msg.sequence + 1;
         let Ok(earlier) = serde_json::from_slice::<ApprovalRequest>(&msg.payload) else { continue };
-        let same = earlier.check_subject(&msg.subject).is_ok()
+        let same = !relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::Consumer)
+            && earlier.check_subject(&msg.subject).is_ok()
             && earlier.id != request.id
             && permission::rule_for(&earlier.tool).as_deref() == Some(rule.as_str());
         if same && decision(stream, &earlier).await?.is_some_and(|d| d.verdict != Verdict::Reject) {

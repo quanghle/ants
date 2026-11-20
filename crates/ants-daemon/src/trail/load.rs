@@ -9,7 +9,7 @@ use ants_proto::{PendingCall, QueuedCall, RunId, RunState, TrailFunction, TrailL
 use ants_trail::{Run, RunState as Session};
 use anyhow::{Context as _, Result, anyhow, bail};
 
-use super::{Book, Leg, Slot, Step, Trails, engine_limits, locked, steps};
+use super::{Book, HOLDING, Leg, Slot, Step, Trails, engine_limits, locked, steps};
 
 /// How long the daemon waits before trying the runs left unrestored again, at first and at most.
 const RESTORE_FIRST: Duration = Duration::from_secs(2);
@@ -84,6 +84,7 @@ impl Trails {
             broke: None,
             late: false,
             starved: false,
+            crashes: 0,
         };
         Ok(Slot::new(engine, book))
     }
@@ -113,6 +114,7 @@ impl Trails {
             broke: None,
             late: false,
             starved: false,
+            crashes: 0,
         };
         Ok(Slot::new(engine, book))
     }
@@ -207,8 +209,24 @@ impl Trails {
         }
     }
 
-    /// Continue run `run` from its records, listed in the index; a run with no header leaves the index.
+    /// Continue run `run` from its records, listed in the index; a run with no header leaves the index. Taken one at a
+    /// time with the run's stops and resumes; within one of another run, a run being stopped or resumed meanwhile is
+    /// left unrestored rather than waited for, as that may wait on this one.
     pub(super) async fn restore_run(&self, run: &RunId) -> Result<()> {
+        let wait = HOLDING.try_with(Vec::is_empty).unwrap_or(true);
+        match self.holding(run, wait, Box::pin(self.restore_held(run))).await {
+            Some(restored) => restored,
+            None => {
+                if let Unrestored::Runs(runs) = &mut *locked(&self.inner.unrestored) {
+                    runs.insert(run.clone());
+                }
+                tracing::info!(run = %run, "a trail run stopped or resumed meanwhile left unrestored");
+                Ok(())
+            }
+        }
+    }
+
+    async fn restore_held(&self, run: &RunId) -> Result<()> {
         if locked(&self.inner.runs).contains_key(run) {
             self.mark_restored(run);
             return Ok(());

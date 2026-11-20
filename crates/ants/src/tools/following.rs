@@ -1,12 +1,12 @@
 //! Following the tool requests ([`follow`]): the pending ones, then each new one and how each reported one ends, as
 //! `ants tools list --follow` and `ants inbox --follow` show them ([`render`]).
 
+use ants_daemon::bus::relayed::{self, Heard, Read};
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use ants_proto::{ApprovalDecision, ApprovalRequest, Envelope, STREAM, UserId, Uuid, subject};
 use anyhow::{Context as _, Result};
-use async_nats::Subscriber;
 use async_nats::jetstream;
 use async_nats::jetstream::stream::{LastRawMessageErrorKind, Stream};
 use chrono::{DateTime, TimeDelta, Utc};
@@ -75,8 +75,10 @@ pub async fn follow(
     // A request heard live is stored after this.
     let stored = stream.cached_info().state.last_sequence;
     // Subscribe before listing, so a request or decision published in between is not missed.
-    let mut asked = client.subscribe(subject::ALL_APPROVAL_REQUESTS).await.context("following tool requests")?;
-    let mut decided = client.subscribe(subject::ALL_APPROVAL_DECISIONS).await.context("following decisions")?;
+    let mut asked =
+        relayed::subscribe(client, subject::ALL_APPROVAL_REQUESTS).await.context("following tool requests")?;
+    let mut decided =
+        relayed::subscribe(client, subject::ALL_APPROVAL_DECISIONS).await.context("following decisions")?;
     let fresh = Box::pin(pending_at(js, &stream, Utc::now()))
         .await?
         .into_iter()
@@ -132,7 +134,7 @@ struct Watch<'a> {
     /// The stream's last sequence when following started: a request heard live is stored after it.
     stored: u64,
     /// The inboxes of the ants with a request reported, where their chains' and assistants' decisions come.
-    inboxes: SelectAll<Subscriber>,
+    inboxes: SelectAll<Heard>,
     /// The ants whose inbox is followed.
     heard: HashSet<UserId>,
     /// The requests reported, by ant and id.
@@ -152,7 +154,8 @@ impl Watch<'_> {
             }
             if self.heard.insert(request.ant.clone()) {
                 let inbox = subject::inbox_of(&request.ant);
-                self.inboxes.push(self.client.subscribe(inbox).await.context("following decisions of chain ants")?);
+                self.inboxes
+                    .push(relayed::subscribe(self.client, inbox).await.context("following decisions of chain ants")?);
             }
             report(&Update::Pending(request.clone()))?;
             let recheck = (!held.is_empty()).then(|| Utc::now() + HELD_RECHECK);
@@ -258,7 +261,8 @@ async fn seq_of(stream: &Stream, request: &ApprovalRequest, mut from: u64) -> Re
             Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => return Ok(None),
             Err(e) => return Err(e).with_context(|| format!("reading request {}", qualified(request))),
         };
-        if serde_json::from_slice::<ApprovalRequest>(&msg.payload).is_ok_and(|r| r.id == request.id) {
+        let relayed = relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::Consumer);
+        if !relayed && serde_json::from_slice::<ApprovalRequest>(&msg.payload).is_ok_and(|r| r.id == request.id) {
             return Ok(Some(msg.sequence));
         }
         from = msg.sequence + 1;

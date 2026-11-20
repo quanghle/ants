@@ -310,7 +310,8 @@ mod tests {
         let entries = tips.iter().flat_map(|(tip, helpful)| {
             let votes = (0..*helpful).map(|n| {
                 let voter = format!("voter-{n}").parse().unwrap();
-                let vote = TipVote { voter, verdict: TipVerdict::Helpful, reason: None, script: None, at: day(0) };
+                let (verdict, text) = (TipVerdict::Helpful, tip.text_sha256());
+                let vote = TipVote { voter, verdict, reason: None, text, script: None, at: day(0) };
                 (tip.vote_key(&vote.voter), serde_json::to_vec(&vote).unwrap())
             });
             std::iter::once((tip.key(), serde_json::to_vec(tip).unwrap())).chain(votes).collect::<Vec<_>>()

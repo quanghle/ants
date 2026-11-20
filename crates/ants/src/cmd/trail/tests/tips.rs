@@ -46,15 +46,25 @@ fn tip(writer: &str, id: &str, key: Option<&str>, text: &str, days: i64, script:
 }
 
 fn vote(voter: &str, verdict: TipVerdict, days: i64) -> TipVote {
-    TipVote { voter: p(voter), verdict, reason: None, script: None, at: now() - TimeDelta::days(days) }
+    TipVote {
+        voter: p(voter),
+        verdict,
+        reason: None,
+        text: String::new(),
+        script: None,
+        at: now() - TimeDelta::days(days),
+    }
 }
 
-/// The entries of `tips`, their retirements and their `votes` under their keys, as a trail's whole board reads them.
+/// The entries of `tips`, their retirements and their `votes` under their keys, each vote judging its tip's text, as a
+/// trail's whole board reads them.
 fn entries(tips: &[&TrailTip], votes: &[(&TrailTip, TipVote)]) -> Vec<(String, Vec<u8>)> {
     let retired =
         tips.iter().filter_map(|tip| Some((tip.retired_key(), serde_json::to_vec(tip.retired.as_ref()?).unwrap())));
     let tips = tips.iter().map(|tip| (tip.key(), serde_json::to_vec(tip).unwrap()));
-    let votes = votes.iter().map(|(tip, vote)| (tip.vote_key(&vote.voter), serde_json::to_vec(vote).unwrap()));
+    let votes = votes.iter().map(|(tip, vote)| {
+        (tip.vote_key(&vote.voter), serde_json::to_vec(&TipVote { text: tip.text_sha256(), ..vote.clone() }).unwrap())
+    });
     tips.chain(retired).chain(votes).collect()
 }
 
@@ -137,7 +147,7 @@ async fn put_tip(js: &jetstream::Context, tip: &TrailTip) {
 }
 
 async fn put_vote(js: &jetstream::Context, tip: &TrailTip, vote: &TipVote) {
-    let payload = serde_json::to_vec(vote).unwrap();
+    let payload = serde_json::to_vec(&TipVote { text: tip.text_sha256(), ..vote.clone() }).unwrap();
     let subject = format!("$KV.{TRAIL_TIPS_BUCKET}.{}", tip.vote_key(&vote.voter));
     js.publish(subject, payload.into()).await.unwrap().await.unwrap();
 }

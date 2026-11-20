@@ -1,6 +1,7 @@
 //! The channel tools: `post_channel` starts a channel thread the ant creates, whose escalations go up the ant's
 //! chain, and `manage_channel` asks the channel manager to change a channel the ant owns (see [`crate::chanadm`]).
 
+use crate::bus::relayed::GuardedKv as _;
 use std::sync::Arc;
 
 use ants_proto::{
@@ -41,7 +42,7 @@ pub fn jetstream_channels(js: async_nats::jetstream::Context, domain: Option<JsD
             let js = reader.clone();
             Box::pin(async move {
                 let kv = js.get_key_value(CHANNELS_BUCKET).await.context("opening the channels")?;
-                let Some(value) = kv.get(channel.as_str()).await.context("reading the channel")? else {
+                let Some(value) = kv.guarded_get(channel.as_str()).await.context("reading the channel")? else {
                     return Ok(None);
                 };
                 let entry: ChannelEntry = serde_json::from_slice(&value).context("reading the channel")?;

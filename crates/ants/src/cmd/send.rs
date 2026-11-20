@@ -1,6 +1,7 @@
 //! `ants ask`, `ants post`, `ants notes`, `ants react` and `ants answer`: what the CLI's human sends.
 
 use ants_daemon::bus;
+use ants_daemon::bus::relayed;
 use ants_daemon::records::{owners, reactions};
 use ants_daemon::stream::reading::Reading;
 use ants_daemon::stream::{notes, questions};
@@ -327,8 +328,7 @@ pub(crate) async fn ask(nats: &Nats<'_>, args: AskArgs) -> Result<()> {
     let (to_human, unserved) = warn_unserved(&js, &nats.me, &envelope.to, to_human, replies).await;
     let changes = followed_reactions(nats, &js, replies).await;
     let status = if (replies.wait || replies.follow) && !to_human && progress::wanted(nats.me.role.is_human()) {
-        client
-            .subscribe(subject::status(&envelope.to, &envelope.thread_id))
+        relayed::subscribe(&client, subject::status(&envelope.to, &envelope.thread_id))
             .await
             .inspect_err(|e| tracing::debug!("showing no progress: {e}"))
             .ok()
@@ -538,14 +538,13 @@ pub(crate) async fn post(nats: &Nats<'_>, args: PostArgs) -> Result<()> {
     let post = &posting.post;
     // Subscribe first so a fast reply is not missed.
     let room = if replies.wait || replies.follow {
-        Some(client.subscribe(subject::chan_room(&post.channel)).await?)
+        Some(relayed::subscribe(&client, subject::chan_room(&post.channel)).await?)
     } else {
         None
     };
     let changes = followed_reactions(nats, &js, replies).await;
     let status = if room.is_some() && progress::wanted(nats.me.role.is_human()) {
-        client
-            .subscribe(subject::status_on(&post.thread_id))
+        relayed::subscribe(&client, subject::status_on(&post.thread_id))
             .await
             .inspect_err(|e| tracing::debug!("showing no progress: {e}"))
             .ok()

@@ -7,6 +7,7 @@
 //! The messages come from what the live feed read ([`Delegations`]); the links and the spend are read every while the
 //! tree shows ([`Io`]).
 
+use ants_daemon::bus::relayed;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -668,7 +669,7 @@ impl Io {
 /// Ask the daemons of `ant` to cancel its prompt on `thread`: whether one did, None when none answered.
 async fn cancel(client: &async_nats::Client, me: &UserId, ant: &UserId, thread: &ThreadId) -> Result<Option<bool>> {
     let request = CancelRequest::new(ant.clone(), thread.clone(), me.clone());
-    let answers = client.subscribe(request.reply_subject()).await?;
+    let answers = relayed::subscribe(client, request.reply_subject()).await?;
     client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
     client.flush().await?;
     Ok(cancel_outcome(&request, answers, CANCEL_WAIT, CANCEL_GRACE).await)

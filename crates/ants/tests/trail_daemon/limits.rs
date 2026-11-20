@@ -47,6 +47,25 @@ async fn a_run_past_its_compute_limit_fails_naming_it_and_a_resume_computes_agai
 }
 
 #[tokio::test]
+async fn a_run_past_its_compute_limit_resumes_under_a_raised_one_to_its_end() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let run = lead.start(COUNTING, TrailLimits { compute_ms: 100, ..TrailLimits::default() }).await;
+    let a = lead.step().await;
+    assert!(lead.reply(&a, COUNT).await);
+    let (error, limit) = failed(&lead, &run).await;
+    assert_eq!(limit, Some(RunLimit::Compute), "{error}");
+
+    // The raised limit reaches the restored session, dumped under the one the run started with.
+    lead.trails.resume(&run, &UserId::human(), Some(TrailLimits::default())).await.unwrap();
+    let b = lead.step().await;
+    assert_eq!(b.text, format!("b {COUNT}"));
+    assert!(lead.reply(&b, "B").await);
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("B") });
+}
+
+#[tokio::test]
 async fn a_run_whose_session_outgrows_its_limit_fails_naming_it_and_resumes_under_a_raised_one() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;

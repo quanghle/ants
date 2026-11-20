@@ -92,6 +92,7 @@ async fn timed_after(
     let client = js.client();
     let wait = client.timeout().unwrap_or(Duration::from_secs(10));
     let inbox = client.new_inbox();
+    #[expect(clippy::disallowed_methods, reason = "direct gets' answers, which the stream sends")]
     let mut replies = client.subscribe(inbox.clone()).await?;
     let prefix = format!("$KV.{bucket}.");
     let (mut last, mut seq) = (Entries::new(), from);

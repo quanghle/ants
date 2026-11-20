@@ -126,8 +126,9 @@ or from a finished run of an inline script it conducted, under the same checks, 
 the conductor machine's `~/.ants/trails` has a trail of. It replaces only a trail it saved, and only with `replace`, and
 removes only one it saved, with `remove_trail`; it does neither from an untrusted thread ([Trust](#trust)). Ant
 credentials write no saved trail: with authentication, `ants signer` saves and removes them for ants, checking each is
-the ant's own ([auth.md](auth.md)), so both tools need it running. A saved trail records who saved it, a human or an
-ant, and the run an ant saved it from; a human saving under a taken name replaces the trail, an ant's included, and
+the ant's own and that the run it is saved from is a finished run of that script in the ant's own run records
+([auth.md](auth.md)), so both tools need it running. A saved trail records who saved it, a human or an ant, and the run
+an ant saved it from; a human saving under a taken name replaces the trail, an ant's included, and
 becomes its saver.
 
 Trails also come from dreams ([sense.md](sense.md#dreams)): a sage's finding of kind `trail` tells of a multi-step
@@ -388,7 +389,9 @@ other than `memory`, and with `session` only when the resume request's limits ra
 does; a run's session size is below its maximum only when its start request's limits set it so) ([Restarts, stops and
 resumes](#restarts-stops-and-resumes)): a resume restores the same session and takes the same answers, so under the same
 limits it would fail the same way. The compute limit is no flag's either, but a resume computes again, which fails
-again unless the machine was only busy.
+again unless the machine was only busy or the resume request's limits raise the run's compute (a run's compute is
+below its maximum only when its start request's limits set it so): the restored session computes under the resume's
+limits, not those it was dumped with.
 
 Each `agent()` step reserves up to 8 of the run's turns as its message's turn budget; the turns its reply spent, and
 one per re-ask, count against the run's turns, and a run that cannot reserve one fails on its turn limit. Each step
@@ -487,8 +490,9 @@ Ants handle tips with three MCP tools ([architecture.md](architecture.md#mcp-too
   or `wrong`, with an optional `reason` of up to 300 characters, on the trail of the step being answered or the trail
   `trail` names. A tip is its writer's and id's: when tips of different writers share the id, `writer` names the one
   meant, and without it the vote is refused naming the writers. Each ant counts once per tip: voting again replaces its
-  earlier vote. No ant votes on its own tip, nor
-  from an untrusted thread. A vote cast answering a step of the tip's trail records the SHA-256 of the step's script.
+  earlier vote. No ant votes on its own tip, nor from an untrusted thread. A vote records the SHA-256 of the tip's text
+  it judged and counts only while the tip has that text, so a tip its writer puts again with other text keeps none of
+  its votes. A vote cast answering a step of the tip's trail also records the SHA-256 of the step's script.
 - **`trail_tips(trail?, query?, tip_key?, limit?)`**: searches the tips ([Searching](#searching)).
 
 ### Ranking and retirement
@@ -553,7 +557,8 @@ ants trail tips review --retire k3f7q2ab
 ```
 
 Each ant writes only its own tips and votes, under keys naming it; a human retires a tip under a retirement key no ant
-writes, so a retired tip stays retired whatever its writer puts, and purges a trail's tips when removing the trail
+writes, so a retired tip stays retired whatever its writer puts, and votes count only for the text they judged, so a
+writer that rewrites its tip loses them; a human purges a trail's tips when removing the trail
 ([auth.md](auth.md#wire-acls-and-verification-invariants)). An ant's `remove_trail` purges none.
 
 ## Rating and finding trails
@@ -606,7 +611,7 @@ trail ([auth.md](auth.md#wire-acls-and-verification-invariants)).
 |---|---|---|
 | KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, waypoints, script, who saved it (a human or an ant) and when, and the run an ant saved it from. |
 | KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (its route: each leg's trail or inline script, waypoint, args, first call id, start and steps; owner, origin, limits, state (a failed one's broken `limit`), spending, the grants its steps hold or whose runs told spending, thread, parent run, the step it spends from and its grant, times), `<ant>.<run>.session` the current leg's dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`, call ids numbered on across legs), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread, label?}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out; a `trail()` step, whose thread is its child run's, keeps the latter alone. An ant answering a step keeps `<ant>.answering.<thread>`, the runs it started answering the step on that thread. |
-| KV `ants_trail_tips` | never expires | The [tips](#tips) left on saved trails and their votes, each under the trail and the ant that wrote it: `<trail>.<writer>.<id>` a tip (trail, id, writer, text, tip key, run, script's SHA-256, time written, and who retired it and when), `<trail>.<voter>.<writer>.<id>` a vote on it (voter, verdict, reason, the SHA-256 of the script voted on, time). |
+| KV `ants_trail_tips` | never expires | The [tips](#tips) left on saved trails and their votes, each under the trail and the ant that wrote it: `<trail>.<writer>.<id>` a tip (trail, id, writer, text, tip key, run, script's SHA-256, time written, and who retired it and when), `<trail>.<voter>.<writer>.<id>` a vote on it (voter, verdict, reason, the SHA-256 of the tip's text it judged, the SHA-256 of the script voted on, time). |
 | KV `ants_trail_ratings` | never expires | The [ratings](#rating-and-finding-trails) conductors gave saved trails, `<trail>.<conductor>.<run>` one per run and trail: trail, conductor, run, outcome, task, reason, the SHA-256 of the script rated, time. |
 
 `ants init` creates the four buckets, and `ants doctor` checks them. Each bucket keeps every message of a key, not
@@ -658,7 +663,8 @@ the longest wall time, so a finished run stays at least 30 days. The full layout
   maxima. The steps sent anew count no step again, a resume tried again after its records were stored in part
   included. A run done, failed otherwise, running or waiting is refused. A run's stops and resumes are taken one at a
   time, however asked: a second resume asked beside one is refused as the run is no longer stopped, and a stop asked
-  while a resume is under way stops the resumed run. An admin's `ants ant resume-trail ANT RUN`
+  while a resume is under way stops the resumed run. A run continued from its records, by a firing delivered again or
+  after a restart, is continued one at a time with these too, so a resume beside it resumes it once. An admin's `ants ant resume-trail ANT RUN`
   resumes it by admin order the same way, limit flags included.
 
 ```sh
@@ -683,7 +689,8 @@ workers = 4
 ```
 
 A worker that cannot start, crashes, or whose exit status or output cannot be read is tried again, the run unchanged,
-after 1 s and up to 1 min apart. A worker past its compute or memory limit, one writing a response larger than its request
+after 1 s and up to 1 min apart; a run whose workers crash 3 times in a row, as a stack overflow's abort brings again,
+fails, its owner told. A worker past its compute or memory limit, one writing a response larger than its request
 takes, or one that exits normally with a response the daemon cannot read, fails the run, as the same request would bring the same again.
 
 `ants doctor` starts the worker of the daemon service's `ants`, else its own, as a daemon does, with a request it

@@ -1,3 +1,4 @@
+use ants_proto::MAX_STEP_LABEL;
 use serde_json::{Value, json};
 
 use super::{CALL_BYTES, MAX_ERROR, MAX_NOTE, MAX_RESULT, NOTE_BYTES, serve};
@@ -95,6 +96,18 @@ fn call_ids_do_not_depend_on_how_answers_are_batched() {
 }
 
 #[test]
+fn an_agent_call_s_label_is_one_line_without_control_characters() {
+    let script = "await parallel(agent('x', label='fix\\nstate: done\\x1b[8m'), agent('y', label='\\x07 \\n'))\n";
+    let made = calls(&start(script, Limits::default()));
+    assert_eq!(made[0].args, json!({"prompt": "x", "label": "fix state: done[8m"}));
+    assert_eq!(made[1].args, json!({"prompt": "y"}));
+    let long = format!("await agent('x', label='{}')\n", "x".repeat(MAX_STEP_LABEL + 1));
+    let label = calls(&start(&long, Limits::default()))[0].args["label"].as_str().unwrap().to_owned();
+    assert_eq!(label.chars().count(), MAX_STEP_LABEL + 1);
+    assert!(label.ends_with('…'));
+}
+
+#[test]
 fn phase_log_and_print_are_events_in_order() {
     let script = "phase('scan')\nprint('a', 1)\nlog('b')\nprint('partial', end='')\n'end'\n";
     let Response::Done { result, events, .. } = start(script, Limits::default()) else { panic!() };
@@ -166,6 +179,24 @@ fn a_timeout_or_memory_error_of_the_script_breaks_no_limit() {
     let (error, limit) = failed(start("x = 'a' * (8 * 1024 * 1024)\n", limits));
     assert!(error.contains("MemoryError"), "{error}");
     assert_eq!(limit, Some(Limit::Memory));
+}
+
+#[test]
+fn a_resume_computes_and_allocates_under_its_own_limits_not_those_of_the_dumped_session() {
+    let script = "n = await agent('x')\nwhile n > 0:\n    n -= 1\nbig = 'a' * (8 * 1024 * 1024)\nlen(big)\n";
+    let tight = Limits { compute_ms: 100, memory_bytes: 1024 * 1024, ..Limits::default() };
+    let loose = Limits { compute_ms: Limits::MAX_COMPUTE_MS, ..Limits::default() };
+    for started_under in [tight, loose] {
+        let started = start(script, started_under);
+        let call = calls(&started)[0].call;
+        let answer = [(call, Answer::Ok(json!(3_000_000)))];
+        let (error, limit) = failed(resume_with(&started, &answer, tight, 1));
+        assert_eq!(limit, Some(Limit::Compute), "{error}");
+        let (error, limit) =
+            failed(resume_with(&started, &answer, Limits { compute_ms: loose.compute_ms, ..tight }, 1));
+        assert_eq!(limit, Some(Limit::Memory), "{error}");
+        assert_eq!(result(resume_with(&started, &answer, loose, 1)), 8 * 1024 * 1024);
+    }
 }
 
 #[test]

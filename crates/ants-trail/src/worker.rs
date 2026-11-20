@@ -1,9 +1,11 @@
 //! The `ants subprocess` worker: serves one [`Request`] from stdin with one [`Response`] on stdout, then exits.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::time::Instant;
 
+use ants_proto::{MAX_STEP_LABEL, one_line};
 use monty::{FunctionCall, OsCall, RunProgress};
 use monty_types::{
     DateTimeSource, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, OsFunctionCall,
@@ -163,14 +165,7 @@ fn start(script: &str, args: &serde_json::Value, limits: Limits, clock: i64, see
         Ok(run) => run.with_os_policy(policy(clock, seed)),
         Err(e) => return session.failed(e),
     };
-    // A feed, as Monty counts it, is one resume: the host calls answered at once (log(), os.urandom(), a name
-    // lookup) start a new turn of it, not a new feed.
-    let tracker = ResourceTracker::new(ResourceLimits {
-        max_feed_duration: Some(limits.compute()),
-        max_memory: Some(limits.memory_bytes),
-        max_recursion_depth: limits.recursion,
-        ..ResourceLimits::default()
-    });
+    let tracker = ResourceTracker::new(resource_limits(&limits));
     let inputs = vec![
         to_monty(args),
         MontyObject::function("__ants_agent", None),
@@ -187,6 +182,8 @@ fn start(script: &str, args: &serde_json::Value, limits: Limits, clock: i64, see
 
 fn resume(snapshot: &RawValue, answers: Vec<(u32, Answer)>, limits: Limits, seed: u64, steps: u32) -> Response {
     let mut session = Session::new(limits, seed, steps);
+    let limited = with_limits(snapshot, &resource_limits(&limits));
+    let snapshot = limited.as_deref().unwrap_or(snapshot);
     let mut waiting = match serde_json::from_str(snapshot.get()) {
         Ok(RunProgress::ResolveFutures(waiting)) => waiting,
         Ok(_) => return Response::Unrestorable { error: "the snapshot is not a suspended session".to_owned() },
@@ -212,6 +209,35 @@ fn resume(snapshot: &RawValue, answers: Vec<(u32, Answer)>, limits: Limits, seed
         }
     }
     Outcome::Waiting(Box::new(waiting)).respond(session)
+}
+
+/// Monty's limits for a run under `limits`.
+fn resource_limits(limits: &Limits) -> ResourceLimits {
+    // A feed, as Monty counts it, is one resume: the host calls answered at once (log(), os.urandom(), a name
+    // lookup) start a new turn of it, not a new feed.
+    ResourceLimits {
+        max_feed_duration: Some(limits.compute()),
+        max_memory: Some(limits.memory_bytes),
+        max_recursion_depth: limits.recursion,
+        ..ResourceLimits::default()
+    }
+}
+
+/// `snapshot`, a dumped [`RunProgress::ResolveFutures`], with its tracker's limits replaced by `limits`; any other
+/// snapshot as it is, for Monty to refuse.
+///
+/// Monty restores a suspended session's tracker as dumped and lends no mutable one while the session waits, so a
+/// resume's limits go into the dump itself; every other part of it stays as written.
+fn with_limits(snapshot: &RawValue, limits: &ResourceLimits) -> Option<Box<RawValue>> {
+    fn replace(object: &RawValue, path: &[&str], value: Box<RawValue>) -> Option<Box<RawValue>> {
+        let Some((key, rest)) = path.split_first() else { return Some(value) };
+        let mut fields: BTreeMap<String, Box<RawValue>> = serde_json::from_str(object.get()).ok()?;
+        let field = fields.get_mut(*key)?;
+        *field = replace(field, rest, value)?;
+        serde_json::value::to_raw_value(&fields).ok()
+    }
+    let limits = serde_json::value::to_raw_value(limits).ok()?;
+    replace(snapshot, &["ResolveFutures", "heap", "tracker", "limits"], limits)
 }
 
 /// The clock, the timezone and the random seed are fixed by the request, so the same request makes the same calls.
@@ -429,7 +455,7 @@ impl Session {
             }
             Some(function) => match call.args.arg(0).map(from_monty).transpose() {
                 Ok(args) => {
-                    let args = args.unwrap_or_default();
+                    let args = labelled(function, args.unwrap_or_default());
                     match oversized(function, &args).map_or_else(|| self.charge(function, &args), Err) {
                         Err(error) => ExtFunctionResult::Error(MontyException::new(ExcType::RuntimeError, Some(error))),
                         Ok(()) => {
@@ -489,6 +515,22 @@ impl Session {
         let printed: String = print.drain(..end).collect();
         self.events.extend(printed.lines().map(|line| Event::Log(cut(line.to_owned(), MAX_NOTE))));
     }
+}
+
+/// `args` of an agent() call with its label made one line cut to [`MAX_STEP_LABEL`] characters, left out when
+/// nothing is left of it; the arguments of other calls as they are. Cleaned here, a call is the same in a replay as
+/// in the journal that keeps it.
+fn labelled(function: Function, mut args: serde_json::Value) -> serde_json::Value {
+    let Some(fields) = args.as_object_mut().filter(|_| function == Function::Agent) else { return args };
+    if let Some(label) = fields.get("label").and_then(serde_json::Value::as_str) {
+        let label = one_line(label, MAX_STEP_LABEL);
+        if label.is_empty() {
+            fields.remove("label");
+        } else {
+            fields.insert("label".to_owned(), label.into());
+        }
+    }
+    args
 }
 
 /// Why a goto's arguments are refused: a state of more than [`MAX_STATE`] bytes of JSON.

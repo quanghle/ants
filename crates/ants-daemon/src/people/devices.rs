@@ -3,6 +3,7 @@
 //! their key, and the assistants their humans enrolled as devices by their grants in [`HUMANS_BUCKET`]
 //! ([`ants_proto::AssistantGrant::sealing`]), taken only from a grant standing that verifies.
 
+use crate::bus::relayed::GuardedKv as _;
 use std::collections::HashSet;
 use std::fmt;
 
@@ -183,7 +184,7 @@ impl Directory {
             keys.iter().filter_map(|k| k.strip_prefix(REVOKED_DEVICES)?.strip_prefix('.')).collect();
         let theirs = keys.iter().filter(|k| k.split('.').next().is_some_and(&human));
         let gets = theirs.map(|entry| async move {
-            let jwt = kv.get(entry).await.with_context(|| format!("reading {entry} in {DEVICES_BUCKET}"))?;
+            let jwt = kv.guarded_get(entry).await.with_context(|| format!("reading {entry} in {DEVICES_BUCKET}"))?;
             anyhow::Ok((entry, jwt))
         });
         let now = now();
@@ -208,7 +209,8 @@ impl Directory {
     pub async fn device(&self, sender: &UserId, device: &DeviceId) -> Result<Lookup> {
         let Some(kv) = &self.kv else { return Ok(Box::pin(self.enrolled(sender, device)).await) };
         let entry = device_entry_key(sender, device);
-        let Some(jwt) = kv.get(&entry).await.with_context(|| format!("reading {entry} in {DEVICES_BUCKET}"))? else {
+        let Some(jwt) = kv.guarded_get(&entry).await.with_context(|| format!("reading {entry} in {DEVICES_BUCKET}"))?
+        else {
             return Ok(Box::pin(self.enrolled(sender, device)).await);
         };
         let verified = match self.check(&entry, &jwt, now(), |_| false) {
@@ -216,7 +218,7 @@ impl Directory {
             Err(skipped) => return Ok(self.skipped(skipped)),
         };
         let record = revoked_device_key(&verified.user_key);
-        if kv.get(&record).await.with_context(|| format!("reading {record} in {DEVICES_BUCKET}"))?.is_some() {
+        if kv.guarded_get(&record).await.with_context(|| format!("reading {record} in {DEVICES_BUCKET}"))?.is_some() {
             return Ok(self.skipped(revoked_entry(&entry, &verified.user_key)));
         }
         Ok(Lookup::Verified(verified))
@@ -248,8 +250,11 @@ impl Directory {
     /// The grant under `key` in [`HUMANS_BUCKET`], if it verifies; why not is warned of.
     async fn grant(&self, key: &str) -> Option<VerifiedGrant> {
         let kv = self.grants.as_ref()?;
-        let value =
-            kv.get(key).await.inspect_err(|e| tracing::warn!("not reading {key} in {HUMANS_BUCKET}: {e}")).ok()??;
+        let value = kv
+            .guarded_get(key)
+            .await
+            .inspect_err(|e| tracing::warn!("not reading {key} in {HUMANS_BUCKET}: {e}"))
+            .ok()??;
         let verified = serde_json::from_slice::<AssistantGrant>(&value)
             .map_err(|e| e.to_string())
             .and_then(|grant| grant.verify(key, &self.account, chrono::Utc::now()).map_err(|e| e.to_string()));

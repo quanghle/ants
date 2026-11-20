@@ -351,7 +351,7 @@ async fn a_post_waiter_reads_back_what_never_comes_live() {
         client.flush().await.unwrap();
         let stored = bus::store_acked(js, post.subject(), post, &post.id.to_string()).await.unwrap();
         let me = Me { id: post.from.clone(), role: Role::by_default(&post.from), assistant_of: None };
-        let posts = channel::caught_up_posts(room, js, &me, post, stored.as_ref().map(|ack| ack.sequence));
+        let posts = channel::caught_up_posts(room.into(), js, &me, post, stored.as_ref().map(|ack| ack.sequence));
         (stored.is_some(), Box::pin(channel::thread_posts(posts, post, true)))
     };
     let next = async |waiter: &mut (dyn futures::Stream<Item = ChannelPost> + Unpin)| {

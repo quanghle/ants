@@ -94,7 +94,7 @@ impl Permissions {
     /// [`subject::react`]); it sets every thread's title, TL;DR and done state and its own pinned,
     /// archived and snoozed threads, no other human's ([`thread_rights`]), while an ant only reads, one key at a time,
     /// a thread's title and done state and a human's own [`Reminders`](crate::Reminders) entry (its snoozes and reminder notes), and
-    /// hears of every done state set through its own consumer ([`done_reader`]), which it deletes, with its channel
+    /// hears of every thread marked done through its own consumer ([`done_reader`]), which it deletes, with its channel
     /// consumer ([`chan_consumer`]), as its retirement stops it, nothing else of [`THREADS_BUCKET`], and of
     /// [`READ_BUCKET`] and [`NOTIFY_BUCKET`] only a human's inbox [`ReadMarker`] and [`NotifyPrefs`], to stop reminding
     /// a human of an escalation it heeded; it reads every device's encryption key in
@@ -339,10 +339,11 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{}.$KV.{NOTIFY_BUCKET}.*", kv_stream(NOTIFY_BUCKET)),
         ]);
         // Hearing of the threads marked done, to tell its provider: its own durable consumer, its filter pinned to
-        // the done states, which so lists the threads marked done, as the notes it reads list the threads noted.
+        // the markings of threads done, which so lists the threads marked done, as the notes it reads list the threads
+        // noted.
         let (threads, done) = (kv_stream(THREADS_BUCKET), done_reader(user));
         publish.extend([
-            format!("$JS.API.CONSUMER.CREATE.{threads}.{done}.$KV.{THREADS_BUCKET}.done.*"),
+            format!("$JS.API.CONSUMER.CREATE.{threads}.{done}.$KV.{THREADS_BUCKET}.done.*.*"),
             format!("$JS.API.CONSUMER.MSG.NEXT.{threads}.{done}"),
         ]);
         publish.extend(ack_subjects(&threads, &done));

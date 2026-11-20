@@ -72,6 +72,9 @@ async fn any_human_titles_a_thread_and_keeps_its_tldr_but_each_marks_only_its_ow
     let done = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::done_key(&thread));
     raw.publish(done.clone(), "{}".into()).await.unwrap();
     assert!(next_violation(&raw, &mut errors).await.contains(&done), "an ant's done state is denied");
+    let marking = format!("{done}.mark");
+    raw.publish(marking.clone(), "{}".into()).await.unwrap();
+    assert!(next_violation(&raw, &mut errors).await.contains(&marking), "an ant's marking done is denied");
 }
 
 #[tokio::test]
@@ -132,7 +135,9 @@ async fn an_ant_s_daemon_hears_the_threads_marked_done_through_its_own_consumer_
     };
     let marks = reader(ants_proto::done_reader(&dev_a), format!("$KV.{}.>", ants_proto::THREADS_BUCKET));
     assert!(stream.create_consumer(marks).await.is_err(), "an ant's consumer reads no other key");
-    let filter = format!("$KV.{}.done.*", ants_proto::THREADS_BUCKET);
+    let states = reader(ants_proto::done_reader(&dev_a), format!("$KV.{}.done.*", ants_proto::THREADS_BUCKET));
+    assert!(stream.create_consumer(states).await.is_err(), "nor the done states");
+    let filter = format!("$KV.{}.done.*.*", ants_proto::THREADS_BUCKET);
     let not_its_own = reader(ants_proto::done_reader(&dev_b), filter);
     assert!(stream.create_consumer(not_its_own).await.is_err(), "nor is dev-b's dev-a's to use");
 
@@ -142,8 +147,8 @@ async fn an_ant_s_daemon_hears_the_threads_marked_done_through_its_own_consumer_
     meta.change_marks(|m| m.pin(&thread)).await.unwrap();
     meta.set_done(&thread, 4).await.unwrap();
     let message = timeout(Duration::from_secs(5), dones.next()).await.unwrap().unwrap().unwrap();
-    let done = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::done_key(&thread));
-    assert_eq!(message.subject.as_str(), done, "its own hears the done state, not the marks");
+    let done = format!("$KV.{}.{}.", ants_proto::THREADS_BUCKET, ants_proto::done_key(&thread));
+    assert!(message.subject.starts_with(&done), "its own hears the marking done, not the marks: {}", message.subject);
     message.ack().await.unwrap();
 }
 
@@ -190,8 +195,8 @@ async fn an_ant_s_daemon_deletes_its_own_done_and_channel_consumers_on_its_retir
     let mut dones = serve(&d_js, &dev_a).await;
     meta.set_done(&revived, 5).await.unwrap();
     let message = timeout(WAIT, dones.next()).await.unwrap().unwrap().unwrap();
-    let done = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::done_key(&revived));
-    assert_eq!(message.subject.as_str(), done, "only what is marked done once it is served again");
+    let done = format!("$KV.{}.{}.", ants_proto::THREADS_BUCKET, ants_proto::done_key(&revived));
+    assert!(message.subject.starts_with(&done), "only what is marked done once it is served again");
 }
 
 #[tokio::test]

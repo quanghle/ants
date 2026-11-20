@@ -314,7 +314,7 @@ impl Drop for Shown {
 
 /// Show `status` and keep it current with the updates `sub` brings, until the returned [`Shown`] drops. With
 /// `interrupt`, Ctrl-C takes the line off before ending the process as interrupted.
-pub fn start(mut sub: async_nats::Subscriber, mut status: Status, interrupt: bool) -> Shown {
+pub fn start(mut sub: ants_daemon::bus::relayed::Heard, mut status: Status, interrupt: bool) -> Shown {
     show(status.line(width()));
     Shown(tokio::spawn(async move {
         let ctrl_c = async {

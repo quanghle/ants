@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ants_proto::{
-    JsDomain, RunId, RunState, SaveTrailOutcome, SaveTrailRequest, SavedTrail, Saver, TRAILS_BUCKET, TrailChange,
-    TrailName, UserId, script_sha256,
+    JsDomain, RunId, RunState, SaveTrailOutcome, SaveTrailRequest, SavedTrail, Saver, TRAIL_RUNS_BUCKET, TRAILS_BUCKET,
+    TrailChange, TrailName, UserId, script_sha256,
 };
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -85,6 +85,8 @@ pub(super) struct Saved {
     ant: UserId,
     /// The connection asking `ants signer` to save; none to save as it would, on a server without credentials.
     signer: Option<async_nats::Client>,
+    /// The runs of the colony, as `ants signer` reads them to check a run named as a trail's source: with no signer.
+    runs: Option<DirectKv>,
 }
 
 /// The script of a saved trail, as a run takes it.
@@ -125,11 +127,17 @@ impl Saved {
                 None
             }
         };
-        let signer = match through {
-            SaveThrough::Signer => Some(js.client()),
-            SaveThrough::Bucket => None,
+        let (signer, runs) = match through {
+            SaveThrough::Signer => (Some(js.client()), None),
+            SaveThrough::Bucket => match DirectKv::whole(js, js_domain, TRAIL_RUNS_BUCKET).await {
+                Ok(runs) => (None, Some(runs.past_relays())),
+                Err(e) => {
+                    tracing::warn!(error = format!("{e:#}"), "reading no trail runs to check saves from runs by");
+                    (None, None)
+                }
+            },
         };
-        Self { kv, dir, ant, signer }
+        Self { kv, dir, ant, signer, runs }
     }
 
     /// The script of the trail saved as `name`: the colony's, else this machine's when the colony has none of that name
@@ -205,7 +213,7 @@ impl Saved {
             Some(client) => {
                 keeper::request(client, &request).await.map_err(|e| format!("{e:#}"))?.ok_or(NO_KEEPER.to_owned())?
             }
-            None => keeper::answer(self.kv()?, &request).await.map_err(|e| format!("{e:#}"))?,
+            None => keeper::answer(self.kv()?, self.runs.as_ref(), &request).await.map_err(|e| format!("{e:#}"))?,
         };
         match outcome {
             SaveTrailOutcome::Done => Ok(true),

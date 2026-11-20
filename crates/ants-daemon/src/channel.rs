@@ -10,6 +10,7 @@
 //! the members the post is relevant to, which wakes them ([`triage_prompt`]). Who is a human is the daemon's
 //! [`crate::people::humans::Registry`]'s to say.
 
+use crate::bus::relayed::{self, GuardedKv as _};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
@@ -56,18 +57,18 @@ const MAX_LINK_CHECKS: usize = 32;
 pub struct Channels {
     entries: HashMap<ChannelId, ChannelEntry>,
     kv: Option<kv::Store>,
-    updates: Option<kv::Watch>,
+    updates: Option<relayed::Watch>,
 }
 
 impl Channels {
     /// The channels in `kv`, watched for changes. The watch starts first, so no change made while the current entries
     /// are read is missed.
     pub async fn watch(kv: kv::Store) -> Result<Self> {
-        let updates = kv.watch_all().await.context("watching the channels")?;
+        let updates = kv.guarded_watch(">").await.context("watching the channels")?;
         let mut channels = Self { entries: HashMap::new(), kv: Some(kv.clone()), updates: Some(updates) };
         let keys: Vec<String> = kv.keys().await.context("listing the channels")?.try_collect().await?;
         for key in keys {
-            let value = kv.get(&key).await.with_context(|| format!("reading channel {key}"))?;
+            let value = kv.guarded_get(&key).await.with_context(|| format!("reading channel {key}"))?;
             channels.set(&key, value.as_deref());
         }
         Ok(channels)
@@ -81,7 +82,7 @@ impl Channels {
     /// its author was added to the channel does.
     pub async fn refresh(&mut self, channel: &ChannelId) {
         let Some(kv) = &self.kv else { return };
-        match kv.get(channel.as_str()).await {
+        match kv.guarded_get(channel.as_str()).await {
             Ok(value) => self.set(channel.as_str(), value.as_deref()),
             Err(e) => tracing::warn!(%channel, error = %e, "reading the channel"),
         }
@@ -140,7 +141,7 @@ pub enum Stored {
 /// Read the entry of `channel` from the channels bucket `kv`, with its revision.
 pub async fn load(kv: &kv::Store, channel: &ChannelId) -> Result<Stored> {
     let key = channel.as_str();
-    let Some(found) = kv.entry(key).await.with_context(|| format!("reading channel {channel}"))? else {
+    let Some(found) = kv.guarded_entry(key).await.with_context(|| format!("reading channel {channel}"))? else {
         return Ok(Stored::Missing);
     };
     if found.operation != kv::Operation::Put {

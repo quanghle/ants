@@ -6,6 +6,7 @@
 //! human's `ants webhook serve`, answers ([`serve`]) once it found the ant reads the message ([`readable`]); a daemon
 //! on a server without credentials answers its ants itself ([`answer`]).
 
+use crate::bus::relayed;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
@@ -120,7 +121,6 @@ pub async fn load(js: &jetstream::Context, messages: &[Uuid]) -> Result<Reaction
         .create_consumer(consumer::push::OrderedConfig {
             deliver_subject: js.client().new_inbox(),
             filter_subjects,
-            headers_only: true,
             deliver_policy: consumer::DeliverPolicy::LastPerSubject,
             replay_policy: consumer::ReplayPolicy::Instant,
             ..Default::default()
@@ -187,6 +187,9 @@ impl Change {
     /// The change a message of the bucket's stream makes, by its key and `KV-Operation` header; None for a key that
     /// is no reaction.
     fn of(msg: &async_nats::Message) -> Option<Self> {
+        if relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, relayed::Read::Consumer) {
+            return None;
+        }
         let key = msg.subject.strip_prefix(&format!("$KV.{REACTIONS_BUCKET}."))?;
         let (by, message, reaction) = parse_reaction_key(key)?;
         let removed = msg.headers.as_ref().and_then(|h| h.get("KV-Operation")).is_some_and(|op| op.as_str() != "PUT");
@@ -201,7 +204,6 @@ pub async fn watch(js: &jetstream::Context) -> Result<impl Stream<Item = Change>
         .create_consumer(consumer::push::OrderedConfig {
             deliver_subject: js.client().new_inbox(),
             filter_subject: format!("$KV.{REACTIONS_BUCKET}.>"),
-            headers_only: true,
             deliver_policy: consumer::DeliverPolicy::New,
             replay_policy: consumer::ReplayPolicy::Instant,
             ..Default::default()
@@ -314,7 +316,7 @@ pub async fn serve(
     answering: Answering,
 ) -> Result<()> {
     let subscribe = async |subject: &'static str| {
-        client.queue_subscribe(subject, QUEUE.to_owned()).await.context("subscribing to reactions requests")
+        relayed::queue_subscribe(&client, subject, QUEUE.to_owned()).await.context("subscribing to reactions requests")
     };
     let lists = subscribe(subject::ALL_REACTIONS_REQUESTS).await?;
     let requests = match answering {
@@ -382,7 +384,8 @@ pub async fn request_within(
     request: &ReactionsRequest,
     wait: Duration,
 ) -> Result<Option<ReactionsReply>> {
-    let mut replies = client.subscribe(request.reply_subject()).await.context("subscribing to the answers")?;
+    let mut replies =
+        relayed::subscribe(client, request.reply_subject()).await.context("subscribing to the answers")?;
     let payload = serde_json::to_vec(request)?;
     let deadline = tokio::time::Instant::now() + wait;
     while tokio::time::Instant::now() < deadline {

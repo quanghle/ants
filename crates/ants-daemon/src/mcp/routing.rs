@@ -2,6 +2,7 @@
 //! profile only breaking a tie ([`colony::pick`]). A message to an ant no daemon serves now is checked for first
 //! ([`Hub::unserved`]), naming ants to message instead.
 
+use crate::bus::relayed::GuardedKv as _;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,7 +49,8 @@ pub fn jetstream_lookup(js: async_nats::jetstream::Context) -> ColonyLookup {
         let js = js.clone();
         Box::pin(async move {
             let kv = js.get_key_value(COLONY_BUCKET).await.context("opening the colony")?;
-            let Some(value) = kv.get(ant.as_str()).await.with_context(|| format!("reading {ant} in the colony"))?
+            let Some(value) =
+                kv.guarded_get(ant.as_str()).await.with_context(|| format!("reading {ant} in the colony"))?
             else {
                 return Ok(None);
             };

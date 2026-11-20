@@ -195,7 +195,8 @@ struct Inner {
     waiters: Mutex<HashMap<RunId, tokio::sync::oneshot::Sender<TrailRun>>>,
     /// Held while a run answering a step is started or resumed within the step's grant.
     answering: tokio::sync::Mutex<()>,
-    /// The runs being stopped or resumed, one stop or resume of a run at a time ([`Trails::changing`]).
+    /// The runs being stopped, resumed or restored, one stop, resume or restoring of a run at a time
+    /// ([`Trails::changing`]).
     changing: Mutex<HashMap<RunId, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -234,6 +235,8 @@ struct Book {
     late: bool,
     /// Whether a call waits for turns the steps of other runs of its tree hold.
     starved: bool,
+    /// The run's workers that crashed in a row.
+    crashes: u32,
 }
 
 impl Slot {
@@ -500,6 +503,7 @@ impl Trails {
             broke: None,
             late: false,
             starved: false,
+            crashes: 0,
         };
         let slot = Slot::new(engine, book);
         // Listed before its header is stored: a run listed with no header is dropped from the index at the next start.
@@ -534,7 +538,10 @@ impl Trails {
     /// those it sent itself, and its child runs stop too. Returns the steps to other ants they waited on, for `by` to
     /// withdraw. A pass in flight ends first, so none gives up steps of the run the stop does not list meanwhile.
     pub async fn stop(&self, run: &RunId, by: &UserId) -> Result<Vec<WaitingStep>, String> {
-        let _changing = self.changing(run).await;
+        self.holding(run, true, Box::pin(self.stop_held(run, by))).await.expect("waited for")
+    }
+
+    async fn stop_held(&self, run: &RunId, by: &UserId) -> Result<Vec<WaitingStep>, String> {
         let slot = self.running(run).await?;
         // Held to the end; a run's engine is locked before its children's, never after.
         let _engine = slot.engine.lock().await;
@@ -610,7 +617,10 @@ impl Trails {
     /// steps it waited on sent anew and its child runs stopped or failed on a limit resumed. A run started answering a
     /// step resumes within what the step's grant leaves after the other runs answering it.
     pub async fn resume(&self, run: &RunId, by: &UserId, limits: Option<TrailLimits>) -> Result<(), String> {
-        let _changing = self.changing(run).await;
+        self.holding(run, true, Box::pin(self.resume_held(run, by, limits))).await.expect("waited for")
+    }
+
+    async fn resume_held(&self, run: &RunId, by: &UserId, limits: Option<TrailLimits>) -> Result<(), String> {
         let stored = |e: anyhow::Error| format!("reading the run: {e:#}");
         let held = locked(&self.inner.runs).get(run).cloned();
         if let Some(slot) = &held {
@@ -971,11 +981,25 @@ impl Trails {
         });
     }
 
-    /// Wait for the stop or resume of run `run` under way, if any, and hold off any other until the returned guard drops.
-    async fn changing(&self, run: &RunId) -> Changing {
+    /// Run `body` as the one stop, resume or restoring of run `run` under way ([`Trails::changing`]): at once when the
+    /// task runs it within one already, else after waiting for the one under way, if any, or None when `wait` is false
+    /// and one is.
+    async fn holding<T>(&self, run: &RunId, wait: bool, body: impl Future<Output = T>) -> Option<T> {
+        let mut held = HOLDING.try_with(Clone::clone).unwrap_or_default();
+        if held.contains(run) {
+            return Some(body.await);
+        }
+        let _changing = self.changing(run, wait).await?;
+        held.push(run.clone());
+        Some(HOLDING.scope(held, body).await)
+    }
+
+    /// Wait for the stop, resume or restoring of run `run` under way, if any, or give up on it when `wait` is false,
+    /// and hold off any other until the returned guard drops.
+    async fn changing(&self, run: &RunId, wait: bool) -> Option<Changing> {
         let lock = locked(&self.inner.changing).entry(run.clone()).or_default().clone();
-        let guard = lock.clone().lock_owned().await;
-        Changing { trails: self.clone(), run: run.clone(), lock, guard: Some(guard) }
+        let guard = if wait { lock.clone().lock_owned().await } else { lock.clone().try_lock_owned().ok()? };
+        Some(Changing { trails: self.clone(), run: run.clone(), lock, guard: Some(guard) })
     }
 
     async fn save_session(&self, slot: &Slot) -> Result<()> {
@@ -1017,7 +1041,12 @@ impl Trails {
     }
 }
 
-/// A stop or resume of a run under way ([`Trails::changing`]).
+tokio::task_local! {
+    /// The runs whose stop, resume or restoring the task runs within ([`Trails::holding`]).
+    static HOLDING: Vec<RunId>;
+}
+
+/// A stop, resume or restoring of a run under way ([`Trails::changing`]).
 struct Changing {
     trails: Trails,
     run: RunId,
@@ -1029,7 +1058,7 @@ impl Drop for Changing {
     fn drop(&mut self) {
         drop(self.guard.take());
         let mut changing = locked(&self.trails.inner.changing);
-        // Held by the map and this alone: no other stop or resume of the run waits.
+        // Held by the map and this alone: no other stop, resume or restoring of the run waits.
         if Arc::strong_count(&self.lock) == 2 {
             changing.remove(&self.run);
         }

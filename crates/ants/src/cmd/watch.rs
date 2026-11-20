@@ -1,5 +1,6 @@
 //! `ants watch`: follow what ants do, as it happens.
 
+use ants_daemon::bus::relayed;
 use ants_daemon::records::reactions;
 use ants_proto::{
     Acting, ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelPost, DeadLetter, DecidedBy,
@@ -38,7 +39,7 @@ pub(crate) async fn run(nats: &Nats<'_>, target: String, thread: Option<thread::
     watched_ant(target, thread.is_some())?;
     let (client, js) = nats.connect("ants-watch").await?;
     let filter = watch_filter(target, thread::resolve(thread, nats, &js).await?.as_ref())?;
-    let mut sub = client.subscribe(filter).await?;
+    let mut sub = relayed::subscribe(&client, filter).await?;
     let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(&js).await);
     let mut printer = Printer { faces: Some(faces), ..Printer::default() };
     let behalf = std::sync::Arc::new(crate::people::behalf::Checker::new(nats, &js));

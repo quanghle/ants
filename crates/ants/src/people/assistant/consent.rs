@@ -5,6 +5,7 @@
 
 use ants_daemon::Allowlist;
 use ants_daemon::admin::held::held_orders;
+use ants_daemon::bus::relayed::GuardedKv as _;
 use ants_proto::{
     ASSISTANT_ORDER_KINDS, Act, ActAnswer, AdminOrder, ApprovalRequest, Confirmations, HUMANS_BUCKET, MACHINES_BUCKET,
     MAX_PRE_ALLOW, ORDER_HOLD, ORDER_RULE, PreAllow, STREAM, UserId, confirmations_key, pre_allow_key, pre_allow_rule,
@@ -295,7 +296,7 @@ async fn store<T: Serialize + DeserializeOwned>(
     mut build: impl FnMut(Option<T>, DateTime<Utc>) -> Result<T>,
 ) -> Result<T> {
     for _ in 0..CONFLICTS {
-        let stored = kv.entry(key).await.with_context(|| format!("reading {what}"))?;
+        let stored = kv.guarded_entry(key).await.with_context(|| format!("reading {what}"))?;
         let (revision, before) = match &stored {
             Some(entry) if entry.operation == kv::Operation::Put => {
                 (Some(entry.revision), serde_json::from_slice::<T>(&entry.value).ok())

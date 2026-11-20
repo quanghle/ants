@@ -359,7 +359,7 @@ pub async fn ensure_colony(js: &jetstream::Context, ttl: Duration) -> Result<kv:
     if let Ok(store) = js.get_key_value(COLONY_BUCKET).await {
         return Ok(store);
     }
-    js.create_key_value(hub::colony_config(ttl))
+    hub::create_colony(js, ttl)
         .await
         .context("creating the colony bucket (with credentials, `ants init` as the human creates it)")
 }
@@ -762,8 +762,9 @@ pub async fn caught_up_inbox(
 }
 
 async fn inbox(client: &async_nats::Client, user: &UserId, read_back: Option<LiveInbox>) -> Result<LiveInbox> {
-    let live = client.subscribe(subject::inbox_of(user)).await?;
+    let live = relayed::subscribe(client, subject::inbox_of(user)).await?;
     let live = live.filter(|msg| std::future::ready(!relayed::heard_relayed(msg)));
+    #[expect(clippy::disallowed_methods, reason = "the stream's republished messages, which as_published tells")]
     let stored = client.subscribe(subject::stored_inbox(user)).await?;
     let user = user.clone();
     let stored = stored.filter_map(move |msg| std::future::ready(as_published(msg, &user)));
@@ -879,7 +880,7 @@ impl Seen {
 /// status the client gets while a leaf node's uplink is down for a confirmation; this does not.
 pub async fn double_ack(client: &async_nats::Client, msg: &jetstream::Message) -> Result<()> {
     let reply = msg.reply.clone().context("acking a message that is not from JetStream")?;
-    client.request(reply, jetstream::AckKind::Ack.into()).await.context("acking")?;
+    relayed::request(client, reply, jetstream::AckKind::Ack.into()).await.context("acking")?;
     Ok(())
 }
 

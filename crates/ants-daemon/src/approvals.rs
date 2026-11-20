@@ -48,6 +48,7 @@
 //! denied act is dropped, and so is every held act of an assistant whose grant is withdrawn ([`Registry::withdrawals`]),
 //! or no longer names it when looked at. Meanwhile the request waits for anyone else's decision, or expires.
 
+use crate::bus::relayed;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::mem::DropGuard;
@@ -99,7 +100,7 @@ enum Offered {
 /// Where a waiting approval request hears of its decision.
 struct Listening {
     /// Humans' decisions, on the request's decision subject.
-    decisions: async_nats::Subscriber,
+    decisions: bus::relayed::Heard,
     /// The ant's live inbox, where the ants of its chain decide: none without a chain, or once it closed.
     inbox: Option<bus::LiveInbox>,
     consents: broadcast::Receiver<UserId>,
@@ -376,7 +377,7 @@ impl NatsApprover {
             .labelled(labels)
             .for_human(Some(human.clone()), self.chain.stand_in.clone());
         // Subscribe first, so a quick answer is not missed.
-        let decisions = self.client.subscribe(request.decision_subject()).await?;
+        let decisions = relayed::subscribe(&self.client, request.decision_subject()).await?;
         let inbox = if self.chain.escalate_to.is_empty() {
             None
         } else {
@@ -579,7 +580,8 @@ impl NatsApprover {
         let stream = self.js.get_stream_no_info(STREAM).await?;
         match stream.direct_get_last_for_subject(request.decision_subject()).await {
             Ok(msg) => {
-                let decision = decided(request, &msg.payload);
+                let relayed = relayed::stored_relayed(Some(&msg.headers), &msg.payload, relayed::Read::DirectGet);
+                let decision = decided(request, &msg.payload).filter(|_| !relayed);
                 if decision.is_none() {
                     tracing::warn!(request = %request.id, "ignoring a stored decision, malformed or for another request");
                 }

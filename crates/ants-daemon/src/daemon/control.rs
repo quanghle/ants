@@ -1,6 +1,7 @@
 //! What humans and admins ask of the running ant besides messages: cancelling its prompt (`ants cancel`), an
 //! assistant's cancel or withdrawal for its human, restarting its harnesses, reading a snapshot of it for a clone and reading or signing in its MCP servers.
 
+use crate::bus::relayed;
 use std::collections::HashMap;
 
 use ants_proto::{Acting, CancelReply, CancelRequest, MessageMark, ThreadId, UserId, subject};
@@ -85,8 +86,8 @@ impl Inbox<'_> {
     /// Answer the humans' cancel requests ([`CancelRequest`]) for as long as the daemon serves, cancelling the prompt
     /// running on the thread each one names, and the assistants' for their humans, which may withdraw a message instead.
     pub(super) async fn hear_cancels(&self) {
-        let subscribe =
-            [subject::cancel_of(self.ant), subject::cancels_by_of(self.ant)].map(|s| self.client.subscribe(s));
+        let subscribe = [subject::cancel_of(self.ant), subject::cancels_by_of(self.ant)]
+            .map(|s| relayed::subscribe(self.client, s));
         let mut requests = match futures::future::try_join_all(subscribe).await {
             Ok(requests) => futures::stream::select_all(requests),
             Err(e) => {
