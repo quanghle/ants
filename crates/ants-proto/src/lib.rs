@@ -47,6 +47,7 @@ mod status;
 pub mod subject;
 #[cfg(test)]
 mod test_support;
+mod text;
 mod threads;
 mod timeline;
 mod trails;
@@ -154,6 +155,7 @@ pub use shared::{
     is_shared_field,
 };
 pub use status::{DecidedBy, MAX_TOOL_PATHS, PlanStep, State, StatusEvent, StatusUpdate, StepStage};
+pub use text::{lines, one_line};
 pub use threads::{
     Archived, Mark, Reminder, Reminders, SNOOZE_MAX, SealedTitle, Snooze, THREAD_UNDONE, ThreadDone, ThreadMarks,
     ThreadSnoozes, ThreadSummary, ThreadTitle,
@@ -165,11 +167,11 @@ pub use timeline::{
 };
 pub use trails::RunLimit;
 pub use trails::{
-    CallAnswer, JournalEntry, MAX_TRAIL_ARGS, MAX_TRAIL_DESCRIPTION, MAX_TRAIL_PHASES, MAX_TRAIL_SCRIPT,
-    MAX_TRAIL_WAYPOINTS, PendingCall, QueuedCall, RunState, SavedTrail, Saver, SpendsFrom, StepBounds, StepGrant,
-    TRAIL_CLOCK_SKEW, TRAIL_RUN_RETENTION, TrailAction, TrailAnswering, TrailFunction, TrailLeg, TrailLimits,
-    TrailOutcome, TrailParent, TrailReply, TrailRequest, TrailRun, TrailRunIndex, TrailSession, TrailSource,
-    TrailSpent, TrailStart, TrailStep, TrailStepThread, WaitingStep, leg_entry,
+    CallAnswer, JournalEntry, MAX_STEP_LABEL, MAX_TRAIL_ARGS, MAX_TRAIL_DESCRIPTION, MAX_TRAIL_PHASES,
+    MAX_TRAIL_SCRIPT, MAX_TRAIL_WAYPOINTS, PendingCall, QueuedCall, RunState, SavedTrail, Saver, SpendsFrom,
+    StepBounds, StepGrant, TRAIL_CLOCK_SKEW, TRAIL_RUN_RETENTION, TrailAction, TrailAnswering, TrailFunction, TrailLeg,
+    TrailLimits, TrailOutcome, TrailParent, TrailReply, TrailRequest, TrailRun, TrailRunIndex, TrailSession,
+    TrailSource, TrailSpent, TrailStart, TrailStep, TrailStepThread, WaitingStep, leg_entry,
 };
 pub use trails::{
     Counts, FIND_TRAILS_LIMIT, Finder, Found, LATEST_RATINGS, MAX_FIND_TRAILS, MAX_RATING_TASK, MAX_RATING_WHY, Query,

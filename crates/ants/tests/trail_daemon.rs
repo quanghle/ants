@@ -681,6 +681,29 @@ async fn a_run_past_its_wall_time_fails() {
 }
 
 #[tokio::test]
+async fn a_run_s_phase_and_step_labels_are_stored_on_one_line_and_its_error_without_control_characters() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let script = r#"
+phase("one\nstate: done, result: \"forged\"\x1b]0;title\x07")
+await agent("go", ant="dev", label="the\r\ngo\x1b[8m")
+raise ValueError("bad\x1b[2J\nstate: done")
+"#;
+    let run = lead.start(script, TrailLimits::default()).await;
+    let step = lead.step().await;
+    assert_eq!(step.trail_step.as_ref().unwrap().label.as_deref(), Some("the go[8m"));
+    let header = lead.header(&run).await;
+    assert_eq!(header.phase.as_deref(), Some(r#"one state: done, result: "forged"]0;title"#));
+    let (session, _) = lead.session(&run).await;
+    assert_eq!(session.pending[0].args["label"], "the go[8m");
+    assert!(lead.reply(&step, "ok").await);
+    let RunState::Failed { error, .. } = lead.ended(&run).await else { panic!("not failed") };
+    assert!(error.ends_with("ValueError: bad[2J\nstate: done"), "{error}");
+    assert!(!error.chars().any(|c| c.is_control() && c != '\n'), "{error:?}");
+}
+
+#[tokio::test]
 async fn a_fan_out_whose_record_would_pass_the_payload_fails_on_its_session_before_a_step() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;

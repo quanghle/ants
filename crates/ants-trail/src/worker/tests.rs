@@ -1,3 +1,4 @@
+use ants_proto::MAX_STEP_LABEL;
 use serde_json::{Value, json};
 
 use super::{CALL_BYTES, MAX_ERROR, MAX_NOTE, MAX_RESULT, NOTE_BYTES, serve};
@@ -92,6 +93,18 @@ fn call_ids_do_not_depend_on_how_answers_are_batched() {
     assert_eq!(separate[0].args, json!({"prompt": "then C", "label": "c", "tips": "then"}));
     let Response::Suspended { pending, .. } = &batched else { unreachable!() };
     assert_eq!(pending.len(), 3);
+}
+
+#[test]
+fn an_agent_call_s_label_is_one_line_without_control_characters() {
+    let script = "await parallel(agent('x', label='fix\\nstate: done\\x1b[8m'), agent('y', label='\\x07 \\n'))\n";
+    let made = calls(&start(script, Limits::default()));
+    assert_eq!(made[0].args, json!({"prompt": "x", "label": "fix state: done[8m"}));
+    assert_eq!(made[1].args, json!({"prompt": "y"}));
+    let long = format!("await agent('x', label='{}')\n", "x".repeat(MAX_STEP_LABEL + 1));
+    let label = calls(&start(&long, Limits::default()))[0].args["label"].as_str().unwrap().to_owned();
+    assert_eq!(label.chars().count(), MAX_STEP_LABEL + 1);
+    assert!(label.ends_with('…'));
 }
 
 #[test]

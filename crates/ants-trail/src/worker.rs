@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::io::{self, Read, Write};
 use std::time::Instant;
 
+use ants_proto::{MAX_STEP_LABEL, one_line};
 use monty::{FunctionCall, OsCall, RunProgress};
 use monty_types::{
     DateTimeSource, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, OsFunctionCall,
@@ -429,7 +430,7 @@ impl Session {
             }
             Some(function) => match call.args.arg(0).map(from_monty).transpose() {
                 Ok(args) => {
-                    let args = args.unwrap_or_default();
+                    let args = labelled(function, args.unwrap_or_default());
                     match oversized(function, &args).map_or_else(|| self.charge(function, &args), Err) {
                         Err(error) => ExtFunctionResult::Error(MontyException::new(ExcType::RuntimeError, Some(error))),
                         Ok(()) => {
@@ -489,6 +490,22 @@ impl Session {
         let printed: String = print.drain(..end).collect();
         self.events.extend(printed.lines().map(|line| Event::Log(cut(line.to_owned(), MAX_NOTE))));
     }
+}
+
+/// `args` of an agent() call with its label made one line cut to [`MAX_STEP_LABEL`] characters, left out when
+/// nothing is left of it; the arguments of other calls as they are. Cleaned here, a call is the same in a replay as
+/// in the journal that keeps it.
+fn labelled(function: Function, mut args: serde_json::Value) -> serde_json::Value {
+    let Some(fields) = args.as_object_mut().filter(|_| function == Function::Agent) else { return args };
+    if let Some(label) = fields.get("label").and_then(serde_json::Value::as_str) {
+        let label = one_line(label, MAX_STEP_LABEL);
+        if label.is_empty() {
+            fields.remove("label");
+        } else {
+            fields.insert("label".to_owned(), label.into());
+        }
+    }
+    args
 }
 
 /// Why a goto's arguments are refused: a state of more than [`MAX_STATE`] bytes of JSON.
