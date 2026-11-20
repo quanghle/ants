@@ -128,7 +128,7 @@ async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
     let sense = Sense::with_stores(stores.clone());
     sense.event(added("id1")).await.unwrap();
     let id = identity::read_id(&home).unwrap().expect("minted");
-    let card = sense.card(&dev_a()).await.unwrap().unwrap();
+    let card = identity::card(&*stores.items(&dev_a()).await.unwrap()).await.unwrap().unwrap();
     assert_eq!((&card.sense, card.identities.as_slice()), (&id, &["id1".to_owned()][..]));
     assert!(home.join(".sense/cache.db").exists());
     let first = stores.items(&dev_a()).await.unwrap();
@@ -157,7 +157,7 @@ async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
     hosting.up(link(&server).await);
     let sense = Sense::with_stores(elsewhere.clone());
     sense.event(added("id2")).await.unwrap();
-    let card = sense.card(&dev_a()).await.unwrap().unwrap();
+    let card = identity::card(&*elsewhere.items(&dev_a()).await.unwrap()).await.unwrap().unwrap();
     assert_eq!((&card.sense, card.identities.as_slice()), (&id, &["id1".to_owned(), "id2".to_owned()][..]));
     assert!(card.returned(), "read back from the log, the cache gone");
     assert_eq!(identity::read_id(&home).unwrap(), Some(id));
@@ -206,7 +206,7 @@ async fn the_identity_record_names_one_sense_identity_for_every_home() {
         }
         let (stores, _hosting) = serving(&dev_a(), &homes[1]).await;
         identified(&stores, &dev_a()).await;
-        let card = Sense::with_stores(stores.clone()).card(&dev_a()).await.unwrap().expect("built from the log");
+        let card = identity::card(&*stores.items(&dev_a()).await.unwrap()).await.unwrap().expect("built from the log");
         assert_eq!((&card.sense, card.identities.as_slice()), (&id, &["id1".to_owned()][..]));
         assert_eq!(identity::read_id(&homes[1]).unwrap(), Some(id.clone()), "the home takes the record's");
     }
@@ -548,7 +548,7 @@ async fn a_renamed_ant_keeps_its_card() {
             sense.event(renamed).await.unwrap();
             std::fs::remove_file(home_b.join(".sense/cache.db")).unwrap();
         }
-        let card = sense.card(&dev_b).await.unwrap().unwrap();
+        let card = identity::card(&*stores.items(&dev_b).await.unwrap()).await.unwrap().unwrap();
         assert_eq!((&card.sense, &card.name, &card.earlier_names[..]), (&id, &dev_b, &[dev_a()][..]));
         assert!(card.moved_at.is_some() && card.identities == ["id1"]);
         assert_eq!(stores.items(&dev_b).await.unwrap().broken().await, None);
@@ -595,7 +595,7 @@ async fn an_export_moves_the_sense_data_to_another_bus() {
     assert!(!Home::new(&home_b).awaits_import(), "the home no longer awaits them");
     assert_eq!(identity::read_id(&home_b).unwrap(), Some(id.clone()));
     assert_eq!(std::fs::read_to_string(Home::new(&home_b).skills().join("review/SKILL.md")).unwrap(), "review well");
-    let card = sense.card(&dev_a()).await.unwrap().unwrap();
+    let card = identity::card(&*stores.items(&dev_a()).await.unwrap()).await.unwrap().unwrap();
     assert_eq!((&card.sense, card.identities.as_slice()), (&id, &["id1".to_owned()][..]));
     let js = bus::connect(&bus_b.url, None, None, &UserId::human(), "test").await.unwrap().1;
     let messages = js.get_stream(SENSE_STREAM).await.unwrap().info().await.unwrap().state.messages;

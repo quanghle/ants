@@ -1,7 +1,11 @@
-//! What an ant has done, counted from its thread records ([`super::record`]) by a query of the cache each time it is
-//! asked: no counter to keep in step, nothing written. The brief's identity shows it.
+//! What an ant has done, counted from the records of its threads of work ([`super::record`], [`work_records`]) by a
+//! query of the cache each time it is asked: no counter to keep in step, nothing written. The brief's identity, the
+//! growth report, a dream's packet and its findings on the identity show it.
 //!
-//! - The threads are the records, one per thread sense saw start; the done ones, those marked done at least once.
+//! - The threads of work are those of the records, one per thread sense saw start, but for the threads of dreams and
+//!   reviews: those a dream names, its own and the review thread its sage answered on, those an ant asking a review
+//!   started and those a review record names, of the ant's reviews of others. The done ones, those marked done at
+//!   least once.
 //! - The active days are the UTC days on which a thread started, started again or was marked done. A record keeps
 //!   only the first start and the last start again and done of its thread, so a thread worked over many days counts
 //!   three of them at most; a session expiring is no activity.
@@ -15,19 +19,20 @@
 //! Counted since a time ([`experience_since`]), as a dream's packet counts it, only the activity since then counts: the
 //! threads started, started again or marked done since, the done ones those marked done since, and the days of that
 //! activity alone.
-//!
-//! Counted over the threads of work alone ([`work`], [`Threads::Work`]), as a dream's findings on the identity count
-//! it, the threads of dreams and reviews are left out: those a dream names, its own and the review thread its sage
-//! answered on, those an ant asking a review started and those a review record names, of the ant's reviews of others.
+
+use std::collections::HashSet;
 
 use ants_proto::UserId;
+use ants_proto::provider::Starter;
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, ToSql, named_params};
 use serde::Serialize;
+use serde_json::Value;
 
-use super::record::KIND;
+use super::record::{self, KIND, Record};
 use crate::cache::CacheError;
 use crate::dream::{DREAM, REVIEW};
+use crate::items::Values;
 use crate::memory::Scope;
 use crate::store::{Items, StoreError};
 
@@ -54,13 +59,13 @@ pub struct Tally {
 }
 
 /// The thread records of the cache's items, their times as Julian days, each with its last activity: those active since
-/// `:since`, an RFC 3339 time or null for all, with only the times since then; with `:work` true, those of work alone
-/// ([`Threads::Work`]), the dreams of kind `:dream` and review records of kind `:review` naming the others.
+/// `:since`, an RFC 3339 time or null for all, with only the times since then; those of work alone ([`work_records`]),
+/// the dreams of kind `:dream` and review records of kind `:review` naming the others.
 const RECORDS: &str = "
 WITH bounds AS (SELECT ifnull(julianday(:since), 0) AS since),
 others AS (
-    SELECT json_extract(item, '$.values.thread') AS thread FROM items WHERE :work AND kind IN (:dream, :review)
-    UNION SELECT json_extract(item, '$.values.review.thread') FROM items WHERE :work AND kind = :dream
+    SELECT json_extract(item, '$.values.thread') AS thread FROM items WHERE kind IN (:dream, :review)
+    UNION SELECT json_extract(item, '$.values.review.thread') FROM items WHERE kind = :dream
 ),
 stored AS (
     SELECT
@@ -71,7 +76,7 @@ stored AS (
         julianday(json_extract(item, '$.values.restarted')) AS restarted,
         julianday(json_extract(item, '$.values.done')) AS done
     FROM items WHERE kind = :kind
-        AND NOT (:work AND ifnull(json_extract(item, '$.values.origin.by.kind') = 'review', 0))
+        AND NOT ifnull(json_extract(item, '$.values.origin.by.kind') = 'review', 0)
         AND json_extract(item, '$.values.thread') NOT IN (SELECT thread FROM others WHERE thread IS NOT NULL)
 ),
 records AS (
@@ -108,40 +113,21 @@ const PEOPLE: &str =
 
 const REPOS: &str = "'repo:' || repo";
 
-/// Which of the ant's threads an experience counts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Threads {
-    All,
-    /// Those of work alone, not of dreams and reviews ([`work`]).
-    Work,
-}
-
 /// The experience of `ant` in `items`, with the `top` people and repositories it worked with most; none before any
-/// record of its threads.
+/// record of its threads of work.
 pub async fn experience(items: &dyn Items, ant: &UserId, top: usize) -> Result<Option<Experience>, StoreError> {
-    counted(items, ant, None, top, Threads::All).await
+    counted(items, ant, None, top).await
 }
 
 /// The experience of `ant` in `items` since `since`, counting only the activity since then ([`experience`]); none when
-/// no thread was active since.
+/// no thread of work was active since.
 pub async fn experience_since(
     items: &dyn Items,
     ant: &UserId,
     since: DateTime<Utc>,
     top: usize,
 ) -> Result<Option<Experience>, StoreError> {
-    counted(items, ant, Some(since), top, Threads::All).await
-}
-
-/// The experience of `ant` in `items` in its threads of work alone, since `since` if given: not those of its dreams,
-/// nor of reviews asked of it as a sage ([`experience`]).
-pub async fn work(
-    items: &dyn Items,
-    ant: &UserId,
-    since: Option<DateTime<Utc>>,
-    top: usize,
-) -> Result<Option<Experience>, StoreError> {
-    counted(items, ant, since, top, Threads::Work).await
+    counted(items, ant, Some(since), top).await
 }
 
 async fn counted(
@@ -149,25 +135,38 @@ async fn counted(
     ant: &UserId,
     since: Option<DateTime<Utc>>,
     top: usize,
-    threads: Threads,
 ) -> Result<Option<Experience>, StoreError> {
     let mut own = items.earlier_names().await;
     own.push(ant.clone());
-    items.experience(&own, since, top, threads).await
+    items.experience(&own, since, top).await
 }
 
-/// The experience counted from the items of `db`, `own` the ant's names, since `since` if given, over `threads`
-/// ([`experience`]).
+/// The records of the ant's threads of work in `items`, the last changed first: not those of its dreams, nor of
+/// reviews, as [`experience`] counts them.
+pub async fn work_records(items: &dyn Items) -> Result<Vec<Record>, StoreError> {
+    let thread = |values: &Values| values.get("thread").and_then(Value::as_str).map(str::to_owned);
+    let mut others = HashSet::new();
+    for item in items.list(DREAM, usize::MAX).await? {
+        others.extend(thread(&item.values));
+        others.extend(item.values.get("review").and_then(Value::as_object).and_then(thread));
+    }
+    others.extend(items.list(REVIEW, usize::MAX).await?.iter().filter_map(|item| thread(&item.values)));
+    let records = record::records(items, usize::MAX).await?.into_iter();
+    let work = |record: &Record| {
+        !matches!(record.origin.by, Starter::Review { .. }) && !others.contains(record.thread.as_str())
+    };
+    Ok(records.filter(work).collect())
+}
+
+/// The experience counted from the items of `db`, `own` the ant's names, since `since` if given ([`experience`]).
 pub(crate) fn count(
     db: &Connection,
     own: &[UserId],
     since: Option<DateTime<Utc>>,
     top: usize,
-    threads: Threads,
 ) -> Result<Option<Experience>, CacheError> {
     let since = since.map(|since| since.to_rfc3339_opts(SecondsFormat::Millis, true));
-    let work = threads == Threads::Work;
-    let base = named_params! {":kind": KIND, ":since": since, ":work": work, ":dream": DREAM, ":review": REVIEW};
+    let base = named_params! {":kind": KIND, ":since": since, ":dream": DREAM, ":review": REVIEW};
     let totals = |row: &rusqlite::Row<'_>| Ok((row.get(0)?, row.get(1)?, row.get(2)?));
     let (threads, done, active_days) = db.query_row(&format!("{RECORDS}{TOTALS}"), base, totals)?;
     if threads == 0 {
@@ -268,9 +267,9 @@ mod tests {
             repos: vec![tally("repo:github.com/o/r", 3, day(4, 10)), tally("repo:github.com/o/s", 2, day(5, 10))],
         };
         assert_eq!(experience(&items, &name("dev-a"), 3).await.unwrap().unwrap(), expected);
-        let first = items.experience(&[name("dev-a")], None, 1, Threads::All).await.unwrap().unwrap();
+        let first = items.experience(&[name("dev-a")], None, 1).await.unwrap().unwrap();
         assert_eq!((first.people, first.repos), (expected.people[..1].to_vec(), expected.repos[..1].to_vec()));
-        let renamed = items.experience(&[name("dev-b"), name("dev-a")], None, 3, Threads::All).await.unwrap().unwrap();
+        let renamed = items.experience(&[name("dev-b"), name("dev-a")], None, 3).await.unwrap().unwrap();
         assert_eq!(renamed.people, expected.people[..2], "dev-b, an earlier name of the ant, is no other");
 
         let done_since = experience_since(&items, &name("dev-a"), day(2, 9), 3).await.unwrap().unwrap();

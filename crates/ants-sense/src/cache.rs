@@ -18,7 +18,7 @@ use crate::home::Home;
 use crate::items::{BODY, Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, TITLE, state_at};
 use crate::log::{Checked, Position};
 use crate::thread::calls::{self, Calls};
-use crate::thread::experience::{self, Experience, Threads};
+use crate::thread::experience::{self, Experience};
 
 /// The schema's version, in `PRAGMA user_version`: a cache of another is built again.
 const SCHEMA_VERSION: i64 = 3;
@@ -265,16 +265,14 @@ impl Cache {
         rows.map(|item| Ok(serde_json::from_str(&item?)?)).collect()
     }
 
-    /// The experience of the ant whose names are `own`, since `since` if given, over `threads`
-    /// ([`crate::thread::experience`]).
+    /// The experience of the ant whose names are `own`, since `since` if given ([`crate::thread::experience`]).
     pub fn experience(
         &self,
         own: &[UserId],
         since: Option<DateTime<Utc>>,
         top: usize,
-        threads: Threads,
     ) -> Result<Option<Experience>, CacheError> {
-        experience::count(&self.db, own, since, top, threads)
+        experience::count(&self.db, own, since, top)
     }
 
     /// The tally of the reviews the items record, with the `top` kinds and ants ([`crate::dream::review_tally`]).

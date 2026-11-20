@@ -362,17 +362,18 @@ impl Stores for One {
 
 #[tokio::test]
 async fn sense_writes_the_card_from_events_and_briefs_and_acks_what_it_does_not_keep() {
-    let sense = Sense::with_stores(Arc::new(One(fresh().await)));
+    let items = fresh().await;
+    let sense = Sense::with_stores(Arc::new(One(items.clone())));
     sense.event(event("dev-a", "id1", "10:00:00", EventKind::AntAdded)).await.unwrap();
     let context = context("id1", "copilot", None, "studio");
     let request = BriefRequest { context: context.clone(), budget: 100, reason: BriefReason::Started };
     let brief = sense.brief(request).await.unwrap().text;
     assert!(brief.starts_with("## Identity\ndev-a") && brief.len() <= 100, "{brief}");
-    let card = sense.card(&dev_a()).await.unwrap().unwrap();
+    let card = super::card(&*items).await.unwrap().unwrap();
     assert_eq!((card.born, &card.harnesses[..]), (at("10:00:00"), &["copilot".to_owned()][..]));
 
     sense.event(event("dev-a", "id1", "11:00:00", EventKind::ThreadDone)).await.unwrap();
-    assert_eq!(sense.card(&dev_a()).await.unwrap(), Some(card));
+    assert_eq!(super::card(&*items).await.unwrap(), Some(card));
     sense.event(event("dev-b", "id9", "11:00:00", EventKind::AntRetired)).await.unwrap();
     let elsewhere = CallContext { ant: "dev-b".parse().unwrap(), ..context };
     let request = BriefRequest { context: elsewhere, budget: 100, reason: BriefReason::Started };

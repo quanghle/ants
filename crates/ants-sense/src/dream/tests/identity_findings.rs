@@ -92,7 +92,9 @@ async fn the_threads_of_dreams_and_reviews_count_toward_no_identity_finding() {
     let told = review_request(1);
     assert!(review_received(&*items, &user("dev-c"), &on(32).thread, &told, now).await.unwrap());
     started(&*items, 32..33, &Starter::Ant { user: user("dev-c") }, repo, now).await;
-    assert_eq!(experience::experience(&*items, &user("dev-a"), 3).await.unwrap().unwrap().threads, 10);
+    assert_eq!(crate::thread::record::records(&*items, usize::MAX).await.unwrap().len(), 10);
+    assert_eq!(experience::experience(&*items, &user("dev-a"), 3).await.unwrap().unwrap().threads, 4);
+    assert_eq!(experience::work_records(&*items).await.unwrap().len(), 4);
     assert!(found(&*items, "").await.is_empty(), "4 threads of work, the sage started none of them");
 
     started(&*items, 24..25, &webhook(), repo, now).await;
