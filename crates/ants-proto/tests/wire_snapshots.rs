@@ -1533,6 +1533,7 @@ fn trails() {
             voter: user("dev-b"),
             verdict: TipVerdict::Stale,
             reason: Some("the smoke tests now run the migrations".to_owned()),
+            text: script_sha256("Run the migrations before the smoke tests."),
             script: Some(script_sha256("agent('dev-a', 'build it')")),
             at: at(5),
         },

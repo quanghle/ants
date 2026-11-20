@@ -205,7 +205,8 @@ impl Hub {
             return Err(format!("tip {id} is not live ({}); only live tips take votes", ranked.status));
         }
         let script = step.filter(|step| step.trail.as_ref() == Some(&trail)).and_then(|step| step.script.clone());
-        let vote = TipVote { voter: self.ant.clone(), verdict, reason: reason.map(str::to_owned), script, at: now };
+        let (voter, reason, text) = (self.ant.clone(), reason.map(str::to_owned), ranked.tip.text_sha256());
+        let vote = TipVote { voter, verdict, reason, text, script, at: now };
         vote.check().map_err(|e| e.to_string())?;
         tips.vote(ranked.tip, &vote).await.map_err(|e| format!("{e:#}"))?;
         tracing::info!(%thread, %trail, tip = %id, %verdict, "trail tip voted on from a tool call");
