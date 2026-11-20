@@ -65,14 +65,11 @@ pub fn account_of(creds: Option<&Path>) -> Result<Option<String>> {
     Ok(Some(iss.to_owned()))
 }
 
-/// The devices bucket, created when missing.
+/// The devices bucket, created as `ants init` does when missing.
 async fn ensure(js: &jetstream::Context) -> Result<kv::Store> {
-    if let Ok(store) = js.get_key_value(DEVICES_BUCKET).await {
-        return Ok(store);
-    }
-    js.create_key_value(ants_daemon::hub::devices_config())
+    Box::pin(ants_daemon::hub::ensure_bucket(js, ants_daemon::hub::Object::Devices))
         .await
-        .with_context(|| format!("creating the bucket {DEVICES_BUCKET}"))
+        .with_context(|| format!("opening the bucket {DEVICES_BUCKET}"))
 }
 
 /// Put the user JWT of `own` in the directory, creating the bucket when missing, unless it is there already: one
@@ -124,15 +121,19 @@ fn device_revocations(dir: &Path) -> Result<Vec<DeviceRevocation>> {
 
 /// Put in the devices bucket on the hub at `url`, with credentials signed by the account key in `dir`
 /// ([`auth::revoker_creds`]), a record of each revoked key of a human's or an ant's credentials it lacks, so senders
-/// stop sealing for the devices they are for and readers refuse the shared settings they signed. Returns the keys recorded now. Fails if the hub is out of reach: the next `ants auth
-/// push` records them.
+/// stop sealing for the devices they are for and readers refuse the shared settings they signed. Returns the keys
+/// recorded now. Fails if the hub is out of reach, or has no devices bucket, which these credentials cannot create as
+/// `ants init` does: the next `ants auth push` records them.
 pub async fn record_revocations(url: &str, js_domain: Option<&JsDomain>, dir: &Path) -> Result<Vec<String>> {
     let revocations = device_revocations(dir)?;
     if revocations.is_empty() {
         return Ok(Vec::new());
     }
     let js = revoker(url, js_domain, dir).await?;
-    let kv = ensure(&js).await?;
+    let kv = js
+        .get_key_value(DEVICES_BUCKET)
+        .await
+        .with_context(|| format!("opening the bucket {DEVICES_BUCKET} (`ants init` as a human creates it)"))?;
     let mut recorded = Vec::new();
     for revocation in revocations {
         let key = revoked_device_key(&revocation.key);

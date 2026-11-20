@@ -22,12 +22,11 @@ pub const MAX_HOLD: Duration = Duration::from_hours(365 * 24);
 /// How many times a change is tried again when another device changed the holds meanwhile.
 const CONFLICTS: usize = 10;
 
-/// The bucket of the holds, created when missing. Entries never expire: the holds they carry do.
+/// The bucket of the holds, created as `ants init` does when missing. Entries never expire: the holds they carry do.
 pub async fn ensure_bucket(js: &jetstream::Context) -> Result<kv::Store> {
-    if let Ok(store) = js.get_key_value(NOTIFY_BUCKET).await {
-        return Ok(store);
-    }
-    js.create_key_value(ants_daemon::hub::notify_config()).await.context("creating the notify bucket")
+    Box::pin(ants_daemon::hub::ensure_bucket(js, ants_daemon::hub::Object::Notify))
+        .await
+        .context("opening the notify bucket (with credentials, `ants init` as a human creates it)")
 }
 
 /// The holds of `human` and their revision, 0 when there are none.

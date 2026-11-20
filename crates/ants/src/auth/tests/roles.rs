@@ -547,3 +547,47 @@ async fn the_buckets_ants_init_made_open_under_every_role_that_creates_them() {
         assert!(!stream.cached_info().config.allow_rollup, "{bucket} denies rollups");
     }
 }
+
+/// On a hub where `ants init` never ran, a human creating a bucket on first use creates it as `ants init` does: its
+/// rollups denied, and a watched one with room for every daemon's watch. The revoker, which may not deny them, creates
+/// no devices bucket and names `ants init`.
+#[tokio::test]
+async fn buckets_made_on_first_use_are_made_as_ants_init_makes_them() {
+    use ants_daemon::hub::{MAX_CONSUMERS, Object};
+    let Some(server) = Server::start() else { return };
+    let alice = p("alice");
+    let team = server.dir().join("auth");
+    crate::credentials::revoke::revoke(&team, None, &[nkeys::KeyPair::new_user().public_key()]).unwrap();
+    let refused = crate::people::devices::record_revocations(&server.url, None, &team).await.unwrap_err();
+    assert!(format!("{refused:#}").contains("`ants init`"), "{refused:#}");
+
+    let creds = server.creds_as(&alice, Role::Human);
+    let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+    assert!(js.get_stream(Object::Devices.stream_name()).await.is_err(), "the revoker created no bucket");
+    crate::people::quiet::ensure_bucket(&js).await.unwrap();
+    crate::people::humans::ensure(&js).await.unwrap();
+    let own = crate::people::devices::Own::from_creds(Some(&creds)).unwrap().unwrap();
+    crate::people::devices::publish(&js, &own).await.unwrap();
+    crate::webhook::ensure_bucket(&js).await.unwrap();
+    bus::ensure_channels(&js).await.unwrap();
+    bus::ensure_chains(&js).await.unwrap();
+    bus::ensure_links(&js).await.unwrap();
+    bus::init_own_buckets(&js).await.unwrap();
+
+    for object in [
+        Object::Notify,
+        Object::Humans,
+        Object::Devices,
+        Object::Webhooks,
+        Object::Channels,
+        Object::Chains,
+        Object::Links,
+        Object::Sessions,
+        Object::Attempts,
+    ] {
+        let config = js.get_stream(object.stream_name()).await.unwrap().cached_info().config.clone();
+        assert!(!config.allow_rollup, "{object} denies rollups");
+        assert_eq!(config.max_consumers == MAX_CONSUMERS, object.watched(), "{object}: {}", config.max_consumers);
+    }
+    assert_eq!(crate::people::devices::record_revocations(&server.url, None, &team).await.unwrap().len(), 1);
+}

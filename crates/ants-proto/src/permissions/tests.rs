@@ -988,7 +988,7 @@ fn humans_read_every_device_key_put_only_their_own_and_only_the_revoker_records_
             "$KV.ants_identities.*.settings"
         ]
     );
-    assert!(revoker.publish.iter().any(|s| s == "$JS.API.STREAM.CREATE.KV_ants_devices"));
+    assert!(!revoker.publish.iter().any(|s| s.contains("STREAM.CREATE") || s.contains("STREAM.UPDATE")));
     assert!(!revoker.publish.iter().any(|s| s.starts_with("ants.") || s.contains("CONSUMER")));
     assert_eq!(revoker.subscribe, [format!("{ENROLL_INBOX}.>")]);
 }

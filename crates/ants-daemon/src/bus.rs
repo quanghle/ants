@@ -8,8 +8,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, Envelope, FILES_STREAM, JsDomain, LINKS_BUCKET,
-    SESSIONS_BUCKET, STREAM, THREADS_BUCKET, UserId, inbox_prefix, subject,
+    COLONY_BUCKET, Envelope, FILES_STREAM, JsDomain, STREAM, THREADS_BUCKET, UserId, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
@@ -394,18 +393,18 @@ pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
 /// allow it. Read and written without stream info ([`DirectKv`]), which no ant's credentials allow. `js_domain` is the
 /// domain `js` was made for ([`jetstream`]).
 pub async fn ensure_sessions(js: &jetstream::Context, js_domain: Option<&JsDomain>, ant: &UserId) -> Result<DirectKv> {
-    ensure_own(js, js_domain, SESSIONS_BUCKET, ant).await
+    ensure_own(js, js_domain, hub::Object::Sessions, ant).await
 }
 
-/// The KV bucket of attempt markers ([`ATTEMPTS_BUCKET`]), under `ant`'s own keys, as [`ensure_sessions`].
+/// The KV bucket of attempt markers ([`ATTEMPTS_BUCKET`](ants_proto::ATTEMPTS_BUCKET)), under `ant`'s own keys, as [`ensure_sessions`].
 pub async fn ensure_attempts(js: &jetstream::Context, js_domain: Option<&JsDomain>, ant: &UserId) -> Result<DirectKv> {
-    ensure_own(js, js_domain, ATTEMPTS_BUCKET, ant).await
+    ensure_own(js, js_domain, hub::Object::Attempts, ant).await
 }
 
 /// The sessions and attempts buckets, created when missing: `ants init`, with the human's credentials.
 pub async fn init_own_buckets(js: &jetstream::Context) -> Result<()> {
-    for bucket in [SESSIONS_BUCKET, ATTEMPTS_BUCKET] {
-        ensure_kept(js, bucket).await?;
+    for object in [hub::Object::Sessions, hub::Object::Attempts] {
+        ensure_kept(js, object).await?;
     }
     Ok(())
 }
@@ -413,45 +412,35 @@ pub async fn init_own_buckets(js: &jetstream::Context) -> Result<()> {
 async fn ensure_own(
     js: &jetstream::Context,
     js_domain: Option<&JsDomain>,
-    bucket: &str,
+    object: hub::Object,
     ant: &UserId,
 ) -> Result<DirectKv> {
-    let kv = DirectKv::new(js, js_domain, bucket).await?;
+    let kv = DirectKv::new(js, js_domain, object.bucket().unwrap_or_default()).await?;
     match kv.exists(ant).await {
         Ok(true) => {}
-        Ok(false) => _ = create_kept(js, bucket).await?,
+        Ok(false) => create_kept(js, object).await?,
         // Through a leaf node, a direct get of a missing stream goes unanswered rather than finding no responders.
-        Err(unanswered) => _ = create_kept(js, bucket).await.map_err(|e| unanswered.context(format!("{e:#}")))?,
+        Err(unanswered) => create_kept(js, object).await.map_err(|e| unanswered.context(format!("{e:#}")))?,
     }
     Ok(kv)
 }
 
-/// The KV bucket of the channels ([`CHANNELS_BUCKET`]), created when missing and the credentials allow it (the
-/// human's). Entries never expire: a channel lasts until the human removes it.
+/// The KV bucket of the channels ([`CHANNELS_BUCKET`](ants_proto::CHANNELS_BUCKET)), created as `ants init` does when missing and the credentials
+/// allow it (the human's). Entries never expire: a channel lasts until the human removes it.
 pub async fn ensure_channels(js: &jetstream::Context) -> Result<kv::Store> {
-    if let Ok(store) = js.get_key_value(CHANNELS_BUCKET).await {
-        return Ok(store);
-    }
-    js.create_key_value(hub::channels_config())
-        .await
-        .context("creating the channels bucket (with credentials, `ants init` as the human creates it)")
+    ensure_bucket(js, hub::Object::Channels).await
 }
 
-/// The KV bucket of the escalation chains ([`CHAINS_BUCKET`]), created when missing and the credentials allow it (the
-/// human's). Entries never expire: a chain outlives its ant's colony entry.
+/// The KV bucket of the escalation chains ([`CHAINS_BUCKET`](ants_proto::CHAINS_BUCKET)), created as `ants init` does when missing and the
+/// credentials allow it (the human's). Entries never expire: a chain outlives its ant's colony entry.
 pub async fn ensure_chains(js: &jetstream::Context) -> Result<kv::Store> {
-    if let Ok(store) = js.get_key_value(CHAINS_BUCKET).await {
-        return Ok(store);
-    }
-    js.create_key_value(hub::chains_config())
-        .await
-        .context("creating the chains bucket (with credentials, `ants init` as the human creates it)")
+    ensure_bucket(js, hub::Object::Chains).await
 }
 
-/// The KV bucket of the links to channel threads ants passed on ([`LINKS_BUCKET`]), created when missing and the
+/// The KV bucket of the links to channel threads ants passed on ([`LINKS_BUCKET`](ants_proto::LINKS_BUCKET)), created when missing and the
 /// credentials allow it (the human's). Entries expire with the stream's messages.
 pub async fn ensure_links(js: &jetstream::Context) -> Result<kv::Store> {
-    ensure_kept(js, LINKS_BUCKET).await
+    ensure_kept(js, hub::Object::Links).await
 }
 
 /// The bucket of the owners of message threads ([`OWNERS_BUCKET`]), created when missing and the credentials allow it
@@ -466,17 +455,22 @@ pub async fn ensure_owners(js: &jetstream::Context) -> Result<()> {
 }
 
 /// A file-backed bucket whose entries expire with the stream's messages.
-async fn ensure_kept(js: &jetstream::Context, bucket: &str) -> Result<kv::Store> {
-    if let Ok(store) = js.get_key_value(bucket).await {
-        return Ok(store);
-    }
-    create_kept(js, bucket).await
+async fn ensure_kept(js: &jetstream::Context, object: hub::Object) -> Result<kv::Store> {
+    ensure_bucket(js, object).await
 }
 
-async fn create_kept(js: &jetstream::Context, bucket: &str) -> Result<kv::Store> {
-    js.create_key_value(hub::kept_config(bucket)).await.with_context(|| {
-        format!("creating the {bucket} bucket (with credentials, `ants init` as the human creates it)")
-    })
+/// The KV bucket of `object`, created as `ants init` does when missing: its rollups denied.
+async fn ensure_bucket(js: &jetstream::Context, object: hub::Object) -> Result<kv::Store> {
+    Box::pin(hub::ensure_bucket(js, object))
+        .await
+        .with_context(|| format!("opening {object} (with credentials, `ants init` as the human creates it)"))
+}
+
+/// Create the bucket of `object` as `ants init` does, without its stream info.
+async fn create_kept(js: &jetstream::Context, object: hub::Object) -> Result<()> {
+    Box::pin(hub::ensure_unseen_bucket(js, object))
+        .await
+        .with_context(|| format!("creating {object} (with credentials, `ants init` as the human creates it)"))
 }
 
 /// Messages from the durable consumer of `ant`'s inbox, which is created if missing and updated if its settings
