@@ -1,12 +1,15 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use ants_proto::{
-    ChannelEntry, ChannelId, DEFAULT_TURN_BUDGET, EscalationReason, Hold, Humans, LimitKind, Pick, PromptEnd,
-    QueueRequest, QueuedMessage, Role, State, StatusEvent, StatusUpdate, Uuid, WEBHOOK_ALLOW,
+    Attachment, AttachmentHandle, ChannelEntry, ChannelId, ChannelPost, DEFAULT_TURN_BUDGET, EscalationReason, Hold,
+    Humans, JsDomain, LimitKind, Pick, PromptEnd, QueueRequest, QueuedMessage, Role, State, StatusEvent, StatusUpdate,
+    ThreadId, Uuid, WEBHOOK_ALLOW,
 };
 use ants_test_support::{NatsServer as Server, free_port};
 use async_nats::jetstream::consumer::PullConsumer;
+use futures::stream::StreamExt as _;
 use rmcp::model::CallToolResult;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
@@ -18,8 +21,13 @@ use crate::admin::restart::Restarted;
 use crate::channel;
 use crate::delivery::attempts::Reply;
 use crate::delivery::dead;
+use crate::escalation::{self, Chain};
+use crate::limits::caps::Caps;
+use crate::pause;
+use crate::permission::PermissionPolicy;
 use crate::pool::fake;
 use crate::sync::MutexExt as _;
+use crate::worktrees::Worktrees;
 
 mod admission;
 mod control;
