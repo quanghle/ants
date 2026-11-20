@@ -658,7 +658,8 @@ the longest wall time, so a finished run stays at least 30 days. The full layout
   maxima. The steps sent anew count no step again, a resume tried again after its records were stored in part
   included. A run done, failed otherwise, running or waiting is refused. A run's stops and resumes are taken one at a
   time, however asked: a second resume asked beside one is refused as the run is no longer stopped, and a stop asked
-  while a resume is under way stops the resumed run. An admin's `ants ant resume-trail ANT RUN`
+  while a resume is under way stops the resumed run. A run continued from its records, by a firing delivered again or
+  after a restart, is continued one at a time with these too, so a resume beside it resumes it once. An admin's `ants ant resume-trail ANT RUN`
   resumes it by admin order the same way, limit flags included.
 
 ```sh
