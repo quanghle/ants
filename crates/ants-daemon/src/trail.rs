@@ -1,7 +1,7 @@
 //! Trails, as their conductor runs them: the daemon of the ant a run is started on runs its script, one worker
 //! process per resume ([`ants_trail`]), and turns each call it makes into a step, a message on a thread of its own:
 //! agent() to an ant, the conductor itself included, and human() to the run's owner as a question. The reply resolving
-//! the step's call ([`PendingCall::answered_by`]) is taken here, not prompted to the conductor's harness, and acked
+//! the step's call ([`steps::answered_by`]) is taken here, not prompted to the conductor's harness, and acked
 //! once its journal entry is stored. A run's records ([`store`]) let a restarted daemon continue it ([`load`]).
 //!
 //! This module and its submodules alone name [`ants_trail`] in the daemon.

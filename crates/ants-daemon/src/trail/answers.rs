@@ -31,7 +31,7 @@ impl Trails {
             (book.header.clone(), pending)
         };
         let Some(pending) = pending else { return Ok(false) };
-        if !pending.answered_by(message, answerer) {
+        if !steps::answered_by(&pending, message, answerer) {
             if message.notice.is_none() && message.escalation.is_none() {
                 return Ok(false);
             }

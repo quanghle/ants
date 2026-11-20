@@ -2,12 +2,27 @@
 
 use ants_proto::{
     AgentArgs, CallAnswer, Envelope, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, PendingCall, Ranked, TipBoard, TrailFunction,
-    TrailRun, TrailStep, WEBHOOK_ALLOW, script_sha256,
+    TrailRun, TrailStep, UserId, WEBHOOK_ALLOW, script_sha256,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::schema;
+
+/// Whether `message`, which passed [`Envelope::check_subject`], answers `call`: `answerer` is the step's recipient,
+/// the message is on the step's thread, and it is neither a step, a notice ([`ants_proto::NoticeKind`]), an escalation
+/// nor an invitation to rate a run ([`Envelope::rating_of`]), as the conductor sends itself on the thread of a step to
+/// itself that a run started there reports on. `answerer` is the message's sender, or the human its
+/// [`Envelope::on_behalf_of`] names once the conductor honours the sender as that human's assistant, as for an answer
+/// to ask_human.
+pub(super) fn answered_by(call: &PendingCall, message: &Envelope, answerer: &UserId) -> bool {
+    message.thread_id == call.thread
+        && *answerer == call.to
+        && message.trail_step.is_none()
+        && message.notice.is_none()
+        && message.escalation.is_none()
+        && message.rating_of.is_none()
+}
 
 /// How many times a reply not matching its schema is asked for again before the call raises in the script.
 pub(super) const MAX_RETRIES: u32 = 2;
@@ -209,6 +224,10 @@ mod tests {
 
     use super::*;
 
+    fn p(s: &str) -> UserId {
+        s.parse().unwrap()
+    }
+
     fn day(n: i64) -> DateTime<Utc> {
         "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap() + TimeDelta::days(n)
     }
@@ -363,5 +382,74 @@ mod tests {
         assert!(unkeyed.ends_with("search them with trail_tips."), "{unkeyed}");
         assert_eq!(retry_tips(&board, &step(Some("build"), "old"), day(91)), None, "no live tips");
         assert!(again("bad", &json!({}), None).starts_with("The reply does not match the schema: bad. Reply with"));
+    }
+
+    #[test]
+    fn only_the_recipients_reply_on_the_steps_thread_answers_a_call() {
+        let step = Envelope::new(p("planner"), p("dev-a"), "build it").as_step(TrailStep {
+            run: RunId::generate(),
+            call: 1,
+            label: None,
+            schema: None,
+            trail: None,
+            script: None,
+            tip_key: None,
+            bounds: None,
+        });
+        let call = PendingCall {
+            call: 1,
+            function: TrailFunction::Agent,
+            args: json!(["dev-a", "build it"]),
+            to: p("dev-a"),
+            thread: step.thread_id.clone(),
+            message: step.id,
+            sent_at: step.sent_at,
+            sent: true,
+            turn_budget: step.turn_budget,
+            retries: 0,
+        };
+        let reply = step.reply(p("dev-a"), "built", ants_proto::Role::Ant).unwrap();
+        assert!(answered_by(&call, &reply, &reply.from));
+        let by_another = step.follow_up(p("dev-b"), p("planner"), "built too");
+        let elsewhere = Envelope::new(p("dev-a"), p("planner"), "built");
+        let notice = reply.clone().as_notice(ants_proto::NoticeKind::SignedOut);
+        let forged = reply.as_step(*step.trail_step.unwrap());
+        for other in [by_another, elsewhere, notice, forged] {
+            assert!(!answered_by(&call, &other, &other.from), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_self_step_is_told_from_its_reply() {
+        let step = Envelope::new(p("planner"), p("planner"), "think").as_step(TrailStep {
+            run: RunId::generate(),
+            call: 2,
+            label: None,
+            schema: None,
+            trail: None,
+            script: None,
+            tip_key: None,
+            bounds: None,
+        });
+        let call = PendingCall {
+            call: 2,
+            function: TrailFunction::Agent,
+            args: json!(null),
+            to: p("planner"),
+            thread: step.thread_id.clone(),
+            message: step.id,
+            sent_at: step.sent_at,
+            sent: true,
+            turn_budget: step.turn_budget,
+            retries: 0,
+        };
+        assert!(!answered_by(&call, &step, &step.from), "the step itself answers nothing");
+        let invitation = Envelope {
+            rating_of: Some(RunId::generate()),
+            ..Envelope::on_thread(step.thread_id.clone(), p("planner"), p("planner"), "rate it")
+        };
+        assert!(!answered_by(&call, &invitation, &invitation.from), "an invitation to rate a run answers nothing");
+        let reply = step.reply(p("planner"), "thought", ants_proto::Role::Ant).unwrap();
+        assert!(answered_by(&call, &reply, &reply.from));
     }
 }

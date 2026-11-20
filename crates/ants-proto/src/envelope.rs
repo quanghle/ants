@@ -151,7 +151,7 @@ pub struct Envelope {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_commits: Vec<ReviewCommit>,
     /// The trail run and call the message is a step of, on the step's own thread: its recipient answers with an
-    /// ordinary reply, which the conductor knows by that thread ([`crate::PendingCall::answered_by`]). Only the
+    /// ordinary reply, which the conductor knows by that thread ([`crate::PendingCall::thread`]). Only the
     /// conductor's daemon sets it, with [`Envelope::as_step`]. Never copied by [`Envelope::reply`] or
     /// [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
