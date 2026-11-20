@@ -335,7 +335,7 @@ impl Page {
             empty: matches!(held.read, Some(Ok(_))).then_some("nothing held"),
             rows,
             keys: &Self::ids(&items),
-            name: "held",
+            viewport: super::mouse::Viewport::Held,
         };
         self.list.draw(frame, area, data, shown, focused);
     }

@@ -180,7 +180,7 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: &Item, now: Da
     }
     let height = usize::from(area.height.saturating_sub(2));
     let inner = style::block(String::new(), focused).inner(area);
-    let top = data.mouse.top("nav", inner, at, at, at + 1, lines.len());
+    let top = data.mouse.top(super::mouse::Viewport::Nav, inner, at, at, at + 1, lines.len());
     for (row, item) in hits {
         if row >= top && row < top + height {
             data.mouse

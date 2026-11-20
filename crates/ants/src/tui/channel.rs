@@ -320,7 +320,15 @@ impl Page {
             .collect();
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        super::mouse::list(frame, inner, data, &format!("channel:{}", self.channel), items, selected, focused);
+        super::mouse::list(
+            frame,
+            inner,
+            data,
+            super::mouse::Viewport::Channel(self.channel.clone()),
+            items,
+            selected,
+            focused,
+        );
         self.draw_editor(frame, head, tabs_row.union(area), data, now);
     }
 

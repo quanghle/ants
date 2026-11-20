@@ -254,7 +254,7 @@ impl Page {
             raw = end;
         }
         let (start, end) = ranges.get(self.selected).copied().unwrap_or_default();
-        let top = data.mouse.top("ant-mcp", area, self.selected, start, end, lines.len());
+        let top = data.mouse.top(super::mouse::Viewport::AntMcp, area, self.selected, start, end, lines.len());
         for (at, (start, end)) in ranges.into_iter().enumerate() {
             let from = start.max(top);
             let to = end.min(top + usize::from(area.height));

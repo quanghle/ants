@@ -10,6 +10,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use super::armed::Armed;
 use super::model::{Data, Key};
+use super::mouse::Viewport;
 use super::select::Selection;
 use super::style;
 
@@ -40,8 +41,8 @@ pub struct Shown<'a, K, T> {
     /// The rows of the items, and the items' keys.
     pub rows: Vec<Text<'static>>,
     pub keys: &'a [K],
-    /// The list's name, as the mouse knows it.
-    pub name: &'static str,
+    /// The list's viewport, as the mouse scrolls it.
+    pub viewport: Viewport,
 }
 
 impl<K: PartialEq + Clone, T> Listed<K, T> {
@@ -90,6 +91,6 @@ impl<K: PartialEq + Clone, T> Listed<K, T> {
         let [top, list] = Layout::vertical([Constraint::Max(tall), Constraint::Min(0)]).areas(inner);
         frame.render_widget(Paragraph::new(about).wrap(Wrap { trim: false }), top);
         let selected = self.selected.at(shown.keys);
-        super::mouse::list(frame, list, data, shown.name, shown.rows, selected, focused);
+        super::mouse::list(frame, list, data, shown.viewport, shown.rows, selected, focused);
     }
 }

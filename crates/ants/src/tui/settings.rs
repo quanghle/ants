@@ -267,7 +267,15 @@ impl Pane {
             .collect();
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        super::mouse::list(frame, inner, data, "ant-settings", items, self.at, focused && self.draft.is_none());
+        super::mouse::list(
+            frame,
+            inner,
+            data,
+            super::mouse::Viewport::AntSettings,
+            items,
+            self.at,
+            focused && self.draft.is_none(),
+        );
     }
 }
 

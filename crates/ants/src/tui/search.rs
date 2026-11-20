@@ -149,7 +149,15 @@ impl Page {
         let items: Vec<Text> = self.matches().iter().map(|e| Text::from(self.row(e, data, now))).collect();
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        super::mouse::list(frame, inner, data, "search", items, self.selected.at(&self.seqs()), focused);
+        super::mouse::list(
+            frame,
+            inner,
+            data,
+            super::mouse::Viewport::Search,
+            items,
+            self.selected.at(&self.seqs()),
+            focused,
+        );
     }
 
     /// A match: where it was, who sent it, how long ago, and its line matching the text, else its first.
@@ -170,7 +178,7 @@ impl Page {
 }
 
 /// The matches of a search, oldest first, and how many earlier ones were left out.
-type Found = Result<(Vec<Entry>, usize)>;
+pub type Found = Result<(Vec<Entry>, usize)>;
 
 /// The search running, at most one: a new one replaces it.
 pub struct Searches {

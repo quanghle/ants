@@ -295,7 +295,7 @@ impl Page {
             empty: matches!(heard.holder, Some(Holder::Here(_))).then_some("no requests heard"),
             rows,
             keys: &Self::ids(&heard.asked),
-            name: "credentials",
+            viewport: super::mouse::Viewport::Credentials,
         };
         self.list.draw(frame, area, data, shown, focused);
     }

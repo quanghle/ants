@@ -33,8 +33,29 @@ pub enum Target {
     AntColumn(usize),
 }
 
+/// A list the mouse scrolls, its rows kept apart from the other lists'.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Viewport {
+    Nav,
+    Home,
+    /// The work view, and an ant's threads: one for any of them shown.
+    Work,
+    Channel(ants_proto::ChannelId),
+    Dm(ants_proto::UserId),
+    Search,
+    Tree,
+    Credentials,
+    Held,
+    /// A thread's waiting cards, listed.
+    ThreadWaiting,
+    AntQueue,
+    AntMcp,
+    AntSettings,
+}
+
+/// Where a list's viewport is.
 #[derive(Default)]
-struct Viewport {
+struct Scrolled {
     top: usize,
     selected: Option<usize>,
     most: usize,
@@ -43,8 +64,8 @@ struct Viewport {
 #[derive(Default)]
 pub struct Regions {
     hits: RefCell<Vec<(Rect, Target)>>,
-    scrolls: RefCell<Vec<(Rect, String)>>,
-    views: RefCell<HashMap<String, Viewport>>,
+    scrolls: RefCell<Vec<(Rect, Viewport)>>,
+    views: RefCell<HashMap<Viewport, Scrolled>>,
 }
 
 impl Regions {
@@ -57,10 +78,10 @@ impl Regions {
         self.hits.borrow_mut().push((area, target));
     }
 
-    pub fn top(&self, id: &str, area: Rect, selected: usize, start: usize, end: usize, total: usize) -> usize {
-        self.scrolls.borrow_mut().push((area, id.to_owned()));
+    pub fn top(&self, id: Viewport, area: Rect, selected: usize, start: usize, end: usize, total: usize) -> usize {
+        self.scrolls.borrow_mut().push((area, id.clone()));
         let mut views = self.views.borrow_mut();
-        let view = views.entry(id.to_owned()).or_default();
+        let view = views.entry(id).or_default();
         view.most = total.saturating_sub(usize::from(area.height));
         if view.selected != Some(selected) {
             if start < view.top {
@@ -81,7 +102,7 @@ impl Regions {
         true
     }
 
-    fn scroll(&self, id: &str, by: isize) {
+    fn scroll(&self, id: &Viewport, by: isize) {
         let mut views = self.views.borrow_mut();
         let Some(view) = views.get_mut(id) else { return };
         view.top = view.top.saturating_add_signed(by).min(view.most);
@@ -115,7 +136,7 @@ pub fn list(
     frame: &mut Frame,
     area: Rect,
     data: &Data,
-    id: &str,
+    id: Viewport,
     rows: Vec<Text<'static>>,
     selected: usize,
     focused: bool,
@@ -165,7 +186,7 @@ pub fn completions(data: &Data, bar: Rect, count: usize, selected: usize, palett
     }
 }
 
-pub fn table(data: &Data, id: &str, area: Rect, selected: usize, total: usize) -> usize {
+pub fn table(data: &Data, id: Viewport, area: Rect, selected: usize, total: usize) -> usize {
     let inner = Rect {
         x: area.x + 1,
         y: area.y + 2,
@@ -299,7 +320,7 @@ impl Mouse {
     ) -> Option<Action> {
         self.last = None;
         if matches!(target, Target::Nav(_)) {
-            model.data.mouse.scroll("nav", by);
+            model.data.mouse.scroll(&Viewport::Nav, by);
             return None;
         }
         if let Target::AntColumn(column) = target {
@@ -458,7 +479,7 @@ mod tests {
                     f,
                     f.area(),
                     &m.data,
-                    "test",
+                    Viewport::Search,
                     vec![Text::from("first-a\nfirst-b"), Text::from("second-a\nsecond-b")],
                     0,
                     true,
@@ -470,7 +491,7 @@ mod tests {
         assert_eq!(Mouse::default().event(&mut m, event, at(1)), None);
         let shown = render(&m);
         assert!(shown.lines().next().unwrap().contains("first-b"), "{shown}");
-        assert_eq!(m.data.mouse.views.borrow()["test"].selected, Some(0));
+        assert_eq!(m.data.mouse.views.borrow()[&Viewport::Search].selected, Some(0));
     }
 
     #[test]

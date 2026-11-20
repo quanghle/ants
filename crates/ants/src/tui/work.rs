@@ -476,7 +476,7 @@ impl Page {
             width: list.width.saturating_sub(2),
             height: list.height.saturating_sub(3),
         };
-        let top = data.mouse.top("work", inner, at, at, at + 1, rows.len());
+        let top = data.mouse.top(super::mouse::Viewport::Work, inner, at, at, at + 1, rows.len());
         for n in top..rows.len().min(top + usize::from(inner.height)) {
             data.mouse.add(Rect { y: inner.y + (n - top) as u16, height: 1, ..inner }, super::mouse::Target::Row(n));
         }

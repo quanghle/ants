@@ -673,7 +673,7 @@ fn draw_list(
         let start: usize = rows.iter().take(selected).map(|row| row.lines.len()).sum();
         (id, start, rows[selected].lines.clone())
     });
-    let top = super::mouse::list(frame, area, data, "home", rows, selected, focused);
+    let top = super::mouse::list(frame, area, data, super::mouse::Viewport::Home, rows, selected, focused);
     if let Some((id, start, lines)) = question_lines {
         let offset = u16::try_from(start.saturating_sub(top)).unwrap_or(u16::MAX);
         let area = Rect { y: area.y.saturating_add(offset), height: area.height.saturating_sub(offset), ..area };

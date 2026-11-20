@@ -84,7 +84,7 @@ impl List {
         }
         let selected = self.selected.drawn(&items.iter().map(Item::id).collect::<Vec<_>>());
         let rows = items.iter().map(|item| Text::from(item.line(usize::from(inner.width.saturating_sub(1))))).collect();
-        mouse::list(frame, inner, data, "thread-waiting", rows, selected, true);
+        mouse::list(frame, inner, data, mouse::Viewport::ThreadWaiting, rows, selected, true);
     }
 }
 

@@ -441,7 +441,7 @@ impl Page {
             block = block.title_bottom(format!(" and {more} more in the stream "));
         }
         let table = Table::new(rows, widths).header(header).block(block).row_highlight_style(style::highlight(focused));
-        let top = super::mouse::table(data, "ant-queue", area, selected, waiting.len());
+        let top = super::mouse::table(data, super::mouse::Viewport::AntQueue, area, selected, waiting.len());
         let mut state = TableState::default().with_offset(top);
         frame.render_stateful_widget(table, area, &mut state);
     }

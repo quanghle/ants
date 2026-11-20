@@ -196,7 +196,15 @@ impl Page {
             let selected = self.selected.at(&dms.iter().map(|dm| dm.thread.clone()).collect::<Vec<_>>());
             let inner = block.inner(area);
             frame.render_widget(block, area);
-            super::mouse::list(frame, inner, data, &format!("dm:{}", self.with), rows, selected, focused);
+            super::mouse::list(
+                frame,
+                inner,
+                data,
+                super::mouse::Viewport::Dm(self.with.clone()),
+                rows,
+                selected,
+                focused,
+            );
         }
     }
 }
