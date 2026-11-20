@@ -228,15 +228,11 @@ impl Model {
         let data = &self.data;
         let closed = match self.pages.last_mut() {
             Some(Page::Thread(page)) => page.find_key(Key::Esc),
-            Some(Page::Ant(page)) => page.write(Key::Esc).is_some() || page.disarm(),
+            Some(Page::Ant(page)) => page.write(Key::Esc).is_some(),
             Some(Page::Channel(page)) => page.write(Key::Esc, data).is_some(),
-            Some(Page::Tree(page)) => page.disarm(),
-            Some(Page::Credentials(page)) => page.disarm(),
-            Some(Page::Held(page)) => page.disarm(),
-            Some(Page::Home(page)) => page.disarm(),
             _ => false,
         };
-        closed || self.card_key(Key::Esc, now).is_some()
+        closed || self.pages.last_mut().is_some_and(Page::disarm) || self.card_key(Key::Esc, now).is_some()
     }
 
     /// Take `text` pasted: into the prompt or the draft being typed, on one line, else into the bar, focused for it,

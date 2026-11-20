@@ -13,13 +13,12 @@ use chrono::{DateTime, Utc};
 use futures::FutureExt as _;
 use futures::future::LocalBoxFuture;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Wrap};
 
+use super::listed::{Listed, Shown};
 use super::model::{Action, Data, Key, To};
-use super::select::Selection;
 use super::style::{self, ago};
 use crate::live::maybe;
 use crate::tools::{self, HeldAct};
@@ -239,9 +238,8 @@ impl Held {
 
 #[derive(Debug, Default)]
 pub struct Page {
-    selected: Selection<Uuid>,
-    /// The answer the next `y` gives.
-    pub armed: Option<Answer>,
+    /// What is held, and the answer the next `y` gives.
+    list: Listed<Uuid, Answer>,
 }
 
 impl Page {
@@ -249,12 +247,12 @@ impl Page {
 
     /// Drop the confirmation asked for, if any: whether there was one.
     pub fn disarm(&mut self) -> bool {
-        self.armed.take().is_some()
+        self.list.disarm()
     }
 
     /// The keys of the answer `a` or `r` asked to confirm, while it waits.
     pub fn prompt(&self) -> Option<&'static str> {
-        self.armed.as_ref().map(|_| Self::ARMED_KEYS)
+        self.list.armed().map(|_| Self::ARMED_KEYS)
     }
 
     fn ids(items: &[Item]) -> Vec<Uuid> {
@@ -264,35 +262,17 @@ impl Page {
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
         let held = &data.held;
         let items = items(data);
-        let ids = Self::ids(&items);
-        let at = self.selected.at(&ids);
-        let armed = self.armed.take();
-        let to = match key {
-            Key::Char('a' | 'r') if held.busy.is_none() => {
-                let answer = if key == Key::Char('r') { ActAnswer::Deny } else { ActAnswer::Confirm };
-                self.armed = items
-                    .get(at)
-                    .filter(|item| held.answer(item).is_none())
-                    .map(|item| Answer { held: item.clone(), answer });
-                return None;
-            }
-            Key::Char('y') => return armed.map(|answer| To::Do(Action::Answer(answer))),
-            Key::Up | Key::Char('k') => at.saturating_sub(1),
-            Key::Down | Key::Char('j') => at + 1,
-            Key::Home => 0,
-            Key::End => usize::MAX,
-            _ => return None,
+        let asked = |at: usize, deny| {
+            let answer = if deny { ActAnswer::Deny } else { ActAnswer::Confirm };
+            items.get(at).filter(|item| held.answer(item).is_none()).map(|item| Answer { held: item.clone(), answer })
         };
-        self.selected.select(&ids, to);
-        None
+        let answer = self.list.key(key, &Self::ids(&items), held.busy.is_some(), asked)?;
+        Some(To::Do(Action::Answer(answer)))
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let held = &data.held;
         let items = items(data);
-        let block = style::block(format!(" Held for confirmation ({}) ", items.len()), focused);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
         let read = match &held.read {
             None => "gathering the orders held for confirmation…".to_owned(),
             Some(Ok(at)) => format!(
@@ -303,24 +283,7 @@ impl Page {
             ),
             Some(Err(e)) => format!("gathering the held orders: {e}"),
         };
-        let mut about = vec![Line::styled(read, style::dim())];
-        if let Some(answer) = &held.busy {
-            about.push(Line::styled(format!("{}…", answer.describe()), Style::new().fg(Color::Cyan)));
-        }
-        if let Some(answer) = &self.armed {
-            about.push(Line::styled(format!("y to {}", answer.describe()), Style::new().fg(Color::Yellow).bold()));
-        }
-        if items.is_empty() {
-            if matches!(held.read, Some(Ok(_))) {
-                about.push(Line::raw("nothing held"));
-            }
-            frame.render_widget(Paragraph::new(about).wrap(Wrap { trim: false }), inner);
-            return;
-        }
-        // The lines but a long reason for a failed gathering fit one row each.
-        let tall = u16::try_from(about.len() * 2).unwrap_or(u16::MAX);
-        let [top, list] = Layout::vertical([Constraint::Max(tall), Constraint::Min(0)]).areas(inner);
-        frame.render_widget(Paragraph::new(about).wrap(Wrap { trim: false }), top);
+        let about = vec![Line::styled(read, style::dim())];
         let rows: Vec<Text> = items
             .iter()
             .map(|item| {
@@ -363,8 +326,17 @@ impl Page {
                 ])
             })
             .collect();
-        let selected = self.selected.at(&Self::ids(&items));
-        super::mouse::list(frame, list, data, "held", rows, selected, focused);
+        let shown = Shown {
+            title: format!(" Held for confirmation ({}) ", items.len()),
+            about,
+            busy: held.busy.as_ref(),
+            describe: Answer::describe,
+            empty: matches!(held.read, Some(Ok(_))).then_some("nothing held"),
+            rows,
+            keys: &Self::ids(&items),
+            name: "held",
+        };
+        self.list.draw(frame, area, data, shown, focused);
     }
 }
 

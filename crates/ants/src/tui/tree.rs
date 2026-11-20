@@ -28,7 +28,9 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::armed::Armed;
 use super::model::{Action, Data, Key, Level, To};
+use super::select::{PAGE, Selection, step};
 use super::style;
 use super::work::ThreadState;
 use crate::cmd::cancel::{CANCEL_GRACE, CANCEL_WAIT, cancel_outcome};
@@ -386,13 +388,18 @@ fn walk(under: &[Vec<usize>], at: usize, depth: usize, prefix: &str, order: &mut
     }
 }
 
+/// The keys of `tree`'s nodes, as a selection keeps them.
+fn nodes(tree: &Tree) -> Vec<(UserId, ThreadId)> {
+    tree.nodes.iter().map(|n| (n.user.clone(), n.thread.clone())).collect()
+}
+
 #[derive(Debug)]
 pub struct Page {
     pub root: ThreadId,
     /// The selected node, kept as nodes come.
-    selected: Option<(UserId, ThreadId)>,
+    selected: Selection<(UserId, ThreadId)>,
     /// `x` was pressed: `y` cancels the selected subtree's prompts.
-    armed: bool,
+    armed: Armed<()>,
     /// The links to the root passed on, once read.
     pub links: Vec<Passed>,
     /// What the ants spent on the tree's threads, once read.
@@ -403,17 +410,17 @@ impl Page {
     pub const ARMED_KEYS: &str = "y cancel every prompt in the selected subtree · any other key keeps them";
 
     pub fn new(root: ThreadId) -> Self {
-        Self { root, selected: None, armed: false, links: Vec::new(), spend: None }
+        Self { root, selected: Selection::default(), armed: Armed::default(), links: Vec::new(), spend: None }
     }
 
     /// Drop the confirmation asked for, if any: whether there was one.
     pub fn disarm(&mut self) -> bool {
-        std::mem::take(&mut self.armed)
+        self.armed.disarm()
     }
 
     /// The keys of the cancel `x` asked to confirm, while it waits.
     pub fn prompt(&self) -> Option<&'static str> {
-        self.armed.then_some(Self::ARMED_KEYS)
+        self.armed.get().map(|()| Self::ARMED_KEYS)
     }
 
     pub fn tree(&self, data: &Data, now: DateTime<Utc>) -> Tree {
@@ -421,20 +428,17 @@ impl Page {
     }
 
     fn at(&self, tree: &Tree) -> usize {
-        self.selected
-            .as_ref()
-            .and_then(|(user, thread)| tree.nodes.iter().position(|n| n.user == *user && n.thread == *thread))
-            .unwrap_or(0)
+        self.selected.at(&nodes(tree))
     }
 
     pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
         let tree = self.tree(data, now);
         let at = self.at(&tree);
-        let armed = std::mem::take(&mut self.armed);
+        let armed = self.armed.take().is_some();
         let to = match key {
             Key::Enter => return tree.nodes.get(at).map(|n| To::Thread(n.thread.clone())),
             Key::Char('x') => {
-                self.armed = true;
+                self.armed.arm(Some(()));
                 return None;
             }
             Key::Char('y') if armed => {
@@ -445,16 +449,9 @@ impl Page {
                     .collect();
                 return (!prompts.is_empty()).then_some(To::Do(Action::CancelSubtree(prompts)));
             }
-            Key::Up | Key::Char('k') => at.saturating_sub(1),
-            Key::Down | Key::Char('j') => at + 1,
-            Key::PageUp => at.saturating_sub(10),
-            Key::PageDown => at + 10,
-            Key::Home => 0,
-            Key::End => usize::MAX,
-            _ => return None,
+            _ => step(key, at, Some(PAGE))?,
         };
-        let node = &tree.nodes[to.min(tree.nodes.len() - 1)];
-        self.selected = Some((node.user.clone(), node.thread.clone()));
+        self.selected.select(&nodes(&tree), to);
         None
     }
 

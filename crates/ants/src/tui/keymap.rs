@@ -360,7 +360,7 @@ const HOME: &[Entry] = &[
         4,
         home_group,
     ),
-    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the allow-all l asked for", 1, home_armed),
+    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the allow-all l asked for", 1, armed),
     Entry::new(DIGITS, "1-9", "answer", "answer the selected question by number", 5, home_question),
     Entry::new(
         &[Key::Enter],
@@ -622,7 +622,7 @@ const TREE: &[Entry] = &[
     Entry::new(UP_DOWN, "↑↓", "select", "select a thread of the tree", 10, always),
     Entry::new(&[Key::Enter], "Enter", "open", "open the selected thread", 5, always),
     Entry::new(&[Key::Char('x')], "x", "cancel subtree", "cancel every prompt in the selected subtree", 11, always),
-    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the cancel x asked for", 1, tree_armed),
+    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the cancel x asked for", 1, armed),
     Entry::new(PAGES, "PgUp PgDn", "page", "move the selection further", 92, always),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
@@ -639,7 +639,7 @@ const ANT: &[Entry] = &[
         "confirm",
         "confirm what r or p asked for: a restart after the prompts running, the pause or the resume",
         1,
-        ant_armed,
+        armed,
     ),
     Entry::new(
         &[Key::Char('!')],
@@ -688,7 +688,7 @@ const CREDENTIALS: &[Entry] = &[
     Entry::new(UP_DOWN, "↑↓", "select", "select a request", 10, always),
     Entry::new(&[Key::Char('a')], "a", "approve", "approve or renew the selected request, once y confirms", 5, always),
     Entry::new(&[Key::Char('r')], "r", "reject", "reject the selected request, once y confirms", 6, always),
-    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the order a or r asked for", 1, page_armed),
+    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the order a or r asked for", 1, armed),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
 
@@ -696,7 +696,7 @@ const HELD: &[Entry] = &[
     Entry::new(UP_DOWN, "↑↓", "select", "select an order or a decision", 10, always),
     Entry::new(&[Key::Char('a')], "a", "confirm", "confirm the selected order or decision, once y confirms", 5, always),
     Entry::new(&[Key::Char('r')], "r", "deny", "deny the selected order or decision, once y confirms", 6, always),
-    Entry::new(&[Key::Char('y')], "y", "confirm", "give the answer a or r asked for", 1, page_armed),
+    Entry::new(&[Key::Char('y')], "y", "confirm", "give the answer a or r asked for", 1, armed),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
 
@@ -871,10 +871,6 @@ fn home_group(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
     check(home_item(model, now).is_some_and(|i| i.of_kind().is_some()), "no group of tool requests selected")
 }
 
-fn home_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
-    check(matches!(model.page(), Page::Home(page) if page.prompt().is_some()), "no allow-all asked for")
-}
-
 fn home_reply(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
     match home_item(model, now) {
         None => Err("nothing selected"),
@@ -996,12 +992,9 @@ fn post_attachments(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str>
     }
 }
 
-fn tree_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
-    check(matches!(model.page(), Page::Tree(page) if page.prompt().is_some()), "no cancel asked for")
-}
-
-fn ant_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
-    check(matches!(model.page(), Page::Ant(page) if page.armed().is_some()), "no restart or pause asked for")
+/// Whether the view waits for the `y` confirming what one of its keys asked for.
+fn armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
+    check(model.page().armed(), "nothing asked for")
 }
 
 fn ant_restart_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
@@ -1011,13 +1004,4 @@ fn ant_restart_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str
 
 fn mcp_signing(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
     check(matches!(model.page(), Page::Ant(page) if page.mcp.signing()), "no sign-in under way")
-}
-
-fn page_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
-    let armed = match model.page() {
-        Page::Credentials(page) => page.prompt().is_some(),
-        Page::Held(page) => page.prompt().is_some(),
-        _ => false,
-    };
-    check(armed, "nothing asked for")
 }

@@ -16,14 +16,13 @@ use chrono::{DateTime, Utc};
 use futures::FutureExt as _;
 use futures::future::LocalBoxFuture;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Wrap};
 use tokio::time::Instant;
 
+use super::listed::{Listed, Shown};
 use super::model::{Action, Data, Key, To};
-use super::select::Selection;
 use super::style::{self, ago};
 use crate::credentials::enroll::{self, Approver};
 use crate::credentials::renew;
@@ -205,9 +204,8 @@ impl Heard {
 
 #[derive(Debug, Default)]
 pub struct Page {
-    selected: Selection<Id>,
-    /// The order the next `y` gives.
-    pub armed: Option<Order>,
+    /// The requests, and the order the next `y` gives.
+    list: Listed<Id, Order>,
 }
 
 impl Page {
@@ -215,12 +213,12 @@ impl Page {
 
     /// Drop the confirmation asked for, if any: whether there was one.
     pub fn disarm(&mut self) -> bool {
-        self.armed.take().is_some()
+        self.list.disarm()
     }
 
     /// The keys of the order `a` or `r` asked to confirm, while it waits.
     pub fn prompt(&self) -> Option<&'static str> {
-        self.armed.as_ref().map(|_| Self::ARMED_KEYS)
+        self.list.armed().map(|_| Self::ARMED_KEYS)
     }
 
     fn ids(asked: &[Asked]) -> Vec<Id> {
@@ -229,30 +227,13 @@ impl Page {
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
         let heard = &data.credentials;
-        let ids = Self::ids(&heard.asked);
-        let at = self.selected.at(&ids);
-        let armed = self.armed.take();
-        let to = match key {
-            Key::Char('a' | 'r') if heard.busy.is_none() => {
-                self.armed = heard.asked.get(at).and_then(|a| a.order(key == Key::Char('r')));
-                return None;
-            }
-            Key::Char('y') => return armed.map(|order| To::Do(Action::Credentials(order))),
-            Key::Up | Key::Char('k') => at.saturating_sub(1),
-            Key::Down | Key::Char('j') => at + 1,
-            Key::Home => 0,
-            Key::End => usize::MAX,
-            _ => return None,
-        };
-        self.selected.select(&ids, to);
-        None
+        let asked = |at: usize, reject| heard.asked.get(at).and_then(|a| a.order(reject));
+        let order = self.list.key(key, &Self::ids(&heard.asked), heard.busy.is_some(), asked)?;
+        Some(To::Do(Action::Credentials(order)))
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let heard = &data.credentials;
-        let block = style::block(format!(" Credentials asked for ({}) ", heard.asked.len()), focused);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
         let mut about = Vec::new();
         match &heard.holder {
             None => about.push(Line::styled("looking for the team's account key…", style::dim())),
@@ -283,23 +264,6 @@ impl Page {
                 about.push(Line::styled(read, style::dim()));
             }
         }
-        if let Some(order) = &heard.busy {
-            about.push(Line::styled(format!("{}…", order.describe()), Style::new().fg(Color::Cyan)));
-        }
-        if let Some(order) = &self.armed {
-            about.push(Line::styled(format!("y to {}", order.describe()), Style::new().fg(Color::Yellow).bold()));
-        }
-        if heard.asked.is_empty() {
-            if matches!(heard.holder, Some(Holder::Here(_))) {
-                about.push(Line::raw("no requests heard"));
-            }
-            frame.render_widget(Paragraph::new(about).wrap(Wrap { trim: false }), inner);
-            return;
-        }
-        // The lines but a long reason for a failed gathering fit one row each.
-        let tall = u16::try_from(about.len() * 2).unwrap_or(u16::MAX);
-        let [top, list] = Layout::vertical([Constraint::Max(tall), Constraint::Min(0)]).areas(inner);
-        frame.render_widget(Paragraph::new(about).wrap(Wrap { trim: false }), top);
         let rows: Vec<Text> = heard
             .asked
             .iter()
@@ -322,8 +286,17 @@ impl Page {
                 ])
             })
             .collect();
-        let selected = self.selected.at(&Self::ids(&heard.asked));
-        super::mouse::list(frame, list, data, "credentials", rows, selected, focused);
+        let shown = Shown {
+            title: format!(" Credentials asked for ({}) ", heard.asked.len()),
+            about,
+            busy: heard.busy.as_ref(),
+            describe: Order::describe,
+            empty: matches!(heard.holder, Some(Holder::Here(_))).then_some("no requests heard"),
+            rows,
+            keys: &Self::ids(&heard.asked),
+            name: "credentials",
+        };
+        self.list.draw(frame, area, data, shown, focused);
     }
 }
 

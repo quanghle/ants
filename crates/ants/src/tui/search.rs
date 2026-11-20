@@ -20,6 +20,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use super::model::{Data, Key, To};
+use super::select::{PAGE, Selection};
 use super::style::{self, ago};
 use crate::live::maybe;
 use crate::people::sealed::Keyring;
@@ -81,12 +82,13 @@ pub struct Page {
     /// The matches newest first and how many earlier ones were left out, or why the search failed; none while it runs.
     pub found: Option<Result<(Vec<Entry>, usize), String>>,
     grep: Option<String>,
-    selected: usize,
+    /// The match selected, by its stream sequence.
+    selected: Selection<u64>,
 }
 
 impl Page {
     pub fn new(query: String, search: &Search) -> Self {
-        Self { query, found: None, grep: search.grep.clone(), selected: 0 }
+        Self { query, found: None, grep: search.grep.clone(), selected: Selection::default() }
     }
 
     /// Take the matches found, given oldest first.
@@ -107,25 +109,20 @@ impl Page {
         }
     }
 
+    fn seqs(&self) -> Vec<u64> {
+        self.matches().iter().map(|e| e.seq).collect()
+    }
+
     pub fn key(&mut self, key: Key) -> Option<To> {
-        let count = self.matches().len();
-        self.selected = match key {
-            Key::Enter => {
-                let e = self.matches().get(self.selected)?;
-                return Some(match e.id {
-                    Some(id) => To::Message(e.thread_id.clone(), id),
-                    None => To::Thread(e.thread_id.clone()),
-                });
-            }
-            Key::Up | Key::Char('k') => self.selected.saturating_sub(1),
-            Key::Down | Key::Char('j') => self.selected + 1,
-            Key::PageUp => self.selected.saturating_sub(10),
-            Key::PageDown => self.selected + 10,
-            Key::Home => 0,
-            Key::End => usize::MAX,
-            _ => return None,
+        let seqs = self.seqs();
+        if key == Key::Enter {
+            let e = self.matches().get(self.selected.at(&seqs))?;
+            return Some(match e.id {
+                Some(id) => To::Message(e.thread_id.clone(), id),
+                None => To::Thread(e.thread_id.clone()),
+            });
         }
-        .min(count.saturating_sub(1));
+        self.selected.step(key, &seqs, Some(PAGE));
         None
     }
 
@@ -151,7 +148,7 @@ impl Page {
         let items: Vec<Text> = self.matches().iter().map(|e| Text::from(self.row(e, data, now))).collect();
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        super::mouse::list(frame, inner, data, "search", items, self.selected, focused);
+        super::mouse::list(frame, inner, data, "search", items, self.selected.at(&self.seqs()), focused);
     }
 
     /// A match: where it was, who sent it, how long ago, and its line matching the text, else its first.

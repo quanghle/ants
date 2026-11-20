@@ -18,6 +18,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use super::input::Input;
 use super::model::{Action, Key};
+use super::select::step;
 use super::style;
 use crate::live::maybe;
 
@@ -177,11 +178,7 @@ impl Page {
                 }
                 return None;
             }
-            Key::Up | Key::Char('k') => self.selected.saturating_sub(1),
-            Key::Down | Key::Char('j') => self.selected + 1,
-            Key::Home => 0,
-            Key::End => last,
-            _ => return None,
+            _ => step(key, self.selected, None)?,
         }
         .min(last);
         None

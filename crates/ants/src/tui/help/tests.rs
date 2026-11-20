@@ -131,8 +131,8 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
         ("memories.rs", "key", &[View::Memories]),
         ("mcp.rs", "key", &[View::Mcp]),
         ("settings.rs", "key", &[View::Settings]),
-        ("credentials.rs", "key", &[View::Credentials]),
-        ("held.rs", "key", &[View::Held]),
+        ("listed.rs", "key", &[View::Credentials]),
+        ("listed.rs", "key", &[View::Held]),
         ("trail.rs", "key", &[View::Start]),
     ];
     let source = |file: &str| match file {
@@ -155,8 +155,7 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
         "memories.rs" => include_str!("../memories.rs"),
         "mcp.rs" => include_str!("../mcp.rs"),
         "settings.rs" => include_str!("../settings.rs"),
-        "credentials.rs" => include_str!("../credentials.rs"),
-        "held.rs" => include_str!("../held.rs"),
+        "listed.rs" => include_str!("../listed.rs"),
         "trail.rs" => include_str!("../trail.rs"),
         _ => unreachable!(),
     };

@@ -18,10 +18,11 @@ use ratatui::widgets::Paragraph;
 
 use super::acts::Change;
 use super::approvals;
+use super::armed::Armed;
 use super::command::{Conversation, GRANT};
 use super::exec::Job;
 use super::model::{Action, Data, Key, Model, To};
-use super::select::Selection;
+use super::select::{Selection, step};
 use super::style::{self, ago};
 use super::{catchup, question};
 use crate::text::excerpt;
@@ -341,7 +342,7 @@ pub struct Page {
     /// The request of the card the keys answer, as last drawn.
     carded: Cell<Option<Uuid>>,
     /// The requests of a group `l` asked to allow once each, which `y` next confirms.
-    armed: Option<Vec<ApprovalRequest>>,
+    armed: Armed<Vec<ApprovalRequest>>,
 }
 
 impl Default for Page {
@@ -352,7 +353,7 @@ impl Default for Page {
             answering: None,
             room: Cell::new(None),
             carded: Cell::new(None),
-            armed: None,
+            armed: Armed::default(),
         }
     }
 }
@@ -440,7 +441,7 @@ impl Page {
 
     /// The keys of the allow-all `l` asked to confirm, while it waits.
     pub fn prompt(&self) -> Option<String> {
-        let batch = self.armed.as_ref()?;
+        let batch = self.armed.get()?;
         let oldest = batch.first()?;
         let (n, what) = (batch.len(), if batch.len() == 1 { "request" } else { "requests" });
         Some(format!(
@@ -451,7 +452,7 @@ impl Page {
 
     /// Drop the allow-all asked to confirm, if any: whether there was one.
     pub fn disarm(&mut self) -> bool {
-        self.armed.take().is_some()
+        self.armed.disarm()
     }
 
     /// Forget the cards' width: the compact pane shows the top request on one line.
@@ -514,7 +515,7 @@ impl Page {
                 let Some(batch) = selected.and_then(Item::of_kind) else {
                     return Some(To::Refused("l allows all of a kind on a group of tool requests".to_owned()));
                 };
-                self.armed = Some(batch);
+                self.armed.arm(Some(batch));
                 return None;
             }
             Key::Char('n') => return pending.map(To::Note),
@@ -548,11 +549,7 @@ impl Page {
             Key::Char('s') => return Some(To::Digest),
             Key::Char('c') => return Some(To::Credentials),
             Key::Char('o') => return Some(To::Held),
-            Key::Up | Key::Char('k') => at.saturating_sub(1),
-            Key::Down | Key::Char('j') => at + 1,
-            Key::Home => 0,
-            Key::End => usize::MAX,
-            _ => return None,
+            _ => step(key, at, None)?,
         };
         self.selected.select(&items.iter().map(Item::id).collect::<Vec<_>>(), to);
         None

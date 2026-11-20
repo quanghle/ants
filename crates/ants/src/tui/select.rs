@@ -5,6 +5,11 @@
 
 use std::cell::{Cell, RefCell};
 
+use super::model::Key;
+
+/// How many rows PageUp and PageDown move in a list that pages.
+pub const PAGE: usize = 10;
+
 #[derive(Debug)]
 pub struct Selection<K> {
     /// The selected item's key, once one was drawn or moved to.
@@ -57,10 +62,32 @@ impl<K: PartialEq + Clone> Selection<K> {
         }
     }
 
+    /// Move the selection among `keys` as `key` does a cursor ([`step`]): whether `key` moves it.
+    pub fn step(&mut self, key: Key, keys: &[K], page: Option<usize>) -> bool {
+        let Some(to) = step(key, self.at(keys), page) else { return false };
+        self.select(keys, to);
+        true
+    }
+
     fn pin(&self, keys: &[K], at: usize) {
         self.at.set(at);
         self.key.replace(keys.get(at).cloned());
     }
+}
+
+/// Where `key` moves a list's cursor at `at`: Up and k a row up, Down and j a row down, PageUp and PageDown `page` rows
+/// in a list that pages, Home to the first row and End past the last, for the list to keep within its rows. None for
+/// another key.
+pub fn step(key: Key, at: usize, page: Option<usize>) -> Option<usize> {
+    Some(match (key, page) {
+        (Key::Up | Key::Char('k'), _) => at.saturating_sub(1),
+        (Key::Down | Key::Char('j'), _) => at.saturating_add(1),
+        (Key::PageUp, Some(page)) => at.saturating_sub(page),
+        (Key::PageDown, Some(page)) => at.saturating_add(page),
+        (Key::Home, _) => 0,
+        (Key::End, _) => usize::MAX,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

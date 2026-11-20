@@ -285,6 +285,30 @@ impl Page {
         }
     }
 
+    /// Whether the view waits for the `y` confirming what one of its keys asked for.
+    pub fn armed(&self) -> bool {
+        match self {
+            Self::Home(page) => page.prompt().is_some(),
+            Self::Tree(page) => page.prompt().is_some(),
+            Self::Ant(page) => page.armed().is_some(),
+            Self::Credentials(page) => page.prompt().is_some(),
+            Self::Held(page) => page.prompt().is_some(),
+            Self::Work(_) | Self::Channel(_) | Self::Thread(_) | Self::Dm(_) | Self::Search(_) => false,
+        }
+    }
+
+    /// Drop the confirmation the view asked for, if any: whether there was one.
+    pub fn disarm(&mut self) -> bool {
+        match self {
+            Self::Home(page) => page.disarm(),
+            Self::Tree(page) => page.disarm(),
+            Self::Ant(page) => page.disarm(),
+            Self::Credentials(page) => page.disarm(),
+            Self::Held(page) => page.disarm(),
+            Self::Work(_) | Self::Channel(_) | Self::Thread(_) | Self::Dm(_) | Self::Search(_) => false,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Self::Home(_) => "home",

@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use super::model::{Data, Key, To};
-use super::select::Selection;
+use super::select::{Selection, step};
 use super::style::{self, ago};
 use crate::people::sealed::State;
 use crate::threads::thread::{Entry, Kind};
@@ -168,11 +168,7 @@ impl Page {
         let to = match key {
             Key::Enter => return dms.get(at).map(|dm| To::Thread(dm.thread.clone())),
             Key::Char('n') => return Some(To::Write),
-            Key::Up | Key::Char('k') => at.saturating_sub(1),
-            Key::Down | Key::Char('j') => at + 1,
-            Key::Home => 0,
-            Key::End => usize::MAX,
-            _ => return None,
+            _ => step(key, at, None)?,
         };
         self.selected.select(&threads, to);
         None

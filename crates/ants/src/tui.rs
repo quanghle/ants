@@ -9,6 +9,7 @@
 mod acts;
 mod ant;
 mod approvals;
+mod armed;
 mod attach;
 mod cards;
 mod catchup;
@@ -32,6 +33,7 @@ mod images;
 mod input;
 mod interrupt;
 mod keymap;
+mod listed;
 mod markdown;
 mod mcp;
 mod memories;

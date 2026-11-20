@@ -19,12 +19,13 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Wrap};
 
+use super::armed;
 use super::exec::Job;
 use super::markdown;
 use super::mcp;
 use super::memories;
 use super::model::{Action, Data, Key, To};
-use super::select::Selection;
+use super::select::{PAGE, Selection, step};
 use super::settings;
 use super::style::{self, ago};
 use super::work::{self, Filter};
@@ -102,7 +103,7 @@ pub struct Page {
     pub mcp: Box<mcp::Page>,
     pub settings: settings::Pane,
     /// What `r` or `p` asked for, which a `y` next confirms.
-    armed: Option<Armed>,
+    armed: armed::Armed<Armed>,
     /// The column of the box atop `[` and `]` scroll.
     column: Column,
     /// How far each column of the box is scrolled, about first, kept within what was last drawn.
@@ -146,7 +147,7 @@ impl Page {
             memories,
             mcp,
             settings,
-            armed: None,
+            armed: armed::Armed::default(),
             column: Column::About,
             scrolled: std::cell::Cell::new([0; 2]),
             scrollable: std::cell::Cell::new([0; 2]),
@@ -155,16 +156,16 @@ impl Page {
 
     /// Drop the confirmation asked for, if any: whether there was one.
     pub fn disarm(&mut self) -> bool {
-        self.armed.take().is_some()
+        self.armed.disarm()
     }
 
     /// The keys of the restart `r` or the pause `p` asked to confirm, while it waits, else of what is being written
     /// in the pane.
     pub fn prompt(&self) -> Option<&'static str> {
         match self.pane {
-            _ if self.armed == Some(Armed::Restart) => Some(Self::ARMED_KEYS),
-            _ if self.armed == Some(Armed::Pause(true)) => Some(Self::PAUSE_KEYS),
-            _ if self.armed == Some(Armed::Pause(false)) => Some(Self::RESUME_KEYS),
+            _ if self.armed() == Some(Armed::Restart) => Some(Self::ARMED_KEYS),
+            _ if self.armed() == Some(Armed::Pause(true)) => Some(Self::PAUSE_KEYS),
+            _ if self.armed() == Some(Armed::Pause(false)) => Some(Self::RESUME_KEYS),
             Pane::Mcp => self.mcp.prompt(),
             Pane::Settings => self.settings.prompt(),
             Pane::Threads | Pane::Queue | Pane::Memories => None,
@@ -173,7 +174,7 @@ impl Page {
 
     /// What `r` or `p` asked for, which `y` then confirms.
     pub fn armed(&self) -> Option<Armed> {
-        self.armed
+        self.armed.get().copied()
     }
 
     /// Read again the memories, MCP servers and settings read so far: what `R` does besides reading everything else.
@@ -215,12 +216,12 @@ impl Page {
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
         match (key, self.armed.take()) {
             (Key::Char('r'), _) => {
-                self.armed = Some(Armed::Restart);
+                self.armed.arm(Some(Armed::Restart));
                 return None;
             }
             (Key::Char('p'), _) => {
                 let paused = data.live.colony.iter().any(|e| e.ant == self.ant && e.paused.is_some());
-                self.armed = Some(Armed::Pause(!paused));
+                self.armed.arm(Some(Armed::Pause(!paused)));
                 return None;
             }
             (Key::Char(c @ ('y' | '!')), Some(Armed::Restart)) => {
@@ -282,13 +283,7 @@ impl Page {
         let at = self.message.at(&messages);
         let to = match key {
             Key::Enter => return self.waiting().get(at).map(|m| To::Thread(m.thread_id.clone())),
-            Key::Up | Key::Char('k') => at.saturating_sub(1),
-            Key::Down | Key::Char('j') => at + 1,
-            Key::PageUp => at.saturating_sub(10),
-            Key::PageDown => at + 10,
-            Key::Home => 0,
-            Key::End => usize::MAX,
-            _ => return None,
+            _ => step(key, at, Some(PAGE))?,
         };
         self.message.select(&messages, to);
         None

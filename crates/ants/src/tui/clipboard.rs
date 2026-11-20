@@ -13,6 +13,7 @@ use ratatui::widgets::Paragraph;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::model::{Action, Key};
+use super::select::step;
 use super::{help, style};
 
 const COMMANDS: &[&str] = &["pbcopy", "wl-copy", "xclip", "clip.exe"];
@@ -129,12 +130,12 @@ impl Picker {
 
     pub fn key(&mut self, key: Key) -> Option<Action> {
         match key {
-            Key::Up | Key::Char('k') => self.selected = self.selected.saturating_sub(1),
-            Key::Down | Key::Char('j') => self.selected = (self.selected + 1).min(self.choices.len() - 1),
-            Key::Home => self.selected = 0,
-            Key::End => self.selected = self.choices.len() - 1,
             Key::Enter => return Some(Action::Copy(self.choices[self.selected].1.clone())),
-            _ => {}
+            _ => {
+                if let Some(to) = step(key, self.selected, None) {
+                    self.selected = to.min(self.choices.len() - 1);
+                }
+            }
         }
         None
     }
