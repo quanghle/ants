@@ -34,7 +34,14 @@ async fn an_ant_leaves_a_tip_once_another_votes_on_it_and_the_trail_s_board_read
     assert!(tips.leave(&tip).await.is_err(), "a tip is left once");
     let elsewhere = TrailTip { trail: "release".parse().unwrap(), id: TipId::generate(), ..tip.clone() };
     tips.leave(&elsewhere).await.unwrap();
-    let vote = |verdict| TipVote { voter: ant("dev"), verdict, reason: None, script: Some(script.clone()), at: now };
+    let vote = |verdict| TipVote {
+        voter: ant("dev"),
+        verdict,
+        reason: None,
+        text: tip.text_sha256(),
+        script: Some(script.clone()),
+        at: now,
+    };
     let dev = Tips::new(&dev_js, None).await.unwrap();
     dev.vote(&tip, &vote(TipVerdict::Stale)).await.unwrap();
     dev.vote(&tip, &vote(TipVerdict::Helpful)).await.unwrap();
