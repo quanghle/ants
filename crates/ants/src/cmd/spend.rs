@@ -16,8 +16,8 @@ pub(crate) struct SpendArgs {
     /// Only this ant.
     #[arg(add = ArgValueCandidates::new(completions::ants))]
     pub(crate) ant: Option<UserId>,
-    /// What the ant, or each ant on the thread, spent on it since a human's last message there: its id, a unique
-    /// start of one, or `last`.
+    /// What the ant, or each ant on the thread, spent on it since a human's last message there and in all: its id, a
+    /// unique start of one, or `last`.
     #[arg(long, value_name = "THREAD")]
     #[arg(add = ArgValueCandidates::new(completions::threads))]
     pub(crate) thread: Option<thread::Pick>,

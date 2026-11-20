@@ -892,7 +892,7 @@ Per-prompt defaults: `prompt_timeout = "30m"` (includes approval wait; `"0"` dis
 
 - `ants spend [--days N]`: one row per ant with spend in the last `N` UTC days (default 7, max 366): today's and total tokens/cost.
 - `ants spend ANT`: daily breakdown, total, and threads with spend since the last human message (costliest first).
-- `ants spend [ANT] --thread THREAD`: spend on `THREAD` since the last human message.
+- `ants spend [ANT] --thread THREAD`: spend on `THREAD` since the last human message, then in all (`TOTAL_TOKENS`, `TOTAL_COST`; `total` in `--json`).
 
 Ants listed with caps in the local `--config` show `spent/cap`; remote ants show spend only. `--json` emits one JSON object per line.
 
