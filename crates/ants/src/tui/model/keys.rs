@@ -390,9 +390,7 @@ impl Model {
 
     pub(in crate::tui) fn view_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         if key == Key::Esc {
-            if let Some(Page::Home(page)) = self.pages.last_mut()
-                && page.disarm()
-            {
+            if self.pages.last_mut().is_some_and(Page::disarm) {
                 return None;
             }
             if self.pages.len() > 1 {
