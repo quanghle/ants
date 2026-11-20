@@ -94,7 +94,8 @@ Nothing else of the host is reachable: these names are defined before the script
   tool picks one), or with neither to the conductor itself. The step's thread keeps the run's owner and links to the
   run's thread. Returns the reply's text; with `schema=`, a JSON Schema as a dict, returns the reply parsed as JSON. A
   reply that does not match the schema is asked for again on the step's thread, naming the mismatch, at most twice;
-  then the call raises. `label=` names the step in the run's thread and status events. `tips=` is the step's tip key
+  then the call raises. `label=` names the step in the run's thread and status events, kept as one line of at most 200
+  characters, control characters left out. `tips=` is the step's tip key
   (one line of 1-120 characters): the step carries the best [tips](#tips) left under it on earlier runs, and a tip
   left answering it goes under it.
 - `await human(questions)`: asks the run's owner, as the `ask_human` MCP tool does. `questions` is a list of 1-4
@@ -111,7 +112,8 @@ Nothing else of the host is reachable: these names are defined before the script
   leg's own script without it), at its waypoint `at` (its start, its first waypoint, without it), with `state` as
   `args`. It never returns: a goto taken ends the leg, and one refused raises `RuntimeError` naming why
   ([Routes](#routes)).
-- `phase(title)`: starts a phase, named as in meta's `phases`, shown as a note on the run's thread.
+- `phase(title)`: starts a phase, named as in meta's `phases`, shown as a note on the run's thread; the run's record
+  keeps it as one line, control characters left out.
 - `log(text)`: a note on the run's thread; `print()` writes notes too. Neither waits.
 - `args`: the leg's input (None without): the JSON value the run was started with on its first leg, the goto's
   `state` on later ones.

@@ -282,6 +282,7 @@ dependencies = [
 name = "ants-trail"
 version = "0.2.0"
 dependencies = [
+ "ants-proto",
  "monty",
  "monty-alloc",
  "monty-types",

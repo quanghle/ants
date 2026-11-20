@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ants_proto::{
     DEFAULT_TURN_BUDGET, PendingCall, RunId, RunLimit, RunState, StepStage, ThreadId, TrailFunction, TrailRun,
-    TrailSession, TrailStepThread,
+    TrailSession, TrailStepThread, lines, one_line,
 };
 use ants_trail::{Call, Event, Function, JournalEntry, Limit, Progress, Run, RunError, Status, WorkerError};
 use anyhow::{Result, anyhow};
@@ -237,7 +237,7 @@ impl Trails {
             let mut book = slot.book();
             for event in &progress.events {
                 if let Event::Phase(phase) = event {
-                    book.header.phase = Some(clip(phase, MAX_PHASE));
+                    book.header.phase = Some(clip(&one_line(phase, MAX_PHASE), MAX_PHASE));
                 }
             }
             let (cancelled, pending): (Vec<PendingCall>, _) =
@@ -278,8 +278,11 @@ impl Trails {
     }
 
     /// End the run of `slot` in `state`, bounded to what its record holds, then store and tell its end ([`Trails::close`]).
-    /// The steps it counted and never sent are given back.
-    async fn end(&self, slot: &Slot, state: RunState) -> Result<()> {
+    /// The steps it counted and never sent are given back; an error is kept without control characters.
+    async fn end(&self, slot: &Slot, mut state: RunState) -> Result<()> {
+        if let RunState::Failed { error, .. } = &mut state {
+            *error = lines(error);
+        }
         let pending = slot.book().pending.clone();
         self.give_back_unsent(slot, &pending);
         {
