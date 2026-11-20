@@ -3,9 +3,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ants_proto::provider::{
     AntRef, BriefReason, BriefRequest, CallContext, Event, EventKind, Export, ImportRequest, Origin, Provider, Starter,
 };
-use ants_proto::{SENSE_STREAM, Stage};
+use ants_proto::{AntIdentity, SENSE_STREAM, Stage};
 use ants_sense::Sense;
-use ants_sense::store::Write;
+use ants_sense::identity::Growth;
+use ants_sense::{items::ItemValues, store::Write};
 use ants_test_support::{NatsServer, eventually, free_port, scratch_dir};
 use serde_json::json;
 

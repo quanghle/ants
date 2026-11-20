@@ -27,7 +27,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::items::{Item, ItemId, Stamp, Values, values_of};
+use crate::items::{Item, ItemId, ItemValues, Stamp, Values};
 use crate::memory::{MAX_BODY_BYTES, MAX_TITLE_CHARS, Memory, MemoryKind, Scope};
 use crate::sanitize::{Limit, Lines, sanitize};
 use crate::store::{Items, StoreError, Write};
@@ -90,12 +90,15 @@ struct Checkpointed {
     writer: CallContext,
 }
 
+impl ItemValues for Checkpointed {
+    const KIND: &str = CHECKPOINT;
+}
+
 impl Register {
     /// The register `item` holds; none for an item of another kind.
     pub fn of(item: &Item) -> Option<Self> {
         (item.kind == CHECKPOINT).then_some(())?;
-        let Checkpointed { thread, goal, step, next, blockers, branch, questions, .. } =
-            serde_json::from_value(Value::Object(item.values.clone())).ok()?;
+        let Checkpointed { thread, goal, step, next, blockers, branch, questions, .. } = Checkpointed::of(item).ok()?;
         Some(Self {
             id: item.id.clone(),
             revision: item.revision,
@@ -204,12 +207,16 @@ struct Handed {
     writer: CallContext,
 }
 
+impl ItemValues for Handed {
+    const KIND: &str = HANDOFF;
+}
+
 impl Handoff {
     /// The handoff `item` holds; none for an item of another kind.
     pub fn of(item: &Item) -> Option<Self> {
         (item.kind == HANDOFF).then_some(())?;
         let Handed { thread, done, in_flight, next, promises, decisions, files, episode, acknowledged, .. } =
-            serde_json::from_value(Value::Object(item.values.clone())).ok()?;
+            Handed::of(item).ok()?;
         Some(Self {
             id: item.id.clone(),
             thread,
@@ -300,7 +307,7 @@ async fn checkpoint_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answe
     {
         return read(sense, context).await;
     }
-    let values = values_of(&register);
+    let values = register.values();
 
     let items = sense.items(&context.ant).await?;
     let mut acknowledge = Vec::new();
@@ -444,7 +451,7 @@ async fn handoff_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> 
     };
     let writes = [
         memory.create(episode.clone()),
-        Write::Create { id: ItemId::new(), kind: HANDOFF.into(), values: values_of(&handed) },
+        Write::Create { id: ItemId::new(), kind: HANDOFF.into(), values: handed.values() },
     ];
     let item = items.write(&writes, by).await?.remove(1);
     let handoff = Handoff::of(&item).ok_or_else(|| StoreError::Unavailable("unreadable handoff".into()))?;

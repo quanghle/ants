@@ -24,7 +24,7 @@ use super::{
     Access, DEFAULT_IMPORTANCE, MEMORY, Memory, MemoryItem, RECALLED_BEGIN, RECALLED_END, Scope, Status, chain,
 };
 use crate::Sense;
-use crate::items::{Item, ItemId};
+use crate::items::{Item, ItemId, ItemValues};
 use crate::records::{self, RecordItem};
 use crate::store::{Items, StoreError};
 use crate::tools::Answer;

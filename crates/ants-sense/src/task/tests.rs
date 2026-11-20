@@ -1,60 +1,18 @@
 use std::sync::Arc;
 
-use ants_proto::provider::{CallContext, Format, Origin, Starter};
-use ants_proto::{SenseId, UserId};
+use ants_proto::SenseId;
+use ants_proto::provider::CallContext;
 
 use super::*;
-use crate::cache::Cache;
-use crate::log::{AccountVerifier, AntLog, EventLog, MemoryLog, NoRevocations, Unsigned};
-use crate::store::{Store, Stores};
+use crate::log::{EventLog, MemoryLog};
+use crate::testing::{self, context, fixture, human, sense};
 
 mod leases;
 
-struct One(Arc<dyn Items>);
-
-impl Stores for One {
-    fn items<'a>(&'a self, _: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
-        Box::pin(async move { Ok(self.0.clone()) })
-    }
-}
-
-async fn setup() -> (Sense, Arc<dyn Items>) {
-    setup_log(MemoryLog::default()).await
-}
-
-async fn setup_log(log: impl EventLog + Send + Sync + 'static) -> (Sense, Arc<dyn Items>) {
-    let log = AntLog::new(
-        log,
-        Unsigned,
-        AccountVerifier::new(vec![], NoRevocations),
-        SenseId::new(),
-        "dev-a".parse().unwrap(),
-        "m1".parse().unwrap(),
-        None,
-    )
-    .unwrap();
-    let store = Store::open(log, Cache::in_memory().unwrap()).await.unwrap();
-    let items: Arc<dyn Items> = Arc::new(tokio::sync::Mutex::new(store));
-    (Sense::with_stores(Arc::new(One(items.clone()))), items)
-}
-
 fn call(thread: &str, arguments: Value) -> ToolCall {
-    ToolCall {
-        name: "task".into(),
-        arguments: arguments.as_object().unwrap().clone(),
-        context: CallContext {
-            ant: "dev-a".parse().unwrap(),
-            identity: "0f1e".into(),
-            thread: thread.parse().unwrap(),
-            origin: Origin { by: Starter::Human { user: "alice".parse().unwrap() }, channel: None },
-            harness: "copilot".into(),
-            model: None,
-            machine: "m1".into(),
-            repo: None,
-            at: "2025-01-01T12:00:00Z".parse().unwrap(),
-        },
-        format: Format::Json,
-    }
+    let context =
+        CallContext { thread: thread.parse().unwrap(), model: None, machine: "m1".into(), ..context(human()) };
+    testing::call("task", arguments, context)
 }
 
 /// The answer to `call` as a provider call gets it, the items caught up with the log as it starts.
@@ -74,7 +32,7 @@ async fn create(sense: &Sense, title: &str, priority: u8) -> ItemId {
 
 #[tokio::test]
 async fn task_external_references_cannot_inject_lines_into_briefs() {
-    let (sense, _) = setup().await;
+    let (sense, _) = sense().await;
     let answer =
         invoke(&sense, json!({"action":"create","title":"Ship parser","external_ref":"bd:team-\u{200b}1\nnext"})).await;
     assert!(!answer.is_error, "{answer:?}");
@@ -85,7 +43,7 @@ async fn task_external_references_cannot_inject_lines_into_briefs() {
 
 #[tokio::test]
 async fn task_ready_is_kind_filtered_open_unblocked_and_sorted_before_limiting() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     let oldest = create(&sense, "oldest", 2).await;
     let urgent = create(&sense, "urgent", 0).await;
     let newer = create(&sense, "newer", 2).await;
@@ -127,7 +85,7 @@ async fn task_ready_is_kind_filtered_open_unblocked_and_sorted_before_limiting()
 
 #[tokio::test]
 async fn task_relationships_validate_types_targets_duplicates_parentage_and_cycles_without_writes() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     let a = create(&sense, "a", 2).await;
     let b = create(&sense, "b", 2).await;
     let c = create(&sense, "c", 2).await;
@@ -182,7 +140,7 @@ async fn task_relationships_validate_types_targets_duplicates_parentage_and_cycl
 
 #[tokio::test]
 async fn task_expected_revisions_preserve_external_references_and_reject_stale_writes() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     let id = create(&sense, "first", 4).await;
     let missing = invoke(&sense, json!({"action": "update", "id": id, "title": "wrong"})).await;
     assert_eq!(missing.json["error"], "revision_required");
@@ -217,7 +175,7 @@ async fn task_expected_revisions_preserve_external_references_and_reject_stale_w
 
 #[tokio::test]
 async fn task_graph_cas_guards_prevent_two_valid_snapshots_from_committing_a_cycle() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     let a = create(&sense, "a", 2).await;
     let b = create(&sense, "b", 2).await;
     let first = Graph::load(&*items).await.unwrap();

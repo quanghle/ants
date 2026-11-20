@@ -14,11 +14,11 @@ use ants_proto::ThreadId;
 use ants_proto::provider::{BoxFuture, CallContext, ToolCall};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::{MemoryItem, Status};
 use crate::Sense;
-use crate::items::{Item, ItemId, Values, values_of};
+use crate::items::{ItemId, ItemValues, Values};
 use crate::sanitize::{Limit, sanitize_title};
 use crate::store::{Write, read_modify_write};
 use crate::tools::{Answer, MAX_REASON_CHARS};
@@ -102,10 +102,8 @@ struct Ballot {
     writer: CallContext,
 }
 
-impl Ballot {
-    fn of(item: &Item) -> Option<Self> {
-        serde_json::from_value(Value::Object(item.values.clone())).ok()
-    }
+impl ItemValues for Ballot {
+    const KIND: &str = VOTE;
 }
 
 /// Answers a `sense_vote` call.
@@ -150,7 +148,7 @@ async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
             return Ok(Err(Answer::error("conflict", message)));
         }
         let cast = items.get(ballot).await?;
-        let previous = cast.as_ref().and_then(Ballot::of).map(|ballot| ballot.vote);
+        let previous = cast.as_ref().and_then(|cast| Ballot::of(cast).ok()).map(|ballot| ballot.vote);
         let mut votes = memory.votes.clone();
         if let Some(previous) = previous {
             let count = votes.count(previous);
@@ -179,7 +177,7 @@ async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
             Write::Put {
                 id: ballot.clone(),
                 kind: VOTE.into(),
-                values: values_of(&record),
+                values: record.values(),
                 expected: Some(cast.as_ref().map_or(0, |cast| cast.revision)),
             },
             Write::Change { id: id.clone(), values: changed, expected: Some(found.item.revision) },

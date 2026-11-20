@@ -21,12 +21,10 @@ use ants_proto::provider::{CallContext, Event, EventKind};
 use ants_proto::{SenseId, UserId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
-use crate::cache::CacheError;
 use crate::home::Home;
-use crate::items::{Item, Values};
+use crate::items::{ItemValues, changed};
 use crate::log::read_status;
 use crate::remind;
 use crate::store::{Items, StoreError, Write, read_modify_write};
@@ -34,6 +32,7 @@ use crate::store::{Items, StoreError, Write, read_modify_write};
 mod tool;
 
 pub(crate) use tool::relationships;
+pub(crate) use tool::writes_record;
 pub use tool::{identity, schema};
 
 /// The kind of the card's item; an ant has one.
@@ -187,6 +186,10 @@ pub struct ClonedFrom {
     pub identity: String,
 }
 
+impl ItemValues for Card {
+    const KIND: &str = CARD;
+}
+
 impl Card {
     /// The card of `sense`, the identity of `ant`, once named `earlier`, made at `at`, linked to no ants identity yet.
     fn new(sense: SenseId, ant: UserId, earlier: Vec<UserId>, at: DateTime<Utc>) -> Self {
@@ -226,26 +229,6 @@ impl Card {
     /// Whether the ant came back from dormancy or under another ants identity and the brief has not told it yet.
     pub fn returned(&self) -> bool {
         self.returned_at.is_some()
-    }
-
-    fn of(item: &Item) -> Result<Self, StoreError> {
-        Ok(serde_json::from_value(Value::Object(item.values.clone())).map_err(CacheError::from)?)
-    }
-
-    fn values(&self) -> Result<Values, StoreError> {
-        match serde_json::to_value(self).map_err(CacheError::from)? {
-            Value::Object(values) => Ok(values),
-            _ => unreachable!("a card is an object"),
-        }
-    }
-
-    /// The values setting `before`, the card's values, to this card's: null for each it no longer has.
-    fn patch(&self, before: &Values) -> Result<Values, StoreError> {
-        let mut values = self.values()?;
-        for name in before.keys() {
-            values.entry(name.clone()).or_insert(Value::Null);
-        }
-        Ok(values)
     }
 
     /// Make `identity` the current ants identity, linked to the card.
@@ -368,7 +351,7 @@ pub async fn record_event(items: &dyn Items, event: &Event) -> Result<Card, Stor
         let mut writes = remind::resumed(items, since, event.at).await?;
         writes.push(Write::Change {
             id: item.id.clone(),
-            values: card.patch(&item.values)?,
+            values: changed(&item.values, card.values()),
             expected: Some(item.revision),
         });
         Card::of(&items.write(&writes, BY).await?.pop().expect("the card written last"))
@@ -413,7 +396,7 @@ async fn update(
             None => {
                 let mut card = Card::new(items.sense().await, ant.clone(), items.earlier_names().await, at);
                 change(&mut card);
-                let (item, created) = items.single(CARD, card.values()?, BY).await?;
+                let (item, created) = items.single(CARD, card.values(), BY).await?;
                 if created {
                     return Card::of(&item);
                 }
@@ -426,7 +409,7 @@ async fn update(
         if card == current {
             return Ok(card);
         }
-        Card::of(&items.change(&item.id, card.patch(&item.values)?, Some(item.revision), BY).await?)
+        Card::of(&items.change(&item.id, changed(&item.values, card.values()), Some(item.revision), BY).await?)
     })
     .await
 }

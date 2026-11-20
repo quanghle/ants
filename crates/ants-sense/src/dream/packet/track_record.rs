@@ -20,7 +20,7 @@ use crate::dream::reviews::told_reason;
 use crate::dream::vitals::percent;
 use crate::dream::{Dream, Finding, FindingKind, FindingTally, Judgement, Signs, TREND, Verdict, get};
 use crate::items::ItemId;
-use crate::memory::{self, Memory, Scope, Status};
+use crate::memory::{self, MemoryItem, Scope, Status};
 use crate::proposal::{self, ProposalItem};
 use crate::records::RecordItem;
 use crate::store::{Items, StoreError};
@@ -383,8 +383,8 @@ async fn outcome(items: &dyn Items, id: &ItemId, at: DateTime<Utc>) -> Result<(S
         return Ok((line, matches!(status, proposal::Status::Pending | proposal::Status::Confirmed)));
     }
     let then = items.at(id, at).await?;
-    if let Some(memory) = Memory::of(&item) {
-        let before = then.as_ref().and_then(Memory::of).map(|memory| memory.status);
+    if let Some(MemoryItem { memory, .. }) = MemoryItem::of(item.clone()) {
+        let before = then.clone().and_then(MemoryItem::of).map(|found| found.memory.status);
         let mut line = format!("memory {id} \"{}\": {}", memory.title, memory.status.name());
         if let Some(by) = &memory.superseded_by {
             let _ = write!(line, " by {by}");

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::brief::Listing;
-use crate::items::{Item, ItemId, Values};
+use crate::items::{Item, ItemId, ItemValues, Values};
 use crate::sanitize::{Limit, sanitize_body, sanitize_title};
 use crate::store::{Items, StoreError, Write};
 use crate::{Answer, Sense};
@@ -101,22 +101,23 @@ pub struct Task {
     pub lease: Option<Lease>,
 }
 
+impl ItemValues for Task {
+    const KIND: &str = TASK;
+}
+
 impl Task {
-    pub fn of(item: &Item) -> Option<Self> {
+    /// The task `item` holds; none for an item of another kind, unreadable or holding no valid task.
+    pub fn held(item: &Item) -> Option<Self> {
         if item.kind != TASK {
             return None;
         }
-        let task: Self = serde_json::from_value(Value::Object(item.values.clone())).ok()?;
+        let task = Self::of(item).ok()?;
         let valid_lease = match (&task.lease, task.status) {
             (Some(lease), Status::InProgress) => (2..=item.revision).contains(&lease.claim_revision),
             (None, Status::InProgress) | (Some(_), _) => false,
             (None, _) => true,
         };
         (task.priority <= 4 && !task.title.trim().is_empty() && valid_lease).then_some(task)
-    }
-
-    fn values(&self) -> Values {
-        serde_json::to_value(self).expect("task values").as_object().expect("task object").clone()
     }
 }
 
@@ -129,7 +130,7 @@ pub struct TaskItem {
 
 impl TaskItem {
     pub fn of(item: Item) -> Option<Self> {
-        Some(Self { task: Task::of(&item)?, item })
+        Some(Self { task: Task::held(&item)?, item })
     }
 
     pub fn id(&self) -> &ItemId {
@@ -189,7 +190,11 @@ pub async fn claimed(
 }
 
 /// Whether a task in progress, task `id` alone when given, is past its lease.
-pub async fn lease_expired(items: &dyn Items, id: Option<&ItemId>, now: DateTime<Utc>) -> Result<bool, StoreError> {
+pub(crate) async fn lease_expired(
+    items: &dyn Items,
+    id: Option<&ItemId>,
+    now: DateTime<Utc>,
+) -> Result<bool, StoreError> {
     Ok(list(items, usize::MAX).await?.iter().any(|found| {
         id.is_none_or(|id| id == found.id())
             && found.task.status == Status::InProgress

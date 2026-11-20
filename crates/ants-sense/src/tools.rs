@@ -34,6 +34,24 @@ pub struct ToolSpec {
     /// The JSON Schema of its arguments.
     pub schema: fn() -> Value,
     pub handler: Handler,
+    /// How its calls on a dream's thread count toward the dream's [`crate::dream::MAX_DREAM_WRITES`]; none when
+    /// they do not.
+    pub dream: Option<DreamWrite>,
+}
+
+/// How a tool's calls count as writes of a dream, made on its thread ([`crate::dream::counted`]).
+#[derive(Debug, Clone, Copy)]
+pub struct DreamWrite {
+    /// Whether a call writes what counts: a memory or a record.
+    pub writes: fn(&ToolCall) -> bool,
+    /// Whether what it writes is stored as quoting outside content while a finding of the dream resting on untrusted
+    /// text is open.
+    pub quotes: bool,
+}
+
+/// Every call writes.
+fn always(_: &ToolCall) -> bool {
+    true
 }
 
 /// What answers a tool's calls, given the ant's call ([`ToolCall::context`] tells whose).
@@ -100,18 +118,29 @@ impl From<StoreError> for Answer {
     }
 }
 
+/// The refusal of a call, `error`: one showing an item of `kind` found at another revision shows it as `name` too.
+pub(crate) fn refused_as(error: impl Into<Answer>, kind: &str, name: &str) -> Answer {
+    let mut answer = error.into();
+    if answer.json["current"]["kind"] == kind {
+        answer.json[name] = answer.json["current"].clone();
+    }
+    answer
+}
+
 pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "brief",
         description: "Show the brief of this thread again: identity, open work and the memories that matter.",
         schema: || object(&json!({})),
         handler: crate::brief::brief,
+        dream: None,
     },
     ToolSpec {
         name: "remember",
         description: "Store a memory: a fact, lesson, decision, preference, gotcha or episode, with citations.",
         schema: remember,
         handler: crate::memory::remember,
+        dream: Some(DreamWrite { writes: always, quotes: true }),
     },
     ToolSpec {
         name: "recall",
@@ -120,6 +149,7 @@ pub const TOOLS: &[ToolSpec] = &[
                       provenance.",
         schema: recall,
         handler: crate::memory::recall,
+        dream: None,
     },
     ToolSpec {
         name: "vote",
@@ -134,6 +164,7 @@ pub const TOOLS: &[ToolSpec] = &[
             schema
         },
         handler: crate::memory::vote,
+        dream: Some(DreamWrite { writes: always, quotes: false }),
     },
     ToolSpec {
         name: "checkpoint",
@@ -142,6 +173,7 @@ pub const TOOLS: &[ToolSpec] = &[
                       show the whole register and every unacknowledged handoff.",
         schema: checkpoint,
         handler: crate::thread::checkpoint,
+        dream: None,
     },
     ToolSpec {
         name: "handoff",
@@ -149,24 +181,28 @@ pub const TOOLS: &[ToolSpec] = &[
                       promises, decisions, files.",
         schema: handoff,
         handler: crate::thread::handoff,
+        dream: None,
     },
     ToolSpec {
         name: "task",
         description: "Keep personal tasks, list ready work and claim a task for this thread under a fenced lease.",
         schema: crate::task::schema,
         handler: crate::task::task,
+        dream: None,
     },
     ToolSpec {
         name: "promise",
         description: "Record a commitment, its promisee and due time; keep, break, release or renegotiate it.",
         schema: crate::promise::schema,
         handler: crate::promise::promise,
+        dream: None,
     },
     ToolSpec {
         name: "remind",
         description: "Set a timed or conditional reminder; acknowledge, postpone, renew or drop it.",
         schema: crate::remind::schema,
         handler: crate::remind::remind,
+        dream: None,
     },
     ToolSpec {
         name: "identity",
@@ -180,6 +216,7 @@ pub const TOOLS: &[ToolSpec] = &[
         ),
         schema: crate::identity::schema,
         handler: crate::identity::identity,
+        dream: Some(DreamWrite { writes: crate::identity::writes_record, quotes: true }),
     },
     ToolSpec {
         name: "skill",
@@ -188,6 +225,7 @@ pub const TOOLS: &[ToolSpec] = &[
                       alone, read one.",
         schema: skill,
         handler: crate::skill::skill,
+        dream: None,
     },
     ToolSpec {
         name: "dream",
@@ -196,6 +234,7 @@ pub const TOOLS: &[ToolSpec] = &[
                       arguments, show the dream's findings and verdicts.",
         schema: crate::dream::schema,
         handler: crate::dream::dream,
+        dream: None,
     },
 ];
 

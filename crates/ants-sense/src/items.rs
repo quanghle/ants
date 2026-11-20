@@ -8,10 +8,13 @@ use std::str::FromStr;
 
 use ants_proto::Machine;
 use chrono::{DateTime, SecondsFormat, Utc};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use crate::store::StoreError;
 
 /// The kind of the log events changing an item, whose data is a [`Change`].
 pub const ITEM_EVENT: &str = "item";
@@ -136,11 +139,23 @@ pub fn changed(before: &Values, after: Values) -> Values {
     changed.chain(removed).collect()
 }
 
-/// The values of an item holding `value`, a struct.
-pub(crate) fn values_of(value: &impl Serialize) -> Values {
-    match serde_json::to_value(value) {
-        Ok(Value::Object(values)) => values,
-        _ => unreachable!("an item holds a struct"),
+/// What an item of one kind holds, as a struct its values are read into and written from.
+pub trait ItemValues: Serialize + DeserializeOwned {
+    /// What it is called in the error naming an item unreadable as one.
+    const KIND: &'static str;
+
+    /// What `item` holds; unavailable when its values are no such struct.
+    fn of(item: &Item) -> Result<Self, StoreError> {
+        serde_json::from_value(Value::Object(item.values.clone()))
+            .map_err(|e| StoreError::Unavailable(format!("unreadable {} {}: {e}", Self::KIND, item.id)))
+    }
+
+    /// The values of an item holding it.
+    fn values(&self) -> Values {
+        match serde_json::to_value(self) {
+            Ok(Value::Object(values)) => values,
+            _ => unreachable!("an item holds a struct"),
+        }
     }
 }
 

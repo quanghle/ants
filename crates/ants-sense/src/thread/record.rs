@@ -11,12 +11,10 @@ use ants_proto::ThreadId;
 use ants_proto::provider::{Event, EventKind, Origin};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
-use crate::cache::CacheError;
 use crate::identity::BY;
-use crate::items::{Item, ItemId, Values};
+use crate::items::{ItemId, ItemValues};
 use crate::store::{Items, StoreError, read_modify_write};
 
 /// The kind of a thread's record.
@@ -48,20 +46,11 @@ pub struct Record {
     pub events: Vec<Uuid>,
 }
 
+impl ItemValues for Record {
+    const KIND: &str = KIND;
+}
+
 impl Record {
-    /// The record `item` holds.
-    pub fn of(item: &Item) -> Result<Self, StoreError> {
-        Ok(serde_json::from_value(Value::Object(item.values.clone())).map_err(CacheError::from)?)
-    }
-
-    /// The values of its item.
-    pub fn values(&self) -> Values {
-        match serde_json::to_value(self) {
-            Ok(Value::Object(values)) => values,
-            _ => unreachable!("a record is an object"),
-        }
-    }
-
     /// The record of `thread` started by `event`, from `origin` in `repo`.
     fn started(thread: &ThreadId, origin: &Origin, repo: Option<&String>, event: &Event) -> Self {
         Self {
@@ -144,9 +133,9 @@ mod tests {
 
     use super::*;
     use crate::Sense;
-    use crate::cache::Cache;
-    use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
-    use crate::store::{Store, Stores};
+
+    use crate::log::MemoryLog;
+    use crate::store::Stores;
 
     const THREAD: &str = "019a7d2c-0000-7000-8000-000000000001";
 
@@ -160,12 +149,8 @@ mod tests {
     }
 
     async fn sense() -> (Sense, Arc<dyn Items>) {
-        let verifier = AccountVerifier::new(vec![], NoRevocations);
-        let ant = "dev-a".parse().unwrap();
-        let log =
-            AntLog::new(MemoryLog::default(), Unsigned, verifier, SenseId::new(), ant, "m1".parse().unwrap(), None);
-        let store = Store::open(log.unwrap(), Cache::in_memory().unwrap()).await.unwrap();
-        let items: Arc<dyn Items> = Arc::new(tokio::sync::Mutex::new(store));
+        let items: Arc<dyn Items> =
+            Arc::new(crate::testing::store(MemoryLog::default(), SenseId::new(), "dev-a".parse().unwrap()).await);
         (Sense::with_stores(Arc::new(Kept(Ok(items.clone())))), items)
     }
 

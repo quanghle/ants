@@ -24,6 +24,10 @@ tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
 tracing.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 
+[features]
+# The fixtures of its tests ([`testing`](src/testing.rs)), shared with the tests of the daemon's sense module.
+test-support = []
+
 [dev-dependencies]
 ants-test-support.workspace = true
 nkeys = "0.4.5"

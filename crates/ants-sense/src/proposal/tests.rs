@@ -7,8 +7,9 @@ use super::*;
 use crate::dream::{ColonyTrails, Covered, FindingKind, Recipient, Start};
 use crate::identity::identity;
 use crate::memory::Trust;
-use crate::memory::tests::{context, human, memory, sense, tool};
+use crate::memory::tests::memory;
 use crate::persona::{self, persona_id};
+use crate::testing::{context, human, sense, tool};
 use crate::{Answer, Sense};
 
 fn at(hours: i64) -> DateTime<Utc> {

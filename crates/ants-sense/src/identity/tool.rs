@@ -101,6 +101,11 @@ struct Request {
     quotes: Option<Quotes>,
 }
 
+/// Whether `call` writes a record: only with `self_model` or `relationship`.
+pub(crate) fn writes_record(call: &ToolCall) -> bool {
+    ["self_model", "relationship"].iter().any(|record| call.arguments.get(*record).is_some_and(|v| !v.is_null()))
+}
+
 /// Answers a `sense_identity` call.
 pub fn identity<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
     Box::pin(async move { answer(sense, call).await.unwrap_or_else(|refused| refused) })
@@ -233,12 +238,12 @@ mod tests {
     use super::*;
     use crate::items::Values;
     use crate::memory::RECALLED_BEGIN;
-    use crate::memory::tests::{context, human, sense, tool};
     use crate::persona::{PERSONA, persona_id};
     use crate::proposal::tests::error;
     use crate::records::SELF_MODEL;
     use crate::skill::{SKILL, skill_id};
     use crate::store::Write;
+    use crate::testing::{context, human, sense, tool};
 
     fn position(text: &str, part: &str) -> usize {
         text.find(part).unwrap_or_else(|| panic!("{part:?} not in:\n{text}"))

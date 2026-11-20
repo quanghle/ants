@@ -1,20 +1,19 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use ants_proto::SenseId;
 use ants_proto::provider::{
     BriefReason, BriefRequest, Event, EventKind, Format, Origin, Output, Provider, Starter, ToolResult,
 };
-use ants_proto::{SenseId, UserId};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::*;
-use crate::cache::Cache;
 use crate::log::{
     AccountVerifier, AntLog, AppendError, EventLog, LogError, MemoryLog, NoRevocations, Stored, Unsigned,
 };
 use crate::memory::{NOTE, RECALLED_BEGIN, RECALLED_END};
-use crate::store::{Store, Stores};
+use crate::testing::{self, One, human, sense, store};
 use crate::tools::Handler;
 
 mod citations;
@@ -24,27 +23,10 @@ mod persona;
 mod records;
 mod work;
 
-/// The items of one ant, the same at each call.
-struct One(Arc<dyn Items>);
-
-impl Stores for One {
-    fn items<'a>(&'a self, _ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
-        let items = self.0.clone();
-        Box::pin(async move { Ok(items) })
-    }
-}
-
 /// sense keeping the items of its one ant in `log`.
 async fn sense_on(log: impl EventLog + Send + Sync + 'static, sense: SenseId) -> (Sense, Arc<dyn Items>) {
-    let verifier = AccountVerifier::new(vec![], NoRevocations);
-    let log = AntLog::new(log, Unsigned, verifier, sense, "dev-a".parse().unwrap(), "m1".parse().unwrap(), None);
-    let store = Store::open(log.unwrap(), Cache::in_memory().unwrap()).await.unwrap();
-    let items: Arc<dyn Items> = Arc::new(tokio::sync::Mutex::new(store));
+    let items: Arc<dyn Items> = Arc::new(store(log, sense, "dev-a".parse().unwrap()).await);
     (Sense::with_stores(Arc::new(One(items.clone()))), items)
-}
-
-async fn sense() -> (Sense, Arc<dyn Items>) {
-    sense_on(MemoryLog::default(), SenseId::new()).await
 }
 
 const THREAD: &str = "019a7d2c-0000-7000-8000-000000000001";
@@ -52,24 +34,12 @@ const OTHER: &str = "019a7d2c-0000-7000-8000-000000000002";
 const THIRD: &str = "019a7d2c-0000-7000-8000-000000000003";
 
 fn context(thread: &str) -> CallContext {
-    CallContext {
-        ant: "dev-a".parse().unwrap(),
-        identity: "0f1e".into(),
-        thread: thread.parse().unwrap(),
-        origin: Origin { by: Starter::Human { user: "alice".parse().unwrap() }, channel: None },
-        harness: "copilot".into(),
-        model: Some("gpt".into()),
-        machine: "studio".into(),
-        repo: None,
-        at: "2025-01-01T12:00:00Z".parse().unwrap(),
-    }
+    CallContext { thread: thread.parse().unwrap(), ..testing::context(human()) }
 }
 
 /// The answer of `handler` to a call on `thread` with `arguments`, which must not be refused.
 async fn call(sense: &Sense, handler: Handler, thread: &str, arguments: Value) -> Answer {
-    let arguments = arguments.as_object().unwrap().clone();
-    let call = ToolCall { name: "tool".into(), arguments, context: context(thread), format: Format::Json };
-    let answer = handler(sense, &call).await;
+    let answer = handler(sense, &testing::call("tool", arguments, context(thread))).await;
     assert!(!answer.is_error, "{answer:?}");
     answer
 }

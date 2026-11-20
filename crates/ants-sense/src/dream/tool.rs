@@ -13,12 +13,12 @@ use serde_json::{Value, json};
 use super::{
     BY, Dream, Finding, FindingKind, Judgement, MAX_DREAM_WRITES, MAX_FINDINGS, State, TRAIL, Verdict, close, get,
 };
-use crate::items::{Item, ItemId, Values};
+use crate::items::{Item, ItemId};
 use crate::memory::{MEMORY, Scope};
 use crate::persona::persona_id;
 use crate::proposal::{self, ProposalItem, Status};
 use crate::sanitize::{Limit, sanitize_title};
-use crate::store::{Items, StoreError, Write, read_modify_write};
+use crate::store::{Items, StoreError, read_modify_write};
 use crate::tools::{Answer, MAX_REASON_CHARS};
 use crate::{Sense, records, skill};
 
@@ -121,20 +121,19 @@ async fn dream_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     let (items, dream, verdicts, decided, warning) = (&*items, &dream, &verdicts, &decided, &warning);
     read_modify_write(|| async move {
         let gone = || StoreError::NotFound(Dream::id(dream.number));
-        let (mut current, revision) = get(items, dream.number).await?.ok_or_else(gone)?;
-        if current.state == State::Done {
-            return Ok(Err(finished(&current)));
+        let (before, revision) = get(items, dream.number).await?.ok_or_else(gone)?;
+        if before.state == State::Done {
+            return Ok(Err(finished(&before)));
         }
+        let mut current = before.clone();
         for verdict in verdicts {
             current.verdicts.retain(|earlier| earlier.finding != verdict.finding);
             current.verdicts.push(verdict.clone());
         }
         let writes = if done {
-            close(current.clone(), revision, context, Utc::now()).to_vec()
+            close(&before, current.clone(), revision, context, Utc::now()).to_vec()
         } else {
-            let mut values = Values::new();
-            values.insert("verdicts".into(), json!(current.verdicts));
-            vec![Write::Change { id: Dream::id(current.number), values, expected: Some(revision) }]
+            vec![before.change(&current, revision)]
         };
         let written = items.write(&writes, BY).await?;
         if done {

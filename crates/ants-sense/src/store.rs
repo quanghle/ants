@@ -564,28 +564,15 @@ pub trait Items: Send + Sync {
     /// [`Store::write`].
     fn write<'a>(&'a self, writes: &'a [Write], by: &'a str) -> BoxFuture<'a, Result<Vec<Item>, StoreError>>;
     /// Like [`Items::write`], but never queue a write without a hub acknowledgment.
-    fn write_confirmed<'a>(&'a self, writes: &'a [Write], by: &'a str) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
-        self.write(writes, by)
-    }
+    fn write_confirmed<'a>(&'a self, writes: &'a [Write], by: &'a str) -> BoxFuture<'a, Result<Vec<Item>, StoreError>>;
     /// Accepted local writes that have not yet been acknowledged by the hub.
-    fn pending(&self) -> BoxFuture<'_, Result<usize, StoreError>> {
-        Box::pin(async { Ok(0) })
-    }
+    fn pending(&self) -> BoxFuture<'_, Result<usize, StoreError>>;
     /// The acknowledged stream sequence of an exact revision, never an offline placeholder.
     fn confirmed_sequence<'a>(
         &'a self,
         id: &'a ItemId,
         revision: u64,
-    ) -> BoxFuture<'a, Result<Option<u64>, StoreError>> {
-        Box::pin(async move {
-            Ok(self
-                .history(id)
-                .await?
-                .iter()
-                .find(|entry| entry.change.revision == revision && entry.sequence != 0)
-                .map(|entry| entry.sequence))
-        })
-    }
+    ) -> BoxFuture<'a, Result<Option<u64>, StoreError>>;
     fn get<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Option<Item>, StoreError>>;
     /// [`Store::list`].
     fn list<'a>(&'a self, kind: &'a str, limit: usize) -> BoxFuture<'a, Result<Vec<Item>, StoreError>>;
@@ -705,19 +692,11 @@ where
     }
 
     fn get<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Option<Item>, StoreError>> {
-        Box::pin(async move {
-            let mut store = self.lock().await;
-            store.replay().await?;
-            store.get(id)
-        })
+        Box::pin(read(self, |store| store.get(id)))
     }
 
     fn list<'a>(&'a self, kind: &'a str, limit: usize) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
-        Box::pin(async move {
-            let mut store = self.lock().await;
-            store.replay().await?;
-            store.list(kind, limit)
-        })
+        Box::pin(read(self, move |store| store.list(kind, limit)))
     }
 
     fn list_by<'a>(
@@ -727,11 +706,7 @@ where
         value: Option<&'a Value>,
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
-        Box::pin(async move {
-            let mut store = self.lock().await;
-            store.replay().await?;
-            store.list_by(kind, name, value, limit)
-        })
+        Box::pin(read(self, move |store| store.list_by(kind, name, value, limit)))
     }
 
     fn search<'a>(
@@ -740,11 +715,7 @@ where
         kind: Option<&'a str>,
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<Hit>, StoreError>> {
-        Box::pin(async move {
-            let mut store = self.lock().await;
-            store.replay().await?;
-            store.search(text, kind, limit)
-        })
+        Box::pin(read(self, move |store| store.search(text, kind, limit)))
     }
 
     fn experience<'a>(
@@ -753,27 +724,15 @@ where
         since: Option<DateTime<Utc>>,
         top: usize,
     ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>> {
-        Box::pin(async move {
-            let mut store = self.lock().await;
-            store.replay().await?;
-            store.experience(own, since, top)
-        })
+        Box::pin(read(self, move |store| store.experience(own, since, top)))
     }
 
     fn review_tally(&self, top: usize) -> BoxFuture<'_, Result<Option<ReviewTally>, StoreError>> {
-        Box::pin(async move {
-            let mut store = self.lock().await;
-            store.replay().await?;
-            store.review_tally(top)
-        })
+        Box::pin(read(self, move |store| store.review_tally(top)))
     }
 
     fn calls(&self, since: DateTime<Utc>) -> BoxFuture<'_, Result<Vec<Calls>, StoreError>> {
-        Box::pin(async move {
-            let mut store = self.lock().await;
-            store.replay().await?;
-            store.calls(since)
-        })
+        Box::pin(read(self, move |store| store.calls(since)))
     }
 
     fn history<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Vec<Revision>, StoreError>> {
@@ -811,6 +770,21 @@ where
     fn messages(&self) -> BoxFuture<'_, Result<Vec<Stored>, StoreError>> {
         Box::pin(async move { self.lock().await.messages().await })
     }
+}
+
+/// What `read` makes of the store, caught up with its log first.
+async fn read<L, S, V, T>(
+    store: &tokio::sync::Mutex<Store<L, S, V>>,
+    read: impl FnOnce(&Store<L, S, V>) -> Result<T, StoreError>,
+) -> Result<T, StoreError>
+where
+    L: EventLog + Send + Sync,
+    S: Signer + Send + Sync,
+    V: Verifier + Send + Sync,
+{
+    let mut store = store.lock().await;
+    store.replay().await?;
+    read(&store)
 }
 
 /// What finds the items of each ant a daemon serves, opening the ant's [`Store`] on first use: the daemon provides it

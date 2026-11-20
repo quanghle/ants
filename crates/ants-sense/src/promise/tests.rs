@@ -1,54 +1,11 @@
-use std::sync::Arc;
-
-use ants_proto::provider::{CallContext, Format, Origin, Starter};
-use ants_proto::{SenseId, UserId};
+use ants_proto::provider::CallContext;
 
 use super::*;
-use crate::cache::Cache;
-use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
-use crate::store::{Store, Stores};
-
-pub(crate) struct One(pub Arc<dyn Items>);
-
-impl Stores for One {
-    fn items<'a>(&'a self, _: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
-        Box::pin(async { Ok(self.0.clone()) })
-    }
-}
-
-async fn setup() -> (Sense, Arc<dyn Items>) {
-    let log = AntLog::new(
-        MemoryLog::default(),
-        Unsigned,
-        AccountVerifier::new(vec![], NoRevocations),
-        SenseId::new(),
-        "dev-a".parse().unwrap(),
-        "m1".parse().unwrap(),
-        None,
-    )
-    .unwrap();
-    let store = Store::open(log, Cache::in_memory().unwrap()).await.unwrap();
-    let items: Arc<dyn Items> = Arc::new(tokio::sync::Mutex::new(store));
-    (Sense::with_stores(Arc::new(One(items.clone()))), items)
-}
+use crate::testing::{self, context, human, sense};
 
 fn call(arguments: Value) -> ToolCall {
-    ToolCall {
-        name: "promise".into(),
-        arguments: arguments.as_object().unwrap().clone(),
-        context: CallContext {
-            ant: "dev-a".parse().unwrap(),
-            identity: "0f1e".into(),
-            thread: "t1".parse().unwrap(),
-            origin: Origin { by: Starter::Human { user: "alice".parse().unwrap() }, channel: None },
-            harness: "copilot".into(),
-            model: None,
-            machine: "m1".into(),
-            repo: None,
-            at: "2025-01-01T12:00:00Z".parse().unwrap(),
-        },
-        format: Format::Json,
-    }
+    let context = CallContext { thread: "t1".parse().unwrap(), model: None, machine: "m1".into(), ..context(human()) };
+    testing::call("promise", arguments, context)
 }
 
 async fn create(sense: &Sense, title: &str, due: &str) -> ItemId {
@@ -59,7 +16,7 @@ async fn create(sense: &Sense, title: &str, due: &str) -> ItemId {
 
 #[tokio::test]
 async fn open_commitments_are_overdue_first_and_resolution_is_terminal() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     let future = create(&sense, "future", "2025-01-02T00:00:00Z").await;
     let overdue = create(&sense, "overdue", "2025-01-01T00:00:00Z").await;
     let now = call(json!({})).context.at;
@@ -78,7 +35,7 @@ async fn open_commitments_are_overdue_first_and_resolution_is_terminal() {
 
 #[tokio::test]
 async fn renegotiation_retains_old_terms_and_atomically_links_the_replacement() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     let id = create(&sense, "first terms", "2025-01-02T00:00:00Z").await;
     let result = promise(
         &sense,
@@ -103,7 +60,7 @@ async fn renegotiation_retains_old_terms_and_atomically_links_the_replacement() 
 
 #[tokio::test]
 async fn invalid_terms_and_stale_revisions_change_nothing() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     for args in [
         json!({"title":"x","promisee":"","due":"2025-01-01T00:00:00Z"}),
         json!({"title":"x","promisee":"alice","due":"tomorrow"}),
@@ -123,7 +80,7 @@ async fn invalid_terms_and_stale_revisions_change_nothing() {
 
 #[tokio::test]
 async fn stale_revisions_return_the_current_commitment_even_after_resolution() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     let id = create(&sense, "first", "2025-01-02T00:00:00Z").await;
     let kept = promise(&sense, &call(json!({"action":"keep","id":id,"revision":1}))).await;
     assert!(!kept.is_error, "{kept:?}");
@@ -142,7 +99,7 @@ async fn stale_revisions_return_the_current_commitment_even_after_resolution() {
 
 #[tokio::test]
 async fn automatic_reminders_remain_schedulable_until_a_commitment_due_in_forty_days() {
-    let (sense, items) = setup().await;
+    let (sense, items) = sense().await;
     let now = call(json!({})).context.at;
     let due = now + chrono::Duration::days(40);
     let id = create(&sense, "long commitment", &due.to_rfc3339()).await;

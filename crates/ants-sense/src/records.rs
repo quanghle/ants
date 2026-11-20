@@ -18,7 +18,7 @@ use chrono::SecondsFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::items::{Item, ItemId};
+use crate::items::{Item, ItemId, ItemValues};
 use crate::memory::{
     MAX_TITLE_CHARS, Quotes, Scope, Trust, framed, holds_recalled_block, holds_recalled_marker, redacted, sanitized,
 };
@@ -50,6 +50,10 @@ pub struct Record {
     pub inherited: Option<SenseId>,
 }
 
+impl ItemValues for Record {
+    const KIND: &str = "record";
+}
+
 /// A record and the item holding it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordItem {
@@ -63,7 +67,7 @@ impl RecordItem {
         if item.kind != SELF_MODEL && item.kind != RELATIONSHIP {
             return None;
         }
-        let record = serde_json::from_value(Value::Object(item.values.clone())).ok()?;
+        let record = Record::of(&item).ok()?;
         Some(Self { item, record })
     }
 
@@ -201,10 +205,7 @@ pub(crate) async fn replace(items: &dyn Items, context: &CallContext, change: Ch
         trust: if untrusted.is_some() { Trust::Untrusted } else { Trust::Own },
         inherited: None,
     };
-    let mut values = match serde_json::to_value(&record) {
-        Ok(Value::Object(values)) => values,
-        _ => unreachable!("a record is an object"),
-    };
+    let mut values = record.values();
     values.insert(crate::fork::INHERITED.into(), Value::Null);
 
     let id = record_id(&record.scope).expect("a record's scope");

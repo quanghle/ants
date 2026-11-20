@@ -4,8 +4,9 @@ use ants_proto::provider::{CallContext, Event, EventKind};
 use chrono::{DateTime, Duration, Utc};
 
 use super::*;
-use crate::memory::tests::{Kept, context, human, memory, sense};
+use crate::memory::tests::memory;
 use crate::memory::{Access, Votes};
+use crate::testing::{Kept, context, human, sense};
 
 fn written(at: DateTime<Utc>) -> CallContext {
     CallContext { at, ..context(human()) }

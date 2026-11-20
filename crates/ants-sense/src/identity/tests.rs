@@ -20,10 +20,7 @@ fn at(time: &str) -> DateTime<Utc> {
 
 /// The items of `sense` in `log`, its cache in memory.
 async fn items(log: &'static MemoryLog, sense: &SenseId) -> Arc<dyn Items> {
-    let verifier = AccountVerifier::new(vec![], NoRevocations);
-    let log = AntLog::new(log, Unsigned, verifier, sense.clone(), dev_a(), "m1".parse().unwrap(), None).unwrap();
-    let store = Store::open(log, Cache::in_memory().unwrap()).await.unwrap();
-    Arc::new(tokio::sync::Mutex::new(store))
+    Arc::new(crate::testing::store(log, sense.clone(), dev_a()).await)
 }
 
 /// The items of `sense` in `log` for `ant`, once named `earlier`, cached in `home`, where its chain status is kept.
@@ -351,9 +348,9 @@ async fn a_card_made_anew_starts_with_the_earlier_names_of_the_home() {
 }
 
 /// The items of dev-a, the same each time.
-struct One(Arc<dyn Items>);
+struct DevA(Arc<dyn Items>);
 
-impl Stores for One {
+impl Stores for DevA {
     fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         let items = if *ant == dev_a() { Ok(self.0.clone()) } else { Err(StoreError::NotKept(ant.to_string())) };
         Box::pin(std::future::ready(items))
@@ -363,7 +360,7 @@ impl Stores for One {
 #[tokio::test]
 async fn sense_writes_the_card_from_events_and_briefs_and_acks_what_it_does_not_keep() {
     let items = fresh().await;
-    let sense = Sense::with_stores(Arc::new(One(items.clone())));
+    let sense = Sense::with_stores(Arc::new(DevA(items.clone())));
     sense.event(event("dev-a", "id1", "10:00:00", EventKind::AntAdded)).await.unwrap();
     let context = context("id1", "copilot", None, "studio");
     let request = BriefRequest { context: context.clone(), budget: 100, reason: BriefReason::Started };

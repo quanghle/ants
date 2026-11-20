@@ -9,12 +9,11 @@ use uuid::Uuid;
 
 use super::*;
 use crate::Sense;
-use crate::cache::Cache;
-use crate::items::{ItemId, Values};
-use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
+use crate::items::{ItemId, ItemValues, Values};
+use crate::log::MemoryLog;
 use crate::memory::{Memory, VOTE};
 use crate::records::RELATIONSHIP;
-use crate::store::{Store, Stores};
+use crate::store::Stores;
 use crate::thread::{CHECKPOINT, HANDOFF};
 use crate::{promise, remind, task, thread};
 
@@ -32,17 +31,7 @@ impl Stores for Kept {
 }
 
 async fn items(ant: &str) -> Arc<dyn Items> {
-    let verifier = AccountVerifier::new(vec![], NoRevocations);
-    let log = AntLog::new(
-        MemoryLog::default(),
-        Unsigned,
-        verifier,
-        SenseId::new(),
-        ant.parse().unwrap(),
-        "m1".parse().unwrap(),
-        None,
-    );
-    Arc::new(tokio::sync::Mutex::new(Store::open(log.unwrap(), Cache::in_memory().unwrap()).await.unwrap()))
+    Arc::new(crate::testing::store(MemoryLog::default(), SenseId::new(), ant.parse().unwrap()).await)
 }
 
 /// sense keeping the source and the clone, as the daemon serving both does.

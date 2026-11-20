@@ -24,16 +24,15 @@ use std::fmt::Write as _;
 use ants_proto::UserId;
 use ants_proto::provider::Starter;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use serde_json::Value;
 
 use crate::brief::{TOP_EXPERIENCE, TOP_MEMORIES};
 use crate::dream::{
-    DREAM, DREAMS, Dream, FindingKind, Judgement, OWN_AFTER_THREADS, PERSONA_AFTER_THREADS, RELATIONSHIP_AFTER_THREADS,
+    self as dream, Dream, FindingKind, Judgement, OWN_AFTER_THREADS, PERSONA_AFTER_THREADS, RELATIONSHIP_AFTER_THREADS,
     ReviewTally, SELF_MODEL_AFTER_THREADS, STALE_ACTIVE_DAYS, State, TREND, review_tally,
 };
 use crate::fork::INHERITED;
 use crate::identity::{Card, card};
-use crate::items::Item;
+use crate::items::{Item, ItemValues, readable};
 use crate::memory::{MEMORY, Memory, MemoryKind, Status, Trust};
 use crate::persona::{self, PERSONA};
 use crate::proposal::{self, Confirmation, PROPOSAL, Proposal, ProposalItem, time};
@@ -92,9 +91,12 @@ impl Data {
             worked: experience(items, ant, usize::MAX).await?,
             own,
             calls: calls::calls(items, since).await?,
-            memories: items.list(MEMORY, usize::MAX).await?.iter().filter_map(Memory::of).collect(),
-            dreams: dreams(items).await?,
-            rested: rested(items).await?,
+            memories: readable(items.list(MEMORY, usize::MAX).await?, Memory::of)
+                .into_iter()
+                .map(|(_, memory)| memory)
+                .collect(),
+            dreams: dream::all(items).await?,
+            rested: dream::rested_count(items).await?,
             reviews: review_tally(items, TOP).await?,
             persona: persona::current(items).await?,
             proposals: proposals.map(|found| found.proposal).collect(),
@@ -147,21 +149,6 @@ pub async fn report(items: &dyn Items, ant: &UserId, now: DateTime<Utc>) -> Resu
 fn first_week(now: DateTime<Utc>) -> DateTime<Utc> {
     let monday = week(now) - Duration::weeks(WEEKS - 1);
     monday.and_hms_opt(0, 0, 0).map_or(now, |midnight| midnight.and_utc())
-}
-
-/// Every dream, the first first; one unreadable left out.
-async fn dreams(items: &dyn Items) -> Result<Vec<Dream>, StoreError> {
-    let all = items.list(DREAM, usize::MAX).await?.into_iter();
-    let mut dreams: Vec<Dream> =
-        all.filter_map(|item| serde_json::from_value(Value::Object(item.values)).ok()).collect();
-    dreams.sort_by_key(|dream| dream.number);
-    Ok(dreams)
-}
-
-/// How many rejected findings rest with the record of the last dream.
-async fn rested(items: &dyn Items) -> Result<usize, StoreError> {
-    let record = items.list(DREAMS, 1).await?;
-    Ok(record.first().and_then(|item| item.values.get("rested")).and_then(Value::as_array).map_or(0, Vec::len))
 }
 
 /// `counts` named, those of none left out, joined by commas.
@@ -571,11 +558,13 @@ mod tests {
     use crate::identity::{self, Growth};
     use crate::items::Values;
     use crate::memory;
-    use crate::memory::tests::{context, human, id_of, sense, tool};
+    use crate::memory::tests::id_of;
     use crate::skill::skill_id;
     use crate::store::Write;
+    use crate::testing::{context, human, sense, tool};
     use crate::thread::record::record_event;
     use crate::tools::{Answer, Handler};
+    use serde_json::Value;
 
     fn name(name: &str) -> UserId {
         name.parse().unwrap()

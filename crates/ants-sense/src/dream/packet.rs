@@ -20,13 +20,18 @@ mod reviewing;
 mod section;
 mod track_record;
 
-pub use colony_trails::{ColonyTrail, ColonyTrails, MAX_LISTED_DESCRIPTION, Standing, TRAILS_SHARE};
+pub use colony_trails::{ColonyTrail, ColonyTrails, TRAILS_SHARE};
 pub use identity::{Identity, identity};
 pub use reviewing::{REVIEWING_SHARE, reviewing};
 pub use section::Section;
 use track_record::TRACK_RECORD_SHARE;
 pub(super) use track_record::review_history;
-pub use track_record::{OUTCOME_DAYS, TRACK_RECORD_DAYS, track_record};
+pub use track_record::track_record;
+#[cfg(test)]
+pub(crate) use {
+    colony_trails::Standing,
+    track_record::{OUTCOME_DAYS, TRACK_RECORD_DAYS},
+};
 
 /// The most bytes of a review packet.
 pub const PACKET_BUDGET: usize = 64 * 1024;

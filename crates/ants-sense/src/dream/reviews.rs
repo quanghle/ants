@@ -24,14 +24,13 @@ use ants_proto::{FindingOutcome, FindingVerdict, MAX_OUTCOME_REASON, ReviewOutco
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, ToSql, named_params};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::review::{clean, is_zero};
 use super::vitals::cost;
 use super::{Judgement, parse};
 use crate::cache::CacheError;
 use crate::identity::BY;
-use crate::items::{Item, ItemId, Values, values_of};
+use crate::items::{ItemId, ItemValues};
 use crate::sanitize::{Limit, sanitize_title};
 use crate::store::{Items, StoreError, Write, read_modify_write};
 
@@ -103,17 +102,11 @@ pub struct ReviewedFinding {
     pub told: Option<DateTime<Utc>>,
 }
 
+impl ItemValues for ReviewRecord {
+    const KIND: &str = REVIEW;
+}
+
 impl ReviewRecord {
-    /// The record `item` holds.
-    pub fn of(item: &Item) -> Result<Self, StoreError> {
-        Ok(serde_json::from_value(Value::Object(item.values.clone())).map_err(CacheError::from)?)
-    }
-
-    /// The values of its item.
-    pub fn values(&self) -> Values {
-        values_of(self)
-    }
-
     fn new(ant: &UserId, dream: u64, thread: &ThreadId, at: DateTime<Utc>) -> Self {
         let (answered, findings, spent) = (None, Vec::new(), None);
         let (ant, thread) = (ant.clone(), thread.clone());
