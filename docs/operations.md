@@ -71,6 +71,7 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 | Log rotation (macOS) | `ants.logrotate` (`logrotate.log`) | — (`journald` rotates) | Always on macOS |
 
 - **Reload & restart:** `ants.daemon` and `ants.webhook` auto-reload edited config files (~6 s) and accept `SIGHUP` (`launchctl kill SIGHUP gui/$(id -u)/<label>`, `systemctl --user reload <unit>`); `ants add`, `ants webhook add`, `ants renew`, `ants leaf config`, `request_ant`, and `ants tools approve --rule` reload or restart matching running units automatically. For renewed leaf uplink credentials (`ants add --enroll`, `ants renew`, `request_ant`, admin `add`/`clone`/`retire` orders), `ants.nats` (or the [managed nats-server](#managed-nats-server)) gets a reload that reconnects only the uplink while keeping local client connections.
+- **Host connection:** once the daemon's host connection (or, with `--ant`, sense's link of its own) stops with an error, such as credentials the server refuses, it logs a warning and is tried again after 1 s, the wait doubling up to 5 min, and at once on a reload; meanwhile the colony entries of the ants using sense say why ([sense.md](sense.md#items-and-cache)).
 - **Logs & linger:** on macOS, `ants.logrotate` copy-truncates logs > 10 MiB hourly (keeping `.1`..`.5.gz`). On Linux, enable `loginctl enable-linger $USER` (`[boot] systemd=true` in `/etc/wsl.conf` on WSL 2). Remove units with `launchctl bootout gui/$(id -u)/<label>` or `systemctl --user disable --now <unit>`.
 
 ### Managed nats-server

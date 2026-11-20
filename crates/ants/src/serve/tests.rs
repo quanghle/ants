@@ -155,6 +155,25 @@ async fn sense_s_own_link_comes_back_after_failing_without_a_reload() {
     up.await.expect("the link comes back without a reload").unwrap();
 }
 
+#[tokio::test]
+async fn the_host_connection_comes_back_after_failing_without_a_reload() {
+    let Some(server) = crate::test_support::Server::start() else { return };
+    let (creds, machine) = (server.dir().join("host.creds"), "m1".parse::<Machine>().unwrap());
+    let nats = server.url.clone();
+    let providers = Providers::default();
+    let host = Host::quietly(Some(machine.clone()), None, nats, Some(creds.clone()), None, [true].into_iter()).unwrap();
+    let host = Host { providers: providers.clone(), ..host };
+    let mut unkept = providers.sense().why_unkept();
+    let mut links = Links::new(providers.clone());
+    links.reconcile(Some((host, vec![])), None);
+    let failed = tokio::time::timeout(Duration::from_secs(30), unkept.wait_for(Option::is_some));
+    let why = failed.await.expect("the connection fails without its credentials").unwrap().clone().unwrap();
+    assert!(why.contains("the host connection stopped"), "{why}");
+    crate::auth::issue_host(&server.dir().join("auth"), &machine, None, &creds).unwrap();
+    let up = tokio::time::timeout(Duration::from_secs(30), unkept.wait_for(Option::is_none));
+    up.await.expect("the connection comes back without a reload").unwrap();
+}
+
 #[test]
 fn flags_override_the_picked_ant() {
     let all = vec![ant("dev-a"), ant("dev-b")];

@@ -101,7 +101,7 @@ impl Links {
     }
 }
 
-/// The machine's host connection, if any, in its task.
+/// The machine's host connection, kept up ([`host::keep`]), if any, in its task.
 #[derive(Default)]
 pub(super) struct HostRun(Option<HostTask>);
 
@@ -110,12 +110,15 @@ pub(super) struct HostTask {
     /// The contents of its credentials file when it started ([`creds_snapshot`]).
     creds: Option<Vec<u8>>,
     ants: watch::Sender<Vec<UserId>>,
+    /// Tells the connection to try again at once, if down.
+    again: Arc<Notify>,
     task: JoinHandle<()>,
 }
 
 impl HostRun {
-    /// Run the host connection `wanted` recording its ants: the one running is told the ants unless it changed, its
-    /// credentials file changed or it stopped, when it starts again; with none wanted, it stops.
+    /// Run the host connection `wanted` recording its ants: the one running is told the ants, trying again at once if
+    /// down, unless it changed, its credentials file changed or it stopped, when it starts again; with none wanted, it
+    /// stops.
     fn reconcile(&mut self, wanted: Option<(Host, Vec<UserId>)>) {
         let Some((wanted, ants)) = wanted else {
             if let Some(old) = self.0.take() {
@@ -127,21 +130,17 @@ impl HostRun {
         let creds = creds_snapshot(wanted.creds.as_deref());
         if let Some(run) = self.0.as_ref().filter(|r| r.host == wanted && r.creds == creds && !r.task.is_finished()) {
             run.ants.send_replace(ants);
+            run.again.notify_waiters();
             return;
         }
         let (sender, receiver) = watch::channel(ants);
-        let (started, providers) = (wanted.clone(), wanted.providers.clone());
-        let sense = providers.sense().hosting();
+        let (started, again) = (wanted.clone(), Arc::new(Notify::new()));
+        let nudged = again.clone();
         let task = tokio::spawn(
-            async move {
-                if let Err(e) = Box::pin(host::run_keeping(started, receiver, Some(sense))).await {
-                    tracing::error!(error = format!("{e:#}"), "host connection stopped");
-                    providers.sense().unkept(Some(format!("the host connection stopped: {e:#}")));
-                }
-            }
-            .instrument(tracing::info_span!("host")),
+            async move { Box::pin(host::keep(started, receiver, &nudged)).await }
+                .instrument(tracing::info_span!("host")),
         );
-        if let Some(old) = self.0.replace(HostTask { host: wanted, creds, ants: sender, task }) {
+        if let Some(old) = self.0.replace(HostTask { host: wanted, creds, ants: sender, again, task }) {
             old.task.abort();
         }
     }

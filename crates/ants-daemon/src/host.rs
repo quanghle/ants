@@ -4,9 +4,9 @@
 //! so an ant stays addressable on its machine after its colony entry expired. It also takes the admin orders to the
 //! machine's ants and records their outcomes ([`crate::admin`]), reading the humans' consent to their assistants'
 //! orders from [`ants_proto::HUMANS_BUCKET`] ([`crate::admin::held`]), and keeps the shared settings of the machine's
-//! ants ([`crate::profile::shared`]), creating those still missing from the machine's config. Without host credentials,
-//! where the ants have their own, the connection stays off and the daemon serves its ants as before, sense keeping none
-//! of their data ([`uncredentialed`]). A daemon serving one ant (`ants daemon --ant`) makes no host connection, but
+//! ants ([`crate::profile::shared`]), creating those still missing from the machine's config. Once it fails, it is tried
+//! again with backoff ([`keep`]). Without host credentials, where the ants have their own, the connection stays off and
+//! the daemon serves its ants as before, sense keeping none of their data ([`uncredentialed`]). A daemon serving one ant (`ants daemon --ant`) makes no host connection, but
 //! sense a link of its own with the host credentials, carrying its logs alone ([`run_sense`]), tried again with backoff
 //! after it fails ([`keep_sense`]).
 
@@ -30,8 +30,9 @@ use crate::{admin, bus, colony};
 
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(30);
-/// The longest wait of sense's link of its own between tries after it failed ([`keep_sense`]).
-const SENSE_RETRY_MAX: Duration = Duration::from_mins(5);
+/// The longest wait of the host connection, or sense's link of its own, between tries after it failed ([`keep`],
+/// [`keep_sense`]).
+const LINK_RETRY_MAX: Duration = Duration::from_mins(5);
 
 /// What a host connection connects with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +195,26 @@ pub async fn run_keeping(host: Host, ants: watch::Receiver<Vec<UserId>>, sense: 
     }
 }
 
+/// Keep the host connection as `host` ([`run_keeping`], sense reaching its ants' data over it) until `ants` closes or
+/// it is dropped. Once it fails, sense keeps none of its ants' data, saying why ([`crate::sense::Sense::unkept`]) until
+/// the connection is up again: it is tried again after 1 s, the wait doubling up to 5 min, and at once when `again` is
+/// notified, as on a reload.
+pub async fn keep(host: Host, ants: watch::Receiver<Vec<UserId>>, again: &tokio::sync::Notify) {
+    let mut delay = RETRY_FIRST;
+    loop {
+        let hosting = host.providers.sense().hosting();
+        let Err(e) = Box::pin(run_keeping(host.clone(), ants.clone(), Some(hosting))).await else { return };
+        tracing::warn!(error = format!("{e:#}"), retry_in = ?delay, "host connection stopped");
+        host.providers.sense().unkept(Some(format!("the host connection stopped: {e:#}")));
+        let mut closing = ants.clone();
+        tokio::select! {
+            () = tokio::time::sleep(delay) => delay = (delay * 2).min(LINK_RETRY_MAX),
+            () = again.notified() => delay = RETRY_FIRST,
+            () = async { while closing.changed().await.is_ok() {} } => return,
+        }
+    }
+}
+
 /// Connect as `host` for sense alone, reaching the data of the process's ants over the connection once up
 /// ([`crate::sense`]), with none of a host connection's other duties: no machine record, admin orders or shared
 /// settings. Runs until dropped; fails only on what waiting cannot mend, as [`run`] does.
@@ -214,7 +235,7 @@ pub async fn keep_sense(host: Host, again: &tokio::sync::Notify) {
         tracing::warn!(error = format!("{e:#}"), retry_in = ?delay, "sense's link stopped");
         host.providers.sense().unkept(Some(format!("sense's link with the host credentials stopped: {e:#}")));
         tokio::select! {
-            () = tokio::time::sleep(delay) => delay = (delay * 2).min(SENSE_RETRY_MAX),
+            () = tokio::time::sleep(delay) => delay = (delay * 2).min(LINK_RETRY_MAX),
             () = again.notified() => delay = RETRY_FIRST,
         }
     }

@@ -19,6 +19,7 @@ pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Resul
     let edited = ConfigFile::new(config, triggers.edits());
     triggers.watch_shared(edited.shared.subscribe());
     triggers.watch_creds(ants_daemon::config::builtins::creds_files()?);
+    let host_creds = triggers.host_creds();
     let hostname = ants_daemon::colony::machine().await;
     let startup = || serve::ants(args, &default_path, &hostname, conn.creds);
     let listed = startup()?;
@@ -44,6 +45,7 @@ pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Resul
         }
         let schedules = scheduler::resolve(listed.schedules, conn.nats, domain)?;
         let settings = listed.host.clone().or(listed.sense_link);
+        host_creds.watch(settings.as_ref().map_or_default(|s| s.creds_candidates(&hostname)));
         let host = serve::host(listed.host, &configs, conn.nats, domain, Some(edited.clone()))
             .map(|(host, ants)| (ants_daemon::host::Host { leaf: serve::leaf_node(), ..host }, ants));
         let sense = serve::sense_link(host.as_ref().map(|(h, _)| h), settings, &configs, conn.nats, domain, &hostname);

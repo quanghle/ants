@@ -161,9 +161,9 @@ While the machine's host connection is down:
 
 While the host connection is first being made and no cache exists, events wait in the ant's queue and briefs fail.
 Sense writes the logs with the machine's host credentials (`ants auth host`), over the host connection, or, in a daemon
-serving one ant (`ants daemon --ant`), which makes none, over a link of its own carrying the logs alone. That link,
-when it fails, as with credentials the server refuses, is tried again after 1 second, the wait doubling up to 5
-minutes, and at once on a reload. A daemon with neither up, as one without host credentials on a server with
+serving one ant (`ants daemon --ant`), which makes none, over a link of its own carrying the logs alone. Either, when it
+fails, as with credentials the server refuses, is tried again after 1 second, the wait doubling up to 5 minutes, and
+at once on a reload. A daemon with neither up, as one without host credentials on a server with
 authentication, and no cache keeps no data: events are acked with no effect, briefs are empty and the sense tools
 answer `unavailable`, naming why. The ant is still served, and `ants doctor`, the daemon's log and the ant's colony
 entry say so ([What an operator sees and configures](#what-an-operator-sees-and-configures)). A daemon serves the

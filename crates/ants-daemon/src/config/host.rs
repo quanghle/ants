@@ -48,11 +48,21 @@ pub struct HostSettings {
     pub js_domain: Option<JsDomain>,
     /// The `[admin]` table's `remote`: whether the admin orders to the machine's ants may be carried out.
     pub remote_admin: bool,
+    /// The auth directory the host credentials were looked for in, where the `[host]` table names none.
+    pub looked_in: Option<PathBuf>,
 }
 
 impl Default for HostSettings {
     fn default() -> Self {
-        Self { creds: None, machine: None, top_machine: None, nats: None, js_domain: None, remote_admin: true }
+        Self {
+            creds: None,
+            machine: None,
+            top_machine: None,
+            nats: None,
+            js_domain: None,
+            remote_admin: true,
+            looked_in: None,
+        }
     }
 }
 
@@ -61,9 +71,12 @@ impl HostSettings {
         let section = std::mem::take(&mut file.host);
         let top_machine = file.machine.clone();
         let fallback = top_machine.as_deref().and_then(|m| m.parse().ok());
-        let creds = match section.creds {
-            Some(creds) => Some(resolve(&creds, base, home)),
-            None => default_host_creds(&home.join(".config/ants/auth"), section.machine.as_ref(), fallback.as_ref()),
+        let (creds, looked_in) = match section.creds {
+            Some(creds) => (Some(resolve(&creds, base, home)), None),
+            None => {
+                let dir = home.join(".config/ants/auth");
+                (default_host_creds(&dir, section.machine.as_ref(), fallback.as_ref()), Some(dir))
+            }
         };
         Self {
             creds,
@@ -72,7 +85,26 @@ impl HostSettings {
             nats: file.nats.clone(),
             js_domain: file.js_domain.clone(),
             remote_admin: file.admin.remote,
+            looked_in,
         }
+    }
+
+    /// The files the host credentials are looked for at where the `[host]` table names none, whether they exist or
+    /// not: `host.creds`, then `host-<machine>.creds` for the table's `machine`, else for [`Self::fallback`] and the
+    /// first label of `hostname` ([`default_host_creds`]). A reload watches them come, go or change.
+    pub fn creds_candidates(&self, hostname: &str) -> Vec<PathBuf> {
+        let Some(dir) = &self.looked_in else { return Vec::new() };
+        let named = |machine: &Machine| dir.join(format!("{}.creds", ants_proto::host_user(machine)));
+        let mut candidates = vec![dir.join("host.creds")];
+        match &self.machine {
+            Some(machine) => candidates.push(named(machine)),
+            None => {
+                candidates.extend(self.fallback().as_ref().map(named));
+                candidates.push(named(&Machine::from_hostname(hostname)));
+            }
+        }
+        candidates.dedup();
+        candidates
     }
 
     /// The top-level `machine` if it is a machine name ([`Machine`]): the machine's name where neither the `[host]`
