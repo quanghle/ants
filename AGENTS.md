@@ -32,11 +32,11 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
   exception is a trail's one-shot `ants subprocess` worker, run only while the trail's script computes.
 - TLS stays on rustls.
 - A daemon acks a JetStream message only after its effects are stored.
-- Also in the repo: `contrib/` (launchd and systemd units, container demo, agent skills), `scripts/` (`check.sh`,
-  `install-units.sh`, `footprint.sh`, `release-notes.sh`, `nats-server.sh`, `demo-containers.sh`), `docs/`
-  (`architecture.md`, `sense.md`,
+- Also in the repo: `contrib/` (launchd and systemd units, container demo, e2e fixture image, agent skills),
+  `scripts/` (`check.sh`, `install-units.sh`, `footprint.sh`, `release-notes.sh`, `nats-server.sh`,
+  `demo-containers.sh`, `e2e.sh` with its scenarios in `e2e/scenarios.sh`), `docs/` (`architecture.md`, `sense.md`,
   `trails.md`, `cli.md`, `config.md`, `auth.md`, `webhooks.md`, `transport.md`, `hooks.md`, `operations.md`,
-  `container-demo.md`),
+  `container-demo.md`, `e2e-scenarios.md`),
   `deny.toml` (dependency policy), `.cargo/config.toml` (7-day dependency cooldown), `rust-toolchain.toml` (pinned
   toolchain; moves together with `rust-version` in `Cargo.toml` and the `toolchain:` of every CI job).
 - `crates/ants/nats-server.sha256` pins the nats-server release bundled with ants: release archives, `ants setup`
