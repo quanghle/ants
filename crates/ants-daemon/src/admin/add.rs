@@ -209,7 +209,11 @@ pub(super) async fn sign<'a>(
 /// uplink carries it.
 pub(super) async fn renew(leaf: &LeafNode, machine: &Machine, ant: &UserId, renewed: String) -> String {
     let (renew, conf) = (leaf.renew, leaf.conf.clone());
-    match tokio::task::spawn_blocking(move || renew(&conf, &renewed)).await.map_err(anyhow::Error::from) {
+    let renewed = tokio::task::spawn_blocking(move || renew(&conf, &renewed)).await.map_err(anyhow::Error::from);
+    if matches!(renewed, Ok(Ok(Some(_)))) {
+        crate::bus::pull_anew();
+    }
+    match renewed {
         Ok(Ok(Some(said))) => format!("the uplink credentials of {machine} were renewed to carry {ant}: {said}"),
         Ok(Ok(None)) => format!(
             "the uplink credentials of {machine} changed meanwhile and were left as they are: until a human runs \

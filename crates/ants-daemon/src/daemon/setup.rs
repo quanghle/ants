@@ -598,7 +598,7 @@ async fn open_messages(
     ant: &UserId,
     in_hand: i64,
     posts: bool,
-) -> Result<impl Stream<Item = <jetstream::consumer::pull::Stream as Stream>::Item> + Unpin + use<>> {
+) -> Result<impl Stream<Item = <bus::Pull as Stream>::Item> + Unpin + use<>> {
     let messages = bus::inbox_consumer(stream, ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
     let posts = if posts {
         match bus::chan_consumer(stream, ant, ACK_WAIT, MAX_DELIVER, in_hand).await {
