@@ -95,18 +95,7 @@ pending_tool() { # pending_tool ANT THREAD: the id ANT/ID of a pending tool requ
         'map(select(.ant == $ant and .thread_id == $thread)) | .[0] | if . == null then empty else "\(.ant)/\(.id)" end'
 }
 
-# queued ANT TEXT: `ants queue ANT` lists TEXT. While ants-6nsam keeps the queue unanswered, says so and goes on.
-queued() {
-    local out
-    if out=$(alice queue "$1" 2>&1); then
-        has "$2" "ants queue" <<<"$out"
-    elif grep -qF "answered within" <<<"$out"; then
-        known ants-6nsam "ants queue $1 got no answer"
-    else
-        printf '%s\n' "$out"
-        fail "ants queue $1 failed"
-    fi
-}
+queued() { alice queue "$1" | has "$2" "ants queue"; } # queued ANT TEXT: `ants queue ANT` lists TEXT
 
 ask_bg() { # ask_bg FILE ARGS...: alice asks in the background, writing the output to FILE
     local out=$1
@@ -154,10 +143,6 @@ F1() {
             doctor --no-harness 2>&1) || true
         note "doctor on $node"
         printf '%s\n' "$out"
-        if [ "$node" = client ] && grep -qE '^fail +config: .*system-messenger: no harness set' <<<"$out"; then
-            known ants-jafsy "ants doctor fails the client's [cli]-only config.toml"
-            out=$(grep -vE '^fail +config:' <<<"$out")
-        fi
         ! grep -qE '^\s*(✗|fail)' <<<"$out" || fail "ants doctor on $node reports a failure"
         [ "$node" = hub ] || grep -E '^ok +leaf uplink' <<<"$out" >/dev/null || fail "leaf uplink not ok on $node"
     done
