@@ -55,6 +55,8 @@ fn the_file_names_the_machine_as_the_host_connection_would() {
         ants(&args(&format!("--config {} {line}", config.display())), &config, "gen-4f2a.internal", None)
     };
     let listed = |text: &str, line: &str| listing(text, line).unwrap();
+    let err = format!("{:#}", listing("messenger = false\n", "").unwrap_err());
+    assert!(err.contains("nothing to serve on this machine: no [[ant]] entries and messenger = false"), "{err}");
     let top = "harness = \"copilot\"\nmachine = \"dev-vm1\"\n";
     assert_eq!(listed(top, "--ant system-messenger").machine, Some("dev-vm1".parse().unwrap()));
     assert_eq!(listed("harness = \"copilot\"\nmachine = \"Dev VM\"\n", "").machine, Some("gen-4f2a".parse().unwrap()));

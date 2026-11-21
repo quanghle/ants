@@ -566,6 +566,13 @@ async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
     assert_eq!(node.status, Status::Fail, "{node}");
     assert!(node.detail.starts_with("nothing listens on 127.0.0.1:1"), "{node}");
     assert_eq!(named(&checks, "outbox")[0].status, Status::Skip, "{checks:#?}");
+    assert!(named(&checks, "leaf uplink ants").is_empty(), "{checks:#?}");
+
+    let none = check_leaf(&setup, Leaf::read(&leaf_config), &[], None, None, None, 0).await;
+    assert_eq!(named(&none, "leaf uplink")[0].status, Status::Ok, "{none:#?}");
+    let skipped = named(&none, "leaf uplink ants")[0];
+    assert_eq!(skipped.status, Status::Skip, "{skipped}");
+    assert!(skipped.detail.starts_with("no ants served here"), "{skipped}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -1456,6 +1463,51 @@ fn a_config_leaving_every_ant_to_another_machine_fails_naming_the_builtin_ones()
         config.display()
     );
     assert!(some.detail.ends_with(&served), "{some}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A machine where only humans run the CLI: the file `ants login` writes, without [[ant]] or harness, the CLI's
+/// credentials telling the server takes some, so the messenger without its own is left to another machine.
+#[tokio::test]
+async fn a_cli_only_config_passes_and_its_ants_checks_skip() {
+    let auth = std::env::home_dir().unwrap().join(".config/ants/auth");
+    if auth.join("system-messenger.creds").is_file() {
+        return;
+    }
+    let dir = ants_test_support::scratch_dir("doctor-cli-only").canonicalize().unwrap();
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        "js_domain = \"hub\"\nnats = \"nats://127.0.0.1:4222\"\n\n[cli]\ncreds = \"~/.config/ants/auth/alice.creds\"\n",
+    )
+    .unwrap();
+    let mut checks = Vec::new();
+    let loaded = check_config(&config, &mut checks).unwrap();
+    if loaded.host.creds.is_some() {
+        // Host credentials here mean a daemon is meant to run, which a file serving no ants fails.
+        assert_eq!(checks[0].status, Status::Fail, "{}", checks[0]);
+        return std::fs::remove_dir_all(&dir).unwrap();
+    }
+    let check = &checks[0];
+    assert_eq!(check.status, Status::Ok, "{check}");
+    assert!(check.detail.contains("lists no ants to serve here, as on a machine where only humans run the CLI"));
+    assert!(check.detail.contains("the built-in system-messenger, without credentials at"), "{check}");
+    let setup = Setup {
+        nats: "nats://127.0.0.1:1".to_owned(),
+        creds: None,
+        js_domain: None,
+        config: config.clone(),
+        leaf_config: dir.join("leaf.conf"),
+        hub_config: dir.join("no-nats.conf"),
+        harnesses: true,
+        team: dir.join("no-team"),
+        webhooks: dir.join("no-webhooks.toml"),
+        home: None,
+        worker: None,
+    };
+    let ants = check_ants(&loaded.ants, &loaded.harnesses, &setup, 0).await;
+    assert_eq!(ants.iter().map(|c| (c.check.as_str(), c.status)).collect::<Vec<_>>(), [("ants", Status::Skip)]);
+    assert!(ants[0].detail.ends_with("no ant credentials or harness sign-in to check"), "{}", ants[0]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

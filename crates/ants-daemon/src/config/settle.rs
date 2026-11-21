@@ -56,7 +56,10 @@ pub(super) fn settle_ant(
     if ant.harness.is_none() {
         ant.harness.clone_from(&file.harness);
     }
-    check_harnesses(&ant, harnesses).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
+    // A built-in ant without one needs none unless served here, which `builtins::leave` settles.
+    if ant.builtin.is_none() || ant.harness.is_some() {
+        check_harnesses(&ant, harnesses).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
+    }
     if ant.provider.is_none() {
         ant.provider.clone_from(&file.provider);
     }

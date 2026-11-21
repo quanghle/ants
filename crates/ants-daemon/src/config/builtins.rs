@@ -10,6 +10,7 @@ use anyhow::{Result, bail};
 
 use super::ant::builtin_creds;
 use super::{Ant, HostSettings, Loaded, home_dir};
+use crate::harness;
 
 /// A built-in ant the file serves but the machine leaves to another, the server taking credentials and the ant having
 /// none on the machine.
@@ -27,22 +28,31 @@ pub fn creds_files() -> Result<Vec<PathBuf>> {
     Ok(BuiltinAnt::ALL.into_iter().map(|builtin| builtin_creds(&builtin.id(), &home)).collect())
 }
 
-/// Whether the server takes credentials, as the machine's `host` credentials or those of one of `ants` tell: only
-/// `ants auth` issues them, and a server without authentication has its ants connect as no one, as the built-in ants
-/// then do too.
-fn takes_credentials(ants: &[Ant], host: &HostSettings) -> bool {
-    host.creds.is_some() || ants.iter().any(|ant| ant.creds.is_some())
+/// Whether the server takes credentials, as the machine's `host` credentials, those of one of `ants` or the CLI's
+/// (`cli`, set in the `[cli]` table) tell: only `ants auth` issues them, and a server without authentication has its
+/// ants connect as no one, as the built-in ants then do too.
+pub(super) fn takes_credentials(ants: &[Ant], host: &HostSettings, cli: bool) -> bool {
+    cli || host.creds.is_some() || ants.iter().any(|ant| ant.creds.is_some())
 }
 
-/// Take out of `ants` the built-in ones the machine leaves to another, those without credentials on a server taking
-/// some ([`takes_credentials`]), `home` standing for `~`.
-pub(super) fn leave(ants: &mut Vec<Ant>, host: &HostSettings, home: &Path) -> Vec<Elsewhere> {
-    if !takes_credentials(ants, host) {
+/// Take out of `ants` the built-in ones the machine leaves to another, those without credentials, where the server
+/// takes some (`takes`, [`takes_credentials`]), `home` standing for `~`.
+pub(super) fn leave(ants: &mut Vec<Ant>, takes: bool, home: &Path) -> Vec<Elsewhere> {
+    if !takes {
         return Vec::new();
     }
     ants.extract_if(.., |ant| ant.builtin.is_some() && ant.creds.is_none())
         .map(|ant| Elsewhere { creds: builtin_creds(&ant.name, home), ant })
         .collect()
+}
+
+/// Fails with [`harness::Unset`] where the built-in `ant`, to be served here, names no harness, nor does its file: a
+/// built-in ant left to another machine needs none.
+pub(super) fn harness_set(ant: &Ant) -> Result<()> {
+    if ant.builtin.is_some() && ant.harness.is_none() {
+        return Err(anyhow::Error::new(harness::Unset).context(format!("ant {}", ant.name)));
+    }
+    Ok(())
 }
 
 impl Loaded {
@@ -55,6 +65,7 @@ impl Loaded {
         let creds = Some(creds.to_owned());
         if let Some(name) = named {
             if let Some(i) = self.elsewhere.iter().position(|left| left.ant.name == *name) {
+                harness_set(&self.elsewhere[i].ant)?;
                 let ant = self.elsewhere.remove(i).ant;
                 self.ants.push(Ant { creds, ..ant });
             } else if let Some(ant) = self.ants.iter_mut().find(|ant| ant.name == *name && ant.creds.is_none()) {
@@ -79,7 +90,7 @@ impl Loaded {
                  ant takes them from ~/.config/ants/auth/<name>.creds, or from --creds with --ant naming it"
             ),
         }
-        self.elsewhere.extend(leave(&mut self.ants, &self.host, &self.home));
+        self.elsewhere.extend(leave(&mut self.ants, true, &self.home));
         Ok(())
     }
 }

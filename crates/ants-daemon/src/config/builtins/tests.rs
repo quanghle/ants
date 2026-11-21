@@ -123,3 +123,24 @@ fn creds_given_stand_for_the_named_ant_or_the_files_one_never_a_builtin_ant_unna
     let e = format!("{:#}", credited("", None).unwrap_err());
     assert!(e.contains("the file lists no [[ant]]: a built-in ant takes them from"), "{e}");
 }
+
+#[test]
+fn a_file_of_the_clis_own_credentials_alone_serves_no_ants_and_needs_no_harness() {
+    let home = Home::new("builtins-cli-only");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml");
+    let cli_only =
+        "js_domain = \"hub\"\nnats = \"nats://127.0.0.1:4222\"\n\n[cli]\ncreds = \"~/.config/ants/auth/alice.creds\"\n";
+    let loaded = parse(cli_only, &path, &home.dir).unwrap();
+    assert!(loaded.ants.is_empty(), "the CLI's credentials tell the server takes some: {:?}", names(&loaded.ants));
+    assert_eq!(left(&loaded), ["system-messenger"]);
+    assert!(parse(&format!("messenger = false\n{cli_only}"), &path, &home.dir).unwrap().ants.is_empty());
+
+    let mut named = parse(cli_only, &path, &home.dir).unwrap();
+    let e = format!("{:#}", named.credit(Some(&"system-messenger".parse().unwrap()), &home.dir).unwrap_err());
+    assert!(e.contains("ant system-messenger: no harness set"), "served here, the messenger needs a harness: {e}");
+
+    home.issue("system-messenger");
+    let e = format!("{:#}", parse(cli_only, &path, &home.dir).unwrap_err());
+    assert!(e.contains("ant system-messenger: no harness set"), "{e}");
+    assert_eq!(names(&home.load(cli_only).ants), ["system-messenger"], "served with its credentials");
+}
