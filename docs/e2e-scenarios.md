@@ -728,7 +728,7 @@ press `2` on the question card.
 ### U5 · Replies steer, `/later` queues, `x` cancels (P1, 3 prompts)
 
 In a thread with `leaf-ant` running `sleep 45` (as S1): type a second instruction and `Enter`; in another such thread
-type `/later Reply TWO.`; in a third press `↑` then `x`.
+type `/later Reply TWO.`; in a third press `Esc` (leaving the bar), `↑` (selecting a message), then `x` and `y`.
 
 **Expect** as S1 (one answer following the second instruction), as S2 (the bar shows `queued · 1 ahead`, two answers
 in order) and as S3 (the cancel notice, the thread no longer `working`).

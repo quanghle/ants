@@ -883,7 +883,7 @@ U5() {
         "wait:queued · 1 ahead:30"
     chat "wait:connected" \
         "type:@leaf-ant $e2e Run the shell command '$(slow 100)' in the foreground, not in the background, then reply LATE-$t." \
-        "key:enter" "wait:sent to leaf-ant" "sleep:15" "key:up" "type:x" "wait:y cancels the prompt" "type:y" \
+        "key:enter" "wait:sent to leaf-ant" "sleep:15" "key:esc" "key:up" "type:x" "wait:y cancels the prompt" "type:y" \
         "wait:cancelled by alice:60"
     th=$(thread_with "FIRST-$t")
     [ -n "$th" ] || fail "no thread holds FIRST-$t"
