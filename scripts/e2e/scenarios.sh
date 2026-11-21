@@ -6,7 +6,7 @@ registry=
 scenario() { registry="$registry$1 $2 $3"$'\n'; }
 # Scenarios that change what the others rely on (a node, an uplink, an ant's settings or pause, the chat's last
 # thread), run one at a time after the rest; the others share the fixture and run side by side with `run -j N`.
-alone=" R1 R2 R3 R4 R5 R6 H1 H2 H3 O1 O2 O3 O6 O7 S4 T4 U4 U7 X1 K1 "
+alone=" R1 R2 R3 R4 R5 R6 H1 H2 H3 O1 O2 O3 O6 O7 S4 T4 U4 U5 U7 U8 X1 K1 "
 is_alone() { case "$alone" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # --- Helpers on the Mac, as the doc's Conventions give them -----------------------------------------------------------
@@ -879,6 +879,84 @@ U7() {
     has pause <<<"$orders"
     has resume <<<"$orders"
     ! is_paused leaf-ant || fail "leaf-ant stayed paused"
+}
+
+# thread_with TEXT: the thread of the first stored message holding TEXT in the last hour, or nothing.
+thread_with() { alice thread search --grep "$1" --since 1h | awk '{ print $3 }' | head -n 1; }
+
+scenario U5 P1 "Replies steer, /later queues, x cancels"
+U5() {
+    local t th
+    t=$(tok)
+    chat "wait:connected" \
+        "type:@leaf-ant $e2e Run the shell command '$(slow 45)' in the foreground, then reply with exactly FIRST-$t." \
+        "key:enter" "wait:sent to leaf-ant" "sleep:15" \
+        "type:Change of plan: once the sleep ends, reply with exactly SECOND-$t and nothing else." "key:enter" "sleep:5"
+    chat "wait:connected" \
+        "type:@leaf-ant $e2e Run the shell command '$(slow 40)' in the foreground, then reply with exactly ONE-$t." \
+        "key:enter" "wait:sent to leaf-ant" "sleep:10" "type:/later Reply with exactly TWO-$t." "key:enter" \
+        "wait:queued · 1 ahead:30"
+    chat "wait:connected" \
+        "type:@leaf-ant $e2e Run the shell command '$(slow 100)' in the foreground, not in the background, then reply LATE-$t." \
+        "key:enter" "wait:sent to leaf-ant" "sleep:15" "key:up" "type:x" "wait:y cancels the prompt" "type:y" \
+        "wait:cancelled by alice:60"
+    th=$(thread_with "FIRST-$t")
+    [ -n "$th" ] || fail "no thread holds FIRST-$t"
+    eventually 240 replied "$th" "SECOND-$t"
+    ant_texts "$th" | lacks "FIRST-$t" "the steered thread's replies"
+    alice thread show "$th" | has steered
+    th=$(thread_with "ONE-$t")
+    eventually 240 replied "$th" "TWO-$t"
+    local texts
+    texts=$(ant_texts "$th")
+    [ "$(grep -nF "ONE-$t" <<<"$texts" | head -n 1 | cut -d: -f1)" -lt \
+        "$(grep -nF "TWO-$t" <<<"$texts" | head -n 1 | cut -d: -f1)" ] || fail "TWO answered before ONE"
+    th=$(thread_with "LATE-$t")
+    alice thread show "$th" | has "ended: cancelled"
+    ant_texts "$th" | lacks "LATE-$t"
+}
+
+scenario U8 P1 "The hub goes away and comes back while the chat is open"
+U8() {
+    local t out th
+    trap 'uplink client up' EXIT
+    t=$(tok)
+    # The chat runs through the drop and the return: the uplink goes down 10 s after it opens, back up 60 s later.
+    (sleep 10; uplink client down; sleep 60; uplink client up) &
+    out=$(chat "wait:connected" "sleep:20" "snap" \
+        "type:@leaf-ant Read node.txt in the working directory and reply with its content and U8-$t." "key:enter" \
+        "sleep:20" "snap" "wait:node=leaf:300")
+    printf '%s\n' "$out"
+    wait
+    th=$(thread_with "U8-$t")
+    [ -n "$th" ] || fail "the message was lost"
+    replied "$th" "node=leaf" || fail "no reply on the thread"
+    [ "$(ant_texts "$th" | count "node=leaf")" -eq 1 ] || fail "the reply was stored more than once"
+    # While the uplink is down, the chat's own server (the client's leaf node) stays up: the header can only tell
+    # the hub is gone from what the chat reads through it.
+    sed -n '/^-- snap/,/^-- /p' <<<"$out" | grep -qF disconnected \
+        || known ants-yl3m6 "the header showed no lost connection while the hub was out of reach"
+}
+
+scenario U9 P1 "A sealed direct message to another human"
+U9() {
+    local t watch
+    t=$(tok)
+    watch=$(mktemp)
+    trap "rm -f '$watch'" EXIT
+    chat "wait:connected" "type:/goto @bob" "key:enter" "type:sealed hello $t" \
+        "wait:to bob on a new thread, sealed" "key:enter" "wait:🔒"
+    bob inbox | has "sealed hello $t" "bob's inbox"
+    bob ask @alice "sealed reply $t" >/dev/null
+    chat "wait:connected" "type:/goto @bob" "key:enter" "wait:sealed reply $t:60" "wait:🔒"
+    # An ant's credentials watching bob's inbox during a second send: refused, or the text stays sealed.
+    (hub timeout 30 ants --creds "$auth/hub-ant.creds" watch 'ants.inbox.bob.>' || true) >"$watch" 2>&1 &
+    sleep 5
+    alice ask @bob "sealed second $t" >/dev/null
+    wait
+    cat "$watch"
+    lacks "sealed second $t" "the ant's watch" <"$watch"
+    grep -qE 'Permissions Violation for Subscription|\[sealed' "$watch" || fail "the ant's watch was neither refused nor sealed"
 }
 
 # --- X. Sense and trails --------------------------------------------------------------------------------------------
