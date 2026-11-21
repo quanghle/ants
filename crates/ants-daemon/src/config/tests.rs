@@ -401,8 +401,7 @@ fn the_builtin_messenger_is_on_unless_turned_off() {
     let names: Vec<_> = ants.iter().map(|ant| ant.name.as_str()).collect();
     assert_eq!(names, ["dev-a", "system-sage"]);
 
-    let err = format!("{:#}", parse_here("messenger = false\nharness = \"claude\"").unwrap_err());
-    assert!(err.contains("nothing to serve"), "{err}");
+    assert!(parse_here("messenger = false\nharness = \"claude\"").unwrap().is_empty(), "the daemon refuses it");
 }
 
 #[test]

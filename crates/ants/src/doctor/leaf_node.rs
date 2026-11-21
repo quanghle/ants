@@ -109,6 +109,10 @@ pub(super) async fn check_leaf(
         format!("ants auth leaf {machine} --ant ANT... --human HUMAN..., then ants leaf config {machine} ...");
     let (check, members) = check_uplink(setup, &leaf, &uplink, ants, human, &generic, now);
     checks.push(check);
+    if ants.is_empty() {
+        let detail = "no ants served here: the uplink needs no rights for ants of this machine, built-in ones included";
+        checks.push(Check::skip("leaf uplink ants", detail));
+    }
     checks.push(check_leaf_system(setup, &leaf, &uplink, generic, now));
     checks.push(check_listening(setup, &leaf, managed).await);
     checks.push(check_outbox(machine, members.as_deref(), uplink.as_ref().ok(), connected).await);

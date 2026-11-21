@@ -355,7 +355,10 @@ fn select(
             if whole {
                 tell_elsewhere(&loaded.elsewhere, !loaded.ants.is_empty());
                 if loaded.ants.is_empty() && !allow_empty {
-                    let why = loaded.elsewhere.iter().map(elsewhere).collect::<Vec<_>>().join("; ");
+                    let mut why = loaded.elsewhere.iter().map(elsewhere).collect::<Vec<_>>().join("; ");
+                    if why.is_empty() {
+                        why = "no [[ant]] entries and messenger = false".to_owned();
+                    }
                     bail!("config {}: nothing to serve on this machine: {why}", path.display());
                 }
             }
