@@ -141,7 +141,7 @@ pub async fn inbox_consumer<I>(
     ack_wait: Duration,
     max_deliver: i64,
     max_ack_pending: i64,
-) -> Result<pull::Stream> {
+) -> Result<super::Pull> {
     let name = ants_proto::inbox_consumer(ant);
     let consumer: PullConsumer = stream
         .create_consumer(pull::Config {
@@ -155,7 +155,7 @@ pub async fn inbox_consumer<I>(
         })
         .await
         .with_context(|| format!("creating consumer {name}"))?;
-    Ok(consumer.messages().await?)
+    Ok(super::pull(consumer).await?)
 }
 
 /// Messages from the durable consumer `chan-<ant>` of every channel post, with the settings of
@@ -167,7 +167,7 @@ pub async fn chan_consumer<I>(
     ack_wait: Duration,
     max_deliver: i64,
     max_ack_pending: i64,
-) -> Result<pull::Stream> {
+) -> Result<super::Pull> {
     let name = ants_proto::chan_consumer(ant);
     let consumer: PullConsumer = stream
         .create_consumer(pull::Config {
@@ -182,7 +182,7 @@ pub async fn chan_consumer<I>(
         })
         .await
         .with_context(|| format!("creating consumer {name}"))?;
-    Ok(consumer.messages().await?)
+    Ok(super::pull(consumer).await?)
 }
 
 /// Delete the durable consumers that keep for `ant` what reaches it while no daemon serves it, but its inbox's: its

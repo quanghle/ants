@@ -350,3 +350,25 @@ async fn no_client_can_forge_the_sender_of_a_stored_inbox_message() {
     assert!(passed.is_empty(), "dev-a's name forged through {passed:?}");
     assert_eq!(taken(genuine).as_deref(), Some("genuine"));
 }
+
+/// A reader waiting on its pull when the daemon pulls anew hears the next message through the new request, and the
+/// old ones are gone two heartbeats later.
+#[tokio::test]
+async fn a_reader_pulled_anew_while_waiting_hears_the_next_message() {
+    let Some(server) = NatsServer::start() else {
+        return;
+    };
+    let (dev, human) = (dev(), UserId::human());
+    let (_client, js) = connect(&server.url, None, None, &dev, "test").await.unwrap();
+    let stream = ensure_stream(&js).await.unwrap();
+    let mut messages = inbox_consumer(&stream, &dev, Duration::from_secs(30), 5, 1).await.unwrap();
+    let reading = tokio::spawn(async move { messages.next().await.unwrap().unwrap() });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let anew = std::time::Instant::now();
+    pull_anew();
+    publish(&js, &Envelope::new(human, dev, "after")).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(5), reading).await.expect("the reader heard nothing").unwrap();
+    assert_eq!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap().text, "after");
+    settled().await;
+    assert!(anew.elapsed() >= 2 * IDLE_HEARTBEAT, "settled before two heartbeats");
+}

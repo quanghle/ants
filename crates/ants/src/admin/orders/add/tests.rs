@@ -257,9 +257,9 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     let (_b, b_js) = bus::connect(&leaf_node.url, Some(&creds), Some(&domain), &dev_b, "test").await.unwrap();
     eventually("dev-b reaches the hub through the leaf", async || bus::open_stream(&b_js, &dev_b).await.is_ok()).await;
 
-    // The renewal's reload dropped the hub's reply mappings of the pulls in flight through the uplink: the daemon's
-    // admin consumer takes its next order only once it missed their heartbeats (ants-dbf0s).
-    let retire = Box::pin(send(&admin, &js, Some(m1.clone()), &dev_b, AdminOp::Retire, 3 * SIGNED));
+    // The renewal's reload left the pulls in flight through the uplink silent: the daemon pulls anew at once, so the
+    // next order goes to a request that hears it rather than wait out its ack wait (ants-dbf0s).
+    let retire = Box::pin(send(&admin, &js, Some(m1.clone()), &dev_b, AdminOp::Retire, Duration::from_secs(10)));
     let (_, retired) = with_signer_at(&hub.url, hub.dir(), Some(&domain), retire).await.unwrap();
     let retired = retired.expect("the daemon decides once the signer answers");
     assert_eq!((retired.state, retired.reason.as_deref()), (OrderState::Applied, None), "{retired:?}");
