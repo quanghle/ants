@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use ants_daemon::bus::relayed::{self, Read};
 use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_proto::{DeviceId, Following, JsDomain, PRESENCE_BUCKET, PRESENCE_HEARTBEAT, Presence, UserId, presence_key};
 use anyhow::{Context as _, Result, anyhow};
@@ -114,8 +115,8 @@ pub fn online_right() -> String {
 }
 
 /// The humans with a device following anything now, from the last entry of every key of the bucket, read through an
-/// ordered consumer: deleted keys are gone, and a presence not renewed expires with the bucket's max age. Nobody when
-/// the bucket is missing.
+/// ordered consumer: deleted keys are gone, a presence not renewed expires with the bucket's max age, and a key whose
+/// last message a stream relayed ([`relayed::stored_relayed`]) counts as gone. Nobody when the bucket is missing.
 pub async fn online(js: &jetstream::Context) -> Result<HashSet<UserId>> {
     let stream = js.get_stream_no_info(format!("KV_{PRESENCE_BUCKET}")).await.context("naming the presences")?;
     let prefix = format!("$KV.{PRESENCE_BUCKET}.");
@@ -123,7 +124,6 @@ pub async fn online(js: &jetstream::Context) -> Result<HashSet<UserId>> {
         .create_consumer(consumer::push::OrderedConfig {
             deliver_subject: js.client().new_inbox(),
             filter_subject: format!("{prefix}>"),
-            headers_only: true,
             deliver_policy: consumer::DeliverPolicy::LastPerSubject,
             replay_policy: consumer::ReplayPolicy::Instant,
             ..Default::default()
@@ -147,6 +147,10 @@ pub async fn online(js: &jetstream::Context) -> Result<HashSet<UserId>> {
             .context("the presences ended early")?
             .map_err(|e| anyhow!(e))
             .context("reading the presences")?;
+        if relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::Consumer) {
+            tracing::warn!(subject = %msg.subject, "skipping a presence a stream relayed");
+            continue;
+        }
         let deleted = msg.headers.as_ref().and_then(|h| h.get("KV-Operation")).is_some_and(|op| op.as_str() != "PUT");
         let human = msg.subject.strip_prefix(&prefix).and_then(|key| key.split('.').next()?.parse().ok());
         if let (false, Some(human)) = (deleted, human) {
@@ -217,6 +221,17 @@ mod tests {
             assert_eq!(online(&phone).await.unwrap(), HashSet::from([alice.clone(), bob.clone()]));
             b_kv.delete(presence_key(&bob, &b_id, Following::Inbox)).await.unwrap();
             assert_eq!(online(&phone).await.unwrap(), HashSet::from([alice.clone()]), "bob left");
+            // A message a stream relayed onto bob's key, as stored there: bob shows as away.
+            let mut headers = async_nats::HeaderMap::new();
+            let stream_headers = [
+                ("Nats-Stream", "KV_ants_trail_runs"),
+                ("Nats-Subject", "$KV.ants_trail_runs.dev-a.x"),
+                ("Nats-Sequence", "1"),
+            ];
+            stream_headers.into_iter().for_each(|(name, value)| headers.insert(name, value));
+            let onto = format!("$KV.{PRESENCE_BUCKET}.{}", presence_key(&bob, &b_id, Following::Inbox));
+            b_js.publish_with_headers(onto, headers, "{}".into()).await.unwrap().await.unwrap();
+            assert_eq!(online(&phone).await.unwrap(), HashSet::from([alice.clone()]), "a relayed presence");
             let (_, ant) = server.connect_as(&p("dev-a"), Role::Ant).await;
             assert!(online(&ant).await.is_err(), "an ant reads the presences");
             let ant_kv = DirectKv::new(&ant, None, PRESENCE_BUCKET).await.unwrap();
