@@ -232,3 +232,31 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
 async fn h_kv_put(kv: &jetstream::kv::Store, entry: &ChannelEntry) {
     kv.put(entry.key(), serde_json::to_vec(entry).unwrap().into()).await.unwrap();
 }
+
+/// `ants queue` lists where an ant's inbox and channel consumers stand, which its daemon reads, in the hub's JetStream
+/// domain too, with the ant's credentials: those of its own consumers only.
+#[tokio::test]
+async fn an_ant_reads_where_its_own_inbox_and_channel_consumers_stand_and_no_other_s() {
+    let Some(server) = Server::start_with("domain: hub", "") else { return };
+    let domain: JsDomain = "hub".parse().unwrap();
+    let domain = Some(&domain);
+    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let human_js = connect_to(&server.url, &server.creds_in(&human, domain), domain, &human).await;
+    bus::ensure_stream(&human_js).await.unwrap();
+    let creds = server.creds_in(&dev_a, domain);
+    let js = connect_to(&server.url, &creds, domain, &dev_a).await;
+    let stream = bus::open_stream(&js, &dev_a).await.unwrap();
+    drop(bus::inbox_consumer(&stream, &dev_a, WAIT, 5, 1).await.unwrap());
+    drop(bus::chan_consumer(&stream, &dev_a, WAIT, 5, 1).await.unwrap());
+    for name in [ants_proto::inbox_consumer(&dev_a), chan_consumer(&dev_a)] {
+        let info = timeout(WAIT, stream.consumer_info(&name)).await.expect("answered").unwrap();
+        assert_eq!(info.name, name);
+    }
+    let (raw, mut errors) = server.watched_with(&dev_a, &creds).await;
+    for name in [ants_proto::inbox_consumer(&dev_b), chan_consumer(&dev_b)] {
+        let denied = format!("$JS.hub.API.CONSUMER.INFO.{STREAM}.{name}");
+        raw.publish(denied.clone(), "".into()).await.unwrap();
+        let v = next_violation(&raw, &mut errors).await;
+        assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");
+    }
+}

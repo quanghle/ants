@@ -569,6 +569,25 @@ fn only_humans_get_the_info_of_the_stream_and_of_the_webhooks_bucket() {
 }
 
 #[test]
+fn an_ant_reads_where_its_own_inbox_and_channel_consumers_stand_and_no_other_s() {
+    let infos = |perms: &Permissions| -> Vec<String> {
+        let mut infos: Vec<String> =
+            perms.publish.iter().filter(|s| s.starts_with("$JS.API.CONSUMER.INFO.ANTS.")).cloned().collect();
+        infos.sort();
+        infos
+    };
+    let want = ["$JS.API.CONSUMER.INFO.ANTS.chan-dev-a", "$JS.API.CONSUMER.INFO.ANTS.inbox-dev-a"];
+    assert_eq!(infos(&Permissions::for_user(&p("dev-a"), Role::Ant)), want);
+    let domain: JsDomain = "hub".parse().unwrap();
+    let in_domain = Permissions::for_user(&p("dev-a"), Role::Ant).with_js_domain(Some(&domain));
+    assert!(in_domain.publish.iter().any(|s| s == "$JS.hub.API.CONSUMER.INFO.ANTS.chan-dev-a"));
+    let assistant = Permissions::for_assistant(&p("pa"), &p("alice"));
+    for s in ["$JS.API.CONSUMER.INFO.ANTS.chan-pa", "$JS.API.CONSUMER.INFO.ANTS.inbox-pa"] {
+        assert!(assistant.publish.iter().any(|have| have == s), "{s} missing from {:?}", assistant.publish);
+    }
+}
+
+#[test]
 fn channels_are_readable_by_ants_and_written_by_humans_only() {
     let a = Permissions::for_user(&p("dev-a"), Role::Ant);
     for s in [
