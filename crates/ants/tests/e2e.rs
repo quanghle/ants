@@ -143,20 +143,21 @@ fn exercise_daemon(custom_tools: bool) {
     let mut said = stdout.lines();
     let thread = said.next().and_then(|l| l.strip_prefix("thread ")).expect(&stdout).to_owned();
     let message = said.next().and_then(|l| l.strip_prefix("message ")).expect(&stdout).to_owned();
-    // The sense brief, naming the ant's sense id and today, comes between the instructions and the message.
+    // The sense brief, naming the ant's sense id and today, comes between the instructions and the message, which opens
+    // with a header naming its sender.
     let expected = if custom_tools {
         [
             "dev-a: stub: [ants role dev-a]\nMaintain the Rust backend.\n\n\
              [ants memory]\nUse the notes tool.\n\n[ants tasks]\nUse the ticket tool.\n\n\
              [ants brief from sense]\n## Identity\ndev-a (sense identity ",
             "- sense_brief: show this brief again.\n\n\
-             hello there\ncustom.db; BD_DB=unmanaged.db; BD_REMOTE=\n\
+             [ants message from human]\nhello there\ncustom.db; BD_DB=unmanaged.db; BD_REMOTE=\n\
              model=stub-model; effort=high; context=long_context\n",
         ]
     } else {
         [
             "dev-a: stub: [ants brief from sense]\n## Identity\ndev-a (sense identity ",
-            "- sense_brief: show this brief again.\n\nhello there\n",
+            "- sense_brief: show this brief again.\n\n[ants message from human]\nhello there\n",
         ]
     };
     let [start, end] = expected;
@@ -1096,12 +1097,18 @@ fn get(addr: &str, path: &str) -> (u16, String) {
     (head.split(' ').nth(1).unwrap().parse().unwrap(), body.to_owned())
 }
 
-/// The text without the sense brief that the first prompt of a session carries.
+/// The text without the sense brief that the first prompt of a session carries, and the header of the message after it.
 fn unbriefed(text: &str) -> String {
     const START: &str = "[ants brief from sense]\n";
     const END: &str = "- sense_brief: show this brief again.\n\n";
     match text.find(START).and_then(|at| text[at..].find(END).map(|len| (at, at + len + END.len()))) {
-        Some((start, end)) => format!("{}{}", &text[..start], &text[end..]),
+        Some((start, end)) => {
+            // The header opening the message after the brief goes with it.
+            let rest = &text[end..];
+            let rest =
+                rest.strip_prefix("[ants message from ").and_then(|r| r.split_once("]\n")).map_or(rest, |(_, r)| r);
+            format!("{}{rest}", &text[..start])
+        }
         None => text.to_owned(),
     }
 }

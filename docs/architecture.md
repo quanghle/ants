@@ -246,9 +246,13 @@ The brief's text.
 [ants] The earlier session of this thread could not be resumed, … (a rebuilt session only)
 The thread's history (a rebuilt session only)
 
+[ants message from alice]
 The message.
 ```
 
+- The message opens with `[ants message from <sender>]` whenever instructions, a brief or a thread's history come
+  before it, so the harness tells the request from the context above it; a prompt carrying the message alone has no
+  such line.
 - The brief follows the configured instructions (`whoami`, `memory`, `tasks`), whichever of them the ant has, and comes before the history that seeds a rebuilt session. Later prompts of the session carry the instructions without it.
 - A brief over its budget of 8000 bytes is cut on a character boundary, followed by `[ants] The brief was cut to its budget of 8000 bytes.` An empty brief adds nothing.
 - A provider not answering within 5 s leaves the brief out, with `[ants] The sense brief is left out: no answer within 5s.` in its place; one failing leaves `… the provider failed (error <code>).`, and an identity record the daemon cannot read `… the ant's identity record cannot be read.` The prompt goes on either way. The wait runs alongside the reading of the message's attachments and does not count toward `prompt_timeout`.

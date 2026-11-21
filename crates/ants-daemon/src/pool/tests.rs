@@ -176,7 +176,7 @@ async fn a_harness_without_session_load_starts_over() {
     pool.prompt(&thread(1), "a").await.unwrap();
     pool.prompt(&thread(2), "b").await.unwrap();
     let told = "[ants] The earlier session of this thread could not be resumed, so this one starts over, without \
-                    the context of the thread.\n\nc";
+                    the context of the thread.\n\n[ants message]\nc";
     assert_eq!(pool.prompt(&thread(1), "c").await.unwrap(), format!("s3: {told}"));
     assert!(log.locked().loaded.is_empty());
 }
@@ -346,7 +346,7 @@ async fn a_session_that_cannot_be_resumed_starts_over_from_the_thread_history() 
 
     let pool = Pool::new(launch, store.clone(), 4, IDLE);
     let seeded = "[ants] The earlier session of this thread could not be resumed, so this one starts over, its \
-                      context rebuilt from the thread's history.\n\nHISTORY 65536\n\nb";
+                      context rebuilt from the thread's history.\n\nHISTORY 65536\n\n[ants message]\nb";
     assert_eq!(pool.run(&thread(1), with_history("b")).await.unwrap().text, format!("s2: {seeded}"));
     assert_eq!(pool.run(&thread(1), with_history("c")).await.unwrap().text, "s2: c", "only the first prompt");
     assert_eq!(store.get(&thread(1)).await.unwrap().map(|s| s.session), Some(SessionId::new("s2")));
@@ -396,7 +396,7 @@ async fn a_clone_s_session_is_forked_else_starts_over_from_the_thread_history() 
     let pool = Pool::new(launch, store.clone(), 4, IDLE);
     let reply = pool.run(&thread(1), with_history("b")).await.unwrap().text;
     assert!(reply.starts_with("s1: [ants] This ant is a clone of another"), "{reply}");
-    assert!(reply.ends_with("HISTORY 65536\n\nb"), "{reply}");
+    assert!(reply.ends_with("HISTORY 65536\n\n[ants message]\nb"), "{reply}");
     assert!(log.locked().loaded.is_empty(), "the session cloned from is not loaded");
     assert_eq!(
         store.get(&thread(1)).await.unwrap().map(|s| (s.session, s.cloned)),
@@ -438,7 +438,7 @@ async fn a_prompt_that_outgrows_the_context_window_runs_again_in_a_new_session_o
     pool.run(&thread(1), with_history("a")).await.unwrap();
     let reply = pool.run(&thread(1), with_history("overflow")).await.unwrap();
     let seeded = "[ants] The session of this thread outgrew the model's context window, so this one starts over, \
-                      its context rebuilt from the thread's history.\n\nHISTORY 32768\n\noverflow";
+                      its context rebuilt from the thread's history.\n\nHISTORY 32768\n\n[ants message]\noverflow";
     assert_eq!(reply, Reply { text: format!("s2: {seeded}"), cut: None, rebuilt: true });
     assert_eq!(
         store.get(&thread(1)).await.unwrap().map(|s| s.session),
@@ -473,7 +473,7 @@ async fn ant_and_tool_instructions_reach_every_prompt_and_resumed_session() {
     for (thread_id, text, session) in [(1, "one", "s1"), (1, "two", "s1"), (2, "three", "s2"), (1, "four", "s1")] {
         assert_eq!(
             pool.prompt(&thread(thread_id), text).await.unwrap(),
-            format!("{session}: {instructions}\n\n{text}")
+            format!("{session}: {instructions}\n\n[ants message]\n{text}")
         );
     }
     assert_eq!(log.locked().loaded, ["s1"]);
@@ -547,13 +547,13 @@ async fn the_brief_follows_the_instructions_when_a_session_starts_or_is_loaded_o
     let brief = Answer::Text("Working on the parser.".to_owned());
     let (prompt, fake) = briefed(brief.clone(), "a").await;
     let instructions = "[ants memory]\nUse notes.\n\n[ants brief from fake]\nWorking on the parser.";
-    assert_eq!(pool.run(&thread(1), prompt).await.unwrap().text, format!("s1: {instructions}\n\na"));
+    assert_eq!(pool.run(&thread(1), prompt).await.unwrap().text, format!("s1: {instructions}\n\n[ants message]\na"));
     let (prompt, _) = briefed(brief.clone(), "b").await;
     let reply = pool.run(&thread(1), prompt).await.unwrap().text;
-    assert_eq!(reply, "s1: [ants memory]\nUse notes.\n\nb", "only the first prompt of a session");
+    assert_eq!(reply, "s1: [ants memory]\nUse notes.\n\n[ants message]\nb", "only the first prompt of a session");
     pool.evict_idle(Instant::now() + IDLE * 2);
     let (prompt, loaded) = briefed(brief.clone(), "c").await;
-    assert_eq!(pool.run(&thread(1), prompt).await.unwrap().text, format!("s1: {instructions}\n\nc"));
+    assert_eq!(pool.run(&thread(1), prompt).await.unwrap().text, format!("s1: {instructions}\n\n[ants message]\nc"));
     assert_eq!((reasons(&fake), reasons(&loaded)), (vec![BriefReason::Started], vec![BriefReason::Loaded]));
     pool.shutdown().await;
 
@@ -562,7 +562,7 @@ async fn the_brief_follows_the_instructions_when_a_session_starts_or_is_loaded_o
     let (prompt, rebuilt) = briefed(brief, "d").await;
     let reply = pool.run(&thread(1), prompt).await.unwrap().text;
     assert!(reply.starts_with(&format!("s2: {instructions}\n\n[ants] The earlier session")), "{reply}");
-    assert!(reply.ends_with("HISTORY 65536\n\nd"), "{reply}");
+    assert!(reply.ends_with("HISTORY 65536\n\n[ants message]\nd"), "{reply}");
     assert_eq!(reasons(&rebuilt), [BriefReason::Rebuilt]);
 }
 
@@ -582,12 +582,12 @@ async fn a_channel_s_description_opens_each_session_of_its_thread_after_the_brie
     let (pool, _, _) = fake_pool(4, Sessions::Loadable);
     let described =
         |text: &str, description: &str| Prompt { channel: Some(description.to_owned()), ..with_history(text) };
-    assert_eq!(pool.run(&thread(1), described("a", "Ops.")).await.unwrap().text, "s1: Ops.\n\na");
+    assert_eq!(pool.run(&thread(1), described("a", "Ops.")).await.unwrap().text, "s1: Ops.\n\n[ants message]\na");
     let reply = pool.run(&thread(1), described("b", "Ops, changed.")).await.unwrap().text;
     assert_eq!(reply, "s1: b", "a running session keeps the description it started with");
     pool.evict_idle(Instant::now() + IDLE * 2);
     let reply = pool.run(&thread(1), described("c", "Ops, changed.")).await.unwrap().text;
-    assert_eq!(reply, "s1: Ops, changed.\n\nc", "a loaded session takes the description of now");
+    assert_eq!(reply, "s1: Ops, changed.\n\n[ants message]\nc", "a loaded session takes the description of now");
     let (prompt, _) = briefed(Answer::Text("Brief.".to_owned()), "overflow").await;
     let reply = pool.run(&thread(1), Prompt { channel: Some("Ops.".to_owned()), ..prompt }).await.unwrap().text;
     let opening = "[ants brief from fake]\nBrief.\n\nOps.";
@@ -599,5 +599,5 @@ async fn a_brief_not_sent_in_time_leaves_a_line_and_the_prompt_goes_on() {
     let (pool, _, _) = fake_pool(1, Sessions::Loadable);
     let (prompt, _) = briefed(Answer::Never, "a").await;
     let reply = pool.run(&thread(1), prompt).await.unwrap().text;
-    assert_eq!(reply, "s1: [ants] The fake brief is left out: no answer within 5s.\n\na");
+    assert_eq!(reply, "s1: [ants] The fake brief is left out: no answer within 5s.\n\n[ants message]\na");
 }

@@ -425,6 +425,7 @@ impl Inbox<'_> {
         let (mut measured, began) = Measured::new(envelope.id);
         let prompt = Prompt {
             text,
+            from: Some(envelope.from.to_string()),
             limits: self.limits,
             spend: Some(spend_tx),
             stop: Some(stop),
