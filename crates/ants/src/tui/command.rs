@@ -539,7 +539,7 @@ impl Model {
             Goto::Thread(prefix) => {
                 let thread = self.read_thread(&prefix)?;
                 self.focus = Focus::View;
-                self.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+                self.push(Page::Thread(thread::Page::new(thread.clone())));
                 return Ok(Some(Action::Open(thread)));
             }
         };
@@ -603,7 +603,7 @@ impl Model {
                 if matches!(self.page(), Page::Thread(page) if page.history.thread == thread) {
                     return None;
                 }
-                self.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+                self.push(Page::Thread(thread::Page::new(thread.clone())));
                 Some(Action::Open(thread))
             }
             Err(e) => {

@@ -394,7 +394,7 @@ impl Model {
                 return None;
             }
             if self.pages.len() > 1 {
-                self.pages.pop();
+                self.pop();
                 return self.shown_reactions();
             } else {
                 self.focus = Focus::Nav;
@@ -410,15 +410,15 @@ impl Model {
     fn go(&mut self, to: To, now: DateTime<Utc>) -> Option<Action> {
         match to {
             To::Thread(thread) => {
-                self.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+                self.push(Page::Thread(thread::Page::new(thread.clone())));
                 Some(Action::Open(thread))
             }
             To::Message(thread, message) => {
-                self.pages.push(Page::Thread(thread::Page::at(thread.clone(), message)));
+                self.push(Page::Thread(thread::Page::at(thread.clone(), message)));
                 Some(Action::Open(thread))
             }
             To::Work(filter) => {
-                self.pages.push(Page::Work(work::Page::new(filter)));
+                self.push(Page::Work(work::Page::new(filter)));
                 None
             }
             To::React(message) => {
@@ -461,11 +461,11 @@ impl Model {
             To::Forward => self.go(To::Bar("/forward @".to_owned()), now),
             To::Tldr(thread) => self.tldr(thread),
             To::Credentials => {
-                self.pages.push(Page::Credentials(credentials::Page::default()));
+                self.push(Page::Credentials(credentials::Page::default()));
                 None
             }
             To::Held => {
-                self.pages.push(Page::Held(held::Page::default()));
+                self.push(Page::Held(held::Page::default()));
                 None
             }
             To::Digest => self.home_digest(now),
