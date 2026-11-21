@@ -14,7 +14,6 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use super::command::Conversation;
 use super::model::{Data, Key, Model, To, Ui};
-use super::mouse::Viewport;
 use super::select::{PAGE, Selection, step};
 use super::style::{self, ago};
 use crate::threads::thread::{Entry, Kind};
@@ -369,7 +368,7 @@ impl Data {
 }
 
 /// Which threads the work view lists.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Filter {
     pub state: Option<ThreadState>,
     /// Only threads where a human reaches this ant ([`Data::reaches`]).
@@ -392,19 +391,11 @@ pub struct Page {
     pub filter: Filter,
     /// The selected thread, kept as threads move.
     selected: Selection<ThreadId>,
-    /// The list the mouse scrolls, apart from those of the other work views stacked.
-    viewport: Viewport,
 }
 
 impl Page {
     pub fn new(filter: Filter) -> Self {
-        Self { viewport: Viewport::Work(filter.clone()), filter, selected: Selection::default() }
-    }
-
-    /// The threads where a human reaches `ant`, as its page lists them.
-    pub fn of_ant(ant: UserId) -> Self {
-        let filter = Filter { user: Some(ant), ..Filter::default() };
-        Self { filter, selected: Selection::default(), viewport: Viewport::AntThreads }
+        Self { filter, selected: Selection::default() }
     }
 
     /// The threads listed with their states, the most urgent first, then the most recently active.
@@ -490,7 +481,7 @@ impl Page {
             width: list.width.saturating_sub(2),
             height: list.height.saturating_sub(3),
         };
-        let top = ui.mouse.top(self.viewport.clone(), inner, at, at, at + 1, rows.len());
+        let top = ui.mouse.top(super::mouse::Viewport::Work, inner, at, at, at + 1, rows.len());
         for n in top..rows.len().min(top + usize::from(inner.height)) {
             ui.mouse.add(Rect { y: inner.y + (n - top) as u16, height: 1, ..inner }, super::mouse::Target::Row(n));
         }

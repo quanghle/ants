@@ -453,6 +453,18 @@ impl Model {
         self.pages.last().expect("a view")
     }
 
+    /// Show `page` over the view, its lists scrolled afresh.
+    pub fn push(&mut self, page: Page) {
+        self.ui.mouse.forget(self.pages.len());
+        self.pages.push(page);
+    }
+
+    /// Close the view shown, back to the one under it.
+    pub fn pop(&mut self) {
+        self.pages.pop();
+        self.ui.mouse.forget(self.pages.len());
+    }
+
     /// Show a notice, unless an error waits for a key and it is none, and keep it with the notices of the run.
     pub fn notify(&mut self, text: impl Into<String>, level: Level, now: DateTime<Utc>) {
         let notice = Notice { text: text.into(), at: now, level };
@@ -793,6 +805,7 @@ impl Model {
 
     /// Select `item` in the nav, showing its view.
     pub fn select(&mut self, item: nav::Item) -> Option<Action> {
+        self.ui.mouse.forget(0);
         self.pages = vec![Page::of(&item)];
         self.nav = item;
         self.shown_reactions()
@@ -808,7 +821,7 @@ impl Model {
                 page.found = Some(Err("stopped for a later search".to_owned()));
             }
         }
-        self.pages.push(Page::Search(search::Page::new(query, &search)));
+        self.push(Page::Search(search::Page::new(query, &search)));
         self.focus = Focus::View;
         Ok(Action::Search(search))
     }
@@ -826,7 +839,7 @@ impl Model {
 
     /// Show the delegation tree of `thread` over the view.
     pub fn tree(&mut self, thread: ThreadId) {
-        self.pages.push(Page::Tree(tree::Page::new(thread)));
+        self.push(Page::Tree(tree::Page::new(thread)));
         self.focus = Focus::View;
     }
 

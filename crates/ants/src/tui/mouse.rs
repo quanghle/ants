@@ -1,6 +1,6 @@
 //! Hit regions recorded while drawing, and line-based list viewports.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
@@ -33,14 +33,14 @@ pub enum Target {
     AntColumn(usize),
 }
 
-/// A list the mouse scrolls, its rows kept apart from the other lists'.
+/// A list the mouse scrolls, its rows kept apart from the other lists' of its page, and from those of the other pages
+/// stacked ([`Regions::forget`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Viewport {
     Nav,
     Home,
-    /// A work view, one for each filter.
-    Work(super::work::Filter),
-    AntThreads,
+    /// A work view, or an ant's threads.
+    Work,
     Channel(ants_proto::ChannelId),
     Dm(ants_proto::UserId),
     Search,
@@ -62,17 +62,34 @@ struct Scrolled {
     most: usize,
 }
 
+/// A viewport of the page at a depth of the stack, or the nav's, at none.
+type Stacked = (Option<usize>, Viewport);
+
 #[derive(Default)]
 pub struct Regions {
     hits: RefCell<Vec<(Rect, Target)>>,
-    scrolls: RefCell<Vec<(Rect, Viewport)>>,
-    views: RefCell<HashMap<Viewport, Scrolled>>,
+    scrolls: RefCell<Vec<(Rect, Stacked)>>,
+    views: RefCell<HashMap<Stacked, Scrolled>>,
+    /// The depth in the stack of the page drawn.
+    depth: Cell<usize>,
 }
 
 impl Regions {
-    pub fn clear(&self) {
+    /// Start a frame drawing the page at `depth` in the stack.
+    pub fn clear(&self, depth: usize) {
         self.hits.borrow_mut().clear();
         self.scrolls.borrow_mut().clear();
+        self.depth.set(depth);
+    }
+
+    /// Drop the viewports of the pages at `depth` and above, popped or replaced.
+    pub fn forget(&self, depth: usize) {
+        self.views.borrow_mut().retain(|(at, _), _| at.is_none_or(|at| at < depth));
+    }
+
+    fn stacked(&self, id: Viewport) -> Stacked {
+        let depth = (id != Viewport::Nav).then(|| self.depth.get());
+        (depth, id)
     }
 
     pub fn add(&self, area: Rect, target: Target) {
@@ -80,9 +97,10 @@ impl Regions {
     }
 
     pub fn top(&self, id: Viewport, area: Rect, selected: usize, start: usize, end: usize, total: usize) -> usize {
-        self.scrolls.borrow_mut().push((area, id.clone()));
+        let key = self.stacked(id);
+        self.scrolls.borrow_mut().push((area, key.clone()));
         let mut views = self.views.borrow_mut();
-        let view = views.entry(id).or_default();
+        let view = views.entry(key).or_default();
         view.most = total.saturating_sub(usize::from(area.height));
         if view.selected != Some(selected) {
             if start < view.top {
@@ -98,14 +116,18 @@ impl Regions {
 
     fn wheel(&self, point: Position, by: isize) -> bool {
         let scrolls = self.scrolls.borrow();
-        let Some((_, id)) = scrolls.iter().rev().find(|(area, _)| area.contains(point)) else { return false };
-        self.scroll(id, by);
+        let Some((_, key)) = scrolls.iter().rev().find(|(area, _)| area.contains(point)) else { return false };
+        self.scroll_key(key, by);
         true
     }
 
-    fn scroll(&self, id: &Viewport, by: isize) {
+    fn scroll(&self, id: Viewport, by: isize) {
+        self.scroll_key(&self.stacked(id), by);
+    }
+
+    fn scroll_key(&self, key: &Stacked, by: isize) {
         let mut views = self.views.borrow_mut();
-        let Some(view) = views.get_mut(id) else { return };
+        let Some(view) = views.get_mut(key) else { return };
         view.top = view.top.saturating_add_signed(by).min(view.most);
     }
 
@@ -320,7 +342,7 @@ impl Mouse {
     ) -> Option<Action> {
         self.last = None;
         if matches!(target, Target::Nav(_)) {
-            model.ui.mouse.scroll(&Viewport::Nav, by);
+            model.ui.mouse.scroll(Viewport::Nav, by);
             return None;
         }
         if let Target::AntColumn(column) = target {
@@ -402,12 +424,69 @@ mod tests {
         m.focus = Focus::View;
         let shown = test_support::screen(&m, 160, 36, at(3));
         assert!(shown.contains("task 40"), "{shown}");
-        m.ui.mouse.scroll(&Viewport::AntThreads, 10);
+        m.ui.mouse.scroll(Viewport::Work, 10);
         assert!(!test_support::screen(&m, 160, 36, at(3)).contains("task 40"), "the ant's threads scrolled");
         m.key(Key::Char('w'), at(3));
         assert_eq!(m.page().name(), "work");
         let shown = test_support::screen(&m, 160, 36, at(3));
         assert!(shown.contains("task 40"), "the work view keeps its own scroll: {shown}");
+    }
+
+    fn forty_tasks_of_dev_a() -> Model {
+        let mut m = test_support::model();
+        let messages = (1..=40)
+            .map(|n| message(n, &ants_proto::ThreadId::generate(), "alice", "dev-a", &format!("task {n:02}")))
+            .collect();
+        m.stored(messages, at(2));
+        m.select(crate::tui::nav::Item::Ant(crate::test_support::live::user("dev-a")));
+        m.focus = Focus::View;
+        m
+    }
+
+    fn top_shown(m: &Model) -> bool {
+        test_support::screen(m, 160, 36, at(3)).contains("task 40")
+    }
+
+    #[test]
+    fn stacked_pages_of_one_kind_scroll_apart() {
+        let mut m = forty_tasks_of_dev_a();
+        assert!(top_shown(&m));
+        m.ui.mouse.scroll(Viewport::Work, 10);
+        assert!(!top_shown(&m), "the ant's threads scrolled");
+        m.key(Key::Char('w'), at(3));
+        assert!(top_shown(&m));
+        m.ui.mouse.scroll(Viewport::Work, 10);
+        assert!(!top_shown(&m), "the work view scrolled");
+        let thread = ants_proto::ThreadId::generate();
+        m.push(Page::Thread(thread::Page::new(thread.clone())));
+        m.tree(thread);
+        m.push(Page::Ant(ant::Page::new(crate::test_support::live::user("dev-a"))));
+        assert!(top_shown(&m), "the same ant stacked again scrolls on its own");
+        m.key(Key::Char('w'), at(3));
+        assert_eq!((m.pages.len(), m.page().name()), (6, "work"));
+        assert!(top_shown(&m), "the same work view stacked again scrolls on its own");
+        m.ui.mouse.scroll(Viewport::Work, 20);
+        for _ in 0..4 {
+            m.key(Key::Esc, at(3));
+        }
+        assert_eq!((m.pages.len(), m.page().name()), (2, "work"));
+        assert!(!top_shown(&m), "the first work view keeps its scroll");
+        m.key(Key::Esc, at(3));
+        assert_eq!(m.page().name(), "ant");
+        assert!(!top_shown(&m), "the first ant keeps its scroll");
+    }
+
+    #[test]
+    fn a_page_pushed_where_one_was_popped_starts_unscrolled() {
+        let mut m = forty_tasks_of_dev_a();
+        m.key(Key::Char('w'), at(3));
+        assert!(top_shown(&m));
+        m.ui.mouse.scroll(Viewport::Work, 10);
+        assert!(!top_shown(&m), "the work view scrolled");
+        m.key(Key::Esc, at(3));
+        assert!(m.ui.mouse.views.borrow().keys().all(|(depth, _)| depth.is_none_or(|depth| depth < 1)));
+        m.key(Key::Char('w'), at(3));
+        assert!(top_shown(&m), "the work view opened again starts at its top");
     }
 
     #[test]
@@ -493,7 +572,7 @@ mod tests {
         let mut m = test_support::model();
         let render = |m: &Model| {
             crate::test_support::render::rendered(20, 3, |f| {
-                m.ui.mouse.clear();
+                m.ui.mouse.clear(0);
                 list(
                     f,
                     f.area(),
@@ -510,7 +589,7 @@ mod tests {
         assert_eq!(Mouse::default().event(&mut m, event, at(1)), None);
         let shown = render(&m);
         assert!(shown.lines().next().unwrap().contains("first-b"), "{shown}");
-        assert_eq!(m.ui.mouse.views.borrow()[&Viewport::Search].selected, Some(0));
+        assert_eq!(m.ui.mouse.views.borrow()[&(Some(0), Viewport::Search)].selected, Some(0));
     }
 
     #[test]
