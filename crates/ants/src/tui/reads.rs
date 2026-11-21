@@ -395,7 +395,7 @@ impl super::model::Model {
             seqs.iter().for_each(|seq| marker.unmark(*seq));
         }
         if self.open() == Some(&thread) && self.pages.len() > 1 {
-            self.pages.pop();
+            self.pop();
         }
         Some(Action::MarkUnread(thread, seqs))
     }

@@ -56,6 +56,11 @@ pub enum Theme {
 }
 
 impl CliSection {
+    /// Whether the section names the CLI's credentials, which only a server taking credentials needs.
+    pub(super) fn has_creds(&self) -> bool {
+        self.creds.is_some()
+    }
+
     /// What the section says of catch-up summaries: refused for `ahead` with no daily tokens to spend.
     pub(super) fn summary(&self) -> Result<SummaryConfig> {
         if self.summaries == Summaries::Ahead && self.summary_daily_tokens == 0 {

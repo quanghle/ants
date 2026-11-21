@@ -135,11 +135,12 @@ setting, a stopped node, a dropped uplink), even when it fails; `ants chat` scen
 driven through a pseudo-terminal in the client and read back with pyte (`contrib/e2e/chat.py`). A run prints `PASS`,
 `FAIL` or `SKIP` per scenario and keeps each scenario's log under `~/.local/share/ants/e2e/runs/`; a failing
 preflight stops it. A check failing on a bug filed in bd is reported beside the scenario's `PASS` as
-`known: <issue>`, the scenario going on. U5, U8 and U9 are run by hand.
+`known: <issue>`, the scenario going on.
 
 `run -j N` (or `ANTS_E2E_JOBS`) runs the preflight first, then the scenarios that only read the fixture N at a time,
 each on threads of its own, then one by one those that change what the others rely on: R1–R6, H1–H3, O1–O3, O6, O7,
-S4, T4, U4, U7, X1 and K1 (a node, an uplink, an ant's settings or pause, the client's leaf credentials). The fixture's
+S4, T4, U4, U5, U7, U8, X1 and K1 (a node, an uplink, an ant's settings or pause, the client's leaf credentials, all
+of an ant's harnesses). The fixture's
 ants take 3 harnesses each (`gate-ant` 2), so a few scenarios can prompt one ant at once. Running several at once
 spends the token's rate limit faster.
 
@@ -727,7 +728,7 @@ press `2` on the question card.
 ### U5 · Replies steer, `/later` queues, `x` cancels (P1, 3 prompts)
 
 In a thread with `leaf-ant` running `sleep 45` (as S1): type a second instruction and `Enter`; in another such thread
-type `/later Reply TWO.`; in a third press `↑` then `x`.
+type `/later Reply TWO.`; in a third press `Esc` (leaving the bar), `↑` (selecting a message), then `x` and `y`.
 
 **Expect** as S1 (one answer following the second instruction), as S2 (the bar shows `queued · 1 ahead`, two answers
 in order) and as S3 (the cancel notice, the thread no longer `working`).

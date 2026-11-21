@@ -149,7 +149,7 @@ impl Hook {
                     feed.consumer(me)
                 )
             })?;
-            let mut messages = reader.messages().await?;
+            let mut messages = ants_daemon::bus::pull(reader).await?;
             while let Some(msg) = messages.next().await {
                 let msg = match msg {
                     Ok(msg) => msg,

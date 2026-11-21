@@ -114,8 +114,10 @@
 //!
 //! A file also serves `system-messenger` ([`builtin_messenger`]) unless it sets `messenger = false`. It serves
 //! `system-sage` ([`builtin_sage`]) while one of its other ants names it as its sage, as each does by default. On a server
-//! taking credentials, a machine serves a built-in ant only where its own are, leaving it to another machine
-//! otherwise ([`Loaded::elsewhere`]).
+//! taking credentials, as credentials in `[host]`, `[cli]` or an `[[ant]]` tell, a machine serves a built-in ant only
+//! where its own are, leaving it to another machine otherwise ([`Loaded::elsewhere`]); only a built-in ant served
+//! needs a harness. A file may so list no ants to serve, as on a machine where only humans run the CLI, which
+//! `ants daemon` refuses.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -339,7 +341,8 @@ pub fn load(path: &Path) -> Result<Loaded> {
 /// directory, apply the top-level `harness`, `nats`, `js_domain` and `human`, check that names are unique, workdirs
 /// exist and every harness named is defined, add the built-in messenger unless `messenger = false`,
 /// settle each ant's sage and add the built-in sage while an ant names it ([`sage::settle`]), leave
-/// to another machine the built-in ants it doesn't serve ([`builtins`]), and
+/// to another machine the built-in ants it doesn't serve ([`builtins`]), a harness being needed only by those it
+/// serves, and
 /// check the schedules, each named once and after no ant, with the top-level `nats`,
 /// `js_domain` and `timezone` where they set none.
 pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
@@ -356,9 +359,6 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         .map(|section| section.settle(base, home))
         .transpose()
         .with_context(|| format!("config {}", path.display()))?;
-    if file.ants.is_empty() && !file.messenger {
-        bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
-    }
     let templates = templates(std::mem::take(&mut file.ant_templates), &harnesses, file.harness.is_some(), base, home)
         .with_context(|| format!("config {}", path.display()))?;
     let tables = ant_tables(text)?;
@@ -392,7 +392,11 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         let sage = settle_ant(sage, &file, (&harnesses, &providers), base, home, path)?;
         ants.push(Ant { file_sage, is_sage: true, ..sage });
     }
-    let elsewhere = builtins::leave(&mut ants, &host, home);
+    let takes = builtins::takes_credentials(&ants, &host, file.cli.has_creds());
+    let elsewhere = builtins::leave(&mut ants, takes, home);
+    for ant in &ants {
+        builtins::harness_set(ant).with_context(|| format!("config {}", path.display()))?;
+    }
     let entries = std::mem::take(&mut file.schedules);
     let schedules = schedules(entries, &file, timezone.as_ref(), &names, base, home, path)?;
     let (base, home) = (base.to_owned(), home.to_owned());

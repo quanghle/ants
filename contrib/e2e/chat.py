@@ -76,7 +76,9 @@ class Chat:
             self.stream.feed(data)
 
     def text(self):
-        return "\n".join(self.screen.display)
+        # Not pyte's display, which fails on the empty cell after a wide character (🔒).
+        buffer = self.screen.buffer
+        return "\n".join("".join(buffer[y][x].data for x in range(COLS)) for y in range(ROWS))
 
     def fail(self, why):
         print(self.text())

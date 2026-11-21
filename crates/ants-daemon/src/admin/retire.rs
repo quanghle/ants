@@ -130,7 +130,11 @@ async fn shrink(
         return format!("the uplink credentials of {machine} were left as they are ({e:#}): {remedy}");
     }
     let (apply, conf) = (leaf.shrink, leaf.conf.clone());
-    match tokio::task::spawn_blocking(move || apply(&conf, &asked, &shrunk)).await.map_err(anyhow::Error::from) {
+    let applied = tokio::task::spawn_blocking(move || apply(&conf, &asked, &shrunk)).await.map_err(anyhow::Error::from);
+    if matches!(applied, Ok(Ok(Some(_)))) {
+        crate::bus::pull_anew();
+    }
+    match applied {
         Ok(Ok(Some(said))) => format!("the uplink credentials of {machine} were renewed without {ant}: {said}"),
         Ok(Ok(None)) => {
             format!("the uplink credentials of {machine} changed meanwhile and were left as they are: {remedy}")

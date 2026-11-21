@@ -88,7 +88,7 @@ impl Model {
             Place::Nav(item) => self.select(item),
             Place::Thread(thread) if self.here().as_ref() == Some(&Place::Thread(thread.clone())) => None,
             Place::Thread(thread) => {
-                self.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+                self.push(Page::Thread(thread::Page::new(thread.clone())));
                 Some(Action::Open(thread))
             }
         };

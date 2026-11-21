@@ -72,7 +72,8 @@ impl Permissions {
     /// usage it reads in the account's JetStream info. Every user lists the streams, with their sizes and no subject
     /// stored. Of these and the owners bucket it gets no stream info, which lists every key of a bucket (so the threads
     /// of other ants): it reads single keys by direct gets. Nor does it get the stream's info, which lists every
-    /// subject stored, so who messages whom: it finds the stream through the info of its own inbox consumer. The filter
+    /// subject stored, so who messages whom: it finds the stream through the info of its own inbox consumer, and reads
+    /// where that one and its channel consumer stand through theirs, for `ants queue`. The filter
     /// of each of its consumers is part of the subject that creates it, so none can be pointed at another inbox: a
     /// consumer with several filters has none in that subject, so no ant may create one. A human (a CLI user;
     /// [`Role::Human`], whatever its name) also watches all ants traffic, decides approval requests, sends admin orders
@@ -346,10 +347,12 @@ impl Permissions {
             format!("$JS.API.CONSUMER.MSG.NEXT.{threads}.{done}"),
         ]);
         publish.extend(ack_subjects(&threads, &done));
-        // Deleting that consumer and its channel consumer as its retirement stops it, so neither keeps piling up.
+        // Deleting that consumer and its channel consumer as its retirement stops it, so neither keeps piling up; and
+        // where the channel consumer stands, as `ants queue` lists it.
         publish.extend([
             format!("$JS.API.CONSUMER.DELETE.{threads}.{done}"),
             format!("$JS.API.CONSUMER.DELETE.{STREAM}.{}", chan_consumer(user)),
+            format!("$JS.API.CONSUMER.INFO.{STREAM}.{}", chan_consumer(user)),
         ]);
         // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
         // filter pinned; no ack, so the spares of the inbox consumer only read it.

@@ -56,6 +56,51 @@ async fn appends_are_gapless_per_identity_and_a_stale_writer_is_refused() {
     assert_eq!(anew.last_sequence(&a).await.unwrap(), 0);
 }
 
+/// Messages a stream relayed onto an identity's subject, by direct gets naming it as their reply subject, and the ack
+/// of a publish the server sent there: no read returns them, a run of them ends no read early, and an append past
+/// them goes through.
+#[tokio::test]
+async fn messages_a_stream_relayed_onto_an_identity_are_skipped() {
+    let Some(server) = NatsServer::start() else { return };
+    let js = connect(&server).await;
+    let log = JetStreamLog::open(&js).await.unwrap();
+    let a = SenseId::new();
+    let onto = subject::sense(&a);
+    let relay = stream::Config {
+        name: "RELAY".to_owned(),
+        subjects: vec!["relay.>".to_owned()],
+        allow_direct: true,
+        ..Default::default()
+    };
+    js.create_stream(relay).await.unwrap();
+    js.publish("relay.x", br#"{"forged":true}"#.to_vec().into()).await.unwrap().await.unwrap();
+
+    assert_eq!(log.append(&a, b"a1".to_vec(), 0).await.unwrap(), 1);
+    let client = js.client();
+    for _ in 0..3 {
+        client.publish_with_reply("$JS.API.DIRECT.GET.RELAY.relay.x", onto.clone(), "".into()).await.unwrap();
+    }
+    client.publish_with_reply("relay.y", onto.clone(), "{}".into()).await.unwrap();
+    client.flush().await.unwrap();
+    for _ in 0..100 {
+        if log.last_sequence(&a).await.unwrap() == 5 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(log.last_sequence(&a).await.unwrap(), 5, "three relays and an ack stored after a1");
+
+    let sequences = async |after, limit| -> Vec<u64> {
+        log.read_after(&a, after, limit).await.unwrap().iter().map(|stored| stored.sequence).collect()
+    };
+    assert_eq!(sequences(0, 10).await, [1]);
+    assert_eq!(sequences(1, 1).await, [0u64; 0], "the log ends at a1, past the relays a batch at a time");
+    assert_eq!(log.append(&a, b"a2".to_vec(), 1).await.unwrap(), 6, "appended past the relays");
+    assert_eq!(sequences(0, 10).await, [1, 6]);
+    assert_eq!(sequences(1, 1).await, [6], "read past the relays");
+    assert!(matches!(log.append(&a, b"stale".to_vec(), 1).await, Err(AppendError::Conflict { last: 6 })));
+}
+
 #[tokio::test]
 async fn a_stream_of_another_config_is_refused() {
     let Some(server) = NatsServer::start() else { return };

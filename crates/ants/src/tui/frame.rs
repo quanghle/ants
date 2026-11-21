@@ -20,7 +20,7 @@ const NAV_WIDTH: u16 = 24;
 pub const QUIT_AGAIN: &str = "Ctrl-C again to quit";
 
 pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
-    model.ui.mouse.clear();
+    model.ui.mouse.clear(model.pages.len() - 1);
     if model.compact {
         return compact::draw(frame, model, now);
     }

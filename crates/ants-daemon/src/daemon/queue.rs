@@ -8,7 +8,7 @@ use std::fmt::Display;
 use std::time::{Duration, Instant};
 
 use ants_proto::{ConsumerPlace, QueueRequest, QueuedMessage, State, StatusUpdate, ThreadId, Uuid, subject};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use futures::future::{FusedFuture as _, FutureExt as _};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
@@ -19,6 +19,10 @@ use crate::monitoring::status;
 use super::control::{Cancel, Why};
 use super::handling::Handled;
 use super::{EVICT_EVERY, InHand, Inbox, Incoming, Steered, is_post, sleep_until, stream_seq};
+
+/// How long [`Inbox::answer_queue`] waits for each consumer's info, well inside the 5 s `ants queue` waits for an
+/// answer.
+const QUEUE_READ: Duration = Duration::from_secs(2);
 
 /// The messages of one thread in hand: one in flight at most, and those joining its prompt, the rest waiting their
 /// turn.
@@ -321,27 +325,37 @@ impl Inbox<'_> {
     }
 
     /// Answer a human's [`QueueRequest`], or an assistant's for its human, with `messages`, those in hand, and where the
-    /// inbox consumer stands: the messages it has not delivered yet wait in the stream.
+    /// inbox and channel consumers stand: the messages they have not delivered yet wait in the stream. Each consumer is
+    /// read within [`QUEUE_READ`], well inside the wait of `ants queue`, so an unread one leaves its place out of the
+    /// answer rather than delay it.
     async fn answer_queue(&self, request: QueueRequest, messages: Vec<QueuedMessage>) {
         let assisted = request.on_behalf_of.as_ref();
         if assisted.is_some() && self.assisted(&request.by, assisted, "queue request").await.is_none() {
             return;
         }
         let place = async |name: String| {
-            let stream = self.js.get_stream_no_info(ants_proto::STREAM).await?;
-            let info = stream.consumer_info(name).await?;
-            anyhow::Ok(ConsumerPlace {
-                acked: info.ack_floor.stream_sequence,
-                delivered: info.delivered.stream_sequence,
-                undelivered: info.num_pending,
-                ack_pending: u64::try_from(info.num_ack_pending).unwrap_or(u64::MAX),
-            })
+            let read = async {
+                let stream = self.js.get_stream_no_info(ants_proto::STREAM).await?;
+                let info = stream.consumer_info(&name).await?;
+                anyhow::Ok(ConsumerPlace {
+                    acked: info.ack_floor.stream_sequence,
+                    delivered: info.delivered.stream_sequence,
+                    undelivered: info.num_pending,
+                    ack_pending: u64::try_from(info.num_ack_pending).unwrap_or(u64::MAX),
+                })
+            };
+            tokio::time::timeout(QUEUE_READ, read)
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("no answer within {QUEUE_READ:?}")))
+                .with_context(|| format!("reading {name}"))
         };
-        let inbox = place(ants_proto::inbox_consumer(self.ant)).await.inspect_err(|e| {
+        let (inbox, posts) =
+            futures::join!(place(ants_proto::inbox_consumer(self.ant)), place(ants_proto::chan_consumer(self.ant)));
+        let inbox = inbox.inspect_err(|e| {
             tracing::warn!(error = format!("{e:#}"), "reading the inbox consumer for ants queue");
         });
         // Missing while the daemon serves no channel posts.
-        let posts = place(ants_proto::chan_consumer(self.ant)).await.inspect_err(|e| {
+        let posts = posts.inspect_err(|e| {
             tracing::debug!(error = format!("{e:#}"), "reading the channel consumer for ants queue");
         });
         let answer = request.answer(messages, inbox.ok(), posts.ok());

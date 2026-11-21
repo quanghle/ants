@@ -27,6 +27,10 @@ use crate::webhook;
 /// harness and environment, all at once.
 pub(super) async fn check_ants(ants: &[Ant], harnesses: &Harnesses, setup: &Setup, now: u64) -> Vec<Check> {
     let config = setup.config.display();
+    if ants.is_empty() {
+        let detail = format!("{config} lists none to serve here: no ant credentials or harness sign-in to check");
+        return vec![Check::skip("ants", detail)];
+    }
     // The harness's name, the ant's environment, the harness and its launch.
     type Started = (String, Vec<(String, String)>, std::sync::Arc<ants_daemon::Harness>, Launch);
     let mut launches: Vec<Started> = Vec::new();

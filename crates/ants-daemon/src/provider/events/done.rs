@@ -73,7 +73,7 @@ pub async fn hear(
 
 /// The markings put from now on, from the durable consumer of `ant`, created if missing: one in hand at a time, so
 /// they are told in the order they were put.
-pub async fn consumer(js: &jetstream::Context, ant: &UserId) -> Result<consumer::pull::Stream> {
+pub async fn consumer(js: &jetstream::Context, ant: &UserId) -> Result<crate::bus::Pull> {
     let stream = js.get_stream_no_info(format!("KV_{THREADS_BUCKET}")).await?;
     let name = done_reader(ant);
     let consumer: consumer::PullConsumer = stream
@@ -90,7 +90,7 @@ pub async fn consumer(js: &jetstream::Context, ant: &UserId) -> Result<consumer:
         .with_context(|| {
             format!("creating consumer {name} (`ants init` as a human creates bucket {THREADS_BUCKET})")
         })?;
-    Ok(consumer.messages().await?)
+    Ok(crate::bus::pull(consumer).await?)
 }
 
 /// Tell of the thread `message` marks done, when the ant holds a session of it, then ack the message: not when the

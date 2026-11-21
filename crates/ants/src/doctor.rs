@@ -160,6 +160,9 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let worker = async {
         match (&loaded, &setup.worker) {
             (None, _) => Check::skip("trail worker", "no config file read: no daemon here conducts runs"),
+            (Some(loaded), _) if loaded.ants.is_empty() => {
+                Check::skip("trail worker", "no ants served here: no daemon here conducts runs")
+            }
             (Some(_), None) => Check::skip("trail worker", "no ants executable found to start as the worker"),
             (Some(_), Some(program)) => check_worker(program, ants_trail::GRACE).await,
         }
@@ -257,11 +260,18 @@ fn check_config(path: &Path, checks: &mut Vec<Check>) -> Option<config::Loaded> 
                     )
                 })
                 .collect();
-            let detail = format!("{} lists {}{elsewhere}", path.display(), names.join(", "));
-            if names.is_empty() {
+            if names.is_empty() && loaded.host.creds.is_none() {
+                let detail = format!(
+                    "{} lists no ants to serve here, as on a machine where only humans run the CLI{elsewhere}",
+                    path.display()
+                );
+                checks.push(Check::ok("config", detail));
+            } else if names.is_empty() {
+                let detail = format!("{} lists no ants{elsewhere}", path.display());
                 let fix = format!("add an [[ant]] to {}, or copy a built-in ant's credentials here", path.display());
                 checks.push(Check::fail("config", format!("{detail}: nothing to serve here"), vec![fix]));
             } else {
+                let detail = format!("{} lists {}{elsewhere}", path.display(), names.join(", "));
                 checks.push(Check::ok("config", detail));
             }
             Some(loaded)

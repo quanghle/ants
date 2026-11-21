@@ -259,7 +259,7 @@ async fn watch(human: &Notified, bus: &HumanBus, links: Option<&Links>) -> Resul
         })
         .await
         .with_context(|| format!("creating consumer {name}"))?;
-    let mut messages = consumer.messages().await.with_context(|| format!("reading consumer {name}"))?;
+    let mut messages = bus::pull(consumer).await.with_context(|| format!("reading consumer {name}"))?;
     while let Some(message) = messages.next().await {
         let message = match message {
             Ok(message) => message,

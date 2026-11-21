@@ -199,7 +199,7 @@ async fn take(js: &jetstream::Context, js_domain: Option<&JsDomain>, orders: &Or
         })
         .await
         .with_context(|| format!("creating consumer {name}"))?;
-    let mut messages = consumer.messages().await.with_context(|| format!("reading consumer {name}"))?;
+    let mut messages = bus::pull(consumer).await.with_context(|| format!("reading consumer {name}"))?;
     let outcomes = DirectKv::new(js, js_domain, MACHINES_BUCKET).await?;
     let stores = Stores::open(js, js_domain).await?;
     tracing::debug!(machine = %orders.machine, "taking admin orders");
@@ -268,7 +268,9 @@ async fn handle(
 
 /// Ack `msg`, trying again for up to [`RECORD_FOR`] like [`record`]: right after an order renewed the uplink, the hub
 /// may be out of reach for a moment, and an order left unacked holds back the machine's next ones until its ack wait.
+/// Not before the pull requests the renewal left silent are gone ([`bus::settled`]), lest the next order go to one.
 async fn ack(js: &jetstream::Context, msg: &jetstream::Message) -> Result<()> {
+    bus::settled().await;
     let until = tokio::time::Instant::now() + RECORD_FOR;
     loop {
         match bus::double_ack(&js.client(), msg).await {
