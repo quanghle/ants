@@ -20,6 +20,7 @@ use data_encoding::BASE64URL_NOPAD;
 use futures::StreamExt as _;
 use nkeys::KeyPair;
 
+use crate::bus::relayed::{self, Read};
 use crate::records::direct_kv::{DirectKv, Lookup};
 
 /// The header making the stream refuse a message unless the last on its subject has the given sequence (0: none).
@@ -31,6 +32,11 @@ const DIRECT_BATCH: usize = 256;
 const DIRECT_BATCH_BYTES: usize = 4 << 20;
 /// How long a read waits for each message of a batch.
 const DIRECT_WAIT: Duration = Duration::from_secs(10);
+/// The header of a batch's end telling the messages left after it.
+const NUM_PENDING: &str = "Nats-Num-Pending";
+/// How many times an append expects anew the last message on its subject, finding only relayed messages after the one
+/// it expected.
+const PAST_RELAYED: usize = 4;
 
 /// The stream of sense's event logs, one subject per sense identity ([`subject::sense`]): file-backed, keeping every
 /// event for good, denying deletes and purges, and serving direct gets. Every host creates it with this config alone,
@@ -91,6 +97,9 @@ impl JetStreamLog {
         }
     }
 
+    /// Up to `limit` messages after `after`, by batched direct gets, skipping those a stream relayed onto the subject
+    /// ([`relayed::stored_relayed`]): after a batch of relayed messages alone the read goes on past them, so it comes
+    /// back empty only at the log's end.
     async fn read(&self, sense: &SenseId, after: u64, limit: usize) -> Result<Vec<Stored>, LogError> {
         let failed =
             |kind, e: &dyn std::fmt::Display| LogError::new(kind, format!("reading sense identity {sense}: {e}"));
@@ -99,54 +108,73 @@ impl JetStreamLog {
         #[expect(clippy::disallowed_methods, reason = "direct gets' answers, which the stream sends")]
         let mut replies = client.subscribe(inbox.clone()).await.map_err(|e| failed(LogErrorKind::Unreachable, &e))?;
         let subject = subject::sense(sense);
-        let request = serde_json::json!({
-            "seq": after + 1,
-            "next_by_subj": subject,
-            "batch": limit.clamp(1, DIRECT_BATCH),
-            "max_bytes": DIRECT_BATCH_BYTES,
-        });
-        let request = async_nats::Request::new().inbox(inbox).payload(request.to_string().into());
-        self.js.send_request(format!("DIRECT.GET.{SENSE_STREAM}"), request).await.map_err(|e| {
-            let kind = match e.kind() {
-                async_nats::PublishErrorKind::Send => LogErrorKind::Unreachable,
-                _ => LogErrorKind::Refused,
-            };
-            failed(kind, &e)
-        })?;
-        let mut read = Vec::new();
+        let (mut read, mut next) = (Vec::new(), after + 1);
         loop {
-            let Ok(Some(msg)) = tokio::time::timeout(DIRECT_WAIT, replies.next()).await else {
-                let none = format!("no answer to a direct get of {SENSE_STREAM}");
-                return Err(failed(LogErrorKind::Unreachable, &none));
-            };
-            match msg.status {
-                None => {}
-                Some(StatusCode::NOT_FOUND) => return Ok(read),
-                Some(status) if status.as_u16() == 204 => return Ok(read),
-                Some(status) => {
-                    let kind = if status == StatusCode::NO_RESPONDERS {
-                        LogErrorKind::Unreachable
-                    } else {
-                        LogErrorKind::Refused
-                    };
-                    let answered = format!("a direct get of {SENSE_STREAM} answered {status} {:?}", msg.description);
-                    return Err(failed(kind, &answered));
+            let request = serde_json::json!({
+                "seq": next,
+                "next_by_subj": subject,
+                "batch": limit.clamp(1, DIRECT_BATCH),
+                "max_bytes": DIRECT_BATCH_BYTES,
+            });
+            let request = async_nats::Request::new().inbox(inbox.clone()).payload(request.to_string().into());
+            self.js.send_request(format!("DIRECT.GET.{SENSE_STREAM}"), request).await.map_err(|e| {
+                let kind = match e.kind() {
+                    async_nats::PublishErrorKind::Send => LogErrorKind::Unreachable,
+                    _ => LogErrorKind::Refused,
+                };
+                failed(kind, &e)
+            })?;
+            let mut got = 0;
+            let pending = loop {
+                let Ok(Some(msg)) = tokio::time::timeout(DIRECT_WAIT, replies.next()).await else {
+                    let none = format!("no answer to a direct get of {SENSE_STREAM}");
+                    return Err(failed(LogErrorKind::Unreachable, &none));
+                };
+                match msg.status {
+                    None => {}
+                    Some(StatusCode::NOT_FOUND) => return Ok(read),
+                    Some(status) if status.as_u16() == 204 => {
+                        break msg.headers.as_ref().and_then(|h| h.get(NUM_PENDING)).map(|n| n.as_str().parse());
+                    }
+                    Some(status) => {
+                        let kind = if status == StatusCode::NO_RESPONDERS {
+                            LogErrorKind::Unreachable
+                        } else {
+                            LogErrorKind::Refused
+                        };
+                        let answered =
+                            format!("a direct get of {SENSE_STREAM} answered {status} {:?}", msg.description);
+                        return Err(failed(kind, &answered));
+                    }
                 }
+                got += 1;
+                let relayed = relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::DirectGet);
+                let msg = StreamMessage::try_from(msg).map_err(|e| failed(LogErrorKind::Integrity, &e))?;
+                if msg.subject.as_str() != subject {
+                    let other = format!("a direct get of {subject} answered with a message on {}", msg.subject);
+                    return Err(failed(LogErrorKind::Integrity, &other));
+                }
+                next = msg.sequence + 1;
+                if relayed {
+                    tracing::warn!(%sense, seq = msg.sequence, "skipping a message a stream relayed");
+                    continue;
+                }
+                let stored_at: SystemTime = msg.time.into();
+                read.push(Stored {
+                    sequence: msg.sequence,
+                    stored_at: stored_at.into(),
+                    payload: msg.payload.to_vec(),
+                });
+            };
+            if !read.is_empty() || got == 0 || matches!(pending, Some(Ok(0u64))) {
+                return Ok(read);
             }
-            let msg = StreamMessage::try_from(msg).map_err(|e| failed(LogErrorKind::Integrity, &e))?;
-            if msg.subject.as_str() != subject {
-                let other = format!("a direct get of {subject} answered with a message on {}", msg.subject);
-                return Err(failed(LogErrorKind::Integrity, &other));
-            }
-            let stored_at: SystemTime = msg.time.into();
-            read.push(Stored { sequence: msg.sequence, stored_at: stored_at.into(), payload: msg.payload.to_vec() });
         }
     }
 
-    async fn publish(&self, sense: &SenseId, payload: Vec<u8>, expected_last: u64) -> Result<u64, AppendError> {
-        let mut headers = HeaderMap::new();
-        headers.insert(EXPECTED_LAST_SUBJECT_SEQUENCE, expected_last.to_string().as_str());
-        headers.insert(EXPECTED_STREAM, SENSE_STREAM);
+    /// Append `payload` expecting the message `expected_last` last on the subject, or one a stream relayed after it
+    /// alone, which no read returns ([`Self::read`]), so that none holds up the writers.
+    async fn publish(&self, sense: &SenseId, payload: Vec<u8>, mut expected_last: u64) -> Result<u64, AppendError> {
         let failed = |e: &PublishError| {
             let kind = match e.kind() {
                 // The ack's no responders: JetStream, on the hub, is out of reach.
@@ -157,14 +185,24 @@ impl JetStreamLog {
             };
             LogError::new(kind, format!("appending to sense identity {sense}: {e}"))
         };
-        let ack = self.js.publish_with_headers(subject::sense(sense), headers, payload.into()).await;
-        match ack.map_err(|e| failed(&e))?.await {
-            Ok(ack) => Ok(ack.sequence),
-            Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => {
-                Err(AppendError::Conflict { last: self.last(sense).await? })
+        for _ in 0..PAST_RELAYED {
+            let mut headers = HeaderMap::new();
+            headers.insert(EXPECTED_LAST_SUBJECT_SEQUENCE, expected_last.to_string().as_str());
+            headers.insert(EXPECTED_STREAM, SENSE_STREAM);
+            let ack = self.js.publish_with_headers(subject::sense(sense), headers, payload.clone().into()).await;
+            match ack.map_err(|e| failed(&e))?.await {
+                Ok(ack) => return Ok(ack.sequence),
+                Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => {
+                    let last = self.last(sense).await?;
+                    if last <= expected_last || !self.read(sense, expected_last, 1).await?.is_empty() {
+                        return Err(AppendError::Conflict { last });
+                    }
+                    expected_last = last;
+                }
+                Err(e) => return Err(AppendError::Failed(failed(&e))),
             }
-            Err(e) => Err(AppendError::Failed(failed(&e))),
         }
+        Err(AppendError::Conflict { last: self.last(sense).await? })
     }
 }
 
