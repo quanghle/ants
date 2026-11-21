@@ -142,6 +142,15 @@ pub(super) async fn serve(
     }
 }
 
+/// The line opening a message that follows the instructions, brief or history in a prompt: what comes after it is the
+/// request to answer, not more of the context before it.
+fn message_header(from: Option<&str>) -> String {
+    match from {
+        Some(from) => format!("[ants message from {from}]"),
+        None => "[ants message]".to_owned(),
+    }
+}
+
 /// The lines ending a prompt's text for its `attachments`, and the image blocks following the text for a harness
 /// taking `images`.
 async fn attached(attachments: Option<Attached>, images: bool) -> (String, Vec<ContentBlock>) {
@@ -193,6 +202,7 @@ impl Connected<'_> {
         let Turn { prompt, reply } = turn;
         let Prompt {
             text,
+            from,
             limits,
             spend,
             mut stop,
@@ -216,7 +226,7 @@ impl Connected<'_> {
         let mut retry = rebuild.is_none();
         let ended = loop {
             let too_many = self.observe(id, limits, spend.as_ref(), progress.as_ref());
-            let text = self.compose(rebuild, &briefed, &mut history, &text, &lines).await;
+            let text = self.compose(rebuild, &briefed, &mut history, (from.as_deref(), &text), &lines).await;
             let content = std::iter::once(ContentBlock::Text(TextContent::new(text))).chain(images.iter().cloned());
             let request = self.cx.send_request(PromptRequest::new(id.clone(), content.collect())).block_task();
             let bounds = Bounds { limits, too_many: &too_many, stop: &mut stop, steers: &mut steers };
@@ -292,13 +302,14 @@ impl Connected<'_> {
     }
 
     /// The prompt's text: the instructions, the ant's brief and its channel's description when `briefed`, the thread's history when the session is a
-    /// `rebuild`, the message's `text` and the `lines` naming its attachments.
+    /// `rebuild`, the message's `text` from its sender and the `lines` naming its attachments. A message after any of
+    /// the first three opens with a header naming its sender ([`message_header`]), so the harness tells it from them.
     async fn compose(
         &self,
         rebuild: Option<Rebuild>,
         briefed: &str,
         history: &mut Option<History>,
-        text: &str,
+        (from, text): (Option<&str>, &str),
         lines: &str,
     ) -> String {
         let seed = match rebuild {
@@ -308,8 +319,15 @@ impl Connected<'_> {
             }
             None => String::new(),
         };
-        [self.launch.instructions.as_str(), briefed, &seed, text, lines]
+        let opening = [self.launch.instructions.as_str(), briefed, &seed];
+        let message = if opening.iter().all(|part| part.is_empty()) {
+            text.to_owned()
+        } else {
+            format!("{}\n{text}", message_header(from))
+        };
+        opening
             .into_iter()
+            .chain([message.as_str(), lines])
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n")

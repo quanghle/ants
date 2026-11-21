@@ -270,7 +270,7 @@ async fn a_prompt_too_large_even_for_a_new_session_goes_to_the_owner_with_the_th
     // The fake harness echoes its prompt, the attachment's line included.
     let history = format!(
         "[ants] The thread's history, read back from ants, oldest first:\n\nhuman to dev-a:\nhello\n{line}\n\n\
-         dev-a to human:\ns1: hello\n\n{line}\n\n[ants] End of the thread's history.\n\noverflows"
+         dev-a to human:\ns1: hello\n\n{line}\n\n[ants] End of the thread's history.\n\n[ants message from human]\noverflows"
     );
     let prompts = log.locked().prompts.clone();
     assert_eq!(prompts.len(), 3, "{prompts:?}");
@@ -710,7 +710,7 @@ async fn the_first_prompt_of_a_session_carries_the_provider_s_brief_asked_with_t
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
-        let briefed = "[ants brief from fake]\nWorking on the parser.\n\na".to_owned();
+        let briefed = "[ants brief from fake]\nWorking on the parser.\n\n[ants message from human]\na".to_owned();
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), briefed));
         bus.send(&t1, "b").await;
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()), "only the first prompt");

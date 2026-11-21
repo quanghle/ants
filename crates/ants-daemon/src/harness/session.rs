@@ -52,6 +52,9 @@ pub enum Spend {
 /// One prompt to run, and what bounds it.
 pub struct Prompt {
     pub text: String,
+    /// Who sent the message prompted with, named in the header that opens it whenever instructions, a brief or a
+    /// thread's history come first in the prompt.
+    pub from: Option<String>,
     pub limits: PromptLimits,
     /// Receives the spend the harness reports while the prompt runs, and a cost reported between prompts when the
     /// next one starts.
@@ -98,6 +101,7 @@ impl Prompt {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            from: None,
             limits: PromptLimits::default(),
             spend: None,
             stop: None,
