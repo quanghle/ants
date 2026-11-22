@@ -351,9 +351,9 @@ A run reports on the thread it started with, as its conductor:
 `ants trail runs` lists the runs of every conductor, or `--ant CONDUCTOR`'s, each with the trail it started (its route
 once it went on by `goto()`); `ants trail show RUN` prints a run (its id or a unique start of one): state, phase,
 spending, args, its route (each leg's trail, waypoint, start and steps), its child runs with their states, the calls
-waiting and queued, and its journal; `--follow` follows it as `ants trail run --follow` does. These need human
-credentials. In `ants chat`, `/trail runs` shows the same list in the pager, and `/trail show RUN` the run as
-`ants trail show RUN` prints it.
+waiting and queued (none once the run is done or failed), and its journal; `--follow` follows it as `ants trail run
+--follow` does. These need human credentials. In `ants chat`, `/trail runs` shows the same list in the pager, and
+`/trail show RUN` the run as `ants trail show RUN` prints it.
 
 ## Limits
 
@@ -678,7 +678,8 @@ ants trail resume 0198c4 --turns 400 --wall 2d --follow
 ```
 
 `/trail stop RUN` and `/trail resume RUN [--steps N] [--at-once N] [--turns N] [--wall DUR]` in `ants chat` stop and
-resume a run the same way, a resume's options replacing the run's limits they name as `ants trail resume`'s flags do.
+resume a run the same way, a stop that leaves steps in other ants' queues showing in the pager what `ants trail stop`
+prints, and a resume's options replacing the run's limits they name as `ants trail resume`'s flags do.
 
 ## Workers
 

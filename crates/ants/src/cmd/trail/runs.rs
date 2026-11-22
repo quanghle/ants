@@ -147,7 +147,8 @@ pub(super) fn picked(runs: Vec<TrailRun>, pick: &Pick, listed: &str) -> Result<T
     }
 }
 
-/// The run `run` with the calls it waits on, its journal and its child runs.
+/// The run `run` with the calls it waits on (none once it ended, whatever its last session held), its journal and its
+/// child runs.
 pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detail> {
     let header = find(js, run).await?;
     let session = session(js, &header).await?;
@@ -155,7 +156,7 @@ pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detai
     let mut journal: Vec<JournalEntry> =
         latest_in(js, TRAIL_RUNS_BUCKET, &calls).await?.iter().filter_map(|(k, v)| parse(k, v)).collect();
     journal.sort_by_key(|entry| entry.call);
-    let (pending, queued) = session.map_or_default(|s| (s.pending, s.queued));
+    let (pending, queued) = session.filter(|_| !header.finished()).map_or_default(|s| (s.pending, s.queued));
     let mut children = list(js, Some(&header.conductor)).await?;
     children.retain(|child| child.parent.as_ref().is_some_and(|parent| parent.run == *run));
     let ratings = super::ratings::of_run(js, &header.conductor, run).await.unwrap_or_else(|e| {

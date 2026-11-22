@@ -430,7 +430,7 @@ async fn humans_stop_and_resume_runs_by_a_unique_start_of_their_id() {
         TrailAction::Start { .. } => unreachable!("no run starts here"),
     })
     .await;
-    let text = control::stop(&client, &alice, &waiting).await.unwrap();
+    let text = control::stop(&client, &alice, &waiting).await.unwrap().said(&waiting);
     assert!(text.ends_with(&format!("  dev-a message {0}: ants withdraw dev-a {0}\n", Uuid::nil())), "{text}");
     let raised = LimitArgs { steps: Some(60), ..LimitArgs::default() }.over(stopped.limits).unwrap();
     let text = control::resume(&client, &alice, &stopped, Some(raised)).await.unwrap();
@@ -472,11 +472,14 @@ async fn a_stop_waiting_for_the_runs_pass_is_told_pending_and_an_unanswered_star
         }
     });
 
-    let text = control::stop_within(&client, &alice, &computing, Duration::from_millis(500)).await.unwrap();
+    let stop = control::stop_within(&client, &alice, &computing, Duration::from_millis(500)).await.unwrap();
+    assert_eq!(stop, control::Stop::Pending);
+    let text = stop.said(&computing);
     assert_eq!(text, control::stopping(&computing.run, &slow));
     assert!(text.contains("pending") && text.contains(&format!("`ants trail stop {}`", computing.run)), "{text}");
-    let text = control::stop_within(&client, &alice, &quick, Duration::from_secs(5)).await.unwrap();
-    assert_eq!(text, control::stopped(&quick.run, &slow, &[]), "the stop that took effect within the wait");
+    let stop = control::stop_within(&client, &alice, &quick, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(stop, control::Stop::Stopped { waiting: Vec::new() }, "the stop that took effect within the wait");
+    assert_eq!(stop.said(&quick), control::stopped(&quick.run, &slow, &[]));
 
     let start = TrailAction::Start {
         trail: TrailSource::Saved("deploy".parse().unwrap()),

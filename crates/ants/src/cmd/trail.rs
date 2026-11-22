@@ -306,7 +306,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
             human(nats, "stopping a run")?;
             let (client, js) = nats.connect("ants-cli").await?;
             let header = runs::pick(&js, &run).await?;
-            print!("{}", control::stop(&client, &nats.me.id, &header).await?);
+            print!("{}", control::stop(&client, &nats.me.id, &header).await?.said(&header));
         }
         TrailCommand::Resume { run, limits, follow } => {
             human(nats, "resuming a run")?;

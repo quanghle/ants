@@ -1390,7 +1390,8 @@ stop is taken and lists the step again, as a stopped run lists the steps whose m
 after `leaf-ant` resumes, the step's thread holds `Withdrawn by alice` and no message of `leaf-ant` holding
 `SECOND-$t`; the resume follows to `done:` with `FIRST-$t` and `SECOND-$t`, the second step sent anew on a new
 thread; `hub-ant` answered `FIRST-$t` once, the journal answering it on resume; `ants trail show` counts 2 steps, the
-step sent anew counting none again; the last resume, of a run done, is refused (`has ended`).
+step sent anew counting none again, and lists no pending calls; the last resume, of a run done, is refused (`has
+ended`).
 
 ### X5 · A run failed on its step limit, resumed with the limit raised (P1, 2 prompts)
 
@@ -1428,9 +1429,9 @@ As X4 up to the waiting step, then in the chat: `/trail runs` (shown in `$PAGER`
 command copying the page to a file, the chat's pager otherwise falling back to the editor), `/trail stop RUN8` (a
 unique start of the run's id), `alice ant resume leaf-ant`, `/trail resume RUN8`; `alice trail show RUN`.
 
-**Expect** the page lists the run `running`; the stop's status line says the run stopped and names the step left in `leaf-ant`'s queue (known issue
-ants-eik57: the line is cut before the step) and the run is `stopped`; the resume's
-says it resumed; the run ends `done` with both tokens. The step is not withdrawn, as in X6.
+**Expect** the page lists the run `running`; the stop's status line says the run stopped with 1 step still waiting in
+other ants' queues, its page (in the same `$PAGER`) naming `ants withdraw leaf-ant MESSAGE`, and the run is `stopped`;
+the resume's says it resumed; the run ends `done` with both tokens. The step is not withdrawn, as in X6.
 
 ### X8 · A run stopped while its step runs (P2, 3 prompts)
 
