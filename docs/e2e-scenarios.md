@@ -288,16 +288,13 @@ on solo ants setup --ant dev-a --workdir /demo/work --managed-nats --no-services
 - Setup names the harness it picked (`claude, the only built-in harness installed here`) and each step done; with
   `--no-services` it leaves two to the user, printed as such: start `ants daemon --config FILE`, which runs the
   nats-server of `[nats_server]`, then `ants init`. It exits 0 (known: it exits 1, its closing `ants doctor` failing
-  on the server it left to the user to start, ants-u9wna). Its harness step passes (known: intermittently the ACP
-  adapter dies with EPIPE during the handshake, ants-i0tk6).
+  on the server it left to the user to start, ants-u9wna). Its harness step passes.
 - `~/.config/ants/nats.conf` and `~/.ants/config.toml` exist, the config holding a `[nats_server]` table, the
   messenger, the sage and `dev-a`; the colony lists `dev-a` and `system-messenger` live on the ACP adapter.
 - The replies hold `node=scratch` with `SETUP-$t`, and `OPS-$t`; `ants thread show` ends with the tokens and cost.
   Setup writes no model: `ANTHROPIC_MODEL` keeps the adapter's Claude Code on Haiku, as its session files show.
-- `ants doctor` prints no `fail` line (the daemon and hub services warn: none installed; known: the harness
-  handshake may fail as in setup, ants-i0tk6).
-- The second setup reports what exists, changes neither file (same checksums) and exits 0 (known: ants-i0tk6
-  there too).
+- `ants doctor` prints no `fail` line (the daemon and hub services warn: none installed).
+- The second setup reports what exists, changes neither file (same checksums) and exits 0.
 
 ### B2 · A worker machine joins the hub by enrollment (P0, 1 prompt)
 

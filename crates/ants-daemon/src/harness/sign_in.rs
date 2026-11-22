@@ -141,23 +141,34 @@ pub async fn handshake(launch: &Launch) -> Handshake {
         return checked;
     }
     let methods = Mutex::new(Vec::new());
+    // The agent, once it opened the session. Stopping it afterwards closes its stdout: an adapter still writing then,
+    // as claude-agent-acp writes its commands right after answering session/new, dies of the broken pipe, which fails
+    // the connection although the harness passed.
+    let opened = Mutex::new(None);
     let connect = Client.v1().name("ants").connect_with((launch.connect)(), async |cx: ConnectionTo<Agent>| {
         let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
         methods.locked().clone_from(&init.auth_methods);
         cx.send_request(NewSessionRequest::new(launch.cwd.clone())).block_task().await?;
-        Ok(match &init.agent_info {
+        let agent = match &init.agent_info {
             Some(info) => format!("{} {}", info.name, info.version),
             None => "an agent that does not name itself".to_owned(),
-        })
+        };
+        *opened.locked() = Some(agent.clone());
+        Ok(agent)
     });
     let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, connect).await;
     let methods = methods.into_inner().unwrap_or_else(PoisonError::into_inner);
     checked.sign_in = harness.sign_in_command(&methods);
-    checked.readiness = match result {
-        Ok(Ok(agent)) => Readiness::Ready { agent },
-        Ok(Err(e)) if needs_sign_in(&e) => Readiness::SignedOut { detail: e.to_string() },
-        Ok(Err(e)) => Readiness::Failed { detail: e.to_string() },
-        Err(_) => Readiness::Failed { detail: format!("no handshake within {HANDSHAKE_TIMEOUT:?}") },
+    let opened = opened.into_inner().unwrap_or_else(PoisonError::into_inner);
+    checked.readiness = match (opened, result) {
+        (Some(agent), Ok(Err(e))) => {
+            tracing::debug!(harness = %harness.name, error = %e, "the harness failed as it was stopped after its handshake");
+            Readiness::Ready { agent }
+        }
+        (Some(agent), _) | (None, Ok(Ok(agent))) => Readiness::Ready { agent },
+        (None, Ok(Err(e))) if needs_sign_in(&e) => Readiness::SignedOut { detail: e.to_string() },
+        (None, Ok(Err(e))) => Readiness::Failed { detail: e.to_string() },
+        (None, Err(_)) => Readiness::Failed { detail: format!("no handshake within {HANDSHAKE_TIMEOUT:?}") },
     };
     checked
 }
