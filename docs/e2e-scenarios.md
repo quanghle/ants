@@ -887,7 +887,7 @@ stuck threads may run below the screen). Once hub-ant's turn has ended (an earli
 alice's message the reply holds `ANSWERED-$t` and the thread is no
 longer listed as escalated. Each scenario of the group marks its thread done at its end, out of home's way.
 
-### E2 · An escalation goes to the chain before any human (P0, 3 prompts, up to 10 more while ants-iwqd6 stands)
+### E2 · An escalation goes to the chain before any human (P0, 4 prompts)
 
 Chain `leaf-ant` → `hub-ant`. The escalation quotes alice's message to the leader, which a small model takes as its own
 instruction to escalate. For the scenario, the instruction to escalate goes in `leaf-ant`'s `whoami`, and `hub-ant`'s
@@ -903,12 +903,10 @@ alice thread show "$th"
 
 **Expect** on the thread, an escalation `level 1` from `leaf-ant` to `hub-ant` (an `[ants]` notice naming the leader,
 the group's notes and alice's message), `hub-ant`'s answer to `leaf-ant`, then `leaf-ant`'s reply holding
-`CHAIN-node=hub`; no escalation on the thread goes to alice, and `thread list --escalated` never lists it: the chain
-took it. Known issue ants-iwqd6: `leaf-ant`'s reply goes back to `hub-ant` carrying the escalation, and the two trade
-replies until the thread's turns run out and a `turn_budget` escalation reaches alice; the run reports it beside
-`PASS`.
+`CHAIN-node=hub`, which does not carry the escalation, so `hub-ant`'s turn on it sends nothing back; no escalation on
+the thread goes to alice, and `thread list --escalated` never lists it: the chain took it.
 
-### E3 · The leader passes it on to the human (P1, 3 prompts, up to 10 more while ants-iwqd6 stands)
+### E3 · The leader passes it on to the human (P1, 5 prompts)
 
 Chain as in E2, and as there each ant's part in its `whoami` (undone at the end).
 
@@ -923,8 +921,8 @@ alice ask --wait --timeout 3m --thread "$th" @leaf-ant "Reply with exactly ENDED
 **Expect** the thread holds the escalation `level 1` to `hub-ant`, then `hub-ant`'s to alice, `asked`, still marked
 `level 1` and ending `[ants] The escalation of leaf-ant reached level 1; hub-ant has no escalate_to above it.` Alice's
 inbox holds it naming `PASS-$t` and her `thread list --escalated` lists the thread; her message ends it (a human's
-message resets the level): `leaf-ant` answers `ENDED-$t` and the thread is no longer listed as escalated. The
-exchange of ants-iwqd6 follows the pass as in E2.
+message resets the level): `leaf-ant` answers `ENDED-$t` and the thread is no longer listed as escalated. No
+`turn_budget` escalation follows the pass: `leaf-ant`'s reply to `hub-ant`'s answer gets no reply, as in E2.
 
 ### E4 · A turn budget runs out between two ants (P1, about 11 prompts)
 
@@ -955,7 +953,7 @@ alice thread search --grep "HANDED-$t" --since 1h; alice thread show THREAD
 handoff `hub-ant -> hub-ant` and its answer `hub-ant -> alice` with `HANDED-$t`, which reaches alice's inbox. The
 colony entry of `hub-ant` counts two threads handled while both run, too briefly to catch reliably: not checked.
 
-### E6 · A chain member decides a tool request (P2, 2 prompts, up to 10 more while ants-iwqd6 stands)
+### E6 · A chain member decides a tool request (P2, 4 prompts)
 
 Chain `gate-ant` → `hub-ant`; `hub-ant` told what to decide through its `whoami` (undone at the end).
 
@@ -970,7 +968,8 @@ alice ant set hub-ant whoami=; alice ant set gate-ant escalate_to=
 **Expect** an `approval` escalation from `gate-ant` to `hub-ant` on the thread; `hub-ant` decides with
 `decide_approval allow_once` (the verdicts are `allow_once`, `allow_always` and `reject`,
 [config.md](config.md#tool-permissions)); the file exists, the reply holds `DONE-$t`, and `ants tools list` no longer
-lists the request. The exchange of ants-iwqd6 (E2) follows the decision too.
+lists the request. `gate-ant`'s reply to `hub-ant`'s answer gets no reply, as in E2: no `turn_budget` escalation
+follows the decision.
 
 ### E7 · An unanswered escalation climbs, and reminders (P2)
 

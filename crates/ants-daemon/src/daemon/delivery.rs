@@ -134,7 +134,9 @@ impl Inbox<'_> {
                 Reply::Message(Box::new(reply))
             }
             _ => {
-                // A reply on an escalation carries it, so its leader's answer is known as one.
+                // A reply on an escalation carries it, so its leader's answer is known as one; but not the stuck
+                // ant's own, so the leader's turn on it is a reply to its own message, sending nothing back.
+                let carried = envelope.escalation.as_deref().filter(|e| e.stuck != *self.ant).cloned();
                 let mut reply = envelope.reply(self.ant.clone(), text, self.humans.sender_role(envelope))?;
                 match escalation::route(self.ant, envelope).map(|(_, route)| route) {
                     Some(Route::Notes) => {
@@ -147,7 +149,7 @@ impl Inbox<'_> {
                         if let Some(Route::Stuck(stuck)) = route {
                             reply.to = stuck;
                         }
-                        Reply::Message(Box::new(reply.with_escalation(envelope.escalation.as_deref().cloned())))
+                        Reply::Message(Box::new(reply.with_escalation(carried)))
                     }
                 }
             }
