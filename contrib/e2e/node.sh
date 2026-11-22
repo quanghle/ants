@@ -1,13 +1,18 @@
 #!/bin/bash
-# Entrypoint of the e2e nodes (docs/e2e-scenarios.md, Fixture): hub, leaf or client. Every step is safe to repeat: keys
-# and credentials are issued once and kept on the node's volume, config files are written anew at each start.
+# Entrypoint of the e2e nodes (docs/e2e-scenarios.md, Fixture): hub, leaf or client, or a scratch node of group B,
+# idle until its scenario sets it up as a user would; `ants-e2e-node config MACHINE` prints the nodes' shared settings.
+# Every step is safe to repeat: keys and credentials are issued once and kept on the node's volume, config files are
+# written anew at each start.
 set -euo pipefail
 umask 077
 
-node=${1:?expected hub, leaf or client}
+node=${1:?expected hub, leaf, client, scratch or config MACHINE}
 auth=$HOME/.config/ants/auth
 conf=$HOME/.ants/config.toml
-mkdir -p "$auth" "$HOME/.ants" /demo/log
+case "$node" in
+config | scratch) mkdir -p /demo/log ;;
+*) mkdir -p "$auth" "$HOME/.ants" /demo/log ;;
+esac
 
 log() { printf 'ants-e2e-node %s: %s\n' "$node" "$*" >&2; }
 
@@ -105,6 +110,7 @@ hub() {
     issue alice.creds ants auth user alice --human --admin --label client
     issue leaf-leaf.creds ants auth leaf leaf --ant leaf-ant --ant gate-ant
     issue leaf-client.creds ants auth leaf client --human alice
+    issue bootstrap.creds ants auth bootstrap
     mkdir -p /demo/jetstream /demo/jwt /demo/work
     if [ ! -d /demo/work/.git ]; then
         git init --quiet --initial-branch main /demo/work
@@ -139,6 +145,13 @@ EOF
 [cli]
 creds = "~/.config/ants/auth/bob.creds"
 
+# Human registration for `ants login` (B6 to B9), against the stub GitHub on the hub's loopback.
+[registration]
+client_id = "e2e-stub"
+github_url = "http://127.0.0.1:8765"
+api_url = "http://127.0.0.1:8765"
+email_domains = ["e2e.example"]
+
 [[ant]]
 name = "hub-ant"
 creds = "~/.config/ants/auth/hub-ant.creds"
@@ -151,6 +164,7 @@ EOF
     keep nats-server nats-server --config /demo/nats.conf
     wait_port
     until ants init --creds "$auth/alice.creds" >>/demo/log/init.log 2>&1; do sleep 2; done
+    keep github-stub python3 /usr/local/bin/ants-e2e-github-stub 8765
     keep signer ants signer --upgrade-check 0
     keep channel ants channel serve --creds "$auth/channel-manager.creds" --upgrade-check 0
     keep daemon ants daemon --upgrade-check 0
@@ -204,11 +218,24 @@ EOF
     keep nats-server nats-server --config "$HOME/.config/ants/leaf.conf"
 }
 
+# A machine as a new user finds it: a working directory holding node.txt, nothing issued, configured or started.
+scratch() {
+    mkdir -p /demo/work
+    printf 'node=scratch\n' >/demo/work/node.txt
+    log "up"
+    exec sleep infinity
+}
+
+if [ "$node" = config ]; then
+    shared_config "${2:?config needs a machine name}"
+    exit
+fi
 trap stop_all TERM INT
 case "$node" in
 hub) hub ;;
 leaf) leaf ;;
 client) client ;;
+scratch) scratch ;;
 *) log "invalid node"; exit 1 ;;
 esac
 log "up"

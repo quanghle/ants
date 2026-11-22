@@ -7,7 +7,7 @@ Manual or scripted end-to-end scenarios for a three-container team under
 [container demo](container-demo.md) builds another topology (Copilot, two worker leaves, no client node).
 
 - [Fixture](#fixture) · [Claude sign-in](#claude-sign-in) · [Running them](#running-them) · [Conventions](#conventions)
-- Scenarios: [F preflight](#f-preflight) · [M messages](#m-messages-between-a-human-and-an-ant) ·
+- Scenarios: [F preflight](#f-preflight) · [B onboarding](#b-bringing-up-machines-and-people) · [M messages](#m-messages-between-a-human-and-an-ant) ·
   [A ant to ant](#a-ant-to-ant-across-machines) · [C channels](#c-channels) ·
   [S steering, queue, cancel](#s-steering-queueing-cancelling-and-withdrawing) · [T tool approvals](#t-tool-approvals) ·
   [O admin orders](#o-admin-orders-from-the-client) · [R resilience](#r-restarts-outages-and-store-and-forward) ·
@@ -82,6 +82,26 @@ on each ant and, for `gate-ant`, a harness redefined with `mode = "default"`
 applies: a steer interrupts the prompt rather than joining it (S1), `ants ant mcp` reports no servers (O5), and a
 bad login may surface as ACP `auth_required` at the first prompt rather than at the session's start (H1).
 
+**Scratch nodes.** The [B scenarios](#b-bringing-up-machines-and-people) bring up machines as a user would, each on a
+scratch node of its own: a container `ants-e2e-NAME` of the same image on the network, started with
+`ants-e2e-node scratch`, with no volume (its `/demo` goes with it), the Claude env file, `IS_SANDBOX=1` and
+`ANTHROPIC_MODEL=claude-haiku-4-5`. It holds `/demo/work/node.txt` (`node=scratch`) and nothing else: no keys, no
+config, nothing started. The image carries the ACP adapter of the built-in `claude` harness too
+(`@agentclientprotocol/claude-agent-acp`, build arg `CLAUDE_ACP_VERSION`), so that `ants setup` finds exactly one
+built-in harness; the fixture's own nodes keep their `[harnesses.claude]` table. `ants-e2e-node config MACHINE` prints
+the shared settings above for a worker machine to start from. A scenario removes its scratch node when it ends;
+`scripts/e2e.sh down` and `reset` remove any left behind.
+
+**Stub GitHub.** For `ants login` (B6 to B9) the hub runs `contrib/e2e/github_stub.py` on its loopback, port 8765
+(log `/demo/log/github-stub.log`): GitHub's device flow (`/login/device/code`, `/login/oauth/access_token`) and the
+REST calls the signer makes (`/user`, `/user/emails`, org and team memberships). A flow stays pending until a
+scenario plays the person signing in, posting the user code `ants login` printed with a login, numeric id and verified
+addresses to `/e2e/authorize`; the stub then answers for that user. The hub's config carries a `[registration]` table
+pointing the signer at the stub (`client_id = "e2e-stub"`, `github_url` and `api_url` `http://127.0.0.1:8765`) with
+`email_domains = ["e2e.example"]`, and the hub keeps `bootstrap.creds` (`ants auth bootstrap`) in its auth directory.
+No certificate is needed: `ants login --github-url https://github.e2e.example` only compares that URL with the
+verification page the signer reports and never fetches it.
+
 ## Claude sign-in
 
 Only the hub and the leaf run Claude Code; the client needs no sign-in. Either way works; the token is signed in to
@@ -143,7 +163,7 @@ preflight stops it. A check failing on a bug filed in bd is reported beside the 
 `known: <issue>`, the scenario going on.
 
 `run -j N` (or `ANTS_E2E_JOBS`) runs the preflight first, then the scenarios that only read the fixture N at a time,
-each on threads of its own, then one by one those that change what the others rely on: R1–R6, H1–H3, O1–O3, O6, O7,
+each on threads of its own, then one by one those that change what the others rely on: B2–B5, R1–R6, H1–H3, O1–O3, O6, O7,
 S4, T4, U4, U5, U7, U8, X1 and K1 (a node, an uplink, an ant's settings or pause, the client's leaf credentials, all
 of an ant's harnesses). The fixture's
 ants take 3 harnesses each (`gate-ant` 2), so a few scenarios can prompt one ant at once. Running several at once
@@ -181,7 +201,7 @@ uplink() {  # uplink leaf|client down|up: point the node's leaf at a dead addres
   of prose. A scenario passes when every line under **Expect** holds; where a model's wording may vary, the
   expectation names what is stored (`ants thread show`, `ants thread search`), not the wording.
 - **Priority:** P0 must pass before a release, P1 should, P2 is worth a look. **Prompts:** the model turns a scenario
-  spends, to budget a run; a full run of P0 and P1 spends about 70.
+  spends, to budget a run; a full run of P0 and P1 spends about 74.
 - Scenarios run one after the other, in the order given within a group; a group leaves the fixture as it found it.
   `ants thread show last` and `ants ask --thread last` name the latest thread of the human asking.
 - Wait bounds: `--timeout 3m` on every `--wait`; `live` in the colony within 30 s of a start; an admin order's outcome
@@ -225,6 +245,167 @@ alice notes "$t"; bob notes "$t"
 
 **Expect** both readers print both notes. `leaf ants --creds /demo/home/.config/ants/auth/leaf-ant.creds inbox` is refused:
 ant credentials read no human inbox.
+
+## B. Bringing up machines and people
+
+What a new user runs first, each on a [scratch node](#fixture) of its own: `ants setup` on an empty machine, a worker
+machine joining the hub, and people joining with `ants login`. `on NODE` runs a command on a scratch node, as `hub`
+does on the hub. No service manager runs in the containers: where the README installs units
+(`scripts/install-units.sh`), the scenarios start what `ants setup` or the README print, in the background, with
+`--upgrade-check 0` as the fixture's services. B2 to B5 issue credentials on the hub and run alone; B1 and B6 to B9
+touch no ant of the fixture.
+
+### B1 · `ants setup` brings an empty machine up, as the quick start does (P0, 2 prompts)
+
+Scratch node `solo`, no credentials: the bus is unauthenticated and the CLI acts as `human`. Its commands run without
+the image's `ANTS_JS_DOMAIN=hub`, which is the fixture's: a machine of its own has no JetStream domain.
+
+```sh
+on solo ants setup --ant dev-a --workdir /demo/work --managed-nats --no-services
+on solo ants daemon --config /demo/home/.ants/config.toml &       # what --no-services leaves to the user,
+on solo ants init                                                 # as setup prints it; then wait for dev-a live
+on solo ants ask --wait --timeout 3m @dev-a "Read node.txt in the working directory and reply with its content and SETUP-$t."
+on solo ants inbox; on solo ants thread show last; on solo ants colony
+on solo ants channel create ops --member dev-a
+on solo ants post --wait --timeout 3m '#ops' "@dev-a reply with exactly OPS-$t"
+on solo ants doctor
+on solo ants setup --ant dev-a --workdir /demo/work --managed-nats --no-services    # again
+```
+
+**Expect**
+- Setup names the harness it picked (`claude, the only built-in harness installed here`) and each step done; with
+  `--no-services` it leaves two to the user, printed as such: start `ants daemon --config FILE`, which runs the
+  nats-server of `[nats_server]`, then `ants init`. It exits 0 (known: it exits 1, its closing `ants doctor` failing
+  on the server it left to the user to start, ants-u9wna).
+- `~/.config/ants/nats.conf` and `~/.ants/config.toml` exist, the config holding a `[nats_server]` table, the
+  messenger, the sage and `dev-a`; the colony lists `dev-a` and `system-messenger` live on the ACP adapter.
+- The replies hold `node=scratch` with `SETUP-$t`, and `OPS-$t`; `ants thread show` ends with the tokens and cost.
+  Setup writes no model: `ANTHROPIC_MODEL` keeps the adapter's Claude Code on Haiku, as its session files show.
+- `ants doctor` prints no `fail` line (the daemon and hub services warn: none installed).
+- The second setup reports what exists, changes neither file (same checksums) and exits 0.
+
+### B2 · A worker machine joins the hub by enrollment (P0, 1 prompt)
+
+The README's leaf flow on scratch node `join-b2`, machine `join-b2`, ant `b2-$t`, with the fixture's addresses:
+
+```sh
+hub ants auth leaf join-b2 --ant b2-$t --js-domain hub
+hub ants auth enroll b2-$t
+# copy server.conf, leaf-join-b2*.creds and enroll-b2-$t.creds to the node
+on join-b2 sh -c 'ants-e2e-node config join-b2 > ~/.ants/config.toml'     # the shared settings, machine join-b2
+on join-b2 ants leaf config join-b2 --uplink nats-leaf://$HUB_IP:7422
+on join-b2 nats-server -c ~/.config/ants/leaf.conf &
+on join-b2 ants add b2-$t --workdir /demo/work --model claude-haiku-4-5 --enroll ~/.config/ants/auth/enroll-b2-$t.creds &
+hub ants enroll list
+hub ants enroll approve b2-$t --js-domain hub
+hub ants --creds ~/.config/ants/auth/alice.creds leaf outbox join-b2 --ant b2-$t --js-domain hub
+on join-b2 ants daemon &
+alice ask --wait --timeout 3m @b2-$t "Read node.txt in the working directory and reply with its content and JOIN-$t."
+alice machines; hub ants auth issued; on join-b2 ants --creds ~/.config/ants/auth/b2-$t.creds doctor --no-harness
+```
+
+**Expect**
+- `ants enroll list` shows `b2-$t` pending and names `join-b2` as the machine whose host credentials are asked for.
+- After the approval `ants add` exits 0, having written `b2-$t.creds` and the host credentials of `join-b2` where
+  the daemon looks for them.
+- The colony shows `b2-$t` live on machine `join-b2`; the reply holds `node=scratch` and `JOIN-$t`.
+- `ants machines` lists `join-b2`; `ants auth issued` lists `b2-$t` and `host-join-b2`; `ants doctor --no-harness`
+  on the node prints no `fail`, `leaf uplink` and `host credentials` ok (known: `leaf store uplink` fails once
+  `ants add` has respelled the uplink's credentials path in `leaf.conf`, ants-6qn5t).
+
+**Undo** (also first, for a run cut short): drop `b2-$t` from the outbox sourcing (`ants leaf outbox join-b2
+--remove-ant`), remove the node, then on the hub revoke `b2-$t`, `host-join-b2` and `leaf-join-b2`
+([auth.md](auth.md#issuing-and-revoking-credentials)). The machine's name stays fixed, so its record in
+`ants machines` is one, not one per run; the ant's name is fresh.
+
+### B3 · A rejected enrollment stops `ants add` (P1)
+
+As B2 on node `join-b3`, up to the request:
+
+```sh
+on join-b3 ants add b3-$t --workdir /demo/work --enroll ~/.config/ants/auth/enroll-b3-$t.creds &
+hub ants enroll reject b3-$t --reason "e2e $t"
+```
+
+**Expect** `ants add` ends with a non-zero status naming the rejection and its reason within about 10 s (it asks every
+5 s); no `b3-$t.creds` on the node; `ants enroll list` no longer lists `b3-$t`; the colony never shows it.
+
+### B4 · An ant added out of band with a signed JWT (P1, 1 prompt)
+
+As B2 on node `join-b4`, the uplink issued with the ant up front (`ants auth leaf` issues none with no member), and
+no enrollment ([auth.md](auth.md#adding-an-ant), first block):
+
+```sh
+on join-b4 ants add b4-$t --workdir /demo/work --model claude-haiku-4-5       # prints the public key U...
+hub ants auth user b4-$t --public-key U... --js-domain hub                     # prints the JWT
+on join-b4 ants add b4-$t --jwt JWT
+hub ants --creds ~/.config/ants/auth/alice.creds leaf outbox join-b4 --ant b4-$t --js-domain hub
+on join-b4 ants daemon &
+alice ask --wait --timeout 3m @b4-$t "Reply with exactly: JWT-$t"
+```
+
+**Expect** `b4-$t` live on `join-b4` and answering with `JWT-$t`. Undo as B2.
+
+### B5 · Enrollment requests seen from `ants chat` (P2)
+
+A request heard on the hub, from `ants add b5-$t --enroll ...` run there under a HOME of its own:
+
+```sh
+alice chat          # home: "requests for credentials are answered on machine hub, ..."; c: the credentials page
+hub ants chat       # as bob, where the account key is: home lists "b5-$t (enroll)"; c, then r and y rejects it
+```
+
+**Expect** on the client, which holds no account key, home names the machine that does (`requests for credentials
+are answered on machine hub, where the team's account key is`) and the credentials page says the key is not on this
+machine and to approve on `machine hub`; on the hub, home counts the request (`b5-$t (enroll)`), its page lists it,
+and `r` then `y` rejects it, ending the `ants add`.
+
+### B6 · A person the registration policy admits is signed at once (P1)
+
+`ants login` on the hub under a HOME of its own, against the [stub GitHub](#fixture); the person signs in as GitHub
+user `dana-$t` with a verified address in `e2e.example`, the policy's domain:
+
+```sh
+HOME=/demo/login-$t ants login --hub nats://127.0.0.1:4222 --name dana-$t --label e2e \
+    --bootstrap ~/.config/ants/auth/bootstrap.creds --github-url https://github.e2e.example &
+# sign in at the stub with the code printed
+HOME=/demo/login-$t ants inbox; HOME=/demo/login-$t ants notes $TH "from dana $t"; alice notes $TH
+hub ants auth issued --json; hub ants auth devices dana-$t
+```
+
+**Expect** login prints the verification page and code, then ends 0 having written `dana-$t.creds` (mode 600) and
+pointed `[cli]` of the new HOME's config at it; the new device reads its inbox and its note reaches alice; `ants auth
+issued` records `dana-$t` with label `e2e` and an `email-domain` grant, and `ants auth devices` lists the device. The
+stub's log shows the device flow. **Undo:** revoke `dana-$t`, remove the HOME.
+
+### B7 · A person outside the registration policy waits for a human (P1)
+
+As B6 for `erin-$t`, whose only verified address is outside the policy:
+
+```sh
+alice tools list                          # "register human erin-$t: GitHub user erin-$t (id N), outside ..."
+alice tools approve signer/ID
+# a second login of erin-$t, same GitHub user, under another HOME
+```
+
+**Expect** login says it waits for a human of the team to approve, and the signer's request is listed; after the
+approval login ends 0 and `ants auth issued` records an `approval` grant naming the human. The second login is signed
+at once, the approval standing for that user and name: two live keys of `erin-$t`. Known: alice, behind the client's
+leaf node, cannot decide the signer's request (no stream captures `ants.approvals.signer.ID`), so bob decides it on the
+hub (ants-304an). **Undo:** revoke `erin-$t`, remove both HOMEs.
+
+### B8 · A rejected registration leaves nothing behind (P2)
+
+As B7 for `frank-$t`, with `alice tools reject signer/ID`. **Expect** login fails naming the refusal (`was refused`),
+leaves no key or credentials file in the HOME, and nothing is issued to `frank-$t`. Known as B7 (ants-304an).
+
+### B9 · A registered device renews (P2)
+
+As B7 for `gina-$t`, then `HOME=/demo/login-$t ants renew`; and as B6 for `hank-$t` (email-domain grant), then
+`ants renew` under that HOME. **Expect** the credentials file of `gina-$t` changes and still reads the inbox, and
+`ants auth issued` records the renewal (`renewed_from`): an approval grant renews while the approval stands. The
+renewal of `hank-$t` is refused, naming `ants login`: only a new sign-in shows the verified addresses. Known as B7
+(ants-304an). **Undo:** revoke both names.
 
 ## M. Messages between a human and an ant
 
@@ -854,6 +1035,7 @@ to no one else; a third human's `ants thread show` of the thread prints `[sealed
 | Feature | Scenarios |
 |---|---|
 | Topology, health, sign-in, `ants doctor` | F1, F2, F3 |
+| Onboarding: `ants setup`, enrollment (`ants add --enroll`, `ants enroll`), out-of-band JWTs, `ants login` against a stub GitHub, registration approvals and renewal | B1–B9 |
 | Human to ant messages, sessions, inbox, read markers, spend | M1, M2, M3, M4 |
 | Attachments (`ants_files`) across a leaf | M5 |
 | Messenger routing and channel triage | M6, C2 |
@@ -877,11 +1059,14 @@ to no one else; a third human's `ants thread show` of the thread prints `[sealed
 Not exercised by these scenarios, each needing more than the three containers or a provider state that cannot be
 produced on demand:
 
-- Human registration by `ants login` (GitHub device flow) and device renewal; a second device of one human.
+- Human registration against the real GitHub or a GitHub Enterprise Server, organization and team grants and the
+  membership sweep (B6 to B9 use a stub GitHub and email-domain grants).
+- Service units (`scripts/install-units.sh`, launchd and systemd): no service manager runs in the containers, so B1
+  and B2 start what setup and the README print by hand; `ants update`.
 - Personal assistants: the grant, `*_for_human` tools, held decisions and orders, assistant-first escalations.
 - Webhook ingress, push notification sinks, quiet hours, approve and reject links; schedules.
 - `wss://`/`tls://` hubs behind a reverse proxy, the HTTPS bridge, Dev Tunnels.
 - Provider rate limits and exhausted quotas, fallbacks, context-window rebuilds, spending caps and their warnings.
 - Escalation chains (`escalate_to`), turn-budget exhaustion, chain approvals, reminders of escalations.
 - Sage reviews and dreams, personas and skills; trail stops, resumes, routes, child runs, tips and ratings.
-- Ant templates and manager ants, clone, export and import, `ants update`, `ants dash`, `ants hook run`.
+- Ant templates and manager ants, clone, export and import, `ants dash`, `ants hook run`.

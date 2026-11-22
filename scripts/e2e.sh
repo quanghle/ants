@@ -25,6 +25,8 @@ Environment:
   ANTS_E2E_CLAUDE_ENV     Env file holding CLAUDE_CODE_OAUTH_TOKEN (default: ~/.config/ants-e2e/claude.env)
   ANTS_E2E_STATE          Run logs (default: ~/.local/share/ants/e2e)
   ANTS_E2E_CLAUDE_VERSION Claude Code npm version for build (default: 2.1.330)
+  ANTS_E2E_CLAUDE_ACP_VERSION
+                          claude-agent-acp npm version for build (default: 0.107.0)
   ANTS_E2E_JOBS           Default of run's -j (default: 1)
   ANTS_E2E_IMAGE          Image that build tags and up creates missing nodes from (default: ants-e2e:local)
 
@@ -88,7 +90,7 @@ hub_ip() {
 
 node_exec() { local node=$1; shift; container exec "$name-$node" "$@"; }
 
-# Copies a file of the hub's team directory into another node's, once; with --force, again.
+# Copies a file of the hub's team directory into another node's (a scratch node's too), once; with --force, again.
 copy_creds() {
     local force= node file
     if [ "$1" = --force ]; then force=1; shift; fi
@@ -155,7 +157,8 @@ build() (
     mkdir -p "$context/contrib"
     cp -R "$root/contrib/e2e" "$root/contrib/launchd" "$root/contrib/systemd" "$context/contrib/"
     container build --cpus 4 --memory 8g --tag "$image" --file "$context/contrib/e2e/Containerfile" \
-        --build-arg "CLAUDE_VERSION=${ANTS_E2E_CLAUDE_VERSION:-2.1.330}" "$context"
+        --build-arg "CLAUDE_VERSION=${ANTS_E2E_CLAUDE_VERSION:-2.1.330}" \
+        --build-arg "CLAUDE_ACP_VERSION=${ANTS_E2E_CLAUDE_ACP_VERSION:-0.107.0}" "$context"
 )
 
 # Creates a node's container, or starts it when stopped. ENV_FILE overrides the Claude env file (H1 uses it).
@@ -184,6 +187,33 @@ remove_node() {
     exists "$1" || return 0
     running "$1" && container stop --time 30 "$name-$1" >/dev/null
     container delete "$name-$1" >/dev/null
+}
+
+# Creates a scratch node of group B: a container of the fixture's image on its network, with no volume (its /demo goes
+# with it), idle until its scenario sets it up. The harness ants setup picks stays on Haiku by ANTHROPIC_MODEL.
+scratch_node() {
+    local node=$1
+    case "$node" in hub | leaf | client) die "not a scratch node: $node" ;; esac
+    remove_scratch "$node"
+    check_claude_env
+    container run --detach --name "$name-$node" --network "$name" --label "$label=1" --label "$label.scratch=1" \
+        --cpus 2 --memory 3g --env-file "$claude_env" --env IS_SANDBOX=1 --env ANTHROPIC_MODEL=claude-haiku-4-5 \
+        "$image" scratch >/dev/null
+}
+
+remove_scratch() {
+    case "$1" in hub | leaf | client) die "not a scratch node: $1" ;; esac
+    exists "$1" || return 0
+    container inspect "$name-$1" | jq --exit-status --arg label "$label.scratch" \
+        '.[0].configuration.labels[$label] == "1"' >/dev/null || die "refusing to remove a node not scratch: $1"
+    container delete --force "$name-$1" >/dev/null
+}
+
+# The scratch nodes left behind, by name without the prefix.
+scratch_nodes() {
+    container list --all --format json \
+        | jq --raw-output --arg label "$label.scratch" --arg prefix "$name-" \
+            '.[] | select((.configuration.labels // {})[$label] == "1") | .configuration.id | ltrimstr($prefix)'
 }
 
 wire() {
@@ -233,6 +263,7 @@ up() {
 
 down() {
     local node
+    for node in $(scratch_nodes); do remove_scratch "$node"; done
     for node in client leaf hub; do remove_node "$node"; done
     if container network inspect "$name" >/dev/null 2>&1; then container network delete "$name" >/dev/null; fi
     say "containers and network removed; volumes kept"

@@ -6,7 +6,7 @@ registry=
 scenario() { registry="$registry$1 $2 $3"$'\n'; }
 # Scenarios that change what the others rely on (a node, an uplink, an ant's settings or pause, the chat's last
 # thread), run one at a time after the rest; the others share the fixture and run side by side with `run -j N`.
-alone=" R1 R2 R3 R4 R5 R6 H1 H2 H3 O1 O2 O3 O6 O7 S4 T4 U4 U5 U7 U8 X1 K1 "
+alone=" B2 B3 B4 B5 R1 R2 R3 R4 R5 R6 H1 H2 H3 O1 O2 O3 O6 O7 S4 T4 U4 U5 U7 U8 X1 K1 "
 is_alone() { case "$alone" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # --- Helpers on the Mac, as the doc's Conventions give them -----------------------------------------------------------
@@ -170,6 +170,431 @@ F3() {
     alice notes "$t" | has "from client $t"
     bob notes "$t" | has "from client $t"
     ! leaf ants --creds "$auth/leaf-ant.creds" inbox >/dev/null 2>&1 || fail "ant credentials read a human inbox"
+}
+
+# --- B. Bringing up machines and people -----------------------------------------------------------------------------
+
+# on NODE CMD...: runs CMD on a node, scratch nodes too, the CLI's own logs left out.
+on() { local node=$1; shift; container exec --env ANTS_LOG=warn "$name-$node" "$@"; }
+# detached NODE LOG CMD: runs the shell command CMD on a node in the background, its output to /demo/log/LOG.log and
+# its exit status, once it ends, to /demo/log/LOG.status.
+detached() {
+    container exec "$name-$1" sh -c "rm -f /demo/log/$2.status; setsid -f sh -c '($3) >>/demo/log/$2.log 2>&1; echo \$? >/demo/log/$2.status' </dev/null >/dev/null 2>&1"
+}
+ended() { on "$1" test -s "/demo/log/$2.status"; } # ended NODE LOG: the command of `detached NODE LOG` ended
+# listens NODE: something listens on the node's NATS client port.
+listens() { on "$1" bash -c '(: >/dev/tcp/127.0.0.1/4222) 2>/dev/null'; }
+no_fail() { ! grep -qE '^\s*(✗|fail)' || return 1; } # no_fail <DOCTOR: ants doctor printed no failure
+
+# join_node MACHINE [ANT...]: a scratch node MACHINE set up as the README's worker machine, up to its leaf node: the
+# hub issues its uplink credentials (carrying ANT...), the node gets server.conf and the uplink credentials, the
+# fixture's shared settings with machine = MACHINE, a leaf.conf pointing at the hub, and its nats-server started.
+join_node() {
+    local machine=$1 ant args=()
+    shift
+    for ant in "$@"; do args+=(--ant "$ant"); done
+    scratch_node "$machine"
+    hub ants auth leaf "$machine" ${args[@]+"${args[@]}"} --js-domain hub >/dev/null
+    copy_creds "$machine" server.conf "leaf-$machine.creds" "leaf-$machine.system.creds" "leaf-$machine.store.creds"
+    container exec "$name-$machine" sh -c "mkdir -p /demo/home/.ants && ants-e2e-node config $machine >/demo/home/.ants/config.toml"
+    on "$machine" ants leaf config "$machine" --uplink "nats-leaf://$(hub_ip):7422" >/dev/null
+    detached "$machine" nats-server "nats-server -c /demo/home/.config/ants/leaf.conf"
+    eventually 60 listens "$machine"
+}
+
+# join_down MACHINE [ANT...]: undoes join_node and what the hub issued for it: the outbox sourcing of the ants, the
+# node, the ants' credentials and enrollment credentials, the machine's host and uplink credentials. Also run first, for a run cut short.
+join_down() {
+    local machine=$1 ant
+    shift
+    for ant in "$@"; do
+        hub ants --creds "$auth/alice.creds" leaf outbox "$machine" --remove-ant "$ant" >/dev/null 2>&1 || true
+    done
+    remove_scratch "$machine"
+    for ant in "$@"; do
+        hub ants auth revoke "$ant" >/dev/null 2>&1 || true
+        hub ants auth revoke "enroll-$ant" >/dev/null 2>&1 || true
+    done
+    for ant in "host-$machine" "leaf-$machine"; do
+        if hub ants auth issued --json | jq --exit-status --slurp --arg name "$ant" \
+            'any(.[]; .name == $name and .revoked == false)' >/dev/null 2>&1; then
+            hub ants auth revoke "$ant" >/dev/null
+        fi
+    done
+}
+
+scenario B1 P0 "ants setup brings an empty machine up, as the quick start does"
+B1() {
+    local t out sums th files="/demo/home/.config/ants/nats.conf /demo/home/.ants/config.toml"
+    t=$(tok)
+    # The image's ANTS_JS_DOMAIN=hub is the fixture's: a machine of its own has no JetStream domain.
+    solo() { container exec --env ANTS_LOG=warn "$name-solo" env -u ANTS_JS_DOMAIN "$@"; }
+    trap 'remove_scratch solo' EXIT
+    scratch_node solo
+    note "ants setup"
+    if ! out=$(solo ants setup --ant dev-a --workdir /demo/work --managed-nats --no-services 2>&1); then
+        printf '%s\n' "$out"
+        [ "$(grep -cE '^fail' <<<"$out")" = 1 ] && grep -qE '^fail +server: .* does not answer' <<<"$out" \
+            || fail "ants setup failed"
+        known ants-u9wna "ants setup --managed-nats --no-services exits 1 for the server it leaves to the user to start"
+    else
+        printf '%s\n' "$out"
+    fi
+    has "done   harness choice: claude" <<<"$out"
+    has "ants daemon --config /demo/home/.ants/config.toml" "what setup leaves to the user" <<<"$out"
+    solo test -s /demo/home/.config/ants/nats.conf || fail "no nats.conf"
+    out=$(solo cat /demo/home/.ants/config.toml)
+    printf '%s\n' "$out"
+    has "[nats_server]" <<<"$out"
+    has 'name = "dev-a"' <<<"$out"
+    has "messenger = true" <<<"$out"
+    # What setup leaves to the user under --no-services: start the daemon, which runs nats-server, then ants init.
+    detached solo daemon "env -u ANTS_JS_DOMAIN ants daemon --config /demo/home/.ants/config.toml --upgrade-check 0"
+    eventually 60 listens solo
+    solo ants init >/dev/null
+    live_on_solo() {
+        solo ants colony --json | jq --slurp --exit-status --arg ant "$1" 'any(.[]; .ant == $ant and .state == "live")'
+    }
+    eventually 120 live_on_solo dev-a
+    eventually 60 live_on_solo system-messenger
+    out=$(solo ants ask --wait --timeout 3m @dev-a "Read node.txt in the working directory and reply with its content and SETUP-$t.")
+    printf '%s\n' "$out"
+    has node=scratch <<<"$out"
+    has "SETUP-$t" <<<"$out"
+    th=$(thread <<<"$out")
+    solo ants inbox
+    out=$(solo ants thread show "$th")
+    printf '%s\n' "$out"
+    has "human -> dev-a" <<<"$out"
+    has '$' "the prompt's cost" <<<"$out"
+    solo ants colony
+    # No model in the config: ANTHROPIC_MODEL of the node keeps the adapter's Claude Code on Haiku.
+    solo sh -c 'cat /demo/home/.claude/projects/*/*.jsonl' | grep -oE '"model":"claude-[a-z0-9.-]+"' | sort -u \
+        | { out=$(cat); printf '%s\n' "$out"; has claude-haiku-4-5 "the session's model" <<<"$out"; lacks sonnet <<<"$out"; lacks opus <<<"$out"; }
+    solo ants channel create ops --member dev-a
+    out=$(solo ants post --wait --timeout 3m '#ops' "@dev-a reply with exactly OPS-$t")
+    printf '%s\n' "$out"
+    has "OPS-$t" <<<"$out"
+    out=$(solo ants doctor 2>&1) || true
+    note "doctor"
+    printf '%s\n' "$out"
+    no_fail <<<"$out" || fail "ants doctor reports a failure"
+    sums=$(solo sha256sum $files)
+    note "ants setup, again"
+    out=$(solo ants setup --ant dev-a --workdir /demo/work --managed-nats --no-services 2>&1) \
+        || { printf '%s\n' "$out"; fail "ants setup failed the second time"; }
+    printf '%s\n' "$out"
+    has "exists config" <<<"$out"
+    [ "$(solo sha256sum $files)" = "$sums" ] || fail "the second ants setup changed a file"
+}
+
+# enroll_heard ANT: `ants enroll list` on the hub lists a request for ANT.
+enroll_heard() { hub ants enroll list 2>&1 | grep -qF -- "$1"; }
+
+# enroll_bg MACHINE ANT LOG [ARGS...]: on the node, `ants add ANT --enroll` in the background with the enrollment
+# credentials the hub issued for ANT, copied there.
+enroll_bg() {
+    local machine=$1 ant=$2 log=$3
+    shift 3
+    hub ants auth enroll "$ant" >/dev/null
+    copy_creds "$machine" "enroll-$ant.creds"
+    detached "$machine" "$log" "ants add $ant --workdir /demo/work --enroll $auth/enroll-$ant.creds $*"
+}
+
+scenario B2 P0 "A worker machine joins the hub by enrollment"
+B2() {
+    local t m=join-b2 ant out th
+    t=$(tok)
+    ant=b2-$t
+    join_down "$m"
+    trap "join_down $m $ant" EXIT
+    join_node "$m" "$ant"
+    enroll_bg "$m" "$ant" add --model claude-haiku-4-5
+    eventually 60 enroll_heard "$ant"
+    out=$(hub ants enroll list 2>&1)
+    printf '%s\n' "$out"
+    has "$ant" <<<"$out"
+    has "$m" "the machine whose host credentials are asked for" <<<"$out"
+    hub ants enroll approve "$ant" --js-domain hub
+    eventually 30 ended "$m" add
+    out=$(on "$m" cat /demo/log/add.log)
+    printf '%s\n' "$out"
+    [ "$(on "$m" cat /demo/log/add.status)" = 0 ] || fail "ants add failed"
+    on "$m" test -s "$auth/$ant.creds" || fail "no credentials of $ant on the node"
+    has "host credentials of $m" <<<"$out"
+    # No service runs the leaf node: ants add prints the reload that connects its uplink with the renewed credentials.
+    has "send the running leaf node SIGHUP" <<<"$out"
+    on "$m" sh -c 'kill -HUP $(pidof nats-server)'
+    hub ants --creds "$auth/alice.creds" leaf outbox "$m" --ant "$ant" --js-domain hub
+    detached "$m" daemon "ants daemon --upgrade-check 0"
+    eventually 120 is_live "$ant"
+    [ "$(colony_field "$ant" .machine)" = "$m" ] || fail "$ant is not on machine $m"
+    out=$(alice ask --wait --timeout 3m "@$ant" "Read node.txt in the working directory and reply with its content and JOIN-$t.")
+    printf '%s\n' "$out"
+    has node=scratch <<<"$out"
+    has "JOIN-$t" <<<"$out"
+    alice machines | has "$m"
+    out=$(hub ants auth issued)
+    has "$ant" <<<"$out"
+    has "host-$m" <<<"$out"
+    out=$(on "$m" ants --creds "$auth/$ant.creds" doctor --no-harness 2>&1) || true
+    note "doctor on $m"
+    printf '%s\n' "$out"
+    if ! no_fail <<<"$out"; then
+        [ "$(grep -cE '^fail' <<<"$out")" = 1 ] && grep -qE '^fail +leaf store uplink: .*/auth/\./leaf-' <<<"$out" \
+            || fail "ants doctor on $m reports a failure"
+        known ants-6qn5t "ants doctor fails the leaf store uplink after ants add --enroll respells the uplink path"
+    fi
+    grep -E '^ok +leaf uplink' <<<"$out" >/dev/null || fail "leaf uplink not ok on $m"
+    grep -E '^ok +host credentials' <<<"$out" >/dev/null || fail "host credentials not ok on $m"
+}
+
+scenario B3 P1 "A rejected enrollment stops ants add"
+B3() {
+    local t m=join-b3 ant out start
+    t=$(tok)
+    ant=b3-$t
+    join_down "$m"
+    trap "join_down $m $ant" EXIT
+    join_node "$m" "$ant"
+    enroll_bg "$m" "$ant" add
+    eventually 60 enroll_heard "$ant"
+    start=$SECONDS
+    hub ants enroll reject "$ant" --reason "e2e $t"
+    eventually 30 ended "$m" add
+    note "ants add ended $((SECONDS - start)) s after the rejection"
+    out=$(on "$m" cat /demo/log/add.log)
+    printf '%s\n' "$out"
+    [ "$(on "$m" cat /demo/log/add.status)" != 0 ] || fail "ants add succeeded"
+    has "e2e $t" "the rejection's reason" <<<"$out"
+    ! on "$m" test -e "$auth/$ant.creds" || fail "credentials of $ant on the node"
+    not_heard() { ! enroll_heard "$ant"; }
+    eventually 60 not_heard
+    [ "$(colony_state "$ant")" = absent ] || fail "$ant is in the colony"
+}
+
+scenario B4 P1 "An ant added out of band with a signed JWT"
+B4() {
+    local t m=join-b4 ant out key jwt
+    t=$(tok)
+    ant=b4-$t
+    join_down "$m"
+    trap "join_down $m $ant" EXIT
+    # The uplink carries the ant from the start: `ants auth leaf` issues none without a member.
+    join_node "$m" "$ant"
+    out=$(on "$m" ants add "$ant" --workdir /demo/work --model claude-haiku-4-5 2>&1)
+    printf '%s\n' "$out"
+    key=$(grep -oE '\bU[A-Z2-7]{55}\b' <<<"$out" | head -n 1)
+    [ -n "$key" ] || fail "ants add printed no public key"
+    jwt=$(hub ants auth user "$ant" --public-key "$key" --js-domain hub)
+    on "$m" ants add "$ant" --jwt "$jwt"
+    on "$m" test -s "$auth/$ant.creds" || fail "no credentials of $ant on the node"
+    hub ants --creds "$auth/alice.creds" leaf outbox "$m" --ant "$ant" --js-domain hub
+    detached "$m" daemon "ants daemon --upgrade-check 0"
+    eventually 120 is_live "$ant"
+    out=$(alice ask --wait --timeout 3m "@$ant" "Reply with exactly: JWT-$t")
+    printf '%s\n' "$out"
+    has "JWT-$t" <<<"$out"
+}
+
+scenario B5 P2 "Enrollment requests seen from ants chat"
+B5() {
+    local t ant home
+    t=$(tok)
+    ant=b5-$t
+    home=/demo/b5-$t
+    b5_down() { # b5_down ANT HOME
+        hub cat "$2/add.log" 2>/dev/null || true
+        hub pkill -f "^ants add $1 " || true
+        hub ants auth revoke "enroll-$1" >/dev/null 2>&1 || true
+        hub rm -rf "$2" || true
+    }
+    trap "b5_down $ant $home" EXIT
+    # A request heard on the hub, from an ants add under a home of its own there.
+    hub ants auth enroll "$ant" >/dev/null
+    container exec "$name-hub" sh -c "mkdir -p $home/.ants && printf 'harness = \"claude\"\n' >$home/.ants/config.toml && setsid -f env HOME=$home ants add $ant --workdir /tmp \
+        --enroll $auth/enroll-$ant.creds >$home/add.log 2>&1 </dev/null"
+    eventually 60 enroll_heard "$ant"
+    # The client holds no account key: home and the credentials page name the machine that does.
+    chat "wait:connected" "wait:answered on machine hub" "type:c" "wait:account key is not on this machine" \
+        "wait:machine hub"
+    # The hub holds it: the chat there lists the request, and rejects it from its page.
+    container exec --interactive "$name-hub" sh -c 'cat >/tmp/ants-e2e-chat.py' <"$root/contrib/e2e/chat.py"
+    container exec "$name-hub" python3 /tmp/ants-e2e-chat.py "wait:connected" "wait:$ant (enroll)" "type:c" \
+        "wait:$ant asks to enroll" "type:r" "wait:y confirms the order" "type:y" "gone:$ant asks to enroll:30"
+    eventually 30 hub grep -q reject "$home/add.log"
+    hub cat "$home/add.log"
+}
+
+# ants login runs on the hub, whose client port listens on its loopback only, each person under a HOME of its own,
+# against the stub GitHub of contrib/e2e/github_stub.py there.
+github=https://github.e2e.example
+stub=http://127.0.0.1:8765
+
+# login_bg HOME LOG NAME [ARGS...]: `ants login` of NAME in the background on the hub, as a person under HOME.
+login_bg() {
+    local home=$1 log=$2 human=$3
+    shift 3
+    hub mkdir -p "$home"
+    detached hub "$log" "HOME=$home ants login --hub nats://127.0.0.1:4222 --name $human \
+        --bootstrap $auth/bootstrap.creds --github-url $github $*"
+}
+login_said() { hub cat "/demo/log/$1.log" 2>/dev/null | grep -qF -- "$2"; } # login_said LOG TEXT
+login_status() { hub cat "/demo/log/$1.status"; }
+
+# signs_in LOG LOGIN ID EMAIL...: plays the person signing in to GitHub with the user code `ants login` showed: the
+# stub GitHub then answers for that user.
+signs_in() {
+    local log=$1 login=$2 id=$3 code body
+    shift 3
+    eventually 60 login_said "$log" "enter the code"
+    code=$(hub cat "/demo/log/$log.log" | sed -nE 's/.*enter the code ([A-Z0-9]+).*/\1/p' | head -n 1)
+    [ -n "$code" ] || fail "no user code shown"
+    body=$(jq --null-input --compact-output --arg code "$code" --arg login "$login" --argjson id "$id" \
+        '{user_code: $code, login: $login, id: $id, emails: $ARGS.positional}' --args "$@")
+    hub curl --fail --silent --show-error -X POST --data "$body" "$stub/e2e/authorize" >/dev/null
+}
+
+# signer_request NAME: the id signer/ID of the signer's pending request to register NAME.
+signer_request() {
+    alice tools list --json | jq --slurp --raw-output --arg name "$1" \
+        'map(select(.ant == "signer" and (tostring | contains($name)))) | .[0] | if . == null then empty else "\(.ant)/\(.id)" end'
+}
+has_signer_request() { [ -n "$(signer_request "$1")" ]; }
+
+# signer_decides approve|reject NAME: alice, on the client, decides the signer's request to register NAME; where the
+# client's leaf node does not carry the decision (ants-304an), bob decides it on the hub.
+signer_decides() {
+    local id out
+    id=$(signer_request "$2")
+    [ -n "$id" ] || fail "no request of the signer for $2"
+    if ! out=$(alice tools "$1" "$id" 2>&1); then
+        printf '%s\n' "$out"
+        grep -qF "no stream captures ants.approvals.signer." <<<"$out" || fail "alice could not $1 $id"
+        known ants-304an "a human behind a leaf node cannot decide the signer's approval requests"
+        bob tools "$1" "$id"
+    fi
+}
+
+issued_of() { hub ants auth issued --json | jq --slurp --compact-output --arg name "$1" '.[] | select(.name == $name)'; }
+github_id() { printf '%d' "$((16#$1))"; } # github_id TOKEN: a numeric GitHub user id of the token's own
+
+scenario B6 P1 "A person the registration policy admits is signed at once"
+B6() {
+    local t th human home log out
+    t=$(tok)
+    human=dana-$t
+    home=/demo/login-$t
+    log=login-$t
+    trap "hub ants auth revoke $human >/dev/null 2>&1 || true; hub pkill -f \"^ants login .* --name $human \" || true; hub rm -rf $home /demo/log/$log.log /demo/log/$log.status || true" EXIT
+    login_bg "$home" "$log" "$human" --label e2e
+    signs_in "$log" "$human" "$(github_id "$t")" "$human@e2e.example"
+    eventually 60 hub test -s "/demo/log/$log.status"
+    out=$(hub cat "/demo/log/$log.log")
+    printf '%s\n' "$out"
+    [ "$(login_status "$log")" = 0 ] || fail "ants login failed"
+    has "sign in to GitHub at $github/login/device and enter the code" <<<"$out"
+    [ "$(hub stat -c %a "$home/.config/ants/auth/$human.creds")" = 600 ] || fail "the credentials are not mode 600"
+    hub cat "$home/.ants/config.toml" | has "$human.creds" "[cli] of the new config"
+    hub env HOME="$home" ants inbox
+    th=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    hub env HOME="$home" ants notes "$th" "from dana $t" >/dev/null
+    alice notes "$th" | has "from dana $t"
+    out=$(issued_of "$human")
+    printf '%s\n' "$out"
+    has '"e2e"' "the device's label" <<<"$out"
+    has "email-domain" "the grant" <<<"$out"
+    has "\"$human\"" <<<"$out"
+    hub ants auth issued | has "$human"
+    hub ants auth devices "$human" | has e2e
+    hub cat /demo/log/github-stub.log | has "POST /login/device/code"
+}
+
+scenario B7 P1 "A person outside the registration policy waits for a human"
+B7() {
+    local t human id out
+    t=$(tok)
+    human=erin-$t
+    id=$(github_id "$t")
+    trap "hub ants auth revoke $human >/dev/null 2>&1 || true; hub pkill -f \"^ants login .* --name $human \" || true; hub rm -rf /demo/login-$t /demo/login-$t-2 /demo/log/login-$t.log /demo/log/login-$t.status /demo/log/login-$t-2.log /demo/log/login-$t-2.status || true" EXIT
+    login_bg "/demo/login-$t" "login-$t" "$human"
+    signs_in "login-$t" "$human" "$id" "$human@elsewhere.example"
+    eventually 60 login_said "login-$t" "waiting for a human of the team to approve"
+    eventually 60 has_signer_request "$human"
+    out=$(alice tools list)
+    printf '%s\n' "$out"
+    has "register human $human" <<<"$out"
+    signer_decides approve "$human"
+    eventually 60 hub test -s "/demo/log/login-$t.status"
+    hub cat "/demo/log/login-$t.log"
+    [ "$(login_status "login-$t")" = 0 ] || fail "ants login failed"
+    out=$(issued_of "$human")
+    printf '%s\n' "$out"
+    has approval "the grant" <<<"$out"
+    grep -qE '"(alice|bob)"' <<<"$out" || fail "the human approving is not recorded"
+    note "a second device of $human"
+    login_bg "/demo/login-$t-2" "login-$t-2" "$human"
+    signs_in "login-$t-2" "$human" "$id" "$human@elsewhere.example"
+    eventually 60 hub test -s "/demo/log/login-$t-2.status"
+    out=$(hub cat "/demo/log/login-$t-2.log")
+    printf '%s\n' "$out"
+    [ "$(login_status "login-$t-2")" = 0 ] || fail "the second device's ants login failed"
+    lacks "waiting for a human" <<<"$out"
+    [ "$(issued_of "$human" | count '"revoked":false')" -ge 2 ] || fail "not two devices of $human issued"
+}
+
+scenario B8 P2 "A rejected registration leaves nothing behind"
+B8() {
+    local t human home log out
+    t=$(tok)
+    human=frank-$t
+    home=/demo/login-$t
+    log=login-$t
+    trap "hub pkill -f \"^ants login .* --name $human \" || true; hub rm -rf $home /demo/log/$log.log /demo/log/$log.status || true" EXIT
+    login_bg "$home" "$log" "$human"
+    signs_in "$log" "$human" "$(github_id "$t")" "$human@elsewhere.example"
+    eventually 60 has_signer_request "$human"
+    signer_decides reject "$human"
+    eventually 60 hub test -s "/demo/log/$log.status"
+    out=$(hub cat "/demo/log/$log.log")
+    printf '%s\n' "$out"
+    [ "$(login_status "$log")" != 0 ] || fail "ants login succeeded"
+    has "was refused" <<<"$out"
+    [ -z "$(hub find "$home" -type f \( -name '*.creds' -o -name '*.nk' \))" ] || fail "a key or credentials file was left"
+    [ -z "$(issued_of "$human")" ] || fail "$human was issued credentials"
+}
+
+scenario B9 P2 "A registered device renews"
+B9() {
+    local t human home log out before
+    t=$(tok)
+    human=gina-$t
+    home=/demo/login-$t
+    log=login-$t
+    trap "hub ants auth revoke $human >/dev/null 2>&1 || true; hub ants auth revoke hank-$t >/dev/null 2>&1 || true; hub pkill -f \"^ants login .* --name (gina|hank)-$t \" || true; hub rm -rf $home $home-2 /demo/log/$log.log /demo/log/$log.status /demo/log/$log-2.log /demo/log/$log-2.status || true" EXIT
+    # An approval grant renews while the approval stands.
+    login_bg "$home" "$log" "$human"
+    signs_in "$log" "$human" "$(github_id "$t")" "$human@elsewhere.example"
+    eventually 60 has_signer_request "$human"
+    signer_decides approve "$human"
+    eventually 60 hub test -s "/demo/log/$log.status"
+    [ "$(login_status "$log")" = 0 ] || { hub cat "/demo/log/$log.log"; fail "ants login failed"; }
+    before=$(hub sha256sum "$home/.config/ants/auth/$human.creds")
+    out=$(hub env HOME="$home" ants renew 2>&1)
+    printf '%s\n' "$out"
+    [ "$(hub sha256sum "$home/.config/ants/auth/$human.creds")" != "$before" ] || fail "the credentials file was not renewed"
+    hub env HOME="$home" ants inbox >/dev/null
+    out=$(issued_of "$human")
+    printf '%s\n' "$out"
+    has renewed_from "the renewal" <<<"$out"
+    # An email-domain grant is refused, naming ants login: only a new sign-in shows the verified addresses.
+    login_bg "$home-2" "$log-2" "hank-$t"
+    signs_in "$log-2" "hank-$t" "$(github_id "${t}1")" "hank-$t@e2e.example"
+    eventually 60 hub test -s "/demo/log/$log-2.status"
+    [ "$(login_status "$log-2")" = 0 ] || { hub cat "/demo/log/$log-2.log"; fail "ants login of hank-$t failed"; }
+    ! out=$(hub env HOME="$home-2" ants renew 2>&1) || { printf '%s\n' "$out"; fail "an email-domain grant renewed"; }
+    printf '%s\n' "$out"
+    has "ants login" <<<"$out"
 }
 
 # --- M. Messages between a human and an ant -------------------------------------------------------------------------
