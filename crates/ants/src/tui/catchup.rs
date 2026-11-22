@@ -5,6 +5,7 @@
 //! are also asked for ahead of time, one at a time, until the human's summaries spent `summary_daily_tokens` that UTC
 //! day.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -130,6 +131,8 @@ pub struct Digest {
     pub got: Option<Result<(UserId, String, u64), String>>,
     pub shown: bool,
     pub top: u16,
+    /// How far it could scroll when last drawn: its wrapped rows past those showing.
+    scrollable: Cell<u16>,
 }
 
 /// What the model keeps of the catch-up summaries.
@@ -248,18 +251,22 @@ pub fn draw_digest(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let inner = usize::from(width.saturating_sub(2));
     let since =
         format!("{} ({})", digest.since.with_timezone(&chrono::Local).format("%b %-d %H:%M"), ago(digest.since, now));
-    let (title, mut lines) = match &digest.got {
-        None => (format!(" Digest since {since} "), vec![Line::styled("asking for a digest…", style::dim())]),
+    let wrap = |span: Span<'static>| markdown::wrap(&[span], inner.max(1)).into_iter().map(Line::from);
+    let (title, mut lines): (_, Vec<Line>) = match &digest.got {
+        None => (format!(" Digest since {since} "), wrap(Span::styled("asking for a digest…", style::dim())).collect()),
         Some(Err(e)) => {
-            (format!(" Digest since {since} "), vec![Line::styled(e.clone(), Style::new().fg(style::ERROR))])
+            (format!(" Digest since {since} "), wrap(Span::styled(e.clone(), Style::new().fg(style::ERROR))).collect())
         }
         Some(Ok((by, text, tokens))) => {
             (format!(" Digest since {since} · {by} · {tokens} tokens "), markdown::render(text, inner.max(10)))
         }
     };
-    lines.extend([Line::raw(""), Line::styled("j/k scroll · s asks again · any other key closes", style::dim())]);
+    lines.push(Line::raw(""));
+    lines.extend(wrap(Span::styled("j/k scroll · s asks again · any other key closes", style::dim())));
+    let scrollable = u16::try_from(lines.len()).unwrap_or(u16::MAX).saturating_sub(height.saturating_sub(2));
+    digest.scrollable.set(scrollable);
     frame.render_widget(Clear, area);
-    let paragraph = Paragraph::new(lines).block(style::block(title, true)).scroll((digest.top, 0));
+    let paragraph = Paragraph::new(lines).block(style::block(title, true)).scroll((digest.top.min(scrollable), 0));
     frame.render_widget(paragraph, area);
 }
 
@@ -300,20 +307,19 @@ impl Model {
     }
 
     fn ask_digest(&mut self, since: DateTime<Utc>) -> Action {
-        self.catchup.digest = Some(Digest { since, got: None, shown: true, top: 0 });
+        self.catchup.digest = Some(Digest { since, got: None, shown: true, top: 0, scrollable: Cell::default() });
         Action::Summarise(Ask::Digest(since))
     }
 
-    /// The keys while the digest shows: j/k scroll, s asks again, any other closes it. End closes it too, the digest
-    /// keeping no count of its rows to stop at.
+    /// The keys while the digest shows: j/k scroll, within its rows as last drawn, s asks again, any other closes it.
     pub fn digest_key(&mut self, key: Key) -> Option<Action> {
         let digest = self.catchup.digest.as_mut()?;
         if key == Key::Char('s') && digest.got.is_some() {
             let since = digest.since;
             return Some(self.ask_digest(since));
         }
-        match step(key, usize::from(digest.top), Some(PAGE)).filter(|_| key != Key::End) {
-            Some(top) => digest.top = u16::try_from(top).unwrap_or(u16::MAX),
+        match step(key, usize::from(digest.top), Some(PAGE)) {
+            Some(top) => digest.top = u16::try_from(top).unwrap_or(u16::MAX).min(digest.scrollable.get()),
             None => digest.shown = false,
         }
         None
@@ -575,9 +581,17 @@ mod tests {
     }
 
     #[test]
-    fn the_digest_scrolls_by_row_and_by_page_back_to_its_top_and_end_closes_it() {
+    fn the_digest_scrolls_by_row_and_by_page_within_its_rows_and_end_goes_to_its_bottom() {
         let mut m = model();
         m.digest(Some("2h"), at(7200)).unwrap();
+        let text: String = (0..60).map(|n| format!("paragraph {n:02}\n\n")).collect();
+        let got = Got::Digest { by: user("messenger"), text, tokens: 42 };
+        m.summarised(Summarised { ask: Ask::Digest(at(0)), result: Ok(got), warnings: Vec::new() }, at(7201));
+        let draw = |m: &Model| screen(m, 80, 24, at(7201));
+        let first = draw(&m);
+        assert!(first.contains("paragraph 00") && !first.contains("paragraph 59"), "{first}");
+        // 60 paragraphs and the blank rows between them, a blank row and the keys: 121 rows, 18 showing.
+        let bottom = 121 - 18;
         let steps = [
             (Key::Up, 0),
             (Key::Char('j'), 1),
@@ -586,17 +600,39 @@ mod tests {
             (Key::PageDown, 11),
             (Key::PageUp, 1),
             (Key::Home, 0),
+            (Key::End, bottom),
+            (Key::Char('j'), bottom),
+            (Key::PageDown, bottom),
+            (Key::Char('k'), bottom - 1),
         ];
         for (key, top) in steps {
             assert_eq!(m.digest_key(key), None);
             let digest = m.catchup.digest.as_ref().unwrap();
             assert!(digest.shown && digest.top == top, "{key:?}: {digest:?}");
         }
-        for key in [Key::End, Key::Char('s'), Key::Esc] {
+        m.digest_key(Key::End);
+        let last = draw(&m);
+        assert!(last.contains("paragraph 59") && last.contains("any other key closes"), "{last}");
+        assert!(!last.contains("paragraph 50"), "the bottom rows fill the overlay: {last}");
+        for key in [Key::Char('x'), Key::Esc] {
             m.catchup.digest.as_mut().unwrap().shown = true;
-            assert_eq!(m.digest_key(key), None, "s asks again only once a digest came");
+            assert_eq!(m.digest_key(key), None);
             assert!(!m.catchup.digest.as_ref().unwrap().shown, "{key:?} closes it");
         }
+    }
+
+    #[test]
+    fn a_digest_still_asked_for_neither_scrolls_nor_asks_again() {
+        let mut m = model();
+        m.digest(Some("2h"), at(7200)).unwrap();
+        screen(&m, 80, 24, at(7200));
+        for key in [Key::Char('j'), Key::PageDown, Key::End] {
+            assert_eq!(m.digest_key(key), None);
+            let digest = m.catchup.digest.as_ref().unwrap();
+            assert!(digest.shown && digest.top == 0, "{key:?}: {digest:?}");
+        }
+        assert_eq!(m.digest_key(Key::Char('s')), None, "s asks again only once a digest came");
+        assert!(!m.catchup.digest.as_ref().unwrap().shown, "s closes it");
     }
 
     #[test]
