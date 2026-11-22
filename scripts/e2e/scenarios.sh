@@ -234,13 +234,7 @@ B1() {
     note "ants setup"
     if ! out=$(solo ants setup --ant dev-a --workdir /demo/work --managed-nats --no-services 2>&1); then
         printf '%s\n' "$out"
-        # The harness's handshake failing on an EPIPE of the adapter is intermittent (ants-i0tk6); the prompts below
-        # still need the harness working.
-        if grep -qE '^fail +harness: .*ACP handshake: .*EPIPE' <<<"$out"; then
-            known ants-i0tk6 "ants setup's harness handshake fails intermittently: the ACP adapter dies with EPIPE"
-        fi
-        [ "$(grep -E '^fail' <<<"$out" | grep -cvE '^fail +harness: .*ACP handshake: .*EPIPE')" = 1 ] \
-            && grep -qE '^fail +server: .* does not answer' <<<"$out" || fail "ants setup failed"
+        [ "$(grep -cE '^fail' <<<"$out")" = 1 ] && grep -qE '^fail +server: .* does not answer' <<<"$out" || fail "ants setup failed"
         known ants-u9wna "ants setup --managed-nats --no-services exits 1 for the server it leaves to the user to start"
     else
         printf '%s\n' "$out"
@@ -283,17 +277,12 @@ B1() {
     out=$(solo ants doctor 2>&1) || true
     note "doctor"
     printf '%s\n' "$out"
-    if grep -qE '^fail +ant .* harness: .*ACP handshake: .*EPIPE' <<<"$out"; then
-        known ants-i0tk6 "ants doctor's harness handshake fails intermittently: the ACP adapter dies with EPIPE"
-    fi
-    grep -vE '^fail +ant .* harness: .*ACP handshake: .*EPIPE' <<<"$out" | no_fail || fail "ants doctor reports a failure"
+    no_fail <<<"$out" || fail "ants doctor reports a failure"
     sums=$(solo sha256sum $files)
     note "ants setup, again"
     if ! out=$(solo ants setup --ant dev-a --workdir /demo/work --managed-nats --no-services 2>&1); then
         printf '%s\n' "$out"
-        grep -E '^fail' <<<"$out" | grep -qvE '^fail +(ant .* )?harness: .*ACP handshake: .*EPIPE' \
-            && fail "ants setup failed the second time"
-        known ants-i0tk6 "ants setup's harness handshake fails intermittently: the ACP adapter dies with EPIPE"
+        fail "ants setup failed the second time"
     fi
     printf '%s\n' "$out"
     has "exists config" <<<"$out"
