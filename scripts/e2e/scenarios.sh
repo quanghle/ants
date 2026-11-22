@@ -474,18 +474,12 @@ signer_request() {
 }
 has_signer_request() { [ -n "$(signer_request "$1")" ]; }
 
-# signer_decides approve|reject NAME: alice, on the client, decides the signer's request to register NAME; where the
-# client's leaf node does not carry the decision (ants-304an), bob decides it on the hub.
+# signer_decides approve|reject NAME: alice, on the client, decides the signer's request to register NAME.
 signer_decides() {
-    local id out
+    local id
     id=$(signer_request "$2")
     [ -n "$id" ] || fail "no request of the signer for $2"
-    if ! out=$(alice tools "$1" "$id" 2>&1); then
-        printf '%s\n' "$out"
-        grep -qF "no stream captures ants.approvals.signer." <<<"$out" || fail "alice could not $1 $id"
-        known ants-304an "a human behind a leaf node cannot decide the signer's approval requests"
-        bob tools "$1" "$id"
-    fi
+    alice tools "$1" "$id" || fail "alice could not $1 $id"
 }
 
 issued_of() { hub ants auth issued --json | jq --slurp --compact-output --arg name "$1" '.[] | select(.name == $name)'; }

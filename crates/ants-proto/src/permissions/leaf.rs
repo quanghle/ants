@@ -38,8 +38,9 @@ impl Permissions {
     /// ([`Self::for_leaf_store`]): these credentials carry none of it.
     ///
     /// For each pattern of a user's inbox, notes and channel subjects, which has a wildcard before the sender, and of a
-    /// human's admin orders, the uplink also gets one literal subject of it (`ants.inbox.dev-a.dev-a`,
-    /// `ants.admin.alice.alice`): nats-server lets the hub stream's interest cross the uplink only when it finds such a
+    /// human's admin orders and approval decisions, the uplink also gets one literal subject of it
+    /// (`ants.inbox.dev-a.dev-a`, `ants.admin.alice.alice`, `ants.approvals.alice.alice`): nats-server lets the hub
+    /// stream's interest cross the uplink, once the hub took an update of the team's account, only when it finds such a
     /// subject, and the pattern allows it anyway.
     ///
     /// The uplink also carries enrollment requests from the machine ([`subject::ALL_ENROLL_REQUESTS`]) and their
@@ -62,14 +63,18 @@ impl Permissions {
             };
             // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.notes.>`, ...) cross the uplink only if
             // `ReverseMatch` finds a publish allowance under it, and that skips allowances with `*` before the last
-            // token, such as `ants.inbox.*.dev-a`. One literal subject each of them already allows is found.
+            // token, such as `ants.inbox.*.dev-a`. One literal subject each of them already allows is found. (A leaf
+            // that just connected gets the interest unchecked; the check comes once the hub takes an update of the
+            // team's account, as a revocation pushes.)
             let mut own = if role.is_human() {
-                vec![subject::ALL_ADMIN_ORDERS_SENT.to_owned()]
+                Vec::new()
             } else {
                 vec![subject::chanadm_from(user), subject::timeline_from(user)]
             };
-            if !role.is_human() && publish.iter().any(|s| s == subject::ALL_ADMIN_ORDERS_SENT) {
-                own.push(subject::ALL_ADMIN_ORDERS_SENT.to_owned());
+            for sent in [subject::ALL_ADMIN_ORDERS_SENT, subject::ALL_APPROVAL_DECISIONS] {
+                if publish.iter().any(|s| s == sent) {
+                    own.push(sent.to_owned());
+                }
             }
             let found = subject::sendable(user, role).into_iter().chain(own);
             let found = found.map(|s| s.replace('*', user.as_str()));

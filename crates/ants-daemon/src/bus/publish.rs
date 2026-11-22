@@ -32,7 +32,7 @@ pub async fn publish(js: &jetstream::Context, envelope: &Envelope) -> Result<Sto
 /// keeps one if the first publish did land after all, as long as the second arrives within its duplicate window
 /// ([`DUPLICATE_WINDOW`](super::DUPLICATE_WINDOW)).
 /// When no stream captures `subject` though the hub's JetStream answers ([`uncaptured`]), the error, or the warning
-/// for a message kept in the outbox, names `ants init` as the fix; the warning comes once per kind of subject.
+/// for a message kept in the outbox, names the fixes ([`uncaptured_hint`]); the warning comes once per kind of subject.
 pub async fn store<T: serde::Serialize>(
     js: &jetstream::Context,
     subject: String,
@@ -86,7 +86,8 @@ pub async fn store_acked<T: serde::Serialize>(
 }
 
 /// After a publish found no stream capturing its subject: whether the hub's JetStream answers all the same, so the hub
-/// is in reach and its `ANTS` stream is missing, as when no `ants init` with a human's credentials has run yet. Out of
+/// is in reach and its `ANTS` stream is missing, as when no `ants init` with a human's credentials has run yet, or a
+/// leaf node's uplink does not carry the subject to it. Out of
 /// the hub's reach (a leaf node's uplink is down), false. It asks for the info of the connection's own inbox consumer,
 /// as [`reach_jetstream`] does, which every user's credentials allow; the user is the one the connection's reply
 /// inboxes are named after ([`inbox_prefix`](ants_proto::inbox_prefix)).
@@ -102,13 +103,15 @@ pub async fn uncaptured(js: &jetstream::Context) -> bool {
 /// How long [`uncaptured`] waits for JetStream: a leaf node whose uplink is down answers at once with no responders.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// What to do when no stream captures `subject` while the hub is in reach ([`uncaptured`]): the stream missing is the
-/// attachments' store for a chunk of an attachment, else the `ANTS` stream.
+/// What to do when no stream captures `subject` while the hub is in reach ([`uncaptured`]): create the stream, the
+/// attachments' store for a chunk of an attachment, else the `ANTS` stream; or, behind a leaf node whose uplink does not
+/// carry the subject, check the uplink's credentials.
 fn uncaptured_hint(subject: &str) -> String {
     let stream = if subject.starts_with("$O.") { FILES_STREAM } else { STREAM };
     format!(
-        "the hub's JetStream answers, but no stream captures {subject}: its {stream} stream is missing; run `ants init` \
-         with a human's credentials to create it"
+        "the hub's JetStream answers, but no stream captures {subject}: either its {stream} stream is missing, which \
+         `ants init` with a human's credentials creates, or a leaf node's uplink does not carry the subject, as with \
+         uplink credentials older than this ants (`ants doctor` on the leaf's machine checks them)"
     )
 }
 

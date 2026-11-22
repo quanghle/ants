@@ -405,22 +405,21 @@ alice tools approve signer/ID
 
 **Expect** login says it waits for a human of the team to approve, and the signer's request is listed; after the
 approval login ends 0 and `ants auth issued` records an `approval` grant naming the human. The second login is signed
-at once, the approval standing for that user and name: two live keys of `erin-$t`. Known: alice, behind the client's
-leaf node, cannot decide the signer's request (no stream captures `ants.approvals.signer.ID`), so bob decides it on the
-hub (ants-304an). **Undo:** revoke `erin-$t`, remove both HOMEs.
+at once, the approval standing for that user and name: two live keys of `erin-$t`. **Undo:** revoke `erin-$t`, remove both
+HOMEs.
 
 ### B8 · A rejected registration leaves nothing behind (P2)
 
 As B7 for `frank-$t`, with `alice tools reject signer/ID`. **Expect** login fails naming the refusal (`was refused`),
-leaves no key or credentials file in the HOME, and nothing is issued to `frank-$t`. Known as B7 (ants-304an).
+leaves no key or credentials file in the HOME, and nothing is issued to `frank-$t`.
 
 ### B9 · A registered device renews (P2)
 
 As B7 for `gina-$t`, then `HOME=/demo/login-$t ants renew`; and as B6 for `hank-$t` (email-domain grant), then
 `ants renew` under that HOME. **Expect** the credentials file of `gina-$t` changes and still reads the inbox, and
 `ants auth issued` records the renewal (`renewed_from`): an approval grant renews while the approval stands. The
-renewal of `hank-$t` is refused, naming `ants login`: only a new sign-in shows the verified addresses. Known as B7
-(ants-304an). **Undo:** revoke both names.
+renewal of `hank-$t` is refused, naming `ants login`: only a new sign-in shows the verified addresses. **Undo:** revoke both
+names.
 
 ## M. Messages between a human and an ant
 
