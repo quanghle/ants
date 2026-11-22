@@ -6,7 +6,7 @@ registry=
 scenario() { registry="$registry$1 $2 $3"$'\n'; }
 # Scenarios that change what the others rely on (a node, an uplink, an ant's settings or pause, the chat's last
 # thread), run one at a time after the rest; the others share the fixture and run side by side with `run -j N`.
-alone=" B2 B3 B4 B5 R1 R2 R3 R4 R5 R6 H1 H2 H3 O1 O2 O3 O6 O7 S4 T4 U4 U5 U7 U8 X1 K1 "
+alone=" B2 B3 B4 B5 R1 R2 R3 R4 R5 R6 H1 H2 H3 O1 O2 O3 O6 O7 S4 T4 U4 U5 U7 U8 X1 X4 X6 X7 K1 "
 is_alone() { case "$alone" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # --- Helpers on the Mac, as the doc's Conventions give them -----------------------------------------------------------
@@ -969,7 +969,7 @@ O1() {
     eventually 180 replied "$th" "RESUMED-$t"
     local orders
     orders=$(alice ant orders leaf-ant)
-    printf '%s\n' "$orders" | head -n 5
+    printf '%s\n' "$orders" | grep -F "$run" || true
     has pause <<<"$orders"
     has resume <<<"$orders"
     has applied <<<"$orders"
@@ -1244,7 +1244,7 @@ H4() {
 chat() {
     container exec --interactive "$name-client" sh -c 'cat >/tmp/ants-e2e-chat.py.$$ && mv /tmp/ants-e2e-chat.py.$$ /tmp/ants-e2e-chat.py' \
         <"$root/contrib/e2e/chat.py"
-    container exec "$name-client" python3 /tmp/ants-e2e-chat.py "$@"
+    container exec ${CHAT_PAGER:+--env "PAGER=$CHAT_PAGER"} "$name-client" python3 /tmp/ants-e2e-chat.py "$@"
 }
 
 scenario U1 P0 "The chat opens on the live colony"
@@ -1441,6 +1441,219 @@ EOF
     run=$(alice trail runs --json | jq --slurp --raw-output 'map(select(any(.route[]?; .trail == "nodes"))) | last | .run // empty')
     [ -n "$run" ] || { alice trail runs; fail "no run of nodes listed"; }
     alice trail show "$run" | has "2"
+}
+
+# The trail of X4-X8: a step on hub-ant, then one on leaf-ant, to stop between them. Its args: t, the token both
+# answers hold, and pre, what the second step's prompt asks before its reply. Saved anew by each, a save replacing it.
+save_stoppable() {
+    container exec --interactive "$name-client" sh -c 'cat >/tmp/stoppable.py.$$ && mv /tmp/stoppable.py.$$ /tmp/stoppable.py' <<'EOF'
+meta = {"name": "stoppable", "description": "Two steps one after the other, to stop between them", "phases": ["first", "second"]}
+
+t = args["t"]
+pre = args.get("pre", "A step of an end-to-end test of ants:")
+phase("first")
+first = await agent("A step of an end-to-end test of ants: reply with exactly FIRST-" + t + " and nothing else.", ant="hub-ant", label="first")
+phase("second")
+second = await agent(pre + " reply with exactly SECOND-" + t + " and nothing else.", ant="leaf-ant", label="second")
+{"first": first, "second": second}
+EOF
+    alice trail save /tmp/stoppable.py >/dev/null
+}
+
+# start_stoppable T [FLAGS...]: starts a run of stoppable conducted by hub-ant with the token T; prints its id.
+start_stoppable() {
+    local t=$1
+    shift
+    alice trail run stoppable --ant hub-ant --args "$(jq -cn --arg t "$t" '{t: $t}')" --yes --json "$@" | jq -r .run
+}
+run_field() { local run=$1; shift; alice trail show "$run" --json | jq --raw-output "$@"; } # run_field RUN [JQ ARGS] JQ
+# second_waits RUN: the first step answered, the second sent to leaf-ant and waited on.
+second_waits() {
+    [ "$(run_field "$1" '[.pending[]? | select(.to == "leaf-ant" and .sent)] | length')" = 1 ] &&
+        [ "$(run_field "$1" '[.journal[]? | select(.answer.ok != null)] | length')" = 1 ]
+}
+second_message() { run_field "$1" '.pending[] | select(.to == "leaf-ant") | .message'; }
+second_thread() { run_field "$1" '.pending[] | select(.to == "leaf-ant") | .thread'; }
+run_state() { run_field "$1" .run.state; }
+# stop_unended RUN: a trap's: stops the run unless it ended or stopped.
+stop_unended() {
+    [ -n "$1" ] || return 0
+    case "$(run_state "$1" 2>/dev/null)" in running | waiting) alice trail stop "$1" >/dev/null 2>&1 || true ;; esac
+}
+# first_answers T: hub-ant's answers holding FIRST-T, the prompts and the run's end left out.
+first_answers() { alice thread search --grep "FIRST-$1" --from hub-ant --since 1h | grep -cE "\): \**FIRST-$1" || true; }
+# done_with RUN T: the run is done, its result holding both answers.
+done_with() {
+    [ "$(run_field "$1" --arg t "$2" '.run.state == "done" and (.run.result.first | contains("FIRST-" + $t))
+        and (.run.result.second | contains("SECOND-" + $t))')" = true ] || { alice trail show "$1"; fail "run $1 is not done with both answers"; }
+}
+
+scenario X4 P0 "A run stopped while a step waits, the step withdrawn, the run resumed"
+X4() {
+    local t out message step_thread
+    t=$(tok)
+    run=
+    trap 'alice ant resume leaf-ant >/dev/null 2>&1 || true; stop_unended "$run"' EXIT
+    save_stoppable
+    alice ant pause leaf-ant
+    run=$(start_stoppable "$t")
+    [ -n "$run" ] || fail "no run started"
+    eventually 180 second_waits "$run"
+    message=$(second_message "$run")
+    step_thread=$(second_thread "$run")
+    queued leaf-ant "$message"
+    out=$(alice trail stop "$run")
+    printf '%s\n' "$out"
+    has "stopped run $run" <<<"$out"
+    has "ants withdraw leaf-ant $message" <<<"$out"
+    alice withdraw leaf-ant "$message"
+    [ "$(alice trail runs --json | jq --slurp --raw-output --arg run "$run" 'map(select(.run == $run)) | .[0].state')" = stopped ] \
+        || fail "the run is not listed stopped"
+    # A stopped run stopped again lists the steps whose messages went out, withdrawn or not (docs/trails.md).
+    out=$(alice trail stop "$run")
+    printf '%s\n' "$out"
+    has "stopped run $run" <<<"$out"
+    alice ant resume leaf-ant
+    withdrawn() { ant_texts "$step_thread" | grep -qF "Withdrawn by alice"; }
+    eventually 60 withdrawn
+    sleep 20
+    alice thread show "$step_thread" --json | jq --raw-output 'select(.from == "leaf-ant") | .text // empty' \
+        | lacks "SECOND-$t" "leaf-ant's messages on the withdrawn step's thread"
+    out=$(alice trail resume "$run" --follow)
+    printf '%s\n' "$out"
+    has "done:" <<<"$out"
+    done_with "$run" "$t"
+    out=$(alice trail show "$run")
+    printf '%s\n' "$out"
+    has "state: done" <<<"$out"
+    if grep -q "^pending calls:" <<<"$out"; then known ants-vf35d "trail show lists the answered calls of a done run as pending"; fi
+    [ "$(run_field "$run" .run.steps)" = 2 ] || fail "the run counts $(run_field "$run" .run.steps) steps, not 2"
+    [ "$(first_answers "$t")" = 1 ] || fail "hub-ant answered FIRST-$t $(first_answers "$t") times"
+    if out=$(alice trail resume "$run" 2>&1); then printf '%s\n' "$out"; fail "a resume of a done run was taken"; fi
+    printf '%s\n' "$out"
+    has "has ended" <<<"$out"
+}
+
+scenario X5 P1 "A run failed on its step limit, resumed with the limit raised"
+X5() {
+    local t out
+    t=$(tok)
+    run=
+    trap 'stop_unended "$run"' EXIT
+    save_stoppable
+    if out=$(alice trail run stoppable --ant hub-ant --args "$(jq -cn --arg t "$t" '{t: $t}')" --steps 1 --yes --follow 2>&1); then
+        printf '%s\n' "$out"
+        fail "the run past its step limit ended well"
+    fi
+    printf '%s\n' "$out"
+    has "limit of 1 steps" <<<"$out"
+    run=$(alice trail runs --json | jq --slurp --raw-output --arg t "$t" 'map(select(.route[0].args.t? == $t)) | .[0].run // empty')
+    [ -n "$run" ] || { alice trail runs; fail "no run of stoppable with $t listed"; }
+    [ "$(run_state "$run")" = failed ] || fail "the run is $(run_state "$run"), not failed"
+    alice trail show "$run" | has "failed on its steps limit"
+    out=$(alice doctor --no-harness 2>&1) || true
+    grep -F "$run" <<<"$out" || { printf '%s\n' "$out"; fail "ants doctor names no run $run"; }
+    has "ants trail resume $run --steps" <<<"$out"
+    out=$(alice trail resume "$run" --steps 5 --follow)
+    printf '%s\n' "$out"
+    has "done:" <<<"$out"
+    done_with "$run" "$t"
+}
+
+scenario X6 P1 "Stopping and resuming a run by admin order"
+X6() {
+    local t out orders
+    t=$(tok)
+    run=
+    trap 'alice ant resume leaf-ant >/dev/null 2>&1 || true; stop_unended "$run"' EXIT
+    save_stoppable
+    alice ant pause leaf-ant
+    run=$(start_stoppable "$t")
+    [ -n "$run" ] || fail "no run started"
+    eventually 180 second_waits "$run"
+    if out=$(bob ant stop-trail hub-ant "$run" 2>&1); then
+        printf '%s\n' "$out"
+        has refused <<<"$out"
+    else
+        printf '%s\n' "$out"
+        has admin <<<"$out"
+    fi
+    sleep 5
+    [ "$(run_state "$run")" = running ] || fail "the run is $(run_state "$run") after bob's order"
+    out=$(alice ant stop-trail hub-ant "$run" --wait 30s)
+    printf '%s\n' "$out"
+    has "ants withdraw leaf-ant $(second_message "$run")" <<<"$out"
+    [ "$(run_state "$run")" = stopped ] || fail "the run is $(run_state "$run"), not stopped"
+    alice ant resume leaf-ant
+    out=$(alice ant resume-trail hub-ant "$run" --wait 30s)
+    printf '%s\n' "$out"
+    out=$(alice trail show "$run" --follow)
+    printf '%s\n' "$out"
+    has "done:" <<<"$out"
+    done_with "$run" "$t"
+    orders=$(alice ant orders hub-ant)
+    printf '%s\n' "$orders" | grep -F "$run" || true
+    grep -F "stop trail run $run" <<<"$orders" | grep alice | has applied "the stop_trail order"
+    grep -F "resume trail run $run" <<<"$orders" | grep alice | has applied "the resume_trail order"
+}
+
+scenario X7 P1 "Stopping and resuming a run from ants chat"
+X7() {
+    local t short out
+    t=$(tok)
+    run=
+    trap 'alice ant resume leaf-ant >/dev/null 2>&1 || true; stop_unended "$run"' EXIT
+    save_stoppable
+    alice ant pause leaf-ant
+    run=$(start_stoppable "$t")
+    [ -n "$run" ] || fail "no run started"
+    eventually 180 second_waits "$run"
+    short=${run:0:13}
+    # The chat shows /trail runs in $PAGER: one that copies what it is given.
+    container exec "$name-client" rm -f /tmp/ants-e2e-x7-runs.txt
+    out=$(CHAT_PAGER='cp -f "$1" /tmp/ants-e2e-x7-runs.txt; true' chat "wait:connected" "type:/trail runs" "key:enter" \
+        "wait:the pager lists them" "type:/trail stop $short" "key:enter" "wait:stopped run $run on hub-ant" "sleep:2")
+    printf '%s\n' "$out"
+    if ! grep -qF "ants withdraw leaf-ant" <<<"$out"; then
+        known ants-eik57 "the stop's status line is cut before the step to withdraw"
+    fi
+    container exec "$name-client" cat /tmp/ants-e2e-x7-runs.txt | grep -F "$run" | has running "the run in /trail runs"
+    [ "$(run_state "$run")" = stopped ] || fail "the run is $(run_state "$run"), not stopped"
+    alice ant resume leaf-ant
+    chat "wait:connected" "type:/trail resume $short" "key:enter" "wait:resumed run" "snap"
+    is_done() { [ "$(run_state "$run")" = done ]; }
+    eventually 180 is_done
+    done_with "$run" "$t"
+}
+
+scenario X8 P2 "A run stopped while its step runs"
+X8() {
+    local t out step_thread
+    t=$(tok)
+    run=
+    trap 'stop_unended "$run"' EXIT
+    save_stoppable
+    run=$(alice trail run stoppable --ant hub-ant --yes --json \
+        --args "$(jq -cn --arg t "$t" --arg pre "A step of a trail alice runs. $e2e Without asking back, run the shell command '$(slow 63)' in the foreground (it only waits, and alice expects it), then" '{t: $t, pre: $pre}')" | jq -r .run)
+    [ -n "$run" ] || fail "no run started"
+    eventually 180 second_waits "$run"
+    step_thread=$(second_thread "$run")
+    sleeping() { leaf pgrep -f 'time\.sleep\(63\)' >/dev/null; }
+    eventually 120 sleeping
+    out=$(alice trail stop "$run")
+    printf '%s\n' "$out"
+    has "stopped run $run" <<<"$out"
+    eventually 180 replied "$step_thread" "SECOND-$t"
+    sleep 5
+    [ "$(run_state "$run")" = stopped ] || fail "the run is $(run_state "$run") after the step's reply"
+    [ "$(run_field "$run" '[.journal[]? | select(.call == 3)] | length')" = 0 ] || fail "the stopped run took the reply"
+    out=$(alice trail resume "$run" --follow)
+    printf '%s\n' "$out"
+    has "done:" <<<"$out"
+    done_with "$run" "$t"
+    # The step sent anew went on a thread of its own: leaf-ant answered SECOND on two threads.
+    [ "$(alice thread search --grep "SECOND-$t" --from leaf-ant --since 1h | awk '{ print $3 }' | sort -u | wc -l | tr -d ' ')" = 2 ] \
+        || fail "leaf-ant did not answer on two threads"
 }
 
 # --- K. Credentials and sealing -------------------------------------------------------------------------------------

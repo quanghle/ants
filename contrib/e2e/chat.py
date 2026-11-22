@@ -70,6 +70,10 @@ class Chat:
             # The chat asks the terminal for its background colour and, on some platforms, waits for the answer.
             if b"\x1b]11;?" in data:
                 os.write(self.fd, b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07")
+            # Coming back from a pager or editor, it asks where the cursor is.
+            if b"\x1b[6n" in data:
+                cursor = self.screen.cursor
+                os.write(self.fd, f"\x1b[{cursor.y + 1};{cursor.x + 1}R".encode())
             # pyte keeps no alternate screen: start afresh when the chat enters it.
             if b"\x1b[?1049h" in data:
                 self.screen.reset()
