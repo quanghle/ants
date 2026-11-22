@@ -4,7 +4,7 @@ use ants_daemon::admin::ConfigFile;
 use ants_proto::{AdminOp, OrderState, Permissions, Role, STREAM, THREADS_BUCKET, chan_consumer, done_reader};
 use serde_json::{Value, json};
 
-use crate::admin::orders::send;
+use crate::admin::orders::{outcome, send};
 use crate::auth::{NewDevice, issue_device_with};
 use crate::credentials::revoke::{self, Kind};
 use crate::test_support::Server;
@@ -117,6 +117,67 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
     assert!(revoke::revoked(&team).unwrap().iter().any(|r| r.key == finding.key));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "its table goes, with the comment above it");
     assert!(work.exists(), "its workdir stays");
+    drop(ants);
+    tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+}
+
+/// While an add order waits for `ants signer`, a pause order to another ant of the machine is decided at once, and
+/// one to the ant being added waits behind the add, then pauses the ant added (ants-aysv7).
+#[tokio::test]
+async fn an_order_to_another_ant_is_decided_while_an_add_waits_for_the_signer() {
+    let Some(server) = Server::start() else { return };
+    let (alice, bob, dev_a, dev_b) = (p("alice"), p("bob"), p("dev-a"), p("dev-b"));
+    let (_, h_js) = server.connect_as(&bob, Role::Human).await;
+    ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
+    ants_daemon::bus::ensure_colony(&h_js, ants_proto::COLONY_TTL).await.unwrap();
+    h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+    h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+    let admin_creds = server.dir().join("alice-admin.creds");
+    let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let rights = Permissions::for_user(&alice, Role::Human);
+    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let (_, js) = admin.connect("test").await.unwrap();
+
+    let work = server.dir().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let path = server.dir().join("config.toml");
+    let text =
+        format!("harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n", work.display().to_string());
+    std::fs::write(&path, &text).unwrap();
+    let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
+    let config = ConfigFile::new(path.clone(), triggers.edits());
+    let (ants, task) = host_of_m1(&server, &js, true, Some(config)).await;
+    let m1: ants_proto::Machine = "m1".parse().unwrap();
+
+    let Value::Object(settings) = json!({ "workdir": work }) else { unreachable!() };
+    let add = AdminOp::Add { settings, assistant_of: None };
+    let (add, none) = send(&admin, &js, Some(m1.clone()), &dev_b, add, Duration::ZERO).await.unwrap();
+    assert_eq!(none, None, "no signer answers");
+    let (behind, _) = send(&admin, &js, Some(m1.clone()), &dev_b, AdminOp::Pause, Duration::ZERO).await.unwrap();
+    let (_, paused) = send(&admin, &js, Some(m1.clone()), &dev_a, AdminOp::Pause, WAIT).await.unwrap();
+    let paused = paused.expect("decided while the add waits for the signer");
+    assert_eq!((paused.state, paused.reason.as_deref()), (OrderState::Applied, None), "{paused:?}");
+    assert!(std::fs::read_to_string(&path).unwrap().contains("paused = true"), "dev-a paused");
+    assert_eq!(outcome(&js, &add).await.unwrap(), None, "the add waits for the signer");
+    assert_eq!(outcome(&js, &behind).await.unwrap(), None, "the pause of dev-b waits behind its add");
+
+    let decided = async {
+        loop {
+            if let Some(decided) = outcome(&js, &behind).await.unwrap() {
+                return decided;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let behind =
+        with_signer(&server, Box::pin(tokio::time::timeout(SIGNED, decided))).await.expect("decided after the add");
+    let added = outcome(&js, &add).await.unwrap().expect("the add is decided first");
+    assert_eq!((added.state, added.reason.as_deref()), (OrderState::Applied, None), "{added:?}");
+    assert_eq!((behind.state, behind.reason.as_deref()), (OrderState::Applied, None), "{behind:?}");
+    let loaded = ants_daemon::config::load(&path).unwrap();
+    let paused: Vec<_> = loaded.ants.iter().map(|ant| (ant.name.as_str(), ant.paused)).collect();
+    assert_eq!(paused, [("dev-a", true), ("dev-b", true)]);
     drop(ants);
     tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
 }
@@ -257,9 +318,9 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     let (_b, b_js) = bus::connect(&leaf_node.url, Some(&creds), Some(&domain), &dev_b, "test").await.unwrap();
     eventually("dev-b reaches the hub through the leaf", async || bus::open_stream(&b_js, &dev_b).await.is_ok()).await;
 
-    // The renewal's reload left the pulls in flight through the uplink silent: the daemon pulls anew at once, so the
-    // next order goes to a request that hears it rather than wait out its ack wait (ants-dbf0s).
-    let retire = Box::pin(send(&admin, &js, Some(m1.clone()), &dev_b, AdminOp::Retire, Duration::from_secs(10)));
+    // The renewal's reload left the pulls in flight through the uplink silent: the daemon pulls anew at once (ants-dbf0s),
+    // and an order the stream delivered to the silent request before it dropped it comes again after a short ack wait.
+    let retire = Box::pin(send(&admin, &js, Some(m1.clone()), &dev_b, AdminOp::Retire, WAIT));
     let (_, retired) = with_signer_at(&hub.url, hub.dir(), Some(&domain), retire).await.unwrap();
     let retired = retired.expect("the daemon decides once the signer answers");
     assert_eq!((retired.state, retired.reason.as_deref()), (OrderState::Applied, None), "{retired:?}");

@@ -225,6 +225,60 @@ async fn an_admin_behind_a_leaf_node_sends_orders_through_its_uplink_and_none_wh
     tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
 }
 
+/// While a retire order waits for its ant to leave the colony, a settings read and a pause of another ant of the
+/// machine are decided at once (ants-aysv7).
+#[tokio::test]
+async fn orders_to_other_ants_are_decided_while_a_retire_waits_for_its_ant_to_stop() {
+    let Some(server) = Server::start() else { return };
+    let (alice, bob, dev_a, dev_b) = (p("alice"), p("bob"), p("dev-a"), p("dev-b"));
+    let (_, h_js) = server.connect_as(&bob, Role::Human).await;
+    ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
+    ants_daemon::bus::ensure_colony(&h_js, ants_proto::COLONY_TTL).await.unwrap();
+    h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+    h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+    let admin_creds = server.dir().join("alice-admin.creds");
+    let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let rights = Permissions::for_user(&alice, Role::Human);
+    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &admin_creds).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let (_, js) = nats.connect("test").await.unwrap();
+
+    let path = server.dir().join("config.toml");
+    let b_creds = server.creds_as(&dev_b, Role::Ant);
+    let text = format!(
+        "harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n\n[[ant]]\nname = \"dev-b\"\n\
+         workdir = \".\"\ncreds = {b_creds:?}\n"
+    );
+    std::fs::write(&path, text).unwrap();
+    let (_, b_js) = server.connect_as(&dev_b, Role::Ant).await;
+    let colony = b_js.get_key_value(ants_proto::COLONY_BUCKET).await.unwrap();
+    colony.put(dev_b.as_str(), b"{}".to_vec().into()).await.expect("dev-b in the colony, as its daemon puts it");
+    let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
+    let config = ConfigFile::new(path.clone(), triggers.edits());
+    let (ants, task) = host_of_m1(&server, &js, true, Some(config)).await;
+
+    let (retire, none) =
+        send(&nats, &js, Some("m1".parse().unwrap()), &dev_b, AdminOp::Retire, Duration::ZERO).await.unwrap();
+    assert_eq!(none, None);
+    let (_, read) = send(&nats, &js, None, &dev_a, AdminOp::ReadSettings, WAIT).await.unwrap();
+    let read = read.expect("decided while the retire waits for dev-b to stop");
+    assert_eq!((read.state, read.reason.as_deref()), (OrderState::Applied, None), "{read:?}");
+    let (_, paused) = send(&nats, &js, None, &dev_a, AdminOp::Pause, WAIT).await.unwrap();
+    let paused = paused.expect("decided while the retire waits for dev-b to stop");
+    assert_eq!((paused.state, paused.reason.as_deref()), (OrderState::Applied, None), "{paused:?}");
+    assert_eq!(outcome(&js, &retire).await.unwrap(), None, "the retire waits for dev-b to leave the colony");
+    let names: Vec<_> = ants_daemon::config::load(&path)
+        .unwrap()
+        .ants
+        .into_iter()
+        .filter(|a| a.builtin.is_none())
+        .map(|a| (a.name, a.paused))
+        .collect();
+    assert_eq!(names, [(dev_a, true)], "dev-b unlisted before the wait, dev-a paused during it");
+    drop(ants);
+    tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+}
+
 /// A restart order reaches the daemon serving the ant, whose outcome tells what it stopped; one to an ant the
 /// machine does not serve is refused.
 #[tokio::test]

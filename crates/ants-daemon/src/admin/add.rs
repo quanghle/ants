@@ -24,7 +24,7 @@ use serde_json::{Map, Value, json};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
 
 use super::ask::{SIGNER_WAIT, Uplink, ask};
-use super::{ConfigFile, LeafNode, NO_CONFIG, Orders, applied, refused};
+use super::{ConfigFile, LeafNode, NO_CONFIG, Orders, Turn, applied, refused};
 use crate::config::{self, edit::toml_value};
 use crate::profile::shared::{self, Roles};
 use crate::records::direct_kv::{DirectKv, Lookup};
@@ -37,6 +37,7 @@ pub(super) async fn apply(
     js: &jetstream::Context,
     identities: &DirectKv,
     orders: &Orders,
+    turn: &Turn<'_>,
     order: &AdminOrder,
     settings: &Map<String, Value>,
     assistant_of: Option<&UserId>,
@@ -46,7 +47,7 @@ pub(super) async fn apply(
         return refused(order, "the machine has no host credentials to ask `ants signer` with");
     };
     let assisting = assistant_of.map(|human| (human, identities));
-    match add(js, orders, config, host_creds, order, settings, assisting).await {
+    match add(js, (orders, turn), (config, host_creds), order, settings, assisting).await {
         Ok(Added::Already) => applied(order, None),
         Ok(Added::Now { creds, key, uplink }) => {
             config.edited.notify_one();
@@ -71,12 +72,12 @@ enum Added {
     },
 }
 
-/// Add the order's ant, with `assisting` the human it is to assist and the bucket of shared settings.
+/// Add the order's ant to `config` with the host credentials at `host_creds`, with `assisting` the human it is to
+/// assist and the bucket of shared settings, waiting for the signer aside in `turn`.
 async fn add(
     js: &jetstream::Context,
-    orders: &Orders,
-    config: &ConfigFile,
-    host_creds: &Path,
+    (orders, turn): (&Orders, &Turn<'_>),
+    (config, host_creds): (&ConfigFile, &Path),
     order: &AdminOrder,
     settings: &Map<String, Value>,
     assisting: Option<(&UserId, &DirectKv)>,
@@ -125,7 +126,7 @@ async fn add(
     let seed_path = dir.join(format!("{ant}.nk"));
     let key = key_for(&creds_path, &seed_path, ant)?;
     let public_key = key.public_key();
-    let (jwt, renewal) = sign(js, host_creds, leaf, accounts, order, ant, &public_key).await?;
+    let (jwt, renewal) = turn.aside(sign(js, host_creds, leaf, accounts, order, ant, &public_key)).await?;
     if let Some((human, _)) = assisting {
         let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
         ants_proto::verify_assistant_of(&jwt, accounts.iter().map(String::as_str), human, now)

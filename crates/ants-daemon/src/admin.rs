@@ -1,9 +1,13 @@
 //! The admin orders to a machine's ants ([`AdminOrder`]), which its host connection ([`crate::host`]) takes from the
-//! hub's stream through the machine's own consumer ([`admin_consumer`]), one at a time and in the order they were
-//! stored. Each it verifies ([`AdminOrder::verify`]) and decides once, recording the outcome in [`MACHINES_BUCKET`]
-//! under the key of the machine and ant of the subject it came on and the order's id ([`admin_outcome_key`]), and acks
-//! it only after the outcome is stored. A message whose order already has an outcome, a replay, it acks without
-//! deciding again. It refuses every order while the config sets `[admin] remote = false`.
+//! hub's stream through the machine's own consumer ([`admin_consumer`]), up to [`IN_HAND`] at once, those to one ant in
+//! the order they were stored ([`hand`]). Each it verifies ([`AdminOrder::verify`]) and decides once, recording the
+//! outcome in [`MACHINES_BUCKET`] under the key of the machine and ant of the subject it came on and the order's id
+//! ([`admin_outcome_key`]), and acks it only after the outcome is stored. A message whose order already has an outcome,
+//! a replay, it acks without deciding again. It refuses every order while the config sets `[admin] remote = false`.
+//!
+//! It decides one order at a time ([`Turn`]), but for the waits of an order on something slow (an ant to stop or go
+//! idle, `ants signer` to answer), during which the orders to other ants are decided. Orders to add, retire or clone
+//! an ant, which change the machine's ants and the uplink of its leaf node, are carried out one at a time.
 //!
 //! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
 //! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once, and its shared settings in
@@ -15,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ants_proto::{
@@ -25,17 +30,21 @@ use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use async_nats::jetstream::consumer::{AckPolicy, PullConsumer, pull};
 use chrono::{DateTime, Utc};
+use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 use serde_json::Value;
 use tokio::sync::Notify;
 
 use crate::bus;
 use crate::records::direct_kv::{DirectKv, Lookup};
+use crate::sync::MutexExt as _;
+use hand::Hand;
 
 mod add;
 mod ask;
 mod clone;
 mod export;
+mod hand;
 pub mod held;
 pub mod mcp;
 mod memories;
@@ -48,11 +57,16 @@ mod set;
 mod settings;
 pub mod trail;
 
-/// How long an order may stay in hand unacked before the stream delivers it again.
-const ACK_WAIT: Duration = Duration::from_secs(60);
+/// How long an order may stay in hand unacked before the stream delivers it again: short, as an order delivered to a
+/// pull request that went silent ([`bus::pull`]) comes again only then.
+const ACK_WAIT: Duration = Duration::from_secs(6);
 /// How often an order in hand tells the stream so, so that an order taking longer than [`ACK_WAIT`] (an ant to stop,
-/// the signer to answer) is not delivered again meanwhile.
-const PROGRESS: Duration = Duration::from_secs(20);
+/// the signer to answer), or waiting for one, is not delivered again meanwhile.
+const PROGRESS: Duration = Duration::from_secs(2);
+/// The most orders the machine's consumer hands the daemon before it acks one.
+const IN_HAND: i64 = 16;
+/// How soon to look again whether every order delivered and not acked is in hand.
+const CHECK_AGAIN: Duration = Duration::from_millis(250);
 /// How long before the stream delivers again an order whose outcome could not be stored.
 const RETRY_ORDER: Duration = Duration::from_secs(5);
 const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -184,7 +198,10 @@ pub async fn serve(js: jetstream::Context, js_domain: Option<JsDomain>, orders: 
     tokio::join!(taking, held::keep(&js, js_domain.as_ref(), &orders));
 }
 
-/// Take the orders through the machine's consumer, created if missing, until its messages stop.
+/// Take the orders through the machine's consumer, created if missing, until its messages stop, and decide each
+/// ([`decide_taken`]) in a future of its own once [`Hand`] lets it go, acking it after. An order taken waits, told to
+/// the stream as in progress, until the consumer's info shows every order delivered and not acked in hand. Once the
+/// messages stop, the orders being decided are finished, and those waiting left to come again.
 async fn take(js: &jetstream::Context, js_domain: Option<&JsDomain>, orders: &Orders) -> Result<()> {
     let name = admin_consumer(&orders.machine);
     let stream = js.get_stream_no_info(STREAM).await.context("naming the ANTS stream")?;
@@ -194,33 +211,139 @@ async fn take(js: &jetstream::Context, js_domain: Option<&JsDomain>, orders: &Or
             filter_subject: subject::admin_orders(&orders.machine),
             ack_policy: AckPolicy::Explicit,
             ack_wait: ACK_WAIT,
-            max_ack_pending: 1,
+            max_ack_pending: IN_HAND,
             ..Default::default()
         })
         .await
         .with_context(|| format!("creating consumer {name}"))?;
-    let mut messages = bus::pull(consumer).await.with_context(|| format!("reading consumer {name}"))?;
+    let mut messages = bus::pull(consumer.clone()).await.with_context(|| format!("reading consumer {name}"))?;
     let outcomes = DirectKv::new(js, js_domain, MACHINES_BUCKET).await?;
     let stores = Stores::open(js, js_domain).await?;
     tracing::debug!(machine = %orders.machine, "taking admin orders");
-    while let Some(msg) = messages.next().await {
-        let msg = msg.with_context(|| format!("reading consumer {name}"))?;
-        match handle(js, &outcomes, &stores, orders, &msg).await {
-            Ok(()) => {}
-            Err(e) => {
+    let mut hand = Hand::default();
+    // The orders being decided that no longer count as in hand: their ack or nak is under way.
+    let letting_go = AtomicUsize::new(0);
+    let decided = |seq: u64, msg: jetstream::Message| {
+        let (outcomes, stores, letting_go) = (&outcomes, &stores, &letting_go);
+        async move {
+            let decided = bus::in_progress(&msg, PROGRESS, decide_taken(js, outcomes, stores, orders, &msg)).await;
+            letting_go.fetch_add(1, Ordering::SeqCst);
+            let acked = match decided {
+                Ok(()) => ack(js, &msg).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = acked {
                 tracing::warn!(
                     subject = %msg.subject, error = format!("{e:#}"), retry_in = ?RETRY_ORDER,
                     "recording an admin order's outcome failed"
                 );
                 bus::nak(&msg, Some(RETRY_ORDER)).await;
             }
+            seq
+        }
+        .boxed()
+    };
+    let mut deciding = FuturesUnordered::new();
+    let mut progress = tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS, PROGRESS);
+    let mut checked_at: Option<tokio::time::Instant> = None;
+    let mut ended = None;
+    loop {
+        if ended.is_none() {
+            deciding.extend(hand.ready().into_iter().map(|(seq, msg)| decided(seq, msg)));
+        } else if deciding.is_empty() {
+            break;
+        }
+        let unchecked = ended.is_none() && hand.unchecked();
+        let pending = async {
+            if let Some(at) = checked_at {
+                tokio::time::sleep_until(at + CHECK_AGAIN).await;
+            }
+            consumer.get_info().await.map(|info| info.num_ack_pending)
+        };
+        tokio::select! {
+            msg = messages.next(), if ended.is_none() => match msg {
+                Some(Ok(msg)) => match msg.info().map(|info| info.stream_sequence) {
+                    Ok(seq) => hand.arrived(seq, ants_of(&msg.subject, &msg.payload), msg),
+                    Err(e) => tracing::warn!(subject = %msg.subject, error = %e, "dropping a message not from a stream"),
+                },
+                Some(Err(e)) => ended = Some(Err(e).with_context(|| format!("reading consumer {name}"))),
+                None => ended = Some(Ok(())),
+            },
+            Some(seq) = deciding.next() => {
+                hand.done(seq);
+                letting_go.fetch_sub(1, Ordering::SeqCst);
+            }
+            pending = pending, if unchecked => {
+                checked_at = Some(tokio::time::Instant::now());
+                match pending {
+                    // Counted once the info came, an order whose ack is under way no longer in hand though the stream
+                    // may count it still: more pending than in hand means an order may be on its way again.
+                    Ok(pending) if pending <= hand.len().saturating_sub(letting_go.load(Ordering::SeqCst)) => hand.checked(),
+                    Ok(_) => {}
+                    Err(e) => tracing::debug!(consumer = name, error = %e, "reading the consumer's info"),
+                }
+            }
+            _ = progress.tick() => {
+                for msg in hand.waiting() {
+                    bus::progress(msg).await;
+                }
+            }
         }
     }
-    Ok(())
+    ended.unwrap_or(Ok(()))
 }
 
-/// Decide the order in `msg` unless it has an outcome, record the outcome, and ack it.
-async fn handle(
+/// The ants an order on `subject` is to, by which [`Hand`] keeps the orders to each in order: the ant of the subject,
+/// and the clone a clone order makes.
+fn ants_of(subject: &str, payload: &[u8]) -> Vec<String> {
+    let mut ants: Vec<String> =
+        subject::parse_admin_order(subject).map(|(_, ant)| ant.to_string()).into_iter().collect();
+    if let Ok(AdminOrder { op: AdminOp::Clone { new, .. }, .. }) = serde_json::from_slice(payload) {
+        ants.push(new.to_string());
+    }
+    ants
+}
+
+/// Whether `op` changes the ants of the machine, and the uplink of its leaf node: such orders are carried out one at a
+/// time.
+fn changes_ants(op: &AdminOp) -> bool {
+    matches!(op, AdminOp::Add { .. } | AdminOp::Retire | AdminOp::Clone { .. })
+}
+
+/// An order's turn to be decided, one order at a time, whether taken or held ([`held::Hold::deciding`]), but for what
+/// it waits for aside ([`Turn::aside`]).
+pub(super) struct Turn<'a> {
+    hold: &'a held::Hold,
+    /// The turn, while the order has it; none while it waits aside, or for an order decided in a turn taken for it.
+    deciding: std::sync::Mutex<Option<tokio::sync::OwnedMutexGuard<()>>>,
+}
+
+impl<'a> Turn<'a> {
+    async fn take(hold: &'a held::Hold) -> Self {
+        Self { hold, deciding: std::sync::Mutex::new(Some(hold.deciding().await)) }
+    }
+
+    /// The turn of an order decided in a turn its caller took for it, which it keeps throughout.
+    fn within(hold: &'a held::Hold) -> Self {
+        Self { hold, deciding: std::sync::Mutex::new(None) }
+    }
+
+    /// Wait for `slow`, an ant to stop or go idle, or the signer to answer, letting other orders be decided meanwhile,
+    /// and take the turn again after. What waits aside leaves the config file and the shared settings alone.
+    pub(super) async fn aside<T>(&self, slow: impl Future<Output = T>) -> T {
+        let given = self.deciding.locked().take().is_some();
+        let waited = slow.await;
+        if given {
+            let deciding = self.hold.deciding().await;
+            *self.deciding.locked() = Some(deciding);
+        }
+        waited
+    }
+}
+
+/// Decide the order in `msg` unless it has an outcome, and record the outcome: done when it is recorded, or there is
+/// none to record, for the message to be acked.
+async fn decide_taken(
     js: &jetstream::Context,
     outcomes: &DirectKv,
     stores: &Stores,
@@ -233,15 +356,17 @@ async fn handle(
         Taken::Unnamed(why) => tracing::warn!(subject = %msg.subject, "dropping an admin order: {why}"),
         taken => {
             let key = taken.key();
-            let _deciding = orders.hold.deciding().await;
+            let changing = matches!(&taken, Taken::Order { order, .. } if changes_ants(&order.op));
+            let _changing = if changing { Some(orders.hold.changing().await) } else { None };
+            let turn = Turn::take(&orders.hold).await;
             if matches!(outcomes.lookup(&key).await?, Lookup::Value(_)) {
                 tracing::debug!(key, "the admin order has an outcome already: a replay");
             } else {
                 let outcome = match taken {
                     Taken::Order { order, machine, ant } => {
                         let stored_at = stored_at.unwrap_or_else(|_| Utc::now());
-                        let deciding = decide(js, outcomes, stores, orders, &msg.subject, &order, stored_at).boxed();
-                        let mut outcome = bus::in_progress(msg, PROGRESS, deciding).await?;
+                        let deciding = decide(js, outcomes, stores, (orders, &turn), &msg.subject, &order, stored_at);
+                        let mut outcome = deciding.boxed().await?;
                         (outcome.machine, outcome.ant) = (machine, ant);
                         outcome
                     }
@@ -263,14 +388,13 @@ async fn handle(
             }
         }
     }
-    ack(js, msg).await
+    Ok(())
 }
 
 /// Ack `msg`, trying again for up to [`RECORD_FOR`] like [`record`]: right after an order renewed the uplink, the hub
-/// may be out of reach for a moment, and an order left unacked holds back the machine's next ones until its ack wait.
-/// Not before the pull requests the renewal left silent are gone ([`bus::settled`]), lest the next order go to one.
+/// may be out of reach for a moment, and an order left unacked holds back the machine's next ones until it comes
+/// again.
 async fn ack(js: &jetstream::Context, msg: &jetstream::Message) -> Result<()> {
-    bus::settled().await;
     let until = tokio::time::Instant::now() + RECORD_FOR;
     loop {
         match bus::double_ack(&js.client(), msg).await {
@@ -372,12 +496,13 @@ impl Stores {
 
 /// The outcome of `order`, taken from `subject` and stored at `stored_at`: refused unless the config allows remote
 /// administration and an admin of the team signed it with credentials not revoked, as [`Stores::devices`] records
-/// them, or an assistant of one for it, which [`held`] holds in `machines`; else what carrying it out ([`apply`]) gave.
+/// them, or an assistant of one for it, which [`held`] holds in `machines`; else what carrying it out ([`apply`]) in
+/// `turn` gave.
 async fn decide(
     js: &jetstream::Context,
     machines: &DirectKv,
     stores: &Stores,
-    orders: &Orders,
+    (orders, turn): (&Orders, &Turn<'_>),
     subject: &str,
     order: &AdminOrder,
     stored_at: DateTime<Utc>,
@@ -401,16 +526,18 @@ async fn decide(
     match (order.verify(subject, accounts, |_| revoked, stored_at), signer) {
         (Err(e), _) => Ok(refused(&e.to_string())),
         (Ok(_), Some(signer)) if order.on_behalf_of.is_some() => held::hold(machines, orders, order, &signer).await,
-        (Ok(_), _) => apply(js, stores, orders, order, stored_at).await,
+        (Ok(_), _) => apply(js, stores, orders, turn, order, stored_at).await,
     }
 }
 
 /// Carry out `order`, which an admin signed and the stream stored at `stored_at`, with the module of its op, which
-/// refuses it when it cannot. Fails, for the order to be taken again, only when a bucket it writes does not answer.
+/// refuses it when it cannot, in `turn`. Fails, for the order to be taken again, only when a bucket it writes does not
+/// answer.
 async fn apply(
     js: &jetstream::Context,
     stores: &Stores,
     orders: &Orders,
+    turn: &Turn<'_>,
     order: &AdminOrder,
     stored_at: DateTime<Utc>,
 ) -> Result<AdminOutcome> {
@@ -420,11 +547,11 @@ async fn apply(
         AdminOp::Resume => pause::apply(orders, order, false),
         AdminOp::Restart { now } => restart::apply(orders, order, *now).await,
         AdminOp::Add { settings, assistant_of } => {
-            Box::pin(add::apply(js, &stores.identities, orders, order, settings, assistant_of.as_ref())).await
+            Box::pin(add::apply(js, &stores.identities, orders, turn, order, settings, assistant_of.as_ref())).await
         }
-        AdminOp::Retire => retire::apply(js, orders, order).await,
+        AdminOp::Retire => retire::apply(js, orders, turn, order).await,
         AdminOp::Clone { new, settings } => {
-            Box::pin(clone::apply(js, stores.shared(orders), orders, order, new, settings)).await
+            Box::pin(clone::apply(js, stores.shared(orders), orders, turn, order, new, settings)).await
         }
         AdminOp::ReadMemories { identity } => memories::apply(orders, order, identity.as_deref(), stored_at).await,
         AdminOp::ExportProvider { identity } => export::export(js, orders, order, identity, stored_at).await,

@@ -27,7 +27,7 @@ use async_nats::jetstream;
 use serde_json::{Map, Value, json};
 
 use super::add::{leaf_uplink, renew};
-use super::{ConfigFile, NO_CONFIG, Orders, applied, refused};
+use super::{ConfigFile, NO_CONFIG, Orders, Turn, applied, refused};
 #[cfg(doc)]
 use crate::clone::Snapshot;
 use crate::config;
@@ -52,6 +52,7 @@ pub(super) async fn apply(
     js: &jetstream::Context,
     bucket: Bucket<'_>,
     orders: &Orders,
+    turn: &Turn<'_>,
     order: &AdminOrder,
     new: &UserId,
     settings: &Map<String, Value>,
@@ -61,7 +62,7 @@ pub(super) async fn apply(
         return refused(order, "the machine has no host credentials to ask `ants signer` with");
     };
     let mut done = Done::default();
-    let cloning = Cloning { js, bucket, orders, config, host_creds, order, new, settings };
+    let cloning = Cloning { js, bucket, orders, turn, config, host_creds, order, new, settings };
     let result = cloning.run(&mut done).await;
     let (paused, key) = (done.paused, done.key.take());
     if result.is_err() {
@@ -94,6 +95,8 @@ struct Cloning<'a> {
     js: &'a jetstream::Context,
     bucket: Bucket<'a>,
     orders: &'a Orders,
+    /// The order's turn, which it sits out while it waits for the ant cloned, copies its files and has its key signed.
+    turn: &'a Turn<'a>,
     config: &'a ConfigFile,
     /// The machine's host credentials, which `ants signer` is asked with.
     host_creds: &'a Path,
@@ -120,9 +123,9 @@ impl Cloning<'_> {
         }
         let leaf = leaf_uplink(self.orders.leaf.as_ref())?;
         let snapshot = self.snapshot(done).await?;
-        let (trees, branches) = copy_files(&plan, &snapshot, new, done).await?;
+        let (trees, branches) = self.turn.aside(copy_files(&plan, &snapshot, new, done)).await?;
         let signed = self.sign(leaf, &plan, done).await?;
-        let (forked, restart, record) = self.store(&plan, &snapshot, &trees, done).await?;
+        let (forked, restart, record) = Box::pin(self.turn.aside(self.store(&plan, &snapshot, &trees, done))).await?;
         if let Some(from) = &record.cloned_from {
             let cloned = EventKind::AntCloned { from: from.ant.clone(), from_identity: from.id.clone() };
             events::arrived(&plan.new_home, new, &record.id, vec![cloned])?;

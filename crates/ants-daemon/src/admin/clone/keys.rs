@@ -37,8 +37,10 @@ impl Cloning<'_> {
         done.files.push(seed_path.clone());
         let key = key_for(&plan.creds_path, &seed_path, new)?;
         let public_key = key.public_key();
-        let (jwt, renewal) =
-            sign(self.js, self.host_creds, leaf, &self.orders.accounts, self.order, new, &public_key).await?;
+        let (jwt, renewal) = self
+            .turn
+            .aside(sign(self.js, self.host_creds, leaf, &self.orders.accounts, self.order, new, &public_key))
+            .await?;
         let seed = key.seed().map_err(|e| anyhow!("the seed of {public_key}: {e}"))?;
         done.files.push(plan.creds_path.clone());
         write_secret(&plan.creds_path, &creds::text(&jwt, &seed))?;

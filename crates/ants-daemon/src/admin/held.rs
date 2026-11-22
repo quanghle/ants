@@ -25,7 +25,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 
-use super::{Orders, Stores, refused};
+use super::{Orders, Stores, Turn, refused};
 use crate::people::humans::Registry;
 use crate::records::direct_kv::{DirectKv, Lookup};
 
@@ -43,20 +43,28 @@ pub const NOT_FOR_ASSISTANT: &str = "an assistant's order may not add, retire or
 pub struct Hold {
     /// The humans' grants and consent records, kept current by a watch of the humans bucket.
     pub humans: Registry,
-    /// Held while an order is decided: one at a time, whether taken or held.
+    /// Held while an order is decided: one at a time, whether taken or held, but for what an order waits for aside
+    /// ([`super::Turn::aside`]).
     deciding: Arc<Mutex<()>>,
+    /// Held while an order adds, retires or clones an ant, from before it takes its turn ([`Hold::deciding`]).
+    changing: Arc<Mutex<()>>,
     /// Notified when an order is held.
     held: Arc<Notify>,
 }
 
 impl Hold {
     pub fn new(humans: Registry) -> Self {
-        Self { humans, deciding: Arc::default(), held: Arc::default() }
+        Self { humans, deciding: Arc::default(), changing: Arc::default(), held: Arc::default() }
     }
 
     /// Decide one order at a time, until the guard drops.
-    pub(super) async fn deciding(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.deciding.lock().await
+    pub(super) async fn deciding(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.deciding).lock_owned().await
+    }
+
+    /// Add, retire or clone one ant at a time, until the guard drops.
+    pub(super) async fn changing(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.changing.lock().await
     }
 
     /// Have the held orders looked at, one being added.
@@ -186,7 +194,7 @@ async fn review(
                 Some(reason) => refused(order, &reason),
                 None => {
                     tracing::info!(id = %order.id, human = ?order.on_behalf_of, how, "carrying out an assistant's order");
-                    super::apply(js, stores, orders, order, now).await?
+                    super::apply(js, stores, orders, &Turn::within(&orders.hold), order, now).await?
                 }
             },
         };

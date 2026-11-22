@@ -24,7 +24,10 @@ impl Cloning<'_> {
             self.config.pausers.paused(src, &self.order.admin);
             self.config.edited.notify_one();
         }
-        let snapshot = tokio::time::timeout(SNAPSHOT_WAIT, self.orders.restarts.snapshot(src, new.clone()))
+        let reading = tokio::time::timeout(SNAPSHOT_WAIT, self.orders.restarts.snapshot(src, new.clone()));
+        let snapshot = self
+            .turn
+            .aside(reading)
             .await
             .map_err(|_| anyhow!("{src}'s prompts did not end within {}", ants_proto::duration::format(SNAPSHOT_WAIT)))?
             .with_context(|| format!("{machine} stopped serving the inbox of {src}"))?

@@ -20,7 +20,7 @@ use serde_json::json;
 
 use super::add::{check_uplink, leaf_uplink};
 use super::ask::{SIGNER_WAIT, Uplink, ask};
-use super::{LeafNode, NO_CONFIG, Orders, applied, refused};
+use super::{LeafNode, NO_CONFIG, Orders, Turn, applied, refused};
 use crate::config;
 use crate::records::direct_kv::{DirectKv, Lookup};
 use crate::secrets::creds::{self, Finding, Seed};
@@ -30,7 +30,12 @@ use crate::secrets::keystore;
 const STOP_WAIT: Duration = Duration::from_mins(5);
 const STOP_POLL: Duration = Duration::from_secs(1);
 
-pub(super) async fn apply(js: &jetstream::Context, orders: &Orders, order: &AdminOrder) -> AdminOutcome {
+pub(super) async fn apply(
+    js: &jetstream::Context,
+    orders: &Orders,
+    turn: &Turn<'_>,
+    order: &AdminOrder,
+) -> AdminOutcome {
     let Some(config) = &orders.config else { return refused(order, NO_CONFIG) };
     let Some(host_creds) = &orders.creds else {
         return refused(order, "the machine has no host credentials to ask `ants signer` with");
@@ -43,7 +48,7 @@ pub(super) async fn apply(js: &jetstream::Context, orders: &Orders, order: &Admi
     if unlisted.listed {
         config.edited.notify_one();
     }
-    let stopped = stopped(js, orders, ant, STOP_WAIT).await;
+    let stopped = turn.aside(stopped(js, orders, ant, STOP_WAIT)).await;
     let home = unlisted.home.display().to_string();
     let Some(key) = unlisted.key else {
         return applied(
@@ -65,19 +70,20 @@ pub(super) async fn apply(js: &jetstream::Context, orders: &Orders, order: &Admi
         Err(e) => (None, Some(format!("{e:#}"))),
     };
     let uplink = leaf.as_ref().map(|(_, uplink, _)| uplink);
-    let (revoked, push_error, shrunk) = match ask(js, host_creds, uplink, order, ant, &key, SIGNER_WAIT).await {
-        Ok(EnrollReply::Retired { revoked, push_error, leaf_jwt, leaf_error: why, .. }) => {
-            (revoked, push_error, leaf_jwt.ok_or(why))
-        }
-        Ok(EnrollReply::Rejected { reason, .. }) => {
-            let reason = reason.as_deref().unwrap_or("no reason given");
-            return refused(order, &format!("`ants signer` refused to revoke {key}: {reason}; {}", hint(&key)));
-        }
-        Ok(EnrollReply::Approved { .. }) => {
-            return refused(order, &format!("`ants signer` answered with an approval; {}", hint(&key)));
-        }
-        Err(e) => return refused(order, &format!("{e:#}; {}", hint(&key))),
-    };
+    let (revoked, push_error, shrunk) =
+        match turn.aside(ask(js, host_creds, uplink, order, ant, &key, SIGNER_WAIT)).await {
+            Ok(EnrollReply::Retired { revoked, push_error, leaf_jwt, leaf_error: why, .. }) => {
+                (revoked, push_error, leaf_jwt.ok_or(why))
+            }
+            Ok(EnrollReply::Rejected { reason, .. }) => {
+                let reason = reason.as_deref().unwrap_or("no reason given");
+                return refused(order, &format!("`ants signer` refused to revoke {key}: {reason}; {}", hint(&key)));
+            }
+            Ok(EnrollReply::Approved { .. }) => {
+                return refused(order, &format!("`ants signer` answered with an approval; {}", hint(&key)));
+            }
+            Err(e) => return refused(order, &format!("{e:#}; {}", hint(&key))),
+        };
     if let Some(creds) = &unlisted.creds
         && let Err(e) = forget(creds)
     {

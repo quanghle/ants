@@ -7,12 +7,12 @@
 //! on a new reply subject, once two idle heartbeats in a row went missing, and at once when the daemon has its leaf
 //! node reconnect the uplink ([`pull_anew`]). Dropping the old reply subject's subscription withdraws its interest: the
 //! stream's next heartbeat to the old request then reaches nobody, which drops the mapping, and the stream drops the
-//! request ([`settled`]).
+//! request; a message the stream delivers to it before that comes again only after its ack wait.
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Waker, ready};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_nats::jetstream::consumer::StreamError;
 use async_nats::jetstream::consumer::pull::{MessagesError, MessagesErrorKind, Stream};
@@ -27,8 +27,6 @@ pub const IDLE_HEARTBEAT: Duration = Duration::from_secs(2);
 
 /// Every [`Pull`] of the process, for [`pull_anew`].
 static PULLS: Mutex<Vec<Weak<Mutex<Reading>>>> = Mutex::new(Vec::new());
-/// When [`pull_anew`] last ran.
-static ANEW: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// The messages of a pull consumer ([`pull`]), as [`Stream`] yields them, but for missed heartbeats, after which it
 /// pulls anew.
@@ -62,7 +60,6 @@ pub async fn pull(consumer: PullConsumer) -> Result<Pull, StreamError> {
 /// Have every [`Pull`] of the process drop its request and make a new one, as after the daemon had its leaf node
 /// reconnect the uplink: a reader busy with a message makes it once it asks for the next.
 pub fn pull_anew() {
-    *ANEW.locked() = Some(Instant::now());
     let pulls: Vec<_> = PULLS.locked().iter().filter_map(Weak::upgrade).collect();
     for pull in pulls {
         let mut reading = pull.locked();
@@ -74,14 +71,6 @@ pub fn pull_anew() {
             waker.wake();
         }
     }
-}
-
-/// Wait until the requests [`pull_anew`] dropped last are gone from their streams, two heartbeats after: a message
-/// stored meanwhile may still be delivered to one, and come again only after its ack wait. A reader holding back the
-/// next message until it acks one, as the admin consumer does, waits for this before acking.
-pub async fn settled() {
-    let Some(anew) = *ANEW.locked() else { return };
-    tokio::time::sleep_until((anew + 2 * IDLE_HEARTBEAT).into()).await;
 }
 
 async fn open(consumer: PullConsumer) -> Result<Stream, StreamError> {
