@@ -472,7 +472,7 @@ second lists nothing; after `--unread` it is listed once more.
 ```sh
 t=$(tok); container exec ants-e2e-client sh -c "printf 'attached-$t\n' > /tmp/in.txt"
 alice ask --wait --timeout 3m --attach /tmp/in.txt @leaf-ant \
-  "Read the attached file with read_attachment. Write its content unchanged to out.txt, then call attach_to_reply with out.txt. Only once attach_to_reply has succeeded, reply DONE: a reply without out.txt attached fails this test."
+  "Read the attached file with read_attachment: it returns the file's text, a single line that is not a path. Write that line unchanged to out.txt, then call attach_to_reply with out.txt. Only once attach_to_reply has succeeded, reply DONE: a reply without out.txt attached fails this test."
 alice thread show last          # note the reply's attachment handle
 # Only if the reply lacks 📎 out.txt (the model skipped the tool call), once:
 alice ask --wait --timeout 3m --thread THREAD @leaf-ant \
@@ -558,7 +558,7 @@ alice channel read e2e; bob channel list
 ### C2 · An unmentioned post is triaged by the messenger (P1, 2 prompts)
 
 ```sh
-t=$(tok); alice post '#e2e' "The ant on the hub machine: reply with exactly TRIAGE-$t"
+t=$(tok); alice post '#e2e' "Without being mentioned, hub-ant is the one to answer this: hub-ant, reply here with exactly TRIAGE-$t"
 sleep 120; alice channel read e2e
 ```
 
