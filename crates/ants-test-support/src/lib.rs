@@ -225,6 +225,25 @@ fn launch(dir: &Path) -> (Child, String) {
     panic!("nats-server did not start");
 }
 
+/// Write the executable file `path` holding `contents`, as a fake tool a test runs.
+///
+/// A child process writes it, never this one: a process another test thread forks keeps a copy of this process's
+/// descriptors until it execs, and one still open on the file for writing makes running it fail with "Text file busy"
+/// (ETXTBSY) on Linux.
+#[cfg(unix)]
+pub fn executable(path: &Path, contents: &str) {
+    use std::io::Write as _;
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(contents.as_bytes()).unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success(), "writing {}: {status}", path.display());
+}
+
 /// A scripted stub of a CLI speaking JSON lines on stdio, such as a native harness protocol: a POSIX shell script that
 /// plays blocks of lines from a script file and records what it gets.
 ///
@@ -278,10 +297,8 @@ done
 impl StubCli {
     /// A stub named `name` in `dir`, with an empty script.
     pub fn new(dir: &Path, name: &str) -> Self {
-        use std::os::unix::fs::PermissionsExt as _;
         let path = dir.join(name);
-        std::fs::write(&path, STUB_CLI).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        executable(&path, STUB_CLI);
         let stub = Self { path };
         std::fs::write(stub.file("script"), "").unwrap();
         stub

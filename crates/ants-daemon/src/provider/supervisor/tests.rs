@@ -242,8 +242,12 @@ async fn a_provider_process_that_exits_is_started_again() {
     assert_eq!(connected.list_tools().await.unwrap(), ToolList::default());
     until(&supervised, |s| matches!(s, State::Down { .. })).await;
     let down = connected.call_tool(call("x")).await.unwrap_err().message;
-    let expected = "provider unavailable: memo is down: exited with exit status: 3: boom; restarting in ";
-    assert!(down.starts_with(expected), "{down}");
+    let exited = "provider unavailable: memo is down: exited with exit status: 3: boom; restarting in ";
+    // Off Linux, tokio learns of the exit from SIGCHLD, which another test's busy runtime may relay after the grace
+    // given once the output closed.
+    let closed = "provider unavailable: memo is down: closed its output; restarting in ";
+    let raced = cfg!(not(target_os = "linux")) && down.starts_with(closed);
+    assert!(down.starts_with(exited) || raced, "{down}");
     assert_eq!((stub.args(1), stub.env(1, "NOTES_DB")), (vec!["--stdio".to_owned()], Some("x.db".to_owned())));
 
     until(&supervised, |s| matches!(s, State::Up(_))).await;

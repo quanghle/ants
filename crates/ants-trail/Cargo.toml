@@ -25,6 +25,7 @@ thiserror = "2.0.21"
 tokio = { workspace = true, features = ["io-util", "macros", "process", "time"] }
 
 [dev-dependencies]
+ants-test-support.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
 [lints]

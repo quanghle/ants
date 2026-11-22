@@ -266,14 +266,11 @@ fn built_in_harnesses_have_default_memory_files_a_replacement_keeps() {
 #[cfg(unix)]
 #[tokio::test]
 async fn bd_memories_are_listed_when_the_ant_s_environment_names_a_database() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let (home, workdir, outside) = dirs("memories-bd");
     let bd = outside.join("bd");
     let script = "#!/bin/sh\n[ \"$1 $2\" = 'memories --json' ] || exit 2\n\
                   printf '[{\"key\":\"k1\",\"content\":\"%s\",\"revision\":1}]' \"$BD_DB\"\n";
-    write(&bd, script);
-    std::fs::set_permissions(&bd, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ants_test_support::executable(&bd, script);
     let mut ant = Ant::new("dev-a".parse().unwrap(), workdir.clone());
     ant.env.insert("BD_DB".to_owned(), "/srv/bd.db".to_owned());
     let env = Env { home, bd: bd.into(), bd_db: Some("/daemon/bd.db".to_owned()) };

@@ -20,16 +20,13 @@ const COMMANDS: &[&str] = &["pbcopy", "wl-copy", "xclip", "clip.exe"];
 
 fn executable(path: &Path) -> bool {
     let Ok(meta) = path.metadata() else { return false };
-    if !meta.is_file() {
-        return false;
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        meta.permissions().mode() & 0o111 != 0
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
     }
     #[cfg(not(unix))]
-    true
+    meta.is_file()
 }
 
 fn command(path: Option<&std::ffi::OsStr>, remote: bool) -> Option<(PathBuf, &'static str)> {
@@ -213,11 +210,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn local_copy_supplies_exact_stdin_and_clipboard_selection_and_checks_completion() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = ants_test_support::scratch_dir("clipboard-stdin");
         let path = dir.join("xclip");
-        std::fs::write(&path, "#!/bin/sh\n/bin/cat > \"$0.input\"\nprintf '%s' \"$*\" > \"$0.args\"\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        ants_test_support::executable(&path, "#!/bin/sh\n/bin/cat > \"$0.input\"\nprintf '%s' \"$*\" > \"$0.args\"\n");
         let text = "first\nsecond \u{1f41c}\n";
         copy_command(&path, "xclip", text).await.unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("xclip.input")).unwrap(), text);
@@ -228,12 +223,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn first_executable_wins_and_ssh_forces_osc52() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = ants_test_support::scratch_dir("clipboard");
         for name in ["wl-copy", "pbcopy"] {
             let path = dir.join(name);
-            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            ants_test_support::executable(&path, "#!/bin/sh\nexit 0\n");
         }
         assert_eq!(command(Some(dir.as_os_str()), false).unwrap().1, "pbcopy");
         assert!(command(Some(dir.as_os_str()), true).is_none());

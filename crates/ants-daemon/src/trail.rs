@@ -49,7 +49,7 @@ use saved::Saved;
 use store::Store;
 
 pub use driver::MAX_RECORD;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use invite::invitation;
 pub use invite::{EndWait, rating_hint};
 pub use limits::AskedLimits;

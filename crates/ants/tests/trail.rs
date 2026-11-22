@@ -362,13 +362,11 @@ async fn each_answer_of_one_request_computes_within_the_limit_on_its_own() {
 #[cfg(unix)]
 #[tokio::test]
 async fn the_clock_is_the_runs_and_the_environment_empty() {
-    use std::os::unix::fs::PermissionsExt as _;
     // The worker, behind a shell script writing down the environment it starts with.
     let dir = ants_test_support::scratch_dir("trail-env");
     let (wrapper, env) = (dir.join("worker"), dir.join("env"));
     let body = format!("#!/bin/sh\n/usr/bin/env > '{}'\nexec '{}' \"$@\"\n", env.display(), env!("CARGO_BIN_EXE_ants"));
-    std::fs::write(&wrapper, body).unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ants_test_support::executable(&wrapper, &body);
 
     let script = "import datetime, os\ntry:\n    os.getenv('PATH')\nexcept RuntimeError:\n    r = 'refused'\n[datetime.datetime.now().isoformat(), r]\n";
     let mut run = run(script, json!(null), Limits::default());

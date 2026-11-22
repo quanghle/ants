@@ -930,12 +930,10 @@ async fn endpoint(secret: &'static str) -> (std::net::SocketAddr, tokio::sync::m
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_and_http_sinks_take_the_notice_and_each_failure_is_reported() {
-    use std::os::unix::fs::PermissionsExt as _;
     let dir = ants_test_support::scratch_dir("notify-exec-http").canonicalize().unwrap();
     let script = |name: &str, body: &str| {
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ants_test_support::executable(&path, &format!("#!/bin/sh\n{body}\n"));
         path.display().to_string()
     };
     let taken = dir.join("taken.json");

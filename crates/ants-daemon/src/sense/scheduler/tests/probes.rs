@@ -1,4 +1,6 @@
-use ants_sense::{Workdirs, items::ItemValues};
+use ants_sense::Workdirs;
+#[cfg(unix)]
+use ants_sense::items::ItemValues;
 
 use super::*;
 
@@ -93,11 +95,8 @@ async fn sense_events_check_overdue_commitments_and_expired_task_leases() {
 
 #[cfg(unix)]
 fn script(root: &std::path::Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let path = root.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    ants_test_support::executable(&path, &format!("#!/bin/sh\n{body}\n"));
 }
 
 #[cfg(unix)]
