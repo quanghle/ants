@@ -391,16 +391,20 @@ mod secret_service {
 
         /// A `secret-tool` running the shell `script` with its arguments, and the directory to remove after.
         fn fake(script: &str) -> (SecretTool, PathBuf) {
+            use std::os::unix::fs::PermissionsExt as _;
             let dir = ants_test_support::scratch_dir("secret-tool");
             let program = dir.join("secret-tool");
-            ants_test_support::executable(&program, &format!("#!/bin/sh\n{script}\n"));
+            std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
             (SecretTool { program, timeout: Duration::from_secs(10), bus: Vec::new() }, dir)
         }
 
         /// `tool` reading the collections through a `busctl` running the shell `script`.
         fn with_bus(mut tool: SecretTool, dir: &Path, script: &str) -> SecretTool {
+            use std::os::unix::fs::PermissionsExt as _;
             let program = dir.join("busctl");
-            ants_test_support::executable(&program, &format!("#!/bin/sh\n{script}\n"));
+            std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
             tool.bus = vec![dir.join("gdbus-missing"), program];
             tool
         }

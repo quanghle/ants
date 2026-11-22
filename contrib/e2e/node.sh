@@ -105,6 +105,7 @@ hub() {
     issue alice.creds ants auth user alice --human --admin --label client
     issue leaf-leaf.creds ants auth leaf leaf --ant leaf-ant --ant gate-ant
     issue leaf-client.creds ants auth leaf client --human alice
+    issue sage-ant.creds ants auth user sage-ant
     mkdir -p /demo/jetstream /demo/jwt /demo/work
     if [ ! -d /demo/work/.git ]; then
         git init --quiet --initial-branch main /demo/work
@@ -146,6 +147,15 @@ workdir = "/demo/work"
 capabilities = ["e2e", "hub"]
 model = "claude-haiku-4-5"
 max_harnesses = 3
+
+# The sage of group D's ants (docs/e2e-scenarios.md, D): its reviews answer predictably, so a pass is a match.
+[[ant]]
+name = "sage-ant"
+creds = "~/.config/ants/auth/sage-ant.creds"
+workdir = "/demo/work"
+model = "claude-haiku-4-5"
+max_harnesses = 1
+whoami = "Reviews for the end-to-end tests of ants: every review answers with exactly one finding, of kind lesson, citing the first thread of the packet as its evidence, with the action 'remember the codeword of that thread'."
 EOF
     } >"$conf"
     keep nats-server nats-server --config /demo/nats.conf

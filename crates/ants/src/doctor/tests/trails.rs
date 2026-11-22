@@ -7,9 +7,7 @@ use ants_test_support::{trail_leg, trail_run};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
 
-#[cfg(unix)]
-use super::super::trails::check_worker;
-use super::super::trails::{MAX_LISTED, check_runs, stuck};
+use super::super::trails::{MAX_LISTED, check_runs, check_worker, stuck};
 use super::*;
 use crate::test_support::colony::entry;
 
@@ -310,10 +308,12 @@ async fn the_runs_check_reads_every_conductor_s_runs_with_a_human_s_credentials(
 #[cfg(unix)]
 #[tokio::test]
 async fn the_worker_check_starts_the_worker_as_a_daemon_does() {
+    use std::os::unix::fs::PermissionsExt as _;
     let dir = ants_test_support::scratch_dir("doctor-worker").canonicalize().unwrap();
     let worker = |name: &str, body: &str| {
         let path = dir.join(name);
-        ants_test_support::executable(&path, &format!("#!/bin/sh\n{body}\n"));
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
     };
     // The ants binary cargo builds beside the test's, for the integration tests.

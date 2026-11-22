@@ -90,13 +90,16 @@ async fn a_command_timeout_does_not_leave_the_check_running() {
 #[cfg(unix)]
 #[tokio::test]
 async fn github_and_bd_checks_interpret_structured_results_without_saving_output() {
+    use std::os::unix::fs::PermissionsExt as _;
+
     let root = ants_test_support::scratch_dir("sense-external-condition");
     let items = items().await;
     let env = BTreeMap::from([("PATH".into(), root.to_str().unwrap().into())]);
     let context = Context { workdir: &root, env: &env, allow: &[], items: &items, now: Utc::now() };
     let stub = |name: &str, body: &str| {
         let path = root.join(name);
-        ants_test_support::executable(&path, &format!("#!/bin/sh\n{body}\n"));
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     };
     stub(
         "gh",
