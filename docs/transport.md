@@ -50,11 +50,11 @@ Without `max_file_store` and `max_memory_store` in its `jetstream` block, the hu
 
 ### Revocation
 
-`ants auth revoke NAME` (or `--key U...`) adds user keys to the `revocations` map of their account (the store account for a leaf node's store account uplink, the team's for every other key `issued.jsonl` records, both for a key it does not know), rewrites `server.conf` (preserving the trusted operator JWT), and pushes the updated account JWT to `--nats`:
+`ants auth revoke NAME` (or `--key U...`) adds user keys to the `revocations` map of their account (the store account for a leaf node's store account uplink, the system account for its system account uplink, the team's for every other key `issued.jsonl` records, all three for a key it does not know), rewrites `server.conf` (preserving the trusted operator JWT), and pushes the updated account JWTs to `--nats`, the system account's last:
 
 - **Hub push:** a short-lived system-account user (`system.nk`, 10 m TTL) publishes `$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE`, closing revoked connections immediately, then probes `$SYS.REQ.CLAIMS.LIST` to report whether a `full` resolver persisted it. Without a `full` resolver, copy `server.conf` to the hub and reload (`SIGHUP`) after every revocation (`ants auth push` retries unreachable servers).
 - **Leaf propagation & catch-up:** leaves join the hub's system account via `leaf-<machine>.system.creds` (subscribe `$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE` and `$SYS._INBOX.<machine_hash>.*`; publish `_INBOX.ants-push.>` and `$SYS.REQ.CLAIMS.PACK`; leaf connections only). Live leaves apply pushes immediately and persist them in their own `full` resolver (`interval: "10s"`). Offline leaves catch up within 10 s of reconnecting to a `full`-resolver hub via `$SYS.REQ.CLAIMS.PACK` (against a `MEMORY`-resolver hub, run `ants auth push` again after reconnect).
-- **Uplinks:** revoking `leaf-<machine>` drops that leaf's uplink and store account uplink at the hub (both recorded under the name in `issued.jsonl`) while leaving the system-account uplink intact.
+- **Uplinks:** revoking `leaf-<machine>` drops that leaf's uplink, store account uplink and system account uplink at the hub (all recorded under the name in `issued.jsonl`); the system account is pushed last, so the leaf hears the team account's revocations before its system account uplink drops.
 
 ## Reverse proxy
 

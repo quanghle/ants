@@ -405,7 +405,7 @@ fn revoked_in(team: &Path, key: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn a_leaf_s_store_uplink_is_recorded_and_revoked_with_its_uplink_in_the_store_account() {
+fn a_leaf_s_store_and_system_uplinks_are_recorded_and_revoked_with_its_uplink_in_their_accounts() {
     use ants_daemon::secrets::creds;
     let dir = ants_test_support::scratch_dir("revoke-leaf-store");
     let team = dir.join("auth");
@@ -417,38 +417,46 @@ fn a_leaf_s_store_uplink_is_recorded_and_revoked_with_its_uplink_in_the_store_ac
     auth::issue_leaf(&team, &m1, &members, &[], approver, None, &uplink).unwrap();
     let uplink_finding = creds::check(&uplink).unwrap();
     let store_finding = creds::check(&auth::leaf_store_creds(&uplink)).unwrap();
-    assert_eq!(store_finding.kind, creds::Kind::LeafStore { machine: m1 });
+    assert_eq!(store_finding.kind, creds::Kind::LeafStore { machine: m1.clone() });
     assert_eq!(store_finding.expires_at, uplink_finding.expires_at, "the uplink's lifetime");
+    let system_finding = creds::check(&auth::leaf_system_creds(&uplink)).unwrap();
+    assert_eq!(system_finding.kind, creds::Kind::LeafSystem { machine: m1 });
+    assert_eq!(system_finding.expires_at, uplink_finding.expires_at, "the uplink's lifetime");
 
     let issued = issued(&team).unwrap();
     let of = |kind: Kind| issued.iter().find(|i| i.kind == kind).unwrap();
-    let (up, store) = (of(Kind::Leaf), of(Kind::LeafStore));
+    let (up, store, system) = (of(Kind::Leaf), of(Kind::LeafStore), of(Kind::LeafSystem));
     assert_eq!((up.key.as_str(), store.key.as_str()), (uplink_finding.key.as_str(), store_finding.key.as_str()));
-    assert_eq!(store.name, "leaf-m1");
-    assert_eq!(store.expires_at, up.expires_at);
+    assert_eq!(system.key, system_finding.key);
+    assert_eq!((store.name.as_str(), system.name.as_str()), ("leaf-m1", "leaf-m1"));
+    assert_eq!((store.expires_at, system.expires_at), (up.expires_at, up.expires_at));
     let listed = listing(&team, auth::now().unwrap()).unwrap();
     assert!(listed.iter().any(|l| l.issued.key == store.key && !l.revoked), "{listed:?}");
 
     let mut keys: Vec<String> = revoke(&team, Some("leaf-m1"), &[]).unwrap().into_iter().map(|r| r.key).collect();
     keys.sort();
-    let mut expected = vec![up.key.clone(), store.key.clone()];
+    let mut expected = vec![up.key.clone(), store.key.clone(), system.key.clone()];
     expected.sort();
     assert_eq!(keys, expected);
     let (team_account, store_account) = (auth::account_key(&team).unwrap(), auth::store_key(&team).unwrap());
+    let system_seed = fs::read_to_string(team.join(auth::SYSTEM_SEED)).unwrap();
+    let system_account = nkeys::KeyPair::from_seed(system_seed.trim()).unwrap().public_key();
     assert_eq!(revoked_in(&team, &store_account), BTreeSet::from([store.key.clone()]));
+    assert_eq!(revoked_in(&team, &system_account), BTreeSet::from([system.key.clone()]));
     assert_eq!(revoked_in(&team, &team_account), BTreeSet::from([up.key.clone()]));
-    // A key the registry does not know is revoked in both accounts.
+    // A key the registry does not know is revoked in all three accounts.
     let unknown = nkeys::KeyPair::new_user().public_key();
     revoke(&team, None, std::slice::from_ref(&unknown)).unwrap();
-    assert!(revoked_in(&team, &store_account).contains(&unknown));
-    assert!(revoked_in(&team, &team_account).contains(&unknown));
+    for account in [&store_account, &system_account, &team_account] {
+        assert!(revoked_in(&team, account).contains(&unknown));
+    }
     let listed = listing(&team, auth::now().unwrap()).unwrap();
     assert!(listed.iter().any(|l| l.issued.key == store.key && l.revoked), "{listed:?}");
     fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
-async fn revoking_a_leaf_s_uplink_by_name_drops_its_store_account_uplink_at_the_hub() {
+async fn revoking_a_leaf_s_uplink_by_name_drops_its_store_and_system_account_uplinks_at_the_hub() {
     use crate::node::leaf;
     let leaf_port = ants_test_support::free_port();
     let Some(hub) = crate::test_support::spawn_hub(leaf_port, "") else { return };
@@ -459,6 +467,7 @@ async fn revoking_a_leaf_s_uplink_by_name_drops_its_store_account_uplink_at_the_
     let approver = crate::node::members::EnrollApprover::Without;
     auth::issue_leaf(&team, &m1, &members, &[], approver, Some(&domain), &creds).unwrap();
     let server_conf = team.join(auth::SERVER_CONF);
+    let system_creds = auth::leaf_system_creds(&creds);
     let listen = format!("127.0.0.1:{}", ants_test_support::free_port());
     let uplinks = [format!("nats-leaf://127.0.0.1:{leaf_port}")];
     let _leaf = ants_test_support::NatsServer::spawn_with(|dir| {
@@ -467,7 +476,7 @@ async fn revoking_a_leaf_s_uplink_by_name_drops_its_store_account_uplink_at_the_
             hub_domain: Some(&domain),
             uplinks: &uplinks,
             creds: &creds,
-            system_creds: None,
+            system_creds: Some(&system_creds),
             server_conf: &server_conf,
             ca_file: None,
             proxy: None,
@@ -479,6 +488,8 @@ async fn revoking_a_leaf_s_uplink_by_name_drops_its_store_account_uplink_at_the_
     .unwrap();
     let system = connect_system(&hub.url, &team).await.unwrap();
     let (team_account, store_account) = (auth::account_key(&team).unwrap(), auth::store_key(&team).unwrap());
+    let system_seed = fs::read_to_string(team.join(auth::SYSTEM_SEED)).unwrap();
+    let system_account = nkeys::KeyPair::from_seed(system_seed.trim()).unwrap().public_key();
     let leaf_accounts = async || -> Vec<String> {
         let Ok(answer) = relayed::request(&system, "$SYS.REQ.SERVER.PING.LEAFZ", "".into()).await else {
             return Vec::new();
@@ -487,15 +498,15 @@ async fn revoking_a_leaf_s_uplink_by_name_drops_its_store_account_uplink_at_the_
         let leafs = answer["data"]["leafs"].as_array().map_or_default(Vec::as_slice);
         leafs.iter().filter_map(|l| l["account"].as_str().map(str::to_owned)).collect()
     };
-    crate::test_support::eventually("both uplinks connected", async || {
+    crate::test_support::eventually("the three uplinks connected", async || {
         let accounts = leaf_accounts().await;
-        accounts.contains(&team_account) && accounts.contains(&store_account)
+        [&team_account, &store_account, &system_account].into_iter().all(|a| accounts.contains(a))
     })
     .await;
 
     revoke(&team, Some("leaf-m1"), &[]).unwrap();
     push(&hub.url, &team).await.unwrap();
-    crate::test_support::eventually("both uplinks dropped", async || leaf_accounts().await.is_empty()).await;
+    crate::test_support::eventually("the three uplinks dropped", async || leaf_accounts().await.is_empty()).await;
     // The leaf node keeps trying, refused.
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(leaf_accounts().await, Vec::<String>::new());

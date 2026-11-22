@@ -29,8 +29,8 @@ use crate::node::members::EnrollApprover;
 /// need ([`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`],
 /// [`Permissions::for_trail_keeper`]), and connect only as a leaf
 /// node, not as a client. Also writes the store account credentials of the leaf's second uplink beside them
-/// ([`leaf_store_creds`]), recorded and revoked with them under the same name and with the same lifetime, and the
-/// system account credentials of its third ([`leaf_system_creds`]).
+/// ([`leaf_store_creds`]), and the system account credentials of its third ([`leaf_system_creds`]), both recorded and
+/// revoked with them under the same name and with the same lifetime.
 ///
 /// nats-server applies a leaf user's permissions from the leaf's side, as for a client: publish limits what the leaf
 /// sends to the hub, subscribe what the hub sends to the leaf (the hub swaps them internally).
@@ -74,7 +74,7 @@ pub fn issue_leaf(
     let members = crate::node::members::Members::new(members, webhooks, approver);
     revoke::record(dir, &Issued { members: Some(members), ..issued })?;
     issue_leaf_store(dir, machine, exp, &leaf_store_creds(out))?;
-    issue_leaf_system(dir, machine, &account.public_key(), &leaf_system_creds(out))
+    issue_leaf_system(dir, machine, &account.public_key(), exp, &leaf_system_creds(out))
 }
 
 /// Where [`issue_leaf`] writes the store account credentials of a leaf node whose uplink credentials are at `uplink`:
@@ -108,8 +108,15 @@ pub fn leaf_system_creds(uplink: &Path) -> PathBuf {
 /// the account updates `ants auth push` sends the hub reach the leaf: they hear those of `account` only, answer only
 /// the push ([`revoke::PUSH_INBOX`]), and connect only as a leaf node. They also let the leaf's `full` resolver ask
 /// the hub's for the accounts it holds ([`PACK_REQUEST`]) and hear the answers on the leaf's own system inbox only
-/// ([`system_inbox`]), which catches a leaf up on the pushes it missed while offline.
-pub(super) fn issue_leaf_system(dir: &Path, machine: &Machine, account: &str, out: &Path) -> Result<()> {
+/// ([`system_inbox`]), which catches a leaf up on the pushes it missed while offline. They expire at `exp`, if ever.
+/// Recorded as [`Kind::LeafSystem`], so revoking the uplink by name revokes them too, in the system account.
+pub(super) fn issue_leaf_system(
+    dir: &Path,
+    machine: &Machine,
+    account: &str,
+    exp: Option<u64>,
+    out: &Path,
+) -> Result<()> {
     let system = load(&dir.join(SYSTEM_SEED))?;
     let user = KeyPair::new_user();
     let permissions = Permissions {
@@ -117,8 +124,10 @@ pub(super) fn issue_leaf_system(dir: &Path, machine: &Machine, account: &str, ou
         subscribe: vec![format!("$SYS.REQ.ACCOUNT.{account}.CLAIMS.UPDATE"), format!("{}.*", system_inbox(machine))],
     };
     let only_leaf = json!({ "allowed_connection_types": LEAF_CONNECTIONS });
-    let jwt = user_jwt(&system, &user.public_key(), &leaf_user(machine), permissions, only_leaf, None)?;
-    write_secret(out, &creds(&jwt, &seed(&user)?))
+    let name = leaf_user(machine);
+    let jwt = user_jwt(&system, &user.public_key(), &name, permissions, only_leaf, exp)?;
+    write_secret(out, &creds(&jwt, &seed(&user)?))?;
+    revoke::record(dir, &Issued::new(&user.public_key(), &name, Kind::LeafSystem, exp)?)
 }
 
 /// What a `full` resolver periodically sends the other servers of its system account, with the hash of the accounts

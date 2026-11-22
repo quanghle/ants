@@ -22,7 +22,7 @@ ants auth user alice --human --store-key --js-domain hub  # seed stored in OS cr
 
 ## Issuing and revoking credentials
 
-Every key issued or signed (`user`, `builtin`, `enroll`, `bootstrap`, `channel-manager`, `host`, `leaf`, `enroll approve`, `enroll renew`, `signer`) is recorded in `issued.jsonl` (public key, name, kind, issue time, expiry, permissions version, plus device ID/label, GitHub binding and grant, `admin`, `assistant_of`, or leaf members). `ants auth leaf` records its store account uplink (`leaf-<machine>.store.creds`) beside the uplink, under the same name `leaf-<machine>`, as kind `leaf-store`, with the uplink's lifetime (no expiry). Built-in credentials have the normal rights of an ant under the reserved service ID; `ants auth user` cannot issue them. Credentials stay valid until expiry unless revoked:
+Every key issued or signed (`user`, `builtin`, `enroll`, `bootstrap`, `channel-manager`, `host`, `leaf`, `enroll approve`, `enroll renew`, `signer`) is recorded in `issued.jsonl` (public key, name, kind, issue time, expiry, permissions version, plus device ID/label, GitHub binding and grant, `admin`, `assistant_of`, or leaf members). `ants auth leaf` records its store account uplink (`leaf-<machine>.store.creds`) and system account uplink (`leaf-<machine>.system.creds`) beside the uplink, under the same name `leaf-<machine>`, as kinds `leaf-store` and `leaf-system`, with the uplink's lifetime (no expiry). Built-in credentials have the normal rights of an ant under the reserved service ID; `ants auth user` cannot issue them. Credentials stay valid until expiry unless revoked:
 
 ```sh
 ants auth revoke alice --nats wss://hub.example/nats        # every key issued to alice, all devices
@@ -38,11 +38,11 @@ ants auth push --nats wss://hub.example/nats                # push account JWT t
 
 `ants auth revoke NAME` revokes all keys for `NAME` in `issued.jsonl` (plus matching `.creds` files in `--dir`), updates
 `revoked.json` and `server.conf` (revoking JWTs for those keys issued at or before the revocation timestamp while
-leaving newer keys valid; a leaf node's store account uplink in the store account's JWT, every other key in the team
-account's, and a key `issued.jsonl` does not know in both), and pushes the updated store and team accounts via
-`$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE` to close
-revoked connections immediately. Revoking `leaf-<machine>` thus revokes the leaf's store account uplink with its
-uplink, closing the hub's sourcing of its outbox. Revoking an ant or assistant by name also deletes its identity record from
+leaving newer keys valid; a leaf node's store account uplink in the store account's JWT, its system account uplink in
+the system account's, every other key in the team account's, and a key `issued.jsonl` does not know in all three), and
+pushes the updated store, team and system accounts, in that order, via `$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE` to
+close revoked connections immediately. Revoking `leaf-<machine>` thus revokes the leaf's store and system account
+uplinks with its uplink, closing the hub's sourcing of its outbox and the leaf's hearing of later pushes. Revoking an ant or assistant by name also deletes its identity record from
 `ants_identities` once the account is pushed (with `--no-push` the record stays; `--key` and `--device` revocations keep
 it). Adding the ant again under the name creates a new record with a new `id`. With the earlier home and built-in
 sense, the new record keeps the sense id, avatar, birth and prompts counted before revocation, including during

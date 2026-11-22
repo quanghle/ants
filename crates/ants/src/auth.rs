@@ -156,12 +156,15 @@ pub struct Revocations {
     pub team: BTreeMap<String, u64>,
     /// Those of the store account: the store account uplinks of leaf nodes.
     pub store: BTreeMap<String, u64>,
+    /// Those of the system account: the system account uplinks of leaf nodes.
+    pub system: BTreeMap<String, u64>,
 }
 
 /// Write the `server.conf` of the team in `dir` again, its accounts revoking the user keys of `revocations`. Returns
 /// the store account's public key and JWT, then the team account's, the order in which a server takes them: the
-/// team's account imports from the store's.
-pub fn write_server_conf(dir: &Path, revocations: &Revocations) -> Result<[AccountJwt; 2]> {
+/// team's account imports from the store's; then the system account's, last, as revoking a leaf node's system account
+/// uplink stops the leaf hearing the pushes.
+pub fn write_server_conf(dir: &Path, revocations: &Revocations) -> Result<[AccountJwt; 3]> {
     let keys = Keys::load(dir)?;
     let path = dir.join(SERVER_CONF);
     // nats-server reloads no change of the trusted operator, so the operator JWT already there stays.
@@ -175,6 +178,7 @@ pub fn write_server_conf(dir: &Path, revocations: &Revocations) -> Result<[Accou
     Ok([
         (keys.store.public_key(), store_jwt(&keys, &revocations.store)?),
         (keys.account.public_key(), account_jwt(&keys, &revocations.team)?),
+        (keys.system.public_key(), system_jwt(&keys, &revocations.system)?),
     ])
 }
 
@@ -345,11 +349,6 @@ fn server_conf(keys: &Keys, operator_jwt: Option<&str>, revocations: &Revocation
             None,
         )?,
     };
-    // JetStream needs a system account in operator mode; `ants auth push` connects to it, and leaf nodes join it to
-    // hear the pushes.
-    let system_limits = json!({ "conn": -1, "leaf": -1, "subs": -1, "data": -1, "payload": -1, "wildcards": true });
-    let system_claims = json!({ "limits": system_limits, "type": "account", "version": 2 });
-    let system_jwt = jwt(operator, &system.public_key(), "SYS", system_claims, None)?;
     Ok(format!(
         "# Written by `ants auth init`. Include it from the server configuration: include \"{SERVER_CONF}\"\n\
          # Credentials carry their permissions in the CONNECT line, longer than the 4 KB nats-server allows by default.\n\
@@ -359,11 +358,23 @@ fn server_conf(keys: &Keys, operator_jwt: Option<&str>, revocations: &Revocation
          resolver: MEMORY\n\
          resolver_preload: {{\n  {system}: {system_jwt}\n  {store}: {store_jwt}\n  {account}: {account_jwt}\n}}\n",
         system = system.public_key(),
+        system_jwt = system_jwt(keys, &revocations.system)?,
         store = store.public_key(),
         store_jwt = store_jwt(keys, &revocations.store)?,
         account = account.public_key(),
         account_jwt = account_jwt(keys, &revocations.team)?,
     ))
+}
+
+/// The JWT of the system account, revoking the user keys of `revocations` issued at or before their time. JetStream
+/// needs a system account in operator mode; `ants auth push` connects to it, and leaf nodes join it to hear the pushes.
+fn system_jwt(keys: &Keys, revocations: &BTreeMap<String, u64>) -> Result<String> {
+    let limits = json!({ "conn": -1, "leaf": -1, "subs": -1, "data": -1, "payload": -1, "wildcards": true });
+    let mut nats = json!({ "limits": limits, "type": "account", "version": 2 });
+    if !revocations.is_empty() {
+        nats["revocations"] = json!(revocations);
+    }
+    jwt(&keys.operator, &keys.system.public_key(), "SYS", nats, None)
 }
 
 /// The limits of an account, with JetStream if `jetstream`, else without.

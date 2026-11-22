@@ -41,6 +41,9 @@ pub enum Kind {
     /// The store account uplink of a leaf node, `leaf-<machine>` like its uplink: issued, and revoked by name, with
     /// it, in the store account.
     LeafStore,
+    /// The system account uplink of a leaf node, `leaf-<machine>` like its uplink: issued, and revoked by name, with
+    /// it, in the system account.
+    LeafSystem,
     ChannelManager,
     /// A machine's host credentials, `host-<machine>`.
     Host,
@@ -531,12 +534,12 @@ pub fn standing_approval(issued: &[Issued], name: &str, github: u64) -> Option<G
 
 /// Drop the revocations whose credentials have all expired, and write the `server.conf` of `dir` with the rest.
 /// Returns the public keys and JWTs of the accounts to push, in order ([`auth::write_server_conf`]).
-pub fn apply(dir: &Path) -> Result<[auth::AccountJwt; 2]> {
+pub fn apply(dir: &Path) -> Result<[auth::AccountJwt; 3]> {
     apply_at(dir, auth::now()?)
 }
 
 /// [`apply`] at `now`, in seconds since the epoch.
-fn apply_at(dir: &Path, now: u64) -> Result<[auth::AccountJwt; 2]> {
+fn apply_at(dir: &Path, now: u64) -> Result<[auth::AccountJwt; 3]> {
     let mut all = revoked(dir)?;
     let before = all.len();
     all.retain(|r| !r.expired(now));
@@ -547,18 +550,23 @@ fn apply_at(dir: &Path, now: u64) -> Result<[auth::AccountJwt; 2]> {
 }
 
 /// The accounts' revocations of `revoked`: a key the registry of `dir` records as a leaf node's store account uplink
-/// ([`Kind::LeafStore`]) in the store account, one it records otherwise in the team's, and one it does not know in
-/// both.
+/// ([`Kind::LeafStore`]) in the store account, one it records as a leaf node's system account uplink
+/// ([`Kind::LeafSystem`]) in the system account, one it records otherwise in the team's, and one it does not know in
+/// all three.
 fn revocations(dir: &Path, revoked: Vec<Revoked>) -> Result<auth::Revocations> {
     let issued = issued(dir)?;
     let mut revocations = auth::Revocations::default();
     for r in revoked {
-        let kinds = || issued.iter().filter(|i| i.key == r.key).map(|i| i.kind);
-        let known = kinds().next().is_some();
-        if !known || kinds().any(|kind| kind == Kind::LeafStore) {
+        let kinds: Vec<Kind> = issued.iter().filter(|i| i.key == r.key).map(|i| i.kind).collect();
+        let known = !kinds.is_empty();
+        let in_account = |of: &dyn Fn(Kind) -> bool| !known || kinds.iter().any(|&kind| of(kind));
+        if in_account(&|kind| kind == Kind::LeafStore) {
             revocations.store.insert(r.key.clone(), r.revoked_at);
         }
-        if !known || kinds().any(|kind| kind != Kind::LeafStore) {
+        if in_account(&|kind| kind == Kind::LeafSystem) {
+            revocations.system.insert(r.key.clone(), r.revoked_at);
+        }
+        if in_account(&|kind| !matches!(kind, Kind::LeafStore | Kind::LeafSystem)) {
             revocations.team.insert(r.key, r.revoked_at);
         }
     }
@@ -647,7 +655,9 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
         Kind::Human if issued.admin => format!("ants auth user {name} --human --admin {domain}"),
         Kind::Human => format!("ants auth user {name} --human {domain}"),
         Kind::Webhook => format!("ants auth user {name} --webhook --to ANT... --channel CHANNEL... {domain}"),
-        Kind::Leaf | Kind::LeafStore => format!("ants auth leaf {} {domain}", name.trim_prefix("leaf-")),
+        Kind::Leaf | Kind::LeafStore | Kind::LeafSystem => {
+            format!("ants auth leaf {} {domain}", name.trim_prefix("leaf-"))
+        }
         Kind::ChannelManager => format!("ants auth channel-manager {domain}"),
         Kind::Host => format!("ants auth host {} {domain}", name.trim_prefix("host-")),
         Kind::Observer => format!("ants auth user {name} --observer {domain}"),
@@ -746,9 +756,10 @@ pub struct Pushed {
     pub kept: Option<bool>,
 }
 
-/// Send the JWTs of the team's store account and account, with its revocations, to the server at `url`, as a user of
-/// the system account signed with its key in `dir`; the server, and every leaf node connected to it through a system
-/// account uplink, closes the connections of users revoked since. Fails unless the server applies both.
+/// Send the JWTs of the team's store account, account and system account, with their revocations, to the server at
+/// `url`, as a user of the system account signed with its key in `dir`; the server, and every leaf node connected to
+/// it through a system account uplink, closes the connections of users revoked since. Fails unless the server applies
+/// all three.
 pub async fn push(url: &str, dir: &Path) -> Result<Pushed> {
     ants_daemon::bus::check_url(url)?;
     let accounts = apply(dir)?;
@@ -756,7 +767,7 @@ pub async fn push(url: &str, dir: &Path) -> Result<Pushed> {
     let server = client.server_info().server_name;
     let mut others = Vec::new();
     for (account, jwt) in accounts {
-        others = update(&client, &server, &account, jwt).await?;
+        others.extend(update(&client, &server, &account, jwt).await?);
     }
     Ok(Pushed { kept: keeps_accounts(&client).await, server, others })
 }
