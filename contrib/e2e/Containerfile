@@ -14,6 +14,8 @@ FROM nats:2.15.3-alpine AS nats
 
 FROM node:24-bookworm-slim
 ARG CLAUDE_VERSION=2.1.330
+# The ACP adapter the built-in `claude` harness starts: what `ants setup` finds on a scratch node (group B).
+ARG CLAUDE_ACP_VERSION=0.107.0
 ENV DO_NOT_TRACK=1 DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 npm_config_audit=false npm_config_fund=false \
     HOME=/demo/home ANTS_JS_DOMAIN=hub
@@ -21,10 +23,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git procps jq python3 python3-pyte \
     && rm -rf /var/lib/apt/lists \
     && npm install --global "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
+        "@agentclientprotocol/claude-agent-acp@${CLAUDE_ACP_VERSION}" \
     && npm cache clean --force
 COPY --from=build /ants /usr/local/bin/ants
 COPY --from=nats /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY contrib/e2e/node.sh /usr/local/bin/ants-e2e-node
+COPY contrib/e2e/github_stub.py /usr/local/bin/ants-e2e-github-stub
 RUN chmod +x /usr/local/bin/ants-e2e-node
 WORKDIR /demo
 ENTRYPOINT ["/usr/local/bin/ants-e2e-node"]
