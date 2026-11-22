@@ -388,3 +388,79 @@ async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
     assert_eq!(&timeout(WAIT, a_live.next()).await.unwrap().unwrap().payload[..], b"to a");
     assert!(timeout(Duration::from_millis(300), b_live.next()).await.is_err(), "nothing for dev-b crosses");
 }
+
+/// A human whose CLI goes through a leaf node decides approval requests, the signer's included, on which nothing on
+/// the leaf subscribes: the hub's stream stores the decision, also once the hub took an update of the team's account,
+/// as a revocation pushes.
+#[tokio::test]
+async fn a_human_behind_a_leaf_node_stores_decisions_on_approval_requests() {
+    let leaf_port = free_port();
+    let Some(hub) = NatsServer::spawn_with(|dir| {
+        init(&dir.join("auth")).unwrap();
+        format!(
+            "jetstream {{ store_dir: {:?}, domain: hub }}\ninclude \"auth/{SERVER_CONF}\"\n\
+             resolver {{ type: full, dir: {:?} }}\nleafnodes {{ listen: \"127.0.0.1:{leaf_port}\", no_advertise: true }}\n",
+            dir.join("js"),
+            dir.join("jwt"),
+        )
+    }) else {
+        return;
+    };
+    let (domain, alice, bob, m1) =
+        ("hub".parse::<JsDomain>().unwrap(), p("alice"), p("bob"), "m1".parse::<Machine>().unwrap());
+    let team = hub.dir().join("auth");
+    let creds = |user: &UserId| {
+        let out = hub.dir().join(format!("{user}.creds"));
+        issue(&team, user, Role::Human, Some(&domain), &out).unwrap();
+        out
+    };
+    let h_js = connect_to(&hub.url, &creds(&bob), Some(&domain), &bob).await;
+    bus::ensure_stream(&h_js).await.unwrap();
+    let leaf_creds = hub.dir().join("leaf-m1.creds");
+    let on_m1 = members(&[], std::slice::from_ref(&alice));
+    issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
+    let (server_conf, listen) = (team.join(SERVER_CONF), format!("127.0.0.1:{}", free_port()));
+    let system_creds = leaf_system_creds(&leaf_creds);
+    let leaf = NatsServer::spawn_with(|dir| {
+        let uplinks = [format!("nats-leaf://127.0.0.1:{leaf_port}")];
+        let config = crate::node::leaf::Leaf {
+            machine: &m1,
+            hub_domain: Some(&domain),
+            uplinks: &uplinks,
+            creds: &leaf_creds,
+            system_creds: Some(&system_creds),
+            server_conf: &server_conf,
+            ca_file: None,
+            proxy: None,
+            listen: &listen,
+        };
+        crate::node::leaf::write(&config, &dir.join("leaf.conf")).unwrap();
+        "include \"leaf.conf\"\n".to_owned()
+    })
+    .unwrap();
+    let js = connect_to(&leaf.url, &creds(&alice), Some(&domain), &alice).await;
+    crate::test_support::eventually("alice on the leaf reaches the hub stream", async || {
+        bus::open_stream(&js, &alice).await.is_ok()
+    })
+    .await;
+    let stream = h_js.get_stream(STREAM).await.unwrap();
+    let decide = async |asker: &UserId, when: &str| {
+        let decision = subject::approval_decision(asker, &ants_proto::Uuid::now_v7());
+        let stored = js.publish(decision.clone(), "deny".into()).await.unwrap().await;
+        assert!(stored.is_ok(), "{when}, the hub's stream stores alice's decision on {decision}: {stored:?}");
+        assert_eq!(&stream.get_last_raw_message_by_subject(&decision).await.unwrap().payload[..], b"deny");
+    };
+    decide(&UserId::signer(), "at first").await;
+    creds(&p("carol"));
+    crate::credentials::revoke::revoke(&team, Some("carol"), &[]).unwrap();
+    crate::credentials::revoke::push(&hub.url, &team).await.unwrap();
+    // The hub withdraws the interest and sends it again, once the uplink allows it.
+    let probe = subject::approval_decision(&UserId::signer(), &ants_proto::Uuid::now_v7());
+    ants_test_support::eventually_within(Duration::from_secs(5), "the interest crosses the uplink again", async || {
+        js.publish(probe.clone(), "deny".into()).await.unwrap().await.is_ok()
+    })
+    .await;
+    for asker in [UserId::signer(), p("dev-a")] {
+        decide(&asker, "after an update of the account").await;
+    }
+}

@@ -1569,3 +1569,51 @@ fn only_hosts_reach_sense_event_logs() {
         }
     }
 }
+
+/// How nats-server's `ReverseMatch` sees `allowance` against `interest`, a subject ending in `>`: `None` when the
+/// allowance publishes nothing under it, else whether it finds the allowance. Below the interest's tokens it descends
+/// only through literal ones, so a `*` before the allowance's last token hides it.
+fn reverse_matched(allowance: &str, interest: &str) -> Option<bool> {
+    let prefix: Vec<&str> = interest.strip_suffix(".>").expect("an interest ending in .>").split('.').collect();
+    let tokens: Vec<&str> = allowance.split('.').collect();
+    for (i, want) in prefix.iter().enumerate() {
+        match tokens.get(i) {
+            Some(&">") => return Some(true),
+            Some(t) if *t == "*" || t == want => {}
+            _ => return None,
+        }
+    }
+    let below = tokens.get(prefix.len()..).filter(|below| !below.is_empty())?;
+    Some(below[..below.len() - 1].iter().all(|t| *t != "*"))
+}
+
+/// The hub sends a leaf the interest of the streams in the team's account (one per subject the store account exports)
+/// only if the leaf's uplink allows publishing a subject `ReverseMatch` finds under it, once it checks, as after an
+/// update of the account: for each one a member stores under, there is such a subject, whatever its role.
+#[test]
+fn the_hub_s_streams_take_what_a_leaf_s_members_store() {
+    let m1: Machine = "m1".parse().unwrap();
+    let (alice, dev_a, pa) = (p("alice"), p("dev-a"), p("pa"));
+    let mut interests: Vec<&str> = crate::STREAM_SUBJECTS.to_vec();
+    interests.extend(["$KV.>", "$O.>"]);
+    for (role, leaf) in [
+        ("a human", Permissions::for_leaf(&m1, [(&alice, LeafRole::Human)])),
+        ("an ant", Permissions::for_leaf(&m1, [(&dev_a, LeafRole::Ant)])),
+        ("an assistant", Permissions::for_leaf(&m1, [(&pa, LeafRole::AssistantOf(&alice))])),
+    ] {
+        for interest in &interests {
+            let seen: Vec<_> = leaf.publish.iter().filter_map(|s| Some((s, reverse_matched(s, interest)?))).collect();
+            assert!(
+                seen.is_empty() || seen.iter().any(|(_, found)| *found),
+                "{role} stores under {interest} on {:?} only, none of which nats-server finds",
+                seen.iter().map(|(s, _)| s).collect::<Vec<_>>()
+            );
+        }
+    }
+    assert_eq!(reverse_matched("ants.approvals.*.*", "ants.approvals.>"), Some(false));
+    assert_eq!(reverse_matched("ants.approvals.alice.alice", "ants.approvals.>"), Some(true));
+    assert_eq!(reverse_matched("ants.approvals.alice", "ants.approvals.>"), Some(true));
+    assert_eq!(reverse_matched("ants.inbox.>", "ants.inbox.>"), Some(true));
+    assert_eq!(reverse_matched("ants.notes.*.alice", "ants.inbox.>"), None);
+    assert_eq!(reverse_matched("ants.approvals", "ants.approvals.>"), None);
+}
