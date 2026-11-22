@@ -513,15 +513,16 @@ member and wakes no one: no message to `leaf-ant`, no answer, no triage. After `
 t=$(tok); TH=$(dm "L7-$t"); TH2=$(dm "L7-$t, another")
 alice remind set "$TH" 2h "check $t"; alice remind set "$TH2" 1h "first $t"; alice remind list; alice remind list --json
 alice remind clear "$TH2"; alice remind set "$TH" 1s "due $t"; alice remind list --json
-# ants chat: home
+# ants chat: /reminders
 alice remind clear "$TH"
 alice thread mute "$TH" --for 1h; alice notify snooze 10m; alice notify status; alice notify status --json
 alice notify resume; alice thread unmute "$TH"; alice notify status --json
 ```
 
-**Expect** `remind list` gives the reminders soonest first (`TH2`, then `TH`); `clear` removes one; setting another
-on `TH` replaces its reminder, which turns `is_due` within seconds and shows on the chat's home with its note. No push
-sink runs in the fixture: `notify status` lists the snooze and the muted thread, and neither once resumed and unmuted.
+**Expect** `remind list` gives the reminders soonest first (`TH2`, then `TH`); `clear` removes one; setting another on
+`TH` replaces its reminder, which turns `is_due` within seconds and is counted due by the chat's `/reminders` (the home
+lists it with its note too, below the stuck items a long-used fixture gathers). No push sink runs in the fixture:
+`notify status` lists the snooze and the muted thread, and neither once resumed and unmuted.
 
 ### L8 · `ants status`, `ants spend`, `ants queue` (P1, 1 prompt)
 
@@ -534,7 +535,8 @@ alice queue
 
 **Expect** `status` prints one line (home items by kind, working ants, the day's spend); `--json` an object with
 `home`, `working` and `spend_today`; `--tmux` `⚑N ◐N $S`. `spend --thread` shows the thread's tokens, more than 0;
-`--days 1 --json` one day and the thread among its threads. `queue` with no ant answers for every live ant.
+`--days 1 --json` one day and the thread among its threads. `queue` with no ant answers for every live ant (its
+table of waiting messages, or that none waits).
 
 ### L9 · Messages from a file (P2, 1 prompt)
 
@@ -968,7 +970,8 @@ prints its text opened; `bob`'s reply appears in the DM with `🔒`; the watcher
 
 On a thread with `leaf-ant`'s reply `HK-$t` (`a_thread` of [L](#l-looking-after-threads-and-channels)): `/goto
 THREAD`, then `/title Chat $t`, `/done`, `/pin` and `/react rocket`. Reopened: `↑` (selecting the reply), `>`, `Reply
-with exactly CQUOTE-$t`, `Enter`. Reopened: `↑`, `f`, `bob FWD-$t`, `Enter`; `/tldr`; `/search CQUOTE-$t`.
+with exactly CQUOTE-$t`, `Enter`. Reopened: `↑`, `f`, `bob FWD-$t`, `Enter`; back on the thread (`/goto THREAD`,
+as the forward moves the chat to the new thread), `/tldr`; `/search CQUOTE-$t`.
 
 **Expect** the status line confirms each mark and the CLI reads it back as L1 to L5 do: the title, `done` by alice,
 the thread among `--pinned`, `reacted rocket: alice` on the reply. `>` pre-fills `@leaf-ant ` under a bar titled
