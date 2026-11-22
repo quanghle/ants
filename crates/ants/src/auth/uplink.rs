@@ -29,7 +29,8 @@ use crate::node::members::EnrollApprover;
 /// need ([`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`],
 /// [`Permissions::for_trail_keeper`]), and connect only as a leaf
 /// node, not as a client. Also writes the store account credentials of the leaf's second uplink beside them
-/// ([`leaf_store_creds`]), and the system account credentials of its third ([`leaf_system_creds`]).
+/// ([`leaf_store_creds`]), recorded and revoked with them under the same name and with the same lifetime, and the
+/// system account credentials of its third ([`leaf_system_creds`]).
 ///
 /// nats-server applies a leaf user's permissions from the leaf's side, as for a client: publish limits what the leaf
 /// sends to the hub, subscribe what the hub sends to the leaf (the hub swaps them internally).
@@ -64,13 +65,15 @@ pub fn issue_leaf(
     dedup(&mut permissions);
     let only_leaf = json!({ "allowed_connection_types": LEAF_CONNECTIONS });
     let name = leaf_user(machine);
-    let jwt = user_jwt(&account, &user.public_key(), &name, permissions, only_leaf, None)?;
+    // Uplink credentials never expire; renewing keeps their lifetime.
+    let exp = None;
+    let jwt = user_jwt(&account, &user.public_key(), &name, permissions, only_leaf, exp)?;
     check_uplink_size(&jwt, machine)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
-    let issued = Issued::new(&user.public_key(), &name, Kind::Leaf, None)?;
+    let issued = Issued::new(&user.public_key(), &name, Kind::Leaf, exp)?;
     let members = crate::node::members::Members::new(members, webhooks, approver);
     revoke::record(dir, &Issued { members: Some(members), ..issued })?;
-    issue_leaf_store(dir, machine, &leaf_store_creds(out))?;
+    issue_leaf_store(dir, machine, exp, &leaf_store_creds(out))?;
     issue_leaf_system(dir, machine, &account.public_key(), &leaf_system_creds(out))
 }
 
@@ -82,14 +85,17 @@ pub fn leaf_store_creds(uplink: &Path) -> PathBuf {
 
 /// Write to `out` the credentials of the store account for the uplink of `machine`'s leaf node that binds the leaf's
 /// JetStream to the hub's, for the hub's sourcing of the machine's outbox ([`Permissions::for_leaf_store`]); they
-/// connect only as a leaf node.
-fn issue_leaf_store(dir: &Path, machine: &Machine, out: &Path) -> Result<()> {
+/// connect only as a leaf node and expire at `exp`, if ever. Recorded as [`Kind::LeafStore`], so revoking the uplink
+/// by name revokes them too, in the store account.
+fn issue_leaf_store(dir: &Path, machine: &Machine, exp: Option<u64>, out: &Path) -> Result<()> {
     let store = load(&dir.join(STORE_SEED))?;
     let user = KeyPair::new_user();
     let only_leaf = json!({ "allowed_connection_types": LEAF_CONNECTIONS });
     let permissions = Permissions::for_leaf_store(machine);
-    let jwt = user_jwt(&store, &user.public_key(), &leaf_user(machine), permissions, only_leaf, None)?;
-    write_secret(out, &creds(&jwt, &seed(&user)?))
+    let name = leaf_user(machine);
+    let jwt = user_jwt(&store, &user.public_key(), &name, permissions, only_leaf, exp)?;
+    write_secret(out, &creds(&jwt, &seed(&user)?))?;
+    revoke::record(dir, &Issued::new(&user.public_key(), &name, Kind::LeafStore, exp)?)
 }
 
 /// Where [`issue_leaf`] writes the system account credentials of a leaf node whose uplink credentials are at

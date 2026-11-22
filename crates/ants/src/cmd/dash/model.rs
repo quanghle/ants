@@ -160,7 +160,7 @@ impl Model {
     pub fn history_loaded(&mut self, thread: &ThreadId, read: anyhow::Result<Vec<Entry>>, now: DateTime<Utc>) {
         let Some(history) = &mut self.history else { return };
         if let Err(e) = history.loaded(thread, read) {
-            self.notify(format!("reading thread {thread}: {e:#}"), Level::Error, now);
+            self.failed(&format!("reading thread {thread}"), &e, now);
         }
     }
 
@@ -208,6 +208,24 @@ impl Model {
         }
         self.notify("reconnected: reading what changed meanwhile", Level::Info, now);
         Some(Action::Refresh)
+    }
+
+    /// Take a read the hub's JetStream answered at `now`: once it is back in reach, what was missed meanwhile is read
+    /// again.
+    pub fn reached(&mut self, now: DateTime<Utc>) -> Option<Action> {
+        if !self.live.reached() {
+            return None;
+        }
+        self.notify("hub reached again: reading what changed meanwhile", Level::Info, now);
+        Some(Action::Refresh)
+    }
+
+    /// Tell that `what` failed with `e` at `now`, unless the hub's JetStream did not answer: the header shows it out of
+    /// reach instead, and the read is tried again on its own.
+    pub fn failed(&mut self, what: &str, e: &anyhow::Error, now: DateTime<Utc>) {
+        if let Some(text) = self.live.failed(what, e, now) {
+            self.notify(text, Level::Error, now);
+        }
     }
 
     pub fn key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {

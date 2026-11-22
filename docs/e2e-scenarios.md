@@ -751,9 +751,10 @@ Select `leaf-ant`, press `p` then `y`; press `p` then `y` again.
 
 `uplink client down` in another terminal; type a message to `leaf-ant`; `uplink client up`.
 
-**Expect** the header shows the connection lost within a minute, without the chat exiting; the message is either sent
-into the outbox or comes back as the thread's draft with an error, never lost silently; once the uplink is back the
-header shows connected, and the thread shows the message and its reply without restarting the chat.
+**Expect** the header shows `○ hub out of reach` within a minute (the client's own leaf node stays up), without the
+chat exiting and without errors about creating buckets; the message is either sent into the outbox or comes back as the
+thread's draft with an error, never lost silently; once the uplink is back the header shows connected, and the thread
+shows the message and its reply without restarting the chat.
 
 ### U9 · A sealed direct message to another human (P1)
 

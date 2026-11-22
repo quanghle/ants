@@ -9,7 +9,7 @@
 //! uplink (`ants leaf config`), which applies it too and keeps it across restarts.
 
 use ants_daemon::bus::relayed;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::Path;
@@ -38,6 +38,9 @@ pub enum Kind {
     Human,
     Webhook,
     Leaf,
+    /// The store account uplink of a leaf node, `leaf-<machine>` like its uplink: issued, and revoked by name, with
+    /// it, in the store account.
+    LeafStore,
     ChannelManager,
     /// A machine's host credentials, `host-<machine>`.
     Host,
@@ -540,8 +543,26 @@ fn apply_at(dir: &Path, now: u64) -> Result<[auth::AccountJwt; 2]> {
     if all.len() != before {
         write_revoked(dir, &all)?;
     }
-    let revocations: BTreeMap<String, u64> = all.into_iter().map(|r| (r.key, r.revoked_at)).collect();
-    auth::write_server_conf(dir, &revocations)
+    auth::write_server_conf(dir, &revocations(dir, all)?)
+}
+
+/// The accounts' revocations of `revoked`: a key the registry of `dir` records as a leaf node's store account uplink
+/// ([`Kind::LeafStore`]) in the store account, one it records otherwise in the team's, and one it does not know in
+/// both.
+fn revocations(dir: &Path, revoked: Vec<Revoked>) -> Result<auth::Revocations> {
+    let issued = issued(dir)?;
+    let mut revocations = auth::Revocations::default();
+    for r in revoked {
+        let kinds = || issued.iter().filter(|i| i.key == r.key).map(|i| i.kind);
+        let known = kinds().next().is_some();
+        if !known || kinds().any(|kind| kind == Kind::LeafStore) {
+            revocations.store.insert(r.key.clone(), r.revoked_at);
+        }
+        if !known || kinds().any(|kind| kind != Kind::LeafStore) {
+            revocations.team.insert(r.key, r.revoked_at);
+        }
+    }
+    Ok(revocations)
 }
 
 /// Print the revocations of `dir`: key, name if known, when revoked and until when it matters.
@@ -626,7 +647,7 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
         Kind::Human if issued.admin => format!("ants auth user {name} --human --admin {domain}"),
         Kind::Human => format!("ants auth user {name} --human {domain}"),
         Kind::Webhook => format!("ants auth user {name} --webhook --to ANT... --channel CHANNEL... {domain}"),
-        Kind::Leaf => format!("ants auth leaf {} {domain}", name.trim_prefix("leaf-")),
+        Kind::Leaf | Kind::LeafStore => format!("ants auth leaf {} {domain}", name.trim_prefix("leaf-")),
         Kind::ChannelManager => format!("ants auth channel-manager {domain}"),
         Kind::Host => format!("ants auth host {} {domain}", name.trim_prefix("host-")),
         Kind::Observer => format!("ants auth user {name} --observer {domain}"),

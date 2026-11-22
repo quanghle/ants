@@ -121,9 +121,13 @@ async fn ensure_kept(js: &jetstream::Context, object: hub::Object) -> Result<kv:
 
 /// The KV bucket of `object`, created as `ants init` does when missing: its rollups denied.
 async fn ensure_bucket(js: &jetstream::Context, object: hub::Object) -> Result<kv::Store> {
-    Box::pin(hub::ensure_bucket(js, object))
-        .await
-        .with_context(|| format!("opening {object} (with credentials, `ants init` as the human creates it)"))
+    Box::pin(hub::ensure_bucket(js, object)).await.map_err(|e| {
+        if super::unanswered(&e) {
+            e.context(format!("opening {object}"))
+        } else {
+            e.context(format!("opening {object} (with credentials, `ants init` as the human creates it)"))
+        }
+    })
 }
 
 /// Create the bucket of `object` as `ants init` does, without its stream info.

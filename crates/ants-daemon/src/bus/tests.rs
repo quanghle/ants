@@ -222,6 +222,74 @@ async fn through_a_leaf_a_publish_with_no_stream_on_the_hub_names_ants_init() {
     }
 }
 
+/// Through a leaf node whose uplink is down, the hub's JetStream does not answer: reading its stream says so, and a
+/// bucket that cannot be read is not missing, so nothing tries to create it; once the hub is back, the bucket opens.
+#[tokio::test]
+async fn through_a_leaf_whose_uplink_is_down_a_bucket_is_out_of_reach_not_missing() {
+    let uplink_port = free_port();
+    let Some(mut hub) = NatsServer::spawn_with(|dir| {
+        format!(
+            "jetstream {{ store_dir: {:?}, domain: hub }}\nleafnodes {{ listen: \"127.0.0.1:{uplink_port}\" }}\n",
+            dir.join("js")
+        )
+    }) else {
+        return;
+    };
+    let leaf = NatsServer::spawn_with(|dir| {
+        format!(
+            "jetstream {{ store_dir: {:?}, domain: m1 }}\nleafnodes {{ remotes: [{{ url: \
+                 \"nats-leaf://127.0.0.1:{uplink_port}\" }}] }}\n",
+            dir.join("js")
+        )
+    })
+    .unwrap();
+    let (dev, domain) = (dev(), "hub".parse().unwrap());
+    let (_client, js) =
+        connect_retrying(&leaf.url, None, Some(&domain), &dev, "test", std::future::pending()).await.unwrap().unwrap();
+    ensure_stream(&js).await.unwrap();
+    ensure_channels(&js).await.unwrap();
+    let read = js.get_stream(STREAM).await.map(drop).map_err(anyhow::Error::from);
+    assert!(read.is_ok(), "{read:?}");
+
+    hub.stop();
+    let start = std::time::Instant::now();
+    let err = loop {
+        match js.get_stream(STREAM).await {
+            Err(e) => break anyhow::Error::from(e),
+            Ok(_) => assert!(start.elapsed() < Duration::from_secs(10), "the hub still answers"),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(unanswered(&err), "{err:#}");
+    let err = ensure_channels(&js).await.unwrap_err();
+    let text = format!("{err:#}");
+    assert!(unanswered(&err), "{text}");
+    assert!(text.contains("did not answer") && !text.contains("creating") && !text.contains("ants init"), "{text}");
+
+    hub.start_again();
+    let start = std::time::Instant::now();
+    while let Err(e) = ensure_channels(&js).await {
+        assert!(start.elapsed() < Duration::from_secs(20), "the bucket is still out of reach: {e:#}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[test]
+fn tells_jetstream_not_answering_from_its_answers() {
+    use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind, RequestError, RequestErrorKind};
+    let no_responders =
+        GetStreamError::with_source(GetStreamErrorKind::Request, RequestError::new(RequestErrorKind::NoResponders));
+    let lookup = anyhow::Error::from(no_responders).context("opening bucket ants_channels");
+    assert!(unanswered(&lookup));
+    let timed_out = async_nats::jetstream::context::CreateStreamError::new(
+        async_nats::jetstream::context::CreateStreamErrorKind::TimedOut,
+    );
+    assert!(unanswered(&timed_out.into()));
+    let missing = serde_json::from_str(r#"{"code":404,"err_code":10059,"description":"stream not found"}"#).unwrap();
+    assert!(!unanswered(&GetStreamError::new(GetStreamErrorKind::JetStream(missing)).into()));
+    assert!(!unanswered(&anyhow::anyhow!("permissions violation")));
+}
+
 #[test]
 fn warns_once_per_kind_of_subject() {
     assert_eq!(subject_kind("ants.kind-test.ops.dev-a"), "ants.kind-test");

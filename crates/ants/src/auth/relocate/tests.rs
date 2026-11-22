@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use ants_daemon::hub;
 use ants_proto::{STREAM, UserId, subject};
 
@@ -50,7 +48,7 @@ async fn a_hub_moved_to_the_store_account_keeps_every_entry() {
     server.stop();
 
     let team = server.dir().join("auth");
-    write_server_conf(&team, &BTreeMap::new()).unwrap();
+    write_server_conf(&team, &crate::auth::Revocations::default()).unwrap();
     let moved = move_stores(&server.dir().join("js"), &team.join(SERVER_CONF), false).unwrap();
     assert!(moved.streams.contains(&STREAM.to_owned()), "{moved:?}");
     assert_eq!((moved.replaced.len(), moved.left), (0, None));

@@ -126,7 +126,9 @@ fn renewable(path: &Path, jwt: &str) -> Result<(auth::Claims, Finding)> {
         return Ok((claims, finding));
     }
     let why = match &finding.kind {
-        Kind::Enrollment { .. } | Kind::LeafSystem { .. } | Kind::Bootstrap => "are not renewed over NATS",
+        Kind::Enrollment { .. } | Kind::LeafSystem { .. } | Kind::LeafStore { .. } | Kind::Bootstrap => {
+            "are not renewed over NATS"
+        }
         _ => "expired, and expired credentials connect no more",
     };
     bail!(

@@ -242,6 +242,39 @@ pub async fn reach_jetstream(
     }
 }
 
+/// Whether `e` is JetStream not answering: no responders, as through a leaf node whose uplink is down, or no answer in
+/// time. A request JetStream answered, if only that what it names is missing, is not.
+pub fn unanswered(e: &anyhow::Error) -> bool {
+    use async_nats::jetstream::context::{
+        AccountError, AccountErrorKind, ConsumerInfoError, CreateStreamError, CreateStreamErrorKind, PublishError,
+        PublishErrorKind, RequestError, RequestErrorKind,
+    };
+    use async_nats::jetstream::stream::{DirectGetError, DirectGetErrorKind};
+    e.chain().any(|e| {
+        if let Some(e) = e.downcast_ref::<RequestError>() {
+            matches!(e.kind(), RequestErrorKind::NoResponders | RequestErrorKind::TimedOut)
+        } else if let Some(e) = e.downcast_ref::<async_nats::RequestError>() {
+            matches!(e.kind(), async_nats::RequestErrorKind::NoResponders | async_nats::RequestErrorKind::TimedOut)
+        } else if let Some(e) = e.downcast_ref::<AccountError>() {
+            matches!(e.kind(), AccountErrorKind::JetStreamUnavailable | AccountErrorKind::TimedOut)
+        } else if let Some(e) = e.downcast_ref::<CreateStreamError>() {
+            matches!(e.kind(), CreateStreamErrorKind::JetStreamUnavailable | CreateStreamErrorKind::TimedOut)
+        } else if let Some(e) = e.downcast_ref::<ConsumerInfoError>() {
+            matches!(e.kind(), ConsumerInfoErrorKind::NoResponders | ConsumerInfoErrorKind::TimedOut)
+        } else if let Some(e) = e.downcast_ref::<PublishError>() {
+            matches!(e.kind(), PublishErrorKind::StreamNotFound | PublishErrorKind::TimedOut)
+        } else if let Some(e) = e.downcast_ref::<DirectGetError>() {
+            match e.kind() {
+                DirectGetErrorKind::TimedOut => true,
+                DirectGetErrorKind::ErrorResponse(code, _) => code == async_nats::StatusCode::NO_RESPONDERS,
+                _ => false,
+            }
+        } else {
+            false
+        }
+    })
+}
+
 /// The options of a connection as `user`, named `name`, with the credentials file `creds`, after warning about what
 /// [`crate::secrets::creds::warn`] finds in it.
 fn options(creds: Option<&Path>, store: &dyn Store, user: &UserId, name: &str) -> Result<async_nats::ConnectOptions> {

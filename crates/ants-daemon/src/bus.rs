@@ -18,7 +18,7 @@ pub use buckets::{
 };
 pub use connect::{
     authenticate, check_url, connect, connect_retrying, connect_retrying_with, connect_watched, connect_with,
-    jetstream, reach_jetstream, worth_retrying,
+    jetstream, reach_jetstream, unanswered, worth_retrying,
 };
 pub use live::{CATCH_UP, LiveInbox, caught_up_inbox, live_inbox};
 pub use publish::{Stored, explain, explained, publish, publish_json, store, store_acked, store_in_hub, uncaptured};

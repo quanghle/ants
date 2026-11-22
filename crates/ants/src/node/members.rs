@@ -425,7 +425,8 @@ mod tests {
         let with_c = Members { ants: users(&["dev-a", "dev-c"]), ..kept.clone() };
         assert_eq!(issued(&team, &m1).unwrap(), Some(with_c), "the enrolled ant joins");
         let listed = revoke::listing(&team, auth::now().unwrap()).unwrap();
-        assert!(listed.len() == 1 && !listed[0].reissued, "the same key, once: {listed:?}");
+        let uplinks: Vec<_> = listed.iter().filter(|l| l.issued.kind == Kind::Leaf).collect();
+        assert!(uplinks.len() == 1 && !uplinks[0].reissued, "the same key, once: {listed:?}");
         assert!(enrolled(&team, &"m2".parse().unwrap(), &p("dev-c")).is_err(), "no uplink of m2 issued");
 
         assert!(retired(&team, &m1, &p("dev-c")).unwrap());

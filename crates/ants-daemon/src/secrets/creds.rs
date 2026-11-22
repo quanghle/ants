@@ -58,6 +58,12 @@ pub enum Kind {
     LeafSystem {
         machine: Machine,
     },
+    /// The store account uplink of `machine`'s leaf node, which `ants auth leaf` writes beside its uplink's
+    /// credentials and through which the hub sources the machine's outbox
+    /// ([`ants_proto::Permissions::for_leaf_store`]).
+    LeafStore {
+        machine: Machine,
+    },
     /// The host credentials of `machine`, with which its daemon writes the machine's record and takes its admin
     /// orders ([`ants_proto::Permissions::for_host`]).
     Host {
@@ -207,6 +213,7 @@ impl Finding {
             Kind::Observer => format!("observer {}", self.name),
             Kind::Leaf { machine, .. } => format!("the leaf node uplink of {machine}"),
             Kind::LeafSystem { machine } => format!("the system account uplink of the leaf node of {machine}"),
+            Kind::LeafStore { machine } => format!("the store account uplink of the leaf node of {machine}"),
             Kind::Host { machine } => format!("the host of {machine}"),
             Kind::Enrollment { ant } => format!("the enrollment of {ant}"),
             Kind::Bootstrap => "the bootstrap credentials".to_owned(),
@@ -244,7 +251,7 @@ impl Finding {
                 renew
             }
             // They carry nothing of the members: those are in the uplink's credentials, leaf-<machine>.creds.
-            Kind::LeafSystem { machine } => vec![format!(
+            Kind::LeafSystem { machine } | Kind::LeafStore { machine } => vec![format!(
                 "ants auth leaf {machine} --ant ANT... --human HUMAN... --webhook WEBHOOK... [--js-domain DOMAIN]"
             )],
             Kind::Host { machine } => vec![format!("ants auth host {machine}{domain}")],
@@ -286,7 +293,11 @@ impl Finding {
     pub fn renewable(&self, now: u64) -> bool {
         let kind = !matches!(
             self.kind,
-            Kind::LeafSystem { .. } | Kind::Host { .. } | Kind::Enrollment { .. } | Kind::Bootstrap
+            Kind::LeafSystem { .. }
+                | Kind::LeafStore { .. }
+                | Kind::Host { .. }
+                | Kind::Enrollment { .. }
+                | Kind::Bootstrap
         );
         kind && self.expiry(now) != Expiry::Expired
     }
@@ -328,9 +339,9 @@ impl Finding {
                 "renew them on the machine holding the team keys with {issue}, put the new file in their place, \
                  restart the leaf node, then run {outbox} as a human"
             ),
-            (Kind::LeafSystem { machine }, _) => format!(
+            (Kind::LeafSystem { machine } | Kind::LeafStore { machine }, _) => format!(
                 "renew them on the machine holding the team keys with {}, naming the members of the uplink \
-                 credentials leaf-{machine}.creds, which it renews too, put both new files in their place and restart \
+                 credentials leaf-{machine}.creds, which it renews too, put the new files in their place and restart \
                  the leaf node",
                 quoted.join(" and ")
             ),
@@ -638,6 +649,9 @@ fn kind(name: &str, publish: &[String], subscribe: &[String], leaf_only: bool) -
         let machine: Machine = machine.parse().map_err(|e| anyhow!("a leaf node's credentials named {name}: {e}"))?;
         if !subscribe.is_empty() && subscribe.iter().all(|s| s.starts_with("$SYS.")) {
             return Ok(Kind::LeafSystem { machine });
+        }
+        if has(publish, &format!("{}.>", machine.deliver_prefix())) {
+            return Ok(Kind::LeafStore { machine });
         }
         let users = subscribe.iter().filter_map(|s| s.strip_prefix("_INBOX.")?.strip_suffix(".>")?.parse().ok());
         // With a JetStream domain, an uplink allows KV writes in their domain form only.

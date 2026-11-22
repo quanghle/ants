@@ -334,6 +334,8 @@ impl Feed {
         &self.js
     }
 
+    /// Whether the client is connected to its server. Through a leaf node, the hub beyond it shows in the reads it
+    /// answers or not ([`State::failed`], [`State::reached`]).
     pub fn connected(&self) -> bool {
         self.client.connection_state() == Connection::Connected
     }

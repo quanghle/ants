@@ -1,5 +1,9 @@
 //! Ant daemon: consumes an ant's durable inbox and answers each message through an ACP harness.
 
+#![cfg_attr(
+    all(test, target_os = "macos"),
+    allow(linker_messages, reason = "a test binary's unwind tables outgrow what ld64 encodes compactly (16 MB)")
+)]
 #![expect(
     rustdoc::private_intra_doc_links,
     reason = "read with --document-private-items, where the links to private items resolve"
