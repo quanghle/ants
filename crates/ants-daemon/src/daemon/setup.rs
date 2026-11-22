@@ -583,10 +583,9 @@ pub(super) async fn inbox_messages(
     };
     let posts = channels.is_some();
     let paused = config.pause.subscribe();
-    let current = match *paused.borrow() {
-        Some(_) => None,
-        None => Some(open_messages(stream, &config.ant, in_hand, posts).await?),
-    };
+    // Not across the opening: a reload replacing the pause meanwhile would block the daemon's thread on its lock.
+    let is_paused = paused.borrow().is_some();
+    let current = if is_paused { None } else { Some(open_messages(stream, &config.ant, in_hand, posts).await?) };
     let (stream, ant) = (stream.clone(), config.ant.clone());
     let messages = pause::pausable(paused, current, async move || open_messages(&stream, &ant, in_hand, posts).await);
     Ok((Box::pin(messages), channels.unwrap_or_default()))
