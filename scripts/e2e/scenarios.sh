@@ -2164,7 +2164,7 @@ X4() {
     out=$(alice trail show "$run")
     printf '%s\n' "$out"
     has "state: done" <<<"$out"
-    if grep -q "^pending calls:" <<<"$out"; then known ants-vf35d "trail show lists the answered calls of a done run as pending"; fi
+    ! grep -q "^pending calls:" <<<"$out" || fail "trail show lists the answered calls of a done run as pending"
     [ "$(run_field "$run" .run.steps)" = 2 ] || fail "the run counts $(run_field "$run" .run.steps) steps, not 2"
     [ "$(first_answers "$t")" = 1 ] || fail "hub-ant answered FIRST-$t $(first_answers "$t") times"
     if out=$(alice trail resume "$run" 2>&1); then printf '%s\n' "$out"; fail "a resume of a done run was taken"; fi
@@ -2237,7 +2237,7 @@ X6() {
 
 scenario X7 P1 "Stopping and resuming a run from ants chat"
 X7() {
-    local t short out
+    local t short out message
     t=$(tok)
     run=
     trap 'alice ant resume leaf-ant >/dev/null 2>&1 || true; stop_unended "$run"' EXIT
@@ -2247,15 +2247,16 @@ X7() {
     [ -n "$run" ] || fail "no run started"
     eventually 180 second_waits "$run"
     short=${run:0:13}
-    # The chat shows /trail runs in $PAGER: one that copies what it is given.
+    message=$(second_message "$run")
+    # The chat shows /trail runs, and the steps a stop leaves waiting, in $PAGER: one that appends what it is given.
     container exec "$name-client" rm -f /tmp/ants-e2e-x7-runs.txt
-    out=$(CHAT_PAGER='cp -f "$1" /tmp/ants-e2e-x7-runs.txt; true' chat "wait:connected" "type:/trail runs" "key:enter" \
+    out=$(CHAT_PAGER='cat "$1" >>/tmp/ants-e2e-x7-runs.txt; true' chat "wait:connected" "type:/trail runs" "key:enter" \
         "wait:the pager lists them" "type:/trail stop $short" "key:enter" "wait:stopped run $run on hub-ant" "sleep:2")
     printf '%s\n' "$out"
-    if ! grep -qF "ants withdraw leaf-ant" <<<"$out"; then
-        known ants-eik57 "the stop's status line is cut before the step to withdraw"
-    fi
-    container exec "$name-client" cat /tmp/ants-e2e-x7-runs.txt | grep -F "$run" | has running "the run in /trail runs"
+    has "1 step still waiting in other ants' queues" "the stop's status line" <<<"$out"
+    out=$(container exec "$name-client" cat /tmp/ants-e2e-x7-runs.txt)
+    grep -F "$run" <<<"$out" | has running "the run in /trail runs"
+    has "ants withdraw leaf-ant $message" "the stop's page" <<<"$out"
     [ "$(run_state "$run")" = stopped ] || fail "the run is $(run_state "$run"), not stopped"
     alice ant resume leaf-ant
     chat "wait:connected" "type:/trail resume $short" "key:enter" "wait:resumed run" "snap"

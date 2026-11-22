@@ -56,8 +56,26 @@ pub(super) async fn ask(
     bail!("no daemon serving {ant} answered within {}s", wait.as_secs())
 }
 
-/// Stop `run` as human `by`; what `ants trail stop` prints.
-pub(crate) async fn stop(client: &async_nats::Client, by: &UserId, run: &TrailRun) -> Result<String> {
+/// How a stop went: the run stopped, leaving `waiting` steps in other ants' queues, or its stop pending as its script
+/// computes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Stop {
+    Stopped { waiting: Vec<WaitingStep> },
+    Pending,
+}
+
+impl Stop {
+    /// What `ants trail stop` prints of `run`, stopped so.
+    pub(crate) fn said(&self, run: &TrailRun) -> String {
+        match self {
+            Self::Stopped { waiting } => stopped(&run.run, &run.conductor, waiting),
+            Self::Pending => stopping(&run.run, &run.conductor),
+        }
+    }
+}
+
+/// Stop `run` as human `by`; [`Stop::said`] is what `ants trail stop` prints.
+pub(crate) async fn stop(client: &async_nats::Client, by: &UserId, run: &TrailRun) -> Result<Stop> {
     stop_within(client, by, run, ANSWER_WAIT).await
 }
 
@@ -67,14 +85,14 @@ pub(super) async fn stop_within(
     by: &UserId,
     run: &TrailRun,
     wait: Duration,
-) -> Result<String> {
+) -> Result<Stop> {
     if run.finished() {
         bail!("run {} has ended: {}", run.run, run.state.name());
     }
     let action = TrailAction::Stop { run: run.run.clone() };
     match ask(client, &run.conductor, by, action, wait).await? {
-        TrailOutcome::Stopped { waiting, .. } => Ok(stopped(&run.run, &run.conductor, &waiting)),
-        TrailOutcome::Stopping { .. } => Ok(stopping(&run.run, &run.conductor)),
+        TrailOutcome::Stopped { waiting, .. } => Ok(Stop::Stopped { waiting }),
+        TrailOutcome::Stopping { .. } => Ok(Stop::Pending),
         other => bail!("{} answered {other:?}", run.conductor),
     }
 }

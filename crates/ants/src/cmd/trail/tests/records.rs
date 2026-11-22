@@ -192,6 +192,7 @@ async fn humans_list_and_show_the_runs_conductors_keep() {
     put(&a_js, &trail_call_key(&dev_a, &waiting.run, 1), &tested).await;
     put(&a_js, &trail_call_key(&dev_a, &waiting.run, 0), &built).await;
     put(&b_js, &done.key(), &done).await;
+    put(&b_js, &trail_session_key(&dev_b, &done.run), &session).await;
 
     assert_eq!(runs::list(&js, None).await.unwrap(), [done.clone(), waiting.clone()]);
     assert_eq!(runs::list(&js, Some(&dev_a)).await.unwrap(), std::slice::from_ref(&waiting));
@@ -234,6 +235,7 @@ async fn humans_list_and_show_the_runs_conductors_keep() {
     let text = runs::render(&runs::detail(&js, &done.run).await.unwrap(), now);
     assert!(text.starts_with(&format!("run {} of an inline script\nconductor dev-b", done.run)), "{text}");
     assert!(text.contains("state: done, result: \"shipped\"\n") && !text.contains("journal"), "{text}");
+    assert!(!text.contains("pending calls") && !text.contains("queued calls"), "the calls of an ended run: {text}");
 
     let absent = RunId::generate();
     let error = runs::detail(&js, &absent).await.unwrap_err().to_string();

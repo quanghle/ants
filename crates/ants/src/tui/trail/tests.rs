@@ -359,8 +359,14 @@ async fn the_trail_jobs_list_plan_start_stop_and_resume_runs_as_ants_trail_does(
     assert!(runs.page.unwrap().contains(record.run.as_str()));
     let pick: Pick = "0190AAAA".parse().unwrap();
     let stop = stopped(&ctx, &pick).await.unwrap();
-    assert!(stop.line.starts_with(&format!("stopped run {} on lead: ", record.run)), "{}", stop.line);
-    assert_eq!(stop.warnings.last().unwrap(), &format!("dev-a message {0}: ants withdraw dev-a {0}", Uuid::nil()));
+    assert_eq!(
+        stop.line,
+        format!("stopped run {} on lead, 1 step still waiting in other ants' queues: the pager lists them", record.run)
+    );
+    assert!(stop.warnings.is_empty(), "{:?}", stop.warnings);
+    let page = stop.page.unwrap();
+    assert!(page.starts_with(&format!("stopped run {} on lead: ", record.run)), "{page}");
+    assert!(page.ends_with(&format!("  dev-a message {0}: ants withdraw dev-a {0}\n", Uuid::nil())), "{page}");
     let own = LimitArgs::default();
     assert_eq!(resumed(&ctx, &pick, own).await.unwrap().line, format!("resumed run {} on lead", record.run));
     let raised = LimitArgs { turns: Some(400), wall: Some(std::time::Duration::from_hours(48)), ..own };

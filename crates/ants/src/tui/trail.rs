@@ -245,13 +245,26 @@ pub async fn started(ctx: &Ctx, start: &start::Start) -> Result<Done> {
     Ok(Done { line: start.started(&run), open: Some(start.thread.clone()), ..Done::default() })
 }
 
-/// Stop the run `pick` names, as `ants trail stop` does: its first line, then the steps left waiting as warnings.
+/// Stop the run `pick` names, as `ants trail stop` does: its first line, or, when steps are left waiting in other
+/// ants' queues, a count of them, the pager showing what `ants trail stop` prints, with how to withdraw each.
 pub async fn stopped(ctx: &Ctx, pick: &Pick) -> Result<Done> {
     let run = runs::pick(&ctx.js, pick).await?;
-    let said = control::stop(&ctx.client, &ctx.me.id, &run).await?;
-    let mut lines = said.lines().map(str::trim);
-    let line = lines.next().unwrap_or_default().to_owned();
-    Ok(Done { line, warnings: lines.map(str::to_owned).collect(), ..Done::default() })
+    let stop = control::stop(&ctx.client, &ctx.me.id, &run).await?;
+    let said = stop.said(&run);
+    if let control::Stop::Stopped { waiting } = &stop
+        && !waiting.is_empty()
+    {
+        let steps = match waiting.len() {
+            1 => "1 step".to_owned(),
+            n => format!("{n} steps"),
+        };
+        let line = format!(
+            "stopped run {} on {}, {steps} still waiting in other ants' queues: the pager lists them",
+            run.run, run.conductor
+        );
+        return Ok(Done { line, page: Some(said), ..Done::default() });
+    }
+    Ok(Done { line: said.lines().next().unwrap_or_default().to_owned(), ..Done::default() })
 }
 
 /// Resume the run `pick` names under its own limits with those `limits` gives instead, as `ants trail resume` does.
