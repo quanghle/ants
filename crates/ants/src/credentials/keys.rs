@@ -44,7 +44,7 @@ pub async fn store_seed(path: &Path, store: &dyn Store, url: &str) -> Result<Mov
         None => bail!("no seed in {}", path.display()),
     };
     let finding = Finding::from_jwt(jwt).with_context(|| format!("credentials {}", path.display()))?;
-    if matches!(finding.kind, Kind::Leaf { .. } | Kind::LeafSystem { .. }) {
+    if matches!(finding.kind, Kind::Leaf { .. } | Kind::LeafSystem { .. } | Kind::LeafStore { .. }) {
         bail!(
             "{} are the uplink credentials of a leaf node, which nats-server reads from the file: their seed stays there",
             path.display()

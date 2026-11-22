@@ -561,6 +561,10 @@ async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
     assert_eq!(carried.status, Status::Fail, "{carried}");
     assert!(carried.detail.contains("no rights for dev-b"), "{carried}");
     assert!(carried.fix[0].starts_with("ants auth leaf m1") && carried.fix[0].contains("--ant dev-b"), "{carried}");
+    let store = named(&checks, "leaf store uplink")[0];
+    assert_eq!(store.status, Status::Ok, "{store}");
+    assert!(store.detail.starts_with("the store account uplink of the leaf node of m1"), "{store}");
+    assert!(store.detail.ends_with("never expiring"), "{store}");
     assert_eq!(named(&checks, "leaf system uplink")[0].status, Status::Warn, "{checks:#?}");
     let node = named(&checks, "leaf node")[0];
     assert_eq!(node.status, Status::Fail, "{node}");
@@ -652,7 +656,7 @@ async fn the_store_account_check_fails_until_the_hub_keeps_jetstream_in_the_stor
     drop(client);
     hub.stop();
     let team = hub.dir().join("auth");
-    auth::write_server_conf(&team, &std::collections::BTreeMap::new()).unwrap();
+    auth::write_server_conf(&team, &auth::Revocations::default()).unwrap();
     auth::move_stores(&hub.dir().join("js"), &team.join(auth::SERVER_CONF), false).unwrap();
     hub.start_again();
     let (_client, _js) = hub.connect(&human).await;

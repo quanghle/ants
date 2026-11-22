@@ -109,8 +109,10 @@ pub(crate) enum AuthCommand {
         out: Option<PathBuf>,
     },
     /// Issue the uplink credentials of a machine's leaf node (leafnodes.remotes[].credentials), allowing what the
-    /// ants and humans on the machine may do and usable only by a leaf node connection, and the system account
-    /// credentials of its second uplink, which only hears the account updates `ants auth push` sends the hub.
+    /// ants and humans on the machine may do and usable only by a leaf node connection, the store account credentials
+    /// of its second uplink, through which the hub sources the machine's outbox, recorded and revoked with the uplink
+    /// (`ants auth revoke leaf-<machine>`) and as long-lived, and the system account credentials of its third, which
+    /// only hears the account updates `ants auth push` sends the hub.
     /// Without --ant, --human or --webhook, it reissues them for the members of the last run, changed by --add-* and
     /// --remove-*.
     Leaf {
@@ -122,14 +124,16 @@ pub(crate) enum AuthCommand {
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
-        /// Where to write the credentials (default: <dir>/leaf-<machine>.creds); the system account credentials of
-        /// the leaf's second uplink go beside them, as <stem>.system.creds.
+        /// Where to write the credentials (default: <dir>/leaf-<machine>.creds); the store account credentials of
+        /// the leaf's second uplink go beside them, as <stem>.store.creds, and the system account credentials of its
+        /// third, as <stem>.system.creds.
         #[arg(long)]
         out: Option<PathBuf>,
     },
     /// Revoke credentials before they expire: every key issued to NAME (an ant, human, webhook or observer,
-    /// `leaf-<machine>`, `host-<machine>`, `channel-manager` or `enroll-<ant>`) and each --key. The team's account in server.conf
-    /// refuses them from then on, and the account is pushed to the server of --nats, which closes their connections,
+    /// `leaf-<machine>`, its store account uplink's too, `host-<machine>`, `channel-manager` or `enroll-<ant>`) and
+    /// each --key. The team's account in server.conf, or its store account for a leaf node's store account uplink,
+    /// refuses them from then on, and the accounts are pushed to the server of --nats, which closes their connections,
     /// as do the leaf nodes connected to it through a system account uplink. Revoking an ant's last live key also
     /// drops it from the uplink, members and outbox sourcing of this machine's leaf node, if it is behind it, and
     /// names what to run for a leaf node of another machine.

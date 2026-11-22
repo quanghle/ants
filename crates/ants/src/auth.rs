@@ -127,7 +127,7 @@ pub fn init(dir: &Path) -> Result<()> {
     write_secret(&dir.join(SYSTEM_SEED), &seed(&keys.system)?)?;
     write_secret(&dir.join(STORE_SEED), &seed(&keys.store)?)?;
     write_secret(&dir.join(ACCOUNT_SEED), &seed(&keys.account)?)?;
-    fs::write(dir.join(SERVER_CONF), server_conf(&keys, None, &BTreeMap::new())?)?;
+    fs::write(dir.join(SERVER_CONF), server_conf(&keys, None, &Revocations::default())?)?;
     Ok(())
 }
 
@@ -148,10 +148,20 @@ pub fn add_store(dir: &Path) -> Result<()> {
 /// An account's public key and JWT, as `ants auth push` sends it.
 pub type AccountJwt = (String, String);
 
-/// Write the `server.conf` of the team in `dir` again, its account revoking each user key of `revocations` issued
-/// at or before its time (seconds since the epoch). Returns the store account's public key and JWT, then the team
-/// account's, the order in which a server takes them: the team's account imports from the store's.
-pub fn write_server_conf(dir: &Path, revocations: &BTreeMap<String, u64>) -> Result<[AccountJwt; 2]> {
+/// The user keys each account revokes, each with its time (seconds since the epoch): JWTs of the key issued at or
+/// before it are refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Revocations {
+    /// Those of the team's account.
+    pub team: BTreeMap<String, u64>,
+    /// Those of the store account: the store account uplinks of leaf nodes.
+    pub store: BTreeMap<String, u64>,
+}
+
+/// Write the `server.conf` of the team in `dir` again, its accounts revoking the user keys of `revocations`. Returns
+/// the store account's public key and JWT, then the team account's, the order in which a server takes them: the
+/// team's account imports from the store's.
+pub fn write_server_conf(dir: &Path, revocations: &Revocations) -> Result<[AccountJwt; 2]> {
     let keys = Keys::load(dir)?;
     let path = dir.join(SERVER_CONF);
     // nats-server reloads no change of the trusted operator, so the operator JWT already there stays.
@@ -162,7 +172,10 @@ pub fn write_server_conf(dir: &Path, revocations: &BTreeMap<String, u64>) -> Res
     });
     fs::write(&path, server_conf(&keys, operator_jwt, revocations)?)
         .with_context(|| format!("writing {}", path.display()))?;
-    Ok([(keys.store.public_key(), store_jwt(&keys)?), (keys.account.public_key(), account_jwt(&keys, revocations)?)])
+    Ok([
+        (keys.store.public_key(), store_jwt(&keys, &revocations.store)?),
+        (keys.account.public_key(), account_jwt(&keys, &revocations.team)?),
+    ])
 }
 
 /// Whether `dir` holds the keys of a team, those of its system account included.
@@ -320,7 +333,7 @@ pub fn check_not_reserved(user: &UserId) -> Result<()> {
 }
 
 /// The `server.conf` of the team, with `operator_jwt` if given, else a new one.
-fn server_conf(keys: &Keys, operator_jwt: Option<&str>, revocations: &BTreeMap<String, u64>) -> Result<String> {
+fn server_conf(keys: &Keys, operator_jwt: Option<&str>, revocations: &Revocations) -> Result<String> {
     let Keys { operator, system, store, account } = keys;
     let operator_jwt = match operator_jwt {
         Some(jwt) => jwt.to_owned(),
@@ -347,9 +360,9 @@ fn server_conf(keys: &Keys, operator_jwt: Option<&str>, revocations: &BTreeMap<S
          resolver_preload: {{\n  {system}: {system_jwt}\n  {store}: {store_jwt}\n  {account}: {account_jwt}\n}}\n",
         system = system.public_key(),
         store = store.public_key(),
-        store_jwt = store_jwt(keys)?,
+        store_jwt = store_jwt(keys, &revocations.store)?,
         account = account.public_key(),
-        account_jwt = account_jwt(keys, revocations)?,
+        account_jwt = account_jwt(keys, &revocations.team)?,
     ))
 }
 
@@ -363,15 +376,19 @@ fn limits(jetstream: bool) -> serde_json::Value {
     })
 }
 
-/// The JWT of the store account: JetStream, exporting what the team's account imports ([`store`]).
-fn store_jwt(keys: &Keys) -> Result<String> {
-    let nats = json!({
+/// The JWT of the store account: JetStream, exporting what the team's account imports ([`store`]), and revoking the
+/// user keys of `revocations` issued at or before their time.
+fn store_jwt(keys: &Keys, revocations: &BTreeMap<String, u64>) -> Result<String> {
+    let mut nats = json!({
         "limits": limits(true),
         "exports": store::exports(),
         "default_permissions": { "pub": {}, "sub": {} },
         "type": "account",
         "version": 2,
     });
+    if !revocations.is_empty() {
+        nats["revocations"] = json!(revocations);
+    }
     jwt(&keys.operator, &keys.store.public_key(), STORE, nats, None)
 }
 
@@ -403,7 +420,7 @@ pub(crate) fn write_server_conf_before_store(dir: &Path) -> Result<()> {
         "version": 2,
     });
     let account_jwt = jwt(&keys.operator, &keys.account.public_key(), TEAM, nats, None)?;
-    let conf = server_conf(&keys, None, &BTreeMap::new())?;
+    let conf = server_conf(&keys, None, &Revocations::default())?;
     let conf: String = conf
         .lines()
         .filter(|line| !line.trim_start().starts_with(&keys.store.public_key()))

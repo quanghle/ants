@@ -184,7 +184,10 @@ pub(super) fn renewed_rights(
             }
             (permissions, json!({ "allowed_connection_types": LEAF_CONNECTIONS }))
         }
-        CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } | CredsKind::Bootstrap => {
+        CredsKind::LeafSystem { .. }
+        | CredsKind::LeafStore { .. }
+        | CredsKind::Enrollment { .. }
+        | CredsKind::Bootstrap => {
             unreachable!("no registry kind")
         }
     })
@@ -218,6 +221,9 @@ pub(super) fn registry_kind(kind: &CredsKind) -> Option<Kind> {
         CredsKind::Host { .. } => Some(Kind::Host),
         CredsKind::Observer => Some(Kind::Observer),
         CredsKind::Leaf { .. } => Some(Kind::Leaf),
-        CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } | CredsKind::Bootstrap => None,
+        CredsKind::LeafSystem { .. }
+        | CredsKind::LeafStore { .. }
+        | CredsKind::Enrollment { .. }
+        | CredsKind::Bootstrap => None,
     }
 }
