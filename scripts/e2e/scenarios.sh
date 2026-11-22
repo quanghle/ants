@@ -1371,8 +1371,8 @@ chain() { # chain ANT LEADER: sets the ant's escalate_to to LEADER and waits for
     eventually 60 shows_chain "$1" "$2"
 }
 unchain() { alice ant set "$1" escalate_to= >/dev/null 2>&1 || true; } # unchain ANT: for traps
-# done_with: for traps, marks the scenario's thread ($th, global so the trap still sees it) done, out of home's way.
-done_with() { [ -z "${th:-}" ] || alice thread done "$th" >/dev/null 2>&1 || true; }
+# mark_done: for traps, marks the scenario's thread ($th, global so the trap still sees it) done, out of home's way.
+mark_done() { [ -z "${th:-}" ] || alice thread done "$th" >/dev/null 2>&1 || true; }
 # escalations THREAD: the escalations stored on the thread, one a line, as `TO: NOTE`.
 escalations() {
     alice thread show "$1" --json | jq --raw-output 'select(.kind == "escalation") | "\(.to): \(.note)"'
@@ -1401,7 +1401,7 @@ from_to() { # from_to THREAD FROM TO: how many messages FROM sent TO on the thre
 scenario E1 P0 "An ant escalates to the thread's owner"
 E1() {
     local t out
-    trap done_with EXIT
+    trap mark_done EXIT
     t=$(tok)
     th=$(alice ask @hub-ant "Use the escalate tool with the issue 'E2E-ESC-$t', then end the turn." | thread)
     in_inbox() { alice inbox --peek --thread "$th" | grep -qF "E2E-ESC-$t"; }
@@ -1425,7 +1425,7 @@ E1() {
 scenario E2 P0 "An escalation goes to the chain before any human"
 E2() {
     local t out
-    trap 'done_with; unchain leaf-ant; alice ant set hub-ant whoami= >/dev/null 2>&1 || true; alice ant set leaf-ant whoami= >/dev/null 2>&1 || true' EXIT
+    trap 'mark_done; unchain leaf-ant; alice ant set hub-ant whoami= >/dev/null 2>&1 || true; alice ant set leaf-ant whoami= >/dev/null 2>&1 || true' EXIT
     # The escalation quotes alice's message to the leader, which a small model takes as its own instruction: the
     # instruction to escalate goes in leaf-ant's whoami instead, and hub-ant's tells it to answer.
     alice ant set hub-ant "whoami=For an end-to-end test of ants: answer an escalation that comes to you yourself, never escalate it further." >/dev/null
@@ -1455,7 +1455,7 @@ E2() {
 scenario E3 P1 "The leader passes it on to the human"
 E3() {
     local t out
-    trap 'done_with; unchain leaf-ant; alice ant set hub-ant whoami= >/dev/null 2>&1 || true; alice ant set leaf-ant whoami= >/dev/null 2>&1 || true' EXIT
+    trap 'mark_done; unchain leaf-ant; alice ant set hub-ant whoami= >/dev/null 2>&1 || true; alice ant set leaf-ant whoami= >/dev/null 2>&1 || true' EXIT
     # As in E2, what each ant does goes in its whoami, out of the text the escalation quotes.
     alice ant set hub-ant "whoami=For an end-to-end test of ants: an escalation holding a PASS- token that comes to you is not yours to answer: call the escalate tool with the token as the issue, then end the turn." >/dev/null
     alice ant set leaf-ant "whoami=For an end-to-end test of ants: asked to pass on a PASS- token, call the escalate tool with the token as the issue, then end the turn." >/dev/null
@@ -1532,7 +1532,7 @@ E6() {
     local t dir out
     t=$(tok)
     dir=$(mktemp -d)
-    trap "done_with; unchain gate-ant; alice ant set hub-ant whoami= >/dev/null 2>&1 || true; leaf rm -f /demo/gate/chain-$t; rm -rf '$dir'" EXIT
+    trap "mark_done; unchain gate-ant; alice ant set hub-ant whoami= >/dev/null 2>&1 || true; leaf rm -f /demo/gate/chain-$t; rm -rf '$dir'" EXIT
     alice ant set hub-ant "whoami=For an end-to-end test of ants: when a tool request to run 'touch /demo/gate/chain-$t' comes up your chain, decide it at once with decide_approval allow_once." >/dev/null
     chain gate-ant hub-ant
     ask_bg "$dir/out" -f --timeout 5m @gate-ant "Run the shell command 'touch /demo/gate/chain-$t' and reply DONE-$t."
