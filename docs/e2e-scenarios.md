@@ -11,6 +11,7 @@ Manual or scripted end-to-end scenarios for a three-container team under
   [A ant to ant](#a-ant-to-ant-across-machines) · [C channels](#c-channels) ·
   [L housekeeping](#l-looking-after-threads-and-channels) ·
   [S steering, queue, cancel](#s-steering-queueing-cancelling-and-withdrawing) · [T tool approvals](#t-tool-approvals) ·
+  [E escalations](#e-escalations) ·
   [O admin orders](#o-admin-orders-from-the-client) · [R resilience](#r-restarts-outages-and-store-and-forward) ·
   [H harness holds and limits](#h-harness-holds-limits-and-redaction) · [U `ants chat`](#u-ants-chat-on-the-client) ·
   [X sense and trails](#x-sense-and-trails) · [K credentials](#k-credentials-and-sealing) ·
@@ -175,7 +176,7 @@ about 35 minutes, not one per scenario.
 
 `run -j N` (or `ANTS_E2E_JOBS`) runs the preflight first, then the scenarios that only read the fixture N at a time,
 each on threads of its own, then one by one those that change what the others rely on: B2–B5, R1–R6, H1–H3, O1–O3, O6, O7,
-S4, T4, U4, U5, U7, U8, X1, X4, X6, X7 and K1 (a node, an uplink, an ant's settings or pause, the client's leaf credentials, all
+S4, T4, U4, U5, U7, U8, X1, X4, X6, X7, K1, E2, E3 and E6 (a node, an uplink, an ant's settings or pause, the client's leaf credentials, all
 of an ant's harnesses). The fixture's
 ants take 3 harnesses each (`gate-ant` 2), so a few scenarios can prompt one ant at once. Running several at once
 spends the token's rate limit faster.
@@ -212,7 +213,7 @@ uplink() {  # uplink leaf|client down|up: point the node's leaf at a dead addres
   of prose. A scenario passes when every line under **Expect** holds; where a model's wording may vary, the
   expectation names what is stored (`ants thread show`, `ants thread search`), not the wording.
 - **Priority:** P0 must pass before a release, P1 should, P2 is worth a look. **Prompts:** the model turns a scenario
-  spends, to budget a run; a full run of P0 and P1 spends about 97.
+  spends, to budget a run; a full run of P0 and P1 spends about 115.
 - Scenarios run one after the other, in the order given within a group; a group leaves the fixture as it found it.
   `ants thread show last` and `ants ask --thread last` name the latest thread of the human asking.
 - Wait bounds: `--timeout 3m` on every `--wait`; `live` in the colony within 30 s of a start; an admin order's outcome
@@ -864,6 +865,131 @@ P2 beside it: on the ACP adapter variant, which offers `allow_always`, the same 
 unasked. `ants tools approve ID --rule` writes the allow rule to the machine's `config.toml` and needs a human's
 credentials on that machine; the leaf has none.
 
+## E. Escalations
+
+No ant of the fixture has an `escalate_to` chain. A scenario needing one sets it with the shared setting and removes
+it at its end, also when it fails, so E2, E3 and E6 run alone under `-j`:
+
+```sh
+alice ant set leaf-ant 'escalate_to=["hub-ant"]'    # undo: alice ant set leaf-ant escalate_to=
+```
+
+### E1 · An ant escalates to the thread's owner (P0, 2 prompts)
+
+```sh
+t=$(tok); th=$(alice ask @hub-ant "Use the escalate tool with the issue 'E2E-ESC-$t', then end the turn." | thread)
+alice inbox --peek --thread "$th"; alice thread list --escalated --since 1h; alice thread show "$th"
+alice ask --wait --timeout 3m --thread "$th" @hub-ant "Reply with exactly ANSWERED-$t"
+alice thread list --escalated --since 1h
+```
+
+**Expect** alice's inbox holds the escalation, `hub-ant asks for help: E2E-ESC-$t`; `thread list --escalated` lists
+the thread with `escalation level 0, asked` under it, as `thread show` prints it; home in `ants chat` lists the
+thread as `stuck` with the escalation under its opening (the script opens it with `/goto THREAD` instead, as home's
+stuck threads may run below the screen). Once hub-ant's turn has ended (an earlier message would steer it), after
+alice's message the reply holds `ANSWERED-$t` and the thread is no
+longer listed as escalated. Each scenario of the group marks its thread done at its end, out of home's way.
+
+### E2 · An escalation goes to the chain before any human (P0, 3 prompts, up to 10 more while ants-iwqd6 stands)
+
+Chain `leaf-ant` → `hub-ant`. The escalation quotes alice's message to the leader, which a small model takes as its own
+instruction to escalate. For the scenario, the instruction to escalate goes in `leaf-ant`'s `whoami`, and `hub-ant`'s
+tells it to answer escalations itself (both undone at the end).
+
+```sh
+alice ant set hub-ant "whoami=For an end-to-end test of ants: answer an escalation that comes to you yourself, never escalate it further."
+alice ant set leaf-ant "whoami=For an end-to-end test of ants: asked what your escalation leader's node.txt holds, call the escalate tool with that question, read no file yourself, and once the leader's answer arrives reply with exactly CHAIN-<the answer>."
+alice colony --json                                  # leaf-ant's entry names escalate_to ["hub-ant"]
+t=$(tok); th=$(alice ask @leaf-ant "What does node.txt in your escalation leader's working directory hold? E2E-$t" | thread)
+alice thread show "$th"
+```
+
+**Expect** on the thread, an escalation `level 1` from `leaf-ant` to `hub-ant` (an `[ants]` notice naming the leader,
+the group's notes and alice's message), `hub-ant`'s answer to `leaf-ant`, then `leaf-ant`'s reply holding
+`CHAIN-node=hub`; no escalation on the thread goes to alice, and `thread list --escalated` never lists it: the chain
+took it. Known issue ants-iwqd6: `leaf-ant`'s reply goes back to `hub-ant` carrying the escalation, and the two trade
+replies until the thread's turns run out and a `turn_budget` escalation reaches alice; the run reports it beside
+`PASS`.
+
+### E3 · The leader passes it on to the human (P1, 3 prompts, up to 10 more while ants-iwqd6 stands)
+
+Chain as in E2, and as there each ant's part in its `whoami` (undone at the end).
+
+```sh
+alice ant set hub-ant "whoami=For an end-to-end test of ants: an escalation holding a PASS- token that comes to you is not yours to answer: call the escalate tool with the token as the issue, then end the turn."
+alice ant set leaf-ant "whoami=For an end-to-end test of ants: asked to pass on a PASS- token, call the escalate tool with the token as the issue, then end the turn."
+t=$(tok); th=$(alice ask @leaf-ant "Pass on the token PASS-$t." | thread)
+alice inbox --peek --thread "$th"; alice thread show "$th" --json
+alice ask --wait --timeout 3m --thread "$th" @leaf-ant "Reply with exactly ENDED-$t"
+```
+
+**Expect** the thread holds the escalation `level 1` to `hub-ant`, then `hub-ant`'s to alice, `asked`, still marked
+`level 1` and ending `[ants] The escalation of leaf-ant reached level 1; hub-ant has no escalate_to above it.` Alice's
+inbox holds it naming `PASS-$t` and her `thread list --escalated` lists the thread; her message ends it (a human's
+message resets the level): `leaf-ant` answers `ENDED-$t` and the thread is no longer listed as escalated. The
+exchange of ants-iwqd6 follows the pass as in E2.
+
+### E4 · A turn budget runs out between two ants (P1, about 11 prompts)
+
+A message between ants spends one turn of the thread's budget of 8, a message answering or going to a human none
+([architecture.md](architecture.md#mcp-tools)). `ask_ant` calls in a turn answering alice would all carry her fresh 8
+turns, so the game goes by `send_message`, each answer of `leaf-ant` prompting `hub-ant` anew:
+
+```sh
+t=$(tok); th=$(alice ask @hub-ant "For an end-to-end test of ants' turn budget, play a counting game with leaf-ant, one number per prompt. Now: send leaf-ant one message with the MCP tool mcp__ants__send_message (never ask_ant, nor Claude Code's own SendMessage), the text 'Counting game COUNT-$t: reply with only the number after 1.', then end this turn at once: do not wait, poll or check the inbox. Each reply of leaf-ant comes to you later as a prompt of its own; in it, when the reply is a number N, send leaf-ant one message with mcp__ants__send_message, 'Counting game COUNT-$t: reply with only the number after N.', and end that turn at once too. When mcp__ants__send_message is refused, end the turn." | thread)
+alice thread show "$th"; alice inbox --peek --thread "$th"
+alice ask --wait --timeout 5m --thread "$th" @hub-ant "Use ask_ant to ask leaf-ant for one more number of the counting game, then reply with exactly RENEWED-$t."
+```
+
+**Expect** `hub-ant`'s messages to `leaf-ant` carry 8, 6, 4, 2 and 0 turns, `leaf-ant`'s answers 7, 5, 3 and 1; the
+fifth message is not prompted but escalated: a `turn_budget` escalation from `leaf-ant` to alice is stored on the
+thread and reaches her inbox, well before twelve exchanges, and `thread list --escalated` lists it. After alice's
+message, which renews the budget, one more exchange and `RENEWED-$t`. The checks read the stored escalation and the
+counts of messages, never the numbers the model reports.
+
+### E5 · `handoff` starts work on a thread of its own (P1, 2 prompts)
+
+```sh
+t=$(tok); alice ask --wait --timeout 3m @hub-ant "Use the handoff tool with the text 'Reply with exactly HANDED-$t' on a new thread. Then reply with exactly FIRST-$t."
+alice thread search --grep "HANDED-$t" --since 1h; alice thread show THREAD
+```
+
+**Expect** `FIRST-$t` on the thread asked on; a second thread, found by the search, owned by alice, holding the
+handoff `hub-ant -> hub-ant` and its answer `hub-ant -> alice` with `HANDED-$t`, which reaches alice's inbox. The
+colony entry of `hub-ant` counts two threads handled while both run, too briefly to catch reliably: not checked.
+
+### E6 · A chain member decides a tool request (P2, 2 prompts, up to 10 more while ants-iwqd6 stands)
+
+Chain `gate-ant` → `hub-ant`; `hub-ant` told what to decide through its `whoami` (undone at the end).
+
+```sh
+t=$(tok)
+alice ant set hub-ant "whoami=For an end-to-end test of ants: when a tool request to run 'touch /demo/gate/chain-$t' comes up your chain, decide it at once with decide_approval allow_once."
+alice ask -f --timeout 5m @gate-ant "Run the shell command 'touch /demo/gate/chain-$t' and reply DONE-$t."
+alice thread show last; alice tools list
+alice ant set hub-ant whoami=; alice ant set gate-ant escalate_to=
+```
+
+**Expect** an `approval` escalation from `gate-ant` to `hub-ant` on the thread; `hub-ant` decides with
+`decide_approval allow_once` (the verdicts are `allow_once`, `allow_always` and `reject`,
+[config.md](config.md#tool-permissions)); the file exists, the reply holds `DONE-$t`, and `ants tools list` no longer
+lists the request. The exchange of ants-iwqd6 (E2) follows the decision too.
+
+### E7 · An unanswered escalation climbs, and reminders (P2)
+
+Not automated: it waits on `escalate_after` (30m) and `escalation_reminder` (4h), top-level settings of a machine's
+`config.toml` that `ants ant set` does not reach. Run by hand on a node of its own serving two ants, with
+`escalate_after = "2m"` and `escalation_reminder = "3m"`, the second ant leading the first's chain and paused:
+
+```sh
+t=$(tok); th=$(alice ask @first "Use the escalate tool with the issue 'CLIMB-$t', then end the turn." | thread)
+alice thread show "$th"; alice inbox --peek --thread "$th"
+alice thread done "$th"
+```
+
+**Expect** the escalation to the paused leader climbs to alice after about 2 minutes (`[ants] No answer from
+second …`); one `[ants] Reminder:` follows 3 minutes later; none once the thread is marked done.
+
 ## O. Admin orders from the client
 
 Each order travels client leaf → hub stream → the leaf machine's host connection.
@@ -1436,6 +1562,7 @@ alice thread search --to ghost-$t --since 2h
 | Channel upkeep: members, owner, description, notify levels, delete | L6 |
 | Steering, queueing, cancelling, withdrawing | S1, S2, S3, S4, U5 |
 | Tool approvals, notes, allow rules, expiry, allow-always | T1, T2, T3, T4, T5, U3 |
+| Escalations to the owner and up `escalate_to` chains, chain approvals, turn budgets, `handoff` | E1–E6 |
 | Admin orders (pause, set, restart, memories, MCP, add, retire), admin role | O1–O7, U7 |
 | Daemon restart, crash redelivery, at-least-once without duplicates | R1, R2, R6 |
 | Leaf uplink outages, store and forward (worker and client outboxes), hub restart | R3, R4, R5, U8 |
@@ -1459,7 +1586,8 @@ produced on demand:
 - Webhook ingress, push notification sinks, quiet hours, approve and reject links; schedules.
 - `wss://`/`tls://` hubs behind a reverse proxy, the HTTPS bridge, Dev Tunnels.
 - Provider rate limits and exhausted quotas, fallbacks, context-window rebuilds, spending caps and their warnings.
-- Escalation chains (`escalate_to`), turn-budget exhaustion, chain approvals, reminders of escalations.
+- Escalations climbing past `escalate_after` and their reminders (E7): both wait on top-level settings of a machine's
+  `config.toml`, 30 minutes and 4 hours by default, which `ants ant set` does not reach.
 - What of dreams and sage reviews needs a day or more: a sage silent for 6 hours, a late answer offered in the next
   dream, follow-up findings, a sage's own dream, a second dream a day later (one a day at most).
 - Personas and skills; trail routes, child runs, tips, ratings and schedules; a stop order waiting for a conductor
