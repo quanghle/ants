@@ -144,7 +144,7 @@ preflight stops it. A check failing on a bug filed in bd is reported beside the 
 
 `run -j N` (or `ANTS_E2E_JOBS`) runs the preflight first, then the scenarios that only read the fixture N at a time,
 each on threads of its own, then one by one those that change what the others rely on: R1–R6, H1–H3, O1–O3, O6, O7,
-S4, T4, U4, U5, U7, U8, X1 and K1 (a node, an uplink, an ant's settings or pause, the client's leaf credentials, all
+S4, T4, U4, U5, U7, U8, X1, X4, X6, X7 and K1 (a node, an uplink, an ant's settings or pause, the client's leaf credentials, all
 of an ant's harnesses). The fixture's
 ants take 3 harnesses each (`gate-ant` 2), so a few scenarios can prompt one ant at once. Running several at once
 spends the token's rate limit faster.
@@ -181,7 +181,7 @@ uplink() {  # uplink leaf|client down|up: point the node's leaf at a dead addres
   of prose. A scenario passes when every line under **Expect** holds; where a model's wording may vary, the
   expectation names what is stored (`ants thread show`, `ants thread search`), not the wording.
 - **Priority:** P0 must pass before a release, P1 should, P2 is worth a look. **Prompts:** the model turns a scenario
-  spends, to budget a run; a full run of P0 and P1 spends about 70.
+  spends, to budget a run; a full run of P0 and P1 spends about 78.
 - Scenarios run one after the other, in the order given within a group; a group leaves the fixture as it found it.
   `ants thread show last` and `ants ask --thread last` name the latest thread of the human asking.
 - Wait bounds: `--timeout 3m` on every `--wait`; `live` in the colony within 30 s of a start; an admin order's outcome
@@ -824,6 +824,95 @@ alice trail runs; alice trail show RUN
 exit 0; `ants trail show RUN` lists a journal of 2 calls and 2 steps spent of 50; the run thread holds the start note
 and `phase: read`; alice's inbox holds the result on that thread.
 
+X4 to X8 stop and resume runs of one trail, `/tmp/stoppable.py` on the client, saved anew by each (a save replaces
+it), conducted by `hub-ant`, its token passed as `args`:
+
+```python
+meta = {"name": "stoppable", "description": "Two steps one after the other, to stop between them", "phases": ["first", "second"]}
+
+t = args["t"]
+pre = args.get("pre", "A step of an end-to-end test of ants:")
+phase("first")
+first = await agent("A step of an end-to-end test of ants: reply with exactly FIRST-" + t + " and nothing else.", ant="hub-ant", label="first")
+phase("second")
+second = await agent(pre + " reply with exactly SECOND-" + t + " and nothing else.", ant="leaf-ant", label="second")
+{"first": first, "second": second}
+```
+
+A bare `Reply with exactly …` from another ant is taken by the model for an instruction smuggled in, hence the
+prompts saying what they are for. `RUN` below is the run's id, from `--json`.
+
+### X4 · A run stopped while a step waits, the step withdrawn, the run resumed (P0, 2 prompts)
+
+The second step waits in `leaf-ant`'s queue, held there by a pause, so nothing depends on timing.
+
+```sh
+t=$(tok); alice trail save /tmp/stoppable.py; alice ant pause leaf-ant
+alice trail run stoppable --ant hub-ant --args "{\"t\":\"$t\"}" --yes --json
+alice trail show RUN --json             # until the first step is answered and the second pending
+alice queue leaf-ant                    # lists the second step's message
+alice trail stop RUN                    # prints the step with its withdraw command
+alice withdraw leaf-ant MESSAGE
+alice trail runs --json; alice trail stop RUN
+alice ant resume leaf-ant; sleep 30; alice thread show STEP_THREAD
+alice trail resume RUN --follow; alice trail show RUN; alice trail resume RUN
+```
+
+**Expect** the stop prints `ants withdraw leaf-ant MESSAGE`; `ants trail runs` lists the run `stopped`; the second
+stop is taken and lists the step again, as a stopped run lists the steps whose messages went out, withdrawn or not;
+after `leaf-ant` resumes, the step's thread holds `Withdrawn by alice` and no message of `leaf-ant` holding
+`SECOND-$t`; the resume follows to `done:` with `FIRST-$t` and `SECOND-$t`, the second step sent anew on a new
+thread; `hub-ant` answered `FIRST-$t` once, the journal answering it on resume; `ants trail show` counts 2 steps, the
+step sent anew counting none again; the last resume, of a run done, is refused (`has ended`).
+
+### X5 · A run failed on its step limit, resumed with the limit raised (P1, 2 prompts)
+
+```sh
+t=$(tok); alice trail run stoppable --ant hub-ant --args "{\"t\":\"$t\"}" --steps 1 --yes --follow
+alice trail runs; alice trail show RUN; alice doctor --no-harness
+alice trail resume RUN --steps 5 --follow
+```
+
+**Expect** the first follow exits non-zero, its error naming the run's `limit of 1 steps`; the run is `failed`,
+`ants trail show` saying `failed on its steps limit`; `ants doctor` on the client warns under `trail runs`, naming
+the run and `ants trail resume RUN --steps 2`; the resume ends `done:` with both tokens.
+
+### X6 · Stopping and resuming a run by admin order (P1, 2 prompts)
+
+As X4 up to the waiting step, then:
+
+```sh
+bob ant stop-trail hub-ant RUN                       # no admin role
+alice ant stop-trail hub-ant RUN --wait 30s
+alice ant resume leaf-ant
+alice ant resume-trail hub-ant RUN --wait 30s
+alice trail show RUN --follow; alice ant orders hub-ant
+```
+
+**Expect** bob's order refused as in O7, the run still `running`; alice's stop prints the step and its withdraw
+command and the run is `stopped`; the run ends `done:` with both tokens; `ants ant orders hub-ant` lists the
+`stop_trail` and `resume_trail` orders `applied` by alice. Unlike X4 the step is not withdrawn: its first copy runs
+once `leaf-ant` resumes and answers nothing, the step sent anew on resume answering the call, so the result holds
+`SECOND-$t` once.
+
+### X7 · Stopping and resuming a run from `ants chat` (P1, 2 prompts)
+
+As X4 up to the waiting step, then in the chat: `/trail runs` (the pager lists the run), `/trail stop RUN8` (a
+unique start of the run's id), `alice ant resume leaf-ant`, `/trail resume RUN8`; `alice trail show RUN`.
+
+**Expect** the stop's status line names the step left in `leaf-ant`'s queue and the run is `stopped`; the resume's
+says it resumed; the run ends `done` with both tokens. The step is not withdrawn, as in X6.
+
+### X8 · A run stopped while its step runs (P2, 3 prompts)
+
+As X4 without the pause, the second step's prompt (`pre` in the args) running `sleep 63` on `leaf-ant` first; once
+it sleeps, `alice trail stop RUN`, then after `leaf-ant`'s reply `alice trail resume RUN --follow`.
+
+**Expect** the stop is taken while the step runs (the step is listed, as its message went out, though withdrawing it
+is too late); `leaf-ant`'s reply arrives on the step's thread and changes nothing: the run stays `stopped` and its
+journal holds no answer for the step; the resume sends the step anew on a new thread, so `leaf-ant` answers
+`SECOND-$t` on two threads, and the run ends `done:` with both tokens.
+
 ## K. Credentials and sealing
 
 ### K1 · Revoked credentials are cut off at the hub and behind a leaf (P1)
@@ -869,7 +958,7 @@ to no one else; a third human's `ants thread show` of the thread prints `[sealed
 | Signed-out hold, prompt limits, dead letters, redaction | H1, H2, H3, H4 |
 | `ants chat`: live state, sending, cards, ant view, reconnect | U1–U9 |
 | Sense memories, reminders and wake-ups | X1, X2 |
-| Trails across machines | X3 |
+| Trails across machines; stops, withdrawals, resumes (by CLI, admin order and `ants chat`), limit failures | X3–X8 |
 | Revocation, sealed messages between humans | K1, K2, U9 |
 
 ## Left out
@@ -883,5 +972,7 @@ produced on demand:
 - `wss://`/`tls://` hubs behind a reverse proxy, the HTTPS bridge, Dev Tunnels.
 - Provider rate limits and exhausted quotas, fallbacks, context-window rebuilds, spending caps and their warnings.
 - Escalation chains (`escalate_to`), turn-budget exhaustion, chain approvals, reminders of escalations.
-- Sage reviews and dreams, personas and skills; trail stops, resumes, routes, child runs, tips and ratings.
+- Sage reviews and dreams, personas and skills; trail routes, child runs, tips, ratings and schedules; a stop order waiting for a conductor
+  whose machine is down, a resume raising `--wall` after a run failed on its wall time (each worth a scenario, left
+  for the cost of a stopped node or a long wait).
 - Ant templates and manager ants, clone, export and import, `ants update`, `ants dash`, `ants hook run`.
