@@ -9,6 +9,7 @@ Manual or scripted end-to-end scenarios for a three-container team under
 - [Fixture](#fixture) · [Claude sign-in](#claude-sign-in) · [Running them](#running-them) · [Conventions](#conventions)
 - Scenarios: [F preflight](#f-preflight) · [M messages](#m-messages-between-a-human-and-an-ant) ·
   [A ant to ant](#a-ant-to-ant-across-machines) · [C channels](#c-channels) ·
+  [L housekeeping](#l-looking-after-threads-and-channels) ·
   [S steering, queue, cancel](#s-steering-queueing-cancelling-and-withdrawing) · [T tool approvals](#t-tool-approvals) ·
   [O admin orders](#o-admin-orders-from-the-client) · [R resilience](#r-restarts-outages-and-store-and-forward) ·
   [H harness holds and limits](#h-harness-holds-limits-and-redaction) · [U `ants chat`](#u-ants-chat-on-the-client) ·
@@ -181,7 +182,7 @@ uplink() {  # uplink leaf|client down|up: point the node's leaf at a dead addres
   of prose. A scenario passes when every line under **Expect** holds; where a model's wording may vary, the
   expectation names what is stored (`ants thread show`, `ants thread search`), not the wording.
 - **Priority:** P0 must pass before a release, P1 should, P2 is worth a look. **Prompts:** the model turns a scenario
-  spends, to budget a run; a full run of P0 and P1 spends about 70.
+  spends, to budget a run; a full run of P0 and P1 spends about 85.
 - Scenarios run one after the other, in the order given within a group; a group leaves the fixture as it found it.
   `ants thread show last` and `ants ask --thread last` name the latest thread of the human asking.
 - Wait bounds: `--timeout 3m` on every `--wait`; `live` in the colony within 30 s of a start; an admin order's outcome
@@ -376,6 +377,177 @@ t=$(tok); alice post '#e2e' "@bob please look at $t"; bob inbox --peek
 
 **Expect** `bob`'s inbox on the hub holds a mention notice naming the channel and holding `$t`; no ant is prompted.
 
+## L. Looking after threads and channels
+
+What a human does around the messages: finding and marking threads, reactions, quoted replies and forwards, TL;DRs,
+channel upkeep, reminders and holds, and the one-line status. Most of it spends no prompt. `alice` acts from the
+client, `bob` from the hub. Two helpers:
+
+```sh
+a_thread() {  # a_thread ANT TOKEN: one prompt; prints the thread and the id of ANT's reply, left unread
+    local th; th=$(alice ask "@$1" "Reply with exactly: HK-$2" | thread)
+    sleep 60; echo "$th $(alice thread show "$th" --json | jq -r --arg a "$1" 'select(.from == $a) | .id' | head -n 1)"
+}
+dm() { alice ask --plaintext @bob "$1" | thread; }   # a thread of two humans, no prompt
+```
+
+### L1 · Finding a thread (P0, 1 prompt)
+
+```sh
+t=$(tok); read -r TH M < <(a_thread leaf-ant "$t")   # asking it to read node.txt first, for a tool call
+TH2=$(dm "L1-$t")
+alice thread list --grep "HK-$t"; alice thread list --ant leaf-ant --grep "$t"; alice thread list --owner bob --grep "$t"
+alice thread list --grep "HK-$t" --json
+alice notes "$TH" "NOTE-$t"
+alice thread search --grep "$t" --from leaf-ant; alice thread search --grep "$t" --to alice
+alice thread search --grep "$t" --type note
+alice thread show "$TH"; alice thread show "${TH:0:18}"; alice thread show last
+alice thread show "$TH" --json; alice thread show "$TH" --no-tools
+alice thread show <the prefix TH and TH2 share>; alice thread show ffffffff
+```
+
+**Expect** `--grep` lists the thread alone, its row naming owner `alice`, users `alice,leaf-ant` and the first line;
+`--ant leaf-ant` and `--owner alice` list it, `--ant hub-ant` and `--owner bob` do not; `--json` gives the same owner
+and users. `--from leaf-ant` finds the reply (message `M`) and not the note; `--to alice` the reply, `--to leaf-ant`
+not; `--type note` the note alone. `thread show` by the full id and by an 18-character prefix prints the thread with
+its `Read(` line, `--no-tools` without it, `--json` only entries of the thread; `last` prints a thread (the latest of
+alice's, another scenario's under `-j`). A prefix two threads share and an unknown one exit non-zero, the first listing
+candidates (`give more of the id`), the second saying no thread of the last 7 days starts with it.
+
+### L2 · Title, done, pin and archive (P0)
+
+```sh
+t=$(tok); TH=$(dm "L2-$t"); bob ask --plaintext --thread "$TH" @alice "L2-$t read"
+alice thread title "$TH" "E2E $t"; alice thread list --grep "$t"; bob thread list --grep "$t"; alice thread title "$TH" --clear
+alice thread done "$TH"; bob thread list --grep "$t"; bob notes "$TH" "reopens"; alice thread list --grep "$t" --json
+alice thread done "$TH"; alice thread undone "$TH"
+alice thread pin "$TH"; alice thread list --pinned; alice thread list; bob thread list --pinned
+alice thread archive "$TH"; alice thread list --pinned; alice thread list --archived; bob thread list --grep "$t"
+alice thread pin "$TH"; alice thread unpin "$TH"; alice thread archive "$TH"
+bob notes "$TH" "new again"; alice thread list --grep "$t"; alice thread unarchive "$TH"
+```
+
+**Expect** the title shows in both humans' lists (titles are shared) and is gone after `--clear`. `done` shows in the
+STATE of both lists (`done.by` `alice` in `--json`); bob's note reopens the thread; `undone` clears a second `done`.
+The pinned thread is listed by `--pinned`, after every unpinned row of the plain list, and not by bob's `--pinned`
+(pins are alice's). Pins and archives exclude each other: archiving the pinned thread unpins it, pinning the archived
+one unarchives it. The archived thread is gone from alice's list, not from bob's; bob's note shows it again as
+`archived+new`; `unarchive` clears it.
+
+### L3 · Reactions (P1, 1 prompt)
+
+```sh
+t=$(tok); read -r TH M < <(a_thread leaf-ant "$t")
+alice react "$M" thumbs-up; alice react "${M:0:18}" eyes; alice thread show "$TH"
+alice react "$M" thumbs-up --remove; sleep 30; alice thread show "$TH"; alice inbox --peek --thread "$TH"
+leaf ants --creds /demo/home/.config/ants/auth/leaf-ant.creds react "$M" rocket      # and --remove
+hub ants --creds /demo/home/.config/ants/auth/hub-ant.creds react "$M" rocket
+```
+
+**Expect** `thread show` prints `reacted thumbs-up: alice` and `reacted eyes: alice` under the reply (the second by a
+prefix); after `--remove` only `eyes` is stored (`reactions` in `--json`). Nothing starts: the count of `ended:` lines
+is the same 30 s later, and the reply is still unread in alice's inbox. With `leaf-ant`'s credentials the signer
+applies `rocket` (`reacted rocket: leaf-ant`) and takes it away; `hub-ant`, which does not read the thread, is refused
+(`none hub-ant reads`).
+
+### L4 · A quoted reply and a forward (P1, 3 prompts)
+
+```sh
+t=$(tok); f=$(tok); read -r TH M < <(a_thread leaf-ant "$t")
+alice ask --wait --timeout 3m --reply-to "$M" "Reply with exactly QUOTED-$t"
+alice ask --wait --timeout 3m --forward "$M" @hub-ant "Reply with the word that follows HK- in the forwarded message, then FWD-$f."
+```
+
+**Expect** the quoted reply lands on `TH`, addressed to `leaf-ant` without `@leaf-ant`, stored with
+`quote.from` `leaf-ant` and its excerpt; `thread show` prints `↪ replying to leaf-ant: HK-$t` above it; the answer is
+`QUOTED-$t`. The forward opens a new thread whose first message holds the note, then
+`Forwarded from leaf-ant on thread TH` and `> HK-$t`; `hub-ant`'s reply holds `$t` and `FWD-$f`.
+
+P2 beside it: forward a message with an attachment (as M5 makes one); the new message lists `📎 out.txt (attached)`
+and `ants attachment get` fetches the copy stored under it.
+
+### L5 · TL;DR and digest (P1, 3 prompts)
+
+```sh
+t=$(tok); TH=$(dm "Plan $t: ship the e2e build on Friday, after the review")
+bob ask --plaintext --thread "$TH" @alice "Agreed for $t: Friday, after the review"
+alice ask --plaintext --forward-thread "$TH" @bob                 # refused: no TL;DR kept yet
+alice thread tldr "$TH" --json; alice thread tldr "$TH" --json; alice thread tldr "$TH" --new --json
+alice ask --plaintext --forward-thread "$TH" @bob
+alice digest --since 10m
+alice thread search --to system-messenger --since 1h --json      # the requests: summary.thread or summary.since
+```
+
+**Expect** the forward is refused until a TL;DR is kept. The first `tldr` asks the messenger (one request with
+`summary.thread` `TH`) and stores a TL;DR by `system-messenger`, not empty; the second prints the same one (same `at`)
+without asking; `--new` asks again and stores a newer one. The forward then carries it: `Forwarded thread TH, its
+TL;DR by system-messenger`. `digest` prints a digest, not empty, after one more request (`summary.since`), and stores
+nothing: the kept TL;DR is unchanged. The summary threads stay out of `ants thread list`.
+
+### L6 · Channel upkeep (P1, 1 prompt)
+
+```sh
+t=$(tok); c=hk-$t
+alice channel create $c --member leaf-ant,alice,bob --description "Housekeeping $t"; alice channel list
+alice channel add $c hub-ant; alice channel set $c --owner leaf-ant --description "Upkeep $t"; alice channel remove $c hub-ant
+TH=$(alice post --wait --timeout 3m $c "@leaf-ant answer this post with exactly HKCHAN-$t, using no tool" | thread)
+bob post --thread "$TH" $c "@alice have a look at $t"; alice channel list
+alice channel notify $c all; alice channel list; alice notify status
+alice channel notify $c mentions; alice channel list; alice channel read $c --peek; alice channel list
+alice channel read $c; alice channel list
+alice thread archive "$TH"; alice channel read $c; alice channel read $c --archived; alice thread unarchive "$TH"
+alice channel remove $c leaf-ant; alice post $c "@leaf-ant answer this post with exactly GONE-$t"; sleep 30
+alice channel delete $c
+```
+
+**Expect** `channel list` shows the description in its `DESCRIPTION` column, then the member added, the owner and
+description set, the member removed. After the answer and bob's post, alice's `UNREAD` is `1 (@1) +1 other` (bob's
+post counts, leaf-ant's answer shows apart); at level `all` it is `2 (@1)` and `ants notify status` lists the level;
+at `mentions` it is `1 (@1) +1 other` again. `read --peek` leaves the count, `read` clears it. The archived thread is
+left out of `channel read` and printed by `--archived`. The post mentioning the removed `leaf-ant` warns that it is no
+member and wakes no one: no message to `leaf-ant`, no answer, no triage. After `delete` the channel is not listed.
+
+### L7 · Reminders, mutes and snooze (P2)
+
+```sh
+t=$(tok); TH=$(dm "L7-$t"); TH2=$(dm "L7-$t, another")
+alice remind set "$TH" 2h "check $t"; alice remind set "$TH2" 1h "first $t"; alice remind list; alice remind list --json
+alice remind clear "$TH2"; alice remind set "$TH" 1s "due $t"; alice remind list --json
+# ants chat: home
+alice remind clear "$TH"
+alice thread mute "$TH" --for 1h; alice notify snooze 10m; alice notify status; alice notify status --json
+alice notify resume; alice thread unmute "$TH"; alice notify status --json
+```
+
+**Expect** `remind list` gives the reminders soonest first (`TH2`, then `TH`); `clear` removes one; setting another
+on `TH` replaces its reminder, which turns `is_due` within seconds and shows on the chat's home with its note. No push
+sink runs in the fixture: `notify status` lists the snooze and the muted thread, and neither once resumed and unmuted.
+
+### L8 · `ants status`, `ants spend`, `ants queue` (P1, 1 prompt)
+
+```sh
+t=$(tok); read -r TH M < <(a_thread leaf-ant "$t")
+alice status; alice status --json; alice status --tmux
+alice spend leaf-ant --thread "$TH"; alice spend leaf-ant --thread "$TH" --json; alice spend leaf-ant --days 1 --json
+alice queue
+```
+
+**Expect** `status` prints one line (home items by kind, working ants, the day's spend); `--json` an object with
+`home`, `working` and `spend_today`; `--tmux` `⚑N ◐N $S`. `spend --thread` shows the thread's tokens, more than 0;
+`--days 1 --json` one day and the thread among its threads. `queue` with no ant answers for every live ant.
+
+### L9 · Messages from a file (P2, 1 prompt)
+
+```sh
+t=$(tok); printf 'Reply with exactly: FILE-%s\n\n  From a file: "quotes", $HOME and a tab\there.\n' "$t" >/tmp/hk-ask.txt
+alice ask --wait --timeout 3m --file /tmp/hk-ask.txt @leaf-ant
+alice channel create hkf-$t --member alice,bob; printf '@bob FILEPOST-%s\nsecond line\n' "$t" >/tmp/hk-post.txt
+alice post --file /tmp/hk-post.txt hkf-$t
+```
+
+**Expect** the reply holds `FILE-$t`; the stored message and post (`thread show --json`) hold the file's text as it
+is, but the trailing newline.
+
 ## S. Steering, queueing, cancelling and withdrawing
 
 ### S1 · A second message steers the running prompt (P0, 1–2 prompts)
@@ -476,6 +648,25 @@ alice inbox; alice ant set gate-ant approval_timeout=
 
 **Expect** after 30 s the call is rejected and the reply says `REFUSED`; the file does not exist; alice's inbox holds
 an `approval` escalation notice on a thread of its own.
+
+### T5 · Approving for the rest of the session, where the harness offers it (P1, 1 prompt)
+
+```sh
+t=$(tok); alice ask -f --timeout 5m @gate-ant "Run two shell commands as two separate tool calls, one after the other: first 'touch /demo/gate/always-1-$t', then 'touch /demo/gate/always-2-$t'. Then reply DONE-$t." &
+sleep 40; alice tools list --json; alice tools show gate-ant/ID
+alice tools approve gate-ant/ID --always
+wait; leaf test -f /demo/gate/always-1-$t; leaf test -f /demo/gate/always-2-$t
+```
+
+**Expect** where the request offers `allow_always` (`options` in `--json`), `tools show` names what it allows, and
+after `--always` the second call runs unasked: one request on the thread, both files, the reply `DONE-$t`. Claude Code
+on its own protocol, as the fixture runs it, offers allow once and reject only: `tools show` names no `always`,
+`--always` is refused (`allow-always is not offered`) leaving the request pending, and after `ants tools approve` the
+second call is asked about too; approved, both files exist and the reply is `DONE-$t`.
+
+P2 beside it: on the ACP adapter variant, which offers `allow_always`, the same steps let the second call through
+unasked. `ants tools approve ID --rule` writes the allow rule to the machine's `config.toml` and needs a human's
+credentials on that machine; the leaf has none.
 
 ## O. Admin orders from the client
 
@@ -773,6 +964,19 @@ Select `bob`, type `sealed hello` and `Enter`. Then, on the hub: `bob inbox`, `b
 prints its text opened; `bob`'s reply appears in the DM with `🔒`; the watcher with ant credentials is refused or sees
 `[sealed, N bytes]`, never the text.
 
+### U10 · Marks and replies in the chat (P1, 3 prompts)
+
+On a thread with `leaf-ant`'s reply `HK-$t` (`a_thread` of [L](#l-looking-after-threads-and-channels)): `/goto
+THREAD`, then `/title Chat $t`, `/done`, `/pin` and `/react rocket`. Reopened: `↑` (selecting the reply), `>`, `Reply
+with exactly CQUOTE-$t`, `Enter`. Reopened: `↑`, `f`, `bob FWD-$t`, `Enter`; `/tldr`; `/search CQUOTE-$t`.
+
+**Expect** the status line confirms each mark and the CLI reads it back as L1 to L5 do: the title, `done` by alice,
+the thread among `--pinned`, `reacted rocket: alice` on the reply. `>` pre-fills `@leaf-ant ` under a bar titled
+`↪ replying to leaf-ant: HK-$t`; the reply is quoted on the thread, reopens it, and is answered `CQUOTE-$t`. `f`
+pre-fills `/forward @`; bob's inbox holds `Forwarded from leaf-ant` and the note. `/tldr` asks the messenger once and
+keeps the TL;DR (`ants thread tldr` prints it without asking again); `/search` lists the matches with the thread's
+title.
+
 ## X. Sense and trails
 
 ### X1 · A memory kept by sense is recalled on another thread and after a restart (P1, 3 prompts)
@@ -861,13 +1065,18 @@ to no one else; a third human's `ants thread show` of the thread prints `[sealed
 | Questions (`ask_human`, `ants answer`) | A3, U4 |
 | Concurrent threads, worktrees | A4 |
 | Channels, mentions, unread counts | C1, C2, C3, U6 |
+| Thread housekeeping: finding, titles, done, pins, archives, reminders, mutes, status | L1, L2, L7, L8, U10 |
+| Reactions | L3, U10 |
+| Quoted replies, forwards, messages from a file | L4, L9, U10 |
+| Catch-up summaries: TL;DRs, digests, forwarded threads | L5, U10 |
+| Channel upkeep: members, owner, description, notify levels, delete | L6 |
 | Steering, queueing, cancelling, withdrawing | S1, S2, S3, S4, U5 |
-| Tool approvals, notes, allow rules, expiry | T1, T2, T3, T4, U3 |
+| Tool approvals, notes, allow rules, expiry, allow-always | T1, T2, T3, T4, T5, U3 |
 | Admin orders (pause, set, restart, memories, MCP, add, retire), admin role | O1–O7, U7 |
 | Daemon restart, crash redelivery, at-least-once without duplicates | R1, R2, R6 |
 | Leaf uplink outages, store and forward (worker and client outboxes), hub restart | R3, R4, R5, U8 |
 | Signed-out hold, prompt limits, dead letters, redaction | H1, H2, H3, H4 |
-| `ants chat`: live state, sending, cards, ant view, reconnect | U1–U9 |
+| `ants chat`: live state, sending, cards, ant view, reconnect, marks and replies | U1–U10 |
 | Sense memories, reminders and wake-ups | X1, X2 |
 | Trails across machines | X3 |
 | Revocation, sealed messages between humans | K1, K2, U9 |

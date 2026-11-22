@@ -376,6 +376,363 @@ C3() {
     bob inbox --peek | has e2e
 }
 
+# --- L. Looking after threads and channels --------------------------------------------------------------------------
+
+# a_thread ANT TOKEN [TEXT]: asks ANT for an exact reply holding HK-TOKEN (one prompt), waits for it, left unread, and
+# prints the thread id and the reply's message id. TEXT replaces the prompt; it must still ask for HK-TOKEN.
+a_thread() {
+    local th id
+    th=$(alice ask "@$1" "${3:-Reply with exactly: HK-$2}" | thread)
+    [ -n "$th" ] || fail "no thread printed"
+    eventually 180 replied "$th" "HK-$2"
+    id=$(alice thread show "$th" --json | jq --raw-output --arg ant "$1" 'select(.kind == "message" and .from == $ant) | .id' | head -n 1)
+    [ -n "$id" ] || fail "no message of $1 on thread $th"
+    printf '%s %s\n' "$th" "$id"
+}
+# dm TEXT: alice writes to bob in the clear, on a new thread: a thread of two humans, no prompt. Prints its id.
+dm() { alice ask --plaintext @bob "$1" | thread; }
+# list_field HUMAN TOKEN JQ: JQ of the row of HUMAN's `ants thread list --grep TOKEN --json`, or null.
+list_field() { "$1" thread list --grep "$2" --json | jq --slurp --raw-output ".[0] | $3"; }
+thread_rows() { grep -cE '^[0-9a-f]{8}-[0-9a-f]{4}-' || true; } # the thread rows of `ants thread list`
+summaries_of() { # summaries_of THREAD: the TL;DR requests to the messenger for THREAD in the last hour
+    alice thread search --to system-messenger --since 1h --json \
+        | jq --slurp --arg th "$1" 'map(select(.summary.thread == $th)) | length'
+}
+
+scenario L1 P0 "Finding a thread"
+L1() {
+    local t out th m th2 prefix i
+    t=$(tok)
+    out=$(a_thread leaf-ant "$t" "Read node.txt in the working directory, then reply with exactly: HK-$t")
+    th=${out% *}
+    m=${out#* }
+    th2=$(dm "L1-$t, a thread of two humans")
+    trap "bob inbox --thread '$th2' >/dev/null 2>&1 || true; alice inbox --thread '$th' >/dev/null 2>&1 || true" EXIT
+    out=$(alice thread list --grep "HK-$t")
+    printf '%s\n' "$out"
+    [ "$(thread_rows <<<"$out")" -eq 1 ] || fail "--grep listed other threads"
+    grep -F "$th" <<<"$out" | has alice "the thread's row"
+    grep -F "$th" <<<"$out" | has leaf-ant "the thread's row"
+    alice thread list --ant leaf-ant --grep "$t" | has "$th" "--ant leaf-ant"
+    alice thread list --ant hub-ant --grep "$t" | lacks "$th" "--ant hub-ant"
+    alice thread list --owner alice --grep "$t" | has "$th" "--owner alice"
+    alice thread list --owner bob --grep "$t" | lacks "$th" "--owner bob"
+    [ "$(list_field alice "HK-$t" '.owner == "alice" and (.users | index("leaf-ant") != null)')" = true ] \
+        || fail "thread list --json lacks the owner or the ant"
+    alice notes "$th" "NOTE-$t" >/dev/null
+    out=$(alice thread search --grep "$t" --from leaf-ant)
+    printf '%s\n' "$out"
+    has "$m" <<<"$out"
+    lacks "NOTE-$t" <<<"$out"
+    alice thread search --grep "$t" --to alice | has "$m" "--to alice"
+    alice thread search --grep "$t" --to leaf-ant | lacks "$m" "--to leaf-ant"
+    out=$(alice thread search --grep "$t" --type note)
+    has "NOTE-$t" <<<"$out"
+    lacks "$m" <<<"$out"
+    out=$(alice thread show "$th")
+    has "HK-$t" <<<"$out"
+    has "Read(" <<<"$out"
+    alice thread show "$th" --no-tools | lacks "Read(" "thread show --no-tools"
+    alice thread show "${th:0:18}" | has "message $m" "thread show by a prefix"
+    [ "$(alice thread show "$th" --json | jq --slurp --arg th "$th" 'length > 0 and all(.[]; .thread_id == $th)')" = true ] \
+        || fail "thread show --json holds entries of other threads"
+    # Under -j another scenario of alice's may be the latest: `last` names some thread of hers.
+    out=$(alice thread show last)
+    grep -qE '^thread [0-9a-f-]{36}' <<<"$out" || fail "thread show last"
+    prefix=
+    for ((i = 1; i <= 36; i++)); do
+        [ "${th:0:i}" = "${th2:0:i}" ] || break
+        prefix=${th:0:i}
+    done
+    [ "${#prefix}" -ge 4 ] || fail "the two threads share no prefix: $th $th2"
+    if out=$(alice thread show "$prefix" 2>&1); then printf '%s\n' "$out"; fail "an ambiguous prefix was taken"; fi
+    has "give more of the id" <<<"$out"
+    has "$th2" <<<"$out"
+    if out=$(alice thread show ffffffff 2>&1); then fail "an unknown prefix was taken"; fi
+    has "no thread over the last 7 days starts with ffffffff" <<<"$out"
+}
+
+scenario L2 P0 "Title, done, pin and archive"
+L2() {
+    local t th
+    t=$(tok)
+    th=$(dm "L2-$t, a thread to look after")
+    bob ask --plaintext --thread "$th" @alice "L2-$t read" >/dev/null
+    trap "alice thread unpin '$th' >/dev/null 2>&1; alice thread unarchive '$th' >/dev/null 2>&1; alice inbox --thread '$th' >/dev/null 2>&1; bob inbox --thread '$th' >/dev/null 2>&1; true" EXIT
+    alice thread title "$th" "E2E $t" | has "E2E $t"
+    alice thread title "$th" | has "E2E $t" "the title"
+    alice thread list --grep "$t" | has "E2E $t" "alice's list"
+    bob thread list --grep "$t" | has "E2E $t" "bob's list"
+    alice thread title "$th" --clear >/dev/null
+    [ "$(list_field bob "$t" .title)" = null ] || fail "the title stayed"
+    alice thread done "$th" >/dev/null
+    alice thread list --grep "$t" | grep -F "$th" | has done "alice's row"
+    bob thread list --grep "$t" | grep -F "$th" | has done "bob's row"
+    [ "$(list_field bob "$t" .done.by)" = alice ] || fail "bob's list does not show it done by alice"
+    bob notes "$th" "L2-$t reopens" >/dev/null
+    [ "$(list_field alice "$t" .done)" = null ] || fail "a note did not reopen the thread"
+    alice thread done "$th" >/dev/null
+    alice thread undone "$th" >/dev/null
+    [ "$(list_field alice "$t" .done)" = null ] || fail "undone left it done"
+    alice thread pin "$th" >/dev/null
+    alice thread list --pinned --since 1h | has "$th" "--pinned"
+    # Pinned threads sort last: no unpinned row follows it.
+    [ "$(alice thread list --since 1h --limit 500 --json | jq --slurp --raw-output --arg th "$th" \
+        'map(select(.thread_id == $th or (.pinned | not))) | last | .thread_id')" = "$th" ] \
+        || fail "an unpinned thread sorts after the pinned one"
+    bob thread list --pinned --since 1h | lacks "$th" "bob's --pinned"
+    # Pins and archives exclude each other: archiving the pinned thread unpins it, pinning it again unarchives it.
+    alice thread archive "$th" >/dev/null
+    alice thread list --pinned --since 1h | lacks "$th" "--pinned after archiving"
+    alice thread list --archived --since 1h | has "$th" "--archived"
+    alice thread list --grep "$t" | lacks "$th" "alice's list after archiving"
+    bob thread list --grep "$t" | has "$th" "bob's list after alice archived"
+    alice thread pin "$th" >/dev/null
+    alice thread list --archived --since 1h | lacks "$th" "--archived after pinning"
+    alice thread unpin "$th" >/dev/null
+    alice thread archive "$th" >/dev/null
+    bob notes "$th" "L2-$t is new again" >/dev/null
+    alice thread list --grep "$t" | grep -F "$th" | has "archived+new" "alice's row after a note"
+    alice thread unarchive "$th" >/dev/null
+    [ "$(list_field alice "$t" '.archived // false')" = false ] || fail "unarchive left it archived"
+}
+
+scenario L3 P1 "Reactions"
+L3() {
+    local t out th m ended
+    t=$(tok)
+    out=$(a_thread leaf-ant "$t")
+    th=${out% *}
+    m=${out#* }
+    trap "alice inbox --thread '$th' >/dev/null 2>&1 || true" EXIT
+    ended=$(alice thread show "$th" | count "ended:")
+    alice react "$m" thumbs-up | has "reacted thumbs-up to message $m"
+    alice thread show "$th" | has "reacted thumbs-up: alice"
+    alice react "${m:0:18}" eyes | has "reacted eyes to message $m" "a reaction by a prefix"
+    alice react "$m" thumbs-up --remove >/dev/null
+    out=$(alice thread show "$th")
+    printf '%s\n' "$out"
+    lacks thumbs-up <<<"$out"
+    has "reacted eyes: alice" <<<"$out"
+    [ "$(alice thread show "$th" --json | jq --slurp --raw-output --arg m "$m" \
+        'map(select(.id == $m)) | .[0].reactions | map(.reaction) | join(",")')" = eyes ] || fail "the reactions stored"
+    # A reaction wakes nobody and marks nothing read.
+    sleep 30
+    [ "$(alice thread show "$th" | count "ended:")" -eq "$ended" ] || fail "a reaction started a prompt"
+    alice inbox --peek --thread "$th" | has "HK-$t" "alice's unread replies"
+    # With an ant's credentials, the signer applies a reaction to a message the ant reads, and refuses another's.
+    leaf ants --creds "$auth/leaf-ant.creds" react "$m" rocket | has "reacted rocket"
+    alice thread show "$th" | has "reacted rocket: leaf-ant"
+    leaf ants --creds "$auth/leaf-ant.creds" react "$m" rocket --remove >/dev/null
+    alice thread show "$th" | lacks rocket
+    if out=$(hub ants --creds "$auth/hub-ant.creds" react "$m" rocket 2>&1); then fail "hub-ant reacted to a message it does not read"; fi
+    has "none hub-ant reads" <<<"$out"
+}
+
+scenario L4 P1 "A quoted reply and a forward"
+L4() {
+    local t f out th m th2
+    t=$(tok)
+    f=$(tok)
+    out=$(a_thread leaf-ant "$t")
+    th=${out% *}
+    m=${out#* }
+    trap "alice inbox --thread '$th' >/dev/null 2>&1 || true" EXIT
+    out=$(alice ask --wait --timeout 3m --reply-to "$m" "Reply with exactly QUOTED-$t")
+    printf '%s\n' "$out"
+    has "QUOTED-$t" <<<"$out"
+    [ "$(thread <<<"$out")" = "$th" ] || fail "the quoted reply went to another thread"
+    [ "$(alice thread show "$th" --json | jq --slurp --raw-output --arg t "$t" \
+        'map(select(.quote != null)) | .[0] | .to == "leaf-ant" and .quote.from == "leaf-ant" and (.quote.text | contains("HK-" + $t))')" = true ] \
+        || fail "the reply is not addressed to the quoted message's author with its quote"
+    alice thread show "$th" | has "↪ replying to leaf-ant: HK-$t"
+    out=$(alice ask --wait --timeout 3m --forward "$m" @hub-ant \
+        "Reply with the word that follows HK- in the forwarded message, then FWD-$f.")
+    printf '%s\n' "$out"
+    has "FWD-$f" <<<"$out"
+    th2=$(thread <<<"$out")
+    [ "$th2" != "$th" ] || fail "the forward stayed on the thread"
+    out=$(alice thread show "$th2")
+    has "Forwarded from leaf-ant on thread $th" <<<"$out"
+    has "> HK-$t" <<<"$out"
+    ant_texts "$th2" | has "$t" "hub-ant's reply"
+}
+
+scenario L5 P1 "TL;DR and digest"
+L5() {
+    local t th fw out at at2 digests
+    t=$(tok)
+    th=$(dm "Plan $t: ship the e2e build on Friday, after the review")
+    bob ask --plaintext --thread "$th" @alice "Agreed for $t: Friday, after the review" >/dev/null
+    trap "alice inbox --thread '$th' >/dev/null 2>&1; bob inbox --thread '$th' >/dev/null 2>&1; true" EXIT
+    if out=$(alice ask --plaintext --forward-thread "$th" @bob 2>&1); then fail "a thread with no TL;DR was forwarded"; fi
+    has "no TL;DR of thread $th" <<<"$out"
+    [ "$(summaries_of "$th")" -eq 0 ] || fail "a TL;DR was asked before any tldr"
+    out=$(alice thread tldr "$th" --json)
+    printf '%s\n' "$out"
+    [ "$(jq --raw-output '.by' <<<"$out")" = system-messenger ] || fail "the TL;DR is not by the messenger"
+    [ -n "$(jq --raw-output '.text // empty' <<<"$out")" ] || fail "an empty TL;DR"
+    at=$(jq --raw-output .at <<<"$out")
+    [ "$(alice thread tldr "$th" --json | jq --raw-output .at)" = "$at" ] || fail "the second tldr asked again"
+    [ "$(summaries_of "$th")" -eq 1 ] || fail "expected one TL;DR request"
+    at2=$(alice thread tldr "$th" --new --json | jq --raw-output .at)
+    [ "$at2" != "$at" ] || fail "tldr --new kept the old TL;DR"
+    [ "$(summaries_of "$th")" -eq 2 ] || fail "expected a second TL;DR request"
+    fw=$(alice ask --plaintext --forward-thread "$th" @bob | thread)
+    trap "alice inbox --thread '$th' >/dev/null 2>&1; bob inbox --thread '$th' >/dev/null 2>&1; bob inbox --thread '$fw' >/dev/null 2>&1; true" EXIT
+    alice thread show "$fw" | has "Forwarded thread $th, its TL;DR by system-messenger"
+    digests() { alice thread search --to system-messenger --since 1h --json | jq --slurp 'map(select(.summary.since != null)) | length'; }
+    digests=$(digests)
+    out=$(alice digest --since 10m)
+    printf '%s\n' "$out"
+    has "digest of the threads" <<<"$out"
+    [ "$(wc -l <<<"$out")" -ge 2 ] || fail "an empty digest"
+    [ "$(digests)" -gt "$digests" ] || fail "the digest asked no one"
+    [ "$(alice thread tldr "$th" --json | jq --raw-output .at)" = "$at2" ] || fail "the digest changed the kept TL;DR"
+    alice thread list --grep "$t" --json | jq --raw-output '.users | join(",")' | lacks system-messenger "thread list"
+}
+
+scenario L6 P1 "Channel upkeep"
+L6() {
+    local t c out th row
+    t=$(tok)
+    c=hk-$t
+    trap "alice channel notify '$c' humans >/dev/null 2>&1; alice channel delete '$c' >/dev/null 2>&1; true" EXIT
+    alice channel create "$c" --member leaf-ant,alice,bob --description "Housekeeping $t" >/dev/null
+    row() { alice channel list | grep -F "#$c "; }
+    alice channel list | has DESCRIPTION
+    row | has "Housekeeping $t" "the channel's row"
+    alice channel add "$c" hub-ant | has hub-ant
+    alice channel set "$c" --owner leaf-ant --description "Upkeep $t" >/dev/null
+    out=$(row)
+    printf '%s\n' "$out"
+    has "Upkeep $t" <<<"$out"
+    has "leaf-ant,alice,bob,hub-ant" <<<"$out"
+    grep -qE '\(default\) +leaf-ant ' <<<"$out" || fail "leaf-ant is not the owner"
+    alice channel remove "$c" hub-ant >/dev/null
+    row | lacks hub-ant "the members"
+    out=$(alice post --wait --timeout 3m "$c" "@leaf-ant answer this post with exactly HKCHAN-$t, using no tool")
+    printf '%s\n' "$out"
+    has "HKCHAN-$t" <<<"$out"
+    th=$(thread <<<"$out")
+    bob post --thread "$th" "$c" "@alice have a look at $t" >/dev/null
+    # alice's unread: bob's post counts (by a human, mentioning her), leaf-ant's answer shows apart.
+    unread() { row | grep -qF "$1"; }
+    eventually 30 unread "1 (@1) +1 other"
+    alice channel notify "$c" all | has all
+    row | has "2 (@1)" "UNREAD at level all"
+    alice notify status | has "#$c notifies all"
+    alice channel notify "$c" mentions >/dev/null
+    row | has "1 (@1) +1 other" "UNREAD at level mentions"
+    alice notify status | has "#$c notifies mentions"
+    alice channel read "$c" --peek | has "HKCHAN-$t" "channel read --peek"
+    row | has "1 (@1) +1 other" "UNREAD after --peek"
+    alice channel read "$c" | has "@alice have a look at $t" "channel read"
+    out=$(row)
+    lacks "(@1)" <<<"$out"
+    lacks other <<<"$out"
+    alice thread archive "$th" >/dev/null
+    alice channel read "$c" | lacks "HKCHAN-$t" "channel read of an archived thread"
+    alice channel read "$c" --archived | has "HKCHAN-$t" "channel read --archived"
+    alice thread unarchive "$th" >/dev/null
+    alice channel notify "$c" humans >/dev/null
+    # A member removed is no longer woken by a mention, and the post is not triaged either.
+    alice channel remove "$c" leaf-ant >/dev/null
+    out=$(alice post "$c" "@leaf-ant answer this post with exactly GONE-$t" 2>&1)
+    printf '%s\n' "$out"
+    has "no member of #$c" <<<"$out"
+    th=$(thread <<<"$out")
+    sleep 30
+    alice thread search --grep "GONE-$t" --to leaf-ant | lacks "GONE-$t" "messages to leaf-ant"
+    [ "$(alice channel read "$c" --peek --thread "$th" | count "GONE-$t")" -eq 1 ] || fail "the post was answered"
+    alice channel delete "$c" | has deleted
+    alice channel list | lacks "#$c " "channel list after delete"
+}
+
+scenario L7 P2 "Reminders, mutes and snooze"
+L7() {
+    local t th th2 out
+    t=$(tok)
+    th=$(dm "L7-$t, a thread to be reminded of")
+    th2=$(dm "L7-$t, another")
+    trap "alice remind clear '$th' >/dev/null 2>&1; alice remind clear '$th2' >/dev/null 2>&1; alice thread unmute '$th' >/dev/null 2>&1; alice notify resume >/dev/null 2>&1; bob inbox --thread '$th' >/dev/null 2>&1; bob inbox --thread '$th2' >/dev/null 2>&1; true" EXIT
+    alice remind set "$th" 2h "check $t" >/dev/null
+    alice remind set "$th2" 1h "first $t" >/dev/null
+    alice remind list | has "check $t"
+    [ "$(alice remind list --json | jq --slurp --raw-output --arg t "$t" \
+        'map(select(.note | contains($t))) | map(.thread) | join(" ")')" = "$th2 $th" ] || fail "reminders not soonest first"
+    alice remind clear "$th2" >/dev/null
+    alice remind list | lacks "first $t" "remind list after clear"
+    alice remind set "$th" 1s "due $t" >/dev/null
+    due() { [ "$(alice remind list --json | jq --slurp --raw-output --arg th "$th" 'map(select(.thread == $th)) | .[0].is_due')" = true ]; }
+    eventually 30 due
+    alice remind list | lacks "check $t" "the reminder replaced"
+    chat "wait:connected" "wait:due $t:30"
+    alice remind clear "$th" >/dev/null
+    alice remind list | lacks "due $t" "remind list after clear"
+    alice thread mute "$th" --for 1h | has muted
+    alice notify snooze 10m | has snoozed
+    out=$(alice notify status)
+    printf '%s\n' "$out"
+    has "snoozed until" <<<"$out"
+    has "muted thread $th" <<<"$out"
+    [ "$(alice notify status --json | jq --raw-output --arg th "$th" '(.snoozed_until != null) and (.muted[$th] != null)')" = true ] \
+        || fail "notify status --json lacks the holds"
+    alice notify resume >/dev/null
+    alice thread unmute "$th" >/dev/null
+    [ "$(alice notify status --json | jq --raw-output --arg th "$th" '(.snoozed_until == null) and (.muted[$th] == null)')" = true ] \
+        || fail "the holds stayed"
+}
+
+scenario L8 P1 "ants status, ants spend, ants queue"
+L8() {
+    local t out th
+    t=$(tok)
+    out=$(a_thread leaf-ant "$t")
+    th=${out% *}
+    trap "alice inbox --thread '$th' >/dev/null 2>&1 || true" EXIT
+    out=$(alice status)
+    printf '%s\n' "$out"
+    [ "$(wc -l <<<"$out")" -eq 1 ] || fail "ants status printed more than one line"
+    has "today" <<<"$out"
+    alice status --json | jq --exit-status \
+        '(.home | type == "object") and (.working | type == "array") and (.spend_today | type == "number")' >/dev/null \
+        || fail "ants status --json"
+    alice status --tmux | grep -qE '^⚑[0-9?]+ ◐[0-9?]+ \$' || fail "ants status --tmux"
+    alice spend leaf-ant --thread "$th" | has "$th"
+    alice spend leaf-ant --thread "$th" --json | jq --exit-status --arg th "$th" '.thread == $th and .tokens > 0' >/dev/null \
+        || fail "spend --thread --json"
+    alice spend leaf-ant --days 1 --json \
+        | jq --exit-status --arg th "$th" '(.days | length) == 1 and any(.threads[]; .thread == $th)' >/dev/null \
+        || fail "spend --days 1 --json lacks the thread"
+    out=$(alice queue)
+    printf '%s\n' "$out"
+    grep -qE 'live ant|leaf-ant' <<<"$out" || fail "ants queue"
+}
+
+scenario L9 P2 "Messages from a file"
+L9() {
+    local t c th out want
+    t=$(tok)
+    c=hkf-$t
+    trap "container exec '$name-client' rm -f /tmp/hk-ask-$t.txt /tmp/hk-post-$t.txt; alice channel delete '$c' >/dev/null 2>&1; true" EXIT
+    container exec "$name-client" sh -c "printf 'Reply with exactly: FILE-$t\n\n  This prompt comes from a file: \"quotes\", \$HOME and a tab\there.\n' >/tmp/hk-ask-$t.txt"
+    out=$(alice ask --wait --timeout 3m --file "/tmp/hk-ask-$t.txt" @leaf-ant)
+    printf '%s\n' "$out"
+    has "FILE-$t" <<<"$out"
+    th=$(thread <<<"$out")
+    want=$(container exec "$name-client" cat "/tmp/hk-ask-$t.txt")
+    [ "$(alice thread show "$th" --json | jq --slurp --raw-output 'map(select(.from == "alice")) | .[0].text')" = "$want" ] \
+        || fail "the stored text differs from the file's"
+    alice channel create "$c" --member alice,bob >/dev/null
+    container exec "$name-client" sh -c "printf '@bob FILEPOST-$t\nsecond line\n' >/tmp/hk-post-$t.txt"
+    th=$(alice post --file "/tmp/hk-post-$t.txt" "$c" | thread)
+    want=$(container exec "$name-client" cat "/tmp/hk-post-$t.txt")
+    [ "$(alice thread show "$th" --json | jq --slurp --raw-output 'map(select(.kind == "post")) | .[0].text')" = "$want" ] \
+        || fail "the stored post differs from the file's"
+    bob channel read "$c" >/dev/null
+}
+
 # --- S. Steering, queueing, cancelling and withdrawing --------------------------------------------------------------
 
 scenario S1 P0 "A second message steers the running prompt"
@@ -512,6 +869,52 @@ T4() {
     has REFUSED <<<"$out"
     ! leaf test -e "/demo/gate/expired-$t" || fail "the expired command ran"
     alice inbox --peek | has approval
+}
+
+scenario T5 P1 "Approving for the rest of the session, where the harness offers it"
+T5() {
+    local t dir th id id2= out always=
+    t=$(tok)
+    dir=$(mktemp -d)
+    trap "leaf rm -f /demo/gate/always-1-$t /demo/gate/always-2-$t; rm -rf '$dir'" EXIT
+    ask_bg "$dir/out" -f --timeout 5m @gate-ant \
+        "Run two shell commands as two separate tool calls, one after the other: first 'touch /demo/gate/always-1-$t', then 'touch /demo/gate/always-2-$t'. Then reply DONE-$t."
+    th=$(thread_of "$dir/out")
+    has_pending() { [ -n "$(pending_tool gate-ant "$th")" ]; }
+    eventually 120 has_pending
+    id=$(pending_tool gate-ant "$th")
+    if alice tools list --json | jq --exit-status --arg id "${id#*/}" 'select(.id == $id) | .options | index("allow_always")' >/dev/null; then
+        alice tools show "$id" | has always "what --always allows"
+        alice tools approve "$id" --always
+        always=1
+    else
+        # Claude Code's own protocol (the fixture's) offers allow once and reject only: --always is refused and the
+        # request stays pending; the second call asks again.
+        note "allow-always is not offered: each call is asked about"
+        alice tools show "$id" | lacks always "tools show"
+        if out=$(alice tools approve "$id" --always 2>&1); then fail "--always was taken though not offered"; fi
+        has "allow-always is not offered" <<<"$out"
+        [ "$(pending_tool gate-ant "$th")" = "$id" ] || fail "the refused --always settled the request"
+        alice tools approve "$id"
+        another() { local p; p=$(pending_tool gate-ant "$th"); [ "$p" = "$id" ] || printf '%s' "$p"; }
+        second() { [ -n "$(another)" ] || grep -qF "DONE-$t" "$dir/out"; }
+        eventually 120 second
+        id2=$(another)
+        if [ -n "$id2" ]; then
+            alice tools approve "$id2"
+        else
+            note "the model ran both commands in one call"
+        fi
+    fi
+    wait
+    cat "$dir/out"
+    if [ -n "$always" ]; then
+        [ "$(alice thread show "$th" --json | jq --slurp 'map(select(.kind == "approval")) | length')" -eq 1 ] \
+            || fail "the second call was asked about after --always"
+    fi
+    has "DONE-$t" <"$dir/out"
+    leaf test -f "/demo/gate/always-1-$t" || fail "the first command did not run"
+    leaf test -f "/demo/gate/always-2-$t" || fail "the second command did not run"
 }
 
 # --- O. Admin orders from the client --------------------------------------------------------------------------------
@@ -951,6 +1354,45 @@ U9() {
     cat "$watch"
     lacks "sealed second $t" "the ant's watch" <"$watch"
     grep -qE 'Permissions Violation for Subscription|\[sealed' "$watch" || fail "the ant's watch was neither refused nor sealed"
+}
+
+scenario U10 P1 "Marks and replies in the chat"
+U10() {
+    local t out th m fw
+    t=$(tok)
+    out=$(a_thread leaf-ant "$t")
+    th=${out% *}
+    m=${out#* }
+    trap "alice thread unpin '$th' >/dev/null 2>&1; alice inbox --thread '$th' >/dev/null 2>&1; true" EXIT
+    chat "wait:connected" "type:/goto $th" "key:enter" "wait:HK-$t" \
+        "type:/title Chat $t" "key:enter" "wait:titled thread $th" \
+        "type:/done" "key:enter" "wait:thread $th done" \
+        "type:/pin" "key:enter" "wait:thread $th pinned" \
+        "type:/react rocket" "key:enter" "wait:reacted rocket to message $m"
+    alice thread title "$th" | has "Chat $t" "the title"
+    [ "$(list_field alice "HK-$t" .done.by)" = alice ] || fail "/done did not mark the thread done"
+    alice thread list --pinned --since 1h | has "$th" "--pinned"
+    alice thread show "$th" | has "reacted rocket: alice"
+    # A quoted reply (> on the selected reply), a forward of it to bob (f), a TL;DR and a search.
+    chat "wait:connected" "type:/goto $th" "key:enter" "wait:HK-$t" \
+        "key:up" "type:>" "wait:replying to leaf-ant: HK-$t" "type:Reply with exactly CQUOTE-$t" "key:enter" \
+        "wait:sent to leaf-ant"
+    eventually 180 replied "$th" "CQUOTE-$t"
+    alice thread show "$th" | has "↪ replying to leaf-ant: HK-$t"
+    [ "$(list_field alice "HK-$t" .done)" = null ] || fail "the reply did not reopen the thread"
+    chat "wait:connected" "type:/goto $th" "key:enter" "wait:CQUOTE-$t" \
+        "key:up" "type:f" "wait:/forward @" "type:bob " "key:esc" "type:FWD-$t" "snap" "key:enter" "sleep:5" "snap" \
+        "type:/tldr" "key:enter" "wait:TL;DR:180" \
+        "type:/search CQUOTE-$t" "key:enter" "wait:search CQUOTE-$t" "wait:Chat $t"
+    fwd() { bob inbox --peek | grep -qF "FWD-$t"; }
+    eventually 60 fwd
+    fw=$(bob inbox --peek --json | jq --slurp --raw-output --arg t "FWD-$t" 'map(select(.text | contains($t))) | .[0].thread_id')
+    trap "alice thread unpin '$th' >/dev/null 2>&1; alice inbox --thread '$th' >/dev/null 2>&1; bob inbox --thread '$fw' >/dev/null 2>&1; true" EXIT
+    bob inbox --peek | has "Forwarded from leaf-ant" "bob's inbox"
+    [ "$(summaries_of "$th")" -ge 1 ] || fail "/tldr asked no one"
+    alice thread tldr "$th" --json | jq --exit-status '.by == "system-messenger" and (.text | length > 0)' >/dev/null \
+        || fail "no TL;DR kept"
+    [ "$(summaries_of "$th")" -eq 1 ] || fail "the TL;DR /tldr asked for was not kept"
 }
 
 # --- X. Sense and trails --------------------------------------------------------------------------------------------
