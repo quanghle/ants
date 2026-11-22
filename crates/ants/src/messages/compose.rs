@@ -202,18 +202,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_editor_writes_the_message_in_a_private_file_removed_afterwards() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let dir = ants_test_support::scratch_dir("compose-editor");
         let script = dir.join("fake editor");
-        std::fs::write(
+        ants_test_support::executable(
             &script,
             "#!/bin/sh\nprintf %s \"$2\" > \"$(dirname \"$0\")/path\"\nls -l \"$2\" | cut -c1-10 > \"$(dirname \"$0\")/mode\"\n\
              test \"$1\" = --wait || exit 9\ncase $(basename \"$2\") in ants-message-*.md) ;; *) exit 8 ;; esac\n\
              if [ -n \"$FAKE_TEXT\" ]; then printf \"$FAKE_TEXT\" > \"$2\"; fi\nexit ${FAKE_EXIT:-0}\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         // Quoted as a command line: the path holds a space.
         let line = |text: &str, exit: u8| format!("FAKE_TEXT='{text}' FAKE_EXIT={exit} '{}' --wait", script.display());
         let input = Input { file: None, edit: true };

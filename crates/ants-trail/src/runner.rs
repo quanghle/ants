@@ -137,7 +137,6 @@ fn classify(status: ExitStatus, out: &Result<Vec<u8>, String>, err: &[u8]) -> Re
 #[cfg(all(test, unix))]
 pub(crate) mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     /// Where fake workers go: beside the test binary, in the target directory.
     fn dir() -> PathBuf {
@@ -150,8 +149,7 @@ pub(crate) mod tests {
         let dir = dir();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ants_test_support::executable(&path, &format!("#!/bin/sh\n{body}\n"));
         Worker::new(path)
     }
 

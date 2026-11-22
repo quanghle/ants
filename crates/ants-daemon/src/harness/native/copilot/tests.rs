@@ -165,8 +165,7 @@ impl Played {
              exec 3>\"$d/in.$n\"\ncat \"$d/out.$n\" 3>&- &\nexec cat >&3\n",
             dir.display()
         );
-        std::fs::write(&relay, text).unwrap();
-        std::fs::set_permissions(&relay, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        ants_test_support::executable(&relay, &text);
         let definition = format!(
             "[harnesses.native]\ncommand = {relay:?}\nprotocol = \"copilot-sdk\"\nsign_in = \"copilot login\"\n{table}"
         );
