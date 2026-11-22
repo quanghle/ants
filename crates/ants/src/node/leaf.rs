@@ -88,6 +88,16 @@ pub fn read_listen(path: &Path) -> Result<String> {
     value(&text, path, "listen")
 }
 
+/// Whether a remote of the leaf node configuration `text`, as [`write()`] writes it, connects with the credentials
+/// file `creds`, however either spells its path ([`normalize`]): [`reconnect_uplink`] respells the uplink's.
+pub fn uses_credentials(text: &str, creds: &Path) -> bool {
+    let Ok(creds) = normalize(creds) else { return false };
+    text.lines()
+        .filter_map(|line| line.trim().strip_prefix("credentials")?.trim_start().strip_prefix(':'))
+        .filter_map(|value| serde_json::from_str::<String>(value.trim()).ok())
+        .any(|named| normalize(Path::new(&named)).is_ok_and(|named| named == creds))
+}
+
 /// The quoted value of the first `key: "..."` line of `text`, the configuration at `path`.
 fn value(text: &str, path: &Path, key: &str) -> Result<String> {
     let line = text

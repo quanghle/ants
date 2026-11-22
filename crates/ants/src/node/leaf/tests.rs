@@ -398,6 +398,10 @@ fn renewed_uplink_credentials_take_a_reload() {
     });
     assert!(said.starts_with("the leaf node reloaded to connect its uplink again"), "{said}");
     assert_eq!(read_uplink(&conf).unwrap().1, Path::new("/home/me/.config/ants/auth/./leaf-m1.creds"));
+    let respelled = fs::read_to_string(&conf).unwrap();
+    assert!(uses_credentials(&respelled, Path::new(creds)), "the same file, respelled");
+    assert!(uses_credentials(&respelled, Path::new("/home/me/.config/ants/auth/./leaf-m1.creds")));
+    assert!(!uses_credentials(&respelled, Path::new("/home/me/.config/ants/auth/leaf-m1.store.creds")));
     let by_hand = use_renewed_uplink(&conf, |_| Outcome::Unmanaged);
     assert!(by_hand.contains("send the running leaf node SIGHUP"), "{by_hand}");
     let stopped = use_renewed_uplink(&conf, |_| Outcome::NotRunning);

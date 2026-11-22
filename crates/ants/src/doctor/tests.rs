@@ -580,6 +580,56 @@ async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `ants add --enroll` and `ants renew` respell the uplink's credentials in leaf.conf to reconnect it; the store and
+/// system account uplinks, still named as written, pass.
+#[tokio::test]
+async fn a_leaf_s_store_and_system_uplinks_pass_after_the_uplink_is_respelled() {
+    let dir = ants_test_support::scratch_dir("doctor-leaf-respelled").canonicalize().unwrap();
+    auth::init(&dir).unwrap();
+    let machine: Machine = "m1".parse().unwrap();
+    let uplink = dir.join("leaf-m1.creds");
+    let ants = [("dev-a".parse().unwrap(), Role::Ant)];
+    auth::issue_leaf(&dir, &machine, &ants, &[], EnrollApprover::Without, None, &uplink).unwrap();
+    let leaf_config = dir.join("leaf.conf");
+    let uplinks = ["nats-leaf://127.0.0.1:7422".to_owned()];
+    let system_creds = auth::leaf_system_creds(&uplink);
+    let leaf = leaf::Leaf {
+        machine: &machine,
+        hub_domain: None,
+        uplinks: &uplinks,
+        creds: &uplink,
+        system_creds: Some(&system_creds),
+        server_conf: &dir.join(auth::SERVER_CONF),
+        ca_file: None,
+        proxy: None,
+        listen: "127.0.0.1:1",
+    };
+    leaf::write(&leaf, &leaf_config).unwrap();
+    leaf::use_renewed_uplink(&leaf_config, |_| crate::service::Outcome::NotRunning);
+    assert!(std::fs::read_to_string(&leaf_config).unwrap().contains("/./leaf-m1.creds"), "respelled");
+    let setup = Setup {
+        nats: "nats://127.0.0.1:1".to_owned(),
+        creds: None,
+        js_domain: None,
+        config: dir.join("no-config.toml"),
+        leaf_config: leaf_config.clone(),
+        hub_config: dir.join("no-nats.conf"),
+        harnesses: false,
+        team: dir.clone(),
+        webhooks: dir.join("no-webhooks.toml"),
+        home: None,
+        worker: None,
+    };
+
+    let checks = check_leaf(&setup, Leaf::read(&leaf_config), &[], None, None, None, 0).await;
+    for name in ["leaf uplink", "leaf store uplink", "leaf system uplink"] {
+        let check = named(&checks, name)[0];
+        assert_eq!(check.status, Status::Ok, "{check}");
+        assert!(!check.detail.contains("/./"), "{check}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// With the team keys, the hub is asked whether it keeps pushed accounts: a warning without a `full` resolver, and
 /// for a hub of another team, which refuses the system account.
 #[tokio::test]

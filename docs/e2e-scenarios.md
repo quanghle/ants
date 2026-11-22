@@ -287,8 +287,8 @@ on solo ants setup --ant dev-a --workdir /demo/work --managed-nats --no-services
 **Expect**
 - Setup names the harness it picked (`claude, the only built-in harness installed here`) and each step done; with
   `--no-services` it leaves two to the user, printed as such: start `ants daemon --config FILE`, which runs the
-  nats-server of `[nats_server]`, then `ants init`. It exits 0 (known: it exits 1, its closing `ants doctor` failing
-  on the server it left to the user to start, ants-u9wna). Its harness step passes.
+  nats-server of `[nats_server]`, then `ants init`. It exits 0, its closing `ants doctor` skipping the server check
+  for the server `--no-services` leaves to start. Its harness step passes.
 - `~/.config/ants/nats.conf` and `~/.ants/config.toml` exist, the config holding a `[nats_server]` table, the
   messenger, the sage and `dev-a`; the colony lists `dev-a` and `system-messenger` live on the ACP adapter.
 - The replies hold `node=scratch` with `SETUP-$t`, and `OPS-$t`; `ants thread show` ends with the tokens and cost.
@@ -322,8 +322,8 @@ alice machines; hub ants auth issued; on join-b2 ants --creds ~/.config/ants/aut
   the daemon looks for them.
 - The colony shows `b2-$t` live on machine `join-b2`; the reply holds `node=scratch` and `JOIN-$t`.
 - `ants machines` lists `join-b2`; `ants auth issued` lists `b2-$t` and `host-join-b2`; `ants doctor --no-harness`
-  on the node prints no `fail`, `leaf uplink` and `host credentials` ok (known: `leaf store uplink` fails once
-  `ants add` has respelled the uplink's credentials path in `leaf.conf`, ants-6qn5t).
+  on the node prints no `fail` (`leaf store uplink` included, though `ants add` has respelled the uplink's
+  credentials path in `leaf.conf`), `leaf uplink` and `host credentials` ok.
 
 **Undo** (also first, for a run cut short): drop `b2-$t` from the outbox sourcing (`ants leaf outbox join-b2
 --remove-ant`), remove the node, then on the hub revoke `b2-$t`, `host-join-b2` and `leaf-join-b2`
