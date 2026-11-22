@@ -1,5 +1,5 @@
-//! The machine's leaf node: its configuration, uplink and system account credentials, whether it listens, and the
-//! hub's sourcing of its outbox.
+//! The machine's leaf node: its configuration, uplink, store and system account credentials, whether it listens, and
+//! the hub's sourcing of its outbox.
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +39,33 @@ impl Leaf {
             let hub_domain = creds::check(&uplink).ok().and_then(|f| f.js_domain);
             Ok(Self { path: path.to_owned(), text, machine, uplink, listen, hub_domain })
         })())
+    }
+}
+
+/// The leaf node's store account credentials, through which the hub sources the machine's outbox: issued, recorded and
+/// revoked with the uplink's, and as long-lived.
+fn check_leaf_store(leaf: &Leaf, generic: String, now: u64) -> Check {
+    let check = "leaf store uplink";
+    let machine = &leaf.machine;
+    let store = auth::leaf_store_creds(&leaf.uplink);
+    if !leaf.text.contains(&*store.to_string_lossy()) {
+        let detail = format!(
+            "{} does not use {}: the hub cannot source this leaf's outbox",
+            leaf.path.display(),
+            store.display()
+        );
+        return Check::fail(check, detail, vec![format!("ants leaf config {machine} --uplink URL ...")]);
+    }
+    match creds::check(&store) {
+        Ok(finding) if finding.kind == (Kind::LeafStore { machine: machine.clone() }) => {
+            check_creds(check, &store, &finding, now)
+        }
+        Ok(finding) => Check::fail(
+            check,
+            format!("{} are the credentials of {}", store.display(), finding.holder()),
+            vec![generic],
+        ),
+        Err(e) => Check::fail(check, format!("{e:#}"), vec![generic]),
     }
 }
 
@@ -113,6 +140,7 @@ pub(super) async fn check_leaf(
         let detail = "no ants served here: the uplink needs no rights for ants of this machine, built-in ones included";
         checks.push(Check::skip("leaf uplink ants", detail));
     }
+    checks.push(check_leaf_store(&leaf, generic.clone(), now));
     checks.push(check_leaf_system(setup, &leaf, &uplink, generic, now));
     checks.push(check_listening(setup, &leaf, managed).await);
     checks.push(check_outbox(machine, members.as_deref(), uplink.as_ref().ok(), connected).await);

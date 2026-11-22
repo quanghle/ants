@@ -393,3 +393,110 @@ fn the_keys_a_key_was_renewed_from_are_its_live_predecessors() {
     assert!(live.iter().any(|i| i.name == "dev-b"));
     fs::remove_dir_all(dir).unwrap();
 }
+
+/// The revoked keys of the account `key` in the `server.conf` of `team`.
+fn revoked_in(team: &Path, key: &str) -> BTreeSet<String> {
+    let conf = fs::read_to_string(team.join(auth::SERVER_CONF)).unwrap();
+    let jwt = conf.lines().find_map(|l| l.trim().strip_prefix(&format!("{key}: ")).map(str::to_owned)).unwrap();
+    let body = jwt.split('.').nth(1).unwrap();
+    let claims: serde_json::Value =
+        serde_json::from_slice(&data_encoding::BASE64URL_NOPAD.decode(body.as_bytes()).unwrap()).unwrap();
+    claims["nats"]["revocations"].as_object().map_or_default(|r| r.keys().cloned().collect())
+}
+
+#[test]
+fn a_leaf_s_store_uplink_is_recorded_and_revoked_with_its_uplink_in_the_store_account() {
+    use ants_daemon::secrets::creds;
+    let dir = ants_test_support::scratch_dir("revoke-leaf-store");
+    let team = dir.join("auth");
+    auth::init(&team).unwrap();
+    let m1: ants_proto::Machine = "m1".parse().unwrap();
+    let uplink = dir.join("leaf-m1.creds");
+    let members = [("dev-a".parse().unwrap(), ants_proto::Role::Ant)];
+    let approver = crate::node::members::EnrollApprover::Without;
+    auth::issue_leaf(&team, &m1, &members, &[], approver, None, &uplink).unwrap();
+    let uplink_finding = creds::check(&uplink).unwrap();
+    let store_finding = creds::check(&auth::leaf_store_creds(&uplink)).unwrap();
+    assert_eq!(store_finding.kind, creds::Kind::LeafStore { machine: m1 });
+    assert_eq!(store_finding.expires_at, uplink_finding.expires_at, "the uplink's lifetime");
+
+    let issued = issued(&team).unwrap();
+    let of = |kind: Kind| issued.iter().find(|i| i.kind == kind).unwrap();
+    let (up, store) = (of(Kind::Leaf), of(Kind::LeafStore));
+    assert_eq!((up.key.as_str(), store.key.as_str()), (uplink_finding.key.as_str(), store_finding.key.as_str()));
+    assert_eq!(store.name, "leaf-m1");
+    assert_eq!(store.expires_at, up.expires_at);
+    let listed = listing(&team, auth::now().unwrap()).unwrap();
+    assert!(listed.iter().any(|l| l.issued.key == store.key && !l.revoked), "{listed:?}");
+
+    let mut keys: Vec<String> = revoke(&team, Some("leaf-m1"), &[]).unwrap().into_iter().map(|r| r.key).collect();
+    keys.sort();
+    let mut expected = vec![up.key.clone(), store.key.clone()];
+    expected.sort();
+    assert_eq!(keys, expected);
+    let (team_account, store_account) = (auth::account_key(&team).unwrap(), auth::store_key(&team).unwrap());
+    assert_eq!(revoked_in(&team, &store_account), BTreeSet::from([store.key.clone()]));
+    assert_eq!(revoked_in(&team, &team_account), BTreeSet::from([up.key.clone()]));
+    // A key the registry does not know is revoked in both accounts.
+    let unknown = nkeys::KeyPair::new_user().public_key();
+    revoke(&team, None, std::slice::from_ref(&unknown)).unwrap();
+    assert!(revoked_in(&team, &store_account).contains(&unknown));
+    assert!(revoked_in(&team, &team_account).contains(&unknown));
+    let listed = listing(&team, auth::now().unwrap()).unwrap();
+    assert!(listed.iter().any(|l| l.issued.key == store.key && l.revoked), "{listed:?}");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn revoking_a_leaf_s_uplink_by_name_drops_its_store_account_uplink_at_the_hub() {
+    use crate::node::leaf;
+    let leaf_port = ants_test_support::free_port();
+    let Some(hub) = crate::test_support::spawn_hub(leaf_port, "") else { return };
+    let team = hub.dir().join("auth");
+    let (m1, domain): (ants_proto::Machine, ants_proto::JsDomain) = ("m1".parse().unwrap(), "hub".parse().unwrap());
+    let creds = hub.dir().join("leaf-m1.creds");
+    let members = [("dev-a".parse().unwrap(), ants_proto::Role::Ant)];
+    let approver = crate::node::members::EnrollApprover::Without;
+    auth::issue_leaf(&team, &m1, &members, &[], approver, Some(&domain), &creds).unwrap();
+    let server_conf = team.join(auth::SERVER_CONF);
+    let listen = format!("127.0.0.1:{}", ants_test_support::free_port());
+    let uplinks = [format!("nats-leaf://127.0.0.1:{leaf_port}")];
+    let _leaf = ants_test_support::NatsServer::spawn_with(|dir| {
+        let config = leaf::Leaf {
+            machine: &m1,
+            hub_domain: Some(&domain),
+            uplinks: &uplinks,
+            creds: &creds,
+            system_creds: None,
+            server_conf: &server_conf,
+            ca_file: None,
+            proxy: None,
+            listen: &listen,
+        };
+        leaf::write(&config, &dir.join("leaf.conf")).unwrap();
+        "include \"leaf.conf\"\n".to_owned()
+    })
+    .unwrap();
+    let system = connect_system(&hub.url, &team).await.unwrap();
+    let (team_account, store_account) = (auth::account_key(&team).unwrap(), auth::store_key(&team).unwrap());
+    let leaf_accounts = async || -> Vec<String> {
+        let Ok(answer) = relayed::request(&system, "$SYS.REQ.SERVER.PING.LEAFZ", "".into()).await else {
+            return Vec::new();
+        };
+        let answer: serde_json::Value = serde_json::from_slice(&answer.payload).unwrap_or_default();
+        let leafs = answer["data"]["leafs"].as_array().map_or_default(Vec::as_slice);
+        leafs.iter().filter_map(|l| l["account"].as_str().map(str::to_owned)).collect()
+    };
+    crate::test_support::eventually("both uplinks connected", async || {
+        let accounts = leaf_accounts().await;
+        accounts.contains(&team_account) && accounts.contains(&store_account)
+    })
+    .await;
+
+    revoke(&team, Some("leaf-m1"), &[]).unwrap();
+    push(&hub.url, &team).await.unwrap();
+    crate::test_support::eventually("both uplinks dropped", async || leaf_accounts().await.is_empty()).await;
+    // The leaf node keeps trying, refused.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(leaf_accounts().await, Vec::<String>::new());
+}
