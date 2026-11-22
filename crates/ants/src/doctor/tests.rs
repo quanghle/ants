@@ -962,11 +962,13 @@ fn one<'a>(checks: &'a [Check], name: &str) -> &'a Check {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_dev_tunnel_needs_a_login_or_a_connect_token_far_from_expiring() {
+    use std::os::unix::fs::PermissionsExt as _;
     let home = ants_test_support::scratch_dir("doctor-devtunnel").canonicalize().unwrap();
     assert!(transports(&home).await.is_empty(), "nothing without the services");
     let devtunnel = home.join("devtunnel");
     let user_show = |json: &str| {
-        ants_test_support::executable(&devtunnel, &format!("#!/bin/sh\nprintf '%s\\n' '{json}'\n"));
+        std::fs::write(&devtunnel, format!("#!/bin/sh\nprintf '%s\\n' '{json}'\n")).unwrap();
+        std::fs::set_permissions(&devtunnel, std::fs::Permissions::from_mode(0o755)).unwrap();
     };
     user_show(r#"{"status": "Not logged in"}"#);
     let token = home.join("connect-token");

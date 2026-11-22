@@ -13,9 +13,7 @@ use crate::auth::issue_host;
 use crate::machines;
 use crate::test_support::Server;
 
-/// How long a test waits for a daemon to decide an order. A daemon takes its orders one at a time, each acked only
-/// after [`ants_daemon::bus::settled`], so a loaded test machine may take several seconds; a decided order ends the wait.
-pub(crate) const WAIT: Duration = Duration::from_secs(20);
+pub(crate) const WAIT: Duration = Duration::from_secs(5);
 
 pub(crate) fn p(s: &str) -> UserId {
     s.parse().unwrap()

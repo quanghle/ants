@@ -6,7 +6,7 @@ registry=
 scenario() { registry="$registry$1 $2 $3"$'\n'; }
 # Scenarios that change what the others rely on (a node, an uplink, an ant's settings or pause, the chat's last
 # thread), run one at a time after the rest; the others share the fixture and run side by side with `run -j N`.
-alone=" R1 R2 R3 R4 R5 R6 H1 H2 H3 O1 O2 O3 O6 O7 S4 T4 U4 U5 U7 U8 X1 K1 "
+alone=" R1 R2 R3 R4 R5 R6 H1 H2 H3 O1 O2 O3 O6 O7 S4 T4 U4 U5 U7 U8 X1 K1 E2 E3 E6 "
 is_alone() { case "$alone" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # --- Helpers on the Mac, as the doc's Conventions give them -----------------------------------------------------------
@@ -512,6 +512,194 @@ T4() {
     has REFUSED <<<"$out"
     ! leaf test -e "/demo/gate/expired-$t" || fail "the expired command ran"
     alice inbox --peek | has approval
+}
+
+# --- E. Escalations -------------------------------------------------------------------------------------------------
+
+chained_to() { colony_field "$1" '(.escalate_to // []) | join(",")'; } # chained_to ANT: its escalate_to, comma-joined
+chain() { # chain ANT LEADER: sets the ant's escalate_to to LEADER and waits for the colony to show it
+    alice ant set "$1" "escalate_to=[\"$2\"]" >/dev/null
+    shows_chain() { [ "$(chained_to "$1")" = "$2" ]; }
+    eventually 60 shows_chain "$1" "$2"
+}
+unchain() { alice ant set "$1" escalate_to= >/dev/null 2>&1 || true; } # unchain ANT: for traps
+# done_with: for traps, marks the scenario's thread ($th, global so the trap still sees it) done, out of home's way.
+done_with() { [ -z "${th:-}" ] || alice thread done "$th" >/dev/null 2>&1 || true; }
+# escalations THREAD: the escalations stored on the thread, one a line, as `TO: NOTE`.
+escalations() {
+    alice thread show "$1" --json | jq --raw-output 'select(.kind == "escalation") | "\(.to): \(.note)"'
+}
+escalated_to() { escalations "$1" | grep -qF "$2: "; } # escalated_to THREAD WHO: an escalation went to WHO
+# listed_escalated THREAD: `ants thread list --escalated` lists the thread, with its escalation under it.
+listed_escalated() { alice thread list --escalated --since 1h | grep -A1 -F "$1"; }
+leaf_texts() { # leaf_texts THREAD: the texts of leaf-ant's messages on the thread
+    alice thread show "$1" --json | jq --raw-output 'select(.from == "leaf-ant") | .text // empty'
+}
+# settled THREAD: waits, 3 minutes at most, until no message was stored on the thread for 30 s.
+settled() {
+    local last now same=0 start=$SECONDS
+    last=$(alice thread show "$1" --json | wc -l)
+    while ((same < 30 && SECONDS - start < 180)); do
+        sleep 10
+        now=$(alice thread show "$1" --json | wc -l)
+        if [ "$now" = "$last" ]; then same=$((same + 10)); else same=0; last=$now; fi
+    done
+}
+from_to() { # from_to THREAD FROM TO: how many messages FROM sent TO on the thread
+    alice thread show "$1" --json | jq --slurp --arg from "$2" --arg to "$3" \
+        'map(select(.kind == "message" and .from == $from and .to == $to)) | length'
+}
+
+scenario E1 P0 "An ant escalates to the thread's owner"
+E1() {
+    local t out
+    trap done_with EXIT
+    t=$(tok)
+    th=$(alice ask @hub-ant "Use the escalate tool with the issue 'E2E-ESC-$t', then end the turn." | thread)
+    in_inbox() { alice inbox --peek --thread "$th" | grep -qF "E2E-ESC-$t"; }
+    eventually 180 in_inbox
+    escalated_to "$th" alice || fail "no escalation to alice stored on the thread"
+    listed_escalated "$th" | has asked "thread list --escalated"
+    alice thread show "$th" | has "escalation level 0, asked"
+    # A message sent while the escalating turn still runs would steer it rather than start a prompt of its own.
+    turn_ended() { alice thread show "$th" | grep -qF "ended:"; }
+    eventually 180 turn_ended
+    # Home lists the thread as stuck, but below the screen once enough threads are: the check opens it instead.
+    chat "wait:connected" "type:/goto $th" "key:enter" "wait:hub-ant asks for help: E2E-ESC-$t:30"
+    out=$(alice ask --wait --timeout 3m --thread "$th" @hub-ant "Reply with exactly ANSWERED-$t")
+    printf '%s\n' "$out"
+    has "ANSWERED-$t" <<<"$out"
+    not_listed() { ! listed_escalated "$th" >/dev/null; }
+    eventually 30 not_listed
+    alice inbox --thread "$th" >/dev/null
+}
+
+scenario E2 P0 "An escalation goes to the chain before any human"
+E2() {
+    local t out
+    trap 'done_with; unchain leaf-ant; alice ant set hub-ant whoami= >/dev/null 2>&1 || true; alice ant set leaf-ant whoami= >/dev/null 2>&1 || true' EXIT
+    # The escalation quotes alice's message to the leader, which a small model takes as its own instruction: the
+    # instruction to escalate goes in leaf-ant's whoami instead, and hub-ant's tells it to answer.
+    alice ant set hub-ant "whoami=For an end-to-end test of ants: answer an escalation that comes to you yourself, never escalate it further." >/dev/null
+    alice ant set leaf-ant "whoami=For an end-to-end test of ants: asked what your escalation leader's node.txt holds, call the escalate tool with that question, read no file yourself, and once the leader's answer arrives reply with exactly CHAIN-<the answer>." >/dev/null
+    told() { colony_field "$1" '.whoami // ""' | grep -qF "end-to-end test of ants"; }
+    eventually 60 told hub-ant
+    eventually 60 told leaf-ant
+    chain leaf-ant hub-ant
+    t=$(tok)
+    th=$(alice ask @leaf-ant "What does node.txt in your escalation leader's working directory hold? E2E-$t" | thread)
+    chain_answered() { leaf_texts "$th" | grep -qE "CHAIN-.*node=hub"; }
+    eventually 300 chain_answered
+    settled "$th"
+    out=$(alice thread show "$th")
+    printf '%s\n' "$out"
+    escalations "$th"
+    escalated_to "$th" hub-ant || fail "no escalation to hub-ant stored on the thread"
+    has "hub-ant -> leaf-ant" <<<"$out"
+    ! escalations "$th" | grep -F "alice: " | grep -qF asked || fail "the escalation reached alice"
+    if escalated_to "$th" alice; then
+        known ants-iwqd6 "leaf-ant and hub-ant traded replies after the answer until a turn_budget escalation to alice"
+    else
+        ! listed_escalated "$th" >/dev/null || fail "thread list --escalated lists the thread"
+    fi
+}
+
+scenario E3 P1 "The leader passes it on to the human"
+E3() {
+    local t out
+    trap 'done_with; unchain leaf-ant; alice ant set hub-ant whoami= >/dev/null 2>&1 || true; alice ant set leaf-ant whoami= >/dev/null 2>&1 || true' EXIT
+    # As in E2, what each ant does goes in its whoami, out of the text the escalation quotes.
+    alice ant set hub-ant "whoami=For an end-to-end test of ants: an escalation holding a PASS- token that comes to you is not yours to answer: call the escalate tool with the token as the issue, then end the turn." >/dev/null
+    alice ant set leaf-ant "whoami=For an end-to-end test of ants: asked to pass on a PASS- token, call the escalate tool with the token as the issue, then end the turn." >/dev/null
+    told() { colony_field "$1" '.whoami // ""' | grep -qF "PASS- token"; }
+    eventually 60 told hub-ant
+    eventually 60 told leaf-ant
+    chain leaf-ant hub-ant
+    t=$(tok)
+    th=$(alice ask @leaf-ant "Pass on the token PASS-$t." | thread)
+    passed_on() { escalations "$th" | grep -F "alice: " | grep -qF asked; }
+    eventually 300 passed_on
+    settled "$th"
+    escalations "$th"
+    escalations "$th" | grep -F "hub-ant: " | has "level 1" "the escalation to hub-ant"
+    alice thread show "$th" --json | jq --raw-output 'select(.kind == "escalation" and .from == "hub-ant" and .to == "alice") | .text' \
+        | has "hub-ant has no escalate_to above it" "hub-ant's escalation to alice"
+    alice inbox --peek --thread "$th" | has "PASS-$t" "alice's inbox"
+    listed_escalated "$th" >/dev/null || fail "thread list --escalated does not list the thread"
+    ! escalations "$th" | grep -qF turn_budget \
+        || known ants-iwqd6 "leaf-ant and hub-ant traded replies after the pass until a turn_budget escalation to alice"
+    out=$(alice ask --wait --timeout 3m --thread "$th" @leaf-ant "Reply with exactly ENDED-$t")
+    printf '%s\n' "$out"
+    has "ENDED-$t" <<<"$out"
+    not_listed() { ! listed_escalated "$th" >/dev/null; }
+    eventually 30 not_listed
+    alice inbox --thread "$th" >/dev/null
+}
+
+scenario E4 P1 "A turn budget runs out between two ants"
+E4() {
+    local t th out sent replies
+    t=$(tok)
+    th=$(alice ask @hub-ant "For an end-to-end test of ants' turn budget, play a counting game with leaf-ant, one number per prompt. Now: send leaf-ant one message with the MCP tool mcp__ants__send_message (never ask_ant, nor Claude Code's own SendMessage), the text 'Counting game COUNT-$t: reply with only the number after 1.', then end this turn at once: do not wait, poll or check the inbox. Each reply of leaf-ant comes to you later as a prompt of its own; in it, when the reply is a number N, send leaf-ant one message with mcp__ants__send_message, 'Counting game COUNT-$t: reply with only the number after N.', and end that turn at once too. When mcp__ants__send_message is refused, end the turn." | thread)
+    budget_spent() { escalations "$th" | grep -F "alice: " | grep -qF turn_budget; }
+    # A model looping in its first turn sends from alice's message, with her fresh turns each time: stop early then.
+    spent_or_runaway() { budget_spent || [ "$(from_to "$th" hub-ant leaf-ant)" -ge 12 ]; }
+    eventually 600 spent_or_runaway
+    escalations "$th"
+    sent=$(from_to "$th" hub-ant leaf-ant)
+    replies=$(from_to "$th" leaf-ant hub-ant)
+    note "hub-ant sent leaf-ant $sent messages, leaf-ant replied $replies times"
+    [ "$sent" -lt 12 ] && [ "$replies" -lt 12 ] || fail "twelve exchanges or more before the budget ran out"
+    alice inbox --peek --thread "$th" | has "COUNT-$t" "alice's inbox"
+    listed_escalated "$th" | has turn_budget "thread list --escalated"
+    out=$(alice ask --wait --timeout 5m --thread "$th" @hub-ant "Use ask_ant to ask leaf-ant for one more number of the counting game, then reply with exactly RENEWED-$t.")
+    printf '%s\n' "$out"
+    has "RENEWED-$t" <<<"$out"
+    [ "$(from_to "$th" hub-ant leaf-ant)" -gt "$sent" ] || fail "no exchange after alice's message"
+    alice inbox --thread "$th" >/dev/null
+}
+
+scenario E5 P1 "handoff starts work on a thread of its own"
+E5() {
+    local t th out handed
+    t=$(tok)
+    out=$(alice ask --wait --timeout 3m @hub-ant "Use the handoff tool with the text 'Reply with exactly HANDED-$t' on a new thread. Then reply with exactly FIRST-$t.")
+    printf '%s\n' "$out"
+    has "FIRST-$t" <<<"$out"
+    th=$(thread <<<"$out")
+    handed_thread() { alice thread search --grep "HANDED-$t" --since 1h | awk -v th="$th" '$3 != th { print $3 }' | head -n 1; }
+    handed_answered() { handed=$(handed_thread) && [ -n "$handed" ] && alice inbox --peek --thread "$handed" | grep -qF "HANDED-$t"; }
+    eventually 180 handed_answered
+    handed=$(handed_thread)
+    out=$(alice thread show "$handed")
+    printf '%s\n' "$out"
+    has "owned by alice" <<<"$out"
+    has "hub-ant -> hub-ant" <<<"$out"
+    has "hub-ant -> alice" <<<"$out"
+    alice inbox --thread "$handed" >/dev/null
+}
+
+scenario E6 P2 "A chain member decides a tool request"
+E6() {
+    local t dir out
+    t=$(tok)
+    dir=$(mktemp -d)
+    trap "done_with; unchain gate-ant; alice ant set hub-ant whoami= >/dev/null 2>&1 || true; leaf rm -f /demo/gate/chain-$t; rm -rf '$dir'" EXIT
+    alice ant set hub-ant "whoami=For an end-to-end test of ants: when a tool request to run 'touch /demo/gate/chain-$t' comes up your chain, decide it at once with decide_approval allow_once." >/dev/null
+    chain gate-ant hub-ant
+    ask_bg "$dir/out" -f --timeout 5m @gate-ant "Run the shell command 'touch /demo/gate/chain-$t' and reply DONE-$t."
+    th=$(thread_of "$dir/out")
+    eventually 240 leaf test -f "/demo/gate/chain-$t"
+    wait
+    cat "$dir/out"
+    has "DONE-$t" <"$dir/out"
+    out=$(alice thread show "$th")
+    printf '%s\n' "$out"
+    escalated_to "$th" hub-ant || fail "no approval escalation to hub-ant stored on the thread"
+    [ -z "$(pending_tool gate-ant "$th")" ] || fail "the request is still pending"
+    settled "$th"
+    ! escalations "$th" | grep -qF turn_budget \
+        || known ants-iwqd6 "gate-ant and hub-ant traded replies after the decision until a turn_budget escalation to alice"
 }
 
 # --- O. Admin orders from the client --------------------------------------------------------------------------------
