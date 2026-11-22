@@ -301,7 +301,7 @@ enroll_bg() {
 
 scenario B2 P0 "A worker machine joins the hub by enrollment"
 B2() {
-    local t m=join-b2 ant out th
+    local t r m=join-b2 ant out th
     t=$(tok)
     ant=b2-$t
     join_down "$m"
@@ -327,10 +327,12 @@ B2() {
     detached "$m" daemon "ants daemon --upgrade-check 0"
     eventually 120 is_live "$ant"
     [ "$(colony_field "$ant" .machine)" = "$m" ] || fail "$ant is not on machine $m"
-    out=$(alice ask --wait --timeout 3m "@$ant" "Read node.txt in the working directory and reply with its content and JOIN-$t.")
+    # A token apart from the ant's name b2-$t, which a model may otherwise fold into the reply.
+    r=$(tok)
+    out=$(alice ask --wait --timeout 3m "@$ant" "Read node.txt in the working directory and reply with its content and JOIN-$r.")
     printf '%s\n' "$out"
     has node=scratch <<<"$out"
-    has "JOIN-$t" <<<"$out"
+    has "JOIN-$r" <<<"$out"
     alice machines | has "$m"
     out=$(hub ants auth issued)
     has "$ant" <<<"$out"
@@ -2010,16 +2012,17 @@ U10() {
 
 scenario X1 P1 "A memory kept by sense is recalled on another thread and after a restart"
 X1() {
-    local t
+    local t label
     trap 'restore_node leaf' EXIT
-    t=$(tok)
-    alice ask --wait --timeout 3m @leaf-ant "Use sense_remember to keep this memory: the e2e codeword is $t. Reply KEPT." | has KEPT
-    alice ask --wait --timeout 3m @leaf-ant "Use sense_recall to find the e2e codeword. Reply with the codeword only." | has "$t"
+    # Memories outlive a run: each run's codeword has a label of its own.
+    t=$(tok) label=$(tok)
+    alice ask --wait --timeout 3m @leaf-ant "Use sense_remember to keep this memory: the e2e codeword labelled $label is $t. Reply KEPT." | has KEPT
+    alice ask --wait --timeout 3m @leaf-ant "Use sense_recall to find the e2e codeword labelled $label. Reply with the codeword only." | has "$t"
     alice ant memories leaf-ant | has "$t"
     container stop "$name-leaf" >/dev/null
     container start "$name-leaf" >/dev/null
     eventually 120 is_live leaf-ant
-    alice ask --wait --timeout 3m @leaf-ant "Use sense_recall to find the e2e codeword. Reply with the codeword only." | has "$t"
+    alice ask --wait --timeout 3m @leaf-ant "Use sense_recall to find the e2e codeword labelled $label. Reply with the codeword only." | has "$t"
     [ "$(colony_field leaf-ant '.sense_unkept // null')" = null ] || fail "leaf-ant keeps no sense data"
 }
 

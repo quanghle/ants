@@ -312,7 +312,7 @@ hub ants enroll list
 hub ants enroll approve b2-$t --js-domain hub
 hub ants --creds ~/.config/ants/auth/alice.creds leaf outbox join-b2 --ant b2-$t --js-domain hub
 on join-b2 ants daemon &
-alice ask --wait --timeout 3m @b2-$t "Read node.txt in the working directory and reply with its content and JOIN-$t."
+r=$(tok); alice ask --wait --timeout 3m @b2-$t "Read node.txt in the working directory and reply with its content and JOIN-$r."
 alice machines; hub ants auth issued; on join-b2 ants --creds ~/.config/ants/auth/b2-$t.creds doctor --no-harness
 ```
 
@@ -320,7 +320,7 @@ alice machines; hub ants auth issued; on join-b2 ants --creds ~/.config/ants/aut
 - `ants enroll list` shows `b2-$t` pending and names `join-b2` as the machine whose host credentials are asked for.
 - After the approval `ants add` exits 0, having written `b2-$t.creds` and the host credentials of `join-b2` where
   the daemon looks for them.
-- The colony shows `b2-$t` live on machine `join-b2`; the reply holds `node=scratch` and `JOIN-$t`.
+- The colony shows `b2-$t` live on machine `join-b2`; the reply holds `node=scratch` and `JOIN-$r`.
 - `ants machines` lists `join-b2`; `ants auth issued` lists `b2-$t` and `host-join-b2`; `ants doctor --no-harness`
   on the node prints no `fail` (`leaf store uplink` included, though `ants add` has respelled the uplink's
   credentials path in `leaf.conf`), `leaf uplink` and `host credentials` ok.
@@ -1302,11 +1302,11 @@ title.
 ### X1 · A memory kept by sense is recalled on another thread and after a restart (P1, 3 prompts)
 
 ```sh
-t=$(tok); alice ask --wait --timeout 3m @leaf-ant "Use sense_remember to keep this memory: the e2e codeword is $t. Reply KEPT."
-alice ask --wait --timeout 3m @leaf-ant "Use sense_recall to find the e2e codeword. Reply with the codeword only."
+t=$(tok); label=$(tok); alice ask --wait --timeout 3m @leaf-ant "Use sense_remember to keep this memory: the e2e codeword labelled $label is $t. Reply KEPT."
+alice ask --wait --timeout 3m @leaf-ant "Use sense_recall to find the e2e codeword labelled $label. Reply with the codeword only."
 alice ant memories leaf-ant
 container stop ants-e2e-leaf; container start ants-e2e-leaf; sleep 30
-alice ask --wait --timeout 3m @leaf-ant "Use sense_recall to find the e2e codeword. Reply with the codeword only."
+alice ask --wait --timeout 3m @leaf-ant "Use sense_recall to find the e2e codeword labelled $label. Reply with the codeword only."
 ```
 
 **Expect** both recalls, on new threads, answer `$t`; `ants ant memories` shows the memory under sense;
