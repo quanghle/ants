@@ -490,11 +490,18 @@ pub async fn create_colony(js: &jetstream::Context, ttl: Duration) -> Result<kv:
     Ok(store)
 }
 
-/// The KV bucket of `object`, created as `ants init` does when missing.
+/// The KV bucket of `object`, created as `ants init` does when missing. One JetStream does not answer for, as through
+/// a leaf node whose uplink is down, is not missing: the error says so ([`crate::bus::unanswered`]).
 pub async fn ensure_bucket(js: &jetstream::Context, object: Object) -> Result<kv::Store> {
     let bucket = object.bucket().with_context(|| format!("{object} is no KV bucket"))?;
-    if let Ok(store) = js.get_key_value(bucket).await {
-        return Ok(store);
+    match js.get_key_value(bucket).await {
+        Ok(store) => return Ok(store),
+        Err(e) => {
+            let e = anyhow::Error::from(e);
+            if crate::bus::unanswered(&e) {
+                return Err(e.context(format!("looking up {object}: JetStream did not answer")));
+            }
+        }
     }
     Box::pin(object.create(js, true)).await?;
     js.get_key_value(bucket).await.with_context(|| format!("looking up {object}"))

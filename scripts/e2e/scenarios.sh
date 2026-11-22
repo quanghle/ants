@@ -917,10 +917,11 @@ U8() {
     [ -n "$th" ] || fail "the message was lost"
     replied "$th" "node=leaf" || fail "no reply on the thread"
     [ "$(ant_texts "$th" | count "node=leaf")" -eq 1 ] || fail "the reply was stored more than once"
-    # While the uplink is down, the chat's own server (the client's leaf node) stays up: the header can only tell
-    # the hub is gone from what the chat reads through it.
-    sed -n '/^-- snap/,/^-- /p' <<<"$out" | grep -qF disconnected \
-        || known ants-yl3m6 "the header showed no lost connection while the hub was out of reach"
+    # While the uplink is down, the chat's own server (the client's leaf node) stays up: the header tells the hub is
+    # gone from the reads it does not answer, and a bucket it cannot read is not taken for missing.
+    sed -n '/^-- snap/,/^-- /p' <<<"$out" | has "hub out of reach" "the header while the uplink was down"
+    lacks "creating bucket" "the chat" <<<"$out"
+    lacks "JetStream unavailable" "the chat" <<<"$out"
 }
 
 scenario U9 P1 "A sealed direct message to another human"

@@ -490,8 +490,11 @@ impl Model {
     /// Take in what the live feed read or heard.
     pub fn take(&mut self, event: live::Event, now: DateTime<Utc>) -> Vec<Action> {
         match event {
-            live::Event::Stored(Ok(entries)) => return self.stored(entries, now),
-            live::Event::Stored(Err(e)) => self.notify(format!("{e:#}"), Level::Error, now),
+            live::Event::Stored(Ok(entries)) => {
+                let reached = self.reached(now);
+                return reached.into_iter().chain(self.stored(entries, now)).collect();
+            }
+            live::Event::Stored(Err(e)) => self.failed("", &e, now),
             live::Event::Status(event) => {
                 self.data.live.status(&event, now);
                 self.data.calls.status(&event);
@@ -501,11 +504,9 @@ impl Model {
             live::Event::Approval(update) => self.approval(update, now),
             live::Event::Decided(outcome) => return self.answered(outcome, now).into_iter().collect(),
             live::Event::FollowEnded(Ok(())) => {}
-            live::Event::FollowEnded(Err(e)) => {
-                self.notify(format!("following the tool requests: {e:#}"), Level::Error, now);
-            }
+            live::Event::FollowEnded(Err(e)) => self.failed("following the tool requests", &e, now),
             live::Event::Colony(Ok(entries)) => self.data.live.colony(entries, now),
-            live::Event::Colony(Err(e)) => self.notify(format!("reading the colony: {e:#}"), Level::Error, now),
+            live::Event::Colony(Err(e)) => self.failed("reading the colony", &e, now),
             live::Event::History(thread, read) => {
                 let read = read.map(|entries| self.tools(entries));
                 for entry in read.iter().flatten() {
@@ -518,7 +519,7 @@ impl Model {
                 if let Some(page) = page
                     && let Err(e) = page.history.loaded(&thread, read)
                 {
-                    self.notify(format!("reading thread {thread}: {e:#}"), Level::Error, now);
+                    self.failed(&format!("reading thread {thread}"), &e, now);
                 }
                 if self.open() == Some(&thread) {
                     return self.shown_reactions().into_iter().collect();
@@ -687,13 +688,11 @@ impl Model {
         let data = &mut self.data;
         match read {
             Read::Marker(Ok(marker)) => data.marker = Some(marker),
-            Read::Marker(Err(e)) => self.notify(format!("reading what was read: {e:#}"), Level::Error, now),
+            Read::Marker(Err(e)) => self.failed("reading what was read", &e, now),
             Read::ChannelMarkers(Ok(markers)) | Read::ChannelMarked(_, Ok(markers)) => {
                 data.channel_reads = Some(markers);
             }
-            Read::ChannelMarkers(Err(e)) => {
-                self.notify(format!("reading which channel posts were read: {e:#}"), Level::Error, now);
-            }
+            Read::ChannelMarkers(Err(e)) => self.failed("reading which channel posts were read", &e, now),
             Read::ChannelMarked(channel, Err(e)) => {
                 self.notify(format!("marking #{channel} read: {e:#}"), Level::Error, now);
             }
@@ -704,7 +703,7 @@ impl Model {
                 data.channels = channels;
                 data.humans = Some(humans);
             }
-            Read::Directory(Err(e)) => self.notify(format!("reading the channels: {e:#}"), Level::Error, now),
+            Read::Directory(Err(e)) => self.failed("reading the channels", &e, now),
             Read::Levels(levels) => data.channel_levels = levels,
             Read::Marked(_, Ok(())) => {}
             Read::Unmarked(thread, Ok(())) => {
@@ -801,6 +800,24 @@ impl Model {
         }
         self.notify("reconnected: reading what changed meanwhile", Level::Info, now);
         Some(Action::Refresh)
+    }
+
+    /// Take a read the hub's JetStream answered at `now`: once it is back in reach, what was missed meanwhile is read
+    /// again.
+    fn reached(&mut self, now: DateTime<Utc>) -> Option<Action> {
+        if !self.data.live.reached() {
+            return None;
+        }
+        self.notify("hub reached again: reading what changed meanwhile", Level::Info, now);
+        Some(Action::Refresh)
+    }
+
+    /// Tell that `what` failed with `e` at `now`, unless the hub's JetStream did not answer: the header shows it out of
+    /// reach instead, and the read is tried again on its own.
+    fn failed(&mut self, what: &str, e: &anyhow::Error, now: DateTime<Utc>) {
+        if let Some(text) = self.data.live.failed(what, e, now) {
+            self.notify(text, Level::Error, now);
+        }
     }
 
     /// Select `item` in the nav, showing its view.
@@ -1259,6 +1276,38 @@ mod tests {
         assert_eq!(m.link(true, at(3)), Some(Action::Refresh));
         assert_eq!(m.link(true, at(4)), None);
         assert!(m.notice_at(at(4)).is_some_and(|n| n.text.starts_with("reconnected")));
+    }
+
+    /// Reads the hub's JetStream does not answer, as through a leaf node whose uplink is down, show the hub out of
+    /// reach rather than errors; the next stream read it answers brings it back and reads what was missed.
+    #[test]
+    fn the_hub_out_of_reach_shows_in_the_header_not_as_errors() {
+        use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind, RequestError, RequestErrorKind};
+        let unanswered = || {
+            let e = GetStreamError::with_source(
+                GetStreamErrorKind::Request,
+                RequestError::new(RequestErrorKind::NoResponders),
+            );
+            anyhow::Error::from(e).context("opening bucket ants_channels")
+        };
+        let mut m = model();
+        assert_eq!(m.link(true, at(1)), None);
+        m.read(Read::Directory(Err(unanswered())), at(2));
+        m.read(Read::Marker(Err(unanswered())), at(3));
+        m.take(live::Event::Stored(Err(unanswered())), at(3));
+        assert_eq!(m.data.live.link, Link::Unreached(at(2)));
+        assert!(m.notice_at(at(3)).is_none(), "{:?}", m.notice_at(at(3)));
+        assert_eq!(m.link(true, at(4)), None, "the server connected does not bring the hub back");
+        let shown = format!("{}", crate::tui::style::link(m.data.live.link, at(9), ""));
+        assert!(shown.contains("hub out of reach 7s, retrying"), "{shown}");
+
+        assert!(m.take(live::Event::Stored(Ok(Vec::new())), at(6)).contains(&Action::Refresh));
+        assert_eq!(m.data.live.link, Link::Connected);
+        assert!(m.notice_at(at(6)).is_some_and(|n| n.text.starts_with("hub reached again")));
+        assert!(!m.take(live::Event::Stored(Ok(Vec::new())), at(7)).contains(&Action::Refresh));
+        m.read(Read::Directory(Err(anyhow::anyhow!("permissions violation"))), at(8));
+        assert!(m.notice_at(at(8)).is_some_and(|n| n.text == "reading the channels: permissions violation"));
+        assert_eq!(m.data.live.link, Link::Connected);
     }
 
     #[test]

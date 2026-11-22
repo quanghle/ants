@@ -76,9 +76,14 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     spans.push(bar());
     let today = data.cards.today().map_or_else(|| "$?".to_owned(), |s| dollars(s.cost));
     spans.push(Span::raw(format!("{today} today")));
-    if let Link::Down(since) = data.live.link {
+    let down = match data.live.link {
+        Link::Connected => None,
+        Link::Down(since) => Some(("disconnected", since)),
+        Link::Unreached(since) => Some(("hub out of reach", since)),
+    };
+    if let Some((what, since)) = down {
         spans.push(bar());
-        spans.push(Span::styled(format!("○ disconnected {}", ago(since, now)), Style::new().fg(style::ERROR)));
+        spans.push(Span::styled(format!("○ {what} {}", ago(since, now)), Style::new().fg(style::ERROR)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), first);
     frame.render_widget(Paragraph::new(second_line(model, &items, now, second.width)), second);

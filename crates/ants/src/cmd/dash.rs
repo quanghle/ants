@@ -134,17 +134,18 @@ impl Dash {
     fn take(&mut self, event: live::Event) -> Option<Action> {
         let (model, now) = (&mut self.model, Utc::now());
         match event {
-            live::Event::Stored(Ok(entries)) => return model.stored(entries, now),
-            live::Event::Stored(Err(e)) => model.notify(format!("{e:#}"), Level::Error, now),
+            live::Event::Stored(Ok(entries)) => {
+                let reached = model.reached(now);
+                return model.stored(entries, now).or(reached);
+            }
+            live::Event::Stored(Err(e)) => model.failed("", &e, now),
             live::Event::Status(event) => model.live.status(&event, now),
             live::Event::Following => model.approvals_reset(),
             live::Event::Approval(update) => model.approval(update),
             live::Event::FollowEnded(Ok(())) => {}
-            live::Event::FollowEnded(Err(e)) => {
-                model.notify(format!("following the tool requests: {e:#}"), Level::Error, now);
-            }
+            live::Event::FollowEnded(Err(e)) => model.failed("following the tool requests", &e, now),
             live::Event::Colony(Ok(entries)) => model.live.colony(entries, now),
-            live::Event::Colony(Err(e)) => model.notify(format!("reading the colony: {e:#}"), Level::Error, now),
+            live::Event::Colony(Err(e)) => model.failed("reading the colony", &e, now),
             live::Event::History(thread, read) => model.history_loaded(&thread, read, now),
             live::Event::Decided(outcome) => model.decided(outcome, now),
         }

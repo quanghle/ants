@@ -19,12 +19,15 @@ pub struct Progress {
     pub at: DateTime<Utc>,
 }
 
-/// The connection to NATS.
+/// The connection to NATS and, through it, to the hub's JetStream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Link {
     Connected,
     /// Lost since then; the client reconnects on its own.
     Down(DateTime<Utc>),
+    /// The server is connected, but the hub's JetStream has not answered since then, as through a leaf node whose
+    /// uplink is down; the reads are tried again on their own.
+    Unreached(DateTime<Utc>),
 }
 
 pub struct State {
@@ -174,12 +177,46 @@ impl State {
                 self.link = Link::Down(now);
                 false
             }
+            (false, Link::Unreached(since)) => {
+                self.link = Link::Down(since);
+                false
+            }
             (true, Link::Down(_)) => {
                 self.link = Link::Connected;
                 true
             }
             _ => false,
         }
+    }
+
+    /// Take `e`, why `what` failed at `now`: when the hub's JetStream did not answer, the hub out of reach and None, as
+    /// the header shows it and the read is tried again on its own; else the error to tell.
+    pub fn failed(&mut self, what: &str, e: &anyhow::Error, now: DateTime<Utc>) -> Option<String> {
+        if ants_daemon::bus::unanswered(e) {
+            self.unreached(now);
+            None
+        } else if what.is_empty() {
+            Some(format!("{e:#}"))
+        } else {
+            Some(format!("{what}: {e:#}"))
+        }
+    }
+
+    /// Take a read the hub's JetStream did not answer at `now`, the server connected.
+    pub fn unreached(&mut self, now: DateTime<Utc>) {
+        if self.link == Link::Connected {
+            self.link = Link::Unreached(now);
+        }
+    }
+
+    /// Take a read the hub's JetStream answered: whether it is back after being out of reach, so what was missed
+    /// meanwhile is to be read again.
+    pub fn reached(&mut self) -> bool {
+        let back = matches!(self.link, Link::Unreached(_));
+        if back {
+            self.link = Link::Connected;
+        }
+        back
     }
 }
 
@@ -326,6 +363,25 @@ mod tests {
         assert!(s.link(true, at(3)));
         assert_eq!(s.link, Link::Connected);
         assert!(!s.link(true, at(4)));
+    }
+
+    #[test]
+    fn the_hub_out_of_reach_is_told_apart_from_the_server_lost() {
+        let mut s = state();
+        assert!(!s.reached(), "already reached");
+        s.unreached(at(1));
+        s.unreached(at(2));
+        assert_eq!(s.link, Link::Unreached(at(1)));
+        assert!(!s.link(true, at(3)), "the server being connected does not bring the hub back");
+        assert_eq!(s.link, Link::Unreached(at(1)));
+        assert!(s.reached());
+        assert_eq!(s.link, Link::Connected);
+        s.unreached(at(4));
+        assert!(!s.link(false, at(5)));
+        assert_eq!(s.link, Link::Down(at(4)), "down since the hub was last reached");
+        s.unreached(at(6));
+        assert_eq!(s.link, Link::Down(at(4)), "a server lost is told over the hub out of reach");
+        assert!(s.link(true, at(7)));
     }
 
     #[test]

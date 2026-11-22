@@ -70,7 +70,7 @@ impl Select {
 pub async fn ensure_bucket(js: &jetstream::Context) -> Result<kv::Store> {
     Box::pin(ants_daemon::hub::ensure_bucket(js, ants_daemon::hub::Object::Read))
         .await
-        .context("creating the read bucket")
+        .context("opening the read bucket")
 }
 
 /// A message to the human, unless malformed or forged.

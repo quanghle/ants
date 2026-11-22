@@ -71,15 +71,16 @@ pub fn list<'a>(mut items: Vec<Text<'a>>, selected: Option<usize>, focused: bool
         .highlight_spacing(HighlightSpacing::Always)
 }
 
-/// The connection as a header shows it: `● connected`, else how long it has been down and `then`.
+/// The connection as a header shows it: `● connected`, else how long it, or the hub beyond it, has been out of reach
+/// and `then`.
 pub fn link(link: Link, now: DateTime<Utc>, then: &str) -> Span<'static> {
-    match link {
-        Link::Connected => Span::styled("● connected", Style::new().fg(CONNECTED)),
-        Link::Down(since) => Span::styled(
-            format!("○ disconnected {}, reconnecting{then}", colony::short(colony::since(since, now))),
-            Style::new().fg(ERROR).bold(),
-        ),
-    }
+    let (what, since, doing) = match link {
+        Link::Connected => return Span::styled("● connected", Style::new().fg(CONNECTED)),
+        Link::Down(since) => ("disconnected", since, "reconnecting"),
+        Link::Unreached(since) => ("hub out of reach", since, "retrying"),
+    };
+    let text = format!("○ {what} {}, {doing}{then}", colony::short(colony::since(since, now)));
+    Span::styled(text, Style::new().fg(ERROR).bold())
 }
 
 /// What an error begins with, besides its colour.
