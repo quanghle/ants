@@ -12,7 +12,8 @@ Manual or scripted end-to-end scenarios for a three-container team under
   [S steering, queue, cancel](#s-steering-queueing-cancelling-and-withdrawing) · [T tool approvals](#t-tool-approvals) ·
   [O admin orders](#o-admin-orders-from-the-client) · [R resilience](#r-restarts-outages-and-store-and-forward) ·
   [H harness holds and limits](#h-harness-holds-limits-and-redaction) · [U `ants chat`](#u-ants-chat-on-the-client) ·
-  [X sense and trails](#x-sense-and-trails) · [K credentials](#k-credentials-and-sealing)
+  [X sense and trails](#x-sense-and-trails) · [K credentials](#k-credentials-and-sealing) ·
+  [D dreams and sage reviews](#d-dreams-and-sage-reviews)
 - [Coverage](#coverage) · [Left out](#left-out)
 
 ## Fixture
@@ -27,7 +28,7 @@ flowchart LR
     subgraph hub["ants-e2e-hub (machine hub)"]
         hnats["nats-server<br/>JetStream domain hub<br/>leaf port 7422"]
         hsvc["ants signer · ants channel serve"]
-        hd["ants daemon<br/>hub-ant · system-messenger"]
+        hd["ants daemon<br/>hub-ant · sage-ant · system-messenger"]
         bob["ants CLI<br/>human bob"]
     end
     subgraph leaf["ants-e2e-leaf (machine leaf)"]
@@ -46,7 +47,7 @@ Three containers on one dedicated network, each with a volume of its own at `/de
 
 | Container | Runs | Users and files |
 |---|---|---|
-| `ants-e2e-hub` | `nats-server` (domain `hub`, leaf port `7422` on the network, `feature_flags { js_api_reply_v2: true }`, `full` resolver), `ants signer`, `ants channel serve`, `ants daemon` | Team keys in `~/.config/ants/auth`; `hub-ant` (`capabilities = ["e2e", "hub"]`, workdir `/demo/work`, a git repository with `node.txt` committed, `max_harnesses = 2`, worktrees left at their default: on); `system-messenger` (`ants auth builtin messenger`); host credentials `hub`; human `bob` (`ants auth user bob --human`, no admin role) |
+| `ants-e2e-hub` | `nats-server` (domain `hub`, leaf port `7422` on the network, `feature_flags { js_api_reply_v2: true }`, `full` resolver), `ants signer`, `ants channel serve`, `ants daemon` | Team keys in `~/.config/ants/auth`; `hub-ant` (`capabilities = ["e2e", "hub"]`, workdir `/demo/work`, a git repository with `node.txt` committed, `max_harnesses = 2`, worktrees left at their default: on); `sage-ant` (workdir `/demo/work`, `max_harnesses = 1`, a `whoami` making its reviews predictable: the sage of [group D](#d-dreams-and-sage-reviews), of its own so that no other scenario's pause or restart takes the reviewer away); `system-messenger` (`ants auth builtin messenger`); host credentials `hub`; human `bob` (`ants auth user bob --human`, no admin role) |
 | `ants-e2e-leaf` | `ants daemon` running its own leaf `nats-server` (`[nats_server] config = "~/.config/ants/leaf.conf"`, so add and retire orders reconnect the uplink) | `leaf-ant` (`capabilities = ["e2e", "leaf"]`, workdir `/demo/work`, no git, `max_harnesses = 2`, `env = { E2E_SECRET_TOKEN = "e2e-s3cr3t-0123456789" }`); `gate-ant` (workdir `/demo/gate`, `tools = "ask"`, `allow = ["read", "search", "execute:ls*"]`, `max_harnesses = 1`); host credentials `leaf`; uplink `ants auth leaf leaf --ant leaf-ant --ant gate-ant` |
 | `ants-e2e-client` | leaf `nats-server` only, no daemon | Human `alice` (`ants auth user alice --human --admin --label client`), `[cli] creds` naming her credentials; uplink `ants auth leaf client --human alice` |
 
@@ -74,6 +75,9 @@ env = { IS_SANDBOX = "1" }
 Every ant sets `model = "claude-haiku-4-5"` to bound the spend. Each workdir holds `node.txt` with one line,
 `node=hub` or `node=leaf` (`node=gate` in `/demo/gate`). Once all three are up, the outboxes are wired from the hub as
 a human: `ants leaf outbox leaf --ant leaf-ant --ant gate-ant` and `ants leaf outbox client --human alice`.
+
+Left up, the fixture's own ants dream too, each once a day after 30 minutes without a prompt, spending a prompt each
+([sense.md](sense.md#dreams)); `sage = "none"` has them review alone.
 
 **ACP adapter variant.** Dropping the `[harnesses.claude]` table runs the built-in `claude` harness
 (`claude-agent-acp`, `npm install --global @agentclientprotocol/claude-agent-acp`), with `env = { IS_SANDBOX = "1" }`
@@ -161,6 +165,12 @@ driven through a pseudo-terminal in the client and read back with pyte (`contrib
 `FAIL` or `SKIP` per scenario and keeps each scenario's log under `~/.local/share/ants/e2e/runs/`; a failing
 preflight stops it. A check failing on a bug filed in bd is reported beside the scenario's `PASS` as
 `known: <issue>`, the scenario going on.
+
+**The slow class.** The scenarios of [group D](#d-dreams-and-sage-reviews) are of class `SLOW` in place of a priority:
+each waits about 35 minutes for a dream, which begins only after 30 minutes without a prompt and which no setting
+shortens. `run` selects them only by id (`D1`), by the group letter `D` or by `slow`, never by `all`, a priority or
+the default; `list` shows the class. They add ants of their own and run side by side, so `run -j 3 D` takes one wait of
+about 35 minutes, not one per scenario.
 
 `run -j N` (or `ANTS_E2E_JOBS`) runs the preflight first, then the scenarios that only read the fixture N at a time,
 each on threads of its own, then one by one those that change what the others rely on: B2–B5, R1–R6, H1–H3, O1–O3, O6, O7,
@@ -1033,6 +1043,80 @@ As U9 from the command line: `alice ask @bob "sealed $t"`, `bob inbox`, `bob thr
 `ants.inbox.bob.alice`) has an empty `text` and a `sealed` object; the title shows to both humans and as `[sealed]`
 to no one else; a third human's `ants thread show` of the thread prints `[sealed]`.
 
+## D. Dreams and sage reviews
+
+Class `SLOW` ([Running them](#running-them)): a dream begins once its ant ran no prompt for 30 minutes, at most once a
+day, and no setting shortens either, so each scenario adds a fresh ant on the hub, gives it one prompt of work and
+waits about 35 minutes. On the hub an add order reconnects no uplink and leaves the prompts running there alone (O6
+adds on the leaf, alone for that reason), so the three run side by side with each other and with the rest. Their add,
+set and retire orders go one at a time, 15 s apart: orders at once have hung the hub's daemon (ants-ocu1r). A restart
+of the hub's container drops the ants added (node.sh writes its config anew), so a D run fails across one. Each ant's
+`whoami` asks it, on a dream thread, to answer each finding with `sense_dream`, finish with `done: true` and reply
+`DREAMT`, which keeps the dream short and its end predictable. The trap retires the ant (`alice ant retire NAME --wait
+6m`) and, only once the retire applied, removes its home on the hub, which a retire leaves: a daemon refuses to start
+while its config lists an ant without a home. Times are compared as stored, to the second, allowing 10 s for the
+`ended` entry stored a moment after the prompt ended.
+
+```sh
+add() { alice ant add "$1" --on hub --model claude-haiku-4-5 --whoami "An ant of the end-to-end tests of ants. On a dream thread: answer each finding with sense_dream, … then call sense_dream with done true, and only then reply DREAMT." --wait 2m; }
+```
+
+### D1 · An ant with no sage reviews its work alone in a dream (SLOW, 2 prompts, about 35 min)
+
+The hub's top-level `sage = "none"` applies to the new ant.
+
+```sh
+t=$(tok); add dream-$t
+w=$(alice ask --wait --timeout 3m @dream-$t "Use sense_remember to keep this memory: the dream codeword is $t. Reply KEPT." | thread)
+# every 5 s, for up to 40 min, until dream-$t has a thread other than $w:
+alice thread list --ant dream-$t --since 2h --json
+alice thread show DREAM; alice thread show DREAM --json; alice ant memories dream-$t; alice colony --json
+sleep 120; alice thread list --ant dream-$t --since 2h --json
+```
+
+**Expect** the colony entry of `dream-$t` names no `sage`; the dream thread opens with a message of `dream-$t` to itself
+marked `wake from sense`, `# Dream 1`, whose packet names thread `$w`; its first message is stored 30 minutes or more
+after the `ended` entry of `$w`; the dream prompt's `ended` entry counts a sense call and its timeline holds a
+`sense_dream` call; `ants ant memories` shows `Dream 1: N findings, …` and `done; diary ID` once the dream is finished;
+the colony entry has no `sense_unkept`; no second dream thread appears in the next 2 minutes.
+
+### D2 · A dream reviewed by a sage (SLOW, 3–4 prompts, about 35 min)
+
+```sh
+t=$(tok); add rev-$t
+alice ant set rev-$t sage=sage-ant; alice colony --json                  # rev-$t's entry: "sage": "sage-ant"
+w=$(alice ask --wait --timeout 3m @rev-$t "Use sense_remember to keep this memory: the review codeword is $t. Reply KEPT." | thread)
+# every 5 s, for up to 40 min, until it finds the review message:
+alice thread search --from rev-$t --to sage-ant --since 2h
+alice thread show REVIEW --json; alice tools list --json
+alice ant memories rev-$t; alice ant memories sage-ant; alice spend sage-ant --thread REVIEW
+```
+
+**Expect** a new thread on which `rev-$t` sends `sage-ant` the review packet, naming `$w`, 30 minutes or more after
+`$w`'s prompt ended; `sage-ant`'s answer on it holds a fenced JSON block with `"findings"`, not an empty list (an empty
+list wakes nobody: the scenario fails showing the answer rather than time out); the review ran read-only: no `edit` or
+`execute` call of `sage-ant` on the thread and no tool request of its pending; `rev-$t` is then prompted on the same
+thread with the findings and answers them with `sense_dream` (its `ended` entry counts a sense call, its timeline a
+`sense_dream` call); `ants ant memories rev-$t` shows `Dream 1` with at least one finding and a verdict on one, and
+`done; diary ID` (a fresh ant's packet holds no finding of its own, so the dream's findings are the sage's);
+`ants ant memories sage-ant` names `rev-$t` in the tally of its reviews; `ants spend` reports the
+review thread.
+
+### D3 · A sage no daemon serves: the ant reviews alone (SLOW, 2 prompts, about 35 min)
+
+`ants ant set` accepts a sage that is in no colony entry ([config.md](config.md#the-sage): reviews go to the ant alone
+while no daemon serves the sage).
+
+```sh
+t=$(tok); add dream-ghost-$t
+alice ant set dream-ghost-$t sage=ghost-$t; alice colony --json          # its entry: "sage": "ghost-$t"
+w=$(alice ask --wait --timeout 3m @dream-ghost-$t "Use sense_remember to keep this memory: the ghost codeword is $t. Reply KEPT." | thread)
+# then as D1
+alice thread search --to ghost-$t --since 2h
+```
+
+**Expect** as D1, and no message to `ghost-$t`.
+
 ## Coverage
 
 | Feature | Scenarios |
@@ -1056,6 +1140,7 @@ to no one else; a third human's `ants thread show` of the thread prints `[sealed
 | Sense memories, reminders and wake-ups | X1, X2 |
 | Trails across machines | X3 |
 | Revocation, sealed messages between humans | K1, K2, U9 |
+| Dreams alone and reviewed by a sage, the sage's records, a sage no daemon serves | D1, D2, D3 |
 
 ## Left out
 
@@ -1071,5 +1156,7 @@ produced on demand:
 - `wss://`/`tls://` hubs behind a reverse proxy, the HTTPS bridge, Dev Tunnels.
 - Provider rate limits and exhausted quotas, fallbacks, context-window rebuilds, spending caps and their warnings.
 - Escalation chains (`escalate_to`), turn-budget exhaustion, chain approvals, reminders of escalations.
-- Sage reviews and dreams, personas and skills; trail stops, resumes, routes, child runs, tips and ratings.
+- What of dreams and sage reviews needs a day or more: a sage silent for 6 hours, a late answer offered in the next
+  dream, follow-up findings, a sage's own dream, a second dream a day later (one a day at most).
+- Personas and skills; trail stops, resumes, routes, child runs, tips and ratings.
 - Ant templates and manager ants, clone, export and import, `ants dash`, `ants hook run`.

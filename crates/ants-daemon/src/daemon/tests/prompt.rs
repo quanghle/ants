@@ -350,7 +350,8 @@ case "$1 $2" in
 "pr create") echo "Creating draft pull request"; echo https://github.test/o/r/pull/7 | tee "$dir/open" ;;
 esac
 "#;
-    ants_test_support::executable(&gh, script);
+    std::fs::write(&gh, script).unwrap();
+    std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     gh
 }
 

@@ -12,8 +12,10 @@ Usage: scripts/e2e.sh COMMAND [ARGS...]
   run [-j N] [SELECTOR...]
                         Run scenarios: ids (M1), groups (M), priorities (P0, P1, P2) or all
                         (default: P0 and P1); prints PASS, FAIL or SKIP for each. With -j N, the scenarios
-                        sharing the fixture run N at a time; those changing it run one by one after them
-  list                  List the scenarios with priority and title
+                        sharing the fixture run N at a time; those changing it run one by one after them.
+                        The slow class (SLOW: group D, about 35 minutes each) runs only when named by id,
+                        by group or by `slow`, never by all, a priority or the default
+  list                  List the scenarios with priority (or class) and title
   status                Show the colony, as alice on the client
   ants NODE ARGS...     Run ants on hub, leaf or client (the client as alice, the hub as bob)
   sh NODE               Open a shell on a node
@@ -257,7 +259,7 @@ up() {
     ready leaf
     ready client
     wire
-    wait_live hub-ant leaf-ant gate-ant system-messenger
+    wait_live hub-ant leaf-ant gate-ant system-messenger sage-ant
     say "fixture up; hub at $(hub_ip)"
 }
 

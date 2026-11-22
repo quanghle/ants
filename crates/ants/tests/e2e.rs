@@ -275,7 +275,8 @@ fn exercise_daemon(custom_tools: bool) {
         #[cfg(unix)]
         {
             let editor = dir.join("editor");
-            ants_test_support::executable(&editor, "#!/bin/sh\nprintf 'from the\\n  editor\\n' > \"$1\"\n");
+            std::fs::write(&editor, "#!/bin/sh\nprintf 'from the\\n  editor\\n' > \"$1\"\n").unwrap();
+            std::fs::set_permissions(&editor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
             let mut edit = ants(&["ask", "--wait", "--edit", "@dev-a"]);
             edit.env_remove("VISUAL").env("EDITOR", &editor);
             let ask = run(edit);

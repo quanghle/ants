@@ -796,7 +796,9 @@ mod tests {
         }
         let exe = bin.join("ants");
         let fake = |path: &Path, version: &str| {
-            ants_test_support::executable(path, &format!("#!/bin/sh\necho 'nats-server: {version}'\n"));
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::write(path, format!("#!/bin/sh\necho 'nats-server: {version}'\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
         let staged = async || {
             fake(&unpacked.join("nats-server"), "v2.15.3");

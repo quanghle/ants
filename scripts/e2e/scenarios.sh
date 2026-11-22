@@ -72,7 +72,7 @@ colony_field() { # colony_field ANT JQ
 is_live() { [ "$(colony_state "$1")" = live ]; }
 is_paused() { [ "$(colony_field "$1" '.paused != null')" = true ]; }
 not_live() { [ "$(colony_state "$1")" != live ]; }
-all_live() { wait_live hub-ant leaf-ant gate-ant system-messenger; }
+all_live() { wait_live hub-ant leaf-ant gate-ant system-messenger sage-ant; }
 
 # Starts a node again after a scenario stopped it, and waits until the fixture is whole.
 restore_node() {
@@ -120,12 +120,12 @@ F1() {
     leaf curl --fail --silent http://127.0.0.1:9464/healthz >/dev/null
     local colony ant
     colony=$(alice colony --json)
-    for ant in hub-ant leaf-ant gate-ant system-messenger; do
+    for ant in hub-ant leaf-ant gate-ant system-messenger sage-ant; do
         jq --slurp --exit-status --arg ant "$ant" \
             'any(.[]; .ant == $ant and .state == "live" and .harness == "claude")' <<<"$colony" >/dev/null \
             || { printf '%s\n' "$colony"; fail "$ant is not live on claude"; }
     done
-    for ant in hub-ant system-messenger; do
+    for ant in hub-ant system-messenger sage-ant; do
         [ "$(colony_field "$ant" .machine)" = hub ] || fail "$ant is not on machine hub"
     done
     for ant in leaf-ant gate-ant; do
@@ -1477,9 +1477,188 @@ K2() {
     lacks "sealed $t" "an ant's view" <<<"$out"
 }
 
+# --- D. Dreams and sage reviews (SLOW) -------------------------------------------------------------------------------
+
+# A dream begins once its ant ran no prompt for 30 minutes, and no setting shortens that: each scenario adds an ant of
+# its own on the hub (where an add order reconnects no uplink), gives it work and waits. The whoami keeps a dream short
+# and its end predictable.
+dreamer="An ant of the end-to-end tests of ants. On a dream thread: answer each finding with sense_dream, applied, rejected or deferred with a short reason, write nothing else, then call sense_dream with done true, and only then reply DREAMT."
+dream_wait=2400 # seconds: the 30 idle minutes, and a margin for the scheduler's look and the harness's start
+# The 30 idle minutes as the stored times tell them, to the second: the idle time starts as the prompt ends, a moment
+# before its `ended` entry is stored.
+idle_least=1790
+
+# dream_order ARGS...: alice's admin order ARGS to the hub's daemon, one at a time across the D scenarios, each followed
+# by 15 s for the reload it causes: orders at once have hung the daemon (ants-ocu1r).
+dream_order() {
+    lockf -k "$state/dream-orders.lock" sh -c 'container exec --env ANTS_LOG=warn "$0" ants "$@"; status=$?; sleep 15; exit $status' \
+        "$name-client" "$@"
+}
+add_dreamer() { # add_dreamer ANT: adds ANT on the hub
+    local out
+    out=$(dream_order ant add "$1" --on hub --model claude-haiku-4-5 --whoami "$dreamer" --wait 2m)
+    printf '%s\n' "$out"
+    has "added on hub" <<<"$out"
+    eventually 60 is_live "$1"
+}
+# retire_dreamer ANT: retires ANT and, once the retire applied, removes its home, which a retire leaves. A home goes
+# never before: the daemon refuses to start while its config lists an ant without one.
+retire_dreamer() {
+    local out attempt
+    # The CLI may fail reading the outcome of a retire that applied: the ant's orders tell.
+    retired() { alice ant orders "$1" 2>/dev/null | grep -qE '^.* retire +applied'; }
+    for attempt in 1 2 3; do
+        retired "$1" && break
+        out=$(dream_order ant retire "$1" --wait 6m 2>&1) || true
+        printf '%s\n' "$out" | grep -v ' WARN ' || true
+        grep -qF "retired on hub" <<<"$out" && break
+    done
+    if grep -qF "retired on hub" <<<"${out:-}" || retired "$1"; then
+        hub rm -rf "/demo/home/.ants/agents/$1"
+    else
+        printf 'WARNING: %s not retired; its home is kept on the hub\n' "$1"
+        return 1
+    fi
+}
+
+# epoch JQ: the time of the first entry of the JSON lines on stdin that JQ selects, in seconds since 1970.
+epoch() {
+    jq --slurp --raw-output "map(select($1)) | first | .stored_at // empty | sub(\"\\\\.[0-9]+Z\$\"; \"Z\") | fromdateiso8601"
+}
+# The threads of ANT other than THREAD in the last 2 hours.
+other_threads() {
+    alice thread list --ant "$1" --since 2h --json | jq --raw-output --arg w "$2" 'select(.thread_id != $w) | .thread_id'
+}
+has_other_thread() { [ -n "$(other_threads "$@")" ]; }
+# ended_on THREAD ANT: the last ended entry of ANT on the thread, as JSON, or nothing.
+ended_on() {
+    alice thread show "$1" --json | jq --slurp --compact-output --arg ant "$2" \
+        'map(select(.kind == "ended" and .from == $ant)) | last // empty'
+}
+has_ended() { [ -n "$(ended_on "$@")" ]; }
+# called_dream THREAD ANT: ANT's prompt there ended counting a sense call, and its timeline names sense_dream.
+called_dream() {
+    local json
+    json=$(alice thread show "$1" --json)
+    jq --slurp --exit-status --arg ant "$2" \
+        'any(.[]; .kind == "ended" and .from == $ant and (.ended.sense_calls // 0) > 0)
+         and any(.[]; .kind == "tool" and .from == $ant and (.text | test("sense_dream")))' <<<"$json" >/dev/null \
+        || { alice thread show "$1" | tail -n 30; fail "$2 answered no finding with sense_dream on $1"; }
+}
+
+# dream_alone ANT WORK [SAGE]: ANT, whose work prompt was on thread WORK, dreams on a new thread with the packet alone,
+# 30 minutes or more after that prompt ended; no message goes to SAGE when one is named.
+dream_alone() {
+    local ant=$1 w=$2 sage=${3:-} dream ended began out
+    eventually "$dream_wait" has_other_thread "$ant" "$w"
+    dream=$(other_threads "$ant" "$w" | head -n 1)
+    note "dream thread $dream"
+    out=$(alice thread show "$dream")
+    printf '%s\n' "$out" | head -n 12
+    has "$ant -> $ant [wake from sense]" <<<"$out"
+    has "# Dream 1" <<<"$out"
+    has "$w" "the dream's packet" <<<"$out"
+    ended=$(alice thread show "$w" --json | epoch '.kind == "ended"')
+    began=$(alice thread show "$dream" --json | epoch '.kind == "message"')
+    note "the work prompt ended at $ended, the dream began at $began: $((began - ended)) s idle"
+    [ $((began - ended)) -ge "$idle_least" ] || fail "the dream began $((began - ended)) s after the work prompt ended, before 30 idle minutes"
+    eventually 600 has_ended "$dream" "$ant"
+    called_dream "$dream" "$ant"
+    finished() { alice ant memories "$ant" | grep -qF "done; diary"; }
+    eventually 120 finished
+    alice ant memories "$ant" | grep -A3 -F "Dream 1:"
+    [ "$(colony_field "$ant" '.sense_unkept // null')" = null ] || fail "$ant keeps no sense data"
+    if [ -n "$sage" ]; then
+        [ -z "$(alice thread search --to "$sage" --since 2h | grep -E "^[0-9]{4}-" || true)" ] || fail "a message went to $sage, whom no daemon serves"
+    fi
+    # One dream a day: none other begins in the next 2 minutes.
+    sleep 120
+    [ "$(other_threads "$ant" "$w" | wc -l | tr -d ' ')" -eq 1 ] || { other_threads "$ant" "$w"; fail "a second dream began"; }
+}
+
+scenario D1 SLOW "An ant with no sage reviews its work alone in a dream"
+D1() {
+    local t ant w
+    t=$(tok)
+    ant=dream-$t
+    trap "retire_dreamer $ant" EXIT
+    add_dreamer "$ant"
+    [ "$(colony_field "$ant" '.sage // null')" = null ] || fail "$ant has a sage: the hub's sage = \"none\" should apply"
+    w=$(alice ask --wait --timeout 3m "@$ant" "Use sense_remember to keep this memory: the dream codeword is $t. Reply KEPT." | thread)
+    replied "$w" KEPT || fail "$ant did not reply KEPT"
+    dream_alone "$ant" "$w"
+}
+
+scenario D2 SLOW "A dream reviewed by a sage"
+D2() {
+    local t ant w review ended began answer out json
+    t=$(tok)
+    ant=rev-$t
+    trap "retire_dreamer $ant" EXIT
+    add_dreamer "$ant"
+    dream_order ant set "$ant" sage=sage-ant
+    sage_named() { [ "$(colony_field "$ant" '.sage // null')" = sage-ant ]; }
+    eventually 60 sage_named
+    eventually 60 is_live "$ant"
+    w=$(alice ask --wait --timeout 3m "@$ant" "Use sense_remember to keep this memory: the review codeword is $t. Reply KEPT." | thread)
+    replied "$w" KEPT || fail "$ant did not reply KEPT"
+    review_thread() { alice thread search --from "$ant" --to sage-ant --since 2h | awk '$1 ~ /^[0-9][0-9][0-9][0-9]-/ { print $3 }' | head -n 1; }
+    asked() { [ -n "$(review_thread)" ]; }
+    eventually "$dream_wait" asked
+    review=$(review_thread)
+    note "review thread $review"
+    ended=$(alice thread show "$w" --json | epoch '.kind == "ended"')
+    began=$(alice thread show "$review" --json | epoch '.kind == "message"')
+    note "the work prompt ended at $ended, the review was asked at $began: $((began - ended)) s idle"
+    [ $((began - ended)) -ge "$idle_least" ] || fail "the review was asked $((began - ended)) s after the work prompt ended, before 30 idle minutes"
+    alice thread show "$review" | has "$w" "the review packet"
+    # The sage's answer: one reply holding a fenced JSON block of findings.
+    answered() { alice thread show "$review" --json | jq --slurp --exit-status 'any(.[]; .kind == "message" and .from == "sage-ant")' >/dev/null; }
+    eventually 900 answered
+    answer=$(alice thread show "$review" --json | jq --slurp --raw-output 'map(select(.kind == "message" and .from == "sage-ant")) | first | .text')
+    printf '%s\n' "$answer" | head -n 30
+    has '```' "the sage's answer" <<<"$answer"
+    has '"findings"' "the sage's answer" <<<"$answer"
+    ! grep -qE '"findings" *: *\[ *\]' <<<"$answer" || fail "the sage answered no finding, despite its whoami: nobody is woken"
+    # Read only: no edit or execute call of the sage, and no tool request of its asked of anyone.
+    json=$(alice thread show "$review" --json)
+    ! jq --slurp --exit-status 'any(.[]; .kind == "tool" and .from == "sage-ant" and (.tool.tool_kind == "edit" or .tool.tool_kind == "execute") and .tool.status == "completed")' \
+        <<<"$json" >/dev/null || { alice thread show "$review"; fail "the sage edited or ran a command in its review"; }
+    [ -z "$(pending_tool sage-ant "$review")" ] || fail "the sage's review asked for a tool"
+    # The findings prompt the ant on the review thread, which it answers with sense_dream.
+    eventually 600 has_ended "$review" "$ant"
+    called_dream "$review" "$ant"
+    finished() { alice ant memories "$ant" | grep -qF "done; diary"; }
+    eventually 120 finished
+    out=$(alice ant memories "$ant")
+    grep -A3 -F "Dream 1:" <<<"$out"
+    grep -qE "Dream 1: [1-9][0-9]* findings, [1-9][0-9]* applied|Dream 1: [1-9][0-9]* findings, [0-9]+ applied, [1-9]" <<<"$out" \
+        || fail "the dream answered none of the sage's findings"
+    alice ant memories sage-ant | has "$ant" "the sage's memories"
+    alice spend sage-ant --thread "$review" | has "$review" "the review's spend"
+    [ "$(colony_field "$ant" '.sense_unkept // null')" = null ] || fail "$ant keeps no sense data"
+}
+
+scenario D3 SLOW "A sage no daemon serves: the ant reviews alone"
+D3() {
+    local t ant w ghost
+    t=$(tok)
+    ant=dream-ghost-$t
+    ghost=ghost-$t
+    trap "retire_dreamer $ant" EXIT
+    add_dreamer "$ant"
+    dream_order ant set "$ant" "sage=$ghost"
+    sage_named() { [ "$(colony_field "$ant" '.sage // null')" = "$ghost" ]; }
+    eventually 60 sage_named
+    eventually 60 is_live "$ant"
+    w=$(alice ask --wait --timeout 3m "@$ant" "Use sense_remember to keep this memory: the ghost codeword is $t. Reply KEPT." | thread)
+    replied "$w" KEPT || fail "$ant did not reply KEPT"
+    dream_alone "$ant" "$w" "$ghost"
+}
+
 # --- Runner ---------------------------------------------------------------------------------------------------------
 
-list_scenarios() { printf '%s' "$registry" | awk '{ id = $1; pri = $2; $1 = ""; $2 = ""; sub(/^  /, ""); printf "%-4s %s  %s\n", id, pri, $0 }'; }
+list_scenarios() { printf '%s' "$registry" | awk '{ id = $1; pri = $2; $1 = ""; $2 = ""; sub(/^  /, ""); printf "%-4s %-4s  %s\n", id, pri, $0 }'; }
 
 select_scenarios() { # ids matching the selectors, in the doc's order
     local selectors=("$@") id pri group sel
@@ -1488,8 +1667,11 @@ select_scenarios() { # ids matching the selectors, in the doc's order
         [ -n "$id" ] || continue
         group=${id%%[0-9]*}
         for sel in "${selectors[@]}"; do
-            case "$sel" in
-            all | "$id" | "$pri" | "$group") printf '%s\n' "$id"; break ;;
+            # The slow class runs only when named: by its id, its group or `slow`.
+            case "$pri:$sel" in
+            SLOW:"$id" | SLOW:"$group" | SLOW:slow | SLOW:SLOW) printf '%s\n' "$id"; break ;;
+            SLOW:*) ;;
+            *:all | *:"$id" | *:"$pri" | *:"$group") printf '%s\n' "$id"; break ;;
             esac
         done
     done <<<"$registry"
