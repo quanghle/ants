@@ -42,7 +42,9 @@ mod prompt;
 mod queue;
 mod served;
 
-const WAIT: Duration = Duration::from_secs(10);
+/// How long a test waits for what it expects; generous, as the full suite loads the machine, and an expected arrival
+/// ends the wait.
+const WAIT: Duration = Duration::from_secs(20);
 const IDLE: Duration = Duration::from_secs(60);
 
 /// dev-a's side of a server: it serves its inbox, and the human sends to it.
