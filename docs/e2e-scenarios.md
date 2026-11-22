@@ -897,15 +897,18 @@ once `leaf-ant` resumes and answers nothing, the step sent anew on resume answer
 
 ### X7 · Stopping and resuming a run from `ants chat` (P1, 2 prompts)
 
-As X4 up to the waiting step, then in the chat: `/trail runs` (the pager lists the run), `/trail stop RUN8` (a
+As X4 up to the waiting step, then in the chat: `/trail runs` (shown in `$PAGER`, which the scenario sets to a
+command copying the page to a file, the chat's pager otherwise falling back to the editor), `/trail stop RUN8` (a
 unique start of the run's id), `alice ant resume leaf-ant`, `/trail resume RUN8`; `alice trail show RUN`.
 
-**Expect** the stop's status line names the step left in `leaf-ant`'s queue and the run is `stopped`; the resume's
+**Expect** the page lists the run `running`; the stop's status line says the run stopped and names the step left in `leaf-ant`'s queue (known issue
+ants-eik57: the line is cut before the step) and the run is `stopped`; the resume's
 says it resumed; the run ends `done` with both tokens. The step is not withdrawn, as in X6.
 
 ### X8 · A run stopped while its step runs (P2, 3 prompts)
 
-As X4 without the pause, the second step's prompt (`pre` in the args) running `sleep 63` on `leaf-ant` first; once
+As X4 without the pause, the second step's prompt (`pre` in the args) running `sleep 63` on `leaf-ant` first, saying
+alice expects it so the model does not ask back; once
 it sleeps, `alice trail stop RUN`, then after `leaf-ant`'s reply `alice trail resume RUN --follow`.
 
 **Expect** the stop is taken while the step runs (the step is listed, as its message went out, though withdrawing it

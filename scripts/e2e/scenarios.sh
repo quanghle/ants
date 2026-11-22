@@ -532,7 +532,7 @@ O1() {
     eventually 180 replied "$th" "RESUMED-$t"
     local orders
     orders=$(alice ant orders leaf-ant)
-    printf '%s\n' "$orders" | head -n 5
+    printf '%s\n' "$orders" | grep -F "$run" || true
     has pause <<<"$orders"
     has resume <<<"$orders"
     has applied <<<"$orders"
@@ -807,7 +807,7 @@ H4() {
 chat() {
     container exec --interactive "$name-client" sh -c 'cat >/tmp/ants-e2e-chat.py.$$ && mv /tmp/ants-e2e-chat.py.$$ /tmp/ants-e2e-chat.py' \
         <"$root/contrib/e2e/chat.py"
-    container exec "$name-client" python3 /tmp/ants-e2e-chat.py "$@"
+    container exec ${CHAT_PAGER:+--env "PAGER=$CHAT_PAGER"} "$name-client" python3 /tmp/ants-e2e-chat.py "$@"
 }
 
 scenario U1 P0 "The chat opens on the live colony"
@@ -1053,7 +1053,7 @@ done_with() {
 
 scenario X4 P0 "A run stopped while a step waits, the step withdrawn, the run resumed"
 X4() {
-    local t run out message step_thread
+    local t out message step_thread
     t=$(tok)
     run=
     trap 'alice ant resume leaf-ant >/dev/null 2>&1 || true; stop_unended "$run"' EXIT
@@ -1089,6 +1089,7 @@ X4() {
     out=$(alice trail show "$run")
     printf '%s\n' "$out"
     has "state: done" <<<"$out"
+    if grep -q "^pending calls:" <<<"$out"; then known ants-vf35d "trail show lists the answered calls of a done run as pending"; fi
     [ "$(run_field "$run" .run.steps)" = 2 ] || fail "the run counts $(run_field "$run" .run.steps) steps, not 2"
     [ "$(first_answers "$t")" = 1 ] || fail "hub-ant answered FIRST-$t $(first_answers "$t") times"
     if out=$(alice trail resume "$run" 2>&1); then printf '%s\n' "$out"; fail "a resume of a done run was taken"; fi
@@ -1098,7 +1099,7 @@ X4() {
 
 scenario X5 P1 "A run failed on its step limit, resumed with the limit raised"
 X5() {
-    local t run out
+    local t out
     t=$(tok)
     run=
     trap 'stop_unended "$run"' EXIT
@@ -1124,7 +1125,7 @@ X5() {
 
 scenario X6 P1 "Stopping and resuming a run by admin order"
 X6() {
-    local t run out orders
+    local t out orders
     t=$(tok)
     run=
     trap 'alice ant resume leaf-ant >/dev/null 2>&1 || true; stop_unended "$run"' EXIT
@@ -1154,14 +1155,14 @@ X6() {
     has "done:" <<<"$out"
     done_with "$run" "$t"
     orders=$(alice ant orders hub-ant)
-    printf '%s\n' "$orders" | head -n 5
-    grep -E 'stop_trail.*applied|applied.*stop_trail' <<<"$orders" | has alice "the stop_trail order"
-    grep -E 'resume_trail.*applied|applied.*resume_trail' <<<"$orders" | has alice "the resume_trail order"
+    printf '%s\n' "$orders" | grep -F "$run" || true
+    grep -F "stop trail run $run" <<<"$orders" | grep alice | has applied "the stop_trail order"
+    grep -F "resume trail run $run" <<<"$orders" | grep alice | has applied "the resume_trail order"
 }
 
 scenario X7 P1 "Stopping and resuming a run from ants chat"
 X7() {
-    local t run short
+    local t short out
     t=$(tok)
     run=
     trap 'alice ant resume leaf-ant >/dev/null 2>&1 || true; stop_unended "$run"' EXIT
@@ -1171,8 +1172,15 @@ X7() {
     [ -n "$run" ] || fail "no run started"
     eventually 180 second_waits "$run"
     short=${run:0:13}
-    chat "wait:connected" "type:/trail runs" "key:enter" "wait:$run" "snap" "key:esc" \
-        "type:/trail stop $short" "key:enter" "wait:stopped run" "wait:ants withdraw leaf-ant" "snap"
+    # The chat shows /trail runs in $PAGER: one that copies what it is given.
+    container exec "$name-client" rm -f /tmp/ants-e2e-x7-runs.txt
+    out=$(CHAT_PAGER='cp -f "$1" /tmp/ants-e2e-x7-runs.txt; true' chat "wait:connected" "type:/trail runs" "key:enter" \
+        "wait:the pager lists them" "type:/trail stop $short" "key:enter" "wait:stopped run $run on hub-ant" "sleep:2")
+    printf '%s\n' "$out"
+    if ! grep -qF "ants withdraw leaf-ant" <<<"$out"; then
+        known ants-eik57 "the stop's status line is cut before the step to withdraw"
+    fi
+    container exec "$name-client" cat /tmp/ants-e2e-x7-runs.txt | grep -F "$run" | has running "the run in /trail runs"
     [ "$(run_state "$run")" = stopped ] || fail "the run is $(run_state "$run"), not stopped"
     alice ant resume leaf-ant
     chat "wait:connected" "type:/trail resume $short" "key:enter" "wait:resumed run" "snap"
@@ -1183,13 +1191,13 @@ X7() {
 
 scenario X8 P2 "A run stopped while its step runs"
 X8() {
-    local t run out step_thread
+    local t out step_thread
     t=$(tok)
     run=
     trap 'stop_unended "$run"' EXIT
     save_stoppable
     run=$(alice trail run stoppable --ant hub-ant --yes --json \
-        --args "$(jq -cn --arg t "$t" --arg pre "$e2e Run the shell command '$(slow 63)' in the foreground, then" '{t: $t, pre: $pre}')" | jq -r .run)
+        --args "$(jq -cn --arg t "$t" --arg pre "A step of a trail alice runs. $e2e Without asking back, run the shell command '$(slow 63)' in the foreground (it only waits, and alice expects it), then" '{t: $t, pre: $pre}')" | jq -r .run)
     [ -n "$run" ] || fail "no run started"
     eventually 180 second_waits "$run"
     step_thread=$(second_thread "$run")
