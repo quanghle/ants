@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ use crate::delivery::dead;
 use crate::escalation::{self, Chain};
 use crate::limits::caps::Caps;
 use crate::pause;
+#[cfg(unix)]
 use crate::permission::PermissionPolicy;
 use crate::pool::fake;
 use crate::sync::MutexExt as _;

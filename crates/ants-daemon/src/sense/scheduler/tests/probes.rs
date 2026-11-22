@@ -1,4 +1,6 @@
-use ants_sense::{Workdirs, items::ItemValues};
+use ants_sense::Workdirs;
+#[cfg(unix)]
+use ants_sense::items::ItemValues;
 
 use super::*;
 
