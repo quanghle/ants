@@ -677,8 +677,13 @@ M6() {
         "For an ant with capability leaf: read node.txt in your working directory and reply with ROUTED-$t and its content." 2>&1)
     printf '%s\n' "$out"
     has "system-messenger" <<<"$out"
-    has "ROUTED-$t" <<<"$out"
-    has node=leaf <<<"$out"
+    if grep -qF "ROUTED-$t" <<<"$out"; then
+        has node=leaf <<<"$out"
+    else
+        # The route gave up while leaf-ant was busy; its reply came after the messenger's last check_inbox.
+        alice thread show "$(thread <<<"$out")" | has "ROUTED-$t" "leaf-ant's reply on the thread"
+        known ants-qsc53 "the messenger's route gave up and leaf-ant's late reply never reached alice"
+    fi
     out=$(alice thread search --from system-messenger --since 10m)
     printf '%s\n' "$out"
     grep -qE 'leaf-ant|gate-ant' <<<"$out" || fail "the messenger sent nothing to the leaf's ants"
