@@ -128,6 +128,11 @@ scripts/e2e.sh down           # remove the containers and network, keeping the v
 scripts/e2e.sh reset          # remove the volumes too: the next up starts afresh
 ```
 
+`build`, `up`, `run`, `down` and `reset` take a lock in the state directory, so a second one waits for the first to
+end rather than changing the fixture under it. `ANTS_E2E_IMAGE` names the image `build` tags and `up` creates missing
+nodes from (default `ants-e2e:local`), to try a changed fixture without retagging the image the running nodes came
+from.
+
 Everything is safe to repeat. `up` creates what is missing and starts what is stopped; the hub issues the team keys
 and credentials once and keeps them on its volume, and `up` copies them to the other nodes; config files are written
 anew at each start. `run` starts with `up`. Each scenario takes fresh tokens and undoes what it changed (a pause, a

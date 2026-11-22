@@ -26,6 +26,9 @@ Environment:
   ANTS_E2E_STATE          Run logs (default: ~/.local/share/ants/e2e)
   ANTS_E2E_CLAUDE_VERSION Claude Code npm version for build (default: 2.1.330)
   ANTS_E2E_JOBS           Default of run's -j (default: 1)
+  ANTS_E2E_IMAGE          Image that build tags and up creates missing nodes from (default: ants-e2e:local)
+
+build, up, run, down and reset take a lock on the state directory: a second one waits for the first to end.
 EOF
 }
 
@@ -53,11 +56,19 @@ container system status >/dev/null || die "the container service is not running:
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 name=ants-e2e
-image=$name:local
+image=${ANTS_E2E_IMAGE:-$name:local}
 label=net.quangle.ants.e2e
 claude_env=${ANTS_E2E_CLAUDE_ENV:-$HOME/.config/ants-e2e/claude.env}
 state=${ANTS_E2E_STATE:-$HOME/.local/share/ants/e2e}
 mkdir -p "$state"
+# Two of these at once would undo each other's fixture: the second waits, re-run under the lock.
+case "$command" in
+build | up | run | down | reset)
+    if [ -z "${ANTS_E2E_LOCKED:-}" ]; then
+        lockf -s -t 0 "$state/fixture.lock" true || say "waiting for another scripts/e2e.sh $command or run to end"
+        ANTS_E2E_LOCKED=1 exec lockf -k "$state/fixture.lock" "$0" "$command" "$@"
+    fi ;;
+esac
 auth=/demo/home/.config/ants/auth
 nodes=(hub leaf client)
 
