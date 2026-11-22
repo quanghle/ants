@@ -677,8 +677,8 @@ M6() {
         "For an ant with capability leaf: read node.txt in your working directory and reply with ROUTED-$t and its content." 2>&1)
     printf '%s\n' "$out"
     has "system-messenger" <<<"$out"
-    if grep -qF "ROUTED-$t" <<<"$out"; then
-        has node=leaf <<<"$out"
+    if grep -qF node=leaf <<<"$out"; then
+        has "ROUTED-$t" <<<"$out"
     else
         # The route gave up while leaf-ant was busy; its reply came after the messenger's last check_inbox.
         alice thread show "$(thread <<<"$out")" | has "ROUTED-$t" "leaf-ant's reply on the thread"
