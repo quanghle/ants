@@ -2314,7 +2314,7 @@ dream_wait=2400 # seconds: the 30 idle minutes, and a margin for the scheduler's
 idle_least=1790
 
 # dream_order ARGS...: alice's admin order ARGS to the hub's daemon, one at a time across the D scenarios, each followed
-# by 15 s for the reload it causes: orders at once have hung the daemon (ants-ocu1r).
+# by 15 s for the reload it causes, as when orders at once hung the daemon (ants-ocu1r, since fixed).
 dream_order() {
     lockf -k "$state/dream-orders.lock" sh -c 'container exec --env ANTS_LOG=warn "$0" ants "$@"; status=$?; sleep 15; exit $status' \
         "$name-client" "$@"

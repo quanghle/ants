@@ -274,3 +274,159 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     drop(ants);
     tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
 }
+
+/// Several add orders sent at once to one machine leave its daemon responsive: each ant added starts and the ant
+/// served before carries on, while the reloads the orders and the new ants' shared settings trigger come back to back
+/// (ants-ocu1r). The daemon runs on a current-thread runtime of its own, as `ants daemon` does, whose heartbeat stops
+/// should anything block its thread.
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one scenario: the daemon, the orders at once, then the ants served")]
+async fn add_orders_sent_at_once_leave_the_daemon_serving_every_ant() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use ants_daemon::host::Host;
+    use ants_proto::Machine;
+
+    use crate::auth::issue_host;
+    use crate::serve;
+
+    let Some(server) = Server::start() else { return };
+    let dir = server.dir().to_owned();
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let (_, js) = server.connect_as(&alice, Role::Human).await;
+    let rights = crate::people::humans::Rights::from_creds(Some(&server.creds_as(&alice, Role::Human))).unwrap();
+    ants_daemon::hub::init(&js, |s| rights.may_publish(s)).await.unwrap();
+    let team = dir.join("auth");
+    let admin_creds = dir.join("alice-admin.creds");
+    let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let rights = Permissions::for_user(&alice, Role::Human);
+    issue_device_with(&team, &alice, Kind::Human, rights, &device, &admin_creds).unwrap();
+    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let (_, admin_js) = admin.connect("test").await.unwrap();
+    let m1: Machine = "m1".parse().unwrap();
+    let host_creds = dir.join("host-m1.creds");
+    issue_host(&team, &m1, None, &host_creds).unwrap();
+
+    let config = dir.join("config.toml");
+    let (a_creds, a_home) = (server.creds_as(&dev_a, Role::Ant), dir.join("homes/dev-a"));
+    std::fs::create_dir_all(&a_home).unwrap();
+    let text = format!(
+        "messenger = false\nsage = \"none\"\nharness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {a_home:?}\n\
+         home = {a_home:?}\ncreds = {a_creds:?}\n"
+    );
+    std::fs::write(&config, text).unwrap();
+
+    let beats = Arc::new(AtomicU64::new(0));
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let daemon = {
+        let (config, url, beats) = (config.clone(), server.url.clone(), beats.clone());
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async move {
+                tokio::spawn(async move {
+                    loop {
+                        beats.fetch_add(1, Ordering::Relaxed);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                });
+                let mut triggers =
+                    crate::reload::Triggers::new(config.clone(), None, Duration::from_secs(3600)).unwrap();
+                let edited = ConfigFile::new(config.clone(), triggers.edits());
+                triggers.watch_shared(edited.shared.subscribe());
+                // Reloads besides the orders' and the shared settings', as a busy machine has, while the ants start.
+                let edits = triggers.edits();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        edits.notify_one();
+                    }
+                });
+                let served = || {
+                    let loaded = ants_daemon::config::load(&config)?;
+                    edited.shared.listed(&loaded.ants);
+                    let configs = serve::configs(loaded.ants, &loaded.harnesses, &url, None, Some(&edited.shared))?;
+                    let host = Host {
+                        machine: None,
+                        fallback: None,
+                        nats: url.clone(),
+                        creds: Some(host_creds.clone()),
+                        js_domain: None,
+                        remote_admin: true,
+                        config: Some(edited.clone()),
+                        restarts: Default::default(),
+                        providers: Default::default(),
+                        leaf: None,
+                    };
+                    let ants = configs.iter().map(|c| c.ant.clone()).collect();
+                    let shared = Some(edited.shared.clone());
+                    let (schedules, metrics, sense, machine) = (Vec::new(), None, None, None);
+                    let host = Some((host, ants));
+                    anyhow::Ok(serve::Served { configs, schedules, metrics, host, sense, shared, machine })
+                };
+                let stopping = async {
+                    let _ = stopped.await;
+                };
+                serve::run(served().unwrap(), served, triggers, stopping, std::future::pending()).await
+            })
+        })
+    };
+    let lookup = ants_daemon::mcp::jetstream_lookup(js.clone());
+    let listed = async |name: &str| {
+        while lookup(p(name)).await.unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    let alive = async || {
+        // The daemon's heartbeat, checked meanwhile: it stops when anything blocks the daemon's thread.
+        loop {
+            let before = beats.load(Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            assert_ne!(beats.load(Ordering::Relaxed), before, "the daemon's thread is blocked");
+        }
+    };
+    tokio::select! {
+        r = tokio::time::timeout(SIGNED, listed("dev-a")) => r.expect("dev-a served"),
+        () = alive() => unreachable!(),
+    }
+
+    let names = ["dev-b", "dev-c", "dev-d"];
+    let add = |name: &str| {
+        let home = dir.join("homes").join(name);
+        let Value::Object(settings) = json!({ "home": home }) else { unreachable!() };
+        let (admin, admin_js, m1, ant) = (&admin, &admin_js, m1.clone(), p(name));
+        async move {
+            let op = AdminOp::Add { settings, assistant_of: None };
+            send(admin, admin_js, Some(m1), &ant, op, SIGNED * 3).await
+        }
+    };
+    let sending = async {
+        let (b, c, d) = tokio::join!(add(names[0]), add(names[1]), add(names[2]));
+        [b, c, d]
+    };
+    let outcomes = tokio::select! {
+        outcomes = with_signer(&server, sending) => outcomes,
+        () = alive() => unreachable!(),
+    };
+    for (name, outcome) in names.iter().zip(outcomes) {
+        let (_, outcome) = outcome.unwrap();
+        let outcome = outcome.unwrap_or_else(|| panic!("the daemon decides the order adding {name}"));
+        assert_eq!((outcome.state, outcome.reason.as_deref()), (OrderState::Applied, None), "{name}: {outcome:?}");
+    }
+    let serving = async {
+        for name in names {
+            listed(name).await;
+        }
+    };
+    tokio::select! {
+        r = tokio::time::timeout(SIGNED, serving) => r.expect("every ant added is served"),
+        () = alive() => unreachable!(),
+    }
+    let before = beats.load(Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_ne!(beats.load(Ordering::Relaxed), before, "the daemon's thread is blocked");
+    assert!(lookup(dev_a.clone()).await.unwrap().is_some(), "dev-a carries on");
+    stop.send(()).unwrap();
+    let ended = tokio::task::spawn_blocking(move || daemon.join()).await.unwrap();
+    assert!(matches!(ended, Ok(Ok(serve::Ended::Replaced))), "{ended:?}");
+}

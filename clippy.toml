@@ -16,3 +16,9 @@ disallowed-methods = [
   { path = "async_nats::Client::queue_subscribe", reason = "use bus::relayed::queue_subscribe" },
   { path = "async_nats::Client::request", reason = "use bus::relayed::request" },
 ]
+
+# A watch's value is behind a std RwLock: a borrow held across an await blocks the daemon's one thread as soon as
+# another task sends on the channel (ants-ocu1r).
+await-holding-invalid-types = [
+  { path = "tokio::sync::watch::Ref", reason = "copy what is needed out of the borrow before awaiting" },
+]

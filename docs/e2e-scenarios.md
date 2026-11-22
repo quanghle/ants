@@ -1470,12 +1470,12 @@ Class `SLOW` ([Running them](#running-them)): a dream begins once its ant ran no
 day, and no setting shortens either, so each scenario adds a fresh ant on the hub, gives it one prompt of work and
 waits about 35 minutes. On the hub an add order reconnects no uplink and leaves the prompts running there alone (O6
 adds on the leaf, alone for that reason), so the three run side by side with each other and with the rest. Their add,
-set and retire orders go one at a time, 15 s apart: orders at once have hung the hub's daemon (ants-ocu1r). A restart
-of the hub's container drops the ants added (node.sh writes its config anew), so a D run fails across one. Each ant's
-`whoami` asks it, on a dream thread, to answer each finding with `sense_dream`, finish with `done: true` and reply
-`DREAMT`, which keeps the dream short and its end predictable. The trap retires the ant (`alice ant retire NAME --wait
-6m`) and, only once the retire applied, removes its home on the hub, which a retire leaves: a daemon refuses to start
-while its config lists an ant without a home. Times are compared as stored, to the second, allowing 10 s for the
+set and retire orders go one at a time, 15 s apart, as when orders at once hung the hub's daemon (ants-ocu1r, since
+fixed). A restart of the hub's container drops the ants added (node.sh writes its config anew), so a D run fails across
+one. Each ant's `whoami` asks it, on a dream thread, to answer each finding with `sense_dream`, finish with `done: true`
+and reply `DREAMT`, which keeps the dream short and its end predictable. The trap retires the ant (`alice ant retire
+NAME --wait 6m`) and, only once the retire applied, removes its home on the hub, which a retire leaves: a daemon refuses
+to start while its config lists an ant without a home. Times are compared as stored, to the second, allowing 10 s for the
 `ended` entry stored a moment after the prompt ended.
 
 ```sh
