@@ -20,6 +20,7 @@ pub(super) struct Leaf {
     pub(super) path: PathBuf,
     text: String,
     pub(super) machine: Machine,
+    /// Without the `./` that [`leaf::reconnect_uplink`] may have put before the file's name.
     uplink: PathBuf,
     pub(super) listen: String,
     /// The hub's JetStream domain, as the uplink credentials carry it.
@@ -36,6 +37,7 @@ impl Leaf {
             let text = std::fs::read_to_string(path)?;
             let (machine, uplink) = leaf::read_uplink(path)?;
             let listen = leaf::read_listen(path)?;
+            let uplink: PathBuf = uplink.components().collect();
             let hub_domain = creds::check(&uplink).ok().and_then(|f| f.js_domain);
             Ok(Self { path: path.to_owned(), text, machine, uplink, listen, hub_domain })
         })())
@@ -48,7 +50,7 @@ fn check_leaf_store(leaf: &Leaf, generic: String, now: u64) -> Check {
     let check = "leaf store uplink";
     let machine = &leaf.machine;
     let store = auth::leaf_store_creds(&leaf.uplink);
-    if !leaf.text.contains(&*store.to_string_lossy()) {
+    if !leaf::uses_credentials(&leaf.text, &store) {
         let detail = format!(
             "{} does not use {}: the hub cannot source this leaf's outbox",
             leaf.path.display(),
@@ -88,7 +90,7 @@ pub(super) fn check_leaf_system(
         );
         let issue = uplink.as_ref().ok().and_then(|f| f.renew().into_iter().next()).unwrap_or(generic);
         Check::warn("leaf system uplink", detail, vec![issue, rewrite])
-    } else if !leaf.text.contains(&*system.to_string_lossy()) {
+    } else if !leaf::uses_credentials(&leaf.text, &system) {
         let detail =
             format!("{path} does not use {}: revocations pushed to the hub do not reach this leaf", system.display());
         Check::warn("leaf system uplink", detail, vec![rewrite])

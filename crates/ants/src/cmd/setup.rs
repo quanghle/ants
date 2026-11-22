@@ -208,17 +208,41 @@ pub async fn run(connection: &Connection<'_>, args: SetupArgs) -> Result<()> {
         return Ok(());
     }
     let nats = (leaf_conf, nats_conf);
-    Box::pin(doctor_checks(report.failed, connection, config_path, nats, home)).await
+    let unstarted = unstarted(args, listen.as_deref(), after_daemon, &config_path, &nats).await;
+    Box::pin(doctor_checks(report.failed, connection, config_path, nats, home, unstarted)).await
+}
+
+/// The address of the local server --no-services left to start, when it does not listen yet, and the command that
+/// starts it: the daemon of `config` for a `managed` one, else nats-server on the leaf node or local hub configuration.
+async fn unstarted(
+    args: &SetupArgs,
+    listen: Option<&str>,
+    managed: bool,
+    config: &Path,
+    (leaf_conf, nats_conf): &(PathBuf, PathBuf),
+) -> Option<(String, String)> {
+    let listen = listen.filter(|_| args.no_services)?;
+    if listening(listen).await {
+        return None;
+    }
+    let start = if managed {
+        format!("ants daemon --config {}", config.display())
+    } else {
+        format!("nats-server -c {}", if leaf_conf.exists() { leaf_conf } else { nats_conf }.display())
+    };
+    Some((listen.to_owned(), start))
 }
 
 /// Run `ants doctor` on the config file, the leaf node and local hub configurations `nats` and `home`; fail when a
-/// check failed, or one of the `failed` steps before.
+/// check failed, or one of the `failed` steps before. `unstarted` is the address and start command of a server
+/// --no-services left to start, not listening yet ([`left_to_start`]).
 async fn doctor_checks(
     failed: usize,
     connection: &Connection<'_>,
     config_path: PathBuf,
     (leaf_conf, nats_conf): (PathBuf, PathBuf),
     home: PathBuf,
+    unstarted: Option<(String, String)>,
 ) -> Result<()> {
     println!("ants doctor:");
     let webhooks = config_path.with_file_name("webhooks.toml");
@@ -235,7 +259,10 @@ async fn doctor_checks(
         worker: doctor::trail_worker(Some(home.clone())),
         home: Some(home),
     };
-    let checks = Box::pin(doctor::run(&setup)).await;
+    let mut checks = Box::pin(doctor::run(&setup)).await;
+    if let Some((listen, start)) = unstarted {
+        left_to_start(&mut checks, &listen, &start);
+    }
     for check in &checks {
         println!("{check}");
     }
@@ -244,6 +271,21 @@ async fn doctor_checks(
         (0, 0) => Ok(()),
         (0, n) => bail!("{n} of {} checks failed", checks.len()),
         (n, _) => bail!("{n} setup steps failed"),
+    }
+}
+
+/// Skip the checks of `checks` failing as no server listens on `listen`, one --no-services left to start with
+/// `start`: the setup did what it was asked, and `ants doctor` checks the server once it runs.
+fn left_to_start(checks: &mut [doctor::Check], listen: &str, start: &str) {
+    for check in checks {
+        if check.status == doctor::Status::Fail && ["server", "leaf node"].contains(&check.check.as_str()) {
+            check.status = doctor::Status::Skip;
+            check.detail = format!(
+                "no server listens on {listen} yet: --no-services leaves it to start ({start}); run `ants doctor` \
+                 once it runs"
+            );
+            check.fix.clear();
+        }
     }
 }
 
@@ -849,6 +891,33 @@ mod tests {
             no_completions: true,
             dry_run: false,
         }
+    }
+
+    #[test]
+    fn a_server_left_to_start_fails_no_check() {
+        use doctor::Status::{Fail, Skip};
+        let check = |check: &str, status, detail: &str| doctor::Check {
+            check: check.to_owned(),
+            status,
+            detail: detail.to_owned(),
+            fix: vec!["a fix".to_owned()],
+        };
+        let mut checks = vec![
+            check("server", Fail, "nats://127.0.0.1:4222 does not answer"),
+            check("leaf node", Fail, "nothing listens on 127.0.0.1:4222"),
+            check("config", Fail, "unreadable"),
+            check("hub", Skip, "JetStream does not answer"),
+        ];
+        left_to_start(&mut checks, "127.0.0.1:4222", "ants daemon --config /c.toml");
+        let statuses: Vec<_> = checks.iter().map(|c| c.status).collect();
+        assert_eq!(statuses, [Skip, Skip, Fail, Skip]);
+        assert_eq!(
+            checks[0].detail,
+            "no server listens on 127.0.0.1:4222 yet: --no-services leaves it to start (ants daemon --config \
+             /c.toml); run `ants doctor` once it runs"
+        );
+        assert!(checks[0].fix.is_empty() && checks[1].fix.is_empty());
+        assert_eq!(checks[2].fix, ["a fix"], "a failure of its own");
     }
 
     #[test]

@@ -236,17 +236,15 @@ B1() {
         printf '%s\n' "$out"
         # The harness's handshake failing on an EPIPE of the adapter is intermittent (ants-i0tk6); the prompts below
         # still need the harness working.
-        if grep -qE '^fail +harness: .*ACP handshake: .*EPIPE' <<<"$out"; then
-            known ants-i0tk6 "ants setup's harness handshake fails intermittently: the ACP adapter dies with EPIPE"
-        fi
-        [ "$(grep -E '^fail' <<<"$out" | grep -cvE '^fail +harness: .*ACP handshake: .*EPIPE')" = 1 ] \
-            && grep -qE '^fail +server: .* does not answer' <<<"$out" || fail "ants setup failed"
-        known ants-u9wna "ants setup --managed-nats --no-services exits 1 for the server it leaves to the user to start"
+        [ "$(grep -cE '^fail' <<<"$out")" = 1 ] && grep -qE '^fail +harness: .*ACP handshake: .*EPIPE' <<<"$out" \
+            || fail "ants setup failed"
+        known ants-i0tk6 "ants setup's harness handshake fails intermittently: the ACP adapter dies with EPIPE"
     else
         printf '%s\n' "$out"
     fi
     has "done   harness choice: claude" <<<"$out"
     has "ants daemon --config /demo/home/.ants/config.toml" "what setup leaves to the user" <<<"$out"
+    has "--no-services leaves it to start" "the server check skipped" <<<"$out"
     solo test -s /demo/home/.config/ants/nats.conf || fail "no nats.conf"
     out=$(solo cat /demo/home/.ants/config.toml)
     printf '%s\n' "$out"
@@ -352,11 +350,7 @@ B2() {
     out=$(on "$m" ants --creds "$auth/$ant.creds" doctor --no-harness 2>&1) || true
     note "doctor on $m"
     printf '%s\n' "$out"
-    if ! no_fail <<<"$out"; then
-        [ "$(grep -cE '^fail' <<<"$out")" = 1 ] && grep -qE '^fail +leaf store uplink: .*/auth/\./leaf-' <<<"$out" \
-            || fail "ants doctor on $m reports a failure"
-        known ants-6qn5t "ants doctor fails the leaf store uplink after ants add --enroll respells the uplink path"
-    fi
+    no_fail <<<"$out" || fail "ants doctor on $m reports a failure"
     grep -E '^ok +leaf uplink' <<<"$out" >/dev/null || fail "leaf uplink not ok on $m"
     grep -E '^ok +host credentials' <<<"$out" >/dev/null || fail "host credentials not ok on $m"
 }
