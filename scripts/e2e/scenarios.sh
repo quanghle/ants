@@ -417,7 +417,8 @@ S3() {
     printf '%s\n' "$out"
     has "ended: cancelled" <<<"$out"
     ant_texts "$th" | lacks "LATE-$t"
-    ! leaf pgrep -f time.sleep >/dev/null || fail "the ant's command still runs on the leaf"
+    # Only S3 sleeps 100 s: the scenarios run beside it under -j run slow commands of their own.
+    ! leaf pgrep -f 'time\.sleep\(100\)' >/dev/null || fail "the ant's command still runs on the leaf"
     alice dead list | lacks "$th" "dead letters"
     alice ask --wait --timeout 3m --thread "$th" @leaf-ant "Reply with exactly ALIVE-$t" | has "ALIVE-$t"
 }
