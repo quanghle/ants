@@ -144,7 +144,7 @@ async fn a_spent_budget_goes_up_the_chain_and_its_leader_renews_it_once_per_leve
         bus.send_spent(&lead, &t1, "and on", Some(&one)).await;
         let reply = next_envelope(&mut to_lead).await;
         assert!(reply.text.ends_with(": go on"), "{}", reply.text);
-        assert_eq!(reply.escalation.as_deref(), Some(&one), "the answer carries the escalation");
+        assert_eq!(reply.escalation, None, "the stuck ant's answer does not carry its escalation");
 
         // The next spend goes one level higher, to the leader's chain in the colony.
         let up = next_envelope(&mut to_boss).await;
@@ -449,33 +449,184 @@ async fn a_thread_a_human_started_stays_hers_and_goes_back_to_her_out_of_turns()
     assert!(answered[0].contains("Post from alice mentioning nobody:\nthe build is red"), "{}", answered[0]);
 }
 
+/// The leader's answer, carrying the escalation, is answered though it answers the stuck ant's message; that answer
+/// does not carry the escalation, so the leader's turn on it sends nothing back and the two stop there, out of turns,
+/// with nothing for the human (ants-iwqd6).
 #[tokio::test]
-async fn the_leader_s_reply_carrying_the_escalation_is_answered_though_it_answers_the_ant_s_message() {
+async fn an_answered_escalation_ends_without_a_turn_budget_escalation_to_the_human() {
+    use super::super::prompt::text::own_reply_note;
+    use ants_proto::{NoReplyWhy, TimelineEntry};
+
     let Some((mut bus, mut to_human)) = Bus::start().await else { return };
     let [lead, carol] = ants(["lead", "carol"]);
     bus.chain = Chain { escalate_to: vec![lead.clone()], after: None, ..Chain::default() };
-    let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
+    let [mut to_lead, mut to_carol] = inboxes(&bus, &[lead.clone(), carol.clone()]).await;
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-    let t1 = ThreadId::generate();
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     bus.send_spent(&carol, &t1, "no turns", None).await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
+        // dev-a is stuck on t1: its answer to its leader's answer does not carry the escalation.
         let notice = next_envelope(&mut to_lead).await;
         let one = notice.escalation.as_deref().expect("the escalation").clone();
         let mut answer = notice.reply(lead.clone(), "go on", Role::Ant).unwrap().with_escalation(Some(one.clone()));
         answer.turn_budget = 0;
         bus::publish_json(&bus.js, answer.subject(), &answer, None).await.unwrap();
         let reply = next_envelope(&mut to_lead).await;
-        assert_eq!((reply.in_reply_to, reply.escalation.as_deref()), (Some(answer.id), Some(&one)));
+        assert_eq!((reply.in_reply_to, reply.escalation.as_deref()), (Some(answer.id), None));
         assert!(reply.text.ends_with(": go on"), "{}", reply.text);
+
+        // dev-a leads carol's escalation on t2: carol's answer to its answer, out of turns, goes no further.
+        let leading = escalated(&carol, &t2, &[std::slice::from_ref(&bus.dev)]);
+        let help = Envelope::on_thread(t2.clone(), carol.clone(), bus.dev.clone(), "help")
+            .with_escalation(Some(leading.clone()));
+        bus::publish_json(&bus.js, help.subject(), &help, None).await.unwrap();
+        let answer = next_envelope(&mut to_carol).await;
+        assert_eq!((answer.in_reply_to, answer.escalation.as_deref()), (Some(help.id), Some(&leading)));
+        let mut thanks = answer.reply(carol.clone(), "thanks", Role::Ant).unwrap();
+        thanks.turn_budget = 0;
+        let seq = bus::publish_json(&bus.js, thanks.subject(), &thanks, None).await.unwrap();
+        let (message, entry) = no_reply_on(&bus, &t2).await;
+        assert_eq!(message, thanks.id);
+        assert!(matches!(entry, TimelineEntry::NoReply { why: NoReplyWhy::ReplyToOwn, .. }), "{entry:?}");
+        bus.until_acked(seq).await;
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(bus.unacked().await, 0);
-    assert_eq!(log.locked().answered, ["go on"], "prompted as an ordinary message");
-    assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing went to the human");
+    let answered = log.locked().answered.clone();
+    assert_eq!(answered.len(), 3, "{answered:?}");
+    assert_eq!(answered[0], "go on", "prompted as an ordinary message");
+    assert_eq!(answered[2], format!("{}\n\nthanks", own_reply_note(&carol, false, true)));
+    let quiet = Duration::from_millis(200);
+    assert!(timeout(quiet, to_carol.next()).await.is_err(), "nothing goes back to carol");
+    assert!(timeout(quiet, to_lead.next()).await.is_err(), "nothing more goes to lead");
+    assert!(timeout(quiet, to_human.next()).await.is_err(), "nothing went to the human");
+}
+
+/// The leader passing the escalation on to the human answers the stuck ant all the same; the stuck ant's answer to
+/// that sends nothing back, and nothing more reaches the human (ants-iwqd6).
+#[tokio::test]
+async fn a_pass_on_to_the_human_is_not_followed_by_a_second_escalation() {
+    use ants_proto::{NoReplyWhy, TimelineEntry};
+
+    let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let home = bus._server.dir().join("pass-on");
+    std::fs::create_dir_all(&home).unwrap();
+    let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
+    let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let escalator = Some(Arc::new(bus.escalator()));
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), escalator).await;
+    bus.mcp = Some(mcp.unwrap());
+    let [carol] = ants(["carol"]);
+    let [mut to_carol] = inboxes(&bus, std::slice::from_ref(&carol).try_into().unwrap()).await;
+    let t1 = ThreadId::generate();
+    // dev-a leads carol's escalation, with no chain above it.
+    let leading = escalated(&carol, &t1, &[std::slice::from_ref(&bus.dev)]);
+    let help = Envelope::on_thread(t1.clone(), carol.clone(), bus.dev.clone(), "hold: help")
+        .with_escalation(Some(leading.clone()));
+    bus::publish_json(&bus.js, help.subject(), &help, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        let passed = call_tool(bus.mcp.as_ref().unwrap(), &t1, "escalate", serde_json::json!({"issue": "not mine"}));
+        let passed = passed.await;
+        assert_ne!(passed.is_error, Some(true), "{passed:?}");
+        let up = next_envelope(&mut to_human).await;
+        let escalation = up.escalation.as_deref().expect("the escalation");
+        assert_eq!((&escalation.stuck, &escalation.thread_id), (&carol, &t1));
+        gate.add_permits(1);
+        let answer = next_envelope(&mut to_carol).await;
+        assert_eq!((answer.in_reply_to, answer.escalation.as_deref()), (Some(help.id), Some(&leading)));
+        let mut waiting = answer.reply(carol.clone(), "awaiting her decision", Role::Ant).unwrap();
+        waiting.turn_budget = 0;
+        let seq = bus::publish_json(&bus.js, waiting.subject(), &waiting, None).await.unwrap();
+        let (message, entry) = no_reply_on(&bus, &t1).await;
+        assert_eq!(message, waiting.id);
+        assert!(matches!(entry, TimelineEntry::NoReply { why: NoReplyWhy::ReplyToOwn, .. }), "{entry:?}");
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+    let quiet = Duration::from_millis(200);
+    assert!(timeout(quiet, to_carol.next()).await.is_err(), "nothing goes back to carol");
+    assert!(timeout(quiet, to_human.next()).await.is_err(), "one escalation reached the human");
+}
+
+/// After a chain member's decide_approval, the member's answer and the requester's answer to it stop there: the
+/// requester's does not carry the approval escalation, so the member's turn on it sends nothing back (ants-iwqd6).
+#[tokio::test]
+async fn a_chain_member_s_decision_ends_without_a_turn_budget_escalation_to_the_human() {
+    use ants_proto::{ApprovalRequest, NoReplyWhy, TimelineEntry, ToolCall, Verdict};
+
+    let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let home = bus._server.dir().join("decide");
+    std::fs::create_dir_all(&home).unwrap();
+    let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
+    let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
+    bus.mcp = Some(mcp.unwrap());
+    let [lead, gate_ant] = ants(["lead", "gate-ant"]);
+    let [mut to_lead, mut to_gate] = inboxes(&bus, &[lead.clone(), gate_ant.clone()]).await;
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    let request_of = |ant: &UserId, thread: &ThreadId, chain: &[UserId]| {
+        let tool =
+            ToolCall { kind: "execute".to_owned(), title: "touch x".to_owned(), locations: Vec::new(), input: None };
+        let verdicts = vec![Verdict::AllowOnce, Verdict::Reject];
+        let request = ApprovalRequest::new(ant.clone(), thread.clone(), tool, verdicts, Duration::from_secs(60));
+        let ants_proto::Hop::Chain { escalation, .. } = ants_proto::Escalation::of_request(&request).up(chain, 3)
+        else {
+            panic!("a chain hop")
+        };
+        *escalation
+    };
+    // dev-a, in gate-ant's chain, decides its request on t2, then answers it.
+    let theirs = request_of(&gate_ant, &t2, std::slice::from_ref(&bus.dev));
+    let asked = Envelope::on_thread(t2.clone(), gate_ant.clone(), bus.dev.clone(), "hold: may it?")
+        .with_escalation(Some(theirs.clone()));
+    bus::publish_json(&bus.js, asked.subject(), &asked, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        let verdict = serde_json::json!({"verdict": "allow_once"});
+        let decided = call_tool(bus.mcp.as_ref().unwrap(), &t2, "decide_approval", verdict).await;
+        assert_ne!(decided.is_error, Some(true), "{decided:?}");
+        assert!(next_envelope(&mut to_gate).await.approval.is_some(), "the decision");
+        gate.add_permits(1);
+        let answer = next_envelope(&mut to_gate).await;
+        assert_eq!((answer.in_reply_to, answer.escalation.as_deref()), (Some(asked.id), Some(&theirs)));
+        let mut confirmed = answer.reply(gate_ant.clone(), "confirmed", Role::Ant).unwrap();
+        confirmed.turn_budget = 0;
+        let seq = bus::publish_json(&bus.js, confirmed.subject(), &confirmed, None).await.unwrap();
+        let (message, entry) = no_reply_on(&bus, &t2).await;
+        assert_eq!(message, confirmed.id);
+        assert!(matches!(entry, TimelineEntry::NoReply { why: NoReplyWhy::ReplyToOwn, .. }), "{entry:?}");
+        bus.until_acked(seq).await;
+
+        // lead decided dev-a's own request on t1 and answers it: dev-a's answer does not carry the escalation.
+        let ours = request_of(&bus.dev, &t1, std::slice::from_ref(&lead));
+        let mut allowed =
+            Envelope::on_thread(t1.clone(), lead.clone(), bus.dev.clone(), "allowed it").with_escalation(Some(ours));
+        allowed.in_reply_to = Some(Uuid::now_v7());
+        bus::publish_json(&bus.js, allowed.subject(), &allowed, None).await.unwrap();
+        let reply = next_envelope(&mut to_lead).await;
+        assert_eq!((reply.in_reply_to, reply.escalation.as_deref()), (Some(allowed.id), None));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+    let quiet = Duration::from_millis(200);
+    assert!(timeout(quiet, to_gate.next()).await.is_err(), "nothing goes back to gate-ant");
+    assert!(timeout(quiet, to_human.next()).await.is_err(), "nothing went to the human");
 }
 
 /// A provider's wake brings turns of its own: prompted on a thread out of turns, and answered to the human.

@@ -1445,11 +1445,8 @@ E2() {
     escalated_to "$th" hub-ant || fail "no escalation to hub-ant stored on the thread"
     has "hub-ant -> leaf-ant" <<<"$out"
     ! escalations "$th" | grep -F "alice: " | grep -qF asked || fail "the escalation reached alice"
-    if escalated_to "$th" alice; then
-        known ants-iwqd6 "leaf-ant and hub-ant traded replies after the answer until a turn_budget escalation to alice"
-    else
-        ! listed_escalated "$th" >/dev/null || fail "thread list --escalated lists the thread"
-    fi
+    ! escalated_to "$th" alice || fail "leaf-ant and hub-ant traded replies after the answer until an escalation to alice"
+    ! listed_escalated "$th" >/dev/null || fail "thread list --escalated lists the thread"
 }
 
 scenario E3 P1 "The leader passes it on to the human"
@@ -1475,7 +1472,7 @@ E3() {
     alice inbox --peek --thread "$th" | has "PASS-$t" "alice's inbox"
     listed_escalated "$th" >/dev/null || fail "thread list --escalated does not list the thread"
     ! escalations "$th" | grep -qF turn_budget \
-        || known ants-iwqd6 "leaf-ant and hub-ant traded replies after the pass until a turn_budget escalation to alice"
+        || fail "leaf-ant and hub-ant traded replies after the pass until a turn_budget escalation to alice"
     out=$(alice ask --wait --timeout 3m --thread "$th" @leaf-ant "Reply with exactly ENDED-$t")
     printf '%s\n' "$out"
     has "ENDED-$t" <<<"$out"
@@ -1547,7 +1544,7 @@ E6() {
     [ -z "$(pending_tool gate-ant "$th")" ] || fail "the request is still pending"
     settled "$th"
     ! escalations "$th" | grep -qF turn_budget \
-        || known ants-iwqd6 "gate-ant and hub-ant traded replies after the decision until a turn_budget escalation to alice"
+        || fail "gate-ant and hub-ant traded replies after the decision until a turn_budget escalation to alice"
 }
 
 # --- O. Admin orders from the client --------------------------------------------------------------------------------
