@@ -237,12 +237,19 @@ M5() {
     t=$(tok)
     container exec "$name-client" sh -c "printf 'attached-$t\n' >/tmp/in.txt && rm -f /tmp/out.txt"
     out=$(alice ask --wait --timeout 3m --attach /tmp/in.txt @leaf-ant \
-        "Read the attached file with read_attachment. Write its content unchanged to out.txt, attach out.txt to the reply with attach_to_reply, and reply DONE.")
+        "Read the attached file with read_attachment. Write its content unchanged to out.txt, then call attach_to_reply with out.txt. Only once attach_to_reply has succeeded, reply DONE: a reply without out.txt attached fails this test.")
     printf '%s\n' "$out"
     has "attachment " <<<"$out"
     th=$(thread <<<"$out")
     out=$(alice thread show "$th")
     printf '%s\n' "$out"
+    # A model now and then skips the tool call and replies DONE alone: one reminder in the thread.
+    if ! grep -qF '📎 out.txt' <<<"$out"; then
+        alice ask --wait --timeout 3m --thread "$th" @leaf-ant \
+            "Your reply carried no attachment. Call attach_to_reply with out.txt now, then reply DONE."
+        out=$(alice thread show "$th")
+        printf '%s\n' "$out"
+    fi
     has "📎 out.txt" <<<"$out"
     handle=$(grep -F '📎 out.txt' <<<"$out" | tail -n 1 | awk '{ print $NF }')
     container exec --workdir /tmp "$name-client" ants attachment get "$handle"

@@ -266,18 +266,21 @@ alice inbox --unread last; alice inbox --peek
 **Expect** `--peek` lists the reply and leaves it unread; the first `ants inbox` lists it again and marks it read; the
 second lists nothing; after `--unread` it is listed once more.
 
-### M5 · Attachments in both directions through the leaf (P1, 1 prompt)
+### M5 · Attachments in both directions through the leaf (P1, 1–2 prompts)
 
 ```sh
 t=$(tok); container exec ants-e2e-client sh -c "printf 'attached-$t\n' > /tmp/in.txt"
 alice ask --wait --timeout 3m --attach /tmp/in.txt @leaf-ant \
-  "Read the attached file with read_attachment. Write its content, reversed line by line, to out.txt, attach out.txt to the reply with attach_to_reply, and reply DONE."
+  "Read the attached file with read_attachment. Write its content unchanged to out.txt, then call attach_to_reply with out.txt. Only once attach_to_reply has succeeded, reply DONE: a reply without out.txt attached fails this test."
 alice thread show last          # note the reply's attachment handle
+# Only if the reply lacks 📎 out.txt (the model skipped the tool call), once:
+alice ask --wait --timeout 3m --thread THREAD @leaf-ant \
+  "Your reply carried no attachment. Call attach_to_reply with out.txt now, then reply DONE."
 container exec --workdir /tmp ants-e2e-client ants attachment get HANDLE
 ```
 
 **Expect** `ants ask` prints `attachment <handle>`; the reply lists `📎 out.txt (…) <handle>`; `ants attachment get`
-saves `/tmp/out.txt` on the client after verifying its size and SHA-256, and its content is the reversed token line.
+saves `/tmp/out.txt` on the client after verifying its size and SHA-256, and its content is the token line.
 
 ### M6 · An unaddressed message is routed by the messenger (P1, 2–3 prompts)
 
