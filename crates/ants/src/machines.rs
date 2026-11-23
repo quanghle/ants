@@ -2,20 +2,15 @@
 //! after an ant's colony entry expired, so that an ant that is offline still has a machine.
 
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
 
-use ants_daemon::bus::relayed::{self, Read};
+use ants_client::requests::Position;
+use ants_daemon::bus::relayed::{Gets, GetsError, Got};
 use ants_proto::{ACCOUNT_HOLDER_KEY, AccountHolder, MACHINES_BUCKET, Machine, MachineRecord, UserId, subject};
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
 use async_nats::{StatusCode, jetstream};
 use chrono::{DateTime, Utc};
-use futures::StreamExt as _;
-use serde_json::json;
 
 use crate::colony::{short, since};
-
-/// Records asked for at once.
-const BATCH: usize = 256;
 
 /// The machines' records, read with a human's credentials by batched direct gets of their keys
 /// ([`subject::machine_records`]), sorted by machine.
@@ -88,51 +83,32 @@ async fn timed_after(
     filter: &str,
     from: u64,
 ) -> Result<(Vec<(String, Vec<u8>, DateTime<Utc>)>, u64)> {
-    let stream = format!("KV_{bucket}");
-    let client = js.client();
-    let wait = client.timeout().unwrap_or(Duration::from_secs(10));
-    let inbox = client.new_inbox();
-    #[expect(clippy::disallowed_methods, reason = "direct gets' answers, which the stream sends")]
-    let mut replies = client.subscribe(inbox.clone()).await?;
+    let mut gets = Gets::open(js, &format!("KV_{bucket}"), filter, Position::from_seq(from)).await?;
     let prefix = format!("$KV.{bucket}.");
-    let (mut last, mut seq) = (Entries::new(), from);
+    let mut last = Entries::new();
     loop {
-        let request = json!({ "seq": seq, "next_by_subj": filter, "batch": BATCH });
-        let request = async_nats::Request::new().inbox(inbox.clone()).payload(serde_json::to_vec(&request)?.into());
-        js.send_request(format!("DIRECT.GET.{stream}"), request)
-            .await
-            .with_context(|| format!("reading {bucket} (`ants init` creates it)"))?;
-        let mut got = 0;
-        loop {
-            let Ok(Some(msg)) = tokio::time::timeout(wait, replies.next()).await else {
-                bail!("no answer reading {bucket} (`ants init` creates it)");
-            };
-            match msg.status {
-                None => {}
-                Some(StatusCode::NOT_FOUND) => return Ok((in_put_order(last), seq)),
-                Some(StatusCode::NO_RESPONDERS) => bail!("no {bucket} bucket: `ants init` creates it"),
-                Some(status) if status.as_u16() == 204 => {
-                    let pending = msg.headers.as_ref().and_then(|h| h.get("Nats-Num-Pending"));
-                    if got == 0 || pending.is_some_and(|n| n.as_str() == "0") {
-                        return Ok((in_put_order(last), seq));
-                    }
-                    break;
-                }
-                Some(status) => bail!("reading {bucket}: {status} {:?}", msg.description),
-            }
-            got += 1;
-            let relayed = relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::DirectGet);
-            let msg = jetstream::message::StreamMessage::try_from(msg).map_err(|e| anyhow!(e))?;
-            seq = msg.sequence + 1;
-            if relayed {
-                tracing::warn!(subject = %msg.subject, "skipping an entry a stream relayed");
+        let stored = match gets.next().await {
+            Ok(Got::End) => return Ok((in_put_order(last), gets.at().seq)),
+            Ok(Got::More) => continue,
+            Ok(Got::Relayed { subject, .. }) => {
+                tracing::warn!(%subject, "skipping an entry a stream relayed");
                 continue;
             }
-            let deleted = msg.headers.get("KV-Operation").is_some();
-            if let Some(key) = msg.subject.strip_prefix(prefix.as_str()) {
-                let value = (!deleted).then(|| (msg.payload.to_vec(), SystemTime::from(msg.time).into()));
-                last.insert(key.to_owned(), (msg.sequence, value));
+            Ok(Got::Stored(stored)) => stored,
+            Err(GetsError::Send(e)) => {
+                return Err(e).with_context(|| format!("reading {bucket} (`ants init` creates it)"));
             }
+            Err(GetsError::Unanswered) => bail!("no answer reading {bucket} (`ants init` creates it)"),
+            Err(GetsError::Status { status: StatusCode::NO_RESPONDERS, .. }) => {
+                bail!("no {bucket} bucket: `ants init` creates it")
+            }
+            Err(GetsError::Status { status, description }) => bail!("reading {bucket}: {status} {description:?}"),
+            Err(GetsError::Malformed(why)) => bail!(why),
+        };
+        let deleted = stored.headers.iter().any(|(name, _)| name == "KV-Operation");
+        if let Some(key) = stored.subject.strip_prefix(prefix.as_str()) {
+            let value = (!deleted).then_some((stored.payload, stored.stored_at));
+            last.insert(key.to_owned(), (stored.seq, value));
         }
     }
 }

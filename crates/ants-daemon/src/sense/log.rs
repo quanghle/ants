@@ -6,34 +6,29 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+use ants_client::requests::Position;
 use ants_proto::{
     DEVICES_BUCKET, DeviceRevocation, JsDomain, SENSE_STREAM, SenseId, UserId, revoked_device_key, subject,
 };
 use ants_sense::log::{AppendError, EventLog, LogError, LogErrorKind, Revocations, Signature, Signer, Stored};
 use anyhow::{Result, bail};
+use async_nats::jetstream;
 use async_nats::jetstream::context::{CreateStreamErrorKind, PublishError, PublishErrorKind};
 use async_nats::jetstream::stream::{self, DirectGetError, DirectGetErrorKind};
-use async_nats::jetstream::{self, message::StreamMessage};
 use async_nats::{HeaderMap, StatusCode};
 use chrono::{DateTime, SecondsFormat, Utc};
 use data_encoding::BASE64URL_NOPAD;
-use futures::StreamExt as _;
 use nkeys::KeyPair;
 
-use crate::bus::relayed::{self, Read};
+use crate::bus::relayed::{Gets, GetsError, Got};
 use crate::records::direct_kv::{DirectKv, Lookup};
 
 /// The header making the stream refuse a message unless the last on its subject has the given sequence (0: none).
 const EXPECTED_LAST_SUBJECT_SEQUENCE: &str = "Nats-Expected-Last-Subject-Sequence";
 /// The header making the server refuse a message unless [`SENSE_STREAM`] is the stream storing it.
 const EXPECTED_STREAM: &str = "Nats-Expected-Stream";
-/// Messages asked for at most by a direct get, and the bytes they come to at most (a larger message comes alone).
-const DIRECT_BATCH: usize = 256;
-const DIRECT_BATCH_BYTES: usize = 4 << 20;
 /// How long a read waits for each message of a batch.
 const DIRECT_WAIT: Duration = Duration::from_secs(10);
-/// The header of a batch's end telling the messages left after it.
-const NUM_PENDING: &str = "Nats-Num-Pending";
 /// How many times an append expects anew the last message on its subject, finding only relayed messages after the one
 /// it expected.
 const PAST_RELAYED: usize = 4;
@@ -98,76 +93,55 @@ impl JetStreamLog {
     }
 
     /// Up to `limit` messages after `after`, by batched direct gets, skipping those a stream relayed onto the subject
-    /// ([`relayed::stored_relayed`]): after a batch of relayed messages alone the read goes on past them, so it comes
+    /// ([`crate::bus::relayed::stored_relayed`]): after a batch of relayed messages alone the read goes on past them, so it comes
     /// back empty only at the log's end.
     async fn read(&self, sense: &SenseId, after: u64, limit: usize) -> Result<Vec<Stored>, LogError> {
         let failed =
             |kind, e: &dyn std::fmt::Display| LogError::new(kind, format!("reading sense identity {sense}: {e}"));
-        let client = self.js.client();
-        let inbox = client.new_inbox();
-        #[expect(clippy::disallowed_methods, reason = "direct gets' answers, which the stream sends")]
-        let mut replies = client.subscribe(inbox.clone()).await.map_err(|e| failed(LogErrorKind::Unreachable, &e))?;
         let subject = subject::sense(sense);
-        let (mut read, mut next) = (Vec::new(), after + 1);
+        let gets = Gets::open(&self.js, SENSE_STREAM, subject.clone(), Position::from_seq(after + 1)).await;
+        let gets = gets.map_err(|e| failed(LogErrorKind::Unreachable, &e))?;
+        let mut gets = gets.waiting(DIRECT_WAIT).in_batches_of(limit);
+        let mut read = Vec::new();
         loop {
-            let request = serde_json::json!({
-                "seq": next,
-                "next_by_subj": subject,
-                "batch": limit.clamp(1, DIRECT_BATCH),
-                "max_bytes": DIRECT_BATCH_BYTES,
-            });
-            let request = async_nats::Request::new().inbox(inbox.clone()).payload(request.to_string().into());
-            self.js.send_request(format!("DIRECT.GET.{SENSE_STREAM}"), request).await.map_err(|e| {
-                let kind = match e.kind() {
-                    async_nats::PublishErrorKind::Send => LogErrorKind::Unreachable,
-                    _ => LogErrorKind::Refused,
-                };
-                failed(kind, &e)
+            let got = gets.next().await.map_err(|e| match e {
+                GetsError::Send(e) => {
+                    let kind = match e.kind() {
+                        async_nats::PublishErrorKind::Send => LogErrorKind::Unreachable,
+                        _ => LogErrorKind::Refused,
+                    };
+                    failed(kind, &e)
+                }
+                GetsError::Unanswered => {
+                    failed(LogErrorKind::Unreachable, &format!("no answer to a direct get of {SENSE_STREAM}"))
+                }
+                GetsError::Status { status, description } => {
+                    let kind = if status == StatusCode::NO_RESPONDERS {
+                        LogErrorKind::Unreachable
+                    } else {
+                        LogErrorKind::Refused
+                    };
+                    failed(kind, &format!("a direct get of {SENSE_STREAM} answered {status} {description:?}"))
+                }
+                GetsError::Malformed(why) => failed(LogErrorKind::Integrity, &why),
             })?;
-            let mut got = 0;
-            let pending = loop {
-                let Ok(Some(msg)) = tokio::time::timeout(DIRECT_WAIT, replies.next()).await else {
-                    let none = format!("no answer to a direct get of {SENSE_STREAM}");
-                    return Err(failed(LogErrorKind::Unreachable, &none));
-                };
-                match msg.status {
-                    None => {}
-                    Some(StatusCode::NOT_FOUND) => return Ok(read),
-                    Some(status) if status.as_u16() == 204 => {
-                        break msg.headers.as_ref().and_then(|h| h.get(NUM_PENDING)).map(|n| n.as_str().parse());
-                    }
-                    Some(status) => {
-                        let kind = if status == StatusCode::NO_RESPONDERS {
-                            LogErrorKind::Unreachable
-                        } else {
-                            LogErrorKind::Refused
-                        };
-                        let answered =
-                            format!("a direct get of {SENSE_STREAM} answered {status} {:?}", msg.description);
-                        return Err(failed(kind, &answered));
-                    }
-                }
-                got += 1;
-                let relayed = relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::DirectGet);
-                let msg = StreamMessage::try_from(msg).map_err(|e| failed(LogErrorKind::Integrity, &e))?;
-                if msg.subject.as_str() != subject {
-                    let other = format!("a direct get of {subject} answered with a message on {}", msg.subject);
-                    return Err(failed(LogErrorKind::Integrity, &other));
-                }
-                next = msg.sequence + 1;
-                if relayed {
-                    tracing::warn!(%sense, seq = msg.sequence, "skipping a message a stream relayed");
-                    continue;
-                }
-                let stored_at: SystemTime = msg.time.into();
-                read.push(Stored {
-                    sequence: msg.sequence,
-                    stored_at: stored_at.into(),
-                    payload: msg.payload.to_vec(),
-                });
+            let on = match &got {
+                Got::End => return Ok(read),
+                Got::More if read.is_empty() => continue,
+                Got::More => return Ok(read),
+                Got::Stored(stored) => &stored.subject,
+                Got::Relayed { subject, .. } => subject,
             };
-            if !read.is_empty() || got == 0 || matches!(pending, Some(Ok(0u64))) {
-                return Ok(read);
+            if *on != subject {
+                let other = format!("a direct get of {subject} answered with a message on {on}");
+                return Err(failed(LogErrorKind::Integrity, &other));
+            }
+            match got {
+                Got::Stored(stored) => {
+                    read.push(Stored { sequence: stored.seq, stored_at: stored.stored_at, payload: stored.payload });
+                }
+                Got::Relayed { seq, .. } => tracing::warn!(%sense, seq, "skipping a message a stream relayed"),
+                Got::More | Got::End => {}
             }
         }
     }
