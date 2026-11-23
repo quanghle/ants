@@ -254,7 +254,7 @@ pub struct Memory {
     #[serde(rename = "type")]
     pub kind: MemoryKind,
     pub scope: Scope,
-    /// At most [`MAX_TITLE_CHARS`] characters, sanitized ([`crate::sanitize`]).
+    /// At most [`MAX_TITLE_CHARS`] characters, sanitized (`crate::sanitize`).
     pub title: String,
     /// At most [`MAX_BODY_BYTES`] bytes as written, sanitized.
     pub body: String,
@@ -285,7 +285,7 @@ pub struct Memory {
     pub votes: Votes,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<Access>,
-    /// The sense identity a clone inherited it from ([`crate::fork`]).
+    /// The sense identity a clone inherited it from (`crate::fork`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited: Option<SenseId>,
 }

@@ -199,14 +199,6 @@ pub async fn pending_for(items: &dyn Items, target: &ItemId) -> Result<Option<Pr
     Ok(pending(items).await?.into_iter().find(|found| &found.proposal.target == target))
 }
 
-/// The proposals of `target`, the newest first.
-pub async fn of_target(items: &dyn Items, target: &ItemId) -> Result<Vec<ProposalItem>, StoreError> {
-    let found = items.list_by(PROPOSAL, "target", Some(&json!(target)), usize::MAX).await?;
-    let mut all: Vec<_> = found.into_iter().filter_map(ProposalItem::of).collect();
-    all.sort_by(|a, b| (b.proposal.writer.at, b.id()).cmp(&(a.proposal.writer.at, a.id())));
-    Ok(all)
-}
-
 /// Refuse a proposal made in `context` in answer to `finding`, if given, when it rests on untrusted text
 /// (`untrusted` of [`dream`]) or names a finding no dream has ([`dream::ground`]).
 pub(crate) async fn refuse_untrusted(

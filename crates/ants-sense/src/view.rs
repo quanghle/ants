@@ -41,7 +41,6 @@ mod report;
 mod work;
 
 pub use report::{KEY as REPORT, NO_DATA};
-pub use work::{COMMITMENTS, FINDINGS, LISTED, REMINDERS, TASKS};
 
 /// The key of the entry counting the entries left out.
 pub const LEFT_OUT: &str = "left out";
@@ -187,6 +186,7 @@ mod tests {
     use ants_proto::provider::Provider as _;
     use serde_json::json;
 
+    use super::work::FINDINGS;
     use super::*;
     use crate::dream::{ColonyTrails, Recipient, Start};
     use crate::items::Values;

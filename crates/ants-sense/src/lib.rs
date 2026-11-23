@@ -15,30 +15,30 @@ use ants_proto::provider::{
     ToolCall, ToolList, ToolResult,
 };
 
-pub mod brief;
+pub(crate) mod brief;
 pub mod cache;
 pub mod dream;
 pub mod export;
-pub mod fork;
+pub(crate) mod fork;
 pub mod home;
 pub mod identity;
 pub mod items;
 pub mod log;
 pub mod memory;
 pub mod persona;
-pub mod promise;
+pub(crate) mod promise;
 pub mod proposal;
-pub mod records;
+pub(crate) mod records;
 pub mod remind;
-pub mod sanitize;
+pub(crate) mod sanitize;
 pub mod skill;
 pub mod store;
-pub mod task;
+pub(crate) mod task;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
-pub mod thread;
+pub(crate) mod thread;
 mod tools;
-pub mod view;
+pub(crate) mod view;
 
 pub use tools::{Answer, DreamWrite, MAX_TOOLS, TOOLS, ToolSpec};
 
@@ -51,7 +51,7 @@ pub const NAME: &str = "sense";
 pub const VERSIONS: &[u32] = &[PROTOCOL_VERSION];
 
 /// What sense implements: its tools, the brief, lifecycle events, which write each ant's card, the memories view, which
-/// shows humans each ant's identity and memories ([`view`]), and exports, which take each ant's log and skill files to
+/// shows humans each ant's identity and memories (`view`), and exports, which take each ant's log and skill files to
 /// another bus ([`export`]).
 pub const CAPABILITIES: Capabilities =
     Capabilities { tools: true, context: true, events: true, wake: true, memories: true, export: true };
