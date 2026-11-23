@@ -180,7 +180,7 @@ impl Model {
             return None;
         }
         if !self.ui.bar.is_empty() || self.ui.bar.quoting.is_some() || self.ui.bar.noting.is_some() {
-            self.empty_into_history();
+            self.empty_into_history(now);
             return None;
         }
         if quitting {

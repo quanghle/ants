@@ -99,7 +99,7 @@ impl Model {
         }
         let slash = matches!(command, Ok(Command::Slash(_)));
         // Before the command moves the view, and so what it acts on.
-        let sealed = self.sealed(self.ui.drafts.here(), &text);
+        let sealed = self.sealed(self.ui.drafts.here(), &text, now);
         let route = self.route(&text);
         let done = command.and_then(|command| match command {
             Command::Slash(command) => self.command(command, now),
@@ -222,14 +222,14 @@ impl Model {
         match slash {
             Slash::Approve { id, always } => {
                 let verdict = if always { Verdict::AllowAlways } else { Verdict::AllowOnce };
-                self.decision(id.as_deref(), verdict).map(Some)
+                self.decision(id.as_deref(), verdict, now).map(Some)
             }
-            Slash::Reject { id } => self.decision(id.as_deref(), Verdict::Reject).map(Some),
+            Slash::Reject { id } => self.decision(id.as_deref(), Verdict::Reject, now).map(Some),
             Slash::Grant(text) => {
-                run(Job::Grant { thread: self.target()?, text: text.unwrap_or_else(|| GRANT.to_owned()) })
+                run(Job::Grant { thread: self.target(now)?, text: text.unwrap_or_else(|| GRANT.to_owned()) })
             }
             Slash::Cancel => {
-                let thread = self.target()?;
+                let thread = self.target(now)?;
                 let ants = self.busy(&thread);
                 if ants.is_empty() {
                     return Err(format!("no ant is at work on thread {thread}"));
@@ -237,10 +237,10 @@ impl Model {
                 run(Job::Cancel { thread, ants })
             }
             Slash::Answer(text) => run(self.answering(&text, now)?),
-            Slash::Done(done) => run(Job::Done { thread: self.target()?, done }),
-            Slash::Mark(marking) => run(Job::Mark { thread: self.target()?, marking }),
-            Slash::Mute(hold) => run(Job::Mute { thread: self.target()?, hold: hold.unwrap_or(quiet::MUTE_FOR) }),
-            Slash::Unmute => run(Job::Unmute { thread: self.target()? }),
+            Slash::Done(done) => run(Job::Done { thread: self.target(now)?, done }),
+            Slash::Mark(marking) => run(Job::Mark { thread: self.target(now)?, marking }),
+            Slash::Mute(hold) => run(Job::Mute { thread: self.target(now)?, hold: hold.unwrap_or(quiet::MUTE_FOR) }),
+            Slash::Unmute => run(Job::Unmute { thread: self.target(now)? }),
             Slash::Notify(Notify::Level(level)) => {
                 let (channel, _) =
                     self.channel_on_view().ok_or("/notify sets a channel's notify level: show the channel first")?;
@@ -249,32 +249,32 @@ impl Model {
             Slash::Notify(Notify::Snooze(hold)) => run(Job::NotifySnooze(hold)),
             Slash::Notify(Notify::Resume) => run(Job::NotifyResume),
             Slash::Notify(Notify::Status) => run(Job::NotifyStatus),
-            Slash::Snooze(duration) => Ok(Some(self.set_snooze(self.target()?, Some(now + duration), now))),
-            Slash::Unsnooze => Ok(Some(self.set_snooze(self.target()?, None, now))),
+            Slash::Snooze(duration) => Ok(Some(self.set_snooze(self.target(now)?, Some(now + duration), now))),
+            Slash::Unsnooze => Ok(Some(self.set_snooze(self.target(now)?, None, now))),
             Slash::Remind(text) => {
                 let message = match self.page() {
                     Page::Thread(page) => page.selected_id(),
                     _ => None,
                 };
-                self.remind_as(self.target()?, message, &text, now).map(Some)
+                self.remind_as(self.target(now)?, message, &text, now).map(Some)
             }
-            Slash::Unremind => Ok(Some(self.set_reminder(self.target()?, None))),
+            Slash::Unremind => Ok(Some(self.set_reminder(self.target(now)?, None))),
             Slash::Reminders => run(Job::Reminders),
-            Slash::Title(text) => run(Job::Title { thread: self.target()?, text }),
-            Slash::Notes(text) => run(Job::Notes { thread: self.target()?, text }),
+            Slash::Title(text) => run(Job::Title { thread: self.target(now)?, text }),
+            Slash::Notes(text) => run(Job::Notes { thread: self.target(now)?, text }),
             Slash::React(reaction) => {
                 let message = match self.page() {
                     Page::Channel(page) => page.post(&self.data, &self.ui).map(|p| p.id),
                     _ => None,
                 };
-                run(Job::React { thread: self.target()?, message, reaction })
+                run(Job::React { thread: self.target(now)?, message, reaction })
             }
             Slash::Goto(to) => self.goto(to),
             Slash::Search(query) => self.search(query, now).map(Some),
             Slash::Digest(since) => self.digest(since.as_deref(), now).map(Some),
-            Slash::Tldr => Ok(self.tldr(self.target()?)),
+            Slash::Tldr => Ok(self.tldr(self.target(now)?)),
             Slash::Tree => {
-                let thread = self.target()?;
+                let thread = self.target(now)?;
                 self.tree(thread);
                 Ok(None)
             }
@@ -286,7 +286,7 @@ impl Model {
                 let source = match chosen {
                     Some(entry) => forward::Source::Message(Box::new(entry)),
                     None => {
-                        let thread = self.target()?;
+                        let thread = self.target(now)?;
                         let tldr = self.data.cards.tldr.get(&thread).ok_or_else(|| {
                             format!("no TL;DR of thread {thread} yet: S or /tldr asks for one, then /forward again")
                         })?;
@@ -303,22 +303,22 @@ impl Model {
             Slash::Add { name, machine, settings, wait } => run(Job::Add { name, machine, settings, wait }),
             Slash::Clone { src, new, machine, settings, wait } => run(Job::Clone { src, new, machine, settings, wait }),
             Slash::Retire(ant) => run(Job::Retire { ant }),
-            Slash::Dead(dead) => self.dead(dead),
-            Slash::Trail(trail) => run(self.trail(trail)?),
+            Slash::Dead(dead) => self.dead(dead, now),
+            Slash::Trail(trail) => run(self.trail(trail, now)?),
             Slash::Attach(_) | Slash::Detach => Ok(None),
             Slash::Quit => Ok(Some(Action::Quit)),
         }
     }
 
     /// The job the `/trail` subcommand `trail` runs.
-    fn trail(&self, trail: Trail) -> Result<Job, String> {
+    fn trail(&self, trail: Trail, now: DateTime<Utc>) -> Result<Job, String> {
         Ok(match trail {
             Trail::List => Job::TrailList,
             Trail::Show(what) => Job::TrailShow(what),
             Trail::Tips(args) => Job::TrailTips(args),
             Trail::Runs => Job::TrailRuns,
             Trail::Run { trail, conductor, args, limits, thread } => {
-                let thread = thread.map(|on| self.on_thread(on)).transpose()?;
+                let thread = thread.map(|on| self.on_thread(on, now)).transpose()?;
                 Job::TrailPlan { trail, conductor, args, limits, thread }
             }
             Trail::Stop(run) => Job::TrailStop(run),
@@ -441,11 +441,11 @@ impl Model {
     }
 
     /// The thread slash commands act on: the open one, else the one selected in the view.
-    pub fn target(&self) -> Result<ThreadId, String> {
+    pub fn target(&self, now: DateTime<Utc>) -> Result<ThreadId, String> {
         let data = &self.data;
         let thread = match self.page() {
             Page::Thread(page) => Some(page.history.thread.clone()),
-            Page::Home(page) => page.thread(data),
+            Page::Home(page) => page.thread(data, now),
             Page::Work(page) => page.thread(data),
             Page::Channel(page) => page.post(data, &self.ui).map(|p| p.thread.clone()),
             Page::Tree(page) => Some(page.root.clone()),
@@ -458,7 +458,7 @@ impl Model {
     /// Why the slash command `name`, without the arguments naming another target, cannot act here at `now`, if it
     /// cannot.
     pub(super) fn unfit(&self, name: &str, now: DateTime<Utc>) -> Option<String> {
-        let target = self.target();
+        let target = self.target(now);
         match name {
             "approve" | "reject" => match target {
                 Ok(thread) if !self.data.live.approvals.iter().any(|r| r.thread_id == thread) => {
@@ -474,7 +474,7 @@ impl Model {
             "answer" => self.question(now).err(),
             "forward" if matches!(self.page(), Page::Thread(page) if page.chosen().is_some()) => None,
             "save" => self.attachment().is_none().then(|| "no attachment on the selected message".to_owned()),
-            "dead" => self.letter(None).err(),
+            "dead" => self.letter(None, now).err(),
             "grant" | "done" | "undone" | "pin" | "unpin" | "mute" | "unmute" | "snooze" | "unsnooze" | "remind"
             | "unremind" | "archive" | "unarchive" | "title" | "notes" | "react" | "tldr" | "tree" | "forward" => {
                 target.err()
@@ -487,10 +487,10 @@ impl Model {
     /// the card the keys answer; else the latest to the human with no answer read on the thread selected, those its
     /// keys answer on home.
     fn question(&self, now: DateTime<Utc>) -> Result<(ThreadId, Uuid, Questions), String> {
-        let thread = self.target()?;
+        let thread = self.target(now)?;
         let asked = match self.page() {
             Page::Thread(page) => page.question(&self.data, now).map(|(id, asked)| (id, asked.clone())),
-            Page::Home(page) => page.question(&self.data).map(|asked| (asked.id, asked.question.clone())),
+            Page::Home(page) => page.question(&self.data, now).map(|asked| (asked.id, asked.question.clone())),
             _ => self.data.question(&thread).map(|asked| (asked.id, asked.question.clone())),
         };
         let me = self.data.me();
@@ -506,7 +506,7 @@ impl Model {
 
     /// Answer a pending tool request with `verdict`: the one `id` picks as `ants tools approve` does, else the first
     /// on the thread acted on.
-    fn decision(&self, id: Option<&str>, verdict: Verdict) -> Result<Action, String> {
+    fn decision(&self, id: Option<&str>, verdict: Verdict, now: DateTime<Utc>) -> Result<Action, String> {
         let approvals = &self.data.live.approvals;
         let request: ApprovalRequest = match id {
             Some(id) => {
@@ -514,7 +514,7 @@ impl Model {
                 tools::select(approvals.clone(), &query).map_err(|e| format!("{e:#}"))?
             }
             None => {
-                let thread = self.target()?;
+                let thread = self.target(now)?;
                 let request = approvals.iter().find(|r| r.thread_id == thread);
                 request.cloned().ok_or_else(|| format!("no tool request waits on thread {thread}"))?
             }
@@ -560,11 +560,11 @@ impl Model {
 
     /// The thread `/trail run --thread` names: one read as `/goto` takes it, the most recently active one read, or the
     /// one slash commands act on.
-    fn on_thread(&self, on: OnThread) -> Result<ThreadId, String> {
+    fn on_thread(&self, on: OnThread, now: DateTime<Utc>) -> Result<ThreadId, String> {
         match on {
             OnThread::Id(prefix) => self.read_thread(&prefix),
             OnThread::Last => self.data.live.order.first().cloned().ok_or_else(|| "no thread read".to_owned()),
-            OnThread::Here => self.target(),
+            OnThread::Here => self.target(now),
         }
     }
 

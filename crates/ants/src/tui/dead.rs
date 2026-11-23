@@ -5,6 +5,7 @@
 //! leave the thread stuck no more.
 
 use ants_proto::NoticeKind;
+use chrono::{DateTime, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 
@@ -51,7 +52,7 @@ impl Letter {
 impl Model {
     /// The dead letter `/dead` acts on: the one at `seq`, else the one selected in the thread view, else the latest of
     /// the thread acted on ([`Model::target`]) not replayed or dropped here.
-    pub(super) fn letter(&self, seq: Option<u64>) -> Result<Letter, String> {
+    pub(super) fn letter(&self, seq: Option<u64>, now: DateTime<Utc>) -> Result<Letter, String> {
         let (entries, chosen) = match self.page() {
             Page::Thread(page) => (&page.history.entries[..], page.chosen()),
             _ => (&[][..], None),
@@ -75,18 +76,18 @@ impl Model {
             }
             return Ok(letter);
         }
-        let thread = self.target()?;
+        let thread = self.target(now)?;
         let read = entries.iter().rev().filter(dead).find(|e| !e.forged && !cleared.contains(&e.seq)).map(Letter::of);
         read.or_else(|| self.data.dead_letter(&thread).map(|a| Letter { seq: a.seq, text: Some(a.text.clone()) }))
             .ok_or_else(|| format!("no dead letter on thread {thread}"))
     }
 
     /// Do what `/dead` asks: replay the dead letter at once, or ask for `y` to drop it.
-    pub(super) fn dead(&mut self, dead: Dead) -> Result<Option<Action>, String> {
+    pub(super) fn dead(&mut self, dead: Dead, now: DateTime<Utc>) -> Result<Option<Action>, String> {
         match dead {
-            Dead::Replay(seq) => Ok(Some(Action::Run(Job::DeadReplay(self.letter(seq)?.seq), String::new()))),
+            Dead::Replay(seq) => Ok(Some(Action::Run(Job::DeadReplay(self.letter(seq, now)?.seq), String::new()))),
             Dead::Drop(seq) => {
-                self.prompt = Some(Prompt::Drop(self.letter(seq)?));
+                self.prompt = Some(Prompt::Drop(self.letter(seq, now)?));
                 Ok(None)
             }
         }

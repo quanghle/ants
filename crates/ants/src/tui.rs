@@ -421,7 +421,7 @@ impl Chat {
             self.model.look(Utc::now());
             self.model.follow_drafts();
             if self.model.ui.history.unsaved() {
-                self.model.keep_history();
+                self.model.keep_history(Utc::now());
             }
             let frame = terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;
             if self.hyperlinks {
@@ -438,7 +438,7 @@ impl Chat {
         let kept = catchup::state_path().ok().map(|path| path.with_file_name(command::HISTORY_FILE));
         self.model.load_history(kept);
         let ran = self.serve(terminal).await;
-        self.model.keep_history();
+        self.model.keep_history(Utc::now());
         ran
     }
 

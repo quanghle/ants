@@ -129,7 +129,7 @@ impl Model {
     /// Whether `text` typed in `conversation` is kept for the run only: addressed to another human ([`Data::private`]),
     /// or a slash command acting on a thread where a text would be: the one open or selected for the conversation
     /// shown, the conversation's own for another, and any thread when not known.
-    pub(super) fn sealed(&self, conversation: &Conversation, text: &str) -> bool {
+    pub(super) fn sealed(&self, conversation: &Conversation, text: &str, now: DateTime<Utc>) -> bool {
         let data = &self.data;
         if data.private(conversation, text) {
             return true;
@@ -141,7 +141,7 @@ impl Model {
         }
         let target: Option<ThreadId> = match conversation {
             Conversation::Thread(thread) => Some(thread.clone()),
-            _ if conversation == self.ui.drafts.here() => self.target().ok(),
+            _ if conversation == self.ui.drafts.here() => self.target(now).ok(),
             _ => None,
         };
         target.is_none_or(|thread| data.private(&Conversation::Thread(thread), text))
@@ -149,16 +149,16 @@ impl Model {
 
     /// Add `text`, typed in the conversation shown, to the bar's history as the latest; kept for the run only when
     /// [`Self::sealed`].
-    pub fn push_history(&mut self, text: &str) {
-        let private = self.sealed(self.ui.drafts.here(), text);
+    pub fn push_history(&mut self, text: &str, now: DateTime<Utc>) {
+        let private = self.sealed(self.ui.drafts.here(), text, now);
         self.ui.history.push(text, private);
     }
 
     /// Empty the bar into its history, and so the draft of the conversation shown: what Esc twice and Ctrl-C do to a
     /// bar holding text.
-    pub fn empty_into_history(&mut self) {
+    pub fn empty_into_history(&mut self, now: DateTime<Utc>) {
         let text = self.ui.bar.text();
-        self.push_history(&text);
+        self.push_history(&text, now);
         self.ui.bar.clear();
         self.ui.history.browsing = None;
         self.follow_drafts();
@@ -180,7 +180,7 @@ impl Model {
         if key != Key::Esc || self.ui.bar.is_empty() || !escaped.is_some_and(|at| now - at <= ESC_AGAIN) {
             return false;
         }
-        self.empty_into_history();
+        self.empty_into_history(now);
         true
     }
 
@@ -280,22 +280,22 @@ impl Model {
     }
 
     /// Keep the history and the drafts in the file they were taken from, leaving out those [`Self::sealed`].
-    pub fn keep_history(&mut self) {
+    pub fn keep_history(&mut self, now: DateTime<Utc>) {
         let Some(path) = self.ui.history.file.clone() else { return };
         self.ui.history.unsaved = false;
-        if let Err(e) = self.write_history(&path) {
+        if let Err(e) = self.write_history(&path, now) {
             tracing::debug!("not keeping the bar's history: {e:#}");
         }
     }
 
-    fn write_history(&self, path: &Path) -> Result<()> {
+    fn write_history(&self, path: &Path, now: DateTime<Utc>) -> Result<()> {
         let ui = &self.ui;
         let sent = ui.history.texts.iter().filter(|kept| !kept.private).map(|kept| kept.text.clone()).collect();
         let here = (ui.drafts.here(), self.ui.bar.text());
         let kept = ui.drafts.kept().map(|(conversation, draft)| (conversation, draft.text()));
         let drafts = std::iter::once(here)
             .chain(kept)
-            .filter(|(conversation, text)| !text.trim().is_empty() && !self.sealed(conversation, text))
+            .filter(|(conversation, text)| !text.trim().is_empty() && !self.sealed(conversation, text, now))
             .map(|(conversation, text)| KeptDraft { conversation: conversation.clone(), text })
             .collect();
         if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
@@ -423,7 +423,7 @@ mod tests {
         m.pages.truncate(1);
         m.follow_drafts();
         typed(&mut m, "who owns billing?");
-        m.keep_history();
+        m.keep_history(at(1));
         let kept = std::fs::read_to_string(&path).unwrap();
         for private in ["lunch", "usual", "see you"] {
             assert!(!kept.contains(private), "{private} is in {kept}");
@@ -455,7 +455,7 @@ mod tests {
         let mut m = model();
         m.load_history(Some(path.clone()));
         m.stored(vec![message(1, &theirs, "bob", "alice", "lunch?")], at(1));
-        assert_eq!(m.target(), Ok(theirs), "home selects the thread between two humans");
+        assert_eq!(m.target(at(1)), Ok(theirs), "home selects the thread between two humans");
         sent(&mut m, "/title Bob surprise party");
         sent(&mut m, "/search budget");
         m.ui.bar.focused = true;
@@ -465,7 +465,7 @@ mod tests {
         assert!(m.ui.bar.is_empty(), "Esc twice empties the bar into the history");
         m.ui.bar.focused = true;
         typed(&mut m, "/title Bob balloons");
-        m.keep_history();
+        m.keep_history(at(1));
         let kept = std::fs::read_to_string(&path).unwrap();
         for private in ["surprise", "cake", "balloons"] {
             assert!(!kept.contains(private), "{private} is in {kept}");

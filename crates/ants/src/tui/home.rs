@@ -370,9 +370,9 @@ impl Page {
         false
     }
 
-    /// The selected item's thread.
-    pub fn thread(&self, data: &Data) -> Option<ThreadId> {
-        let items = self.rows(data, Utc::now());
+    /// The selected item's thread at `now`.
+    pub fn thread(&self, data: &Data, now: DateTime<Utc>) -> Option<ThreadId> {
+        let items = self.rows(data, now);
         items.get(self.at(&items)).map(|i| i.thread.clone())
     }
 
@@ -427,8 +427,8 @@ impl Page {
 
     /// The focused card's question on the selected thread, else the thread's latest waiting question; never a newer
     /// question in place of one answered elsewhere while its typed answer was being composed.
-    pub fn question<'a>(&self, data: &'a Data) -> Option<&'a super::work::Asked> {
-        let thread = self.thread(data)?;
+    pub fn question<'a>(&self, data: &'a Data, now: DateTime<Utc>) -> Option<&'a super::work::Asked> {
+        let thread = self.thread(data, now)?;
         match &self.answering {
             Some(cursor) => data.asked(&thread, cursor.question),
             None => data.question(&thread),
@@ -1272,7 +1272,7 @@ mod tests {
         let (done, asked) = (ThreadId::generate(), ThreadId::generate());
         let selected = |m: &crate::tui::model::Model| {
             let crate::tui::model::Page::Home(home) = m.page() else { panic!("home") };
-            home.thread(&m.data)
+            home.thread(&m.data, at(3))
         };
         let finished = || {
             let mut m = model();
@@ -1320,13 +1320,34 @@ mod tests {
 
         let selected = |m: &crate::tui::model::Model| {
             let crate::tui::model::Page::Home(home) = m.page() else { panic!("home") };
-            home.thread(&m.data)
+            home.thread(&m.data, at(8))
         };
         m.key(Key::Home, at(8));
         m.key(Key::Down, at(8));
         assert_eq!(selected(&m), Some(other.clone()));
-        m.data.cards.snoozed.snooze(&stuck, Utc::now(), Utc::now() + chrono::TimeDelta::hours(1));
+        m.data.cards.snoozed.snooze(&stuck, at(8), at(8) + chrono::TimeDelta::hours(1));
         assert_eq!(selected(&m), Some(other), "on its item as one above leaves");
+    }
+
+    #[test]
+    fn a_slash_command_acts_on_the_row_selected_at_its_time_not_at_the_clock_s() {
+        use crate::tui::exec::Job;
+
+        let (stuck, other) = (ThreadId::generate(), ThreadId::generate());
+        let mut m = model();
+        m.stored(vec![message(1, &stuck, "alice", "dev-b", "review"), escalation(2, &stuck, "dev-b", "alice")], at(2));
+        m.stored(vec![message(3, &other, "alice", "dev-c", "build"), escalation(4, &other, "dev-c", "alice")], at(4));
+        m.data.cards.snoozed.snooze(&stuck, at(5), at(20));
+        let done =
+            |thread: &ThreadId| Some(Action::Run(Job::Done { thread: thread.clone(), done: true }, "/done".into()));
+
+        assert_eq!(items(&m.data, at(10)).len(), 1, "the snoozed thread is off home");
+        screen(&m, 140, 30, at(10));
+        assert_eq!(m.submit("/done".to_owned(), at(10)), done(&other), "the top row while the snooze holds");
+
+        assert_eq!(items(&m.data, at(30)).len(), 2, "the snooze ended, the thread is back on top");
+        screen(&m, 140, 30, at(30));
+        assert_eq!(m.submit("/done".to_owned(), at(30)), done(&stuck), "the top row once it ended");
     }
 
     #[test]
