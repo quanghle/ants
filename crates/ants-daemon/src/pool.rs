@@ -37,7 +37,7 @@ use crate::provider::events::Lifecycle;
 use crate::records::direct_kv::DirectKv;
 use crate::stream::history::Rebuild;
 use crate::sync::MutexExt as _;
-use crate::worktrees::{Branch, Pruned, Worktrees};
+use crate::worktrees::{Branch, Pruned, WorktreeFailed, Worktrees};
 
 /// Most prompts a thread with messages in hand runs back to back on its harness while other threads wait for one.
 pub const BURST: usize = 8;
@@ -599,9 +599,13 @@ impl Pool {
         if let Some(dir) = self.checkouts.as_ref().and_then(|checkouts| checkouts.workdir(thread)) {
             launch = launch.in_dir(dir);
         } else if let Some(worktrees) = self.worktrees.as_ref().filter(|_| self.isolate) {
+            // Never in the workdir other threads share, which the worktree is there to keep them out of.
             match worktrees.checkout(thread).await {
                 Ok(dir) => launch = launch.in_dir(dir),
-                Err(e) => tracing::warn!(%thread, error = format!("{e:#}"), "working in the shared workdir"),
+                Err(e) => {
+                    tracing::warn!(%thread, error = format!("{e:#}"), "the thread's git worktree failed; its message waits");
+                    return Err(e.context(WorktreeFailed));
+                }
             }
         }
         let session = if moved {

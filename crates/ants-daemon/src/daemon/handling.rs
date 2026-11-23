@@ -12,6 +12,7 @@ use crate::harness::SignedOut;
 use crate::limits::breaker::StartFailed;
 use crate::limits::ratelimit::Limited;
 use crate::monitoring::status;
+use crate::worktrees::WorktreeFailed;
 
 use super::burial::Letter;
 use super::delivery::reply_id;
@@ -116,6 +117,8 @@ impl Inbox<'_> {
                     return (thread, Handled::Broken(Box::new((arrived, msg))));
                 }
             }
+            // No harness was started: the breaker learns nothing of it.
+            None if e.is::<WorktreeFailed>() => {}
             None => self.holds.breaker.settled(),
         }
         if let Some(signed_out) = e.downcast_ref::<SignedOut>() {

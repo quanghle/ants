@@ -85,7 +85,7 @@ async fn worktrees_left_behind_are_pruned_while_threads_share_the_workdir() {
 }
 
 #[tokio::test]
-async fn a_thread_whose_worktree_fails_shares_the_workdir() {
+async fn a_thread_whose_worktree_fails_waits_rather_than_share_the_workdir() {
     let Some(repo) = crate::test_support::repo("pool-worktrees-fail") else { return };
     let home = repo.parent().unwrap().join("home");
     let (launch, log, _) = fake::launch();
@@ -93,8 +93,14 @@ async fn a_thread_whose_worktree_fails_shares_the_workdir() {
     crate::test_support::run(&repo, &["branch", "ants/dev-a/t1"]);
     crate::test_support::run(&repo, &["switch", "--quiet", "ants/dev-a/t1"]);
     let pool = Pool::new(launch.in_dir(repo.clone()), SessionStore::memory(), 4, IDLE).with_worktrees(worktrees);
-    assert_eq!(pool.prompt(&thread(1), "a").await.unwrap(), "s1: a", "its branch is checked out elsewhere");
-    assert_eq!(log.locked().cwds, std::slice::from_ref(&repo));
+    pool.prompt(&thread(2), "b").await.unwrap();
+    let e = pool.prompt(&thread(1), "a").await.unwrap_err();
+    assert!(e.is::<WorktreeFailed>(), "its branch is checked out elsewhere: {e:#}");
+    assert_eq!(log.locked().cwds, [home.join("worktrees/t2")], "no harness started in the shared workdir");
+    assert_eq!(pool.live(), 1, "the failed start holds no slot");
+    crate::test_support::run(&repo, &["switch", "--quiet", "main"]);
+    assert_eq!(pool.prompt(&thread(1), "a").await.unwrap(), "s2: a", "tried again, in its own worktree");
+    assert_eq!(log.locked().cwds, [home.join("worktrees/t2"), home.join("worktrees/t1")]);
     std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
 }
 
