@@ -4,10 +4,16 @@
 use std::time::Duration;
 
 use ants_daemon::bus;
-use ants_proto::{Role, ThreadId, ToolCall};
+use ants_proto::{ApprovalRequest, Envelope, Role, STREAM, ThreadId, ToolCall, Verdict, subject};
+use async_nats::jetstream;
+use async_nats::jetstream::stream::LastRawMessageErrorKind;
+use chrono::Utc;
 use futures::StreamExt as _;
 
+use super::answer::{check, decide};
 use super::*;
+use crate::cmd::tools::decide_request;
+use crate::connection::Nats;
 use crate::test_support::Server;
 
 fn request(ant: &UserId, title: &str, offered: Vec<Verdict>, timeout: Duration) -> ApprovalRequest {

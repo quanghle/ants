@@ -14,7 +14,9 @@ use chrono::{DateTime, TimeDelta, Utc};
 use futures::StreamExt as _;
 use futures::stream::SelectAll;
 
-use super::{HeldAct, State, commands, deciders, excerpt, pending_at, qualified, standing};
+use super::requests::{pending_at, qualified, standing};
+use super::text::{commands, excerpt};
+use super::{HeldAct, State, deciders};
 use crate::text::left;
 
 /// What following the tool requests reports.
