@@ -37,7 +37,8 @@ use super::settings::{Config, Connection, HarnessSettings, Spending, WorktreeSet
 use super::{ACK_WAIT, GROWN_WAIT, IN_HAND_PER_HARNESS, MAX_DELIVER, Served, Stop, mcp_sign_in, stopped};
 
 /// The config with worktrees turned on or off for good, telling of a default turning them on and warning of threads
-/// running at once in one git work tree.
+/// running at once in one git work tree. Whether threads do get a worktree each is told once the repository is looked
+/// at ([`Worktrees::find`]).
 pub(super) async fn settle_worktrees(config: Config) -> Config {
     let (workdir, max_harnesses, asked) =
         (&config.harness.workdir, config.pooling.max_harnesses, config.worktrees.per_thread);
@@ -47,8 +48,7 @@ pub(super) async fn settle_worktrees(config: Config) -> Config {
             ant = %config.ant,
             workdir = %workdir.display(),
             max_harnesses,
-            "giving each thread its own git worktree, as threads may run at once in a git workdir; \
-             worktrees = false shares the workdir"
+            "worktrees are on, as threads may run at once in a git workdir; worktrees = false shares the workdir"
         );
     } else if crate::worktrees::shares_git_workdir(workdir, max_harnesses, asked) {
         tracing::warn!(

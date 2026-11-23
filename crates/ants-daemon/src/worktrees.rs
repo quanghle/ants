@@ -11,6 +11,10 @@
 //! ([`Worktrees::left_behind`]), no new one being created. A branch holding such commits is reported
 //! ([`Worktrees::ahead`], [`Pruned::kept`]), so its work is not forgotten.
 //!
+//! A repository with no commit has nothing to start a branch from: its threads work in the workdir, shared, until it
+//! has one. From then on each new thread gets its worktree, while the threads that started in the workdir stay there,
+//! where their sessions are.
+//!
 //! Ants of one daemon may share a repository. Git does not take concurrent `git worktree add` and `prune` on one
 //! repository (one's prune removes another's half-made registration, an add fails reading another's), so the changes
 //! to a repository's worktrees and branches go one at a time across the daemon, by its git common directory. An add
@@ -20,10 +24,11 @@
 //! worktree, as by a daemon killed while adding one, is deleted once its thread has no session, unless it holds
 //! commits.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Weak};
 use std::time::Duration;
 
@@ -116,6 +121,12 @@ pub struct Worktrees {
     repo: PathBuf,
     /// Where the workdir is inside the repository, so a thread works at the same place in its own worktree.
     within: PathBuf,
+    /// The ant's workdir, where threads work while the repository has no commit.
+    workdir: PathBuf,
+    /// Whether the repository was seen with a commit: looked for at each new thread until there is one.
+    born: AtomicBool,
+    /// The threads that started in the workdir, the repository having no commit then, and stay there.
+    sharing: std::sync::Mutex<HashSet<ThreadId>>,
     /// A directory per thread.
     dir: PathBuf,
     /// One change to the worktrees at a time, so a thread's worktree is never removed while it is being set up.
@@ -131,21 +142,23 @@ pub struct Worktrees {
 
 impl Worktrees {
     /// The worktrees of the ant's threads under `home`, of the repository `workdir` is in. None, with a warning, when
-    /// it is in none, has no commit to start a branch from, or git cannot be run: the threads then share the workdir.
+    /// it is in none or git cannot be run: the threads then share the workdir. So do, with a warning, those starting
+    /// while the repository has no commit to start a branch from ([`Worktrees::checkout`]).
     pub async fn find(ant: &UserId, workdir: &Path, home: &Path) -> Option<Self> {
         match git(workdir, ["rev-parse", "--show-toplevel", "--show-prefix"]).await {
-            Ok(_) if git(workdir, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).await.is_err() => {
-                tracing::warn!(
-                    workdir = %workdir.display(),
-                    "the workdir's git repository has no commits yet; its threads share it until the daemon restarts"
-                );
-                None
-            }
             Ok(out) => {
                 let mut lines = out.lines();
                 let repo = PathBuf::from(lines.next().unwrap_or_default());
                 let within = Path::new(lines.next().unwrap_or_default()).components().collect();
-                tracing::info!(repo = %repo.display(), "giving each thread its own git worktree");
+                let born = has_commit(workdir).await;
+                if born {
+                    tracing::info!(repo = %repo.display(), "giving each thread its own git worktree");
+                } else {
+                    tracing::warn!(
+                        workdir = %workdir.display(),
+                        "the workdir's git repository has no commits yet; threads share the workdir until it has one"
+                    );
+                }
                 let dir = home.join("worktrees");
                 let common = match git(workdir, ["rev-parse", "--git-common-dir"]).await {
                     Ok(common) => workdir.join(common.trim()),
@@ -154,7 +167,8 @@ impl Worktrees {
                         repo.join(".git")
                     }
                 };
-                Some(Self::new(ant, repo, within, dir, &common))
+                let worktrees = Self::new(ant, repo, within, dir, &common);
+                Some(Self { workdir: workdir.to_owned(), born: AtomicBool::new(born), ..worktrees })
             }
             Err(e) => {
                 tracing::warn!(
@@ -198,8 +212,19 @@ impl Worktrees {
 
     fn new(ant: &UserId, repo: PathBuf, within: PathBuf, dir: PathBuf, common: &Path) -> Self {
         let (repository, fetching) = (repository_lock(common, Lock::Changes), repository_lock(common, Lock::Fetches));
-        let changing = Mutex::new(());
-        Self { ant: ant.clone(), repo, within, dir, changing, repository, fetching, base: Base::Head }
+        Self {
+            ant: ant.clone(),
+            repo,
+            within,
+            workdir: PathBuf::new(),
+            born: AtomicBool::new(true),
+            sharing: std::sync::Mutex::default(),
+            dir,
+            changing: Mutex::new(()),
+            repository,
+            fetching,
+            base: Base::Head,
+        }
     }
 
     /// The same, starting a thread's new branch from `base`, which also tells what the commits of a branch are compared
@@ -209,11 +234,15 @@ impl Worktrees {
         Self { base, ..self }
     }
 
-    /// The directory the thread works in, in its worktree, which is created when missing.
+    /// The directory the thread works in, in its worktree, which is created when missing. The workdir instead, shared,
+    /// for a thread starting while the repository has no commit, and from then on for that thread.
     pub async fn checkout(&self, thread: &ThreadId) -> Result<PathBuf> {
         let _changing = self.changing.lock().await;
         let path = self.path(thread);
         if !path.join(".git").is_file() {
+            if self.shares(thread).await {
+                return Ok(self.workdir.clone());
+            }
             self.add(thread, &path).await?;
             tracing::info!(%thread, worktree = %path.display(), "created the thread's git worktree");
         }
@@ -222,6 +251,32 @@ impl Worktrees {
             bail!("{} is not in the thread's worktree", self.within.display());
         }
         Ok(cwd)
+    }
+
+    /// Whether the thread works in the workdir: it started there, or starts now and the repository still has no commit.
+    async fn shares(&self, thread: &ThreadId) -> bool {
+        if !self.born.load(Ordering::Relaxed) {
+            if !has_commit(&self.repo).await {
+                if self.sharing.locked().insert(thread.clone()) {
+                    tracing::info!(%thread, workdir = %self.workdir.display(), "the thread works in the shared workdir");
+                }
+                return true;
+            }
+            self.born.store(true, Ordering::Relaxed);
+            tracing::info!(
+                repo = %self.repo.display(),
+                sharing = self.sharing.locked().len(),
+                "the repository has a commit now: giving each new thread its own git worktree"
+            );
+        }
+        self.sharing.locked().contains(thread)
+    }
+
+    /// The threads working in the workdir, as the repository had no commit when they started.
+    pub fn sharing(&self) -> Vec<ThreadId> {
+        let mut threads: Vec<ThreadId> = self.sharing.locked().iter().cloned().collect();
+        threads.sort();
+        threads
     }
 
     /// Remove the worktree of each thread `expired` tells, one at a time, and tell how many were removed and which
@@ -527,6 +582,11 @@ fn repository_lock(common: &Path, what: Lock) -> Arc<Mutex<()>> {
     let lock = Arc::new(Mutex::new(()));
     locks.insert(key, Arc::downgrade(&lock));
     lock
+}
+
+/// Whether the repository `dir` is in has a commit at its `HEAD`.
+async fn has_commit(dir: &Path) -> bool {
+    git(dir, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).await.is_ok()
 }
 
 /// Whether each thread of an ant gets its own git worktree: as the config key `worktrees` says, and where it is unset
@@ -836,16 +896,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_repository_without_commits_is_shared() {
+    async fn a_repository_without_commits_is_shared_until_it_has_one() {
         if !ants_test_support::have("git") {
             return;
         }
         let dir = ants_test_support::scratch_dir("worktrees-empty").canonicalize().unwrap();
-        run(&dir, &["init", "--quiet"]);
-        std::fs::create_dir_all(dir.join("sub")).unwrap();
-        assert!(Worktrees::find(&ant(), &dir, &dir.join(".home")).await.is_none(), "an unborn HEAD");
-        assert!(Worktrees::find(&ant(), &dir.join("sub"), &dir.join(".home")).await.is_none(), "below the top level");
-        assert!(!dir.join(".home/worktrees").exists());
+        let (repo, home) = (dir.join("repo"), dir.join("home"));
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::write(repo.join("sub/file"), "one").unwrap();
+        run(&repo, &["init", "--quiet", "--initial-branch=main"]);
+        let top = Worktrees::find(&ant(), &repo, &home).await.unwrap();
+        let below = Worktrees::find(&"dev-b".parse().unwrap(), &repo.join("sub"), &dir.join("home-b")).await.unwrap();
+        let (a, b, c) = (thread("a"), thread("b"), thread("c"));
+        assert_eq!(top.checkout(&a).await.unwrap(), repo, "an unborn HEAD");
+        assert_eq!(below.checkout(&a).await.unwrap(), repo.join("sub"), "below the top level");
+        assert!(!home.join("worktrees").exists() && run(&repo, &["branch", "--list", "ants/*"]).is_empty());
+        assert_eq!(top.prune(async |_: &ThreadId| true).await, Pruned::default());
+
+        run(&repo, &["add", "."]);
+        commit(&repo, "first");
+        assert_eq!(top.checkout(&b).await.unwrap(), home.join("worktrees/b"), "a new thread, once there is a commit");
+        assert_eq!(top.checkout(&a).await.unwrap(), repo, "a thread that started in the workdir stays there");
+        assert_eq!(top.checkout(&c).await.unwrap(), home.join("worktrees/c"));
+        assert_eq!((top.sharing(), top.threads()), (vec![a.clone()], vec![b, c]));
+        assert_eq!(below.checkout(&a).await.unwrap(), repo.join("sub"));
+        assert_eq!(below.checkout(&thread("d")).await.unwrap(), dir.join("home-b/worktrees/d/sub"));
+        let again = Worktrees::find(&ant(), &repo, &home).await.unwrap();
+        assert_eq!(again.checkout(&a).await.unwrap(), home.join("worktrees/a"), "as after a daemon restart");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
