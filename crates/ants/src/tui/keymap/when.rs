@@ -34,8 +34,8 @@ pub(super) fn not_selecting(model: &Model, now: DateTime<Utc>) -> Result<(), &'s
     on_view(model, now)
 }
 
-pub(super) fn thread_selected(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
-    check(model.target().is_ok(), "no thread selected")
+pub(super) fn thread_selected(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
+    check(model.target(now).is_ok(), "no thread selected")
 }
 
 pub(super) fn home_item(model: &Model, now: DateTime<Utc>) -> Option<home::Item> {

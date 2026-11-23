@@ -186,7 +186,7 @@ fn a_person_shows_online_and_opens_the_dm_with_its_keys() {
     let mut m = model();
     let bob = user("bob");
     m.stored(vec![message(1, &ThreadId::generate(), "alice", "dev-a", "deploy the site")], at(0));
-    m.people(people::Event::Online(Ok([bob.clone()].into())), at(0));
+    m.people_event(people::Event::Online(Ok([bob.clone()].into())), at(0));
     assert!(screen(&m, 120, 32, at(1)).contains("● bob"));
 
     m.select(nav::Item::Person(bob));

@@ -143,7 +143,7 @@ impl View {
 
 /// The views whose keys hold on `model`'s screen, the most particular first.
 pub fn views(model: &Model) -> Vec<View> {
-    if model.asking.as_ref().is_some_and(Asking::takes_keys) {
+    if model.asking().is_some_and(Asking::takes_keys) {
         return vec![View::Request];
     }
     if model.prompt.as_ref().is_some_and(Prompt::covers) {
@@ -152,7 +152,7 @@ pub fn views(model: &Model) -> Vec<View> {
     if model.focus == Focus::Nav {
         return vec![View::Nav];
     }
-    if matches!(model.page(), Page::Thread(page) if page.listing()) {
+    if model.page().covers() {
         return vec![View::Pending];
     }
     let view = match model.page() {

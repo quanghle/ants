@@ -7,7 +7,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use serde_json::{Map, Value};
 
-use super::super::{markdown, style};
+use super::super::style;
 
 /// The keys of an edit's input naming its file.
 const PATHS: [&str; 3] = ["file_path", "path", "notebook_path"];
@@ -53,12 +53,6 @@ pub fn asked(request: &ApprovalRequest) -> Vec<Line<'static>> {
         lines.push(Line::styled("… the rest of the input was cut at 2,000 characters", style::dim()));
     }
     lines
-}
-
-/// `lines` wrapped at words into rows at most `width` columns wide.
-pub fn wrapped(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
-    let width = width.max(1);
-    lines.iter().flat_map(|line| markdown::wrap(&line.spans, width).into_iter().map(Line::from)).collect()
 }
 
 /// The command of an execute request's input: a string, or its words.

@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use super::command::Tone;
 use super::home::{self, Why};
 use super::markdown;
-use super::model::{Action, Data, Key, Level, Model};
+use super::model::{Action, Data, Key, Level, Model, Overlay};
 use super::select::{PAGE, step};
 use super::style::{self, ago};
 use super::timeline::Tools;
@@ -134,8 +134,6 @@ pub struct Digest {
 /// How the digest overlay shows, kept in [`Ui`](super::model::Ui).
 #[derive(Debug, Default)]
 pub struct Shown {
-    /// Whether it shows, once a digest was asked for.
-    pub on: bool,
     /// How many rows it is scrolled down.
     pub top: u16,
     /// How far it could scroll when last drawn: its wrapped rows past those showing.
@@ -244,9 +242,9 @@ fn current(data: &Data, thread: &ThreadId, tldr: &ThreadSummary) -> bool {
     tldr.is_current(data.live.summary(thread).map_or(0, |s| s.last_reopening))
 }
 
-/// Draw the digest overlay, if shown.
+/// Draw the digest overlay.
 pub fn draw_digest(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
-    let Some(digest) = model.catchup.digest.as_ref().filter(|_| model.ui.digest.on) else { return };
+    let Some(digest) = model.catchup.digest.as_ref() else { return };
     let shown = &model.ui.digest;
     let area = frame.area();
     let (width, height) = (area.width.saturating_sub(8).min(100), area.height.saturating_sub(4));
@@ -276,7 +274,18 @@ pub fn draw_digest(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
 impl Model {
     /// Whether the digest overlay shows.
     pub fn digest_shown(&self) -> bool {
-        self.catchup.digest.is_some() && self.ui.digest.on
+        self.overlays.iter().any(|o| matches!(o, Overlay::Digest))
+    }
+
+    /// Show the digest over the rest, unless it shows already.
+    fn show_digest(&mut self) {
+        if !self.digest_shown() {
+            self.overlay(Overlay::Digest);
+        }
+    }
+
+    fn close_digest(&mut self) {
+        self.overlays.retain(|o| !matches!(o, Overlay::Digest));
     }
 
     /// Ask for a new TL;DR of `thread`.
@@ -293,7 +302,7 @@ impl Model {
     pub fn home_digest(&mut self, now: DateTime<Utc>) -> Option<Action> {
         let since = self.catchup.from(now);
         if self.catchup.digest.as_ref().is_some_and(|d| d.since == since && !matches!(d.got, Some(Err(_)))) {
-            self.ui.digest.on = true;
+            self.show_digest();
             return None;
         }
         Some(self.ask_digest(since))
@@ -314,7 +323,8 @@ impl Model {
 
     fn ask_digest(&mut self, since: DateTime<Utc>) -> Action {
         self.catchup.digest = Some(Digest { since, got: None });
-        self.ui.digest = Shown { on: true, ..Shown::default() };
+        self.ui.digest = Shown::default();
+        self.show_digest();
         Action::Summarise(Ask::Digest(since))
     }
 
@@ -328,13 +338,13 @@ impl Model {
         let shown = &mut self.ui.digest;
         match step(key, usize::from(shown.top), Some(PAGE)) {
             Some(top) => shown.top = u16::try_from(top).unwrap_or(u16::MAX).min(shown.scrollable.get()),
-            None => shown.on = false,
+            None => self.close_digest(),
         }
         None
     }
 
     /// Take how a summary request went.
-    pub fn summarised(&mut self, summarised: Summarised, now: DateTime<Utc>) {
+    pub fn summary_event(&mut self, summarised: Summarised, now: DateTime<Utc>) {
         let Summarised { ask, result, warnings } = summarised;
         let warned = |line: String| {
             if warnings.is_empty() {
@@ -380,7 +390,7 @@ impl Model {
                     Ok(_) => Err("no digest came".to_owned()),
                     Err(e) => Err(format!("{e:#}")),
                 });
-                let shown = self.ui.digest.on;
+                let shown = self.digest_shown();
                 if !warnings.is_empty() {
                     self.notify(warnings.join(" · "), Level::Error, now);
                 }
@@ -572,7 +582,7 @@ mod tests {
         assert_eq!(m.key(Key::Char('s'), at(30)), Some(Action::Summarise(Ask::Digest(at(10)))));
         assert!(screen(&m, 140, 30, at(30)).contains("asking for a digest…"));
         let got = Got::Digest { by: user("messenger"), text: "Two deploys **landed**.".into(), tokens: 42 };
-        m.summarised(Summarised { ask: Ask::Digest(at(10)), result: Ok(got), warnings: Vec::new() }, at(31));
+        m.summary_event(Summarised { ask: Ask::Digest(at(10)), result: Ok(got), warnings: Vec::new() }, at(31));
         let shown = screen(&m, 140, 30, at(31));
         assert!(shown.contains("messenger · 42 tokens") && shown.contains("Two deploys landed."), "{shown}");
         assert_eq!(m.key(Key::Char('j'), at(31)), None);
@@ -594,7 +604,7 @@ mod tests {
         m.digest(Some("2h"), at(7200)).unwrap();
         let text: String = (0..60).map(|n| format!("paragraph {n:02}\n\n")).collect();
         let got = Got::Digest { by: user("messenger"), text, tokens: 42 };
-        m.summarised(Summarised { ask: Ask::Digest(at(0)), result: Ok(got), warnings: Vec::new() }, at(7201));
+        m.summary_event(Summarised { ask: Ask::Digest(at(0)), result: Ok(got), warnings: Vec::new() }, at(7201));
         let draw = |m: &Model| screen(m, 80, 24, at(7201));
         let first = draw(&m);
         assert!(first.contains("paragraph 00") && !first.contains("paragraph 59"), "{first}");
@@ -623,7 +633,7 @@ mod tests {
         assert!(last.contains("paragraph 59") && last.contains("any other key closes"), "{last}");
         assert!(!last.contains("paragraph 50"), "the bottom rows fill the overlay: {last}");
         for key in [Key::Char('x'), Key::Esc] {
-            m.ui.digest.on = true;
+            m.show_digest();
             assert_eq!(m.digest_key(key), None);
             assert!(!m.digest_shown(), "{key:?} closes it");
         }
@@ -663,7 +673,7 @@ mod tests {
             tokens: 9,
         };
         let ask = Ask::Tldr { thread: thread.clone(), ahead: false };
-        m.summarised(Summarised { ask, result: Ok(Got::Tldr(tldr)), warnings: Vec::new() }, at(4));
+        m.summary_event(Summarised { ask, result: Ok(Got::Tldr(tldr)), warnings: Vec::new() }, at(4));
         let shown = screen(&m, 140, 30, at(64));
         assert!(shown.contains("TL;DR (messenger, 1m ago, S asks for a new one)"), "{shown}");
         assert!(shown.contains("Deployed to staging."), "{shown}");
@@ -683,9 +693,9 @@ mod tests {
         assert_eq!(m.ahead(at(20)), Some(Action::Summarise(ask(&new))));
         assert_eq!(m.ahead(at(20)), None, "one at a time");
         let failed = Summarised { ask: ask(&new), result: Err(anyhow!("no reply")), warnings: Vec::new() };
-        m.summarised(failed, at(21));
+        m.summary_event(failed, at(21));
         assert_eq!(m.ahead(at(21)), Some(Action::Summarise(ask(&old))), "a failed one waits for a newer entry");
-        m.summarised(Summarised { ask: ask(&old), result: Ok(Got::Spent(500)), warnings: Vec::new() }, at(22));
+        m.summary_event(Summarised { ask: ask(&old), result: Ok(Got::Spent(500)), warnings: Vec::new() }, at(22));
         m.stored(vec![message(30, &new, "dev-a", "alice", "more")], at(30));
         assert_eq!(m.ahead(at(30)), None, "stopped for the UTC day");
         assert!(m.ahead(at(30) + TimeDelta::days(1)).is_some());

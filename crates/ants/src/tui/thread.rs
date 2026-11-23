@@ -100,7 +100,7 @@ pub struct Page {
     /// The attachment `o` opens of the message with them, by its sequence.
     mark: attach::Mark<u64>,
     /// The cursor on the question card the keys answer, while Enter has focused it.
-    answering: Option<question::Cursor>,
+    answering: question::Focus,
     /// The waiting requests and questions listed individually, opened by Ctrl-L.
     listing: Option<pending::List>,
     /// The room the oldest pending tool request had on its card as last drawn, `(width, lines)`, which tells whether it
@@ -122,7 +122,7 @@ impl Page {
             about: None,
             at: None,
             mark: attach::Mark::default(),
-            answering: None,
+            answering: question::Focus::default(),
             listing: None,
             card_room: Cell::new(None),
             find: None,
@@ -308,7 +308,7 @@ impl Page {
         if !self.listing() {
             self.selected = Some(picked);
             self.at = None;
-            self.answering = None;
+            self.answering.leave();
         }
     }
 
@@ -316,11 +316,7 @@ impl Page {
         if self.card(data, now).is_none() {
             self.key(Key::Enter, data, now);
         }
-        if let Some(cursor) = self.answering.as_mut().filter(|cursor| cursor.question == question) {
-            cursor.mouse_select(at);
-            return true;
-        }
-        false
+        self.answering.mouse_select(question, at)
     }
 
     #[cfg(test)]
@@ -477,13 +473,8 @@ impl Page {
             Key::Char('n') => return self.pending(data).cloned().map(To::Note),
             // The question's card folds while a tool request waits: its keys answer the request's.
             Key::Char('1'..='9') if self.pending(data).is_none() => {
-                return match question::thread_key(key, data, &self.history.thread, &self.history.entries, now)? {
-                    question::Keyed::To(to) => Some(*to),
-                    question::Keyed::Focus(cursor) => {
-                        self.answering = Some(cursor);
-                        None
-                    }
-                };
+                let keyed = question::thread_key(key, data, &self.history.thread, &self.history.entries, now);
+                return self.answering.keyed(keyed);
             }
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
             Key::Char('z') => return Some(To::Snooze(self.history.thread.clone())),
@@ -521,7 +512,7 @@ impl Page {
         let Some(oldest) = self.pending(data) else {
             if key == Key::Enter {
                 let keyed = question::keyed(data, &self.history.entries, now);
-                self.answering = keyed.map(|(id, asked)| question::Cursor::new(id, asked));
+                self.answering.set(keyed.map(|(id, asked)| question::Cursor::new(id, asked)));
             }
             return None;
         };

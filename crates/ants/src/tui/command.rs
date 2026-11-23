@@ -97,7 +97,7 @@ impl Model {
         }
         let slash = matches!(command, Ok(Command::Slash(_)));
         // Before the command moves the view, and so what it acts on.
-        let sealed = self.sealed(self.ui.drafts.here(), &text);
+        let sealed = self.sealed(self.ui.drafts.here(), &text, now);
         let route = self.route(&text);
         let done = command.and_then(|command| match command {
             Command::Slash(command) => self.command(command, now),
@@ -162,7 +162,7 @@ impl Model {
             }
             Note::Reject(request) => request,
         };
-        if let Some(storing) = self.asking.as_ref().filter(|a| a.storing) {
+        if let Some(storing) = self.asking().filter(|a| a.storing) {
             let id = tools::qualified(&storing.request);
             self.ui.bar.set_status(
                 format!("storing the decision on request {id}: send the note once it is stored"),
@@ -180,7 +180,7 @@ impl Model {
             }
         };
         asking.note = Some(text);
-        self.asking = Some(asking);
+        self.ask(asking);
         self.ui.bar.set_text("");
         self.ui.bar.noting = None;
         self.ui.bar.focused = false;

@@ -556,7 +556,7 @@ mod tests {
         m.key(Key::Char('a'), at(3));
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "one order at a time");
 
-        m.credentials(Event::Done(reject, Ok("dev-c rejected".to_owned())), at(4));
+        m.credentials_event(Event::Done(reject, Ok("dev-c rejected".to_owned())), at(4));
         assert!(screen(&m, 140, 30, at(4)).contains("dev-c rejected"), "the outcome is a notice");
         assert_eq!(m.data.credentials.asked, [renewing("dev-a", "UAKEYOFDEVA00")], "the request answered goes");
         assert!(m.data.credentials.busy.is_none());
@@ -565,7 +565,7 @@ mod tests {
         m.key(Key::Char('a'), at(4));
         let renew = Order::Renew("dev-a".to_owned(), "UAKEYOFDEVA00".to_owned());
         assert_eq!(m.key(Key::Char('y'), at(4)), Some(Action::Credentials(renew.clone())));
-        m.credentials(Event::Done(renew, Err("renew: refused".to_owned())), at(5));
+        m.credentials_event(Event::Done(renew, Err("renew: refused".to_owned())), at(5));
         assert_eq!(m.data.credentials.asked.len(), 1, "a failed order leaves the request");
     }
 
@@ -591,7 +591,7 @@ mod tests {
             version: String::new(),
             updated_at: at(1),
         };
-        m.credentials(Event::Recorded(Some(recorded)), at(1));
+        m.credentials_event(Event::Recorded(Some(recorded)), at(1));
         let shown = screen(&m, 140, 30, at(1) + chrono::Duration::minutes(3));
         assert!(
             shown.contains("approve them on machine keybox (host keybox.lan), as `ants signer` there recorded 3m ago"),

@@ -1,13 +1,16 @@
-//! What each view does for the model: takes its keys, draws itself, tells the footer what it asks, and drops what it
-//! asked to confirm.
+//! What each view does for the model: takes its keys, what is typed or pasted into what it holds and the keys of its
+//! focused question card, draws itself and its footer, tells what covers it, and drops what it asked to confirm.
 
 use std::borrow::Cow;
 
+use ants_proto::Uuid;
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 
 use super::{Data, Key, Model, Page, To, Ui};
+use crate::tui::{ant, keymap, search, style, thread, tree};
 
 impl Page {
     /// Take `key`: where it leads, if anywhere.
@@ -41,6 +44,73 @@ impl Page {
         }
     }
 
+    /// Take `key` if it is typed into what the view holds: the text found in a thread, an ant's setting or sign-in
+    /// address being written, or a channel's members editor. Where it leads, if anywhere.
+    pub fn typed(&mut self, key: Key, data: &Data) -> Option<Option<To>> {
+        match self {
+            Self::Thread(page) => page.find_key(key).then_some(None),
+            Self::Ant(page) => page.write(key).map(|action| action.map(To::Do)),
+            Self::Channel(page) => page.write(key, data),
+            _ => None,
+        }
+    }
+
+    /// Type `line` pasted into the focused question card or into what the view has being written, if any: whether it
+    /// took it.
+    pub fn paste(&mut self, line: &str, data: &Data, now: DateTime<Utc>) -> bool {
+        match self {
+            Self::Home(page) => page.card_paste(line, data, now),
+            Self::Thread(page) => {
+                page.card_paste(line, data, now) || line.chars().all(|c| page.finding() && page.find_key(Key::Char(c)))
+            }
+            Self::Channel(page) => page.paste(line),
+            Self::Ant(page) => line.chars().all(|c| page.write(Key::Char(c)).is_some()),
+            _ => false,
+        }
+    }
+
+    /// Take `key` on the view's focused question card, or on the list covering it, if any: where it leads, if
+    /// anywhere.
+    pub fn card_key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<Option<To>> {
+        match self {
+            Self::Home(page) => page.card_key(key, data, now),
+            Self::Thread(page) => page.card_key(key, data, now),
+            _ => None,
+        }
+    }
+
+    /// Move to the row `at` of the card of the message `question`, focusing it, as a click on it does: whether the
+    /// view shows that card.
+    pub fn mouse_question(&mut self, question: Uuid, at: usize, data: &Data, now: DateTime<Utc>) -> bool {
+        match self {
+            Self::Home(page) => page.mouse_question(question, at, data, now),
+            Self::Thread(page) => page.mouse_question(question, at, data, now),
+            _ => false,
+        }
+    }
+
+    /// Whether PgUp, PgDn, Ctrl-Home and Ctrl-End move the view while the bar is written in: a thread's conversation.
+    pub fn scrolls_while_writing(&self) -> bool {
+        matches!(self, Self::Thread(_))
+    }
+
+    /// The view's own footer, at most `width` wide: the text being found in a thread, the keys of a focused question
+    /// card, else those of what the view asks to confirm or has being written.
+    pub fn footer(&self, data: &Data, now: DateTime<Utc>, width: u16) -> Option<Line<'static>> {
+        let card = match self {
+            Self::Thread(page) => match page.find_footer() {
+                Some(footer) => return Some(style::clip(footer, usize::from(width))),
+                None => page.card(data, now),
+            },
+            Self::Home(page) => page.card(data, now).map(|(cursor, _)| cursor),
+            _ => None,
+        };
+        if let Some(cursor) = card {
+            return Some(keymap::prompt(cursor.keys(), width, false));
+        }
+        self.prompt().map(|keys| keymap::prompt(&keys, width, self.armed()))
+    }
+
     /// The keys of what the view asks to confirm, or of what is being written in it, for the footer.
     pub fn prompt(&self) -> Option<Cow<'static, str>> {
         match self {
@@ -52,6 +122,18 @@ impl Page {
             Self::Held(page) => page.prompt().map(Cow::Borrowed),
             Self::Work(_) | Self::Thread(_) | Self::Dm(_) | Self::Search(_) => None,
         }
+    }
+
+    /// Whether a list of the view's own covers it, taking its keys: a thread's waiting cards.
+    pub fn covers(&self) -> bool {
+        matches!(self, Self::Thread(page) if page.listing())
+    }
+
+    /// Show the list covering the view, or close it: whether the view has one.
+    pub fn toggle_cover(&mut self) -> bool {
+        let Self::Thread(page) = self else { return false };
+        page.toggle_waiting();
+        true
     }
 
     /// Whether the view waits for the `y` confirming what one of its keys asked for.
@@ -77,12 +159,30 @@ impl Page {
 
     /// Close what the view finds or has being written, else drop what it asked to confirm: whether anything was.
     pub fn close(&mut self, data: &Data) -> bool {
-        let closed = match self {
-            Self::Thread(page) => page.find_key(Key::Esc),
-            Self::Ant(page) => page.write(Key::Esc).is_some(),
-            Self::Channel(page) => page.write(Key::Esc, data).is_some(),
-            _ => false,
-        };
-        closed || self.disarm()
+        self.typed(Key::Esc, data).is_some() || self.disarm()
+    }
+}
+
+/// A kind of view, to find those of it among the views opened.
+pub(in crate::tui) trait Stacked: Sized + 'static {
+    fn of(page: &mut Page) -> Option<&mut Self>;
+}
+
+macro_rules! stacked {
+    ($($variant:ident: $page:ty),*) => {$(
+        impl Stacked for $page {
+            fn of(page: &mut Page) -> Option<&mut Self> {
+                if let Page::$variant(page) = page { Some(page) } else { None }
+            }
+        }
+    )*};
+}
+
+stacked!(Thread: thread::Page, Search: search::Page, Tree: tree::Page, Ant: ant::Page);
+
+impl Model {
+    /// The views of the kind `P` among those opened, the shown one last.
+    pub(in crate::tui) fn pages_mut<P: Stacked>(&mut self) -> impl DoubleEndedIterator<Item = &mut P> {
+        self.pages.iter_mut().filter_map(P::of)
     }
 }

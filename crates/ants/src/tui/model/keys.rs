@@ -43,17 +43,11 @@ impl Model {
         if key == Key::Char('q') && self.overlaid() {
             self.closed_by_q = Some(now);
         }
-        if self.asking.as_ref().is_some_and(Asking::takes_keys) && self.help().is_none() {
-            return self.answer(key, now);
-        }
         if self.compact {
             return self.compact_key(key, now);
         }
-        if let Some(taken) = self.overlay_key(key) {
+        if let Some(taken) = self.overlay_key(key, now) {
             return taken;
-        }
-        if self.digest_shown() {
-            return self.digest_key(key);
         }
         if let Some(taken) = self.prompt_key(key, now) {
             return taken;
@@ -61,10 +55,7 @@ impl Model {
         if let Some(action) = self.fold_key(key, now) {
             return Some(action);
         }
-        if key == Key::Ctrl('l')
-            && let Some(Page::Thread(page)) = self.pages.last_mut()
-        {
-            page.toggle_waiting();
+        if key == Key::Ctrl('l') && self.pages.last_mut().is_some_and(Page::toggle_cover) {
             self.focus = Focus::View;
             self.ui.bar.focused = false;
             return None;
@@ -84,7 +75,7 @@ impl Model {
         if self.ui.bar.focused
             && self.focus == Focus::View
             && matches!(key, Key::PageUp | Key::PageDown | Key::CtrlHome | Key::CtrlEnd)
-            && matches!(self.page(), Page::Thread(_))
+            && self.page().scrolls_while_writing()
         {
             return self.view_key(key, now);
         }
@@ -132,15 +123,8 @@ impl Model {
         if self.ui.bar.focused || self.focus != Focus::View {
             return None;
         }
-        match self.pages.last_mut()? {
-            Page::Thread(page) => page.find_key(key).then_some(None),
-            Page::Ant(page) => page.write(key),
-            Page::Channel(page) => {
-                let to = page.write(key, &self.data)?;
-                Some(to.and_then(|to| self.go(to, now)))
-            }
-            _ => None,
-        }
+        let to = self.pages.last_mut()?.typed(key, &self.data)?;
+        Some(to.and_then(|to| self.go(to, now)))
     }
 
     /// R: read everything again, the shown ant's memories, MCP servers and settings too.
@@ -151,12 +135,9 @@ impl Model {
         Some(Action::Refresh)
     }
 
-    /// Whether the help, the notices, the digest or a tool request in full covers the view.
+    /// Whether an overlay, a prompt's box or a list of the view's own covers the view.
     fn overlaid(&self) -> bool {
-        self.covered()
-            || self.digest_shown()
-            || self.asking.as_ref().is_some_and(Asking::takes_keys)
-            || matches!(self.page(), Page::Thread(page) if page.listing())
+        self.covered() || self.page().covers()
     }
 
     /// q: quit, unless the bar holds text or q closed an overlay within [`QUIT_WITHIN`], which a q coming that soon
@@ -180,7 +161,7 @@ impl Model {
             return None;
         }
         if !self.ui.bar.is_empty() || self.ui.bar.quoting.is_some() || self.ui.bar.noting.is_some() {
-            self.empty_into_history();
+            self.empty_into_history(now);
             return None;
         }
         if quitting {
@@ -190,18 +171,11 @@ impl Model {
         None
     }
 
-    /// Close what is open, the topmost first: the help or the notices, the digest, a tool request in full, a prompt, the
-    /// bar's list or the palette, or what the view asks, finds or has being written. Whether anything was.
+    /// Close what is open, the topmost first: an overlay (the help, the notices, the digest, a tool request in full), a
+    /// prompt, the bar's list or the palette, or what the view lists, asks, finds or has being written. Whether
+    /// anything was.
     fn close(&mut self, now: DateTime<Utc>) -> bool {
-        if self.close_overlay() {
-            return true;
-        }
-        if self.digest_shown() {
-            self.ui.digest.on = false;
-            return true;
-        }
-        if self.asking.as_ref().is_some_and(Asking::takes_keys) {
-            self.answer(Key::Esc, now);
+        if self.close_overlay(now) {
             return true;
         }
         if self.prompt.take().is_some() {
@@ -215,10 +189,7 @@ impl Model {
             self.close_palette();
             return true;
         }
-        if let Some(Page::Thread(page)) = self.pages.last_mut()
-            && page.listing()
-        {
-            page.toggle_waiting();
+        if self.page().covers() && self.pages.last_mut().is_some_and(Page::toggle_cover) {
             self.ui.bar.focused = false;
             return true;
         }
@@ -235,13 +206,7 @@ impl Model {
     pub fn paste(&mut self, text: &str, now: DateTime<Utc>) {
         self.follow_drafts();
         let text = pasted(text);
-        if text.is_empty()
-            || self.compact
-            || self.drops_paste()
-            || self.digest_shown()
-            || self.asking.as_ref().is_some_and(Asking::takes_keys)
-            || (!self.ui.bar.focused && matches!(self.page(), Page::Thread(page) if page.listing()))
-        {
+        if text.is_empty() || self.compact || self.drops_paste() || (!self.ui.bar.focused && self.page().covers()) {
             return;
         }
         let line = text.replace(['\n', '\t'], " ");
@@ -250,7 +215,7 @@ impl Model {
         }
         if !self.ui.bar.focused
             && self.focus == Focus::View
-            && (self.card_paste(&line, now) || self.pages.last_mut().is_some_and(|page| write(page, &line)))
+            && self.pages.last_mut().is_some_and(|page| page.paste(&line, &self.data, now))
         {
             return;
         }
@@ -259,41 +224,31 @@ impl Model {
 
     /// Take `key` on the question card focused in the view shown, if any: where it leads, if anywhere.
     fn card_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
-        let data = &self.data;
-        let to = match self.pages.last_mut()? {
-            Page::Home(page) => page.card_key(key, data, now)?,
-            Page::Thread(page) => page.card_key(key, data, now)?,
-            _ => return None,
-        };
+        let to = self.pages.last_mut()?.card_key(key, &self.data, now)?;
         Some(to.and_then(|to| self.go(to, now)))
     }
 
-    /// Type `text` pasted on the question card focused in the view shown, if any: whether it took it.
-    fn card_paste(&mut self, text: &str, now: DateTime<Utc>) -> bool {
-        let data = &self.data;
-        match self.pages.last_mut() {
-            Some(Page::Home(page)) => page.card_paste(text, data, now),
-            Some(Page::Thread(page)) => page.card_paste(text, data, now),
-            _ => false,
-        }
-    }
-
     /// Take `key` while a tool request is being answered.
-    fn answer(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
-        let asking = self.asking.as_mut()?;
+    pub(super) fn answer(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
+        let asking = self.asking_mut()?;
         match asking.key(key) {
-            Answer::Keep => {}
-            Answer::Close => self.asking = None,
+            // Esc while its decision is stored leaves the request in full, the storing going on.
+            Answer::Keep => {
+                if let Some(asking) = self.unask() {
+                    self.ask(asking);
+                }
+            }
+            Answer::Close => _ = self.unask(),
             Answer::Refused(refusal) => self.notify(refusal, Level::Error, now),
             Answer::Decide(verdict) => {
-                return self.asking.as_ref().map(|a| Action::Decide(Box::new(a.request.clone()), verdict));
+                return self.asking().map(|a| Action::Decide(Box::new(a.request.clone()), verdict));
             }
             Answer::Note => {
-                let request = self.asking.take()?.request;
+                let request = self.unask()?.request;
                 return self.note_on(request, now);
             }
             Answer::Open(thread) => {
-                self.asking = None;
+                self.unask();
                 if self.open() != Some(&thread) {
                     self.focus = Focus::View;
                     return self.go(To::Thread(thread), now);
@@ -327,7 +282,7 @@ impl Model {
         match Asking::decide(request, verdict) {
             Ok(asking) => {
                 let action = Action::Decide(Box::new(asking.request.clone()), verdict);
-                self.asking = Some(asking);
+                self.ask(asking);
                 Some(action)
             }
             Err(refusal) => {
@@ -346,7 +301,7 @@ impl Model {
             Ok(asking) => {
                 let mut requests = vec![asking.request.clone()];
                 requests.extend(asking.batch.iter().cloned());
-                self.asking = Some(asking);
+                self.ask(asking);
                 Some(Action::AllowAll(requests))
             }
             Err(refusal) => {
@@ -358,7 +313,7 @@ impl Model {
 
     /// Whether a decision is still being stored, which the status line then says: one at a time.
     fn still_storing(&mut self, now: DateTime<Utc>) -> bool {
-        let Some(storing) = self.asking.as_ref().filter(|a| a.storing) else { return false };
+        let Some(storing) = self.asking().filter(|a| a.storing) else { return false };
         let text = match storing.batch.len() {
             0 => format!("storing the decision on request {}", crate::tools::qualified(&storing.request)),
             n => format!("allowing {} requests of {} once", n + 1, storing.request.ant),
@@ -426,7 +381,7 @@ impl Model {
                 None
             }
             To::Ask(request, None) => {
-                self.asking = Some(Asking::full(request));
+                self.ask(Asking::full(request));
                 None
             }
             To::Ask(request, Some(verdict)) => self.decide(request, verdict, now),
@@ -527,16 +482,4 @@ fn pasted(text: &str) -> String {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let kept = |c: &char| matches!(c, '\n' | '\t') || !(c.is_control() || ('\u{F0000}'..='\u{FFFFD}').contains(c));
     text.chars().filter(kept).collect()
-}
-
-/// Type `line` into the draft `page` is writing, if any: whether it took it.
-fn write(page: &mut Page, line: &str) -> bool {
-    if let Page::Channel(page) = page {
-        return page.paste(line);
-    }
-    line.chars().all(|c| match page {
-        Page::Ant(page) => page.write(Key::Char(c)).is_some(),
-        Page::Thread(page) => page.finding() && page.find_key(Key::Char(c)),
-        _ => false,
-    })
 }

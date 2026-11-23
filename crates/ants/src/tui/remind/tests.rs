@@ -30,7 +30,7 @@ fn b_asks_when_and_sets_the_reminder_with_its_note_at_once() {
 #[test]
 fn reminders_lists_them_in_the_pager_from_any_view() {
     let mut m = model();
-    assert!(m.target().is_err() && m.unfit("reminders", at(1)).is_none(), "no thread needed");
+    assert!(m.target(at(1)).is_err() && m.unfit("reminders", at(1)).is_none(), "no thread needed");
     m.follow_drafts();
     m.ui.bar.focused = true;
     m.ui.bar.set_text("/reminders");

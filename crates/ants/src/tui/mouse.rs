@@ -304,13 +304,7 @@ impl Mouse {
                 model.ui.bar.focused = false;
                 model.focus = Focus::View;
                 let data = &model.data;
-                let selected = if let Some(Page::Thread(page)) = model.pages.last_mut() {
-                    page.mouse_question(question, at, data, now)
-                } else if let Some(Page::Home(page)) = model.pages.last_mut() {
-                    page.mouse_question(question, at, data, now)
-                } else {
-                    false
-                };
+                let selected = model.pages.last_mut().is_some_and(|page| page.mouse_question(question, at, data, now));
                 if again && selected { model.key(Key::Enter, now) } else { None }
             }
             Target::View => {

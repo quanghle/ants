@@ -15,7 +15,7 @@ impl Model {
         self.focus == Focus::View
             && !self.prompt.as_ref().is_some_and(super::Prompt::covers)
             && here != Conversation::None
-            && !matches!(self.page(), Page::Thread(page) if page.listing())
+            && !self.page().covers()
             && self.ui.selecting.as_ref() != Some(&here)
     }
 

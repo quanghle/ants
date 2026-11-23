@@ -46,7 +46,7 @@ fn ctrl_l_lists_every_waiting_card_and_enter_opens_the_selected_request_not_the_
     m.data.settled.add(ApprovalRequest { id: Uuid::now_v7(), ..push.clone() }, crate::tools::State::Expired, at(6));
 
     assert_eq!(m.key(Key::Enter, at(10)), None);
-    assert_eq!(m.asking.as_ref().unwrap().request, push, "Enter without the list still opens the oldest");
+    assert_eq!(m.asking().unwrap().request, push, "Enter without the list still opens the oldest");
     m.key(Key::Esc, at(10));
     m.key(Key::Ctrl('l'), at(10));
     for (width, height) in [(100, 20), (100, 30), (40, 12)] {
@@ -58,13 +58,13 @@ fn ctrl_l_lists_every_waiting_card_and_enter_opens_the_selected_request_not_the_
     }
     m.key(Key::Down, at(10));
     m.key(Key::Enter, at(10));
-    assert_eq!(m.asking.as_ref().unwrap().request, tag);
+    assert_eq!(m.asking().unwrap().request, tag);
     m.key(Key::Esc, at(10));
     let earlier = ApprovalRequest { requested_at: at(-1), id: Uuid::now_v7(), ..push };
     m.data.live.approvals.push(earlier);
     waiting_screen(&m, 100, 20);
     m.key(Key::Enter, at(10));
-    assert_eq!(m.asking.as_ref().unwrap().request, tag, "an arrival does not move the selection");
+    assert_eq!(m.asking().unwrap().request, tag, "an arrival does not move the selection");
 }
 
 #[test]
@@ -78,7 +78,7 @@ fn the_list_opens_an_older_question_visibly_even_while_tools_wait_and_keeps_its_
         m.key(Key::Enter, at(10));
         let shown = waiting_screen(&m, width, height);
         assert!(shown.contains("Backfill?") && shown.contains("› 1 yes"), "{width}x{height}: {shown}");
-        assert!(m.asking.is_none());
+        assert!(m.asking().is_none());
         let mut latest = newer;
         latest.id = Some(Uuid::now_v7());
         latest.seq = 3;
@@ -110,13 +110,13 @@ fn every_waiting_row_scrolls_into_a_narrow_list_and_an_empty_list_answers_nothin
             m.key(Key::Down, at(10));
         }
         m.key(Key::Enter, at(10));
-        assert_eq!(m.asking.as_ref().unwrap().request.tool.title, "command-11");
+        assert_eq!(m.asking().unwrap().request.tool.title, "command-11");
         m.key(Key::Esc, at(10));
         m.data.live.approvals.clear();
         let shown = waiting_screen(&m, width, 10);
         assert!(shown.contains("Waiting (0)"), "{shown}");
         assert_eq!(m.key(Key::Enter, at(10)), None);
-        assert!(m.asking.is_none());
+        assert!(m.asking().is_none());
         m.key(Key::Esc, at(10));
         assert!(m.typing());
     }
@@ -141,7 +141,7 @@ fn the_waiting_list_steps_by_row_by_half_its_height_and_to_either_end() {
         assert!(shown.contains("Waiting (12)"), "{shown}");
         m.key(key, at(10));
         m.key(Key::Enter, at(10));
-        let title = m.asking.as_ref().unwrap().request.tool.title.clone();
+        let title = m.asking().unwrap().request.tool.title.clone();
         m.key(Key::Esc, at(10));
         title
     };
@@ -256,7 +256,7 @@ fn the_waiting_list_keeps_composition_and_uses_its_own_help_and_palette_keys() {
     m.key(Key::Char('a'), at(10));
     m.paste("not an answer", at(10));
     assert_eq!(m.ui.bar.text(), "draft");
-    assert!(m.asking.is_none(), "a hidden request is not answered");
+    assert!(m.asking().is_none(), "a hidden request is not answered");
     assert_eq!(crate::tui::keymap::views(&m), vec![crate::tui::keymap::View::Pending]);
     m.key(Key::Char('?'), at(10));
     assert!(m.help().is_some());
