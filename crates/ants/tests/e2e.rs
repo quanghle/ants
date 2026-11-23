@@ -27,12 +27,15 @@ use ants_test_support::{NatsServer, free_port, scratch_dir};
 const ANTS: &str = env!("CARGO_BIN_EXE_ants");
 const WAIT: Duration = Duration::from_secs(60);
 
+#[path = "e2e/flood.rs"]
+mod flood;
+
 fn main() {
     let me = std::env::args().next().unwrap_or_default();
     if Path::new(&me).file_stem().is_some_and(|name| name == "copilot" || name == "stub-adapter") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 10] = [
+    let tests: [(&str, fn()); 11] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
         ("a_daemon_exits_once_its_executable_was_replaced", a_daemon_exits_once_its_executable_was_replaced),
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
@@ -58,6 +61,7 @@ fn main() {
             "a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread",
             a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread,
         ),
+        ("a_flood_of_messages_is_answered_once_each", flood::a_flood_of_messages_is_answered_once_each),
     ];
     let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
     for (name, test) in tests {
@@ -1204,6 +1208,9 @@ fn stub_harness() {
                             assert!(start.elapsed() < WAIT, "the prompt was not released");
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
+                    }
+                    if let Some(ms) = std::env::var("ANTS_TEST_PROMPT_DELAY_MS").ok().and_then(|ms| ms.parse().ok()) {
+                        tokio::time::sleep(Duration::from_millis(ms)).await;
                     }
                     let text: String = prompt
                         .prompt
