@@ -7,7 +7,8 @@ use ants_daemon::admin::ConfigFile;
 use ants_proto::{AdminOp, OrderState, Permissions, Role, STREAM, THREADS_BUCKET, chan_consumer, done_reader};
 use serde_json::{Value, json};
 
-use crate::admin::orders::{outcome, send};
+use crate::admin::orders::outcome;
+use crate::admin::orders::tests::send;
 use crate::auth::{NewDevice, issue_device_with};
 use crate::credentials::revoke::{self, Kind};
 use crate::test_support::Server;

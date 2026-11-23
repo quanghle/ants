@@ -21,12 +21,13 @@ use ants_proto::{
     ChannelEntry, ChannelId, ChannelPost, Humans, ThreadId, ThreadMarks, ThreadOrigin, UserId, Uuid, subject,
 };
 use anyhow::{Context as _, Result, bail};
-use async_nats::jetstream::kv::{self, UpdateErrorKind};
+use async_nats::jetstream::kv;
 use async_nats::jetstream::{self, consumer};
 use futures::StreamExt as _;
 
 pub use change::{Change, Changed};
 
+use crate::cas;
 use crate::people::humans::Me;
 
 /// Attempts at a compare-and-set update before giving up on a channel that keeps changing.
@@ -221,13 +222,11 @@ pub async fn update<T>(
             }
         };
         let changed = change(&mut entry);
-        match kv.update(entry.key(), encode(&entry)?.into(), revision).await {
-            Ok(_) => return Ok((entry, changed)),
-            Err(e) if e.kind() == UpdateErrorKind::WrongLastRevision => {
-                tracing::debug!(%channel, "the channel changed meanwhile; retrying");
-            }
-            Err(e) => return Err(e).with_context(|| format!("updating channel {channel}")),
+        let stored = cas::update(kv, entry.key(), encode(&entry)?, revision).await;
+        if stored.with_context(|| format!("updating channel {channel}"))? {
+            return Ok((entry, changed));
         }
+        tracing::debug!(%channel, "the channel changed meanwhile; retrying");
     }
     bail!("channel #{channel} kept changing; try again")
 }

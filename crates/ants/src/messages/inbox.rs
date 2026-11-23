@@ -22,10 +22,11 @@ use ants_proto::{Acting, Envelope, Question, Questions, ReadMarker, Role, Thread
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use async_nats::jetstream::consumer::DeliverPolicy;
-use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
+use async_nats::jetstream::kv::{self, Operation};
 use futures::{FutureExt as _, StreamExt as _};
 
 use crate::avatars::Faces;
+use crate::cas;
 use crate::messages::attachments;
 use crate::people::sealed::{Keyring, State};
 
@@ -156,10 +157,9 @@ impl Inbox {
         for _ in 0..CONFLICTS {
             let (mut marker, revision) = self.marker().await?;
             change(&mut marker);
-            match self.kv.update(self.human.as_str(), serde_json::to_vec(&marker)?.into(), revision).await {
-                Ok(_) => return Ok(()),
-                Err(e) if e.kind() == UpdateErrorKind::WrongLastRevision => continue,
-                Err(e) => return Err(e).with_context(|| doing.to_owned()),
+            let stored = cas::update(&self.kv, self.human.as_str(), serde_json::to_vec(&marker)?, revision).await;
+            if stored.with_context(|| doing.to_owned())? {
+                return Ok(());
             }
         }
         bail!("{doing}: the read marker kept moving")

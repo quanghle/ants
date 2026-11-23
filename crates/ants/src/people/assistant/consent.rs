@@ -18,6 +18,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{CONFLICTS, after, designated, device_creds, signing_creds};
+use crate::cas;
 use crate::connection::Nats;
 use crate::people::humans;
 use crate::tools::HeldAct;
@@ -305,14 +306,14 @@ async fn store<T: Serialize + DeserializeOwned>(
             None => (None, None),
         };
         let record = build(before, Utc::now())?;
-        let value = serde_json::to_vec(&record)?.into();
+        let value = serde_json::to_vec(&record)?;
         let stored = match revision {
-            Some(revision) => kv.update(key, value, revision).await.map_err(|e| e.kind().to_string()),
-            None => kv.create(key, value).await.map_err(|e| e.kind().to_string()),
+            Some(revision) => cas::update(kv, key, value, revision).await.map_err(|e| e.kind().to_string()),
+            None => cas::create(kv, key, value).await.map_err(|e| e.kind().to_string()),
         };
         match stored {
-            Ok(_) => return Ok(record),
-            Err(e) if e.contains("wrong last") || e.contains("already exists") => {}
+            Ok(true) => return Ok(record),
+            Ok(false) => {}
             Err(e) => bail!("storing {what} in {HUMANS_BUCKET}: {e}"),
         }
     }

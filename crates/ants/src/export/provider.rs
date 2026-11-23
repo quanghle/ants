@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use ants_daemon::admin::payload;
 use ants_proto::provider::Export as ProviderPart;
-use ants_proto::{AdminOp, Machine, OrderState, ProviderExport, UserId};
+use ants_proto::{AdminOp, Machine, ProviderExport, UserId};
 use anyhow::{Context as _, Result, bail, ensure};
 use async_nats::jetstream;
 
@@ -17,7 +17,7 @@ use super::Export;
 #[cfg(doc)]
 use ants_proto::AdminPayload;
 
-use crate::admin::orders;
+use crate::admin::orders::{self, Admin, Sent};
 use crate::connection::Nats;
 
 /// How long the CLI waits for the daemon to export or import the provider's part.
@@ -40,25 +40,23 @@ pub async fn export(
     identity: &str,
 ) -> Result<Option<ProviderPart>> {
     let op = AdminOp::ExportProvider { identity: identity.to_owned() };
-    let (order, outcome) = orders::send(nats, js, Some(machine), ant, op, WAIT)
-        .await
-        .with_context(|| format!("asking for the export of the provider of {ant} ({LEAVE_OUT})"))?;
-    let Some(outcome) = outcome else {
-        bail!(
+    let sent = async { Admin::of(nats)?.send(js, Some(machine), ant, op, WAIT).await };
+    let sent = sent.await.with_context(|| format!("asking for the export of the provider of {ant} ({LEAVE_OUT})"))?;
+    let outcome = match sent {
+        Sent::Pending(order) => bail!(
             "the daemon of {} did not answer within {}s: it exports the provider's part of {ant} only while online, \
              and the order is refused as stale once it waited {}m; {LEAVE_OUT}",
             order.machine,
             WAIT.as_secs(),
             ants_proto::MEMORIES_FRESH.num_minutes()
-        );
-    };
-    if outcome.state != OrderState::Applied {
-        bail!(
+        ),
+        Sent::Refused(order, outcome) => bail!(
             "the daemon of {} refused to export the provider's part of {ant}: {}; {LEAVE_OUT}",
             order.machine,
-            orders::reason(&outcome)
-        );
-    }
+            orders::reason(&outcome.reason)
+        ),
+        Sent::Applied(_, outcome) => outcome,
+    };
     let result: ProviderExport = serde_json::from_value(outcome.result.unwrap_or_default())
         .context("reading the outcome of the provider's export")?;
     let (name, stored) = match (result.provider, result.payload) {
@@ -88,19 +86,18 @@ pub async fn import(
     identity: &str,
     part: &ProviderPart,
 ) -> Result<Imported> {
-    let admin = orders::Admin::of(nats)?;
+    let admin = Admin::of(nats)?;
     let bytes = serde_json::to_vec(part)?;
     let stored = payload::put(js, &machine, &bytes).await.context("storing the provider's part for the daemon")?;
     let op = AdminOp::ImportProvider { identity: identity.to_owned(), payload: stored };
-    let (order, outcome) = admin.send(js, Some(machine), ant, op, WAIT).await?;
-    Ok(match outcome {
-        None => Imported::Pending(orders::pending_note(&order)),
-        Some(outcome) if outcome.state == OrderState::Applied => Imported::Done,
-        Some(outcome) => Imported::Refused(format!(
+    Ok(match admin.send(js, Some(machine), ant, op, WAIT).await? {
+        Sent::Pending(order) => Imported::Pending(orders::pending_note(&order)),
+        Sent::Applied(..) => Imported::Done,
+        Sent::Refused(order, outcome) => Imported::Refused(format!(
             "the daemon of {} refused the part of provider {} of {ant}: {}",
             order.machine,
             part.provider,
-            orders::reason(&outcome)
+            orders::reason(&outcome.reason)
         )),
     })
 }

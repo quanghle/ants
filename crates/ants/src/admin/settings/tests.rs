@@ -142,7 +142,7 @@ async fn an_admin_reads_the_settings_and_changes_them_expecting_what_was_read() 
         .map(|a| a.parse().unwrap())
         .collect();
     let op = order(&first.settings, None, &changes);
-    let (_, applied) = orders::send(&admin, &js, Some(first.machine.clone()), &dev_a, op, WAIT).await.unwrap();
+    let (_, applied) = orders::tests::send(&admin, &js, Some(first.machine.clone()), &dev_a, op, WAIT).await.unwrap();
     assert_eq!(applied.map(|o| (o.state, o.reason)), Some((OrderState::Applied, None)));
     let edited = std::fs::read_to_string(&path).unwrap();
     assert!(edited.contains("model = \"o3\"  # fast enough"), "{edited}");
@@ -150,7 +150,7 @@ async fn an_admin_reads_the_settings_and_changes_them_expecting_what_was_read() 
 
     std::fs::write(&path, edited.replace("\"o3\"", "\"o4\"")).unwrap();
     let stale = order(&first.settings, None, &["model=o5".parse().unwrap()]);
-    let (_, refused) = orders::send(&admin, &js, None, &dev_a, stale, WAIT).await.unwrap();
+    let (_, refused) = orders::tests::send(&admin, &js, None, &dev_a, stale, WAIT).await.unwrap();
     let refused = refused.expect("decided at once");
     assert_eq!(refused.state, OrderState::Refused);
     assert!(refused.reason.unwrap().starts_with("model changed since the order was sent"));
@@ -176,7 +176,7 @@ async fn an_admin_reads_the_settings_and_changes_them_expecting_what_was_read() 
     let workdir = server.dir().display().to_string();
     let moved = Assignment { field: vec!["workdir".to_owned()], value: Some(json!(workdir)) };
     let op = order(&last.settings, None, &[moved]);
-    let (pending, none) = orders::send(&admin, &js, None, &dev_a, op, Duration::ZERO).await.unwrap();
+    let (pending, none) = orders::tests::send(&admin, &js, None, &dev_a, op, Duration::ZERO).await.unwrap();
     assert_eq!(none, None);
     let listed = orders::orders_of(&js, &dev_a).await.unwrap();
     assert_eq!(listed.iter().find(|o| o.id == pending.id).map(|o| o.state), Some(OrderState::Pending));
@@ -220,7 +220,8 @@ async fn sets_at_once_on_an_ant_never_read_wait_for_the_pending_read() {
     let config = Some(ConfigFile::new(path.clone(), triggers.edits()));
 
     let m1: Machine = "m1".parse().unwrap();
-    let (_, none) = orders::send(&admin, &js, Some(m1), &dev_a, AdminOp::ReadSettings, Duration::ZERO).await.unwrap();
+    let (_, none) =
+        orders::tests::send(&admin, &js, Some(m1), &dev_a, AdminOp::ReadSettings, Duration::ZERO).await.unwrap();
     assert_eq!(none, None, "no daemon of m1 yet");
     let (o3, debug) = ([a("model=o3")], [a("env.RUST_LOG=debug")]);
     let model = set(&admin, &dev_a, &o3, WAIT);
@@ -289,7 +290,7 @@ async fn the_shared_settings_are_created_once_changed_by_orders_and_served_on_ev
     let settings = &reading.read.as_ref().unwrap().settings;
     let op = order(settings, reading.verified_shared(), &[a("model=o3"), a("memory=notes")]);
     changes.mark_unchanged();
-    let (_, applied) = orders::send(&admin, &js, None, &dev_a, op, WAIT).await.unwrap();
+    let (_, applied) = orders::tests::send(&admin, &js, None, &dev_a, op, WAIT).await.unwrap();
     assert_eq!(applied.map(|o| (o.state, o.reason)), Some((OrderState::Applied, None)));
     let changed = verified_of(&admin, &js, &dev_a).await.unwrap();
     assert_eq!(
@@ -310,7 +311,7 @@ async fn the_shared_settings_are_created_once_changed_by_orders_and_served_on_ev
         (Some("o3"), Vec::<String>::new())
     );
     let (_, read_memories) =
-        orders::send(&admin, &js, None, &dev_a, AdminOp::ReadMemories { identity: None }, WAIT).await.unwrap();
+        orders::tests::send(&admin, &js, None, &dev_a, AdminOp::ReadMemories { identity: None }, WAIT).await.unwrap();
     let memories: ants_proto::Memories = serde_json::from_value(read_memories.unwrap().result.unwrap()).unwrap();
     assert_eq!(
         (memories.core.whoami.as_deref(), memories.core.memory.as_deref()),

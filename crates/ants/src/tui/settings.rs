@@ -395,11 +395,11 @@ impl Io {
                     if !settings::may_order(&nats) {
                         anyhow::bail!("changing settings needs a human device's admin credentials");
                     }
-                    let (order, outcome) = orders::send(&nats, &js, Some(machine), &to, op, settings::SET_WAIT).await?;
-                    Ok(match outcome {
-                        Some(o) if o.state == OrderState::Applied => Sent::Applied(order.id),
-                        Some(o) => Sent::Refused(order.id, o.reason.unwrap_or_default()),
-                        None => Sent::Pending(order.id, order.machine),
+                    let admin = orders::Admin::of(&nats)?;
+                    Ok(match admin.send(&js, Some(machine), &to, op, settings::SET_WAIT).await? {
+                        orders::Sent::Applied(order, _) => Sent::Applied(order.id),
+                        orders::Sent::Refused(order, o) => Sent::Refused(order.id, o.reason.unwrap_or_default()),
+                        orders::Sent::Pending(order) => Sent::Pending(order.id, order.machine),
                     })
                 };
                 let sent = async move {

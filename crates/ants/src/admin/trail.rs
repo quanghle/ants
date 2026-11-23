@@ -6,10 +6,10 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ants_proto::{AdminOp, AdminOrder, AdminOutcome, Machine, OrderState, TrailOutcome, UserId};
+use ants_proto::{AdminOp, Machine, TrailOutcome, UserId};
 use anyhow::{Result, bail};
 
-use crate::admin::orders::Admin;
+use crate::admin::orders::{self, Admin, Sent};
 use crate::cmd::trail::runs::{self, Pick};
 use crate::cmd::trail::{LimitArgs, control};
 use crate::connection::Nats;
@@ -32,8 +32,7 @@ pub(crate) async fn stop(nats: &Nats<'_>, ordered: Ordered<'_>) -> Result<()> {
         bail!("run {} of {} has ended: {}", header.run, header.conductor, header.state.name());
     }
     let op = AdminOp::StopTrail { run: header.run };
-    let (order, outcome) = admin.send(&js, ordered.machine, ordered.ant, op, ordered.wait).await?;
-    print!("{}", told(&order, outcome.as_ref())?);
+    print!("{}", told(&admin.send(&js, ordered.machine, ordered.ant, op, ordered.wait).await?)?);
     Ok(())
 }
 
@@ -47,30 +46,32 @@ pub(crate) async fn resume(nats: &Nats<'_>, ordered: Ordered<'_>, limits: LimitA
     }
     let limits = if limits.given() { Some(limits.over(header.limits)?) } else { None };
     let op = AdminOp::ResumeTrail { run: header.run, limits };
-    let (order, outcome) = admin.send(&js, ordered.machine, ordered.ant, op, ordered.wait).await?;
-    print!("{}", told(&order, outcome.as_ref())?);
+    print!("{}", told(&admin.send(&js, ordered.machine, ordered.ant, op, ordered.wait).await?)?);
     Ok(())
 }
 
-/// What came of `order`, a stop or resume of a run, in lines: the steps a stop left in other ants' queues with the
-/// command withdrawing each; or why it was refused, as the error.
-fn told(order: &AdminOrder, outcome: Option<&AdminOutcome>) -> Result<String> {
+/// What came of the order `sent`, a stop or resume of a run, in lines: the steps a stop left in other ants' queues
+/// with the command withdrawing each; or why it was refused, as the error.
+fn told(sent: &Sent) -> Result<String> {
+    let (Sent::Pending(order) | Sent::Applied(order, _) | Sent::Refused(order, _)) = sent;
     let (ant, machine) = (&order.ant, &order.machine);
     let (verb, run) = match &order.op {
         AdminOp::StopTrail { run } => ("stop", run),
         AdminOp::ResumeTrail { run, .. } => ("resume", run),
         other => bail!("order {} is no order about a trail run: {}", order.id, other.describe()),
     };
-    let Some(outcome) = outcome.filter(|o| !matches!(o.state, OrderState::Pending | OrderState::Held)) else {
-        return Ok(format!(
-            "the order to {verb} run {run} of {ant} waits for the daemon of {machine}: `ants ant orders {ant}` tells \
-             when it is decided\n"
-        ));
+    let outcome = match sent {
+        Sent::Pending(_) => {
+            return Ok(format!(
+                "the order to {verb} run {run} of {ant} waits for the daemon of {machine}: `ants ant orders {ant}` \
+                 tells when it is decided\n"
+            ));
+        }
+        Sent::Refused(_, outcome) => {
+            bail!("{machine} refused to {verb} run {run} of {ant}: {}", orders::reason(&outcome.reason))
+        }
+        Sent::Applied(_, outcome) => outcome,
     };
-    if outcome.state == OrderState::Refused {
-        let reason = outcome.reason.as_deref().unwrap_or("no reason given");
-        bail!("{machine} refused to {verb} run {run} of {ant}: {reason}");
-    }
     let mut out = String::new();
     match &order.op {
         AdminOp::ResumeTrail { limits: Some(limits), .. } => {
@@ -102,7 +103,7 @@ fn told(order: &AdminOrder, outcome: Option<&AdminOutcome>) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{RunId, TrailLimits, Uuid, WaitingStep};
+    use ants_proto::{AdminOrder, AdminOutcome, OrderState, RunId, TrailLimits, Uuid, WaitingStep};
 
     use super::*;
 
@@ -119,6 +120,8 @@ mod tests {
             let result = result.map(|r| serde_json::to_value(r).unwrap());
             AdminOutcome::of(order, state, reason.map(Into::into), result)
         };
+        let told =
+            |order: &AdminOrder, outcome: Option<&AdminOutcome>| told(&Sent::of(order.clone(), outcome.cloned()));
         let message = Uuid::now_v7();
         let waiting = vec![WaitingStep { to: p("dev-a"), message }];
         let stopped =

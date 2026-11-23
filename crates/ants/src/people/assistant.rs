@@ -22,6 +22,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use nkeys::XKey;
 use serde::Deserialize;
 
+use crate::cas;
 use crate::connection::Nats;
 use crate::credentials::revoke;
 use crate::people::{devices, humans};
@@ -459,14 +460,14 @@ async fn put(
         let mut grant =
             AssistantGrant::new(human.clone(), assistant.clone(), issued_at, jwt.clone()).with_sealing(enrolled);
         grant.signature = auth::sign(&key, &grant.signed())?;
-        let value = serde_json::to_vec(&grant)?.into();
+        let value = serde_json::to_vec(&grant)?;
         let stored = match revision {
-            Some(revision) => kv.update(&grant_key, value, revision).await.map_err(|e| e.kind().to_string()),
-            None => kv.create(&grant_key, value).await.map_err(|e| e.kind().to_string()),
+            Some(revision) => cas::update(&kv, &grant_key, value, revision).await.map_err(|e| e.kind().to_string()),
+            None => cas::create(&kv, &grant_key, value).await.map_err(|e| e.kind().to_string()),
         };
         match stored {
-            Ok(_) => return Ok((verified, grant)),
-            Err(e) if e.contains("wrong last") || e.contains("already exists") => {}
+            Ok(true) => return Ok((verified, grant)),
+            Ok(false) => {}
             Err(e) => bail!("storing the assistant grant in {HUMANS_BUCKET}: {e}"),
         }
     }

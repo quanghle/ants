@@ -16,13 +16,13 @@ use std::time::Duration;
 use ants_daemon::config::{self, Ant, Summary};
 use ants_daemon::secrets::creds::{Finding, Kind};
 use ants_daemon::secrets::sealing;
-use ants_proto::{AdminOp, JsDomain, JwtError, Machine, OrderState, Permissions, UserId};
+use ants_proto::{AdminOp, JsDomain, JwtError, Machine, Permissions, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use serde_json::{Map, Value, json};
 
 use super::{Local, Sealing, check, ended_sealing, put, read, replaced, risky, signing_creds};
-use crate::admin::orders;
+use crate::admin::orders::{self, Sent};
 use crate::connection::Nats;
 use crate::credentials::{keys, revoke};
 use crate::people::humans;
@@ -259,19 +259,19 @@ async fn enable_on(nats: &Nats<'_>, args: &EnableArgs, ant: &UserId, machine: Ma
         bail!("{ant} is a human: an assistant is an ant");
     }
     let op = AdminOp::Add { settings, assistant_of: Some(human.clone()) };
-    let (order, outcome) = admin.send(&js, Some(machine.clone()), ant, op, args.wait).await?;
     let set = format!("ants assistant set {ant}");
-    let Some(outcome) = outcome else {
-        println!("{}", orders::pending_note(&order));
-        println!("once {ant} is added, `{set}` makes it the assistant of {human}");
-        return Ok(());
-    };
-    if outcome.state != OrderState::Applied {
-        bail!(
+    match admin.send(&js, Some(machine.clone()), ant, op, args.wait).await? {
+        Sent::Pending(order) => {
+            println!("{}", orders::pending_note(&order));
+            println!("once {ant} is added, `{set}` makes it the assistant of {human}");
+            return Ok(());
+        }
+        Sent::Refused(_, outcome) => bail!(
             "the daemon of {machine} refused to add {ant}: {} (were {ant} added there already as the assistant of \
              {human}, `{set}` signs the grant)",
-            orders::reason(&outcome)
-        );
+            orders::reason(&outcome.reason)
+        ),
+        Sent::Applied(..) => {}
     }
     println!("{ant} added on {machine} as the assistant of {human}; its daemon starts it");
     let (before, _) = put(&js, creds, human, Some(ant.clone()), Sealing::Keep)
@@ -745,7 +745,7 @@ mod tests {
     /// then signs the grant; the signer refuses an assistant add order of another human.
     #[tokio::test]
     async fn enable_on_a_machine_adds_the_assistant_by_order() {
-        use ants_proto::{IDENTITIES_BUCKET, SharedSettings};
+        use ants_proto::{IDENTITIES_BUCKET, OrderState, SharedSettings};
 
         use crate::test_support::orders::host_of_m1;
         use crate::test_support::orders::{SIGNED, with_signer};
@@ -799,7 +799,7 @@ mod tests {
 
         let op = AdminOp::Add { settings: Map::new(), assistant_of: Some(bob.clone()) };
         let bobs = p("bob-assistant");
-        let sent = crate::admin::orders::send(&nats, &js, Some(m1), &bobs, op, SIGNED);
+        let sent = crate::admin::orders::tests::send(&nats, &js, Some(m1), &bobs, op, SIGNED);
         let (_, refused) = with_signer(&server, Box::pin(sent)).await.unwrap();
         let refused = refused.expect("the daemon decides once the signer answers");
         assert_eq!(refused.state, OrderState::Refused);
