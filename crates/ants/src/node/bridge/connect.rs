@@ -77,7 +77,7 @@ impl Remote {
         let (dial, proxy) = match proxy {
             None => (authority.clone(), None),
             Some(proxy) => {
-                let (dial, auth) = parse_proxy(proxy)?;
+                let (dial, auth) = parse_proxy(proxy).context("--proxy")?;
                 (dial, Some(auth))
             }
         };

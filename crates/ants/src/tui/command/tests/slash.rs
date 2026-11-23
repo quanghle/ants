@@ -223,6 +223,17 @@ fn views() -> Vec<(&'static str, Model)> {
     sent.attachments = ants_client::attachments::listed(&[log], |id| envelope.attachment_handle(id));
     let mut dead = message(2, &thread, "alice", "dev-a", "deploy");
     (dead.kind, dead.id) = (ants_client::entry::Kind::Dead, None);
+    let mut summarised = reading(&thread, vec![ask.clone()]);
+    let tldr = ants_proto::ThreadSummary {
+        thread_id: thread.clone(),
+        text: "deploying".into(),
+        by: user("messenger"),
+        asker: user("alice"),
+        at: at(1),
+        upto: 1,
+        tokens: 9,
+    };
+    summarised.data.cards.tldr.insert(thread.clone(), tldr);
     vec![
         ("nothing read", model()),
         ("a thread selected", selected),
@@ -232,12 +243,13 @@ fn views() -> Vec<(&'static str, Model)> {
         ("a question on the thread open", reading(&thread, vec![ask.clone(), asked])),
         ("an attachment on the thread open", reading(&thread, vec![ask.clone(), sent])),
         ("a dead letter on the thread open", reading(&thread, vec![ask, dead])),
+        ("a TL;DR of the thread open", summarised),
     ]
 }
 
 #[test]
 fn every_listed_command_is_refused_for_want_of_what_its_row_says_it_needs_and_of_nothing_else() {
-    const NEEDS: [Needs; 8] = [
+    const NEEDS: [Needs; 9] = [
         Needs::Nothing,
         Needs::Thread,
         Needs::Request,
@@ -246,6 +258,7 @@ fn every_listed_command_is_refused_for_want_of_what_its_row_says_it_needs_and_of
         Needs::Question,
         Needs::Attachment,
         Needs::Letter,
+        Needs::Forwardable,
     ];
     let now = at(9);
     let told = |m: &Model, needs| m.need(needs, now).err().map(String::from);

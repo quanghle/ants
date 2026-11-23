@@ -48,17 +48,17 @@ pub(crate) fn client_config(roots: rustls::RootCertStore) -> Result<TlsConnector
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
-/// `host:port` and the Proxy-Authorization of a CONNECT proxy URL.
+/// `host:port` and the Proxy-Authorization of a CONNECT proxy URL. The error names the URL, not where it was given:
+/// the flag or the variable is the caller's to add.
 pub(crate) fn parse_proxy(proxy: &str) -> Result<(String, Option<String>)> {
-    let rest =
-        proxy.strip_prefix("http://").with_context(|| format!("--proxy {proxy:?}: expected http://host:port"))?;
+    let rest = proxy.strip_prefix("http://").with_context(|| format!("{proxy:?}: expected http://host:port"))?;
     let authority = rest.trim_end_matches('/');
     let (auth, host) = match authority.rsplit_once('@') {
         Some((user, host)) => (Some(format!("Basic {}", BASE64.encode(user.as_bytes()))), host),
         None => (None, authority),
     };
     if host.is_empty() || host.contains('/') {
-        bail!("--proxy {proxy:?}: expected http://host:port");
+        bail!("{proxy:?}: expected http://host:port");
     }
     let dial = if host.rsplit_once(':').is_some_and(|(_, port)| port.parse::<u16>().is_ok()) {
         host.to_owned()
