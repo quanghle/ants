@@ -304,3 +304,37 @@ async fn the_dead_letter_of_a_message_near_max_payload_is_stored_and_told() {
         &envelope.text[envelope.text.len() - 200..]
     );
 }
+
+/// An escalation quoting a message near `max_payload` fits: stored, its text cut with a line telling so.
+#[tokio::test]
+async fn an_escalation_quoting_a_message_near_max_payload_is_cut_to_fit() {
+    let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+    bus.ledger = Arc::new(Ledger::memory(bus.dev.clone(), Caps { thread_cost: Some(1.0), ..Caps::default() }));
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let max = bus::max_payload(&bus.client);
+    let thread = ThreadId::generate();
+    let text = format!("cost 2 stall {}", "z".repeat(max - 400));
+    let (_, seq) = bus.send_from(dev_b.clone(), &thread, &text).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let escalation = next_envelope(&mut to_human).await;
+        assert_eq!(escalation.thread_id, thread);
+        assert!(escalation.text.starts_with("Thread cost cap reached"), "{}", &escalation.text[..100]);
+        let end = &escalation.text[escalation.text.len() - 200..];
+        assert!(end.contains("[ants] This notice was cut to fit the bus's max_payload"), "{end}");
+        assert!(serde_json::to_vec(&escalation).unwrap().len() <= max);
+        let reply = next_envelope(&mut to_dev_b).await;
+        assert!(reply.text.starts_with("partial"), "{}", reply.text);
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().prompted, 1, "prompted once");
+    assert!(dead::list(&bus.stream).await.unwrap().is_empty());
+    assert_eq!(bus.unacked().await, 0);
+}

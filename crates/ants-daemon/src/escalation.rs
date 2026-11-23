@@ -70,8 +70,8 @@ pub use route::{Route, group, members_at, route};
 use step::{
     Fresh, Step, chain_of, next_step, passes_on, repeats, settled_question, supersede, superseded, waits_for_turns,
 };
-pub use text::group_note;
 use text::{chain_text, duration, join, notes_text, owner_text, reason_text, what_passes, why_text};
+pub use text::{fit, group_note};
 use time::{millis, now_ms};
 
 /// Default of `escalate_after`: as long as a prompt may run by default.
@@ -92,13 +92,14 @@ const HEED_WAIT: Duration = Duration::from_secs(10);
 /// the hub stored it rather than the machine's outbox.
 pub type Sender = Arc<dyn Fn(Envelope, String) -> BoxFuture<'static, Result<Option<u64>>> + Send + Sync>;
 
-/// Stores through JetStream ([`bus::store_acked`]), first recording the link to a channel thread the envelope passes
-/// on, if any ([`links::pass_on`]), then tells of the escalation or question on the ant's status
-/// (`status::escalated`).
+/// Stores through JetStream ([`bus::store_acked`]), cut to fit the server's `max_payload` ([`fit`]), first recording
+/// the link to a channel thread the envelope passes on, if any ([`links::pass_on`]), then tells of the escalation or
+/// question on the ant's status (`status::escalated`).
 pub fn jetstream_sender(js: async_nats::jetstream::Context) -> Sender {
     Arc::new(move |envelope, id| {
         let js = js.clone();
         Box::pin(async move {
+            let envelope = fit(envelope, bus::max_payload(&js.client()));
             links::passing_on(&js, &envelope).await;
             let ack = bus::store_acked(&js, envelope.subject(), &envelope, &id).await?;
             status::escalated(&js.client(), &envelope);

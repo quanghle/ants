@@ -50,6 +50,21 @@ fn climbs(from: Escalation) -> Step {
 }
 
 #[test]
+fn a_notice_past_max_payload_is_cut_on_a_char_boundary_with_a_line_telling_so() {
+    let notice = Envelope::new(p("dev-a"), p("human"), "short");
+    assert_eq!(fit(notice.clone(), 4096), notice, "one that fits is left as it is");
+    let long = Envelope::new(p("dev-a"), p("human"), format!("{}\"", "é".repeat(4000)));
+    let cut = fit(long, 4096);
+    assert!(serde_json::to_vec(&cut).unwrap().len() <= 4096 - 1024);
+    let (kept, line) = cut.text.split_once("\n\n[ants] ").expect("a line telling of the cut");
+    assert!(kept.chars().all(|c| c == 'é') && !kept.is_empty(), "{kept}");
+    assert_eq!(
+        line,
+        format!("This notice was cut to fit the bus's max_payload: {} of its 8001 bytes are kept.", kept.len())
+    );
+}
+
+#[test]
 fn a_first_escalation_starts_at_the_stuck_ant() {
     let new = Escalation::new(p("dev-a"), t(), EscalationReason::Cap);
     assert_eq!(step("dev-a", None, None), climbs(new));

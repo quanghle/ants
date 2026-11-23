@@ -7,6 +7,35 @@ use ants_proto::{DEFAULT_TURN_BUDGET, Envelope, Escalation, EscalationReason, Ow
 use super::route::{Route, members_at, route};
 use crate::limits::caps::Pending;
 
+/// Bytes a notice leaves under the server's `max_payload`, for its headers.
+const NOTICE_HEADROOM: usize = 1024;
+
+/// `notice` with its text cut to fit `max_payload`, its headers aside, ending with an `[ants]` line telling of the cut
+/// when it is cut: an escalation or notice quoting a message near the limit would be over it whole.
+pub fn fit(mut notice: Envelope, max_payload: usize) -> Envelope {
+    let room = max_payload.saturating_sub(NOTICE_HEADROOM);
+    let size = |notice: &Envelope| serde_json::to_vec(notice).map_or(usize::MAX, |json| json.len());
+    let mut over = size(&notice).saturating_sub(room);
+    if over == 0 {
+        return notice;
+    }
+    let text = std::mem::take(&mut notice.text);
+    let mut keep = text.len();
+    // Each byte cut shrinks the JSON by one or more, its escape included: a few rounds at most.
+    loop {
+        keep = text.floor_char_boundary(keep.saturating_sub(over));
+        notice.text = format!(
+            "{}\n\n[ants] This notice was cut to fit the bus's max_payload: {keep} of its {} bytes are kept.",
+            &text[..keep],
+            text.len()
+        );
+        over = size(&notice).saturating_sub(room);
+        if over == 0 || keep == 0 {
+            return notice;
+        }
+    }
+}
+
 /// What an assistant passes on of `pending`: the question or the escalation.
 pub(super) fn what_passes(pending: &Pending) -> &'static str {
     match pending.escalation.reason {
