@@ -450,6 +450,23 @@ fn ants_sharing_a_git_workdir_with_worktrees_turned_off_are_warned() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn a_home_too_long_for_a_socket_fails_no_check_with_a_runtime_directory_to_bind_in() {
+    let dir = ants_test_support::scratch_dir("doctor-mcp-socket").canonicalize().unwrap();
+    let config = dir.join("config.toml");
+    let long = "a-home-nested-deep-enough-that-its-mcp-socket-path-is-past-sun-len".repeat(2);
+    std::fs::write(
+        &config,
+        format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\n[[ant]]\nname = \"dev\"\nworkdir = \".\"\nhome = \"{long}\"\n"),
+    )
+    .unwrap();
+    let loaded = config::load(&config).unwrap();
+    assert!(loaded.ants[0].home.as_ref().unwrap().join("mcp.sock").as_os_str().len() > 108);
+    assert_eq!(check_mcp_sockets(&loaded.ants, &config), []);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn an_open_file_limit_below_what_the_ants_need_is_warned() {
     use ants_daemon::limits::files::Limit;

@@ -305,7 +305,7 @@ With `protocol = "mcp"`, the command is an MCP server over stdio (newline-delimi
 
 ## MCP tools
 
-Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/mcp` with per-thread bearer token) or via `ants mcp --socket <home>/mcp.sock` (`0600`, `ANTS_MCP_TOKEN`; current-user named pipe on Windows). Allowlist rules match `other:<tool>`:
+Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/mcp` with per-thread bearer token) or via `ants mcp --socket <home>/mcp.sock` (`0600`, `ANTS_MCP_TOKEN`; current-user named pipe on Windows). A home whose `mcp.sock` path is longer than a Unix socket takes (103 bytes on macOS, 107 on Linux) gets its socket at `ants-<uid>/<hash of home>.sock` in `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else `/tmp`, the first it fits in, the directory `0700` and refused when another user owns it or others may enter it; `ants doctor` fails `ant NAME mcp socket` for an ant whose socket has no place. Allowlist rules match `other:<tool>`:
 
 | Tool | Description |
 |---|---|

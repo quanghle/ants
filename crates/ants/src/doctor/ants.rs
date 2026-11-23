@@ -303,6 +303,46 @@ pub(super) fn check_open_files(ants: &[Ant], limit: Option<Limit>) -> Option<Che
     Some(Check::warn("open files", format!("{detail}: harness starts may fail and messages wait"), fix))
 }
 
+/// Whether the socket each ant's harnesses without HTTP MCP reach its tools through has a place: `<home>/mcp.sock`,
+/// else, that path too long for a Unix socket, a directory of the user's own under the runtime directory
+/// ([`ants_daemon::mcp::socket_address`]). Fails, naming the fix, for an ant whose socket has none: its daemon would
+/// serve those harnesses no tools. Nothing on Windows, whose named pipes have no such limit.
+pub(super) fn check_mcp_sockets(ants: &[Ant], config: &Path) -> Vec<Check> {
+    #[cfg(unix)]
+    {
+        ants.iter()
+            .filter_map(|ant| {
+                let home = ant_home(ant)?;
+                let e = ants_daemon::mcp::socket_address(&home).err()?;
+                let fix = vec![
+                    format!(
+                        "a shorter home = in the [[ant]] named {} of {}, or a short XDG_RUNTIME_DIR or TMPDIR for the \
+                         daemon",
+                        ant.name,
+                        config.display()
+                    ),
+                    "or give the ant a harness with HTTP MCP, which needs no socket".to_owned(),
+                ];
+                let detail = format!("{e:#}: harnesses without HTTP MCP get none of the ants tools");
+                Some(Check::fail(format!("ant {} mcp socket", ant.name), detail, fix))
+            })
+            .collect()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (ants, config);
+        Vec::new()
+    }
+}
+
+/// The home of `ant`: its `home`, else the default one; None without a home directory to find that in.
+fn ant_home(ant: &Ant) -> Option<PathBuf> {
+    match &ant.home {
+        Some(home) => Some(home.clone()),
+        None => Some(ants_daemon::config::default_home(&std::env::home_dir()?, ant.name.as_str())),
+    }
+}
+
 /// The chain and size of each ant's sense event log, as the daemon serving it last verified it
 /// ([`ants_sense::log::ChainStatus`]), kept in the ant's home: the doctor's credentials do not reach the log. Nothing
 /// for an ant whose log was never read.
@@ -311,13 +351,7 @@ pub(super) fn check_sense_logs(ants: &[Ant]) -> Vec<Check> {
 }
 
 fn check_sense_log(ant: &Ant) -> Vec<Check> {
-    let home = match &ant.home {
-        Some(home) => home.clone(),
-        None => match std::env::home_dir() {
-            Some(dir) => ants_daemon::config::default_home(&dir, ant.name.as_str()),
-            None => return Vec::new(),
-        },
-    };
+    let Some(home) = ant_home(ant) else { return Vec::new() };
     let status = match ants_sense::log::read_status(&home) {
         Ok(Some(status)) => status,
         Ok(None) => return Vec::new(),
