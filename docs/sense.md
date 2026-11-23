@@ -148,7 +148,10 @@ item moved on, with the current item to merge and try again.
 The cache, `.sense/cache.db` in the ant's home (SQLite with full-text search), holds the items as the log left them, so
 reads read no log: a call to sense (a tool call, a brief, an event) and a cycle of the ant's schedule catch the cache up
 with the log once, as they start, writing nothing to disk when the log holds nothing new, and a read reaches the log
-only to append writes still waiting for it. A log failing other than by being out of reach, as on a signature or a
+only to append writes still waiting for it. The calls of one ant take turns at its log, to catch up or to append: those
+that come while another has its turn share the first catch-up started after them, and a read, served from the cache,
+waits for no turn, so a brief takes a turn to catch up, or none, another when the session changes the ant's card, and
+waits for the ant's other calls no further. A log failing other than by being out of reach, as on a signature or a
 permission, fails the call. The cache is never the source of truth: a cache missing, unreadable, of another schema,
 sense id or incarnation of the stream, or built from a message the log no longer holds unchanged, is built again from
 the log when the ant's items open. One that may hold writes not yet appended is never replaced.

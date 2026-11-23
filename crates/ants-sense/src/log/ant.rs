@@ -39,6 +39,12 @@ pub struct AntLog<L, S, V> {
     kept: Option<ChainStatus>,
 }
 
+impl<L, S, V> AntLog<L, S, V> {
+    pub fn chain(&self) -> &Chain {
+        &self.chain
+    }
+}
+
 impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
     /// The log of `sense`, the identity of `ant`, served on `machine`, its status kept in `home`, the ant's home, if
     /// any. Reads nothing yet: [`AntLog::catch_up`] does.
@@ -76,10 +82,6 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
 
     pub fn log(&self) -> &L {
         &self.log
-    }
-
-    pub fn chain(&self) -> &Chain {
-        &self.chain
     }
 
     pub fn status(&self) -> ChainStatus {

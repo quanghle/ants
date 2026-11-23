@@ -12,11 +12,11 @@ use crate::cache::Cache;
 use crate::log::{
     AccountVerifier, AntLog, AppendError, Event, EventLog, LogError, MemoryLog, NoRevocations, Stored, Unsigned,
 };
-use crate::store::{Items, Store, StoreError, Stores};
+use crate::store::{Items, Shared, Store, StoreError, Stores};
 use crate::tools::{Answer, Handler};
 
 /// The items of an ant over a log of `L`, unsigned and verified against no account.
-pub type Kept<L = MemoryLog> = tokio::sync::Mutex<Store<L, Unsigned, AccountVerifier<NoRevocations>>>;
+pub type Kept<L = MemoryLog> = Shared<L, Unsigned, AccountVerifier<NoRevocations>>;
 
 /// The one store of every ant.
 pub struct One(pub Arc<dyn Items>);
@@ -53,7 +53,7 @@ impl EventLog for SharedLog {
 pub async fn store<L: EventLog>(log: L, sense: SenseId, ant: UserId) -> Kept<L> {
     let verifier = AccountVerifier::new(vec![], NoRevocations);
     let log = AntLog::new(log, Unsigned, verifier, sense, ant, "m1".parse().unwrap(), None).unwrap();
-    tokio::sync::Mutex::new(Store::open(log, Cache::in_memory().unwrap()).await.unwrap())
+    Shared::new(Store::open(log, Cache::in_memory().unwrap()).await.unwrap())
 }
 
 /// Sense keeping the items of `dev-a` in `log` as those of every ant, and those items.

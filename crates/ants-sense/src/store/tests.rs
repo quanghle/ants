@@ -1,5 +1,6 @@
 //! Tests of the store: revisions and expected ones, past values, raced writes, items of known ids, listing and search,
-//! cache rebuilds, atomic writes, writes whose callers stopped waiting, and how sense reaches an ant's items.
+//! cache rebuilds, atomic writes, writes whose callers stopped waiting, how sense reaches an ant's items, and a store
+//! its calls share ([`sharing`]).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,6 +12,7 @@ use super::*;
 use crate::log::{AccountVerifier, MemoryLog, NoRevocations, Stored, Unsigned};
 
 mod offline;
+mod sharing;
 
 /// A log counting the messages read from it.
 struct Counted<'a>(&'a MemoryLog, AtomicUsize);
@@ -283,7 +285,7 @@ impl Stores for Memory {
             }
             let log: &'static MemoryLog = Box::leak(Box::default());
             let store = Store::open(ant_log(log, &SenseId::new()), Cache::in_memory()?).await?;
-            Ok(Arc::new(tokio::sync::Mutex::new(store)) as Arc<dyn Items>)
+            Ok(Arc::new(Shared::new(store)) as Arc<dyn Items>)
         })
     }
 }

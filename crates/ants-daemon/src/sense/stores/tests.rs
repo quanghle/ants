@@ -1,5 +1,6 @@
 //! Tests of the sense stores a process keeps: the host link and its retries, items opened on first use, identity
-//! records across re-adds, renames and revocations, exports, and caches serving while disconnected.
+//! records across re-adds, renames and revocations, exports, caches serving while disconnected, and calls sharing a
+//! catch-up ([`sharing`]).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -15,6 +16,8 @@ use serde_json::json;
 
 use super::*;
 use crate::bus;
+
+mod sharing;
 
 fn dev_a() -> UserId {
     "dev-a".parse().unwrap()

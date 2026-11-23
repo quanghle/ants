@@ -1,7 +1,9 @@
 //! An ant's items, written to its log and read from its cache ([`Store`]), and how sense's tools reach the store of
 //! the ant they serve ([`Stores`], [`Items`]).
 
-use std::sync::Arc;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, PoisonError};
+use std::time::Instant;
 
 use ants_proto::provider::BoxFuture;
 use ants_proto::{Machine, SenseId, UserId};
@@ -49,10 +51,12 @@ pub enum StoreError {
 /// Concurrent remote changes that invalidate queued changes are reported and the affected writes remain queued.
 pub struct Store<L, S, V> {
     log: AntLog<L, S, V>,
-    cache: Cache,
+    cache: Arc<Cache>,
     machine: Machine,
     /// Why the latest [`Store::sync`] failed; none when it succeeded.
     unsynced: Option<String>,
+    /// When the latest [`Store::sync`] started, if it succeeded ([`Store::sync_since`]).
+    synced: Option<Instant>,
     /// The log may hold events read or appended that the cache has yet to apply: still so as a call starts when the
     /// last stopped waiting for its log or cache ([`Store::settle`]).
     unsettled: bool,
@@ -83,7 +87,8 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         };
         log.resume(position);
         let machine = "offline".parse().expect("a machine name");
-        let mut store = Self { log, cache, machine, unsynced: None, unsettled: false };
+        let cache = Arc::new(cache);
+        let mut store = Self { log, cache, machine, unsynced: None, synced: None, unsettled: false };
         match store.sync().await {
             Err(StoreError::Log(error)) if is_offline(&error) => {}
             Err(StoreError::Unavailable(_)) if store.cache.pending_conflict()?.is_some() => {}
@@ -111,6 +116,7 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     /// write and those after it, returning an error rather than overwriting either side.
     pub async fn sync(&mut self) -> Result<(), StoreError> {
         self.settle().await;
+        let started = Instant::now();
         let synced = match self.catch_up().await {
             Ok(()) => self.flush().await,
             failed => failed,
@@ -119,7 +125,18 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
             StoreError::Unavailable(reason) => reason.clone(),
             error => error.to_string(),
         });
+        self.synced = synced.is_ok().then_some(started);
         synced
+    }
+
+    /// [`Store::sync`], unless one that started after `asked` succeeded and no write waits since: the calls that
+    /// came while another had its turn at the log share the first catch-up started after them, which read the log
+    /// as it was once each of them had asked.
+    pub async fn sync_since(&mut self, asked: Instant) -> Result<(), StoreError> {
+        if !self.unsettled && self.synced.is_some_and(|started| started > asked) && self.pending()? == 0 {
+            return Ok(());
+        }
+        self.sync().await
     }
 
     /// The outcome of the latest [`Store::sync`], a failure as [`StoreError::Unavailable`]: what a call refusing to
@@ -558,7 +575,7 @@ where
     }
 }
 
-/// An ant's items as sense's tools reach them, each call taking its turn: a [`Store`] behind a lock.
+/// An ant's items as sense's tools reach them: a [`Store`] its calls share ([`Shared`]).
 pub trait Items: Send + Sync {
     /// [`Store::create`].
     fn create<'a>(&'a self, kind: &'a str, values: Values, by: &'a str) -> BoxFuture<'a, Result<Item, StoreError>>;
@@ -634,6 +651,8 @@ pub trait Items: Send + Sync {
     fn at<'a>(&'a self, id: &'a ItemId, at: DateTime<Utc>) -> BoxFuture<'a, Result<Option<Item>, StoreError>>;
     /// [`Store::sync`].
     fn sync(&self) -> BoxFuture<'_, Result<(), StoreError>>;
+    /// [`Store::sync_since`].
+    fn sync_since(&self, asked: Instant) -> BoxFuture<'_, Result<(), StoreError>>;
     /// [`Store::last_sync`].
     fn last_sync(&self) -> BoxFuture<'_, Result<(), StoreError>>;
     /// The sense identity whose items these are.
@@ -648,7 +667,91 @@ pub trait Items: Send + Sync {
     fn messages(&self) -> BoxFuture<'_, Result<Vec<Stored>, StoreError>>;
 }
 
-impl<L, S, V> Items for tokio::sync::Mutex<Store<L, S, V>>
+/// What a store's log told so far, as the last turn at it left it.
+#[derive(Default)]
+struct Seen {
+    broken: Option<Break>,
+    bytes: u64,
+    earlier: Vec<UserId>,
+}
+
+/// A [`Store`] its ant's calls share ([`Items`]). A write or a catch-up takes its turn at the log ([`Shared::lock`]),
+/// held across the log's round trips; a read serves the cache without one, so it waits for no other call's round
+/// trip, and takes a turn only to append writes left waiting for the log.
+pub struct Shared<L, S, V> {
+    store: tokio::sync::Mutex<Store<L, S, V>>,
+    cache: Arc<Cache>,
+    sense: SenseId,
+    seen: std::sync::Mutex<Seen>,
+}
+
+/// A turn at the log of a [`Shared`] store: what the log told is kept as the turn ends.
+pub struct Turn<'a, L, S, V> {
+    store: tokio::sync::MutexGuard<'a, Store<L, S, V>>,
+    seen: &'a std::sync::Mutex<Seen>,
+}
+
+impl<L, S, V> Deref for Turn<'_, L, S, V> {
+    type Target = Store<L, S, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.store
+    }
+}
+
+impl<L, S, V> DerefMut for Turn<'_, L, S, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.store
+    }
+}
+
+impl<L, S, V> Drop for Turn<'_, L, S, V> {
+    fn drop(&mut self) {
+        let chain = self.store.log.chain();
+        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        seen.bytes = chain.bytes();
+        if seen.broken.as_ref() != chain.broken() {
+            seen.broken = chain.broken().cloned();
+        }
+        if seen.earlier != chain.earlier() {
+            seen.earlier = chain.earlier().to_vec();
+        }
+    }
+}
+
+impl<L, S, V> Shared<L, S, V> {
+    pub fn new(store: Store<L, S, V>) -> Self {
+        let chain = store.log.chain();
+        let seen = Seen { broken: chain.broken().cloned(), bytes: chain.bytes(), earlier: chain.earlier().to_vec() };
+        Self {
+            cache: store.cache.clone(),
+            sense: chain.sense().clone(),
+            seen: std::sync::Mutex::new(seen),
+            store: tokio::sync::Mutex::new(store),
+        }
+    }
+
+    /// The store, once the turns asked for before have ended.
+    pub async fn lock(&self) -> Turn<'_, L, S, V> {
+        Turn { store: self.store.lock().await, seen: &self.seen }
+    }
+
+    fn seen(&self) -> std::sync::MutexGuard<'_, Seen> {
+        self.seen.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl<L: EventLog, S: Signer, V: Verifier> Shared<L, S, V> {
+    /// What `read` makes of the cache, the writes left waiting for the log appended first when it can be reached.
+    async fn read<T>(&self, read: impl FnOnce(&Cache) -> Result<T, CacheError>) -> Result<T, StoreError> {
+        if self.cache.read(Cache::pending_count).await? > 0 {
+            self.lock().await.replay().await?;
+        }
+        Ok(self.cache.read(read).await?)
+    }
+}
+
+impl<L, S, V> Items for Shared<L, S, V>
 where
     L: EventLog + Send + Sync,
     S: Signer + Send + Sync,
@@ -697,7 +800,7 @@ where
     }
 
     fn pending(&self) -> BoxFuture<'_, Result<usize, StoreError>> {
-        Box::pin(async move { self.lock().await.pending() })
+        Box::pin(async move { Ok(self.cache.read(Cache::pending_count).await?) })
     }
 
     fn confirmed_sequence<'a>(
@@ -706,10 +809,8 @@ where
         revision: u64,
     ) -> BoxFuture<'a, Result<Option<u64>, StoreError>> {
         Box::pin(async move {
-            Ok(self
-                .lock()
-                .await
-                .history(id)?
+            let history = self.cache.read(|cache| cache.history(id)).await?;
+            Ok(history
                 .iter()
                 .find(|entry| entry.change.revision == revision && entry.sequence != 0)
                 .map(|entry| entry.sequence))
@@ -717,11 +818,11 @@ where
     }
 
     fn get<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Option<Item>, StoreError>> {
-        Box::pin(read(self, |store| store.get(id)))
+        Box::pin(self.read(|cache| cache.get(id)))
     }
 
     fn list<'a>(&'a self, kind: &'a str, limit: usize) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
-        Box::pin(read(self, move |store| store.list(kind, limit)))
+        Box::pin(self.read(move |cache| cache.list(kind, limit)))
     }
 
     fn list_by<'a>(
@@ -731,7 +832,7 @@ where
         value: Option<&'a Value>,
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
-        Box::pin(read(self, move |store| store.list_by(kind, name, value, limit)))
+        Box::pin(self.read(move |cache| cache.list_by(kind, name, value, limit)))
     }
 
     fn search<'a>(
@@ -740,7 +841,7 @@ where
         kind: Option<&'a str>,
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<Hit>, StoreError>> {
-        Box::pin(read(self, move |store| store.search(text, kind, limit)))
+        Box::pin(self.read(move |cache| cache.search(text, kind, limit)))
     }
 
     fn experience<'a>(
@@ -749,27 +850,31 @@ where
         since: Option<DateTime<Utc>>,
         top: usize,
     ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>> {
-        Box::pin(read(self, move |store| store.experience(own, since, top)))
+        Box::pin(self.read(move |cache| cache.experience(own, since, top)))
     }
 
     fn review_tally(&self, top: usize) -> BoxFuture<'_, Result<Option<ReviewTally>, StoreError>> {
-        Box::pin(read(self, move |store| store.review_tally(top)))
+        Box::pin(self.read(move |cache| cache.review_tally(top)))
     }
 
     fn calls(&self, since: DateTime<Utc>) -> BoxFuture<'_, Result<Vec<Calls>, StoreError>> {
-        Box::pin(read(self, move |store| store.calls(since)))
+        Box::pin(self.read(move |cache| cache.calls(since)))
     }
 
     fn history<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Vec<Revision>, StoreError>> {
-        Box::pin(async move { self.lock().await.history(id) })
+        Box::pin(async move { Ok(self.cache.read(|cache| cache.history(id)).await?) })
     }
 
     fn at<'a>(&'a self, id: &'a ItemId, at: DateTime<Utc>) -> BoxFuture<'a, Result<Option<Item>, StoreError>> {
-        Box::pin(async move { self.lock().await.at(id, at) })
+        Box::pin(async move { Ok(self.cache.read(|cache| cache.at(id, at)).await?) })
     }
 
     fn sync(&self) -> BoxFuture<'_, Result<(), StoreError>> {
         Box::pin(async move { self.lock().await.sync().await })
+    }
+
+    fn sync_since(&self, asked: Instant) -> BoxFuture<'_, Result<(), StoreError>> {
+        Box::pin(async move { self.lock().await.sync_since(asked).await })
     }
 
     fn last_sync(&self) -> BoxFuture<'_, Result<(), StoreError>> {
@@ -777,39 +882,24 @@ where
     }
 
     fn sense(&self) -> BoxFuture<'_, SenseId> {
-        Box::pin(async move { self.lock().await.sense().clone() })
+        Box::pin(std::future::ready(self.sense.clone()))
     }
 
     fn broken(&self) -> BoxFuture<'_, Option<Break>> {
-        Box::pin(async move { self.lock().await.log().chain().broken().cloned() })
+        Box::pin(std::future::ready(self.seen().broken.clone()))
     }
 
     fn log_bytes(&self) -> BoxFuture<'_, u64> {
-        Box::pin(async move { self.lock().await.log().chain().bytes() })
+        Box::pin(std::future::ready(self.seen().bytes))
     }
 
     fn earlier_names(&self) -> BoxFuture<'_, Vec<UserId>> {
-        Box::pin(async move { self.lock().await.log().chain().earlier().to_vec() })
+        Box::pin(std::future::ready(self.seen().earlier.clone()))
     }
 
     fn messages(&self) -> BoxFuture<'_, Result<Vec<Stored>, StoreError>> {
         Box::pin(async move { self.lock().await.messages().await })
     }
-}
-
-/// What `read` makes of the store, caught up with its log first.
-async fn read<L, S, V, T>(
-    store: &tokio::sync::Mutex<Store<L, S, V>>,
-    read: impl FnOnce(&Store<L, S, V>) -> Result<T, StoreError>,
-) -> Result<T, StoreError>
-where
-    L: EventLog + Send + Sync,
-    S: Signer + Send + Sync,
-    V: Verifier + Send + Sync,
-{
-    let mut store = store.lock().await;
-    store.replay().await?;
-    read(&store)
 }
 
 /// What finds the items of each ant a daemon serves, opening the ant's [`Store`] on first use: the daemon provides it
@@ -819,12 +909,14 @@ pub trait Stores: Send + Sync {
     fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>>;
 
     /// The items of `ant` caught up with its log, as a provider call starts, so that the reads of the call serve the
-    /// cache; still the items when the hub cannot be reached or writes wait for the log, as the reads meet any failure
+    /// cache, by a catch-up of its own or the one it shares with the calls that came with it ([`Store::sync_since`]);
+    /// still the items when the hub cannot be reached or writes wait for the log, as the reads meet any failure
     /// appending them, and a call refusing to work offline checks the outcome ([`Items::last_sync`]).
     fn synced<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         Box::pin(async move {
+            let asked = Instant::now();
             let items = self.items(ant).await?;
-            match items.sync().await {
+            match items.sync_since(asked).await {
                 Err(StoreError::Log(error)) if is_offline(&error) || items.pending().await? > 0 => {}
                 Err(StoreError::Unavailable(_)) => {}
                 result => result?,
