@@ -31,6 +31,8 @@ const WAIT: Duration = Duration::from_secs(60);
 mod churn;
 #[path = "e2e/flood.rs"]
 mod flood;
+#[path = "e2e/junk.rs"]
+mod junk;
 #[path = "e2e/leaf.rs"]
 mod leaf;
 
@@ -39,7 +41,7 @@ fn main() {
     if Path::new(&me).file_stem().is_some_and(|name| name == "copilot" || name == "stub-adapter") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 13] = [
+    let tests: [(&str, fn()); 14] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
         ("a_daemon_exits_once_its_executable_was_replaced", a_daemon_exits_once_its_executable_was_replaced),
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
@@ -68,6 +70,10 @@ fn main() {
         ("a_flood_of_messages_is_answered_once_each", flood::a_flood_of_messages_is_answered_once_each),
         ("reloads_under_traffic_lose_no_message", churn::reloads_under_traffic_lose_no_message),
         ("a_flapping_uplink_loses_no_message", leaf::a_flapping_uplink_loses_no_message),
+        (
+            "junk_on_the_subjects_is_dead_lettered_once_and_the_ant_answers_on",
+            junk::junk_on_the_subjects_is_dead_lettered_once_and_the_ant_answers_on,
+        ),
     ];
     let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
     for (name, test) in tests {
