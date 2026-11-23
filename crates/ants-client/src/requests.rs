@@ -1,9 +1,12 @@
 //! The requests of a human's reads and writes, built with no I/O, and the reading of their answers: a window of the
-//! stream by batched direct gets ([`batch_get`], [`batch_answer`]), the publish of an [`Envelope`] under its id
-//! with the stream's ack ([`publish`], [`stored`]), the record of a thread's owner ([`owner_record`],
-//! [`owner_recorded`]), a bucket's entry read by a direct get and put by compare-and-set ([`kv_get`], [`kv_entry`],
-//! [`kv_update`], [`kv_updated`]), as the human's [`ReadMarker`] is, and what is heard live: an ant's
-//! [`StatusEvent`]s on a thread ([`status_event`]) and the messages to the human ([`heard`]).
+//! stream by batched direct gets (`batch_get`, [`batch_answer`]), the publish of an [`Envelope`] under its id
+//! with the stream's ack (`publish`, `stored`), the record of a thread's owner (`owner_record`, `owner_recorded`),
+//! a bucket's entry read by a direct get and put by compare-and-set (`kv_get`, `kv_entry`, `kv_update`,
+//! `kv_updated`), as the human's [`ReadMarker`] is, and what is heard live: an ant's [`StatusEvent`]s on a thread
+//! (`status_event`, [`status_on`]) and the messages to the human (`heard`).
+//!
+//! What a client of another kind sends and awaits itself, over async-nats, is public; the rest is
+//! [`crate::client::Client`]'s alone.
 
 use std::time::Duration;
 
@@ -14,22 +17,22 @@ use ants_proto::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::error::{Error, ErrorKind};
 use crate::relayed::{self, DIRECT_HEADERS, Read};
-use crate::transport::{Message, TransportError};
+use crate::transport::Message;
 
 /// How long a request waits for its answer.
 pub const REQUEST_WAIT: Duration = Duration::from_secs(10);
 /// Messages asked for at once by a direct get, and the bytes they come to at most (a larger message comes alone).
 pub const DIRECT_BATCH: usize = 256;
-pub const DIRECT_BATCH_BYTES: usize = 4 << 20;
+pub(crate) const DIRECT_BATCH_BYTES: usize = 4 << 20;
 /// The header of the messages left of a batched direct get, on the status ending each batch.
-pub const NUM_PENDING: &str = "Nats-Num-Pending";
+pub(crate) const NUM_PENDING: &str = "Nats-Num-Pending";
 
 const MSG_ID: &str = "Nats-Msg-Id";
 const SEQUENCE: &str = "Nats-Sequence";
 const SUBJECT: &str = "Nats-Subject";
 const TIME_STAMP: &str = "Nats-Time-Stamp";
-const LAST_SEQUENCE: &str = "Nats-Last-Sequence";
 /// The header making the stream refuse a message unless the last on its subject has the given sequence (0: none).
 const EXPECTED_LAST_SUBJECT_SEQUENCE: &str = "Nats-Expected-Last-Subject-Sequence";
 /// The header marking a KV delete or purge, and its values.
@@ -42,50 +45,14 @@ const MAX_PER_SUBJECT: u32 = 10077;
 /// subject.
 const RECORDED: &str = "maximum messages per subject";
 
-/// Why a read or write failed.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Error {
-    #[error("{what}: {error}")]
-    Transport { what: String, error: TransportError },
-    /// JetStream answered with an error.
-    #[error("{what}: JetStream refused it: {description} (code {code}, error {err_code})")]
-    Refused { what: String, code: u16, err_code: u32, description: String },
-    /// The server answered with a status in place of a message.
-    #[error("{what}: answered {status} {description}")]
-    Status { what: String, status: u16, description: String },
-    #[error("{what}: an answer that does not parse: {why}")]
-    Malformed { what: String, why: String },
-    /// A bucket's entry is a message a stream relayed ([`crate::relayed`]), not one its writer put.
-    #[error("{what}: its entry is a message a stream relayed, not one its writer put")]
-    Relayed { what: String },
-    /// Other devices changed an entry each time this one tried to.
-    #[error("{what}: it kept moving")]
-    Conflict { what: String },
-    /// What was asked for cannot be sent.
-    #[error("{0}")]
-    Invalid(String),
-}
-
-impl Error {
-    /// `error`, of the transport, while `what` was done.
-    pub fn transport(what: &str, error: TransportError) -> Self {
-        Self::Transport { what: what.to_owned(), error }
-    }
-
-    fn malformed(what: &str, why: impl ToString) -> Self {
-        Self::Malformed { what: what.to_owned(), why: why.to_string() }
-    }
-}
-
 /// The prefix of the JetStream API's subjects, in `domain` if the hub has one.
-pub fn api(domain: Option<&JsDomain>) -> String {
+pub(crate) fn api(domain: Option<&JsDomain>) -> String {
     domain.map_or_else(|| "$JS.API.".to_owned(), |domain| format!("$JS.{domain}.API."))
 }
 
 /// The subject a put under `key` of `bucket` goes to: through the JetStream API of the hub's domain, if it has one.
 fn put_subject(domain: Option<&JsDomain>, bucket: &str, key: &str) -> String {
-    let api = domain.map_or_default(|domain| format!("$JS.{domain}.API."));
+    let api = domain.map_or_default(|domain| api(Some(domain)));
     format!("{api}$KV.{bucket}.{key}")
 }
 
@@ -145,7 +112,7 @@ impl Position {
 }
 
 /// The batched direct get of the stream's messages on `filter` from `at` on, its answers to come on `reply`.
-pub fn batch_get(domain: Option<&JsDomain>, filter: &str, at: &Position, reply: String) -> Message {
+pub(crate) fn batch_get(domain: Option<&JsDomain>, filter: &str, at: &Position, reply: String) -> Message {
     let payload = serde_json::to_vec(&at.request(filter)).unwrap_or_default();
     Message { reply: Some(reply), ..Message::new(format!("{}DIRECT.GET.{STREAM}", api(domain)), payload) }
 }
@@ -167,10 +134,9 @@ pub enum Got {
     Stored(Stored),
     /// The message at this sequence is one a stream relayed ([`crate::relayed`]): a reader refuses it.
     Relayed(u64),
-    /// The batch ended, with how many messages are left after it and the stream's last sequence, as far as told.
+    /// The batch ended, with how many messages are left after it, as far as told.
     End {
         pending: Option<u64>,
-        last: Option<u64>,
     },
     /// Nothing is stored from the position on.
     Nothing,
@@ -183,11 +149,8 @@ pub fn batch_answer(answer: Message) -> Result<Got, Error> {
     match answer.status {
         None => {}
         Some(404) => return Ok(Got::Nothing),
-        Some(204) => return Ok(Got::End { pending: number(NUM_PENDING), last: number(LAST_SEQUENCE) }),
-        Some(status) => {
-            let description = answer.description.unwrap_or_default();
-            return Err(Error::Status { what: WHAT.to_owned(), status, description });
-        }
+        Some(204) => return Ok(Got::End { pending: number(NUM_PENDING) }),
+        Some(status) => return Err(Error::status(WHAT, status, answer.description)),
     }
     let seq = number(SEQUENCE).ok_or_else(|| Error::malformed(WHAT, "no sequence"))?;
     if relayed::stored_relayed(answer.header_names(), &answer.payload, Read::DirectGet) {
@@ -215,13 +178,13 @@ pub struct Ack {
 
 /// The publish of `envelope` on its subject under its id, which the stream keeps once however often it is sent
 /// within its duplicate window.
-pub fn publish(envelope: &Envelope) -> Result<Message, Error> {
-    let payload = serde_json::to_vec(envelope).map_err(|e| Error::Invalid(e.to_string()))?;
+pub(crate) fn publish(envelope: &Envelope) -> Result<Message, Error> {
+    let payload = serde_json::to_vec(envelope).map_err(|e| Error::invalid("sending the message", e))?;
     Ok(Message::new(envelope.subject(), payload).header(MSG_ID, envelope.id.to_string()))
 }
 
 /// The ack in `answer`, a stream's answer to a publish made to `what`; its refusal otherwise.
-pub fn stored(what: &str, answer: &Message) -> Result<Ack, Error> {
+pub(crate) fn stored(what: &str, answer: &Message) -> Result<Ack, Error> {
     #[derive(Deserialize)]
     struct Refusal {
         #[serde(default)]
@@ -243,13 +206,12 @@ pub fn stored(what: &str, answer: &Message) -> Result<Ack, Error> {
         duplicate: bool,
     }
     if let Some(status) = answer.status {
-        let description = answer.description.clone().unwrap_or_default();
-        return Err(Error::Status { what: what.to_owned(), status, description });
+        return Err(Error::status(what, status, answer.description.clone()));
     }
     let answer: Answer = serde_json::from_slice(&answer.payload).map_err(|e| Error::malformed(what, e))?;
     match answer.error {
         Some(Refusal { code, err_code, description }) => {
-            Err(Error::Refused { what: what.to_owned(), code, err_code, description })
+            Err(Error::new(what, ErrorKind::Refused { code, err_code, description }))
         }
         None if answer.stream.is_empty() => Err(Error::malformed(what, "an ack naming no stream")),
         None => Ok(Ack { stream: answer.stream, seq: answer.seq, domain: answer.domain, duplicate: answer.duplicate }),
@@ -258,7 +220,7 @@ pub fn stored(what: &str, answer: &Message) -> Result<Ack, Error> {
 
 /// The record of `owner` as the owner of `thread` that a message to `to` names, in the owners bucket: the first
 /// record of a thread to an ant stays, the bucket refusing another or dropping it as a repeat of the first's id.
-pub fn owner_record(domain: Option<&JsDomain>, thread: &ThreadId, to: &UserId, owner: &UserId) -> Message {
+pub(crate) fn owner_record(domain: Option<&JsDomain>, thread: &ThreadId, to: &UserId, owner: &UserId) -> Message {
     let key = owner_key(thread, to);
     let id = owner_record_id(&key);
     Message::new(put_subject(domain, OWNERS_BUCKET, &key), owner.to_string()).header(MSG_ID, id)
@@ -266,10 +228,10 @@ pub fn owner_record(domain: Option<&JsDomain>, thread: &ThreadId, to: &UserId, o
 
 /// Whether `answer` to an [`owner_record`] says the thread's owner for the ant is recorded, by this record or by one
 /// before it; why not otherwise.
-pub fn owner_recorded(answer: &Message) -> Result<(), Error> {
+pub(crate) fn owner_recorded(answer: &Message) -> Result<(), Error> {
     match stored("recording the thread's owner", answer) {
         Ok(_) => Ok(()),
-        Err(Error::Refused { err_code, description, .. })
+        Err(Error { kind: ErrorKind::Refused { err_code, description, .. }, .. })
             if err_code == MAX_PER_SUBJECT || description.contains(RECORDED) =>
         {
             Ok(())
@@ -279,29 +241,26 @@ pub fn owner_recorded(answer: &Message) -> Result<(), Error> {
 }
 
 /// The direct get of the last message under `key` of `bucket`.
-pub fn kv_get(domain: Option<&JsDomain>, bucket: &str, key: &str) -> Message {
+pub(crate) fn kv_get(domain: Option<&JsDomain>, bucket: &str, key: &str) -> Message {
     Message::new(format!("{}DIRECT.GET.KV_{bucket}.$KV.{bucket}.{key}", api(domain)), Vec::new())
 }
 
 /// A bucket's entry: its value, none for a key with none or deleted, and its revision, 0 for a key never written.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KvEntry {
-    pub value: Option<Vec<u8>>,
-    pub revision: u64,
+pub(crate) struct KvEntry {
+    pub(crate) value: Option<Vec<u8>>,
+    pub(crate) revision: u64,
 }
 
 /// The entry in `answer` to a [`kv_get`] made to `what`.
-pub fn kv_entry(what: &str, answer: Message) -> Result<KvEntry, Error> {
+pub(crate) fn kv_entry(what: &str, answer: Message) -> Result<KvEntry, Error> {
     match answer.status {
         None => {}
         Some(404) => return Ok(KvEntry { value: None, revision: 0 }),
-        Some(status) => {
-            let description = answer.description.unwrap_or_default();
-            return Err(Error::Status { what: what.to_owned(), status, description });
-        }
+        Some(status) => return Err(Error::status(what, status, answer.description)),
     }
     if relayed::stored_relayed(answer.header_names(), &answer.payload, Read::DirectGet) {
-        return Err(Error::Relayed { what: what.to_owned() });
+        return Err(Error::new(what, ErrorKind::Relayed));
     }
     let revision = answer.header_value(SEQUENCE).and_then(|seq| seq.parse().ok());
     let revision = revision.ok_or_else(|| Error::malformed(what, "no sequence"))?;
@@ -311,39 +270,39 @@ pub fn kv_entry(what: &str, answer: Message) -> Result<KvEntry, Error> {
 
 /// The put of `value` under `key` of `bucket`, stored only while the key's last message is still the one at
 /// `revision` (0: none).
-pub fn kv_update(domain: Option<&JsDomain>, bucket: &str, key: &str, value: Vec<u8>, revision: u64) -> Message {
+pub(crate) fn kv_update(domain: Option<&JsDomain>, bucket: &str, key: &str, value: Vec<u8>, revision: u64) -> Message {
     Message::new(put_subject(domain, bucket, key), value).header(EXPECTED_LAST_SUBJECT_SEQUENCE, revision.to_string())
 }
 
 /// Whether `answer` to a [`kv_update`] made to `what` says the value is stored, with its revision; None when the key
 /// changed meanwhile.
-pub fn kv_updated(what: &str, answer: &Message) -> Result<Option<u64>, Error> {
+pub(crate) fn kv_updated(what: &str, answer: &Message) -> Result<Option<u64>, Error> {
     match stored(what, answer) {
         Ok(ack) => Ok(Some(ack.seq)),
-        Err(Error::Refused { err_code: WRONG_LAST_SEQUENCE, .. }) => Ok(None),
+        Err(Error { kind: ErrorKind::Refused { err_code: WRONG_LAST_SEQUENCE, .. }, .. }) => Ok(None),
         Err(e) => Err(e),
     }
 }
 
 /// The direct get of the read marker of `human`.
-pub fn marker_get(domain: Option<&JsDomain>, human: &UserId) -> Message {
+pub(crate) fn marker_get(domain: Option<&JsDomain>, human: &UserId) -> Message {
     kv_get(domain, READ_BUCKET, human.as_str())
 }
 
 /// The put of `marker` as the read marker of `human`, stored only while its entry is still at `revision`.
-pub fn marker_put(domain: Option<&JsDomain>, human: &UserId, marker: &ReadMarker, revision: u64) -> Message {
+pub(crate) fn marker_put(domain: Option<&JsDomain>, human: &UserId, marker: &ReadMarker, revision: u64) -> Message {
     let value = serde_json::to_vec(marker).unwrap_or_default();
     kv_update(domain, READ_BUCKET, human.as_str(), value, revision)
 }
 
 /// The direct get of the record designating the assistant of `human`.
-pub fn grant_get(domain: Option<&JsDomain>, human: &UserId) -> Message {
+pub(crate) fn grant_get(domain: Option<&JsDomain>, human: &UserId) -> Message {
     kv_get(domain, HUMANS_BUCKET, &assistant_grant_key(human))
 }
 
 /// The update `message`, heard live on a status subject, tells; none for one a stream relayed, one that does not
 /// parse, and one naming another ant or thread than its subject.
-pub fn status_event(message: &Message) -> Option<StatusEvent> {
+pub(crate) fn status_event(message: &Message) -> Option<StatusEvent> {
     if relayed::heard_relayed(message.reply.as_deref(), message.header_names()) {
         return None;
     }
@@ -359,7 +318,7 @@ pub fn status_on(subject: &str, payload: &[u8]) -> Option<StatusEvent> {
 
 /// The envelope `message`, heard live on an inbox subject, carries; none for one a stream relayed, one that parses
 /// as no envelope, and one whose sender is forged.
-pub fn heard(message: &Message) -> Option<Envelope> {
+pub(crate) fn heard(message: &Message) -> Option<Envelope> {
     if relayed::heard_relayed(message.reply.as_deref(), message.header_names()) {
         return None;
     }
@@ -372,6 +331,11 @@ mod tests {
 
     fn p(s: &str) -> UserId {
         s.parse().unwrap()
+    }
+
+    /// What went wrong with a read that failed.
+    fn kind<T: std::fmt::Debug>(read: Result<T, Error>) -> ErrorKind {
+        read.unwrap_err().kind
     }
 
     fn headers(message: &Message) -> Vec<(&str, &str)> {
@@ -426,12 +390,12 @@ mod tests {
 
         let end = Message { status: Some(204), ..Message::new("_INBOX.alice.x", "") };
         let end = end.header("Nats-Num-Pending", "12").header("Nats-Last-Sequence", "300");
-        assert_eq!(batch_answer(end).unwrap(), Got::End { pending: Some(12), last: Some(300) });
+        assert_eq!(batch_answer(end).unwrap(), Got::End { pending: Some(12) });
         let nothing = Message { status: Some(404), ..Message::default() };
         assert_eq!(batch_answer(nothing).unwrap(), Got::Nothing);
         let refused = Message { status: Some(408), description: Some("Bad Request".into()), ..Message::default() };
-        assert!(matches!(batch_answer(refused), Err(Error::Status { status: 408, .. })));
-        assert!(matches!(batch_answer(Message::new("x", "{}")), Err(Error::Malformed { .. })), "no sequence");
+        assert!(matches!(kind(batch_answer(refused)), ErrorKind::Status { status: 408, .. }));
+        assert!(matches!(kind(batch_answer(Message::new("x", "{}"))), ErrorKind::Malformed(_)), "no sequence");
     }
 
     /// The stream's headers a writer stored under other cases of their names, and a time under the stream's own.
@@ -477,9 +441,9 @@ mod tests {
         let again = Message::new("r", r#"{"stream":"ANTS","seq":12,"duplicate":true}"#);
         assert!(stored("sending", &again).unwrap().duplicate);
         let refused = Message::new("r", r#"{"error":{"code":503,"err_code":10077,"description":"full"}}"#);
-        assert!(matches!(stored("sending", &refused), Err(Error::Refused { code: 503, err_code: 10077, .. })));
-        assert!(matches!(stored("sending", &Message::new("r", "{}")), Err(Error::Malformed { .. })));
-        assert!(matches!(stored("sending", &Message::new("r", "")), Err(Error::Malformed { .. })));
+        assert!(matches!(kind(stored("sending", &refused)), ErrorKind::Refused { code: 503, err_code: 10077, .. }));
+        assert!(matches!(kind(stored("sending", &Message::new("r", "{}"))), ErrorKind::Malformed(_)));
+        assert!(matches!(kind(stored("sending", &Message::new("r", ""))), ErrorKind::Malformed(_)));
     }
 
     #[test]
@@ -517,7 +481,7 @@ mod tests {
         let deleted = kv_entry("reading", got("42", "").header("KV-Operation", "DEL")).unwrap();
         assert_eq!(deleted, KvEntry { value: None, revision: 42 });
         let relayed = got("43", r#"{"below":9}"#).header("Nats-Sequence", "5");
-        assert!(matches!(kv_entry("reading", relayed), Err(Error::Relayed { .. })));
+        assert!(matches!(kind(kv_entry("reading", relayed)), ErrorKind::Relayed));
 
         assert_eq!(kv_updated("marking", &Message::new("r", r#"{"stream":"KV_ants_read","seq":44}"#)), Ok(Some(44)));
         let moved = r#"{"error":{"code":400,"err_code":10071,"description":"wrong last sequence: 43"}}"#;

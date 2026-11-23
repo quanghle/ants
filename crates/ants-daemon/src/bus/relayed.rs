@@ -37,10 +37,10 @@ fn names(headers: Option<&HeaderMap>) -> impl Iterator<Item = &str> + Clone {
 
 /// `msg` as ants-client's readers of answers take one ([`ants_client::requests`]): its headers a name once per value,
 /// the values of one name in the order the message carries them.
-fn message(msg: Message) -> ants_client::Message {
+fn message(msg: Message) -> ants_client::transport::Message {
     let headers = msg.headers.iter().flat_map(HeaderMap::iter);
     let headers = headers.flat_map(|(name, values)| values.iter().map(move |v| (name.to_string(), v.to_string())));
-    ants_client::Message {
+    ants_client::transport::Message {
         subject: msg.subject.to_string(),
         reply: msg.reply.map(|reply| reply.to_string()),
         headers: headers.collect(),

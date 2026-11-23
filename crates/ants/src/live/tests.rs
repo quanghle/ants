@@ -3,13 +3,13 @@
 
 use std::time::Duration;
 
+use ants_client::entry::Kind;
 use ants_daemon::bus;
 use ants_proto::{Envelope, StatusUpdate, Uuid};
 
 use super::*;
 use crate::test_support::Server;
 use crate::test_support::live::{request, user};
-use crate::threads::thread::Kind;
 
 #[test]
 fn a_verdict_answers_only_a_pending_request_offering_it() {
@@ -241,5 +241,5 @@ async fn the_feed_opens_a_sealed_message_from_a_device_added_since_its_keyring_w
     let (_, read) = tail(bob_js, Parser::opening(keyring), None, Duration::from_hours(1), false).await;
     let entries = read.unwrap().0;
     let [entry] = entries.as_slice() else { panic!("not one message: {entries:?}") };
-    assert_eq!((entry.text.as_str(), entry.sealed), ("lunch at noon?", Some(crate::people::sealed::State::Opened)));
+    assert_eq!((entry.text.as_str(), entry.sealed), ("lunch at noon?", Some(ants_client::sealed::State::Opened)));
 }

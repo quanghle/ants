@@ -16,9 +16,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::entry::Entry;
+use crate::error::{Error, ErrorKind};
 use crate::inbox;
 use crate::parser::Parser;
-use crate::requests::{self, Ack, Error, Got, Position, REQUEST_WAIT};
+use crate::requests::{self, Ack, Got, Position, REQUEST_WAIT};
 use crate::sending::{self, Recipient, Send};
 use crate::transport::{Connect, Message, Subscription, Transport};
 
@@ -214,7 +215,7 @@ impl Client {
                 return Ok(Marked { marker, revision });
             }
         }
-        Err(Error::Conflict { what: what.to_owned() })
+        Err(Error::new(what, ErrorKind::Conflict))
     }
 
     /// The human's assistant while the grant naming it stands, read and verified now; none without an account to
@@ -319,7 +320,7 @@ impl Reader {
             let answer = replies.next(Some(REQUEST_WAIT)).await.map_err(|e| Error::transport(WHAT, e))?;
             match requests::batch_answer(answer)? {
                 Got::Nothing => self.done = true,
-                Got::End { pending, .. } => self.done = got == 0 || pending == Some(0),
+                Got::End { pending } => self.done = got == 0 || pending == Some(0),
                 Got::Relayed(seq) if past(seq) => self.done = true,
                 Got::Relayed(seq) => {
                     got += 1;

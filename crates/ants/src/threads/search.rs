@@ -13,13 +13,14 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use ants_client::entry::{Entry, Kind};
 use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{ChannelId, UserId};
 use anyhow::{Result, bail};
 use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 
-use crate::threads::thread::{self, Entry, Kind, Parser};
+use crate::threads::thread::{self, Parser};
 
 type Time = DateTime<Utc>;
 

@@ -7,16 +7,19 @@
 //! - what a human sends ([`sending`]), and the requests of its reads and writes with the reading of their answers
 //!   ([`requests`]);
 //! - those reads and writes themselves ([`client`]), over a transport of four calls that names no runtime
-//!   ([`transport`]).
+//!   ([`transport`]), and why one failed ([`error`]).
 //!
 //! Beside them, what the server of a page tells it of where to connect ([`site`]).
 //!
 //! The crate builds natively and for `wasm32-unknown-unknown`. A binding, for a browser or another platform, wraps
 //! [`client::Client`] and implements [`transport::Transport`]; nothing here names the binding's types.
+//!
+//! Each item has one path, through its module: the crate's root re-exports none.
 
 pub mod attachments;
 pub mod client;
 pub mod entry;
+pub mod error;
 pub mod inbox;
 pub mod parser;
 pub mod relayed;
@@ -26,13 +29,6 @@ pub mod sending;
 pub mod site;
 pub mod text;
 pub mod transport;
-
-pub use client::{Client, InboxFeed, MarkRead, Marked, Page, Reader, Scope, Sent, Session, StatusFeed, Window};
-pub use entry::{Entry, Kind};
-pub use parser::{Lookups, NoLookups, Parser};
-pub use requests::Error;
-pub use sending::{Recipient, ReplyTo, Send};
-pub use transport::{Connect, Message, Pending, Subscription, Transport, TransportError};
 
 #[cfg(test)]
 mod tests {

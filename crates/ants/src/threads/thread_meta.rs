@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use ants_client::entry::Entry;
 use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
     JsDomain, Mark, Reminders, STREAM, THREAD_UNDONE, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes,
@@ -25,7 +26,7 @@ use futures::StreamExt as _;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::people::sealed::{self, Keyring, Sealer, Sealing};
-use crate::threads::thread::{self, Entry, Pick};
+use crate::threads::thread::{self, Pick};
 
 /// Why titles and marks cannot be had when the hub has no bucket for them.
 pub const MISSING: &str = "there is no bucket ants_threads: `ants init` as a human creates it";
@@ -101,7 +102,7 @@ pub async fn of_or_none(
             Some(e) => marks.mark_at(thread, e.seq, e.stored_at, thread::idle_before(auto_archive, Utc::now())),
             None => marks.mark(thread, 0),
         };
-        let done = meta.done(thread).await?.filter(|d| d.holds(thread::last_reopening(entries)));
+        let done = meta.done(thread).await?.filter(|d| d.holds(ants_client::entry::last_reopening(entries)));
         anyhow::Ok(About { title, mark, done })
     };
     read.await.unwrap_or_else(|e| {
@@ -279,8 +280,9 @@ pub async fn mark_done(meta: &Meta, thread: &ThreadId, done: bool, last: u64) ->
     }
 }
 
-/// The sequence of the last message, channel post or note stored on `thread` ([`thread::Kind::reopens`]), reading from
-/// the thread's start when its id is time-ordered, else from all the stream keeps; 0 for none.
+/// The sequence of the last message, channel post or note stored on `thread`
+/// ([`ants_client::entry::Kind::reopens`]), reading from the thread's start when its id is time-ordered, else from all
+/// the stream keeps; 0 for none.
 pub async fn last_reopening(js: &jetstream::Context, thread: &ThreadId) -> Result<u64> {
     let mut last = 0;
     thread::scan(js, thread::show_start(thread, None), |entry| {

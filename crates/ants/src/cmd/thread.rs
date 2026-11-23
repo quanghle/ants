@@ -90,7 +90,7 @@ pub(crate) enum ThreadCommand {
         channel: Option<ChannelId>,
         /// Only messages of these kinds (repeat or separate with commas).
         #[arg(long = "type", value_name = "TYPE", value_parser = thread::kind_parser(), value_delimiter = ',')]
-        kinds: Vec<thread::Kind>,
+        kinds: Vec<ants_client::entry::Kind>,
         /// From when: a duration back from now (90m, 2h, 3d; 0 for everything the stream keeps), an RFC 3339 time, or
         /// a date or date and time in UTC (2026-11-14, 2026-11-14 09:30); by default 24h before --until.
         #[arg(long, value_name = "TIME", value_parser = search::parse_when)]

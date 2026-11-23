@@ -21,7 +21,10 @@ pub struct Message {
     /// The subject answers go to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<String>,
-    /// The headers, a name once per value, the values of one name in the order the message carries them.
+    /// The headers, a name once per value, each name in the case the message carries it. The values of one name are
+    /// in the order the message carries them, whatever the order of the names: a reader takes the last value of a
+    /// name as the server's ([`Message::header_value`]), so a [`Transport`] whose NATS client keeps headers in a map
+    /// hands on each name's values in the order the client read them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<(String, String)>,
     #[serde(default)]
@@ -91,6 +94,10 @@ pub enum TransportError {
 
 /// A connection speaking core NATS. Where the server is and what authenticates the connection, the transport knows
 /// from whoever made it.
+///
+/// A message it hands on, an answer or one of a subscription, carries its headers as [`Message::headers`] says:
+/// names in their own case, the values of one name in the order they came. The readers of a direct get's answers
+/// rely on it to tell the stream's headers from those a writer stored.
 pub trait Transport {
     /// Connect as `options` says, resolving once connected; a transport that reconnects on its own keeps to them.
     fn connect(&self, options: Connect) -> Pending<'_, Result<(), TransportError>>;
@@ -111,4 +118,23 @@ pub trait Subscription {
     /// The next message, waited for no longer than `wait` when given ([`TransportError::TimedOut`]);
     /// [`TransportError::Closed`] once the subscription has ended.
     fn next(&mut self, wait: Option<Duration>) -> Pending<'_, Result<Message, TransportError>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_header_s_value_is_the_last_under_its_exact_name() {
+        let message = Message::new("_INBOX.alice.x", "")
+            .header("Nats-Sequence", "1")
+            .header("nats-sequence", "2")
+            .header("Nats-Sequence", "7")
+            .header("NATS-SEQUENCE", "3");
+        assert_eq!(message.header_value("Nats-Sequence"), Some("7"), "the last, as the server adds its own last");
+        assert_eq!(message.header_value("nats-sequence"), Some("2"), "another case is another header");
+        assert_eq!(message.header_value("Nats-Subject"), None);
+        let names: Vec<&str> = message.header_names().collect();
+        assert_eq!(names, ["Nats-Sequence", "nats-sequence", "Nats-Sequence", "NATS-SEQUENCE"], "one per value");
+    }
 }

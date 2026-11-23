@@ -68,7 +68,7 @@ pub(crate) async fn run(nats: &Nats<'_>, args: InboxArgs) -> Result<()> {
 /// Prints a message of the inbox, opened as `state` says, from `acting` for its human or not.
 fn print(
     e: &Envelope,
-    state: Option<sealed::State>,
+    state: Option<ants_client::sealed::State>,
     acting: ants_proto::Acting,
     reactions: &[reactions::Reacted],
     json: bool,

@@ -4,8 +4,8 @@
 
 use std::rc::Rc;
 
+use ants_client::client::{MarkRead, Session, Window};
 use ants_client::transport::{Message, Transport as _};
-use ants_client::{MarkRead, Session, Window};
 use ants_proto::{StatusEvent, StatusUpdate};
 use ants_test_support::NatsTransport;
 use async_nats::HeaderMap;
@@ -234,7 +234,7 @@ async fn a_web_device_does_what_the_page_s_views_do_and_nothing_else() {
 
 /// The client of the web device of `alice` on `server`, connected, with its transport: the hub set up by another
 /// device of hers.
-async fn page(server: &Server, domain: Option<&JsDomain>) -> (ants_client::Client, Rc<NatsTransport>) {
+async fn page(server: &Server, domain: Option<&JsDomain>) -> (ants_client::client::Client, Rc<NatsTransport>) {
     let (team, alice) = (server.dir().join("auth"), p("alice"));
     let laptop = server.dir().join("alice.creds");
     let full = Permissions::for_user(&alice, Role::Human).with_js_domain(domain);
@@ -250,13 +250,13 @@ async fn page(server: &Server, domain: Option<&JsDomain>) -> (ants_client::Clien
     let transport = Rc::new(NatsTransport::new(&server.url, Some(&out)));
     let account = Some(account_key(&team).unwrap());
     let session = Session { human: alice, domain: domain.cloned(), account, name: "ants-web".into() };
-    let client = ants_client::Client::new(transport.clone(), session);
+    let client = ants_client::client::Client::new(transport.clone(), session);
     client.connect().await.unwrap();
     (client, transport)
 }
 
 /// Every page of `window`, read to its end: the sequence, sender and text of each entry.
-async fn read(client: &ants_client::Client, window: Window) -> Vec<(u64, String, String)> {
+async fn read(client: &ants_client::client::Client, window: Window) -> Vec<(u64, String, String)> {
     let mut reader = client.reader(window);
     let mut entries = Vec::new();
     loop {
@@ -278,10 +278,10 @@ async fn the_client_s_reads_and_writes_pass(server: &Server, domain: Option<&JsD
     let (d_client, d_js) = bus::connect(&server.url, Some(&ant), domain, &dev_a, "test").await.unwrap();
 
     // A send to an ant: the thread's owner recorded, which the ant's daemon reads, and the stream's ack.
-    let ask = |text: &str, to: Option<&UserId>| ants_client::Send {
+    let ask = |text: &str, to: Option<&UserId>| ants_client::sending::Send {
         to: to.cloned(),
         text: text.into(),
-        ..ants_client::Send::default()
+        ..ants_client::sending::Send::default()
     };
     let sent = client.send(ask("hi", Some(&dev_a))).await.unwrap();
     assert_eq!((&sent.owner_unrecorded, sent.ack.stream.as_str(), sent.ack.duplicate), (&None, STREAM, false));

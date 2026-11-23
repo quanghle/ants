@@ -12,6 +12,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ants_client::entry::{Entry, Kind};
 use ants_client::text::spelling;
 use ants_daemon::bus::relayed;
 use ants_daemon::stream::reading::{self, Reading};
@@ -27,7 +28,7 @@ use tokio::sync::mpsc;
 pub use self::screen::{HeldLogs, Screen, bracket_pastes, keyboard, warning};
 pub use self::state::{History, Link, State};
 use crate::colony;
-use crate::threads::thread::{self, Entry, Kind, Parser};
+use crate::threads::thread::{self, Parser};
 use crate::threads::thread_meta;
 use crate::tools::{self, Update};
 

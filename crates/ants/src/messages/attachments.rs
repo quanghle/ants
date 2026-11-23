@@ -7,7 +7,10 @@ use std::io::{Read as _, Write as _};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
-pub use ants_client::attachments::{Listed, listed, listed_on, size, sizes};
+use ants_client::attachments::sizes;
+pub use ants_client::attachments::{Listed, size};
+#[cfg(test)]
+pub use ants_client::attachments::{listed, listed_on};
 use ants_daemon::files;
 use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{
@@ -192,7 +195,7 @@ pub async fn open(
             "attachment {handle} is sealed with a message this device does not open ({}): {}",
             state.placeholder(),
             match state {
-                sealed::State::Forged => "it is forged",
+                ants_client::sealed::State::Forged => "it is forged",
                 _ => "sent before this device had an encryption key, or not sealed for it",
             }
         ),

@@ -1,5 +1,7 @@
 //! `ants ask`, `ants post`, `ants notes`, `ants react` and `ants answer`: what the CLI's human sends.
 
+use ants_client::attachments::listed_on;
+use ants_client::inbox::ParseError;
 use ants_daemon::bus;
 use ants_daemon::bus::relayed;
 use ants_daemon::records::{owners, reactions};
@@ -201,7 +203,7 @@ impl Target {
         let Some(pick) = self.reply_to else { return Ok((thread, None)) };
         let message = message(nats, js, pick, None, "reply to").await?;
         let id = message.id.unwrap_or_default();
-        if message.sealed.is_some_and(|s| s != sealed::State::Opened) {
+        if message.sealed.is_some_and(|s| s != ants_client::sealed::State::Opened) {
             bail!("message {id} is sealed and does not open on this device: there is nothing to quote");
         }
         let from = message.from.clone().ok_or_else(|| anyhow!("message {id} names no sender to reply to"))?;
@@ -222,7 +224,7 @@ async fn message(
     pick: thread::MessagePick,
     keyring: Option<std::sync::Arc<sealed::Keyring>>,
     what: &str,
-) -> Result<thread::Entry> {
+) -> Result<ants_client::entry::Entry> {
     let me = &nats.me;
     if !me.role.is_human() {
         bail!("the credentials of {} are an ant's, which read no message back to {what}", me.id);
@@ -379,15 +381,13 @@ fn print_sent(stored: bus::Stored, envelope: &Envelope, unaddressed: Option<&Rec
 /// The replies in `inbox` on `thread`, those with a forged sender skipped.
 fn replies_on(inbox: bus::LiveInbox, thread: ThreadId) -> impl futures::Stream<Item = Envelope> {
     inbox.filter_map(move |msg| {
-        let reply = match serde_json::from_slice::<Envelope>(&msg.payload) {
-            Ok(reply) => match reply.check_subject(&msg.subject) {
-                Ok(()) => (reply.thread_id == thread).then_some(reply),
-                Err(e) => {
-                    tracing::warn!("ignoring a reply with a forged sender: {e}");
-                    None
-                }
-            },
-            Err(_) => None,
+        let reply = match ants_client::inbox::parse(&msg.subject, &msg.payload) {
+            Ok(reply) => (reply.thread_id == thread).then_some(reply),
+            Err(ParseError::Forged(e)) => {
+                tracing::warn!("ignoring a reply with a forged sender: {e}");
+                None
+            }
+            Err(ParseError::Malformed(_)) => None,
         };
         std::future::ready(reply)
     })
@@ -408,7 +408,7 @@ async fn show_reply(
     let (opened, _) = sealed::read(reply.clone(), keyring);
     shown.add(opened.id, &opened.from, &opened.text);
     println!("{}", said(opened.from.as_str(), &opened.text));
-    print!("{}", attachments::render(&attachments::listed_on(&opened.subject(), &opened.attachments), "  "));
+    print!("{}", attachments::render(&listed_on(&opened.subject(), &opened.attachments), "  "));
     // Seen here, so `ants inbox` need not show it again. The other replies stay unread; an ant's inbox consumer is its
     // daemon's.
     if nats.me.role.is_human() {
@@ -551,7 +551,7 @@ pub(crate) async fn post(nats: &Nats<'_>, args: PostArgs) -> Result<()> {
         progress::clear();
         shown.add(reply.id, &reply.from, &reply.text);
         println!("{}", said(&by, &reply.text));
-        print!("{}", attachments::render(&attachments::listed_on(&reply.subject(), &reply.attachments), "  "));
+        print!("{}", attachments::render(&listed_on(&reply.subject(), &reply.attachments), "  "));
         Ok(())
     });
     Box::pin(with_reactions(shown_replies, &shown, changes)).await
@@ -660,7 +660,7 @@ pub(crate) async fn notes(
         let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
         let by = behalf.label(&post.from, post.on_behalf_of.as_ref()).await;
         println!("{}", said(&format!("{time} {by} ({} turns left)", post.turn_budget), &post.text));
-        print!("{}", attachments::render(&attachments::listed_on(&post.subject(), &post.attachments), "  "));
+        print!("{}", attachments::render(&listed_on(&post.subject(), &post.attachments), "  "));
     }
     Ok(())
 }
@@ -699,7 +699,7 @@ pub(crate) fn check_fits(js: &jetstream::Context, message: &impl serde::Serializ
     if max_payload == 0 || len <= max {
         return Ok(());
     }
-    let (len, max) = attachments::sizes(len, max);
+    let (len, max) = ants_client::attachments::sizes(len, max);
     bail!("the message is {len}; one message carries at most {max}: put the text in a file and {attach} instead")
 }
 

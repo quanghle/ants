@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
+use ants_client::entry::Entry;
 use ants_daemon::channel::CLOCK_SLACK;
 use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{ThreadId, UserId, Uuid, subject};
@@ -14,7 +15,7 @@ use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
 
 use super::text::time;
-use super::{Entry, LATE, LISTED, Parser, RECENT, window};
+use super::{LATE, LISTED, Parser, RECENT, window};
 use crate::connection::Nats;
 use crate::text::excerpt;
 use crate::threads::thread_meta;

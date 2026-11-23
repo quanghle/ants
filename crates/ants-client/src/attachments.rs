@@ -103,7 +103,7 @@ pub fn listed_on(subject: &str, attachments: &[Attachment]) -> Vec<Listed> {
 }
 
 /// The attachments of the message the hub stored on `subject` at `stored` ([`listed_on`]).
-pub fn stored_on(subject: &str, attachments: &[Attachment], stored: DateTime<Utc>) -> Vec<Listed> {
+pub(crate) fn stored_on(subject: &str, attachments: &[Attachment], stored: DateTime<Utc>) -> Vec<Listed> {
     let listed = listed_on(subject, attachments);
     listed.into_iter().map(|listed| Listed { stored: Some(stored), ..listed }).collect()
 }
