@@ -199,7 +199,7 @@ pub fn lines(
         (Some(state), _) => Line::styled(style::fit(&how(state, &request.ant), width), style::dim()),
         (None, Some(asking)) => Line::styled(asking.storing_what(), Style::new().fg(style::PENDING).bold()),
         (None, None) => {
-            let left = format!("expires in {}", tools::left(request.expires_at, now));
+            let left = format!("expires in {}", crate::text::left(request.expires_at, now));
             if keyed {
                 let hints = style::hints(&keys(request, writing), width.saturating_sub(left.chars().count() + 3));
                 let hints = match (group, hints.strip_suffix(DETAILS)) {

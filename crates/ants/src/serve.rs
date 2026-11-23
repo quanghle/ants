@@ -137,14 +137,14 @@ pub fn sense_link(
 const SHARED_FIRST_READ: Duration = Duration::from_secs(5);
 
 /// The machine's leaf node, at ~/.config/ants/leaf.conf, whose uplink an add order renews to carry the ant added
-/// ([`crate::add::renew_and_reconnect`]); none without a home directory.
+/// ([`crate::node::leaf::uplink::renew_and_reconnect`]); none without a home directory.
 pub fn leaf_node() -> Option<LeafNode> {
-    let conf = crate::auth::default_dir().ok()?.with_file_name("leaf.conf");
+    let conf = crate::node::leaf::default_path().ok()?;
     Some(LeafNode {
         conf,
         uplink: crate::node::leaf::read_uplink,
-        renew: crate::add::renew_and_reconnect,
-        shrink: |conf, asked, shrunk| crate::add::shrink_and_reconnect(conf, Some(asked), shrunk),
+        renew: crate::node::leaf::uplink::renew_and_reconnect,
+        shrink: |conf, asked, shrunk| crate::node::leaf::uplink::shrink_and_reconnect(conf, Some(asked), shrunk),
     })
 }
 

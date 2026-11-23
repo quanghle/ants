@@ -16,11 +16,11 @@ use ants_proto::{COLONY_BUCKET, ColonyEntry, ENROLL_INBOX, JsDomain, LeafRole, M
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::Context;
 
+use crate::auth;
 use crate::credentials::enroll;
 use crate::credentials::revoke::{self, Kind};
 use crate::node::{members, natsd, outbox};
 use crate::service::{Action, Outcome};
-use crate::{add, auth};
 
 /// How long a retirement waits for the daemon to stop the ant, its prompts in flight ending, before revoking its
 /// credentials, which cuts off what still runs.
@@ -168,13 +168,13 @@ pub fn home_note(name: &UserId, template: &str, home: &Path) -> String {
 /// Drop `ant`, whose keys `ants retire` or `ants auth revoke` revoked in the team directory `dir`, from the leaf nodes
 /// whose members the registry keeps it among ([`members::behind`]), as a retire order does. For this machine's leaf
 /// node (~/.config/ants/leaf.conf): renew its uplink credentials for the same key without what they allowed only for
-/// the ant ([`auth::shrink_leaf`]), have the node reconnect its uplink with them ([`add::shrink_and_reconnect`]), and
+/// the ant ([`auth::shrink_leaf`]), have the node reconnect its uplink with them ([`crate::node::leaf::uplink::shrink_and_reconnect`]), and
 /// once they are written drop the ant from the leaf's members ([`members::retired`]) and from what the hub, `hub` when
 /// connected, takes from the machine's outbox ([`outbox::drop_ant`]). For a leaf node whose uplink credentials are on
 /// another machine, it names what to run. What came of it, a line each; none when the ant is behind no leaf node.
 pub async fn leave_leaves(dir: &Path, ant: &UserId, hub: Option<&Context>) -> Vec<String> {
     let apply = |conf: &Path, action| natsd::apply(conf, action);
-    leave_leaves_with(dir, ant, hub, || add::leaf_node(None), apply).await
+    leave_leaves_with(dir, ant, hub, || crate::node::leaf::uplink::leaf_node(None), apply).await
 }
 
 /// [`leave_leaves`], `local` reading this machine's leaf node configuration, and `apply` reloading the node.
@@ -253,7 +253,9 @@ async fn leave_here(
         Ok(None) => format!("the uplink credentials of the leaf node {machine} allowed nothing only for {ant}"),
         Ok(Some(shrunk)) => {
             let conf = conf.to_owned();
-            let write = move || add::shrink_and_apply(&conf, Some(&jwt), &shrunk, |action| apply(&conf, action));
+            let write = move || {
+                crate::node::leaf::uplink::shrink_and_apply(&conf, Some(&jwt), &shrunk, |action| apply(&conf, action))
+            };
             match tokio::task::spawn_blocking(write).await.map_err(anyhow::Error::from).and_then(|r| r) {
                 Ok(Some(reconnected)) => {
                     format!("the uplink credentials of the leaf node {machine} renewed without {ant}: {reconnected}")

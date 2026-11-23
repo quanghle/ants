@@ -15,9 +15,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use super::TipsArgs;
-use crate::colony::{short, since};
-use crate::machines::latest_in;
+use crate::buckets::latest_in;
 use crate::text::one_line;
+use crate::text::{short, since};
 
 /// How many characters of a tip key a listing shows.
 const KEY_WIDTH: usize = 40;

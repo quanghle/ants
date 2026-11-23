@@ -27,7 +27,7 @@ const ATTEMPTS: usize = 5;
 pub async fn read(js: &jetstream::Context) -> Result<Identities> {
     let filter = subject::kv(IDENTITIES_BUCKET, "*");
     let mut identities = Identities::new();
-    for (key, payload) in crate::machines::latest_in(js, IDENTITIES_BUCKET, &filter).await? {
+    for (key, payload) in crate::buckets::latest_in(js, IDENTITIES_BUCKET, &filter).await? {
         if key == INCARNATION_KEY {
             continue;
         }
@@ -368,7 +368,7 @@ pub fn describe(faces: &Faces, ant: &UserId, now: chrono::DateTime<chrono::Utc>)
         out.push_str("no identity record yet: the avatar comes from the name until the ant's daemon starts\n");
         return out;
     };
-    let age = crate::colony::short(crate::colony::since(record.born, now));
+    let age = crate::text::short(crate::text::since(record.born, now));
     let _ = writeln!(out, "born {} ({age} ago)", record.born.format("%Y-%m-%d %H:%M:%SZ"));
     let _ = writeln!(out, "{}", seeded(record));
     let next = match stage.next_at() {

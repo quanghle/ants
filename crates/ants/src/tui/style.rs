@@ -9,7 +9,6 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, HighlightSpacing, List};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
-use crate::colony;
 use crate::live::Link;
 
 /// Something failed or was refused, or the connection is down.
@@ -22,11 +21,6 @@ pub const PENDING: Color = Color::Yellow;
 pub const CONNECTED: Color = Color::Green;
 /// A notice that reports no error, and the border of the focused block.
 pub const INFO: Color = Color::Cyan;
-
-/// `then` from `now`, such as `5s ago`.
-pub fn ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    format!("{} ago", colony::short(colony::since(then, now)))
-}
 
 pub fn dim() -> Style {
     Style::new().add_modifier(Modifier::DIM)
@@ -82,7 +76,7 @@ pub fn link(link: Link, now: DateTime<Utc>, then: &str) -> Span<'static> {
         Link::Down(since) => ("disconnected", since, "reconnecting"),
         Link::Unreached(since) => ("hub out of reach", since, "retrying"),
     };
-    let text = format!("○ {what} {}, {doing}{then}", colony::short(colony::since(since, now)));
+    let text = format!("○ {what} {}, {doing}{then}", crate::text::short(crate::text::since(since, now)));
     Span::styled(text, Style::new().fg(ERROR).bold())
 }
 

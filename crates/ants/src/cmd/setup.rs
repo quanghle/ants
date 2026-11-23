@@ -133,7 +133,7 @@ pub async fn run(connection: &Connection<'_>, args: SetupArgs) -> Result<()> {
         Some(path) => std::path::absolute(path)?,
         None => config::default_path()?,
     };
-    let leaf_conf = auth::default_dir()?.with_file_name("leaf.conf");
+    let leaf_conf = crate::node::leaf::default_path()?;
     let nats_conf = auth::default_dir()?.with_file_name("nats.conf");
     let mut report = Report { dry_run: args.dry_run, failed: 0 };
     let harness = pick_harness(&mut report, args, &config_path)?;
@@ -780,7 +780,7 @@ fn config_file(
         if let Some(harness) = harness {
             let _ = writeln!(text, "harness = {}", quoted(harness));
         }
-        if connection.nats != crate::add::DEFAULT_NATS {
+        if connection.nats != crate::cli::DEFAULT_NATS {
             let _ = writeln!(text, "nats = {}", quoted(connection.nats));
         }
         text.push_str("messenger = true\n");
@@ -1103,7 +1103,7 @@ mod tests {
         let dir = ants_test_support::scratch_dir("setup-managed-table").canonicalize().unwrap();
         let (conf, path) = (dir.join("leaf.conf"), dir.join("config.toml"));
         let mut report = Report { dry_run: false, failed: 0 };
-        let connection = Connection { nats: crate::add::DEFAULT_NATS, creds: None, js_domain: None };
+        let connection = Connection { nats: crate::cli::DEFAULT_NATS, creds: None, js_domain: None };
         let args = managed_args(Some("bin/nats-server"));
         let managed = Managed::New(conf.clone());
         assert!(config_file(&mut report, &args, Some("copilot"), &connection, &path, &managed));

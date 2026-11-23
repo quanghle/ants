@@ -12,9 +12,9 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use serde::Serialize;
 
-use crate::colony::{short, since};
-use crate::machines::latest_in;
+use crate::buckets::latest_in;
 use crate::text::one_line;
+use crate::text::{short, since};
 
 /// What a trail's name is made of.
 const NAMES: &str = "a trail's name is 1-64 of a-z, 0-9 and '-'";

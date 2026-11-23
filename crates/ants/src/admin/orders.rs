@@ -25,8 +25,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::colony::{short, since};
 use crate::connection::Nats;
+use crate::text::ago;
 use crate::{auth, machines};
 
 /// How often [`Admin::send`] looks for the outcome of the order it sent.
@@ -381,7 +381,7 @@ pub(crate) fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
                 None => o.state.as_str().to_owned(),
             };
             [
-                o.sent_at.map_or_else(|| "-".to_owned(), |at| format!("{} ago", short(since(at, now)))),
+                o.sent_at.map_or_else(|| "-".to_owned(), |at| ago(at, now)),
                 o.by(),
                 o.machine.to_string(),
                 o.op.as_ref().map_or_else(|| "-".to_owned(), AdminOp::describe),

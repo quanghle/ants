@@ -22,8 +22,9 @@ use super::command::{Conversation, GRANT};
 use super::exec::Job;
 use super::model::{Action, Data, Key, Model, To, Ui};
 use super::select::Selection;
-use super::style::{self, ago};
+use super::style;
 use super::{catchup, question};
+use crate::text::ago;
 use crate::text::excerpt;
 
 mod items;

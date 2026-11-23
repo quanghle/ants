@@ -451,7 +451,7 @@ impl Shown<'_> {
         let mut said = Vec::new();
         if !turn.calls.is_empty() {
             let took = if turn.running {
-                turn.started().map(|at| crate::colony::short(crate::colony::since(at, self.now)))
+                turn.started().map(|at| crate::text::short(crate::text::since(at, self.now)))
             } else {
                 turn.took().and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map(ants_client::text::took)
             };
@@ -504,7 +504,7 @@ impl Shown<'_> {
             }
             Some(call_status::FAILED) => (BULLET, Style::new().fg(style::ERROR), Some(format!("failed after {took}"))),
             _ if self.busy => {
-                let elapsed = crate::colony::short(crate::colony::since(call.started, self.now));
+                let elapsed = crate::text::short(crate::text::since(call.started, self.now));
                 (self.spinner(), busy(), Some(format!("running {elapsed}")))
             }
             Some(status) => (BULLET, style::dim(), Some(status.replace('_', " "))),

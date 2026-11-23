@@ -32,12 +32,13 @@ use super::home::{self, Why};
 use super::markdown;
 use super::model::{Action, Data, Key, Level, Model, Overlay};
 use super::select::{PAGE, step};
-use super::style::{self, ago};
+use super::style;
 use super::timeline::Tools;
 use super::work;
 use crate::cmd::send;
 use crate::colony;
 use crate::people::humans;
+use crate::text::ago;
 use crate::threads::summary;
 use crate::threads::thread_meta::Meta;
 

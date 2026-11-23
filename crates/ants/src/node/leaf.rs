@@ -36,6 +36,8 @@ use crate::node::conf::{quote, value};
 use crate::node::web;
 use crate::service::{Action, Outcome, Service, failure, manual};
 
+pub(crate) mod uplink;
+
 /// Where every ants process connects by default.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:4222";
 /// nats-server's own default for a remote without a port; written out so the file says where it goes.
@@ -47,6 +49,11 @@ const LEAFNODES: &str = "leafnodes {\n";
 /// How often the leaf's resolver asks the hub's for accounts newer than its own: at most that long after reconnecting,
 /// a leaf applies the pushes it missed. The hub answers with nothing while their accounts match, so this costs little.
 const RESOLVER_SYNC: &str = "10s";
+
+/// Where `ants leaf config` writes the configuration by default, `~/.config/ants/leaf.conf`.
+pub fn default_path() -> Result<PathBuf> {
+    Ok(crate::auth::default_dir()?.with_file_name("leaf.conf"))
+}
 
 /// A machine's leaf node.
 pub struct Leaf<'a> {

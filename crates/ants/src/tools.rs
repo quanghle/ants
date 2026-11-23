@@ -46,6 +46,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::connection::Nats;
+use crate::text::left;
 use ants_daemon::records::chains;
 use ants_daemon::{bus, config, permission};
 use ants_proto::{
@@ -57,7 +58,7 @@ use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::stream::{LastRawMessageErrorKind, Stream};
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 
 mod following;
 
@@ -635,16 +636,6 @@ pub async fn suggestion(stream: &Stream, seq: u64, request: &ApprovalRequest) ->
         }
     }
     Ok((approved_before + 1 >= SUGGEST_AFTER).then_some(Suggestion { rule, approved_before }))
-}
-
-/// Time left before `expires_at`, such as `4m05s`.
-pub(crate) fn left(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let secs = (expires_at - now).max(TimeDelta::zero()).num_seconds();
-    match secs {
-        0..60 => format!("{secs}s"),
-        60..3600 => format!("{}m{:02}s", secs / 60, secs % 60),
-        _ => format!("{}h{:02}m", secs / 3600, secs % 3600 / 60),
-    }
 }
 
 /// The first line of `text`, cut to `max` characters.

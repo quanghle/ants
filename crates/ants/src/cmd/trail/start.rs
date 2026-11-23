@@ -16,9 +16,9 @@ use chrono::Utc;
 use serde_json::{Value, json};
 
 use super::{RunArgs, control, follow, runs, saved};
-use crate::colony::{short, since};
 use crate::connection::Nats;
 use crate::text::one_line;
+use crate::text::{short, since};
 use crate::threads::thread;
 
 /// The trail `ants trail run` runs: a saved one, by name, or the script of a file.

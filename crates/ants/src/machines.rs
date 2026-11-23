@@ -1,16 +1,12 @@
 //! `ants machines`: the machines whose daemons recorded the ants they serve ([`MACHINES_BUCKET`]), which stay there
 //! after an ant's colony entry expired, so that an ant that is offline still has a machine.
 
-use std::collections::HashMap;
-
-use ants_client::requests::Position;
-use ants_daemon::bus::relayed::{Gets, GetsError, Got};
 use ants_proto::{ACCOUNT_HOLDER_KEY, AccountHolder, MACHINES_BUCKET, Machine, MachineRecord, UserId, subject};
-use anyhow::{Context as _, Result, bail};
-use async_nats::{StatusCode, jetstream};
-use chrono::{DateTime, Utc};
+use anyhow::{Context as _, Result};
+use async_nats::jetstream;
+use chrono::Utc;
 
-use crate::colony::{short, since};
+use crate::text::{ago, short, since};
 
 /// The machines' records, read with a human's credentials by batched direct gets of their keys
 /// ([`subject::machine_records`]), sorted by machine.
@@ -43,85 +39,11 @@ pub fn held_on(holder: &AccountHolder, now: chrono::DateTime<Utc>) -> String {
     format!("machine {}{host}, as `ants signer` there recorded {ago} ago", holder.machine)
 }
 
-/// The key and value of each live entry of [`MACHINES_BUCKET`] on `filter` (a subject under `$KV.ants_machines.`), by
-/// batched direct gets of the bucket's stream, which keeps one message per key, in the order they were last put.
+/// The key and value of each live entry of [`MACHINES_BUCKET`] on `filter` (a subject under `$KV.ants_machines.`), in
+/// the order they were last put ([`crate::buckets::latest_in`]).
 pub(crate) async fn latest(js: &jetstream::Context, filter: &str) -> Result<Vec<(String, Vec<u8>)>> {
-    latest_in(js, MACHINES_BUCKET, filter).await
+    crate::buckets::latest_in(js, MACHINES_BUCKET, filter).await
 }
-
-/// [`latest`] of `bucket`, a KV bucket, on `filter`, a subject under `$KV.<bucket>.`: each key as its writer last put
-/// it. A message a stream relayed is skipped, leaving the key as its writer put it before, when the bucket keeps it,
-/// as the trails' buckets do.
-pub(crate) async fn latest_in(js: &jetstream::Context, bucket: &str, filter: &str) -> Result<Vec<(String, Vec<u8>)>> {
-    Ok(latest_after(js, bucket, filter, 1).await?.0)
-}
-
-/// [`latest_in`], with when each entry was put.
-pub(crate) async fn latest_timed_in(
-    js: &jetstream::Context,
-    bucket: &str,
-    filter: &str,
-) -> Result<Vec<(String, Vec<u8>, DateTime<Utc>)>> {
-    Ok(timed_after(js, bucket, filter, 1).await?.0)
-}
-
-/// [`latest_in`] from the stream's sequence `from` on, with the sequence to read from next for the entries put since.
-pub(crate) async fn latest_after(
-    js: &jetstream::Context,
-    bucket: &str,
-    filter: &str,
-    from: u64,
-) -> Result<(Vec<(String, Vec<u8>)>, u64)> {
-    let (entries, seq) = timed_after(js, bucket, filter, from).await?;
-    Ok((entries.into_iter().map(|(key, value, _)| (key, value)).collect(), seq))
-}
-
-/// [`latest_after`], with when each entry was put.
-async fn timed_after(
-    js: &jetstream::Context,
-    bucket: &str,
-    filter: &str,
-    from: u64,
-) -> Result<(Vec<(String, Vec<u8>, DateTime<Utc>)>, u64)> {
-    let mut gets = Gets::open(js, &subject::kv_stream(bucket), filter, Position::from_seq(from)).await?;
-    let mut last = Entries::new();
-    loop {
-        let stored = match gets.next().await {
-            Ok(Got::End) => return Ok((in_put_order(last), gets.at().seq)),
-            Ok(Got::More) => continue,
-            Ok(Got::Relayed { subject, .. }) => {
-                tracing::warn!(%subject, "skipping an entry a stream relayed");
-                continue;
-            }
-            Ok(Got::Stored(stored)) => stored,
-            Err(GetsError::Send(e)) => {
-                return Err(e).with_context(|| format!("reading {bucket} (`ants init` creates it)"));
-            }
-            Err(GetsError::Unanswered) => bail!("no answer reading {bucket} (`ants init` creates it)"),
-            Err(GetsError::Status { status: StatusCode::NO_RESPONDERS, .. }) => {
-                bail!("no {bucket} bucket: `ants init` creates it")
-            }
-            Err(GetsError::Status { status, description }) => bail!("reading {bucket}: {status} {description:?}"),
-            Err(GetsError::Malformed(why)) => bail!(why),
-        };
-        let deleted = stored.headers.iter().any(|(name, _)| name == "KV-Operation");
-        if let Some(key) = subject::kv_key(bucket, &stored.subject) {
-            let value = (!deleted).then_some((stored.payload, stored.stored_at));
-            last.insert(key.to_owned(), (stored.seq, value));
-        }
-    }
-}
-
-/// What a writer last put under each key, by the sequence of that message, deleted keys left out, in the order put.
-fn in_put_order(last: Entries) -> Vec<(String, Vec<u8>, DateTime<Utc>)> {
-    let mut entries: Vec<_> =
-        last.into_iter().filter_map(|(key, (seq, value))| value.map(|(value, at)| (seq, key, value, at))).collect();
-    entries.sort_unstable_by_key(|(seq, ..)| *seq);
-    entries.into_iter().map(|(_, key, value, at)| (key, value, at)).collect()
-}
-
-/// Each key's last message a writer put: its sequence, and its value and when it was put, None for a delete.
-type Entries = HashMap<String, (u64, Option<(Vec<u8>, DateTime<Utc>)>)>;
 
 fn sorted(mut records: Vec<MachineRecord>) -> Vec<MachineRecord> {
     records.sort_by(|a, b| a.machine.cmp(&b.machine));
@@ -176,7 +98,7 @@ fn table(records: &[MachineRecord], now: chrono::DateTime<Utc>) -> String {
                 r.machine.to_string(),
                 if r.hostname.is_empty() { "-".to_owned() } else { r.hostname.clone() },
                 if r.version.is_empty() { "-".to_owned() } else { r.version.clone() },
-                format!("{} ago", short(since(r.updated_at, now))),
+                ago(r.updated_at, now),
                 if ants.is_empty() { "-".to_owned() } else { ants.join(",") },
             ]
         }))

@@ -20,10 +20,11 @@ use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
 use super::input::Input;
 use super::model::{Action, Key};
 use super::select::step;
-use super::style::{self, ago};
+use super::style;
 use crate::admin::orders::{self, Listed};
 use crate::admin::settings::{self, Assignment, Reading};
 use crate::live::maybe;
+use crate::text::ago;
 
 /// How often the orders to the shown ant are listed again.
 const LIST_EVERY: Duration = Duration::from_secs(10);

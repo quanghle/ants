@@ -380,7 +380,7 @@ impl Connection {
         let config = config.unwrap_or_default();
         let file = CliDefaults::load(&config).unwrap_or_default();
         Connection {
-            nats: flag("nats").or(file.nats).unwrap_or_else(|| crate::add::DEFAULT_NATS.to_owned()),
+            nats: flag("nats").or(file.nats).unwrap_or_else(|| crate::cli::DEFAULT_NATS.to_owned()),
             creds: flag("creds").map(PathBuf::from).or(file.creds),
             js_domain: flag("js-domain").and_then(|d| d.parse().ok()).or(file.js_domain),
             config,

@@ -12,9 +12,10 @@ use ratatui::widgets::Paragraph;
 use super::home::{self, Why};
 use super::model::{Action, Data, Focus, Key, Level, Model, Page};
 use super::nav;
-use super::style::{self, ago};
+use super::style;
 use super::work::dollars;
 use crate::live::Link;
+use crate::text::ago;
 
 /// The keys of the pane, after the top item.
 const KEYS: &str = "Enter open in the full view · q quit";

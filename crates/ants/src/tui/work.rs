@@ -13,7 +13,8 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use super::command::Conversation;
 use super::model::{Data, Key, Model, To, Ui};
 use super::select::{PAGE, Selection};
-use super::style::{self, ago};
+use super::style;
+use crate::text::ago;
 
 pub mod entries;
 mod facts;

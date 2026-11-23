@@ -20,8 +20,9 @@ use super::command::Conversation;
 use super::exec::Job;
 use super::model::{Action, Data, Key, Model, To, Ui};
 use super::select::{PAGE, Selection};
-use super::style::{self, ago};
+use super::style;
 use crate::channel::reads::Unread;
+use crate::text::ago;
 
 mod activity;
 mod header;

@@ -21,9 +21,10 @@ use ratatui::widgets::Paragraph;
 
 use super::model::{Data, Key, Model, To};
 use super::select::{PAGE, Selection};
-use super::style::{self, ago};
+use super::style;
 use crate::live::maybe;
 use crate::people::sealed::Keyring;
+use crate::text::ago;
 use crate::threads::search::{self, Search};
 use crate::threads::thread::Parser;
 

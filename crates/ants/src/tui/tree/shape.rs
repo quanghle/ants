@@ -231,7 +231,7 @@ impl Tree {
         let working = nodes.iter().any(|n| matches!(n.state, NodeState::Working(_)));
         let first = said.iter().map(|(.., s)| s.at).min();
         let last = if working { Some(now) } else { said.iter().map(|(.., s)| s.at).max() };
-        let elapsed = first.zip(last).map(|(first, last)| crate::colony::since(first, last));
+        let elapsed = first.zip(last).map(|(first, last)| crate::text::since(first, last));
         let via = data.live.summary(root).map(|s| s.channels.iter().map(|c| format!("#{c}")).collect());
         Self { nodes, via: via.unwrap_or_default(), ants, turns, spend, elapsed }
     }

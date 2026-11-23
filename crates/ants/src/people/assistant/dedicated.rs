@@ -23,12 +23,12 @@ use serde_json::{Map, Value, json};
 
 use super::{Local, Sealing, check, ended_sealing, put, read, replaced, risky, signing_creds};
 use crate::admin::orders::{self, Sent};
+use crate::auth;
 use crate::connection::Nats;
 use crate::credentials::{keys, revoke};
 use crate::people::humans;
 use crate::service::{Action, Outcome, Service, Services, failure, manual};
 use crate::signing::retire;
-use crate::{add, auth};
 
 /// Tool rules a dedicated assistant runs without asking: reading and searching within its own home, and thinking.
 const ALLOW: [&str; 3] = [tool_kind::READ, tool_kind::SEARCH, tool_kind::THINK];
@@ -225,7 +225,7 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
         format!("the credentials and [[ant]] of {name} are in place, but the grant is not signed: run `{again}` again")
     })?;
     replaced(&name, human, before, Some(&path));
-    if let Ok(Some((_, leaf))) = add::leaf_node(None) {
+    if let Ok(Some((_, leaf))) = crate::node::leaf::uplink::leaf_node(None) {
         println!(
             "this machine runs the leaf node of {}: a leaf node's uplink carries only an ant's rights, so the `nats` \
              of the [[ant]] of {name} should reach the hub directly",
@@ -373,7 +373,7 @@ fn entry(
     p.context.clone_from(&args.context);
     p.allow = ALLOW.iter().map(ToString::to_string).collect();
     p.allow.extend(args.allow.iter().filter(|r| !ALLOW.contains(&r.as_str())).cloned());
-    if nats != summary.nats.as_deref().unwrap_or(add::DEFAULT_NATS) {
+    if nats != summary.nats.as_deref().unwrap_or(crate::cli::DEFAULT_NATS) {
         p.nats = Some(nats.to_owned());
     }
     if js_domain.is_some() && js_domain != summary.js_domain.as_ref() {

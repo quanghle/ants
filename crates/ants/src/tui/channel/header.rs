@@ -12,7 +12,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::activity::{Event, What};
-use crate::colony;
 use crate::text::excerpt;
 use crate::tui::model::Data;
 use crate::tui::{nav, react, style};
@@ -167,7 +166,8 @@ fn pack(items: &[Vec<Span<'static>>], width: usize, rows: usize) -> Vec<Line<'st
 
 /// An event in one line: how long ago, who did it if known, and what.
 fn told(event: &Event, data: &Data, now: DateTime<Utc>) -> Line<'static> {
-    let mut spans = vec![Span::styled(format!("{} ", colony::short(colony::since(event.at, now))), style::dim())];
+    let mut spans =
+        vec![Span::styled(format!("{} ", crate::text::short(crate::text::since(event.at, now))), style::dim())];
     if let Some(by) = &event.by {
         spans.push(Span::styled(format!("{by} "), Style::new().fg(Color::Blue).bold()));
     }

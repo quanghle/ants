@@ -27,10 +27,11 @@ use super::memories;
 use super::model::{Action, Data, Key, Model, To};
 use super::select::{PAGE, Selection};
 use super::settings;
-use super::style::{self, ago};
+use super::style;
 use super::work::{self, Filter};
 use crate::live::maybe;
 use crate::queue::{self, Waiting};
+use crate::text::ago;
 
 /// How often the shown ant's queue is asked for.
 const READ_EVERY: Duration = Duration::from_secs(10);

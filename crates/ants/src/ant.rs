@@ -13,8 +13,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::admin::{orders, settings};
-use crate::colony::{self, State, short, since};
+use crate::colony::{self, State};
 use crate::connection::Nats;
+use crate::text::{short, since};
 use crate::threads::thread;
 use crate::{queue, spend};
 

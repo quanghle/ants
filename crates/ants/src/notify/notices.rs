@@ -292,7 +292,7 @@ pub(super) fn approval_notice(
         text,
         "\nthread {}, request {id}, rejected in {} unless answered\nants tools approve {id} | ants tools reject {id}",
         request.thread_id,
-        tools::left(request.expires_at, now),
+        crate::text::left(request.expires_at, now),
     );
     if let Some(suggested) = suggested {
         let _ = write!(
@@ -593,7 +593,7 @@ pub(super) fn digest_notice(
                 tools::qualified(request),
                 request.tool.title,
                 request.tool.kind,
-                tools::left(request.expires_at, now)
+                crate::text::left(request.expires_at, now)
             );
         }
         if pending.len() > DIGEST_PENDING {

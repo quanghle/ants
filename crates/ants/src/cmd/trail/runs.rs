@@ -18,8 +18,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::colony::{short, since};
-use crate::machines::{latest_in, latest_timed_in};
+use crate::buckets::{latest_in, latest_timed_in};
+use crate::text::ago;
 use crate::text::{after_colon, one_line};
 
 /// The runs `conductor` keeps, else those of every conductor, oldest first.
@@ -171,10 +171,6 @@ pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detai
 pub(crate) async fn session(js: &jetstream::Context, run: &TrailRun) -> Result<Option<TrailSession>> {
     let session = subject::kv(TRAIL_RUNS_BUCKET, trail_session_key(&run.conductor, &run.run));
     Ok(latest_in(js, TRAIL_RUNS_BUCKET, &session).await?.iter().find_map(|(k, v)| parse(k, v)))
-}
-
-fn ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    format!("{} ago", short(since(at, now)))
 }
 
 fn local(at: DateTime<Utc>) -> String {

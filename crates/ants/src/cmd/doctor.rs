@@ -44,7 +44,7 @@ pub(crate) async fn run(conn: &Connection<'_>, args: DoctorArgs) -> Result<()> {
         },
         leaf_config: match leaf_config {
             Some(path) => path,
-            None => auth::default_dir()?.with_file_name("leaf.conf"),
+            None => crate::node::leaf::default_path()?,
         },
         hub_config: auth::default_dir()?.with_file_name("nats.conf"),
         harnesses: !no_harness,

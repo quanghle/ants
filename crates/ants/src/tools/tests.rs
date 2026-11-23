@@ -325,10 +325,3 @@ fn a_query_names_a_known_ant_and_a_request_id() {
     assert!(pick("dev-a/dev-b/0").unwrap_err().contains("is not a request id"));
     assert!(pick("/0").unwrap_err().contains("invalid user id"));
 }
-
-#[test]
-fn time_left_reads_at_a_glance() {
-    let now = Utc::now();
-    let secs = |s| left(now + TimeDelta::seconds(s), now);
-    assert_eq!([secs(-5), secs(45), secs(245), secs(3 * 3600 + 120)], ["0s", "45s", "4m05s", "3h02m"]);
-}

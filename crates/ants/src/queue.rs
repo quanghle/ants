@@ -259,7 +259,7 @@ fn cells(m: &Waiting, now: DateTime<Utc>) -> Vec<String> {
         Some(channel) => format!("{} in #{channel}", m.from),
         None => m.from.to_string(),
     };
-    let age = crate::colony::short((now - m.sent_at).to_std().unwrap_or_default());
+    let age = crate::text::short(crate::text::since(m.sent_at, now));
     vec![m.id.to_string(), m.thread_id.to_string(), from, age, state(m)]
 }
 

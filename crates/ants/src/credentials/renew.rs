@@ -246,7 +246,7 @@ fn check_renewed(
 fn leaf_uplink(path: Option<&Path>) -> Option<(PathBuf, PathBuf)> {
     let path = match path {
         Some(path) => path.to_owned(),
-        None => auth::default_dir().ok()?.with_file_name("leaf.conf"),
+        None => crate::node::leaf::default_path().ok()?,
     };
     let (_, creds) = leaf::read_uplink(&path).ok()?;
     Some((path, creds))

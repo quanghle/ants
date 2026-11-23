@@ -271,7 +271,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
                     "replaced trail {}, saved by {} {} ago",
                     trail.name,
                     before.saved_by,
-                    crate::colony::short(crate::colony::since(before.saved_at, trail.saved_at))
+                    crate::text::short(crate::text::since(before.saved_at, trail.saved_at))
                 ),
                 None => println!("saved trail {}", trail.name),
             }

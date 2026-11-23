@@ -185,7 +185,7 @@ async fn an_entry_put_before_messages_a_stream_relayed_onto_its_key_is_still_rea
         h_js.create_stream(config).await.unwrap();
     }
     let latest = async |bucket: &str, filter: &str| {
-        crate::machines::latest_in(&h_js, bucket, &format!("$KV.{bucket}.{filter}")).await.unwrap()
+        crate::buckets::latest_in(&h_js, bucket, &format!("$KV.{bucket}.{filter}")).await.unwrap()
     };
 
     // A saved trail: a conductor's daemon and a human's CLI read the human's, and an ant's relay onto a name saved

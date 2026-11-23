@@ -461,7 +461,7 @@ pub fn moved_line(ant: &UserId, mark: &MovedMark, now: DateTime<Utc>) -> String 
         "{ant} was moved to another bus by {} {} ago: no daemon serves it; `ants ant unseal {ant}` undoes the move, \
          `ants auth revoke {ant}` ends it on this bus",
         mark.by,
-        crate::colony::short(crate::colony::since(mark.at, now))
+        crate::text::short(crate::text::since(mark.at, now))
     )
 }
 
