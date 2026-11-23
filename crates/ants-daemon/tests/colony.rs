@@ -1,6 +1,6 @@
 //! The colony against a real nats-server: entries appear, refresh, leave on a clean stop and expire after a crash.
 
-#![allow(clippy::disallowed_methods, reason = "tests read and hear as they please")]
+#![expect(clippy::disallowed_methods, reason = "tests read and hear as they please")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

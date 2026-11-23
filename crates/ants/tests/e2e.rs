@@ -4,7 +4,7 @@
 //! `stub-adapter` one a config file defines as a harness, it serves ACP on stdio and answers every prompt with
 //! `stub: <prompt>`.
 
-#![allow(clippy::disallowed_methods, reason = "tests read and hear as they please")]
+#![expect(clippy::disallowed_methods, reason = "tests read and hear as they please")]
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

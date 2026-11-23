@@ -2,7 +2,7 @@
 //! `ants subprocess` workers: the ants a run's steps go to are played by the test, which reads the steps the conductor
 //! sends and hands it their replies, as its inbox would. Thread notes are kept in memory.
 
-#![allow(clippy::disallowed_methods, reason = "tests read and hear as they please")]
+#![expect(clippy::disallowed_methods, reason = "tests read and hear as they please")]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
