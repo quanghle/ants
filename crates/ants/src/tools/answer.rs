@@ -29,20 +29,26 @@ pub async fn answer(
     now: DateTime<Utc>,
 ) -> Result<ApprovalDecision> {
     let (seq, request) = find(stream, id).await?;
-    answer_request(js, stream, seq, &request, verdict, &UserId::human(), now).await
+    let answer = Answer { seq, request: &request, verdict, by: &UserId::human(), now };
+    answer_request(js, stream, &answer).await
 }
 
-/// Answer `request`, stored at stream sequence `seq`, as `answer` does, as the human `by`.
-pub async fn answer_request(
-    js: &jetstream::Context,
-    stream: &Stream,
-    seq: u64,
-    request: &ApprovalRequest,
-    verdict: Verdict,
-    by: &UserId,
-    now: DateTime<Utc>,
-) -> Result<ApprovalDecision> {
-    let last = check(js, stream, seq, request, verdict, now).await?;
+/// A human's answer to a tool request.
+pub struct Answer<'a> {
+    /// The stream sequence the request is stored at.
+    pub seq: u64,
+    pub request: &'a ApprovalRequest,
+    pub verdict: Verdict,
+    /// The human answering.
+    pub by: &'a UserId,
+    /// When: an expired request takes no answer.
+    pub now: DateTime<Utc>,
+}
+
+/// Give `answer`, as `answer()` does.
+pub async fn answer_request(js: &jetstream::Context, stream: &Stream, answer: &Answer<'_>) -> Result<ApprovalDecision> {
+    let Answer { request, verdict, by, .. } = *answer;
+    let last = check(js, stream, answer).await?;
     decide(js, stream, request, request.decide(verdict).by(Some(by.clone())), last).await
 }
 
@@ -51,16 +57,10 @@ fn answered(request: &ApprovalRequest, decision: &ApprovalDecision) -> anyhow::E
     anyhow::anyhow!("request {} was already answered{by}: {}", qualified(request), spelling(decision.verdict))
 }
 
-/// Check that `request`, stored at stream sequence `seq`, is pending and offers `verdict`. Returns the sequence of the
-/// last message on its decision subject, for [`decide`].
-pub(super) async fn check(
-    js: &jetstream::Context,
-    stream: &Stream,
-    seq: u64,
-    request: &ApprovalRequest,
-    verdict: Verdict,
-    now: DateTime<Utc>,
-) -> Result<u64> {
+/// Check that the request of `answer` is pending and offers its verdict. Returns the sequence of the last message on
+/// its decision subject, for [`decide`].
+pub(super) async fn check(js: &jetstream::Context, stream: &Stream, answer: &Answer<'_>) -> Result<u64> {
+    let Answer { seq, request, verdict, now, .. } = *answer;
     let last = match state_at(js, stream, seq, request, now).await? {
         (State::Pending, last) => last,
         (State::Decided(d), _) => return Err(answered(request, &d)),

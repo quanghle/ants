@@ -135,7 +135,7 @@ pub(crate) async fn credentials(args: &AddArgs, listing: &Listing, nats: &str, s
         (None, None) => None,
     };
     if let Some(jwt) = &jwt {
-        complete(args, out, jwt, &user, store, stored, url).await?;
+        complete(args, out, jwt, &UserKey { user: &user, stored, store }, url).await?;
     }
     if let Some((ant, entry)) = &listing.entry {
         take_over_home(ant)?;
@@ -289,17 +289,19 @@ impl HostPlan {
     }
 }
 
-/// Complete the credentials at `out` with `jwt`: the seed in the OS credential store when `stored`, proven at `url`,
-/// else in the file; then remove the seed left waiting.
-async fn complete(
-    args: &AddArgs,
-    out: &Path,
-    jwt: &str,
-    user: &KeyPair,
-    store: &dyn Store,
+/// An ant's user key, and where its seed is kept.
+struct UserKey<'a> {
+    user: &'a KeyPair,
+    /// Whether the seed is, or is to be, in `store` rather than in a file.
     stored: bool,
-    url: &str,
-) -> Result<()> {
+    /// The OS credential store.
+    store: &'a dyn Store,
+}
+
+/// Complete the credentials at `out` with `jwt` and `key`: its seed in the OS credential store when stored there,
+/// proven at `url`, else in the file; then remove the seed left waiting.
+async fn complete(args: &AddArgs, out: &Path, jwt: &str, key: &UserKey<'_>, url: &str) -> Result<()> {
+    let UserKey { user, stored, store } = *key;
     let name = &args.name;
     if stored {
         match keys::write_new_stored(out, jwt, user, None, store, url).await {

@@ -16,7 +16,7 @@ use crate::completions;
 use crate::connection::{Connection, Nats};
 use crate::service::{Action, Outcome, Service, Services, failure, manual};
 use crate::tools::{
-    self, Update, answer_request, details, find, pending, qualified, row, state, suggestion, suggestion_text,
+    self, Answer, Update, answer_request, details, find, pending, qualified, row, state, suggestion, suggestion_text,
 };
 
 #[derive(Subcommand, Debug)]
@@ -192,7 +192,8 @@ pub(crate) async fn decide_request(
         }
         None => None,
     };
-    let decision = match answer_request(&js, &stream, seq, &request, verdict, &nats.me.id, Utc::now()).await {
+    let answer = Answer { seq, request: &request, verdict, by: &nats.me.id, now: Utc::now() };
+    let decision = match answer_request(&js, &stream, &answer).await {
         Ok(decision) => decision,
         Err(e) if note.is_some() => bail!("{e:#}; the note was not sent"),
         Err(e) => return Err(e),

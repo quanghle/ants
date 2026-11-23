@@ -49,7 +49,7 @@ mod text;
 
 #[cfg(test)]
 pub use answer::answer;
-pub use answer::{Suggestion, answer_request, suggestion};
+pub use answer::{Answer, Suggestion, answer_request, suggestion};
 pub use assisted::HeldAct;
 pub(crate) use assisted::{deciders, record};
 pub use following::{Update, follow, render};
