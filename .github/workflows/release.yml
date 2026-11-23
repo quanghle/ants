@@ -5,7 +5,8 @@ name: Release
 # archive holds the nats-server pinned in crates/ants/nats-server.sha256 beside ants, with its license. They
 # rerun here unless CI already passed on the same commit pushed to main. A tag with a pre-release suffix (v0.2.0-rc.1)
 # makes a pre-release. The notes come from bd (scripts/release-notes.sh): the
-# work closed and requirements added since the previous release, per the committed .bd/issues.jsonl. Run by hand
+# work closed and requirements added since the previous release, per the committed .bd/issues.jsonl; notes over
+# GitHub's 125000-character limit only count the requirements, the full notes attached as release-notes.md. Run by hand
 # (workflow_dispatch), it checks and builds only, keeping the archives and notes as workflow artifacts and showing the
 # notes in the run summary.
 on:
@@ -73,12 +74,19 @@ jobs:
           REV: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
         run: |
           scripts/release-notes.sh "$REV" > release-notes.md
-          cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
+          mkdir notes
+          if [ "$(wc -c < release-notes.md)" -le 125000 ]; then
+            cp release-notes.md notes/body.md
+          else
+            scripts/release-notes.sh --brief "$REV" > notes/body.md
+            cp release-notes.md notes/
+          fi
+          cat notes/body.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-notes
-          path: release-notes.md
+          path: notes/
           if-no-files-found: error
 
   checks:
@@ -163,6 +171,7 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-notes
+          path: notes
 
       - name: Checksums
         working-directory: dist
@@ -179,5 +188,7 @@ jobs:
         run: |
           prerelease=
           case "$TAG" in *-*) prerelease=--prerelease ;; esac
-          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "ants $TAG" \
-            --notes-file release-notes.md $prerelease
+          full=
+          [ ! -f notes/release-notes.md ] || full=notes/release-notes.md
+          gh release create "$TAG" dist/* $full --repo "$GITHUB_REPOSITORY" --verify-tag --title "ants $TAG" \
+            --notes-file notes/body.md $prerelease
