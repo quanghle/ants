@@ -40,8 +40,8 @@ use tokio::sync::{mpsc, watch};
 use super::turn::{Reply, Spent, Tokens};
 use super::{
     Cli, Harness, Info, Native, NativeSession, Open, Process, Setting, Updates, approve, based_id, context_overflow,
-    cost_base, deny_approval, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out,
-    unsupported,
+    cost_base, deny_approval, failed, is_flag, mcp_servers_json, prompt_text, quota_exhausted, rate_limited,
+    signed_out, unsupported,
 };
 use crate::harness::mcp_sign_in::Report;
 use crate::sync::MutexExt as _;
@@ -192,11 +192,12 @@ struct Shared {
 impl Shared {
     /// The error answering a failed SDK call: how the CLI exited once its output ended, else the SDK's error.
     async fn error(&self, e: &sdk::Error) -> Error {
-        if e.is_transport_failure() || *self.closed.borrow() {
-            self.process.lock().await.exited().await
-        } else {
-            failed(e)
-        }
+        if e.is_transport_failure() || *self.closed.borrow() { self.exited().await } else { failed(e) }
+    }
+
+    /// The error of the CLI's output ending.
+    async fn exited(&self) -> Error {
+        self.process.lock().await.exited().await
     }
 
     /// Wait for the CLI's output to end.
@@ -364,9 +365,7 @@ impl Native for Copilot {
                  (--available-tools, --excluded-tools)"
             );
         }
-        let foreign = |arg: &&String| {
-            FOREIGN_ARGS.iter().any(|f| arg == f || arg.strip_prefix(f).is_some_and(|rest| rest.starts_with('=')))
-        };
+        let foreign = |arg: &&String| FOREIGN_ARGS.iter().any(|flag| is_flag(arg, flag));
         if let Some(arg) = harness.args.iter().find(foreign) {
             bail!("protocol copilot-sdk runs the CLI's server, which {arg} in args would replace");
         }
@@ -380,8 +379,7 @@ impl Native for Copilot {
     async fn start(mut cli: Cli) -> Result<Self, Error> {
         let args = SessionArgs::take(&mut cli.args).map_err(failed)?;
         let mcp = args.mcp_servers().map_err(failed)?;
-        let mut process = cli.spawn(SERVER_ARGS, None)?;
-        let (stdin, stdout) = process.take_io().ok_or_else(|| failed("no stdio"))?;
+        let (process, stdin, stdout) = cli.spawn(SERVER_ARGS, None)?;
         let (closing, closed) = watch::channel(false);
         let cwd = std::env::current_dir().unwrap_or_default();
         let entra =
@@ -773,7 +771,7 @@ impl NativeSession for CopilotSession {
                 }
                 () = self.shared.ended() => None,
             };
-            let Some(event) = event else { return Err(self.shared.process.lock().await.exited().await) };
+            let Some(event) = event else { return Err(self.shared.exited().await) };
             if let Some(done) = self.translate(&mut turn, &event, &updates) {
                 return done;
             }

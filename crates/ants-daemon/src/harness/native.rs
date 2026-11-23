@@ -598,6 +598,11 @@ pub(crate) async fn approve(cli: &Cli, updates: Option<Updates>, call: ToolCallU
     }
 }
 
+/// Whether argument `arg` of a definition gives `flag`, alone or with its `=value`.
+pub(crate) fn is_flag(arg: &str, flag: &str) -> bool {
+    arg.strip_prefix(flag).is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
+}
+
 /// The text of a prompt's blocks, joined by blank lines.
 pub(crate) fn prompt_text(prompt: &[ContentBlock]) -> String {
     let texts: Vec<&str> = prompt
@@ -739,6 +744,22 @@ struct Live<S> {
     settings: Mutex<BTreeMap<&'static str, String>>,
     /// The prompts running in it.
     prompts: AtomicUsize,
+}
+
+/// A prompt running in a session, counted until it ends, however it does.
+struct Prompting<'a>(&'a AtomicUsize);
+
+impl<'a> Prompting<'a> {
+    fn new(prompts: &'a AtomicUsize) -> Self {
+        prompts.fetch_add(1, Ordering::Relaxed);
+        Self(prompts)
+    }
+}
+
+impl Drop for Prompting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// The ACP agent side of one connection.
@@ -937,9 +958,9 @@ impl<N: Native> Translator<N> {
     ) -> Result<PromptResponse, Error> {
         let live = self.live(&request.session_id)?;
         let updates = Updates { cx, session: request.session_id };
-        live.prompts.fetch_add(1, Ordering::Relaxed);
+        let prompting = Prompting::new(&live.prompts);
         let done = live.session.prompt(request.prompt, updates).await;
-        live.prompts.fetch_sub(1, Ordering::Relaxed);
+        drop(prompting);
         if let Err(e) = &done
             && e.code == ErrorCode::AUTH_REQUIRED
         {

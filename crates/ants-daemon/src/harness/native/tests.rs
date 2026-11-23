@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::ErrorCode;
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio, SessionId};
+use agent_client_protocol::{Channel, ErrorCode};
 use ants_proto::{HarnessAgent, LimitKind, StatusUpdate, ThreadId};
 use ants_test_support::{StubCli, scratch_dir};
 use serde_json::{Value, json};
@@ -341,12 +342,14 @@ async fn a_stopped_cli_has_its_grace_to_exit_then_is_killed() {
     script(&native, Some(1), &[vec![]]);
     script(&native, Some(2), &[vec!["!sleep 30".to_owned()]]);
     let cli = Cli::new(&native.harness, &[], &ModelSettings::default());
-    let mut exits = cli.spawn(["--stub"], Some(&native.dir)).unwrap();
+    let (mut exits, stdin, _stdout) = cli.spawn(["--stub"], Some(&native.dir)).unwrap();
+    drop(stdin);
     assert!(
         exits.stop(Duration::from_secs(10)).await.is_some_and(|status| status.success()),
         "at the end of its input"
     );
-    let mut sleeps = cli.spawn(["--stub"], None).unwrap();
+    let (mut sleeps, stdin, _stdout) = cli.spawn(["--stub"], None).unwrap();
+    drop(stdin);
     let started = std::time::Instant::now();
     assert_eq!(sleeps.stop(Duration::from_millis(200)).await, None, "killed");
     assert!(started.elapsed() < Duration::from_secs(10));
@@ -500,4 +503,28 @@ async fn a_native_cli_reports_its_mcp_servers_and_signs_them_in_on_the_loopback(
     let policy = PermissionPolicy::new(Allowlist::parse(&["*"]).unwrap(), None);
     let acp = Launch::new(acp, native.dir.clone(), vec![], policy, ModelSettings::default());
     assert!(crate::harness::open_mcp(&acp).await.unwrap().is_none(), "ACP reports no MCP servers");
+}
+
+#[tokio::test]
+async fn a_prompt_dropped_mid_turn_no_longer_counts_as_running() {
+    let native = Fixture::new("native-dropped-prompt", "");
+    let steering = ok(1, json!({ "name": "stub-cli", "version": "1.2.3", "steer": true }));
+    let accepted = ok(4, json!({ "accepted": true }));
+    script(&native, None, &[vec![], vec![steering], vec![opened("n1")], vec![], vec![accepted]]);
+    let cli = Cli::new(&native.harness, &[], &ModelSettings::default());
+    let translator =
+        Arc::new(Translator::<stub::Stub> { cli, native: tokio::sync::OnceCell::new(), sessions: Mutex::default() });
+    translator.clone().initialize(InitializeRequest::new(ProtocolVersion::V1)).await.unwrap();
+    let session = translator.clone().new_session(NewSessionRequest::new(native.dir.clone())).await.unwrap().session_id;
+    let said = |text: &str| vec![ContentBlock::Text(TextContent::new(text))];
+    // The translator runs a prompt in a task of the connection, which nothing drops while it is open.
+    let (ours, _client) = Channel::duplex();
+    let dropped = async |cx: ConnectionTo<Client>| {
+        let prompt = translator.clone().prompt(PromptRequest::new(session.clone(), said("hello")), cx);
+        assert!(tokio::time::timeout(Duration::from_millis(200), prompt).await.is_err(), "the turn does not end");
+        let steer = SteerRequest { session_id: session.clone(), prompt: said("more") };
+        assert!(!translator.clone().steer(steer).await?.accepted, "no prompt runs to take a steer");
+        Ok(())
+    };
+    Agent.v1().name("test").connect_with(ours, dropped).await.unwrap();
 }

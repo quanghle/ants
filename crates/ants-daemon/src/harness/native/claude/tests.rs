@@ -5,18 +5,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::ErrorCode;
-use agent_client_protocol::v1::schema::{EnvVariable, McpServer, McpServerStdio, SessionId};
-use ants_proto::{HarnessAgent, LimitKind, StatusUpdate, ThreadId};
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{EnvVariable, McpServer, McpServerStdio, SessionId, TextContent};
+use agent_client_protocol::{Agent, Channel, Client, ErrorCode};
+use ants_proto::{HarnessAgent, LimitKind, PlanStep, StatusUpdate, ThreadId};
 use ants_test_support::{StubCli, scratch_dir};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use super::*;
 use crate::harness::{
-    Harnesses, Launch, ModelSettings, PlanStep, Prompt, Readiness, Session, SignedOut, Spend, StartFailed, Steer,
-    Steering, fork, handshake, parse_definitions,
+    Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
+    parse_definitions,
 };
+use crate::limits::breaker::StartFailed;
 use crate::limits::ratelimit::Limited;
 use crate::permission::{Allowlist, PermissionPolicy};
 
@@ -623,4 +625,35 @@ fn claude_definitions_are_checked() {
         assert!(define(&format!("command = \"claude\"\nmode = {mode:?}")).unwrap().bypasses_permissions());
     }
     assert!(define("command = \"claude\"\nargs = [\"--allowedTools=Read\", \"-p\"]").is_ok());
+}
+
+#[tokio::test]
+async fn a_prompt_dropped_mid_turn_leaves_no_turn_running() {
+    let fixture = Fixture::new("claude-dropped-prompt", "");
+    fixture.script(None, &[vec![signed_in()], vec![init(), text("Hel")]]);
+    let claude = Claude::start(Cli::new(&fixture.harness, &[], &ModelSettings::default())).await.unwrap();
+    let open = Open { cwd: fixture.dir.clone(), mcp_servers: Vec::new(), sign_ins: None, skills: None };
+    let session = claude.new_session(open).await.unwrap();
+    let said = |text: &str| vec![ContentBlock::Text(TextContent::new(text))];
+    // The session is prompted without the translator, whose own task of a prompt nothing drops.
+    let (ours, _client) = Channel::duplex();
+    let dropped = async |cx: ConnectionTo<Client>| {
+        let updates = Updates { cx, session: SessionId::new("s") };
+        let mut prompt = Box::pin(session.prompt(said("hello"), updates));
+        let turn_runs = async {
+            while !session.steers.locked().open {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            done = &mut prompt => panic!("the turn has no result: {done:?}"),
+            () = turn_runs => {}
+        }
+        drop(prompt);
+        assert!(session.running.borrow().is_none(), "no turn to interrupt");
+        assert!(session.shared.asking.locked().is_none(), "nowhere to send tool requests");
+        assert!(!session.steer(said("more")).await?, "no turn takes a steer");
+        Ok(())
+    };
+    Agent.v1().name("test").connect_with(ours, dropped).await.unwrap();
 }

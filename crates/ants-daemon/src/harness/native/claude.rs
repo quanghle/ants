@@ -33,8 +33,8 @@ use super::io::{older, probe_version};
 use super::turn::{Reply, Spent, Tokens};
 use super::{
     Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates, approve,
-    based_id, context_overflow, cost_base, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited,
-    signed_out,
+    based_id, context_overflow, cost_base, deny_approval, failed, is_flag, mcp_servers_json, quota_exhausted,
+    rate_limited, signed_out,
 };
 use crate::harness::Skills;
 use crate::sync::MutexExt as _;
@@ -134,9 +134,7 @@ impl Native for Claude {
         }
         let context = harness.context.values().flat_map(|value| &value.args);
         for arg in harness.args.iter().chain(context) {
-            let own =
-                |flag: &&&str| arg == **flag || arg.strip_prefix(**flag).is_some_and(|rest| rest.starts_with('='));
-            if let Some(flag) = OWN_ARGS.iter().find(own) {
+            if let Some(flag) = OWN_ARGS.iter().find(|flag| is_flag(arg, flag)) {
                 bail!("protocol claude passes {flag} itself; remove it from the arguments");
             }
         }
@@ -241,8 +239,7 @@ impl Claude {
         for (name, value) in ENV {
             cli.env.entry((*name).to_owned()).or_insert_with(|| (*value).to_owned());
         }
-        let mut process = cli.spawn(self.args(&how, &servers, open.skills.as_ref()), Some(&open.cwd))?;
-        let (stdin, stdout) = process.take_io().ok_or_else(|| failed("no stdio"))?;
+        let (process, stdin, stdout) = cli.spawn(self.args(&how, &servers, open.skills.as_ref()), Some(&open.cwd))?;
         let (events, received) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
             cli: self.cli.clone(),
@@ -365,8 +362,7 @@ impl Shared {
             return Err(self.exited().await);
         }
         let subtype = request["subtype"].as_str().unwrap_or_default().to_owned();
-        let message = json!({ "type": "control_request", "request_id": id, "request": request });
-        if self.writer.send(&message).await.is_err() {
+        if self.writer.send(&control_request(&id, &request)).await.is_err() {
             return Err(self.exited().await);
         }
         let Ok(response) = rx.await else { return Err(self.exited().await) };
@@ -415,6 +411,11 @@ impl Shared {
             None => failed(format!("{} stopped", self.cli.name())),
         }
     }
+}
+
+/// Control request `request` as Claude Code reads it, the response coming under `id`.
+fn control_request(id: &str, request: &Value) -> Value {
+    json!({ "type": "control_request", "request_id": id, "request": request })
 }
 
 /// Read the CLI's output: responses to control requests to whoever awaits them, its own control requests answered,
@@ -489,7 +490,7 @@ impl Drop for ClaudeSession {
         runtime.spawn(async move {
             // Writing fails only once the CLI is gone.
             if running {
-                let interrupt = json!({ "type": "control_request", "request_id": "ants-close", "request": { "subtype": "interrupt" } });
+                let interrupt = control_request("ants-close", &json!({ "subtype": "interrupt" }));
                 let _ = shared.writer.send(&interrupt).await;
             }
             let _ = shared.writer.close().await;
@@ -499,6 +500,18 @@ impl Drop for ClaudeSession {
             }
             reader.inspect(tokio::task::JoinHandle::abort);
         });
+    }
+}
+
+/// Ends the session's turn when its prompt ends, however it does: its tool requests then go nowhere, it takes no more
+/// steers and no turn runs.
+struct Ended<'a>(&'a ClaudeSession);
+
+impl Drop for Ended<'_> {
+    fn drop(&mut self) {
+        self.0.shared.asking.locked().take();
+        self.0.steers.locked().open = false;
+        self.0.running.send_replace(None);
     }
 }
 
@@ -628,11 +641,8 @@ impl NativeSession for ClaudeSession {
         *self.steers.locked() = Steers::default();
         self.running.send_replace(Some(turn));
         *self.shared.asking.locked() = Some(updates.clone());
-        let done = self.turn(&mut events, &prompt, &updates).await;
-        self.shared.asking.locked().take();
-        self.steers.locked().open = false;
-        self.running.send_replace(None);
-        done
+        let _ended = Ended(self);
+        self.turn(&mut events, &prompt, &updates).await
     }
 
     async fn steer(&self, prompt: Vec<ContentBlock>) -> Result<bool, Error> {

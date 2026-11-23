@@ -57,8 +57,13 @@ impl Cli {
         command
     }
 
-    /// Start the CLI ([`Self::command`]) with `protocol_args`, working in `cwd`, else in the daemon's directory.
-    pub(crate) fn spawn<I, S>(&self, protocol_args: I, cwd: Option<&Path>) -> Result<Process, Error>
+    /// Start the CLI ([`Self::command`]) with `protocol_args`, working in `cwd`, else in the daemon's directory: the
+    /// process, and its stdin and stdout to speak to it through.
+    pub(crate) fn spawn<I, S>(
+        &self,
+        protocol_args: I,
+        cwd: Option<&Path>,
+    ) -> Result<(Process, ChildStdin, ChildStdout), Error>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
@@ -75,14 +80,11 @@ impl Cli {
             let task = tokio::spawn(drain(stderr, self.name().to_owned(), tail.clone()));
             (tail, task)
         });
-        Ok(Process {
-            name: self.name().to_owned(),
-            pid: child.id(),
-            stdin: child.stdin.take(),
-            stdout: child.stdout.take(),
-            child: Some(child),
-            stderr,
-        })
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            return Err(super::failed("no stdio"));
+        };
+        let process = Process { name: self.name().to_owned(), pid: child.id(), child: Some(child), stderr };
+        Ok((process, stdin, stdout))
     }
 }
 
@@ -151,23 +153,16 @@ async fn drain(stderr: impl AsyncRead + Unpin, name: String, tail: Arc<Mutex<Vec
     }
 }
 
-/// A running native CLI. Dropped while it runs, its stdin closes, and unless it exits within a second it is killed with
-/// what it started.
+/// A running native CLI. Dropped while it runs, it is killed with what it started unless it exits within a second, as
+/// one does whose stdin closed.
 pub(crate) struct Process {
     name: String,
     pid: Option<u32>,
     child: Option<Child>,
-    stdin: Option<ChildStdin>,
-    stdout: Option<ChildStdout>,
     stderr: Option<Stderr>,
 }
 
 impl Process {
-    /// Its stdin and stdout, to speak to it through; taken once.
-    pub(crate) fn take_io(&mut self) -> Option<(ChildStdin, ChildStdout)> {
-        Some((self.stdin.take()?, self.stdout.take()?))
-    }
-
     /// The last of what it wrote to stderr.
     pub(crate) fn stderr(&self) -> String {
         let Some((tail, _)) = &self.stderr else { return String::new() };
@@ -208,10 +203,9 @@ impl Process {
         }
     }
 
-    /// Close its stdin and wait up to `grace` for it to exit, then kill it and what it started. Its exit status, if it
-    /// exited on its own.
+    /// Wait up to `grace` for it to exit, as one does whose stdin closed, then kill it and what it started. Its exit
+    /// status, if it exited on its own.
     pub(crate) async fn stop(&mut self, grace: Duration) -> Option<ExitStatus> {
-        self.stdin = None;
         let child = self.child.as_mut()?;
         let status = tokio::time::timeout(grace, child.wait()).await.ok().and_then(Result::ok);
         if status.is_none() {
@@ -224,7 +218,6 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        self.stdin = None;
         let Some(mut child) = self.child.take() else { return };
         if matches!(child.try_wait(), Ok(Some(_))) {
             return;

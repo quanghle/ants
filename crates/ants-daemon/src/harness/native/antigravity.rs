@@ -385,8 +385,7 @@ async fn run(cli: &Cli, launch: &[String], cwd: &Path, resume: Option<&str>) -> 
     if let Some(id) = resume {
         args.extend(["--conversation".to_owned(), id.to_owned()]);
     }
-    let mut process = cli.spawn(&args, Some(cwd))?;
-    let (stdin, stdout) = process.take_io().ok_or_else(|| failed("no stdio"))?;
+    let (mut process, stdin, stdout) = cli.spawn(&args, Some(cwd))?;
     let mut lines = JsonLines::new(stdout);
     loop {
         let event = match lines.next().await {
@@ -399,9 +398,7 @@ async fn run(cli: &Cli, launch: &[String], cwd: &Path, resume: Option<&str>) -> 
                 let (tx, events) = mpsc::unbounded_channel();
                 let reader = tokio::spawn(async move {
                     while let Ok(Some(event)) = lines.next().await {
-                        if tx.send(event).is_err() {
-                            break;
-                        }
+                        super::io::forward(&tx, event);
                     }
                 });
                 return Ok((Running { process, denied: 0, writer: JsonWriter::new(stdin), events, reader }, id));

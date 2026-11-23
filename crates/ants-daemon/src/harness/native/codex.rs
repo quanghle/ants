@@ -95,13 +95,18 @@ impl Shared {
     async fn request(&self, method: &str, params: Value) -> Result<Value, Error> {
         match self.rpc.request(method, params).await {
             Ok(result) => Ok(result),
-            Err(e) if e.is_closed() => Err(self.process.lock().await.exited().await),
+            Err(e) if e.is_closed() => Err(self.exited().await),
             Err(e) if e.message.starts_with("no rollout found") => Err(failed(format!(
                 "codex {method}: {}; codex keeps a thread once a turn has started in it",
                 e.message
             ))),
             Err(e) => Err(failed(format!("codex {method}: {}", e.message))),
         }
+    }
+
+    /// The error of the server's output ending.
+    async fn exited(&self) -> Error {
+        self.process.lock().await.exited().await
     }
 
     fn notified(&self, method: &str, params: Value) {
@@ -277,14 +282,14 @@ impl Native for Codex {
 
     fn validate(harness: &Harness) -> anyhow::Result<()> {
         if let Some(mode) = harness.mode.as_deref().filter(|&mode| permissions(Some(mode)).is_none()) {
-            bail!("protocol codex takes mode workspace-write, read-only or full-access, not {mode}");
+            let modes = MODES.map(|(name, ..)| name);
+            bail!("protocol codex takes mode {}, not {mode}", crate::harness::one_of(&modes));
         }
         Ok(())
     }
 
     async fn start(cli: Cli) -> Result<Self, Error> {
-        let mut process = cli.spawn(["app-server"], None)?;
-        let (stdin, stdout) = process.take_io().ok_or_else(|| failed("no stdio"))?;
+        let (process, stdin, stdout) = cli.spawn(["app-server"], None)?;
         let (rpc, incoming) = Rpc::new(stdout, stdin, false);
         let shared = Arc::new(Shared {
             cli,
@@ -360,7 +365,7 @@ impl Codex {
             )));
         }
         if self.shared.rpc.notify("initialized", json!({})).await.is_err() {
-            return Err(self.shared.process.lock().await.exited().await);
+            return Err(self.shared.exited().await);
         }
         let account = self.shared.request("account/read", json!({ "refreshToken": false })).await?;
         if account["account"].is_null() && account["requiresOpenaiAuth"] == true {
@@ -526,7 +531,7 @@ impl NativeSession for CodexSession {
         let mut turn = Turn::new(id, updates, known);
         let done = loop {
             let Some((method, params)) = rx.recv().await else {
-                return Err(self.shared.process.lock().await.exited().await);
+                return Err(self.shared.exited().await);
             };
             if let Some(done) = turn.handle(&method, params) {
                 break done;
@@ -553,7 +558,7 @@ impl NativeSession for CodexSession {
         let params = json!({ "threadId": self.id, "expectedTurnId": turn, "input": input(&prompt) });
         match self.shared.rpc.request("turn/steer", params).await {
             Ok(_) => Ok(true),
-            Err(e) if e.is_closed() => Err(self.shared.process.lock().await.exited().await),
+            Err(e) if e.is_closed() => Err(self.shared.exited().await),
             Err(e) => {
                 tracing::debug!(error = %e, "codex refused a steer, as of a turn ending");
                 Ok(false)
