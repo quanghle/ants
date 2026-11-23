@@ -52,7 +52,7 @@ use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 use crate::bus;
-use crate::limits::caps::{Ended, Ledger, Pending, Reminder};
+use crate::limits::caps::{Ended, Ledger, Pending, Reminder, Sent, today};
 use crate::mcp::Colony;
 use crate::monitoring::status;
 use crate::people::assistant_first::AssistantFirst;
@@ -302,7 +302,7 @@ impl Escalator {
                 let summary = stuck.notice.text.clone();
                 self.climb(pending.escalation, &summary, &stuck, true).await
             }
-            Step::Again(pending) if repeats(&pending, &stuck) => {
+            Step::Again(pending) if repeats(&pending, &stuck, &today()) => {
                 tracing::info!(%thread, reason = stuck.reason.as_str(), "the thread's escalation waits; not sent again");
                 let escalated = if pending.at_owner() {
                     Escalated::Owner(stuck.notice.to.clone())
@@ -313,7 +313,7 @@ impl Escalator {
             }
             Step::Again(pending) => {
                 // Stored before it is sent, as a climb is, so a retry sends it again and a later post does not.
-                let pending = Pending { sent_as: Some(stuck.id.clone()), ..*pending };
+                let pending = Pending { sent: Some(Sent::now(&stuck.id)), ..*pending };
                 self.ledger.set_pending(&thread, Some(pending.clone())).await?;
                 if pending.at_owner() {
                     return self.to_owner(&pending.escalation, None, &stuck).await;
@@ -491,7 +491,7 @@ impl Escalator {
             summary: notice.text.chars().take(SUMMARY_CHARS).collect(),
             channel: None,
             question: notice.question.clone().map(Box::new),
-            sent_as: None,
+            sent: None,
         };
         self.ledger.set_pending(thread, Some(pending)).await?;
         if deadline.is_some() {
@@ -653,7 +653,7 @@ impl Escalator {
                     summary,
                     channel: stuck.channel.clone(),
                     question: stuck.notice.question.clone().map(Box::new),
-                    sent_as: Some(stuck.id.clone()),
+                    sent: Some(Sent::now(&stuck.id)),
                 };
                 self.ledger.set_pending(thread, Some(pending)).await?;
                 if deadline.is_some() {
@@ -679,7 +679,7 @@ impl Escalator {
                         summary,
                         channel: stuck.channel.clone(),
                         question: stuck.notice.question.clone().map(Box::new),
-                        sent_as: Some(stuck.id.clone()),
+                        sent: Some(Sent::now(&stuck.id)),
                     };
                     self.ledger.set_pending(thread, Some(pending)).await?;
                 }
