@@ -191,8 +191,8 @@ impl Tools {
     }
 }
 
-/// Ant, capabilities, harness and the agent it runs, machine, activity or a pause or signed-out harness, the fallback
-/// answering for it, and advertised role instructions.
+/// Ant, capabilities, harness and the agent it runs, machine, activity or a daemon unable to serve it, a pause or a
+/// signed-out harness, the fallback answering for it, and advertised role instructions.
 pub(super) fn describe(entries: &[&ColonyEntry]) -> String {
     let lines: Vec<String> = entries
         .iter()
@@ -206,9 +206,19 @@ pub(super) fn describe(entries: &[&ColonyEntry]) -> String {
                 (None, None, None, activity) => format!(", {}", activity.as_str()),
             };
             let activity = if e.paused.is_some() { format!("{activity}, paused") } else { activity };
+            let activity = if e.unserved.is_some() { ", unserved".to_owned() } else { activity };
             let agent = e.agent.as_ref().map_or_default(|a| format!(" running {a}"));
             let mut text = format!("{}: {capabilities} ({}{agent} on {}{activity})", e.ant, e.harness, e.machine);
-            if let Some(paused) = &e.paused {
+            if let Some(unserved) = &e.unserved {
+                let _ = write!(
+                    text,
+                    "\n  not served since {} ({}): messages to {} wait queued; serving is tried again at {}",
+                    unserved.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    unserved.error,
+                    e.ant,
+                    unserved.retry_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                );
+            } else if let Some(paused) = &e.paused {
                 let _ = write!(
                     text,
                     "\n  paused since {}: {} takes no new prompt and messages to it wait queued until a human resumes \
@@ -288,7 +298,7 @@ fn nobody_has(capability: &str, entries: &[ColonyEntry]) -> String {
 }
 
 /// Why no daemon serves `ant` now, given its colony entry, or None when one does: no entry, a stale one (see
-/// [`colony::is_live`]), a pause, a harness signed out or failing to start, or a provider limit holding its messages past `wait`
+/// [`colony::is_live`]), a daemon unable to serve it, a pause, a harness signed out or failing to start, or a provider limit holding its messages past `wait`
 /// from `now`, with no fallback answering for it.
 pub(crate) fn why_unserved(
     ant: &UserId,
@@ -305,6 +315,16 @@ pub(crate) fn why_unserved(
             "{ant} is stale in the colony: the daemon on {} last beat {} ago and may not serve {ant} now",
             entry.machine,
             ants_proto::duration::format(Duration::from_secs(ago.as_secs()))
+        ));
+    }
+    if let Some(unserved) = &entry.unserved {
+        return Some(format!(
+            "the daemon of {ant} on {} cannot serve it since {} ({}): messages to {ant} wait queued; serving is tried \
+             again at {}",
+            entry.machine,
+            unserved.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            unserved.error,
+            unserved.retry_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         ));
     }
     if let Some(paused) = &entry.paused {
@@ -366,7 +386,7 @@ fn alternatives(
     if let Some(entry) = entry {
         let sharing: Vec<&ColonyEntry> = others
             .iter()
-            .filter(|e| e.ant != *ant && colony::is_live(e, now) && e.paused.is_none())
+            .filter(|e| e.ant != *ant && colony::is_live(e, now) && e.paused.is_none() && e.unserved.is_none())
             .filter(|e| e.fallback.is_some() || e.signed_out.is_none() && e.failing.is_none() && e.limited.is_none())
             .filter(|e| entry.capabilities.iter().any(|c| colony::has_capability(e, c)))
             .take(SHOWN_NAMES)

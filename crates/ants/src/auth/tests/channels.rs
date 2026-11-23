@@ -127,6 +127,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
         signed_out: None,
         limited: None,
         failing: None,
+        unserved: None,
         fallback: None,
         memory_low: None,
         model: None,

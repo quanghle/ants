@@ -1055,6 +1055,7 @@ mod tests {
             signed_out: None,
             limited: None,
             failing: None,
+            unserved: None,
             fallback: None,
             memory_low: None,
             model: None,

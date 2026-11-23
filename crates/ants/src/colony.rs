@@ -56,11 +56,14 @@ fn chain(entry: &ColonyEntry) -> String {
     entry.escalate_to.iter().map(UserId::as_str).collect::<Vec<_>>().join(",")
 }
 
-/// What the ant is doing: `paused` while an admin or its config pauses it, `fallback` while a fallback answers for its
-/// harness, `signed-out` while its harness is,
-/// `failing` while its harness keeps failing to start, `rate-limited` or `out-of-quota` while a provider limit holds its
+/// What the ant is doing: `unserved` while its daemon cannot serve it, `paused` while an admin or its config pauses it,
+/// `fallback` while a fallback answers for its harness, `signed-out` while its harness is, `failing` while its harness
+/// keeps failing to start, `rate-limited` or `out-of-quota` while a provider limit holds its
 /// messages, else its activity.
 pub(crate) fn activity(entry: &ColonyEntry) -> &'static str {
+    if entry.unserved.is_some() {
+        return "unserved";
+    }
     if entry.paused.is_some() {
         return "paused";
     }
@@ -75,13 +78,35 @@ pub(crate) fn activity(entry: &ColonyEntry) -> &'static str {
     }
 }
 
-/// One line per ant paused (since when, by whom, and how to resume it), whose harness is signed out (since when, and how to sign it in), keeps failing to start (since
-/// when, with its last error) or is held back by a provider limit (until when), or a fallback answers for.
+/// One line per ant its daemon cannot serve (why, since when, and when it is tried again), paused (since when, by
+/// whom, and how to resume it), whose harness is signed out (since when, and how to sign it in), keeps failing to start
+/// (since when, with its last error) or is held back by a provider limit (until when), or a fallback answers for.
 pub fn held(entries: &[ColonyEntry], now: DateTime<Utc>) -> Vec<String> {
     entries
         .iter()
-        .filter_map(|e| paused_line(e, now).or_else(|| held_line(e, now)).or_else(|| fallback_line(e, now)))
+        .filter_map(|e| {
+            unserved_line(e, now)
+                .or_else(|| paused_line(e, now))
+                .or_else(|| held_line(e, now))
+                .or_else(|| fallback_line(e, now))
+        })
         .collect()
+}
+
+fn unserved_line(e: &ColonyEntry, now: DateTime<Utc>) -> Option<String> {
+    let unserved = e.unserved.as_ref()?;
+    let retry = match (unserved.retry_at - now).to_std() {
+        Ok(wait) if !wait.is_zero() => format!("tried again in {}", short(wait)),
+        _ => "tried again now".to_owned(),
+    };
+    Some(format!(
+        "{}: not served on {} for {} ({}); messages to {} wait queued, {retry}.",
+        e.ant,
+        e.machine,
+        short(since(unserved.since, now)),
+        unserved.error,
+        e.ant
+    ))
 }
 
 fn paused_line(e: &ColonyEntry, now: DateTime<Utc>) -> Option<String> {
@@ -240,7 +265,8 @@ pub const EMPTY_COLONY: &str = "no daemon beats, or the hub's JetStream memory s
 
 /// Why no daemon serves `ant` now, given its colony entry, or None when one does: no entry (with no escalation chain
 /// kept for it either, the name may be wrong; with no ant in the colony at all, the store may be full: `absent`), a
-/// stale entry, a pause, or a harness signed out or held back by a provider limit with no fallback answering for it.
+/// stale entry, a daemon that cannot serve it, a pause, or a harness signed out or held back by a provider limit with no
+/// fallback answering for it.
 pub fn unserved(ant: &UserId, entry: Option<&ColonyEntry>, absent: Absent, now: DateTime<Utc>) -> Option<String> {
     let Some(entry) = entry else {
         return Some(match absent {
@@ -259,8 +285,8 @@ pub fn unserved(ant: &UserId, entry: Option<&ColonyEntry>, absent: Absent, now: 
             short(since(entry.heartbeat_at, now))
         ));
     }
-    if let Some(paused) = paused_line(entry, now) {
-        return Some(paused);
+    if let Some(line) = unserved_line(entry, now).or_else(|| paused_line(entry, now)) {
+        return Some(line);
     }
     if entry.fallback.is_some() {
         return None;
@@ -752,6 +778,30 @@ mod tests {
         assert_eq!(activity(&limited), "paused");
         limited.paused.as_mut().unwrap().by = Some("alice".parse().unwrap());
         assert!(held(&[limited], now)[0].starts_with("dev-a: paused for 5m by alice;"));
+    }
+
+    #[test]
+    fn an_ant_its_daemon_cannot_serve_says_why_and_when_it_is_tried_again() {
+        let now = Utc::now();
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        let mut e = entry("dev-a", 600, 2, now);
+        e.paused = Some(ants_proto::Paused { since: now, by: None });
+        e.unserved = Some(ants_proto::Unserved {
+            since: now - chrono::Duration::minutes(3),
+            error: "the ANTS stream holds its 10000 consumers".to_owned(),
+            retry_at: now + chrono::Duration::seconds(40),
+        });
+        let line = "dev-a: not served on m1 for 3m (the ANTS stream holds its 10000 consumers); messages to dev-a wait \
+                    queued, tried again in 40s.";
+        assert_eq!(activity(&e), "unserved", "before its pause");
+        assert_eq!(held(std::slice::from_ref(&e), now), [line]);
+        assert_eq!(unserved(&dev_a, Some(&e), Absent::Known, now).as_deref(), Some(line));
+        e.unserved.as_mut().unwrap().retry_at = now - chrono::Duration::seconds(1);
+        assert!(held(std::slice::from_ref(&e), now)[0].ends_with("wait queued, tried again now."));
+        let table = table(std::slice::from_ref(&e), now);
+        assert_eq!(table.lines().nth(1).unwrap().split_whitespace().nth(2), Some("unserved"), "{table}");
+        let json: serde_json::Value = serde_json::from_str(&json(&e, now, &Faces::plain()).unwrap()).unwrap();
+        assert!(json["unserved"]["retry_at"].is_string() && json["unserved"]["error"].is_string(), "{json}");
     }
 
     /// Read with the human's credentials: an ant registered, one with only its escalation chain kept, one unknown.

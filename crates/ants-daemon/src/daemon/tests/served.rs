@@ -199,7 +199,8 @@ async fn a_harness_asking_an_ant_mid_prompt_gets_its_reply_through_the_daemon() 
 }
 
 /// An ant whose start fails because the `ANTS` stream holds as many consumers as it may, the error naming the stream
-/// and its limit, is served once consumers are freed, without a reload, and answers its messages.
+/// and its limit, is listed in the colony as unserved, with why and when it is tried again, until it is served once
+/// consumers are freed, without a reload, and answers its messages.
 #[tokio::test]
 async fn an_ant_started_while_the_stream_is_full_is_served_once_consumers_are_freed() {
     const ROOM: i32 = 4;
@@ -235,6 +236,10 @@ async fn an_ant_started_while_the_stream_is_full_is_served_once_consumers_are_fr
         let inbox = ants_proto::inbox_consumer(&dev_a);
         let consumer = stream.get_consumer::<jetstream::consumer::pull::Config>(&inbox).await;
         assert!(consumer.is_err(), "no inbox consumer while the stream is full");
+        let listed = colony_entry(&js, &dev_a).await.expect("listed while unserved");
+        let unserved = listed.unserved.expect("listed as unserved");
+        assert!(unserved.error.contains("the ANTS stream holds its"), "{}", unserved.error);
+        assert!(unserved.since < unserved.retry_at, "{unserved:?}");
         for name in &held {
             stream.delete_consumer(name).await.unwrap();
         }
@@ -247,6 +252,49 @@ async fn an_ant_started_while_the_stream_is_full_is_served_once_consumers_are_fr
     };
     assert_eq!(answer.thread_id, message.thread_id);
     assert!(answer.text.ends_with("echo: hello"), "{}", answer.text);
+    let listed = colony_entry(&js, &dev_a).await.expect("listed once served");
+    assert_eq!(listed.unserved, None, "served now");
     stop.request();
     timeout(WAIT, daemon).await.expect("the daemon stops").unwrap();
+}
+
+/// A daemon stopped while its ant waits to be served again takes the ant's colony entry along.
+#[tokio::test]
+async fn a_daemon_stopped_while_its_ant_waits_to_be_served_leaves_the_colony() {
+    let Some(server) = Server::start() else { return };
+    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    js.create_stream(jetstream::stream::Config { max_consumers: 1, ..crate::hub::stream_config() }).await.unwrap();
+    crate::hub::init(&js, |_| true).await.unwrap();
+    let stream = js.get_stream(ants_proto::STREAM).await.unwrap();
+    let held = jetstream::consumer::pull::Config { durable_name: Some("held".to_owned()), ..Default::default() };
+    stream.create_consumer(held).await.unwrap();
+    let [dev_a] = ants(["dev-a"]);
+    let _fake = crate::harness::fakes::install("waiting-echo", echoing());
+    let [config] = <[Config; 1]>::try_from(configs(&server.url, "waiting-echo", server.dir(), &["dev-a"]))
+        .unwrap_or_else(|_| panic!("one ant"));
+    let (stop, restarts, providers) = (Stop::default(), Restarts::default(), crate::provider::Providers::default());
+    let daemon = run_until(config, &stop, &restarts, &providers);
+    tokio::pin!(daemon);
+    let listed = async {
+        loop {
+            if colony_entry(&js, &dev_a).await.is_some_and(|e| e.unserved.is_some()) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::select! {
+        served = &mut daemon => panic!("the daemon stopped: {served:?}"),
+        listed = timeout(WAIT, listed) => listed.expect("listed as unserved"),
+    }
+    stop.request();
+    timeout(WAIT, daemon).await.expect("the daemon stops").unwrap();
+    assert_eq!(colony_entry(&js, &dev_a).await, None, "gone from the colony");
+}
+
+/// The colony entry of `ant`, if the colony lists one.
+async fn colony_entry(js: &jetstream::Context, ant: &UserId) -> Option<ants_proto::ColonyEntry> {
+    let colony = bus::ensure_colony(js, ants_proto::COLONY_TTL).await.unwrap();
+    let value = colony.get(ant.as_str()).await.unwrap()?;
+    Some(serde_json::from_slice(&value).unwrap())
 }
