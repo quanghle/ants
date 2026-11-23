@@ -140,6 +140,58 @@ async fn a_dead_letter_refused_by_a_full_store_is_buried_once_there_is_room() {
     assert_eq!(bus.unacked().await, 0);
 }
 
+/// The texts stored in the hub's stream on `subject`, oldest first: core subscribers hear refused publishes too.
+async fn stored_texts(bus: &Bus, subject: &str) -> Vec<String> {
+    let (mut from, mut texts) = (1, Vec::new());
+    while let Ok(msg) = bus.stream.get_first_raw_message_by_subject(subject, from).await {
+        from = msg.sequence + 1;
+        texts.push(serde_json::from_slice::<Envelope>(&msg.payload).unwrap().text);
+    }
+    texts
+}
+
+/// An answer whose escalation the full store refuses is kept on the machine: once the store has room, the retry
+/// escalates and replies with it, the harness not prompted again.
+#[tokio::test]
+async fn an_answer_whose_escalation_a_full_store_refuses_is_sent_once_there_is_room_unprompted_again() {
+    let Some((mut bus, _)) = start_small().await else { return };
+    bus.ledger = Arc::new(Ledger::memory(bus.dev.clone(), Caps { thread_cost: Some(1.0), ..Caps::default() }));
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let thread = ThreadId::generate();
+    let (held, seq) = bus.send_from(dev_b.clone(), &thread, "hold cost 2 stall").await;
+    let (to_dev_b, to_human) = (subject::inbox(&dev_b, &bus.dev), subject::inbox(&UserId::human(), &bus.dev));
+    let cap = "Thread cost cap reached (2.00 of 1.00 since a human's last message)";
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to start", || log.locked().prompted == 1).await;
+        fill(&bus.js).await;
+        gate.add_permits(1);
+        until("the prompt to be cancelled", || log.locked().cancelled == 1).await;
+        // Several retries of the store pass.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(stored_texts(&bus, &to_human).await.is_empty(), "no escalation stored while full");
+        assert!(stored_texts(&bus, &to_dev_b).await.is_empty(), "no reply stored while full");
+        let given = bus.answered.given(&held).await.expect("the answer is kept on the machine");
+        assert_eq!(given.limit.as_deref(), Some(cap));
+        assert_eq!(bus.consumer().await.num_redelivered, 0, "in hand, not redelivered");
+
+        free(&bus.js).await;
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().prompted, 1, "prompted once");
+    assert_eq!(stored_texts(&bus, &to_dev_b).await, [format!("partial\n\n[ants] {cap}; the prompt was cancelled.")]);
+    let escalations = stored_texts(&bus, &to_human).await;
+    assert_eq!(escalations, [format!("{cap}; needs a decision. Last message from dev-b:\nhold cost 2 stall")]);
+    assert!(bus.answered.given(&held).await.is_none(), "forgotten once the reply is recorded");
+    assert!(dead::list(&bus.stream).await.unwrap().is_empty());
+    assert_eq!(bus.unacked().await, 0);
+}
+
 /// A reply past the server's `max_payload` is cut to fit, with a line telling so, and sent once.
 #[tokio::test]
 async fn a_reply_past_max_payload_is_cut_to_fit_and_sent_once() {

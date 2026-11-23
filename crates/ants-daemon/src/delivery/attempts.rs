@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    ChannelPost, Envelope, Hold, MessageMark, NotesPost, ThreadId, UserId, Uuid, assisted_withdrawal_key, attempt_key,
-    message_mark_key,
+    ChannelPost, Envelope, Hold, MessageMark, NoReplyWhy, NotesPost, ThreadId, UserId, Uuid, assisted_withdrawal_key,
+    attempt_key, message_mark_key,
 };
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -332,15 +332,38 @@ async fn mark(
 /// Messages whose reply is stored, in the hub's stream or the machine's outbox, while their ack may not be: one file
 /// per message, named after its envelope id, holding the reply, in `<home>/answered` of the ant. Beside them, in
 /// `<home>/unsent`, the replies the hub refused to store with their attempt marker, as while its JetStream store is
-/// full: the message's retry sends that reply rather than prompting the harness again.
+/// full: the message's retry sends that reply rather than prompting the harness again. In `<home>/given`, the answers
+/// the harness gave whose reply a later step failed to build or record, as an escalation the full store refused
+/// ([`Given`]): the retry makes the reply of that answer rather than prompting again.
 pub struct Answered {
     stored: Notes,
     unsent: Notes,
+    given: Notes,
+}
+
+/// What the harness answered a message with, kept on the machine until its reply is recorded ([`Answered`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Given {
+    /// The answer, with the notices it carries, redacted and cut to fit.
+    pub text: String,
+    /// The limit or cap the prompt reached, escalated with the reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<String>,
+    /// Why the turn sends no reply, if it sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unanswered: Option<(NoReplyWhy, Option<String>)>,
+    /// The tokens the prompt spent, for a summary the reply carries.
+    #[serde(default)]
+    pub tokens: u64,
 }
 
 impl Answered {
     pub fn new(home: &Path) -> Self {
-        Self { stored: Notes::new(home, "answered"), unsent: Notes::new(home, "unsent") }
+        Self {
+            stored: Notes::new(home, "answered"),
+            unsent: Notes::new(home, "unsent"),
+            given: Notes::new(home, "given"),
+        }
     }
 
     /// Whether the reply to `request` is stored.
@@ -373,10 +396,27 @@ impl Answered {
         self.unsent.forget(request).await;
     }
 
+    /// Keep `given`, the harness's answer to `request`, on the machine, durably, as a step before its reply was
+    /// recorded failed.
+    pub async fn keep_given(&self, request: &Envelope, given: &Given) -> Result<()> {
+        self.given.add(request, given).await.context("keeping the answer on this machine")
+    }
+
+    /// The answer to `request` kept on the machine ([`Self::keep_given`]), if any.
+    pub async fn given(&self, request: &Envelope) -> Option<Given> {
+        self.given.get(request).await
+    }
+
+    /// Forget the answer to `request` kept on the machine, once its reply is recorded or the message done with.
+    pub async fn forget_given(&self, request: &Envelope) {
+        self.given.forget(request).await;
+    }
+
     /// Remove notes older than `max_age`, by when the stream no longer keeps their messages.
     pub async fn prune(&self, max_age: Duration) {
         self.stored.prune(max_age).await;
         self.unsent.prune(max_age).await;
+        self.given.prune(max_age).await;
     }
 }
 
