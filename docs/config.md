@@ -241,7 +241,9 @@ A sage has no sage of its own: neither the built-in sage, nor the built-in messe
 
 ## Worktrees
 
-With worktrees on, each thread works in its own git worktree at `<home>/worktrees/<thread>` on branch `ants/<ant>/<thread>`, created from `HEAD` on the thread's first prompt and removed once its session expires (a branch with unmerged commits is kept, and its thread is told). A workdir outside a git work tree stays shared.
+With worktrees on, each thread works in its own git worktree at `<home>/worktrees/<thread>` on branch `ants/<ant>/<thread>`, created from `HEAD` on the thread's first prompt and removed once its session expires (a branch with unmerged commits is kept, and its thread is told). A workdir outside a git work tree stays shared, as does a thread whose worktree cannot be created (warned in the daemon log).
+
+Ants of one daemon may share a repository: the daemon creates and removes the worktrees and branches of one repository one at a time across its ants, tries a failed `git worktree add` once more (after `git worktree prune`), and deletes a branch left by an add that failed twice.
 
 - Unset `worktrees` turns them on when the workdir is inside a git work tree (a `.git` directory or file in it or above it) that does not ignore it (`git check-ignore`, as for a directory in `target/`) and `max_harnesses > 1`, logging so at daemon start; otherwise threads share the workdir.
 - `worktrees = true` (`--worktrees`) turns them on; `worktrees = false` (`--no-worktrees`) keeps every thread in the shared workdir, with a warning at daemon start and in `ants doctor` when `max_harnesses > 1` and the workdir is a git work tree, as threads running at once may clobber each other's edits.

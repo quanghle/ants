@@ -10,17 +10,26 @@
 //! remote's default branch). Worktrees left behind once the option is turned off are removed the same way
 //! ([`Worktrees::left_behind`]), no new one being created. A branch holding such commits is reported
 //! ([`Worktrees::ahead`], [`Pruned::kept`]), so its work is not forgotten.
+//!
+//! Ants of one daemon may share a repository. Git does not take concurrent `git worktree add` and `prune` on one
+//! repository (one's prune removes another's half-made registration, an add fails reading another's), so the changes
+//! to a repository's worktrees and branches go one at a time across the daemon, by its git common directory. An add
+//! that fails anyway, as with another process's git racing it, is tried once more, and a branch made by an add that
+//! failed is deleted.
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-
+use std::sync::{Arc, LazyLock, Weak};
 use std::time::Duration;
 
 use ants_proto::{ThreadId, UserId};
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use tokio::sync::Mutex;
+
+use crate::sync::MutexExt as _;
 
 /// Longest a git fetch for a thread's new branch may take.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -95,6 +104,9 @@ pub struct Worktrees {
     dir: PathBuf,
     /// One change to the worktrees at a time, so a thread's worktree is never removed while it is being set up.
     changing: Mutex<()>,
+    /// One change at a time to the repository's worktrees and branches, shared by every ant of the daemon working in
+    /// it ([`repository_lock`]). Taken after [`Worktrees::changing`], never before.
+    repository: Arc<Mutex<()>>,
     /// Where a thread's new branch starts.
     base: Base,
 }
@@ -110,7 +122,14 @@ impl Worktrees {
                 let within = Path::new(lines.next().unwrap_or_default()).components().collect();
                 tracing::info!(repo = %repo.display(), "giving each thread its own git worktree");
                 let dir = home.join("worktrees");
-                Some(Self { ant: ant.clone(), repo, within, dir, changing: Mutex::new(()), base: Base::Head })
+                let common = match git(workdir, ["rev-parse", "--git-common-dir"]).await {
+                    Ok(common) => workdir.join(common.trim()),
+                    Err(e) => {
+                        tracing::warn!(error = format!("{e:#}"), "finding the repository's git directory");
+                        repo.join(".git")
+                    }
+                };
+                Some(Self::new(ant, repo, within, dir, &common))
             }
             Err(e) => {
                 tracing::warn!(
@@ -144,12 +163,17 @@ impl Worktrees {
                     worktrees = %dir.display(),
                     "removing the git worktrees left by threads once their sessions expire"
                 );
-                let within = PathBuf::new();
-                return Some(Self { ant: ant.clone(), repo, within, dir, changing: Mutex::new(()), base: Base::Head });
+                let common = repo.clone();
+                return Some(Self::new(ant, repo, PathBuf::new(), dir, &common));
             }
         }
         tracing::warn!(worktrees = %dir.display(), "keeping the thread worktrees left in no git repository");
         None
+    }
+
+    fn new(ant: &UserId, repo: PathBuf, within: PathBuf, dir: PathBuf, common: &Path) -> Self {
+        let repository = repository_lock(common);
+        Self { ant: ant.clone(), repo, within, dir, changing: Mutex::new(()), repository, base: Base::Head }
     }
 
     /// The same, starting a thread's new branch from `base`, which also tells what the commits of a branch are compared
@@ -314,6 +338,7 @@ impl Worktrees {
         {
             return Ok(());
         }
+        let _repository = self.repository.lock().await;
         git(&self.repo, ["config", &format!("branch.{branch}.description"), text]).await.map(drop)
     }
 
@@ -330,34 +355,68 @@ impl Worktrees {
         branch_name(&self.ant, thread)
     }
 
+    /// Create the thread's worktree at `path`, on its branch, made when missing. Tried again once failed, after
+    /// forgetting the worktrees whose directory is gone; a branch the add made is deleted when that fails too.
     async fn add(&self, thread: &ThreadId, path: &Path) -> Result<()> {
+        let branch = self.branch(thread);
+        let existed = self.has_branch(&branch).await;
+        // Fetched before the repository is taken, so other ants' worktrees need not wait for the remote.
+        let start = if existed { None } else { Some(self.start(thread).await) };
+        let start = start.as_deref().unwrap_or("HEAD");
+        let _repository = self.repository.lock().await;
+        let Err(first) = self.try_add(path, &branch, (!existed).then_some(start)).await else { return Ok(()) };
+        tracing::info!(%thread, error = format!("{first:#}"), "creating the thread's git worktree again");
+        let retried = async {
+            // Forget worktrees whose directory is gone, which git would not add again.
+            git(&self.repo, ["worktree", "prune"]).await?;
+            let exists = self.has_branch(&branch).await;
+            self.try_add(path, &branch, (!exists).then_some(start)).await
+        };
+        let Err(e) = retried.await else { return Ok(()) };
+        if path.exists() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+        if !existed && self.has_branch(&branch).await {
+            // Left by the failed add, the branch would otherwise outlive the thread: no worktree tells of it.
+            let _ = git(&self.repo, ["worktree", "prune"]).await;
+            if let Err(e) = git(&self.repo, ["branch", "--delete", "--force", "--quiet", &branch]).await {
+                tracing::warn!(%thread, %branch, error = format!("{e:#}"), "deleting the branch of a failed worktree");
+            }
+        }
+        Err(e)
+    }
+
+    /// One attempt at [`Worktrees::add`]: on `branch`, or a new branch started from `new` when given.
+    async fn try_add(&self, path: &Path, branch: &str, new: Option<&str>) -> Result<()> {
         // Left over from an add that failed half-way: it is no worktree, and in the way of a new one.
         if path.exists() {
             std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))?;
         }
         std::fs::create_dir_all(&self.dir).with_context(|| format!("creating {}", self.dir.display()))?;
-        // Forget worktrees whose directory is gone, which git would not add again.
-        git(&self.repo, ["worktree", "prune"]).await?;
-        let branch = self.branch(thread);
-        let exists =
-            git(&self.repo, ["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_ok();
         let path = path.as_os_str();
-        if exists {
-            git(&self.repo, [OsStr::new("worktree"), "add".as_ref(), "--quiet".as_ref(), path, branch.as_ref()])
-                .await?;
-        } else {
-            let start = self.start(thread).await;
-            // No upstream for the branch, which starting from a remote branch would otherwise set.
-            let args = ["worktree", "add", "--quiet", "--no-track", "-b", &branch].map(OsStr::new);
-            git(&self.repo, args.into_iter().chain([path, OsStr::new(&start)])).await?;
+        match new {
+            None => {
+                let args = [OsStr::new("worktree"), "add".as_ref(), "--quiet".as_ref(), path, branch.as_ref()];
+                git(&self.repo, args).await?;
+            }
+            Some(start) => {
+                // No upstream for the branch, which starting from a remote branch would otherwise set.
+                let args = ["worktree", "add", "--quiet", "--no-track", "-b", branch].map(OsStr::new);
+                git(&self.repo, args.into_iter().chain([path, OsStr::new(start)])).await?;
+            }
         }
         Ok(())
+    }
+
+    async fn has_branch(&self, branch: &str) -> bool {
+        git(&self.repo, ["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_ok()
     }
 
     /// Remove the thread's worktree, and its branch unless that holds commits not in the repository's `HEAD`: then the
     /// branch kept.
     async fn remove(&self, thread: &ThreadId) -> Result<Option<Branch>> {
         let path = self.path(thread);
+        let _repository = self.repository.lock().await;
         let removed =
             git(&self.repo, [OsStr::new("worktree"), "remove".as_ref(), "--force".as_ref(), path.as_ref()]).await;
         if let Err(e) = removed {
@@ -390,6 +449,21 @@ impl Worktrees {
         tracing::info!(%thread, worktree = %path.display(), "removed the git worktree of the expired thread");
         Ok(kept)
     }
+}
+
+/// The lock on changes to the worktrees and branches of the repository whose git common directory is `common`, the
+/// same for every ant of the daemon.
+fn repository_lock(common: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: LazyLock<std::sync::Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = LazyLock::new(Default::default);
+    let common = common.canonicalize().unwrap_or_else(|_| common.to_owned());
+    let mut locks = LOCKS.locked();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&common).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(common, Arc::downgrade(&lock));
+    lock
 }
 
 /// Whether each thread of an ant gets its own git worktree: as the config key `worktrees` says, and where it is unset
@@ -608,6 +682,49 @@ mod tests {
         std::fs::remove_file(path.join(".git")).unwrap();
         assert_eq!(worktrees.checkout(&a).await.unwrap(), path, "a directory that is no worktree");
         assert_eq!(std::fs::read_to_string(path.join("sub/file")).unwrap(), "one");
+        std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ants_sharing_a_repository_check_out_and_prune_at_once() {
+        let Some(repo) = repo("worktrees-shared-repo") else { return };
+        let root = repo.parent().unwrap();
+        let mut all = Vec::new();
+        for i in 0..24 {
+            let ant: UserId = format!("dev-{i}").parse().unwrap();
+            let workdir = if i % 2 == 0 { repo.clone() } else { repo.join("sub") };
+            all.push(Worktrees::find(&ant, &workdir, &root.join(format!("home-{i}"))).await.unwrap());
+        }
+        let threads: Vec<ThreadId> = (0..3).map(|j| thread(&format!("t{j}"))).collect();
+        let checkouts = all.iter().flat_map(|w| threads.iter().map(move |t| w.checkout(t)));
+        for dir in futures::future::join_all(checkouts).await {
+            let dir = dir.unwrap();
+            assert!(dir.join("file").is_file() || dir.join("sub/file").is_file(), "{}", dir.display());
+        }
+        let branches = run(&repo, &["branch", "--list", "ants/*", "--format=%(refname:short)"]);
+        assert_eq!(branches.lines().count(), 72);
+        let pruned = futures::future::join_all(all.iter().map(|w| w.prune(async |_: &ThreadId| true))).await;
+        assert!(pruned.iter().all(|p| *p == Pruned { removed: 3, kept: Vec::new() }), "{pruned:?}");
+        assert_eq!(run(&repo, &["branch", "--list", "ants/*"]), "");
+        assert_eq!(run(&repo, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_checkout_leaves_no_branch() {
+        let Some(repo) = repo("worktrees-failed") else { return };
+        let home = repo.parent().unwrap().join("home");
+        let hook = repo.join(".git/hooks/post-checkout");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let worktrees = Worktrees::find(&ant(), &repo, &home).await.unwrap();
+        assert!(worktrees.checkout(&thread("a")).await.is_err());
+        assert_eq!(run(&repo, &["branch", "--list", "ants/*"]), "", "the branch the add made is gone");
+        assert!(!home.join("worktrees/a").exists());
         std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
     }
 
