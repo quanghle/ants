@@ -221,12 +221,7 @@ impl Inbox<'_> {
         }
 
         drop(messages);
-        // Hand waiting messages back at once rather than after the ack wait, oldest first.
-        let mut waiting: Vec<_> = threads.into_values().flat_map(|t| t.waiting).map(|(_, msg)| msg).collect();
-        waiting.sort_by_key(stream_seq);
-        for msg in &waiting {
-            bus::nak(msg, None).await;
-        }
+        hand_back_waiting(threads).await;
         if !running.is_empty() {
             tracing::info!(prompts = running.len(), "finishing prompts in flight; Ctrl-C again stops now");
             let drain = async { while running.next().await.is_some() {} };
@@ -539,4 +534,13 @@ fn queue_request(msg: &async_nats::Message) -> Option<QueueRequest> {
     }
     tracing::info!(by = %request.by, "listing the messages in hand");
     Some(request)
+}
+
+/// Hand the messages waiting on `threads` back at once rather than after the ack wait, oldest first.
+async fn hand_back_waiting(threads: HashMap<ThreadId, Thread>) {
+    let mut waiting: Vec<_> = threads.into_values().flat_map(|t| t.waiting).map(|(_, msg)| msg).collect();
+    waiting.sort_by_key(stream_seq);
+    for msg in &waiting {
+        bus::nak(msg, None).await;
+    }
 }
