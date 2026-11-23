@@ -28,7 +28,7 @@ mod route;
 pub use bar::{Bar, Draft, Edited, Note, Tone};
 pub use drafts::{Conversation, Drafts};
 pub use history::{FILE as HISTORY_FILE, History};
-pub use parse::{COMMANDS, Command, Dead, Goto, Notify, OnThread, Slash, Trail, parse};
+pub use parse::{COMMANDS, Command, Dead, Goto, Needs, Notify, OnThread, Row, Slash, Trail, parse};
 pub use route::Route;
 
 /// A paste of more bytes than this is staged as a text file rather than put in the bar.
@@ -36,6 +36,34 @@ const PASTE_ATTACH: usize = 64 * 1024;
 
 /// What `/grant` without a text sends the stuck ant.
 pub const GRANT: &str = "Carry on: fresh turns granted.";
+
+/// Why a slash command cannot act on the view shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unmet {
+    /// As the bar's status line tells it once the command is run.
+    told: String,
+    /// As the palette says it beside the command it dims, where it words it otherwise.
+    listed: Option<String>,
+}
+
+impl Unmet {
+    /// As the palette says it.
+    pub fn listed(self) -> String {
+        self.listed.unwrap_or(self.told)
+    }
+}
+
+impl From<String> for Unmet {
+    fn from(told: String) -> Self {
+        Self { told, listed: None }
+    }
+}
+
+impl From<Unmet> for String {
+    fn from(unmet: Unmet) -> Self {
+        unmet.told
+    }
+}
 
 /// Send the note `text` on `request` to its ant on its thread, as any message of the human's there.
 pub fn note_job(request: &ApprovalRequest, text: &str) -> Job {
@@ -208,10 +236,10 @@ impl Model {
         let run = |job| Ok(Some(Action::Run(job, String::new())));
         match command {
             Command::Ask { text, .. } | Command::Post { text, .. } | Command::Say(text) => run(self.job(route, text)?),
-            Command::Later(text) => match self.job(route, text)? {
-                job @ (Job::Reply { .. } | Job::Post { thread: Some(_), .. }) => run(Job::Later(Box::new(job))),
-                _ => Err("/later replies on an open thread: open one first".to_owned()),
-            },
+            Command::Later(text) => {
+                self.thread_open()?;
+                run(Job::Later(Box::new(self.job(route, text)?)))
+            }
             Command::Slash(_) => Err("nothing to send".to_owned()),
         }
     }
@@ -229,11 +257,7 @@ impl Model {
                 run(Job::Grant { thread: self.target()?, text: text.unwrap_or_else(|| GRANT.to_owned()) })
             }
             Slash::Cancel => {
-                let thread = self.target()?;
-                let ants = self.busy(&thread);
-                if ants.is_empty() {
-                    return Err(format!("no ant is at work on thread {thread}"));
-                }
+                let (thread, ants) = self.at_work()?;
                 run(Job::Cancel { thread, ants })
             }
             Slash::Answer(text) => run(self.answering(&text, now)?),
@@ -296,10 +320,7 @@ impl Model {
                 source.check().map_err(|e| format!("{e:#}"))?;
                 run(Job::Forward { to, source, note })
             }
-            Slash::Save(to) => {
-                let listed = self.attachment().ok_or("no attachment on the selected message")?;
-                run(Job::Save(Box::new(listed), to.map(|to| attach::expand(&to))))
-            }
+            Slash::Save(to) => run(Job::Save(Box::new(self.marked()?), to.map(|to| attach::expand(&to)))),
             Slash::Add { name, machine, settings, wait } => run(Job::Add { name, machine, settings, wait }),
             Slash::Clone { src, new, machine, settings, wait } => run(Job::Clone { src, new, machine, settings, wait }),
             Slash::Retire(ant) => run(Job::Retire { ant }),
@@ -455,32 +476,65 @@ impl Model {
         thread.ok_or_else(|| "no thread open or selected".to_owned())
     }
 
-    /// Why the slash command `name`, without the arguments naming another target, cannot act here at `now`, if it
-    /// cannot.
-    pub(super) fn unfit(&self, name: &str, now: DateTime<Utc>) -> Option<String> {
-        let target = self.target();
-        match name {
-            "approve" | "reject" => match target {
-                Ok(thread) if !self.data.live.approvals.iter().any(|r| r.thread_id == thread) => {
-                    Some("no tool request waits on the thread".to_owned())
-                }
-                found => found.err(),
-            },
-            "cancel" => match target {
-                Ok(thread) if self.busy(&thread).is_empty() => Some("no ant is at work on the thread".to_owned()),
-                found => found.err(),
-            },
-            "later" => (!matches!(self.page(), Page::Thread(_))).then(|| "no thread open".to_owned()),
-            "answer" => self.question(now).err(),
-            "forward" if matches!(self.page(), Page::Thread(page) if page.chosen().is_some()) => None,
-            "save" => self.attachment().is_none().then(|| "no attachment on the selected message".to_owned()),
-            "dead" => self.letter(None).err(),
-            "grant" | "done" | "undone" | "pin" | "unpin" | "mute" | "unmute" | "snooze" | "unsnooze" | "remind"
-            | "unremind" | "archive" | "unarchive" | "title" | "notes" | "react" | "tldr" | "tree" | "forward" => {
-                target.err()
-            }
-            _ => None,
+    /// Why what a slash command `needs`, given no argument naming another target, is not here at `now`, if it is not:
+    /// what the command taking it is refused with, and what the palette dims it with.
+    pub(super) fn need(&self, needs: Needs, now: DateTime<Utc>) -> Result<(), Unmet> {
+        match needs {
+            Needs::Nothing => {}
+            Needs::Thread => _ = self.target()?,
+            Needs::Request => _ = self.request()?,
+            Needs::BusyAnt => _ = self.at_work()?,
+            Needs::OpenThread => self.thread_open()?,
+            Needs::Question => _ = self.question(now)?,
+            Needs::Attachment => _ = self.marked()?,
+            Needs::Letter => _ = self.letter(None)?,
         }
+        Ok(())
+    }
+
+    /// Why the slash command `name`, without the arguments naming another target, cannot act here at `now`, if it
+    /// cannot, as the palette says it.
+    pub(super) fn unfit(&self, name: &str, now: DateTime<Utc>) -> Option<String> {
+        let row = COMMANDS.iter().find(|row| row.name == name)?;
+        self.need(row.needs, now).err().map(Unmet::listed)
+    }
+
+    /// The first tool request waiting on the thread slash commands act on.
+    fn request(&self) -> Result<&ApprovalRequest, Unmet> {
+        let thread = self.target()?;
+        self.data.live.approvals.iter().find(|r| r.thread_id == thread).ok_or_else(|| Unmet {
+            told: format!("no tool request waits on thread {thread}"),
+            listed: Some("no tool request waits on the thread".to_owned()),
+        })
+    }
+
+    /// The thread slash commands act on, with the ants at work on it now.
+    fn at_work(&self) -> Result<(ThreadId, Vec<UserId>), Unmet> {
+        let thread = self.target()?;
+        let ants = self.busy(&thread);
+        if ants.is_empty() {
+            return Err(Unmet {
+                told: format!("no ant is at work on thread {thread}"),
+                listed: Some("no ant is at work on the thread".to_owned()),
+            });
+        }
+        Ok((thread, ants))
+    }
+
+    /// Whether a thread is open, as `/later` needs to reply on it.
+    fn thread_open(&self) -> Result<(), Unmet> {
+        match self.page() {
+            Page::Thread(_) => Ok(()),
+            _ => Err(Unmet {
+                told: "/later replies on an open thread: open one first".to_owned(),
+                listed: Some("no thread open".to_owned()),
+            }),
+        }
+    }
+
+    /// The marked attachment of the message selected in the view.
+    fn marked(&self) -> Result<attachments::Listed, Unmet> {
+        self.attachment().ok_or_else(|| "no attachment on the selected message".to_owned().into())
     }
 
     /// The questions `/answer` answers at `now`, the message asking them and its thread: on an open thread, those of
@@ -513,11 +567,7 @@ impl Model {
                 let query = tools::Query::parse(id).map_err(|e| format!("{e:#}"))?;
                 tools::select(approvals.clone(), &query).map_err(|e| format!("{e:#}"))?
             }
-            None => {
-                let thread = self.target()?;
-                let request = approvals.iter().find(|r| r.thread_id == thread);
-                request.cloned().ok_or_else(|| format!("no tool request waits on thread {thread}"))?
-            }
+            None => self.request()?.clone(),
         };
         match live::refusal(&request, &tools::State::Pending, verdict) {
             Some(why) => Err(why),
@@ -1265,5 +1315,89 @@ mod tests {
         let saved = m.command(save, at(0)).unwrap();
         let to = std::env::home_dir().map(|home| home.join("logs"));
         assert_eq!(saved, Some(Action::Run(Job::Save(Box::new(sent.attachments[0].clone()), to), String::new())));
+    }
+
+    /// A model showing the thread open with `entries` read.
+    fn reading(thread: &ThreadId, entries: Vec<crate::threads::thread::Entry>) -> Model {
+        let mut m = model();
+        m.stored(entries.clone(), at(1));
+        let mut page = thread::Page::new(thread.clone());
+        page.history.loaded(thread, Ok(entries)).unwrap();
+        m.pages.push(Page::Thread(page));
+        m
+    }
+
+    /// Views differing in what slash commands need of them: each need but [`Needs::Nothing`] is met in one and not
+    /// in another.
+    fn views() -> Vec<(&'static str, Model)> {
+        let thread = ThreadId::generate();
+        let ask = message(1, &thread, "alice", "dev-a", "deploy");
+        let mut selected = model();
+        selected.select(nav::Item::Work(None));
+        selected.stored(vec![ask.clone()], at(1));
+        let mut requested = model();
+        let push = request("dev-a", "git push", vec![Verdict::AllowOnce, Verdict::Reject]);
+        requested.take(live::Event::Approval(tools::Update::Pending(push)), at(1));
+        let mut busy = reading(&thread, vec![ask.clone()]);
+        let working = StatusEvent::new(user("dev-a"), thread.clone(), StatusUpdate::Thought { text: "hm".into() });
+        busy.take(live::Event::Status(working), at(2));
+        let mut asked = message(2, &thread, "dev-a", "alice", "Ship it?");
+        let options = ["yes".to_owned(), "no".to_owned()];
+        asked.question = Some(ants_proto::Question::new("Ship it?", &options, true).unwrap().into());
+        let mut sent = message(2, &thread, "dev-a", "alice", "the log");
+        let envelope = ants_proto::Envelope::new(user("dev-a"), user("alice"), "x");
+        let log = ants_daemon::files::reference("build.log", "text/plain", b"ok").unwrap();
+        sent.attachments = attachments::listed(&[log], |id| envelope.attachment_handle(id));
+        let mut dead = message(2, &thread, "alice", "dev-a", "deploy");
+        (dead.kind, dead.id) = (crate::threads::thread::Kind::Dead, None);
+        vec![
+            ("nothing read", model()),
+            ("a thread selected", selected),
+            ("a thread open", reading(&thread, vec![ask.clone()])),
+            ("a tool request selected", requested),
+            ("an ant at work on the thread open", busy),
+            ("a question on the thread open", reading(&thread, vec![ask.clone(), asked])),
+            ("an attachment on the thread open", reading(&thread, vec![ask.clone(), sent])),
+            ("a dead letter on the thread open", reading(&thread, vec![ask, dead])),
+        ]
+    }
+
+    #[test]
+    fn every_listed_command_is_refused_for_want_of_what_its_row_says_it_needs_and_of_nothing_else() {
+        const NEEDS: [Needs; 8] = [
+            Needs::Nothing,
+            Needs::Thread,
+            Needs::Request,
+            Needs::BusyAnt,
+            Needs::OpenThread,
+            Needs::Question,
+            Needs::Attachment,
+            Needs::Letter,
+        ];
+        let now = at(9);
+        let told = |m: &Model, needs| m.need(needs, now).err().map(String::from);
+        for needs in NEEDS.into_iter().filter(|needs| *needs != Needs::Nothing) {
+            let met: Vec<bool> = views().iter().map(|(_, m)| told(m, needs).is_none()).collect();
+            assert!(met.contains(&true) && met.contains(&false), "{needs:?} met in a view and not in another: {met:?}");
+        }
+        let lines = COMMANDS.iter().flat_map(|row| row.args.split(" | ").map(move |form| (row, form)));
+        for (row, line) in lines.map(|(row, form)| (row, parse::tests::bare(row.name, form))) {
+            for (view, mut m) in views() {
+                let unmet = told(&m, row.needs);
+                let wants: Vec<String> = NEEDS.into_iter().filter_map(|needs| told(&m, needs)).collect();
+                m.ui.bar.focused = true;
+                m.ui.bar.set_text(&line);
+                m.submit(line.clone(), now);
+                let refused = m.ui.bar.status.take().filter(|s| s.tone == Tone::Error).map(|s| s.text);
+                match unmet {
+                    Some(why) => assert_eq!(refused, Some(why), "{line} with {view}: its row needs {:?}", row.needs),
+                    None => assert!(
+                        refused.as_ref().is_none_or(|why| !wants.contains(why)),
+                        "{line} with {view}: its row needs {:?}, met there, yet it is refused: {refused:?}",
+                        row.needs
+                    ),
+                }
+            }
+        }
     }
 }

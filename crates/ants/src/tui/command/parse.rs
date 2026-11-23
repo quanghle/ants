@@ -13,62 +13,120 @@ use crate::cmd::trail::runs::Pick;
 use crate::cmd::trail::{LimitArgs, Shown, TipsArgs};
 use crate::threads::thread_meta::Marking;
 
-/// The slash commands: name, arguments and what each does, as the list shows them. A command of several forms lists
-/// them between ` | `.
-pub const COMMANDS: &[(&str, &str, &str)] = &[
-    ("approve", "[ID] [--always]", "allow a tool request, once or for the session"),
-    ("reject", "[ID]", "refuse a tool request"),
-    ("grant", "[TEXT]", "fresh turns for the stuck ant"),
-    ("cancel", "", "stop the prompt an ant runs"),
-    ("later", "TEXT", "reply without interrupting the ant at work"),
-    ("answer", "PICK...", "answer the questions asked: N, N,M or TEXT, one each"),
-    ("done", "", "mark the thread done"),
-    ("undone", "", "mark the thread not done"),
-    ("pin", "", "pin the thread"),
-    ("unpin", "", "unpin the thread"),
-    ("mute", "[DURATION]", "hold back the thread's notifications"),
-    ("unmute", "", "notify of the thread again"),
-    (
+/// A slash command as the list shows it, with what it needs to act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Row {
+    pub name: &'static str,
+    /// Its arguments: those of a command of several forms, between ` | `.
+    pub args: &'static str,
+    /// What it does.
+    pub about: &'static str,
+    /// What it needs of the view shown, given no argument naming another target.
+    pub needs: Needs,
+}
+
+/// What a slash command needs of the view shown to act there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Needs {
+    Nothing,
+    /// A thread open or selected.
+    Thread,
+    /// A tool request waiting on the thread open or selected.
+    Request,
+    /// An ant at work on the thread open or selected.
+    BusyAnt,
+    /// A thread open, not only selected.
+    OpenThread,
+    /// A question to the human waiting for an answer on the thread open or selected.
+    Question,
+    /// An attachment marked on the message selected.
+    Attachment,
+    /// A dead letter selected, or on the thread open or selected.
+    Letter,
+}
+
+const fn row(name: &'static str, args: &'static str, about: &'static str, needs: Needs) -> Row {
+    Row { name, args, about, needs }
+}
+
+/// The slash commands.
+pub const COMMANDS: &[Row] = &[
+    row("approve", "[ID] [--always]", "allow a tool request, once or for the session", Needs::Request),
+    row("reject", "[ID]", "refuse a tool request", Needs::Request),
+    row("grant", "[TEXT]", "fresh turns for the stuck ant", Needs::Thread),
+    row("cancel", "", "stop the prompt an ant runs", Needs::BusyAnt),
+    row("later", "TEXT", "reply without interrupting the ant at work", Needs::OpenThread),
+    row("answer", "PICK...", "answer the questions asked: N, N,M or TEXT, one each", Needs::Question),
+    row("done", "", "mark the thread done", Needs::Thread),
+    row("undone", "", "mark the thread not done", Needs::Thread),
+    row("pin", "", "pin the thread", Needs::Thread),
+    row("unpin", "", "unpin the thread", Needs::Thread),
+    row("mute", "[DURATION]", "hold back the thread's notifications", Needs::Thread),
+    row("unmute", "", "notify of the thread again", Needs::Thread),
+    row(
         "notify",
         "all|humans|mentions | snooze DURATION | resume | status",
         "which unread posts of the channel count; snooze or resume push notifications, or show what holds them",
+        Needs::Nothing,
     ),
-    ("snooze", "[DURATION]", "keep the thread off home, 1h unless given"),
-    ("unsnooze", "", "bring the thread back on home"),
-    ("remind", "DURATION|TIME [NOTE]", "remind of the thread (or selected message) on home and by push then"),
-    ("unremind", "", "clear the thread's reminder"),
-    ("reminders", "", "every reminder, the soonest due first, in the pager"),
-    ("archive", "", "archive the thread"),
-    ("unarchive", "", "unarchive the thread"),
-    ("title", "TEXT", "title the thread"),
-    ("notes", "TEXT", "post to the thread's notes: wakes nobody, renews their turn budget"),
-    ("react", "NAME", "react to the latest message"),
-    ("goto", "THREAD|#channel|@user", "show a thread, channel or user"),
-    ("search", "QUERY", "search the threads"),
-    ("digest", "[SINCE]", "catch-up summary"),
-    ("tldr", "", "summary of the thread"),
-    ("tree", "", "the thread's delegation tree"),
-    ("forward", "@ANT [TEXT]", "hand the selected message, else the thread's TL;DR, to an ant on a new thread"),
-    ("attach", "PATH", "attach a file to the next message"),
-    ("detach", "", "drop the files attached"),
-    ("save", "[PATH]", "save the marked attachment"),
-    ("add", "NAME --on MACHINE [FLAGS]", "add an ant by admin order, with the flags of ants ant add"),
-    ("clone", "ANT NEW [FLAGS]", "clone the ant as NEW by admin order, with the flags of ants ant clone"),
-    ("retire", "ANT", "retire the ant by admin order, its home kept"),
-    (
+    row("snooze", "[DURATION]", "keep the thread off home, 1h unless given", Needs::Thread),
+    row("unsnooze", "", "bring the thread back on home", Needs::Thread),
+    row(
+        "remind",
+        "DURATION|TIME [NOTE]",
+        "remind of the thread (or selected message) on home and by push then",
+        Needs::Thread,
+    ),
+    row("unremind", "", "clear the thread's reminder", Needs::Thread),
+    row("reminders", "", "every reminder, the soonest due first, in the pager", Needs::Nothing),
+    row("archive", "", "archive the thread", Needs::Thread),
+    row("unarchive", "", "unarchive the thread", Needs::Thread),
+    row("title", "TEXT", "title the thread", Needs::Thread),
+    row("notes", "TEXT", "post to the thread's notes: wakes nobody, renews their turn budget", Needs::Thread),
+    row("react", "NAME", "react to the latest message", Needs::Thread),
+    row("goto", "THREAD|#channel|@user", "show a thread, channel or user", Needs::Nothing),
+    row("search", "QUERY", "search the threads", Needs::Nothing),
+    row("digest", "[SINCE]", "catch-up summary", Needs::Nothing),
+    row("tldr", "", "summary of the thread", Needs::Thread),
+    row("tree", "", "the thread's delegation tree", Needs::Thread),
+    row(
+        "forward",
+        "@ANT [TEXT]",
+        "hand the selected message, else the thread's TL;DR, to an ant on a new thread",
+        Needs::Thread,
+    ),
+    row("attach", "PATH", "attach a file to the next message", Needs::Nothing),
+    row("detach", "", "drop the files attached", Needs::Nothing),
+    row("save", "[PATH]", "save the marked attachment", Needs::Attachment),
+    row(
+        "add",
+        "NAME --on MACHINE [FLAGS]",
+        "add an ant by admin order, with the flags of ants ant add",
+        Needs::Nothing,
+    ),
+    row(
+        "clone",
+        "ANT NEW [FLAGS]",
+        "clone the ant as NEW by admin order, with the flags of ants ant clone",
+        Needs::Nothing,
+    ),
+    row("retire", "ANT", "retire the ant by admin order, its home kept", Needs::Nothing),
+    row(
         "dead",
         "replay [SEQ] | drop [SEQ]",
         "send a dead letter (the one selected, else the thread's latest) to its ant again, or drop it once y confirms",
+        Needs::Letter,
     ),
-    (
+    row(
         "trail",
         "list | show NAME|RUN | tips NAME [--key KEY] [--all] | tips NAME --retire ID [--writer ANT] | runs | run \
          NAME [@ANT] [--steps N] [--at-once N] [--turns N] [--wall DUR] [--thread THREAD] [ARGS] | stop RUN | resume \
          RUN [--steps N] [--at-once N] [--turns N] [--wall DUR]",
         "list or show saved trails and runs, list or retire a trail's tips, start a run of a saved trail once y \
          confirms it, stop or resume a run",
+        Needs::Nothing,
     ),
-    ("quit", "", "leave ants chat"),
+    row("quit", "", "leave ants chat", Needs::Nothing),
 ];
 
 /// What the bar's text says to do.
@@ -306,7 +364,7 @@ fn slash(text: &str) -> Result<Slash, String> {
     let (name, args) = first_word(text);
     let name = name.to_ascii_lowercase();
     let usage = || {
-        let args = COMMANDS.iter().find(|(n, ..)| *n == name).map_or("", |(_, args, _)| *args);
+        let args = COMMANDS.iter().find(|row| row.name == name).map_or("", |row| row.args);
         format!("usage: /{name} {args}").trim_end().to_owned()
     };
     let bare = |command: Slash| if args.is_empty() { Ok(command) } else { Err(usage()) };
@@ -378,7 +436,7 @@ fn slash(text: &str) -> Result<Slash, String> {
         "dead" => dead(args).map(Slash::Dead).map_err(|why| why.unwrap_or_else(usage)),
         "trail" => trail(args).map(Slash::Trail).map_err(|why| why.unwrap_or_else(usage)),
         "quit" => bare(Slash::Quit),
-        _ if COMMANDS.iter().any(|(n, ..)| *n == name) => Err(usage()),
+        _ if COMMANDS.iter().any(|row| row.name == name) => Err(usage()),
         _ => Err(format!("no command /{name}: the palette lists them")),
     }
 }
@@ -562,7 +620,7 @@ fn goto(to: &str) -> Result<Goto, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use serde_json::json;
 
     use super::*;
@@ -882,9 +940,19 @@ mod tests {
         args
     }
 
+    /// The command `name` typed in its `form` with a sample of each argument it requires and no other.
+    pub(in crate::tui::command) fn bare(name: &str, form: &str) -> String {
+        let required = arguments(form).into_iter().filter(|arg| !arg.starts_with('['));
+        let samples = required.map(|arg| {
+            let first = arg.split('|').next().unwrap_or_default();
+            format!(" {}", first.split_whitespace().map(sample).collect::<Vec<_>>().join(" "))
+        });
+        format!("/{name}{}", samples.collect::<String>())
+    }
+
     #[test]
     fn every_listed_command_parses_with_its_arguments() {
-        for (name, form) in COMMANDS.iter().flat_map(|(name, forms, _)| forms.split(" | ").map(move |f| (name, f))) {
+        for (name, form) in COMMANDS.iter().flat_map(|row| row.args.split(" | ").map(move |f| (row.name, f))) {
             let mut lines = vec![format!("/{name}")];
             for arg in arguments(form) {
                 let (alternatives, optional) = match arg.strip_prefix('[').and_then(|a| a.strip_suffix(']')) {

@@ -313,7 +313,7 @@ fn every_place_named_is_in_ants_chat() {
             Slash(names) => problems.extend(
                 names
                     .split_whitespace()
-                    .filter(|slash| !COMMANDS.iter().any(|(listed, ..)| listed == slash))
+                    .filter(|slash| !COMMANDS.iter().any(|row| row.name == *slash))
                     .map(|slash| format!("{at}: no /{slash} in COMMANDS: name a command listed there")),
             ),
             Press(view, key, short) => {
