@@ -9,13 +9,13 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - Record discovered work with `bd create ... --dep discovered-from:<id>`.
 - Specs: `bd spec list`, `bd spec show <area>`. Areas: wire, transport, daemon, harness, memory, cli, efficiency,
   messenger, channels, webhooks, admin, assistant, trails, sense (with sense/identity, sense/memory, sense/brief,
-  sense/work, sense/triggers, sense/store, sense/dreams).
+  sense/work, sense/triggers, sense/store, sense/dreams), web.
 - Link every piece of work to the requirement it serves (`bd spec link <id> <requirement>`) or mark it
   `bd spec none <id> -r "<why>"`. `bd spec drift` must report 0 problems.
 - A behaviour change that contradicts a requirement goes through `bd spec change`, not a silent edit.
-- A spec for a new feature says, for each surface (CLI, `ants chat`, MCP tools, admin orders, `ants doctor`, docs,
-  `contrib/skills/`), what the feature offers there or why nothing: a feature lands with its surfaces, or with issues
-  for the ones still missing.
+- A spec for a new feature says, for each surface (CLI, `ants chat`, the web client, MCP tools, admin orders,
+  `ants doctor`, docs, `contrib/skills/`), what the feature offers there or why nothing: a feature lands with its
+  surfaces, or with issues for the ones still missing.
 - The database is local; refresh the committed snapshot with `bd export -o .bd/issues.jsonl` in each commit that
   changes issues or specs. Release notes (`scripts/release-notes.sh`) are built from that snapshot, so the commit a
   release tag points at must carry an up-to-date export.
@@ -38,6 +38,8 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
   of every CI job.
 - `crates/ants/nats-server.sha256` pins the nats-server release bundled with ants: release archives, `ants setup`
   downloads and CI's tests all take it from there.
+- The web client's front end and its browser bindings (the crate `ants-web`) live in the repo `ants-web`, beside this
+  one and local for now; its work and its spec (area web) are tracked in this repo's bd.
 - Comment only code that needs clarification.
 - Modules are `x.rs` with submodules in `x/`, never `x/mod.rs`. Unit tests of `x.rs` start inline
   (`#[cfg(test)] mod tests { … }` at its end); once they outgrow the code they test, they move to `x/tests.rs`
