@@ -8,6 +8,7 @@ use std::time::Duration;
 
 pub use uuid::Uuid;
 
+mod acp;
 mod admin;
 mod ant_request;
 mod approvals;
@@ -52,6 +53,7 @@ mod threads;
 mod timeline;
 mod trails;
 
+pub use acp::{call_ended, call_status, tool_kind};
 pub use admin::{
     ADMIN_PAYLOADS, ASSISTANT_ORDER_KINDS, AdminOp, AdminOrder, AdminOutcome, AdminPayload, FieldChange,
     HARNESSES_FIELD, Hidden, MAX_ADMIN_PAYLOAD, ORDER_CLOCK_SKEW, ORDER_HOLD, ORDER_RULE, ORDER_SIGNING_CONTEXT,

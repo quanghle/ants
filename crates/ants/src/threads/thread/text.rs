@@ -7,7 +7,8 @@ use ants_client::sealed::State;
 use ants_client::text::took;
 use ants_proto::{
     Acting, Answer, Answered, Attachment, AttachmentHandle, ChannelId, DecidedBy, MAX_TITLE, NoReplyWhy, NoticeKind,
-    Pick, PromptEnd, Questions, Quote, Reacted, SummaryRequest, ThreadId, TimelineEnd, UserId, Uuid,
+    Pick, PromptEnd, Questions, Quote, Reacted, SummaryRequest, ThreadId, TimelineEnd, UserId, Uuid, call_status,
+    tool_kind,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -317,9 +318,9 @@ fn prompt_end(end: &TimelineEnd) -> String {
 fn ended(tool: &ToolCall) -> String {
     let took = tool.duration_ms.map(took);
     match (tool.status.as_deref(), took) {
-        (Some("completed"), Some(took)) => format!(" · {took}"),
-        (Some("completed"), None) => String::new(),
-        (Some("failed"), Some(took)) => format!(" · failed after {took}"),
+        (Some(call_status::COMPLETED), Some(took)) => format!(" · {took}"),
+        (Some(call_status::COMPLETED), None) => String::new(),
+        (Some(call_status::FAILED), Some(took)) => format!(" · failed after {took}"),
         (Some(status), _) => format!(" · {}", ants_proto::one_line(&status.replace('_', " "), NOTE)),
         (None, _) => " · started".to_owned(),
     }
@@ -335,19 +336,19 @@ pub(crate) fn call_label(kind: Option<&str>, title: &str) -> (String, Option<Str
     ];
     let title = title.trim();
     let name = match kind {
-        Some("execute") => {
+        Some(tool_kind::EXECUTE) => {
             let command = title.strip_prefix("Run ").unwrap_or(title);
             let command = command.strip_prefix('`').and_then(|c| c.strip_suffix('`')).unwrap_or(command);
             return ("Run".to_owned(), (!command.is_empty()).then(|| command.to_owned()));
         }
-        Some("read") => "Read",
-        Some("edit") => "Edit",
-        Some("delete") => "Delete",
-        Some("move") => "Move",
-        Some("search") => "Search",
-        Some("think") => "Think",
-        Some("fetch") => "Fetch",
-        Some("switch_mode") => "Mode",
+        Some(tool_kind::READ) => "Read",
+        Some(tool_kind::EDIT) => "Edit",
+        Some(tool_kind::DELETE) => "Delete",
+        Some(tool_kind::MOVE) => "Move",
+        Some(tool_kind::SEARCH) => "Search",
+        Some(tool_kind::THINK) => "Think",
+        Some(tool_kind::FETCH) => "Fetch",
+        Some(tool_kind::SWITCH_MODE) => "Mode",
         _ => return (title.to_owned(), None),
     };
     let (name, args) = match title.split_once(' ') {

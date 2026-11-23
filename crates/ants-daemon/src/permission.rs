@@ -29,7 +29,7 @@ use agent_client_protocol::v1::schema::{
     PermissionOption, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, ToolCallUpdateFields,
 };
-use ants_proto::{ThreadId, ToolCall, Verdict};
+use ants_proto::{ThreadId, ToolCall, Verdict, tool_kind};
 use anyhow::{Result, bail};
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -37,8 +37,6 @@ use serde_json::Value;
 use crate::secrets::redact::Redactor;
 use crate::sync::MutexExt as _;
 
-const KINDS: [&str; 10] =
-    ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"];
 /// Longest raw tool input shown to the human.
 const MAX_INPUT: usize = 2000;
 
@@ -62,8 +60,8 @@ impl FromStr for Rule {
             Some(_) => bail!("allow rule {s:?} has an empty pattern"),
             None => (s, None),
         };
-        if !KINDS.contains(&kind) {
-            bail!("allow rule {s:?}: unknown tool kind {kind:?}, expected * or one of {}", KINDS.join(", "));
+        if !tool_kind::ALL.contains(&kind) {
+            bail!("allow rule {s:?}: unknown tool kind {kind:?}, expected * or one of {}", tool_kind::ALL.join(", "));
         }
         Ok(Self { kind: Some(kind.to_owned()), pattern })
     }
@@ -76,12 +74,12 @@ impl Rule {
         }
         let Some(pattern) = &self.pattern else { return true };
         match tool.kind.as_str() {
-            "execute" => command(tool.fields).is_some_and(|c| !has_shell_control(&c) && glob(pattern, &c)),
-            "read" | "edit" | "delete" | "move" => {
+            tool_kind::EXECUTE => command(tool.fields).is_some_and(|c| !has_shell_control(&c) && glob(pattern, &c)),
+            tool_kind::READ | tool_kind::EDIT | tool_kind::DELETE | tool_kind::MOVE => {
                 let paths = paths(tool.fields, workdir);
                 !paths.is_empty() && paths.iter().all(|p| path_matches(pattern, p, workdir))
             }
-            "fetch" => {
+            tool_kind::FETCH => {
                 let url = tool.fields.raw_input.as_ref().and_then(|i| i.get("url")).and_then(Value::as_str);
                 url.or(tool.fields.title.as_deref()).is_some_and(|t| glob(pattern, t))
             }
@@ -140,12 +138,12 @@ impl Allowlist {
 pub fn rule_for(tool: &ToolCall) -> Option<String> {
     let input = tool.input.as_deref().and_then(|i| serde_json::from_str::<Value>(i).ok());
     let pattern = match tool.kind.as_str() {
-        "execute" => input.as_ref().and_then(command_in).filter(|c| !has_shell_control(c))?,
-        "read" | "edit" | "delete" | "move" => match tool.locations.as_slice() {
+        tool_kind::EXECUTE => input.as_ref().and_then(command_in).filter(|c| !has_shell_control(c))?,
+        tool_kind::READ | tool_kind::EDIT | tool_kind::DELETE | tool_kind::MOVE => match tool.locations.as_slice() {
             [path] if Path::new(path).is_absolute() && normalize(Path::new(path)) == Path::new(path) => path.clone(),
             _ => return None,
         },
-        "fetch" => input
+        tool_kind::FETCH => input
             .as_ref()
             .and_then(|i| i.get("url"))
             .and_then(Value::as_str)
@@ -153,7 +151,7 @@ pub fn rule_for(tool: &ToolCall) -> Option<String> {
         _ => tool.title.clone(),
     };
     let fits = !pattern.is_empty() && pattern.trim() == pattern && !pattern.contains('*');
-    (fits && KINDS.contains(&tool.kind.as_str())).then(|| format!("{}:{pattern}", tool.kind))
+    (fits && tool_kind::ALL.contains(&tool.kind.as_str())).then(|| format!("{}:{pattern}", tool.kind))
 }
 
 /// Whether the allowlist rule `rule` covers `tool`, a call as an approver is shown it ([`Approver::decide`]): how a
@@ -170,8 +168,10 @@ pub fn covers(rule: &str, tool: &ToolCall) -> bool {
     let Some(pattern) = &rule.pattern else { return true };
     let input = tool.input.as_deref().and_then(|i| serde_json::from_str::<Value>(i).ok());
     match tool.kind.as_str() {
-        "execute" => input.as_ref().and_then(command_in).is_some_and(|c| !has_shell_control(&c) && glob(pattern, &c)),
-        "read" | "edit" | "delete" | "move" => {
+        tool_kind::EXECUTE => {
+            input.as_ref().and_then(command_in).is_some_and(|c| !has_shell_control(&c) && glob(pattern, &c))
+        }
+        tool_kind::READ | tool_kind::EDIT | tool_kind::DELETE | tool_kind::MOVE => {
             pattern.starts_with('/')
                 && !tool.locations.is_empty()
                 && tool.locations.iter().all(|l| {
@@ -179,7 +179,7 @@ pub fn covers(rule: &str, tool: &ToolCall) -> bool {
                     path.is_absolute() && normalize(path) == path && glob(pattern, l)
                 })
         }
-        "fetch" => {
+        tool_kind::FETCH => {
             let url = input.as_ref().and_then(|i| i.get("url")).and_then(Value::as_str);
             glob(pattern, url.unwrap_or(&tool.title))
         }
@@ -393,13 +393,13 @@ struct Tool<'a> {
 
 fn kind_name(fields: &ToolCallUpdateFields) -> String {
     if codex_mcp_tool(fields).is_some() {
-        return "other".to_owned();
+        return tool_kind::OTHER.to_owned();
     }
     fields
         .kind
         .and_then(|k| serde_json::to_value(k).ok())
         .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "other".to_owned())
+        .unwrap_or_else(|| tool_kind::OTHER.to_owned())
 }
 
 /// The ACP option `verdict` picks, by option kind, never by position or label.

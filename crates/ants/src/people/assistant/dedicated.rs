@@ -16,7 +16,7 @@ use std::time::Duration;
 use ants_daemon::config::{self, Ant, Summary};
 use ants_daemon::secrets::creds::{Finding, Kind};
 use ants_daemon::secrets::sealing;
-use ants_proto::{AdminOp, JsDomain, JwtError, Machine, Permissions, UserId};
+use ants_proto::{AdminOp, JsDomain, JwtError, Machine, Permissions, UserId, tool_kind};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use serde_json::{Map, Value, json};
@@ -31,7 +31,7 @@ use crate::signing::retire;
 use crate::{add, auth};
 
 /// Tool rules a dedicated assistant runs without asking: reading and searching within its own home, and thinking.
-const ALLOW: [&str; 3] = ["read", "search", "think"];
+const ALLOW: [&str; 3] = [tool_kind::READ, tool_kind::SEARCH, tool_kind::THINK];
 
 /// `ants assistant enable`.
 #[derive(clap::Args, Debug)]

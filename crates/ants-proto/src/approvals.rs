@@ -42,7 +42,8 @@ impl Verdict {
 /// The tool call a harness asks permission for, as the human gets to see it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ToolCall {
-    /// ACP tool kind: read, edit, delete, move, search, execute, think, fetch, switch_mode or other.
+    /// ACP tool kind ([`tool_kind`](crate::tool_kind)): read, edit, delete, move, search, execute, think, fetch,
+    /// switch_mode or other.
     pub kind: String,
     pub title: String,
     /// Files the call touches.
