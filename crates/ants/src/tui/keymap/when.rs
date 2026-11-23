@@ -10,7 +10,7 @@ pub(super) fn always(_: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
 }
 
 pub(super) fn bar_empty(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
-    check(model.bar.is_empty(), "the bar holds text: Ctrl-C empties it")
+    check(model.ui.bar.is_empty(), "the bar holds text: Ctrl-C empties it")
 }
 
 pub(super) fn check(holds: bool, why: &'static str) -> Result<(), &'static str> {
@@ -26,11 +26,11 @@ pub(super) fn on_view(model: &Model, _: DateTime<Utc>) -> Result<(), &'static st
 }
 
 pub(super) fn selecting(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
-    check(model.selecting.is_some() && !model.typing(), "nothing selected: a printable key is written already")
+    check(model.ui.selecting.is_some() && !model.typing(), "nothing selected: a printable key is written already")
 }
 
 pub(super) fn not_selecting(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
-    check(model.selecting.is_none() || model.typing(), "Esc goes back to writing first")?;
+    check(model.ui.selecting.is_none() || model.typing(), "Esc goes back to writing first")?;
     on_view(model, now)
 }
 

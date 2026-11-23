@@ -47,14 +47,14 @@ impl Model {
     /// Take `key` for the bar when it is focused or `key` focuses it: Ctrl-K, or @ or # in a view. Returns None when
     /// the key is not the bar's.
     pub fn bar_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
-        if !self.bar.focused {
+        if !self.ui.bar.focused {
             match key {
-                Key::Ctrl('k') if self.bar.is_empty() => self.bar.insert('/'),
+                Key::Ctrl('k') if self.ui.bar.is_empty() => self.ui.bar.insert('/'),
                 Key::Ctrl('k') => {}
-                Key::Char(c @ ('@' | '#')) if self.focus == Focus::View => self.bar.insert(c),
+                Key::Char(c @ ('@' | '#')) if self.focus == Focus::View => self.ui.bar.insert(c),
                 _ => return None,
             }
-            self.bar.focused = true;
+            self.ui.bar.focused = true;
             return Some(None);
         }
         if self.history_key(key) {
@@ -66,16 +66,16 @@ impl Model {
         if self.complete_key(key) {
             return Some(None);
         }
-        let before = self.bar.text();
-        let edited = self.bar.key(key);
+        let before = self.ui.bar.text();
+        let edited = self.ui.bar.key(key);
         self.escaped(key, now);
-        if self.bar.text() != before {
-            self.bar.pick = complete::Pick::default();
+        if self.ui.bar.text() != before {
+            self.ui.bar.pick = complete::Pick::default();
         }
         // Leaving the bar empty drops the reply `>` or the note set up.
-        if key == Key::Esc && self.bar.is_empty() {
-            self.bar.quoting = None;
-            self.bar.noting = None;
+        if key == Key::Esc && self.ui.bar.is_empty() {
+            self.ui.bar.quoting = None;
+            self.ui.bar.noting = None;
         }
         Some(match edited {
             Edited::Done => None,
@@ -86,7 +86,7 @@ impl Model {
 
     /// Do what the bar's `text` says, emptying the bar; else keep it and tell why on its status line.
     pub(super) fn submit(&mut self, text: String, now: DateTime<Utc>) -> Option<Action> {
-        if let Some(note) = self.bar.noting.clone() {
+        if let Some(note) = self.ui.bar.noting.clone() {
             return self.note(note, text);
         }
         let command = match self.channel_on_view() {
@@ -109,25 +109,25 @@ impl Model {
             Ok(action) => action,
             Err(why) => {
                 if why.starts_with("usage:") || why.starts_with("no command") {
-                    self.bar.refused = Some(self.bar.raw());
-                    self.bar.pick = complete::Pick::default();
+                    self.ui.bar.refused = Some(self.ui.bar.raw());
+                    self.ui.bar.pick = complete::Pick::default();
                 }
-                self.bar.set_status(why, Tone::Error);
+                self.ui.bar.set_status(why, Tone::Error);
                 return None;
             }
         };
         self.ui.history.push(&text, sealed);
-        self.bar.set_text("");
-        self.bar.status = None;
+        self.ui.bar.set_text("");
+        self.ui.bar.status = None;
         if slash {
-            self.bar.focused = false;
+            self.ui.bar.focused = false;
         } else {
-            self.bar.quoting = None;
+            self.ui.bar.quoting = None;
         }
         match action {
             Some(Action::Run(job, _)) => Some(self.run_job(job, text, slash)),
             Some(Action::Decide(request, verdict)) => {
-                self.bar.set_status(format!("answering request {}…", tools::qualified(&request)), Tone::Busy);
+                self.ui.bar.set_status(format!("answering request {}…", tools::qualified(&request)), Tone::Busy);
                 Some(Action::Decide(request, verdict))
             }
             other => other,
@@ -138,14 +138,14 @@ impl Model {
     fn run_job(&mut self, job: Job, text: String, slash: bool) -> Action {
         let here = self.ui.drafts.here().clone();
         self.ui.drafts.sending(&text, here);
-        let job = match job.sends().then(|| self.bar.staged.take(&text)).flatten() {
+        let job = match job.sends().then(|| self.ui.bar.staged.take(&text)).flatten() {
             Some(files) => {
                 let count = if files.len() == 1 { "1 file".to_owned() } else { format!("{} files", files.len()) };
-                self.bar.set_status(format!("sending with {count}…"), Tone::Busy);
+                self.ui.bar.set_status(format!("sending with {count}…"), Tone::Busy);
                 Job::Attached { job: Box::new(job), files }
             }
             None => {
-                self.bar.set_status(if slash { "running…" } else { "sending…" }, Tone::Busy);
+                self.ui.bar.set_status(if slash { "running…" } else { "sending…" }, Tone::Busy);
                 job
             }
         };
@@ -157,16 +157,16 @@ impl Model {
     fn note(&mut self, note: Note, text: String) -> Option<Action> {
         let request = match note {
             Note::Reply(request) => {
-                self.bar.sending_note(&text, request.clone());
-                self.bar.set_text("");
-                self.bar.noting = None;
+                self.ui.bar.sending_note(&text, request.clone());
+                self.ui.bar.set_text("");
+                self.ui.bar.noting = None;
                 return Some(self.run_job(note_job(&request, &text), text, false));
             }
             Note::Reject(request) => request,
         };
         if let Some(storing) = self.asking.as_ref().filter(|a| a.storing) {
             let id = tools::qualified(&storing.request);
-            self.bar.set_status(
+            self.ui.bar.set_status(
                 format!("storing the decision on request {id}: send the note once it is stored"),
                 Tone::Error,
             );
@@ -176,17 +176,17 @@ impl Model {
             Ok(asking) => asking,
             Err(refusal) => {
                 let ant = &request.ant;
-                self.bar.set_status(format!("{refusal}: Enter sends the note to {ant} as a reply"), Tone::Error);
-                self.bar.noting = Some(Note::Reply(request));
+                self.ui.bar.set_status(format!("{refusal}: Enter sends the note to {ant} as a reply"), Tone::Error);
+                self.ui.bar.noting = Some(Note::Reply(request));
                 return None;
             }
         };
         asking.note = Some(text);
         self.asking = Some(asking);
-        self.bar.set_text("");
-        self.bar.noting = None;
-        self.bar.focused = false;
-        self.bar.set_status(format!("rejecting request {}…", tools::qualified(&request)), Tone::Busy);
+        self.ui.bar.set_text("");
+        self.ui.bar.noting = None;
+        self.ui.bar.focused = false;
+        self.ui.bar.set_status(format!("rejecting request {}…", tools::qualified(&request)), Tone::Busy);
         Some(Action::Decide(request, Verdict::Reject))
     }
 
@@ -328,11 +328,11 @@ impl Model {
 
     /// Stage a file for the next message, or drop those staged, the bar kept open to write it.
     fn stage(&mut self, slash: &Slash) {
-        let staged = &mut self.bar.staged;
+        let staged = &mut self.ui.bar.staged;
         let line = match slash {
             Slash::Attach(path) => match staged.add(path) {
                 Ok(line) => line,
-                Err(e) => return self.bar.set_status(format!("{e:#}"), Tone::Error),
+                Err(e) => return self.ui.bar.set_status(format!("{e:#}"), Tone::Error),
             },
             _ => match staged.clear() {
                 0 => "no files attached".to_owned(),
@@ -340,30 +340,30 @@ impl Model {
                 n => format!("dropped the {n} files attached"),
             },
         };
-        self.bar.set_text("");
-        self.bar.set_status(line, Tone::Done);
+        self.ui.bar.set_text("");
+        self.ui.bar.set_status(line, Tone::Done);
     }
 
     /// Take `text` pasted into the bar, focusing it: image files dropped on the terminal, or a paste of over
     /// [`PASTE_ATTACH`] bytes as a text file, staged as `/attach` does; else the text at the cursor.
     pub(super) fn paste_in_bar(&mut self, text: &str) {
-        self.bar.focused = true;
+        self.ui.bar.focused = true;
         let staged = if let Some(paths) = attach::dropped_images(text) {
             paths
                 .iter()
-                .map(|path| self.bar.staged.add_path(path))
+                .map(|path| self.ui.bar.staged.add_path(path))
                 .collect::<anyhow::Result<Vec<_>>>()
                 .map(|l| l.join(" · "))
         } else if text.len() > PASTE_ATTACH {
-            self.bar.staged.add_paste(text)
+            self.ui.bar.staged.add_paste(text)
         } else {
-            self.bar.paste(text);
-            self.bar.pick = complete::Pick::default();
+            self.ui.bar.paste(text);
+            self.ui.bar.pick = complete::Pick::default();
             return;
         };
         match staged {
-            Ok(line) => self.bar.set_status(line, Tone::Done),
-            Err(e) => self.bar.set_status(format!("{e:#}"), Tone::Error),
+            Ok(line) => self.ui.bar.set_status(line, Tone::Done),
+            Err(e) => self.ui.bar.set_status(format!("{e:#}"), Tone::Error),
         }
     }
 
@@ -395,21 +395,21 @@ impl Model {
     /// Open the bar to reply on `thread` to the message `quoted`, its text begun with an @mention of `mention` in
     /// place of any it began with.
     pub(super) fn quote(&mut self, thread: ThreadId, quoted: Quoted, mention: Option<&UserId>) {
-        let text = self.bar.raw();
+        let text = self.ui.bar.raw();
         let rest = match text.strip_prefix('@') {
             Some(after) => after.split_once(char::is_whitespace).map_or("", |(_, rest)| rest.trim_start()),
             None => &text,
         };
         let mention = mention.map_or_default(|m| format!("@{m} "));
-        self.bar.set_raw(&format!("{mention}{rest}"));
-        self.bar.quoting = Some((thread, quoted));
-        self.bar.focused = true;
+        self.ui.bar.set_raw(&format!("{mention}{rest}"));
+        self.ui.bar.quoting = Some((thread, quoted));
+        self.ui.bar.focused = true;
     }
 
     /// The message the next send replies to, quoting it, with its thread: the one `>` picked, while that thread is
     /// open.
     fn quoting(&self) -> Option<(ThreadId, Quoted)> {
-        let (thread, quoted) = self.bar.quoting.as_ref()?;
+        let (thread, quoted) = self.ui.bar.quoting.as_ref()?;
         match self.page() {
             Page::Thread(page) if page.history.thread == *thread => Some((thread.clone(), quoted.clone())),
             _ => None,
@@ -574,25 +574,25 @@ impl Model {
     /// back as the draft of the conversation it was typed in if that holds none.
     pub fn outcome(&mut self, outcome: Outcome) -> Option<Action> {
         self.follow_drafts();
-        self.bar.staged.sent(&outcome.text, outcome.result.is_err());
-        let note = self.bar.note_sent(&outcome.text);
+        self.ui.bar.staged.sent(&outcome.text, outcome.result.is_err());
+        let note = self.ui.bar.note_sent(&outcome.text);
         let typed = self.ui.drafts.sent(&outcome.text).filter(|typed| typed != self.ui.drafts.here());
         match outcome.result {
             Ok(mut done) => {
                 self.data.withdrawn.extend(done.withdrew);
                 self.data.dead_cleared.extend(done.dead);
                 if let Some((text, files)) = done.edit.take() {
-                    self.bar.set_text(&text);
+                    self.ui.bar.set_text(&text);
                     for path in files {
-                        if let Err(e) = self.bar.staged.add(&path.to_string_lossy()) {
+                        if let Err(e) = self.ui.bar.staged.add(&path.to_string_lossy()) {
                             done.warnings.push(format!("{e:#}"));
                         }
                     }
-                    self.bar.focused = true;
+                    self.ui.bar.focused = true;
                 }
                 let tone = if done.warnings.is_empty() { Tone::Done } else { Tone::Warn };
                 let text = std::iter::once(done.line).chain(done.warnings).collect::<Vec<_>>().join(" · ");
-                self.bar.set_status(text, tone);
+                self.ui.bar.set_status(text, tone);
                 if let Some(planned) = done.planned {
                     self.prompt = Some(Prompt::Start(*planned));
                 }
@@ -607,17 +607,17 @@ impl Model {
                 Some(Action::Open(thread))
             }
             Err(e) => {
-                self.bar.set_status(format!("{e:#}"), Tone::Error);
+                self.ui.bar.set_status(format!("{e:#}"), Tone::Error);
                 if let Some(typed) = typed
                     && !outcome.text.is_empty()
                 {
                     let draft = Draft::of(&outcome.text, outcome.quoting, note.map(Note::Reply));
                     self.ui.drafts.keep(typed, draft);
-                } else if self.bar.is_empty() && !outcome.text.is_empty() {
-                    self.bar.set_text(&outcome.text);
-                    self.bar.quoting = outcome.quoting;
-                    self.bar.noting = note.map(Note::Reply);
-                    self.bar.focused = true;
+                } else if self.ui.bar.is_empty() && !outcome.text.is_empty() {
+                    self.ui.bar.set_text(&outcome.text);
+                    self.ui.bar.quoting = outcome.quoting;
+                    self.ui.bar.noting = note.map(Note::Reply);
+                    self.ui.bar.focused = true;
                 }
                 None
             }
@@ -627,8 +627,8 @@ impl Model {
     /// Take the outcome of a decision on a tool request.
     pub fn decided(&mut self, decided: anyhow::Result<String>) {
         match decided {
-            Ok(line) => self.bar.set_status(line, Tone::Done),
-            Err(e) => self.bar.set_status(format!("{e:#}"), Tone::Error),
+            Ok(line) => self.ui.bar.set_status(line, Tone::Done),
+            Err(e) => self.ui.bar.set_status(format!("{e:#}"), Tone::Error),
         }
     }
 
@@ -636,10 +636,10 @@ impl Model {
     pub fn edited(&mut self, edited: anyhow::Result<String>) {
         match edited {
             Ok(text) => {
-                self.bar.set_text(&text);
-                self.bar.focused = true;
+                self.ui.bar.set_text(&text);
+                self.ui.bar.focused = true;
             }
-            Err(e) => self.bar.set_status(format!("{e:#}"), Tone::Error),
+            Err(e) => self.ui.bar.set_status(format!("{e:#}"), Tone::Error),
         }
     }
 }
@@ -660,15 +660,19 @@ mod tests {
     fn a_paste_goes_into_the_bar_whole_its_line_breaks_new_lines_rather_than_enter() {
         let mut m = model();
         m.paste("q\r\nnow\tplease\x1b\rdone", at(0));
-        assert!(m.bar.focused, "a paste where nothing is typed focuses the bar");
-        assert_eq!(m.bar.text(), "q\nnow    please\ndone");
+        assert!(m.ui.bar.focused, "a paste where nothing is typed focuses the bar");
+        assert_eq!(m.ui.bar.text(), "q\nnow    please\ndone");
         m.key(Key::Home, at(0));
         m.paste("so\n", at(0));
-        assert_eq!(m.bar.text(), "q\nnow    please\nso\ndone", "pasted at the cursor, Home going to its line's start");
+        assert_eq!(
+            m.ui.bar.text(),
+            "q\nnow    please\nso\ndone",
+            "pasted at the cursor, Home going to its line's start"
+        );
         m.key(Key::Esc, at(0));
         m.overlay(crate::tui::model::Overlay::Help(crate::tui::help::Help::default()));
         m.paste("q", at(0));
-        assert!(m.help().is_some() && !m.bar.focused, "help takes no paste");
+        assert!(m.help().is_some() && !m.ui.bar.focused, "help takes no paste");
     }
 
     #[test]
@@ -676,22 +680,22 @@ mod tests {
         let mut m = model();
         let log = "a\tlog line\n".repeat(7000);
         m.paste(&log, at(0));
-        assert!(m.bar.focused && m.bar.is_empty());
-        assert_eq!(m.bar.staged.names(), ["paste-1.txt"]);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "attached paste-1.txt (75 KiB): sent with the next message");
-        let files = m.bar.staged.take("see").unwrap();
+        assert!(m.ui.bar.focused && m.ui.bar.is_empty());
+        assert_eq!(m.ui.bar.staged.names(), ["paste-1.txt"]);
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "attached paste-1.txt (75 KiB): sent with the next message");
+        let files = m.ui.bar.staged.take("see").unwrap();
         assert_eq!((files[0].bytes.as_slice(), files[0].attachment.mime.as_str()), (log.as_bytes(), "text/plain"));
 
         let dir = ants_test_support::scratch_dir("pasted");
         let shot = dir.join("shot.png");
         std::fs::write(&shot, b"png").unwrap();
         m.paste(&format!("'{}' ", shot.display()), at(0));
-        assert!(m.bar.is_empty());
-        assert_eq!(m.bar.staged.names(), ["shot.png"]);
+        assert!(m.ui.bar.is_empty());
+        assert_eq!(m.ui.bar.staged.names(), ["shot.png"]);
         m.paste(&format!("{} ", shot.display()), at(0));
-        assert_eq!(m.bar.staged.names(), ["shot.png", "shot.png"]);
+        assert_eq!(m.ui.bar.staged.names(), ["shot.png", "shot.png"]);
         m.paste(&"x".repeat(9 << 20), at(0));
-        let status = m.bar.status.as_ref().unwrap();
+        let status = m.ui.bar.status.as_ref().unwrap();
         assert!(status.tone == Tone::Error && status.text.contains("an attachment is at most"), "{status:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -700,31 +704,31 @@ mod tests {
     fn ctrl_k_or_at_or_hash_focus_the_bar_which_then_takes_every_key() {
         let mut m = model();
         assert_eq!(m.key(Key::Ctrl('k'), at(0)), None);
-        assert!(m.bar.focused && m.bar.text() == "/", "on the palette");
+        assert!(m.ui.bar.focused && m.ui.bar.text() == "/", "on the palette");
         m.key(Key::Backspace, at(0));
         assert_eq!(m.key(Key::Char('q'), at(0)), None, "q types");
         assert_eq!(m.key(Key::Esc, at(0)), None);
-        assert!(!m.bar.focused && m.bar.text() == "q", "Esc leaves the bar, keeping its text");
-        m.bar.set_text("");
+        assert!(!m.ui.bar.focused && m.ui.bar.text() == "q", "Esc leaves the bar, keeping its text");
+        m.ui.bar.set_text("");
         m.key(Key::Char('@'), at(0));
-        assert!(m.bar.focused && m.bar.text() == "@");
+        assert!(m.ui.bar.focused && m.ui.bar.text() == "@");
         typed(&mut m, "dev-a deploy");
         let action = m.key(Key::Enter, at(0));
         let job = Job::Ask { to: user("dev-a"), thread: None, text: "deploy".into(), quote: None };
         assert_eq!(action, Some(Action::Run(job, "@dev-a deploy".into())));
-        assert!(m.bar.focused && m.bar.is_empty(), "the bar stays for the next message");
-        assert_eq!(m.bar.status.as_ref().map(|s| s.tone), Some(Tone::Busy));
+        assert!(m.ui.bar.focused && m.ui.bar.is_empty(), "the bar stays for the next message");
+        assert_eq!(m.ui.bar.status.as_ref().map(|s| s.tone), Some(Tone::Busy));
         m.key(Key::Esc, at(0));
         m.key(Key::Tab, at(0));
         m.key(Key::Char('#'), at(0));
-        assert!(!m.bar.focused, "# in the nav is no bar's");
+        assert!(!m.ui.bar.focused, "# in the nav is no bar's");
     }
 
     #[test]
     fn plain_text_replies_on_the_open_thread_and_else_goes_unaddressed() {
         let thread = ThreadId::generate();
         let mut m = model();
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(&mut m, "who owns billing?");
         let job = Job::Unaddressed { text: "who owns billing?".into() };
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "who owns billing?".into())));
@@ -761,9 +765,9 @@ mod tests {
         m.pages.push(Page::Dm(crate::tui::dm::Page::new(user("bob"))));
         m.key(Key::Up, at(0));
         typed(&mut m, "n");
-        assert!(m.bar.focused && m.bar.is_empty(), "n on a thread selected writes in the bar");
+        assert!(m.ui.bar.focused && m.ui.bar.is_empty(), "n on a thread selected writes in the bar");
         typed(&mut m, "n");
-        assert_eq!(m.bar.text(), "n", "the focused bar takes the keys of the DM");
+        assert_eq!(m.ui.bar.text(), "n", "the focused bar takes the keys of the DM");
         let job = Job::Ask { to: user("bob"), thread: None, text: "n".into(), quote: None };
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "n".into())));
     }
@@ -774,20 +778,20 @@ mod tests {
         let mut m = model();
         let run = |m: &mut Model, text: &str| {
             m.follow_drafts();
-            m.bar.focused = true;
-            m.bar.set_text(text);
+            m.ui.bar.focused = true;
+            m.ui.bar.set_text(text);
             m.key(Key::Enter, at(0))
         };
         assert_eq!(run(&mut m, "/done"), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "no thread open or selected");
-        assert_eq!(m.bar.text(), "/done", "a command that fails keeps its text");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "no thread open or selected");
+        assert_eq!(m.ui.bar.text(), "/done", "a command that fails keeps its text");
         m.select(nav::Item::Work(None));
         m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy")], at(1));
         let done = Job::Done { thread: thread.clone(), done: true };
         assert_eq!(run(&mut m, "/done"), Some(Action::Run(done, "/done".into())));
-        assert!(!m.bar.focused, "a slash command leaves the bar");
+        assert!(!m.ui.bar.focused, "a slash command leaves the bar");
         assert_eq!(run(&mut m, "/cancel"), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, format!("no ant is at work on thread {thread}"));
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, format!("no ant is at work on thread {thread}"));
         let working = StatusEvent::new(user("dev-a"), thread.clone(), StatusUpdate::Thought { text: "hm".into() });
         m.take(live::Event::Status(working), at(2));
         let cancel = Job::Cancel { thread: thread.clone(), ants: vec![user("dev-a")] };
@@ -800,7 +804,7 @@ mod tests {
         assert_eq!(run(&mut m, "/unsnooze"), Some(Action::Change(thread.clone(), Change::Snooze(None), 1)));
         assert!(m.data.cards.snoozed.get(&thread, at(1)).is_none(), "woken at once");
         assert_eq!(run(&mut m, "/nope"), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "no command /nope: the palette lists them");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "no command /nope: the palette lists them");
         assert_eq!(run(&mut m, "/quit"), Some(Action::Quit));
     }
 
@@ -820,8 +824,8 @@ mod tests {
         m.pages.push(Page::Thread(page));
         let answer = |m: &mut Model| {
             m.follow_drafts();
-            m.bar.focused = true;
-            m.bar.set_text("/answer after lunch");
+            m.ui.bar.focused = true;
+            m.ui.bar.set_text("/answer after lunch");
             match m.key(Key::Enter, at(2)) {
                 Some(Action::Run(Job::Answer { question, .. }, _)) => question,
                 other => panic!("{other:?}"),
@@ -846,8 +850,8 @@ mod tests {
         m.pages.push(Page::Thread(page));
         let answer = |m: &mut Model, text: &str| {
             m.follow_drafts();
-            m.bar.focused = true;
-            m.bar.set_text(text);
+            m.ui.bar.focused = true;
+            m.ui.bar.set_text(text);
             m.key(Key::Enter, at(2))
         };
         let picks = vec![ants_proto::Pick::Options(vec![1, 3]), ants_proto::Pick::Typed("after lunch".into())];
@@ -855,10 +859,10 @@ mod tests {
         let sent = answer(&mut m, "/answer 3,1 'after lunch'");
         assert!(matches!(sent, Some(Action::Run(ref sent, _)) if *sent == job), "{sent:?}");
         assert_eq!(answer(&mut m, "/answer 1"), None);
-        let status = &m.bar.status.as_ref().unwrap().text;
+        let status = &m.ui.bar.status.as_ref().unwrap().text;
         assert!(status.contains("1 answers to 2 questions"), "{status}");
         assert_eq!(answer(&mut m, "/answer 4 no"), None);
-        let status = &m.bar.status.as_ref().unwrap().text;
+        let status = &m.ui.bar.status.as_ref().unwrap().text;
         assert!(status.contains("question 1: no option 4"), "{status}");
     }
 
@@ -869,8 +873,8 @@ mod tests {
         m.take(live::Event::Approval(tools::Update::Pending(push.clone())), at(0));
         let run = |m: &mut Model, text: &str| {
             m.follow_drafts();
-            m.bar.focused = true;
-            m.bar.set_text(text);
+            m.ui.bar.focused = true;
+            m.ui.bar.set_text(text);
             m.key(Key::Enter, at(0))
         };
         assert_eq!(
@@ -879,14 +883,14 @@ mod tests {
             "home selects it"
         );
         assert_eq!(run(&mut m, "/approve --always"), None);
-        assert!(m.bar.status.as_ref().unwrap().text.starts_with("allow-always is not offered"));
+        assert!(m.ui.bar.status.as_ref().unwrap().text.starts_with("allow-always is not offered"));
         let id = push.id.to_string();
         let named = format!("/reject dev-a/{}", &id[..8]);
         assert_eq!(run(&mut m, &named), Some(Action::Decide(Box::new(push), Verdict::Reject)));
         m.decided(Ok("answered request".into()));
-        assert_eq!(m.bar.status, Some(Status { text: "answered request".into(), tone: Tone::Done }));
+        assert_eq!(m.ui.bar.status, Some(Status { text: "answered request".into(), tone: Tone::Done }));
         assert_eq!(run(&mut m, "/reject 0000"), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "no tool request 0000");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "no tool request 0000");
     }
 
     #[test]
@@ -894,19 +898,21 @@ mod tests {
         let mut m = model();
         let push = request("dev-a", "git push", vec![Verdict::AllowOnce, Verdict::Reject]);
         m.take(live::Event::Approval(tools::Update::Pending(push.clone())), at(0));
-        m.bar.set_text("draft");
+        m.ui.bar.set_text("draft");
         assert_eq!(m.key(Key::Char('n'), at(0)), None);
-        assert!(m.bar.noting.is_none() && m.bar.status.as_ref().unwrap().text.starts_with("the bar holds a draft"));
-        m.bar.set_text("");
+        assert!(
+            m.ui.bar.noting.is_none() && m.ui.bar.status.as_ref().unwrap().text.starts_with("the bar holds a draft")
+        );
+        m.ui.bar.set_text("");
 
         m.compact = true;
         assert_eq!(m.key(Key::Char('n'), at(0)), None, "the top request");
-        assert!(m.bar.focused && m.bar.noting == Some(Note::Reject(Box::new(push.clone()))));
+        assert!(m.ui.bar.focused && m.ui.bar.noting == Some(Note::Reject(Box::new(push.clone()))));
         assert!(!m.compact, "the note written in the full view");
         let note = "open a pull request instead";
         typed(&mut m, note);
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Decide(Box::new(push.clone()), Verdict::Reject)));
-        assert!(m.bar.is_empty() && m.bar.noting.is_none() && !m.bar.focused);
+        assert!(m.ui.bar.is_empty() && m.ui.bar.noting.is_none() && !m.ui.bar.focused);
         assert!(m.asking.as_ref().is_some_and(|a| a.storing && a.note.as_deref() == Some(note)));
         assert!(m.asking.as_ref().and_then(Asking::status).unwrap().to_string().contains("then sending the note"));
 
@@ -916,7 +922,7 @@ mod tests {
         assert_eq!(sent, [Action::Run(ask.clone(), note.into())], "the note goes once the rejection is stored");
         assert!(m.asking.is_none());
         m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text: note.into(), quoting: None });
-        assert_eq!((m.bar.text(), &m.bar.noting), (note.to_owned(), &Some(Note::Reply(Box::new(push)))));
+        assert_eq!((m.ui.bar.text(), &m.ui.bar.noting), (note.to_owned(), &Some(Note::Reply(Box::new(push)))));
         assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(ask, note.into())), "sent again as a reply");
     }
 
@@ -931,13 +937,13 @@ mod tests {
         assert!(matches!(m.key(Key::Enter, at(0)), Some(Action::Decide(_, Verdict::Reject))));
         let refused = anyhow::anyhow!("request dev-a/{} was already answered by bob: allow-once", push.id);
         assert_eq!(m.take(live::Event::Decided(Err(refused)), at(1)), [], "no note sent");
-        assert_eq!((m.bar.text(), &m.bar.noting), (note.to_owned(), &Some(Note::Reply(Box::new(push.clone())))));
-        let status = m.bar.status.as_ref().unwrap();
+        assert_eq!((m.ui.bar.text(), &m.ui.bar.noting), (note.to_owned(), &Some(Note::Reply(Box::new(push.clone())))));
+        let status = m.ui.bar.status.as_ref().unwrap();
         assert!(status.text.contains("by bob") && status.text.contains("the note was not sent"), "{}", status.text);
-        assert!(m.bar.focused && m.asking.is_none());
+        assert!(m.ui.bar.focused && m.asking.is_none());
         let ask = Job::Ask { to: push.ant.clone(), thread: Some(push.thread_id), text: note.into(), quote: None };
         assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(ask, note.into())), "Enter sends it as a reply");
-        assert!(m.bar.is_empty() && m.bar.noting.is_none());
+        assert!(m.ui.bar.is_empty() && m.ui.bar.noting.is_none());
     }
 
     #[test]
@@ -955,8 +961,8 @@ mod tests {
         m.read(Read::Directory(Ok((vec![ops], ants_proto::Humans::default()))), at(1));
         let run = |m: &mut Model, text: &str| {
             m.follow_drafts();
-            m.bar.focused = true;
-            m.bar.set_text(text);
+            m.ui.bar.focused = true;
+            m.ui.bar.set_text(text);
             m.key(Key::Enter, at(1))
         };
         assert_eq!(run(&mut m, &format!("/goto {}", &thread.as_str()[..10])), Some(Action::Open(thread)));
@@ -964,29 +970,29 @@ mod tests {
         assert!(matches!(run(&mut m, "/goto #ops"), Some(Action::Reactions(_))));
         assert_eq!(m.nav, nav::Item::Channel("ops".parse().unwrap()));
         assert_eq!(run(&mut m, "/goto #sales"), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "not a member of #sales");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "not a member of #sales");
         run(&mut m, "/goto @dev-a");
         assert_eq!(m.nav, nav::Item::Ant(user("dev-a")));
         assert_eq!(run(&mut m, "/goto ffff"), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "no thread ffff read");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "no thread ffff read");
     }
 
     #[test]
     fn later_replies_on_the_open_thread_waiting_its_turn() {
         let thread = ThreadId::generate();
         let mut m = model();
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(&mut m, "/later then the docs");
         assert_eq!(m.key(Key::Enter, at(0)), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "/later replies on an open thread: open one first");
-        m.bar.set_text("");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "/later replies on an open thread: open one first");
+        m.ui.bar.set_text("");
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
         typed(&mut m, "/later then the docs");
         let reply = Job::Reply { thread, to: None, text: "then the docs".into(), quote: None };
         let job = Job::Later(Box::new(reply));
         assert!(job.sends());
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "/later then the docs".into())));
-        assert!(m.bar.focused, "the bar stays for the next message, as after a send");
+        assert!(m.ui.bar.focused, "the bar stays for the next message, as after a send");
     }
 
     #[test]
@@ -996,17 +1002,17 @@ mod tests {
         m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy")], at(1));
         m.focus = Focus::View;
         m.key(Key::Char('i'), at(1));
-        assert!(!m.bar.focused, "home has no conversation to write in");
+        assert!(!m.ui.bar.focused, "home has no conversation to write in");
         m.pages.push(Page::Thread(thread::Page::new(thread)));
         m.key(Key::Char('i'), at(1));
-        assert_eq!((m.bar.text(), m.bar.focused), ("i".to_owned(), true), "written");
+        assert_eq!((m.ui.bar.text(), m.ui.bar.focused), ("i".to_owned(), true), "written");
         m.key(Key::Ctrl('u'), at(1));
         m.key(Key::Esc, at(1));
         m.key(Key::Up, at(1));
         assert!(!m.typing());
         m.key(Key::Char('i'), at(1));
-        assert!(m.bar.focused && m.typing());
-        assert_eq!(m.bar.text(), "", "i is not written then");
+        assert!(m.ui.bar.focused && m.typing());
+        assert_eq!(m.ui.bar.text(), "", "i is not written then");
     }
 
     #[test]
@@ -1025,8 +1031,8 @@ mod tests {
         m.key(Key::Up, at(3));
         m.key(Key::Up, at(3));
         m.key(Key::Char('>'), at(3));
-        assert!(m.bar.focused);
-        assert_eq!(m.bar.text(), "@dev-a ", "the bar addresses the author of the message selected");
+        assert!(m.ui.bar.focused);
+        assert_eq!(m.ui.bar.text(), "@dev-a ", "the bar addresses the author of the message selected");
         typed(&mut m, "why staging?");
         let quote = Some(Quoted {
             id: ids[1],
@@ -1036,30 +1042,30 @@ mod tests {
         let job = Job::Ask { to: user("dev-a"), thread: Some(thread.clone()), text: "why staging?".into(), quote };
         let sent = Some(Action::Run(job.clone(), "@dev-a why staging?".into()));
         assert_eq!(m.key(Key::Enter, at(3)), sent, "on the thread");
-        assert_eq!(m.bar.quoting, None, "sent once");
+        assert_eq!(m.ui.bar.quoting, None, "sent once");
         let failed = Outcome {
             result: Err(anyhow::anyhow!("no route")),
             text: "@dev-a why staging?".into(),
             quoting: job.quoting(),
         };
         m.outcome(failed);
-        assert_eq!(m.bar.text(), "@dev-a why staging?");
+        assert_eq!(m.ui.bar.text(), "@dev-a why staging?");
         assert_eq!(
-            m.bar.quoting.as_ref().map(|(t, q)| (t, q.id)),
+            m.ui.bar.quoting.as_ref().map(|(t, q)| (t, q.id)),
             Some((&thread, ids[1])),
             "a failed send quotes again"
         );
         m.key(Key::Ctrl('u'), at(3));
         m.key(Key::Esc, at(3));
-        assert_eq!(m.bar.quoting, None);
-        m.bar.focused = true;
+        assert_eq!(m.ui.bar.quoting, None);
+        m.ui.bar.focused = true;
 
         m.key(Key::Esc, at(3));
         m.key(Key::Up, at(3));
         m.key(Key::Up, at(3));
-        m.bar.set_text("@dev-b and the docs");
+        m.ui.bar.set_text("@dev-b and the docs");
         m.key(Key::Char('>'), at(3));
-        assert_eq!(m.bar.text(), "and the docs", "a human's message gets no mention, and the one typed goes");
+        assert_eq!(m.ui.bar.text(), "and the docs", "a human's message gets no mention, and the one typed goes");
         let quote = Some(Quoted { id: ids[0], quote: ants_proto::Quote::new(user("alice"), "deploy"), sealed: false });
         let reply = Job::Reply { thread, to: None, text: "and the docs".into(), quote };
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Run(reply, "and the docs".into())));
@@ -1067,10 +1073,10 @@ mod tests {
         m.key(Key::Esc, at(3));
         m.key(Key::Up, at(3));
         m.key(Key::Char('>'), at(3));
-        assert!(m.bar.quoting.is_some());
+        assert!(m.ui.bar.quoting.is_some());
         m.key(Key::Ctrl('u'), at(3));
         m.key(Key::Esc, at(3));
-        assert_eq!(m.bar.quoting, None, "leaving the bar empty drops the reply");
+        assert_eq!(m.ui.bar.quoting, None, "leaving the bar empty drops the reply");
     }
 
     #[test]
@@ -1082,12 +1088,12 @@ mod tests {
             vec![message(1, &thread, "alice", "dev-a", "deploy"), message(2, &thread, "dev-a", "alice", "done")];
         m.stored(entries.clone(), at(2));
         m.focus = Focus::View;
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(&mut m, "/forward @");
-        assert_eq!((m.bar.text(), m.bar.focused), ("/forward @".to_owned(), true));
+        assert_eq!((m.ui.bar.text(), m.ui.bar.focused), ("/forward @".to_owned(), true));
         typed(&mut m, "dev-b");
         assert_eq!(m.key(Key::Enter, at(2)), None, "following the latest, the thread goes, by its TL;DR");
-        let refused = &m.bar.status.as_ref().unwrap().text;
+        let refused = &m.ui.bar.status.as_ref().unwrap().text;
         assert_eq!(*refused, format!("no TL;DR of thread {thread} yet: S or /tldr asks for one, then /forward again"));
         let tldr = ants_proto::ThreadSummary {
             thread_id: thread.clone(),
@@ -1117,13 +1123,13 @@ mod tests {
         let mut m = model();
         m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy")], at(1));
         m.follow_drafts();
-        m.bar.focused = true;
-        m.bar.set_text("/tree");
+        m.ui.bar.focused = true;
+        m.ui.bar.set_text("/tree");
         assert_eq!(m.key(Key::Enter, at(1)), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "no thread open or selected");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "no thread open or selected");
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
         m.follow_drafts();
-        m.bar.set_text("/tree");
+        m.ui.bar.set_text("/tree");
         m.key(Key::Enter, at(1));
         assert_eq!(m.page().name(), "tree");
         assert_eq!(m.tree_shown().unwrap().0, thread);
@@ -1134,16 +1140,16 @@ mod tests {
         let mut m = model();
         let failed = Outcome { result: Err(anyhow::anyhow!("no route")), text: "@dev-a deploy".into(), quoting: None };
         assert_eq!(m.outcome(failed), None);
-        assert_eq!((m.bar.text(), m.bar.focused), ("@dev-a deploy".into(), true));
-        assert_eq!(m.bar.status, Some(Status { text: "no route".into(), tone: Tone::Error }));
+        assert_eq!((m.ui.bar.text(), m.ui.bar.focused), ("@dev-a deploy".into(), true));
+        assert_eq!(m.ui.bar.status, Some(Status { text: "no route".into(), tone: Tone::Error }));
         let thread = ThreadId::generate();
         let warnings = vec!["dev-a is served by no daemon".to_owned()];
         let done = Done { line: "sent to dev-a".into(), warnings, open: Some(thread.clone()), ..Done::default() };
         let sent = Outcome { result: Ok(done), text: "@dev-a deploy".into(), quoting: None };
         assert_eq!(m.outcome(sent), Some(Action::Open(thread)));
         assert_eq!(m.page().name(), "thread");
-        assert_eq!(m.bar.text(), "@dev-a deploy", "a success leaves the bar's text alone");
-        let status = m.bar.status.as_ref().unwrap();
+        assert_eq!(m.ui.bar.text(), "@dev-a deploy", "a success leaves the bar's text alone");
+        let status = m.ui.bar.status.as_ref().unwrap();
         assert_eq!((status.text.as_str(), status.tone), ("sent to dev-a · dev-a is served by no daemon", Tone::Warn));
     }
 
@@ -1157,9 +1163,9 @@ mod tests {
         let done = Done { line: "withdrew".into(), withdrew: Some(withdrawn), edit, ..Done::default() };
         m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None });
         assert!(m.data.withdrawn.contains(&withdrawn));
-        assert!(m.bar.focused && m.bar.text() == "deploy the site");
-        assert_eq!(m.bar.staged.names(), ["notes.txt"]);
-        let status = m.bar.status.as_ref().unwrap();
+        assert!(m.ui.bar.focused && m.ui.bar.text() == "deploy the site");
+        assert_eq!(m.ui.bar.staged.names(), ["notes.txt"]);
+        let status = m.ui.bar.status.as_ref().unwrap();
         assert!(status.tone == Tone::Warn && status.text.starts_with("withdrew · "), "{}", status.text);
 
         let thread = ThreadId::generate();
@@ -1169,12 +1175,12 @@ mod tests {
         page.history.loaded(&thread, Ok(entries)).unwrap();
         m.pages.push(Page::Thread(page));
         m.key(Key::Esc, at(1));
-        assert!(m.bar.is_empty(), "the draft stays with home");
-        m.bar.set_text("deploy the docs too");
+        assert!(m.ui.bar.is_empty(), "the draft stays with home");
+        m.ui.bar.set_text("deploy the docs too");
         m.key(Key::Up, at(1));
         assert_eq!(m.key(Key::Char('E'), at(1)), None, "a draft in the bar is kept");
-        assert_eq!(m.bar.text(), "deploy the docs too");
-        assert!(m.bar.status.as_ref().unwrap().text.starts_with("the bar holds a draft"));
+        assert_eq!(m.ui.bar.text(), "deploy the docs too");
+        assert!(m.ui.bar.status.as_ref().unwrap().text.starts_with("the bar holds a draft"));
     }
 
     #[test]
@@ -1182,39 +1188,39 @@ mod tests {
         let dir = ants_test_support::scratch_dir("bar-attach");
         std::fs::write(dir.join("notes.txt"), b"notes").unwrap();
         let mut m = model();
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(&mut m, &format!("/attach {}/no", dir.display()));
         assert_eq!(m.completions()[0].word, format!("{}/notes.txt", dir.display()), "paths complete");
         typed(&mut m, "tes.txt");
         assert_eq!(m.key(Key::Enter, at(0)), None);
-        assert!(m.bar.focused && m.bar.is_empty(), "the bar stays open to write the message");
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "attached notes.txt (5 B): sent with the next message");
-        assert_eq!(m.bar.staged.names(), ["notes.txt"]);
+        assert!(m.ui.bar.focused && m.ui.bar.is_empty(), "the bar stays open to write the message");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "attached notes.txt (5 B): sent with the next message");
+        assert_eq!(m.ui.bar.staged.names(), ["notes.txt"]);
         typed(&mut m, &format!("/attach {}/missing", dir.display()));
         m.key(Key::Enter, at(0));
-        assert_eq!(m.bar.status.as_ref().unwrap().tone, Tone::Error);
-        m.bar.set_text("");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().tone, Tone::Error);
+        m.ui.bar.set_text("");
 
         typed(&mut m, "@dev-a read this");
         let Some(Action::Run(Job::Attached { job, files }, text)) = m.key(Key::Enter, at(0)) else { panic!() };
         assert_eq!(*job, Job::Ask { to: user("dev-a"), thread: None, text: "read this".into(), quote: None });
         assert_eq!((files.len(), text.as_str()), (1, "@dev-a read this"));
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "sending with 1 file…");
-        assert!(m.bar.staged.names().is_empty(), "the files go with one message");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "sending with 1 file…");
+        assert!(m.ui.bar.staged.names().is_empty(), "the files go with one message");
         m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text, quoting: None });
-        assert_eq!((m.bar.text(), m.bar.staged.names()), ("@dev-a read this".to_owned(), vec!["notes.txt"]));
+        assert_eq!((m.ui.bar.text(), m.ui.bar.staged.names()), ("@dev-a read this".to_owned(), vec!["notes.txt"]));
 
         let thread = ThreadId::generate();
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
         m.follow_drafts();
-        m.bar.set_text("/done");
+        m.ui.bar.set_text("/done");
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(Job::Done { thread, done: true }, "/done".into())));
-        assert_eq!(m.bar.staged.names(), ["notes.txt"], "only a message takes the files");
-        m.bar.focused = true;
+        assert_eq!(m.ui.bar.staged.names(), ["notes.txt"], "only a message takes the files");
+        m.ui.bar.focused = true;
         typed(&mut m, "/detach");
         m.key(Key::Enter, at(0));
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "dropped the file attached");
-        assert!(m.bar.staged.names().is_empty());
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "dropped the file attached");
+        assert!(m.ui.bar.staged.names().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1226,20 +1232,20 @@ mod tests {
         let mut m = model();
         let run = |m: &mut Model, text: &str| {
             m.follow_drafts();
-            m.bar.focused = true;
-            m.bar.set_text(text);
+            m.ui.bar.focused = true;
+            m.ui.bar.set_text(text);
             m.key(Key::Enter, at(0))
         };
         assert_eq!(run(&mut m, "/notes split the work"), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "no thread open or selected");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "no thread open or selected");
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
         let notes = Job::Notes { thread: thread.clone(), text: "split the work".into() };
         assert_eq!(run(&mut m, "/notes split the work"), Some(Action::Run(notes, "/notes split the work".into())));
-        assert!(!m.bar.focused, "a slash command leaves the bar");
+        assert!(!m.ui.bar.focused, "a slash command leaves the bar");
         run(&mut m, &format!("/attach {}/plan.md", dir.display()));
         let Some(Action::Run(Job::Attached { job, files }, _)) = run(&mut m, "/notes the plan") else { panic!() };
         assert_eq!((*job, files.len()), (Job::Notes { thread, text: "the plan".into() }, 1));
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "sending with 1 file…");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "sending with 1 file…");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

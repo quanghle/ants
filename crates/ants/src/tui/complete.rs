@@ -72,11 +72,11 @@ pub fn narrow<T>(typed: &str, names: impl IntoIterator<Item = (String, T)>) -> V
 impl Model {
     /// The completions of the word at the bar's cursor, none when the bar is not focused or Esc closed them.
     pub fn completions(&self) -> Vec<Candidate> {
-        if !self.bar.focused || self.bar.pick.closed {
+        if !self.ui.bar.focused || self.ui.bar.pick.closed {
             return Vec::new();
         }
-        let (start, typed) = self.bar.word();
-        if self.bar.raw().chars().take(start).eq("/attach ".chars()) {
+        let (start, typed) = self.ui.bar.word();
+        if self.ui.bar.raw().chars().take(start).eq("/attach ".chars()) {
             return super::attach::paths(&typed);
         }
         let Some(word) = Word::of(&typed) else {
@@ -133,15 +133,15 @@ impl Model {
         if candidates.is_empty() {
             return false;
         }
-        let pick = &mut self.bar.pick;
+        let pick = &mut self.ui.bar.pick;
         let selected = pick.selected.min(candidates.len() - 1);
         match key {
             Key::Up => pick.selected = selected.checked_sub(1).unwrap_or(candidates.len() - 1),
             Key::Down => pick.selected = (selected + 1) % candidates.len(),
             Key::Esc => pick.closed = true,
-            Key::Tab => self.bar.complete(&candidates[selected].word),
-            Key::Enter if self.bar.word().1 != candidates[selected].word => {
-                self.bar.complete(&candidates[selected].word);
+            Key::Tab => self.ui.bar.complete(&candidates[selected].word),
+            Key::Enter if self.ui.bar.word().1 != candidates[selected].word => {
+                self.ui.bar.complete(&candidates[selected].word);
             }
             _ => return false,
         }
@@ -234,19 +234,19 @@ mod tests {
         assert_eq!(words(&m), ["@bob", "@bobcat", "@dev-b"]);
         let details: Vec<String> = m.completions().into_iter().map(|c| c.detail).collect();
         assert_eq!(details, ["human", "ant", "ant"]);
-        m.bar.set_text("@");
+        m.ui.bar.set_text("@");
         m.pages.push(Page::Channel(channel::Page::new("ops".parse().unwrap())));
         assert_eq!(words(&m), ["@carol", "@dev-b"]);
-        m.bar.set_text("hi #");
+        m.ui.bar.set_text("hi #");
         assert_eq!(words(&m), ["#devops", "#ops"]);
-        m.bar.set_text("/mu");
+        m.ui.bar.set_text("/mu");
         assert!(m.completions().is_empty(), "the palette lists the commands");
     }
 
     #[test]
     fn up_down_select_tab_or_enter_complete_and_esc_closes() {
         let mut m = team();
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(&mut m, "ask @d please");
         for _ in 0.."please".len() + 1 {
             m.key(Key::Left, at(0));
@@ -256,13 +256,13 @@ mod tests {
         m.key(Key::Down, at(0));
         m.key(Key::Up, at(0));
         assert_eq!(m.key(Key::Tab, at(0)), None);
-        assert_eq!(m.bar.text(), "ask @dev-b please", "the space after the word is kept");
+        assert_eq!(m.ui.bar.text(), "ask @dev-b please", "the space after the word is kept");
         assert!(m.completions().is_empty());
-        m.bar.set_text("#o");
+        m.ui.bar.set_text("#o");
         m.key(Key::Esc, at(0));
-        assert!(m.completions().is_empty() && m.bar.focused, "Esc closes the list, not the bar");
+        assert!(m.completions().is_empty() && m.ui.bar.focused, "Esc closes the list, not the bar");
         m.key(Key::Enter, at(0));
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "nothing to post to #o");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "nothing to post to #o");
         typed(&mut m, "p");
         assert_eq!(words(&m), ["#ops", "#devops"], "typing opens the list again");
     }

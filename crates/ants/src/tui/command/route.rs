@@ -140,12 +140,12 @@ impl Model {
         if let Some(searching) = self.ui.history.searching() {
             return searching;
         }
-        match &self.bar.noting {
+        match &self.ui.bar.noting {
             Some(Note::Reject(request)) => {
                 format!("reject {} with a note to {}", crate::tools::qualified(request), request.ant)
             }
             Some(Note::Reply(request)) => format!("to {} on the request's thread", request.ant),
-            None => self.route(&self.bar.text()).describe(&self.data),
+            None => self.route(&self.ui.bar.text()).describe(&self.data),
         }
     }
 }
@@ -167,7 +167,7 @@ mod tests {
         let mut m = model();
         let title = |m: &mut Model, text: &str| {
             m.follow_drafts();
-            m.bar.set_text(text);
+            m.ui.bar.set_text(text);
             m.bar_title()
         };
         assert_eq!(title(&mut m, "who owns billing?"), "to the assistant or the messenger on a new thread");
@@ -185,7 +185,7 @@ mod tests {
         let Some(Page::Thread(page)) = m.pages.last_mut() else { panic!() };
         page.history.loaded(&thread, Ok(entries)).unwrap();
         assert_eq!(title(&mut m, "go on"), "reply to dev-b on \"deploy\"");
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         let reply = Job::Reply { thread: thread.clone(), to: Some(user("dev-b")), text: "go on".into(), quote: None };
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(reply, "go on".into())));
         assert_eq!(title(&mut m, "#ops look"), "new thread in #ops", "a #channel typed first changes it");
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn the_bar_shows_its_title() {
         let mut m = model();
-        m.bar.set_text("@dev-a deploy");
+        m.ui.bar.set_text("@dev-a deploy");
         let shown = crate::test_support::render::rendered(120, 32, |f| crate::tui::frame::draw(f, &m, at(0)));
         assert!(shown.contains("┌ > to dev-a on a new thread ─"), "{shown}");
     }

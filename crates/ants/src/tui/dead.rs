@@ -43,7 +43,7 @@ impl Letter {
         if key != Key::Char('y') {
             return None;
         }
-        model.bar.set_status(format!("dropping dead letter {}…", self.seq), Tone::Busy);
+        model.ui.bar.set_status(format!("dropping dead letter {}…", self.seq), Tone::Busy);
         Some(Action::Run(Job::DeadDrop(self.seq), String::new()))
     }
 }

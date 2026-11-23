@@ -99,13 +99,13 @@ impl Model {
     /// The text after the `/` starting the focused bar, up to the cursor, while the palette shows: the name of a
     /// command refused while the bar holds it unchanged.
     fn palette_typed(&self) -> Option<String> {
-        if !self.bar.focused || self.bar.pick.closed || self.bar.noting.is_some() {
+        if !self.ui.bar.focused || self.ui.bar.pick.closed || self.ui.bar.noting.is_some() {
             return None;
         }
         if let Some(name) = self.refused() {
             return Some(name);
         }
-        let (start, typed) = self.bar.word();
+        let (start, typed) = self.ui.bar.word();
         if start != 0 {
             return None;
         }
@@ -114,7 +114,7 @@ impl Model {
 
     /// The name typed of the slash command refused, while the bar holds it unchanged.
     fn refused(&self) -> Option<String> {
-        let refused = self.bar.refused.as_ref().filter(|text| **text == self.bar.raw())?;
+        let refused = self.ui.bar.refused.as_ref().filter(|text| **text == self.ui.bar.raw())?;
         let name = refused.trim_start().trim_start_matches('/').split_whitespace().next();
         Some(name.unwrap_or_default().to_owned())
     }
@@ -127,10 +127,10 @@ impl Model {
         if entries.is_empty() {
             return None;
         }
-        let selected = self.bar.pick.selected.min(entries.len() - 1);
+        let selected = self.ui.bar.pick.selected.min(entries.len() - 1);
         match key {
-            Key::Up => self.bar.pick.selected = selected.checked_sub(1).unwrap_or(entries.len() - 1),
-            Key::Down => self.bar.pick.selected = (selected + 1) % entries.len(),
+            Key::Up => self.ui.bar.pick.selected = selected.checked_sub(1).unwrap_or(entries.len() - 1),
+            Key::Down => self.ui.bar.pick.selected = (selected + 1) % entries.len(),
             Key::Esc => self.close_palette(),
             Key::Tab | Key::Enter => return Some(self.pick(entries.swap_remove(selected), key == Key::Tab, now)),
             _ => return None,
@@ -143,33 +143,33 @@ impl Model {
     fn pick(&mut self, entry: Entry, tab: bool, now: DateTime<Utc>) -> Option<Action> {
         match entry.act {
             Act::Command { name, run: true } if !tab => {
-                self.bar.set_text(&format!("/{name}"));
+                self.ui.bar.set_text(&format!("/{name}"));
                 return self.submit(format!("/{name}"), now);
             }
             // The arguments of a command refused go with it.
             Act::Command { name, .. } if self.refused().is_some() => {
-                self.bar.set_text(&format!("/{name} "));
-                self.bar.pick = complete::Pick::default();
+                self.ui.bar.set_text(&format!("/{name} "));
+                self.ui.bar.pick = complete::Pick::default();
             }
-            Act::Command { name, .. } => self.bar.complete(&format!("/{name}")),
-            Act::Key(_) if entry.why.is_some() => self.bar.set_status(entry.why.unwrap_or_default(), Tone::Error),
+            Act::Command { name, .. } => self.ui.bar.complete(&format!("/{name}")),
+            Act::Key(_) if entry.why.is_some() => self.ui.bar.set_status(entry.why.unwrap_or_default(), Tone::Error),
             Act::Key(key) => {
-                self.bar.set_text("");
-                self.bar.focused = false;
+                self.ui.bar.set_text("");
+                self.ui.bar.focused = false;
                 // A letter picked while writing acts as on the message selected, else the latest.
                 if !matches!(key, Key::Char(_)) || !self.typing() {
                     return self.key(key, now);
                 }
-                self.selecting = Some(self.conversation());
+                self.ui.selecting = Some(self.conversation());
                 let action = self.key(key, now);
-                if self.selecting.is_some() {
+                if self.ui.selecting.is_some() {
                     self.unselect(false);
                 }
                 return action;
             }
             Act::Go(place) => {
-                self.bar.set_text("");
-                self.bar.focused = false;
+                self.ui.bar.set_text("");
+                self.ui.bar.focused = false;
                 return self.visit(place);
             }
         }
@@ -179,11 +179,11 @@ impl Model {
     /// Close the palette: a bar holding only the word typed for it is emptied and left, else (or for a command refused)
     /// the list closes.
     pub(super) fn close_palette(&mut self) {
-        if self.bar.raw().contains(char::is_whitespace) || self.refused().is_some() {
-            self.bar.pick.closed = true;
+        if self.ui.bar.raw().contains(char::is_whitespace) || self.refused().is_some() {
+            self.ui.bar.pick.closed = true;
         } else {
-            self.bar.set_text("");
-            self.bar.focused = false;
+            self.ui.bar.set_text("");
+            self.ui.bar.focused = false;
         }
     }
 }
@@ -251,13 +251,13 @@ mod tests {
     fn slash_then_a_few_letters_and_enter_runs_the_command_in_a_thread() {
         let (mut m, thread) = on_thread();
         m.key(Key::Char('/'), at(1));
-        assert_eq!((m.bar.focused, m.bar.text()), (true, "/".to_owned()), "/ opens the palette");
+        assert_eq!((m.ui.bar.focused, m.ui.bar.text()), (true, "/".to_owned()), "/ opens the palette");
         typed(&mut m, "arch");
         let words: Vec<String> = m.palette(at(1)).into_iter().map(|e| e.word).collect();
         assert_eq!(words[..2], ["/archive", "e"], "the command, then the key doing it: {words:?}");
         let archive = Job::Mark { thread, marking: Marking::Archive };
         assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(archive, "/archive".into())));
-        assert!(!m.bar.focused && m.bar.is_empty());
+        assert!(!m.ui.bar.focused && m.ui.bar.is_empty());
     }
 
     #[test]
@@ -267,7 +267,7 @@ mod tests {
         typed(&mut m, "nope");
         assert!(m.palette(at(1)).is_empty());
         assert_eq!(m.key(Key::Enter, at(1)), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "no command /nope: the palette lists them");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "no command /nope: the palette lists them");
         let words: Vec<String> = m.palette(at(1)).into_iter().map(|e| e.word).collect();
         assert_eq!(words.len(), COMMANDS.len(), "matching none, all the commands: {words:?}");
         let shown = crate::test_support::render::rendered(100, 20, |f| crate::tui::frame::draw(f, &m, at(1)));
@@ -275,9 +275,9 @@ mod tests {
         m.key(Key::Backspace, at(1));
         assert!(m.palette(at(1)).is_empty(), "an edit narrows as typed again");
 
-        m.bar.set_text("/done now");
+        m.ui.bar.set_text("/done now");
         assert_eq!(m.key(Key::Enter, at(1)), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "usage: /done");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "usage: /done");
         let words: Vec<String> = m.palette(at(1)).into_iter().map(|e| e.word).collect();
         assert_eq!(words, ["/done", "/undone"]);
         let done = Job::Done { thread, done: true };
@@ -289,7 +289,7 @@ mod tests {
         let mut m = model();
         m.focus = Focus::View;
         m.key(Key::Ctrl('k'), at(1));
-        assert_eq!((m.bar.focused, m.bar.text()), (true, "/".to_owned()), "Ctrl-K opens the palette");
+        assert_eq!((m.ui.bar.focused, m.ui.bar.text()), (true, "/".to_owned()), "Ctrl-K opens the palette");
         let all = m.palette(at(1));
         assert!(all.iter().any(|e| e.word == "/goto") && all.iter().any(|e| e.word == "s"), "commands and keys");
         assert!(all.iter().all(|e| e.word != "Ctrl-K /"), "not the palette itself");
@@ -301,15 +301,15 @@ mod tests {
         let shown = crate::test_support::render::rendered(100, 20, |f| crate::tui::frame::draw(f, &m, at(1)));
         assert!(shown.contains("/archive    (no thread open or selected)"), "{shown}");
 
-        m.bar.set_text("/done");
+        m.ui.bar.set_text("/done");
         let done = m.palette(at(1));
         let key = done.iter().position(|e| e.word == "d").unwrap();
         for _ in 0..key {
             m.key(Key::Down, at(1));
         }
         assert_eq!(m.key(Key::Enter, at(1)), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "nothing selected", "a key that cannot act says why");
-        assert_eq!(m.bar.text(), "/done", "and the palette stays");
+        assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "nothing selected", "a key that cannot act says why");
+        assert_eq!(m.ui.bar.text(), "/done", "and the palette stays");
     }
 
     #[test]
@@ -320,21 +320,21 @@ mod tests {
         let shown = m.palette(at(1));
         assert_eq!(shown[0].act, Act::Key(Key::Char('T')), "{shown:?}");
         assert!(matches!(m.key(Key::Enter, at(1)), Some(Action::KeepTools(_))));
-        assert!(!m.bar.focused && m.bar.is_empty());
+        assert!(!m.ui.bar.focused && m.ui.bar.is_empty());
 
         m.key(Key::Char('/'), at(2));
         typed(&mut m, "mu");
         assert_eq!(m.key(Key::Tab, at(2)), None);
-        assert_eq!(m.bar.text(), "/mute ", "Tab completes a command");
+        assert_eq!(m.ui.bar.text(), "/mute ", "Tab completes a command");
         assert!(m.palette(at(2)).is_empty(), "the arguments typed, the palette goes");
-        m.bar.set_text("/titl");
+        m.ui.bar.set_text("/titl");
         m.key(Key::Enter, at(2));
-        assert_eq!(m.bar.text(), "/title ", "Enter completes a command needing an argument");
-        m.bar.set_text("/");
+        assert_eq!(m.ui.bar.text(), "/title ", "Enter completes a command needing an argument");
+        m.ui.bar.set_text("/");
         m.key(Key::Esc, at(2));
-        assert!(!m.bar.focused && m.bar.is_empty(), "Esc empties and leaves the bar the palette opened");
+        assert!(!m.ui.bar.focused && m.ui.bar.is_empty(), "Esc empties and leaves the bar the palette opened");
         assert_eq!(m.key(Key::Ctrl('f'), at(2)), None);
-        assert!(!m.bar.focused, "Ctrl-F finds in a thread");
+        assert!(!m.ui.bar.focused, "Ctrl-F finds in a thread");
     }
 
     fn with_channels() -> Model {
@@ -365,7 +365,7 @@ mod tests {
         assert!(words.contains(&"the ops deploy is done".to_owned()), "threads by title: {words:?}");
         m.key(Key::Enter, at(1));
         assert_eq!((m.page().name(), &m.nav), ("channel", &crate::tui::nav::Item::Channel("ops".parse().unwrap())));
-        assert!(!m.bar.focused && m.bar.is_empty());
+        assert!(!m.ui.bar.focused && m.ui.bar.is_empty());
 
         m.key(Key::Char('/'), at(2));
         typed(&mut m, "deploy");
@@ -386,6 +386,6 @@ mod tests {
         assert_eq!(m.key(Key::Ctrl('t'), at(3)), Some(Action::Open(then)), "the next one");
         m.data.marker.as_mut().unwrap().mark(2);
         assert_eq!(m.key(Key::Ctrl('t'), at(4)), None);
-        assert_eq!(m.notice.as_ref().unwrap().text, "nothing unread elsewhere");
+        assert_eq!(m.ui.notice.as_ref().unwrap().text, "nothing unread elsewhere");
     }
 }

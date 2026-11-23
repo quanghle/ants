@@ -12,8 +12,8 @@ use crate::tui::test_support::model;
 /// Send `text` from the bar of the view shown.
 fn run(m: &mut Model, text: &str) -> Option<Action> {
     m.follow_drafts();
-    m.bar.focused = true;
-    m.bar.set_text(text);
+    m.ui.bar.focused = true;
+    m.ui.bar.set_text(text);
     m.key(Key::Enter, at(1))
 }
 
@@ -27,7 +27,7 @@ fn notify_snoozes_resumes_and_shows_the_holds_from_any_view_the_level_on_a_chann
     assert_eq!(run(&mut m, "/notify resume"), ran(Job::NotifyResume, "/notify resume"));
     assert_eq!(run(&mut m, "/notify status"), ran(Job::NotifyStatus, "/notify status"));
     assert_eq!(run(&mut m, "/notify mentions"), None);
-    let status = m.bar.status.as_ref().map(|s| s.text.as_str());
+    let status = m.ui.bar.status.as_ref().map(|s| s.text.as_str());
     assert_eq!(status, Some("/notify sets a channel's notify level: show the channel first"));
 }
 

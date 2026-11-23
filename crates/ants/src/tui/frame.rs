@@ -30,9 +30,9 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let [header, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(tall)]).areas(frame.area());
     frame.render_widget(Paragraph::new(header_line(model, now, header.width)), header);
-    model.fold.drawn(width);
-    let nav_focused = model.focus == Focus::Nav && !model.bar.focused;
-    let right = if model.fold.nav(width) {
+    model.ui.fold.drawn(width);
+    let nav_focused = model.focus == Focus::Nav && !model.ui.bar.focused;
+    let right = if model.ui.fold.nav(width) {
         let [left, right] = Layout::horizontal([Constraint::Length(NAV_WIDTH), Constraint::Min(20)]).areas(body);
         nav::draw(frame, left, &model.data, &model.ui, &model.nav, now, nav_focused);
         right
@@ -40,22 +40,22 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         body
     };
     let [view, bar] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(model.bar.height(right.width))]).areas(right);
-    let focused = model.focus == Focus::View && !model.bar.focused;
+        Layout::vertical([Constraint::Min(3), Constraint::Length(model.ui.bar.height(right.width))]).areas(right);
+    let focused = model.focus == Focus::View && !model.ui.bar.focused;
     let ui = &model.ui;
     ui.mouse.add(view, super::mouse::Target::View);
     model.page().draw(frame, view, model, now, focused);
-    model.bar.draw(frame, bar, &model.completions(), &model.bar_title(), &model.enter_hint());
+    model.ui.bar.draw(frame, bar, &model.completions(), &model.bar_title(), &model.enter_hint());
     let completions = model.completions();
     if !completions.is_empty() {
-        super::mouse::completions(&ui.mouse, bar, completions.len(), model.bar.pick.selected, false);
+        super::mouse::completions(&ui.mouse, bar, completions.len(), model.ui.bar.pick.selected, false);
     }
     let palette = model.palette(now);
     if !palette.is_empty() {
-        palette::draw(frame, bar, &palette, model.bar.pick.selected);
-        super::mouse::completions(&ui.mouse, bar, palette.len(), model.bar.pick.selected, true);
+        palette::draw(frame, bar, &palette, model.ui.bar.pick.selected);
+        super::mouse::completions(&ui.mouse, bar, palette.len(), model.ui.bar.pick.selected, true);
     }
-    if nav_focused && !model.fold.nav(width) {
+    if nav_focused && !model.ui.fold.nav(width) {
         let over = Rect { width: NAV_WIDTH.min(view.width), ..view };
         frame.render_widget(Clear, over);
         nav::draw(frame, over, &model.data, &model.ui, &model.nav, now, true);
@@ -67,7 +67,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         ui.mouse.add(frame.area(), super::mouse::Target::Overlay);
         approvals::draw_full(frame, asking, now);
     }
-    if model.catchup.shown() {
+    if model.digest_shown() {
         ui.mouse.add(frame.area(), super::mouse::Target::Overlay);
     }
     catchup::draw_digest(frame, model, now);
@@ -115,7 +115,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
     if !model.palette(now).is_empty() {
         return keymap::prompt("↑↓ select · Enter run · Tab complete · Esc close", width, false);
     }
-    if model.bar.focused && !model.completions().is_empty() {
+    if model.ui.bar.focused && !model.completions().is_empty() {
         return keymap::prompt("↑↓ select · Tab/Enter complete · Esc close the list", width, false);
     }
     if model.ui.history.searching().is_some() {
@@ -125,7 +125,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
             false,
         );
     }
-    if model.bar.focused {
+    if model.ui.bar.focused {
         let keys = "Enter send · Ctrl-J new line · Ctrl-G editor · / palette · Esc leave";
         return keymap::prompt(keys, width, false);
     }

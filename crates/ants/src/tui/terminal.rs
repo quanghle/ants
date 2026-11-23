@@ -261,11 +261,11 @@ mod tests {
     #[test]
     fn suspend_is_global_and_keeps_composition_and_overlays() {
         let mut model = test_support::model();
-        model.bar.focused = true;
-        model.bar.set_text("unsent");
+        model.ui.bar.focused = true;
+        model.ui.bar.set_text("unsent");
         model.overlay(crate::tui::model::Overlay::Help(super::super::help::Help::default()));
         assert_eq!(model.key(super::super::model::Key::Ctrl('z'), at(1)), Some(super::super::model::Action::Suspend));
-        assert_eq!(model.bar.text(), "unsent");
+        assert_eq!(model.ui.bar.text(), "unsent");
         assert!(model.help().is_some());
     }
 }

@@ -254,13 +254,13 @@ impl Mouse {
         self.last = Some((target.clone(), now));
         match target {
             Target::Nav(item) => {
-                model.bar.focused = false;
+                model.ui.bar.focused = false;
                 let action = if model.nav != item { model.select(item) } else { None };
                 model.focus = if again { Focus::View } else { Focus::Nav };
                 action
             }
             Target::Completion { at, palette } => {
-                model.bar.pick.selected = at;
+                model.ui.bar.pick.selected = at;
                 if again { model.key(if palette { Key::Enter } else { Key::Tab }, now) } else { None }
             }
             Target::ChannelTab(tab) => {
@@ -273,27 +273,27 @@ impl Mouse {
                 if again { model.key(Key::Enter, now) } else { None }
             }
             Target::Message(seq) => {
-                model.bar.focused = false;
+                model.ui.bar.focused = false;
                 model.focus = Focus::View;
-                model.selecting = Some(model.conversation());
+                model.ui.selecting = Some(model.conversation());
                 if let Some(Page::Thread(page)) = model.pages.last_mut() {
                     page.mouse_select(seq);
                 }
                 if again { model.view_key(Key::Char('v'), now) } else { None }
             }
             Target::Step(thread) => {
-                model.bar.focused = false;
+                model.ui.bar.focused = false;
                 model.focus = Focus::View;
-                model.selecting = Some(model.conversation());
+                model.ui.selecting = Some(model.conversation());
                 if let Some(Page::Thread(page)) = model.pages.last_mut() {
                     page.mouse_select_step(thread);
                 }
                 if again { model.view_key(Key::Enter, now) } else { None }
             }
             Target::Row(at) => {
-                model.bar.focused = false;
+                model.ui.bar.focused = false;
                 model.focus = Focus::View;
-                model.selecting = Some(model.conversation());
+                model.ui.selecting = Some(model.conversation());
                 model.view_key(Key::Home, now);
                 for _ in 0..at {
                     model.view_key(Key::Down, now);
@@ -301,7 +301,7 @@ impl Mouse {
                 if again { model.key(Key::Enter, now) } else { None }
             }
             Target::Question(question, at) => {
-                model.bar.focused = false;
+                model.ui.bar.focused = false;
                 model.focus = Focus::View;
                 let data = &model.data;
                 let selected = if let Some(Page::Thread(page)) = model.pages.last_mut() {
@@ -314,7 +314,7 @@ impl Mouse {
                 if again && selected { model.key(Key::Enter, now) } else { None }
             }
             Target::View => {
-                model.bar.focused = false;
+                model.ui.bar.focused = false;
                 model.focus = Focus::View;
                 None
             }
@@ -323,7 +323,7 @@ impl Mouse {
                 if let Some(Page::Ant(page)) = model.pages.last_mut() {
                     page.pane = pane;
                 }
-                model.bar.focused = false;
+                model.ui.bar.focused = false;
                 model.focus = Focus::View;
                 None
             }
@@ -352,7 +352,8 @@ impl Mouse {
         }
         if let Target::Completion { palette, .. } = target {
             let count = if palette { model.palette(now).len() } else { model.completions().len() };
-            model.bar.pick.selected = model.bar.pick.selected.saturating_add_signed(by).min(count.saturating_sub(1));
+            model.ui.bar.pick.selected =
+                model.ui.bar.pick.selected.saturating_add_signed(by).min(count.saturating_sub(1));
             return None;
         }
         if matches!(target, Target::Overlay | Target::Copy(_)) {
@@ -637,16 +638,16 @@ mod tests {
     #[test]
     fn completions_select_before_applying_and_question_options_select_before_sending() {
         let mut m = test_support::model();
-        m.bar.focused = true;
-        m.bar.set_text("@");
+        m.ui.bar.focused = true;
+        m.ui.bar.set_text("@");
         draw(&m);
         let candidate = m.completions()[0].word.clone();
         let event = click(&m, &Target::Completion { at: 0, palette: false });
         let mut mouse = Mouse::default();
         assert_eq!(mouse.event(&mut m, event, at(1)), None);
-        assert_eq!(m.bar.text(), "@");
+        assert_eq!(m.ui.bar.text(), "@");
         assert_eq!(mouse.event(&mut m, event, at(1)), None);
-        assert!(m.bar.text().starts_with(&candidate));
+        assert!(m.ui.bar.text().starts_with(&candidate));
 
         let mut m = test_support::model();
         let id = ants_proto::ThreadId::generate();

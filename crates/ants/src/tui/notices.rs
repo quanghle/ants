@@ -130,7 +130,7 @@ mod tests {
         m.notify("tool calls: none", Level::Info, at(1));
         m.key(Key::Char('N'), at(2));
         m.paste("hello", at(2));
-        assert_eq!((m.bar.text(), m.bar.focused), (String::new(), false), "the bar takes none of it");
+        assert_eq!((m.ui.bar.text(), m.ui.bar.focused), (String::new(), false), "the bar takes none of it");
         assert!(!m.overlays.is_empty(), "the notices still show");
     }
 
@@ -162,7 +162,7 @@ mod tests {
         for i in 0..=KEPT {
             m.notify(format!("notice {i}"), Level::Info, at(1));
         }
-        assert_eq!(m.notices.len(), KEPT);
-        assert_eq!(m.notices[0].text, "notice 1");
+        assert_eq!(m.ui.notices.len(), KEPT);
+        assert_eq!(m.ui.notices[0].text, "notice 1");
     }
 }

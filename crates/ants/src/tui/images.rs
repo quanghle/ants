@@ -35,16 +35,10 @@ const MAX_DECODED: u64 = 128 * 1024 * 1024;
 /// The images encoded for the terminal, by handle: None for one that failed.
 #[derive(Default)]
 pub struct Images {
-    /// Whether images are drawn at all.
-    pub on: bool,
     encoded: HashMap<AttachmentHandle, Option<Protocol>>,
 }
 
 impl Images {
-    pub fn new(on: bool) -> Self {
-        Self { on, encoded: HashMap::new() }
-    }
-
     /// The image under `handle`, once encoded.
     pub fn get(&self, handle: &AttachmentHandle) -> Option<&Protocol> {
         self.encoded.get(handle)?.as_ref()
@@ -67,7 +61,7 @@ impl Images {
 /// The images to draw for what `model` shows: the latest image attachments of the open thread.
 pub fn wanted(model: &Model) -> Vec<Listed> {
     let Page::Thread(page) = model.page() else { return Vec::new() };
-    if !model.data.images.on {
+    if !model.ui.inline_images {
         return Vec::new();
     }
     let all = page.history.entries.iter().rev().flat_map(|e| e.attachments.iter().rev());
@@ -235,7 +229,7 @@ mod tests {
         let bytes = png(40, 40);
         let attachment = files::reference("shot.png", "image/png", &bytes).unwrap();
         let [listed] = attachments::listed(&[attachment], |id| message.attachment_handle(id)).try_into().unwrap();
-        let mut images = Images::new(true);
+        let mut images = Images::default();
         let (mut lines, mut placed) = (vec![Line::raw("📎 shot.png")], Vec::new());
         place(&mut lines, &mut placed, &images, &listed, 2, 40);
         assert_eq!((lines.len(), placed.len()), (1, 0), "not encoded yet");

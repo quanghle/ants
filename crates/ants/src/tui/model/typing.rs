@@ -16,20 +16,20 @@ impl Model {
             && !self.prompt.as_ref().is_some_and(super::Prompt::covers)
             && here != Conversation::None
             && !matches!(self.page(), Page::Thread(page) if page.listing())
-            && self.selecting.as_ref() != Some(&here)
+            && self.ui.selecting.as_ref() != Some(&here)
     }
 
     /// Take `key` while the bar is not focused in a conversation: written in the bar or selecting while typing, back to
     /// typing while selecting. None when the key is the view's.
     pub(super) fn conversation_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
-        if self.bar.focused || self.focus != Focus::View || self.conversation() == Conversation::None {
+        if self.ui.bar.focused || self.focus != Focus::View || self.conversation() == Conversation::None {
             return None;
         }
         if !self.typing() {
             return match key {
                 Key::Char('i') | Key::Esc | Key::End => {
                     self.unselect(key == Key::End);
-                    self.bar.focused = key == Key::Char('i');
+                    self.ui.bar.focused = key == Key::Char('i');
                     Some(None)
                 }
                 _ => None,
@@ -37,9 +37,9 @@ impl Model {
         }
         let thread = matches!(self.page(), Page::Thread(_));
         match key {
-            Key::Char('?') if self.bar.is_empty() => None,
+            Key::Char('?') if self.ui.bar.is_empty() => None,
             Key::Char(_) => self.write(key, now),
-            Key::Enter | Key::Backspace | Key::Delete if !self.bar.is_empty() => self.write(key, now),
+            Key::Enter | Key::Backspace | Key::Delete if !self.ui.bar.is_empty() => self.write(key, now),
             Key::Up => {
                 self.select_latest(now);
                 Some(None)
@@ -47,13 +47,13 @@ impl Model {
             // The latest post or message of a channel or a DM is the first listed.
             Key::End if !thread => {
                 self.select_latest(now);
-                self.selecting = None;
+                self.ui.selecting = None;
                 Some(None)
             }
             Key::Down | Key::Home | Key::End | Key::PageUp | Key::PageDown => {
                 let action = self.view_key(key, now);
                 if !thread || matches!(self.page(), Page::Thread(page) if page.selecting()) {
-                    self.selecting = Some(self.conversation());
+                    self.ui.selecting = Some(self.conversation());
                 }
                 Some(action)
             }
@@ -63,13 +63,13 @@ impl Model {
 
     /// Write `key` in the bar, focusing it.
     fn write(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
-        self.bar.focused = true;
+        self.ui.bar.focused = true;
         self.bar_key(key, now)
     }
 
     /// Up while typing: select the latest message or post.
     fn select_latest(&mut self, now: DateTime<Utc>) {
-        self.selecting = Some(self.conversation());
+        self.ui.selecting = Some(self.conversation());
         let (data, ui) = (&self.data, &self.ui);
         match self.pages.last_mut() {
             Some(Page::Thread(page)) => page.select(),
@@ -82,14 +82,14 @@ impl Model {
     /// Forget a selection left behind in another view, and write once the bar is focused from one, as >, f or E focus
     /// it: the message stays marked for the command written, and Up comes back to it.
     pub(super) fn settle(&mut self) {
-        if self.bar.focused || self.selecting.as_ref().is_some_and(|here| *here != self.conversation()) {
-            self.selecting = None;
+        if self.ui.bar.focused || self.ui.selecting.as_ref().is_some_and(|here| *here != self.conversation()) {
+            self.ui.selecting = None;
         }
     }
 
     /// Back to typing, a thread's view where it is, or following its latest message when `latest`.
     pub fn unselect(&mut self, latest: bool) {
-        self.selecting = None;
+        self.ui.selecting = None;
         if let Some(Page::Thread(page)) = self.pages.last_mut() {
             page.unselect(latest);
         }

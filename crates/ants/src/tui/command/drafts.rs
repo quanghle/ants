@@ -103,13 +103,13 @@ impl Model {
         let drafts = &mut self.ui.drafts;
         if drafts.here != here {
             let draft = drafts.kept.remove(&here).unwrap_or_default();
-            let left = self.bar.swap(draft);
+            let left = self.ui.bar.swap(draft);
             let there = std::mem::replace(&mut drafts.here, here);
             if !left.is_empty() {
                 drafts.kept.insert(there, left);
             }
         }
-        drafts.held = !self.bar.is_empty();
+        drafts.held = !self.ui.bar.is_empty();
     }
 }
 
@@ -137,13 +137,13 @@ mod tests {
         let mut m = model();
         m.stored(vec![message(1, &a, "alice", "dev-a", "deploy"), message(2, &b, "alice", "dev-b", "docs")], at(1));
         show(&mut m, &a);
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(&mut m, "ship it");
         assert!(m.ui.drafts.holds(&Conversation::Thread(a.clone())));
         show(&mut m, &b);
-        assert!(m.bar.is_empty(), "thread B shows its own draft");
+        assert!(m.ui.bar.is_empty(), "thread B shows its own draft");
         assert_eq!(m.bar_title(), "reply on \"docs\"");
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         assert_eq!(m.key(Key::Enter, at(1)), None, "nothing to send on B");
         assert!(m.ui.drafts.holds(&Conversation::Thread(a.clone())) && !m.ui.drafts.holds(&Conversation::None));
         m.pages.push(Page::Work(work::Page::new(Filter::default())));
@@ -151,7 +151,7 @@ mod tests {
         let shown = crate::test_support::render::rendered(120, 32, |f| crate::tui::frame::draw(f, &m, at(1)));
         assert!(shown.contains("deploy ✎"), "the lists mark it: {shown}");
         show(&mut m, &a);
-        assert_eq!(m.bar.text(), "ship it", "back on A");
+        assert_eq!(m.ui.bar.text(), "ship it", "back on A");
         let Some(Action::Run(Job::Reply { thread, .. }, _)) = m.key(Key::Enter, at(1)) else { panic!() };
         assert_eq!(thread, a);
     }
@@ -161,14 +161,14 @@ mod tests {
         let (a, b) = (ThreadId::generate(), ThreadId::generate());
         let mut m = model();
         show(&mut m, &a);
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(&mut m, "ship it");
         let Some(Action::Run(_, text)) = m.key(Key::Enter, at(1)) else { panic!() };
         show(&mut m, &b);
         typed(&mut m, "and the docs");
         m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text, quoting: None });
-        assert_eq!(m.bar.text(), "and the docs", "B keeps its draft");
+        assert_eq!(m.ui.bar.text(), "and the docs", "B keeps its draft");
         show(&mut m, &a);
-        assert_eq!(m.bar.text(), "ship it", "A has the text back");
+        assert_eq!(m.ui.bar.text(), "ship it", "A has the text back");
     }
 }

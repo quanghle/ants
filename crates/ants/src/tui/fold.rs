@@ -61,22 +61,23 @@ fn flip(chosen: Option<bool>, width: u16, from: u16) -> Option<bool> {
 impl Model {
     /// Take `key` if it folds or shows the nav, or the side panel on a thread: the choice to keep.
     pub(in crate::tui) fn fold_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
-        let width = self.fold.width.get();
+        let width = self.ui.fold.width.get();
         let what = match key {
             NAV_KEY => {
-                self.fold.folds.nav = flip(self.fold.folds.nav, width, NAV_FROM);
-                if self.fold.nav(width) { "the nav shows" } else { "the nav folds: Tab shows it" }
+                self.ui.fold.folds.nav = flip(self.ui.fold.folds.nav, width, NAV_FROM);
+                if self.ui.fold.nav(width) { "the nav shows" } else { "the nav folds: Tab shows it" }
             }
             PANEL_KEY if matches!(self.page(), Page::Thread(_)) => {
-                self.fold.folds.panel = flip(self.fold.folds.panel, width, PANEL_FROM);
-                if self.fold.panel(width) { "the side panel shows" } else { "the side panel folds" }
+                self.ui.fold.folds.panel = flip(self.ui.fold.folds.panel, width, PANEL_FROM);
+                if self.ui.fold.panel(width) { "the side panel shows" } else { "the side panel folds" }
             }
             _ => return None,
         };
-        let follows = if key == NAV_KEY { self.fold.folds.nav.is_none() } else { self.fold.folds.panel.is_none() };
+        let follows =
+            if key == NAV_KEY { self.ui.fold.folds.nav.is_none() } else { self.ui.fold.folds.panel.is_none() };
         let what = if follows { format!("{what}, as the width has it") } else { what.to_owned() };
         self.notify(what, Level::Info, now);
-        Some(Action::KeepFolds(self.fold.folds.clone()))
+        Some(Action::KeepFolds(self.ui.fold.folds.clone()))
     }
 }
 

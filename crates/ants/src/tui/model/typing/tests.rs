@@ -28,7 +28,7 @@ fn what_is_typed_in_a_thread_is_sent_there_and_no_mark_of_the_thread_changes() {
         let action = m.key(Key::Char(c), at(3));
         assert!(!matches!(action, Some(Action::Change(..))), "{c}: {action:?}");
     }
-    assert_eq!(m.bar.text(), text);
+    assert_eq!(m.ui.bar.text(), text);
     let Some(Action::Run(Job::Reply { thread: on, text: sent, .. }, _)) = m.key(Key::Enter, at(3)) else {
         panic!("not a reply")
     };
@@ -59,12 +59,12 @@ fn with_a_message_selected_the_thread_keys_act_on_it_as_before() {
 
     m.key(Key::Up, at(3));
     m.key(Key::Char('i'), at(3));
-    assert!(m.bar.focused && m.bar.is_empty() && m.typing(), "i writes, not written");
+    assert!(m.ui.bar.focused && m.ui.bar.is_empty() && m.typing(), "i writes, not written");
     m.key(Key::Esc, at(3));
     for back in [Key::End, Key::Esc] {
         m.key(Key::Up, at(3));
         m.key(back, at(3));
-        assert!(m.typing() && !m.bar.focused, "{back:?}");
+        assert!(m.typing() && !m.ui.bar.focused, "{back:?}");
         assert_eq!(m.page().name(), "thread", "{back:?}");
     }
 }
@@ -74,11 +74,11 @@ fn q_is_written_in_a_conversation_and_a_question_mark_on_an_empty_bar_shows_the_
     let thread = ThreadId::generate();
     let mut m = opened(&thread);
     m.key(Key::Char('?'), at(3));
-    assert!(m.help().is_some() && m.bar.is_empty(), "not written");
+    assert!(m.help().is_some() && m.ui.bar.is_empty(), "not written");
     m.key(Key::Esc, at(3));
     assert_eq!(m.key(Key::Char('q'), at(3)), None);
     m.key(Key::Char('?'), at(3));
-    assert_eq!(m.bar.text(), "q?", "written");
+    assert_eq!(m.ui.bar.text(), "q?", "written");
     assert!(m.help().is_none());
 }
 
@@ -91,5 +91,5 @@ fn a_letter_picked_in_the_palette_while_writing_acts_on_the_latest_message() {
         m.key(Key::Char(c), at(3));
     }
     assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Copy("deployed".into())));
-    assert!(m.typing() && !m.bar.focused);
+    assert!(m.typing() && !m.ui.bar.focused);
 }

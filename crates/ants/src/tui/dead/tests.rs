@@ -19,8 +19,8 @@ fn gave_up(thread: &ThreadId) -> Vec<Entry> {
 
 fn run(m: &mut Model, text: &str) -> Option<Action> {
     m.follow_drafts();
-    m.bar.focused = true;
-    m.bar.set_text(text);
+    m.ui.bar.focused = true;
+    m.ui.bar.set_text(text);
     m.key(Key::Enter, at(9))
 }
 
@@ -40,15 +40,15 @@ fn dead_replays_the_stuck_thread_s_dead_letter_or_drops_it_once_y_confirms() {
     assert!(m.prompt.is_none(), "any other key keeps it");
     run(&mut m, "/dead drop");
     assert_eq!(m.key(Key::Char('y'), at(9)), Some(Action::Run(Job::DeadDrop(2), String::new())));
-    assert_eq!(m.bar.status.as_ref().unwrap().text, "dropping dead letter 2…");
+    assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "dropping dead letter 2…");
 
     let done = Done { line: "dropped dead letter 2".into(), dead: Some(2), ..Done::default() };
     m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None });
-    assert_eq!(m.bar.status.as_ref().unwrap().text, "dropped dead letter 2");
+    assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "dropped dead letter 2");
     assert!(!stuck(&m), "neither the dead letter nor the notice of it holds the thread");
     m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
     assert_eq!(run(&mut m, "/dead replay"), None);
-    assert_eq!(m.bar.status.as_ref().unwrap().text, format!("no dead letter on thread {thread}"));
+    assert_eq!(m.ui.bar.status.as_ref().unwrap().text, format!("no dead letter on thread {thread}"));
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn dead_acts_on_the_gave_up_line_or_notice_selected_else_the_thread_s_latest() {
 
     m.data.dead_cleared.extend([2, 5]);
     assert_eq!(run(&mut m, "/dead replay"), None);
-    assert_eq!(m.bar.status.as_ref().unwrap().text, "dead letter 2 is replayed or dropped already");
+    assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "dead letter 2 is replayed or dropped already");
     select(&mut m, 4);
     assert_eq!(m.unfit("dead", at(9)), Some(format!("no dead letter on thread {thread}")));
 }
