@@ -25,8 +25,15 @@ async fn calls_of_an_ant_that_come_together_share_a_catch_up() {
     for call in calls {
         assert!(Arc::ptr_eq(&call.unwrap(), &items));
     }
+    // The calls are answered, so the server has their gets already: a message published now reaches the
+    // subscription after them, however long a loaded machine takes to deliver either.
+    client.publish(format!("$JS.API.DIRECT.GET.{SENSE_STREAM}"), "end".into()).await.unwrap();
     let mut asked = 0;
-    while tokio::time::timeout(Duration::from_millis(200), gets.next()).await.is_ok_and(|get| get.is_some()) {
+    while tokio::time::timeout(Duration::from_secs(30), gets.next())
+        .await
+        .unwrap()
+        .is_some_and(|get| get.payload != "end")
+    {
         asked += 1;
     }
     assert_eq!(asked, 2, "one read of the log for the first call, one shared by the seven that came during it");
