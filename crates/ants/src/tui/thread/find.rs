@@ -104,7 +104,7 @@ impl Page {
     /// it, Enter and Shift-Enter step to the next and previous match and another key stops asking; then n and N step,
     /// Ctrl-F asks again and Esc ends it. Whether it took `key`.
     pub fn find_key(&mut self, key: Key) -> bool {
-        if self.listing() || self.answering.is_some() {
+        if self.listing() || self.answering.on() {
             return false;
         }
         let Some(find) = &mut self.find else {
@@ -138,12 +138,12 @@ impl Page {
 
     /// Whether the footer asks for the text to find, which typing changes.
     pub fn finding(&self) -> bool {
-        !self.listing() && self.answering.is_none() && self.find.as_ref().is_some_and(|f| f.asking)
+        !self.listing() && !self.answering.on() && self.find.as_ref().is_some_and(|f| f.asking)
     }
 
     /// The footer while finding text in the conversation.
     pub fn find_footer(&self) -> Option<Line<'static>> {
-        if self.listing() || self.answering.is_some() {
+        if self.listing() || self.answering.on() {
             return None;
         }
         Some(self.find.as_ref()?.footer(self.laid.borrow().found.len()))

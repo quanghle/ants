@@ -122,23 +122,9 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
         return keymap::prompt(keys, width, false);
     }
     if model.focus == Focus::View
-        && let Page::Thread(page) = model.page()
-        && let Some(footer) = page.find_footer()
+        && let Some(line) = model.page().footer(&model.data, now, width)
     {
-        return style::clip(footer, usize::from(width));
-    }
-    if model.focus == Focus::View {
-        let card = match model.page() {
-            Page::Home(page) => page.card(&model.data, now).map(|(cursor, _)| cursor),
-            Page::Thread(page) => page.card(&model.data, now),
-            _ => None,
-        };
-        if let Some(cursor) = card {
-            return keymap::prompt(cursor.keys(), width, false);
-        }
-        if let Some(keys) = model.page().prompt() {
-            return keymap::prompt(&keys, width, model.page().armed());
-        }
+        return line;
     }
     keymap::footer(model, now, width)
 }

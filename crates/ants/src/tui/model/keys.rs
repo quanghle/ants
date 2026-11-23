@@ -75,7 +75,7 @@ impl Model {
         if self.ui.bar.focused
             && self.focus == Focus::View
             && matches!(key, Key::PageUp | Key::PageDown | Key::CtrlHome | Key::CtrlEnd)
-            && matches!(self.page(), Page::Thread(_))
+            && self.page().scrolls_while_writing()
         {
             return self.view_key(key, now);
         }
@@ -123,15 +123,8 @@ impl Model {
         if self.ui.bar.focused || self.focus != Focus::View {
             return None;
         }
-        match self.pages.last_mut()? {
-            Page::Thread(page) => page.find_key(key).then_some(None),
-            Page::Ant(page) => page.write(key),
-            Page::Channel(page) => {
-                let to = page.write(key, &self.data)?;
-                Some(to.and_then(|to| self.go(to, now)))
-            }
-            _ => None,
-        }
+        let to = self.pages.last_mut()?.typed(key, &self.data)?;
+        Some(to.and_then(|to| self.go(to, now)))
     }
 
     /// R: read everything again, the shown ant's memories, MCP servers and settings too.
@@ -222,7 +215,7 @@ impl Model {
         }
         if !self.ui.bar.focused
             && self.focus == Focus::View
-            && (self.card_paste(&line, now) || self.pages.last_mut().is_some_and(|page| write(page, &line)))
+            && self.pages.last_mut().is_some_and(|page| page.paste(&line, &self.data, now))
         {
             return;
         }
@@ -231,23 +224,8 @@ impl Model {
 
     /// Take `key` on the question card focused in the view shown, if any: where it leads, if anywhere.
     fn card_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
-        let data = &self.data;
-        let to = match self.pages.last_mut()? {
-            Page::Home(page) => page.card_key(key, data, now)?,
-            Page::Thread(page) => page.card_key(key, data, now)?,
-            _ => return None,
-        };
+        let to = self.pages.last_mut()?.card_key(key, &self.data, now)?;
         Some(to.and_then(|to| self.go(to, now)))
-    }
-
-    /// Type `text` pasted on the question card focused in the view shown, if any: whether it took it.
-    fn card_paste(&mut self, text: &str, now: DateTime<Utc>) -> bool {
-        let data = &self.data;
-        match self.pages.last_mut() {
-            Some(Page::Home(page)) => page.card_paste(text, data, now),
-            Some(Page::Thread(page)) => page.card_paste(text, data, now),
-            _ => false,
-        }
     }
 
     /// Take `key` while a tool request is being answered.
@@ -504,16 +482,4 @@ fn pasted(text: &str) -> String {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let kept = |c: &char| matches!(c, '\n' | '\t') || !(c.is_control() || ('\u{F0000}'..='\u{FFFFD}').contains(c));
     text.chars().filter(kept).collect()
-}
-
-/// Type `line` into the draft `page` is writing, if any: whether it took it.
-fn write(page: &mut Page, line: &str) -> bool {
-    if let Page::Channel(page) = page {
-        return page.paste(line);
-    }
-    line.chars().all(|c| match page {
-        Page::Ant(page) => page.write(Key::Char(c)).is_some(),
-        Page::Thread(page) => page.finding() && page.find_key(Key::Char(c)),
-        _ => false,
-    })
 }

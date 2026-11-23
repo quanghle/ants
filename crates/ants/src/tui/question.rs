@@ -288,19 +288,67 @@ impl Cursor {
     }
 }
 
-/// Take `key` on the card `focus` holds the cursor of, of questions asked on `thread` while the card still shows,
-/// `None` once it is gone: where it leads, if the card takes it. A card gone takes the key, meant for it rather than
-/// for whatever shows now, and ends the focus; the card keeps it while the bar takes its answer, and ends it once
-/// it leaves for anywhere else.
-pub fn focused(focus: &mut Option<Cursor>, key: Key, thread: Option<&ThreadId>) -> Option<Option<To>> {
-    let Some(thread) = thread else { return focus.take().map(|_| None) };
-    match focus.as_mut()?.key(key, thread) {
-        None => Some(None),
-        Some(Some(to @ To::Bar(_))) => Some(Some(to)),
-        Some(to) => {
-            *focus = None;
-            Some(to)
+/// The focus on a question card of a view: the cursor on it, once Enter or a number focused it.
+#[derive(Debug, Default)]
+pub struct Focus(Option<Cursor>);
+
+impl Focus {
+    pub fn cursor(&self) -> Option<&Cursor> {
+        self.0.as_ref()
+    }
+
+    /// Whether a card has the focus, still showing or not.
+    pub fn on(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Focus the card `cursor` is on, or none.
+    pub fn set(&mut self, cursor: Option<Cursor>) {
+        self.0 = cursor;
+    }
+
+    pub fn leave(&mut self) {
+        self.0 = None;
+    }
+
+    /// Take `key` on the card it holds the cursor of, of questions asked on `thread` while the card still shows,
+    /// `None` once it is gone: where it leads, if the card takes it. A card gone takes the key, meant for it rather
+    /// than for whatever shows now, and ends the focus; the card keeps it while the bar takes its answer, and ends it
+    /// once it leaves for anywhere else.
+    pub fn key(&mut self, key: Key, thread: Option<&ThreadId>) -> Option<Option<To>> {
+        let Some(thread) = thread else { return self.0.take().map(|_| None) };
+        match self.0.as_mut()?.key(key, thread) {
+            None => Some(None),
+            Some(Some(to @ To::Bar(_))) => Some(Some(to)),
+            Some(to) => {
+                self.0 = None;
+                Some(to)
+            }
         }
+    }
+
+    /// Where a number led on a card not focused ([`key`], [`thread_key`]): somewhere, or nowhere with the card
+    /// focused on the pick made.
+    pub fn keyed(&mut self, keyed: Option<Keyed>) -> Option<To> {
+        match keyed? {
+            Keyed::To(to) => Some(*to),
+            Keyed::Focus(cursor) => {
+                self.0 = Some(cursor);
+                None
+            }
+        }
+    }
+
+    /// Type `text` pasted on the focused card, while `shown`: whether it took it.
+    pub fn paste(&mut self, text: &str, shown: bool) -> bool {
+        shown && self.0.as_mut().is_some_and(|cursor| cursor.paste(text))
+    }
+
+    /// Move to the row `at` of the card of the message `question`, as a click on it does: whether that card has the
+    /// focus.
+    pub fn mouse_select(&mut self, question: Uuid, at: usize) -> bool {
+        let cursor = self.0.as_mut().filter(|cursor| cursor.question == question);
+        cursor.map(|cursor| cursor.mouse_select(at)).is_some()
     }
 }
 

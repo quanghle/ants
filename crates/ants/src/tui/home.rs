@@ -51,8 +51,8 @@ pub struct Page {
     selected: Selection<Id>,
     /// The groups of tool requests listed one by one, by ant and thread.
     expanded: HashSet<(UserId, ThreadId)>,
-    /// The cursor on the selected question item's card, while Enter has focused it.
-    answering: Option<question::Cursor>,
+    /// The focus on the selected question item's card.
+    answering: question::Focus,
     /// How wide the card the keys answer was drawn last and over how many lines what its request asks, which tells
     /// whether the request shows whole on screen; none on the compact pane.
     room: Cell<Option<(usize, usize)>>,
@@ -67,7 +67,7 @@ impl Default for Page {
         Self {
             selected: Selection::on_top(),
             expanded: HashSet::new(),
-            answering: None,
+            answering: question::Focus::default(),
             room: Cell::new(None),
             carded: Cell::new(None),
             armed: Armed::default(),
@@ -80,11 +80,7 @@ impl Page {
         if self.card(data, now).is_none() {
             self.key(Key::Enter, data, now);
         }
-        if let Some(cursor) = self.answering.as_mut().filter(|cursor| cursor.question == question) {
-            cursor.mouse_select(at);
-            return true;
-        }
-        false
+        self.answering.mouse_select(question, at)
     }
 
     /// The selected item's thread at `now`.
@@ -136,7 +132,7 @@ impl Page {
     /// The cursor on the focused question card, and the thread of its question, while the question is still the
     /// selected item's.
     pub fn card(&self, data: &Data, now: DateTime<Utc>) -> Option<(&question::Cursor, ThreadId)> {
-        let cursor = self.answering.as_ref()?;
+        let cursor = self.answering.cursor()?;
         let items = self.rows(data, now);
         let item = items.get(self.at(&items))?;
         (item.question.as_ref()?.0 == cursor.question).then(|| (cursor, item.thread.clone()))
@@ -146,7 +142,7 @@ impl Page {
     /// question in place of one answered elsewhere while its typed answer was being composed.
     pub fn question<'a>(&self, data: &'a Data, now: DateTime<Utc>) -> Option<&'a super::work::Asked> {
         let thread = self.thread(data, now)?;
-        match &self.answering {
+        match self.answering.cursor() {
             Some(cursor) => data.asked(&thread, cursor.question),
             None => data.question(&thread),
         }
@@ -155,12 +151,13 @@ impl Page {
     /// Take `key` on the focused question card, if any: where it leads, if anywhere.
     pub fn card_key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<Option<To>> {
         let thread = self.card(data, now).map(|(_, thread)| thread);
-        question::focused(&mut self.answering, key, thread.as_ref())
+        self.answering.key(key, thread.as_ref())
     }
 
     /// Type `text` pasted on the focused question card, if any: whether it took it.
     pub fn card_paste(&mut self, text: &str, data: &Data, now: DateTime<Utc>) -> bool {
-        self.card(data, now).is_some() && self.answering.as_mut().is_some_and(|c| c.paste(text))
+        let shown = self.card(data, now).is_some();
+        self.answering.paste(text, shown)
     }
 
     /// The keys of the allow-all `l` asked to confirm, while it waits.
@@ -215,7 +212,7 @@ impl Page {
             }
             Key::Enter if selected.is_some_and(|i| i.question.is_some()) => {
                 let (id, asked) = selected?.question.as_ref()?;
-                self.answering = Some(question::Cursor::new(*id, asked));
+                self.answering.set(Some(question::Cursor::new(*id, asked)));
                 return None;
             }
             Key::Enter => {
@@ -246,13 +243,7 @@ impl Page {
             Key::Char('1'..='9') if selected.is_some_and(|i| i.question.is_some()) => {
                 let item = selected?;
                 let (id, asked) = item.question.as_ref()?;
-                return match question::key(key, &item.thread, *id, asked)? {
-                    question::Keyed::To(to) => Some(*to),
-                    question::Keyed::Focus(cursor) => {
-                        self.answering = Some(cursor);
-                        None
-                    }
-                };
+                return self.answering.keyed(question::key(key, &item.thread, *id, asked));
             }
             Key::Char('r') => return thread().map(To::Reply),
             Key::Char('f') => return thread().map(|_| To::Forward),

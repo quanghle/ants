@@ -16,7 +16,7 @@ use crate::tui::{approvals, question, style};
 impl Page {
     /// The cursor on the focused question card, while its question is still the one the keys answer.
     pub fn card(&self, data: &Data, now: DateTime<Utc>) -> Option<&question::Cursor> {
-        let cursor = self.answering.as_ref()?;
+        let cursor = self.answering.cursor()?;
         question::cards(data, &self.history.entries, now)
             .iter()
             .any(|card| card.asked.id == Some(cursor.question) && card.answers.is_empty())
@@ -29,7 +29,7 @@ impl Page {
         if self.listing() {
             return None;
         }
-        if let Some(cursor) = &self.answering {
+        if let Some(cursor) = self.answering.cursor() {
             self.card(data, now)?;
             let asked = self.history.entries.iter().find(|e| e.id == Some(cursor.question))?;
             return Some((cursor.question, asked.question.as_ref()?));
@@ -43,12 +43,13 @@ impl Page {
             return self.waiting_key(key, data, now);
         }
         let shown = self.card(data, now).is_some();
-        question::focused(&mut self.answering, key, shown.then_some(&self.history.thread))
+        self.answering.key(key, shown.then_some(&self.history.thread))
     }
 
     /// Type `text` pasted on the focused question card, if any: whether it took it.
     pub fn card_paste(&mut self, text: &str, data: &Data, now: DateTime<Utc>) -> bool {
-        self.card(data, now).is_some() && self.answering.as_mut().is_some_and(|c| c.paste(text))
+        let shown = self.card(data, now).is_some();
+        self.answering.paste(text, shown)
     }
 }
 
