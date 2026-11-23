@@ -153,8 +153,8 @@ impl Inbox<'_> {
         }
         tracing::error!(%thread, error = format!("{e:#}"), "handling message");
         status::state(self.client, self.ant, &thread, State::Failed);
-        // A failed last attempt, an overdue one that failed to send its recorded reply, or one too large to send: no
-        // delivery follows.
+        // A failed last attempt, an overdue one that failed to send its recorded reply or kept answer, or one too large
+        // to send: no delivery follows.
         if attempt != Attempt::Early || bus::too_large(&e) {
             let error = if stalled.is_some() { overdue() } else { format!("{e:#}") };
             match self.bury(&incoming, &msg, &error).await {
@@ -250,15 +250,19 @@ impl Inbox<'_> {
         }
     }
 
-    /// Handle the message at stream sequence `seq`, taken up: answer it, or bury it when overdue. Marks it finished
-    /// once it is acked or buried.
+    /// Handle the message at stream sequence `seq`, taken up: answer it, or bury it when overdue, unless an earlier
+    /// attempt left its reply or the harness's answer to send. Marks it finished once it is acked or buried.
     async fn take(&self, incoming: &mut Incoming, msg: &jetstream::Message, seq: u64, attempt: Attempt) -> Result<()> {
         // A reply the hub refused to record with the attempt marker is kept on the machine.
         let marker = match self.answered.unsent(&incoming.envelope).await {
             Some(reply) => Some(Marker::Replied(Box::new(reply))),
             None => self.attempts.get(seq, &incoming.envelope).await?,
         };
-        if attempt == Attempt::Overdue && !matches!(marker, Some(Marker::Replied(_))) {
+        // An overdue message is answered only with what an earlier attempt left: its reply, or the harness's answer.
+        if attempt == Attempt::Overdue
+            && !matches!(marker, Some(Marker::Replied(_)))
+            && self.answered.given(&incoming.envelope).await.is_none()
+        {
             match self.bury(incoming, msg, &overdue()).await {
                 Ok(()) => {
                     self.attempts.forget(seq).await;
@@ -328,7 +332,8 @@ impl Inbox<'_> {
     /// its thread, so `ants thread show` tells what became of it. The notice answers the sender, as a reply would,
     /// unless no reply can go to it: a webhook's goes to the thread's owner, and one to an ant out of turns, or to a
     /// channel post, to the human who withdrew it. The human an assistant withdrew a message for by a record of its own
-    /// is told too, unless the notice goes to it.
+    /// is told too, unless the notice goes to it. What a failed attempt kept on the machine for the retry, the harness's
+    /// answer or its reply, is forgotten.
     async fn withdrawn(&self, Handling { incoming, msg, seq }: Handling<'_>, withdrawal: &Withdrawal) -> Result<()> {
         let (by, on_behalf_of) = (&withdrawal.by, withdrawal.on_behalf_of.as_ref());
         let envelope = &incoming.envelope;
@@ -377,7 +382,9 @@ impl Inbox<'_> {
                 .as_notice(ants_proto::NoticeKind::Assistant);
             bus::store(self.js, told.subject(), &told, &format!("on-behalf-withdrawn-{message}")).await?;
         }
-        self.done(msg, seq).await
+        self.done(msg, seq).await?;
+        self.answered.forget_kept(envelope).await;
+        Ok(())
     }
 
     /// Note the message the ant is about to answer with its escalator: a human's ends the thread's escalation and gives

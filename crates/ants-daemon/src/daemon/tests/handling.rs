@@ -1,4 +1,5 @@
-//! Handling a message: retries, withdrawals before the prompt, and attempts cut off or recorded before a crash.
+//! Handling a message: retries, withdrawals before the prompt, and attempts cut off, recorded or leaving the harness's
+//! answer on the machine before a crash.
 
 use super::*;
 
@@ -548,6 +549,89 @@ async fn a_reply_recorded_before_a_crash_is_stored_once_without_a_prompt() {
     let state = bus.stream.get_info().await.unwrap().state;
     assert_eq!(state.messages, 2, "the message and one copy of its reply");
     assert!(!bus.marked(seq).await);
+    assert_eq!(bus.unacked().await, 0);
+}
+
+/// The harness's answer to `ask`, the message at stream sequence `seq`, kept on the machine by an attempt that started
+/// and failed to make its reply.
+async fn keep_answer(bus: &Bus, ask: &Envelope, seq: u64) {
+    use crate::delivery::attempts::Given;
+    bus.attempts.start(seq, ask).await.unwrap();
+    let (text, title) = ("s1: done before".to_owned(), Some("Kept".to_owned()));
+    let given = Given { text, limit: None, unanswered: None, tokens: 0, title };
+    bus.answered.keep_given(ask, &given).await.unwrap();
+}
+
+/// A message on the consumer's extra delivery, its attempts spent, whose harness answered one of them is no dead
+/// letter: the answer kept on the machine is sent as its reply, the harness not prompted.
+#[tokio::test]
+async fn an_overdue_message_whose_answer_is_kept_is_answered_from_it_unprompted() {
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    let (ask, seq) = bus.send(&t1, "a").await;
+
+    // Its attempts ran out without an outcome, one of them keeping the harness's answer.
+    let consumer: PullConsumer = bus
+        .stream
+        .create_consumer(jetstream::consumer::pull::Config {
+            durable_name: Some(ants_proto::inbox_consumer(&bus.dev)),
+            filter_subject: subject::inbox_of(&bus.dev),
+            ack_policy: jetstream::consumer::AckPolicy::Explicit,
+            ack_wait: ACK_WAIT,
+            max_deliver: MAX_DELIVER,
+            max_ack_pending: 4,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for delivery in 1..=MAX_ATTEMPTS {
+        let mut batch = consumer.fetch().max_messages(1).expires(WAIT).messages().await.unwrap();
+        let msg = batch.next().await.expect("a delivery").unwrap();
+        assert_eq!(msg.info().unwrap().delivered, delivery);
+        msg.ack_with(jetstream::AckKind::Nak(None)).await.unwrap();
+    }
+    keep_answer(&bus, &ask, seq).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let reply = next_envelope(&mut replies).await;
+        assert_eq!((reply.text.as_str(), reply.in_reply_to), ("s1: done before", Some(ask.id)));
+        assert_eq!(reply.title.as_deref(), Some("Kept"));
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().starts, 0, "not prompted again");
+    assert!(dead::list(&bus.stream).await.unwrap().is_empty(), "no dead letter");
+    assert!(bus.answered.given(&ask).await.is_none(), "forgotten once the reply is recorded");
+    assert!(!bus.marked(seq).await);
+    assert_eq!(bus.unacked().await, 0);
+}
+
+/// Withdrawing a message that awaits its retry with the harness's answer kept on the machine forgets the answer.
+#[tokio::test]
+async fn a_message_withdrawn_while_its_answer_is_kept_leaves_no_answer_on_the_machine() {
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    let (ask, seq) = bus.send(&t1, "a").await;
+    keep_answer(&bus, &ask, seq).await;
+    assert_eq!(withdraw(&bus, &ask).await, None);
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let notice = next_envelope(&mut replies).await;
+        let withdrawn = "[ants] Withdrawn by human before dev-a retried it after a failed attempt (ants withdraw).";
+        assert_eq!((notice.text.as_str(), notice.in_reply_to), (withdrawn, Some(ask.id)));
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().starts, 0, "never prompted");
+    assert!(bus.answered.given(&ask).await.is_none(), "the kept answer went with the withdrawal");
     assert_eq!(bus.unacked().await, 0);
 }
 

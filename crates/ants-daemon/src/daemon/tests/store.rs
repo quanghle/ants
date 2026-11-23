@@ -185,14 +185,19 @@ async fn junk_met_while_the_store_is_full_is_a_dead_letter_once_there_is_room() 
     assert_eq!(bus.unacked().await, 0);
 }
 
-/// The texts stored in the hub's stream on `subject`, oldest first: core subscribers hear refused publishes too.
-async fn stored_texts(bus: &Bus, subject: &str) -> Vec<String> {
-    let (mut from, mut texts) = (1, Vec::new());
+/// The messages stored in the hub's stream on `subject`, oldest first: core subscribers hear refused publishes too.
+async fn stored_on(bus: &Bus, subject: &str) -> Vec<Envelope> {
+    let (mut from, mut stored) = (1, Vec::new());
     while let Ok(msg) = bus.stream.get_first_raw_message_by_subject(subject, from).await {
         from = msg.sequence + 1;
-        texts.push(serde_json::from_slice::<Envelope>(&msg.payload).unwrap().text);
+        stored.push(serde_json::from_slice(&msg.payload).unwrap());
     }
-    texts
+    stored
+}
+
+/// The texts of the messages stored in the hub's stream on `subject`, oldest first.
+async fn stored_texts(bus: &Bus, subject: &str) -> Vec<String> {
+    stored_on(bus, subject).await.into_iter().map(|stored| stored.text).collect()
 }
 
 /// An answer whose escalation the full store refuses is kept on the machine: once the store has room, the retry
@@ -233,6 +238,76 @@ async fn an_answer_whose_escalation_a_full_store_refuses_is_sent_once_there_is_r
     let escalations = stored_texts(&bus, &to_human).await;
     assert_eq!(escalations, [format!("{cap}; needs a decision. Last message from dev-b:\nhold cost 2 stall")]);
     assert!(bus.answered.given(&held).await.is_none(), "forgotten once the reply is recorded");
+    assert!(dead::list(&bus.stream).await.unwrap().is_empty());
+    assert_eq!(bus.unacked().await, 0);
+}
+
+/// A prompt a second message joined, cut at a cap while the store is full, is not run again: the notice to the message
+/// it started with and the answer to the one that joined it, with the title the turn suggested, are kept on the
+/// machine, and sent once the store has room, the cap escalated once.
+#[tokio::test]
+async fn a_joined_prompt_a_full_store_refuses_the_outcome_of_is_settled_once_there_is_room_unprompted_again() {
+    let Some((mut bus, _)) = start_small().await else { return };
+    bus.ledger = Arc::new(Ledger::memory(bus.dev.clone(), Caps { thread_cost: Some(1.0), ..Caps::default() }));
+    let home = bus._server.dir().join("joined");
+    std::fs::create_dir_all(&home).unwrap();
+    let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
+    let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
+    bus.mcp = Some(mcp.unwrap());
+    let (launch, log, gate) = fake::launch();
+    log.locked().steers = true;
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let thread = ThreadId::generate();
+    let (first, _) = bus.send_from(dev_b.clone(), &thread, "hold cost 2 stall").await;
+    let (to_dev_b, to_human) = (subject::inbox(&dev_b, &bus.dev), subject::inbox(&UserId::human(), &bus.dev));
+    let cap = "Thread cost cap reached (2.00 of 1.00 since a human's last message)";
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to start", || log.locked().prompted == 1).await;
+        let (joining, seq) = bus.send_from(dev_b.clone(), &thread, "b").await;
+        until("b to join", || log.locked().steered.len() == 1).await;
+        let title = serde_json::json!({"title": "Fix the build"});
+        let suggested = call_tool(bus.mcp.as_ref().unwrap(), &thread, "suggest_thread_title", title).await;
+        assert_ne!(suggested.is_error, Some(true), "{suggested:?}");
+        fill(&bus.js).await;
+        gate.add_permits(1);
+        until("the prompt to be cancelled", || log.locked().cancelled == 1).await;
+        // Several retries of the store pass.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(stored_on(&bus, &to_human).await.is_empty(), "no escalation stored while full");
+        assert!(stored_on(&bus, &to_dev_b).await.is_empty(), "neither notice nor reply stored while full");
+        assert_eq!(log.locked().prompted, 1, "neither message prompted again");
+        assert!(bus.answered.unsent(&first).await.is_some(), "the notice is kept on the machine");
+        let given = bus.answered.given(&joining).await.expect("the answer is kept on the machine");
+        assert_eq!((given.limit.as_deref(), given.title.as_deref()), (Some(cap), Some("Fix the build")));
+
+        free(&bus.js).await;
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+        joining
+    };
+    let ((), joining) = tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().prompted, 1, "prompted once");
+    let mut sent = stored_on(&bus, &to_dev_b).await;
+    sent.sort_by_key(|reply| reply.in_reply_to != Some(first.id));
+    let sent: Vec<_> =
+        sent.iter().map(|reply| (reply.in_reply_to, reply.text.as_str(), reply.title.as_deref())).collect();
+    let notice = format!(
+        "[ants] dev-b steered the prompt answering this message with message {}; the answer goes in reply to it.",
+        joining.id
+    );
+    let answer = format!("partial\n\n[ants] {cap}; the prompt was cancelled.");
+    assert_eq!(
+        sent,
+        [(Some(first.id), notice.as_str(), None), (Some(joining.id), answer.as_str(), Some("Fix the build"))]
+    );
+    let escalations = stored_texts(&bus, &to_human).await;
+    assert_eq!(escalations, [format!("{cap}; needs a decision. Last message from dev-b:\nb")]);
+    assert!(bus.answered.unsent(&first).await.is_none(), "forgotten once sent");
+    assert!(bus.answered.given(&joining).await.is_none(), "forgotten once the reply is recorded");
     assert!(dead::list(&bus.stream).await.unwrap().is_empty());
     assert_eq!(bus.unacked().await, 0);
 }

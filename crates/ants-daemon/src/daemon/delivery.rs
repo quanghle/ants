@@ -92,18 +92,18 @@ impl Inbox<'_> {
         Ok(())
     }
 
-    /// The reply carrying `text`, the answer to `incoming`, and the title the turn suggested for the thread, whatever
-    /// kind of reply it is: `None` when the answer went up the chain or nowhere instead, and the message is done with.
+    /// The reply carrying `text`, the answer to `incoming`, and `title`, the one the turn suggested for the thread,
+    /// whatever kind of reply it is: `None` when the answer went up the chain or nowhere instead, and the message is
+    /// done with.
     pub(super) async fn reply_for(
         &self,
         h @ Handling { incoming, msg, seq }: Handling<'_>,
         read: Option<Context>,
-        text: String,
+        (text, title): (String, Option<String>),
         limit: Option<&String>,
     ) -> Result<Option<Reply>> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
-        let title = self.mcp.and_then(|mcp| mcp.take_title(thread));
         let reply = match (&incoming.post, read) {
             (Some(posted), Some(read)) => {
                 let Some(post) = self.post_reply(h, &posted.post, read, &text).await? else {

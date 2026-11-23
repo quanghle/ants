@@ -334,7 +334,8 @@ async fn mark(
 /// `<home>/unsent`, the replies the hub refused to store with their attempt marker, as while its JetStream store is
 /// full: the message's retry sends that reply rather than prompting the harness again. In `<home>/given`, the answers
 /// the harness gave whose reply a later step failed to build or record, as an escalation the full store refused
-/// ([`Given`]): the retry makes the reply of that answer rather than prompting again.
+/// ([`Given`]): the retry makes the reply of that answer rather than prompting again. A message withdrawn or
+/// dead-lettered keeps neither ([`Answered::forget_kept`]).
 pub struct Answered {
     stored: Notes,
     unsent: Notes,
@@ -355,6 +356,9 @@ pub struct Given {
     /// The tokens the prompt spent, for a summary the reply carries.
     #[serde(default)]
     pub tokens: u64,
+    /// The title the turn suggested for the thread, for the reply to carry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 impl Answered {
@@ -410,6 +414,13 @@ impl Answered {
     /// Forget the answer to `request` kept on the machine, once its reply is recorded or the message done with.
     pub async fn forget_given(&self, request: &Envelope) {
         self.given.forget(request).await;
+    }
+
+    /// Forget the answer to `request` and the reply to it kept on the machine, as the message is withdrawn or a dead
+    /// letter and neither is ever sent.
+    pub async fn forget_kept(&self, request: &Envelope) {
+        self.given.forget(request).await;
+        self.unsent.forget(request).await;
     }
 
     /// Remove notes older than `max_age`, by when the stream no longer keeps their messages.

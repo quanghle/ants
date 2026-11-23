@@ -249,7 +249,9 @@ impl Inbox<'_> {
         let notice = notice.into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = fit_to(self.redactor.redact(&text).into_owned(), reply_room(self.client));
-        let given = Given { text, limit, unanswered, tokens: measured.tokens };
+        // Taken while the turn lasts, and kept with the answer, so a retry's reply carries it too.
+        let title = self.mcp.and_then(|mcp| mcp.take_title(thread));
+        let given = Given { text, limit, unanswered, tokens: measured.tokens, title };
         Box::pin(self.send_given(h, read, given, false)).await
     }
 
@@ -257,7 +259,7 @@ impl Inbox<'_> {
     /// end the turn with no reply, or make the reply, escalate the limit the prompt reached, record the reply and
     /// deliver it. A step failing before the reply is recorded keeps the answer on the machine ([`Answered::keep_given`](
     /// crate::delivery::attempts::Answered::keep_given)), so the retry sends it rather than prompting again.
-    async fn send_given(
+    pub(super) async fn send_given(
         &self,
         h @ Handling { incoming, seq, .. }: Handling<'_>,
         read: Option<Context>,
@@ -300,12 +302,12 @@ impl Inbox<'_> {
         given: &Given,
     ) -> Result<Option<Reply>> {
         let envelope = &incoming.envelope;
-        let Given { text, limit, unanswered, tokens } = given.clone();
+        let Given { text, limit, unanswered, tokens, title } = given.clone();
         if let Some(unanswered) = unanswered {
             self.end_unanswered(h, unanswered, text, limit.as_ref()).await?;
             return Ok(None);
         }
-        let Some(mut reply) = Box::pin(self.reply_for(h, read, text, limit.as_ref())).await? else {
+        let Some(mut reply) = Box::pin(self.reply_for(h, read, (text, title), limit.as_ref())).await? else {
             return Ok(None);
         };
         if let Reply::Message(message) = &mut reply {
@@ -324,7 +326,7 @@ impl Inbox<'_> {
     /// Record `reply` to `envelope`, the message at stream sequence `seq`, with its attempt marker, so a redelivery
     /// sends it rather than prompting again; refused, as while the hub's store is full, it is kept on the machine
     /// instead, for the retry to send.
-    async fn record_reply(&self, seq: u64, envelope: &Envelope, reply: &Reply) {
+    pub(super) async fn record_reply(&self, seq: u64, envelope: &Envelope, reply: &Reply) {
         let thread = &envelope.thread_id;
         if let Err(e) = self.attempts.replied(seq, envelope, reply).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "recording the reply");

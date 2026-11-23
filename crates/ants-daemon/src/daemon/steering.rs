@@ -15,7 +15,7 @@ use ants_proto::{Envelope, ThreadId, UserId, Uuid};
 use anyhow::Result;
 use async_nats::jetstream::{self};
 
-use crate::delivery::attempts::Reply;
+use crate::delivery::attempts::{Given, Reply};
 use crate::files::Attached;
 use crate::harness::Steer;
 
@@ -183,7 +183,8 @@ impl Inbox<'_> {
     /// Settle `incoming`, the message at stream sequence `seq`, whose prompt `by`'s message `id` steered and took the
     /// answer of. Its sender is told so, unless it is a post, another ant's reply to the ant's own message, or a
     /// message whose answer goes elsewhere than its sender, or the thread has no turns left: those end with no reply
-    /// ([`NoReplyWhy::Steered`]).
+    /// ([`NoReplyWhy::Steered`]). Either outcome is kept on the machine when it cannot be recorded or sent, so the retry
+    /// settles the message the same way rather than prompting the harness with it again.
     pub(super) async fn superseded(
         &self,
         h @ Handling { incoming, seq, .. }: Handling<'_>,
@@ -204,12 +205,12 @@ impl Inbox<'_> {
         let notice = tells.then(|| envelope.reply(self.ant.clone(), text, self.humans.sender_role(envelope)).ok());
         let Some(notice) = notice.flatten() else {
             let reason = format!("message {id} from {by} took the answer");
-            return self.end_unanswered(h, (NoReplyWhy::Steered, Some(reason)), String::new(), None).await;
+            let unanswered = Some((NoReplyWhy::Steered, Some(reason)));
+            let given = Given { text: String::new(), limit: None, unanswered, tokens: 0, title: None };
+            return Box::pin(self.send_given(h, None, given, false)).await;
         };
         let reply = Reply::Message(Box::new(notice.as_notice(NoticeKind::Steered)));
-        if let Err(e) = self.attempts.replied(seq, envelope, &reply).await {
-            tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "recording the reply");
-        }
+        self.record_reply(seq, envelope, &reply).await;
         self.deliver(h, &reply).await
     }
 
