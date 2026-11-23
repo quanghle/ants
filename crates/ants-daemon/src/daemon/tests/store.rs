@@ -256,7 +256,7 @@ async fn a_joined_prompt_a_full_store_refuses_the_outcome_of_is_settled_once_the
     let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
     bus.mcp = Some(mcp.unwrap());
     let (launch, log, gate) = fake::launch();
-    log.locked().steers = true;
+    log.locked().knobs.steers = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let dev_b: UserId = "dev-b".parse().unwrap();
     let thread = ThreadId::generate();

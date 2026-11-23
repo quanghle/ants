@@ -322,7 +322,7 @@ async fn a_withdrawn_message_redelivered_after_a_crash_is_acked_unprompted() {
 async fn a_message_held_for_a_sign_in_can_be_withdrawn() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
-    log.locked().signed_out = true;
+    log.locked().knobs.signed_out = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let (a, _) = bus.send(&t1, "a").await;
@@ -332,7 +332,7 @@ async fn a_message_held_for_a_sign_in_can_be_withdrawn() {
         let notice = next_envelope(&mut replies).await;
         assert!(notice.text.contains("is not signed in"), "{}", notice.text);
         assert_eq!(withdraw(&bus, &a).await, None, "turned away unprompted, a is not started");
-        log.locked().signed_out = false;
+        log.locked().knobs.signed_out = false;
         assert_eq!(next_envelope(&mut replies).await.text, WITHDRAWN);
         ctrl_c.add_permits(1);
     };
@@ -351,7 +351,7 @@ async fn a_message_held_for_a_provider_limit_after_its_tools_ran_can_be_withdraw
     use ants_proto::MessageMark;
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
-    log.locked().limited = Some("API Error: 429 Too Many Requests, retry after 0.2s".to_owned());
+    log.locked().knobs.limited = Some("API Error: 429 Too Many Requests, retry after 0.2s".to_owned());
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let (a, _) = bus.send(&t1, "tools 1 a").await;
@@ -374,7 +374,7 @@ async fn a_message_held_for_a_provider_limit_after_its_tools_ran_can_be_withdraw
         })
         .await
         .expect("a withdrawn while held for the limit");
-        log.locked().limited = None;
+        log.locked().knobs.limited = None;
         let notice = next_envelope(&mut replies).await;
         assert_eq!((notice.text.as_str(), notice.in_reply_to), (WITHDRAWN_LIMITED, Some(a.id)));
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()), "the thread goes on");
@@ -405,7 +405,7 @@ async fn a_message_cut_off_then_held_for_a_sign_in_can_be_withdrawn() {
     };
     tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), crash);
     drop(pool);
-    log.locked().signed_out = true;
+    log.locked().knobs.signed_out = true;
 
     let pool = Pool::new(launch, store, 2, IDLE);
     let check = async {
@@ -419,7 +419,7 @@ async fn a_message_cut_off_then_held_for_a_sign_in_can_be_withdrawn() {
         .await
         .expect("a held, awaiting a retry");
         assert_eq!(withdraw(&bus, &a).await, None, "held for the sign-in, a is withdrawable");
-        log.locked().signed_out = false;
+        log.locked().knobs.signed_out = false;
         let notice = next_envelope(&mut replies).await;
         assert_eq!((notice.text.as_str(), notice.in_reply_to), (WITHDRAWN_SIGNED_OUT, Some(a.id)));
         ctrl_c.add_permits(1);
@@ -454,7 +454,7 @@ async fn a_message_held_for_a_sign_in_after_its_tools_ran_can_be_withdrawn() {
         let listed = queue(&bus).await;
         assert!(listed.messages.iter().any(|m| m.id == a.id), "a is listed: {listed:?}");
         assert_eq!(withdraw(&bus, &a).await, None, "held for the sign-in, a is withdrawable");
-        log.locked().signed_out = false;
+        log.locked().knobs.signed_out = false;
         let notice = next_envelope(&mut replies).await;
         assert_eq!((notice.text.as_str(), notice.in_reply_to), (WITHDRAWN_SIGNED_OUT, Some(a.id)));
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()), "the thread goes on");

@@ -46,7 +46,7 @@ async fn a_session_that_cannot_be_resumed_starts_over_from_the_thread_history() 
     let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE);
     pool.run(&thread(1), with_history("a")).await.unwrap();
     pool.shutdown().await;
-    log.locked().lose_sessions = true;
+    log.locked().knobs.lose_sessions = true;
 
     let pool = Pool::new(launch, store.clone(), 4, IDLE);
     let seeded = "[ants] The earlier session of this thread could not be resumed, so this one starts over, its \
@@ -70,7 +70,7 @@ async fn a_session_lost_is_told_lost_then_rebuilt() {
     let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE).with_lifecycle(lifecycle.clone());
     assert!(!pool.run(&thread(1), Prompt::new("a")).await.unwrap().rebuilt);
     pool.shutdown().await;
-    log.locked().lose_sessions = true;
+    log.locked().knobs.lose_sessions = true;
 
     let pool = Pool::new(launch, store, 4, IDLE).with_lifecycle(lifecycle);
     assert!(pool.run(&thread(1), Prompt::new("b")).await.unwrap().rebuilt, "the reply tells of the rebuilt session");
@@ -89,7 +89,7 @@ async fn a_clone_s_session_is_forked_else_starts_over_from_the_thread_history() 
     let (launch, log, _) = fake::launch();
     let session = SessionId::new("s9");
     assert_eq!(crate::harness::fork(&launch, &session).await.unwrap(), None, "no fork advertised");
-    log.locked().forks = true;
+    log.locked().knobs.forks = true;
     let forked = crate::harness::fork(&launch.clone().in_dir(std::path::PathBuf::from("/w")), &session).await.unwrap();
     assert_eq!(forked, Some(SessionId::new("f1")));
     assert_eq!(log.locked().forked, [("s9".to_owned(), std::path::PathBuf::from("/w"))]);
