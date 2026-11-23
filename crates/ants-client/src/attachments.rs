@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use ants_proto::{Attachment, AttachmentHandle, MAX_ATTACHMENTS, SealedAttachment, Uuid};
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A size for people: bytes, KiB or MiB, with one decimal under 10.
 pub fn size(bytes: u64) -> String {
@@ -32,20 +32,25 @@ pub fn sizes(len: u64, limit: u64) -> (String, String) {
 /// An attachment as a message lists it: its reference, the handle naming where its bytes are, and why it is unavailable
 /// when the reference is invalid ([`Attachment::check`]); when the hub stored the message, if known, for the wait for
 /// chunks still on their way.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Listed {
     #[serde(flatten)]
     pub attachment: Attachment,
-    #[serde(serialize_with = "display")]
+    #[serde(serialize_with = "display", deserialize_with = "parsed")]
     pub handle: AttachmentHandle,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored: Option<DateTime<Utc>>,
 }
 
-fn display<S: Serializer>(handle: &AttachmentHandle, s: S) -> Result<S::Ok, S::Error> {
+/// A handle as its text, which names an attachment to people and tools.
+pub fn display<S: Serializer>(handle: &AttachmentHandle, s: S) -> Result<S::Ok, S::Error> {
     s.collect_str(handle)
+}
+
+fn parsed<'de, D: Deserializer<'de>>(d: D) -> Result<AttachmentHandle, D::Error> {
+    String::deserialize(d)?.parse().map_err(serde::de::Error::custom)
 }
 
 impl Listed {

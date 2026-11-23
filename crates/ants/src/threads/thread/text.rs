@@ -2,9 +2,15 @@
 
 use std::fmt::Write as _;
 
+use ants_client::entry::PromptEnded;
+use ants_client::sealed::State;
 pub(crate) use ants_client::text::took;
-use ants_proto::{Answered, DecidedBy, MAX_TITLE, NoReplyWhy, Pick, PromptEnd, TimelineEnd, UserId};
+use ants_proto::{
+    Acting, Answer, Answered, Attachment, AttachmentHandle, ChannelId, DecidedBy, MAX_TITLE, NoReplyWhy, NoticeKind,
+    Pick, PromptEnd, Questions, Quote, Reacted, SummaryRequest, ThreadId, TimelineEnd, UserId, Uuid,
+};
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 
 use super::summaries::Summary;
 use super::{Entry, Kind, NoReply, ToolCall, ToolRejection};
@@ -12,6 +18,108 @@ use crate::messages::attachments;
 
 /// How many characters of a note on an entry, or of a tool call's status, [`render`] shows.
 const NOTE: usize = 1000;
+
+/// An entry as `--json` prints it (`ants thread show`, `ants search`): what [`render`] shows of it, without the fields
+/// thread states and reply threading are derived from.
+#[derive(Serialize)]
+pub struct Shown<'a> {
+    seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<Uuid>,
+    stored_at: DateTime<Utc>,
+    kind: Kind,
+    thread_id: &'a ThreadId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<&'a UserId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<&'a UserId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel: Option<&'a ChannelId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<&'a UserId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<&'a str>,
+    text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quote: Option<&'a Quote>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<Attached<'a>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    forged: bool,
+    #[serde(skip_serializing_if = "Acting::is_own")]
+    acting: &'a Acting,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sealed: Option<State>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    reactions: &'a [Reacted],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggested_title: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<&'a SummaryRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    question: Option<&'a Questions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    answer: Option<&'a Answer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool: Option<&'a ToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    no_reply: Option<&'a NoReply>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rejected: Option<&'a ToolRejection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended: Option<&'a PromptEnded>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notice: Option<NoticeKind>,
+}
+
+/// An attachment as [`Shown`] lists it: its reference, its handle and why it is unavailable.
+#[derive(Serialize)]
+struct Attached<'a> {
+    #[serde(flatten)]
+    attachment: &'a Attachment,
+    #[serde(serialize_with = "ants_client::attachments::display")]
+    handle: &'a AttachmentHandle,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable: Option<&'a str>,
+}
+
+impl<'a> Shown<'a> {
+    pub fn of(entry: &'a Entry) -> Self {
+        let attached = |listed: &'a attachments::Listed| Attached {
+            attachment: &listed.attachment,
+            handle: &listed.handle,
+            unavailable: listed.unavailable.as_deref(),
+        };
+        Self {
+            seq: entry.seq,
+            id: entry.id,
+            stored_at: entry.stored_at,
+            kind: entry.kind,
+            thread_id: &entry.thread_id,
+            from: entry.from.as_ref(),
+            to: entry.to.as_ref(),
+            channel: entry.channel.as_ref(),
+            owner: entry.owner.as_ref(),
+            note: entry.note.as_deref(),
+            text: &entry.text,
+            quote: entry.quote.as_ref(),
+            attachments: entry.attachments.iter().map(attached).collect(),
+            forged: entry.forged,
+            acting: &entry.acting,
+            sealed: entry.sealed,
+            reactions: &entry.reactions,
+            suggested_title: entry.suggested_title.as_deref(),
+            summary: entry.summary.as_ref(),
+            question: entry.question.as_ref(),
+            answer: entry.answer.as_ref(),
+            tool: entry.tool.as_ref(),
+            no_reply: entry.no_reply.as_ref(),
+            rejected: entry.rejected.as_deref(),
+            ended: entry.ended.as_deref(),
+            notice: entry.notice,
+        }
+    }
+}
 
 pub(crate) fn time(at: DateTime<Utc>) -> String {
     at.format("%Y-%m-%d %H:%M:%S").to_string()
