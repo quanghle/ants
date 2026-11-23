@@ -1,5 +1,5 @@
-//! Tests of the cache: searches are words only, a cache of another schema or unreadable is replaced, and pending writes
-//! prevent replacing it.
+//! Tests of the cache: searches are words only, a cache of another schema or unreadable is replaced, pending writes
+//! prevent replacing it, and applying nothing new writes nothing.
 
 use super::*;
 
@@ -55,5 +55,22 @@ fn pending_writes_prevent_replacing_a_corrupt_missing_or_different_log_cache() {
     std::fs::remove_file(&file).unwrap();
     assert!(Cache::open(&home).is_err());
     assert!(!file.exists(), "a pending cache is not silently replaced");
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn applying_nothing_where_the_cache_was_built_to_writes_nothing() {
+    let home = ants_test_support::scratch_dir("sense-cache-nothing");
+    let mut cache = Cache::open(&home).unwrap();
+    cache.reset(&SenseId::new(), "one").unwrap();
+    let tip = crate::log::Mark { index: 1, sha256: "00".into() };
+    let position = Position { sequence: 1, tip, events: 1, bytes: 10, broken: None, ant: None };
+    cache.apply(&[], Some(&position)).unwrap();
+    let written = cache.db.total_changes();
+    cache.apply(&[], Some(&position)).unwrap();
+    assert_eq!(cache.db.total_changes(), written, "nothing written");
+    let further = Position { sequence: 2, ..position };
+    cache.apply(&[], Some(&further)).unwrap();
+    assert_eq!(cache.built().unwrap().unwrap().position, Some(further), "a position moved on is kept");
     std::fs::remove_dir_all(home).unwrap();
 }

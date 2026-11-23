@@ -189,6 +189,11 @@ impl Cache {
     /// event that is no item's change, or does not follow on the item's last ([`Change::apply`]), changes nothing; nor
     /// does a batch ([`ITEMS_EVENT`]) of which one change does not, or which changes an item twice.
     pub fn apply(&mut self, events: &[Checked], position: Option<&Position>) -> Result<(), CacheError> {
+        let position_text = position.map(serde_json::to_string).transpose()?;
+        // Nothing read, as when a call to sense finds the log where the cache left it, writes nothing: each write syncs.
+        if events.is_empty() && meta(&self.db, "position")? == position_text && self.pending_count()? == 0 {
+            return self.clear_pending_marker();
+        }
         let tx = self.db.transaction()?;
         let pending = outbox::pending(&tx)?;
         if !pending.is_empty() {
@@ -229,7 +234,7 @@ impl Cache {
         if !pending.is_empty() {
             outbox::overlay(&tx)?;
         }
-        set_meta(&tx, "position", position.map(serde_json::to_string).transpose()?.as_deref())?;
+        set_meta(&tx, "position", position_text.as_deref())?;
         tx.commit()?;
         self.clear_pending_marker()?;
         Ok(())

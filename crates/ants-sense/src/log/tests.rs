@@ -1,5 +1,5 @@
 //! Tests of the event log: chained and verified events, stale writers, rewritten or removed events, signing by the
-//! ant's unrevoked credentials, broken logs, size, and renamed ants.
+//! ant's unrevoked credentials, broken logs, the status kept, size, and renamed ants.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -255,6 +255,34 @@ async fn a_log_ending_before_or_differing_from_what_was_verified_is_broken() {
         std::fs::remove_dir_all(&home).unwrap();
     }
     assert_eq!(read_status(Path::new("/nonexistent")).unwrap(), None);
+}
+
+#[tokio::test]
+async fn the_status_is_written_again_only_once_changed_or_stale() {
+    let (team, log, sense) = (Team::new(), MemoryLog::default(), SenseId::new());
+    let home = ants_test_support::scratch_dir("sense-status");
+    let mut writer = ant_log(&log, team.signer("dev-a"), team.verifier(), &sense, Some(&home));
+    writer.append("note", json!(1)).await.unwrap();
+    let kept = read_status(&home).unwrap().unwrap();
+    writer.catch_up().await.unwrap();
+    let mut reader = ant_log(&log, Unsigned, team.verifier(), &sense, Some(&home));
+    reader.catch_up().await.unwrap();
+    reader.catch_up().await.unwrap();
+    assert_eq!(read_status(&home).unwrap().unwrap(), kept, "reading to the same end writes nothing");
+
+    writer.append("note", json!(2)).await.unwrap();
+    let appended = read_status(&home).unwrap().unwrap();
+    assert_eq!(appended.events, 2, "an append is kept");
+    writer.catch_up().await.unwrap();
+    assert_eq!(read_status(&home).unwrap().unwrap(), appended, "the status appended, read");
+
+    let stale = ChainStatus { checked_at: appended.checked_at - STATUS_REFRESH, ..appended.clone() };
+    write_status(&home, &stale).unwrap();
+    let mut reader = ant_log(&log, Unsigned, team.verifier(), &sense, Some(&home));
+    reader.catch_up().await.unwrap();
+    let refreshed = read_status(&home).unwrap().unwrap();
+    assert!(refreshed.checked_at > appended.checked_at, "a status kept {STATUS_REFRESH} ago is kept anew");
+    std::fs::remove_dir_all(&home).unwrap();
 }
 
 #[tokio::test]
