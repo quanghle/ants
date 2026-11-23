@@ -34,6 +34,11 @@ pub enum Error {
     InvalidTitle(String),
     #[error("a channel's description of {0} characters is too long: at most {MAX_CHANNEL_DESCRIPTION}")]
     LongDescription(usize),
+    #[error(
+        "invalid channel description {0:?}: use text without control characters but whitespace, or \
+         characters reordering text"
+    )]
+    InvalidDescription(String),
     #[error("invalid question: {0}")]
     InvalidQuestion(String),
     #[error("invalid answer: {0}")]

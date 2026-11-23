@@ -45,6 +45,25 @@ fn a_question_has_one_to_500_characters_and_two_to_nine_one_line_options() {
 }
 
 #[test]
+fn questions_options_headers_and_typed_answers_hold_no_characters_reordering_text() {
+    let rule = "without control characters or characters reordering text";
+    let text = Question::new("Ship \u{202e}?ti", &options(&["a", "b"]), true).unwrap_err().to_string();
+    assert!(text.contains(rule), "{text}");
+    assert!(Question::new("Ship \u{1b}[8mit?", &options(&["a", "b"]), true).is_err());
+    assert!(Question::new("Ship\tit,\r\nnow?", &options(&["a", "b"]), true).is_ok(), "whitespace stays");
+    let option = Question::new("q", &options(&["a", "\u{2067}b"]), true).unwrap_err().to_string();
+    assert!(option.contains("option 2") && option.contains(rule), "{option}");
+    let header = Questions::new(vec![question(true).headed("Ship \u{200e}it")]).unwrap_err().to_string();
+    assert!(header.contains("header") && header.contains(rule), "{header}");
+    let mut described = question(true);
+    described.options[0].description = Some("now\u{202d}".to_owned());
+    let description = Questions::new(vec![described]).unwrap_err().to_string();
+    assert!(description.contains("description of option 1") && description.contains(rule), "{description}");
+    let typed = question(true).check_pick(&Pick::Typed("la\u{202e}ter".to_owned())).unwrap_err();
+    assert!(typed.contains(rule), "{typed}");
+}
+
+#[test]
 fn one_to_four_questions_with_short_one_line_headers_and_descriptions() {
     let q = question(true);
     assert_eq!(three().questions[1].header.as_deref(), Some("Regions"), "trimmed");

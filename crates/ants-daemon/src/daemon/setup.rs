@@ -454,6 +454,7 @@ async fn connect_mcp(mcp: &mut Mcp, bus: Bus<'_>, redactor: &std::sync::Arc<Reda
     mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
     mcp.with_files(crate::mcp::jetstream_files(js.clone()), config.harness.workdir.clone());
     mcp.with_redactor(redactor.clone());
+    mcp.with_max_payload(bus::max_payload(client));
     // Without credentials the server is open, with no `ants signer` to answer, and the daemon reads what it would.
     mcp.with_reaction_asker(match config.connection.creds {
         Some(_) => crate::mcp::nats_reaction_asker(client.clone()),

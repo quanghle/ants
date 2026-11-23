@@ -29,7 +29,7 @@ use data_encoding::BASE64;
 use nkeys::XKey;
 
 use crate::connection::Nats;
-use crate::messages::attachments::{self, File};
+use crate::messages::attachments::File;
 use crate::people::devices::{self, Devices, Directory, Lookup, VerifiedDevice};
 
 /// What `ants ask` may do instead of sealing.
@@ -77,10 +77,9 @@ fn seal_file(key: &Key, file: &File) -> Result<(Attachment, File)> {
         .map_err(|_| anyhow!("sealing attachment {name}"))?;
     ensure!(
         bytes.len() as u64 <= MAX_ATTACHMENT_SIZE,
-        "{name} is {}: sealed, an attachment is at most {} less {} bytes; {PLAINTEXT}",
-        attachments::size(file.bytes.len() as u64),
-        attachments::size(MAX_ATTACHMENT_SIZE),
-        SealedAttachment::OVERHEAD
+        "{name} is {} bytes: sealed, an attachment is at most {} bytes; {PLAINTEXT}",
+        file.bytes.len(),
+        MAX_ATTACHMENT_SIZE - SealedAttachment::OVERHEAD
     );
     // Its id comes from the ciphertext, which a fresh nonce makes differ on every try: the bytes stored under one
     // handle never change.
@@ -497,6 +496,7 @@ impl Sealing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::messages::attachments;
 
     struct Device {
         human: UserId,
@@ -752,7 +752,10 @@ mod tests {
         let mut e = message(&alice, &bob);
         let key = bob.key();
         let refused = seal(&mut e, &mut [file], alice.id, &alice.xkey, &[(bob.id, &key)]).unwrap_err().to_string();
-        assert!(refused.contains("big.bin is 8.0 MiB: sealed, an attachment is at most 8.0 MiB less 16"), "{refused}");
+        assert!(
+            refused.contains("big.bin is 8388608 bytes: sealed, an attachment is at most 8388592 bytes"),
+            "{refused}"
+        );
     }
 
     /// `ants ask --attach` from Alice to Bob seals the file with the message: the store holds only its ciphertext,

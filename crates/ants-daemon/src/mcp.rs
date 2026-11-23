@@ -107,6 +107,9 @@ pub const TOKEN_ENV: &str = "ANTS_MCP_TOKEN";
 /// Name the harness shows the tools under.
 const SERVER_NAME: &str = "ants";
 
+/// Room a message the tools send leaves for its headers within the server's `max_payload`.
+pub const HEADER_ROOM: usize = 1024;
+
 /// Publishes an envelope and resolves once JetStream has stored it.
 pub type Outbox = Arc<dyn Fn(Envelope) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
@@ -175,6 +178,7 @@ impl Mcp {
             sealing: OnceLock::new(),
             files: OnceLock::new(),
             redactor: OnceLock::new(),
+            max_payload: OnceLock::new(),
             provider: OnceLock::new(),
             trails: OnceLock::new(),
             dreams: OnceLock::new(),
@@ -262,6 +266,12 @@ impl Mcp {
     /// `read_attachment` are refused.
     pub fn with_files(&self, files: FileAccess, workdir: PathBuf) {
         let _ = self.hub.files.set((files, workdir));
+    }
+
+    /// Refuse a message or post the tools send whose JSON is over `max_payload` (the server's) less [`HEADER_ROOM`],
+    /// before any of its attachments is stored; without it the server alone refuses one.
+    pub fn with_max_payload(&self, max_payload: usize) {
+        let _ = self.hub.max_payload.set(max_payload);
     }
 
     /// Redact with `redactor` the files the tools attach whose bytes are UTF-8 text, before they are stored.
@@ -416,6 +426,8 @@ struct Hub {
     files: OnceLock<(FileAccess, PathBuf)>,
     /// What redacts the text files the tools attach; none redacts nothing.
     redactor: OnceLock<Arc<Redactor>>,
+    /// The server's `max_payload` ([`Mcp::with_max_payload`]).
+    max_payload: OnceLock<usize>,
     /// The ant's provider ([`crate::provider`]).
     provider: OnceLock<Connected>,
     /// The runs the ant conducts ([`Mcp::with_trails`]).
@@ -450,6 +462,21 @@ impl Hub {
 
     fn caller(&self, token: &str) -> Option<ThreadId> {
         self.sessions.locked().tokens.get(token).cloned()
+    }
+
+    /// Refuse `message`, a message or post the tools send, when its JSON is longer than one NATS message carries
+    /// ([`Mcp::with_max_payload`]), naming its size and the limit.
+    fn check_fits(&self, message: &impl serde::Serialize) -> Result<(), String> {
+        let Some(&max_payload) = self.max_payload.get().filter(|&&max| max > 0) else { return Ok(()) };
+        let len = serde_json::to_vec(message).map_or(0, |json| json.len());
+        let max = max_payload.saturating_sub(HEADER_ROOM);
+        if len <= max {
+            return Ok(());
+        }
+        Err(format!(
+            "the message is {len} bytes; one message carries at most {max} bytes: write the text to a file in the \
+             working directory and send it with `attach` instead; nothing sent"
+        ))
     }
 
     async fn send(&self, envelope: &Envelope) -> Result<(), String> {

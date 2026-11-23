@@ -136,6 +136,8 @@ impl Hub {
             .with_creator(Some(self.ant.clone()))
             .with_allow(current.allow.clone());
         post.turn_budget = left;
+        post.attachments = loaded.iter().map(|l| l.attachment.clone()).collect();
+        self.check_fits(&post)?;
         let attachments = self.store(loaded, |id| post.attachment_handle(id)).await?;
         post.attachments = attachments;
         (access.post)(post.clone(), source).await.map_err(|e| format!("not posted: {e:#}"))?;

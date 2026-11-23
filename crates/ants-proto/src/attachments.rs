@@ -102,7 +102,8 @@ impl Attachment {
     }
 
     /// Check the reference: a UUIDv7 id, a name of 1 to [`MAX_ATTACHMENT_NAME`] bytes, neither `.` nor `..`, without
-    /// `/`, `\` or control characters, so it names a file in one directory on every system; a lowercase
+    /// `/`, `\`, control characters or characters reordering text ([`crate::shown`]), so it names a file in one
+    /// directory on every system and reads as it is named; a lowercase
     /// `type/subtype`; at most [`MAX_ATTACHMENT_SIZE`] bytes; and a SHA-256 in lowercase hex.
     pub fn check(&self) -> Result<(), Error> {
         let invalid = |reason| Err(Error::InvalidAttachment { name: self.name.clone(), reason });
@@ -113,8 +114,8 @@ impl Attachment {
         if name.is_empty() || name.len() > MAX_ATTACHMENT_NAME || name == "." || name == ".." {
             return invalid("use a file name of 1-255 bytes");
         }
-        if name.chars().any(|c| c == '/' || c == '\\' || c.is_control()) {
-            return invalid("its name holds '/', '\\' or a control character");
+        if name.chars().any(|c| c == '/' || c == '\\' || !crate::shown(c)) {
+            return invalid("its name holds '/', '\\', a control character or one reordering text");
         }
         if !valid_mime(&self.mime) {
             return invalid("its media type is no lowercase type/subtype");
@@ -336,6 +337,10 @@ mod tests {
         assert!(Attachment { name: "ünïcode.txt".into(), ..shot.clone() }.check().is_ok());
         for name in ["", ".", "..", "a/b", "a\\b", "a\nb", &"x".repeat(256)] {
             assert!(Attachment { name: name.into(), ..shot.clone() }.check().is_err(), "{name:?}");
+        }
+        for name in ["evil\u{202e}gnp.exe", "a\u{200f}.txt", "\u{2066}a\u{2069}.txt", "a\u{61c}b"] {
+            let refused = Attachment { name: name.into(), ..shot.clone() }.check().unwrap_err().to_string();
+            assert!(refused.contains("a control character or one reordering text"), "{refused}");
         }
         for mime in ["image", "Image/png", "image/", "/png", "text/plain; charset=utf-8"] {
             assert!(Attachment { mime: mime.into(), ..shot.clone() }.check().is_err(), "{mime}");

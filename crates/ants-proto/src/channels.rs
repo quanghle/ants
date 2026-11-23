@@ -44,11 +44,15 @@ impl ChannelEntry {
     }
 
     /// Set the description to `text`, trimmed; none or a blank one clears it. Returns whether it changed; one longer
-    /// than [`MAX_CHANNEL_DESCRIPTION`] is refused, changing nothing.
+    /// than [`MAX_CHANNEL_DESCRIPTION`], or holding control characters but whitespace or characters reordering text
+    /// ([`crate::shown`]), is refused, changing nothing.
     pub fn set_description(&mut self, text: Option<&str>) -> Result<bool, Error> {
         let text = text.map(str::trim).filter(|t| !t.is_empty());
         if let Some(count) = text.map(|t| t.chars().count()).filter(|n| *n > MAX_CHANNEL_DESCRIPTION) {
             return Err(Error::LongDescription(count));
+        }
+        if let Some(text) = text.filter(|t| !t.chars().all(crate::text::shown_in_lines)) {
+            return Err(Error::InvalidDescription(text.to_owned()));
         }
         let text = text.map(str::to_owned);
         if self.description == text {

@@ -287,3 +287,42 @@ async fn read_attachment_returns_images_and_text_and_saves_other_files() {
     let handle = late.attachment_handle(late.attachments[0].id);
     assert_eq!(listed, format!("here\n📎 log.txt (text/plain, 2 B) handle {handle}"));
 }
+
+#[tokio::test]
+async fn a_message_over_max_payload_is_refused_before_its_files_are_stored() {
+    let home = home("too-big");
+    let (mcp, mut sent) = start(&home).await;
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("notes.txt"), "hello").unwrap();
+    let stored = MemoryFiles::default();
+    mcp.with_files(memory_files(stored.clone()), home.to_path_buf());
+    let mut ops = ChannelEntry::new("ops".parse().unwrap());
+    ops.add_member(user("dev-a"));
+    let posted = Arc::new(StdMutex::new(Vec::new()));
+    mcp.with_channels(channels(vec![ops], posted.clone()));
+    mcp.with_max_payload(4096);
+    let current = from_human();
+    let _turn = mcp.begin(&current);
+    let client = client_in(&mcp, &current.thread_id, &work).await;
+
+    let (big, attach) = ("x".repeat(4096), serde_json::json!(["notes.txt"]));
+    for (tool, args) in [
+        ("send_message", serde_json::json!({"to": "dev-b", "text": big, "attach": attach})),
+        ("handoff", serde_json::json!({"text": big})),
+        ("post_notes", serde_json::json!({"text": big, "attach": attach})),
+        ("post_channel", serde_json::json!({"channel": "ops", "text": big, "attach": attach})),
+    ] {
+        let (ok, text) = call(&client, tool, args).await;
+        assert!(!ok && text.contains(" bytes; one message carries at most 3072 bytes: "), "{tool}: {text}");
+        assert!(text.contains("send it with `attach` instead; nothing sent"), "{tool}: {text}");
+    }
+    assert!(sent.try_recv().is_err() && posted.locked().is_empty(), "nothing sent");
+    assert!(stored.locked().is_empty(), "nothing stored");
+    let (ok, text) = call(&client, "read_notes", serde_json::json!({})).await;
+    assert!(ok && text.ends_with("has no notes yet."), "{text}");
+
+    let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "x".repeat(2048)})).await;
+    assert!(ok, "{text}");
+    assert_eq!(sent.try_recv().unwrap().text.len(), 2048, "one under the limit goes");
+}

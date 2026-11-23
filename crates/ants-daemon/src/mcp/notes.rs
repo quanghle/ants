@@ -58,6 +58,8 @@ impl Hub {
                 })?;
             // Stored once, before the first try: the handles name the thread, not the post.
             if attachments.is_none() {
+                post.attachments = loaded.iter().map(|l| l.attachment.clone()).collect();
+                self.check_fits(&post)?;
                 let ant = self.ant.clone();
                 let handle_of =
                     |id| AttachmentHandle { from: ant.clone(), scope: AttachmentScope::Notes(thread.clone()), id };

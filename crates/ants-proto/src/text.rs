@@ -37,6 +37,18 @@ pub fn shown(c: char) -> bool {
         && !matches!(c, '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
+/// Whether `c` may stand in one line of text someone else wrote: [`shown`], and no Unicode line or paragraph
+/// separator.
+pub(crate) fn shown_in_line(c: char) -> bool {
+    shown(c) && !matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// Whether `c` may stand in text of several lines someone else wrote: [`shown`], or whitespace such as a line break
+/// or a tab.
+pub(crate) fn shown_in_lines(c: char) -> bool {
+    shown(c) || c.is_whitespace()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

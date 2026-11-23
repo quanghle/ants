@@ -401,7 +401,7 @@ impl Job {
                 Ok(Done::line(thread_meta::retitle(&ctx.js, ctx.meta()?, &ctx.sealing, &thread, &text, false).await?))
             }
             Self::Notes { thread, text } => {
-                let post = send::post_notes(&ctx.js, me, thread, text, &files).await?;
+                let post = send::post_notes(&ctx.js, me, thread, text, &files, ATTACH).await?;
                 Ok(Done::line(format!("{}{}", send::notes_posted(&post), with(&files))))
             }
             Self::React { thread, message, reaction } => react(ctx, &thread, message, reaction).await,
@@ -628,6 +628,9 @@ async fn retire(ctx: &Ctx, ant: &UserId) -> Result<Done> {
     Ok(Done::line(said.replace('\n', " ")))
 }
 
+/// How the chat attaches a file, as [`send::check_fits`] suggests it.
+const ATTACH: &str = "attach it with /attach";
+
 /// The warning for a message kept in the leaf node's outbox.
 fn outbox(stored: bus::Stored) -> Vec<String> {
     match stored {
@@ -674,6 +677,7 @@ async fn deliver(
     if let Some(q) = quote.filter(|_| envelope.quote.is_some()) {
         envelope.quote = Some(q.quote(false));
     }
+    send::check_fits(&ctx.js, &envelope, ATTACH)?;
     let (mut warnings, _) = send::unserved(&ctx.js, &ctx.me, &envelope.to).await;
     attachments::store(&ctx.js, &stored, |id| envelope.attachment_handle(id)).await?;
     let stored = send::deliver(&ctx.js, ctx.domain.as_ref(), &envelope).await?;
@@ -705,6 +709,7 @@ async fn post(
     }
     posting.post.attachments = attachments::references(files);
     posting.post.queue = queue;
+    send::check_fits(&ctx.js, &posting.post, ATTACH)?;
     attachments::store(&ctx.js, files, |id| posting.post.attachment_handle(id)).await?;
     let (stored, notified) = posting.deliver(&ctx.js, &ctx.me).await?;
     let post = &posting.post;
@@ -997,6 +1002,26 @@ mod tests {
         let (_, bytes) =
             attachments::fetch(&js, &listed.handle, Some(&listed.attachment), listed.stored).await.unwrap();
         assert_eq!(bytes, b"# plan");
+
+        // One over the server's max_payload is refused before its files are stored, naming its size and the limit.
+        let big = "x".repeat(1024 * 1024);
+        let files_before =
+            js.get_stream(ants_daemon::hub::files_config().name).await.unwrap().info().await.unwrap().state.messages;
+        for job in [
+            Job::Ask { to: user("dev-a"), thread: Some(thread.clone()), text: big.clone(), quote: None },
+            Job::Post { channel: "ops".parse().unwrap(), thread: None, text: big.clone(), quote: None },
+            Job::Notes { thread: thread.clone(), text: big.clone() },
+        ] {
+            let refused = Job::Attached { job: Box::new(job), files: Rc::clone(&files) }.run(&ctx).await.unwrap_err();
+            let refused = refused.to_string();
+            assert!(refused.starts_with("the message is 1.0 MiB; one message carries at most 1023 KiB"), "{refused}");
+            assert!(refused.ends_with("put the text in a file and attach it with /attach instead"), "{refused}");
+        }
+        let files_after =
+            js.get_stream(ants_daemon::hub::files_config().name).await.unwrap().info().await.unwrap().state.messages;
+        assert_eq!(files_after, files_before, "nothing stored");
+        let after = thread::history(&js, &thread, None, thread::Activity::None, None).await.unwrap();
+        assert_eq!(after.len(), entries.len(), "nothing sent");
     }
 
     /// The bar replays a dead letter to its ant, or drops it, as `ants dead replay|drop` do: once gone, it is no more.

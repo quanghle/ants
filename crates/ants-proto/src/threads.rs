@@ -87,7 +87,7 @@ impl ThreadSummary {
 }
 
 fn breaks_title(c: char) -> bool {
-    !crate::shown(c) || matches!(c, '\u{2028}' | '\u{2029}')
+    !crate::text::shown_in_line(c)
 }
 
 /// A thread marked done, under its [`done_key`] in [`THREADS_BUCKET`]: one state per thread, shared by every human,

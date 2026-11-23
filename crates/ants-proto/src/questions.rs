@@ -195,18 +195,23 @@ impl Question {
         Self { text: self.text.trim().to_owned(), header, options, ..self }
     }
 
-    /// That the text has 1 to [`MAX_QUESTION`] characters, a header is one line of 1 to [`MAX_HEADER`], and there are
-    /// [`MIN_OPTIONS`] to [`MAX_OPTIONS`] options, each label one line of 1 to [`MAX_OPTION`] characters and each
-    /// description one line of 1 to [`MAX_DESCRIPTION`].
+    /// That the text has 1 to [`MAX_QUESTION`] characters, without control characters but whitespace nor characters
+    /// reordering text ([`crate::shown`]), a header is one line of 1 to [`MAX_HEADER`], and there are [`MIN_OPTIONS`]
+    /// to [`MAX_OPTIONS`] options, each label one line of 1 to [`MAX_OPTION`] characters and each description one line
+    /// of 1 to [`MAX_DESCRIPTION`]; a line holds no control characters, characters reordering text or Unicode line and
+    /// paragraph separators.
     pub fn check(&self) -> Result<(), String> {
         let length = self.text.trim().chars().count();
         if length == 0 || length > MAX_QUESTION {
             return Err(format!("the question has {length} characters; use 1-{MAX_QUESTION}"));
         }
+        if !self.text.chars().all(crate::text::shown_in_lines) {
+            return Err(format!("the question {:?}: {NOT_SHOWN}", self.text));
+        }
         if let Some(header) = &self.header
             && !one_line(header, MAX_HEADER)
         {
-            return Err(format!("header {header:?}: use one line of 1-{MAX_HEADER} characters"));
+            return Err(format!("header {header:?}: use one line of 1-{MAX_HEADER} characters, {NOT_SHOWN}"));
         }
         if !(MIN_OPTIONS..=MAX_OPTIONS).contains(&self.options.len()) {
             return Err(format!("{} options; use {MIN_OPTIONS}-{MAX_OPTIONS}", self.options.len()));
@@ -214,13 +219,14 @@ impl Question {
         for (n, option) in (1..).zip(&self.options) {
             let label = &option.label;
             if !one_line(label, MAX_OPTION) {
-                return Err(format!("option {n} {label:?}: use one line of 1-{MAX_OPTION} characters"));
+                return Err(format!("option {n} {label:?}: use one line of 1-{MAX_OPTION} characters, {NOT_SHOWN}"));
             }
             if let Some(description) = &option.description
                 && !one_line(description, MAX_DESCRIPTION)
             {
                 return Err(format!(
-                    "the description of option {n} {label:?}: use one line of 1-{MAX_DESCRIPTION} characters"
+                    "the description of option {n} {label:?}: use one line of 1-{MAX_DESCRIPTION} characters, \
+                     {NOT_SHOWN}"
                 ));
             }
         }
@@ -296,12 +302,15 @@ impl Question {
             }
             Pick::Typed(text) if text.trim().is_empty() => Err("an empty answer".to_owned()),
             Pick::Typed(text) if !one_line(text, MAX_TYPED) => {
-                Err(format!("a typed answer is one line of 1-{MAX_TYPED} characters"))
+                Err(format!("a typed answer is one line of 1-{MAX_TYPED} characters, {NOT_SHOWN}"))
             }
             Pick::Typed(_) => Ok(()),
         }
     }
 }
+
+/// The rule of [`breaks_line`] and [`crate::shown`], as a refusal names it.
+const NOT_SHOWN: &str = "without control characters or characters reordering text";
 
 /// Whether `text` is one line of 1 to `max` characters, without spaces around it.
 fn one_line(text: &str, max: usize) -> bool {
@@ -309,8 +318,10 @@ fn one_line(text: &str, max: usize) -> bool {
     (1..=max).contains(&length) && text.trim() == text && !text.chars().any(breaks_line)
 }
 
+/// Whether `c` has no place in one line of text: a control character, one reordering text ([`crate::shown`]) or a
+/// Unicode line or paragraph separator.
 pub(crate) fn breaks_line(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+    !crate::text::shown_in_line(c)
 }
 
 impl From<Question> for Questions {

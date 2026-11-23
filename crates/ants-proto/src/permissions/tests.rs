@@ -705,6 +705,13 @@ fn only_a_human_or_its_assistant_describes_a_channel_and_never_with_other_change
     assert!(entry.apply_for_human(&describe).unwrap().is_empty(), "nothing to change");
     let long = [ChannelOp::SetDescription { description: "x".repeat(MAX_CHANNEL_DESCRIPTION + 1) }];
     assert!(matches!(entry.apply_for_human(&long), Err(Refusal::Invalid(_))));
+    for bad in ["evil\u{202e}gnp.exe", "red \u{1b}[31m", "\u{2066}isolated"] {
+        let bidi = [ChannelOp::SetDescription { description: bad.to_owned() }];
+        let Err(Refusal::Invalid(why)) = entry.apply_for_human(&bidi) else { panic!("{bad:?} taken") };
+        assert!(why.contains("without control characters but whitespace, or characters reordering text"), "{why}");
+    }
+    let lines = [ChannelOp::SetDescription { description: "Incidents\n\tand upkeep".to_owned() }];
+    assert_eq!(entry.apply_for_human(&lines).unwrap().len(), 1, "line breaks and tabs stay");
     let blank = [ChannelOp::SetDescription { description: " ".to_owned() }];
     assert_eq!(entry.apply_for_human(&blank).unwrap(), ["description cleared"], "a blank one clears it");
     assert_eq!(entry.description, None);

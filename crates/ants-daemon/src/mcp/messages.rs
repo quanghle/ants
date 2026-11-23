@@ -220,6 +220,7 @@ impl Tools {
             return Err(format!("thread {thread} is the current one; hand off to `new` or another thread"));
         }
         let envelope = self.hub.follow_on(thread, self.hub.ant.clone(), text, Some(on))?;
+        self.hub.check_fits(&envelope)?;
         self.hub.send(&envelope).await?;
         Ok(format!(
             "Handed off on thread {} as message {} ({} turns left). The work runs there as its own prompt, its answer \
@@ -239,6 +240,8 @@ impl Tools {
     ) -> Result<String, String> {
         let mut envelope = self.hub.outgoing(thread, to, text, on)?;
         let loaded = self.hub.load(thread, attach).await?;
+        envelope.attachments = loaded.iter().map(|l| l.attachment.clone()).collect();
+        self.hub.check_fits(&envelope)?;
         let unserved = self.hub.unserved(&envelope.to, Duration::ZERO).await;
         let attachments = self.hub.store(loaded, |id| envelope.attachment_handle(id)).await?;
         envelope.attachments = attachments;
@@ -278,6 +281,8 @@ impl Tools {
             ));
         }
         let loaded = self.hub.load(thread, attach).await?;
+        envelope.attachments = loaded.iter().map(|l| l.attachment.clone()).collect();
+        self.hub.check_fits(&envelope)?;
         let attachments = self.hub.store(loaded, |id| envelope.attachment_handle(id)).await?;
         envelope.attachments = attachments;
         self.hub.ask(envelope, wait, cx.ct.cancelled()).await
