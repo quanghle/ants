@@ -39,24 +39,14 @@ pub struct Timeline {
     pub message: Uuid,
     pub entries: Vec<TimelineEntry>,
     /// How many tool calls of the prompt were left out so far, past [`MAX_TIMELINE_CALLS`].
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub omitted: u32,
     pub at: DateTime<Utc>,
 }
 
-#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if takes a reference")]
-fn is_zero(n: &u32) -> bool {
-    *n == 0
-}
-
-#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if takes a reference")]
-fn is_zero_u64(n: &u64) -> bool {
-    *n == 0
-}
-
-#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if takes a reference")]
-fn is_zero_f64(n: &f64) -> bool {
-    *n == 0.0
+/// Whether `value` is its type's default, which a record leaves out.
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 /// One entry of a [`Timeline`] record, tagged by `type`.
@@ -138,13 +128,13 @@ pub struct TimelineEnd {
     /// How long the prompt ran, from when it got its thread's harness: a wait for a free one is not counted.
     pub duration_ms: u64,
     /// The tokens the harness reported the prompt spent.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub tokens: u64,
     /// The cost in US dollars the harness reported the prompt spent.
-    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub cost: f64,
     /// How many tool requests the prompt asked of humans or the ant's chain.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub asked: u32,
     /// Whether the thread's session was rebuilt for the prompt: lost, or outgrown and started anew.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -154,7 +144,7 @@ pub struct TimelineEnd {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub calls: BTreeMap<String, CallCount>,
     /// How many of the prompt's tool calls called the built-in sense's own tools (`sense_<tool>`).
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub sense_calls: u32,
 }
 
@@ -162,7 +152,7 @@ pub struct TimelineEnd {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallCount {
     pub calls: u32,
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub failed: u32,
 }
 
