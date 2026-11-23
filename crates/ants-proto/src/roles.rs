@@ -139,9 +139,9 @@ pub struct VerifiedUser {
 }
 
 impl VerifiedUser {
-    /// Whether the JWT carries [`ADMIN_TAG`].
+    /// Whether the JWT carries [`ADMIN_TAG`]; a web device's ([`crate::WEB_TAG`]) never counts, whatever it carries.
     pub fn is_admin(&self) -> bool {
-        is_admin(self.tags.iter().map(String::as_str))
+        is_admin(self.tags.iter().map(String::as_str)) && !crate::is_web(self.tags.iter().map(String::as_str))
     }
 
     /// The human the JWT says the user assists ([`AssistantOf`]), if any.

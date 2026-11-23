@@ -8,6 +8,7 @@
 //! teams = ["acme/core"]               # ... and of these teams, as org/team
 //! email_domains = ["acme.example"]    # ... and users with a verified email address in these domains
 //! ttl = "30d"                         # how long the credentials of a registered device stay valid
+//! web_ttl = "7d"                      # ... and those of a registered web device, a page of the web client
 //! sweep = "6h"                        # how often memberships are checked again; "0": never
 //! token_file = "~/.config/ants/github-token"   # the signer's GitHub token, mode 0600; or:
 //! token_store = "github-token"        # its entry in the OS credential store (service "ants")
@@ -21,6 +22,9 @@ use serde::{Deserialize, Serialize};
 
 /// How long the credentials of a registered device stay valid by default.
 pub const DEFAULT_REGISTRATION_TTL: Duration = Duration::from_hours(30 * 24);
+
+/// How long the credentials of a registered web device stay valid by default.
+pub const DEFAULT_WEB_TTL: Duration = Duration::from_hours(7 * 24);
 
 /// How often the signer checks again by default whether the GitHub users of registered devices still fall under the
 /// policy.
@@ -49,6 +53,9 @@ pub struct Registration {
     /// How long the credentials of a registered device stay valid.
     #[serde(default = "default_ttl", deserialize_with = "ants_proto::duration::deserialize")]
     pub ttl: Duration,
+    /// How long the credentials of a registered web device ([`ants_proto::WEB_TAG`]) stay valid.
+    #[serde(default = "default_web_ttl", deserialize_with = "ants_proto::duration::deserialize")]
+    pub web_ttl: Duration,
     /// How often the signer checks again, with its token, whether the GitHub users of the devices an organization or
     /// team registered still fall under the policy, revoking the names of those who left; zero: never.
     #[serde(default = "default_sweep", deserialize_with = "ants_proto::duration::deserialize")]
@@ -67,6 +74,10 @@ pub struct Registration {
 
 fn default_ttl() -> Duration {
     DEFAULT_REGISTRATION_TTL
+}
+
+fn default_web_ttl() -> Duration {
+    DEFAULT_WEB_TTL
 }
 
 fn default_sweep() -> Duration {
@@ -180,6 +191,11 @@ impl std::fmt::Display for Grant {
 }
 
 impl Registration {
+    /// How long the credentials of a device registered now stay valid: a web device's, when `web`, or any other's.
+    pub fn lifetime(&self, web: bool) -> Duration {
+        if web { self.web_ttl } else { self.ttl }
+    }
+
     /// Check the table, lowercasing what GitHub compares without case.
     fn check(&mut self) -> Result<()> {
         if self.client_id.trim().is_empty() {
@@ -198,8 +214,10 @@ impl Registration {
             }
             domain.make_ascii_lowercase();
         }
-        if self.ttl < Duration::from_mins(1) {
-            bail!("[registration] ttl {:?} is under a minute", self.ttl);
+        for (key, ttl) in [("ttl", self.ttl), ("web_ttl", self.web_ttl)] {
+            if ttl < Duration::from_mins(1) {
+                bail!("[registration] {key} {ttl:?} is under a minute");
+            }
         }
         if self.token_file.is_some() && self.token_store.is_some() {
             bail!("[registration] names both token_file and token_store: keep one");
@@ -314,6 +332,13 @@ mod tests {
         assert_eq!((registration.ttl, registration.github_url.as_str()), (DEFAULT_REGISTRATION_TTL, GITHUB_URL));
         assert_eq!(registration.sweep, DEFAULT_SWEEP);
         assert_eq!(
+            (registration.lifetime(false), registration.lifetime(true)),
+            (Duration::from_hours(30 * 24), Duration::from_hours(7 * 24))
+        );
+        std::fs::write(&path, format!("{table}ttl = \"10d\"\nweb_ttl = \"2d\"\n")).unwrap();
+        let set = signer_registration(&path).unwrap().unwrap();
+        assert_eq!((set.lifetime(false), set.lifetime(true)), (Duration::from_hours(240), Duration::from_hours(48)));
+        assert_eq!(
             (registration.api_url.as_str(), registration.token_file.as_deref()),
             ("http://127.0.0.1:1", Some(dir.join("github-token").as_path()))
         );
@@ -342,7 +367,8 @@ mod tests {
         for (bad, why) in [
             ("client_id = \"\"", "client_id is empty"),
             ("client_id = \"x\"\nteams = [\"core\"]", "is not org/team"),
-            ("client_id = \"x\"\nttl = \"10s\"", "under a minute"),
+            ("client_id = \"x\"\nttl = \"10s\"", "ttl 10s is under a minute"),
+            ("client_id = \"x\"\nweb_ttl = \"10s\"", "web_ttl 10s is under a minute"),
             ("client_id = \"x\"\nsweep = \"6\"", "sweep"),
             ("client_id = \"x\"\ntoken_file = \"f\"\ntoken_store = \"s\"", "keep one"),
             ("client_id = \"x\"\nscope = \"all\"", "unknown field"),

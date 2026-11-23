@@ -1,6 +1,7 @@
 //! What each kind of credentials may publish and subscribe to ([`Permissions`]), which `ants auth` puts in the user
-//! JWTs it issues: a human's or an ant's, an assistant's, a leaf node's uplink, a machine's host connection, a
-//! webhook's, an observer's, and those of enrollment, bootstrap and the services, versioned by [`PERMISSIONS_VERSION`].
+//! JWTs it issues: a human's or an ant's, a human's web device's, an assistant's, a leaf node's uplink, a machine's
+//! host connection, a webhook's, an observer's, and those of enrollment, bootstrap and the services, versioned by
+//! [`PERMISSIONS_VERSION`].
 
 use std::fmt;
 
@@ -15,9 +16,11 @@ mod human;
 mod leaf;
 mod services;
 mod user;
+mod web;
 
 pub use hooks::Destination;
 pub use leaf::LeafRole;
+pub use web::{WEB_TAG, is_web};
 
 /// JetStream stream backing a KV bucket.
 fn kv_stream(bucket: &str) -> String {
@@ -82,7 +85,8 @@ pub struct Permissions {
 /// [`PermissionsVersion::tag`]. Credentials carrying an older version were issued before the permissions changed:
 /// ants processes using them warn and name the command that renews them.
 ///
-/// Bump it whenever the permissions of any role change: [`Permissions::for_user`], [`Permissions::for_assistant`], [`Permissions::for_leaf`],
+/// Bump it whenever the permissions of any role change: [`Permissions::for_user`], [`Permissions::for_web`],
+/// [`Permissions::for_assistant`], [`Permissions::for_leaf`],
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_host`],
 /// [`Permissions::for_enrollment`],
 /// [`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`], [`Permissions::for_trail_keeper`],
@@ -91,7 +95,7 @@ pub struct Permissions {
 /// or [`Permissions::with_js_domain`], or
 /// the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(1);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(2);
 
 /// A version of the permissions `ants auth` gives ([`PERMISSIONS_VERSION`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

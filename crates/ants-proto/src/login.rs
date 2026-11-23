@@ -37,7 +37,8 @@ pub const MAX_REGISTRATIONS: usize = 10;
 /// A machine asking, on [`subject::login`], for the credentials of a new device of the human `name`: a user JWT for
 /// `public_key`, the device's NKey, whose seed stays on the machine. The request is signed by that NKey
 /// ([`LoginRequest::signed`]), so whoever else holds the bootstrap credentials cannot change it, and names
-/// `reply_xkey`, a one-off X25519 key the answers are sealed to ([`LoginReply`]).
+/// `reply_xkey`, a one-off X25519 key the answers are sealed to ([`LoginReply`]). One asking for a web device
+/// ([`LoginRequest::web`]) names no encryption key of the device's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginRequest {
     pub name: UserId,
@@ -48,6 +49,11 @@ pub struct LoginRequest {
     /// The device's own encryption key, generated beside its NKey, for its user JWT to bind ([`DeviceKey::tag`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xkey: Option<DeviceKey>,
+    /// Whether the device is a page of the web client, asking for web credentials
+    /// ([`Permissions::for_web`](crate::Permissions::for_web), [`WEB_TAG`](crate::WEB_TAG)), which bind no encryption
+    /// key: the signer refuses such a request naming an `xkey`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub web: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub made_at: DateTime<Utc>,
@@ -66,6 +72,7 @@ impl LoginRequest {
             public_key: public_key.into(),
             reply_xkey: reply_xkey.into(),
             xkey: None,
+            web: false,
             label: None,
             made_at,
             expires_at: made_at + LOGIN_TTL,
@@ -83,6 +90,7 @@ impl LoginRequest {
             &self.public_key,
             &self.reply_xkey,
             xkey,
+            if self.web { "web" } else { "" },
             &time(&self.made_at),
             &time(&self.expires_at),
         ];
@@ -172,11 +180,17 @@ mod tests {
         assert_eq!(back.signed(), bare, "the same bytes after the wire");
         request.signature = "sig".into();
         assert_eq!(request.signed(), bare);
+        assert!(!serde_json::to_string(&request).unwrap().contains("web"), "left out unless asked for");
+        let web = LoginRequest { web: true, ..request.clone() };
+        let json = serde_json::to_value(&web).unwrap();
+        assert_eq!(json["web"], true);
+        assert_eq!(serde_json::from_value::<LoginRequest>(json).unwrap(), web);
         for change in [
             |r: &mut LoginRequest| r.name = p("bob"),
             |r: &mut LoginRequest| r.public_key = "UOTHER".into(),
             |r: &mut LoginRequest| r.reply_xkey = "XOTHER".into(),
             |r: &mut LoginRequest| r.xkey = Some(format!("X{}", "A".repeat(55)).parse().unwrap()),
+            |r: &mut LoginRequest| r.web = true,
             |r: &mut LoginRequest| r.label = None,
             |r: &mut LoginRequest| r.label = Some(String::new()),
             |r: &mut LoginRequest| r.made_at += chrono::TimeDelta::nanoseconds(1),

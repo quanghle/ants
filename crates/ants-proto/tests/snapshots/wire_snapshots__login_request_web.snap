@@ -1,0 +1,14 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "name": "alice",
+  "public_key": "UDEF",
+  "reply_xkey": "XREPLY",
+  "web": true,
+  "label": "Alice's phone browser",
+  "made_at": "2025-01-01T12:00:00Z",
+  "expires_at": "2025-01-01T12:15:00Z",
+  "signature": "c2lnLWxvZ2lu"
+}

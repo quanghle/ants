@@ -8,7 +8,7 @@ use ants_daemon::config::registration::{GithubAccount, Grant};
 use ants_daemon::secrets::creds::Kind as CredsKind;
 use ants_proto::{
     ADMIN_TAG, AssistantOf, BuiltinAnt, DeviceId, DeviceKey, JsDomain, Machine, Permissions, REGISTERED_TAG, Role,
-    UserId,
+    UserId, WEB_TAG,
 };
 use anyhow::{Context as _, Result, bail};
 use nkeys::{KeyPair, XKey};
@@ -60,6 +60,9 @@ pub struct NewDevice<'a> {
     pub expires_at: Option<u64>,
     /// Whether a human's credentials carry the admin role ([`ADMIN_TAG`]).
     pub admin: bool,
+    /// Whether a human's credentials are a web device's ([`WEB_TAG`]), with [`Permissions::for_web`]: never an
+    /// admin's, and binding no encryption key.
+    pub web: bool,
     /// The human whose assistant an ant's credentials ([`Kind::Assistant`]) make it ([`AssistantOf`]).
     pub assistant_of: Option<UserId>,
 }
@@ -71,6 +74,7 @@ impl NewDevice<'_> {
             github: self.github.clone(),
             grant: self.grant.clone(),
             admin: self.admin,
+            web: self.web,
             assistant_of: self.assistant_of.clone(),
             ..issued
         }
@@ -89,7 +93,7 @@ pub fn issue_device_with(
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let key = KeyPair::new_user();
-    let xkey = (kind == Kind::Human).then(XKey::new);
+    let xkey = (kind == Kind::Human && !new.web).then(XKey::new);
     let bound = xkey.as_ref().map(device_key).transpose()?;
     let (device, extra) = device_claims(kind, new, bound.as_ref())?;
     let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, extra, new.expires_at)?;
@@ -105,8 +109,9 @@ pub(crate) fn device_key(xkey: &XKey) -> Result<DeviceKey> {
 }
 
 /// A new device for credentials of `kind`, if a human's, and the claims carrying it with its encryption key `xkey`,
-/// marked [`REGISTERED_TAG`] when a registration grants it (`new.grant`) and [`ADMIN_TAG`] for an admin
-/// (`new.admin`); an assistant's carry its human's [`AssistantOf::tag`] instead.
+/// marked [`REGISTERED_TAG`] when a registration grants it (`new.grant`), [`ADMIN_TAG`] for an admin (`new.admin`)
+/// and [`WEB_TAG`] for a web device (`new.web`), which is never an admin's and binds no encryption key; an
+/// assistant's carry its human's [`AssistantOf::tag`] instead.
 pub(super) fn device_claims(
     kind: Kind,
     new: &NewDevice<'_>,
@@ -114,6 +119,17 @@ pub(super) fn device_claims(
 ) -> Result<(Option<DeviceId>, Value)> {
     if new.admin && kind != Kind::Human {
         bail!("only a human's credentials carry the admin role");
+    }
+    if new.web {
+        if kind != Kind::Human {
+            bail!("only a human's device is a web device");
+        }
+        if new.admin {
+            bail!("a web device's credentials never carry the admin role");
+        }
+        if let Some(xkey) = xkey {
+            bail!("a web device's credentials bind no encryption key: {xkey} refused");
+        }
     }
     match (kind, &new.assistant_of) {
         (Kind::Assistant, None) => bail!("an assistant's credentials name the human it assists"),
@@ -134,7 +150,8 @@ pub(super) fn device_claims(
     let device = DeviceId::generate();
     let tags = std::iter::once(device.tag()).chain(xkey.map(DeviceKey::tag));
     let tags = tags.chain(new.grant.is_some().then(|| REGISTERED_TAG.to_owned()));
-    let tags: Vec<String> = tags.chain(new.admin.then(|| ADMIN_TAG.to_owned())).collect();
+    let tags = tags.chain(new.admin.then(|| ADMIN_TAG.to_owned()));
+    let tags: Vec<String> = tags.chain(new.web.then(|| WEB_TAG.to_owned())).collect();
     Ok((Some(device), json!({ "tags": tags })))
 }
 
