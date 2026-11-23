@@ -4,6 +4,10 @@
 //! cap is reached and every live harness is busy, a new thread waits for one to finish. While memory is low
 //! (`crate::limits::pressure`) idle harnesses stop at once and the cap is lowered.
 //!
+//! With more threads busy than the cap, the idle harness of a thread with more messages in hand
+//! ([`Pool::set_in_hand`]) is kept for its next one, up to [`BURST`] prompts back to back and for [`KEEP_FOR`] after
+//! each, rather than stopped for another thread's: otherwise nearly every prompt would start a harness and stop one.
+//!
 //! A prompt runs on the ant's own harness or on one of its fallbacks (`crate::limits::fallback`). A thread whose live
 //! harness is another one's moves to a new harness once that one is idle, and a session that last ran in another
 //! harness, as stored beside it, is not resumed: the new one starts over from the thread's history.
@@ -11,7 +15,7 @@
 //! A restart ([`Pool::restart`]) stops the idle harnesses at once and each busy one once its prompts end; the thread's
 //! next prompt starts a new harness, which resumes its session.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -34,6 +38,12 @@ use crate::records::direct_kv::DirectKv;
 use crate::stream::history::Rebuild;
 use crate::sync::MutexExt as _;
 use crate::worktrees::{Branch, Pruned, Worktrees};
+
+/// Most prompts a thread with messages in hand runs back to back on its harness while other threads wait for one.
+pub const BURST: usize = 8;
+
+/// Longest the idle harness of a thread with messages in hand is kept for its next prompt while other threads wait.
+pub const KEEP_FOR: Duration = Duration::from_secs(5);
 
 /// A thread's stored session and the harness it ran in, so a restarted daemon resumes it only in that harness.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +126,8 @@ struct Live {
     busy: usize,
     /// The pool's [`Pool::restarts`] when the harness started: a restart since stops it once it is idle.
     restarts: u64,
+    /// Prompts it ran since it started or its thread last had no message in hand.
+    turns: usize,
 }
 
 enum Slot {
@@ -127,7 +139,8 @@ enum Slot {
 enum Claim {
     Live(Arc<Session>),
     Start,
-    Wait,
+    /// Until a harness frees, starts or stops, or until the time given, when an idle one is no longer kept.
+    Wait(Option<Instant>),
 }
 
 pub struct Pool {
@@ -138,6 +151,8 @@ pub struct Pool {
     max_live: usize,
     idle_after: Duration,
     slots: Mutex<HashMap<ThreadId, Slot>>,
+    /// The threads with messages in hand ([`Pool::set_in_hand`]). Locked after [`Pool::slots`], never before.
+    in_hand: Mutex<HashSet<ThreadId>>,
     /// Signalled when a harness becomes free, starts or stops.
     changed: Notify,
     /// The git worktrees of threads, pruned as their sessions expire.
@@ -188,6 +203,7 @@ impl Pool {
             max_live: max_live.max(1),
             idle_after,
             slots: Mutex::default(),
+            in_hand: Mutex::default(),
             changed: Notify::new(),
             worktrees: None,
             isolate: false,
@@ -393,6 +409,27 @@ impl Pool {
         idle.len()
     }
 
+    /// Tell which threads have messages in hand, waiting for a prompt or about to run one: the idle harness of such a
+    /// thread is kept for its next prompt ([`BURST`], [`KEEP_FOR`]) rather than stopped for another thread's.
+    pub fn set_in_hand(&self, threads: HashSet<ThreadId>) {
+        let mut slots = self.slots();
+        let mut in_hand = self.in_hand.locked();
+        let released = in_hand.iter().any(|thread| !threads.contains(thread));
+        for (thread, slot) in slots.iter_mut() {
+            if let Slot::Ready(live) = slot
+                && !threads.contains(thread)
+            {
+                live.turns = 0;
+            }
+        }
+        *in_hand = threads;
+        drop(in_hand);
+        drop(slots);
+        if released {
+            self.changed.notify_waiters();
+        }
+    }
+
     /// Read the memory, if watched: whether it is low, which the colony is told. Recovering wakes the threads waiting
     /// for a harness under the lower cap.
     fn check_memory(&self) -> bool {
@@ -489,7 +526,10 @@ impl Pool {
                     tell(began);
                     return self.start(thread, fallback, review).await;
                 }
-                Claim::Wait => changed.await,
+                Claim::Wait(None) => changed.await,
+                Claim::Wait(Some(until)) => {
+                    let _ = tokio::time::timeout_at(tokio::time::Instant::from_std(until), changed).await;
+                }
             }
         }
     }
@@ -505,10 +545,11 @@ impl Pool {
                     && live.restarts == restarts =>
             {
                 live.busy += 1;
+                live.turns += 1;
                 return Claim::Live(live.session.clone());
             }
             // A dead harness with a prompt in flight is about to fail it; take over once it has.
-            Some(Slot::Ready(Live { busy: 1.., .. }) | Slot::Starting) => return Claim::Wait,
+            Some(Slot::Ready(Live { busy: 1.., .. }) | Slot::Starting) => return Claim::Wait(None),
             // Dead, idle on another harness or for another kind of prompt, or started before a restart.
             Some(Slot::Ready(_)) => {
                 slots.remove(thread);
@@ -516,9 +557,10 @@ impl Pool {
             None => {}
         }
         let cap = self.cap();
+        let now = Instant::now();
         while slots.len() >= cap {
-            if !evict_least_recently_used(&mut slots) {
-                return Claim::Wait;
+            if let Err(until) = evict_least_recently_used(&mut slots, &self.in_hand.locked(), now) {
+                return Claim::Wait(until);
             }
         }
         slots.insert(thread.clone(), Slot::Starting);
@@ -589,27 +631,41 @@ impl Pool {
             tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
         }
         let session = Arc::new(session);
-        let live = Live { session: session.clone(), fallback, review, last_used: Instant::now(), busy: 1, restarts };
+        let last_used = Instant::now();
+        let live = Live { session: session.clone(), fallback, review, last_used, busy: 1, restarts, turns: 1 };
         self.slots().insert(thread.clone(), Slot::Ready(live));
         starting.done = true;
         Ok(Lease { pool: self, thread: thread.clone(), session, rebuilt: lost })
     }
 }
 
-/// Stop the least recently used harness that has no prompt in flight. False when every one is busy.
-fn evict_least_recently_used(slots: &mut HashMap<ThreadId, Slot>) -> bool {
-    let oldest = slots
-        .iter()
-        .filter_map(|(thread, slot)| match slot {
-            Slot::Ready(live) if live.busy == 0 => Some((thread, live.last_used)),
-            _ => None,
-        })
-        .min_by_key(|(_, last_used)| *last_used)
-        .map(|(thread, _)| thread.clone());
-    let Some(oldest) = oldest else { return false };
+/// Stop the least recently used harness that has no prompt in flight and is not kept for the next prompt of its
+/// thread, which has messages `in_hand`: kept for [`BURST`] prompts back to back, each time for [`KEEP_FOR`]. When there
+/// is none, fails with when the first kept one is no longer kept, if any is.
+fn evict_least_recently_used(
+    slots: &mut HashMap<ThreadId, Slot>,
+    in_hand: &HashSet<ThreadId>,
+    now: Instant,
+) -> Result<(), Option<Instant>> {
+    let mut kept_until: Option<Instant> = None;
+    let mut oldest: Option<(&ThreadId, Instant)> = None;
+    for (thread, slot) in slots.iter() {
+        let Slot::Ready(live) = slot else { continue };
+        if live.busy > 0 {
+            continue;
+        }
+        let until = live.last_used + KEEP_FOR;
+        if live.turns < BURST && until > now && in_hand.contains(thread) {
+            kept_until = Some(kept_until.map_or(until, |kept| kept.min(until)));
+        } else if oldest.is_none_or(|(_, last_used)| live.last_used < last_used) {
+            oldest = Some((thread, live.last_used));
+        }
+    }
+    let Some((oldest, _)) = oldest else { return Err(kept_until) };
+    let oldest = oldest.clone();
     tracing::info!(thread = %oldest, "stopping harness to stay within the cap");
     slots.remove(&oldest);
-    true
+    Ok(())
 }
 
 /// A prompt in flight on a thread's session.

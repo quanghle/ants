@@ -221,6 +221,48 @@ async fn a_busy_harness_is_never_stopped() {
 }
 
 #[tokio::test]
+async fn busy_threads_past_the_cap_run_their_messages_back_to_back() {
+    const PROMPTS: usize = 20;
+    let (pool, log, _) = fake_pool(2, Sessions::Loadable);
+    let threads: Vec<ThreadId> = (1..=6).map(thread).collect();
+    let left: Mutex<HashMap<ThreadId, usize>> = Mutex::new(threads.iter().map(|t| (t.clone(), PROMPTS)).collect());
+    // As the inbox does once a message is handled: the threads with messages left in hand.
+    let tell = || pool.set_in_hand(left.locked().iter().filter(|(_, n)| **n > 0).map(|(t, _)| t.clone()).collect());
+    tell();
+    let run = async |t: &ThreadId| {
+        for i in 0..PROMPTS {
+            pool.prompt(t, &format!("{t} {i}")).await.unwrap();
+            *left.locked().get_mut(t).unwrap() -= 1;
+            // Answering, while the threads waiting for a harness try to take one.
+            settle().await;
+            tell();
+        }
+    };
+    futures::future::join_all(threads.iter().map(run)).await;
+    let log = log.locked();
+    assert_eq!(log.answered.len(), threads.len() * PROMPTS, "every prompt answered");
+    let bursts = threads.len() * PROMPTS.div_ceil(BURST);
+    assert!(log.starts <= bursts + threads.len(), "{} harness starts for {} prompts", log.starts, log.answered.len());
+}
+
+#[tokio::test]
+async fn a_thread_with_nothing_left_in_hand_gives_up_its_idle_harness() {
+    let (pool, log, _) = fake_pool(1, Sessions::Loadable);
+    let (t1, t2) = (thread(1), thread(2));
+    pool.set_in_hand([t1.clone(), t2.clone()].into());
+    pool.prompt(&t1, "a").await.unwrap();
+    let waiting = pool.prompt(&t2, "b");
+    let release = async {
+        settle().await;
+        assert_eq!(log.locked().starts, 1, "the harness is kept for the thread's next message");
+        pool.set_in_hand([t2.clone()].into());
+    };
+    let (reply, ()) = tokio::join!(waiting, release);
+    assert_eq!(reply.unwrap(), "s2: b");
+    assert_eq!(log.locked().starts, 2);
+}
+
+#[tokio::test]
 async fn a_prompt_waiting_for_a_free_harness_is_told_when_it_gets_one() {
     let (pool, _, gate) = fake_pool(1, Sessions::Loadable);
     let (t1, t2) = (thread(1), thread(2));
