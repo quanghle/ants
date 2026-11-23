@@ -68,8 +68,6 @@ const LEFT_OUT: [&str; 10] = [
     ".bd",
     ants_daemon::provider::events::DIR,
 ];
-/// How often a compare-and-set of the identity record is tried again when another writer changed it in between.
-const ATTEMPTS: usize = 5;
 
 /// An exported ant, as `NAME.ant` holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,18 +432,15 @@ pub(crate) async fn read(kv: &DirectKv, ant: &UserId) -> Result<(Option<AntIdent
 
 /// Set or clear the moved mark of `ant`'s identity record by compare-and-set: whether it changed.
 async fn mark_moved(kv: &DirectKv, ant: &UserId, mark: Option<MovedMark>) -> Result<bool> {
-    for _ in 0..ATTEMPTS {
-        let (record, last) = read(kv, ant).await?;
-        let mut record = record.with_context(|| format!("{ant} has no identity record"))?;
+    let absent = format!("{ant} has no identity record");
+    let marked = crate::avatars::change_in(kv, ant, &absent, |record| {
         if record.moved.is_some() == mark.is_some() {
             return Ok(false);
         }
         record.moved.clone_from(&mark);
-        if kv.update(ant.as_str(), serde_json::to_vec(&record)?, last).await? {
-            return Ok(true);
-        }
-    }
-    bail!("the identity of {ant} kept changing while being updated")
+        Ok(true)
+    });
+    Ok(marked.await?.1)
 }
 
 /// `ants ant unseal`.

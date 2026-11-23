@@ -72,6 +72,7 @@ use self::notices::{
     question_notice, relayed, reminder_notice, unserved_notice,
 };
 use self::sinks::send;
+use crate::cas;
 use crate::people::presence::Present;
 use crate::tools;
 
@@ -483,9 +484,9 @@ async fn count_held(human: &Human, bus: &HumanBus, kind: &str, now: DateTime<Utc
         let mut held = held.unwrap_or_default();
         held.add(kind, now);
         let Ok(value) = serde_json::to_vec(&held) else { return };
-        match kv.update(held_key(name), value.into(), revision).await {
-            Ok(_) => return,
-            Err(e) if e.kind() == kv::UpdateErrorKind::WrongLastRevision => {}
+        match cas::update(kv, &held_key(name), value, revision).await {
+            Ok(true) => return,
+            Ok(false) => {}
             Err(e) => {
                 tracing::warn!(human = %name, error = %e, "counting a notice held back");
                 return;
