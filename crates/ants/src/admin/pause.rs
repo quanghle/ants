@@ -4,11 +4,11 @@
 
 use std::time::Duration;
 
-use ants_proto::{AdminOp, AdminOrder, AdminOutcome, Machine, OrderState, UserId};
+use ants_proto::{AdminOp, Machine, UserId};
 use anyhow::{Result, bail};
 use async_nats::jetstream;
 
-use crate::admin::orders::Admin;
+use crate::admin::orders::{self, Admin, Sent};
 
 /// How long the ant view waits for the order's outcome.
 pub(crate) const WAIT: Duration = Duration::from_secs(10);
@@ -38,31 +38,33 @@ pub(crate) async fn order(
     wait: Duration,
 ) -> Result<String> {
     let op = if paused { AdminOp::Pause } else { AdminOp::Resume };
-    let (order, outcome) = admin.send(js, machine, ant, op, wait).await?;
-    said(&order, outcome.as_ref(), paused)
+    said(&admin.send(js, machine, ant, op, wait).await?, paused)
 }
 
-fn said(order: &AdminOrder, outcome: Option<&AdminOutcome>, paused: bool) -> Result<String> {
+fn said(sent: &Sent, paused: bool) -> Result<String> {
+    let (Sent::Pending(order) | Sent::Applied(order, _) | Sent::Refused(order, _)) = sent;
     let (ant, machine) = (&order.ant, &order.machine);
     let verb = if paused { "pause" } else { "resume" };
-    match outcome.map(|o| (o.state, o.reason.as_deref())) {
-        None | Some((OrderState::Pending | OrderState::Held, _)) => Ok(format!(
+    match sent {
+        Sent::Pending(_) => Ok(format!(
             "the order to {verb} {ant} waits for the daemon of {machine}: `ants ant orders {ant}` tells when it is \
              decided"
         )),
-        Some((OrderState::Applied, _)) if paused => Ok(format!(
+        Sent::Applied(..) if paused => Ok(format!(
             "{ant} paused on {machine}: it takes no new prompt and the messages to it wait queued until `ants ant \
              resume {ant}`"
         )),
-        Some((OrderState::Applied, _)) => Ok(format!("{ant} resumed on {machine}")),
-        Some((OrderState::Refused, reason)) => {
-            bail!("{machine} refused to {verb} {ant}: {}", reason.unwrap_or("no reason given"))
+        Sent::Applied(..) => Ok(format!("{ant} resumed on {machine}")),
+        Sent::Refused(_, outcome) => {
+            bail!("{machine} refused to {verb} {ant}: {}", orders::reason(&outcome.reason))
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use ants_proto::{AdminOrder, AdminOutcome, OrderState};
+
     use super::*;
 
     fn p(name: &str) -> UserId {
@@ -73,7 +75,7 @@ mod tests {
     fn tells_how_the_order_went() {
         let order = AdminOrder::new(p("alice"), "m1".parse().unwrap(), p("dev-a"), AdminOp::Pause, "");
         let outcome = |state, reason: Option<&str>| AdminOutcome::of(&order, state, reason.map(Into::into), None);
-        let said = |outcome: Option<&AdminOutcome>, paused| said(&order, outcome, paused);
+        let said = |outcome: Option<&AdminOutcome>, paused| said(&Sent::of(order.clone(), outcome.cloned()), paused);
         assert_eq!(
             said(Some(&outcome(OrderState::Applied, None)), true).unwrap(),
             "dev-a paused on m1: it takes no new prompt and the messages to it wait queued until `ants ant resume dev-a`"

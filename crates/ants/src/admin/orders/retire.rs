@@ -4,11 +4,11 @@
 
 use std::time::Duration;
 
-use ants_proto::{AdminOp, Machine, OrderState, UserId};
+use ants_proto::{AdminOp, Machine, UserId};
 use anyhow::{Result, bail};
 use async_nats::jetstream;
 
-use super::Admin;
+use super::{Admin, Sent};
 use crate::connection::Nats;
 use crate::signing::retire::stop_note;
 
@@ -32,11 +32,13 @@ pub async fn retire(
     machine: Option<Machine>,
     wait: Duration,
 ) -> Result<String> {
-    let (order, outcome) = admin.send(js, machine, ant, AdminOp::Retire, wait).await?;
-    let Some(outcome) = outcome else { return Ok(super::pending_note(&order)) };
-    if outcome.state != OrderState::Applied {
-        bail!("the daemon of {} refused to retire {ant}: {}", order.machine, super::reason(&outcome));
-    }
+    let (order, outcome) = match admin.send(js, machine, ant, AdminOp::Retire, wait).await? {
+        Sent::Pending(order) => return Ok(super::pending_note(&order)),
+        Sent::Refused(order, outcome) => {
+            bail!("the daemon of {} refused to retire {ant}: {}", order.machine, super::reason(&outcome.reason))
+        }
+        Sent::Applied(order, outcome) => (order, outcome),
+    };
     let result = outcome.result.unwrap_or_default();
     let mut lines = vec![format!("{ant} retired on {}.", order.machine)];
     lines.push(stop_note(ant, result["stopped"].as_bool().unwrap_or(false)));

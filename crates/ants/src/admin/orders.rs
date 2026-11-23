@@ -22,13 +22,14 @@ use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::{self, consumer::DeliverPolicy};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::colony::{short, since};
 use crate::connection::Nats;
 use crate::{auth, machines};
 
-/// How often [`send`] looks for the outcome of the order it sent.
+/// How often [`Admin::send`] looks for the outcome of the order it sent.
 pub(crate) const POLL: Duration = Duration::from_millis(250);
 
 /// The credentials that sign an order: a human's device's, carrying the admin role.
@@ -39,18 +40,40 @@ fn admin_creds<'a>(nats: &Nats<'a>) -> Result<&'a Path> {
     }
 }
 
-/// Send `op` about `ant` to the daemon of `machine`, else of the machine that last recorded serving it, signed with
-/// the admin credentials of `nats`, once the hub's stream has stored it; then wait up to `wait` for its outcome. None
-/// when the order is still pending then, as it stays until the machine's daemon takes it.
-pub async fn send(
-    nats: &Nats<'_>,
-    js: &jetstream::Context,
-    machine: Option<Machine>,
-    ant: &UserId,
-    op: AdminOp,
-    wait: Duration,
-) -> Result<(AdminOrder, Option<AdminOutcome>)> {
-    Admin::of(nats)?.send(js, machine, ant, op, wait).await
+/// What came of an order sent, when the wait for its outcome ended.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Sent {
+    /// The daemon of the order's machine has not decided it: it has not taken it yet, or holds it for a human's word.
+    Pending(AdminOrder),
+    Applied(AdminOrder, AdminOutcome),
+    /// Refused, for the reason its outcome tells.
+    Refused(AdminOrder, AdminOutcome),
+}
+
+impl Sent {
+    /// `order` with the `outcome` recorded for it, if any.
+    pub(crate) fn of(order: AdminOrder, outcome: Option<AdminOutcome>) -> Self {
+        match outcome {
+            None => Self::Pending(order),
+            Some(outcome) => match outcome.state {
+                OrderState::Pending | OrderState::Held => Self::Pending(order),
+                OrderState::Applied => Self::Applied(order, outcome),
+                OrderState::Refused => Self::Refused(order, outcome),
+            },
+        }
+    }
+}
+
+/// How [`Admin::ask`] words an order the daemon did not answer, refused or answered with no result.
+pub struct Asked<'a> {
+    /// What the daemon does only while online, as in "it reads MCP servers only while online".
+    pub online: &'a str,
+    /// How long an order waits before the daemon refuses it as stale.
+    pub fresh: chrono::Duration,
+    /// What the order asks the daemon to do, as in "read the memories of dev-a".
+    pub to: &'a str,
+    /// What an answer without a result lacks, as in "a result".
+    pub lacking: &'a str,
 }
 
 /// The admin whose device credentials sign the orders it sends, apart from the connection that sends them.
@@ -66,8 +89,52 @@ impl Admin {
         Ok(Self { id: nats.me.id.clone(), creds: admin_creds(nats)?.to_owned() })
     }
 
-    /// [`send`] with these credentials.
+    /// Send `op` about `ant` to the daemon of `machine`, else of the machine that last recorded serving it, signed
+    /// with these credentials, once the hub's stream has stored it; then wait up to `wait` for its outcome: pending
+    /// when there is none then, as the order stays until the machine's daemon takes it.
     pub async fn send(
+        &self,
+        js: &jetstream::Context,
+        machine: Option<Machine>,
+        ant: &UserId,
+        op: AdminOp,
+        wait: Duration,
+    ) -> Result<Sent> {
+        let (order, outcome) = self.outcome_of(js, machine, ant, op, wait).await?;
+        Ok(Sent::of(order, outcome))
+    }
+
+    /// [`Admin::send`] an order that reads, `op`, and take the result of its outcome as the answer; an order
+    /// unanswered within `wait`, refused or applied with no result is an error, worded by `asked`.
+    pub async fn ask<T: DeserializeOwned>(
+        &self,
+        js: &jetstream::Context,
+        machine: Option<Machine>,
+        ant: &UserId,
+        op: AdminOp,
+        wait: Duration,
+        asked: &Asked<'_>,
+    ) -> Result<T> {
+        match self.send(js, machine, ant, op, wait).await? {
+            Sent::Pending(order) => bail!(
+                "the daemon of {} did not answer within {}s: {}, and the order is refused as stale once it waited {}m",
+                order.machine,
+                wait.as_secs(),
+                asked.online,
+                asked.fresh.num_minutes()
+            ),
+            Sent::Applied(order, outcome) => match outcome.result {
+                Some(result) => Ok(serde_json::from_value(result)?),
+                None => bail!("the daemon of {} answered without {}", order.machine, asked.lacking),
+            },
+            Sent::Refused(order, outcome) => {
+                bail!("the daemon of {} refused to {}: {}", order.machine, asked.to, reason(&outcome.reason))
+            }
+        }
+    }
+
+    /// The order sent as [`Admin::send`] sends it, with the outcome recorded for it within `wait`, as recorded.
+    async fn outcome_of(
         &self,
         js: &jetstream::Context,
         machine: Option<Machine>,
@@ -139,9 +206,9 @@ pub(crate) fn pending_note(order: &AdminOrder) -> String {
     )
 }
 
-/// Why the daemon refused an order, as its outcome says.
-pub(crate) fn reason(outcome: &AdminOutcome) -> &str {
-    outcome.reason.as_deref().unwrap_or("no reason given")
+/// Why the daemon refused an order, as the `reason` of its outcome says.
+pub(crate) fn reason(reason: &Option<String>) -> &str {
+    reason.as_deref().unwrap_or("no reason given")
 }
 
 /// Publish `order` to the hub's stream, as message id its id, and wait until the stream stored it. No outbox keeps an
@@ -339,4 +406,4 @@ pub(crate) fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

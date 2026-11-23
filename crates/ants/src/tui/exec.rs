@@ -452,8 +452,8 @@ async fn grant(ctx: &Ctx, thread: ThreadId, text: String, files: &[File]) -> Res
 
 /// Send `ant` a restart order, at once when `now`.
 async fn restart(ctx: &Ctx, ant: &UserId, now: bool) -> Result<Done> {
-    let (order, outcome) = crate::admin::restart::send(admin(ctx)?, &ctx.js, None, ant, now).await?;
-    Ok(Done::line(crate::admin::restart::told(&order, outcome)?))
+    let sent = crate::admin::restart::send(admin(ctx)?, &ctx.js, None, ant, now).await?;
+    Ok(Done::line(crate::admin::restart::told(sent)?))
 }
 
 /// Answer the questions of message `question` on `thread`, still waiting on the human, with `picks`.

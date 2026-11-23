@@ -25,7 +25,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::admin::orders::{self, Listed};
+use crate::admin::orders::{self, Admin, Listed, Sent};
 use crate::auth;
 use crate::colony::{short, since};
 use crate::connection::Nats;
@@ -282,24 +282,22 @@ pub async fn read(nats: &Nats<'_>, js: &jetstream::Context, ant: &UserId, wait: 
         orders = decided(js, ant, id, wait).await?;
         match orders.iter().find(|o| o.id == id) {
             Some(o) if o.state == OrderState::Applied => None,
-            Some(o) if o.state != OrderState::Pending => Some(format!(
-                "the daemon of {machine} refused the read: {}",
-                o.reason.as_deref().unwrap_or("no reason given")
-            )),
+            Some(o) if o.state != OrderState::Pending => {
+                Some(format!("the daemon of {machine} refused the read: {}", orders::reason(&o.reason)))
+            }
             _ => Some(format!("the read waits for the daemon of {machine}")),
         }
     } else {
-        match orders::send(nats, js, None, ant, AdminOp::ReadSettings, wait).await {
-            Ok((sent, outcome)) => {
+        let sent = async { Admin::of(nats)?.send(js, None, ant, AdminOp::ReadSettings, wait).await };
+        match sent.await {
+            Ok(sent) => {
                 orders = orders::orders_of(js, ant).await?;
-                match outcome {
-                    Some(o) if o.state == OrderState::Applied => None,
-                    Some(o) => Some(format!(
-                        "the daemon of {} refused the read: {}",
-                        o.machine,
-                        o.reason.as_deref().unwrap_or("no reason given")
-                    )),
-                    None => Some(format!("the read waits for the daemon of {}", sent.machine)),
+                match sent {
+                    Sent::Applied(..) => None,
+                    Sent::Refused(_, o) => {
+                        Some(format!("the daemon of {} refused the read: {}", o.machine, orders::reason(&o.reason)))
+                    }
+                    Sent::Pending(order) => Some(format!("the read waits for the daemon of {}", order.machine)),
                 }
             }
             Err(e) => Some(format!("{e:#}")),
@@ -347,13 +345,16 @@ pub async fn set(nats: &Nats<'_>, ant: &UserId, assignments: &[Assignment], wait
         eprintln!("ignoring {ant}'s shared settings, not verified ({why}): expecting the values of its config");
     }
     let op = order(&read.settings, reading.shared.as_deref().and_then(SharedRecord::verified), assignments);
-    let (sent, outcome) = orders::send(nats, &js, Some(read.machine.clone()), ant, op, wait).await?;
-    println!("order {} sent to the daemon of {}", sent.id, read.machine);
-    match outcome {
-        Some(o) if o.state == OrderState::Applied => println!("applied"),
-        Some(o) => bail!("refused: {}", o.reason.as_deref().unwrap_or("no reason given")),
-        None if wait.is_zero() => {}
-        None => println!("pending: the daemon of {} has not taken it yet; `ants ant orders {ant}` tells", read.machine),
+    let sent = Admin::of(nats)?.send(&js, Some(read.machine.clone()), ant, op, wait).await?;
+    let (Sent::Pending(order) | Sent::Applied(order, _) | Sent::Refused(order, _)) = &sent;
+    println!("order {} sent to the daemon of {}", order.id, read.machine);
+    match sent {
+        Sent::Applied(..) => println!("applied"),
+        Sent::Refused(_, o) => bail!("refused: {}", orders::reason(&o.reason)),
+        Sent::Pending(_) if wait.is_zero() => {}
+        Sent::Pending(_) => {
+            println!("pending: the daemon of {} has not taken it yet; `ants ant orders {ant}` tells", read.machine);
+        }
     }
     Ok(())
 }
