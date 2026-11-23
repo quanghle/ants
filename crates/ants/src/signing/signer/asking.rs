@@ -54,30 +54,17 @@ pub struct Signed {
     pub leaf_jwt: Option<String>,
 }
 
-/// Ask, as `requester`, for ant `name` from `template` with the settings `request` (JSON), for the public key of
-/// `user`. Returns the ant's user JWT of an approval, checked to be the account's for that key and ant, and the leaf's
-/// renewed uplink JWT, checked likewise; a refusal is an error carrying the signer's reason.
-pub async fn ask(
-    requester: &Requester<'_>,
-    template: &str,
-    request: &str,
-    reason: &str,
-    thread: &ThreadId,
-    name: &UserId,
-    user: &KeyPair,
-) -> Result<Signed> {
+/// Ask, as `requester`, for the ant `asked`, its name, template, settings (JSON) and the reason, for the public key
+/// of `user`. Returns the ant's user JWT of an approval, checked to be the account's for that key and ant, and the
+/// leaf's renewed uplink JWT, checked likewise; a refusal is an error carrying the signer's reason.
+pub async fn ask(requester: &Requester<'_>, asked: AskedAnt, thread: &ThreadId, user: &KeyPair) -> Result<Signed> {
     let Requester { client, jwt, leaf, until, .. } = *requester;
     let claims = auth::verified(jwt).context("the manager's credentials")?;
     let manager: UserId = claims.name.parse().with_context(|| format!("credentials named {}", claims.name))?;
     let mut replies = relayed::subscribe(client, subject::antreq_reply(&manager)).await?;
     let public_key = user.public_key();
     let host = colony::machine().await;
-    let asked = AskedAnt {
-        name: name.clone(),
-        template: template.to_owned(),
-        request: request.to_owned(),
-        reason: reason.to_owned(),
-    };
+    let name = &asked.name.clone();
     let mut asking = AntRequest::new(manager.clone(), asked, thread.clone(), &public_key, host, until);
     asking.credentials = jwt.to_owned();
     let mut uplink: Option<KeyPair> = None;

@@ -9,7 +9,7 @@ use super::*;
 use crate::test_support::Server;
 use ants_daemon::Harnesses;
 
-use crate::auth::{NewDevice, issue_device_with, issue_host};
+use crate::auth::{Issue, NewDevice, issue_host};
 use crate::credentials::issued::Kind;
 use crate::test_support::orders::{WAIT, host_of_m1};
 
@@ -116,7 +116,7 @@ async fn an_admin_reads_the_settings_and_changes_them_expecting_what_was_read() 
     let admin_creds = server.dir().join("alice-admin.creds");
     let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &admin_creds).unwrap();
+    Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
     let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     assert!(may_order(&admin));
     let (_, js) = admin.connect("test").await.unwrap();
@@ -211,7 +211,7 @@ async fn sets_at_once_on_an_ant_never_read_wait_for_the_pending_read() {
     let admin_creds = server.dir().join("alice-admin.creds");
     let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &admin_creds).unwrap();
+    Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
     let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
     let path = server.dir().join("config.toml");
@@ -263,7 +263,7 @@ async fn the_shared_settings_are_created_once_changed_by_orders_and_served_on_ev
     let admin_creds = server.dir().join("alice-admin.creds");
     let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &admin_creds).unwrap();
+    Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
     let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
     let path = server.dir().join("config.toml");

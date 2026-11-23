@@ -203,7 +203,8 @@ async fn a_human_s_devices_are_listed_relabelled_and_revoked_one_by_one() {
     let issue = |label: &str, file: &str| {
         let out = team.join(file);
         let permissions = ants_proto::Permissions::for_user(&alice, ants_proto::Role::Human);
-        let device = auth::issue_device(&team, &alice, Kind::Human, permissions, Some(label), &out).unwrap();
+        let device =
+            auth::Issue::new(&team, &alice, Kind::Human, permissions).labelled(Some(label)).into_file(&out).unwrap();
         (out, device.unwrap())
     };
     let (laptop, laptop_id) = issue("Laptop", "alice-laptop.creds");
@@ -213,15 +214,10 @@ async fn a_human_s_devices_are_listed_relabelled_and_revoked_one_by_one() {
     let claims = crate::people::humans::creds_claims(&text).unwrap();
     assert_eq!(claims["nats"]["tags"][0], laptop_id.tag(), "the JWT carries the device id");
     assert!(
-        auth::issue_device(
-            &team,
-            &alice,
-            Kind::Ant,
-            ants_proto::Permissions::for_user(&alice, ants_proto::Role::Ant),
-            Some("x"),
-            &team.join("x.creds")
-        )
-        .is_err()
+        auth::Issue::new(&team, &alice, Kind::Ant, ants_proto::Permissions::for_user(&alice, ants_proto::Role::Ant))
+            .labelled(Some("x"))
+            .into_file(&team.join("x.creds"))
+            .is_err()
     );
 
     let listed = devices(&team, "alice").unwrap();
@@ -272,7 +268,7 @@ fn revoking_a_name_withdraws_its_approval_grants_but_revoking_a_device_does_not(
         };
         let key = nkeys::KeyPair::new_user().public_key();
         let permissions = ants_proto::Permissions::for_user(&carol, ants_proto::Role::Human);
-        auth::sign_device_with(&team, &carol, Kind::Human, permissions, &new, &key, None).unwrap();
+        auth::Issue::new(&team, &carol, Kind::Human, permissions).with(&new).for_key(&key, None).unwrap();
     };
     sign("laptop");
     sign("phone");

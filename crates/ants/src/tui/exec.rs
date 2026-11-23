@@ -793,7 +793,7 @@ mod tests {
         use ants_daemon::admin::ConfigFile;
         use ants_proto::Role;
 
-        use crate::auth::{NewDevice, issue_device_with};
+        use crate::auth::{Issue, NewDevice};
         use crate::credentials::issued::Kind;
         use crate::test_support::orders::{WAIT, host_of_m1, with_signer};
         use crate::tui::model::Action;
@@ -809,7 +809,7 @@ mod tests {
         let creds = server.dir().join("alice-admin.creds");
         let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
         let rights = ants_proto::Permissions::for_user(&alice, Role::Human);
-        issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &creds).unwrap();
+        Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&creds).unwrap();
         let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
         let (client, js) = nats.connect("test").await.unwrap();
         let work = server.dir().join("work");

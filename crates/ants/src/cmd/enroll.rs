@@ -132,17 +132,8 @@ pub(crate) async fn run(conn: &Connection<'_>, command: EnrollCommand) -> Result
             let stop = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
-            let (listen, reconnect) = (approver::LISTEN, approver::AUTO_RECONNECT);
-            approver::renewals::auto(
-                conn.nats,
-                &dir,
-                domain,
-                listen,
-                reconnect,
-                approver::renewals::print_renewed,
-                stop,
-            )
-            .await
+            let connect = async || approver::Approver::connect(conn.nats, &dir, domain, approver::LISTEN).await;
+            approver::renewals::auto(connect, approver::AUTO_RECONNECT, approver::renewals::print_renewed, stop).await
         }
         EnrollCommand::Renew { name, public_key, dir: d, .. } => {
             let dir = dir(d)?;

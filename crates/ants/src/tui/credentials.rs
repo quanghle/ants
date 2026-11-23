@@ -623,10 +623,7 @@ mod tests {
         let repeat = Duration::from_millis(100);
         let asking = crate::credentials::enroll::request(
             &server.url,
-            &creds,
-            &dev_c,
-            &key,
-            None,
+            crate::credentials::enroll::Enrollment::new(&creds, &dev_c, &key),
             repeat,
             std::future::pending(),
         );

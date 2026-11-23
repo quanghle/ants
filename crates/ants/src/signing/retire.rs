@@ -431,7 +431,8 @@ mod tests {
         let (m1, m2): (Machine, Machine) = ("m1".parse().unwrap(), "m2".parse().unwrap());
         for ant in [p("dev-a"), p("dev-c")] {
             let permissions = Permissions::for_user(&ant, Role::Ant);
-            auth::issue_device(&team, &ant, Role::Ant.into(), permissions, None, &dir.join(format!("{ant}.creds")))
+            auth::Issue::new(&team, &ant, Role::Ant.into(), permissions)
+                .into_file(&dir.join(format!("{ant}.creds")))
                 .unwrap();
         }
         let (m1_uplink, m2_uplink) = (dir.join("leaf-m1.creds"), dir.join("leaf-m2.creds"));

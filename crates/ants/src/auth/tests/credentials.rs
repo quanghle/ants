@@ -89,15 +89,10 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     };
     issue(&team, &p("dev-a"), Role::Ant, Some(&hub), &out("dev-a")).unwrap();
     assert_eq!(renewed("dev-a").finding.js_domain, Some(hub.clone()));
-    let device = issue_device(
-        &team,
-        &p("alice"),
-        Kind::Human,
-        Permissions::for_user(&p("alice"), Role::Human),
-        Some("laptop"),
-        &out("alice"),
-    )
-    .unwrap();
+    let device = Issue::new(&team, &p("alice"), Kind::Human, Permissions::for_user(&p("alice"), Role::Human))
+        .labelled(Some("laptop"))
+        .into_file(&out("alice"))
+        .unwrap();
     assert_eq!(renewed("alice").finding.device, device);
     let devices = issued::devices(&team, "alice").unwrap();
     assert_eq!(devices.len(), 1, "one device, renewed: {devices:?}");
@@ -151,7 +146,7 @@ fn a_human_device_binds_its_encryption_key_and_renewal_keeps_it_or_adds_one() {
     let bound = |jwt: &str| creds::Finding::from_jwt(jwt).unwrap().xkey;
     let registered = || issued::issued(&team).unwrap().pop().unwrap().xkey;
 
-    issue_device(&team, &p("alice"), Kind::Human, human(), Some("laptop"), &out("alice")).unwrap();
+    Issue::new(&team, &p("alice"), Kind::Human, human()).labelled(Some("laptop")).into_file(&out("alice")).unwrap();
     let (jwt, _) = read_creds(&out("alice")).unwrap();
     let xkey = creds::load_xkey(&out("alice"), &keystore::Memory::default()).unwrap().unwrap();
     let laptop = device_key(&xkey).unwrap();
@@ -162,7 +157,7 @@ fn a_human_device_binds_its_encryption_key_and_renewal_keeps_it_or_adds_one() {
     let err = renew(&team, &jwt, &new(), Some(&other)).unwrap_err().to_string();
     assert!(err.contains("already"), "{err}");
 
-    let (unbound, _) = sign_device(&team, &p("alice"), Kind::Human, human(), None, &new(), None).unwrap();
+    let (unbound, _) = Issue::new(&team, &p("alice"), Kind::Human, human()).for_key(&new(), None).unwrap();
     assert_eq!(bound(&unbound), None, "signed for a key generated elsewhere, without --xkey");
     let added = renew(&team, &unbound, &new(), Some(&other)).unwrap();
     assert_eq!((bound(&added.jwt), registered()), (Some(other.clone()), Some(other.clone())));
@@ -176,7 +171,7 @@ fn a_human_device_binds_its_encryption_key_and_renewal_keeps_it_or_adds_one() {
     let err = renew(&team, &ant, &new(), Some(&other)).unwrap_err().to_string();
     assert!(err.contains("only a human's"), "{err}");
     let ant_rights = Permissions::for_user(&p("dev-b"), Role::Ant);
-    assert!(sign_device(&team, &p("dev-b"), Kind::Ant, ant_rights, None, &new(), Some(&other)).is_err());
+    assert!(Issue::new(&team, &p("dev-b"), Kind::Ant, ant_rights).for_key(&new(), Some(&other)).is_err());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -189,10 +184,10 @@ fn an_admin_s_device_carries_the_role_through_renewal_until_revoked() {
     let out = |name: &str| dir.join(format!("{name}.creds"));
     let human = || Permissions::for_user(&p("alice"), Role::Human);
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
-    issue_device_with(&team, &p("alice"), Kind::Human, human(), &admin, &out("admin")).unwrap();
-    issue_device(&team, &p("alice"), Kind::Human, human(), Some("phone"), &out("phone")).unwrap();
+    Issue::new(&team, &p("alice"), Kind::Human, human()).with(&admin).into_file(&out("admin")).unwrap();
+    Issue::new(&team, &p("alice"), Kind::Human, human()).labelled(Some("phone")).into_file(&out("phone")).unwrap();
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
-    let err = issue_device_with(&team, &p("dev-a"), Kind::Ant, ant, &admin, &out("dev-a")).unwrap_err();
+    let err = Issue::new(&team, &p("dev-a"), Kind::Ant, ant).with(&admin).into_file(&out("dev-a")).unwrap_err();
     assert!(err.to_string().contains("admin"), "{err}");
 
     let (jwt, key) = read_creds(&out("admin")).unwrap();
@@ -235,7 +230,7 @@ fn an_ant_becomes_a_human_s_only_assistant_through_its_user_jwt() {
     let assistant = |user: &UserId, of: &UserId| {
         let new = NewDevice { assistant_of: Some(of.clone()), ..NewDevice::default() };
         let rights = Permissions::for_assistant(user, of);
-        issue_device_with(&team, user, Kind::Assistant, rights, &new, &out(user.as_str()))
+        Issue::new(&team, user, Kind::Assistant, rights).with(&new).into_file(&out(user.as_str()))
     };
     let refused = |user: &UserId, of: &UserId, why: &str| {
         let err = check_assistant(&team, user, of).unwrap_err().to_string();
@@ -243,7 +238,9 @@ fn an_ant_becomes_a_human_s_only_assistant_through_its_user_jwt() {
     };
     refused(&pa, &alice, "not a human of the team");
     check_assistant(&team, &pa, &UserId::human()).unwrap();
-    issue_device(&team, &alice, Kind::Human, Permissions::for_user(&alice, Role::Human), None, &out("alice")).unwrap();
+    Issue::new(&team, &alice, Kind::Human, Permissions::for_user(&alice, Role::Human))
+        .into_file(&out("alice"))
+        .unwrap();
     issue(&team, &p("carol"), Role::Human, None, &out("carol")).unwrap();
     refused(&alice, &alice, "its own assistant");
     refused(&UserId::human(), &alice, "is a human");
@@ -294,14 +291,14 @@ fn only_credentials_a_registration_granted_are_marked_registered() {
     let grant = || Grant::Org("acme".into());
 
     let device = NewDevice { github: Some(github()), grant: Some(grant()), ..NewDevice::default() };
-    let (jwt, _) = sign_device_with(&team, &p("alice"), Kind::Human, human(), &device, &new(), None).unwrap();
+    let (jwt, _) = Issue::new(&team, &p("alice"), Kind::Human, human()).with(&device).for_key(&new(), None).unwrap();
     assert!(registered(&jwt));
     let renewed = renew_registered(&team, &jwt, &new(), None, github(), grant()).unwrap();
     assert!(registered(&renewed.jwt) && renewed.finding.registered, "ants signer keeps the mark");
     assert!(!registered(&renew(&team, &renewed.jwt, &new(), None).unwrap().jwt), "ants enroll renew drops it");
 
     let bound = NewDevice { github: Some(github()), ..NewDevice::default() };
-    let (issued, _) = sign_device_with(&team, &p("alice"), Kind::Human, human(), &bound, &new(), None).unwrap();
+    let (issued, _) = Issue::new(&team, &p("alice"), Kind::Human, human()).with(&bound).for_key(&new(), None).unwrap();
     assert!(!registered(&issued), "bound with `ants auth user --github`, without a grant");
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -421,7 +418,7 @@ fn credentials_of_the_longest_names_fit_max_control_line() {
         }
         let new = NewDevice { assistant_of: Some(human.clone()), ..NewDevice::default() };
         let rights = Permissions::for_assistant(&assistant, &human).with_js_domain(domain);
-        issue_device_with(&team, &assistant, Kind::Assistant, rights, &new, &out).unwrap();
+        Issue::new(&team, &assistant, Kind::Assistant, rights).with(&new).into_file(&out).unwrap();
         sizes.push(("Assistant".to_owned(), read_creds(&out).unwrap().0.len()));
         for (kind, size) in sizes {
             assert!(size + 3 * 1024 <= MAX_CONTROL_LINE as usize, "{kind}: {size} bytes with domain {domain:?}");

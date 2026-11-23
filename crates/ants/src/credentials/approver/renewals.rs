@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ants_daemon::bus::relayed;
 use ants_daemon::secrets::creds::Finding;
-use ants_proto::{JsDomain, RenewReply, RenewRequest, subject};
+use ants_proto::{RenewReply, RenewRequest, subject};
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
 use futures::StreamExt as _;
@@ -146,15 +146,12 @@ impl Approver {
     }
 }
 
-/// `ants enroll renew --auto`: renew every credentials asking ([`auth::renew`]) as their requests arrive, over the
-/// server at `url`, with the account key in `dir`, until `stop` completes. Each run connects afresh every
-/// [`super::AUTO_RECONNECT`], with credentials it issues itself, and reads the revocations again. Calls `renewed` with
-/// what each renewal did.
+/// `ants enroll renew --auto`: renew every credentials asking ([`auth::renew`]) as their requests arrive, with the
+/// account key in the team directory of the approver `connect` gives, until `stop` completes. Each run connects
+/// afresh every `reconnect` ([`super::AUTO_RECONNECT`]), with credentials the approver issues itself, and reads the
+/// revocations again. Calls `renewed` with what each renewal did.
 pub async fn auto(
-    url: &str,
-    dir: &Path,
-    js_domain: Option<&JsDomain>,
-    listen: Duration,
+    connect: impl AsyncFn() -> Result<Approver>,
     reconnect: Duration,
     mut renewed: impl FnMut(&RenewRequest, &auth::Renewed),
     stop: impl Future<Output = ()>,
@@ -163,7 +160,8 @@ pub async fn auto(
     let mut answered: HashMap<(String, String), RenewReply> = HashMap::new();
     tokio::pin!(stop);
     loop {
-        let approver = Approver::connect(url, dir, js_domain, listen).await?;
+        let approver = connect().await?;
+        let dir = &approver.dir;
         let mut requests = relayed::subscribe(&approver.client, subject::ALL_RENEW_REQUESTS).await?;
         approver.client.flush().await?;
         let until = tokio::time::sleep(reconnect);

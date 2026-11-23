@@ -16,7 +16,7 @@ use std::time::Duration;
 use ants_daemon::config::{self, Ant, Summary};
 use ants_daemon::secrets::creds::{Finding, Kind};
 use ants_daemon::secrets::sealing;
-use ants_proto::{AdminOp, JsDomain, JwtError, Machine, Permissions, UserId, tool_kind};
+use ants_proto::{AdminOp, JwtError, Machine, Permissions, UserId, tool_kind};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use serde_json::{Map, Value, json};
@@ -192,7 +192,7 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
             }
             None
         }
-        None => Some(entry(&args, &name, human, &summary, &out, nats.url, nats.domain)?),
+        None => Some(entry(nats, &args, &name, &summary, &out)?),
     };
     for rule in args.allow.iter().filter(|r| risky(r)) {
         println!("warning: {name} runs {rule} requests without asking: fetched pages and command output can steer it");
@@ -209,7 +209,7 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
                 println!("replacing the {why} credentials of {name} in {}", out.display());
                 retire::forget(&out)?;
             }
-            issue(&dir, &name, human, nats.domain, &out, args.store_key, nats.url).await?;
+            issue(nats, &dir, &name, &out, args.store_key).await?;
             println!("credentials of {name}, assistant of {human}, in {}", out.display());
         }
     }
@@ -346,18 +346,11 @@ fn held(out: &Path, dir: &Path, ant: &UserId, human: &UserId) -> Result<Held> {
     Ok(Held::Live)
 }
 
-/// The `[[ant]]` entry of the assistant `ant` of `human`, new to the file `summary` describes: working in its home,
-/// created here, with its credentials at `out`, the assistant's whoami and tool rules, the flags' settings, and the
-/// server and JetStream domain where they differ from the file's.
-fn entry(
-    args: &EnableArgs,
-    ant: &UserId,
-    human: &UserId,
-    summary: &Summary,
-    out: &Path,
-    nats: &str,
-    js_domain: Option<&JsDomain>,
-) -> Result<String> {
+/// The `[[ant]]` entry of the assistant `ant` of the human of `nats`, new to the file `summary` describes: working in
+/// its home, created here, with its credentials at `out`, the assistant's whoami and tool rules, the flags' settings,
+/// and the server and JetStream domain of `nats` where they differ from the file's.
+fn entry(nats: &Nats<'_>, args: &EnableArgs, ant: &UserId, summary: &Summary, out: &Path) -> Result<String> {
+    let (human, js_domain, nats) = (&nats.me.id, nats.domain, nats.url);
     let home = match &args.home {
         Some(home) => std::path::absolute(home)?,
         None => config::default_home(&std::env::home_dir().context("no home directory")?, ant.as_str()),
@@ -387,18 +380,11 @@ fn entry(
     config::entry(&p)
 }
 
-/// Issue the credentials of `ant` as the assistant of `human` with the account key in `dir`, as `ants auth user ANT
-/// --assistant-of HUMAN` does, for the hub's JetStream domain `domain`, and write them to `out`: the seed in the OS
-/// credential store with `store_key`, proven at `url`.
-async fn issue(
-    dir: &Path,
-    ant: &UserId,
-    human: &UserId,
-    domain: Option<&JsDomain>,
-    out: &Path,
-    store_key: bool,
-    url: &str,
-) -> Result<()> {
+/// Issue the credentials of `ant` as the assistant of the human of `nats` with the account key in `dir`, as `ants
+/// auth user ANT --assistant-of HUMAN` does, for the hub's JetStream domain, and write them to `out`: the seed in the
+/// OS credential store with `store_key`, proven at the server of `nats`.
+async fn issue(nats: &Nats<'_>, dir: &Path, ant: &UserId, out: &Path, store_key: bool) -> Result<()> {
+    let (human, domain, url) = (&nats.me.id, nats.domain, nats.url);
     let permissions = Permissions::for_assistant(ant, human).with_js_domain(domain);
     let new = auth::NewDevice { assistant_of: Some(human.clone()), ..auth::NewDevice::default() };
     if let Some(parent) = out.parent() {
@@ -407,10 +393,10 @@ async fn issue(
     let kind = issued::Kind::Assistant;
     if store_key {
         let key = nkeys::KeyPair::new_user();
-        let (jwt, _) = auth::sign_device_with(dir, ant, kind, permissions, &new, &key.public_key(), None)?;
+        let (jwt, _) = auth::Issue::new(dir, ant, kind, permissions).with(&new).for_key(&key.public_key(), None)?;
         return keys::issue_stored(out, &jwt, &key, None, url).await;
     }
-    auth::issue_device_with(dir, ant, kind, permissions, &new, out).map(drop)
+    auth::Issue::new(dir, ant, kind, permissions).with(&new).into_file(out).map(drop)
 }
 
 /// `ants assistant disable`.
@@ -762,7 +748,7 @@ mod tests {
         let admin_creds = server.dir().join("alice-admin.creds");
         let admin = auth::NewDevice { label: Some("laptop"), admin: true, ..auth::NewDevice::default() };
         let rights = Permissions::for_user(&alice, Role::Human);
-        auth::issue_device_with(&team, &alice, issued::Kind::Human, rights, &admin, &admin_creds).unwrap();
+        auth::Issue::new(&team, &alice, issued::Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
         let nats = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
         let (_, js) = nats.connect("test").await.unwrap();
         let (path, home) = (server.dir().join("config.toml"), server.dir().join("pa-home"));

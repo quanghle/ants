@@ -697,6 +697,11 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn asked(name: &str, template: &str, request: &str, reason: &str) -> ants_proto::AskedAnt {
+        let (template, request, reason) = (template.to_owned(), request.to_owned(), reason.to_owned());
+        ants_proto::AskedAnt { name: p(name), template, request, reason }
+    }
+
     /// A config file on the signer's machine with template `worker` for manager `lead`, of at most `max_ants`.
     fn templates(server: &Server, max_ants: usize) -> PathBuf {
         let src = server.dir().join("src");
@@ -752,7 +757,7 @@ mod tests {
             let (jwt, key) = auth::read_creds(&self.creds).unwrap();
             let (template, reason) = ("worker", "more hands");
             let requester = Requester { client: &self.client, jwt: &jwt, key: &key, leaf: None, repeat: REPEAT, until };
-            ask(&requester, template, request, reason, &thread, &p(name), user).await
+            ask(&requester, asked(name, template, request, reason), &thread, user).await
         }
     }
 
@@ -907,7 +912,7 @@ mod tests {
             let user = KeyPair::new_user();
             let leaf = Some(&leaf);
             let requester = Requester { client: &lead.client, jwt: &jwt, key: &key, leaf, repeat: REPEAT, until };
-            ask(&requester, "worker", "{}", "more hands", &thread, &p("lead-a"), &user).await
+            ask(&requester, asked("lead-a", "worker", "{}", "more hands"), &thread, &user).await
         };
         let (refused, events) = signing(&server, &config, asking).await;
         let err = format!("{:#}", refused.unwrap_err());

@@ -317,7 +317,7 @@ async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
     let creds = server.dir().join("pa-assistant.creds");
     let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
     let rights = Permissions::for_assistant(&pa, &alice);
-    issue_device_with(&server.dir().join("auth"), &pa, Kind::Assistant, rights, &new, &creds).unwrap();
+    Issue::new(&server.dir().join("auth"), &pa, Kind::Assistant, rights).with(&new).into_file(&creds).unwrap();
     let (client, mut errors) = server.watched_with(&pa, &creds).await;
     for s in [
         "ants.approvals.dev-a.r1",
@@ -355,7 +355,7 @@ async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
     let creds = server.dir().join("pa-assistant.creds");
     let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
     let rights = Permissions::for_assistant(&pa, &alice);
-    issue_device_with(&server.dir().join("auth"), &pa, Kind::Assistant, rights, &new, &creds).unwrap();
+    Issue::new(&server.dir().join("auth"), &pa, Kind::Assistant, rights).with(&new).into_file(&creds).unwrap();
     let (pa_client, mut pa_js) = bus::connect(&server.url, Some(&creds), None, &pa, "test").await.unwrap();
     pa_js.set_timeout(Duration::from_secs(1));
     bus::ensure_stream(&a_js).await.unwrap();

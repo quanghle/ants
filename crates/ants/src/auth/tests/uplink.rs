@@ -37,7 +37,7 @@ fn a_leaf_uplink_carries_an_assistant_s_rights() {
     issue(&team, &alice, Role::Human, None, &dir.join("alice.creds")).unwrap();
     let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
     let rights = Permissions::for_assistant(&pa, &alice);
-    issue_device_with(&team, &pa, Kind::Assistant, rights, &new, &dir.join("pa.creds")).unwrap();
+    Issue::new(&team, &pa, Kind::Assistant, rights).with(&new).into_file(&dir.join("pa.creds")).unwrap();
     issue_leaf(
         &team,
         &m1,

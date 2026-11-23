@@ -536,7 +536,7 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
         let xkey = (kind == issued::Kind::Human).then(nkeys::XKey::new);
         let bound = xkey.as_ref().map(auth::device_key).transpose()?;
         let (jwt, device) =
-            auth::sign_device_with(&dir, &user, kind, permissions, &new, &key.public_key(), bound.as_ref())?;
+            auth::Issue::new(&dir, &user, kind, permissions).with(&new).for_key(&key.public_key(), bound.as_ref())?;
         keys::issue_stored(&out, &jwt, &key, xkey.as_ref(), conn.nats).await?;
         println!("{}", out.display());
         if let Some(device) = device {
@@ -546,14 +546,14 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
     }
     let Some(key) = public_key else {
         let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
-        let device = auth::issue_device_with(&dir, &user, kind, permissions, &new, &out)?;
+        let device = auth::Issue::new(&dir, &user, kind, permissions).with(&new).into_file(&out)?;
         println!("{}", out.display());
         if let Some(device) = device {
             eprintln!("device {device}");
         }
         return Ok(());
     };
-    let (jwt, device) = auth::sign_device_with(&dir, &user, kind, permissions, &new, &key, xkey.as_ref())?;
+    let (jwt, device) = auth::Issue::new(&dir, &user, kind, permissions).with(&new).for_key(&key, xkey.as_ref())?;
     if let Some(device) = device {
         eprintln!("device {device}");
     }
@@ -865,7 +865,7 @@ mod tests {
         let issue = |user: &str, role: Role, n: usize| {
             let user: UserId = user.parse().unwrap();
             let out = dir.join(format!("{user}-{n}.creds"));
-            auth::issue_device(&team, &user, role.into(), Permissions::for_user(&user, role), None, &out).unwrap();
+            auth::Issue::new(&team, &user, role.into(), Permissions::for_user(&user, role)).into_file(&out).unwrap();
             auth::read_creds(&out).unwrap().1.public_key()
         };
         let (first, second) = (issue("dev-c", Role::Ant, 1), issue("dev-c", Role::Ant, 2));

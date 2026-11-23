@@ -934,7 +934,7 @@ fn the_xkey_check_warns_of_a_human_device_binding_none_and_fails_on_a_lost_seed(
         (check.status, shown)
     };
 
-    auth::issue_device(&team, &alice, issued::Kind::Human, rights(), None, &path).unwrap();
+    auth::Issue::new(&team, &alice, issued::Kind::Human, rights()).into_file(&path).unwrap();
     let (status, shown) = check(&path);
     assert!(status == Status::Ok && shown.contains("in the file"), "{shown}");
     let text = std::fs::read_to_string(&path).unwrap();
@@ -946,7 +946,7 @@ fn the_xkey_check_warns_of_a_human_device_binding_none_and_fails_on_a_lost_seed(
 
     let user = nkeys::KeyPair::new_user();
     let (jwt, _) =
-        auth::sign_device(&team, &alice, issued::Kind::Human, rights(), None, &user.public_key(), None).unwrap();
+        auth::Issue::new(&team, &alice, issued::Kind::Human, rights()).for_key(&user.public_key(), None).unwrap();
     auth::write_creds(&path, &jwt, &user).unwrap();
     let (status, shown) = check(&path);
     assert!(

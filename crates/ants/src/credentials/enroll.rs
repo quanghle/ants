@@ -55,23 +55,6 @@ pub struct Approval {
     pub host_jwt: Option<String>,
 }
 
-/// Ask for the credentials of `ant` for the public key of `user`, with the enrollment credentials at `creds`, over
-/// the server at `url`, for the machine's `leaf` node if it has one: repeat the request every `repeat` until an answer
-/// for the key arrives, the enrollment credentials expire or the server refuses them, or `stop` completes. Returns the
-/// user JWT of an approval, checked to be the account's for that key and ant, and the renewed uplink JWT of the leaf,
-/// checked likewise.
-pub async fn request(
-    url: &str,
-    creds: &Path,
-    ant: &UserId,
-    user: &KeyPair,
-    leaf: Option<&Leaf>,
-    repeat: Duration,
-    stop: impl Future<Output = ()>,
-) -> Result<Approval> {
-    request_with(url, creds, ant, user, Alongside { leaf, host: None }, repeat, stop).await
-}
-
 /// What a machine asks along with the credentials of an ant: through its `leaf` node if it has one, and the `host`
 /// credentials it lacks.
 #[derive(Clone, Copy, Default)]
@@ -80,17 +63,40 @@ pub struct Alongside<'a> {
     pub host: Option<&'a HostAsk>,
 }
 
-/// [`request`], asking for what goes `alongside`, the `host` credentials of the machine too: an approval's host JWT is
-/// checked to be the account's for the host's key and machine.
-pub async fn request_with(
+/// What a machine asks for: the credentials of `ant` for the public key of `user`, with the enrollment credentials at
+/// `creds`, and what goes `alongside`.
+#[derive(Clone, Copy)]
+pub struct Enrollment<'a> {
+    pub creds: &'a Path,
+    pub ant: &'a UserId,
+    pub user: &'a KeyPair,
+    pub alongside: Alongside<'a>,
+}
+
+impl<'a> Enrollment<'a> {
+    /// The credentials of `ant` alone.
+    pub fn new(creds: &'a Path, ant: &'a UserId, user: &'a KeyPair) -> Self {
+        Self { creds, ant, user, alongside: Alongside::default() }
+    }
+
+    /// Asked through the machine's `leaf` node, if it has one.
+    #[cfg(test)]
+    pub fn through(self, leaf: Option<&'a Leaf>) -> Self {
+        Self { alongside: Alongside { leaf, ..self.alongside }, ..self }
+    }
+}
+
+/// Ask for the `enrollment` over the server at `url`: repeat the request every `repeat` until an answer for the key
+/// arrives, the enrollment credentials expire or the server refuses them, or `stop` completes. Returns the user JWT
+/// of an approval, checked to be the account's for that key and ant, the renewed uplink JWT of the leaf, checked
+/// likewise, and the host JWT, checked to be the account's for the host's key and machine.
+pub async fn request(
     url: &str,
-    creds: &Path,
-    ant: &UserId,
-    user: &KeyPair,
-    Alongside { leaf, host }: Alongside<'_>,
+    enrollment: Enrollment<'_>,
     repeat: Duration,
     stop: impl Future<Output = ()>,
 ) -> Result<Approval> {
+    let Enrollment { creds, ant, user, alongside: Alongside { leaf, host } } = enrollment;
     let (enrollment_jwt, enrollment_key) = auth::read_creds(creds)?;
     let (enrollment, left) = check_enrollment(&enrollment_jwt, creds, ant)?;
     let (events_tx, mut events) = tokio::sync::mpsc::unbounded_channel();

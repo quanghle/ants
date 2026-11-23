@@ -12,7 +12,7 @@ use futures::StreamExt as _;
 use nkeys::KeyPair;
 use serde_json::json;
 
-use crate::auth::{self, NewDevice, issue_device_with, issue_host};
+use crate::auth::{self, Issue, NewDevice, issue_host};
 use crate::credentials::issued::Kind;
 use crate::node::members::{self, EnrollApprover};
 use crate::signing::signer::{Options, serve};
@@ -149,7 +149,7 @@ async fn the_signer_signs_on_an_admin_s_order_for_the_machine_asking_only() {
     let admin_creds = server.dir().join("alice-admin.creds");
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&team, &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+    Issue::new(&team, &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
     let bob_creds = server.creds_as(&bob, Role::Human);
     let host_creds: PathBuf = server.dir().join("host-m1.creds");
     let m1: Machine = "m1".parse().unwrap();
@@ -235,7 +235,7 @@ async fn on_a_leaf_node_s_machine_the_signer_renews_the_uplink_to_carry_the_ant_
     let admin_creds = server.dir().join("alice-admin.creds");
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&team, &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+    Issue::new(&team, &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
     let host_creds: PathBuf = server.dir().join("host-m1.creds");
     let (m1, m2): (Machine, Machine) = ("m1".parse().unwrap(), "m2".parse().unwrap());
     issue_host(&team, &m1, None, &host_creds).unwrap();

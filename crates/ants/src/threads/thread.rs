@@ -311,15 +311,13 @@ pub async fn history_with(
     mut parser: Parser,
 ) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
-    let mut timelines = Timelines::default();
-    let mut seqs = HashMap::new();
-    let mut end_seqs = Vec::new();
+    let mut merged = Merged::default();
     let start = show_start(thread, since);
     reading::read_back_awaiting(js, "", Reading::Gets, subject::ALL, start, async |seq, stored, msg| {
         let (subject, payload) = (msg.subject.as_str(), &msg.payload[..]);
         if let Some((on, _)) = subject::parse_timeline(subject) {
             if activity != Activity::None && on == *thread {
-                add_timeline(&mut timelines, &mut seqs, &mut end_seqs, seq, subject, payload, activity);
+                merged.add(seq, subject, payload, activity);
             }
         } else if let Some(entry) = parser.read(seq, stored.into(), subject, payload).await
             && entry.thread_id == *thread
@@ -329,6 +327,7 @@ pub async fn history_with(
         ControlFlow::Continue(())
     })
     .await?;
+    let Merged { timelines, seqs, end_seqs } = merged;
     if !timelines.is_empty() {
         let seq = |ant: &UserId, key| seqs.get(&(ant.clone(), key)).copied().unwrap_or_default();
         if matches!(activity, Activity::Calls | Activity::All) {
@@ -378,42 +377,44 @@ pub fn timeline_entries(seq: u64, subject: &str, payload: &[u8]) -> Vec<Entry> {
     calls.chain(timelines.no_replies().iter().map(|end| Entry::no_reply(seq, end))).collect()
 }
 
-/// Merge the timeline record stored at `seq` on `subject`, noting it as the last of each entry to be shown, and as
-/// the record of each prompt end it holds, in the order [`Timelines::ends`] keeps them.
-fn add_timeline(
-    timelines: &mut Timelines,
-    seqs: &mut HashMap<(UserId, TimelineKey), u64>,
-    end_seqs: &mut Vec<u64>,
-    seq: u64,
-    subject: &str,
-    payload: &[u8],
-    activity: Activity,
-) {
-    let Ok(record) = serde_json::from_slice::<Timeline>(payload) else {
-        tracing::debug!(seq, subject, "skipping a timeline record that does not parse");
-        return;
-    };
-    let keys: Vec<_> = record
-        .entries
-        .iter()
-        .filter_map(|e| match e {
-            TimelineEntry::Tool(call) if matches!(activity, Activity::Calls | Activity::All) => {
-                Some(TimelineKey::Call(record.message, call.id.clone()))
-            }
-            TimelineEntry::NoReply { .. } => Some(TimelineKey::NoReply(record.message)),
-            TimelineEntry::Rejected(rejected) if activity == Activity::All => {
-                Some(TimelineKey::Rejected(rejected.request))
-            }
-            _ => None,
-        })
-        .collect();
-    let ant = record.ant.clone();
-    let ends = record.entries.iter().filter(|e| matches!(e, TimelineEntry::Ended(_))).count();
-    if timelines.add(subject, record) {
-        seqs.extend(keys.into_iter().map(|key| ((ant.clone(), key), seq)));
-        end_seqs.extend(std::iter::repeat_n(seq, ends));
-    } else {
-        tracing::debug!(seq, subject, "skipping a timeline record its subject does not name");
+/// The timeline records of a thread merged, with where each was stored: the sequence of the last record of each
+/// entry to be shown, and of the record of each prompt end, in the order [`Timelines::ends`] keeps them.
+#[derive(Default)]
+struct Merged {
+    timelines: Timelines,
+    seqs: HashMap<(UserId, TimelineKey), u64>,
+    end_seqs: Vec<u64>,
+}
+
+impl Merged {
+    /// Merge the timeline record stored at `seq` on `subject`, of the entries `activity` shows.
+    fn add(&mut self, seq: u64, subject: &str, payload: &[u8], activity: Activity) {
+        let Ok(record) = serde_json::from_slice::<Timeline>(payload) else {
+            tracing::debug!(seq, subject, "skipping a timeline record that does not parse");
+            return;
+        };
+        let keys: Vec<_> = record
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                TimelineEntry::Tool(call) if matches!(activity, Activity::Calls | Activity::All) => {
+                    Some(TimelineKey::Call(record.message, call.id.clone()))
+                }
+                TimelineEntry::NoReply { .. } => Some(TimelineKey::NoReply(record.message)),
+                TimelineEntry::Rejected(rejected) if activity == Activity::All => {
+                    Some(TimelineKey::Rejected(rejected.request))
+                }
+                _ => None,
+            })
+            .collect();
+        let ant = record.ant.clone();
+        let ends = record.entries.iter().filter(|e| matches!(e, TimelineEntry::Ended(_))).count();
+        if self.timelines.add(subject, record) {
+            self.seqs.extend(keys.into_iter().map(|key| ((ant.clone(), key), seq)));
+            self.end_seqs.extend(std::iter::repeat_n(seq, ends));
+        } else {
+            tracing::debug!(seq, subject, "skipping a timeline record its subject does not name");
+        }
     }
 }
 

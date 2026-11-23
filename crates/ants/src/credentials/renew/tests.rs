@@ -103,7 +103,7 @@ async fn renewing_a_human_device_without_an_encryption_key_binds_a_new_one_and_k
     let first = KeyPair::new_user();
     let rights = ants_proto::Permissions::for_user(&p("alice"), Role::Human);
     let human = issued::Kind::Human;
-    let (jwt, _) = auth::sign_device(&team, &p("alice"), human, rights, None, &first.public_key(), None).unwrap();
+    let (jwt, _) = auth::Issue::new(&team, &p("alice"), human, rights).for_key(&first.public_key(), None).unwrap();
     auth::replace_creds(&creds, &jwt, &first, None).unwrap();
     let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
     let renewal = async |user: &KeyPair, xkey: Option<&DeviceKey>| {
@@ -149,10 +149,7 @@ async fn auto_approval_renews_asking_credentials_and_answers_a_repeat_alike() {
     let (done_tx, mut done) = tokio::sync::mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let approving = auto(
-        &server.url,
-        &team,
-        None,
-        LISTEN,
+        async || Approver::connect(&server.url, &team, None, LISTEN).await,
         Duration::from_millis(300),
         move |request, renewed| done_tx.send((request.name.clone(), renewed.jwt.clone())).unwrap(),
         async move {

@@ -81,7 +81,7 @@ async fn enrollment_credentials_ask_only_for_their_ant() {
 
     let other = enrollment(&server, &p("dev-b"), Duration::from_secs(60));
     let user = KeyPair::new_user();
-    let err = request(&server.url, &other, &p("dev-a"), &user, None, REPEAT, pending()).await.unwrap_err();
+    let err = request(&server.url, Enrollment::new(&other, &p("dev-a"), &user), REPEAT, pending()).await.unwrap_err();
     assert!(err.to_string().contains("not enroll-dev-a"), "{err:#}");
 }
 
@@ -94,7 +94,7 @@ async fn an_approval_completes_the_credentials_of_the_asking_key() {
     let user = KeyPair::new_user();
     let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
 
-    let asking = request(&server.url, &creds, &dev_a, &user, None, REPEAT, pending());
+    let asking = request(&server.url, Enrollment::new(&creds, &dev_a, &user), REPEAT, pending());
     let approving = async {
         let heard = approver.pending(None).await.unwrap();
         assert_eq!(heard.len(), 1, "{heard:?}");
@@ -123,7 +123,7 @@ async fn a_webhook_approval_gives_a_webhooks_credentials_for_its_destination() {
     let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
     let to = Destination::Ant(p("dev-a"));
 
-    let asking = request(&server.url, &creds, &hook, &user, None, REPEAT, pending());
+    let asking = request(&server.url, Enrollment::new(&creds, &hook, &user), REPEAT, pending());
     let approving = once_heard(async || approver.approve_webhook(&team, &hook, std::slice::from_ref(&to), None).await);
     let (jwt, key) = Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
     assert_eq!(key.unwrap(), user.public_key());
@@ -248,7 +248,8 @@ async fn an_approval_grants_the_host_credentials_of_the_asking_machine_only() {
         let creds = enrollment(&server, &ant, Duration::from_secs(60));
         let (user, host) = (KeyPair::new_user(), HostAsk { machine: m(machine), key: KeyPair::new_user() });
         let alongside = Alongside { leaf, host: Some(&host) };
-        let asking = request_with(&server.url, &creds, &ant, &user, alongside, REPEAT, pending());
+        let asking =
+            request(&server.url, Enrollment { creds: &creds, ant: &ant, user: &user, alongside }, REPEAT, pending());
         let approving = once_heard(async || approver.approve_with(&team, &ant, None, grant).await);
         let (approval, approved) =
             Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
@@ -354,7 +355,8 @@ async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
     let m1_leaf = Leaf { machine, creds: uplink_creds.clone() };
     let user = KeyPair::new_user();
     let approver = Approver::connect(&m2_node.url, &team, Some(&domain), Duration::from_millis(1500)).await.unwrap();
-    let asking = request(&m1_node.url, &enroll_creds, &dev_c, &user, Some(&m1_leaf), REPEAT, pending());
+    let asking =
+        request(&m1_node.url, Enrollment::new(&enroll_creds, &dev_c, &user).through(Some(&m1_leaf)), REPEAT, pending());
     let approving = async {
         once_heard(async || approver.approve(&team, &dev_c, None).await).await.unwrap_or_else(|e| panic!("{e:#}"))
     };
@@ -410,8 +412,8 @@ async fn a_rejection_or_the_expiry_ends_the_request() {
     assert!(err.contains("no enrollment request for dev-a"), "{err}");
 
     let both = async {
-        let first = request(&server.url, &creds, &dev_a, &first, None, REPEAT, pending());
-        let second = request(&server.url, &creds, &dev_a, &second, None, REPEAT, pending());
+        let first = request(&server.url, Enrollment::new(&creds, &dev_a, &first), REPEAT, pending());
+        let second = request(&server.url, Enrollment::new(&creds, &dev_a, &second), REPEAT, pending());
         tokio::join!(first, second)
     };
     let answering = async {
@@ -431,7 +433,7 @@ async fn a_rejection_or_the_expiry_ends_the_request() {
         .await
         .expect("rejected machines keep asking");
     let short = enrollment(&server, &dev_a, Duration::from_secs(1));
-    let asking = request(&server.url, &short, &dev_a, &first, None, REPEAT, pending());
+    let asking = request(&server.url, Enrollment::new(&short, &dev_a, &first), REPEAT, pending());
     let err = timeout(WAIT, asking).await.expect("the request outlives its enrollment credentials").unwrap_err();
     // Expired before or after connecting: NATS refuses with "User Authentication Expired" or the request ends.
     assert!(format!("{err:#}").to_lowercase().contains("expire"), "{err:#}");
@@ -448,8 +450,8 @@ async fn the_expiry_or_a_stop_ends_a_request_whose_server_is_gone() {
     let (a, b) = (KeyPair::new_user(), KeyPair::new_user());
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let first = request(&url, &expiring, &dev_a, &a, None, REPEAT, pending());
-    let second = request(&url, &lasting, &dev_b, &b, None, REPEAT, async {
+    let first = request(&url, Enrollment::new(&expiring, &dev_a, &a), REPEAT, pending());
+    let second = request(&url, Enrollment::new(&lasting, &dev_b, &b), REPEAT, async {
         let _ = stop_rx.await;
     });
     let stopping = async {
@@ -475,7 +477,7 @@ async fn a_refusal_of_the_enrollment_credentials_ends_the_request() {
     let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
     let user = KeyPair::new_user();
 
-    let asking = request(&server.url, &creds, &dev_a, &user, None, REPEAT, pending());
+    let asking = request(&server.url, Enrollment::new(&creds, &dev_a, &user), REPEAT, pending());
     let revoking = async {
         while approver.pending(None).await.unwrap().is_empty() {}
         let (_, key) = auth::read_creds(&creds).unwrap();
@@ -506,7 +508,7 @@ async fn an_ant_the_uplink_has_no_room_for_is_neither_signed_nor_recorded() {
     let (leaf, user) = (Leaf { machine: m1.clone(), creds: uplink.clone() }, KeyPair::new_user());
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let asking = request(&server.url, &creds, &dev_x, &user, Some(&leaf), REPEAT, async {
+    let asking = request(&server.url, Enrollment::new(&creds, &dev_x, &user).through(Some(&leaf)), REPEAT, async {
         let _ = stop_rx.await;
     });
     let approving = async {

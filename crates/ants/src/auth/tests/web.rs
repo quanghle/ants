@@ -15,7 +15,7 @@ use super::*;
 /// Web credentials of `human` issued to `out`: the device.
 fn issue_web(team: &Path, human: &UserId, out: &Path) -> ants_proto::DeviceId {
     let new = NewDevice { label: Some("browser"), web: true, ..NewDevice::default() };
-    issue_device_with(team, human, Kind::Human, Permissions::for_web(human), &new, out).unwrap().unwrap()
+    Issue::new(team, human, Kind::Human, Permissions::for_web(human)).with(&new).into_file(out).unwrap().unwrap()
 }
 
 /// What JetStream answers `payload` published on `subject` under `headers`: its ack, or its error.
@@ -246,7 +246,7 @@ async fn page(server: &Server, domain: Option<&JsDomain>) -> (ants_client::clien
     let out = server.dir().join("alice-web.creds");
     let new = NewDevice { web: true, ..NewDevice::default() };
     let web = Permissions::for_web(&alice).with_js_domain(domain);
-    issue_device_with(&team, &alice, Kind::Human, web, &new, &out).unwrap();
+    Issue::new(&team, &alice, Kind::Human, web).with(&new).into_file(&out).unwrap();
     let transport = Rc::new(NatsTransport::new(&server.url, Some(&out)));
     let account = Some(account_key(&team).unwrap());
     let session = Session { human: alice, domain: domain.cloned(), account, name: "ants-web".into() };
@@ -387,7 +387,7 @@ async fn a_web_device_reaches_a_hub_s_domain_with_the_same_rights() {
     let out = server.dir().join("alice-web.creds");
     let new = NewDevice { web: true, ..NewDevice::default() };
     let web = Permissions::for_web(&alice).with_js_domain(Some(&hub));
-    issue_device_with(&team, &alice, Kind::Human, web, &new, &out).unwrap();
+    Issue::new(&team, &alice, Kind::Human, web).with(&new).into_file(&out).unwrap();
     let finding = Finding::from_creds(&std::fs::read_to_string(&out).unwrap()).unwrap();
     assert_eq!((finding.web, finding.js_domain.as_ref()), (true, Some(&hub)));
     let (client, mut errors) = server.watched_with(&alice, &out).await;
@@ -441,14 +441,19 @@ fn web_credentials_carry_the_tag_never_the_admin_role_nor_an_encryption_key_and_
 
     // Never with the admin role, an encryption key, or for another than a human.
     let admin = NewDevice { web: true, admin: true, ..NewDevice::default() };
-    let err = sign_device_with(&team, &alice, Kind::Human, web(), &admin, &new(), None).unwrap_err().to_string();
+    let err = Issue::new(&team, &alice, Kind::Human, web()).with(&admin).for_key(&new(), None).unwrap_err().to_string();
     assert!(err.contains("never carry the admin role"), "{err}");
     let plain = NewDevice { web: true, ..NewDevice::default() };
     let xkey = device_key(&XKey::new()).unwrap();
-    let err = sign_device_with(&team, &alice, Kind::Human, web(), &plain, &new(), Some(&xkey)).unwrap_err().to_string();
+    let err = Issue::new(&team, &alice, Kind::Human, web())
+        .with(&plain)
+        .for_key(&new(), Some(&xkey))
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("bind no encryption key"), "{err}");
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
-    let err = sign_device_with(&team, &p("dev-a"), Kind::Ant, ant, &plain, &new(), None).unwrap_err().to_string();
+    let err =
+        Issue::new(&team, &p("dev-a"), Kind::Ant, ant).with(&plain).for_key(&new(), None).unwrap_err().to_string();
     assert!(err.contains("only a human's device"), "{err}");
     assert_eq!(issued::issued(&team).unwrap().len(), 1, "nothing refused was recorded");
 
@@ -467,14 +472,14 @@ fn web_credentials_carry_the_tag_never_the_admin_role_nor_an_encryption_key_and_
     // And the lifetime: as long from now as the earlier credentials had from their issue.
     let week = 7 * 86_400;
     let expiring = NewDevice { web: true, expires_at: Some(now().unwrap() + week), ..NewDevice::default() };
-    let (expiring, _) = sign_device_with(&team, &alice, Kind::Human, web(), &expiring, &new(), None).unwrap();
+    let (expiring, _) = Issue::new(&team, &alice, Kind::Human, web()).with(&expiring).for_key(&new(), None).unwrap();
     let phone = new();
     let exp = verified(&renew(&team, &expiring, &phone, None).unwrap().jwt).unwrap().exp;
     assert!(exp.is_some_and(|exp| exp.abs_diff(now().unwrap() + week) <= 2), "{exp:?}");
 
     // `ants auth devices` marks them, beside the human's other devices.
     let human = Permissions::for_user(&alice, Role::Human);
-    issue_device(&team, &alice, Kind::Human, human, Some("laptop"), &dir.join("alice.creds")).unwrap();
+    Issue::new(&team, &alice, Kind::Human, human).labelled(Some("laptop")).into_file(&dir.join("alice.creds")).unwrap();
     let devices = issued::devices(&team, "alice").unwrap();
     let listed: Vec<(Option<&str>, bool)> = devices.iter().map(|d| (d.label.as_deref(), d.web)).collect();
     assert_eq!(listed, [(Some("browser"), true), (None, true), (Some("laptop"), false)]);

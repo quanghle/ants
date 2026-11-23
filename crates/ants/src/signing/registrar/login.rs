@@ -228,16 +228,10 @@ impl Registrar<'_> {
             ..auth::NewDevice::default()
         };
         let permissions = Permissions::for_human_device(name, request.web).with_js_domain(self.js_domain);
-        let (jwt, _) = auth::sign_device_with(
-            self.dir,
-            name,
-            Kind::Human,
-            permissions,
-            &new,
-            &request.public_key,
-            request.xkey.as_ref(),
-        )
-        .context("signing failed")?;
+        let (jwt, _) = auth::Issue::new(self.dir, name, Kind::Human, permissions)
+            .with(&new)
+            .for_key(&request.public_key, request.xkey.as_ref())
+            .context("signing failed")?;
         Ok(jwt)
     }
 

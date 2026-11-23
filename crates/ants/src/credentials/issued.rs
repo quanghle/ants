@@ -400,8 +400,10 @@ mod tests {
         };
         let key = nkeys::KeyPair::new_user();
         let permissions = ants_proto::Permissions::for_user(&alice, ants_proto::Role::Human);
-        let (jwt, device) =
-            auth::sign_device_with(&team, &alice, Kind::Human, permissions, &new, &key.public_key(), None).unwrap();
+        let (jwt, device) = auth::Issue::new(&team, &alice, Kind::Human, permissions)
+            .with(&new)
+            .for_key(&key.public_key(), None)
+            .unwrap();
 
         let listed = devices(&team, "alice").unwrap();
         assert_eq!(listed.len(), 1);

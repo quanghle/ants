@@ -28,27 +28,76 @@ pub fn issue(dir: &Path, user: &UserId, role: Role, js_domain: Option<&JsDomain>
 }
 
 /// Issue a new NATS user for `user`, of `kind`, with `permissions`, write its `.creds` file to `out` and record its
-/// key ([`issued::record`]). A human's are for a new device ([`issue_device`]).
+/// key ([`issued::record`]). A human's are for a new device ([`Issue`]).
 #[cfg(test)]
 pub fn issue_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permissions, out: &Path) -> Result<()> {
-    issue_device(dir, user, kind, permissions, None, out).map(drop)
+    Issue::new(dir, user, kind, permissions).into_file(out).map(drop)
 }
 
-/// `issue_with`, with a human's credentials for a new device labelled `label`, whose id and new encryption key their
-/// user JWT carries ([`DeviceId::tag`], [`DeviceKey::tag`]) and the registry records, the key's seed in the file after
-/// the NKey seed. Returns the device id, for a human's.
-pub fn issue_device(
-    dir: &Path,
-    user: &UserId,
-    kind: Kind,
-    permissions: Permissions,
-    label: Option<&str>,
-    out: &Path,
-) -> Result<Option<DeviceId>> {
-    issue_device_with(dir, user, kind, permissions, &NewDevice { label, ..NewDevice::default() }, out)
+/// Credentials to issue, signed with the account key in the team directory `dir`: those of `user`, of `kind`, with
+/// `permissions`. A human's are for a new device, whose id their user JWT carries ([`DeviceId::tag`]) and the
+/// registry records with `new`.
+pub struct Issue<'a> {
+    pub dir: &'a Path,
+    pub user: &'a UserId,
+    pub kind: Kind,
+    pub permissions: Permissions,
+    pub new: NewDevice<'a>,
 }
 
-/// What the registry records of a human's new device besides its key, and when its credentials expire.
+impl<'a> Issue<'a> {
+    /// Credentials recording nothing more than their key.
+    pub fn new(dir: &'a Path, user: &'a UserId, kind: Kind, permissions: Permissions) -> Self {
+        Self { dir, user, kind, permissions, new: NewDevice::default() }
+    }
+
+    /// A human's, for a new device labelled `label`.
+    #[cfg(test)]
+    pub fn labelled(self, label: Option<&'a str>) -> Self {
+        Self { new: NewDevice { label, ..self.new }, ..self }
+    }
+
+    /// Recording `new` with the device.
+    pub fn with(self, new: &NewDevice<'a>) -> Self {
+        Self { new: new.clone(), ..self }
+    }
+
+    /// Issue them for a new user NKey, write their `.creds` file to `out` and record the key ([`issued::record`]). A
+    /// human's bind a new encryption key ([`DeviceKey::tag`]), but a web device's, its seed in the file after the
+    /// NKey seed. Returns the device id, for a human's.
+    pub fn into_file(self, out: &Path) -> Result<Option<DeviceId>> {
+        let Self { dir, user, kind, permissions, new } = self;
+        check_not_reserved(user)?;
+        let account = load(&dir.join(ACCOUNT_SEED))?;
+        let key = KeyPair::new_user();
+        let xkey = (kind == Kind::Human && !new.web).then(XKey::new);
+        let bound = xkey.as_ref().map(device_key).transpose()?;
+        let (device, extra) = device_claims(kind, &new, bound.as_ref())?;
+        let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, extra, new.expires_at)?;
+        write_secret(out, &creds_with(&jwt, &seed(&key)?, xkey.as_ref())?)?;
+        let issued = Issued::new(&key.public_key(), user.as_str(), kind, new.expires_at)?;
+        issued::record(dir, &new.record(issued, device, bound))?;
+        Ok(device)
+    }
+
+    /// Sign their user JWT for `public_key`, a user NKey generated on another machine, and record the key
+    /// ([`issued::record`]), binding the encryption key `xkey` generated on the device, if given; only a human's bind
+    /// one. The seed stays where it was generated. Returns the JWT and the device id, for a human's.
+    pub fn for_key(self, public_key: &str, xkey: Option<&DeviceKey>) -> Result<(String, Option<DeviceId>)> {
+        let Self { dir, user, kind, permissions, new } = self;
+        check_user_key(public_key)?;
+        check_not_reserved(user)?;
+        let account = load(&dir.join(ACCOUNT_SEED))?;
+        let (device, extra) = device_claims(kind, &new, xkey)?;
+        let jwt = user_jwt(&account, public_key, user.as_str(), permissions, extra, new.expires_at)?;
+        let issued = Issued::new(public_key, user.as_str(), kind, new.expires_at)?;
+        issued::record(dir, &new.record(issued, device, xkey.cloned()))?;
+        Ok((jwt, device))
+    }
+}
+
+/// What the registry records of new credentials besides their key, a human's new device above all, and when they
+/// expire.
 #[derive(Debug, Clone, Default)]
 pub struct NewDevice<'a> {
     pub label: Option<&'a str>,
@@ -65,6 +114,12 @@ pub struct NewDevice<'a> {
     pub web: bool,
     /// The human whose assistant an ant's credentials ([`Kind::Assistant`]) make it ([`AssistantOf`]).
     pub assistant_of: Option<UserId>,
+    /// The template a manager added an ant from ([`Issued::template`]).
+    pub template: Option<&'a str>,
+    /// The manager ant that added an ant from `template`.
+    pub added_by: Option<UserId>,
+    /// The admin order that added an ant on its machine ([`Issued::order`]).
+    pub order: Option<ants_proto::Uuid>,
 }
 
 impl NewDevice<'_> {
@@ -76,31 +131,12 @@ impl NewDevice<'_> {
             admin: self.admin,
             web: self.web,
             assistant_of: self.assistant_of.clone(),
+            template: self.template.map(str::to_owned),
+            added_by: self.added_by.clone(),
+            order: self.order,
             ..issued
         }
     }
-}
-
-/// [`issue_device`], recording `new` with the device.
-pub fn issue_device_with(
-    dir: &Path,
-    user: &UserId,
-    kind: Kind,
-    permissions: Permissions,
-    new: &NewDevice<'_>,
-    out: &Path,
-) -> Result<Option<DeviceId>> {
-    check_not_reserved(user)?;
-    let account = load(&dir.join(ACCOUNT_SEED))?;
-    let key = KeyPair::new_user();
-    let xkey = (kind == Kind::Human && !new.web).then(XKey::new);
-    let bound = xkey.as_ref().map(device_key).transpose()?;
-    let (device, extra) = device_claims(kind, new, bound.as_ref())?;
-    let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, extra, new.expires_at)?;
-    write_secret(out, &creds_with(&jwt, &seed(&key)?, xkey.as_ref())?)?;
-    let issued = Issued::new(&key.public_key(), user.as_str(), kind, new.expires_at)?;
-    issued::record(dir, &new.record(issued, device, bound))?;
-    Ok(device)
 }
 
 /// The public key of `xkey`, as a user JWT binds it.
@@ -283,44 +319,9 @@ pub fn sign_user(
 }
 
 /// Sign the user JWT of `user`, of `kind`, with `permissions` for `public_key`, a user NKey generated on another
-/// machine, and record the key ([`issued::record`]). A human's are for a new device ([`sign_device`]).
+/// machine, and record the key ([`issued::record`]). A human's are for a new device ([`Issue::for_key`]).
 pub fn sign_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permissions, public_key: &str) -> Result<String> {
-    sign_device(dir, user, kind, permissions, None, public_key, None).map(|(jwt, _)| jwt)
-}
-
-/// [`sign_with`], with a human's for a new device labelled `label`, as [`issue_device`], binding the encryption key
-/// `xkey` generated on the device, if given; only a human's bind one. Returns the JWT and the device id, for a
-/// human's.
-pub fn sign_device(
-    dir: &Path,
-    user: &UserId,
-    kind: Kind,
-    permissions: Permissions,
-    label: Option<&str>,
-    public_key: &str,
-    xkey: Option<&DeviceKey>,
-) -> Result<(String, Option<DeviceId>)> {
-    sign_device_with(dir, user, kind, permissions, &NewDevice { label, ..NewDevice::default() }, public_key, xkey)
-}
-
-/// [`sign_device`], recording `new` with the device.
-pub fn sign_device_with(
-    dir: &Path,
-    user: &UserId,
-    kind: Kind,
-    permissions: Permissions,
-    new: &NewDevice<'_>,
-    public_key: &str,
-    xkey: Option<&DeviceKey>,
-) -> Result<(String, Option<DeviceId>)> {
-    check_user_key(public_key)?;
-    check_not_reserved(user)?;
-    let account = load(&dir.join(ACCOUNT_SEED))?;
-    let (device, extra) = device_claims(kind, new, xkey)?;
-    let jwt = user_jwt(&account, public_key, user.as_str(), permissions, extra, new.expires_at)?;
-    let issued = Issued::new(public_key, user.as_str(), kind, new.expires_at)?;
-    issued::record(dir, &new.record(issued, device, xkey.cloned()))?;
-    Ok((jwt, device))
+    Issue::new(dir, user, kind, permissions).for_key(public_key, None).map(|(jwt, _)| jwt)
 }
 
 /// Sign the user JWT of `ant`, added by `manager` from `template`, for `public_key`, with the permissions of an ant,
@@ -333,18 +334,9 @@ pub fn sign_added(
     template: &str,
     manager: &UserId,
 ) -> Result<String> {
-    check_user_key(public_key)?;
-    check_not_reserved(ant)?;
-    let account = load(&dir.join(ACCOUNT_SEED))?;
     let permissions = Permissions::for_user(ant, Role::Ant).with_js_domain(js_domain);
-    let jwt = user_jwt(&account, public_key, ant.as_str(), permissions, json!({}), None)?;
-    let issued = Issued {
-        template: Some(template.to_owned()),
-        added_by: Some(manager.clone()),
-        ..Issued::new(public_key, ant.as_str(), Kind::Ant, None)?
-    };
-    issued::record(dir, &issued)?;
-    Ok(jwt)
+    let new = NewDevice { template: Some(template), added_by: Some(manager.clone()), ..NewDevice::default() };
+    Issue { dir, user: ant, kind: Kind::Ant, permissions, new }.for_key(public_key, None).map(|(jwt, _)| jwt)
 }
 
 /// Sign the user JWT of `ant`, added on its machine by the admin order `order`, for `public_key`, with the permissions
@@ -358,19 +350,13 @@ pub fn sign_ordered(
     order: ants_proto::Uuid,
     assistant_of: Option<&UserId>,
 ) -> Result<String> {
-    check_user_key(public_key)?;
-    check_not_reserved(ant)?;
-    let account = load(&dir.join(ACCOUNT_SEED))?;
-    let (permissions, extra, kind) = match assistant_of {
-        Some(human) => {
-            (Permissions::for_assistant(ant, human), json!({ "tags": [AssistantOf::tag(human)] }), Kind::Assistant)
-        }
-        None => (Permissions::for_user(ant, Role::Ant), json!({}), Kind::Ant),
+    let (permissions, kind) = match assistant_of {
+        Some(human) => (Permissions::for_assistant(ant, human), Kind::Assistant),
+        None => (Permissions::for_user(ant, Role::Ant), Kind::Ant),
     };
-    let jwt = user_jwt(&account, public_key, ant.as_str(), permissions.with_js_domain(js_domain), extra, None)?;
-    let issued = Issued::new(public_key, ant.as_str(), kind, None)?;
-    issued::record(dir, &Issued { order: Some(order), assistant_of: assistant_of.cloned(), ..issued })?;
-    Ok(jwt)
+    let permissions = permissions.with_js_domain(js_domain);
+    let new = NewDevice { order: Some(order), assistant_of: assistant_of.cloned(), ..NewDevice::default() };
+    Issue { dir, user: ant, kind, permissions, new }.for_key(public_key, None).map(|(jwt, _)| jwt)
 }
 
 /// `permissions` of credentials of `kind` for the hub's JetStream domain `domain`, if it has one: a leaf node's uplink

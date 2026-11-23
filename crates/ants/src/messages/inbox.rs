@@ -503,7 +503,9 @@ mod tests {
         let creds = server.dir().join(format!("{human}-{label}.creds"));
         let permissions = ants_proto::Permissions::for_user(human, Role::Human);
         let team = server.dir().join("auth");
-        let device = crate::auth::issue_device(&team, human, Role::Human.into(), permissions, Some(label), &creds);
+        let device = crate::auth::Issue::new(&team, human, Role::Human.into(), permissions)
+            .labelled(Some(label))
+            .into_file(&creds);
         assert!(device.unwrap().is_some());
         let (client, mut js) = bus::connect(&server.url, Some(&creds), None, human, "test").await.unwrap();
         js.set_timeout(Duration::from_secs(1));

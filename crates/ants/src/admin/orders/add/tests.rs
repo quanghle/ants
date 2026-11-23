@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::admin::orders::outcome;
 use crate::admin::orders::tests::send;
-use crate::auth::{NewDevice, issue_device_with};
+use crate::auth::{Issue, NewDevice};
 use crate::credentials::issued::{self, Kind};
 use crate::credentials::revoke;
 use crate::test_support::Server;
@@ -56,7 +56,7 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
         format!("$JS.API.CONSUMER.INFO.{STREAM}.{}", chan_consumer(&dev_b)),
         format!("$JS.API.CONSUMER.INFO.{threads}.{}", done_reader(&dev_b)),
     ]);
-    issue_device_with(&team, &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+    Issue::new(&team, &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
     let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
 
@@ -140,7 +140,7 @@ async fn an_order_to_another_ant_is_decided_while_an_add_waits_for_the_signer() 
     let admin_creds = server.dir().join("alice-admin.creds");
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+    Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
     let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
 
@@ -245,7 +245,7 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     let admin_creds = hub.dir().join("alice-admin.creds");
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human).with_js_domain(Some(&domain));
-    issue_device_with(&team, &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+    Issue::new(&team, &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
 
     let uplink_creds = hub.dir().join("leaf-m1.creds");
     let on_m1 = auth::members(std::slice::from_ref(&dev_a), std::slice::from_ref(&alice));
@@ -367,7 +367,7 @@ async fn add_orders_sent_at_once_leave_the_daemon_serving_every_ant() {
     let admin_creds = dir.join("alice-admin.creds");
     let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&team, &alice, Kind::Human, rights, &device, &admin_creds).unwrap();
+    Issue::new(&team, &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
     let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, admin_js) = admin.connect("test").await.unwrap();
     let m1: Machine = "m1".parse().unwrap();
