@@ -58,6 +58,8 @@ async fn attach_sends_files_from_the_working_directory_only() {
 
     #[cfg(unix)]
     std::os::unix::fs::symlink("../secret.txt", work.join("link")).unwrap();
+    #[cfg(unix)]
+    assert!(std::process::Command::new("mkfifo").arg(work.join("pipe")).status().unwrap().success());
     let nine = serde_json::json!(vec!["notes.txt"; 9]);
     for (attach, why) in [
         (serde_json::json!(["../secret.txt"]), "outside the working directory"),
@@ -65,6 +67,8 @@ async fn attach_sends_files_from_the_working_directory_only() {
         #[cfg(unix)]
         (serde_json::json!(["link"]), "outside the working directory"),
         (serde_json::json!(["sub"]), "no regular file"),
+        #[cfg(unix)]
+        (serde_json::json!(["pipe"]), "no regular file"),
         (serde_json::json!(["notes.txt", "gone.txt"]), "cannot attach \"gone.txt\""),
         (serde_json::json!(["big.bin"]), "over the 8 MiB"),
         (nine, "at most 8 files"),

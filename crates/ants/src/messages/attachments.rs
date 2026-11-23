@@ -62,9 +62,13 @@ pub fn read(path: &Path) -> Result<File> {
     let shown = path.display();
     let name = path.file_name().with_context(|| format!("{shown} names no file to attach"))?;
     let name = name.to_str().with_context(|| format!("the name of {shown} is not UTF-8: rename it to attach it"))?;
+    let no_file = || format!("{shown} is no file: only a file is attached");
+    // Opening a FIFO would wait for a writer: what is no regular file is refused before it is opened.
+    let meta = std::fs::metadata(path).with_context(|| format!("reading {shown}"))?;
+    ensure!(meta.is_file(), no_file());
     let file = std::fs::File::open(path).with_context(|| format!("opening {shown} to attach it"))?;
     let meta = file.metadata().with_context(|| format!("reading {shown}"))?;
-    ensure!(meta.is_file(), "{shown} is no file: only a file is attached");
+    ensure!(meta.is_file(), no_file());
     let too_big = |len| format!("{shown} is {}: an attachment is at most {}", size(len), size(MAX_ATTACHMENT_SIZE));
     ensure!(meta.len() <= MAX_ATTACHMENT_SIZE, too_big(meta.len()));
     let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or_default());
@@ -440,6 +444,14 @@ mod tests {
         assert_eq!(super::read(&big).unwrap().attachment.size, MAX_ATTACHMENT_SIZE);
 
         assert!(super::read(&dir).unwrap_err().to_string().contains("is no file"));
+        #[cfg(unix)]
+        {
+            let fifo = dir.join("pipe");
+            let made = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+            assert!(made.success());
+            let refused = super::read(&fifo).unwrap_err().to_string();
+            assert!(refused.contains("is no file: only a file is attached"), "{refused}");
+        }
         assert!(super::read(&dir.join("missing")).is_err());
         assert_eq!(read_all(&vec![shot.clone(); MAX_ATTACHMENTS]).unwrap().len(), MAX_ATTACHMENTS);
         let many = read_all(&vec![shot; MAX_ATTACHMENTS + 1]).unwrap_err().to_string();

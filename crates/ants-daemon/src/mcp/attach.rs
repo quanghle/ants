@@ -96,6 +96,10 @@ async fn load_one(root: &Path, path: &str, redactor: &Redactor) -> Result<Loaded
     if !real.starts_with(root) {
         return Err(format!("it is outside the working directory {}", root.display()));
     }
+    // Opening a FIFO would wait for a writer: what is no regular file is refused before it is opened.
+    if !tokio::fs::metadata(&real).await.map_err(|e| e.to_string())?.is_file() {
+        return Err("it is no regular file".to_owned());
+    }
     let mut file = tokio::fs::File::open(&real).await.map_err(|e| e.to_string())?;
     let metadata = file.metadata().await.map_err(|e| e.to_string())?;
     if !metadata.is_file() {
