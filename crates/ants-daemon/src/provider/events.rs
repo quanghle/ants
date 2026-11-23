@@ -3,9 +3,9 @@
 //! happened, to which ant and identity, on which thread and when: never what a message, prompt or reply said.
 //!
 //! An ant's events wait in its home, one JSON [`Event`] a line in [`QUEUE`], from when they happen until its provider
-//! acks them, so a restarted daemon tells those left. One task delivers the events of every ant ([`Outbox`]), an ant's
-//! next only once its provider acked the one before, retrying with a backoff while the provider fails or is not
-//! connected. Past [`CAP`] waiting, an ant's oldest go, with a warning. An ant renamed takes the events queued under
+//! acks them, so a restarted daemon tells those left. One task delivers the events of every ant ([`Outbox`]), each call
+//! of a provider a task of its own, an ant's next only once its provider acked the one before, retrying with a backoff
+//! while the provider fails or is not connected. Past [`CAP`] waiting, an ant's oldest go, with a warning. An ant renamed takes the events queued under
 //! its earlier names, as its provider serves it under its new one.
 //!
 //! Beside the queue, [`IDENTITY`] holds the id of the identity record the provider was told of, so a daemon tells of an
@@ -214,9 +214,12 @@ impl Inner {
             }
             queue.sending = true;
             let (resolve, ant, event) = (self.resolve.clone(), ant.clone(), event.clone());
-            sending.push(Box::pin(async move {
-                let id = event.id;
-                let sent = match resolve(ant.clone()).await {
+            let (id, of) = (event.id, ant.clone());
+            // A task of its own: the call goes on while this one waits for the queues, which a burst of events
+            // holds for seconds, and a call left unpolled would keep what it holds of its provider, as sense's
+            // turn at the ant's log, from the ant's other calls.
+            let call = tokio::spawn(async move {
+                match resolve(of).await {
                     None => Sent::Failed("no provider connected".to_owned()),
                     Some(provider) => match tokio::time::timeout(CALL_WAIT, provider.event(event)).await {
                         Ok(Ok(_)) => Sent::Acked,
@@ -224,7 +227,10 @@ impl Inner {
                         Ok(Err(e)) => Sent::Failed(e.to_string()),
                         Err(_) => Sent::Failed(format!("no ack within {}s", CALL_WAIT.as_secs())),
                     },
-                };
+                }
+            });
+            sending.push(Box::pin(async move {
+                let sent = call.await.unwrap_or_else(|e| Sent::Failed(format!("the call ended: {e}")));
                 (ant, id, sent)
             }));
         }

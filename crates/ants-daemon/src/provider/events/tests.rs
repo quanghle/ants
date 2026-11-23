@@ -1,5 +1,5 @@
-//! Tests of lifecycle events told to providers: order per ant, acks and retries under the same id, a capped queue kept
-//! across restarts, renames, and providers without events.
+//! Tests of lifecycle events told to providers: order per ant, acks and retries under the same id, calls going on while
+//! the queues are held, a capped queue kept across restarts, renames, and providers without events.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,6 +16,9 @@ pub(crate) struct Recording {
     pub(crate) got: Mutex<Vec<Event>>,
     failing: AtomicUsize,
     events: bool,
+    /// What each call waits for before it answers, if any.
+    gate: Option<Arc<Notify>>,
+    answered: AtomicUsize,
 }
 
 impl Recording {
@@ -47,7 +50,13 @@ impl Provider for Recording {
         let failed = self.failing.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)).is_ok();
         self.got.locked().push(event);
         let result = if failed { Err(RpcError::unavailable("down")) } else { Ok(Ack {}) };
-        Box::pin(std::future::ready(result))
+        Box::pin(async move {
+            if let Some(gate) = &self.gate {
+                gate.notified().await;
+            }
+            self.answered.fetch_add(1, Ordering::Relaxed);
+            result
+        })
     }
 }
 
@@ -125,6 +134,37 @@ async fn each_ant_s_events_arrive_in_order_and_leave_the_queue_once_acked() {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     assert!(!queue_file(&a).exists() && !queue_file(&b).exists(), "no event left once acked");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_call_in_flight_goes_on_while_the_delivering_task_waits_for_the_queues() {
+    let dir = ants_test_support::scratch_dir("events-held");
+    let gate = Arc::new(Notify::new());
+    let provider = Arc::new(Recording { events: true, gate: Some(gate.clone()), ..Recording::default() });
+    let outbox = outbox_to(provider.clone()).await;
+    outbox.push(&dir, event(Uuid::new_v4(), &p("dev-a"), "ida", None, EventKind::ThreadExpired)).await;
+    took(&provider, 1).await;
+    // As a burst of events being stored holds the queues: the delivering task, woken, waits for them.
+    let queues = outbox.0.queues.lock().await;
+    outbox.wake();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    gate.notify_one();
+    for _ in 0..1_000 {
+        if provider.answered.load(Ordering::Relaxed) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(provider.answered.load(Ordering::Relaxed), 1, "the call ended while the queues were held");
+    drop(queues);
+    for _ in 0..1_000 {
+        if outbox.pending(&p("dev-a")).await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(outbox.pending(&p("dev-a")).await.is_empty(), "the event left the queue once acked");
     std::fs::remove_dir_all(dir).unwrap();
 }
 

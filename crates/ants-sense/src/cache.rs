@@ -246,6 +246,13 @@ impl Cache {
         self.writes.clone().lock_owned().await
     }
 
+    /// What `read` makes of the cache once the writes made so far have ended: a read runs on the caller's thread,
+    /// which a write running would hold up. For reads sharing the cache with a writer ([`crate::store::Shared`]).
+    pub async fn read<T>(&self, read: impl FnOnce(&Self) -> T) -> T {
+        let _turn = self.writes.lock().await;
+        read(self)
+    }
+
     /// Wait for the writes made so far to end, those whose callers stopped waiting for them too.
     pub async fn settled(&self) {
         drop(self.writes.lock().await);

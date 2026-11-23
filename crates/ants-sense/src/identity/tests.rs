@@ -11,7 +11,7 @@ use crate::Sense;
 use crate::cache::Cache;
 use crate::items::ItemId;
 use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
-use crate::store::{Store, Stores};
+use crate::store::{Shared, Store, Stores};
 
 fn dev_a() -> UserId {
     "dev-a".parse().unwrap()
@@ -39,7 +39,7 @@ async fn items_in(
     let log =
         AntLog::new(log, Unsigned, verifier, sense.clone(), ant, "m1".parse().unwrap(), Some(home.to_owned())).unwrap();
     let store = Store::open(log.with_earlier_names(earlier), Cache::open(home).unwrap()).await.unwrap();
-    Arc::new(tokio::sync::Mutex::new(store))
+    Arc::new(Shared::new(store))
 }
 
 /// The items of a new sense identity, in a log of their own.

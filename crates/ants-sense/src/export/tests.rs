@@ -316,13 +316,13 @@ async fn the_records_of_threads_sense_writes_survive_an_export_and_import() {
         at: chrono::Utc::now(),
         kind,
     };
-    let store = tokio::sync::Mutex::new(a.store(&sense, "dev-a", &[]).await);
+    let store = crate::store::Shared::new(a.store(&sense, "dev-a", &[]).await);
     record_event(&store, &event(started)).await.unwrap();
     let recorded = record_event(&store, &event(EventKind::ThreadDone)).await.unwrap().unwrap();
     drop(store);
 
     let export = a.export(&sense, "dev-a", vec![]).await;
     import(&mut b.ant_log(&sense, "dev-a", &[]), &export).await.unwrap();
-    let store = tokio::sync::Mutex::new(b.store(&sense, "dev-a", &[]).await);
+    let store = crate::store::Shared::new(b.store(&sense, "dev-a", &[]).await);
     assert_eq!(record(&store, &thread).await.unwrap(), Some(recorded));
 }

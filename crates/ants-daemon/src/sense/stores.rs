@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ants_proto::provider::BoxFuture;
 use ants_proto::{JsDomain, Machine, SenseId, UserId};
@@ -24,7 +24,7 @@ use ants_sense::export::{self, SenseExport};
 use ants_sense::home::Home;
 use ants_sense::identity;
 use ants_sense::log::{AntLog, EventLog, LogErrorKind};
-use ants_sense::store::{Items, Store, StoreError, Stores, is_offline};
+use ants_sense::store::{Items, Shared, Store, StoreError, Stores, is_offline};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use serde::{Deserialize, Serialize};
@@ -267,6 +267,15 @@ impl SenseStores {
         }
     }
 
+    /// Whether the home's id of `ant` is settled against its identity record, `items` still being the ones served.
+    fn is_settled(&self, ant: &UserId, items: &Arc<tokio::sync::Mutex<Option<Opened>>>) -> bool {
+        let state = self.state();
+        state
+            .ants
+            .get(ant)
+            .is_some_and(|served| Arc::ptr_eq(&served.items, items) && matches!(served.named, Named::Settled))
+    }
+
     /// The home's id of `ant` is settled against the record in `named`, if `items` are still the ones served.
     fn settled(&self, ant: &UserId, items: &Arc<tokio::sync::Mutex<Option<Opened>>>) {
         if let Some(served) = self.state().ants.get_mut(ant)
@@ -324,9 +333,12 @@ impl SenseStores {
         Ok(Of { items, home, creds, link, route: state.route.clone(), named: served.named.clone() })
     }
 
-    /// The items of `ant`, caught up with its log as they open, and again when `sync` says so.
+    /// The items of `ant`, caught up with its log as they open, and again when `sync` says so: the calls of an ant
+    /// wait for one another only while its items open or its sense id settles, never for a catch-up, which each
+    /// makes in its turn at the log or shares ([`Store::sync_since`]).
     fn opened<'a>(&'a self, ant: &'a UserId, sync: bool) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         Box::pin(async move {
+            let asked = Instant::now();
             let Of { items: slot, home, creds, link, route, named } = self.of(ant)?;
             let files = Home::new(&home);
             if files.awaits_import() {
@@ -336,16 +348,19 @@ impl SenseStores {
                     files.importing().display()
                 )));
             }
-            let mut opened = slot.lock().await;
-            let mut current = opened.clone();
+            let mut current = slot.lock().await.clone();
             if let Some(items) = &current
                 && sync
             {
-                match items.sync().await {
+                match items.sync_since(asked).await {
                     Err(StoreError::Log(error))
                         if error.kind == LogErrorKind::Incarnation && items.pending().await? == 0 =>
                     {
-                        *opened = None;
+                        let mut opened = slot.lock().await;
+                        // Unless another call opened them again meanwhile.
+                        if opened.as_ref().is_some_and(|opened| Arc::ptr_eq(opened, items)) {
+                            *opened = None;
+                        }
                         current = None;
                     }
                     // The items remain readable, including when a conflict requires explicit reconciliation.
@@ -358,36 +373,50 @@ impl SenseStores {
             let items = match current {
                 Some(items) => items,
                 None => {
-                    if link.is_none() && !files.cache().exists() {
-                        return Err(match self.state().host {
-                            Host::Connecting => StoreError::Unavailable("the host connection is not up yet".into()),
-                            _ => StoreError::NotKept(
-                                self.unkept.borrow().clone().unwrap_or_else(|| "no host connection".into()),
-                            ),
-                        });
+                    let mut opened = slot.lock().await;
+                    match opened.clone() {
+                        // Another call opened them meanwhile, caught up as they open.
+                        Some(items) => items,
+                        None => {
+                            if link.is_none() && !files.cache().exists() {
+                                return Err(match self.state().host {
+                                    Host::Connecting => {
+                                        StoreError::Unavailable("the host connection is not up yet".into())
+                                    }
+                                    _ => StoreError::NotKept(
+                                        self.unkept.borrow().clone().unwrap_or_else(|| "no host connection".into()),
+                                    ),
+                                });
+                            }
+                            if let Named::Record(record) = &named {
+                                take_named(ant, &home, record).await?;
+                            }
+                            let mint = matches!(named, Named::Home);
+                            let items =
+                                open(ant, &home, creds.as_deref(), link.as_deref(), route, mint).await.map_err(
+                                    |e| StoreError::Unavailable(format!("opening the sense data of {ant}: {e:#}")),
+                                )?;
+                            *opened = Some(items.clone());
+                            items
+                        }
                     }
-                    if let Named::Record(record) = &named {
-                        take_named(ant, &home, record).await?;
-                    }
-                    let items =
-                        open(ant, &home, creds.as_deref(), link.as_deref(), route, matches!(named, Named::Home))
-                            .await
-                            .map_err(|e| StoreError::Unavailable(format!("opening the sense data of {ant}: {e:#}")))?;
-                    *opened = Some(items.clone());
-                    items
                 }
             };
             if let Named::Record(record) = &named
                 && link
                     .is_some_and(|link| link.js.client().connection_state() == async_nats::connection::State::Connected)
             {
-                match settle(self, ant, &home, record, &*items).await {
-                    Ok(true) => self.settled(ant, &slot),
-                    // Settled on a later call, the record or the card unread meanwhile.
-                    Ok(false) => {}
-                    Err(refused) => {
-                        *opened = None;
-                        return Err(refused);
+                let mut opened = slot.lock().await;
+                // Unless a call that came with this one settled it meanwhile, or closed the items.
+                if !self.is_settled(ant, &slot) && opened.as_ref().is_some_and(|opened| Arc::ptr_eq(opened, &items)) {
+                    match settle(self, ant, &home, record, &*items).await {
+                        Ok(true) => self.settled(ant, &slot),
+                        // Settled on a later call, the record or the card unread meanwhile.
+                        Ok(false) => {}
+                        Err(refused) => {
+                            *opened = None;
+                            return Err(refused);
+                        }
                     }
                 }
             }
@@ -540,7 +569,7 @@ async fn open(
         .with_earlier_names(earlier);
     let store = Store::open(log, cache).await?.with_machine(context.machine);
     store.cache().set_context(&saved_context).await?;
-    Ok(Arc::new(tokio::sync::Mutex::new(store)))
+    Ok(Arc::new(Shared::new(store)))
 }
 
 mod host;

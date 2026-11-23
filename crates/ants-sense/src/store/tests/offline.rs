@@ -214,7 +214,7 @@ async fn authentication_signing_and_integrity_failures_never_queue_writes() {
 #[tokio::test]
 async fn reads_through_items_replay_pending_writes_when_the_hub_returns() {
     let (log, sense) = (Fallible::default(), SenseId::new());
-    let store = tokio::sync::Mutex::new(open(&log, &sense, None).await);
+    let store = Shared::new(open(&log, &sense, None).await);
     log.online(false);
     let item = store.create("note", note("cached"), "t").await.unwrap();
     assert_eq!(store.list("note", 10).await.unwrap(), std::slice::from_ref(&item));
