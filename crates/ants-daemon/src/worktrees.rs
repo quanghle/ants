@@ -131,9 +131,16 @@ pub struct Worktrees {
 
 impl Worktrees {
     /// The worktrees of the ant's threads under `home`, of the repository `workdir` is in. None, with a warning, when
-    /// it is in none or git cannot be run: the threads then share the workdir.
+    /// it is in none, has no commit to start a branch from, or git cannot be run: the threads then share the workdir.
     pub async fn find(ant: &UserId, workdir: &Path, home: &Path) -> Option<Self> {
         match git(workdir, ["rev-parse", "--show-toplevel", "--show-prefix"]).await {
+            Ok(_) if git(workdir, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).await.is_err() => {
+                tracing::warn!(
+                    workdir = %workdir.display(),
+                    "the workdir's git repository has no commits yet; its threads share it until the daemon restarts"
+                );
+                None
+            }
             Ok(out) => {
                 let mut lines = out.lines();
                 let repo = PathBuf::from(lines.next().unwrap_or_default());
@@ -829,14 +836,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_repository_without_commits_fails_the_checkout() {
+    async fn a_repository_without_commits_is_shared() {
         if !ants_test_support::have("git") {
             return;
         }
         let dir = ants_test_support::scratch_dir("worktrees-empty").canonicalize().unwrap();
         run(&dir, &["init", "--quiet"]);
-        let worktrees = Worktrees::find(&ant(), &dir, &dir.join(".home")).await.unwrap();
-        assert!(worktrees.checkout(&thread("a")).await.is_err());
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        assert!(Worktrees::find(&ant(), &dir, &dir.join(".home")).await.is_none(), "an unborn HEAD");
+        assert!(Worktrees::find(&ant(), &dir.join("sub"), &dir.join(".home")).await.is_none(), "below the top level");
+        assert!(!dir.join(".home/worktrees").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
