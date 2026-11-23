@@ -10,7 +10,7 @@ use std::fmt;
 use ants_proto::{
     ASSISTANT_RECORD, AssistantGrant, DEVICES_BUCKET, DeviceId, DeviceKey, HUMANS_BUCKET, REVOKED_DEVICES, UserId,
     UserJwt, VerifiedGrant, assistant_grant_key, assistant_grant_of, device_entry_key, device_entry_of,
-    revoked_device_key,
+    revoked_device_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::context::GetStreamErrorKind;
@@ -138,7 +138,7 @@ impl Directory {
     pub async fn open(js: &jetstream::Context, account: &str) -> Result<Self> {
         let kv = match js.get_key_value(DEVICES_BUCKET).await {
             Ok(kv) => Some(kv),
-            Err(e) => match js.get_stream(format!("KV_{DEVICES_BUCKET}")).await {
+            Err(e) => match js.get_stream(subject::kv_stream(DEVICES_BUCKET)).await {
                 Err(missing) if matches!(missing.kind(), GetStreamErrorKind::JetStream(e) if e.error_code() == ErrorCode::STREAM_NOT_FOUND) => {
                     None
                 }

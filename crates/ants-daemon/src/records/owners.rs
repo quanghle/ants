@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ants_proto::{
-    JsDomain, OWNERS_BUCKET, ThreadId, UserId, assisted_owner_key, owner_key, owner_outbox, owner_record_id,
+    JsDomain, OWNERS_BUCKET, ThreadId, UserId, assisted_owner_key, owner_key, owner_outbox, owner_record_id, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::HeaderMap;
@@ -149,9 +149,7 @@ pub async fn record(
     let in_hub = async {
         let kv = DirectKv::new(js, js_domain, OWNERS_BUCKET).await?;
         match kv.put_as(&key, value.clone(), &id).await {
-            Err(e) if bus::is_store_full(e.as_ref()) => {
-                Err(bus::explain_full(e, &format!("$KV.{OWNERS_BUCKET}.{key}")))
-            }
+            Err(e) if bus::is_store_full(e.as_ref()) => Err(bus::explain_full(e, &subject::kv(OWNERS_BUCKET, &key))),
             Err(e) if !format!("{e:#}").contains(RECORDED) => {
                 Err(e).context("recording it (with credentials, `ants init` as the human creates the bucket)")
             }
@@ -200,7 +198,7 @@ pub async fn record_for_human(
     let key = assisted_owner_key(thread, to, human, assistant);
     let kv = DirectKv::new(js, js_domain, OWNERS_BUCKET).await?;
     match kv.put_as(&key, human.to_string(), &owner_record_id(&key)).await {
-        Err(e) if bus::is_store_full(e.as_ref()) => Err(bus::explain_full(e, &format!("$KV.{OWNERS_BUCKET}.{key}"))),
+        Err(e) if bus::is_store_full(e.as_ref()) => Err(bus::explain_full(e, &subject::kv(OWNERS_BUCKET, &key))),
         Err(e) if !format!("{e:#}").contains(RECORDED) => Err(e).context("recording the thread's owner"),
         _ => Ok(()),
     }
@@ -226,7 +224,7 @@ pub async fn recording(
 
 /// The stream of [`OWNERS_BUCKET`].
 pub fn owners_stream() -> String {
-    format!("KV_{OWNERS_BUCKET}")
+    subject::kv_stream(OWNERS_BUCKET)
 }
 
 #[cfg(test)]

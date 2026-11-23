@@ -102,14 +102,15 @@ pub(crate) use keys::STORAGE_WARNING_PREFIX;
 pub use keys::{
     ANTS_VERSION, Feed, SERVING_EVERY, SPARE_READERS, Serving, TRAIL_ANSWERING, TRAIL_RUNS_INDEX, TRAIL_STEPS,
     assisted_marks_key, assisted_owner_key, assisted_reminders_key, assisted_withdrawal_key, attempt_key,
-    chan_consumer, chan_reader, channel_manager_serving_key, channel_manager_serving_subject, channel_reads_key,
-    channel_seen_key, daily_spend_key, dead_reader, done_key, done_mark_key, done_reader, escalation_deadlines_key,
-    held_key, inbox_consumer, inbox_prefix, link_key, link_outbox, links_to, marks_key, mention_key, message_mark_key,
-    notes_consumer, notify_consumer, owner_key, owner_outbox, owner_record_id, parse_link_key, parse_reaction_key,
-    parse_trail_run_key, reaction_key, reactions_to, reminders_key, sent_reader, session_key, spare_readers,
-    storage_warning_key, summary_key, thread_origin_key, thread_spend_key, title_key, trail_answering_key,
-    trail_call_key, trail_run_key, trail_runs_index_key, trail_runs_reader, trail_runs_subject, trail_session_key,
-    trail_step_key, unserved_key, webhook_marker_key, webhook_marker_subject, webhook_seen_key,
+    chan_consumer, chan_reader, channel_manager_serving_key, channel_reads_key, channel_seen_key, daily_spend_key,
+    dead_reader, done_key, done_mark_key, done_reader, escalation_deadlines_key, held_key, inbox_consumer,
+    inbox_prefix, link_key, link_outbox, links_to, marks_key, mention_key, message_mark_key, notes_consumer,
+    notify_consumer, owner_key, owner_outbox, owner_record_id, parse_daily_spend_key, parse_link_key,
+    parse_reaction_key, parse_thread_spend_key, parse_trail_run_key, parse_webhook_marker_key, reaction_key,
+    reactions_to, reminders_key, sent_reader, session_key, spare_readers, storage_warning_key, summary_key,
+    thread_origin_key, thread_spend_key, title_key, trail_answering_key, trail_call_key, trail_run_key,
+    trail_runs_index_key, trail_runs_reader, trail_session_key, trail_step_key, unserved_key, webhook_marker_key,
+    webhook_seen_key,
 };
 pub use keys::{
     TIP_RETIRED, TRAIL_STEPS_ON, trail_rating_key, trail_thread_step_key, trail_thread_steps_prefix, trail_tip_key,
@@ -353,7 +354,7 @@ pub const TRAILS_BUCKET: &str = "ants_trails";
 /// conductor's [`TrailRunIndex`] ([`trail_runs_index_key`]) and the [`TrailStepThread`] of each step's thread
 /// ([`trail_step_key`]), kept again under the thread of the step's run ([`trail_thread_step_key`]). Each ant reads and
 /// writes only its own keys
-/// ([`trail_runs_subject`]), by direct gets naming them; humans read all, by direct gets naming no subject, and write
+/// ([`subject::trail_runs`]), by direct gets naming them; humans read all, by direct gets naming no subject, and write
 /// none: a run is started, stopped and resumed by its conductor. Entries expire [`TRAIL_RUN_RETENTION`] and a run's most
 /// wall time ([`TrailLimits::MAX`]) after their last put, so a run's entries outlive its end by
 /// [`TRAIL_RUN_RETENTION`] at least.

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ants_daemon::stream::reading::{self, Reading};
-use ants_proto::{ChannelId, UserId};
+use ants_proto::{ChannelId, UserId, subject};
 use anyhow::{Result, bail};
 use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
@@ -111,10 +111,7 @@ impl Search {
     /// subjects name. Tool requests come before decisions, which a request read places on its thread.
     fn filters(&self) -> Vec<String> {
         let kinds = self.kinds();
-        let any = |name: Option<String>| name.unwrap_or_else(|| "*".to_owned());
-        let from = any(self.from.as_ref().map(UserId::to_string));
-        let to = any(self.to.as_ref().map(UserId::to_string));
-        let channel = any(self.channel.as_ref().map(ChannelId::to_string));
+        let (from, to, channel) = (self.from.as_ref(), self.to.as_ref(), self.channel.as_ref());
         let mut filters = Vec::new();
         let mut add = |filter: String| {
             if !filters.contains(&filter) {
@@ -122,26 +119,26 @@ impl Search {
             }
         };
         if kinds.iter().any(|k| matches!(k, Kind::Message | Kind::Escalation | Kind::Mention | Kind::Decision)) {
-            add(format!("ants.inbox.{to}.{from}"));
-            add(format!("ants.inbox.{to}.{from}.{}", ants_proto::subject::WEBHOOK));
+            add(subject::inboxes(to, from));
+            add(subject::webhook_inboxes(to, from));
         }
         if kinds.contains(&Kind::Post) {
-            add(format!("ants.chan.{channel}.{from}"));
-            add(format!("ants.chan.{channel}.{from}.{}", ants_proto::subject::WEBHOOK));
+            add(subject::chans(channel, from));
+            add(subject::webhook_chans(channel, from));
         }
         if kinds.contains(&Kind::Note) {
-            add(format!("ants.notes.*.{from}"));
+            add(subject::notes_by(from));
         }
         if kinds.contains(&Kind::Approval) {
-            add(format!("ants.approvals.{from}"));
+            add(subject::approvals_of(from));
         }
         // A human's decision names no sender: with --from only a chain ant's, an inbox message, is one.
         if kinds.contains(&Kind::Decision) && self.from.is_none() {
-            add(format!("ants.approvals.{to}"));
-            add(format!("ants.approvals.{to}.*"));
+            add(subject::approvals_of(to));
+            add(subject::approval_decisions_of(to));
         }
         if kinds.contains(&Kind::Dead) {
-            add(format!("ants.dead.{to}"));
+            add(subject::dead_of(to));
         }
         filters
     }

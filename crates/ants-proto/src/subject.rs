@@ -1,6 +1,20 @@
 //! Subject names. Each takes typed ids, so a subject never carries a wildcard or a stray dot.
 
+use std::fmt;
+
 use crate::{ChannelId, Machine, Role, SenseId, ThreadId, UserId};
+
+/// One token of a filter: the id, or `*` for any.
+struct OrAny<'a, T>(Option<&'a T>);
+
+impl<T: fmt::Display> fmt::Display for OrAny<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(id) => id.fmt(f),
+            None => f.write_str("*"),
+        }
+    }
+}
 
 /// Durable inbox of `to`, for messages from `from`, an ant or a human. The sender is part of the subject because
 /// credentials can pin it there ([`inbox_from`]), while anything in the payload is whatever the publisher wrote.
@@ -40,6 +54,16 @@ pub fn inbox_from(user: &UserId) -> String {
     format!("ants.inbox.*.{user}")
 }
 
+/// The messages to `to` from `from`, an ant or a human ([`inbox`]), `None` standing for anyone.
+pub fn inboxes(to: Option<&UserId>, from: Option<&UserId>) -> String {
+    format!("ants.inbox.{}.{}", OrAny(to), OrAny(from))
+}
+
+/// The messages to `to` from the webhook `webhook` ([`webhook_inbox`]), `None` standing for anyone.
+pub fn webhook_inboxes(to: Option<&UserId>, webhook: Option<&UserId>) -> String {
+    format!("ants.inbox.{}.{}.{WEBHOOK}", OrAny(to), OrAny(webhook))
+}
+
 /// The recipient and the sender an inbox subject names, [`inbox`] or [`webhook_inbox`], or `None` when it is no inbox
 /// subject.
 pub fn parse_inbox(subject: &str) -> Option<(UserId, UserId)> {
@@ -68,6 +92,11 @@ pub fn notes_of(thread: &ThreadId) -> String {
 /// Every notes subject `user` may post on.
 pub fn notes_from(user: &UserId) -> String {
     format!("ants.notes.*.{user}")
+}
+
+/// The posts by `from` to the notes of every thread ([`notes_from`]), `None` standing for anyone.
+pub fn notes_by(from: Option<&UserId>) -> String {
+    format!("ants.notes.*.{}", OrAny(from))
 }
 
 /// The thread and the sender a notes subject names, or `None` when it is no notes subject.
@@ -99,6 +128,16 @@ pub fn chan_room(channel: &ChannelId) -> String {
 /// Every channel subject `user`, an ant or a human, may post on as itself. A webhook's are [`webhook_chan`].
 pub fn chan_from(user: &UserId) -> String {
     format!("ants.chan.*.{user}")
+}
+
+/// The posts to `channel` by `from`, an ant or a human ([`chan`]), `None` standing for any.
+pub fn chans(channel: Option<&ChannelId>, from: Option<&UserId>) -> String {
+    format!("ants.chan.{}.{}", OrAny(channel), OrAny(from))
+}
+
+/// The posts to `channel` by the webhook `webhook` ([`webhook_chan`]), `None` standing for any.
+pub fn webhook_chans(channel: Option<&ChannelId>, webhook: Option<&UserId>) -> String {
+    format!("ants.chan.{}.{}.{WEBHOOK}", OrAny(channel), OrAny(webhook))
 }
 
 /// The channel and the sender a channel subject names, [`chan`] or [`webhook_chan`], or `None` when it is no channel
@@ -174,9 +213,38 @@ pub fn approvals(ant: &UserId) -> String {
     format!("ants.approvals.{ant}")
 }
 
+/// The permission requests of `ant` ([`approvals`]), `None` standing for every ant's.
+pub fn approvals_of(ant: Option<&UserId>) -> String {
+    format!("ants.approvals.{}", OrAny(ant))
+}
+
+/// The human's answers to the permission requests of `ant` ([`approval_decision`]), `None` standing for every ant's.
+pub fn approval_decisions_of(ant: Option<&UserId>) -> String {
+    format!("ants.approvals.{}.*", OrAny(ant))
+}
+
+/// What follows `ants.approvals.` in `subject`, split at its first dot: the ant of a request ([`approvals`]) alone,
+/// or the ant and the request of a decision ([`approval_decision`]). `None` when it is no approvals subject. The
+/// tokens are not checked: a reader compares them with what the payload names.
+pub fn parse_approvals(subject: &str) -> Option<(&str, Option<&str>)> {
+    let rest = subject.strip_prefix("ants.approvals.")?;
+    Some(rest.split_once('.').map_or((rest, None), |(ant, request)| (ant, Some(request))))
+}
+
 /// Messages an ant gave up on, as [`DeadLetter`](super::DeadLetter)s.
 pub fn dead(ant: &UserId) -> String {
     format!("ants.dead.{ant}")
+}
+
+/// The dead letters of `ant` ([`dead`]), `None` standing for every ant's, one token each.
+pub fn dead_of(ant: Option<&UserId>) -> String {
+    format!("ants.dead.{}", OrAny(ant))
+}
+
+/// What follows `ants.dead.` in `subject`, the ant of a [`dead`] subject, or `None` when it is no dead letter's. It is
+/// not checked: a reader compares it with the ant the letter names.
+pub fn parse_dead(subject: &str) -> Option<&str> {
+    subject.strip_prefix("ants.dead.")
 }
 
 /// Every ant's dead letters.
@@ -322,6 +390,11 @@ pub fn status(ant: &UserId, thread: &ThreadId) -> String {
     format!("ants.status.{ant}.{thread}")
 }
 
+/// Whether `subject` is one of live progress ([`status`]).
+pub fn is_status(subject: &str) -> bool {
+    subject.starts_with("ants.status.")
+}
+
 /// Live progress of an ant on every thread.
 pub fn status_of(ant: &UserId) -> String {
     format!("ants.status.{ant}.*")
@@ -447,19 +520,51 @@ pub fn trailed(ant: &UserId) -> String {
     format!("ants.trailed.{ant}")
 }
 
+/// The subject of `key` in the stream of the KV bucket `bucket` ([`kv_stream`]). `key` may be a pattern, for a filter
+/// or a permission.
+pub fn kv(bucket: &str, key: impl fmt::Display) -> String {
+    format!("$KV.{bucket}.{key}")
+}
+
+/// Every key of the KV bucket `bucket`: the subjects of its stream.
+pub fn kv_all(bucket: &str) -> String {
+    kv(bucket, ">")
+}
+
+/// The key of the KV bucket `bucket` that `subject` stores ([`kv`]), or `None` when it is none of the bucket's.
+pub fn kv_key<'a>(bucket: &str, subject: &'a str) -> Option<&'a str> {
+    subject.strip_prefix("$KV.")?.strip_prefix(bucket)?.strip_prefix('.')
+}
+
+/// Whether `subject` is one of a KV bucket's stream, whatever the bucket.
+pub fn is_kv(subject: &str) -> bool {
+    subject.starts_with("$KV.")
+}
+
+/// JetStream stream backing the KV bucket `bucket`.
+pub fn kv_stream(bucket: &str) -> String {
+    format!("KV_{bucket}")
+}
+
+/// Where a direct get of `key` (or of the keys a pattern names) in the KV bucket `bucket` is asked, without a
+/// JetStream domain.
+pub fn kv_get(bucket: &str, key: impl fmt::Display) -> String {
+    format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(bucket), kv(bucket, key))
+}
+
 /// The colony entry of an ant: the subject its daemon puts [`super::ColonyEntry`] on.
 pub fn colony(ant: &UserId) -> String {
-    format!("$KV.{}.{ant}", super::COLONY_BUCKET)
+    kv(super::COLONY_BUCKET, ant)
 }
 
 /// The record of `machine` in [`super::MACHINES_BUCKET`]: the subject its daemon puts [`super::MachineRecord`] on.
 pub fn machine_record(machine: &Machine) -> String {
-    format!("$KV.{}.{machine}", super::MACHINES_BUCKET)
+    kv(super::MACHINES_BUCKET, machine)
 }
 
 /// Where `ants signer` puts the record of the machine holding the team's account key ([`super::AccountHolder`]).
 pub fn account_holder() -> String {
-    format!("$KV.{}.{}", super::MACHINES_BUCKET, super::ACCOUNT_HOLDER_KEY)
+    kv(super::MACHINES_BUCKET, super::ACCOUNT_HOLDER_KEY)
 }
 
 /// Every admin order to the ants of `machine`, `ants.admin.<machine>.<ant>`, which the machine's daemon takes from the
@@ -494,29 +599,29 @@ pub fn parse_admin_order(subject: &str) -> Option<(Machine, UserId)> {
 /// The records of every machine in [`super::MACHINES_BUCKET`], whose keys are the machines' names alone, without the
 /// outcomes of admin orders kept beside them ([`super::admin_outcome_key`]).
 pub fn machine_records() -> String {
-    format!("$KV.{}.*", super::MACHINES_BUCKET)
+    kv(super::MACHINES_BUCKET, "*")
 }
 
 /// The outcomes of the admin orders to the ants of `machine` in [`super::MACHINES_BUCKET`], which only its host
 /// credentials write.
 pub fn admin_outcomes(machine: &Machine) -> String {
-    format!("$KV.{}.{machine}.>", super::MACHINES_BUCKET)
+    kv(super::MACHINES_BUCKET, format_args!("{machine}.>"))
 }
 
 /// The outcomes of the admin orders about `ant`, on whatever machine ([`super::admin_outcome_key`]).
 pub fn admin_outcomes_of(ant: &UserId) -> String {
-    format!("$KV.{}.*.{ant}.*", super::MACHINES_BUCKET)
+    kv(super::MACHINES_BUCKET, format_args!("*.{ant}.*"))
 }
 
 /// The chain of an ant in [`super::CHAINS_BUCKET`]: the subject its daemon puts [`super::ChainEntry`] on.
 pub fn chain(ant: &UserId) -> String {
-    format!("$KV.{}.{ant}", super::CHAINS_BUCKET)
+    kv(super::CHAINS_BUCKET, ant)
 }
 
 /// The identity record of an ant in [`super::IDENTITIES_BUCKET`]: the subject its daemon creates and updates
 /// [`super::AntIdentity`] on.
 pub fn identity(ant: &UserId) -> String {
-    format!("$KV.{}.{ant}", super::IDENTITIES_BUCKET)
+    kv(super::IDENTITIES_BUCKET, ant)
 }
 
 const REVOKED_GROWTH_PREFIX: &str = "growth.";
@@ -528,79 +633,97 @@ pub fn revoked_growth_key(sense: &super::SenseId) -> String {
 
 /// The subjects on which the revoker preserves the growth of revoked sense identities.
 pub fn all_revoked_growth() -> String {
-    format!("$KV.{}.{REVOKED_GROWTH_PREFIX}*", super::IDENTITIES_BUCKET)
+    kv(super::IDENTITIES_BUCKET, format_args!("{REVOKED_GROWTH_PREFIX}*"))
 }
 
 /// Every ant's shared settings in [`super::IDENTITIES_BUCKET`]: the subjects host credentials put
 /// [`super::SharedSettings`] on ([`super::SharedSettings::key_of`]).
 pub fn all_shared_settings() -> String {
-    format!("$KV.{}.*.settings", super::IDENTITIES_BUCKET)
+    kv(super::IDENTITIES_BUCKET, "*.settings")
 }
 
 /// The incarnation marker of [`super::IDENTITIES_BUCKET`] ([`super::INCARNATION_KEY`]), which host credentials read.
 pub fn identities_incarnation() -> String {
-    format!("$KV.{}.{}", super::IDENTITIES_BUCKET, super::INCARNATION_KEY)
+    kv(super::IDENTITIES_BUCKET, super::INCARNATION_KEY)
 }
 
 /// The entry of a human in [`super::HUMANS_BUCKET`]: the subject a human puts [`super::HumanEntry`] on.
 pub fn human_entry(human: &UserId) -> String {
-    format!("$KV.{}.{human}", super::HUMANS_BUCKET)
+    kv(super::HUMANS_BUCKET, human)
 }
 
 /// The [`super::ReadMarker`] of a human in [`super::READ_BUCKET`]: the subject only that human puts it on.
 pub fn read_marker(human: &UserId) -> String {
-    format!("$KV.{}.{human}", super::READ_BUCKET)
+    kv(super::READ_BUCKET, human)
 }
 
 /// The [`super::ChannelReadMarkers`] of a human in [`super::READ_BUCKET`]: the subject only that human puts them on.
 pub fn channel_reads(human: &UserId) -> String {
-    format!("$KV.{}.{}", super::READ_BUCKET, super::channel_reads_key(human))
+    kv(super::READ_BUCKET, super::channel_reads_key(human))
 }
 
 /// The [`super::NotifyPrefs`] of a human in [`super::NOTIFY_BUCKET`]: the subject only that human puts them on.
 pub fn notify_prefs(human: &UserId) -> String {
-    format!("$KV.{}.{human}", super::NOTIFY_BUCKET)
+    kv(super::NOTIFY_BUCKET, human)
 }
 
 /// The [`super::HeldNotices`] of a human in [`super::NOTIFY_BUCKET`]: the subject only that human's credentials put
 /// them on.
 pub fn notify_held(human: &UserId) -> String {
-    format!("$KV.{}.{}", super::NOTIFY_BUCKET, super::held_key(human))
+    kv(super::NOTIFY_BUCKET, super::held_key(human))
 }
 
 /// Every [`super::Presence`] of a human's devices in [`super::PRESENCE_BUCKET`]: the subjects only that human puts
 /// them on.
 pub fn presence_of(human: &UserId) -> String {
-    format!("$KV.{}.{human}.>", super::PRESENCE_BUCKET)
+    kv(super::PRESENCE_BUCKET, format_args!("{human}.>"))
 }
 
 /// Every entry of a human's devices in [`super::DEVICES_BUCKET`]: the subjects only that human puts its device user
 /// JWTs on.
 pub fn devices_of(human: &UserId) -> String {
-    format!("$KV.{}.{human}.>", super::DEVICES_BUCKET)
+    kv(super::DEVICES_BUCKET, format_args!("{human}.>"))
 }
 
 /// The record of `assistant`'s credentials in [`super::DEVICES_BUCKET`] ([`super::AssistantRecord`]): the subject
 /// only the assistant's credentials put it on.
 pub fn assistant_record(assistant: &UserId) -> String {
-    format!("$KV.{}.{}", super::DEVICES_BUCKET, super::assistant_record_key(assistant))
+    kv(super::DEVICES_BUCKET, super::assistant_record_key(assistant))
 }
 
 /// Every [`super::AssistantRecord`] in [`super::DEVICES_BUCKET`].
 pub fn assistant_records() -> String {
-    format!("$KV.{}.*.{}", super::DEVICES_BUCKET, super::ASSISTANT_RECORD)
+    kv(super::DEVICES_BUCKET, format_args!("*.{}", super::ASSISTANT_RECORD))
 }
 
 /// Every [`super::DeviceRevocation`] in [`super::DEVICES_BUCKET`]: the subjects only the credentials `ants auth revoke`
 /// and `ants auth push` issue put records on.
 pub fn revoked_devices() -> String {
-    format!("$KV.{}.{}.*", super::DEVICES_BUCKET, super::REVOKED_DEVICES)
+    kv(super::DEVICES_BUCKET, format_args!("{}.*", super::REVOKED_DEVICES))
+}
+
+/// The subject of the [`super::Serving`] of `ants channel serve` ([`super::channel_manager_serving_key`]) in the
+/// stream of [`super::WEBHOOKS_BUCKET`].
+pub fn channel_manager_serving() -> String {
+    kv(super::WEBHOOKS_BUCKET, super::channel_manager_serving_key())
+}
+
+/// The subject of the marker of `webhook` ([`super::webhook_marker_key`]) in the stream of
+/// [`super::WEBHOOKS_BUCKET`].
+pub fn webhook_marker(webhook: &UserId) -> String {
+    kv(super::WEBHOOKS_BUCKET, super::webhook_marker_key(webhook))
+}
+
+/// The subject of every key of a conductor's runs in the stream of [`super::TRAIL_RUNS_BUCKET`]: those its
+/// credentials write.
+pub fn trail_runs(conductor: &UserId) -> String {
+    kv(super::TRAIL_RUNS_BUCKET, format_args!("{conductor}.>"))
 }
 
 /// The entry of a channel in [`super::CHANNELS_BUCKET`]: the subject a human, or the channel manager, puts
 /// [`super::ChannelEntry`] on.
 pub fn channel_entry(channel: &ChannelId) -> String {
-    format!("$KV.{}.{channel}", super::CHANNELS_BUCKET)
+    kv(super::CHANNELS_BUCKET, channel)
 }
 
 /// Everything, for `ants watch`.

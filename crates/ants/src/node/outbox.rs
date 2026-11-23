@@ -487,7 +487,7 @@ fn admit_into(config: &mut stream::Config, machine: &Machine, wanted: Vec<Source
 
 /// The configuration of the stream of `bucket`, or `None` while `ants init` has not created it.
 async fn bucket_config(hub: &Context, bucket: &str) -> Result<Option<stream::Config>> {
-    stream_config(hub, &format!("KV_{bucket}")).await
+    stream_config(hub, &subject::kv_stream(bucket)).await
 }
 
 /// The configuration of stream `name`, or `None` while `ants init` has not created it.

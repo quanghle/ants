@@ -16,7 +16,7 @@ use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
     JsDomain, Mark, Reminders, STREAM, THREAD_UNDONE, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes,
     ThreadSummary, ThreadTitle, UserId, assisted_marks_key, assisted_reminders_key, done_key, marks_key, reminders_key,
-    summary_key, title_key,
+    subject, summary_key, title_key,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -41,12 +41,12 @@ const PRUNED_MARKER: Duration = Duration::from_secs(1);
 
 /// The direct get subject of every key naming `human` second, which only `human`'s credentials may publish.
 fn own_right(human: &UserId) -> String {
-    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.*.{human}")
+    subject::kv_get(THREADS_BUCKET, format_args!("*.{human}"))
 }
 
 /// The direct get subject of every title.
 pub fn titles_right() -> String {
-    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.title.*")
+    subject::kv_get(THREADS_BUCKET, "title.*")
 }
 
 /// The titles, TL;DRs, done states and the marks of the CLI's human, unless its credentials are no human's: a request

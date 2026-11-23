@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use ants_daemon::bus::relayed::{self, Read};
 use ants_daemon::records::direct_kv::{DirectKv, Lookup};
-use ants_proto::{DeviceId, Following, JsDomain, PRESENCE_BUCKET, PRESENCE_HEARTBEAT, Presence, UserId, presence_key};
+use ants_proto::{
+    DeviceId, Following, JsDomain, PRESENCE_BUCKET, PRESENCE_HEARTBEAT, Presence, UserId, presence_key, subject,
+};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream::stream::ConsumerErrorKind;
 use async_nats::jetstream::{self, ErrorCode, consumer};
@@ -111,19 +113,18 @@ impl Present {
 /// What credentials need to read every human's presence ([`online`]): a human's and an assistant's have it, an ant's
 /// not.
 pub fn online_right() -> String {
-    format!("$JS.API.CONSUMER.CREATE.KV_{PRESENCE_BUCKET}")
+    format!("$JS.API.CONSUMER.CREATE.{}", subject::kv_stream(PRESENCE_BUCKET))
 }
 
 /// The humans with a device following anything now, from the last entry of every key of the bucket, read through an
 /// ordered consumer: deleted keys are gone, a presence not renewed expires with the bucket's max age, and a key whose
 /// last message a stream relayed ([`relayed::stored_relayed`]) counts as gone. Nobody when the bucket is missing.
 pub async fn online(js: &jetstream::Context) -> Result<HashSet<UserId>> {
-    let stream = js.get_stream_no_info(format!("KV_{PRESENCE_BUCKET}")).await.context("naming the presences")?;
-    let prefix = format!("$KV.{PRESENCE_BUCKET}.");
+    let stream = js.get_stream_no_info(subject::kv_stream(PRESENCE_BUCKET)).await.context("naming the presences")?;
     let consumer = match stream
         .create_consumer(consumer::push::OrderedConfig {
             deliver_subject: js.client().new_inbox(),
-            filter_subject: format!("{prefix}>"),
+            filter_subject: subject::kv_all(PRESENCE_BUCKET),
             deliver_policy: consumer::DeliverPolicy::LastPerSubject,
             replay_policy: consumer::ReplayPolicy::Instant,
             ..Default::default()
@@ -152,7 +153,7 @@ pub async fn online(js: &jetstream::Context) -> Result<HashSet<UserId>> {
             continue;
         }
         let deleted = msg.headers.as_ref().and_then(|h| h.get("KV-Operation")).is_some_and(|op| op.as_str() != "PUT");
-        let human = msg.subject.strip_prefix(&prefix).and_then(|key| key.split('.').next()?.parse().ok());
+        let human = subject::kv_key(PRESENCE_BUCKET, &msg.subject).and_then(|key| key.split('.').next()?.parse().ok());
         if let (false, Some(human)) = (deleted, human) {
             online.insert(human);
         }

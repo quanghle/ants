@@ -64,8 +64,10 @@ impl Permissions {
         publish.retain(|s| !reads_through(s));
         as_human.retain(|s| !reads_through(s));
         let devices_only = [subject::devices_of(assistant), subject::presence_of(assistant)];
-        let own_marks =
-            [format!("$KV.{THREADS_BUCKET}.*.{assistant}"), format!("$KV.{THREADS_BUCKET}.*.{assistant}.*")];
+        let own_marks = [
+            subject::kv(THREADS_BUCKET, format_args!("*.{assistant}")),
+            subject::kv(THREADS_BUCKET, format_args!("*.{assistant}.*")),
+        ];
         let notify = notify_prefs_rights(assistant);
         let unattributed = [
             // Acts for its human that wait for the human's confirmation, which these subjects cannot carry.
@@ -77,21 +79,20 @@ impl Permissions {
             subject::ALL_REACTIONS_REPLIES.to_owned(),
             subject::ALL_RENEW_REQUESTS.to_owned(),
             subject::DEAD_ALL.to_owned(),
-            format!("$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
-            format!("$KV.{OWNERS_BUCKET}.*.*"),
+            subject::kv(ATTEMPTS_BUCKET, "*.msg.*"),
+            subject::kv(OWNERS_BUCKET, "*.*"),
             "ants.out.owners.*.*".to_owned(),
-            format!("$KV.{CHANNELS_BUCKET}.>"),
-            format!("$KV.{IDENTITIES_BUCKET}.*"),
-            format!("$KV.{TRAIL_TIPS_BUCKET}.>"),
-            format!("$KV.{TRAIL_RATINGS_BUCKET}.>"),
-            format!("$KV.{TRAILS_BUCKET}.*"),
+            subject::kv_all(CHANNELS_BUCKET),
+            subject::kv(IDENTITIES_BUCKET, "*"),
+            subject::kv_all(TRAIL_TIPS_BUCKET),
+            subject::kv_all(TRAIL_RATINGS_BUCKET),
+            subject::kv(TRAILS_BUCKET, "*"),
             format!("$JS.API.STREAM.INFO.{OUTBOX_STREAM}"),
             format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
             format!("$JS.API.STREAM.MSG.GET.{INTAKE_STREAM}"),
         ];
-        let humans = format!("$KV.{HUMANS_BUCKET}.");
         let withheld = |s: &str| {
-            s.starts_with(&humans)
+            subject::kv_key(HUMANS_BUCKET, s).is_some()
                 || [
                     "$JS.API.STREAM.CREATE.",
                     "$JS.API.STREAM.UPDATE.",
@@ -122,19 +123,19 @@ impl Permissions {
         publish.extend([
             subject::cancels_by(assistant),
             subject::queues_by(assistant),
-            format!("$KV.{OWNERS_BUCKET}.*.*.{human}.{assistant}"),
+            subject::kv(OWNERS_BUCKET, format_args!("*.*.{human}.{assistant}")),
         ]);
         publish.extend(gets_only(&read_marker_rights(human)));
         publish.extend(gets_only(&thread_rights(human)));
         // The pins, archives and snoozes it sets for its human, under keys naming it.
         publish.extend(
             [assisted_marks_key(human, assistant), assisted_reminders_key(human, assistant)]
-                .map(|k| format!("$KV.{THREADS_BUCKET}.{k}")),
+                .map(|k| subject::kv(THREADS_BUCKET, &k)),
         );
         let attempts = kv_stream(ATTEMPTS_BUCKET);
-        publish.push(format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.{human}.unserved.*"));
+        publish.push(subject::kv_get(ATTEMPTS_BUCKET, format_args!("{human}.unserved.*")));
         // The withdrawals it records for its human while no daemon of the ant answers, under keys naming it.
-        let withdrawals = format!("$KV.{ATTEMPTS_BUCKET}.*.msg.*.{assistant}");
+        let withdrawals = subject::kv(ATTEMPTS_BUCKET, format_args!("*.msg.*.{assistant}"));
         publish.extend([format!("$JS.API.DIRECT.GET.{attempts}.{withdrawals}"), withdrawals]);
         let mut seen = std::collections::HashSet::new();
         publish.retain(|s| seen.insert(s.clone()));

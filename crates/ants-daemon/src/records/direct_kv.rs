@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ants_client::requests::{DIRECT_BATCH, Position, Stored};
-use ants_proto::{JsDomain, UserId};
+use ants_proto::{JsDomain, UserId, subject};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::context::{PublishError, PublishErrorKind};
 use async_nats::jetstream::message::StreamMessage;
@@ -84,7 +84,8 @@ impl DirectKv {
     /// The bucket `bucket`, without a request: whether it exists shows on the first read. `js_domain` is the domain `js`
     /// was made for ([`crate::bus::jetstream`]).
     pub async fn new(js: &jetstream::Context, js_domain: Option<&JsDomain>, bucket: &str) -> Result<Self> {
-        let stream = js.get_stream_no_info(format!("KV_{bucket}")).await.with_context(|| format!("naming {bucket}"))?;
+        let stream =
+            js.get_stream_no_info(subject::kv_stream(bucket)).await.with_context(|| format!("naming {bucket}"))?;
         let api = js_domain.map_or_default(|domain| format!("$JS.{domain}.API."));
         Ok(Self { js: js.clone(), stream, bucket: bucket.to_owned(), api, whole: false, past: None })
     }
@@ -213,7 +214,7 @@ impl DirectKv {
 
     /// [`DirectKv::last_put`] through the consumer `reader`, created filtering `key` alone and deleted after.
     async fn last_put_through(&self, reader: &str, key: &str) -> Result<Option<Put>> {
-        let stream = format!("KV_{}", self.bucket);
+        let stream = subject::kv_stream(&self.bucket);
         // A consumer left by an interrupted read filters another key; as a rule none is left to delete.
         let _ = self.js.delete_consumer_from_stream(reader, &stream).await;
         let config = consumer::pull::Config {
@@ -262,7 +263,7 @@ impl DirectKv {
             return self.stream.direct_get_last_for_subject(self.subject(key)).await;
         }
         let request = serde_json::json!({ "last_by_subj": self.subject(key) }).to_string();
-        let subject = format!("{}DIRECT.GET.KV_{}", self.request_api(), self.bucket);
+        let subject = format!("{}DIRECT.GET.{}", self.request_api(), subject::kv_stream(&self.bucket));
         #[expect(clippy::disallowed_methods, reason = "a direct get's answer, which the stream sends")]
         let msg = match self.js.client().request(subject, request.into()).await {
             Ok(msg) => msg,
@@ -297,7 +298,7 @@ impl DirectKv {
         let Ok(Ok(jetstream::response::Response::Ok(listed))) = tokio::time::timeout(LIST_WAIT, list).await else {
             return None;
         };
-        let name = format!("KV_{}", self.bucket);
+        let name = subject::kv_stream(&self.bucket);
         Some(listed.streams.unwrap_or_default().iter().any(|info| info.config.name == name))
     }
 
@@ -509,7 +510,7 @@ impl DirectKv {
     /// among them: batched direct gets naming no subject ([`DirectKv::whole`]).
     async fn each_stored(&self, filter: &str, mut each: impl FnMut(Got)) -> Result<()> {
         let bucket = &self.bucket;
-        let mut gets = Gets::open(&self.js, &format!("KV_{bucket}"), self.subject(filter), Position::all()).await?;
+        let mut gets = Gets::open(&self.js, &subject::kv_stream(bucket), self.subject(filter), Position::all()).await?;
         loop {
             match gets.next().await {
                 Ok(Got::End) => return Ok(()),
@@ -531,7 +532,7 @@ impl DirectKv {
     }
 
     fn subject(&self, key: &str) -> String {
-        format!("$KV.{}.{key}", self.bucket)
+        subject::kv(&self.bucket, key)
     }
 
     fn put_subject(&self, key: &str) -> String {

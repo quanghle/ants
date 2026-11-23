@@ -75,13 +75,13 @@ async fn a_webhook_posts_as_itself_to_its_destinations_only_and_reads_no_message
 
     // Its marker, which it empties at will, says only the version it runs. Ants read nothing of the bucket, put no
     // marker, and never send on a webhook's subjects: an ant never passes for a webhook either.
-    raw.publish(ants_proto::webhook_marker_subject(&hook), "".into()).await.unwrap();
+    raw.publish(ants_proto::subject::webhook_marker(&hook), "".into()).await.unwrap();
     raw.flush().await.unwrap();
     let (a_raw, mut errors) = server.watched(&dev_a).await;
     for denied in [
         "$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.github.x".to_owned(),
-        format!("$JS.API.DIRECT.GET.KV_ants_webhooks.{}", ants_proto::webhook_marker_subject(&hook)),
-        ants_proto::webhook_marker_subject(&dev_a),
+        format!("$JS.API.DIRECT.GET.KV_ants_webhooks.{}", ants_proto::subject::webhook_marker(&hook)),
+        ants_proto::subject::webhook_marker(&dev_a),
         subject::webhook_inbox(&p("dev-b"), &dev_a),
         subject::webhook_chan(&ops, &dev_a),
     ] {

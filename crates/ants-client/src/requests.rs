@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use ants_proto::{
     Envelope, HUMANS_BUCKET, JsDomain, OWNERS_BUCKET, READ_BUCKET, ReadMarker, STREAM, StatusEvent, ThreadId, UserId,
-    assistant_grant_key, owner_key, owner_record_id,
+    assistant_grant_key, owner_key, owner_record_id, subject,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -86,7 +86,7 @@ pub fn api(domain: Option<&JsDomain>) -> String {
 /// The subject a put under `key` of `bucket` goes to: through the JetStream API of the hub's domain, if it has one.
 fn put_subject(domain: Option<&JsDomain>, bucket: &str, key: &str) -> String {
     let api = domain.map_or_default(|domain| format!("$JS.{domain}.API."));
-    format!("{api}$KV.{bucket}.{key}")
+    format!("{api}{}", subject::kv(bucket, key))
 }
 
 /// A batched direct get: up to `batch` messages on `next_by_subj`, the first at or after `seq`, or stored at or after
@@ -280,7 +280,10 @@ pub fn owner_recorded(answer: &Message) -> Result<(), Error> {
 
 /// The direct get of the last message under `key` of `bucket`.
 pub fn kv_get(domain: Option<&JsDomain>, bucket: &str, key: &str) -> Message {
-    Message::new(format!("{}DIRECT.GET.KV_{bucket}.$KV.{bucket}.{key}", api(domain)), Vec::new())
+    Message::new(
+        format!("{}DIRECT.GET.{}.{}", api(domain), subject::kv_stream(bucket), subject::kv(bucket, key)),
+        Vec::new(),
+    )
 }
 
 /// A bucket's entry: its value, none for a key with none or deleted, and its revision, 0 for a key never written.

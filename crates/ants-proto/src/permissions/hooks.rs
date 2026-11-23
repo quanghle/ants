@@ -41,7 +41,7 @@ impl Permissions {
     pub fn for_webhook(webhook: &UserId, destinations: &[Destination]) -> Self {
         let seen = kv_stream(WEBHOOKS_BUCKET);
         let channels = kv_stream(CHANNELS_BUCKET);
-        let own = format!("$KV.{WEBHOOKS_BUCKET}.{webhook}.>");
+        let own = subject::kv(WEBHOOKS_BUCKET, format_args!("{webhook}.>"));
         let mut publish: Vec<String> = Vec::new();
         for destination in destinations {
             let subject = destination.subject(webhook);
@@ -65,7 +65,7 @@ impl Permissions {
             Destination::Channel(_) => None,
         });
         // Recording the owner of the threads it starts in an ant's inbox, under that ant's keys, where no record is.
-        publish.extend(ants.map(|ant| format!("$KV.{OWNERS_BUCKET}.*.{ant}")));
+        publish.extend(ants.map(|ant| subject::kv(OWNERS_BUCKET, format_args!("*.{ant}"))));
         publish.push(subject::renew(webhook.as_str()));
         publish.dedup();
         Self {

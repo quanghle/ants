@@ -110,12 +110,11 @@ pub async fn load(js: &jetstream::Context, messages: &[Uuid]) -> Result<Reaction
     if messages.is_empty() {
         return Ok(Reactions::new());
     }
-    let stream = js.get_stream_no_info(format!("KV_{REACTIONS_BUCKET}")).await.context("naming the reactions")?;
-    let prefix = format!("$KV.{REACTIONS_BUCKET}.");
+    let stream = js.get_stream_no_info(subject::kv_stream(REACTIONS_BUCKET)).await.context("naming the reactions")?;
     let filter_subjects = if messages.len() <= MAX_FILTERS {
-        messages.iter().map(|m| format!("{prefix}{}", reactions_to(m))).collect()
+        messages.iter().map(|m| subject::kv(REACTIONS_BUCKET, reactions_to(m))).collect()
     } else {
-        vec![format!("{prefix}>")]
+        vec![subject::kv_all(REACTIONS_BUCKET)]
     };
     let consumer = match stream
         .create_consumer(consumer::push::OrderedConfig {
@@ -190,7 +189,7 @@ impl Change {
         if relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, relayed::Read::Consumer) {
             return None;
         }
-        let key = msg.subject.strip_prefix(&format!("$KV.{REACTIONS_BUCKET}."))?;
+        let key = subject::kv_key(REACTIONS_BUCKET, &msg.subject)?;
         let (by, message, reaction) = parse_reaction_key(key)?;
         let removed = msg.headers.as_ref().and_then(|h| h.get("KV-Operation")).is_some_and(|op| op.as_str() != "PUT");
         Some(Self { message, by, reaction, removed, acting: Acting::Own })
@@ -199,11 +198,11 @@ impl Change {
 
 /// Every reaction added or removed from now on, while there is a bucket.
 pub async fn watch(js: &jetstream::Context) -> Result<impl Stream<Item = Change> + use<>> {
-    let stream = js.get_stream_no_info(format!("KV_{REACTIONS_BUCKET}")).await.context("naming the reactions")?;
+    let stream = js.get_stream_no_info(subject::kv_stream(REACTIONS_BUCKET)).await.context("naming the reactions")?;
     let consumer = stream
         .create_consumer(consumer::push::OrderedConfig {
             deliver_subject: js.client().new_inbox(),
-            filter_subject: format!("$KV.{REACTIONS_BUCKET}.>"),
+            filter_subject: subject::kv_all(REACTIONS_BUCKET),
             deliver_policy: consumer::DeliverPolicy::New,
             replay_policy: consumer::ReplayPolicy::Instant,
             ..Default::default()

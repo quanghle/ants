@@ -7,7 +7,7 @@ use std::path::Path;
 
 use ants_proto::{
     MAX_TIP_TEXT, Ranked, Retirement, TRAIL_TIPS_BUCKET, TipBoard, TipId, TipRetired, TipStatus, TipVote, TrailName,
-    TrailTip, UserId, script_sha256,
+    TrailTip, UserId, script_sha256, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -25,7 +25,7 @@ const KEY_WIDTH: usize = 40;
 /// The tips of the trail `name` with their votes, and the [`script_sha256`] of the script the colony saved under that
 /// name, against which a tip is of an older script; none when the colony saves no such trail.
 pub(crate) async fn read(js: &jetstream::Context, name: &TrailName) -> Result<(TipBoard, Option<String>)> {
-    let entries = latest_in(js, TRAIL_TIPS_BUCKET, &format!("$KV.{TRAIL_TIPS_BUCKET}.{name}.>")).await?;
+    let entries = latest_in(js, TRAIL_TIPS_BUCKET, &subject::kv(TRAIL_TIPS_BUCKET, format_args!("{name}.>"))).await?;
     let script = super::saved::get(js, name).await?.map(|saved| script_sha256(&saved.script));
     Ok((TipBoard::new(name.clone(), entries), script))
 }
@@ -231,10 +231,10 @@ pub(crate) fn retired(tip: &TrailTip, now: DateTime<Utc>) -> String {
 /// Purge the tips of the trail `name` and their votes: how many entries went.
 pub(super) async fn purge(js: &jetstream::Context, name: &TrailName) -> Result<u64> {
     let stream = js
-        .get_stream(format!("KV_{TRAIL_TIPS_BUCKET}"))
+        .get_stream(subject::kv_stream(TRAIL_TIPS_BUCKET))
         .await
         .context("opening ants_trail_tips (`ants init` creates it)")?;
-    super::saved::purge_keys(&stream, &format!("$KV.{TRAIL_TIPS_BUCKET}.{name}.>")).await
+    super::saved::purge_keys(&stream, &subject::kv(TRAIL_TIPS_BUCKET, format_args!("{name}.>"))).await
 }
 
 /// What `ants trail rm` adds to its line for the `purged` entries of tips and votes it removed with the trail.

@@ -12,7 +12,7 @@ use crate::{
     HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, READ_BUCKET, Role, SESSIONS_BUCKET,
     STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET,
     TRAILS_BUCKET, UserId, chan_consumer, chan_reader, dead_reader, done_reader, inbox_consumer, inbox_prefix,
-    notes_consumer, sent_reader, spare_readers, subject, trail_runs_reader, trail_runs_subject,
+    notes_consumer, sent_reader, spare_readers, subject, trail_runs_reader,
 };
 #[cfg(doc)]
 use crate::{
@@ -118,7 +118,7 @@ impl Permissions {
     /// `ants signer` to save a trail as its own or remove one it saved ([`crate::SaveTrailRequest`], on
     /// [`subject::save_trail`]), which writes only new trails and replaces or removes only those the ant saved
     /// ([`crate::Saver`], [`Permissions::for_trail_keeper`]). An ant gets, puts and deletes only the records of the trail runs it conducts
-    /// ([`trail_runs_subject`]), and reads one back past messages a stream relayed onto it through its own consumer
+    /// ([`subject::trail_runs`]), and reads one back past messages a stream relayed onto it through its own consumer
     /// ([`trail_runs_reader`]); a human reads every run's and writes none (`trail_rights`), but asks an ant's daemon to
     /// start, stop or resume the runs it conducts ([`TrailRequest`], on [`subject::trail`], which the ant alone hears
     /// and answers on [`subject::trailed`]). Every ant and human reads the trails' tips ([`TRAIL_TIPS_BUCKET`]) by
@@ -246,9 +246,9 @@ impl Permissions {
         let chan_read = chan_reader(user);
         let sessions = kv_stream(SESSIONS_BUCKET);
         let attempts = kv_stream(ATTEMPTS_BUCKET);
-        let own_keys = format!("$KV.{SESSIONS_BUCKET}.{user}.>");
-        let own_attempts = format!("$KV.{ATTEMPTS_BUCKET}.{user}.>");
-        let own_runs = trail_runs_subject(user);
+        let own_keys = subject::kv(SESSIONS_BUCKET, format_args!("{user}.>"));
+        let own_attempts = subject::kv(ATTEMPTS_BUCKET, format_args!("{user}.>"));
+        let own_runs = subject::trail_runs(user);
         let (runs, runs_read) = (kv_stream(TRAIL_RUNS_BUCKET), trail_runs_reader(user));
         let dead_read = dead_reader(user);
         let sent_read = sent_reader(user);
@@ -257,11 +257,11 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{sessions}.{own_keys}"),
             own_keys,
             // Get of every ant's daily spend, which pool caps add up.
-            format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.day.*"),
+            subject::kv_get(SESSIONS_BUCKET, "*.day.*"),
             // The account's JetStream usage, and the shared notes of the storage warnings given.
             "$JS.API.INFO".to_owned(),
-            format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.{STORAGE_WARNING_PREFIX}.*.*.warned"),
-            format!("$KV.{SESSIONS_BUCKET}.{STORAGE_WARNING_PREFIX}.*.*.warned"),
+            subject::kv_get(SESSIONS_BUCKET, format_args!("{STORAGE_WARNING_PREFIX}.*.*.warned")),
+            subject::kv(SESSIONS_BUCKET, format_args!("{STORAGE_WARNING_PREFIX}.*.*.warned")),
             // Get, put and delete of the markers of its own attempts.
             format!("$JS.API.DIRECT.GET.{attempts}.{own_attempts}"),
             own_attempts,
@@ -274,9 +274,9 @@ impl Permissions {
             format!("$JS.API.CONSUMER.DELETE.{runs}.{runs_read}"),
             own_runs,
             // Put of its own tips on trails and its own votes on tips.
-            format!("$KV.{TRAIL_TIPS_BUCKET}.*.{user}.>"),
+            subject::kv(TRAIL_TIPS_BUCKET, format_args!("*.{user}.>")),
             // Put of its own ratings of the trails its runs took.
-            format!("$KV.{TRAIL_RATINGS_BUCKET}.*.{user}.*"),
+            subject::kv(TRAIL_RATINGS_BUCKET, format_args!("*.{user}.*")),
             // Exactly its requests subject: an ant cannot answer its own requests one level below.
             subject::approvals(user),
             // Reading the decision stored on one of its requests: a direct get naming the subject in its own
@@ -299,7 +299,7 @@ impl Permissions {
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{sent_read}"),
             format!("$JS.API.CONSUMER.DELETE.{STREAM}.{sent_read}"),
             // Get of the mark of every message to an ant, to tell whether those it sent still wait.
-            format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
+            subject::kv_get(ATTEMPTS_BUCKET, "*.msg.*"),
             subject::status_of(user),
             subject::cancelled_of(user),
             subject::queued(user),
@@ -313,7 +313,7 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{}", kv_stream(IDENTITIES_BUCKET)),
             subject::identity(user),
             // Put of the links it passed on, and the same in the leaf's outbox.
-            format!("$KV.{LINKS_BUCKET}.{user}.>"),
+            subject::kv(LINKS_BUCKET, format_args!("{user}.>")),
             format!("ants.out.links.{user}.>"),
             subject::renew(user.as_str()),
             // Asking the signer for an ant added from a template, should it manage one.
@@ -328,22 +328,22 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(DEVICES_BUCKET), subject::revoked_devices()),
             // Get of a thread's title, to title the pull request of the thread's branch: one key at a time, which
             // it must know, as it gets no stream info listing them.
-            format!("$JS.API.DIRECT.GET.{}.$KV.{THREADS_BUCKET}.title.*", kv_stream(THREADS_BUCKET)),
+            subject::kv_get(THREADS_BUCKET, "title.*"),
             // Get of what tells whether the human an escalation reached heeded it, to stop reminding it: a thread's
             // done state, a human's own reminders entry with its snoozes (not those its assistant set, a key deeper),
             // its inbox read marker (not its channel reads) and the notifications it holds back (not those held). One
             // key at a time, as for titles.
-            format!("$JS.API.DIRECT.GET.{}.$KV.{THREADS_BUCKET}.done.*", kv_stream(THREADS_BUCKET)),
-            format!("$JS.API.DIRECT.GET.{}.$KV.{THREADS_BUCKET}.reminders.*", kv_stream(THREADS_BUCKET)),
-            format!("$JS.API.DIRECT.GET.{}.$KV.{READ_BUCKET}.*", kv_stream(READ_BUCKET)),
-            format!("$JS.API.DIRECT.GET.{}.$KV.{NOTIFY_BUCKET}.*", kv_stream(NOTIFY_BUCKET)),
+            subject::kv_get(THREADS_BUCKET, "done.*"),
+            subject::kv_get(THREADS_BUCKET, "reminders.*"),
+            subject::kv_get(READ_BUCKET, "*"),
+            subject::kv_get(NOTIFY_BUCKET, "*"),
         ]);
         // Hearing of the threads marked done, to tell its provider: its own durable consumer, its filter pinned to
         // the markings of threads done, which so lists the threads marked done, as the notes it reads list the threads
         // noted.
         let (threads, done) = (kv_stream(THREADS_BUCKET), done_reader(user));
         publish.extend([
-            format!("$JS.API.CONSUMER.CREATE.{threads}.{done}.$KV.{THREADS_BUCKET}.done.*.*"),
+            format!("$JS.API.CONSUMER.CREATE.{threads}.{done}.{}", subject::kv(THREADS_BUCKET, "done.*.*")),
             format!("$JS.API.CONSUMER.MSG.NEXT.{threads}.{done}"),
         ]);
         publish.extend(ack_subjects(&threads, &done));

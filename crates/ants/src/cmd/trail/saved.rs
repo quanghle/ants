@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use ants_proto::{RatingSummary, RunId, SavedTrail, Saver, TRAILS_BUCKET, TrailName, UserId, Uuid};
+use ants_proto::{RatingSummary, RunId, SavedTrail, Saver, TRAILS_BUCKET, TrailName, UserId, Uuid, subject};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -119,13 +119,13 @@ pub(super) async fn put(js: &jetstream::Context, trail: &SavedTrail) -> Result<O
 
 /// The colony's trail `name`.
 pub(super) async fn get(js: &jetstream::Context, name: &TrailName) -> Result<Option<SavedTrail>> {
-    let found = latest_in(js, TRAILS_BUCKET, &format!("$KV.{TRAILS_BUCKET}.{name}")).await?;
+    let found = latest_in(js, TRAILS_BUCKET, &subject::kv(TRAILS_BUCKET, name)).await?;
     Ok(found.iter().find_map(|(key, payload)| parse(key, payload)))
 }
 
 /// The colony's trails, by name.
 pub(super) async fn colony(js: &jetstream::Context) -> Result<Vec<SavedTrail>> {
-    let found = latest_in(js, TRAILS_BUCKET, &format!("$KV.{TRAILS_BUCKET}.*")).await?;
+    let found = latest_in(js, TRAILS_BUCKET, &subject::kv(TRAILS_BUCKET, "*")).await?;
     let mut trails: Vec<SavedTrail> = found.iter().filter_map(|(key, payload)| parse(key, payload)).collect();
     trails.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(trails)
@@ -153,7 +153,7 @@ pub(super) struct Purged {
 /// the refusal names. The trail goes first, so that no tip left or rating put while it is removed outlives the purge,
 /// as tips are left and ratings put only of saved trails; removing it again purges what a failed purge left.
 pub(super) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailName) -> Result<Purged> {
-    let saved = !latest_in(js, TRAILS_BUCKET, &format!("$KV.{TRAILS_BUCKET}.{name}")).await?.is_empty();
+    let saved = !latest_in(js, TRAILS_BUCKET, &subject::kv(TRAILS_BUCKET, name)).await?.is_empty();
     if saved {
         let kv = js.get_key_value(TRAILS_BUCKET).await.context("opening ants_trails (`ants init` creates it)")?;
         kv.delete(name.as_str()).await.with_context(|| format!("removing trail {name}"))?;

@@ -40,14 +40,14 @@ impl Permissions {
         let entry = subject::human_entry(human);
         let publish = vec![
             subject::inbox_from(human),
-            format!("$KV.{OWNERS_BUCKET}.*.*"),
+            subject::kv(OWNERS_BUCKET, "*.*"),
             format!("$JS.API.DIRECT.GET.{STREAM}"),
             format!("$JS.API.DIRECT.GET.{read}.{marker}"),
             marker,
             subject::presence_of(human),
             format!("$JS.API.DIRECT.GET.{humans}.{entry}"),
             entry,
-            format!("$JS.API.DIRECT.GET.{humans}.$KV.{HUMANS_BUCKET}.{}", assistant_grant_key(human)),
+            subject::kv_get(HUMANS_BUCKET, assistant_grant_key(human)),
             subject::renew(human.as_str()),
         ];
         let subscribe = vec![

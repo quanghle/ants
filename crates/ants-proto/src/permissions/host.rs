@@ -50,7 +50,7 @@ impl Permissions {
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::admin_orders(machine)),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
-            format!("$JS.API.DIRECT.GET.{}.$KV.{COLONY_BUCKET}.*", kv_stream(COLONY_BUCKET)),
+            subject::kv_get(COLONY_BUCKET, "*"),
             subject::ALL_ENROLL_REQUESTS.to_owned(),
             format!("$JS.API.STREAM.CREATE.{SENSE_STREAM}"),
             subject::ALL_SENSE.to_owned(),

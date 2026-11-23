@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ants_daemon::records::reactions::{self, Change};
-use ants_proto::{REACTIONS_BUCKET, UserId, Uuid};
+use ants_proto::{REACTIONS_BUCKET, UserId, Uuid, subject};
 use anyhow::Result;
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt as _};
@@ -27,7 +27,7 @@ pub async fn changes(
     behalf: &Arc<Checker>,
 ) -> BoxStream<'static, Change> {
     let none = || futures::stream::pending().boxed();
-    if !nats.rights.may_publish(&format!("$JS.API.CONSUMER.CREATE.KV_{REACTIONS_BUCKET}")) {
+    if !nats.rights.may_publish(&format!("$JS.API.CONSUMER.CREATE.{}", subject::kv_stream(REACTIONS_BUCKET))) {
         return none();
     }
     match reactions::watch(js).await {

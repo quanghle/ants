@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ants_proto::{
     CallAnswer, JournalEntry, PendingCall, RunState, TRAIL_RUNS_BUCKET, TrailFunction, TrailRun, TrailSession, Uuid,
-    trail_run_key,
+    subject, trail_run_key,
 };
 use anyhow::{Result, anyhow};
 use async_nats::jetstream;
@@ -151,7 +151,7 @@ impl Records for Bucket<'_> {
 }
 
 async fn read(js: &jetstream::Context, key: &str, seqs: &mut (u64, u64)) -> Result<Read> {
-    let header_filter = format!("$KV.{TRAIL_RUNS_BUCKET}.{key}");
+    let header_filter = subject::kv(TRAIL_RUNS_BUCKET, key);
     let (headers, next) = latest_after(js, TRAIL_RUNS_BUCKET, &header_filter, seqs.0).await?;
     seqs.0 = next;
     let (entries, next) = latest_after(js, TRAIL_RUNS_BUCKET, &format!("{header_filter}.>"), seqs.1).await?;

@@ -46,7 +46,7 @@ pub async fn list<I>(stream: &stream::Stream<I>) -> Result<Vec<(u64, DeadLetter)
 /// The dead letter at stream sequence `seq`.
 pub async fn get<I>(stream: &stream::Stream<I>, seq: u64) -> Result<DeadLetter> {
     let msg = stream.get_raw_message(seq).await.with_context(|| format!("reading message {seq}"))?;
-    if !msg.subject.starts_with("ants.dead.") {
+    if ants_proto::subject::parse_dead(&msg.subject).is_none() {
         bail!("message {seq} is on {}, not a dead letter", msg.subject);
     }
     letter(&msg.subject, Some(&msg.headers), &msg.payload).with_context(|| format!("dead letter {seq}"))

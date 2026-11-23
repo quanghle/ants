@@ -187,8 +187,8 @@ impl Parser {
                 ..entry(Kind::Note, post.thread_id)
             });
         }
-        if let Some(rest) = subject.strip_prefix("ants.approvals.") {
-            if rest.contains('.') {
+        if let Some((_, request)) = subject::parse_approvals(subject) {
+            if request.is_some() {
                 let d: ApprovalDecision = serde_json::from_slice(payload).ok()?;
                 let thread = self.requests.get(&(d.ant.clone(), d.request_id))?.clone();
                 let forged = d.subject() != subject;
@@ -205,7 +205,7 @@ impl Parser {
             let text = format!("{}: {}", r.tool.kind, r.tool.title);
             return Some(Entry { from: Some(r.ant), note, text, forged, ..entry(Kind::Approval, r.thread_id) });
         }
-        if let Some(ant) = subject.strip_prefix("ants.dead.") {
+        if let Some(ant) = subject::parse_dead(subject) {
             let d: DeadLetter = serde_json::from_slice(payload).ok()?;
             let forged = d.ant.as_str() != ant;
             let note = Some(format!("after {} deliveries: {}", d.deliveries, d.error));

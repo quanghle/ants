@@ -7,6 +7,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::subject::kv_stream;
+
 mod assistant;
 mod domain;
 mod enrollment;
@@ -21,11 +23,6 @@ mod web;
 pub use hooks::Destination;
 pub use leaf::LeafRole;
 pub use web::{WEB_TAG, is_web};
-
-/// JetStream stream backing a KV bucket.
-fn kv_stream(bucket: &str) -> String {
-    format!("KV_{bucket}")
-}
 
 /// Whether the permission subject `pattern` allows publishing `subject`, a permission subject too: token by token, `*`
 /// standing for any one token and `>` for the rest.

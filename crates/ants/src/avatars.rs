@@ -10,7 +10,7 @@ use ants_daemon::config::Theme as ThemeSetting;
 use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{
     AntIdentity, Avatar, Frame, IDENTITIES_BUCKET, INCARNATION_KEY, JsDomain, Palette, Rgb, SeedSource, Stage, Theme,
-    UserId, hue_named,
+    UserId, hue_named, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -25,7 +25,7 @@ const ATTEMPTS: usize = 5;
 
 /// Every ant's identity record, read with a human's credentials by direct gets of the bucket's stream.
 pub async fn read(js: &jetstream::Context) -> Result<Identities> {
-    let filter = format!("$KV.{IDENTITIES_BUCKET}.*");
+    let filter = subject::kv(IDENTITIES_BUCKET, "*");
     let mut identities = Identities::new();
     for (key, payload) in crate::machines::latest_in(js, IDENTITIES_BUCKET, &filter).await? {
         if key == INCARNATION_KEY {

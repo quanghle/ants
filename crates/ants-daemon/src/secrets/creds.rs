@@ -531,7 +531,7 @@ fn kind(name: &str, publish: &[String], subscribe: &[String], leaf_only: bool) -
             let user: UserId = user;
             if has_kv(&subject::colony(&user)) {
                 ants.push(user);
-            } else if has_kv(&format!("$KV.{WEBHOOKS_BUCKET}.{user}.>")) {
+            } else if has_kv(&subject::kv(WEBHOOKS_BUCKET, format_args!("{user}.>"))) {
                 webhooks.push(user);
             } else {
                 humans.push(user);

@@ -15,7 +15,7 @@ use ants_daemon::profile::identity;
 use ants_daemon::secrets::creds::{Finding, Kind};
 use ants_proto::{
     DEVICES_BUCKET, DeviceId, DeviceRevocation, ENROLL_INBOX, IDENTITIES_BUCKET, JsDomain, UserId, device_entry_key,
-    revoked_device_key,
+    revoked_device_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::stream::DirectGetErrorKind;
@@ -76,8 +76,8 @@ async fn ensure(js: &jetstream::Context) -> Result<kv::Store> {
 /// direct get then. Returns whether it put it.
 pub async fn publish(js: &jetstream::Context, own: &Own) -> Result<bool> {
     let key = device_entry_key(&own.human, &own.device);
-    let bucket = js.get_stream_no_info(format!("KV_{DEVICES_BUCKET}")).await?;
-    match bucket.direct_get_last_for_subject(format!("$KV.{DEVICES_BUCKET}.{key}")).await {
+    let bucket = js.get_stream_no_info(subject::kv_stream(DEVICES_BUCKET)).await?;
+    match bucket.direct_get_last_for_subject(subject::kv(DEVICES_BUCKET, &key)).await {
         Ok(there) if *there.payload == *own.jwt.as_bytes() => return Ok(false),
         Ok(_) => {}
         Err(e) if e.kind() == DirectGetErrorKind::NotFound => {}

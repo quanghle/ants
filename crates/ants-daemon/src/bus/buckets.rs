@@ -219,7 +219,7 @@ async fn creating<I>(e: stream::ConsumerError, name: &str, stream: &stream::Stre
 /// retirement stops it, so neither piles up for an ant that may never be served again. Serving it again creates them
 /// anew, starting with what is stored from then on.
 pub async fn forget_retired(js: &jetstream::Context, ant: &UserId) -> Result<()> {
-    let threads = format!("KV_{THREADS_BUCKET}");
+    let threads = subject::kv_stream(THREADS_BUCKET);
     let mut failed = Vec::new();
     for (stream, name) in [(STREAM, ants_proto::chan_consumer(ant)), (threads.as_str(), ants_proto::done_reader(ant))] {
         match js.delete_consumer_from_stream(&name, stream).await {

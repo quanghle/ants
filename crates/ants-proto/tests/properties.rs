@@ -300,7 +300,7 @@ proptest! {
             (ants_proto::assisted_reminders_key(&ant, &other), vec!["reminders", a, o]),
             (ants_proto::assisted_withdrawal_key(&ant, &message, &other), vec![a, "msg", &m, o]),
             (ants_proto::webhook_marker_key(&ant), vec![a, "webhook"]),
-            (ants_proto::webhook_marker_subject(&ant), vec!["$KV", ants_proto::WEBHOOKS_BUCKET, a, "webhook"]),
+            (ants_proto::subject::webhook_marker(&ant), vec!["$KV", ants_proto::WEBHOOKS_BUCKET, a, "webhook"]),
             // Patterns: their wildcards stand only where these say.
             (subject::inbox_of(&ant), vec!["ants", "inbox", a, ">"]),
             (subject::webhook_inbox(&other, &ant), vec!["ants", "inbox", o, a, "webhook"]),

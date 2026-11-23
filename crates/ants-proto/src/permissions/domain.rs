@@ -2,7 +2,7 @@
 //! ([`Permissions::with_js_domain`]), and for a leaf node's uplink to one ([`Permissions::with_uplink_js_domain`]).
 
 use super::{Permissions, covers};
-use crate::JsDomain;
+use crate::{JsDomain, subject};
 
 impl Permissions {
     /// The same permissions, also for clients that use the JetStream API of `domain` (`$JS.<domain>.API.…`), as every
@@ -22,7 +22,7 @@ impl Permissions {
             .iter()
             .filter_map(|s| match s.strip_prefix("$JS.API.") {
                 Some(rest) => Some(format!("{api}{rest}")),
-                None if s.starts_with("$KV.") => Some(format!("{api}{s}")),
+                None if subject::is_kv(s) => Some(format!("{api}{s}")),
                 None => None,
             })
             .filter(|s| !self.publish.iter().any(|have| covers(have, s)))
@@ -44,7 +44,7 @@ impl Permissions {
         for s in &mut self.publish {
             if let Some(rest) = s.strip_prefix("$JS.API.") {
                 *s = format!("{api}{rest}");
-            } else if s.starts_with("$KV.") {
+            } else if subject::is_kv(s) {
                 *s = format!("{api}{s}");
             }
         }

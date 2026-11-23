@@ -165,10 +165,8 @@ pub fn explain_full(e: anyhow::Error, subject: &str) -> anyhow::Error {
     if !super::is_store_full(e.as_ref()) {
         return e;
     }
-    let memory = [COLONY_BUCKET, PRESENCE_BUCKET].iter().any(|bucket| {
-        let rest = subject.strip_prefix("$KV.").and_then(|rest| rest.strip_prefix(bucket));
-        rest.is_some_and(|rest| rest.starts_with('.'))
-    });
+    let memory =
+        [COLONY_BUCKET, PRESENCE_BUCKET].iter().any(|bucket| ants_proto::subject::kv_key(bucket, subject).is_some());
     let (store, setting) = if memory { ("memory", "max_memory_store") } else { ("file", "max_file_store") };
     let whose = if subject.starts_with("ants.out.") { "this machine's leaf node's" } else { "the hub's" };
     anyhow::Error::new(StoreFull {
