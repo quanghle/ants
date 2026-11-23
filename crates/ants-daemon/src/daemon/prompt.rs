@@ -13,7 +13,7 @@ use async_nats::jetstream;
 
 use crate::bus;
 use crate::channel::{Context, Earlier};
-use crate::delivery::attempts::{Marker, Reply};
+use crate::delivery::attempts::{Given, Marker, Reply};
 use crate::escalation::Stuck;
 use crate::files::Attached;
 use crate::harness::{Prompt, SignedOut, Spend, Steering};
@@ -169,6 +169,11 @@ impl Inbox<'_> {
             Some(posted) => Some(self.threads.context(&posted.post, seq, Earlier::Unseen, &humans).await?),
             None => None,
         };
+        // The harness answered an earlier attempt, whose reply a later step failed to make or record.
+        if let Some(given) = self.answered.given(envelope).await {
+            tracing::info!(%thread, "sending the answer the harness gave an earlier attempt");
+            return Box::pin(self.send_given(h, read, given, true)).await;
+        }
         // Answered with no reply, so it spends no turn.
         let own = self.replies_to_own(incoming, read.as_ref());
         let spent = self.turns_spent(incoming, read.as_ref(), &humans);
@@ -244,14 +249,67 @@ impl Inbox<'_> {
         let notice = notice.into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = fit_to(self.redactor.redact(&text).into_owned(), reply_room(self.client));
-        if let Some(unanswered) = unanswered {
-            return self.end_unanswered(h, unanswered, text, limit.as_ref()).await;
-        }
-        let Some(mut reply) = Box::pin(self.reply_for(h, read, text, limit.as_ref())).await? else {
+        let given = Given { text, limit, unanswered, tokens: measured.tokens };
+        Box::pin(self.send_given(h, read, given, false)).await
+    }
+
+    /// Answer `incoming` with `given`, the answer its harness gave, `kept` on the machine by an earlier attempt or not:
+    /// end the turn with no reply, or make the reply, escalate the limit the prompt reached, record the reply and
+    /// deliver it. A step failing before the reply is recorded keeps the answer on the machine ([`Answered::keep_given`](
+    /// crate::delivery::attempts::Answered::keep_given)), so the retry sends it rather than prompting again.
+    async fn send_given(
+        &self,
+        h @ Handling { incoming, seq, .. }: Handling<'_>,
+        read: Option<Context>,
+        given: Given,
+        kept: bool,
+    ) -> Result<()> {
+        let envelope = &incoming.envelope;
+        let reply = match Box::pin(self.reply_of(h, read, &given)).await {
+            Ok(reply) => reply,
+            Err(e) => {
+                if !kept && let Err(keep) = self.answered.keep_given(envelope, &given).await {
+                    tracing::warn!(thread = %envelope.thread_id, error = format!("{keep:#}"), "keeping the answer");
+                }
+                return Err(e);
+            }
+        };
+        let Some(reply) = reply else {
+            if kept {
+                self.answered.forget_given(envelope).await;
+            }
             return Ok(());
         };
+        // From here on a redelivery sends this reply rather than prompting again. Out of the hub's reach, as while a
+        // leaf node's uplink is down, the reply still goes to the machine's outbox, and `answered` keeps it from being
+        // prompted again.
+        self.record_reply(seq, envelope, &reply).await;
+        if kept {
+            self.answered.forget_given(envelope).await;
+        }
+        self.deliver(h, &reply).await
+    }
+
+    /// The reply of `given`, the harness's answer to `incoming`, with the limit the prompt reached escalated; `None`
+    /// when the turn ends with no reply, or the answer went up the chain or nowhere instead, and the message is done
+    /// with.
+    async fn reply_of(
+        &self,
+        h @ Handling { incoming, seq, .. }: Handling<'_>,
+        read: Option<Context>,
+        given: &Given,
+    ) -> Result<Option<Reply>> {
+        let envelope = &incoming.envelope;
+        let Given { text, limit, unanswered, tokens } = given.clone();
+        if let Some(unanswered) = unanswered {
+            self.end_unanswered(h, unanswered, text, limit.as_ref()).await?;
+            return Ok(None);
+        }
+        let Some(mut reply) = Box::pin(self.reply_for(h, read, text, limit.as_ref())).await? else {
+            return Ok(None);
+        };
         if let Reply::Message(message) = &mut reply {
-            message.summary = envelope.summary.clone().map(|s| SummaryRequest { tokens: Some(measured.tokens), ..s });
+            message.summary = envelope.summary.clone().map(|s| SummaryRequest { tokens: Some(tokens), ..s });
         }
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
@@ -260,11 +318,7 @@ impl Inbox<'_> {
         {
             self.escalate(incoming, &limit, EscalationReason::Cap, seq, None).await?;
         }
-        // From here on a redelivery sends this reply rather than prompting again. Out of the hub's reach, as while a
-        // leaf node's uplink is down, the reply still goes to the machine's outbox, and `answered` keeps it from being
-        // prompted again.
-        self.record_reply(seq, envelope, &reply).await;
-        self.deliver(h, &reply).await
+        Ok(Some(reply))
     }
 
     /// Record `reply` to `envelope`, the message at stream sequence `seq`, with its attempt marker, so a redelivery

@@ -144,6 +144,7 @@ impl Inbox<'_> {
         let mut paused = self.pause.subscribe();
         let mut drift = self.drift.subscribe();
         loop {
+            let junk_waits = !self.holds.junk.is_empty() && stalling.is_terminated();
             let retry_deadline = threads.values().filter_map(|t| t.retry.as_ref().map(|r| r.until)).min();
             // Every fallback was turned away lately: the first to be tried again lets the messages on.
             let now = tokio::time::Instant::now();
@@ -157,7 +158,7 @@ impl Inbox<'_> {
                 _ = evict.tick() => {
                     self.pool.evict_idle(Instant::now());
                 }
-                _ = progress.tick() => ack_progress(&threads).await,
+                _ = progress.tick() => ack_progress(&threads, self.holds.junk.messages()).await,
                 () = sleep_until(retry_deadline), if retry_deadline.is_some() => {
                     give_up_retries(&mut threads);
                     ready = Some(threads.keys().cloned().collect());
@@ -165,7 +166,8 @@ impl Inbox<'_> {
                 () = &mut signing_in => ready = Some(threads.keys().cloned().collect()),
                 () = &mut lifting => ready = Some(threads.keys().cloned().collect()),
                 () = &mut repairing => ready = Some(threads.keys().cloned().collect()),
-                () = &mut stalling => ready = Some(threads.keys().cloned().collect()),
+                () = std::future::ready(()), if junk_waits => stalling.set(self.hub_back().fuse()),
+                () = &mut stalling => ready = Some(self.hub_tried(&threads).await),
                 Ok(()) = paused.changed() => ready = Some(threads.keys().cloned().collect()),
                 Ok(()) = drift.changed() => self.workload.set_drift(drift.borrow_and_update().clone()),
                 () = sleep_until(fallback_up), if fallback_up.is_some() => ready = Some(threads.keys().cloned().collect()),
@@ -230,6 +232,13 @@ impl Inbox<'_> {
                 () = stop() => tracing::warn!("stopping mid-prompt; those messages are redelivered"),
             }
         }
+    }
+
+    /// The hub is tried again ([`Inbox::hub_back`]): bury the messages never to be answered held for it again
+    /// ([`Inbox::bury_held_junk`]), and let every thread go on.
+    async fn hub_tried(&self, threads: &HashMap<ThreadId, Thread>) -> Vec<ThreadId> {
+        Box::pin(self.bury_held_junk()).await;
+        threads.keys().cloned().collect()
     }
 
     /// Admit `msg` and queue it on its thread: the thread, or `None` when the message is not to be handled now.
@@ -370,9 +379,13 @@ impl Inbox<'_> {
     }
 }
 
-/// Tell the server the messages waiting in hand are still being worked on, so it does not redeliver them.
-async fn ack_progress(threads: &HashMap<ThreadId, Thread>) {
+/// Tell the server the messages waiting in hand, and `junk` ([`super::holds::Junk`]), are still being worked on, so it
+/// does not redeliver them.
+async fn ack_progress(threads: &HashMap<ThreadId, Thread>, junk: Vec<jetstream::Message>) {
     for (_, msg) in threads.values().flat_map(|t| &t.waiting) {
+        bus::progress(msg).await;
+    }
+    for msg in &junk {
         bus::progress(msg).await;
     }
 }
