@@ -41,7 +41,7 @@ impl Hub {
     /// Post `text` to the notes of `thread`, spending one of its turns. The post that spends the last one escalates
     /// the thread up its origin chain, in the end to its owner, else the default human.
     async fn post_notes(&self, thread: &ThreadId, text: String, attach: &[String]) -> Result<String, String> {
-        let current = self.sessions.locked().current.get(thread).map(|e| {
+        let current = self.sessions.locked().current(thread).map(|e| {
             let carried = e.escalation.as_deref().cloned();
             let owner = (self.humans.human_owner(e.owner.as_ref()), e.creator.clone(), e.origin_thread.clone());
             (e.turn_budget, owner, self.humans.owner_of(e), carried, e.allow.clone())

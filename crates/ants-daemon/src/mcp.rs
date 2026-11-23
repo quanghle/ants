@@ -168,23 +168,18 @@ impl Mcp {
             notes,
             humans,
             escalator,
-            channels: std::sync::OnceLock::new(),
+            channels: OnceLock::new(),
             lookup: OnceLock::new(),
             admin: OnceLock::new(),
             requester: OnceLock::new(),
             reaction_asker: OnceLock::new(),
-            assisting: OnceLock::new(),
-            human_store: OnceLock::new(),
+            assist: Assist::default(),
             sealing: OnceLock::new(),
-            files: OnceLock::new(),
-            redactor: OnceLock::new(),
-            max_payload: OnceLock::new(),
-            provider: OnceLock::new(),
+            attach: Attach::default(),
+            provided: Provided::default(),
             trails: OnceLock::new(),
             dreams: OnceLock::new(),
             served: Mutex::default(),
-            callers: OnceLock::new(),
-            origin_store: OnceLock::new(),
             settling: tokio::sync::Mutex::default(),
             state_path,
             sessions: Mutex::default(),
@@ -239,7 +234,7 @@ impl Mcp {
 
     /// Take the ant for the assistant of `human`, as its credentials' assistant_of tag says.
     pub fn with_assisting(&self, human: UserId) {
-        let _ = self.hub.assisting.set(human);
+        let _ = self.hub.assist.human.set(human);
     }
 
     /// The human the tools may act for, setting `on_behalf_of` on what they send ([`Envelope::on_behalf`]): the one
@@ -252,7 +247,7 @@ impl Mcp {
     /// Serve the tools acting for the human the ant assists ([`Mcp::with_assisting`]) through `store`; without it
     /// they are refused.
     pub fn with_human_store(&self, store: Arc<dyn HumanStore>) {
-        let _ = self.hub.human_store.set(store);
+        let _ = self.hub.assist.store.set(store);
     }
 
     /// Open the human's sealed messages and seal those sent for it to humans through `sealing`, which does so only
@@ -265,23 +260,23 @@ impl Mcp {
     /// thread's sessions work in when they were given one ([`Mcp::servers`]); without it `attach` and
     /// `read_attachment` are refused.
     pub fn with_files(&self, files: FileAccess, workdir: PathBuf) {
-        let _ = self.hub.files.set((files, workdir));
+        let _ = self.hub.attach.files.set((files, workdir));
     }
 
     /// Refuse a message or post the tools send whose JSON is over `max_payload` (the server's) less [`HEADER_ROOM`],
     /// before any of its attachments is stored; without it the server alone refuses one.
     pub fn with_max_payload(&self, max_payload: usize) {
-        let _ = self.hub.max_payload.set(max_payload);
+        let _ = self.hub.attach.max_payload.set(max_payload);
     }
 
     /// Redact with `redactor` the files the tools attach whose bytes are UTF-8 text, before they are stored.
     pub fn with_redactor(&self, redactor: Arc<Redactor>) {
-        let _ = self.hub.redactor.set(redactor);
+        let _ = self.hub.attach.redactor.set(redactor);
     }
 
     /// Take `provider` for the ant's provider, which [`Mcp::provider`] gives.
     pub fn with_provider(&self, provider: Connected) {
-        let _ = self.hub.provider.set(provider);
+        let _ = self.hub.provided.provider.set(provider);
     }
 
     /// Reach the ant's trail runs through `trails` for `run_trail`, `trail_status` and `stop_trail`, the trails' tips
@@ -299,7 +294,7 @@ impl Mcp {
 
     /// The ant's provider, connected: none when the ant has none.
     pub fn provider(&self) -> Option<&Connected> {
-        self.hub.provider.get()
+        self.hub.provided.provider.get()
     }
 
     /// The MCP servers each harness session gets: HTTP where the harness takes it, else `ants mcp` over the socket.
@@ -310,17 +305,7 @@ impl Mcp {
         let exe = std::env::current_exe().ok();
         Arc::new(move |session: &McpSession<'_>| {
             let thread = session.thread;
-            let running = Running {
-                harness: session.harness.to_owned(),
-                model: session.model.map(str::to_owned),
-                repo: repository(session.dir),
-            };
-            {
-                let mut sessions = hub.sessions.locked();
-                sessions.dirs.insert(thread.clone(), session.dir.to_owned());
-                sessions.running.insert(thread.clone(), running);
-            }
-            let token = hub.token(thread);
+            let token = hub.open(thread, session);
             if session.http {
                 let auth = HttpHeader::new(header::AUTHORIZATION.as_str(), format!("Bearer {token}"));
                 return vec![McpServer::Http(McpServerHttp::new(SERVER_NAME, &url).headers(vec![auth]))];
@@ -374,34 +359,85 @@ impl Mcp {
     }
 }
 
-/// A session opened: the harness running it, the model the config sets for it, and the repository it works in
-/// ([`repository`]), read once as it opens.
-struct Running {
+/// What a thread's sessions were opened with: their token, and of the last one opened the directory it works in, the
+/// harness running it, the model the config sets for it, and the repository it works in ([`repository`]), read once
+/// as it opens.
+struct Opened {
+    token: String,
+    dir: PathBuf,
     harness: String,
     model: Option<String>,
     repo: Option<String>,
 }
 
+/// The turn of a thread's session, from [`Mcp::begin`] until its guard drops.
+struct TurnState {
+    /// The message the thread is handling.
+    current: Envelope,
+    /// The title the session suggested, until a message on the thread carries it.
+    title: Option<String>,
+    /// Whether the session called `complete`, and why.
+    completed: Option<turn::Completed>,
+    /// The paths of the files the session attached to the final answer.
+    reply_files: Option<Vec<String>>,
+    /// The handles of the files attached to the message being handled, and when the hub stored it.
+    carried: Option<(Vec<AttachmentHandle>, DateTime<Utc>)>,
+}
+
+impl TurnState {
+    /// The turn that handles `current`.
+    fn of(current: Envelope) -> Self {
+        Self { current, title: None, completed: None, reply_files: None, carried: None }
+    }
+}
+
 #[derive(Default)]
 struct Sessions {
     tokens: HashMap<String, ThreadId>,
-    by_thread: HashMap<ThreadId, String>,
-    /// The message each thread is handling.
-    current: HashMap<ThreadId, Envelope>,
-    /// The title each thread's session suggested during its turn, until a message on the thread carries it.
-    titles: HashMap<ThreadId, String>,
-    /// Whether each thread's session called `complete` during its turn, and why.
-    completed: HashMap<ThreadId, turn::Completed>,
-    /// The directory each thread's sessions work in.
-    dirs: HashMap<ThreadId, PathBuf>,
-    /// Each thread's last session opened.
-    running: HashMap<ThreadId, Running>,
+    /// What each thread's sessions were opened with.
+    opened: HashMap<ThreadId, Opened>,
+    /// The turn each thread is in.
+    turns: HashMap<ThreadId, TurnState>,
     /// Where each thread came from, as the messages it handled tell, settled ([`Mcp::settle_origin`]) or read back.
     origins: HashMap<ThreadId, Origin>,
-    /// The paths of the files each thread's session attached to the final answer of its turn.
-    reply_files: HashMap<ThreadId, Vec<String>>,
-    /// The handles of the files attached to the message each thread is handling, and when the hub stored it.
-    carried: HashMap<ThreadId, (Vec<AttachmentHandle>, DateTime<Utc>)>,
+}
+
+impl Sessions {
+    /// The message `thread` is handling.
+    fn current(&self, thread: &ThreadId) -> Option<&Envelope> {
+        self.turns.get(thread).map(|turn| &turn.current)
+    }
+}
+
+/// Acting for the human the ant assists.
+#[derive(Default)]
+struct Assist {
+    /// The human whose assistant the ant's credentials make it ([`ants_proto::AssistantOf`]).
+    human: OnceLock<UserId>,
+    /// What the tools acting for that human read and write through.
+    store: OnceLock<Arc<dyn HumanStore>>,
+}
+
+/// Attaching files to what the tools send, and what one message carries.
+#[derive(Default)]
+struct Attach {
+    /// The attachments' store and the ant's workdir.
+    files: OnceLock<(FileAccess, PathBuf)>,
+    /// What redacts the text files the tools attach; none redacts nothing.
+    redactor: OnceLock<Arc<Redactor>>,
+    /// The server's `max_payload` ([`Mcp::with_max_payload`]).
+    max_payload: OnceLock<usize>,
+}
+
+/// The ant's provider and what the calls of its tools carry.
+#[derive(Default)]
+struct Provided {
+    /// The ant's provider ([`crate::provider`]).
+    provider: OnceLock<Connected>,
+    /// Who the provider calls are for ([`Mcp::with_callers`]).
+    callers: OnceLock<crate::provider::context::Callers>,
+    /// Where the threads' origins are kept ([`Mcp::with_origins`]).
+    origins: OnceLock<crate::provider::origins::OriginStore>,
 }
 
 struct Hub {
@@ -411,35 +447,22 @@ struct Hub {
     notes: Arc<dyn NotesStore>,
     humans: Registry,
     escalator: Option<Arc<Escalator>>,
-    channels: std::sync::OnceLock<ChannelAccess>,
+    channels: OnceLock<ChannelAccess>,
     lookup: OnceLock<ColonyLookup>,
     admin: OnceLock<Arc<dyn Admin>>,
     requester: OnceLock<AntRequester>,
     reaction_asker: OnceLock<ReactionAsker>,
-    /// The human whose assistant the ant's credentials make it ([`ants_proto::AssistantOf`]).
-    assisting: OnceLock<UserId>,
-    /// What the tools acting for that human read and write through.
-    human_store: OnceLock<Arc<dyn HumanStore>>,
-    /// What opens and seals that human's sealed messages.
+    assist: Assist,
+    /// What opens and seals the sealed messages of the human the ant assists.
     sealing: OnceLock<Arc<dyn HumanSealing>>,
-    /// The attachments' store and the ant's workdir.
-    files: OnceLock<(FileAccess, PathBuf)>,
-    /// What redacts the text files the tools attach; none redacts nothing.
-    redactor: OnceLock<Arc<Redactor>>,
-    /// The server's `max_payload` ([`Mcp::with_max_payload`]).
-    max_payload: OnceLock<usize>,
-    /// The ant's provider ([`crate::provider`]).
-    provider: OnceLock<Connected>,
+    attach: Attach,
+    provided: Provided,
     /// The runs the ant conducts ([`Mcp::with_trails`]).
     trails: OnceLock<crate::trail::Trails>,
     /// The ant's dreams, when its provider is sense ([`Mcp::with_dreams`]).
     dreams: OnceLock<crate::sense::Dreams>,
     /// The provider's tools as listed last.
     served: Mutex<provider::Served>,
-    /// Who the provider calls are for ([`Mcp::with_callers`]).
-    callers: OnceLock<crate::provider::context::Callers>,
-    /// Where the threads' origins are kept ([`Mcp::with_origins`]).
-    origin_store: OnceLock<crate::provider::origins::OriginStore>,
     /// Held while a thread's origin is settled or read back, so none is lost to another.
     settling: tokio::sync::Mutex<()>,
     state_path: PathBuf,
@@ -448,15 +471,21 @@ struct Hub {
 }
 
 impl Hub {
-    /// The token of `thread`'s sessions, made on first use.
-    fn token(&self, thread: &ThreadId) -> String {
+    /// Note what `session` of `thread` is opened with, and return the token of the thread's sessions, made on first
+    /// use.
+    fn open(&self, thread: &ThreadId, session: &McpSession<'_>) -> String {
+        let (harness, model) = (session.harness.to_owned(), session.model.map(str::to_owned));
+        let (dir, repo) = (session.dir.to_owned(), repository(session.dir));
         let mut sessions = self.sessions.locked();
-        if let Some(token) = sessions.by_thread.get(thread) {
-            return token.clone();
-        }
-        let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        sessions.tokens.insert(token.clone(), thread.clone());
-        sessions.by_thread.insert(thread.clone(), token.clone());
+        let token = match sessions.opened.get(thread) {
+            Some(opened) => opened.token.clone(),
+            None => {
+                let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+                sessions.tokens.insert(token.clone(), thread.clone());
+                token
+            }
+        };
+        sessions.opened.insert(thread.clone(), Opened { token: token.clone(), dir, harness, model, repo });
         token
     }
 
@@ -467,7 +496,7 @@ impl Hub {
     /// Refuse `message`, a message or post the tools send, when its JSON is longer than one NATS message carries
     /// ([`Mcp::with_max_payload`]), naming its size and the limit.
     fn check_fits(&self, message: &impl serde::Serialize) -> Result<(), String> {
-        let Some(&max_payload) = self.max_payload.get().filter(|&&max| max > 0) else { return Ok(()) };
+        let Some(&max_payload) = self.attach.max_payload.get().filter(|&&max| max > 0) else { return Ok(()) };
         let len = serde_json::to_vec(message).map_or(0, |json| json.len());
         let max = max_payload.saturating_sub(HEADER_ROOM);
         if len <= max {
@@ -480,7 +509,7 @@ impl Hub {
     }
 
     async fn send(&self, envelope: &Envelope) -> Result<(), String> {
-        let current = self.sessions.locked().current.get(&envelope.thread_id).cloned();
+        let current = self.sessions.locked().current(&envelope.thread_id).cloned();
         let trail_spent = self.trail_spent(current.as_ref(), envelope).await;
         (self.outbox)(Envelope { trail_spent, ..envelope.clone() }).await.map_err(|e| format!("not sent: {e:#}"))
     }

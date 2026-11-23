@@ -102,7 +102,7 @@ impl Hub {
         };
         let wait = if args.wait { Some(ask_wait(args.timeout.as_deref())?) } else { None };
         let limits = args.limits.unwrap_or_default().limits().map_err(|e| format!("limits: {e}"))?;
-        let current = self.sessions.locked().current.get(thread).cloned();
+        let current = self.sessions.locked().current(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; runs start only while one is")?;
         let spends_from = spending(&current, &trail)?;
         let stored = self.origin_of(thread).await.map_err(|e| {

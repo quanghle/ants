@@ -148,7 +148,7 @@ impl Hub {
 
     /// A message from the ant to `to` as [`Hub::outgoing`] makes it, `to` being any user, the ant itself included.
     fn follow_on(&self, thread: &ThreadId, to: UserId, text: String, on: Option<&str>) -> Result<Envelope, String> {
-        let current = self.sessions.locked().current.get(thread).cloned();
+        let current = self.sessions.locked().current(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; messages go out only while one is")?;
         let role = if self.humans.is_human(&to) { Role::Human } else { self.humans.sender_role(&current) };
         let mut envelope = current.reply(self.ant.clone(), text, role).map_err(|_| no_turns(thread, &current.from))?;
@@ -181,7 +181,7 @@ impl Hub {
         let question = args.questions()?;
         let human = {
             let sessions = self.sessions.locked();
-            let current = sessions.current.get(thread);
+            let current = sessions.current(thread);
             current
                 .map(|current| self.humans.owner_of(current))
                 .ok_or("no message is being handled on this thread; questions go out only while one is".to_owned())?

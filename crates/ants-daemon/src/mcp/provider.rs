@@ -53,7 +53,7 @@ impl Directories {
         if hub.ant != context.ant {
             return None;
         }
-        hub.sessions.locked().dirs.get(&context.thread).cloned()
+        hub.sessions.locked().opened.get(&context.thread).map(|opened| opened.dir.clone())
     }
 }
 
@@ -65,7 +65,7 @@ impl Mcp {
     /// Take `callers` for who the calls of the provider's tools and its brief requests are for; until then those calls
     /// are refused, the identity record taken as one that cannot be read.
     pub fn with_callers(&self, callers: Callers) {
-        let _ = self.hub.callers.set(callers);
+        let _ = self.hub.provided.callers.set(callers);
     }
 
     /// Who a provider call now is for: an error saying why when the ant's identity record is absent or cannot be read.
@@ -76,12 +76,12 @@ impl Mcp {
     /// Keep the threads' origins in `store`, read back for a thread whose origin this process has not settled yet;
     /// without one they live in memory only.
     pub fn with_origins(&self, store: OriginStore) {
-        let _ = self.hub.origin_store.set(store);
+        let _ = self.hub.provided.origins.set(store);
     }
 
     /// Where the threads' origins are kept ([`Mcp::with_origins`]), if anywhere.
     pub fn origin_store(&self) -> Option<&OriginStore> {
-        self.hub.origin_store.get()
+        self.hub.provided.origins.get()
     }
 
     /// Settle where the thread of `envelope`, a message it is about to handle, posted in `channel` when it is a
@@ -106,7 +106,7 @@ impl Mcp {
 
 impl Hub {
     async fn who_calls(&self) -> Result<Caller, String> {
-        match self.callers.get() {
+        match self.provided.callers.get() {
             Some(callers) => callers.caller().await,
             None => Err(CANNOT_READ.to_owned()),
         }
@@ -123,8 +123,8 @@ impl Hub {
             }
         };
         let sessions = self.sessions.locked();
-        let running = sessions.running.get(thread).ok_or("no session of the thread was opened")?;
-        let (harness, model, repo) = (&running.harness, running.model.as_deref(), running.repo.clone());
+        let opened = sessions.opened.get(thread).ok_or("no session of the thread was opened")?;
+        let (harness, model, repo) = (&opened.harness, opened.model.as_deref(), opened.repo.clone());
         Ok(caller.context(thread.clone(), origin, harness, model, repo))
     }
 
@@ -135,7 +135,7 @@ impl Hub {
         let earlier = self.read_origin(thread).await?;
         let kept = settled(earlier.clone(), now);
         if earlier.as_ref() != Some(&kept)
-            && let Some(store) = self.origin_store.get()
+            && let Some(store) = self.provided.origins.get()
         {
             store.put(thread, &kept).await?;
         }
@@ -161,7 +161,7 @@ impl Hub {
         if let Some(origin) = self.sessions.locked().origins.get(thread) {
             return Ok(Some(origin.clone()));
         }
-        match self.origin_store.get() {
+        match self.provided.origins.get() {
             Some(store) => store.get(thread).await,
             None => Ok(None),
         }
@@ -171,7 +171,9 @@ impl Hub {
 impl Tools {
     /// The provider's tools as served now: none without a provider of tools, or when its list fails.
     pub(super) async fn provider_tools(&self) -> Vec<rmcp::model::Tool> {
-        let Some(provider) = self.hub.provider.get().filter(|p| p.has(Capability::Tools)) else { return Vec::new() };
+        let Some(provider) = self.hub.provided.provider.get().filter(|p| p.has(Capability::Tools)) else {
+            return Vec::new();
+        };
         let list = match tokio::time::timeout(LIST_TIMEOUT, provider.list_tools()).await {
             Ok(Ok(list)) => list,
             Ok(Err(e)) => {
@@ -197,7 +199,7 @@ impl Tools {
 
     /// The provider and the name of its tool that `name` serves, if it serves one: never one of ants' own names.
     pub(super) fn provider_of<'a>(&self, name: &'a str) -> Option<(&Connected, &'a str)> {
-        let provider = self.hub.provider.get()?;
+        let provider = self.hub.provided.provider.get()?;
         let tool = name.strip_prefix(provider.name())?.strip_prefix('_')?;
         (valid_tool_name(tool) && !own_names().contains(name)).then_some((provider, tool))
     }
