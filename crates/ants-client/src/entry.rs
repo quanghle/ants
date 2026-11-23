@@ -1,20 +1,74 @@
-//! One stored message on a thread, an [`Entry`], with its [`Kind`].
+//! One stored message on a thread, an [`Entry`], with its [`Kind`], and what an ant stored on its timeline as an entry
+//! has it ([`ToolCall`], [`NoReply`], [`PromptEnded`], [`ToolRejection`]).
 
-use ants_daemon::records::reactions::Reacted;
 use ants_proto::{
-    Acting, Answer, Answered, ChannelId, EscalationReason, NoticeKind, Questions, Quote, SummaryRequest, ThreadId,
-    UserId, Uuid,
+    Acting, Answer, Answered, ChannelId, DecidedBy, EscalationReason, NoReplyWhy, NoticeKind, Questions, Quote,
+    Reacted, SummaryRequest, ThreadId, TimelineEnd, UserId, Uuid,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use super::text::took;
-use super::{NoReply, PromptEnded, ToolCall, ToolRejection};
-use crate::messages::attachments;
-use crate::people::sealed;
+use crate::attachments;
+use crate::sealed;
+use crate::text::took;
+
+/// A tool call an ant stored on its timeline, as a [`Kind::Tool`] entry has it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ToolCall {
+    /// The call's id, unique within its prompt.
+    pub call_id: String,
+    /// The message whose prompt made the call.
+    pub message: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+/// A prompt an ant ended with no reply sent, from its timeline, as a [`Kind::NoReply`] entry has it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NoReply {
+    /// The message whose prompt ended so.
+    pub message: Uuid,
+    pub why: NoReplyWhy,
+    /// The reason the ant gave to `complete`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// How a prompt of an ant ended and what it took, from its timeline, as a [`Kind::Ended`] entry has it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PromptEnded {
+    /// The message whose prompt ended so.
+    pub message: Uuid,
+    #[serde(flatten)]
+    pub end: TimelineEnd,
+}
+
+// The cost is read from JSON, which has no NaN.
+impl Eq for PromptEnded {}
+
+/// A tool request that was rejected or expired, as a [`Kind::Rejected`] entry has it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ToolRejection {
+    /// The message whose prompt asked for the tool.
+    pub message: Uuid,
+    pub request: Uuid,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tool_kind: String,
+    pub by: DecidedBy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decider: Option<UserId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<UserId>,
+}
 
 /// What a stored message on a thread is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// An inbox message, between ants or between an ant and a human.
@@ -34,21 +88,30 @@ pub enum Kind {
     /// A message an ant gave up on.
     Dead,
     /// A tool call an ant made, from its timeline records: not a message, so not searched.
-    #[value(skip)]
     Tool,
     /// A prompt an ant ended with no reply sent, from its timeline records: not a message, so not searched.
-    #[value(skip)]
     NoReply,
     /// A rejected or expired tool request from an ant's timeline records: not a message, so not searched.
-    #[value(skip)]
     Rejected,
     /// How a prompt of an ant ended and what it took, from its timeline records: not a message, so not searched.
-    #[value(skip)]
     Ended,
 }
 
 impl Kind {
-    pub(crate) fn as_str(self) -> &'static str {
+    /// The kinds that are stored messages, which a search looks through: not those from an ant's timeline records
+    /// ([`Kind::on_timeline`]).
+    pub const MESSAGES: [Self; 8] = [
+        Self::Message,
+        Self::Escalation,
+        Self::Mention,
+        Self::Post,
+        Self::Note,
+        Self::Approval,
+        Self::Decision,
+        Self::Dead,
+    ];
+
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Message => "message",
             Self::Escalation => "escalation",
@@ -74,6 +137,16 @@ impl Kind {
     /// ([`ants_proto::ThreadDone::holds`]): no tool request, decision on one or dead letter does.
     pub fn reopens(self) -> bool {
         matches!(self, Self::Message | Self::Escalation | Self::Mention | Self::Post | Self::Note)
+    }
+}
+
+/// A kind of stored message by its name ([`Kind::as_str`]), in any case: none of those from an ant's timeline records.
+impl std::str::FromStr for Kind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let found = Self::MESSAGES.into_iter().find(|kind| kind.as_str().eq_ignore_ascii_case(s));
+        found.ok_or_else(|| format!("unknown kind of message {s:?}"))
     }
 }
 
@@ -125,7 +198,7 @@ pub struct Entry {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub forged: bool,
     /// For whom the sender, an assistant, sent an inbox message, as the CLI checked its `on_behalf_of`
-    /// ([`crate::people::behalf::Checker`]): a claim not honoured is forged, and the message the sender's own.
+    /// ([`crate::parser::Lookups::acting`]): a claim not honoured is forged, and the message the sender's own.
     #[serde(skip_serializing_if = "Acting::is_own")]
     pub acting: Acting,
     /// What the CLI made of a sealed message between two humans: opened, its text the message's; else its text
@@ -211,7 +284,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    pub(crate) fn new(seq: u64, stored_at: DateTime<Utc>, kind: Kind, thread_id: ThreadId) -> Self {
+    pub fn new(seq: u64, stored_at: DateTime<Utc>, kind: Kind, thread_id: ThreadId) -> Self {
         Self {
             seq,
             id: None,
@@ -256,7 +329,7 @@ impl Entry {
     }
 
     /// The entry of a tool call merged from timeline records, the last of them stored at `seq`.
-    pub(super) fn tool(seq: u64, merged: &ants_proto::MergedCall) -> Self {
+    pub fn tool(seq: u64, merged: &ants_proto::MergedCall) -> Self {
         let call = &merged.call;
         let tool = ToolCall {
             call_id: call.id.clone(),
@@ -278,7 +351,7 @@ impl Entry {
     }
 
     /// The entry of a prompt that ended with no reply sent, from timeline records, the last of them stored at `seq`.
-    pub(super) fn no_reply(seq: u64, merged: &ants_proto::MergedNoReply) -> Self {
+    pub fn no_reply(seq: u64, merged: &ants_proto::MergedNoReply) -> Self {
         let end = NoReply { message: merged.message, why: merged.why, reason: merged.reason.clone() };
         Self {
             from: Some(merged.ant.clone()),
@@ -289,7 +362,7 @@ impl Entry {
     }
 
     /// The entry of a rejected tool request merged from timeline records, the last of them stored at `seq`.
-    pub(super) fn rejected(seq: u64, merged: &ants_proto::MergedRejection) -> Self {
+    pub fn rejected(seq: u64, merged: &ants_proto::MergedRejection) -> Self {
         let rejection = &merged.rejection;
         let rejected = ToolRejection {
             message: merged.message,
@@ -308,7 +381,7 @@ impl Entry {
     }
 
     /// The entry of how a prompt ended, from the timeline record stored at `seq`.
-    pub(super) fn ended(seq: u64, merged: &ants_proto::MergedEnd) -> Self {
+    pub fn ended(seq: u64, merged: &ants_proto::MergedEnd) -> Self {
         let ended = PromptEnded { message: merged.message, end: merged.end.clone() };
         Self {
             from: Some(merged.ant.clone()),
@@ -327,7 +400,7 @@ impl Entry {
 
     /// Who sent it to whom: `alice -> dev-a`, `dev-a -> #ops`, `dev-a -> notes`, `(a human) -> dev-a`; for an
     /// assistant's message for its human, `alice via pa -> dev-a`, or `pa (forged: for alice) -> dev-a`.
-    pub(crate) fn route(&self) -> String {
+    pub fn route(&self) -> String {
         let from = self.sender();
         match (self.kind, &self.to, &self.channel) {
             (Kind::Post, _, Some(channel)) => format!("{from} -> #{channel}"),
@@ -339,12 +412,12 @@ impl Entry {
     }
 
     /// Who sent it, as [`Acting::label`] names an assistant acting for its human.
-    pub(crate) fn sender(&self) -> String {
+    pub fn sender(&self) -> String {
         self.acting.label(self.from.as_ref().map_or("(a human)", UserId::as_str))
     }
 
     /// The users it was between.
-    pub(super) fn users(&self) -> impl Iterator<Item = &UserId> {
+    pub fn users(&self) -> impl Iterator<Item = &UserId> {
         self.from.iter().chain(&self.to)
     }
 }

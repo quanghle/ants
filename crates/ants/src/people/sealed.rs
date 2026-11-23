@@ -11,6 +11,7 @@ use std::sync::{Mutex, OnceLock};
 use ants_daemon::secrets::keystore::{self, Store};
 use std::ops::ControlFlow;
 
+pub use ants_client::sealed::size_note;
 use ants_daemon::files;
 use ants_daemon::secrets::creds;
 use ants_daemon::secrets::sealing::{NONCE_LEN, open_message, open_plain, seal_envelope, seal_title};
@@ -36,11 +37,6 @@ use crate::people::devices::{self, Devices, Directory, Lookup, VerifiedDevice};
 pub const PLAINTEXT: &str = "`--plaintext` sends it in the clear";
 /// What else may be done when `ants chat` cannot seal a message.
 pub const PLAINTEXT_ASK: &str = "`ants ask --plaintext` sends it in the clear";
-/// How the ciphertext of a message shows where nothing is opened: `ants watch` and dead letters.
-pub fn size_note(sealed: &Sealed) -> String {
-    format!("[sealed, {} bytes]", sealed.size())
-}
-
 /// Seal the text, suggested title and attachments of `envelope` for `recipients`, each a device and its key, from the
 /// sending device `device` whose key is `xkey`, leaving its text empty, and its title and attachments none. `files`,
 /// those the envelope carries, are sealed under the message's content key ([`seal_file`]), each becoming the file to
@@ -323,24 +319,18 @@ pub async fn read_title(mut title: ThreadTitle, keyring: Option<&Keyring>) -> Th
 /// `envelope` as `keyring` reads it, with what it made of it if sealed: opened, its text, suggested title, quote and
 /// attachments put back; else its text the placeholder its state shows ([`State::placeholder`]). Either way no longer
 /// sealed. Without a keyring, every sealed message is unreadable.
-pub fn read(mut envelope: Envelope, keyring: Option<&Keyring>) -> (Envelope, Option<State>) {
+pub fn read(envelope: Envelope, keyring: Option<&Keyring>) -> (Envelope, Option<State>) {
     if envelope.sealed.is_none() {
         return (envelope, None);
     }
     let opening = keyring.and_then(|k| k.open(&envelope)).unwrap_or(Opening::Unreadable);
     let state = opening.state();
-    envelope.sealed = None;
-    envelope.title = None;
-    envelope.quote = None;
-    envelope.attachments = Vec::new();
-    match opening {
-        Opening::Opened(body) => {
-            envelope.text = body.text;
-            envelope.title = body.title;
-            envelope.quote = body.quote;
-            envelope.attachments = body.attachments;
-        }
-        _ => envelope.text = state.placeholder().to_owned(),
+    let mut envelope = ants_client::sealed::unopened(envelope, state);
+    if let Opening::Opened(body) = opening {
+        envelope.text = body.text;
+        envelope.title = body.title;
+        envelope.quote = body.quote;
+        envelope.attachments = body.attachments;
     }
     (envelope, Some(state))
 }

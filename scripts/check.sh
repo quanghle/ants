@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Run the checks of CI's check and deny jobs (.github/workflows/ci.yml) locally: formatting, lints, rustdoc, the test
-# suite twice (as is and with nats-server 2.16's v2 ack and flow control subjects), cargo-deny and, with --footprint,
-# the release build and the idle footprint check, all with lint and rustdoc warnings fatal.
+# Run the checks of CI's check and deny jobs (.github/workflows/ci.yml) locally: formatting, lints, the build of
+# ants-client for a browser (wasm32-unknown-unknown; `rustup target add wasm32-unknown-unknown` installs the target),
+# rustdoc, the test suite twice (as is and with nats-server 2.16's v2 ack and flow control subjects), cargo-deny and,
+# with --footprint, the release build and the idle footprint check, all with lint and rustdoc warnings fatal.
 #
 #   scripts/check.sh               # every check but the release build and footprint; stops at the first failure
 #   scripts/check.sh --footprint   # also `cargo build --release` and scripts/footprint.sh
@@ -32,7 +33,7 @@ footprint=0
 while [ $# -gt 0 ]; do
     case "$1" in
     --footprint) footprint=1; shift ;;
-    -h | --help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
     esac
 done
@@ -60,6 +61,7 @@ footprint_unmeasurable() {
 
 run cargo fmt --all --check
 run cargo clippy --all-targets
+run cargo check -p ants-client --target wasm32-unknown-unknown
 run env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 run env ANTS_REQUIRE_TOOLS=$require_tools ANTS_TEST_JS_ACK_FC_V2=0 cargo test
 run env ANTS_REQUIRE_TOOLS=$require_tools ANTS_TEST_JS_ACK_FC_V2=1 cargo test

@@ -1,0 +1,24 @@
+[package]
+name = "ants-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "What a human's client derives from what it reads and sends, with no I/O, and its reads and writes over a transport"
+
+[dependencies]
+ants-proto.workspace = true
+chrono = { workspace = true, features = ["std", "serde"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror = "2.0.21"
+
+[dev-dependencies]
+data-encoding.workspace = true
+nkeys = "0.4.5"
+futures = { workspace = true, features = ["executor"] }
+
+[lints]
+workspace = true

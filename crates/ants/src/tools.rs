@@ -62,14 +62,7 @@ mod following;
 
 pub use following::{Update, follow, render};
 
-/// How a verdict is printed.
-pub(crate) fn spelling(verdict: Verdict) -> &'static str {
-    match verdict {
-        Verdict::AllowOnce => "allow-once",
-        Verdict::AllowAlways => "allow-always",
-        Verdict::Reject => "reject",
-    }
-}
+pub(crate) use ants_client::text::spelling;
 
 fn options(request: &ApprovalRequest) -> String {
     request.options.iter().map(|v| spelling(*v)).collect::<Vec<_>>().join("|")

@@ -13,30 +13,26 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ants_daemon::stream::reading::{self, Reading};
-use ants_proto::{
-    DecidedBy, Mark, NoReplyWhy, ThreadId, ThreadMarks, Timeline, TimelineEnd, TimelineEntry, Timelines, UserId, Uuid,
-    subject,
-};
+use ants_proto::{Mark, ThreadId, ThreadMarks, Timeline, TimelineEntry, Timelines, UserId, Uuid, subject};
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use clap::builder::TypedValueParser as _;
 
 use self::summaries::Done;
 use crate::connection::Nats;
 use crate::people::sealed;
 use crate::threads::thread_meta;
 
-pub use self::entry::{Entry, Kind, last_reopening};
 pub use self::parser::Parser;
 pub use self::pick::{Pick, recent_threads, resolve};
 pub use self::summaries::Summary;
 pub(crate) use self::summaries::{Select, Threads};
 pub(crate) use self::text::{answer_line, call_label, time, took};
 pub use self::text::{answers_to, render, table};
+pub use ants_client::entry::{Entry, Kind, NoReply, ToolCall, ToolRejection, last_reopening};
 pub use message::{MessagePick, find as find_message, recent_messages};
 
-mod entry;
 mod message;
 mod parser;
 mod pick;
@@ -55,59 +51,21 @@ const LISTED: usize = 10;
 /// How far back `ants thread list` reads by default.
 const SINCE: Duration = Duration::from_hours(24);
 
-/// A tool call an ant stored on its timeline, as a [`Kind::Tool`] entry has it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ToolCall {
-    /// The call's id, unique within its prompt.
-    pub call_id: String,
-    /// The message whose prompt made the call.
-    pub message: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub paths: Vec<String>,
-}
-
-/// A prompt an ant ended with no reply sent, from its timeline, as a [`Kind::NoReply`] entry has it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct NoReply {
-    /// The message whose prompt ended so.
-    pub message: Uuid,
-    pub why: NoReplyWhy,
-    /// The reason the ant gave to `complete`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-/// How a prompt of an ant ended and what it took, from its timeline, as a [`Kind::Ended`] entry has it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct PromptEnded {
-    /// The message whose prompt ended so.
-    pub message: Uuid,
-    #[serde(flatten)]
-    pub end: TimelineEnd,
-}
-
-// The cost is read from JSON, which has no NaN.
-impl Eq for PromptEnded {}
-
-/// A tool request that was rejected or expired, as a [`Kind::Rejected`] entry has it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ToolRejection {
-    /// The message whose prompt asked for the tool.
-    pub message: Uuid,
-    pub request: Uuid,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub tool_kind: String,
-    pub by: DecidedBy,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub decider: Option<UserId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub via: Option<UserId>,
+/// What `--type` takes: a kind of stored message by its name ([`Kind::MESSAGES`]), each listed with what it is.
+pub(crate) fn kind_parser() -> impl clap::builder::TypedValueParser<Value = Kind> {
+    let about = |kind| match kind {
+        Kind::Message => "An inbox message, between ants or between an ant and a human",
+        Kind::Escalation => "An inbox message carrying an escalation",
+        Kind::Mention => "An inbox message telling a human member of a channel post that @mentioned it",
+        Kind::Post => "A channel post",
+        Kind::Note => "A post to the thread's notes",
+        Kind::Approval => "A tool request an ant escalated to the humans",
+        Kind::Decision => "A decision on a tool request: a human's, or an ant's of the requester's chain",
+        Kind::Dead => "A message an ant gave up on",
+        Kind::Tool | Kind::NoReply | Kind::Rejected | Kind::Ended => "",
+    };
+    let values = Kind::MESSAGES.map(|kind| clap::builder::PossibleValue::new(kind.as_str()).help(about(kind)));
+    clap::builder::PossibleValuesParser::new(values).try_map(|name| name.parse::<Kind>())
 }
 
 /// What of its ants' timelines [`history`] adds to a thread's messages.
@@ -397,7 +355,7 @@ pub async fn history_with(
     }
     let ids: Vec<Uuid> = entries.iter().filter_map(|e| e.id).collect();
     let mut reactions = crate::messages::inbox::reactions_or_none(js, &ids).await;
-    if let Some(behalf) = &parser.behalf {
+    if let Some(behalf) = parser.behalf() {
         behalf.reactions(&mut reactions).await;
     }
     for entry in &mut entries {

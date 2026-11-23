@@ -1,13 +1,14 @@
-//! Tests of `ants thread`: every kind of stored message on its thread, forged messages, titles, listing, picking by id,
-//! replies and forwards, tool calls and requests, prompt ends, and sealed messages.
+//! Tests of `ants thread`: how its entries show (those of every kind of stored message are tested where they are made,
+//! in ants-client), forged messages, titles, listing, picking by id, replies and forwards, tool calls and requests,
+//! prompt ends, and sealed messages.
 
 use std::assert_matches;
 
 use ants_daemon::channel::CLOCK_SLACK;
 use ants_daemon::records::reactions::Reacted;
 use ants_proto::{
-    Acting, ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, Escalation,
-    EscalationReason, Humans, NotesPost, SummaryRequest, ToolCall, Verdict,
+    Acting, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, DecidedBy, Envelope, Escalation, EscalationReason,
+    Humans, NotesPost, SummaryRequest, ToolCall, Verdict,
 };
 use serde::Serialize;
 
@@ -39,66 +40,14 @@ fn entries(messages: &[(String, Vec<u8>)]) -> Vec<Entry> {
 }
 
 #[test]
-fn every_kind_of_stored_message_lands_on_its_thread() {
-    let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
+fn a_thread_shows_its_messages_with_who_sent_them_to_whom_and_their_reactions() {
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
     let ask = Envelope::on_thread(t("t1"), alice.clone(), dev_a.clone(), "fix it").with_owner(Some(alice));
-    let reply = ask.reply(dev_a.clone(), "done\nsee the diff", ants_proto::Role::Human).unwrap();
-    let post = ChannelPost::on_thread("ops".parse().unwrap(), t("t1"), dev_b.clone(), "@dev-a nice");
-    let note = NotesPost::new(t("t1"), dev_a.clone(), "plan");
-    let escalation = Escalation::new(dev_a.clone(), t("t1"), EscalationReason::TurnBudget);
-    let up = Envelope::on_thread(t("t1"), dev_a.clone(), dev_b, "help").with_escalation(Some(escalation));
-    let request = ApprovalRequest::new(
-        dev_a.clone(),
-        t("t1"),
-        ToolCall { kind: "execute".into(), title: "rm -rf build".into(), ..Default::default() },
-        vec![Verdict::AllowOnce],
-        Duration::from_secs(60),
-    );
-    let decision = request.decide(Verdict::AllowOnce);
-    let dead = DeadLetter::of_envelope(dev_a.clone(), 3, 5, "harness died", ask.clone());
-    let unknown = ApprovalDecision::new(Uuid::now_v7(), dev_a, Verdict::Reject);
-    let messages = [
-        (ask.subject(), json(&ask)),
-        (reply.subject(), json(&reply)),
-        (post.subject(), json(&post)),
-        (note.subject(), json(&note)),
-        (up.subject(), json(&up)),
-        (request.subject(), json(&request)),
-        (decision.subject(), json(&decision)),
-        (dead.subject(), json(&dead)),
-        // A decision on a request not read, and a payload of no kind, are on no thread known.
-        (unknown.subject(), json(&unknown)),
-        ("ants.inbox.dev-a.alice".to_owned(), b"not json".to_vec()),
-    ];
-    let entries = entries(&messages);
-    let kinds: Vec<Kind> = entries.iter().map(|e| e.kind).collect();
-    let expected = [
-        Kind::Message,
-        Kind::Message,
-        Kind::Post,
-        Kind::Note,
-        Kind::Escalation,
-        Kind::Approval,
-        Kind::Decision,
-        Kind::Dead,
-    ];
-    assert_eq!(kinds, expected);
-    assert!(entries.iter().all(|e| e.thread_id == t("t1") && !e.forged), "{entries:?}");
-    assert_eq!(entries[1].route(), "dev-a -> alice");
-    assert_eq!(entries[2].route(), "dev-b -> #ops");
-    assert_eq!(entries[3].route(), "dev-a -> notes");
-    assert!(entries[4].note.as_deref().unwrap().contains("turn_budget"), "{:?}", entries[4]);
-    assert_eq!(entries[6].route(), "(a human) -> dev-a");
-    assert!(entries[6].text.starts_with("allow-once on dev-a/"), "{}", entries[6].text);
-    assert_eq!(entries[7].note.as_deref(), Some("after 5 deliveries: harness died"));
-
-    assert_eq!(entries[0].id, Some(ask.id));
-    assert_eq!((entries[2].id, entries[3].id), (Some(post.id), Some(note.id)));
-    assert_eq!((entries[5].id, entries[7].id), (None, None), "a tool request and a dead letter");
-    let mut entries = entries;
+    let reply = ask.reply(dev_a, "done\nsee the diff", ants_proto::Role::Human).unwrap();
+    let mut entries = entries(&[(ask.subject(), json(&ask)), (reply.subject(), json(&reply))]);
     let eyes = Reacted::new("eyes".parse().unwrap(), vec![p("alice"), p("dev-a")]);
     entries[1].reactions = vec![eyes];
-    let shown = render(&entries[..2]);
+    let shown = render(&entries);
     assert!(shown.starts_with("● alice -> dev-a · "), "{shown}");
     assert!(shown.contains(&format!(" · message {}\n  fix it\n\n● dev-a -> alice · ", ask.id)), "{shown}");
     assert!(shown.ends_with("\n  done\n  see the diff\n  reacted eyes: alice, dev-a\n"), "{shown}");
@@ -894,7 +843,7 @@ async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
     assert_eq!(kinds, [Kind::Message, Kind::Message, Kind::NoReply], "--no-tools keeps the ends with no reply");
     let messages = history(&js, &ask.thread_id, None, Activity::None, None).await.unwrap();
     assert!(messages.iter().all(|e| e.kind == Kind::Message), "{messages:?}");
-    assert!(!<Kind as clap::ValueEnum>::value_variants().contains(&Kind::Tool), "tool calls are not searched");
+    assert!(!Kind::MESSAGES.contains(&Kind::Tool), "tool calls are not searched");
 }
 
 #[tokio::test]
@@ -966,7 +915,7 @@ async fn a_thread_shows_rejected_and_expired_tool_requests_once() {
     );
     let without = history(&js, &ask.thread_id, None, Activity::Ends, None).await.unwrap();
     assert_eq!(without.len(), 1, "--no-tools omits rejections: {without:?}");
-    assert!(!<Kind as clap::ValueEnum>::value_variants().contains(&Kind::Rejected));
+    assert!(!Kind::MESSAGES.contains(&Kind::Rejected));
 }
 
 #[tokio::test]
@@ -1031,7 +980,7 @@ async fn a_thread_shows_how_each_run_of_a_prompt_ended() {
     assert_eq!(without.len(), 3, "--no-tools keeps the ends: {without:?}");
     let live = history(&js, &ask.thread_id, None, Activity::Calls, None).await.unwrap();
     assert_eq!(live.len(), 1, "{live:?}");
-    assert!(!<Kind as clap::ValueEnum>::value_variants().contains(&Kind::Ended));
+    assert!(!Kind::MESSAGES.contains(&Kind::Ended));
 }
 
 #[test]

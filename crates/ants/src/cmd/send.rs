@@ -124,37 +124,13 @@ fn note(words: Vec<String>, input: &compose::Input) -> Result<(Option<UserId>, S
     }
 }
 
-/// Who a message goes to, with the human it assists when it got the message as that human's assistant.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Recipient {
-    pub to: UserId,
-    pub assistant_of: Option<UserId>,
-}
-
-impl From<UserId> for Recipient {
-    fn from(to: UserId) -> Self {
-        Self { to, assistant_of: None }
-    }
-}
-
-impl std::fmt::Display for Recipient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.assistant_of {
-            Some(human) => write!(f, "{} (assistant of {human})", self.to),
-            None => write!(f, "{}", self.to),
-        }
-    }
-}
+pub(crate) use ants_client::sending::Recipient;
 
 /// Who gets what `me` sends without naming anyone: the human's assistant while the grant naming it stands, as the
 /// CLI verifies it for the team of `account` ([`assistant::designated`]), else the messenger.
 pub(crate) async fn unaddressed(js: &jetstream::Context, me: &humans::Me, account: Option<&str>) -> Recipient {
-    if me.role.is_human()
-        && let Some(assistant) = assistant::designated(js, account, &me.id).await
-    {
-        return Recipient { to: assistant, assistant_of: Some(me.id.clone()) };
-    }
-    UserId::messenger().into()
+    let assistant = if me.role.is_human() { assistant::designated(js, account, &me.id).await } else { None };
+    ants_client::sending::unaddressed(&me.id, assistant)
 }
 
 /// `to`, else who gets what names no one ([`unaddressed`]), which `ants ask` then tells.
@@ -494,11 +470,7 @@ pub(crate) async fn seal_to_human(
 /// recorded for the thread and the recipient before the message goes out ([`owners::record`]); the first record of a
 /// thread to an ant stays.
 pub(crate) fn ask_envelope(me: &humans::Me, thread: Option<ThreadId>, to: UserId, text: String) -> Envelope {
-    let envelope = match thread {
-        Some(thread) => Envelope::on_thread(thread, me.id.clone(), to, text),
-        None => Envelope::new(me.id.clone(), to, text),
-    };
-    envelope.with_owner(me.role.is_human().then(|| me.id.clone()))
+    ants_client::sending::ask_envelope(&me.id, me.role.is_human(), thread, to, text)
 }
 
 /// Send `envelope` from [`ask_envelope`] as `ants ask` does: its owner recorded for the thread and recipient first,

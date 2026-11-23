@@ -36,6 +36,17 @@ flowchart LR
 - **Daemon:** `ants daemon` serves ants over per-ant NATS connections and durable consumers, runs up to `max_harnesses` ACP processes per ant, enforces tool allowlists, prompt limits, and spending caps, refreshes colony heartbeats, and exposes an MCP server to each session ([config.md](config.md)).
 - **Ants and humans:** ants are named agents (`dev-a`, `reviewer`, `messenger`) with a workdir, harness, capabilities, and optional `whoami`. Humans (`human` by default, or named users from `ants auth user NAME --human` or `ants login`) own threads they start and decide tool requests. Unaddressed `ants ask` messages go to the human's assistant while its grant stands, else to `system-messenger` for capability routing. Agent-to-agent messages share a per-thread turn budget (default 8).
 
+## Client logic
+
+Crate `ants-client` holds what a human's client does with the wire, whatever it runs on. It has no I/O of its own, names no NATS client or async runtime, and builds natively and for `wasm32-unknown-unknown` (`cargo check -p ants-client --target wasm32-unknown-unknown`, part of `scripts/check.sh` and CI). The CLI and `ants chat` take from it what they share with any other client:
+
+- **What a client shows:** the entries of stored messages (`entry`, `parser`: every kind of stored message placed on its thread, forged senders marked, answers matched to their questions, daemon notices marked as such) with their attachments as listed under a message. A sealed message is an entry marked sealed: opening one needs the device's key and the directory of devices, which stay with the client holding them (`Lookups`; the CLI's are its keyring and its checks of assistants' claims).
+- **What a reader refuses:** a stored message that parses as no `Envelope` is skipped, and a message a stream relayed (stored with the headers a direct get adds, or the payload of one of the server's answers) is refused (`relayed`), by the daemon's readers, the CLI's and any other client's alike.
+- **The inbox:** which entries are the human's to read and which of those its `ReadMarker` tells unread, by thread, and the marker's change on reading (`inbox`).
+- **What a human sends:** the addressee of a message naming no one (the human's assistant while its grant stands, else `system-messenger`) and the `Envelope` of a message as `ants ask` sends it (`sending`).
+- **Requests and answers:** a window of the stream by batched direct gets, the publish of an `Envelope` under its id with the stream's ack, the record of a thread's owner, a KV entry read by a direct get and put by compare-and-set (the read marker), and the `StatusEvent`s heard live (`requests`).
+- **Reads and writes:** the same as async functions (`client`) over a transport trait of four calls, connect, publish, subscribe and request, which names no runtime (`transport`). A client on another platform implements the trait over its own NATS client and wraps `Client`, whose calls take and return owned values that serialize. The CLI and `ants chat` keep their own reads and writes over async-nats, which also store in a leaf node's outbox while the hub is out of reach; a client over the trait speaks to the server holding the stream.
+
 ## Stores and subjects
 
 | Store / subject | Storage / TTL | Purpose |

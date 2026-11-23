@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use super::OPENING;
-use super::entry::{Entry, Kind};
 use super::text::time;
+use super::{Entry, Kind};
 
 /// One thread as `ants thread list` prints it, from the messages read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

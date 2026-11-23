@@ -11,6 +11,7 @@ description = "The ant daemon: JetStream inbox consumer and ACP harness pool"
 [dependencies]
 agent-client-protocol = { workspace = true, features = ["process", "unstable_end_turn_token_usage", "unstable_session_fork"] }
 ants-proto.workspace = true
+ants-client.workspace = true
 ants-sense.workspace = true
 ants-trail.workspace = true
 anyhow.workspace = true

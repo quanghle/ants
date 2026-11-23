@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ants-proto", "crates/ants-sense", "crates/ants-trail", "crates/ants-daemon", "crates/ants", "crates/ants-test-support"]
+members = ["crates/ants-proto", "crates/ants-client", "crates/ants-sense", "crates/ants-trail", "crates/ants-daemon", "crates/ants", "crates/ants-test-support"]
 
 [workspace.package]
 edition = "2024"
@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 agent-client-protocol = "5.2.0"
 ants-proto = { path = "crates/ants-proto" }
+ants-client = { path = "crates/ants-client" }
 ants-sense = { path = "crates/ants-sense" }
 ants-trail = { path = "crates/ants-trail" }
 ants-test-support = { path = "crates/ants-test-support" }
