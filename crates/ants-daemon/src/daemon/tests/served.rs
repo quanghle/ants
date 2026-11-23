@@ -141,9 +141,9 @@ async fn a_harness_asking_an_ant_mid_prompt_gets_its_reply_through_the_daemon() 
     let (client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
     crate::hub::init(&js, |_| true).await.unwrap();
     let prompts = Arc::new(StdMutex::new(Vec::new()));
-    let _fake = crate::harness::fakes::install("asking", asking(prompts.clone()));
+    let fake = crate::harness::fakes::install("asking", asking(prompts.clone()));
     let [dev_a, dev_b] = ants(["dev-a", "dev-b"]);
-    let [config, peer] = <[Config; 2]>::try_from(configs(&server.url, "asking", server.dir(), &["dev-a", "dev-b"]))
+    let [config, peer] = <[Config; 2]>::try_from(configs(&server.url, fake.name(), server.dir(), &["dev-a", "dev-b"]))
         .unwrap_or_else(|_| panic!("two ants"));
     // dev-b is in the colony, its inbox heard here.
     let colony = bus::ensure_colony(&js, ants_proto::COLONY_TTL).await.unwrap();
@@ -222,8 +222,8 @@ async fn an_ant_started_while_the_stream_is_full_is_served_once_consumers_are_fr
     assert!(full.contains(&format!("the ANTS stream holds its {ROOM} consumers, its limit")), "{full}");
     assert!(full.contains("`ants doctor`") && full.contains("maximum consumers limit reached"), "{full}");
 
-    let _fake = crate::harness::fakes::install("echoing", echoing());
-    let [config] = <[Config; 1]>::try_from(configs(&server.url, "echoing", server.dir(), &["dev-a"]))
+    let fake = crate::harness::fakes::install("echoing", echoing());
+    let [config] = <[Config; 1]>::try_from(configs(&server.url, fake.name(), server.dir(), &["dev-a"]))
         .unwrap_or_else(|_| panic!("one ant"));
     let mut replies = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
     client.flush().await.unwrap();
@@ -269,8 +269,8 @@ async fn a_daemon_stopped_while_its_ant_waits_to_be_served_leaves_the_colony() {
     let held = jetstream::consumer::pull::Config { durable_name: Some("held".to_owned()), ..Default::default() };
     stream.create_consumer(held).await.unwrap();
     let [dev_a] = ants(["dev-a"]);
-    let _fake = crate::harness::fakes::install("waiting-echo", echoing());
-    let [config] = <[Config; 1]>::try_from(configs(&server.url, "waiting-echo", server.dir(), &["dev-a"]))
+    let fake = crate::harness::fakes::install("waiting-echo", echoing());
+    let [config] = <[Config; 1]>::try_from(configs(&server.url, fake.name(), server.dir(), &["dev-a"]))
         .unwrap_or_else(|_| panic!("one ant"));
     let (stop, restarts, providers) = (Stop::default(), Restarts::default(), crate::provider::Providers::default());
     let daemon = run_until(config, &stop, &restarts, &providers);
