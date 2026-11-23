@@ -10,6 +10,7 @@ use crate::harness::{SignedOut, Spend};
 use crate::limits::breaker::StartFailed;
 use crate::limits::caps::{Recorded, Warning};
 use crate::limits::ratelimit::Limited;
+use crate::worktrees::WorktreeFailed;
 
 use super::super::Inbox;
 
@@ -72,8 +73,8 @@ impl Inbox<'_> {
     }
 
     /// Note that the prompt `measured` failed with `e`, after a tool call started if `worked`, when it ran at all: not
-    /// when the harness did not start, nor when it turned the prompt away for want of signing in or at a provider
-    /// limit before any tool ran.
+    /// when the harness did not start or the thread's worktree could not be made, nor when the harness turned the
+    /// prompt away for want of signing in or at a provider limit before any tool ran.
     pub(in crate::daemon) async fn note_failed(
         &self,
         thread: &ThreadId,
@@ -81,7 +82,10 @@ impl Inbox<'_> {
         e: &anyhow::Error,
         worked: bool,
     ) {
-        if !e.is::<StartFailed>() && (worked || !(e.is::<SignedOut>() || e.is::<Limited>())) {
+        if !e.is::<StartFailed>()
+            && !e.is::<WorktreeFailed>()
+            && (worked || !(e.is::<SignedOut>() || e.is::<Limited>()))
+        {
             self.note_end(thread, measured, PromptEnd::Failed, false).await;
         }
     }

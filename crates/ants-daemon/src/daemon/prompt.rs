@@ -24,6 +24,7 @@ use crate::limits::overflow::ContextOverflow;
 use crate::limits::ratelimit::Limited;
 use crate::monitoring::status::{self, Status};
 use crate::sync::MutexExt as _;
+use crate::worktrees::WorktreeFailed;
 
 use super::control::{Cancel, Why};
 use super::delivery::{fit_to, reply_room};
@@ -334,9 +335,9 @@ impl Inbox<'_> {
             self.attempts.release(envelope).await;
             return Err(e);
         }
-        // Nothing ran: the harness did not start. Its retry, or the message held for the harness to start, carries no
-        // cut-off warning.
-        if e.is::<StartFailed>() {
+        // Nothing ran: the harness did not start, or its thread's worktree could not be made. Its retry, or the message
+        // held for the harness to start, carries no cut-off warning.
+        if e.is::<StartFailed>() || e.is::<WorktreeFailed>() {
             if !cut_off {
                 self.attempts.forget(seq).await;
             }

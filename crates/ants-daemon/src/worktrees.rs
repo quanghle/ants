@@ -15,7 +15,10 @@
 //! repository (one's prune removes another's half-made registration, an add fails reading another's), so the changes
 //! to a repository's worktrees and branches go one at a time across the daemon, by its git common directory. An add
 //! that fails anyway, as with another process's git racing it, is tried once more, and a branch made by an add that
-//! failed is deleted.
+//! failed is deleted. Fetches of one repository go one at a time too, apart from those changes, so they do not clash
+//! on the remote's refs while other ants' worktrees need not wait for the remote. A branch of the ant left without a
+//! worktree, as by a daemon killed while adding one, is deleted once its thread has no session, unless it holds
+//! commits.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -84,6 +87,19 @@ impl Branch {
     }
 }
 
+/// A thread's worktree that could not be made, the context of the error: the thread's prompt does not run, rather than
+/// run in the workdir live threads share, and its message is tried again as after a failed attempt. Nothing ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorktreeFailed;
+
+impl std::fmt::Display for WorktreeFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("creating the thread's git worktree")
+    }
+}
+
+impl std::error::Error for WorktreeFailed {}
+
 /// What a [`Worktrees::prune`] did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Pruned {
@@ -107,6 +123,8 @@ pub struct Worktrees {
     /// One change at a time to the repository's worktrees and branches, shared by every ant of the daemon working in
     /// it ([`repository_lock`]). Taken after [`Worktrees::changing`], never before.
     repository: Arc<Mutex<()>>,
+    /// One fetch at a time from the repository, shared like [`Worktrees::repository`] and never taken while holding it.
+    fetching: Arc<Mutex<()>>,
     /// Where a thread's new branch starts.
     base: Base,
 }
@@ -172,8 +190,9 @@ impl Worktrees {
     }
 
     fn new(ant: &UserId, repo: PathBuf, within: PathBuf, dir: PathBuf, common: &Path) -> Self {
-        let repository = repository_lock(common);
-        Self { ant: ant.clone(), repo, within, dir, changing: Mutex::new(()), repository, base: Base::Head }
+        let (repository, fetching) = (repository_lock(common, Lock::Changes), repository_lock(common, Lock::Fetches));
+        let changing = Mutex::new(());
+        Self { ant: ant.clone(), repo, within, dir, changing, repository, fetching, base: Base::Head }
     }
 
     /// The same, starting a thread's new branch from `base`, which also tells what the commits of a branch are compared
@@ -200,15 +219,17 @@ impl Worktrees {
 
     /// Remove the worktree of each thread `expired` tells, one at a time, and tell how many were removed and which
     /// branches were kept. A thread whose worktree is being set up waits for the removal to end, and `expired` is asked
-    /// with no change going on.
+    /// with no change going on. A branch of the ant without a worktree that holds no commits goes too once `expired`
+    /// tells its thread: one left by an add cut short, as when the daemon was killed.
     pub async fn prune(&self, mut expired: impl AsyncFnMut(&ThreadId) -> bool) -> Pruned {
         let mut pruned = Pruned::default();
-        for thread in self.threads() {
+        let threads = self.threads();
+        for thread in &threads {
             let _changing = self.changing.lock().await;
-            if !expired(&thread).await {
+            if !expired(thread).await {
                 continue;
             }
-            match self.remove(&thread).await {
+            match self.remove(thread).await {
                 Ok(kept) => {
                     pruned.removed += 1;
                     pruned.kept.extend(kept);
@@ -216,7 +237,32 @@ impl Worktrees {
                 Err(e) => tracing::warn!(%thread, error = format!("{e:#}"), "removing the thread's git worktree"),
             }
         }
+        for thread in self.branched().await.into_iter().filter(|t| !threads.contains(t)) {
+            let _changing = self.changing.lock().await;
+            // Counted first, so a branch kept for its commits is never taken for an expired thread again.
+            if self.path(&thread).exists() || !self.count(&thread).await.is_ok_and(|b| b.commits == 0) {
+                continue;
+            }
+            if !expired(&thread).await {
+                continue;
+            }
+            let branch = self.branch(&thread);
+            let _repository = self.repository.lock().await;
+            match git(&self.repo, ["branch", "--delete", "--force", "--quiet", &branch]).await {
+                Ok(_) => tracing::info!(%thread, %branch, "deleted the thread's branch left without a worktree"),
+                Err(e) => tracing::warn!(%thread, %branch, error = format!("{e:#}"), "deleting the thread's branch"),
+            }
+        }
         pruned
+    }
+
+    /// The threads of the ant with a branch in the repository.
+    async fn branched(&self) -> Vec<ThreadId> {
+        let prefix = format!("refs/heads/ants/{}/", self.ant);
+        let Ok(refs) = git(&self.repo, ["for-each-ref", "--format=%(refname)", &prefix]).await else {
+            return Vec::new();
+        };
+        refs.lines().filter_map(|name| name.strip_prefix(&prefix)?.parse().ok()).collect()
     }
 
     /// The thread's branch, when it holds commits not in the repository's `HEAD`, nor with [`Base::Upstream`] in the
@@ -295,6 +341,7 @@ impl Worktrees {
     /// The default branch of the default remote, once fetched.
     async fn fetched_upstream(&self) -> Result<String> {
         let remote = self.remote().await.context("the repository has no default remote")?;
+        let _fetching = self.fetching.lock().await;
         let fetch = ["fetch", "--quiet", "--no-tags", &remote];
         remote_git(&self.repo, fetch, FETCH_TIMEOUT).await?;
         self.upstream(&remote).await.with_context(|| {
@@ -451,18 +498,27 @@ impl Worktrees {
     }
 }
 
-/// The lock on changes to the worktrees and branches of the repository whose git common directory is `common`, the
-/// same for every ant of the daemon.
-fn repository_lock(common: &Path) -> Arc<Mutex<()>> {
-    static LOCKS: LazyLock<std::sync::Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = LazyLock::new(Default::default);
-    let common = common.canonicalize().unwrap_or_else(|_| common.to_owned());
+/// What a [`repository_lock`] serializes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Lock {
+    /// Changes to the repository's worktrees and branches.
+    Changes,
+    /// Fetches from its remote.
+    Fetches,
+}
+
+/// The lock on `what` of the repository whose git common directory is `common`, the same for every ant of the daemon.
+fn repository_lock(common: &Path, what: Lock) -> Arc<Mutex<()>> {
+    type Locks = HashMap<(PathBuf, Lock), Weak<Mutex<()>>>;
+    static LOCKS: LazyLock<std::sync::Mutex<Locks>> = LazyLock::new(Default::default);
+    let key = (common.canonicalize().unwrap_or_else(|_| common.to_owned()), what);
     let mut locks = LOCKS.locked();
     locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(&common).and_then(Weak::upgrade) {
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
         return lock;
     }
     let lock = Arc::new(Mutex::new(()));
-    locks.insert(common, Arc::downgrade(&lock));
+    locks.insert(key, Arc::downgrade(&lock));
     lock
 }
 
@@ -729,6 +785,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_branch_left_without_a_worktree_goes_once_its_thread_has_no_session() {
+        let Some(repo) = repo("worktrees-orphans") else { return };
+        let home = repo.parent().unwrap().join("home");
+        let worktrees = Worktrees::find(&ant(), &repo, &home).await.unwrap();
+        // As left by a daemon killed between git making the branch and the worktree.
+        for t in ["a", "b", "c"] {
+            run(&repo, &["branch", &format!("ants/dev-a/{t}")]);
+        }
+        run(&repo, &["branch", "ants/dev-b/a"]);
+        run(&repo, &["switch", "--quiet", "ants/dev-a/c"]);
+        commit(&repo, "work of c");
+        run(&repo, &["switch", "--quiet", "main"]);
+        let mut asked = Vec::new();
+        let pruned = worktrees
+            .prune(async |t: &ThreadId| {
+                asked.push(t.clone());
+                *t != thread("b")
+            })
+            .await;
+        assert_eq!(pruned, Pruned::default(), "no worktree removed");
+        assert_eq!(asked, [thread("a"), thread("b")], "a branch with commits is not taken for an expired thread");
+        let branches = run(&repo, &["branch", "--list", "ants/*", "--format=%(refname:short)"]);
+        assert_eq!(
+            branches.lines().collect::<Vec<_>>(),
+            ["ants/dev-a/b", "ants/dev-a/c", "ants/dev-b/a"],
+            "a's goes; b's thread has a session, c's holds a commit, and another ant's is not this ant's"
+        );
+        let path = worktrees.checkout(&thread("b")).await.unwrap();
+        assert_eq!(run(&path, &["branch", "--show-current"]).trim(), "ants/dev-a/b", "the branch is checked out");
+        std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
     async fn a_workdir_outside_a_work_tree_is_shared() {
         if !ants_test_support::have("git") {
             return;
@@ -836,6 +925,28 @@ mod tests {
         let branches = run(&repo, &["branch", "--list", "ants/*", "--format=%(refname:short)"]);
         assert_eq!(branches.trim(), "ants/dev-a/a", "a branch with only upstream commits is deleted");
         std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ants_sharing_a_repository_fetch_one_at_a_time() {
+        let Some(repo) = repo("worktrees-upstream-shared") else { return };
+        let root = repo.parent().unwrap().to_owned();
+        let (_, other) = with_remote(&repo, true);
+        commit(&other, "upstream work");
+        run(&other, &["push", "--quiet", "origin", "main"]);
+        let mut all = Vec::new();
+        for i in 0..16 {
+            let ant: UserId = format!("dev-{i}").parse().unwrap();
+            let home = root.join(format!("home-{i}"));
+            all.push(Worktrees::find(&ant, &repo, &home).await.unwrap().with_base(Base::Upstream));
+        }
+        let t = thread("t");
+        let paths = futures::future::join_all(all.iter().map(|w| w.checkout(&t))).await;
+        for path in paths {
+            let path = path.unwrap();
+            assert_eq!(run(&path, &["log", "-1", "--format=%s"]).trim(), "upstream work", "{}", path.display());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
