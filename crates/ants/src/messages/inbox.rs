@@ -466,7 +466,8 @@ pub fn render(e: &Envelope, acting: &Acting, reactions: &[Reacted], faces: Optio
     let from = faces.and_then(|f| f.known(&e.from)).unwrap_or_else(|| e.from.to_string());
     let from = acting.label(&from);
     let at = e.sent_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
-    let indent = |text: &str| text.lines().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
+    let indent =
+        |text: &str| ants_proto::lines(text).lines().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
     let attached = attachments::render(&attachments::listed(&e.attachments, |id| e.attachment_handle(id)), "  ");
     let under = attached + &render_reactions(reactions, "  ");
     if let Some(question) = e.asks() {
@@ -535,6 +536,19 @@ mod tests {
         );
         assert!(shown.contains(&header), "{shown}");
         assert!(shown.contains("\n  deploy failed\n"), "{shown}");
+    }
+
+    #[test]
+    fn a_message_shows_without_control_or_reordering_characters() {
+        use crate::test_support::hostile::{HOSTILE, assert_printable};
+        let said = Envelope::on_thread("t1".parse().unwrap(), "dev-a".parse().unwrap(), UserId::human(), HOSTILE);
+        let shown = render(&said, &Acting::Own, &[], None);
+        assert_printable(&shown);
+        assert!(shown.contains("\n  [2J]0;pwned]52;c;cHduZWQ=spoof31m\n  line two\n"), "{shown}");
+        let mut question = Question::new("Ship it?", &["yes".to_owned(), "no".to_owned()], true).unwrap();
+        (question.text, question.options[0].label) = (HOSTILE.to_owned(), HOSTILE.to_owned());
+        let asked = Envelope::asking("t1".parse().unwrap(), "dev-a".parse().unwrap(), UserId::human(), question);
+        assert_printable(&render(&asked, &Acting::Own, &[], None));
     }
 
     #[test]

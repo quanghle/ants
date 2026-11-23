@@ -653,7 +653,8 @@ pub fn threads(posts: Vec<ChannelPost>) -> Vec<Thread> {
 /// indented under it.
 fn render_post(out: &mut String, post: &ChannelPost, by: &dyn Fn(&ChannelPost) -> String, indent: &str) {
     let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
-    let mut lines = post.text.lines();
+    let text = ants_proto::lines(&post.text);
+    let mut lines = text.lines();
     let _ = writeln!(out, "{indent}{time} {}: {}", by(post), lines.next().unwrap_or(""));
     for line in lines {
         let _ = writeln!(out, "{indent}    {line}");

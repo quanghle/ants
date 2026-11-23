@@ -430,7 +430,7 @@ async fn show_reply(
     }
     let (opened, _) = sealed::read(reply.clone(), keyring);
     shown.add(opened.id, &opened.from, &opened.text);
-    println!("{}: {}", opened.from, opened.text);
+    println!("{}", said(opened.from.as_str(), &opened.text));
     print!("{}", attachments::render(&attachments::listed_on(&opened.subject(), &opened.attachments), "  "));
     // Seen here, so `ants inbox` need not show it again. The other replies stay unread; an ant's inbox consumer is its
     // daemon's.
@@ -576,7 +576,7 @@ pub(crate) async fn post(nats: &Nats<'_>, args: PostArgs) -> Result<()> {
         let by = behalf.label(&reply.from, reply.on_behalf_of.as_ref()).await;
         progress::clear();
         shown.add(reply.id, &reply.from, &reply.text);
-        println!("{by}: {}", reply.text);
+        println!("{}", said(&by, &reply.text));
         print!("{}", attachments::render(&attachments::listed_on(&reply.subject(), &reply.attachments), "  "));
         Ok(())
     });
@@ -685,7 +685,7 @@ pub(crate) async fn notes(
     for post in &read.posts {
         let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
         let by = behalf.label(&post.from, post.on_behalf_of.as_ref()).await;
-        println!("{time} {by} ({} turns left): {}", post.turn_budget, post.text);
+        println!("{}", said(&format!("{time} {by} ({} turns left)", post.turn_budget), &post.text));
         print!("{}", attachments::render(&attachments::listed_on(&post.subject(), &post.attachments), "  "));
     }
     Ok(())
@@ -708,6 +708,12 @@ pub(crate) async fn post_notes(
 }
 
 /// What `ants notes` prints once it posted `post`.
+/// A reply, post or note as `ants ask --wait`, `ants post --wait` and `ants notes` print it: `by`, then its text
+/// without control characters but line breaks, nor those reordering text.
+fn said(by: &str, text: &str) -> String {
+    format!("{by}: {}", ants_proto::lines(text))
+}
+
 pub(crate) fn notes_posted(post: &NotesPost) -> String {
     format!("posted to the notes of thread {} ({} turns left)", post.thread_id, post.turn_budget)
 }
@@ -814,6 +820,13 @@ pub(crate) async fn answering(js: &jetstream::Context, human: &UserId, id: Uuid,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replies_waited_for_print_without_control_or_reordering_characters() {
+        let shown = said("dev-a", crate::test_support::hostile::HOSTILE);
+        crate::test_support::hostile::assert_printable(&shown);
+        assert_eq!(shown, "dev-a: [2J]0;pwned]52;c;cHduZWQ=spoof31m\nline two");
+    }
 
     fn words(s: &str) -> Vec<String> {
         s.split(' ').map(str::to_owned).collect()

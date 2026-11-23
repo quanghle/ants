@@ -105,6 +105,22 @@ fn at(mut post: ChannelPost, secs: i64) -> ChannelPost {
 }
 
 #[test]
+fn posts_and_descriptions_show_without_control_or_reordering_characters() {
+    use crate::test_support::hostile::{HOSTILE, assert_printable};
+    let start = ChannelPost::new(ops(), p("dev-a"), HOSTILE);
+    let reply = start.reply(p("dev-b"), HOSTILE, &[], &Humans::default()).unwrap();
+    let shown = render(&threads(vec![start, reply]), &|post| post.from.to_string());
+    assert_printable(&shown);
+    assert!(shown.contains(" dev-a: [2J]0;pwned]52;c;cHduZWQ=spoof31m\n    line two\n"), "{shown}");
+    assert!(shown.contains(" dev-b: [2J]0;pwned]52;c;cHduZWQ=spoof31m\n        line two\n"), "{shown}");
+    let mut entry = ChannelEntry::new(ops());
+    entry.description = Some(HOSTILE.to_owned());
+    let listed = table(&[entry], None);
+    assert_printable(&listed);
+    assert!(listed.ends_with(" [2J]0;pwned]52;c;cHduZWQ=spoof31m…"), "{listed}");
+}
+
+#[test]
 fn posts_group_by_thread_with_replies_indented() {
     let a = at(ChannelPost::new(ops(), UserId::human(), "build is red @dev-a"), 0);
     let b = at(ChannelPost::new(ops(), p("dev-b"), "deploying"), 1);

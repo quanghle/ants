@@ -94,6 +94,10 @@ The `ants` binary provides scripting commands, daemon and service subcommands, a
 | `ants hook run --on EVENT [--concurrency N] [--timeout DUR] -- CMD [ARGS...]` | Run `CMD` per bus event using `--observer` credentials ([hooks.md](hooks.md)). |
 | `ants mcp --socket PATH --token TOK` | Internal stdio-to-socket/pipe MCP bridge spawned by `ants daemon`. |
 
+### Text written by others
+
+Without `--json`, the commands print what other humans and ants wrote (messages, posts, notes, questions, titles, TL;DRs, channel descriptions, dead letters, `ants watch` traffic) without control characters but line breaks, and without characters reordering text (U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069), so no escape sequence reaches the terminal; tabs print as spaces. `--json` prints it as stored.
+
 ### Thread and message identifiers
 
 `THREAD` in `ask`, `inbox`, `post`, `notes`, `thread show`, `thread title`, `thread pin`/`unpin`/`archive`/`unarchive`, `thread done`/`undone`, `thread mute`/`unmute`, `cancel`, `watch`, `spend --thread`, and `channel read --thread` accepts a hyphenated UUID (used without lookup), a unique prefix (or non-UUID thread ID), or `last` (latest thread the human sent or received on). Prefix lookup (human creds only) checks the human's own threads from the last 7 d first, then all threads in the last 7 d (bounded to `[-5m, +10m]` around the timestamp encoded in a UUIDv7 prefix); exact matches win, and ambiguous or missing prefixes list candidates (id, time, title where readable, route, and first line of the latest message).

@@ -119,6 +119,35 @@ fn a_quoted_reply_shows_the_message_it_replies_to_before_its_text() {
 }
 
 #[test]
+fn text_someone_else_wrote_shows_without_control_or_reordering_characters() {
+    use crate::test_support::hostile::{HOSTILE, assert_printable};
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let ask = Envelope::on_thread(t("t1"), alice.clone(), dev_a.clone(), HOSTILE);
+    let quote = ants_proto::Quote::new(alice.clone(), HOSTILE);
+    let reply = Envelope::on_thread(t("t1"), dev_a.clone(), alice, HOSTILE).quoting(ask.id, quote);
+    let post = ChannelPost::on_thread("ops".parse().unwrap(), t("t1"), dev_a.clone(), HOSTILE);
+    let dead = DeadLetter::of_payload(dev_a, 7, 3, HOSTILE, HOSTILE.as_bytes());
+    let read = entries(&[
+        (ask.subject(), json(&ask)),
+        (reply.subject(), json(&reply)),
+        (post.subject(), json(&post)),
+        (dead.subject(), json(&dead)),
+    ]);
+    let shown = render(&read);
+    assert_printable(&shown);
+    assert!(shown.contains("\n  [2J]0;pwned]52;c;cHduZWQ=spoof31m\n  line two\n"), "{shown}");
+
+    let mut threads = Threads::new(Some("spoof"));
+    read.iter().for_each(|e| threads.add(e));
+    let (mut listed, _) =
+        threads.finish(&Select { grep: Some("spoof".into()), ..Default::default() }, &ThreadMarks::default());
+    listed[0].title = Some(HOSTILE.to_owned());
+    let table = table(&listed);
+    assert_printable(&table);
+    assert_eq!(table.lines().count(), 3, "a header, the thread and the line matching: {table}");
+}
+
+#[test]
 fn a_message_on_another_sender_s_subject_is_marked_forged() {
     let e = Envelope::on_thread(t("t1"), p("alice"), p("dev-a"), "hi");
     let entries = entries(&[("ants.inbox.dev-a.mallory".to_owned(), json(&e))]);
