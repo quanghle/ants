@@ -37,13 +37,16 @@ mod junk;
 mod full;
 #[path = "e2e/leaf.rs"]
 mod leaf;
+#[path = "e2e/storm.rs"]
+mod storm;
 
 fn main() {
     let me = std::env::args().next().unwrap_or_default();
     if Path::new(&me).file_stem().is_some_and(|name| name == "copilot" || name == "stub-adapter") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 15] = [
+    let tests: [(&str, fn()); 16] = [
+    let tests: [(&str, fn()); 16] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
         ("a_daemon_exits_once_its_executable_was_replaced", a_daemon_exits_once_its_executable_was_replaced),
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
@@ -77,6 +80,7 @@ fn main() {
             junk::junk_on_the_subjects_is_dead_lettered_once_and_the_ant_answers_on,
         ),
         ("a_full_hub_answers_once_space_returns", full::a_full_hub_answers_once_space_returns),
+        ("a_channel_storm_ends_at_the_turn_budget", storm::a_channel_storm_ends_at_the_turn_budget),
     ];
     let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
     for (name, test) in tests {
