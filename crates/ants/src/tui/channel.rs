@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use ants_client::attachments::Listed;
+use ants_client::entry::{Entry, Kind};
 use ants_proto::{ChannelId, ChannelNotify, ReadMarker, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -20,8 +22,6 @@ use super::model::{Action, Data, Key, Model, To, Ui};
 use super::select::{PAGE, Selection};
 use super::style::{self, ago};
 use crate::channel::reads::Unread;
-use crate::messages::attachments::Listed;
-use crate::threads::thread::{Entry, Kind};
 
 mod activity;
 mod header;

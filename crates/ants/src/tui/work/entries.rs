@@ -1,10 +1,9 @@
 //! What a thread's entries, read in full, tell before something is sent on it: who a reply goes to, which ant is
 //! stuck, whether a question still waits, and the latest message to react to.
 
+use ants_client::entry::{Entry, Kind};
 use ants_proto::{EscalationReason, ThreadId, UserId, Uuid};
 use anyhow::{Result, bail};
-
-use crate::threads::thread::{Entry, Kind};
 
 /// Who a reply on a thread whose `entries` are these goes to: the last ant that messaged `me` there, else the last ant
 /// `me` messaged there; `human` tells the humans.

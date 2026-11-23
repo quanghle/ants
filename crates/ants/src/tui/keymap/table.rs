@@ -526,7 +526,7 @@ pub(super) const BAR: &[Entry] = &[
         "Ctrl-P Ctrl-N",
         "history",
         "the texts sent, earlier and later",
-        5,
+        HELP_ONLY,
         always,
     ),
     Entry::new(
@@ -534,7 +534,7 @@ pub(super) const BAR: &[Entry] = &[
         "Ctrl-R",
         "search history",
         "search the texts sent: typing narrows it, Ctrl-R goes earlier, Enter takes the text, Esc or Ctrl-G puts back the one before",
-        6,
+        HELP_ONLY,
         always,
     ),
     Entry::new(
@@ -542,16 +542,16 @@ pub(super) const BAR: &[Entry] = &[
         "↑↓ Tab",
         "complete",
         "pick an @ant, #channel or /command listed and complete it (Enter too); with no list, ↑↓ move by line",
-        7,
+        HELP_ONLY,
         always,
     ),
-    Entry::new(&[Key::Left, Key::Right], "←→", "move", "move the cursor", 8, always),
+    Entry::new(&[Key::Left, Key::Right], "←→", "move", "move the cursor", HELP_ONLY, always),
     Entry::new(
         &[Key::Home, Key::End, Key::Ctrl('a'), Key::Ctrl('e')],
         "Ctrl-A Ctrl-E",
         "line start/end",
         "to the start or the end of the line (Home, End too)",
-        9,
+        HELP_ONLY,
         always,
     ),
     Entry::new(
@@ -559,7 +559,7 @@ pub(super) const BAR: &[Entry] = &[
         "Alt-B Alt-F",
         "word",
         "back or on a word (Ctrl-← Ctrl-→ too)",
-        10,
+        HELP_ONLY,
         always,
     ),
     Entry::new(
@@ -567,7 +567,7 @@ pub(super) const BAR: &[Entry] = &[
         "Backspace",
         "delete",
         "delete the character before the cursor (Delete: the one under it)",
-        11,
+        HELP_ONLY,
         always,
     ),
     Entry::new(
@@ -575,7 +575,7 @@ pub(super) const BAR: &[Entry] = &[
         "Ctrl-K Ctrl-U",
         "kill line",
         "kill to the end or the start of the line",
-        12,
+        HELP_ONLY,
         always,
     ),
     Entry::new(
@@ -583,10 +583,10 @@ pub(super) const BAR: &[Entry] = &[
         "Ctrl-W Alt-D",
         "kill word",
         "kill the word before the cursor (Alt-Backspace too) or after it",
-        13,
+        HELP_ONLY,
         always,
     ),
-    Entry::new(&[Key::Ctrl('y')], "Ctrl-Y", "yank", "put back the text killed last", 14, always),
+    Entry::new(&[Key::Ctrl('y')], "Ctrl-Y", "yank", "put back the text killed last", HELP_ONLY, always),
 ];
 
 pub(super) const START: &[Entry] = &[

@@ -6,7 +6,7 @@ use ants_proto::{ApprovalRequest, ChannelId, ChannelNotify, Questions, ThreadId,
 use chrono::{DateTime, Utc};
 
 use super::{COMMANDS, Goto, Needs, Notify, OnThread, Slash, Trail, parse};
-use crate::messages::{attachments, forward};
+use crate::messages::forward;
 use crate::people::quiet;
 use crate::tui::exec::Job;
 use crate::tui::model::{Action, Focus, Model, Page};
@@ -219,12 +219,12 @@ impl Model {
     }
 
     /// The marked attachment of the message selected in the view.
-    fn marked(&self) -> Result<attachments::Listed, Unmet> {
+    fn marked(&self) -> Result<ants_client::attachments::Listed, Unmet> {
         self.attachment().ok_or_else(|| "no attachment on the selected message".to_owned().into())
     }
 
     /// The marked attachment of the message selected in the view, if any.
-    pub fn attachment(&self) -> Option<attachments::Listed> {
+    pub fn attachment(&self) -> Option<ants_client::attachments::Listed> {
         match self.page() {
             Page::Thread(page) => page.attachment().cloned(),
             Page::Channel(page) => page.attachment(&self.data, &self.ui).cloned(),

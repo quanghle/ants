@@ -2,6 +2,7 @@
 //! is selected), the human's channels with their unread posts and @mentions, the ants
 //! with their state, and the team's other humans, online or not. Each entry selects a view.
 
+use ants_client::entry::Kind;
 use ants_proto::{Activity, ChannelId, ColonyEntry, Humans, ThreadId, UserId};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -16,7 +17,6 @@ use super::style;
 use super::work::ThreadState;
 use crate::channel::reads::Unread;
 use crate::colony;
-use crate::threads::thread::Kind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {

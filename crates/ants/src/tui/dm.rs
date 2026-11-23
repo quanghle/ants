@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use ants_client::entry::{Entry, Kind};
 use ants_proto::{ThreadId, UserId};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -18,7 +19,6 @@ use super::model::{Data, Key, Model, To};
 use super::select::Selection;
 use super::style::{self, ago};
 use crate::people::sealed::State;
-use crate::threads::thread::{Entry, Kind};
 
 /// The lock marking a sealed message between two humans, and a thread with one.
 pub const LOCK: &str = "🔒";

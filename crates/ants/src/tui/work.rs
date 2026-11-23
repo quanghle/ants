@@ -18,7 +18,7 @@ use super::style::{self, ago};
 pub mod entries;
 mod facts;
 
-pub use facts::{Asked, Facts, ThreadState, to};
+pub use facts::{Asked, Facts, ThreadState};
 
 impl ThreadState {
     pub fn color(self) -> Color {
@@ -368,24 +368,14 @@ pub fn reason(data: &Data, thread: &ThreadId) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{Envelope, Escalation, EscalationReason, StatusEvent, StatusUpdate, ThreadDone, Verdict, subject};
+    use ants_client::entry::Entry;
+    use ants_proto::{Envelope, EscalationReason, StatusEvent, StatusUpdate, ThreadDone, Verdict, subject};
 
     use super::*;
-    use crate::test_support::live::{at, message, request, user};
-    use crate::threads::thread::{Entry, Parser};
+    use crate::test_support::live::{at, escalation, message, request, user};
+    use crate::threads::thread::Parser;
     use crate::tui::model::{Model, Page as View};
     use crate::tui::test_support::model;
-
-    fn escalation(seq: u64, thread: &ThreadId, from: &str, to: &str, reason: EscalationReason) -> Entry {
-        let x = Escalation::new(user(from), thread.clone(), reason);
-        let envelope = Envelope {
-            thread_id: thread.clone(),
-            escalation: Some(Box::new(x)),
-            ..Envelope::new(user(from), user(to), "help")
-        };
-        let payload = serde_json::to_vec(&envelope).unwrap();
-        Parser::default().entry(seq, at(seq.cast_signed()), &subject::inbox(&user(to), &user(from)), &payload).unwrap()
-    }
 
     fn busy(m: &mut Model, thread: &ThreadId) {
         let update = StatusUpdate::State { state: ants_proto::State::Working };

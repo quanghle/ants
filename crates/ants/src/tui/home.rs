@@ -427,7 +427,7 @@ mod tests {
 
     use super::*;
     use crate::live::Event;
-    use crate::test_support::live::{at, message, request, user};
+    use crate::test_support::live::{self, at, message, request, user};
     use crate::threads::thread::Parser;
     use crate::tools::{State, Update};
     use crate::tui::model::Action;
@@ -596,15 +596,8 @@ mod tests {
         assert!(!screen(&m, 140, 30, at(5)).contains("y allows once"));
     }
 
-    fn escalation(seq: u64, thread: &ThreadId, from: &str, to: &str) -> crate::threads::thread::Entry {
-        let x = ants_proto::Escalation::new(user(from), thread.clone(), ants_proto::EscalationReason::TurnBudget);
-        let envelope = Envelope {
-            thread_id: thread.clone(),
-            escalation: Some(Box::new(x)),
-            ..Envelope::new(user(from), user(to), "help")
-        };
-        let payload = serde_json::to_vec(&envelope).unwrap();
-        Parser::default().entry(seq, at(seq.cast_signed()), &subject::inbox(&user(to), &user(from)), &payload).unwrap()
+    fn escalation(seq: u64, thread: &ThreadId, from: &str, to: &str) -> ants_client::entry::Entry {
+        live::escalation(seq, thread, from, to, ants_proto::EscalationReason::TurnBudget)
     }
 
     /// A request to run `command`, its input as the daemon sends it: cut at 2,000 characters.
@@ -891,7 +884,7 @@ mod tests {
         assert!(refused.starts_with(&format!("no TL;DR of thread {thread} yet")), "{refused}");
     }
 
-    fn mention(seq: u64, thread: &ThreadId, from: &str) -> crate::threads::thread::Entry {
+    fn mention(seq: u64, thread: &ThreadId, from: &str) -> ants_client::entry::Entry {
         let envelope = Envelope {
             thread_id: thread.clone(),
             mention: Some(Mention { channel: "ops".parse().unwrap(), post: Uuid::now_v7(), author: None }),

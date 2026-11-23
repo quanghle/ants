@@ -2,6 +2,7 @@
 //! told what the views show ([`Watched::watch`]), heard from in turn ([`Watched::next`]), and what it brought taken
 //! in by the model ([`Model::view_event`]).
 
+use ants_client::entry::Entry;
 use ants_proto::{AttachmentHandle, ThreadId, UserId};
 use chrono::{DateTime, Utc};
 use ratatui_image::protocol::Protocol;
@@ -14,7 +15,6 @@ use super::{
 };
 use crate::avatars::Identities;
 use crate::text::excerpt;
-use crate::threads::thread::Entry;
 
 pub struct Watched {
     /// The done states, snoozes and reminders changed, and the open thread's state.

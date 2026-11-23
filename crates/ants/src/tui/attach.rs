@@ -7,6 +7,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use ants_client::attachments::Listed;
 use ants_proto::{MAX_ATTACHMENTS, Uuid};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -15,7 +16,7 @@ use ratatui::text::{Line, Span};
 
 use super::complete::Candidate;
 use super::style;
-use crate::messages::attachments::{self, File, Listed};
+use crate::messages::attachments::{self, File};
 use crate::people::sealed::Keyring;
 
 /// Most paths `/attach` completes.
@@ -70,7 +71,7 @@ pub fn line(listed: &Listed) -> Line<'static> {
     let attachment = &listed.attachment;
     match &listed.unavailable {
         None => Line::from(vec![
-            Span::raw(format!("📎 {} ({}) ", attachment.name, attachments::size(listed.size()))),
+            Span::raw(format!("📎 {} ({}) ", attachment.name, ants_client::attachments::size(listed.size()))),
             Span::styled(attachment.mime.clone(), style::dim()),
         ]),
         // An invalid name may hold control characters, which are escaped rather than sent to the terminal.
@@ -92,7 +93,7 @@ fn available(listed: &Listed) -> Result<&Listed> {
 pub async fn open(js: &jetstream::Context, keyring: Option<&Keyring>, listed: &Listed) -> Result<String> {
     let path = fetched(js, keyring, listed).await?;
     let viewer = view(path).await?;
-    Ok(format!("opened {} ({}) with {viewer}", listed.attachment.name, attachments::size(listed.size())))
+    Ok(format!("opened {} ({}) with {viewer}", listed.attachment.name, ants_client::attachments::size(listed.size())))
 }
 
 /// Open the file or URL at `path` with the system's viewer ([`opener`]): the viewer's name.
@@ -213,7 +214,13 @@ pub async fn save(
     let listed = available(listed)?;
     let expected = Some(&listed.attachment);
     let (attachment, size, path) = attachments::save(js, keyring, &listed.handle, expected, listed.stored, out).await?;
-    Ok(format!("saved {} ({}, {}) to {}", attachment.name, attachments::size(size), attachment.mime, path.display()))
+    Ok(format!(
+        "saved {} ({}, {}) to {}",
+        attachment.name,
+        ants_client::attachments::size(size),
+        attachment.mime,
+        path.display()
+    ))
 }
 
 /// `path` with a leading `~/` in the home directory.
@@ -348,7 +355,7 @@ impl Staged {
         let line = format!(
             "attached {} ({}): sent with the next message",
             file.attachment.name,
-            attachments::size(file.attachment.size)
+            ants_client::attachments::size(file.attachment.size)
         );
         self.files.push(file);
         ants_daemon::files::distinct(self.files.iter_mut().map(|f| &mut f.attachment));
@@ -413,7 +420,7 @@ pub fn paths(typed: &str) -> Vec<Candidate> {
             let (word, detail) = if dir {
                 (format!("{lead}{name}/"), "directory".to_owned())
             } else {
-                (format!("{lead}{name}"), attachments::size(len))
+                (format!("{lead}{name}"), ants_client::attachments::size(len))
             };
             Candidate { word, detail }
         })
@@ -431,7 +438,7 @@ mod tests {
     fn listed(name: &str, bytes: &[u8]) -> Listed {
         let message = Envelope::new(UserId::human(), "dev-a".parse().unwrap(), "look");
         let attachment = files::reference(name, ants_proto::guess_mime(name), bytes).unwrap();
-        attachments::listed(&[attachment], |id| message.attachment_handle(id)).remove(0)
+        ants_client::attachments::listed(&[attachment], |id| message.attachment_handle(id)).remove(0)
     }
 
     #[test]
@@ -543,7 +550,7 @@ mod tests {
         let mut message = Envelope::new(alice, "dev-a".parse().unwrap(), "see attached");
         message.attachments = attachments::references(&files);
         attachments::store(&js, &files, |id| message.attachment_handle(id)).await.unwrap();
-        let [shown] = attachments::listed_on(&message.subject(), &message.attachments).try_into().unwrap();
+        let [shown] = ants_client::attachments::listed_on(&message.subject(), &message.attachments).try_into().unwrap();
 
         let path = fetched(&js, None, &shown).await.unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"findings");

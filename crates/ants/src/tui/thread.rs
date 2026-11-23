@@ -20,6 +20,8 @@
 
 use std::cell::{Cell, RefCell};
 
+use ants_client::attachments::Listed;
+use ants_client::entry::{Entry, Kind};
 use ants_proto::{ApprovalRequest, Quote, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 
@@ -28,8 +30,6 @@ use super::exec::{Edit, Job, Quoted};
 use super::model::{Action, Data, Key, To};
 use super::{approvals, attach, question};
 use crate::live::History;
-use crate::messages::attachments::Listed;
-use crate::threads::thread::{Entry, Kind};
 
 mod cards;
 mod conversation;

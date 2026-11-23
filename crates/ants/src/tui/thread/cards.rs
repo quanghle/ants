@@ -1,5 +1,6 @@
 //! The thread's cards: its tool requests and questions under the conversation, the one the keys answer whole.
 
+use ants_client::entry::{Entry, Kind};
 use ants_proto::{ThreadId, Uuid};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -9,7 +10,6 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use super::Page;
-use crate::threads::thread::{Entry, Kind};
 use crate::tui::model::{Data, Key, Model, To};
 use crate::tui::{approvals, question, style};
 

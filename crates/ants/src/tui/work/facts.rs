@@ -3,13 +3,13 @@
 
 use std::collections::{HashMap, HashSet};
 
+use ants_client::entry::{Entry, Kind};
 use ants_client::inbox;
 use ants_proto::{ChannelId, EscalationReason, NoticeKind, Questions, ThreadDone, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 
 use super::super::dm;
 use super::super::model::Data;
-use crate::threads::thread::{Entry, Kind};
 
 /// What a thread waits on, as its messages and the ants' progress tell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -124,9 +124,6 @@ pub struct Fact {
     pub inbox: Vec<Inboxed>,
 }
 
-/// Whether `entry` is in the inbox of `me`.
-pub use ants_client::inbox::holds as to;
-
 /// What the messages read tell of each thread.
 #[derive(Debug, Default)]
 pub struct Facts(HashMap<ThreadId, Fact>);
@@ -199,7 +196,7 @@ impl Facts {
         if let Some(answer) = &entry.answer {
             fact.questions.retain(|q| q.id != answer.question);
         }
-        if to(entry, me)
+        if inbox::holds(entry, me)
             && let (Some(question), Some(id), Some(from)) = (&entry.question, entry.id, &entry.from)
         {
             fact.questions.push(Asked { id, at: entry.stored_at, from: from.clone(), question: question.clone() });

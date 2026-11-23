@@ -4,12 +4,12 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use ants_client::entry::Kind;
 use ants_proto::{ApprovalRequest, Questions, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
 
 use super::super::model::Data;
 use super::super::{approvals, question};
-use crate::threads::thread::Kind;
 use crate::tools::State;
 
 /// Why a thread is on home, in the order home lists them.

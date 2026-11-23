@@ -121,9 +121,8 @@ fn attachments_list_under_their_message_and_o_opens_the_marked_one() {
         crate::test_support::live::user("alice"),
         "x",
     );
-    sent.attachments = crate::messages::attachments::listed(&[shot("before.png"), shot("after.png")], |id| {
-        envelope.attachment_handle(id)
-    });
+    sent.attachments =
+        ants_client::attachments::listed(&[shot("before.png"), shot("after.png")], |id| envelope.attachment_handle(id));
     let entries = vec![sent, message(2, &thread, "alice", "dev-a", "thanks")];
     let mut page = Page::new(thread.clone());
     page.history.loaded(&thread, Ok(entries)).unwrap();
@@ -160,7 +159,7 @@ fn an_image_encoded_draws_under_its_line_and_the_others_keep_theirs() {
         crate::test_support::live::user("alice"),
         "x",
     );
-    sent.attachments = crate::messages::attachments::listed(&[shot, log], |id| envelope.attachment_handle(id));
+    sent.attachments = ants_client::attachments::listed(&[shot, log], |id| envelope.attachment_handle(id));
     let mut page = Page::new(thread.clone());
     page.history.loaded(&thread, Ok(vec![sent.clone()])).unwrap();
     let before = screen(&page, &m, 80, at(3));

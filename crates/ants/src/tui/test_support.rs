@@ -4,6 +4,7 @@
 use std::io::Cursor;
 use std::time::Duration;
 
+use ants_client::entry::{Entry, Kind, ToolCall};
 use ants_proto::{
     ChannelEntry, ChannelId, ChannelPost, HumanEntry, Humans, ReadMarker, StatusEvent, StatusUpdate, ThreadId, Uuid,
     subject,
@@ -21,7 +22,7 @@ use crate::live::State;
 use crate::test_support::colony::entry;
 use crate::test_support::live::{at, message, user};
 use crate::test_support::render::rendered;
-use crate::threads::thread::{Entry, Kind, Parser, ToolCall};
+use crate::threads::thread::Parser;
 
 /// The model of alice, with bob a human too and nothing read yet.
 pub(super) fn model() -> Model {

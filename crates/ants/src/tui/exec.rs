@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ants_client::attachments::Listed;
 use ants_daemon::records::reactions;
 use ants_proto::{ChannelId, ChannelNotify, JsDomain, Machine, Pick, Quote, Reaction, ThreadId, UserId, Uuid};
 use anyhow::{Result, anyhow, bail};
@@ -23,7 +24,7 @@ use crate::admin::orders;
 use crate::admin::pause;
 use crate::cmd::send as cli;
 use crate::cmd::{cancel, dead};
-use crate::messages::attachments::{File, Listed};
+use crate::messages::attachments::File;
 use crate::messages::forward;
 use crate::people::sealed::{Keyring, Sealing};
 use crate::people::{humans, quiet};
@@ -575,6 +576,7 @@ async fn retire(ctx: &Ctx, ant: &UserId) -> Result<Done> {
 
 #[cfg(test)]
 mod tests {
+    use ants_client::entry::Kind;
     use ants_daemon::bus;
     use ants_proto::Question;
 
@@ -582,7 +584,6 @@ mod tests {
     use crate::connection::Nats;
     use crate::messages::attachments;
     use crate::test_support::live::user;
-    use crate::threads::thread::Kind;
 
     /// What the bar sends to another human, a reply on their thread with a file attached and its title are sealed for
     /// both; a reply to an ant quoting a sealed message carries no excerpt of it, and notes posted there go in the

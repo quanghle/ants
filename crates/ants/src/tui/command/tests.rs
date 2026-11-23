@@ -5,7 +5,7 @@ use ants_proto::{ChannelEntry, Questions, StatusEvent, StatusUpdate};
 use super::bar::Status;
 use super::*;
 use crate::live;
-use crate::messages::{attachments, forward};
+use crate::messages::forward;
 use crate::test_support::live::{at, message, request, user};
 use crate::tui::acts::Change;
 use crate::tui::exec::{Done, Outcome};

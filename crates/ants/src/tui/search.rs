@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use ants_client::entry::{Entry, Kind};
 use ants_proto::ChannelId;
 use anyhow::Result;
 use async_nats::jetstream;
@@ -24,7 +25,7 @@ use super::style::{self, ago};
 use crate::live::maybe;
 use crate::people::sealed::Keyring;
 use crate::threads::search::{self, Search};
-use crate::threads::thread::{Entry, Kind, Parser};
+use crate::threads::thread::Parser;
 
 /// How many matches a search lists, the latest.
 pub const LIMIT: usize = 50;

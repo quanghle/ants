@@ -1,17 +1,17 @@
 //! What the model takes in besides keys: what the live feed read or heard ([`Model::take`]), what the UI read of the
 //! inbox, the channels and the reactions ([`Model::read`]), and the connection's state.
 
+use ants_client::entry::Entry;
 use ants_proto::ChannelEntry;
 use chrono::{DateTime, Utc};
 
 use super::{Action, Level, Model, Page};
 use crate::live;
 use crate::text::excerpt;
-use crate::threads::thread::Entry;
 use crate::tools::Update;
 use crate::tui::command::{self, Tone};
 use crate::tui::reads::Read;
-use crate::tui::{approvals, held, react, thread, work};
+use crate::tui::{approvals, held, react, thread};
 
 impl Model {
     /// Take in what the live feed read or heard.
@@ -71,7 +71,7 @@ impl Model {
         let mut actions = Vec::new();
         for page in self.pages_mut::<thread::Page>() {
             let thread = page.history.thread.clone();
-            if entries.iter().any(|e| e.thread_id == thread && work::to(e, &me)) {
+            if entries.iter().any(|e| e.thread_id == thread && ants_client::inbox::holds(e, &me)) {
                 actions.push(Action::MarkRead(thread));
             }
             page.history.stored(entries.clone());
@@ -92,7 +92,7 @@ impl Model {
         let me = self.data.live.me.clone();
         for tool in &tools {
             self.data.calls.stored(tool);
-            if tool.kind == crate::threads::thread::Kind::NoReply {
+            if tool.kind == ants_client::entry::Kind::NoReply {
                 self.data.facts.add(tool, &me);
             }
         }
