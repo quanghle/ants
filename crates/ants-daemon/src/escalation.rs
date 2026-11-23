@@ -58,9 +58,10 @@ use crate::monitoring::status;
 use crate::people::assistant_first::AssistantFirst;
 use crate::people::humans::Registry;
 use crate::records::chains::Chains;
-use crate::records::heed::{Heed, Heeded};
+use crate::records::heed::Heed;
 use crate::records::links;
 
+mod deadlines;
 mod route;
 mod step;
 mod text;
@@ -70,7 +71,7 @@ pub use route::{Route, group, members_at, route};
 use step::{
     Fresh, Step, chain_of, next_step, passes_on, repeats, settled_question, supersede, superseded, waits_for_turns,
 };
-use text::{chain_text, duration, join, notes_text, owner_text, reason_text, what_passes, why_text};
+use text::{chain_text, join, notes_text, owner_text, summary, what_passes, why_text};
 pub use text::{fit, group_note};
 use time::{millis, now_ms};
 
@@ -79,14 +80,6 @@ pub const DEFAULT_ESCALATE_AFTER: Duration = Duration::from_mins(30);
 /// Default of `escalation_reminder`: how long an escalation that reached a human waits for a human's message before
 /// the first reminder.
 pub const DEFAULT_ESCALATION_REMINDER: Duration = Duration::from_hours(4);
-/// The waits before each reminder after the first, backing off; the reminders stop after the last.
-const REMIND_AGAIN: [Duration; 2] = [Duration::from_hours(24), Duration::from_hours(3 * 24)];
-/// Pause after a failed look at the deadlines.
-const RETRY: Duration = Duration::from_secs(30);
-/// Most of an escalation's text kept for the escalations that follow it up.
-const SUMMARY_CHARS: usize = 4000;
-/// Longest a look at what the human did about an escalation may take before its reminder goes out regardless.
-const HEED_WAIT: Duration = Duration::from_secs(10);
 
 /// Stores an envelope under a message id, resolving once JetStream has it, with the hub stream's sequence of it when
 /// the hub stored it rather than the machine's outbox.
@@ -170,6 +163,13 @@ impl Stuck {
     pub fn new(reason: EscalationReason, notice: Envelope, id: String, about: Option<&Envelope>) -> Self {
         let carried = about.and_then(|e| e.escalation.as_deref().cloned());
         Self { reason, request_id: None, notice, id, carried, channel: None }
+    }
+
+    /// Where the thread's escalation stands once `escalation` went out for it to `to`, about `summary`, under its
+    /// message id.
+    fn pending(&self, escalation: Escalation, to: Vec<UserId>, deadline: Option<i64>, summary: String) -> Pending {
+        let (channel, sent) = (self.channel.clone(), Some(Sent::now(&self.id)));
+        Pending { channel, sent, ..Pending::of(escalation, to, deadline, &self.notice, summary) }
     }
 }
 
@@ -266,6 +266,12 @@ impl Escalator {
 
     pub fn ledger(&self) -> &Ledger {
         &self.ledger
+    }
+
+    /// When an escalation going out now goes one level higher without its leader's answer, in Unix milliseconds;
+    /// None when it waits for good.
+    fn deadline(&self) -> Option<i64> {
+        self.chain.after.map(|after| now_ms() + millis(after))
     }
 
     /// Escalate `stuck`, the ant's issue on the thread of its notice, one level up and return where it went. The
@@ -376,7 +382,7 @@ impl Escalator {
         let (ant, thread, from) = (&self.ant, &envelope.thread_id, &envelope.from);
         let text = format!(
             "[ants] {from} answered the escalation of {ant} on thread {thread} in place of {reached}: {}",
-            envelope.text.chars().take(SUMMARY_CHARS).collect::<String>(),
+            summary(&envelope.text),
         );
         let notice = Envelope::new(ant.clone(), reached.clone(), text)
             .with_owner(Some(reached))
@@ -409,7 +415,7 @@ impl Escalator {
             return Ok(false);
         }
         let _busy = self.busy.lock().await;
-        let deadline = self.chain.after.map(|after| now_ms() + millis(after));
+        let deadline = self.deadline();
         if self.ledger.climbed(thread, carried, members_at(carried).to_vec(), deadline).await? {
             tracing::info!(%thread, by = %envelope.from, level = carried.level, "a member escalated the thread higher");
             if deadline.is_some() {
@@ -451,11 +457,19 @@ impl Escalator {
         let escalation = &pending.escalation;
         let human =
             escalation.assistant_of.clone().unwrap_or_else(|| self.humans.owner_or_default(pending.owner.as_ref()));
-        let mut notice = Envelope::on_thread(escalation.thread_id.clone(), self.ant.clone(), human, text)
+        let mut stuck = self.following(escalation.thread_id.clone(), pending, human, text, id);
+        stuck.notice.question = pending.question.as_deref().cloned();
+        stuck
+    }
+
+    /// What sends the escalation `pending` of `thread` on with `text` to `human`, under message id `id`: a message
+    /// from the ant on the thread, as the thread's owner and creator have it, carrying no question.
+    fn following(&self, thread: ThreadId, pending: &Pending, human: UserId, text: String, id: String) -> Stuck {
+        let escalation = &pending.escalation;
+        let notice = Envelope::on_thread(thread, self.ant.clone(), human, text)
             .with_owner(pending.owner.clone())
             .with_creator(pending.creator.clone())
             .with_origin_thread(pending.origin_thread.clone());
-        notice.question = pending.question.as_deref().cloned();
         Stuck {
             reason: escalation.reason,
             request_id: escalation.request_id,
@@ -480,20 +494,8 @@ impl Escalator {
         let Some(assistant) = assistants.of(human, &self.ant).await else { return Ok(None) };
         let escalation = Escalation::new(self.ant.clone(), thread.clone(), EscalationReason::Question)
             .to_assistant(assistant.clone(), human.clone());
-        let deadline = self.chain.after.map(|after| now_ms() + millis(after));
-        let pending = Pending {
-            escalation: escalation.clone(),
-            to: vec![assistant.clone()],
-            renewed_by: None,
-            deadline,
-            owner: notice.owner.clone(),
-            creator: notice.creator.clone(),
-            origin_thread: notice.origin_thread.clone(),
-            summary: notice.text.chars().take(SUMMARY_CHARS).collect(),
-            channel: None,
-            question: notice.question.clone().map(Box::new),
-            sent: None,
-        };
+        let deadline = self.deadline();
+        let pending = Pending::of(escalation.clone(), vec![assistant.clone()], deadline, notice, summary(&notice.text));
         self.ledger.set_pending(thread, Some(pending)).await?;
         if deadline.is_some() {
             self.deadline_set.notify_one();
@@ -524,94 +526,6 @@ impl Escalator {
         (!from.is_visited(&assistant)).then(|| (assistant, human.clone()))
     }
 
-    /// Send every escalation whose leader did not answer by its deadline one level higher, and every reminder due, as
-    /// deadlines pass. Runs until dropped.
-    pub async fn deadlines(&self) {
-        loop {
-            let next = match self.ledger.deadlines().await {
-                Ok(deadlines) => deadlines.values().min().copied(),
-                Err(e) => {
-                    tracing::warn!(error = format!("{e:#}"), "reading escalation deadlines");
-                    Some(now_ms() + millis(RETRY))
-                }
-            };
-            let sleep = async {
-                match next {
-                    Some(at) => {
-                        tokio::time::sleep(Duration::from_millis(at.saturating_sub(now_ms()).max(0) as u64)).await;
-                    }
-                    None => std::future::pending().await,
-                }
-            };
-            tokio::select! {
-                () = self.deadline_set.notified() => continue,
-                () = sleep => {}
-            }
-            if let Err(e) = self.overdue().await {
-                tracing::warn!(error = format!("{e:#}"), "escalating past a deadline");
-                tokio::time::sleep(RETRY).await;
-            }
-        }
-    }
-
-    /// Send the reminders due and escalate one level higher every escalation past its deadline, dropping stale
-    /// deadlines.
-    async fn overdue(&self) -> Result<()> {
-        let now = now_ms();
-        for (thread, at) in self.ledger.deadlines().await? {
-            if at > now {
-                continue;
-            }
-            let _busy = self.busy.lock().await;
-            if let Some(reminder) = self.ledger.reminder(&thread).await?.filter(|r| r.at <= now) {
-                self.remind(&thread, reminder, now).await?;
-            }
-            let pending = self.ledger.pending(&thread).await?;
-            let due =
-                pending.filter(|p| p.deadline.is_some_and(|d| d <= now) && p.renewed_by.is_none() && !p.at_owner());
-            let Some(pending) = due else {
-                self.ledger.recheck(&thread).await?;
-                continue;
-            };
-            let escalation = &pending.escalation;
-            let waited = self.chain.after.map_or_else(String::new, |after| format!(" within {}", duration(after)));
-            let id = format!("overdue-{}-{thread}-{}", self.ant, escalation.level);
-            if let Some(human) = &escalation.assistant_of {
-                let text = format!(
-                    "[ants] No answer from {}, the assistant of {human}, on thread {thread}{waited}; {} goes on to \
-                     {human}.\n\n{}",
-                    escalation.leader,
-                    what_passes(&pending),
-                    pending.summary
-                );
-                let stuck = self.passing_on(&pending, text, id);
-                let (escalated, _) = self.climb(escalation.clone(), &pending.summary, &stuck, true).await?;
-                tracing::info!(%thread, %escalated, "passed on past the deadline");
-                continue;
-            }
-            let text = format!(
-                "[ants] No answer from {} on thread {thread}{waited}; the escalation goes one level higher.\n\n{}",
-                escalation.leader, pending.summary
-            );
-            let human = self.humans.owner_or_default(pending.owner.as_ref());
-            let notice = Envelope::on_thread(thread.clone(), self.ant.clone(), human, text)
-                .with_owner(pending.owner.clone())
-                .with_creator(pending.creator.clone())
-                .with_origin_thread(pending.origin_thread.clone());
-            let stuck = Stuck {
-                reason: escalation.reason,
-                request_id: escalation.request_id,
-                notice,
-                id,
-                carried: None,
-                channel: pending.channel.clone(),
-            };
-            let (escalated, _) = self.climb(escalation.clone(), &pending.summary, &stuck, true).await?;
-            tracing::info!(%thread, %escalated, "escalated past the deadline");
-        }
-        Ok(())
-    }
-
     /// Send the escalation `from` one level up, keeping `summary` for the escalations that follow it up. `had_pending`
     /// says whether the thread had an escalation already. A member climbing another ant's escalation sets no
     /// deadline: the stuck ant's daemon keeps it ([`Escalator::took_climb`]).
@@ -624,9 +538,7 @@ impl Escalator {
     ) -> Result<(Escalated, Option<String>)> {
         let thread = &stuck.notice.thread_id;
         let chain = self.chain_of(&from.leader).await;
-        let summary: String = summary.chars().take(SUMMARY_CHARS).collect();
-        let (owner, creator) = (stuck.notice.owner.clone(), stuck.notice.creator.clone());
-        let origin_thread = stuck.notice.origin_thread.clone();
+        let summary = text::summary(summary);
         let mut hop = from.up(&chain, self.chain.max_hops);
         if matches!(hop, Hop::Owner(_))
             && let Some((assistant, human)) = self.assistant_first(&from, stuck).await
@@ -636,26 +548,14 @@ impl Escalator {
         match hop {
             Hop::Chain { escalation, to } => {
                 let ours = escalation.stuck == self.ant;
-                let deadline = self.chain.after.filter(|_| ours).map(|after| now_ms() + millis(after));
+                let deadline = self.deadline().filter(|_| ours);
                 // Before the escalation is stored: a retry stores the post again under the same id. An assistant
                 // settles alone, with no group to coordinate in the notes.
                 if let Some(notes) = self.notes.as_ref().filter(|_| escalation.assistant_of.is_none()) {
                     let post = NotesPost::new(thread.clone(), self.ant.clone(), notes_text(&escalation, &to));
                     notes(post, format!("{}/notes", stuck.id)).await?;
                 }
-                let pending = Pending {
-                    escalation: (*escalation).clone(),
-                    to: to.clone(),
-                    renewed_by: None,
-                    deadline,
-                    owner,
-                    creator,
-                    origin_thread,
-                    summary,
-                    channel: stuck.channel.clone(),
-                    question: stuck.notice.question.clone().map(Box::new),
-                    sent: Some(Sent::now(&stuck.id)),
-                };
+                let pending = stuck.pending((*escalation).clone(), to.clone(), deadline, summary);
                 self.ledger.set_pending(thread, Some(pending)).await?;
                 if deadline.is_some() {
                     self.deadline_set.notify_one();
@@ -669,81 +569,10 @@ impl Escalator {
                     _ => from,
                 };
                 if from.level > 0 || had_pending || waits_for_turns(stuck.reason) {
-                    let pending = Pending {
-                        escalation: from.clone(),
-                        to: Vec::new(),
-                        renewed_by: None,
-                        deadline: None,
-                        owner,
-                        creator,
-                        origin_thread,
-                        summary,
-                        channel: stuck.channel.clone(),
-                        question: stuck.notice.question.clone().map(Box::new),
-                        sent: Some(Sent::now(&stuck.id)),
-                    };
+                    let pending = stuck.pending(from.clone(), Vec::new(), None, summary);
                     self.ledger.set_pending(thread, Some(pending)).await?;
                 }
                 self.to_owner(&from, Some(because), stuck).await
-            }
-        }
-    }
-
-    /// Remind the human `reminder` names of the thread's escalation, on the thread, carrying it, under a message id
-    /// of its own, then schedule the next reminder, backing off, unless this one is the last ([`REMIND_AGAIN`]).
-    /// Unless the human heeded it ([`Escalator::heeded`]): one marked done, read or muted ends the reminders, one
-    /// snoozed holds the next back until the snooze ends.
-    async fn remind(&self, thread: &ThreadId, reminder: Reminder, now: i64) -> Result<()> {
-        match self.heeded(thread, &reminder).await {
-            Heeded::No => {}
-            Heeded::Snoozed(until) => {
-                tracing::info!(%thread, human = %reminder.to, %until, "holding the reminder back while snoozed");
-                return self.ledger.postpone_reminder(thread, until.timestamp_millis().max(now + 1)).await;
-            }
-            heeded => {
-                tracing::info!(%thread, human = %reminder.to, ?heeded, "the human heeded the escalation; no more reminders");
-                return self.ledger.end_reminder(thread).await;
-            }
-        }
-        let Reminder { escalation, to, owner, creator, origin_thread, summary, since, sent, .. } = reminder;
-        let (ant, stuck) = (&self.ant, &escalation.stuck);
-        let waited = chrono::DateTime::from_timestamp_millis(since)
-            .map_or_else(String::new, |at| format!(" since {}", at.format("%Y-%m-%d %H:%M UTC")));
-        let again = REMIND_AGAIN.get(sent as usize);
-        let last = if again.is_none() { " This is the last reminder." } else { "" };
-        let text = format!(
-            "[ants] Reminder: the escalation of {stuck} on thread {thread} ({}) has waited for a human{waited}. A \
-             human's message to {ant} on the thread ends it: `ants ask --thread {thread} @{ant} TEXT`.{last}\n\n\
-             {summary}",
-            reason_text(escalation.reason),
-        );
-        let escalation = Escalation { stand_in: self.chain.stand_in.clone(), ..escalation };
-        let notice = Envelope::on_thread(thread.clone(), ant.clone(), to, text)
-            .with_owner(owner)
-            .with_creator(creator)
-            .with_origin_thread(origin_thread)
-            .with_escalation(Some(escalation));
-        let human = notice.to.clone();
-        let seq = (self.send)(notice, format!("remind-{ant}-{thread}-{since}-{}", sent + 1)).await?;
-        self.ledger.reminded(thread, again.map(|after| now + millis(*after)), seq).await?;
-        tracing::info!(%thread, %human, sent = sent + 1, "reminded of the escalation");
-        Ok(())
-    }
-
-    /// What the human `reminder` is for did about the thread's escalation; [`Heeded::No`] without a way to look, or
-    /// when looking fails, so a reminder too many beats one missed.
-    async fn heeded(&self, thread: &ThreadId, reminder: &Reminder) -> Heeded {
-        let Some(heed) = &self.heed else { return Heeded::No };
-        let look = heed(reminder.to.clone(), thread.clone(), reminder.seqs.clone());
-        match tokio::time::timeout(HEED_WAIT, look).await {
-            Ok(Ok(heeded)) => heeded,
-            Ok(Err(e)) => {
-                tracing::warn!(%thread, error = format!("{e:#}"), "looking up what the human did; reminding");
-                Heeded::No
-            }
-            Err(_) => {
-                tracing::warn!(%thread, "no answer in time looking up what the human did; reminding");
-                Heeded::No
             }
         }
     }
@@ -755,6 +584,14 @@ impl Escalator {
             Some(allow) => Some(allow.clone()),
             None => self.ledger.narrowed(&escalation.thread_id, None).await?,
         };
+        let to_member = |member: &UserId, text: String| {
+            Envelope::on_thread(escalation.thread_id.clone(), self.ant.clone(), member.clone(), text)
+                .with_owner(stuck.notice.owner.clone())
+                .with_creator(stuck.notice.creator.clone())
+                .with_origin_thread(stuck.notice.origin_thread.clone())
+                .with_escalation(Some(escalation.clone()))
+                .with_allow(allow.clone())
+        };
         if escalation.stuck != self.ant {
             let (thread, leader) = (&escalation.thread_id, &escalation.leader);
             let text = format!(
@@ -763,23 +600,11 @@ impl Escalator {
                 escalation.level,
                 join(to)
             );
-            let notice = Envelope::on_thread(thread.clone(), self.ant.clone(), escalation.stuck.clone(), text)
-                .with_owner(stuck.notice.owner.clone())
-                .with_creator(stuck.notice.creator.clone())
-                .with_origin_thread(stuck.notice.origin_thread.clone())
-                .with_escalation(Some(escalation.clone()))
-                .with_allow(allow.clone());
-            (self.send)(notice, format!("{}-{}", stuck.id, escalation.stuck)).await?;
+            (self.send)(to_member(&escalation.stuck, text), format!("{}-{}", stuck.id, escalation.stuck)).await?;
         }
         let text = chain_text(escalation, to, summary);
         for target in to {
-            let mut envelope =
-                Envelope::on_thread(escalation.thread_id.clone(), self.ant.clone(), target.clone(), text.clone())
-                    .with_owner(stuck.notice.owner.clone())
-                    .with_creator(stuck.notice.creator.clone())
-                    .with_origin_thread(stuck.notice.origin_thread.clone())
-                    .with_escalation(Some(escalation.clone()))
-                    .with_allow(allow.clone());
+            let mut envelope = to_member(target, text.clone());
             envelope.in_reply_to = stuck.notice.in_reply_to;
             (self.send)(envelope, format!("{}-{target}", stuck.id)).await?;
         }
@@ -819,7 +644,7 @@ impl Escalator {
                 owner: notice.owner.clone(),
                 creator: notice.creator.clone(),
                 origin_thread: notice.origin_thread.clone(),
-                summary: notice.text.chars().take(SUMMARY_CHARS).collect(),
+                summary: summary(&notice.text),
                 since: now,
                 at: now + millis(remind),
                 sent: 0,

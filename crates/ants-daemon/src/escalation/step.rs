@@ -3,7 +3,8 @@
 use ants_proto::{Envelope, Escalation, EscalationReason, ThreadId, UserId};
 use uuid::Uuid;
 
-use super::{Escalated, SUMMARY_CHARS, Stuck};
+use super::text::summary;
+use super::{Escalated, Stuck};
 use crate::limits::caps::Pending;
 
 /// What an escalation does next.
@@ -73,8 +74,7 @@ pub(super) fn superseded(pending: &Pending, reason: EscalationReason) -> bool {
 /// reason and about its notice, then the question, which no longer goes on to the human as a question.
 pub(super) fn supersede(asked: Pending, stuck: &Stuck) -> Pending {
     let escalation = Escalation { reason: stuck.reason, request_id: stuck.request_id, ..asked.escalation };
-    let summary =
-        format!("{}\n\nAsked before: {}", stuck.notice.text, asked.summary).chars().take(SUMMARY_CHARS).collect();
+    let summary = summary(&format!("{}\n\nAsked before: {}", stuck.notice.text, asked.summary));
     Pending { escalation, summary, question: None, sent: None, ..asked }
 }
 

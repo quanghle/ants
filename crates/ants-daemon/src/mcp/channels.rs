@@ -109,7 +109,7 @@ impl Hub {
     ) -> Result<String, String> {
         let (current, source) = {
             let sessions = self.sessions.locked();
-            let current = sessions.current.get(thread).cloned();
+            let current = sessions.current(thread).cloned();
             let channel = sessions.origins.get(thread).is_some_and(|origin| origin.channel.is_some());
             (current, (!channel).then(|| thread.clone()))
         };

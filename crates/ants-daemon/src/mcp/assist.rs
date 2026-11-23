@@ -215,19 +215,19 @@ impl Hub {
     /// The human the ant acts for now: the one its credentials make it the assistant of, while that human's grant
     /// names the ant.
     pub(super) fn assisting_now(&self) -> Option<UserId> {
-        let human = self.assisting.get()?;
+        let human = self.assist.human.get()?;
         (self.humans.assistant(human).as_ref() == Some(&self.ant)).then(|| human.clone())
     }
 
     /// [`Hub::assisting_now`], and the store to act through, else why the ant may not act for its human.
     fn acting_for(&self) -> Result<(UserId, &dyn HumanStore), String> {
-        let Some(human) = self.assisting.get() else {
+        let Some(human) = self.assist.human.get() else {
             return Err(format!("{} is no human's assistant", self.ant));
         };
         if self.assisting_now().is_none() {
             return Err(format!("the grant of {human} no longer names {}: nothing is done for {human}", self.ant));
         }
-        let store = self.human_store.get().ok_or("acting for a human is not available here")?;
+        let store = self.assist.store.get().ok_or("acting for a human is not available here")?;
         Ok((human.clone(), store.as_ref()))
     }
 

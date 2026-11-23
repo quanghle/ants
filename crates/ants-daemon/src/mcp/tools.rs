@@ -43,7 +43,7 @@ impl Tools {
         if hub.requester.get().is_some() {
             tool_router.merge(Self::managers_router());
         }
-        if hub.assisting.get().is_some() {
+        if hub.assist.human.get().is_some() {
             tool_router.merge(Self::assist_router());
         }
         if hub.trails.get().is_some() {
@@ -69,7 +69,7 @@ impl Tools {
     /// and answers with its reply (requirement ants-x39hk.12.4).
     fn refused_in_review(&self, name: &str, cx: &RequestContext<RoleServer>) -> Option<CallToolResult> {
         let thread = self.thread(cx).ok()?;
-        let allow = self.hub.sessions.locked().current.get(&thread)?.allow.clone();
+        let allow = self.hub.sessions.locked().current(&thread)?.allow.clone();
         if !ants_proto::is_review(allow.as_deref()) {
             return None;
         }
@@ -111,7 +111,7 @@ impl Tools {
     /// The tools offered now: those acting for the human the ant assists only while its grant names the ant.
     fn offered(&self) -> Vec<rmcp::model::Tool> {
         let mut tools = self.tool_router.list_all();
-        if self.hub.assisting.get().is_some() && self.hub.assisting_now().is_none() {
+        if self.hub.assist.human.get().is_some() && self.hub.assisting_now().is_none() {
             let assist = Self::assist_router();
             tools.retain(|t| !assist.has_route(&t.name));
         }
@@ -123,7 +123,7 @@ impl Tools {
 impl ServerHandler for Tools {
     fn get_info(&self) -> ServerConfig {
         let assisting = self.hub.assisting_now();
-        let provider = self.hub.provider.get().filter(|p| p.has(Capability::Tools)).map(Connected::name);
+        let provider = self.hub.provided.provider.get().filter(|p| p.has(Capability::Tools)).map(Connected::name);
         let ant = &self.hub.ant;
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))
