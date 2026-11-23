@@ -142,13 +142,14 @@ async fn a_human_grants_and_withdraws_its_assistant() {
 /// Alice; `seal off` ends both at once.
 #[tokio::test]
 async fn an_enrolled_assistant_opens_and_seals_for_its_human_until_withdrawn() {
+    use ants_client::sealed::State;
     use ants_daemon::people::devices::Directory;
     use ants_daemon::secrets::sealing::{AssistantSealing, Opening, seal_envelope};
     use ants_proto::Envelope;
     use crypto_secretbox::XSalsa20Poly1305;
     use crypto_secretbox::aead::{KeyInit as _, OsRng};
 
-    use crate::people::sealed::{Keyring, PLAINTEXT, Sealer, State};
+    use crate::people::sealed::{Keyring, PLAINTEXT, Sealer};
 
     let Some(server) = Server::start() else { return };
     let (alice, bob, pa) = (p("alice"), p("bob"), p("pa"));

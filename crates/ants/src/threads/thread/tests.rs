@@ -4,6 +4,7 @@
 
 use std::assert_matches;
 
+use ants_client::entry::last_reopening;
 use ants_daemon::channel::CLOCK_SLACK;
 use ants_daemon::records::reactions::Reacted;
 use ants_proto::{
@@ -1061,12 +1062,12 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
     let (follow, ()) = tokio::join!(follow, asked);
     follow.unwrap();
     let [(e, state)] = followed.as_slice() else { panic!("not one message: {followed:?}") };
-    assert_eq!((e.text.as_str(), *state), ("lunch at noon?", Some(crate::people::sealed::State::Opened)));
+    assert_eq!((e.text.as_str(), *state), ("lunch at noon?", Some(ants_client::sealed::State::Opened)));
 
     // The thread's history and a search open it too.
     let shown = history(&bob_js, &e.thread_id, None, Activity::None, for_history).await.unwrap();
     let opened: Vec<_> = shown.iter().map(|e| (e.text.as_str(), e.sealed)).collect();
-    assert_eq!(opened, [("lunch at noon?", Some(crate::people::sealed::State::Opened))]);
+    assert_eq!(opened, [("lunch at noon?", Some(ants_client::sealed::State::Opened))]);
     let search = crate::threads::search::Search { grep: Some("lunch".into()), limit: 10, ..Default::default() };
     let (found, _) = search.run(&bob_js, Parser::opening(for_search)).await.unwrap();
     assert_eq!(found.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), ["lunch at noon?"]);

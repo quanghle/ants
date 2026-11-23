@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use ants_client::entry::PromptEnded;
+use ants_client::entry::{Entry, Kind, NoReply, PromptEnded, ToolCall, ToolRejection};
 use ants_client::sealed::State;
 use ants_client::text::took;
 use ants_proto::{
@@ -13,7 +13,6 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use super::summaries::Summary;
-use super::{Entry, Kind, NoReply, ToolCall, ToolRejection};
 use crate::messages::attachments;
 
 /// How many characters of a note on an entry, or of a tool call's status, [`render`] shows.
@@ -85,7 +84,7 @@ struct Attached<'a> {
 
 impl<'a> Shown<'a> {
     pub fn of(entry: &'a Entry) -> Self {
-        let attached = |listed: &'a attachments::Listed| Attached {
+        let attached = |listed: &'a ants_client::attachments::Listed| Attached {
             attachment: &listed.attachment,
             handle: &listed.handle,
             unavailable: listed.unavailable.as_deref(),

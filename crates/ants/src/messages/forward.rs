@@ -4,6 +4,7 @@
 //! ([`Envelope::origin_thread`]) as a spin-off does, so the source thread's delegation tree shows it. The recipient
 //! gets only what is forwarded: no grant to the source thread comes with it.
 
+use ants_client::entry::{Entry, Kind};
 use ants_proto::{Envelope, MAX_ATTACHMENTS, ThreadId, ThreadSummary, UserId};
 use anyhow::{Result, bail, ensure};
 use async_nats::jetstream;
@@ -11,7 +12,6 @@ use async_nats::jetstream;
 use crate::cmd::send;
 use crate::messages::attachments::{self, File};
 use crate::people::{humans, sealed};
-use crate::threads::thread::{Entry, Kind};
 
 /// What a forward carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +38,7 @@ impl Source {
         let what = entry.id.map_or_else(|| format!("entry {}", entry.seq), |id| format!("message {id}"));
         ensure!(entry.kind.reopens() && !entry.forged, "{what} is no message, post or note to forward");
         ensure!(entry.from.is_some(), "{what} names no author");
-        if entry.sealed.is_some_and(|s| s != sealed::State::Opened) {
+        if entry.sealed.is_some_and(|s| s != ants_client::sealed::State::Opened) {
             bail!("{what} is sealed and does not open on this device: there is nothing to forward");
         }
         Ok(())
@@ -119,11 +119,11 @@ impl Source {
 
 #[cfg(test)]
 mod tests {
+    use ants_client::entry::Entry;
     use ants_proto::{Attachment, AttachmentHandle, AttachmentScope, Uuid};
     use chrono::TimeZone as _;
 
     use super::*;
-    use crate::threads::thread::Entry;
 
     fn p(name: &str) -> UserId {
         name.parse().unwrap()
@@ -147,7 +147,7 @@ mod tests {
         let attachment = Attachment::new("build.log", "text/plain", 3, "0".repeat(64)).unwrap();
         let handle =
             AttachmentHandle { from: p("dev-a"), scope: AttachmentScope::Inbox(p("alice")), id: attachment.id };
-        entry.attachments = attachments::listed(&[attachment], |_| handle.clone());
+        entry.attachments = ants_client::attachments::listed(&[attachment], |_| handle.clone());
         let thread = entry.thread_id.clone();
         let source = Source::Message(Box::new(entry));
         assert_eq!(
@@ -189,7 +189,7 @@ mod tests {
     fn only_a_message_with_an_author_and_opened_text_is_forwarded() {
         assert!(Source::Message(Box::new(message("x"))).check().is_ok());
         let mut sealed = message("[sealed]");
-        sealed.sealed = Some(sealed::State::Unreadable);
+        sealed.sealed = Some(ants_client::sealed::State::Unreadable);
         assert!(Source::Message(Box::new(sealed)).check().is_err());
         let mut tool = message("Read file");
         tool.kind = Kind::Tool;

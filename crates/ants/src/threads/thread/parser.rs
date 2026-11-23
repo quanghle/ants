@@ -4,11 +4,11 @@
 
 use std::sync::Arc;
 
+use ants_client::entry::Entry;
 use ants_client::parser::{Lookups, NoLookups};
 use ants_proto::{Acting, Envelope, UserId, subject};
 use chrono::{DateTime, Utc};
 
-use super::Entry;
 use crate::people::sealed;
 
 /// Turns stored messages into [`Entry`]s, in stream order ([`ants_client::parser::Parser`]). A sealed message between two
@@ -27,7 +27,7 @@ struct LookedUp {
 }
 
 impl Lookups for LookedUp {
-    fn read(&self, envelope: Envelope) -> (Envelope, Option<sealed::State>) {
+    fn read(&self, envelope: Envelope) -> (Envelope, Option<ants_client::sealed::State>) {
         sealed::read(envelope, self.keyring.as_deref())
     }
 

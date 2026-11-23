@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
+use ants_client::entry::Entry;
 use ants_daemon::bus;
 use ants_daemon::records::owners;
 use ants_daemon::stream::reading::{self, Reading};
@@ -21,7 +22,7 @@ use futures::StreamExt as _;
 use crate::colony;
 use crate::connection::Nats;
 use crate::messages::{inbox, progress};
-use crate::threads::thread::{self, Entry, Pick};
+use crate::threads::thread::{self, Pick};
 use crate::threads::thread_meta;
 
 /// Most bytes of entries a request carries: the newest that fit.

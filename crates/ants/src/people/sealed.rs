@@ -783,7 +783,7 @@ mod tests {
         assert!(got.attachments.is_empty() && got.sealed.is_some());
         let keyring = Keyring::load(&nats[1], &js[1]).await.unwrap();
         let (opened, _) = read(got.clone(), Some(&keyring));
-        let [listed] = attachments::listed_on(&opened.subject(), &opened.attachments).try_into().unwrap();
+        let [listed] = ants_client::attachments::listed_on(&opened.subject(), &opened.attachments).try_into().unwrap();
         let handle = listed.handle.clone();
         assert_eq!(listed.line(), format!("📎 plan.md ({} B) {handle}", plain.len()));
         let (stored, bytes) = files::get(&js[2], &handle, None).await.unwrap();

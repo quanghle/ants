@@ -30,7 +30,9 @@ pub use self::summaries::Summary;
 pub(crate) use self::summaries::{Select, Threads};
 pub use self::text::{Shown, answers_to, render, table};
 pub(crate) use self::text::{answer_line, call_label, time};
-pub use ants_client::entry::{Entry, Kind, NoReply, ToolCall, ToolRejection, last_reopening};
+#[cfg(test)]
+pub use ants_client::entry::ToolCall;
+pub use ants_client::entry::{Entry, Kind};
 pub use message::{MessagePick, find as find_message, recent_messages};
 
 mod message;

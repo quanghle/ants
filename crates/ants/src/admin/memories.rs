@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
+use ants_client::attachments::size;
 use ants_daemon::profile::identity;
 use ants_proto::{AdminOp, MEMORIES_FRESH, Machine, Memories, UserId};
 use anyhow::Result;
@@ -13,7 +14,6 @@ use async_nats::jetstream;
 
 use crate::admin::orders::{Admin, Asked};
 use crate::connection::Nats;
-use crate::messages::attachments::size;
 
 /// How long the CLI waits for the daemon's answer.
 pub const WAIT: Duration = Duration::from_secs(15);

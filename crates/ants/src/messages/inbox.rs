@@ -12,7 +12,9 @@ use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
+use ants_client::attachments::{Listed, listed};
 use ants_client::inbox::{CONFLICTS, ParseError, mark_read as mark_in, mark_unread, marker_of, parse};
+use ants_client::sealed::State;
 use ants_daemon::bus;
 use ants_daemon::delivery::unserved;
 use ants_daemon::people::humans::Registry;
@@ -28,7 +30,7 @@ use futures::{FutureExt as _, StreamExt as _};
 use crate::avatars::Faces;
 use crate::cas;
 use crate::messages::attachments;
-use crate::people::sealed::{Keyring, State};
+use crate::people::sealed::Keyring;
 
 /// How often a followed inbox is read again with no message announced, against an announcement missed.
 const RESCAN: Duration = Duration::from_secs(30);
@@ -339,7 +341,7 @@ pub struct Shown<'a> {
     #[serde(flatten)]
     envelope: Envelope,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    attachments: Vec<attachments::Listed>,
+    attachments: Vec<Listed>,
     reactions: &'a [Reacted],
     /// What the CLI made of a sealed message, whose text it opened or shows `[sealed]` or `[forged]` for.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -351,7 +353,7 @@ pub struct Shown<'a> {
 
 impl<'a> Shown<'a> {
     pub fn new(envelope: &Envelope, reactions: &'a [Reacted]) -> Self {
-        let attachments = attachments::listed(&envelope.attachments, |id| envelope.attachment_handle(id));
+        let attachments = listed(&envelope.attachments, |id| envelope.attachment_handle(id));
         Self {
             envelope: Envelope { attachments: Vec::new(), ..envelope.clone() },
             attachments,
@@ -453,7 +455,7 @@ pub fn render(e: &Envelope, acting: &Acting, reactions: &[Reacted], faces: Optio
     let at = e.sent_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
     let indent =
         |text: &str| ants_proto::lines(text).lines().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
-    let attached = attachments::render(&attachments::listed(&e.attachments, |id| e.attachment_handle(id)), "  ");
+    let attached = attachments::render(&listed(&e.attachments, |id| e.attachment_handle(id)), "  ");
     let under = attached + &render_reactions(reactions, "  ");
     if let Some(question) = e.asks() {
         let text = indent(&render_question(e.id, question, Vec::new()));

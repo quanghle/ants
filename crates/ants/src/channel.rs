@@ -658,7 +658,7 @@ fn render_post(out: &mut String, post: &ChannelPost, by: &dyn Fn(&ChannelPost) -
     for line in lines {
         let _ = writeln!(out, "{indent}    {line}");
     }
-    let attached = crate::messages::attachments::listed(&post.attachments, |id| post.attachment_handle(id));
+    let attached = ants_client::attachments::listed(&post.attachments, |id| post.attachment_handle(id));
     out.push_str(&crate::messages::attachments::render(&attached, &format!("{indent}    ")));
 }
 

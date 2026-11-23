@@ -3,13 +3,13 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use ants_client::entry::{Entry, Kind};
 use ants_proto::{Acting, ChannelId, EscalationReason, Humans, Mark, ThreadId, ThreadMarks, UserId};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use super::OPENING;
 use super::text::time;
-use super::{Entry, Kind};
 
 /// One thread as `ants thread list` prints it, from the messages read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
