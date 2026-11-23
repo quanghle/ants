@@ -9,13 +9,13 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - Record discovered work with `bd create ... --dep discovered-from:<id>`.
 - Specs: `bd spec list`, `bd spec show <area>`. Areas: wire, transport, daemon, harness, memory, cli, efficiency,
   messenger, channels, webhooks, admin, assistant, trails, sense (with sense/identity, sense/memory, sense/brief,
-  sense/work, sense/triggers, sense/store, sense/dreams).
+  sense/work, sense/triggers, sense/store, sense/dreams), web.
 - Link every piece of work to the requirement it serves (`bd spec link <id> <requirement>`) or mark it
   `bd spec none <id> -r "<why>"`. `bd spec drift` must report 0 problems.
 - A behaviour change that contradicts a requirement goes through `bd spec change`, not a silent edit.
-- A spec for a new feature says, for each surface (CLI, `ants chat`, MCP tools, admin orders, `ants doctor`, docs,
-  `contrib/skills/`), what the feature offers there or why nothing: a feature lands with its surfaces, or with issues
-  for the ones still missing.
+- A spec for a new feature says, for each surface (CLI, `ants chat`, the web client, MCP tools, admin orders,
+  `ants doctor`, docs, `contrib/skills/`), what the feature offers there or why nothing: a feature lands with its
+  surfaces, or with issues for the ones still missing.
 - The database is local; refresh the committed snapshot with `bd export -o .bd/issues.jsonl` in each commit that
   changes issues or specs. Release notes (`scripts/release-notes.sh`) are built from that snapshot, so the commit a
   release tag points at must carry an up-to-date export.
@@ -34,15 +34,12 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
   exception is a trail's one-shot `ants subprocess` worker, run only while the trail's script computes.
 - TLS stays on rustls.
 - A daemon acks a JetStream message only after its effects are stored.
-- Also in the repo: `contrib/` (launchd and systemd units, container demo, e2e fixture image, agent skills),
-  `scripts/` (`check.sh`, `install-units.sh`, `footprint.sh`, `release-notes.sh`, `nats-server.sh`,
-  `demo-containers.sh`, `e2e.sh` with its scenarios in `e2e/scenarios.sh`), `docs/` (`architecture.md`, `sense.md`,
-  `trails.md`, `cli.md`, `config.md`, `auth.md`, `webhooks.md`, `transport.md`, `hooks.md`, `operations.md`,
-  `container-demo.md`, `e2e-scenarios.md`),
-  `deny.toml` (dependency policy), `.cargo/config.toml` (7-day dependency cooldown), `rust-toolchain.toml` (pinned
-  toolchain; moves together with `rust-version` in `Cargo.toml` and the `toolchain:` of every CI job).
+- `rust-toolchain.toml` pins the toolchain and moves together with `rust-version` in `Cargo.toml` and the `toolchain:`
+  of every CI job.
 - `crates/ants/nats-server.sha256` pins the nats-server release bundled with ants: release archives, `ants setup`
   downloads and CI's tests all take it from there.
+- The web client's front end and its browser bindings (the crate `ants-web`) live in the repo `ants-web`, beside this
+  one and local for now; its work and its spec (area web) are tracked in this repo's bd.
 - Comment only code that needs clarification.
 - Modules are `x.rs` with submodules in `x/`, never `x/mod.rs`. Unit tests of `x.rs` start inline
   (`#[cfg(test)] mod tests { … }` at its end); once they outgrow the code they test, they move to `x/tests.rs`
@@ -74,15 +71,7 @@ skipped checks.
 - `ANTS_TEST_JS_ACK_FC_V2=1` runs the test servers with nats-server 2.16's v2 ack and flow control subjects; CI and
   the script run `cargo test` both ways.
 - `ANTS_STRESS=N cargo test -p ants --test e2e -- flood reloads_under flapping storm many_ants` runs the stress tests
-  at N times their size (minutes, not run by CI or the script): a flood with the daemon killed twice during the
-  backlog, reloads listing and unlisting ants and reading half-written files under traffic, a leaf node's uplink
-  flapping with one outage past the ack wait, channel storms of 6 + 6N member ants each mentioning everyone, and 12×N
-  ants in git worktrees on one daemon; every message answered once, a withdrawn one never, none a dead letter for an
-  outage, every storm ended by the thread's turn budget, every thread in a worktree of its own and its session briefed,
-  each worktree removed with its branch.
-- `cargo build --release` and `scripts/footprint.sh --ants target/release/ants --port 14722 --max-mb 10` with
-  `--footprint`; the footprint check skips where `scripts/footprint.sh` cannot measure (Linux and macOS only, needs
-  `nats-server`, and `footprint` on macOS).
+  at N times their size (minutes, not run by CI or the script).
 - `cargo deny --locked check` (skipped without cargo-deny). A new license goes into `deny.toml`'s allow-list only if
   permissive.
 - Dependency cooldown: `cargo update` and `cargo add` take only versions published at least 7 days ago, and a

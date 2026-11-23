@@ -95,7 +95,7 @@ pub struct Permissions {
 /// or [`Permissions::with_js_domain`], or
 /// the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(2);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(1);
 
 /// A version of the permissions `ants auth` gives ([`PERMISSIONS_VERSION`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

@@ -304,7 +304,7 @@ fn user_jwt_tags() {
     snap(
         "user_jwt_tags",
         &vec![
-            PermissionsVersion(2).tag(),
+            PermissionsVersion(1).tag(),
             device().tag(),
             xkey.tag(),
             REGISTERED_TAG.to_owned(),
