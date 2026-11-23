@@ -478,6 +478,52 @@ mod tests {
     use super::*;
     use crate::cmd::{channel::ChannelCommand, tools::ToolsCommand};
 
+    /// The long flags of `command` and of its commands, each with the first command found taking it, but for the
+    /// hidden ones and those clap adds.
+    fn long_flags(command: &clap::Command, path: &str, flags: &mut std::collections::BTreeMap<String, String>) {
+        for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
+            if let Some(long) = arg.get_long().filter(|long| !["help", "version"].contains(long)) {
+                flags.entry(long.to_owned()).or_insert_with(|| path.to_owned());
+            }
+        }
+        for sub in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+            long_flags(sub, &format!("{path} {}", sub.get_name()), flags);
+        }
+    }
+
+    /// The markdown files under `dir`, read into `text`.
+    fn markdown(dir: &std::path::Path, text: &mut String) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                markdown(&path, text);
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                text.push_str(&std::fs::read_to_string(&path).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn readme_or_docs_name_every_long_flag() {
+        use clap::CommandFactory as _;
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut docs = std::fs::read_to_string(root.join("README.md")).unwrap();
+        markdown(&root.join("docs"), &mut docs);
+        let mut flags = std::collections::BTreeMap::new();
+        long_flags(&Cli::command(), "ants", &mut flags);
+        assert!(flags.len() > 100, "the commands' flags are found: {}", flags.len());
+        // `--thread` is not named by `--threads`.
+        let named = |flag: &str| {
+            let flag = format!("--{flag}");
+            docs.match_indices(&flag)
+                .any(|(at, _)| !docs[at + flag.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-'))
+        };
+        let missing: Vec<String> =
+            flags.iter().filter(|(flag, _)| !named(flag)).map(|(flag, path)| format!("--{flag} ({path})")).collect();
+        assert!(missing.is_empty(), "named in neither README.md nor docs/: {}", missing.join(", "));
+    }
+
     #[test]
     fn watch_spend_and_channel_read_take_a_start_of_a_thread_id_or_last() {
         let start = Some(thread::Pick::Prefix("0199".to_owned()));
