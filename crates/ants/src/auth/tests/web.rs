@@ -1,6 +1,13 @@
 //! Web credentials, a human's device that is a page of the web client: what the server lets them do, each by the
-//! request of core NATS the page sends, and what it refuses; and how they are issued, renewed and listed.
+//! request of core NATS the page sends, and what it refuses; what `ants-client`'s client, which the page runs, does
+//! with them over async-nats; and how they are issued, renewed and listed.
 
+use std::rc::Rc;
+
+use ants_client::transport::{Message, Transport as _};
+use ants_client::{MarkRead, Session, Window};
+use ants_proto::{StatusEvent, StatusUpdate};
+use ants_test_support::NatsTransport;
 use async_nats::HeaderMap;
 
 use super::*;
@@ -223,6 +230,121 @@ async fn a_web_device_does_what_the_page_s_views_do_and_nothing_else() {
     // And the human's other device sees what the page stored.
     let kept = h_js.get_stream_no_info(STREAM).await.unwrap().get_raw_message(asked_at).await.unwrap();
     assert_eq!(serde_json::from_slice::<Envelope>(&kept.payload).unwrap(), ask);
+}
+
+/// The client of the web device of `alice` on `server`, connected, with its transport: the hub set up by another
+/// device of hers.
+async fn page(server: &Server, domain: Option<&JsDomain>) -> (ants_client::Client, Rc<NatsTransport>) {
+    let (team, alice) = (server.dir().join("auth"), p("alice"));
+    let laptop = server.dir().join("alice.creds");
+    let full = Permissions::for_user(&alice, Role::Human).with_js_domain(domain);
+    issue_with(&team, &alice, Kind::Human, full, &laptop).unwrap();
+    let h_js = connect_to(&server.url, &laptop, domain, &alice).await;
+    let rights = crate::people::humans::Rights::from_creds(Some(&laptop)).unwrap();
+    ants_daemon::hub::init(&h_js, |s| rights.may_publish(s)).await.unwrap();
+
+    let out = server.dir().join("alice-web.creds");
+    let new = NewDevice { web: true, ..NewDevice::default() };
+    let web = Permissions::for_web(&alice).with_js_domain(domain);
+    issue_device_with(&team, &alice, Kind::Human, web, &new, &out).unwrap();
+    let transport = Rc::new(NatsTransport::new(&server.url, Some(&out)));
+    let account = Some(account_key(&team).unwrap());
+    let session = Session { human: alice, domain: domain.cloned(), account, name: "ants-web".into() };
+    let client = ants_client::Client::new(transport.clone(), session);
+    client.connect().await.unwrap();
+    (client, transport)
+}
+
+/// Every page of `window`, read to its end: the sequence, sender and text of each entry.
+async fn read(client: &ants_client::Client, window: Window) -> Vec<(u64, String, String)> {
+    let mut reader = client.reader(window);
+    let mut entries = Vec::new();
+    loop {
+        let page = timeout(WAIT, reader.next()).await.expect("no page").unwrap();
+        assert_eq!((page.skipped, page.relayed), (0, 0));
+        entries.extend(page.entries.into_iter().map(|e| (e.seq, e.from.unwrap().to_string(), e.text)));
+        if page.done {
+            return entries;
+        }
+    }
+}
+
+/// The client sends, hears, reads a window and marks read on `server`, whose JetStream is in `domain`, and the
+/// server refuses none of it.
+async fn the_client_s_reads_and_writes_pass(server: &Server, domain: Option<&JsDomain>) {
+    let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
+    let (client, transport) = page(server, domain).await;
+    let ant = server.creds_in(&dev_a, domain);
+    let (d_client, d_js) = bus::connect(&server.url, Some(&ant), domain, &dev_a, "test").await.unwrap();
+
+    // A send to an ant: the thread's owner recorded, which the ant's daemon reads, and the stream's ack.
+    let ask = |text: &str, to: Option<&UserId>| ants_client::Send {
+        to: to.cloned(),
+        text: text.into(),
+        ..ants_client::Send::default()
+    };
+    let sent = client.send(ask("hi", Some(&dev_a))).await.unwrap();
+    assert_eq!((&sent.owner_unrecorded, sent.ack.stream.as_str(), sent.ack.duplicate), (&None, STREAM, false));
+    assert_eq!(sent.ack.domain.as_deref(), domain.map(JsDomain::as_str));
+    let thread = sent.envelope.thread_id.clone();
+    let seen = owners::Owners::new(d_js.clone()).recorded(&thread, &dev_a).await.unwrap();
+    assert_eq!(seen, Some(alice.clone()));
+    // One naming no one: the grant of an assistant read, there is none, so to the messenger.
+    let unaddressed = client.send(ask("anyone?", None)).await.unwrap();
+    assert_eq!(unaddressed.unaddressed, Some(UserId::messenger().into()));
+    assert_eq!((&unaddressed.owner_unrecorded, unaddressed.ack.seq), (&None, sent.ack.seq + 1));
+
+    // The ant's status and its reply, heard live. The marker's read is a round trip: the server has both
+    // subscriptions by its answer.
+    let mut status = client.status(thread.clone()).await.unwrap();
+    let mut inbox = client.inbox().await.unwrap();
+    assert_eq!(client.marker().await.unwrap().revision, 0, "no marker yet");
+    let working = StatusEvent::new(dev_a.clone(), thread, StatusUpdate::State { state: ants_proto::State::Working });
+    d_client.publish(working.subject(), serde_json::to_vec(&working).unwrap().into()).await.unwrap();
+    assert_eq!(timeout(WAIT, status.next()).await.expect("no status").unwrap(), working);
+    let reply = sent.envelope.reply(dev_a.clone(), "hello", Role::Human).unwrap();
+    bus::publish(&d_js, &reply).await.unwrap();
+    assert_eq!(timeout(WAIT, inbox.next()).await.expect("no message").unwrap(), reply);
+
+    // The stream read back: all of it, what was stored in the last hour, and what came before the reply.
+    let replied = sent.ack.seq + 2;
+    let all = read(&client, Window::default()).await;
+    let texts: Vec<(u64, &str, &str)> = all.iter().map(|(seq, from, text)| (*seq, &**from, &**text)).collect();
+    let expected = [(sent.ack.seq, "alice", "hi"), (sent.ack.seq + 1, "alice", "anyone?"), (replied, "dev-a", "hello")];
+    assert_eq!(texts, expected);
+    let since = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+    assert_eq!(read(&client, Window { since, ..Window::default() }).await, all);
+    let before = Window { until_seq: Some(replied - 1), ..Window::default() };
+    assert_eq!(read(&client, before).await, all[..2]);
+    let on = Window { from_seq: Some(replied), ..Window::default() };
+    assert_eq!(read(&client, on).await, all[2..]);
+
+    // The reply marked read by compare-and-set, as stored, and unread again.
+    let marked = client.mark_read(MarkRead { seqs: vec![replied], ..MarkRead::default() }).await.unwrap();
+    assert!(marked.revision > 0 && marked.marker.is_read(replied), "{marked:?}");
+    assert_eq!(client.marker().await.unwrap(), marked);
+    let unmarked = client.mark_unread(vec![replied]).await.unwrap();
+    assert!(unmarked.revision > marked.revision && !unmarked.marker.is_read(replied), "{unmarked:?}");
+
+    // The server answers a connection in order: the refusal of this publish is the first it sent, so it refused
+    // nothing the client did.
+    let denied = subject::read_marker(&bob);
+    transport.publish(Message::new(denied.clone(), "{}")).await.unwrap();
+    crate::test_support::eventually("the refusal", async || !transport.server_errors().is_empty()).await;
+    let errors = transport.server_errors();
+    assert!(errors.len() == 1 && errors[0].contains(&format!("Publish to \"{denied}\"")), "{errors:?}");
+}
+
+#[tokio::test]
+async fn the_client_sends_reads_marks_read_and_hears_with_web_credentials() {
+    let Some(server) = Server::start() else { return };
+    the_client_s_reads_and_writes_pass(&server, None).await;
+}
+
+#[tokio::test]
+async fn the_client_does_the_same_in_a_hub_s_domain() {
+    let Some(server) = Server::start_with("domain: hub", "") else { return };
+    the_client_s_reads_and_writes_pass(&server, Some(&"hub".parse().unwrap())).await;
 }
 
 #[tokio::test]
