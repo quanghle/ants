@@ -264,7 +264,7 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
 
     // `ants signer`'s credentials answer an ant's requests, for the messages it reads only.
     let approver =
-        crate::credentials::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, WAIT)
+        crate::credentials::approver::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, WAIT)
             .await
             .unwrap();
     let serving = tokio::spawn(reactions::serve(
@@ -308,7 +308,7 @@ async fn ants_signer_reads_the_runs_ants_save_trails_from() {
     let key = trail_session_key(&dev_a, &RunId::generate());
     DirectKv::new(&a_js, None, TRAIL_RUNS_BUCKET).await.unwrap().put(&key, b"{}".to_vec()).await.unwrap();
     let approver =
-        crate::credentials::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, WAIT)
+        crate::credentials::approver::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, WAIT)
             .await
             .unwrap();
     let keeper = DirectKv::whole(approver.hub(), None, TRAIL_RUNS_BUCKET).await.unwrap().past_relays();

@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::auth::team_dir;
 use crate::connection::Connection;
-use crate::credentials::renew;
+use crate::credentials::approver;
 use crate::release::upgrade;
 use crate::signing::signer;
 
@@ -56,7 +56,7 @@ pub(crate) async fn run(conn: &Connection<'_>, args: SignerArgs) -> Result<()> {
         None => eprintln!("refusing registrations: {} has no [registration] table", config.display()),
     }
     let options =
-        signer::Options { config: &config, approval_timeout, reconnect: renew::AUTO_RECONNECT, tick: signer::TICK };
+        signer::Options { config: &config, approval_timeout, reconnect: approver::AUTO_RECONNECT, tick: signer::TICK };
     let stop = async {
         let _ = tokio::signal::ctrl_c().await;
     };

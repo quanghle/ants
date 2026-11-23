@@ -46,7 +46,7 @@ use nkeys::XKey;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use crate::credentials::enroll::Approver;
+use crate::credentials::approver::Approver;
 use crate::signing::signer::AbortOnDrop;
 
 mod login;

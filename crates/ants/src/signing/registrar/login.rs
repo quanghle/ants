@@ -16,7 +16,7 @@ use nkeys::XKey;
 
 use super::{Asking, Event, Flow, LEAST_ASKING, MAX_WAITING_REGISTRATIONS, Progress, Registrar, Update};
 use crate::auth;
-use crate::credentials::enroll::Approver;
+use crate::credentials::approver::Approver;
 use crate::credentials::issued::{self, Kind};
 use crate::credentials::revoke;
 use crate::signing::binding::{self, Binder};

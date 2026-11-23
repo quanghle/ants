@@ -9,7 +9,7 @@ use tokio::time::Instant;
 use super::offboard::{Offboarder, gone};
 use super::{Progress, Registrar, Renewal, Update};
 use crate::auth;
-use crate::credentials::enroll::Approver;
+use crate::credentials::approver::Approver;
 use crate::credentials::issued;
 use crate::signing::github::Github;
 use crate::signing::signer::AbortOnDrop;

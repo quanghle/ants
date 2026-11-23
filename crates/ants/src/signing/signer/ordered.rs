@@ -31,7 +31,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use super::live;
 use crate::auth;
-use crate::credentials::enroll::Approver;
+use crate::credentials::approver::Approver;
 use crate::credentials::issued::{self, Kind};
 use crate::credentials::push;
 use crate::credentials::revoke;

@@ -45,7 +45,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 
 use crate::auth;
-use crate::credentials::enroll::Approver;
+use crate::credentials::approver::Approver;
 use crate::credentials::issued;
 use crate::credentials::revoke;
 use crate::node::{members, outbox};
@@ -70,7 +70,7 @@ pub struct Options<'a> {
     /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting, or on
     /// a registration outside the registration policy, at most until its request expires.
     pub approval_timeout: Duration,
-    /// How long it stays connected with one set of the credentials it issues itself ([`crate::credentials::renew::AUTO_RECONNECT`]).
+    /// How long it stays connected with one set of the credentials it issues itself ([`crate::credentials::approver::AUTO_RECONNECT`]).
     pub reconnect: Duration,
     /// How often it looks for decisions ([`TICK`]).
     pub tick: Duration,
@@ -161,7 +161,7 @@ pub async fn serve(
     let holder = holder(options.config).await;
     tokio::pin!(stop);
     loop {
-        let approver = Approver::connect_signer(url, dir, js_domain, crate::credentials::enroll::LISTEN).await?;
+        let approver = Approver::connect_signer(url, dir, js_domain, crate::credentials::approver::LISTEN).await?;
         record_holder(&approver, js_domain, &holder).await;
         let mut requests = relayed::subscribe(&approver.client, subject::ALL_ANT_REQUESTS).await?;
         let mut logins = relayed::subscribe(&approver.client, subject::ALL_LOGIN_REQUESTS).await?;

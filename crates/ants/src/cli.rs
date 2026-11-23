@@ -13,10 +13,9 @@ use crate::cmd::{
     ant::AntCommand, assistant::AssistantCommand, attachment::AttachmentCommand, auth::AuthCommand,
     bridge::BridgeCommand, channel::ChannelCommand, dead::DeadCommand, doctor, enroll::EnrollCommand,
     harness::HarnessCommand, hook::HookCommand, inbox, keys::KeysCommand, leaf::LeafCommand, login,
-    notify::NotifyCommand, remind::RemindCommand, send, setup, signer, spend::SpendArgs, thread::ThreadCommand,
+    notify::NotifyCommand, remind::RemindCommand, renew, send, setup, signer, spend::SpendArgs, thread::ThreadCommand,
     tools::ToolsCommand, trail::TrailCommand, web, webhook::WebhookCommand,
 };
-use crate::credentials::renew;
 use crate::messages::{attachments, progress};
 use crate::release::update;
 use crate::signing::retire;

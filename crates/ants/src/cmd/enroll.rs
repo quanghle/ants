@@ -9,7 +9,7 @@ use clap::Subcommand;
 use crate::auth::team_dir;
 use crate::channel;
 use crate::connection::Connection;
-use crate::credentials::{enroll, renew};
+use crate::credentials::approver;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum EnrollCommand {
@@ -93,11 +93,11 @@ pub(crate) async fn run(conn: &Connection<'_>, command: EnrollCommand) -> Result
     let dir = |dir| team_dir(dir);
     match command {
         EnrollCommand::List { dir: d } => {
-            enroll::Approver::connect(conn.nats, &dir(d)?, domain, enroll::LISTEN).await?.list().await
+            approver::Approver::connect(conn.nats, &dir(d)?, domain, approver::LISTEN).await?.list().await
         }
         EnrollCommand::Approve { ant, public_key, webhook: true, to, channels, dir: d, .. } => {
             let dir = dir(d)?;
-            let approver = enroll::Approver::connect(conn.nats, &dir, domain, enroll::LISTEN).await?;
+            let approver = approver::Approver::connect(conn.nats, &dir, domain, approver::LISTEN).await?;
             let destinations: Vec<Destination> =
                 to.into_iter().map(Destination::Ant).chain(channels.into_iter().map(Destination::Channel)).collect();
             let key = approver.approve_webhook(&dir, &ant, &destinations, public_key.as_deref()).await?;
@@ -106,7 +106,7 @@ pub(crate) async fn run(conn: &Connection<'_>, command: EnrollCommand) -> Result
         }
         EnrollCommand::Approve { ant, public_key, no_host, dir: d, .. } => {
             let dir = dir(d)?;
-            let approver = enroll::Approver::connect(conn.nats, &dir, domain, enroll::LISTEN).await?;
+            let approver = approver::Approver::connect(conn.nats, &dir, domain, approver::LISTEN).await?;
             let approved = approver.approve_with(&dir, &ant, public_key.as_deref(), !no_host).await?;
             println!("{ant} approved for {}", approved.public_key);
             if let Some(host) = &approved.host {
@@ -123,7 +123,7 @@ pub(crate) async fn run(conn: &Connection<'_>, command: EnrollCommand) -> Result
             Ok(())
         }
         EnrollCommand::Renewals { dir: d } => {
-            let approver = enroll::Approver::connect(conn.nats, &dir(d)?, domain, enroll::LISTEN).await?;
+            let approver = approver::Approver::connect(conn.nats, &dir(d)?, domain, approver::LISTEN).await?;
             approver.list_renewals().await
         }
         EnrollCommand::Renew { name: None, auto: true, dir: d, .. } => {
@@ -132,19 +132,28 @@ pub(crate) async fn run(conn: &Connection<'_>, command: EnrollCommand) -> Result
             let stop = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
-            let (listen, reconnect) = (enroll::LISTEN, renew::AUTO_RECONNECT);
-            renew::auto(conn.nats, &dir, domain, listen, reconnect, renew::print_renewed, stop).await
+            let (listen, reconnect) = (approver::LISTEN, approver::AUTO_RECONNECT);
+            approver::renewals::auto(
+                conn.nats,
+                &dir,
+                domain,
+                listen,
+                reconnect,
+                approver::renewals::print_renewed,
+                stop,
+            )
+            .await
         }
         EnrollCommand::Renew { name, public_key, dir: d, .. } => {
             let dir = dir(d)?;
             let name = name.context("name the credentials to renew, or give --auto")?;
-            let approver = enroll::Approver::connect(conn.nats, &dir, domain, enroll::LISTEN).await?;
+            let approver = approver::Approver::connect(conn.nats, &dir, domain, approver::LISTEN).await?;
             let (request, renewed) = approver.renew(&dir, &name, public_key.as_deref()).await?;
-            renew::print_renewed(&request, &renewed);
+            approver::renewals::print_renewed(&request, &renewed);
             Ok(())
         }
         EnrollCommand::Reject { ant, public_key, reason, dir: d } => {
-            let approver = enroll::Approver::connect(conn.nats, &dir(d)?, domain, enroll::LISTEN).await?;
+            let approver = approver::Approver::connect(conn.nats, &dir(d)?, domain, approver::LISTEN).await?;
             for key in approver.reject(&ant, public_key.as_deref(), reason.as_deref()).await? {
                 println!("{ant} rejected for {key}");
             }

@@ -87,7 +87,7 @@ use self::reads::Reads;
 use self::search::Searches;
 use self::watched::Watched;
 use crate::auth::team_dir;
-use crate::credentials::enroll;
+use crate::credentials::approver;
 use crate::live::{self, Feed, Screen};
 use crate::messages::{compose, progress};
 use crate::people::{presence, sealed};
@@ -211,7 +211,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     let mcp = mcp::Io::new(nats, js.clone());
     let settings = settings::Io::new(js.clone(), nats.url, nats.creds.map(Path::to_path_buf), nats.domain.cloned());
     let (credentials, holder) =
-        credentials::Io::new(js.clone(), nats.url, nats.domain.cloned(), team_dir(None), enroll::LISTEN);
+        credentials::Io::new(js.clone(), nats.url, nats.domain.cloned(), team_dir(None), approver::LISTEN);
     let creds = crate::people::assistant::signing_creds(nats).map(Path::to_path_buf).map_err(|e| format!("{e:#}"));
     let held = held::Io::new(js.clone(), me.clone(), nats.account.clone(), creds);
     let cards = cards::Io::new(cards::Source::open(nats, &js).await.checking(feed.behalf()));

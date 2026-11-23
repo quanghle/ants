@@ -3,12 +3,17 @@
 
 use std::future::pending;
 
-use ants_proto::{Machine, UserId};
+use ants_proto::{Destination, Machine, Role, UserId};
 use async_nats::Event;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::*;
+use crate::credentials::approver::Approver;
+use crate::credentials::approver::enrollments::HostApproved;
+use crate::credentials::issued::{self, Kind};
+use crate::credentials::revoke;
+use crate::node::members;
 use crate::node::members::EnrollApprover;
 use crate::test_support::Server;
 

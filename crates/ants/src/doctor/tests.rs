@@ -371,7 +371,7 @@ async fn the_reactions_check_names_who_answers_an_ants_requests() {
     webhook.abort();
 
     let approver =
-        crate::credentials::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, wait)
+        crate::credentials::approver::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, wait)
             .await
             .unwrap();
     let signer = tokio::spawn(serve(approver.client.clone(), approver.hub().clone(), None, Answering::ListsAndChanges));
@@ -411,7 +411,7 @@ async fn the_trail_saves_check_tells_whether_the_signer_answers() {
     js.create_stream(ants_daemon::hub::trails_config()).await.unwrap();
     drop(human);
     let approver =
-        crate::credentials::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, wait)
+        crate::credentials::approver::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, wait)
             .await
             .unwrap();
     let keeping = ants_daemon::trail::keeper::serve(approver.client.clone(), approver.hub().clone(), None);
