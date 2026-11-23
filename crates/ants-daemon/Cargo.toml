@@ -21,11 +21,11 @@ data-encoding.workspace = true
 futures.workspace = true
 # Copilot CLI's server protocol (crate::harness::native::copilot), without features: no bundled CLI, TLS or HTTP. Pinned
 # exactly, the SDK and the CLI agreeing on a protocol version; SDK_VERSION in copilot.rs names it.
-github-copilot-sdk = { version = "=1.0.29", default-features = false }
+github-copilot-sdk = { version = "=1.0.34", default-features = false }
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
-jiff = { version = "0.2.39", default-features = false, features = ["std", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
+jiff = { version = "1.0.0", default-features = false, features = ["std", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 nkeys = { version = "0.4.5", features = ["xkeys"] }
 ring = "0.17.14"
 rmcp = { workspace = true, features = ["server", "macros", "transport-streamable-http-server"] }

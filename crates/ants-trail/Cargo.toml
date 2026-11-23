@@ -14,11 +14,11 @@ monty = "1.5.0"
 # The worker's memory limit: the `ants` binary's global allocator counts live bytes for Monty and caps a worker.
 monty-alloc = { version = "1.5.0", features = ["exit-code"] }
 monty-types = "1.5.0"
-num-bigint = { version = "0.4", default-features = false }
+num-bigint = { version = "0.5", default-features = false }
 # Monty's own parser, at Monty's version: reads a trail's meta without running it.
-ruff_python_ast = "0.0.14"
-ruff_python_parser = "0.0.14"
-ruff_text_size = "0.0.14"
+ruff_python_ast = "0.0.22"
+ruff_python_parser = "0.0.22"
+ruff_text_size = "0.0.22"
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = "2.0.21"

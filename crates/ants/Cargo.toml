@@ -24,7 +24,7 @@ futures.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
-jiff = { version = "0.2.39", default-features = false, features = ["std", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
+jiff = { version = "1.0.0", default-features = false, features = ["std", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 rustls-native-certs = "0.8.3"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
 tracing.workspace = true
