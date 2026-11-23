@@ -87,14 +87,29 @@ impl Admin {
         }
         let machine = match machine {
             Some(machine) => machine,
-            None => machines::machines_of(js, ant).await?.into_iter().next().with_context(|| {
-                format!("no machine recorded serving {ant}: its daemon records it once it runs with host credentials")
-            })?,
+            None => serving(js, ant).await?,
         };
         let mut order = AdminOrder::new(self.id.clone(), machine, ant.clone(), op, jwt);
         order.signature = auth::sign(&key, &order.signed())?;
         sent(js, order, wait).await
     }
+}
+
+/// The machine that last recorded serving `ant`, or why none: no machine lists it, or no machine recorded itself.
+async fn serving(js: &jetstream::Context, ant: &UserId) -> Result<Machine> {
+    let records = machines::list(js).await?;
+    if let Some(record) = ants_proto::machines_of(&records, ant).into_iter().next() {
+        return Ok(record.machine.clone());
+    }
+    if records.is_empty() {
+        bail!(
+            "no machine recorded serving {ant}: a machine's daemon records the ants it serves once it runs with host credentials"
+        );
+    }
+    bail!(
+        "no machine lists {ant}: it was retired, never added or its name is misspelt; `ants machines` shows the ants \
+         each machine serves"
+    )
 }
 
 /// Publish the signed `order` and wait up to `wait` for its outcome.
