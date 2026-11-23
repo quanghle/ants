@@ -13,6 +13,8 @@ use tokio::time::Instant;
 
 use super::{OFFBOARDED, Progress, Registrar, SWEEP_PACE, SWEEP_RECHECK, SWEEP_RESERVE, Update};
 use crate::auth;
+use crate::credentials::issued;
+use crate::credentials::push;
 use crate::credentials::revoke;
 use crate::people::devices;
 use crate::signing::github::Github;
@@ -35,7 +37,7 @@ impl Registrar<'_> {
         if let Err(e) = record_offboarded(self.dir, &line) {
             tracing::warn!(name, "recording the revocation in {OFFBOARDED}: {e:#}");
         }
-        let pushed = match revoke::push(self.url, self.dir).await {
+        let pushed = match push::push(self.url, self.dir).await {
             Ok(_) => match devices::record_revocations(self.url, self.js_domain, self.dir).await {
                 Ok(_) => String::new(),
                 Err(e) => format!(", but recording the revoked devices failed ({e:#}): `ants auth push`"),
@@ -191,8 +193,8 @@ pub(super) fn gone(account: &GithubAccount, now: Option<&GithubAccount>) -> Stri
 pub(super) fn swept(dir: &Path) -> Result<BTreeMap<String, GithubAccount>> {
     let revoked: HashSet<String> = revoke::revoked(dir)?.into_iter().map(|r| r.key).collect();
     let now = auth::now()?;
-    let mut latest: HashMap<String, revoke::Issued> = HashMap::new();
-    for one in revoke::issued(dir)? {
+    let mut latest: HashMap<String, issued::Issued> = HashMap::new();
+    for one in issued::issued(dir)? {
         latest.insert(one.key.clone(), one);
     }
     let live = latest.into_values().filter(|i| !revoked.contains(&i.key) && i.expires_at.is_none_or(|exp| exp > now));

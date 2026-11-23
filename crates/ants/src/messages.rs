@@ -2,8 +2,11 @@
 //! line while replies are awaited, the inbox, and reactions followed live.
 
 pub(crate) mod attachments;
+pub(crate) mod cancel;
 pub(crate) mod compose;
+pub(crate) mod dead;
 pub(crate) mod forward;
 pub(crate) mod inbox;
 pub(crate) mod progress;
 pub(crate) mod reacted;
+pub(crate) mod send;

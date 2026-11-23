@@ -18,7 +18,8 @@ use super::issuing::{human_tags, in_domain};
 use super::short_lived::signer_permissions;
 use super::uplink::{LEAF_CONNECTIONS, allowed, check_uplink_size, dedup, merge};
 use super::{ACCOUNT_SEED, assistants, leaf_role, members};
-use crate::credentials::revoke::{self, Issued, Kind};
+use crate::credentials::issued::{self, Issued, Kind};
+use crate::credentials::revoke;
 
 /// Credentials renewed by [`renew`].
 #[derive(Debug)]
@@ -102,7 +103,7 @@ pub(super) fn renew_as(
         }
     }
     let xkey = finding.xkey.clone().or_else(|| xkey.cloned());
-    let issued = revoke::issued(dir)?;
+    let issued = issued::issued(dir)?;
     let kind = registry_kind(&finding.kind)
         .with_context(|| format!("{} cannot be renewed: issue new ones with `ants auth`", finding.holder()))?;
     if issued.iter().any(|i| i.key == public_key && (i.name != claims.name || i.kind != kind)) {
@@ -139,7 +140,7 @@ pub(super) fn renew_as(
         record.members =
             Some(crate::node::members::Members { ants, humans, webhooks, enroll_approver: *enroll_approver });
     }
-    revoke::record(dir, &record)?;
+    issued::record(dir, &record)?;
     Ok(Renewed { jwt, finding: renewed, previous: claims.sub })
 }
 

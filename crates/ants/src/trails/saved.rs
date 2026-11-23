@@ -21,8 +21,8 @@ const NAMES: &str = "a trail's name is 1-64 of a-z, 0-9 and '-'";
 
 /// A saved trail, the colony's or a local one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(super) struct Trail {
-    pub(super) name: TrailName,
+pub(crate) struct Trail {
+    pub(crate) name: TrailName,
     pub(super) description: String,
     pub(super) phases: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -62,13 +62,13 @@ impl From<SavedTrail> for Trail {
 }
 
 /// The directory of this machine's trails: `~/.ants/trails`.
-pub(super) fn local_dir() -> Result<PathBuf> {
+pub(crate) fn local_dir() -> Result<PathBuf> {
     Ok(std::env::home_dir().context("no home directory")?.join(".ants").join("trails"))
 }
 
 /// The trail of the file `path`, saved by the human `by` at `now` under `name`, else under its meta's name: refused when
 /// the file does not compile, lacks its literal meta first, or breaks the bounds of [`SavedTrail::check`].
-pub(super) fn read(path: &Path, name: Option<TrailName>, by: &UserId, now: DateTime<Utc>) -> Result<SavedTrail> {
+pub(crate) fn read(path: &Path, name: Option<TrailName>, by: &UserId, now: DateTime<Utc>) -> Result<SavedTrail> {
     let script = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let meta = checked(path, &script)?;
     let name = match name {
@@ -109,7 +109,7 @@ fn usable(name: &TrailName) -> Result<()> {
 }
 
 /// Save `trail` for the colony, replacing the one of its name; returns the one replaced.
-pub(super) async fn put(js: &jetstream::Context, trail: &SavedTrail) -> Result<Option<SavedTrail>> {
+pub(crate) async fn put(js: &jetstream::Context, trail: &SavedTrail) -> Result<Option<SavedTrail>> {
     let before = get(js, &trail.name).await?;
     let kv = js.get_key_value(TRAILS_BUCKET).await.context("opening ants_trails (`ants init` creates it)")?;
     let payload = serde_json::to_vec(trail)?;
@@ -140,19 +140,19 @@ fn parse(key: &str, payload: &[u8]) -> Option<SavedTrail> {
 
 /// What `ants trail rm` purged with a trail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Purged {
+pub(crate) struct Purged {
     /// Whether the trail was still saved, rather than removed already with tips or ratings left.
-    pub(super) trail: bool,
+    pub(crate) trail: bool,
     /// Entries of tips and votes.
-    pub(super) tips: u64,
-    pub(super) ratings: u64,
+    pub(crate) tips: u64,
+    pub(crate) ratings: u64,
 }
 
 /// Remove the colony's trail `name` and purge its tips and ratings, refused when the colony has none of that name and
 /// neither tips nor ratings are left of it; `local` is the directory of this machine's trails, whose file of that name
 /// the refusal names. The trail goes first, so that no tip left or rating put while it is removed outlives the purge,
 /// as tips are left and ratings put only of saved trails; removing it again purges what a failed purge left.
-pub(super) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailName) -> Result<Purged> {
+pub(crate) async fn remove(js: &jetstream::Context, local: &Path, name: &TrailName) -> Result<Purged> {
     let saved = !latest_in(js, TRAILS_BUCKET, &subject::kv(TRAILS_BUCKET, name)).await?.is_empty();
     if saved {
         let kv = js.get_key_value(TRAILS_BUCKET).await.context("opening ants_trails (`ants init` creates it)")?;
@@ -313,7 +313,7 @@ fn filled(header: &[&str], optional: &[&str], rows: Vec<Vec<String>>) -> Vec<Vec
 /// The trail `ants trail show NAME` shows, which a run of NAME runs.
 #[derive(Debug)]
 pub(crate) struct Found {
-    pub(super) trail: Trail,
+    pub(crate) trail: Trail,
     /// The local file of the same name the colony's trail runs instead of.
     pub(super) shadows: Option<PathBuf>,
     pub(super) ratings: Option<RatingSummary>,
@@ -339,7 +339,7 @@ pub(super) async fn find(js: &jetstream::Context, local: &Path, name: &TrailName
 
 /// A trail as `ants trail show --json` shows it, with its script.
 #[derive(Serialize)]
-pub(super) struct Shown<'a> {
+pub(crate) struct Shown<'a> {
     #[serde(flatten)]
     trail: &'a Trail,
     script: &'a str,

@@ -9,13 +9,13 @@ use tokio::time::Instant;
 use super::offboard::{Offboarder, gone};
 use super::{Progress, Registrar, Renewal, Update};
 use crate::auth;
-use crate::credentials::enroll::Approver;
-use crate::credentials::revoke;
+use crate::credentials::approver::Approver;
+use crate::credentials::issued;
 use crate::signing::github::Github;
 use crate::signing::signer::AbortOnDrop;
 
 impl Registrar<'_> {
-    /// Answer the renewal request `msg` if it is one of credentials a registration granted ([`revoke::registered`]):
+    /// Answer the renewal request `msg` if it is one of credentials a registration granted ([`issued::registered`]):
     /// a repeat with the answer it had, a new one by renewing them while their grant holds, else refusing. An
     /// organization or team grant is checked again on GitHub first, by a task reporting [`Progress::Member`].
     pub async fn renewal(&mut self, approver: &Approver, msg: &async_nats::Message) -> Result<()> {
@@ -32,12 +32,12 @@ impl Registrar<'_> {
             Some((_, Renewal::Checking { .. })) => return Ok(()),
             None => {}
         }
-        let issued = revoke::issued(self.dir)?;
-        let Some(record) = revoke::registered(&issued, &current.sub) else { return Ok(()) };
+        let issued = issued::issued(self.dir)?;
+        let Some(record) = issued::registered(&issued, &current.sub) else { return Ok(()) };
         let (Some(account), Some(grant)) = (record.github.clone(), record.grant.clone()) else { return Ok(()) };
         let name = request.name.as_str();
         let reply = match grant {
-            Grant::Approval(_) => match revoke::standing_approval(&issued, name, account.id) {
+            Grant::Approval(_) => match issued::standing_approval(&issued, name, account.id) {
                 Some(grant) => self.renewed(&request, account, grant),
                 None => self.refused(
                     &request,

@@ -22,9 +22,9 @@ use super::help::{Help, centered};
 use super::keymap::{self, View};
 use super::model::{Action, Key, Model, Overlay};
 use super::style::{block, dim};
-use crate::cmd::send;
-use crate::cmd::trail::runs::{self, Pick};
-use crate::cmd::trail::{self as cli, LimitArgs, Shown, TipsArgs, control, saved, start, tips as cli_tips};
+use crate::messages::send;
+use crate::trails::runs::{self, Pick};
+use crate::trails::{self as cli, LimitArgs, Shown, TipsArgs, control, saved, start, tips as cli_tips};
 
 /// How wide the summary of a run to start is at most.
 const WIDTH: u16 = 100;
@@ -212,7 +212,7 @@ async fn listed(ctx: &Ctx) -> Result<Done> {
     let going = listed.iter().filter(|run| !run.finished()).count();
     let recorded = if listed.len() == 1 { "1 run".to_owned() } else { format!("{} runs", listed.len()) };
     let line = format!("{recorded} recorded, {going} not over: the pager lists them");
-    let rated = crate::cmd::trail::ratings::of_runs(&crate::cmd::trail::ratings::read_or_none(&ctx.js, None).await);
+    let rated = crate::trails::ratings::of_runs(&crate::trails::ratings::read_or_none(&ctx.js, None).await);
     let mut page = runs::table(&listed, &rated, now);
     let mut trails: Vec<&TrailName> = Vec::new();
     for trail in listed.iter().rev().filter_map(|run| run.trail()) {

@@ -20,7 +20,7 @@ fn p(s: &str) -> UserId {
 fn issue(team: &Path, user: &UserId, role: Role) -> String {
     let out = team.join(format!("{user}-{role:?}.creds"));
     let permissions = Permissions::for_user(user, role);
-    auth::issue_device(team, user, role.into(), permissions, None, &out).unwrap();
+    auth::Issue::new(team, user, role.into(), permissions).into_file(&out).unwrap();
     std::fs::read_to_string(out).unwrap()
 }
 
@@ -102,7 +102,7 @@ fn revocations_of_humans_assistants_ants_and_unknown_keys_are_recorded_and_no_ot
     let out = dir.join("pa.creds");
     let new = auth::NewDevice { assistant_of: Some(p("alice")), ..auth::NewDevice::default() };
     let rights = Permissions::for_assistant(&p("pa"), &p("alice"));
-    auth::issue_device_with(&team, &p("pa"), revoke::Kind::Assistant, rights, &new, &out).unwrap();
+    auth::Issue::new(&team, &p("pa"), issued::Kind::Assistant, rights).with(&new).into_file(&out).unwrap();
     let assistant_key = auth::read_creds(&out).unwrap().1.public_key();
     let unknown = KeyPair::new_user().public_key();
     assert!(device_revocations(&team).unwrap().is_empty());
@@ -183,7 +183,7 @@ async fn humans_publish_their_devices_and_readers_take_only_verified_unrevoked_k
 
     // Revoking bob's credentials and pushing records the revocation, once; readers then skip his device.
     revoke::revoke(&team, Some("bob"), &[]).unwrap();
-    crate::cmd::auth::push(&server.url, None, &team).await.unwrap();
+    crate::credentials::push::push_and_report(&server.url, None, &team).await.unwrap();
     assert_eq!(record_revocations(&server.url, None, &team).await.unwrap(), Vec::<String>::new(), "recorded already");
     let record: DeviceRevocation =
         serde_json::from_slice(&kv.get(revoked_device_key(&bob_key)).await.unwrap().unwrap()).unwrap();

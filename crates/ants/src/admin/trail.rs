@@ -10,9 +10,9 @@ use ants_proto::{AdminOp, Machine, TrailOutcome, UserId};
 use anyhow::{Result, bail};
 
 use crate::admin::orders::{self, Admin, Sent};
-use crate::cmd::trail::runs::{self, Pick};
-use crate::cmd::trail::{LimitArgs, control};
 use crate::connection::Nats;
+use crate::trails::runs::{self, Pick};
+use crate::trails::{LimitArgs, control};
 
 /// Where an order about a run goes: the run, of `ant`, on `machine`, else the machine that last recorded serving it,
 /// waiting up to `wait` for the outcome.

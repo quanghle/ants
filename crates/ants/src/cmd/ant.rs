@@ -10,8 +10,8 @@ use clap_complete::engine::ArgValueCandidates;
 
 use crate::admin::settings::{self, Assignment};
 use crate::admin::{mcp, memories, orders, pause, restart, trail};
-use crate::cmd::trail::ResumeLimitArgs;
-use crate::cmd::trail::runs::Pick;
+use crate::trails::ResumeLimitArgs;
+use crate::trails::runs::Pick;
 use crate::{ant, avatars, completions, export, sense_id};
 
 #[derive(Subcommand, Debug)]

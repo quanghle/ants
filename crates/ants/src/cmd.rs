@@ -21,7 +21,8 @@
 //! where `main.rs` awaits [`run`]: that future is at least as large as the largest one an arm awaits unboxed.
 //!
 //! Top-level modules hold the logic commands share with each other, the terminal UI, the daemon's services and the
-//! assistant. The terminal UI ([`crate::tui`]: `ants`, `ants chat`, `ants status`) stays top-level for its size.
+//! assistant: none of them imports from this module, but `cli.rs` for the clap types and tests that drive a command.
+//! The terminal UI ([`crate::tui`]: `ants`, `ants chat`, `ants status`) stays top-level for its size.
 
 pub(crate) mod ant;
 pub(crate) mod assistant;
@@ -44,6 +45,7 @@ pub(crate) mod leaf;
 pub(crate) mod login;
 pub(crate) mod notify;
 pub(crate) mod remind;
+pub(crate) mod renew;
 pub(crate) mod retire;
 pub(crate) mod send;
 pub(crate) mod setup;
@@ -60,7 +62,6 @@ use anyhow::Result;
 
 use crate::cli::{Cli, Command, DaemonCommand};
 use crate::connection::Connection;
-use crate::credentials::renew;
 use crate::release::update;
 use crate::threads::summary;
 use crate::{add, colony, completions, machines, queue, tui};

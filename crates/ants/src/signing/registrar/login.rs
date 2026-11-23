@@ -16,8 +16,9 @@ use nkeys::XKey;
 
 use super::{Asking, Event, Flow, LEAST_ASKING, MAX_WAITING_REGISTRATIONS, Progress, Registrar, Update};
 use crate::auth;
-use crate::credentials::enroll::Approver;
-use crate::credentials::revoke::{self, Kind};
+use crate::credentials::approver::Approver;
+use crate::credentials::issued::{self, Kind};
+use crate::credentials::revoke;
 use crate::signing::binding::{self, Binder};
 use crate::signing::github::Github;
 use crate::signing::signer::AbortOnDrop;
@@ -72,7 +73,7 @@ impl Registrar<'_> {
         if running >= MAX_REGISTRATIONS {
             bail!("the signer is busy with {running} registrations: try again in a few minutes");
         }
-        let issued = revoke::issued(self.dir)?;
+        let issued = issued::issued(self.dir)?;
         if issued.iter().any(|i| i.key == request.public_key)
             || revoke::revoked(self.dir)?.iter().any(|r| r.key == request.public_key)
         {
@@ -109,9 +110,9 @@ impl Registrar<'_> {
     pub(super) fn grant(&self, request: &LoginRequest, user: &GithubUser) -> Result<Option<Grant>> {
         let registration =
             signer_registration(self.config)?.context("registration is no longer enabled on this team")?;
-        let issued = revoke::issued(self.dir)?;
+        let issued = issued::issued(self.dir)?;
         binding::check(&issued, &request.name, &user.account(), Binder::Signer)?;
-        Ok(registration.grant(user).or_else(|| revoke::standing_approval(&issued, request.name.as_str(), user.id)))
+        Ok(registration.grant(user).or_else(|| issued::standing_approval(&issued, request.name.as_str(), user.id)))
     }
 
     /// Ask the humans whether the GitHub user `account`, outside the policy, may have the credentials `request` asks
@@ -227,16 +228,10 @@ impl Registrar<'_> {
             ..auth::NewDevice::default()
         };
         let permissions = Permissions::for_human_device(name, request.web).with_js_domain(self.js_domain);
-        let (jwt, _) = auth::sign_device_with(
-            self.dir,
-            name,
-            Kind::Human,
-            permissions,
-            &new,
-            &request.public_key,
-            request.xkey.as_ref(),
-        )
-        .context("signing failed")?;
+        let (jwt, _) = auth::Issue::new(self.dir, name, Kind::Human, permissions)
+            .with(&new)
+            .for_key(&request.public_key, request.xkey.as_ref())
+            .context("signing failed")?;
         Ok(jwt)
     }
 

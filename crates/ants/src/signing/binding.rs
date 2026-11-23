@@ -1,13 +1,13 @@
 //! Bindings of human names to GitHub users: a name registered with a GitHub sign-in (`ants login`, answered by
 //! `ants signer`) or bound by `ants auth user NAME --human --github LOGIN` belongs to that GitHub user's numeric id for
-//! good. The registry ([`revoke::ISSUED`]) holds them, on the record of each device signed for the name, so they are
+//! good. The registry ([`issued::ISSUED`]) holds them, on the record of each device signed for the name, so they are
 //! kept and backed up with it.
 
 use ants_daemon::config::registration::GithubAccount;
 use ants_proto::UserId;
 use anyhow::{Result, bail};
 
-use crate::credentials::revoke::{self, Issued, Kind};
+use crate::credentials::issued::{self, Issued, Kind};
 
 /// Who binds: `ants signer` registering a device, or the operator with `ants auth user --github`, who may also bind a
 /// name already holding a human's keys.
@@ -76,7 +76,7 @@ fn kind(kind: Kind) -> &'static str {
 
 /// [`check`] against the registry of `dir`.
 pub fn check_in(dir: &std::path::Path, name: &UserId, github: &GithubAccount, binder: Binder) -> Result<bool> {
-    check(&revoke::issued(dir)?, name, github, binder)
+    check(&issued::issued(dir)?, name, github, binder)
 }
 
 #[cfg(test)]

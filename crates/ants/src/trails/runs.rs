@@ -48,7 +48,7 @@ pub(crate) type Rated = HashMap<RunId, Vec<(TrailName, RatingOutcome)>>;
 
 /// A run's header as `ants trail runs --json` lists it: without its legs' scripts, which `ants trail show RUN --json`
 /// gives, and with the outcome its ratings gave each trail, `rated`, when it has any.
-pub(super) fn header_json(run: &TrailRun, rated: &Rated) -> Result<String> {
+pub(crate) fn header_json(run: &TrailRun, rated: &Rated) -> Result<String> {
     let mut value = serde_json::to_value(run)?;
     if let Some(legs) = value.get_mut("route").and_then(Value::as_array_mut) {
         for leg in legs.iter_mut().filter_map(Value::as_object_mut) {
@@ -66,7 +66,7 @@ pub(super) fn header_json(run: &TrailRun, rated: &Rated) -> Result<String> {
 
 /// A run as `ants trail show RUN` shows it: its header, the calls it waits on, its journal by call, and its child runs.
 #[derive(Debug, Serialize)]
-pub(super) struct Detail {
+pub(crate) struct Detail {
     pub(super) run: TrailRun,
     pub(super) pending: Vec<PendingCall>,
     pub(super) queued: Vec<QueuedCall>,
@@ -79,7 +79,7 @@ pub(super) struct Detail {
 }
 
 /// The run `run`, of whichever conductor keeps it.
-pub(super) async fn find(js: &jetstream::Context, run: &RunId) -> Result<TrailRun> {
+pub(crate) async fn find(js: &jetstream::Context, run: &RunId) -> Result<TrailRun> {
     let mut found = headers(js, &subject::kv(TRAIL_RUNS_BUCKET, format_args!("*.{run}"))).await?;
     match found.len() {
         0 => bail!("no run {run}: `ants trail runs` lists the runs kept"),
@@ -150,7 +150,7 @@ pub(super) fn picked(runs: Vec<TrailRun>, pick: &Pick, listed: &str) -> Result<T
 
 /// The run `run` with the calls it waits on (none once it ended, whatever its last session held), its journal and its
 /// child runs.
-pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detail> {
+pub(crate) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detail> {
     let header = find(js, run).await?;
     let session = session(js, &header).await?;
     let calls = subject::kv(TRAIL_RUNS_BUCKET, format_args!("{}.call.*", trail_run_key(&header.conductor, run)));

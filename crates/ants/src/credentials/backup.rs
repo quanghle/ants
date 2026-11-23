@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{self, ACCOUNT_SEED, OPERATOR_SEED, SERVER_CONF, STORE_SEED, SYSTEM_SEED};
 use crate::credentials::age;
-use crate::credentials::revoke::{ISSUED, REVOKED};
+use crate::credentials::issued::ISSUED;
+use crate::credentials::revoke::REVOKED;
 
 /// The record of the last backup, in the team directory.
 pub const RECORD: &str = "backup.json";
@@ -370,7 +371,8 @@ pub(crate) fn read_hidden(label: &str, what: &str, otherwise: &str) -> Result<St
 mod tests {
     use super::*;
     use crate::credentials::age::Refused;
-    use crate::credentials::revoke::{self, Issued, Kind};
+    use crate::credentials::issued::{self, Issued, Kind};
+    use crate::credentials::revoke;
 
     const PASS: &str = "correct horse battery staple";
     /// A low work factor, for fast tests.
@@ -379,7 +381,7 @@ mod tests {
     fn team(root: &Path) -> PathBuf {
         let dir = root.join("auth");
         auth::init(&dir).unwrap();
-        revoke::record(&dir, &Issued::new(&KeyPair::new_user().public_key(), "dev-a", Kind::Ant, None).unwrap())
+        issued::record(&dir, &Issued::new(&KeyPair::new_user().public_key(), "dev-a", Kind::Ant, None).unwrap())
             .unwrap();
         dir
     }
@@ -449,7 +451,7 @@ mod tests {
         assert_eq!(state(&dir).unwrap(), State::None);
         let record = backup(&dir, &root.join("team.age"), PASS, FAST).unwrap();
         assert_eq!(state(&dir).unwrap(), State::Current(record.clone()));
-        revoke::record(&dir, &Issued::new(&KeyPair::new_user().public_key(), "dev-b", Kind::Ant, None).unwrap())
+        issued::record(&dir, &Issued::new(&KeyPair::new_user().public_key(), "dev-b", Kind::Ant, None).unwrap())
             .unwrap();
         assert_eq!(state(&dir).unwrap(), State::Behind { record: record.clone(), issued: 1, revoked: false });
         revoke::revoke(&dir, Some("dev-a"), &[]).unwrap();

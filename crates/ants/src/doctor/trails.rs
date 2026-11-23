@@ -12,10 +12,10 @@ use ants_trail::{Limits, Request, Response, Worker};
 use chrono::{DateTime, Utc};
 
 use super::{Check, Connected, NETWORK_TIMEOUT};
-use crate::cmd::trail::runs;
 use crate::service::{Service, Services};
 use crate::text::one_line;
 use crate::text::{short, since};
+use crate::trails::runs;
 
 /// The most stuck runs listed, one check each.
 pub(super) const MAX_LISTED: usize = 10;
@@ -111,102 +111,117 @@ pub(super) fn stuck(
     colony: &[ColonyEntry],
     now: DateTime<Utc>,
 ) -> Vec<Check> {
-    let check = "trail runs";
-    let gone = |ant: &ants_proto::UserId| !colony.iter().any(|entry| entry.ant == *ant);
-    let awaited = |run: &TrailRun| {
-        let Some(link) = &run.parent else { return true };
-        let calls = pending.iter().find(|(id, _)| *id == link.run).map_or_default(|(_, calls)| &calls[..]);
-        calls.iter().any(|call| call.call == link.call && call.child().as_ref() == Some(&run.run))
-    };
-    let mut found: Vec<Check> = listed
-        .iter()
-        .filter_map(|run| {
-            let name = match run.first_trail() {
-                Some(trail) => format!("run {} of trail {trail}", run.run),
-                None => format!("run {} of an inline script", run.run),
-            };
-            let elapsed = since(run.started_at, now);
-            let ago = |at: Option<DateTime<Utc>>| short(since(at.unwrap_or(run.updated_at), now));
-            let (detail, fix) = match &run.state {
-                RunState::Stopped { by } => {
-                    if !awaited(run) {
-                        return None;
-                    }
-                    let wall = wall_past(&run.limits, elapsed)?;
-                    let detail =
-                        format!("{name}, conducted by {}, was stopped by {by} {} ago", run.conductor, ago(None));
-                    (detail, format!("ants trail resume {}{wall}", run.run))
-                }
-                RunState::Failed { .. } if run.parent.is_some() => return None,
-                RunState::Failed { error, .. } => {
-                    let raise = raised(run, elapsed)?;
-                    let error = error.lines().rfind(|line| !line.trim().is_empty()).unwrap_or_default();
-                    let detail = format!(
-                        "{name}, conducted by {}, failed {} ago: {}",
-                        run.conductor,
-                        ago(run.ended_at),
-                        one_line(error, 160)
-                    );
-                    (detail, format!("ants trail resume {}{raise}", run.run))
-                }
-                RunState::Running | RunState::Waiting if gone(&run.conductor) => {
-                    let detail = format!(
-                        "{name} waits on its conductor {}, which is not in the colony: no daemon conducts it",
-                        run.conductor
-                    );
-                    let fix = format!(
-                        "start the daemon serving {}; `ants trail stop {}` needs it too",
-                        run.conductor, run.run
-                    );
-                    return Some(Check::warn(check, detail, vec![fix]));
-                }
-                RunState::Running | RunState::Waiting if elapsed > run.limits.wall_time() + OVERDUE_GRACE => {
-                    return Some(overdue(run, &name, elapsed));
-                }
-                RunState::Running => {
-                    let calls = pending.iter().find(|(id, _)| *id == run.run).map_or_default(|(_, calls)| &calls[..]);
-                    let mut away: Vec<&str> = calls
-                        .iter()
-                        .filter(|call| call.function == TrailFunction::Agent && gone(&call.to))
-                        .map(|call| call.to.as_str())
-                        .collect();
-                    away.sort_unstable();
-                    away.dedup();
-                    if away.is_empty() {
-                        return None;
-                    }
-                    let detail = format!(
-                        "{name}, conducted by {}, waits on steps sent to {}, not in the colony: no daemon serves them \
-                         to answer",
-                        run.conductor,
-                        away.join(", ")
-                    );
-                    return Some(Check::warn(check, detail, vec![format!("ants trail stop {}", run.run)]));
-                }
-                RunState::Waiting | RunState::Done { .. } => return None,
-            };
-            let fix = if gone(&run.conductor) {
-                format!("{fix}, once a daemon serves {} again: it is not in the colony", run.conductor)
-            } else {
-                fix
-            };
-            Some(Check::warn(check, detail, vec![fix]))
-        })
-        .collect();
+    let seen = Seen { pending, colony, now };
+    let mut found: Vec<Check> = listed.iter().filter_map(|run| seen.stuck(run)).collect();
     if found.is_empty() {
         let unfinished = listed.iter().filter(|r| !r.finished()).count();
         let detail = match listed.len() {
             0 => "no runs of trails".to_owned(),
             n => format!("no run stuck: {n} kept, {unfinished} unfinished"),
         };
-        return vec![Check::ok(check, detail)];
+        return vec![Check::ok(CHECK, detail)];
     }
     if found.len() > MAX_LISTED {
         let more = found.len() - MAX_LISTED;
         found.truncate(MAX_LISTED);
-        found.push(Check::warn(check, format!("{more} more stuck"), vec!["ants trail runs".to_owned()]));
+        found.push(Check::warn(CHECK, format!("{more} more stuck"), vec!["ants trail runs".to_owned()]));
     }
     found
+}
+
+/// The name of the check of the runs of trails.
+const CHECK: &str = "trail runs";
+
+/// What tells whether a run is stuck: the calls each run waits on, the ants of the colony, and the time.
+struct Seen<'a> {
+    pending: &'a [(RunId, Vec<PendingCall>)],
+    colony: &'a [ColonyEntry],
+    now: DateTime<Utc>,
+}
+
+impl Seen<'_> {
+    /// Whether `ant` is not in the colony.
+    fn gone(&self, ant: &ants_proto::UserId) -> bool {
+        !self.colony.iter().any(|entry| entry.ant == *ant)
+    }
+
+    /// Whether `run` is no child run, or its parent waits on it.
+    fn awaited(&self, run: &TrailRun) -> bool {
+        let Some(link) = &run.parent else { return true };
+        let calls = self.pending.iter().find(|(id, _)| *id == link.run).map_or_default(|(_, calls)| &calls[..]);
+        calls.iter().any(|call| call.call == link.call && call.child().as_ref() == Some(&run.run))
+    }
+
+    /// The warning of `run`, if it is stuck, as [`stuck`] tells.
+    fn stuck(&self, run: &TrailRun) -> Option<Check> {
+        let name = match run.first_trail() {
+            Some(trail) => format!("run {} of trail {trail}", run.run),
+            None => format!("run {} of an inline script", run.run),
+        };
+        let elapsed = since(run.started_at, self.now);
+        let ago = |at: Option<DateTime<Utc>>| short(since(at.unwrap_or(run.updated_at), self.now));
+        let (detail, fix) = match &run.state {
+            RunState::Stopped { by } => {
+                if !self.awaited(run) {
+                    return None;
+                }
+                let wall = wall_past(&run.limits, elapsed)?;
+                let detail = format!("{name}, conducted by {}, was stopped by {by} {} ago", run.conductor, ago(None));
+                (detail, format!("ants trail resume {}{wall}", run.run))
+            }
+            RunState::Failed { .. } if run.parent.is_some() => return None,
+            RunState::Failed { error, .. } => {
+                let raise = raised(run, elapsed)?;
+                let error = error.lines().rfind(|line| !line.trim().is_empty()).unwrap_or_default();
+                let detail = format!(
+                    "{name}, conducted by {}, failed {} ago: {}",
+                    run.conductor,
+                    ago(run.ended_at),
+                    one_line(error, 160)
+                );
+                (detail, format!("ants trail resume {}{raise}", run.run))
+            }
+            RunState::Running | RunState::Waiting if self.gone(&run.conductor) => {
+                let detail = format!(
+                    "{name} waits on its conductor {}, which is not in the colony: no daemon conducts it",
+                    run.conductor
+                );
+                let fix =
+                    format!("start the daemon serving {}; `ants trail stop {}` needs it too", run.conductor, run.run);
+                return Some(Check::warn(CHECK, detail, vec![fix]));
+            }
+            RunState::Running | RunState::Waiting if elapsed > run.limits.wall_time() + OVERDUE_GRACE => {
+                return Some(overdue(run, &name, elapsed));
+            }
+            RunState::Running => {
+                let calls = self.pending.iter().find(|(id, _)| *id == run.run).map_or_default(|(_, calls)| &calls[..]);
+                let mut away: Vec<&str> = calls
+                    .iter()
+                    .filter(|call| call.function == TrailFunction::Agent && self.gone(&call.to))
+                    .map(|call| call.to.as_str())
+                    .collect();
+                away.sort_unstable();
+                away.dedup();
+                if away.is_empty() {
+                    return None;
+                }
+                let detail = format!(
+                    "{name}, conducted by {}, waits on steps sent to {}, not in the colony: no daemon serves them \
+                     to answer",
+                    run.conductor,
+                    away.join(", ")
+                );
+                return Some(Check::warn(CHECK, detail, vec![format!("ants trail stop {}", run.run)]));
+            }
+            RunState::Waiting | RunState::Done { .. } => return None,
+        };
+        let fix = if self.gone(&run.conductor) {
+            format!("{fix}, once a daemon serves {} again: it is not in the colony", run.conductor)
+        } else {
+            fix
+        };
+        Some(Check::warn(CHECK, detail, vec![fix]))
+    }
 }
 
 /// The check of `run`, named `name`, running or waiting `elapsed` after its start, past its wall time: its conductor's

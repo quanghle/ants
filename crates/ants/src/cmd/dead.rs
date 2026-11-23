@@ -6,13 +6,13 @@ use std::sync::Arc;
 use ants_daemon::delivery::dead;
 use ants_daemon::monitoring::metrics;
 use ants_proto::DeadLetter;
-use anyhow::{Context as _, Result};
-use async_nats::jetstream;
+use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
 use crate::completions;
 use crate::connection::Nats;
+use crate::messages::dead::{dropped, replayed, stream};
 use crate::serve::serve_metrics;
 use crate::text::excerpt;
 
@@ -65,23 +65,6 @@ pub(crate) async fn run(nats: &Nats<'_>, command: DeadCommand) -> Result<()> {
         }
     }
     Ok(())
-}
-
-async fn stream(js: &jetstream::Context) -> Result<jetstream::stream::Stream> {
-    js.get_stream(ants_proto::STREAM).await.context("opening the ANTS stream")
-}
-
-/// Send the message of dead letter `seq` to its inbox again, as it was, and remove the dead letter, as `ants dead
-/// replay` does: the line it prints.
-pub(crate) async fn replayed(js: &jetstream::Context, seq: u64) -> Result<String> {
-    let envelope = dead::replay(js, &stream(js).await?, seq).await?;
-    Ok(format!("replayed to {} on thread {}", envelope.to, envelope.thread_id))
-}
-
-/// Remove dead letter `seq` without replaying it, as `ants dead drop` does: the line it prints.
-pub(crate) async fn dropped(js: &jetstream::Context, seq: u64) -> Result<String> {
-    dead::discard(&stream(js).await?, seq).await?;
-    Ok(format!("dropped dead letter {seq}"))
 }
 
 /// One line of `ants dead list`: sequence, ant, thread, sender, deliveries, time, error and the start of the text, or

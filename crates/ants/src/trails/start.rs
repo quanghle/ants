@@ -182,7 +182,7 @@ pub(crate) fn summary(plan: &Plan, conductor: &UserId, thread: Option<&ThreadId>
 }
 
 /// Ask `question` on the terminal, stdin and stderr: None without one on both.
-pub(super) fn ask_terminal(question: &str) -> Result<Option<bool>> {
+pub(crate) fn ask_terminal(question: &str) -> Result<Option<bool>> {
     let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     ask(question, terminal, std::io::stdin().lock(), std::io::stderr())
 }
@@ -205,7 +205,7 @@ pub(super) fn ask(
 }
 
 /// `ants trail run`, confirming with `confirm` unless --yes: it answers None without a terminal to ask on.
-pub(super) async fn run(
+pub(crate) async fn run(
     nats: &Nats<'_>,
     args: RunArgs,
     confirm: impl FnOnce(&str) -> Result<Option<bool>>,
@@ -225,7 +225,7 @@ pub(super) async fn run(
     };
     let conductor = match ant {
         Some(ant) => ant,
-        None => crate::cmd::send::unaddressed(&js, &nats.me, nats.account.as_deref()).await.to,
+        None => crate::messages::send::unaddressed(&js, &nats.me, nats.account.as_deref()).await.to,
     };
     let thread = thread::resolve(thread, nats, &js).await?;
     let summary = summary(&plan, &conductor, thread.as_ref(), &limits);

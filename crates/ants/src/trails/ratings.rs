@@ -150,7 +150,7 @@ pub(super) async fn purge(js: &jetstream::Context, name: &TrailName) -> Result<u
 
 /// What `ants trail rm` adds to its line for the `purged` ratings it removed with the trail, before what it says of the
 /// tips, if `tips` it says anything.
-pub(super) fn purged(purged: u64, tips: bool) -> String {
+pub(crate) fn purged(purged: u64, tips: bool) -> String {
     let and = if tips { "," } else { " and" };
     match purged {
         0 => String::new(),

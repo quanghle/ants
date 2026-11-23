@@ -16,7 +16,7 @@ use super::services::start_server;
 use super::transports::same_address;
 use super::{Check, Connected, Identity, NETWORK_TIMEOUT, Setup, Status};
 use crate::auth;
-use crate::credentials::revoke;
+use crate::credentials::push;
 
 /// Connect, then check JetStream and the hub's stream and buckets. `managed` is the nats-server configuration the
 /// daemon runs itself ([`start_server`]).
@@ -367,7 +367,7 @@ pub(super) fn consumers(object: hub::Object, count: usize, limit: usize) -> Chec
 }
 
 /// Whether the hub keeps the accounts `ants auth push` sends it across restarts, as only a `full` resolver does
-/// ([`revoke::keeps_accounts`]): asked as a user of the team's system account, which only the machine holding the team
+/// ([`push::keeps_accounts`]): asked as a user of the team's system account, which only the machine holding the team
 /// keys can sign.
 pub(super) async fn check_resolver(setup: &Setup, through_leaf: bool) -> Check {
     let check = "hub resolver";
@@ -377,7 +377,7 @@ pub(super) async fn check_resolver(setup: &Setup, through_leaf: bool) -> Check {
         Err(check) => return check,
     };
     let server = client.server_info().server_name;
-    match tokio::time::timeout(NETWORK_TIMEOUT, revoke::keeps_accounts(&client)).await {
+    match tokio::time::timeout(NETWORK_TIMEOUT, push::keeps_accounts(&client)).await {
         Ok(Some(true)) => {
             Check::ok(check, format!("server {server} keeps pushed accounts across restarts (full resolver)"))
         }
@@ -414,7 +414,7 @@ async fn connect_hub_system(setup: &Setup, through_leaf: bool, check: &str) -> R
     if through_leaf {
         return Err(Check::skip(check, "the CLI connects to the leaf node: point --nats at the hub to check it"));
     }
-    match tokio::time::timeout(NETWORK_TIMEOUT * 2, revoke::connect_system(&setup.nats, &setup.team)).await {
+    match tokio::time::timeout(NETWORK_TIMEOUT * 2, push::connect_system(&setup.nats, &setup.team)).await {
         Err(_) => Err(Check::skip(check, format!("{} does not answer", setup.nats))),
         Ok(Ok(client)) => Ok(client),
         Ok(Err(e)) => {

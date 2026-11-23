@@ -31,8 +31,10 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use super::live;
 use crate::auth;
-use crate::credentials::enroll::Approver;
-use crate::credentials::revoke::{self, Kind};
+use crate::credentials::approver::Approver;
+use crate::credentials::issued::{self, Kind};
+use crate::credentials::push;
+use crate::credentials::revoke;
 use crate::node::{members, outbox};
 
 /// How long the signer answers a repeat of a request the same way, without deciding again.
@@ -100,7 +102,7 @@ fn host(approver: &Approver, request: &EnrollRequest, now: DateTime<Utc>) -> Res
         bail!("revoked host credentials of {machine}");
     }
     let name = host_user(&machine);
-    if !revoke::issued(&approver.dir)?.iter().any(|i| i.key == claims.sub && i.kind == Kind::Host && i.name == name) {
+    if !issued::issued(&approver.dir)?.iter().any(|i| i.key == claims.sub && i.kind == Kind::Host && i.name == name) {
         bail!("host credentials of {machine} the team never issued");
     }
     auth::check_signature(&claims.sub, &request.signed(), &request.signature).context("the host credentials")?;
@@ -201,7 +203,7 @@ async fn add(
     if revoked.contains(key) {
         bail!("the key {key} is revoked");
     }
-    let issued = revoke::issued(dir)?;
+    let issued = issued::issued(dir)?;
     if let Some(other) = issued.iter().find(|i| i.order == Some(order.id) && i.key != key) {
         bail!("the order added {ant} with the key {} already", other.key);
     }
@@ -260,7 +262,7 @@ async fn retire(
 ) -> Result<EnrollReply> {
     let dir = approver.dir.as_path();
     let (ant, key) = (&request.ant, request.public_key.as_str());
-    let issued = revoke::issued(dir)?;
+    let issued = issued::issued(dir)?;
     let of_ant = |key: &str| {
         issued
             .iter()
@@ -286,7 +288,7 @@ async fn retire(
         .collect();
     let role = asked.assistant_of.as_ref().map_or(LeafRole::Ant, LeafRole::AssistantOf);
     let newly = if keys.is_empty() { Vec::new() } else { revoke::revoke(dir, None, &keys)? };
-    let push_error = if newly.is_empty() { None } else { revoke::push(url, dir).await.err().map(|e| format!("{e:#}")) };
+    let push_error = if newly.is_empty() { None } else { push::push(url, dir).await.err().map(|e| format!("{e:#}")) };
     if push_error.is_none() {
         crate::signing::retire::clean_consumers(url, approver.js_domain(), dir, ant).await;
     }

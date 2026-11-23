@@ -3,15 +3,15 @@
 use std::path::{Path, PathBuf};
 
 use ants_proto::{
-    BuiltinAnt, ChannelId, DEVICES_BUCKET, Destination, DeviceKey, IDENTITIES_BUCKET, JsDomain, Machine, Permissions,
-    UserId,
+    BuiltinAnt, ChannelId, Destination, DeviceKey, IDENTITIES_BUCKET, JsDomain, Machine, Permissions, UserId,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 
 use crate::auth::team_dir;
 use crate::connection::Connection;
-use crate::credentials::{backup, keys, revoke};
+use crate::credentials::push::push_and_report;
+use crate::credentials::{backup, issued, keys, listing, revoke};
 use crate::node::members;
 use crate::node::members::EnrollApprover;
 use crate::people::devices;
@@ -412,19 +412,19 @@ pub(crate) async fn run(conn: &Connection<'_>, command: AuthCommand) -> Result<(
         AuthCommand::Leaf { machine, members, dir, out } => leaf_creds(machine, members, dir, out, domain),
         AuthCommand::Revoke { name, mut keys, earlier, devices, no_push, dir } => {
             if earlier {
-                keys.extend(revoke::renewed_from(&team_dir(dir.clone())?, &keys)?);
+                keys.extend(issued::renewed_from(&team_dir(dir.clone())?, &keys)?);
             }
             revoke_credentials(name, keys, devices, no_push, dir, conn).await
         }
-        AuthCommand::Revoked { dir } => revoke::list(&team_dir(dir)?),
-        AuthCommand::Issued { json, dir } => revoke::list_issued(&team_dir(dir)?, json),
-        AuthCommand::Devices { human, json, dir } => revoke::list_devices(&team_dir(dir)?, human.as_str(), json),
+        AuthCommand::Revoked { dir } => listing::list(&team_dir(dir)?),
+        AuthCommand::Issued { json, dir } => listing::list_issued(&team_dir(dir)?, json),
+        AuthCommand::Devices { human, json, dir } => listing::list_devices(&team_dir(dir)?, human.as_str(), json),
         AuthCommand::Rename { human, device, label, dir } => {
-            let renamed = revoke::rename(&team_dir(dir)?, human.as_str(), &device, &label)?;
+            let renamed = issued::rename(&team_dir(dir)?, human.as_str(), &device, &label)?;
             println!("{} of {human} is now labelled {label:?}", renamed.device);
             Ok(())
         }
-        AuthCommand::Push { dir } => push(conn.nats, domain, &team_dir(dir)?).await,
+        AuthCommand::Push { dir } => push_and_report(conn.nats, domain, &team_dir(dir)?).await,
         AuthCommand::MoveStores { store_dir, server_conf, replace, dir } => {
             let server_conf = match server_conf {
                 Some(conf) => conf,
@@ -438,10 +438,10 @@ pub(crate) async fn run(conn: &Connection<'_>, command: AuthCommand) -> Result<(
         AuthCommand::Restore { file, passphrase_file, force, dir } => {
             backup::run_restore(&team_dir(dir)?, &file, passphrase_file.as_deref(), force)
         }
-        AuthCommand::Admin(AdminCommand::List { json, dir }) => revoke::list_admins(&team_dir(dir)?, json),
+        AuthCommand::Admin(AdminCommand::List { json, dir }) => listing::list_admins(&team_dir(dir)?, json),
         AuthCommand::Admin(AdminCommand::Drop { human, no_push, dir }) => {
             let dir = team_dir(dir)?;
-            let keys: Vec<String> = revoke::admins(&dir, auth::now()?)?
+            let keys: Vec<String> = issued::admins(&dir, auth::now()?)?
                 .into_iter()
                 .filter(|a| a.name == human.as_str())
                 .map(|a| a.key)
@@ -533,10 +533,10 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
     if store_key {
         let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
         let key = nkeys::KeyPair::new_user();
-        let xkey = (kind == revoke::Kind::Human).then(nkeys::XKey::new);
+        let xkey = (kind == issued::Kind::Human).then(nkeys::XKey::new);
         let bound = xkey.as_ref().map(auth::device_key).transpose()?;
         let (jwt, device) =
-            auth::sign_device_with(&dir, &user, kind, permissions, &new, &key.public_key(), bound.as_ref())?;
+            auth::Issue::new(&dir, &user, kind, permissions).with(&new).for_key(&key.public_key(), bound.as_ref())?;
         keys::issue_stored(&out, &jwt, &key, xkey.as_ref(), conn.nats).await?;
         println!("{}", out.display());
         if let Some(device) = device {
@@ -546,14 +546,14 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
     }
     let Some(key) = public_key else {
         let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
-        let device = auth::issue_device_with(&dir, &user, kind, permissions, &new, &out)?;
+        let device = auth::Issue::new(&dir, &user, kind, permissions).with(&new).into_file(&out)?;
         println!("{}", out.display());
         if let Some(device) = device {
             eprintln!("device {device}");
         }
         return Ok(());
     };
-    let (jwt, device) = auth::sign_device_with(&dir, &user, kind, permissions, &new, &key, xkey.as_ref())?;
+    let (jwt, device) = auth::Issue::new(&dir, &user, kind, permissions).with(&new).for_key(&key, xkey.as_ref())?;
     if let Some(device) = device {
         eprintln!("device {device}");
     }
@@ -624,14 +624,14 @@ fn user_rights(
     to: Vec<UserId>,
     channels: Vec<ChannelId>,
     domain: Option<&JsDomain>,
-) -> Result<(revoke::Kind, Permissions)> {
+) -> Result<(issued::Kind, Permissions)> {
     let Kind { human, web, observer, webhook, assistant_of } = asked;
     if let Some(of) = assistant_of {
-        return Ok((revoke::Kind::Assistant, Permissions::for_assistant(user, of).with_js_domain(domain)));
+        return Ok((issued::Kind::Assistant, Permissions::for_assistant(user, of).with_js_domain(domain)));
     }
     let kind = match (webhook, observer) {
-        (true, _) => revoke::Kind::Webhook,
-        (_, true) => revoke::Kind::Observer,
+        (true, _) => issued::Kind::Webhook,
+        (_, true) => issued::Kind::Observer,
         _ => auth::role(user, human).into(),
     };
     let permissions = match (webhook, observer) {
@@ -778,12 +778,12 @@ pub(crate) async fn revoke_credentials(
     let now = auth::now()?;
     let mut name = name;
     if let (Some(human), false) = (&name, devices.is_empty()) {
-        keys.extend(revoke::device_keys(&dir, human, &devices)?);
+        keys.extend(issued::device_keys(&dir, human, &devices)?);
         name = None;
     }
     let ant = name.clone().filter(|name| {
-        let issued = revoke::issued(&dir).unwrap_or_default();
-        issued.iter().any(|i| &i.name == name && matches!(i.kind, revoke::Kind::Ant | revoke::Kind::Assistant))
+        let issued = issued::issued(&dir).unwrap_or_default();
+        issued.iter().any(|i| &i.name == name && matches!(i.kind, issued::Kind::Ant | issued::Kind::Assistant))
     });
     let revoked = revoke::revoke(&dir, name.as_deref(), &keys)?;
     for r in &revoked {
@@ -822,7 +822,7 @@ pub(crate) async fn revoke_credentials(
         }
         return Ok(());
     }
-    push(url, domain, &dir).await?;
+    push_and_report(url, domain, &dir).await?;
     for ant in &retired {
         crate::signing::retire::clean_consumers(url, domain, &dir, ant).await;
     }
@@ -835,12 +835,12 @@ pub(crate) async fn revoke_credentials(
 
 /// The ants among the names of `revoked` that hold no live key in the team directory `dir` any more: retired.
 fn retired_ants(dir: &Path, revoked: &[revoke::Revoked]) -> Result<Vec<UserId>> {
-    let issued = revoke::issued(dir)?;
+    let issued = issued::issued(dir)?;
     let live = crate::signing::signer::live(dir)?;
     let mut ants: Vec<UserId> = Vec::new();
     for r in revoked {
         let of_ant =
-            |i: &revoke::Issued| i.key == r.key && matches!(i.kind, revoke::Kind::Ant | revoke::Kind::Assistant);
+            |i: &issued::Issued| i.key == r.key && matches!(i.kind, issued::Kind::Ant | issued::Kind::Assistant);
         let Some(name) = r.name.as_deref().filter(|_| issued.iter().any(of_ant)) else { continue };
         let Ok(ant) = name.parse::<UserId>() else { continue };
         if !ants.contains(&ant) && !live.iter().any(|i| i.name == name) {
@@ -848,80 +848,6 @@ fn retired_ants(dir: &Path, revoked: &[revoke::Revoked]) -> Result<Vec<UserId>> 
         }
     }
     Ok(ants)
-}
-
-/// Push the team's account to the server at `url` ([`revoke::push`]), saying how to apply it otherwise on failure;
-/// once it is applied, record in the hub's directory of encryption keys, in JetStream domain `domain` if it has one,
-/// the revoked keys of humans' credentials not recorded yet ([`devices::record_revocations`]).
-pub(crate) async fn push(url: &str, domain: Option<&JsDomain>, dir: &Path) -> Result<()> {
-    let pushed = match revoke::push(url, dir).await {
-        Ok(pushed) => {
-            println!(
-                "account pushed to server {} ({url}); connections of revoked credentials are closed",
-                pushed.server
-            );
-            let applied: Vec<&str> =
-                pushed.others.iter().filter(|(_, error)| error.is_none()).map(|(name, _)| name.as_str()).collect();
-            if !applied.is_empty() {
-                println!("also applied by: {}", applied.join(", "));
-            }
-            for (name, error) in &pushed.others {
-                if let Some(error) = error {
-                    println!("not applied by {name}: {error}");
-                }
-            }
-            let conf = dir.join(auth::SERVER_CONF);
-            match pushed.kept {
-                Some(true) => println!(
-                    "server {} keeps it across restarts (full resolver): copy {} to it only for changes besides the \
-                     account's (operator, system account, max_control_line)",
-                    pushed.server,
-                    conf.display()
-                ),
-                Some(false) => println!(
-                    "server {0} keeps it in memory only: a restart brings back the account of its server.conf, so \
-                     copy {1} to it and reload it (SIGHUP); for it to keep pushed accounts, add `resolver {{ type: \
-                     full, dir: \"/ABSOLUTE/DIR\" }}` after its `include \"{2}\"` and restart it",
-                    pushed.server,
-                    conf.display(),
-                    auth::SERVER_CONF
-                ),
-                None => println!(
-                    "server {} did not tell whether it keeps pushed accounts across restarts (`ants doctor` on this \
-                     machine checks it); without a full resolver, copy {} to it and reload it (SIGHUP)",
-                    pushed.server,
-                    conf.display()
-                ),
-            }
-            println!(
-                "leaf nodes not listed (offline, or with no system account uplink) did not apply it: run `ants auth \
-                 push` again once they are connected, unless the hub keeps it (they then catch up within 10 s of \
-                 reconnecting)"
-            );
-            Ok(())
-        }
-        Err(e) => Err(e.context(format!(
-            "the account was not pushed to {url}; the revocations stay in {}: push them with `ants auth push \
-             --nats URL` once the hub is in reach, or copy server.conf to the hub and reload it (SIGHUP)",
-            dir.display()
-        ))),
-    };
-    pushed?;
-    match devices::record_revocations(url, domain, dir).await {
-        Ok(recorded) => {
-            if !recorded.is_empty() {
-                println!(
-                    "recorded in {DEVICES_BUCKET} as revoked, so no message is sealed for their devices any more: {}",
-                    recorded.join(", ")
-                );
-            }
-            Ok(())
-        }
-        Err(e) => Err(e.context(format!(
-            "the account was pushed, but the revoked keys of humans' credentials are not all recorded in \
-             {DEVICES_BUCKET}, so messages may still be sealed for their devices: run `ants auth push --nats URL` again"
-        ))),
-    }
 }
 
 #[cfg(test)]
@@ -939,7 +865,7 @@ mod tests {
         let issue = |user: &str, role: Role, n: usize| {
             let user: UserId = user.parse().unwrap();
             let out = dir.join(format!("{user}-{n}.creds"));
-            auth::issue_device(&team, &user, role.into(), Permissions::for_user(&user, role), None, &out).unwrap();
+            auth::Issue::new(&team, &user, role.into(), Permissions::for_user(&user, role)).into_file(&out).unwrap();
             auth::read_creds(&out).unwrap().1.public_key()
         };
         let (first, second) = (issue("dev-c", Role::Ant, 1), issue("dev-c", Role::Ant, 2));
@@ -987,7 +913,7 @@ mod tests {
         }
         let err = issue_user(parse("alice", &["--web"]).unwrap(), &conn).await.unwrap_err().to_string();
         assert!(err.contains("only a human's device is a web device"), "{err}");
-        assert!(revoke::issued(&team).unwrap().is_empty());
+        assert!(issued::issued(&team).unwrap().is_empty());
 
         let out = dir.join("alice.jwt");
         let signing = ["--human", "--web", "--label", "browser", "--public-key", &key, "--out", out.to_str().unwrap()];
@@ -1004,7 +930,7 @@ mod tests {
         let text = std::fs::read_to_string(team.join("human.creds")).unwrap();
         assert!(ants_daemon::secrets::creds::Finding::from_creds(&text).unwrap().web);
         assert!(ants_daemon::secrets::creds::xkey_of(&text).is_none());
-        let devices = revoke::devices(&team, "alice").unwrap();
+        let devices = issued::devices(&team, "alice").unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!((devices[0].web, devices[0].label.as_deref()), (true, Some("browser")));
         std::fs::remove_dir_all(dir).unwrap();

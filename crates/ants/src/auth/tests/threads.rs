@@ -312,7 +312,7 @@ async fn only_humans_and_webhooks_to_ants_record_a_thread_s_owner_and_the_first_
         issue_with(
             &server.dir().join("auth"),
             webhook,
-            crate::credentials::revoke::Kind::Webhook,
+            crate::credentials::issued::Kind::Webhook,
             Permissions::for_webhook(webhook, &[to]),
             &creds,
         )

@@ -24,13 +24,12 @@ use tokio::time::Instant;
 use super::listed::{Listed, Shown};
 use super::model::{Action, Data, Key, Model, To};
 use super::style;
-use crate::credentials::enroll::{self, Approver};
-use crate::credentials::renew;
+use crate::credentials::approver::{self, Approver};
 use crate::live::maybe;
 use crate::text::ago;
 use crate::{auth, machines};
 
-/// How often the requests are gathered; each gathering listens [`enroll::LISTEN`], as machines repeat theirs.
+/// How often the requests are gathered; each gathering listens [`approver::LISTEN`], as machines repeat theirs.
 const GATHER_EVERY: Duration = Duration::from_secs(15);
 
 /// Where the team's account key is, which alone hears and answers the requests.
@@ -258,7 +257,7 @@ impl Page {
                     Some(Ok(at)) => format!(
                         "heard with the account key in {}, listening {}s, {}",
                         dir.display(),
-                        enroll::LISTEN.as_secs(),
+                        approver::LISTEN.as_secs(),
                         ago(*at, now)
                     ),
                     Some(Err(e)) => format!("listening for requests: {e}"),
@@ -473,14 +472,14 @@ impl Io {
         })
     }
 
-    /// The connection to the server, made afresh once older than [`renew::AUTO_RECONNECT`], as its credentials last
+    /// The connection to the server, made afresh once older than [`approver::AUTO_RECONNECT`], as its credentials last
     /// only a while.
     fn approver(&self, dir: PathBuf) -> LocalBoxFuture<'static, Result<Rc<Approver>>> {
         let (connected, url, domain, listen) =
             (self.connected.clone(), self.url.clone(), self.domain.clone(), self.listen);
         async move {
             if let Some((approver, at)) = connected.borrow().as_ref()
-                && at.elapsed() < renew::AUTO_RECONNECT
+                && at.elapsed() < approver::AUTO_RECONNECT
             {
                 return Ok(approver.clone());
             }
@@ -623,7 +622,12 @@ mod tests {
         auth::issue_enrollment(&team, &dev_c, Duration::from_secs(60), &creds).unwrap();
         let key = nkeys::KeyPair::new_user();
         let repeat = Duration::from_millis(100);
-        let asking = enroll::request(&server.url, &creds, &dev_c, &key, None, repeat, std::future::pending());
+        let asking = crate::credentials::enroll::request(
+            &server.url,
+            crate::credentials::enroll::Enrollment::new(&creds, &dev_c, &key),
+            repeat,
+            std::future::pending(),
+        );
         let approving = async {
             loop {
                 match io.next().await {

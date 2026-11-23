@@ -204,7 +204,7 @@ impl std::error::Error for Unread {}
 
 /// Follow `run` until it ends: print what changes, a line each, then its result; with `json`, only its record once it
 /// ends. Fails once it failed or stopped, or once it is past its wall time with no daemon conducting it.
-pub(super) async fn follow(js: &jetstream::Context, run: TrailRun, json: bool) -> Result<()> {
+pub(crate) async fn follow(js: &jetstream::Context, run: TrailRun, json: bool) -> Result<()> {
     let records = Bucket { js, key: trail_run_key(&run.conductor, &run.run), seqs: (1, 1) };
     following(records, run, json, Patience::DEFAULT).await
 }

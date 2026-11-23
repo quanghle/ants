@@ -5,10 +5,11 @@ use chrono::{TimeDelta, Utc};
 use clap::Parser;
 use serde_json::json;
 
+use super::super::Shown;
 use super::super::saved::{self, Source};
-use super::super::{Shown, TrailCommand};
 use super::{human, p, script, write};
 use crate::cli::{Cli, Command};
+use crate::cmd::trail::TrailCommand;
 use crate::connection::Nats;
 use crate::test_support::Server;
 
@@ -216,9 +217,9 @@ async fn humans_save_list_show_replace_and_remove_trails_and_ants_save_none_from
     let (_, ant_js) = ant.connect("test").await.unwrap();
     assert_eq!(saved::colony(&ant_js).await.unwrap().len(), 1, "an ant reads the colony's trails");
     let save = TrailCommand::Save { file: file.clone(), name: None };
-    let error = super::super::run(&ant, save).await.unwrap_err().to_string();
+    let error = crate::cmd::trail::run(&ant, save).await.unwrap_err().to_string();
     assert_eq!(error, "saving a trail needs a human's credentials; those of dev-a are an ant's");
-    let error = super::super::run(&ant, TrailCommand::Rm { name: "deploy".parse().unwrap() }).await.unwrap_err();
+    let error = crate::cmd::trail::run(&ant, TrailCommand::Rm { name: "deploy".parse().unwrap() }).await.unwrap_err();
     assert!(error.to_string().starts_with("removing a trail needs a human's"), "{error}");
 
     saved::remove(&js, &local, &"deploy".parse().unwrap()).await.unwrap();

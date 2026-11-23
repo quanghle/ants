@@ -9,8 +9,8 @@ use ants_proto::{Envelope, MAX_ATTACHMENTS, ThreadId, ThreadSummary, UserId};
 use anyhow::{Result, bail, ensure};
 use async_nats::jetstream;
 
-use crate::cmd::send;
 use crate::messages::attachments::{self, File};
+use crate::messages::send;
 use crate::people::{humans, sealed};
 
 /// What a forward carries.

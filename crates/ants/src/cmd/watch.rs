@@ -13,6 +13,7 @@ use futures::StreamExt as _;
 
 use crate::avatars::Faces;
 use crate::connection::Nats;
+use crate::messages::reacted::reaction_line;
 use crate::threads::thread;
 
 /// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for an ant (one token), its
@@ -135,13 +136,6 @@ pub(crate) async fn watched_reactions(
             none()
         }
     }
-}
-
-/// A reaction added or removed as `ants watch` prints it, an assistant's for its human naming both ([`Acting::label`]).
-pub(crate) fn reaction_line(change: &reactions::Change) -> String {
-    let verb = if change.removed { "removed the reaction" } else { "reacted" };
-    let by = change.acting.label(change.by.as_str());
-    format!("{by} {verb} {} to message {}", change.reaction, change.message)
 }
 
 /// An envelope as `ants watch` prints it: an escalation it carries with its level, reason, stuck ant and thread,

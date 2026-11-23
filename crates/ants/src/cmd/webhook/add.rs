@@ -12,7 +12,7 @@ use data_encoding::HEXLOWER;
 use nkeys::KeyPair;
 
 use crate::auth;
-use crate::credentials::{enroll, revoke};
+use crate::credentials::{enroll, issued};
 use crate::service::{Action, Outcome, Service, Services, failure};
 use crate::webhook::{self, Config, Listing};
 
@@ -166,43 +166,15 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    match &args.enroll {
-        None => {
-            let domain = js_domain.or(listing.js_domain.as_ref());
-            let permissions = Permissions::for_webhook(name, std::slice::from_ref(&destination)).with_js_domain(domain);
-            auth::issue_device(&team, name, revoke::Kind::Webhook, permissions, None, &out)?;
-        }
-        Some(enrollment) => {
-            let url = args.hub.as_deref().unwrap_or(nats);
-            let user = KeyPair::new_user();
-            eprintln!(
-                "asking for the credentials of {name} ({}); approve with `ants enroll approve {name} --webhook {}`",
-                user.public_key(),
-                destination_flag(&destination)
-            );
-            let stop = async {
-                let _ = tokio::signal::ctrl_c().await;
-            };
-            let approval = enroll::request(url, enrollment, name, &user, None, ENROLL_REPEAT, stop).await?;
-            auth::write_creds(&out, &approval.jwt, &user)?;
-        }
-    }
+    let domain = js_domain.or(listing.js_domain.as_ref());
+    credentials(&args, args.hub.as_deref().unwrap_or(nats), domain, &team, &destination, &out).await?;
     webhook::check_creds("webhook", name, Some(&out), &destination)?;
     ants_daemon::config::write(&path, &text)?;
     println!("webhook {name} listed in {}", path.display());
     println!("credentials of {name} in {}", out.display());
     println!("secret of {name} in {}", secret_file.display());
 
-    match Services::local().apply(Service::Webhook, Action::Reload, &path) {
-        Outcome::Done(command) => println!("ants webhook serve reloaded to serve {name} ({command})"),
-        Outcome::NotRunning => println!("the webhook service is not running; it serves {name} once started"),
-        outcome => println!(
-            "{}a running `ants webhook serve --config {}` serves {name} within seconds, or at once on SIGHUP ({})",
-            failure(outcome),
-            path.display(),
-            crate::service::manual(Service::Webhook, Action::Reload)
-        ),
-    }
+    reload(name, &path);
     println!();
     if listing.public_url.is_none() {
         let listen = listing.listen.as_deref().unwrap_or(webhook::DEFAULT_LISTEN);
@@ -214,6 +186,54 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
     let shown = if given.is_some() { "<the secret given>" } else { &secret };
     println!("{}", sender(args.preset, args.signing_token, &url, shown));
     Ok(())
+}
+
+/// The credentials of the webhook `args` adds, written to `out`: issued with the account key in `team`, for the
+/// JetStream domain `domain` if any, or with --enroll asked for over the server at `url` and awaited.
+async fn credentials(
+    args: &AddArgs,
+    url: &str,
+    domain: Option<&JsDomain>,
+    team: &Path,
+    destination: &Destination,
+    out: &Path,
+) -> Result<()> {
+    let name = &args.name;
+    match &args.enroll {
+        None => {
+            let permissions = Permissions::for_webhook(name, std::slice::from_ref(destination)).with_js_domain(domain);
+            auth::Issue::new(team, name, issued::Kind::Webhook, permissions).into_file(out)?;
+        }
+        Some(enrollment) => {
+            let user = KeyPair::new_user();
+            eprintln!(
+                "asking for the credentials of {name} ({}); approve with `ants enroll approve {name} --webhook {}`",
+                user.public_key(),
+                destination_flag(destination)
+            );
+            let stop = async {
+                let _ = tokio::signal::ctrl_c().await;
+            };
+            let approval =
+                enroll::request(url, enroll::Enrollment::new(enrollment, name, &user), ENROLL_REPEAT, stop).await?;
+            auth::write_creds(out, &approval.jwt, &user)?;
+        }
+    }
+    Ok(())
+}
+
+/// Reload the webhook service to serve `name`, listed in the config file `path`, and print how that went.
+fn reload(name: &UserId, path: &Path) {
+    match Services::local().apply(Service::Webhook, Action::Reload, path) {
+        Outcome::Done(command) => println!("ants webhook serve reloaded to serve {name} ({command})"),
+        Outcome::NotRunning => println!("the webhook service is not running; it serves {name} once started"),
+        outcome => println!(
+            "{}a running `ants webhook serve --config {}` serves {name} within seconds, or at once on SIGHUP ({})",
+            failure(outcome),
+            path.display(),
+            crate::service::manual(Service::Webhook, Action::Reload)
+        ),
+    }
 }
 
 /// The URL the sender posts the events of webhook `name` to: under `public_url`, else behind the reverse proxy.

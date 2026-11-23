@@ -11,9 +11,9 @@ use chrono::Utc;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::cmd::send;
 use crate::completions;
 use crate::connection::{Connection, Nats};
+use crate::messages::send;
 use crate::service::{Action, Outcome, Service, Services, failure, manual};
 use crate::tools::{
     self, Answer, Update, answer_request, details, find, pending, qualified, row, state, suggestion, suggestion_text,

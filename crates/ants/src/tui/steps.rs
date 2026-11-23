@@ -11,8 +11,8 @@ use chrono::{DateTime, Utc};
 use futures::FutureExt as _;
 use futures::future::LocalBoxFuture;
 
-pub(crate) use crate::cmd::trail::runs::Step;
 use crate::live::maybe;
+pub(crate) use crate::trails::runs::Step;
 
 /// How many threads' steps are kept, those heard of least recently dropped first.
 const MAX_THREADS: usize = 64;
@@ -131,7 +131,7 @@ impl Io {
             async move {
                 let mut steps = Vec::new();
                 for ant in &ants {
-                    match crate::cmd::trail::runs::steps_on(&js, ant, &thread).await {
+                    match crate::trails::runs::steps_on(&js, ant, &thread).await {
                         Ok(read) => steps.extend(read),
                         Err(e) => return Event(thread, Err(e)),
                     }

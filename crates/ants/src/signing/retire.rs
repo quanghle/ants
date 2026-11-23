@@ -18,7 +18,7 @@ use async_nats::jetstream::Context;
 
 use crate::auth;
 use crate::credentials::enroll;
-use crate::credentials::revoke::{self, Kind};
+use crate::credentials::issued::{self, Kind};
 use crate::node::{members, natsd, outbox};
 use crate::service::{Action, Outcome};
 
@@ -241,7 +241,7 @@ async fn leave_here(
         Ok((jwt, _)) => jwt,
         Err(e) => return left(e),
     };
-    let assistant_of = match revoke::issued(dir) {
+    let assistant_of = match issued::issued(dir) {
         Ok(issued) => issued
             .into_iter()
             .rfind(|i| i.name == ant.as_str() && matches!(i.kind, Kind::Ant | Kind::Assistant))
@@ -399,7 +399,7 @@ pub async fn retire(
             }
         } else {
             if !revoked.is_empty() {
-                crate::cmd::auth::push(url, js_domain, &dir).await?;
+                crate::credentials::push::push_and_report(url, js_domain, &dir).await?;
             }
             clean_consumers(url, js_domain, &dir, name).await;
         }
@@ -433,7 +433,8 @@ mod tests {
         let (m1, m2): (Machine, Machine) = ("m1".parse().unwrap(), "m2".parse().unwrap());
         for ant in [p("dev-a"), p("dev-c")] {
             let permissions = Permissions::for_user(&ant, Role::Ant);
-            auth::issue_device(&team, &ant, Role::Ant.into(), permissions, None, &dir.join(format!("{ant}.creds")))
+            auth::Issue::new(&team, &ant, Role::Ant.into(), permissions)
+                .into_file(&dir.join(format!("{ant}.creds")))
                 .unwrap();
         }
         let (m1_uplink, m2_uplink) = (dir.join("leaf-m1.creds"), dir.join("leaf-m2.creds"));
@@ -452,7 +453,7 @@ mod tests {
             Outcome::Done("kill -HUP".to_owned())
         };
         let (old, key) = auth::read_creds(&m1_uplink).unwrap();
-        revoke::revoke(&team, Some("dev-c"), &[]).unwrap();
+        crate::credentials::revoke::revoke(&team, Some("dev-c"), &[]).unwrap();
 
         let said = leave_leaves_with(&team, &p("dev-c"), None, local(&conf, &m1, &m1_uplink), reload).await;
         let [said] = said.as_slice() else { panic!("{said:?}") };

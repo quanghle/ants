@@ -516,7 +516,7 @@ impl Revocable {
     /// The leaf nodes that applied a push, once one has: their system account uplink is up.
     async fn pushed_to_leaf(&self) -> Vec<(String, Option<String>)> {
         for _ in 0..50 {
-            let pushed = crate::credentials::revoke::push(&self.hub.url, &self.team).await.unwrap();
+            let pushed = crate::credentials::push::push(&self.hub.url, &self.team).await.unwrap();
             if !pushed.others.is_empty() {
                 return pushed.others;
             }
@@ -543,7 +543,7 @@ async fn a_revocation_pushed_to_the_hub_reaches_the_leaf_and_outlives_its_restar
     let (_a_client, mut a_closed) = watched(&leaf_node.url, &team.a).await.unwrap();
     let (b_client, mut b_closed) = watched(&leaf_node.url, &team.b).await.unwrap();
     crate::credentials::revoke::revoke(&team.team, Some("dev-a"), &[]).unwrap();
-    let pushed = crate::credentials::revoke::push(&team.hub.url, &team.team).await.unwrap();
+    let pushed = crate::credentials::push::push(&team.hub.url, &team.team).await.unwrap();
     assert_eq!(pushed.others, [("m1".to_owned(), None)]);
     timeout(Duration::from_secs(5), a_closed.recv()).await.expect("dev-a's connection to the leaf stays open");
     assert!(watched(&leaf_node.url, &team.a).await.is_err(), "the leaf still takes dev-a's credentials");
@@ -566,7 +566,7 @@ async fn a_leaf_offline_during_a_push_catches_up_from_a_hub_with_a_full_resolver
     drop(leaf_node);
 
     crate::credentials::revoke::revoke(&team.team, Some("dev-a"), &[]).unwrap();
-    let pushed = crate::credentials::revoke::push(&team.hub.url, &team.team).await.unwrap();
+    let pushed = crate::credentials::push::push(&team.hub.url, &team.team).await.unwrap();
     assert_eq!(pushed.others, [], "the stopped leaf heard the push");
 
     let leaf_node = team.start_leaf();

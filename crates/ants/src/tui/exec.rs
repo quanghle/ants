@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use ants_client::attachments::Listed;
 use ants_daemon::records::reactions;
-use ants_proto::{ChannelId, ChannelNotify, JsDomain, Machine, Pick, Quote, Reaction, ThreadId, UserId, Uuid};
+use ants_proto::{ChannelId, ChannelNotify, JsDomain, Machine, Pick, Reaction, ThreadId, UserId, Uuid};
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream;
 use futures::future::LocalBoxFuture;
@@ -22,16 +22,18 @@ use super::work::entries::{latest, waiting};
 use super::{attach, notify, remind, trail};
 use crate::admin::orders;
 use crate::admin::pause;
-use crate::cmd::send as cli;
-use crate::cmd::{cancel, dead};
 use crate::messages::attachments::File;
 use crate::messages::forward;
+use crate::messages::send as cli;
+use crate::messages::{cancel, dead};
 use crate::people::sealed::{Keyring, Sealing};
 use crate::people::{humans, quiet};
 use crate::threads::thread::{self};
 use crate::threads::thread_meta::{self, Marking, Meta};
 
 mod send;
+
+pub(crate) use cli::Quoted;
 
 /// What a job needs: the UI's connection and its human.
 pub struct Ctx {
@@ -54,24 +56,6 @@ pub struct Ctx {
 impl Ctx {
     pub(super) fn meta(&self) -> Result<&Meta> {
         self.meta.as_ref().map_err(|e| anyhow!("{e}"))
-    }
-}
-
-/// The message or post a send replies to, quoting it ([`Envelope::quoting`]).
-///
-/// [`Envelope::quoting`]: ants_proto::Envelope::quoting
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Quoted {
-    pub id: Uuid,
-    pub quote: Quote,
-    /// Whether the message was sealed: only a sealed reply carries its excerpt ([`Quote::withheld`]).
-    pub sealed: bool,
-}
-
-impl Quoted {
-    /// The quote as a reply carries it, `sealed` or not.
-    pub fn quote(self, sealed: bool) -> Quote {
-        if self.sealed && !sealed { self.quote.withheld() } else { self.quote }
     }
 }
 
@@ -578,7 +562,7 @@ async fn retire(ctx: &Ctx, ant: &UserId) -> Result<Done> {
 mod tests {
     use ants_client::entry::Kind;
     use ants_daemon::bus;
-    use ants_proto::Question;
+    use ants_proto::{Question, Quote};
 
     use super::*;
     use crate::connection::Nats;
@@ -809,8 +793,8 @@ mod tests {
         use ants_daemon::admin::ConfigFile;
         use ants_proto::Role;
 
-        use crate::auth::{NewDevice, issue_device_with};
-        use crate::credentials::revoke::Kind;
+        use crate::auth::{Issue, NewDevice};
+        use crate::credentials::issued::Kind;
         use crate::test_support::orders::{WAIT, host_of_m1, with_signer};
         use crate::tui::model::Action;
 
@@ -825,7 +809,7 @@ mod tests {
         let creds = server.dir().join("alice-admin.creds");
         let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
         let rights = ants_proto::Permissions::for_user(&alice, Role::Human);
-        issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &creds).unwrap();
+        Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&creds).unwrap();
         let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
         let (client, js) = nats.connect("test").await.unwrap();
         let work = server.dir().join("work");

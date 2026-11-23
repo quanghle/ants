@@ -8,8 +8,8 @@ use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{FieldChange, MACHINES_BUCKET, Permissions, Role};
 
 use super::*;
-use crate::auth::{NewDevice, issue_device_with, issue_host};
-use crate::credentials::revoke::Kind;
+use crate::auth::{Issue, NewDevice, issue_host};
+use crate::credentials::issued::Kind;
 use crate::test_support::Server;
 use crate::test_support::orders::{WAIT, host_of_m1, host_of_m1_serving, p};
 
@@ -42,7 +42,7 @@ async fn a_machine_s_daemon_decides_each_order_to_its_ants_once_and_records_why(
     let admin_creds = server.dir().join("alice-admin.creds");
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+    Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
     let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
     let unrecorded = send(&admin, &js, None, &dev_a, AdminOp::Pause, WAIT).await.unwrap_err().to_string();
@@ -153,7 +153,7 @@ async fn an_admin_behind_a_leaf_node_sends_orders_through_its_uplink_and_none_wh
     let admin_creds = hub.dir().join("alice-admin.creds");
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human).with_js_domain(Some(&domain));
-    issue_device_with(&team, &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+    Issue::new(&team, &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
 
     let leaf_creds = hub.dir().join("leaf-m1.creds");
     let on_m1 = auth::members(std::slice::from_ref(&dev_a), std::slice::from_ref(&alice));
@@ -261,7 +261,7 @@ async fn orders_to_other_ants_are_decided_while_a_retire_waits_for_its_ant_to_st
     let admin_creds = server.dir().join("alice-admin.creds");
     let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &admin_creds).unwrap();
+    Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
     let nats = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
 
@@ -314,7 +314,7 @@ async fn a_restart_order_restarts_the_harnesses_of_an_ant_its_machine_serves() {
     let admin_creds = server.dir().join("alice-admin.creds");
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+    Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
     let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
     let restarts = Restarts::default();
@@ -362,7 +362,7 @@ async fn a_set_order_edits_the_config_in_place_unless_a_field_changed_or_the_fil
     let admin_creds = server.dir().join("alice-admin.creds");
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+    Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
     let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
 
@@ -419,7 +419,7 @@ async fn a_pause_order_sets_paused_in_the_config_and_a_resume_order_removes_it()
     let admin_creds = server.dir().join("alice-admin.creds");
     let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &admin_creds).unwrap();
+    Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
     let nats = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
     let admin = Admin::of(&nats).unwrap();
@@ -466,7 +466,7 @@ async fn a_read_memories_order_answers_with_the_ant_s_core_and_harness_memories(
     let admin_creds = server.dir().join("alice-admin.creds");
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
-    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+    Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
     let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
 

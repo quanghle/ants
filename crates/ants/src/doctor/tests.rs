@@ -18,7 +18,7 @@ use super::server::{check_store_account, consumer_limit, consumers, storage_chec
 use super::transports::leafnode_info;
 use super::*;
 use crate::avatars::{Depth, Faces};
-use crate::credentials::{backup, revoke};
+use crate::credentials::{backup, issued};
 #[cfg(unix)]
 use crate::node::bridge;
 use crate::node::leaf;
@@ -183,7 +183,7 @@ async fn the_versions_check_waits_for_every_component_to_allow_renewal() {
     let creds = server.dir().join("github.creds");
     let to = [ants_proto::Destination::Ant(dev_a.clone())];
     let permissions = ants_proto::Permissions::for_webhook(&hook, &to);
-    auth::issue_with(&server.dir().join("auth"), &hook, crate::credentials::revoke::Kind::Webhook, permissions, &creds)
+    auth::issue_with(&server.dir().join("auth"), &hook, crate::credentials::issued::Kind::Webhook, permissions, &creds)
         .unwrap();
     let _bus = crate::webhook::Bus::connect(&hook, Some(&creds), &server.url, None, "test").await.unwrap();
 
@@ -371,7 +371,7 @@ async fn the_reactions_check_names_who_answers_an_ants_requests() {
     webhook.abort();
 
     let approver =
-        crate::credentials::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, wait)
+        crate::credentials::approver::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, wait)
             .await
             .unwrap();
     let signer = tokio::spawn(serve(approver.client.clone(), approver.hub().clone(), None, Answering::ListsAndChanges));
@@ -411,7 +411,7 @@ async fn the_trail_saves_check_tells_whether_the_signer_answers() {
     js.create_stream(ants_daemon::hub::trails_config()).await.unwrap();
     drop(human);
     let approver =
-        crate::credentials::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, wait)
+        crate::credentials::approver::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, wait)
             .await
             .unwrap();
     let keeping = ants_daemon::trail::keeper::serve(approver.client.clone(), approver.hub().clone(), None);
@@ -773,7 +773,7 @@ fn the_backup_check_warns_until_a_backup_holds_every_key_issued() {
     backup::backup(&team, &root.join("team.age"), "passphrase", 10).unwrap();
     assert_eq!(check_backup(&team).unwrap().status, Status::Ok);
     let key = nkeys::KeyPair::new_user().public_key();
-    revoke::record(&team, &revoke::Issued::new(&key, "dev-a", revoke::Kind::Ant, None).unwrap()).unwrap();
+    issued::record(&team, &issued::Issued::new(&key, "dev-a", issued::Kind::Ant, None).unwrap()).unwrap();
     let check = check_backup(&team).unwrap();
     assert_eq!(check.status, Status::Warn, "{check}");
     assert!(check.detail.contains("predates 1 issued.jsonl entry"), "{check}");
@@ -934,7 +934,7 @@ fn the_xkey_check_warns_of_a_human_device_binding_none_and_fails_on_a_lost_seed(
         (check.status, shown)
     };
 
-    auth::issue_device(&team, &alice, revoke::Kind::Human, rights(), None, &path).unwrap();
+    auth::Issue::new(&team, &alice, issued::Kind::Human, rights()).into_file(&path).unwrap();
     let (status, shown) = check(&path);
     assert!(status == Status::Ok && shown.contains("in the file"), "{shown}");
     let text = std::fs::read_to_string(&path).unwrap();
@@ -946,7 +946,7 @@ fn the_xkey_check_warns_of_a_human_device_binding_none_and_fails_on_a_lost_seed(
 
     let user = nkeys::KeyPair::new_user();
     let (jwt, _) =
-        auth::sign_device(&team, &alice, revoke::Kind::Human, rights(), None, &user.public_key(), None).unwrap();
+        auth::Issue::new(&team, &alice, issued::Kind::Human, rights()).for_key(&user.public_key(), None).unwrap();
     auth::write_creds(&path, &jwt, &user).unwrap();
     let (status, shown) = check(&path);
     assert!(

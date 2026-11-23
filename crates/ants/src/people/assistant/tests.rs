@@ -60,7 +60,7 @@ fn a_replacing_record_is_issued_after_the_one_stored() {
 /// What a human sends naming no one goes to its assistant while the grant naming it verifies, else the messenger.
 #[tokio::test]
 async fn a_human_s_unaddressed_asks_go_to_its_assistant_while_its_grant_stands() {
-    use crate::cmd::send::{Recipient, unaddressed};
+    use crate::messages::send::{Recipient, unaddressed};
 
     let Some(server) = Server::start() else { return };
     let alice = p("alice");
@@ -250,7 +250,9 @@ async fn an_assistant_acts_for_its_human_only_while_grant_and_credentials_say_so
         let assistant = server.dir().join(format!("{ant}-assistant.creds"));
         let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
         let rights = ants_proto::Permissions::for_assistant(ant, &alice);
-        auth::issue_device_with(&server.dir().join("auth"), ant, revoke::Kind::Assistant, rights, &new, &assistant)
+        auth::Issue::new(&server.dir().join("auth"), ant, issued::Kind::Assistant, rights)
+            .with(&new)
+            .into_file(&assistant)
             .unwrap();
         let (_, ant_js) = bus::connect(&server.url, Some(&assistant), None, ant, "test").await.unwrap();
         let kept = ants_daemon::people::behalf::keep_record(&ant_js, None, ant, &assistant).await.unwrap();
@@ -298,7 +300,7 @@ async fn a_following_checker_takes_withdrawals_and_revocations() {
     let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
     let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
     let team = server.dir().join("auth");
-    auth::issue_device_with(&team, &pa, revoke::Kind::Assistant, rights, &new, &assistant).unwrap();
+    auth::Issue::new(&team, &pa, issued::Kind::Assistant, rights).with(&new).into_file(&assistant).unwrap();
     let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
     ants_daemon::people::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
     put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
@@ -322,7 +324,7 @@ async fn a_following_checker_takes_withdrawals_and_revocations() {
     comes_to(Acting::Forged(alice.clone())).await;
     put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
     comes_to(Acting::For(alice.clone())).await;
-    revoke::revoke(&team, Some("pa"), &[]).unwrap();
+    crate::credentials::revoke::revoke(&team, Some("pa"), &[]).unwrap();
     crate::people::devices::record_revocations(&server.url, None, &team).await.unwrap();
     comes_to(Acting::Forged(alice.clone())).await;
 }
@@ -350,7 +352,9 @@ async fn an_assistant_s_marks_and_snoozes_count_for_its_human_while_granted() {
     let assistant = server.dir().join("pa-assistant.creds");
     let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
     let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
-    auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
+    auth::Issue::new(&server.dir().join("auth"), &pa, issued::Kind::Assistant, rights)
+        .with(&new)
+        .into_file(&assistant)
         .unwrap();
     let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
     ants_daemon::people::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
@@ -428,7 +432,9 @@ async fn an_assistant_s_reactions_for_its_human_show_as_hers() {
     let assistant = server.dir().join("pa-assistant.creds");
     let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
     let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
-    auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
+    auth::Issue::new(&server.dir().join("auth"), &pa, issued::Kind::Assistant, rights)
+        .with(&new)
+        .into_file(&assistant)
         .unwrap();
     let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
     ants_daemon::people::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
@@ -472,7 +478,9 @@ async fn an_assistant_s_posts_for_its_human_show_as_hers() {
     let assistant = server.dir().join("pa-assistant.creds");
     let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
     let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
-    auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
+    auth::Issue::new(&server.dir().join("auth"), &pa, issued::Kind::Assistant, rights)
+        .with(&new)
+        .into_file(&assistant)
         .unwrap();
     let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
     ants_daemon::people::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
@@ -514,7 +522,9 @@ async fn an_assistant_s_credentials_reach_what_its_tools_act_on_for_its_human() 
     let assistant = server.dir().join("pa-assistant.creds");
     let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
     let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
-    auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
+    auth::Issue::new(&server.dir().join("auth"), &pa, issued::Kind::Assistant, rights)
+        .with(&new)
+        .into_file(&assistant)
         .unwrap();
     let (_, mut pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
     pa_js.set_timeout(Duration::from_secs(2));
@@ -653,7 +663,10 @@ async fn an_assistant_s_admin_orders_wait_for_its_human_to_consent() {
     let creds = server.dir().join("alice-admin.creds");
     let device = auth::NewDevice { label: Some("laptop"), admin: true, ..auth::NewDevice::default() };
     let rights = ants_proto::Permissions::for_user(&alice, Role::Human);
-    auth::issue_device_with(&server.dir().join("auth"), &alice, revoke::Kind::Human, rights, &device, &creds).unwrap();
+    auth::Issue::new(&server.dir().join("auth"), &alice, issued::Kind::Human, rights)
+        .with(&device)
+        .into_file(&creds)
+        .unwrap();
     let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
     bus::ensure_stream(&js).await.unwrap();
     js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
@@ -662,7 +675,9 @@ async fn an_assistant_s_admin_orders_wait_for_its_human_to_consent() {
     let assistant = server.dir().join("pa-assistant.creds");
     let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
     let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
-    auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
+    auth::Issue::new(&server.dir().join("auth"), &pa, issued::Kind::Assistant, rights)
+        .with(&new)
+        .into_file(&assistant)
         .unwrap();
     let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
     put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();

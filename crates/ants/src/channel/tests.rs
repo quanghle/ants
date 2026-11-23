@@ -337,7 +337,7 @@ async fn a_post_on_a_webhook_s_thread_keeps_its_owner_and_no_ant_posts_as_a_webh
     crate::auth::issue_with(
         &server.dir().join("auth"),
         &hook,
-        crate::credentials::revoke::Kind::Webhook,
+        crate::credentials::issued::Kind::Webhook,
         permissions,
         &creds,
     )
