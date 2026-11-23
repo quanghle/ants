@@ -24,8 +24,7 @@ async fn a_spent_cap_hands_the_thread_to_the_human_until_the_human_answers() {
         assert_eq!(reply.text, format!("partial\n\n[ants] {cap}; the prompt was cancelled."));
         let escalation = next_envelope(&mut to_human).await;
         assert_eq!(escalation.text, format!("{cap}; needs a decision. Last message from dev-b:\ncost 2 stall"));
-        let escalation = next_envelope(&mut to_human).await;
-        assert_eq!(escalation.text, format!("{cap}; needs a decision. Last message from dev-b:\nmore"));
+        // The next message out of allowance finds the escalation waiting for the human: it is not sent again.
         assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "go on".to_owned()), "a fresh allowance");
         ctrl_c.add_permits(1);
     };

@@ -9,10 +9,11 @@ use crate::limits::caps::Pending;
 /// What an escalation does next.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Step {
-    /// Go to the same members again, at the same level: the leader has not answered yet.
-    Again(Pending),
+    /// Go to the same members again, at the same level: the leader has not answered yet. Not for a stuck ant only
+    /// repeating it ([`repeats`]).
+    Again(Box<Pending>),
     /// Go one level above this escalation.
-    Climb(Escalation),
+    Climb(Box<Escalation>),
 }
 
 /// Whose escalation for what, should it start afresh.
@@ -38,12 +39,12 @@ pub(super) fn next_step(
     let Fresh { ant, origin, thread, reason } = fresh;
     let carried = carried.filter(|c| &c.thread_id == thread);
     let pending = pending.filter(|p| !settled_question(p));
-    let retarget = |e: &Escalation| Escalation { reason, request_id, ..e.clone() };
+    let retarget = |e: &Escalation| Box::new(Escalation { reason, request_id, ..e.clone() });
     match (carried, pending) {
         (Some(c), Some(p)) if c.level > p.escalation.level => Step::Climb(retarget(c)),
         (Some(c), None) if c.stuck != *ant => Step::Climb(retarget(c)),
         (_, Some(p)) if p.renewed_by.is_some() => Step::Climb(retarget(&p.escalation)),
-        (_, Some(p)) => Step::Again(p.clone()),
+        (_, Some(p)) => Step::Again(Box::new(p.clone())),
         _ => Step::Climb(retarget(&Escalation::new_from(ant.clone(), thread.clone(), reason, origin))),
     }
 }
@@ -74,7 +75,22 @@ pub(super) fn supersede(asked: Pending, stuck: &Stuck) -> Pending {
     let escalation = Escalation { reason: stuck.reason, request_id: stuck.request_id, ..asked.escalation };
     let summary =
         format!("{}\n\nAsked before: {}", stuck.notice.text, asked.summary).chars().take(SUMMARY_CHARS).collect();
-    Pending { escalation, summary, question: None, ..asked }
+    Pending { escalation, summary, question: None, sent_as: None, ..asked }
+}
+
+/// Whether `reason` is one every message on the thread meets again until the escalation is answered: its turns or
+/// allowance spent, or its notes out of turns. Such an escalation is kept even when it goes straight to a human, so
+/// the next message's waits for it ([`repeats`]).
+pub(super) fn waits_for_turns(reason: EscalationReason) -> bool {
+    matches!(reason, EscalationReason::TurnBudget | EscalationReason::Cap | EscalationReason::Notes)
+}
+
+/// Whether `stuck`, going to the members of the thread's `pending` escalation again, would only repeat it: stuck for
+/// want of turns ([`waits_for_turns`]) on another message than the one the escalation went out for at this level. In
+/// a channel every member woken by every post meets the spent budget, and each would send the same escalation once
+/// per post; a retry of the same message sends it again, so a failed send is not lost.
+pub(super) fn repeats(pending: &Pending, stuck: &Stuck) -> bool {
+    waits_for_turns(stuck.reason) && pending.sent_as.as_ref().is_some_and(|sent| *sent != stuck.id)
 }
 
 /// Whether `envelope` passes the escalation `carried` of the ant's thread on to a human: from the assistant leading the

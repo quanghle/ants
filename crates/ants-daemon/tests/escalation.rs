@@ -113,10 +113,10 @@ async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_
         assert!(two.text.contains("[ants] No answer from lead on thread"), "{}", two.text);
         assert!(two.text.ends_with("Turn budget spent."), "{}", two.text);
 
-        // Stuck again before boss answers: the same members get it again, at the same level.
+        // Stuck again for want of turns before boss answers: the escalation waits for boss, sent once per level.
         let again = escalator.escalate(stuck("Still stuck.", "e2")).await.unwrap();
         assert_eq!(again, Escalated::Chain { level: 2, leader: ant("boss"), to: vec![ant("boss")] });
-        assert!(next(&mut to_boss).await.text.ends_with("Still stuck."));
+        assert!(timeout(Duration::from_millis(200), to_boss.next()).await.is_err(), "not sent again");
 
         // boss answers: a fresh budget once, and no more deadline.
         let mut answer = two.reply(ant("boss"), "go on", ants_proto::Role::Ant).unwrap();
@@ -313,7 +313,8 @@ async fn a_stand_in_s_answer_to_an_escalation_reaching_the_human_without_reminde
 
     assert_eq!(escalate("e1").await.unwrap(), Escalated::Owner(UserId::human()));
     next(&mut to_human).await;
-    assert_eq!(escalator.ledger().pending(&thread).await.unwrap(), None, "no chain record");
+    let pending = escalator.ledger().pending(&thread).await.unwrap().expect("kept, so the next one waits for it");
+    assert!(pending.at_owner() && pending.deadline.is_none(), "{pending:?}");
     assert_eq!(escalator.ledger().reminder(&thread).await.unwrap(), None, "no reminder");
     assert!(escalator.ledger().deadlines().await.unwrap().is_empty(), "nothing due");
 
