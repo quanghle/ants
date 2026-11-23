@@ -465,10 +465,7 @@ fn channels_are_managed_posted_to_and_read() {
     asking.0.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
     assert_eq!(asking.0.wait().unwrap().code(), Some(1), "{stderr}");
     assert!(stderr.contains(&format!("no reply on thread {thread} within 3s")), "{stderr}");
-    assert!(
-        stderr.contains("system-messenger is not in the colony: no daemon serves system-messenger now"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("system-messenger is not in the colony, which lists no ant: no daemon beats"), "{stderr}");
     assert!(stderr.contains("--wait may not end until one does"), "{stderr}");
 
     assert_eq!(ok(&["channel", "delete", "dev"]).0, "deleted #dev; the posts to #dev stay in the stream\n");

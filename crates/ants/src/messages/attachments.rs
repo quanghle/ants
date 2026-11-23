@@ -39,21 +39,24 @@ impl Attach {
     }
 }
 
-/// A file to attach: its reference, with a fresh id, and its bytes.
+/// A file to attach: its reference, its id derived from it ([`files::attachment_id`]), and its bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct File {
     pub attachment: Attachment,
     pub bytes: Vec<u8>,
 }
 
-/// Read the files at `paths` to attach to one message: at most [`MAX_ATTACHMENTS`], each read with [`read`].
+/// Read the files at `paths` to attach to one message: at most [`MAX_ATTACHMENTS`], each read with [`read`], each with
+/// an id of its own ([`files::distinct`]).
 pub fn read_all(paths: &[PathBuf]) -> Result<Vec<File>> {
     ensure!(
         paths.len() <= MAX_ATTACHMENTS,
         "{} files to attach: a message carries at most {MAX_ATTACHMENTS}",
         paths.len()
     );
-    paths.iter().map(|path| read(path)).collect()
+    let mut files: Vec<File> = paths.iter().map(|path| read(path)).collect::<Result<_>>()?;
+    files::distinct(files.iter_mut().map(|f| &mut f.attachment));
+    Ok(files)
 }
 
 /// Read the file at `path` to attach: a regular file of at most [`MAX_ATTACHMENT_SIZE`] bytes, named by its base name,
@@ -62,10 +65,17 @@ pub fn read(path: &Path) -> Result<File> {
     let shown = path.display();
     let name = path.file_name().with_context(|| format!("{shown} names no file to attach"))?;
     let name = name.to_str().with_context(|| format!("the name of {shown} is not UTF-8: rename it to attach it"))?;
+    let no_file = || format!("{shown} is no file: only a file is attached");
+    // Opening a FIFO would wait for a writer: what is no regular file is refused before it is opened.
+    let meta = std::fs::metadata(path).with_context(|| format!("reading {shown}"))?;
+    ensure!(meta.is_file(), no_file());
     let file = std::fs::File::open(path).with_context(|| format!("opening {shown} to attach it"))?;
     let meta = file.metadata().with_context(|| format!("reading {shown}"))?;
-    ensure!(meta.is_file(), "{shown} is no file: only a file is attached");
-    let too_big = |len| format!("{shown} is {}: an attachment is at most {}", size(len), size(MAX_ATTACHMENT_SIZE));
+    ensure!(meta.is_file(), no_file());
+    let too_big = |len| {
+        let (len, max) = sizes(len, MAX_ATTACHMENT_SIZE);
+        format!("{shown} is {len}: an attachment is at most {max}")
+    };
     ensure!(meta.len() <= MAX_ATTACHMENT_SIZE, too_big(meta.len()));
     let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or_default());
     file.take(MAX_ATTACHMENT_SIZE + 1).read_to_end(&mut bytes).with_context(|| format!("reading {shown}"))?;
@@ -77,12 +87,8 @@ pub fn read(path: &Path) -> Result<File> {
 /// `text` to attach as the file `name`, of at most [`MAX_ATTACHMENT_SIZE`] bytes, of the media type its name gives.
 pub fn text(name: &str, text: &str) -> Result<File> {
     let len = text.len() as u64;
-    ensure!(
-        len <= MAX_ATTACHMENT_SIZE,
-        "{name} would be {}: an attachment is at most {}",
-        size(len),
-        size(MAX_ATTACHMENT_SIZE)
-    );
+    let (shown, max) = sizes(len, MAX_ATTACHMENT_SIZE);
+    ensure!(len <= MAX_ATTACHMENT_SIZE, "{name} would be {shown}: an attachment is at most {max}");
     let bytes = text.as_bytes().to_vec();
     let attachment = files::reference(name, guess_mime(name), &bytes).with_context(|| format!("attaching {name}"))?;
     Ok(File { attachment, bytes })
@@ -120,6 +126,12 @@ pub fn size(bytes: u64) -> String {
     } else {
         scaled(KIB * KIB, "MiB")
     }
+}
+
+/// `len` and `limit` for people ([`size`]), as exact bytes when they would read the same.
+pub fn sizes(len: u64, limit: u64) -> (String, String) {
+    let (shown, max) = (size(len), size(limit));
+    if shown == max && len != limit { (format!("{len} bytes"), format!("{limit} bytes")) } else { (shown, max) }
 }
 
 /// An attachment as a message lists it: its reference, the handle naming where its bytes are, and why it is unavailable
@@ -435,11 +447,22 @@ mod tests {
         let big = dir.join("big.bin");
         std::fs::File::create(&big).unwrap().set_len(MAX_ATTACHMENT_SIZE + 1).unwrap();
         let refused = super::read(&big).unwrap_err().to_string();
-        assert!(refused.contains("is 8.0 MiB: an attachment is at most 8.0 MiB"), "{refused}");
+        assert!(refused.contains("is 8388609 bytes: an attachment is at most 8388608 bytes"), "{refused}");
+        std::fs::File::create(&big).unwrap().set_len(MAX_ATTACHMENT_SIZE * 2).unwrap();
+        let refused = super::read(&big).unwrap_err().to_string();
+        assert!(refused.contains("is 16 MiB: an attachment is at most 8.0 MiB"), "{refused}");
         std::fs::File::create(&big).unwrap().set_len(MAX_ATTACHMENT_SIZE).unwrap();
         assert_eq!(super::read(&big).unwrap().attachment.size, MAX_ATTACHMENT_SIZE);
 
         assert!(super::read(&dir).unwrap_err().to_string().contains("is no file"));
+        #[cfg(unix)]
+        {
+            let fifo = dir.join("pipe");
+            let made = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+            assert!(made.success());
+            let refused = super::read(&fifo).unwrap_err().to_string();
+            assert!(refused.contains("is no file: only a file is attached"), "{refused}");
+        }
         assert!(super::read(&dir.join("missing")).is_err());
         assert_eq!(read_all(&vec![shot.clone(); MAX_ATTACHMENTS]).unwrap().len(), MAX_ATTACHMENTS);
         let many = read_all(&vec![shot; MAX_ATTACHMENTS + 1]).unwrap_err().to_string();

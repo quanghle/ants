@@ -222,13 +222,34 @@ pub fn drifted(entries: &[ColonyEntry]) -> Vec<String> {
         .collect()
 }
 
+/// What a colony without an entry for an ant says of it ([`unserved`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Absent {
+    /// The colony lists other ants, and an escalation chain is kept for this one.
+    Known,
+    /// The colony lists other ants, but no escalation chain is kept for this one either: the name may be wrong.
+    Unknown,
+    /// The colony lists no ant at all: no daemon beats, or the hub's memory store, full, refuses every heartbeat.
+    Empty,
+}
+
+/// A note for a colony listing no ant at all ([`Absent::Empty`]).
+pub const EMPTY_COLONY: &str = "no daemon beats, or the hub's JetStream memory store is full and refuses their \
+                                heartbeats (`ants doctor` shows its usage)";
+
 /// Why no daemon serves `ant` now, given its colony entry, or None when one does: no entry (with no escalation chain
-/// kept for it either, the name may be wrong), a stale entry, a pause, or a harness signed out or held back by a
-/// provider limit with no fallback answering for it.
-pub fn unserved(ant: &UserId, entry: Option<&ColonyEntry>, chain_kept: bool, now: DateTime<Utc>) -> Option<String> {
+/// kept for it either, the name may be wrong; with no ant in the colony at all, the store may be full: `absent`), a
+/// stale entry, a pause, or a harness signed out or held back by a provider limit with no fallback answering for it.
+pub fn unserved(ant: &UserId, entry: Option<&ColonyEntry>, absent: Absent, now: DateTime<Utc>) -> Option<String> {
     let Some(entry) = entry else {
-        let hint = if chain_kept { "" } else { " (`ants colony` lists the ants served: check the name)" };
-        return Some(format!("{ant} is not in the colony: no daemon serves {ant} now{hint}"));
+        return Some(match absent {
+            Absent::Known => format!("{ant} is not in the colony: no daemon serves {ant} now"),
+            Absent::Unknown => format!(
+                "{ant} is not in the colony: no daemon serves {ant} now (`ants colony` lists the ants served: check the \
+                 name)"
+            ),
+            Absent::Empty => format!("{ant} is not in the colony, which lists no ant: {EMPTY_COLONY}"),
+        });
     };
     if State::of(entry, now) == State::Stale {
         return Some(format!(
@@ -274,6 +295,7 @@ async fn read_unserved(js: &jetstream::Context, ants: &[&UserId]) -> Result<Vec<
         js.get_key_value(CHAINS_BUCKET).await.inspect_err(|e| tracing::debug!("{CHAINS_BUCKET} unread: {e}")).ok();
     let now = Utc::now();
     let mut warnings = Vec::new();
+    let mut empty = None;
     for ant in ants {
         let entry = match kv.guarded_get(ant.as_str()).await.with_context(|| format!("reading {ant} in the colony"))? {
             Some(value) => {
@@ -283,12 +305,18 @@ async fn read_unserved(js: &jetstream::Context, ants: &[&UserId]) -> Result<Vec<
             }
             None => None,
         };
-        // Only chains read and found lacking hint at a misspelt name.
-        let chain_kept = match (&entry, &kept) {
-            (None, Some(kept)) => chains::read(kept, ant).await.map_or(true, |chain| chain.is_some()),
-            _ => true,
+        let absent = if entry.is_some() {
+            Absent::Known
+        } else if *empty.get_or_insert(kv.status().await.is_ok_and(|status| status.values() == 0)) {
+            Absent::Empty
+        } else {
+            // Only chains read and found lacking hint at a misspelt name.
+            match &kept {
+                Some(kept) if chains::read(kept, ant).await.is_ok_and(|chain| chain.is_none()) => Absent::Unknown,
+                _ => Absent::Known,
+            }
         };
-        warnings.extend(unserved(ant, entry.as_ref(), chain_kept, now));
+        warnings.extend(unserved(ant, entry.as_ref(), absent, now));
     }
     Ok(warnings)
 }
@@ -408,7 +436,7 @@ pub async fn show(nats: &crate::connection::Nats<'_>, json: bool) -> Result<()> 
             println!("{}", self::json(entry, now, &faces)?);
         }
     } else if entries.is_empty() {
-        println!("no ants registered");
+        println!("no ants registered: {EMPTY_COLONY}");
         if !moved.is_empty() {
             println!("\n{}", moved.join("\n"));
         }
@@ -677,34 +705,49 @@ mod tests {
     fn unserved_ants_say_why() {
         let now = Utc::now();
         let dev_a: UserId = "dev-a".parse().unwrap();
-        assert_eq!(unserved(&dev_a, Some(&entry("dev-a", 60, 2, now)), false, now), None, "a live ant is served");
         assert_eq!(
-            unserved(&dev_a, None, true, now).unwrap(),
+            unserved(&dev_a, Some(&entry("dev-a", 60, 2, now)), Absent::Unknown, now),
+            None,
+            "a live ant is served"
+        );
+        assert_eq!(
+            unserved(&dev_a, None, Absent::Known, now).unwrap(),
             "dev-a is not in the colony: no daemon serves dev-a now"
         );
         assert_eq!(
-            unserved(&dev_a, None, false, now).unwrap(),
+            unserved(&dev_a, None, Absent::Unknown, now).unwrap(),
             "dev-a is not in the colony: no daemon serves dev-a now (`ants colony` lists the ants served: check the \
              name)"
         );
+        let empty = unserved(&dev_a, None, Absent::Empty, now).unwrap();
+        assert!(empty.starts_with("dev-a is not in the colony, which lists no ant: no daemon beats, or"), "{empty}");
+        assert!(empty.contains("memory store is full") && !empty.contains("check the name"), "{empty}");
         assert_eq!(
-            unserved(&dev_a, Some(&entry("dev-a", 600, 300, now)), true, now).unwrap(),
+            unserved(&dev_a, Some(&entry("dev-a", 600, 300, now)), Absent::Known, now).unwrap(),
             "dev-a is stale in the colony: the daemon on m1 last beat 5m ago and may not serve dev-a now"
         );
         let mut out = entry("dev-a", 600, 2, now);
         out.signed_out = Some(ants_proto::SignInNeeded { since: now, sign_in: None });
-        assert!(unserved(&dev_a, Some(&out), true, now).unwrap().starts_with("dev-a: harness copilot signed out"));
+        assert!(
+            unserved(&dev_a, Some(&out), Absent::Known, now).unwrap().starts_with("dev-a: harness copilot signed out")
+        );
         let mut limited = entry("dev-a", 600, 2, now);
         limited.limited = Some(HarnessLimit { kind: LimitKind::Quota, since: now, until: now });
         assert!(
-            unserved(&dev_a, Some(&limited), true, now).unwrap().starts_with("dev-a: harness copilot out of quota")
+            unserved(&dev_a, Some(&limited), Absent::Known, now)
+                .unwrap()
+                .starts_with("dev-a: harness copilot out of quota")
         );
         limited.fallback = Some(ants_proto::ServingFallback { name: "claude".to_owned(), since: now });
-        assert_eq!(unserved(&dev_a, Some(&limited), true, now), None, "a fallback answers");
+        assert_eq!(unserved(&dev_a, Some(&limited), Absent::Known, now), None, "a fallback answers");
         limited.paused = Some(ants_proto::Paused { since: now - chrono::Duration::minutes(5), by: None });
         let paused = "dev-a: paused for 5m by its config; it takes no new prompt and messages to dev-a wait queued. \
                       Run `ants ant resume dev-a`.";
-        assert_eq!(unserved(&dev_a, Some(&limited), true, now).unwrap(), paused, "a fallback answers no paused ant");
+        assert_eq!(
+            unserved(&dev_a, Some(&limited), Absent::Known, now).unwrap(),
+            paused,
+            "a fallback answers no paused ant"
+        );
         assert_eq!(activity(&limited), "paused");
         limited.paused.as_mut().unwrap().by = Some("alice".parse().unwrap());
         assert!(held(&[limited], now)[0].starts_with("dev-a: paused for 5m by alice;"));
@@ -721,6 +764,8 @@ mod tests {
 
         bus::ensure_colony(&human, COLONY_TTL).await.unwrap();
         bus::ensure_chains(&human).await.unwrap();
+        let empty = unserved_warnings(&human, &ants[2..]).await;
+        assert!(empty[0].starts_with("dev-c is not in the colony, which lists no ant"), "{empty:?}");
         let (_, js) = server.connect(&ids[0]).await;
         let kv = bus::ensure_colony(&js, COLONY_TTL).await.unwrap();
         let _registration = Registration::start(kv, entry("dev-a", 60, 0, Utc::now()), COLONY_HEARTBEAT).await.unwrap();

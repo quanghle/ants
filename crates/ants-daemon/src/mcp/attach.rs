@@ -61,7 +61,7 @@ pub fn jetstream_files(js: async_nats::jetstream::Context) -> FileAccess {
     }
 }
 
-/// A file read to attach: its reference, with a fresh id, and its bytes.
+/// A file read to attach: its reference, its id derived from it ([`crate::files::attachment_id`]), and its bytes.
 pub(super) struct Loaded {
     pub attachment: Attachment,
     pub bytes: Arc<[u8]>,
@@ -84,6 +84,7 @@ pub(super) async fn load(dir: &Path, paths: &[String], redactor: &Redactor) -> R
             load_one(&root, path.trim(), redactor).await.map_err(|why| format!("cannot attach {path:?}: {why}"))?;
         loaded.push(file);
     }
+    crate::files::distinct(loaded.iter_mut().map(|l| &mut l.attachment));
     Ok(loaded)
 }
 
@@ -96,12 +97,17 @@ async fn load_one(root: &Path, path: &str, redactor: &Redactor) -> Result<Loaded
     if !real.starts_with(root) {
         return Err(format!("it is outside the working directory {}", root.display()));
     }
+    // Opening a FIFO would wait for a writer: what is no regular file is refused before it is opened.
+    if !tokio::fs::metadata(&real).await.map_err(|e| e.to_string())?.is_file() {
+        return Err("it is no regular file".to_owned());
+    }
     let mut file = tokio::fs::File::open(&real).await.map_err(|e| e.to_string())?;
     let metadata = file.metadata().await.map_err(|e| e.to_string())?;
     if !metadata.is_file() {
         return Err("it is no regular file".to_owned());
     }
-    let too_big = |size: u64| format!("it is {} long, over the 8 MiB an attachment holds", size_text(size));
+    let too_big =
+        |size: u64| format!("it is {size} bytes long, over the {MAX_ATTACHMENT_SIZE} (8 MiB) an attachment holds");
     if metadata.len() > MAX_ATTACHMENT_SIZE {
         return Err(too_big(metadata.len()));
     }
