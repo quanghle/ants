@@ -107,16 +107,7 @@ impl Trails {
         // broke.
         let mut broke = None;
         loop {
-            let (answers, raised) = {
-                let mut book = slot.book();
-                (std::mem::take(&mut book.answers), book.broke.take())
-            };
-            broke = broke.or(raised);
-            for (call, answer) in answers {
-                if let Err(e) = engine.answer(call, answer) {
-                    tracing::debug!(call, error = %e, "a trail answer the run no longer takes");
-                }
-            }
+            broke = broke.or(hand_answers(slot, &mut engine));
             let header = slot.header();
             if header.finished() {
                 // Ended in memory, its end not stored yet.
@@ -160,13 +151,7 @@ impl Trails {
                 engine.fail(format!("the run reached its limit of {} turns", header.limits.turns));
                 continue;
             }
-            let session = serde_json::to_string(engine.state())?;
-            let (pending, anew) = {
-                let mut book = slot.book();
-                book.anew.retain(|call| engine.outstanding().iter().any(|c| c.call == *call));
-                (book.pending.clone(), book.anew.clone())
-            };
-            let record = TrailSession { session, pending, queued: load::queued(&engine), anew };
+            let record = session_record(slot, &engine)?;
             // The record as save_session stores it: the session escaped once more, beside the calls it waits on.
             let size = serde_json::to_vec(&record)?.len();
             if size > MAX_RECORD {
@@ -176,19 +161,25 @@ impl Trails {
                 ));
                 continue;
             }
-            {
-                let mut book = slot.book();
-                book.session = record.session;
-                book.queued = record.queued;
-                if !matches!(book.header.state, RunState::Stopped { .. }) {
-                    book.header.state = waiting_or_running(&book.pending, &engine);
-                }
-            }
-            self.save_ancestors(&header).await?;
-            self.save_session(slot).await?;
-            self.save_header(slot).await?;
-            return self.publish(slot).await;
+            return self.rest(slot, &engine, record, &header).await;
         }
+    }
+
+    /// Store the run of `slot` as it waits for the answers to the calls of `engine`, its session as in `record` and
+    /// its ancestors as `header` names them, and tell of it.
+    async fn rest(&self, slot: &Slot, engine: &Run, record: TrailSession, header: &TrailRun) -> Result<()> {
+        {
+            let mut book = slot.book();
+            book.session = record.session;
+            book.queued = record.queued;
+            if !matches!(book.header.state, RunState::Stopped { .. }) {
+                book.header.state = waiting_or_running(&book.pending, engine);
+            }
+        }
+        self.save_ancestors(header).await?;
+        self.save_session(slot).await?;
+        self.save_header(slot).await?;
+        self.publish(slot).await
     }
 
     /// Let the script compute in a worker, once one of the daemon's is free: an error leaving the run unchanged is
@@ -687,6 +678,32 @@ fn deadline(book: &super::Book) -> Option<DateTime<Utc>> {
     }
     let wall = chrono::Duration::from_std(header.limits.wall_time()).ok()?;
     Some(header.started_at + wall)
+}
+
+/// Hand `engine` the answers that arrived for the run of `slot` since its last pass: the limit one of them broke
+/// the run on, if any.
+fn hand_answers(slot: &Slot, engine: &mut Run) -> Option<RunLimit> {
+    let (answers, raised) = {
+        let mut book = slot.book();
+        (std::mem::take(&mut book.answers), book.broke.take())
+    };
+    for (call, answer) in answers {
+        if let Err(e) = engine.answer(call, answer) {
+            tracing::debug!(call, error = %e, "a trail answer the run no longer takes");
+        }
+    }
+    raised
+}
+
+/// The session record of the run of `slot` as `engine` waits: its calls asked anew pruned of those answered.
+fn session_record(slot: &Slot, engine: &Run) -> Result<TrailSession> {
+    let session = serde_json::to_string(engine.state())?;
+    let (pending, anew) = {
+        let mut book = slot.book();
+        book.anew.retain(|call| engine.outstanding().iter().any(|c| c.call == *call));
+        (book.pending.clone(), book.anew.clone())
+    };
+    Ok(TrailSession { session, pending, queued: load::queued(engine), anew })
 }
 
 /// Whether the run of `header` ran past its wall time.

@@ -146,3 +146,16 @@ pub struct Storage {
     /// When to warn a human of JetStream storage filling up.
     pub jetstream: crate::monitoring::storage::Settings,
 }
+
+impl Config {
+    /// What the ant's inbox takes of its settings.
+    pub(super) fn inbox(&self) -> super::InboxSettings<'_> {
+        super::InboxSettings {
+            builtin: self.presence.builtin,
+            pause: &self.pause,
+            drift: &self.drift,
+            limits: self.harness.limits,
+            home: &self.storage.home,
+        }
+    }
+}

@@ -109,10 +109,10 @@ impl Inbox<'_> {
             self.metrics.buried();
         }
         match burial {
-            Burial::Hub(_) => self.buried.forget(&incoming.envelope).await,
+            Burial::Hub(_) => self.marks.buried.forget(&incoming.envelope).await,
             Burial::Outbox => self.keep_letter(incoming, msg, dead).await,
         }
-        self.answered.forget_kept(&incoming.envelope).await;
+        self.marks.answered.forget_kept(&incoming.envelope).await;
         Ok(())
     }
 
@@ -125,7 +125,7 @@ impl Inbox<'_> {
             post: incoming.post.as_ref().map(|posted| posted.post.clone()),
             last_delivery: msg.reply.as_ref().filter(|_| last).map(ToString::to_string),
         };
-        if let Err(e) = self.buried.add(&incoming.envelope, &kept).await {
+        if let Err(e) = self.marks.buried.add(&incoming.envelope, &kept).await {
             // The redelivery buries it with an error of its own, under the same message id.
             tracing::warn!(error = format!("{e:#}"), "noting the dead letter");
         }
@@ -138,12 +138,12 @@ impl Inbox<'_> {
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             every.tick().await;
-            for (message, kept) in self.buried.undelivered().await {
+            for (message, kept) in self.marks.buried.undelivered().await {
                 let seq = kept.dead.stream_seq;
                 match dead::finish(self.js, &kept, self.humans).await {
                     Ok(Some(_)) => {
-                        self.attempts.forget(seq).await;
-                        self.buried.forget_id(message).await;
+                        self.marks.attempts.forget(seq).await;
+                        self.marks.buried.forget_id(message).await;
                     }
                     Ok(None) => tracing::debug!(stream_seq = seq, "the hub is out of reach; the dead letter waits"),
                     Err(e) => tracing::warn!(stream_seq = seq, error = format!("{e:#}"), "dead-lettering"),

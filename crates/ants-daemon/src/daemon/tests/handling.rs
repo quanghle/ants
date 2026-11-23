@@ -534,8 +534,8 @@ async fn a_reply_recorded_before_a_crash_is_stored_once_without_a_prompt() {
 
     // The crashed attempt recorded its reply and stored it, but never acked.
     let reply = ask.reply(bus.dev.clone(), "s1: done before", Role::Human).unwrap();
-    bus.attempts.start(seq, &ask).await.unwrap();
-    bus.attempts.replied(seq, &ask, &Reply::Message(Box::new(reply.clone()))).await.unwrap();
+    bus.marks.attempts.start(seq, &ask).await.unwrap();
+    bus.marks.attempts.replied(seq, &ask, &Reply::Message(Box::new(reply.clone()))).await.unwrap();
     bus::publish_json(&bus.js, reply.subject(), &reply, Some(&reply_id(&bus.dev, &ask))).await.unwrap();
     assert_eq!(next_reply(&mut replies).await, (t1.clone(), "done before".to_owned()));
 
@@ -556,10 +556,10 @@ async fn a_reply_recorded_before_a_crash_is_stored_once_without_a_prompt() {
 /// and failed to make its reply.
 async fn keep_answer(bus: &Bus, ask: &Envelope, seq: u64) {
     use crate::delivery::attempts::Given;
-    bus.attempts.start(seq, ask).await.unwrap();
+    bus.marks.attempts.start(seq, ask).await.unwrap();
     let (text, title) = ("s1: done before".to_owned(), Some("Kept".to_owned()));
     let given = Given { text, limit: None, unanswered: None, tokens: 0, title, files: None };
-    bus.answered.keep_given(ask, &given).await.unwrap();
+    bus.marks.answered.keep_given(ask, &given).await.unwrap();
 }
 
 /// A message on the consumer's extra delivery, its attempts spent, whose harness answered one of them is no dead
@@ -605,7 +605,7 @@ async fn an_overdue_message_whose_answer_is_kept_is_answered_from_it_unprompted(
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(log.locked().starts, 0, "not prompted again");
     assert!(dead::list(&bus.stream).await.unwrap().is_empty(), "no dead letter");
-    assert!(bus.answered.given(&ask).await.is_none(), "forgotten once the reply is recorded");
+    assert!(bus.marks.answered.given(&ask).await.is_none(), "forgotten once the reply is recorded");
     assert!(!bus.marked(seq).await);
     assert_eq!(bus.unacked().await, 0);
 }
@@ -631,7 +631,7 @@ async fn a_message_withdrawn_while_its_answer_is_kept_leaves_no_answer_on_the_ma
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(log.locked().starts, 0, "never prompted");
-    assert!(bus.answered.given(&ask).await.is_none(), "the kept answer went with the withdrawal");
+    assert!(bus.marks.answered.given(&ask).await.is_none(), "the kept answer went with the withdrawal");
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -676,7 +676,7 @@ async fn a_withdrawal_an_assistant_records_while_no_daemon_serves_is_honoured_be
     assert_eq!(record(&for_alice, &pa).await.unwrap(), Recorded::Holds);
     assert_eq!(record(&b, &pb).await.unwrap(), Recorded::Holds, "stored, but pb is not alice's assistant");
     assert_eq!(
-        bus.attempts.take_up(&c).await.unwrap(),
+        bus.marks.attempts.take_up(&c).await.unwrap(),
         crate::delivery::attempts::TakenUp::Started(None),
         "c is taken up"
     );

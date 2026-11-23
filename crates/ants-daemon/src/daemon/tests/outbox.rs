@@ -147,7 +147,7 @@ async fn a_reply_kept_in_the_outbox_answers_its_message_once() {
         "no second reply"
     );
     assert_eq!(bus.unacked().await, 0);
-    assert!(!bus.answered.has(&ask).await, "forgotten once acked");
+    assert!(!bus.marks.answered.has(&ask).await, "forgotten once acked");
 }
 
 /// dev-a's daemon on a leaf node gives up on a message while the leaf's uplink is down: the dead letter goes to the
@@ -198,7 +198,7 @@ async fn dead_letter_kept_in_the_outbox(past_window: bool) {
     };
     tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), down);
     drop(pool);
-    let kept = bus.buried.get(&ask).await.expect("noted on the machine");
+    let kept = bus.marks.buried.get(&ask).await.expect("noted on the machine");
     assert_eq!(kept.last_delivery, None, "the extra delivery finishes the burial");
     let kept = kept.dead;
     assert!(kept.error.contains("doomed"), "{}", kept.error);
@@ -225,7 +225,7 @@ async fn dead_letter_kept_in_the_outbox(past_window: bool) {
     assert_eq!((&notice.thread_id, notice.in_reply_to), (&t1, Some(ask.id)));
     assert!(notice.text.contains(&format!("ants dead replay {}", letters[0].0)), "{}", notice.text);
     assert_eq!(bus.unacked().await, 0);
-    assert!(bus.buried.get(&ask).await.is_none(), "forgotten once terminated");
+    assert!(bus.marks.buried.get(&ask).await.is_none(), "forgotten once terminated");
 }
 
 /// dev-a's daemon on a leaf node gives up on a message on the consumer's extra delivery while the leaf's uplink is
@@ -327,7 +327,7 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
         msg.ack_with(async_nats::jetstream::AckKind::Nak(None)).await.unwrap();
     }
 
-    let buried = &bus.buried;
+    let buried = &bus.marks.buried;
     let until_buried = |kept: bool| async move {
         let done = timeout(WAIT, async {
             while buried.undelivered().await.is_empty() == kept {
@@ -343,7 +343,7 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
         uplinked.switch(Link::Down).await;
         gate.add_permits(1);
         until_buried(true).await;
-        let kept = bus.buried.get(&doomed).await.expect("noted on the machine");
+        let kept = bus.marks.buried.get(&doomed).await.expect("noted on the machine");
         if back == UplinkBack::Live {
             uplinked.switch(Link::Up).await;
             until_buried(false).await;
@@ -423,7 +423,7 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].thread_id, t1);
     assert!(notices[0].text.contains(&format!("ants dead replay {}", letters[0].0)), "{}", notices[0].text);
-    assert!(bus.buried.get(&doomed).await.is_none(), "forgotten once terminated");
+    assert!(bus.marks.buried.get(&doomed).await.is_none(), "forgotten once terminated");
 }
 
 /// dev-a's daemon on a leaf node has a message in hand behind another on its thread when the leaf's uplink is cut:

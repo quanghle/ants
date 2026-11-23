@@ -8,8 +8,6 @@ use futures::stream::{Stream, StreamExt as _};
 
 use crate::approvals::NatsApprover;
 use crate::channel::Channels;
-use crate::delivery::attempts::Answered;
-use crate::delivery::dead::Buried;
 use crate::escalation::{self, Escalator};
 use crate::harness::Launch;
 use crate::limits::caps::Ledger;
@@ -250,6 +248,13 @@ pub(super) struct Services {
     pub(super) mcp: Mcp,
     /// The sign-ins to MCP servers of the harnesses' sessions.
     pub(super) mcp_sign_ins: mcp_sign_in::Untold,
+}
+
+impl Services {
+    /// What the inbox takes of the ant's identity record and of its provider, `sense` when that is its provider.
+    pub(super) fn provider<'a>(&'a self, sense: Option<&'a crate::sense::Sense>) -> super::Provider<'a> {
+        super::Provider { identity: self.identity.as_ref(), lifecycle: self.lifecycle.as_ref(), sense }
+    }
 }
 
 /// Set up the ant's redactor, approvals, notes, spending ledger, escalator and records, and start its MCP server, its
@@ -502,13 +507,17 @@ pub(super) fn storage_watcher(
     }
 }
 
-/// The marks of the messages answered and buried, pruned of those the stream no longer keeps.
-pub(super) async fn delivery_marks(home: &std::path::Path) -> (Answered, Buried) {
-    let answered = Answered::new(home);
-    answered.prune(bus::RETENTION).await;
-    let buried = Buried::new(home);
-    buried.prune(bus::RETENTION).await;
-    (answered, buried)
+/// The marks of the deliveries of the messages of `ant`, its attempts in `attempts`, those of the messages answered
+/// and buried pruned of what the stream no longer keeps.
+pub(super) async fn delivery_marks(
+    attempts: crate::records::direct_kv::DirectKv,
+    ant: &UserId,
+    home: &std::path::Path,
+) -> super::Marks {
+    let marks = super::Marks::new(attempts, ant, home);
+    marks.answered.prune(bus::RETENTION).await;
+    marks.buried.prune(bus::RETENTION).await;
+    marks
 }
 
 /// The ant's harness pool, isolating threads in worktrees when asked to, or else cleaning up the ones left behind, and

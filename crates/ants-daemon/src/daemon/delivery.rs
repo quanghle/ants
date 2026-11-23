@@ -214,7 +214,7 @@ impl Inbox<'_> {
         let why = "Turn budget spent before the answer was posted";
         self.escalate(incoming, why, EscalationReason::TurnBudget, seq, Some(text)).await?;
         bus::double_ack(self.client, msg).await?;
-        self.attempts.forget(seq).await;
+        self.marks.attempts.forget(seq).await;
         Ok(())
     }
 
@@ -319,7 +319,7 @@ impl Inbox<'_> {
     /// Note the findings of the sage's answer to `request` and what the review thread spent in all. A fresh human
     /// message renews only its allowance, not this total. Sense keeps only the first answer to a review.
     pub(super) async fn note_review(&self, request: &Envelope, text: &str) {
-        let Some(sense) = self.sense.filter(|_| request.review_outcomes.is_some()) else { return };
+        let Some(sense) = self.provider.sense.filter(|_| request.review_outcomes.is_some()) else { return };
         let thread = &request.thread_id;
         let spent = self.ledger.thread_total(thread).await.inspect_err(|e| {
             tracing::warn!(%thread, error = format!("{e:#}"), "reading what the review thread spent");
@@ -369,15 +369,16 @@ impl Inbox<'_> {
             tracing::warn!(thread = %request.thread_id, error = format!("{e:#}"), "noting the posts shown");
         }
         let noted = self
+            .marks
             .answered
             .add(request, reply)
             .await
             .inspect_err(|e| tracing::warn!(error = format!("{e:#}"), "noting the stored reply"));
-        self.answered.forget_unsent(request).await;
+        self.marks.answered.forget_unsent(request).await;
         match bus::double_ack(self.client, msg).await {
             Ok(()) => {
-                self.attempts.forget(seq).await;
-                self.answered.forget(request).await;
+                self.marks.attempts.forget(seq).await;
+                self.marks.answered.forget(request).await;
             }
             Err(e) if noted.is_ok() => {
                 tracing::warn!(thread = %request.thread_id, error = %e, "acking; the redelivery is acked unanswered");

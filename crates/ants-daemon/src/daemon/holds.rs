@@ -410,7 +410,7 @@ impl Inbox<'_> {
         let now = tokio::time::Instant::now();
         self.holds.failover.down(on.index, now + retry);
         if e.is::<StartFailed>() {
-            self.attempts.release(&arrived.envelope).await;
+            self.marks.attempts.release(&arrived.envelope).await;
         }
         if let Some(outage) = self.outage()
             && self.fallback(now).is_none()

@@ -38,7 +38,7 @@ impl Inbox<'_> {
                     let text = channel::quoted(envelope.quote.as_ref(), &envelope.text);
                     let note = if self.asks_review(incoming) {
                         (incoming.steered != Steered::Joining).then_some(REVIEW_NOTE)
-                    } else if self.builtin == Some(ants_proto::BuiltinAnt::Messenger)
+                    } else if self.settings.builtin == Some(ants_proto::BuiltinAnt::Messenger)
                         && incoming.post.is_none()
                         && incoming.resume.is_none()
                         && !envelope.webhook
