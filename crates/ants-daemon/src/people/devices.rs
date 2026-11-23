@@ -8,8 +8,9 @@ use std::collections::HashSet;
 use std::fmt;
 
 use ants_proto::{
-    AssistantGrant, DEVICES_BUCKET, DeviceId, DeviceKey, HUMANS_BUCKET, REVOKED_DEVICES, UserId, UserJwt,
-    VerifiedGrant, assistant_grant_key, assistant_grant_of, device_entry_key, device_entry_of, revoked_device_key,
+    ASSISTANT_RECORD, AssistantGrant, DEVICES_BUCKET, DeviceId, DeviceKey, HUMANS_BUCKET, REVOKED_DEVICES, UserId,
+    UserJwt, VerifiedGrant, assistant_grant_key, assistant_grant_of, device_entry_key, device_entry_of,
+    revoked_device_key,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::context::GetStreamErrorKind;
@@ -182,7 +183,10 @@ impl Directory {
             .with_context(|| format!("listing {DEVICES_BUCKET}"))?;
         let revoked: HashSet<&str> =
             keys.iter().filter_map(|k| k.strip_prefix(REVOKED_DEVICES)?.strip_prefix('.')).collect();
-        let theirs = keys.iter().filter(|k| k.split('.').next().is_some_and(&human));
+        let theirs = keys
+            .iter()
+            .filter(|k| k.split('.').next().is_some_and(&human))
+            .filter(|k| k.split('.').nth(1) != Some(ASSISTANT_RECORD));
         let gets = theirs.map(|entry| async move {
             let jwt = kv.guarded_get(entry).await.with_context(|| format!("reading {entry} in {DEVICES_BUCKET}"))?;
             anyhow::Ok((entry, jwt))
