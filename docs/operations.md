@@ -106,6 +106,15 @@ With a [`[nats_server]`](config.md#managed-nats-server) table in its config file
 - **Changes:** the daemon reads `[nats_server]` at start; a changed table logs `the [nats_server] table changed; it takes effect on a restart`.
 - **Checks:** `ants doctor` reports the configuration `[nats_server]` names as run by `ants daemon`: `ok` while the daemon service runs, `fail` with the start command when it is stopped, `warn` with `scripts/install-units.sh --managed-nats --config FILE` when no daemon service is installed, and `fail` naming two owners when an `ants.nats` / `ants-nats` unit runs it too. A leaf node or server that does not answer gets the daemon's start command as its fix, or, with the daemon running, its log.
 
+### WebSocket listeners for pages
+
+A page connects to a WebSocket listener of its server, and a browser lets every page open in it try: the listener's `allowed_origins` decides which pages are taken.
+
+- **Hub:** name the web client's origin, as the reverse proxy serves it, in the `websocket` block of the hub's configuration, with `compression: true`, never `same_origin` ([transport.md](transport.md#hub)), and restart `nats-server`: it reloads no change of that block.
+- **Single machine:** `ants setup --web` adds a loopback listener (`ws://127.0.0.1:4281`) taking only `http://127.0.0.1:4280`, the origin `ants web` serves the page on, to `~/.config/ants/nats.conf`, and restarts the server through its `ants.nats` / `ants-nats` service or the daemon [managing it](#managed-nats-server); with `--no-services` and a server started by hand, it says to restart that server. Run again, it reports the listener as existing and changes nothing ([transport.md](transport.md#pages-on-a-single-machine-or-a-leaf-node)).
+- **Leaf node:** `ants leaf config MACHINE --uplink URL --web` writes the same listener into `leaf.conf` and restarts the leaf node; leave `--web` out to drop it.
+- **Checks:** `ants doctor` reports `web listener` for each of `leaf.conf`, `nats.conf` (without a `leaf.conf`) and the configuration `[nats_server]` names that has a `websocket` block: `ok` naming the origins taken, `ok` for a block naming none on a server with authentication (an operator, accounts or an `authorization`, also in an included file), and `fail` for a block naming none on a server without, with the `allowed_origins` line to add.
+
 ## Monitoring
 
 `ants daemon`, `ants webhook serve`, `ants bridge serve`, `ants bridge connect`, and `ants dead watch` expose unauthenticated loopback HTTP health and Prometheus metrics when `--metrics ADDR` (`ANTS_METRICS` on daemon) or config `metrics` is set (read at startup):

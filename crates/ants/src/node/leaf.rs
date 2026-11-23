@@ -32,12 +32,16 @@ use anyhow::{Context as _, Result, bail};
 use data_encoding::BASE64URL_NOPAD;
 use serde_json::Value;
 
+use crate::node::web;
 use crate::service::{Action, Outcome, Service, failure, manual};
 
 /// Where every ants process connects by default.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:4222";
 /// nats-server's own default for a remote without a port; written out so the file says where it goes.
 const LEAFNODE_PORT: u16 = 7422;
+
+/// The line opening the uplinks of a leaf node configuration.
+const LEAFNODES: &str = "leafnodes {\n";
 
 /// How often the leaf's resolver asks the hub's for accounts newer than its own: at most that long after reconnecting,
 /// a leaf applies the pushes it missed. The hub answers with nothing while their accounts match, so this costs little.
@@ -67,11 +71,32 @@ pub struct Leaf<'a> {
 
 /// Write the leaf node configuration of `leaf` to `out`, replacing any earlier one.
 pub fn write(leaf: &Leaf, out: &Path) -> Result<()> {
+    write_as(leaf, out, false)
+}
+
+/// [`write()`], with the loopback WebSocket listener taking the page of `ants web` ([`web::block`]).
+pub fn write_with_web(leaf: &Leaf, out: &Path) -> Result<()> {
+    write_as(leaf, out, true)
+}
+
+fn write_as(leaf: &Leaf, out: &Path, web: bool) -> Result<()> {
     let out = normalize(out)?;
     let dir = out.parent().context("no directory for the leaf configuration")?;
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let text = render(leaf, dir)?;
+    let mut text = render(leaf, dir)?;
+    if web {
+        text = with_web(&text, leaf.listen)?;
+    }
     fs::write(&out, text).with_context(|| format!("writing {}", out.display()))
+}
+
+/// The configuration `text` of a leaf node whose clients connect to `listen`, with the WebSocket listener for the
+/// page of `ants web` before its `leafnodes`: among the settings whose change takes a restart ([`switch`]), as
+/// nats-server reloads no change of a WebSocket listener.
+fn with_web(text: &str, listen: &str) -> Result<String> {
+    let block = web::block(web::listen(listen)?, &web::origin());
+    let at = text.find(LEAFNODES).context("no leafnodes in the leaf configuration")?;
+    Ok(format!("{}{block}{}", &text[..at], &text[at..]))
 }
 
 /// The machine name and uplink credentials of the leaf node configuration at `path`, as [`write()`] writes it.

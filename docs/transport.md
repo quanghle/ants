@@ -26,6 +26,8 @@ jetstream {
 websocket {
   listen: 127.0.0.1:8080
   no_tls: true
+  allowed_origins: ["https://hub.example.com"]
+  compression: true
 }
 leafnodes {
   listen: 127.0.0.1:7422
@@ -43,6 +45,8 @@ Without `max_file_store` and `max_memory_store` in its `jetstream` block, the hu
 - `include "server.conf"` resolves relative to the config directory even if prefixed with `/`. Copy `server.conf` (`ants auth init`) next to the hub config; it configures operator/account trust and `max_control_line: 65536` so permission JWTs fit in `CONNECT`.
 - `server.conf` preloads three accounts: the system account, the store account `ants-store`, the only one with JetStream, and the team's account, where every client connects, with JetStream limits of 0. The store account exports, and the team's account imports under the same names, the JetStream API (`$JS.API.>` and `$JS.*.API.>`, its answers streamed for pulls and batched direct gets), acks and flow control (`$JS.ACK.>`, `$JS.FC.>`), every subject a stream stores (`$KV.>`, `$O.>`, those of `ANTS`, `ANTS_SENSE` and `ANTS_OUT`) as services, and the reply inboxes (`_INBOX.>`, `_INBOX_HOST.>`) and the max-deliveries advisories as streams. A request through a service import gets a reply subject of the store account's own (`_R_.…`), so no client can have its answer stored by naming a stored subject as the reply. Permissions name the same subjects as before; the store account maps its own JetStream domain to the plain API past the import, where permissions are no longer checked, so domain credentials list the domain form of each plain right rather than a wildcard over several (see [JetStream domain](#jetstream-domain)). A hub or leaf node whose streams are still in the team's account moves them with `ants auth move-stores` ([operations.md](operations.md#moving-the-streams-into-the-store-account)).
 - `websocket` routes paths ending in `/leafnode` to leaf connections, `/mqtt` to MQTT, and any other path (such as `/nats`) to client connections. WebSocket and TCP clients authenticate identically with `.creds`.
+- `allowed_origins` names the origins of the pages the listener takes: the web client's own, as the browser sends it (scheme, host, and the port when not the scheme's default), which behind the reverse proxy is the public one (`https://hub.example.com`), not the listener's address. `nats-server` refuses a WebSocket upgrade carrying any other `Origin` header (`403 Forbidden`), so no other site's page connects. Never set `same_origin` instead: it refuses the web client's page behind a proxy that terminates TLS or rewrites `Host`, and wherever the page and the listener differ in port. Neither setting concerns a client sending no `Origin` header: the CLI over `ws://` or `wss://` and a leaf node's uplink connect as before, with their credentials. A change of the `websocket` block takes a restart of `nats-server`, which reloads none (`config reload not supported for Websocket`).
+- `compression: true` lets a client that asks for it (browsers do) compress its WebSocket frames, cutting a thread's read to about a third on the wire.
 - `leafnodes { no_advertise: true }` stops the hub from advertising `127.0.0.1:7422` to leaves, keeping reconnects on the proxy or tunnel address (likewise set `no_advertise: true` on clustered hubs or client WebSocket blocks).
 - `resolver { type: full, dir: "..." }`, after the include, replaces `server.conf`'s `MEMORY` resolver (kept as `MEMORY` inside `server.conf` so leaf nodes can set their own directory and because `SIGHUP` cannot switch resolver types): the hub persists pushed accounts across restarts and syncs them to reconnecting leaf nodes (see [Revocation](#revocation)). Preloaded JWTs from `server.conf` apply only when newer than the stored JWT. Give an absolute `dir` (relative paths resolve against `nats-server`'s working directory), and restart the hub when first adding it. `ants auth push` and `ants doctor` check whether the hub runs a `full` resolver (`$SYS.REQ.CLAIMS.LIST`).
 - `feature_flags { js_api_reply_v2: true }` scopes JetStream source control replies to `$JSC.R.<machine>.*.ANTS_OUT.>`, required for hub outbox sourcing under scoped leaf credentials.
@@ -55,6 +59,24 @@ Without `max_file_store` and `max_memory_store` in its `jetstream` block, the hu
 - **Hub push:** a short-lived system-account user (`system.nk`, 10 m TTL) publishes `$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE`, closing revoked connections immediately, then probes `$SYS.REQ.CLAIMS.LIST` to report whether a `full` resolver persisted it. Without a `full` resolver, copy `server.conf` to the hub and reload (`SIGHUP`) after every revocation (`ants auth push` retries unreachable servers).
 - **Leaf propagation & catch-up:** leaves join the hub's system account via `leaf-<machine>.system.creds` (subscribe `$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE` and `$SYS._INBOX.<machine_hash>.*`; publish `_INBOX.ants-push.>` and `$SYS.REQ.CLAIMS.PACK`; leaf connections only). Live leaves apply pushes immediately and persist them in their own `full` resolver (`interval: "10s"`). Offline leaves catch up within 10 s of reconnecting to a `full`-resolver hub via `$SYS.REQ.CLAIMS.PACK` (against a `MEMORY`-resolver hub, run `ants auth push` again after reconnect).
 - **Uplinks:** revoking `leaf-<machine>` drops that leaf's uplink, store account uplink and system account uplink at the hub (all recorded under the name in `issued.jsonl`); the system account is pushed last, so the leaf hears the team account's revocations before its system account uplink drops.
+
+### Pages on a single machine or a leaf node
+
+A single machine's `nats-server` (`ants setup`) and a leaf node's (`ants leaf config`) have no WebSocket listener. `--web` on either command adds one for the page `ants web` serves, on loopback and for that page's origin alone:
+
+```hcl
+websocket {
+  listen: "127.0.0.1:4281"
+  no_tls: true
+  allowed_origins: ["http://127.0.0.1:4280"]
+  compression: true
+}
+```
+
+- The listener takes port 4281 on the loopback host of the server's client port; `http://127.0.0.1:4280` is the origin `ants web` serves the page on by default. Origins are compared as written: `http://localhost:4280` is another origin, which the listener refuses.
+- `ants setup --web` appends the block to `~/.config/ants/nats.conf` and restarts the server running it, its service or the `ants daemon` managing it; a second run finds the listener and changes nothing. A `websocket` block already there is kept: one naming other origins fails the step, with the origin to add. On a machine whose server is a leaf node, the step points to `ants leaf config --web`.
+- `ants leaf config MACHINE --uplink URL --web` writes the block into `leaf.conf` and restarts the leaf node; a second run writes the same file, and a run without `--web` drops the listener.
+- A single machine's server asks for no credentials, so the origin is all that keeps another site's page, open in the same browser, from connecting as the human: `ants doctor` fails (`web listener`) a `websocket` block naming no origin in the configuration of a server without authentication, and names the `allowed_origins` to add.
 
 ## Reverse proxy
 
