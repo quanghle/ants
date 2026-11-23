@@ -524,7 +524,7 @@ async fn keep_held(
                 held.send_replace(Some(put));
             }
             Ok(None) => break,
-            Err(e) => tracing::warn!(ant = %entry.ant, error = format!("{e:#}"), "colony heartbeat"),
+            Err(e) => beat_failed(&entry, e),
         }
     }
     tracing::info!(ant = %entry.ant, "another daemon took over the colony entry");
@@ -576,7 +576,7 @@ impl Registration {
             loop {
                 due(&mut ticks, workload.as_deref(), &mut entry).await;
                 if let Err(e) = put(&beat_kv, &entry).await {
-                    tracing::warn!(ant = %entry.ant, error = format!("{e:#}"), "colony heartbeat");
+                    beat_failed(&entry, e);
                 }
             }
         });
@@ -756,6 +756,12 @@ fn match_scores(wanted: &BTreeSet<String>, candidates: &[&ColonyEntry]) -> Vec<u
         *holders.entry(word).or_default() += 1;
     }
     shared.iter().map(|words| words.iter().map(|word| SCALE / holders[word.as_str()]).sum()).collect()
+}
+
+/// Warn that the heartbeat putting `entry` failed with `e`, naming a full store as such ([`bus::explain_full`]).
+fn beat_failed(entry: &ColonyEntry, e: anyhow::Error) {
+    let e = bus::explain_full(e, &format!("$KV.{}.{}", ants_proto::COLONY_BUCKET, entry.key()));
+    tracing::warn!(ant = %entry.ant, error = format!("{e:#}"), "colony heartbeat");
 }
 
 async fn put(kv: &kv::Store, entry: &ColonyEntry) -> Result<()> {

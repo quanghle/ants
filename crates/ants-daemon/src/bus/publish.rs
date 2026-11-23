@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use ants_proto::{Envelope, FILES_STREAM, STREAM, UserId, subject};
+use ants_proto::{COLONY_BUCKET, Envelope, FILES_STREAM, PRESENCE_BUCKET, STREAM, UserId, subject};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use async_nats::jetstream::context::PublishErrorKind;
@@ -55,7 +55,7 @@ pub async fn store_acked<T: serde::Serialize>(
     let unreachable = match publish_to_hub(js, &subject, message()).await {
         Ok(ack) => return Ok(Some(ack)),
         Err(e) if out_of_reach(&e) => e,
-        Err(e) => return Err(e).context("waiting for JetStream to store the message"),
+        Err(e) => return Err(explained(e, &subject, false)).context("waiting for JetStream to store the message"),
     };
     let uncaptured = unreachable.kind() == PublishErrorKind::StreamNotFound && uncaptured(js).await;
     let Some(outbox) = subject::outbox(&subject) else {
@@ -115,10 +115,53 @@ fn uncaptured_hint(subject: &str) -> String {
     )
 }
 
-/// `e`, the error of a publish to `subject`, with `uncaptured_hint` when `uncaptured`.
+/// `e`, the error of a publish to `subject`, with `uncaptured_hint` when `uncaptured`, or saying the store is full
+/// when it is ([`explain_full`]).
 pub fn explained(e: jetstream::context::PublishError, subject: &str, uncaptured: bool) -> anyhow::Error {
-    let e = anyhow::Error::new(e);
+    let e = explain_full(anyhow::Error::new(e), subject);
     if uncaptured { e.context(uncaptured_hint(subject)) } else { e }
+}
+
+/// `e`, the error of a write to `subject`, saying which JetStream store is full and what to do when JetStream refused
+/// it for want of room ([`super::is_store_full`]); else `e` as it is.
+pub fn explain_full(e: anyhow::Error, subject: &str) -> anyhow::Error {
+    if !super::is_store_full(e.as_ref()) {
+        return e;
+    }
+    let memory = [COLONY_BUCKET, PRESENCE_BUCKET].iter().any(|bucket| {
+        let rest = subject.strip_prefix("$KV.").and_then(|rest| rest.strip_prefix(bucket));
+        rest.is_some_and(|rest| rest.starts_with('.'))
+    });
+    let (store, setting) = if memory { ("memory", "max_memory_store") } else { ("file", "max_file_store") };
+    let whose = if subject.starts_with("ants.out.") { "this machine's leaf node's" } else { "the hub's" };
+    anyhow::Error::new(StoreFull {
+        hint: format!(
+            "{whose} JetStream {store} store is full: free space, or raise {setting} in its jetstream block (and in \
+             [storage] of the ants config); `ants doctor` names the streams using most"
+        ),
+        cause: e,
+    })
+}
+
+/// A write JetStream refused for want of room ([`explain_full`]): the hint, then the refusal alone, not the errors
+/// wrapping it that repeat it.
+#[derive(Debug)]
+struct StoreFull {
+    hint: String,
+    cause: anyhow::Error,
+}
+
+impl std::fmt::Display for StoreFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.hint)
+    }
+}
+
+impl std::error::Error for StoreFull {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        let refusal = self.cause.chain().find(|e| e.downcast_ref::<jetstream::Error>().is_some())?;
+        Some(refusal)
+    }
 }
 
 /// `e`, the error of a publish to `subject` in the hub's stream, with what to do about it when no stream captures the
@@ -168,7 +211,7 @@ pub async fn store_in_hub<T: serde::Serialize>(
             }
             Ok(None)
         }
-        Err(e) => Err(e).context("waiting for JetStream to store the message"),
+        Err(e) => Err(explained(e, &subject, false)).context("waiting for JetStream to store the message"),
     }
 }
 

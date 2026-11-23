@@ -21,7 +21,9 @@ pub use connect::{
     jetstream, reach_jetstream, unanswered, worth_retrying,
 };
 pub use live::{CATCH_UP, LiveInbox, caught_up_inbox, live_inbox};
-pub use publish::{Stored, explain, explained, publish, publish_json, store, store_acked, store_in_hub, uncaptured};
+pub use publish::{
+    Stored, explain, explain_full, explained, publish, publish_json, store, store_acked, store_in_hub, uncaptured,
+};
 pub(crate) use publish::{out_of_reach, warn_uncaptured};
 pub use pull::{IDLE_HEARTBEAT, Pull, pull, pull_anew};
 
@@ -33,6 +35,13 @@ pub const RETENTION: Duration = Duration::from_hours(30 * 24);
 /// outbox lands up to about two and a half minutes after the uplink is back, so it may follow its twin stored
 /// directly by the length of an outage plus that: a day covers outages overnight.
 pub const DUPLICATE_WINDOW: Duration = Duration::from_hours(24);
+
+/// Whether `e` or one of its causes is JetStream refusing a write for want of room in its store: "insufficient
+/// resources", err_code 10023.
+pub fn is_store_full(e: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(e), |e| e.source())
+        .any(|e| e.downcast_ref::<jetstream::Error>().is_some_and(|e| e.error_code() == jetstream::ErrorCode(10023)))
+}
 
 /// Ack `msg` and wait until the server confirms it. [`jetstream::Message::double_ack`] takes the "no responders"
 /// status the client gets while a leaf node's uplink is down for a confirmation; this does not.

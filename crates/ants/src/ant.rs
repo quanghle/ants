@@ -58,9 +58,9 @@ pub fn holds(ant: &UserId, entry: Option<&ColonyEntry>, moved: Option<&MovedMark
     if let Some(mark) = moved {
         return vec![crate::export::moved_line(ant, mark, now)];
     }
-    let Some(e) = entry else { return colony::unserved(ant, None, true, now).into_iter().collect() };
+    let Some(e) = entry else { return colony::unserved(ant, None, colony::Absent::Known, now).into_iter().collect() };
     if State::of(e, now) == State::Stale {
-        return colony::unserved(ant, Some(e), true, now).into_iter().collect();
+        return colony::unserved(ant, Some(e), colony::Absent::Known, now).into_iter().collect();
     }
     let entries = std::slice::from_ref(e);
     let prefix = format!("{ant}: ");

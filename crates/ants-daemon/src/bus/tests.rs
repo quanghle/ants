@@ -1,5 +1,6 @@
 //! Tests of the NATS connection and JetStream objects: waiting for a server, leaf or credential store, failing at once
-//! on what retrying cannot cure, missing streams naming `ants init`, credentials in URLs, and live inbox readers.
+//! on what retrying cannot cure, missing streams naming `ants init`, full stores naming the setting to raise,
+//! credentials in URLs, and live inbox readers.
 
 use std::path::Path;
 
@@ -438,4 +439,58 @@ async fn a_reader_pulled_anew_while_waiting_hears_the_next_message() {
     publish(&js, &Envelope::new(human, dev, "after")).await.unwrap();
     let msg = tokio::time::timeout(Duration::from_secs(5), reading).await.expect("the reader heard nothing").unwrap();
     assert_eq!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap().text, "after");
+}
+
+/// A write a full store refuses names the store, file or memory, and the setting to raise, the refusal once, and no
+/// `ants init`.
+#[tokio::test]
+async fn a_full_store_is_named_with_the_setting_to_raise() {
+    let Some(server) = NatsServer::spawn_with(|dir| {
+        format!("jetstream {{ store_dir: {:?}, max_file_store: 1MB, max_memory_store: 1MB }}\n", dir.join("js"))
+    }) else {
+        return;
+    };
+    let js = jetstream::new(async_nats::connect(&server.url).await.unwrap());
+    let fill = |name: &str, storage| stream::Config {
+        name: name.to_owned(),
+        subjects: vec![format!("{name}.>")],
+        storage,
+        ..Default::default()
+    };
+    js.create_stream(fill("files", stream::StorageType::File)).await.unwrap();
+    let colony = ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
+    js.create_stream(fill("memory", stream::StorageType::Memory)).await.unwrap();
+    for name in ["files", "memory"] {
+        for _ in 0..20 {
+            let stored = match js.publish(format!("{name}.x"), vec![b'x'; 100_000].into()).await {
+                Ok(ack) => ack.await.map(drop),
+                Err(e) => Err(e),
+            };
+            if stored.is_err() {
+                break;
+            }
+        }
+    }
+
+    let refused = store(&js, "files.x".to_owned(), &"hello", "id-1").await.unwrap_err();
+    assert!(is_store_full(refused.as_ref()), "{refused:#}");
+    let shown = format!("{refused:#}");
+    assert!(
+        shown.contains("the hub's JetStream file store is full: free space, or raise max_file_store")
+            && shown.contains("`ants doctor` names the streams using most"),
+        "{shown}"
+    );
+    assert_eq!(shown.matches("insufficient resources").count(), 1, "{shown}");
+    assert!(!shown.contains("ants init"), "{shown}");
+
+    let beat = colony.put("dev-a", vec![b'x'; 10_000].into()).await.map_err(anyhow::Error::new).unwrap_err();
+    let shown = format!("{:#}", explain_full(beat, &format!("$KV.{COLONY_BUCKET}.dev-a")));
+    assert!(
+        shown.contains("the hub's JetStream memory store is full: free space, or raise max_memory_store"),
+        "{shown}"
+    );
+    assert_eq!(shown.matches("insufficient resources").count(), 1, "{shown}");
+
+    let other = anyhow::anyhow!("something else");
+    assert_eq!(format!("{:#}", explain_full(other, "files.x")), "something else");
 }

@@ -90,7 +90,17 @@ pub fn a_full_hub_answers_once_space_returns() {
     }
     let refused = run(ants(&["ask", "@dev-a", "tok-f99999"]));
     let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(!refused.status.success() && stderr.contains("insufficient resources"), "ants ask on a full hub: {stderr}");
+    let full_store = "the hub's JetStream file store is full: free space, or raise max_file_store";
+    assert!(!refused.status.success() && stderr.contains(full_store), "ants ask on a full hub: {stderr}");
+    // The owner's record is refused too, in a warning of its own.
+    let error = &stderr[stderr.find("Error:").unwrap_or_default()..];
+    assert_eq!(error.matches("insufficient resources").count(), 1, "the refusal once: {stderr}");
+    assert!(!stderr.contains("ants init") && !stderr.contains("outbox"), "no hint that does not apply: {stderr}");
+    let attached = dir.join("att.bin");
+    std::fs::write(&attached, vec![b'a'; 300_000]).unwrap();
+    let refused = run(ants(&["ask", "--attach", attached.to_str().unwrap(), "@dev-a", "tok-f99998"]));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success() && stderr.contains(full_store), "ants ask --attach on a full hub: {stderr}");
 
     // Each reply fails to store and leaves its message unacked, with the daemon idle meanwhile.
     let cpu = cpu_seconds(daemon.0.id());

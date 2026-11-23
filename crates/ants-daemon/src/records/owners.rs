@@ -20,6 +20,7 @@ use anyhow::{Context as _, Result};
 use async_nats::HeaderMap;
 use async_nats::jetstream;
 
+use crate::bus;
 use crate::records::direct_kv::{DirectKv, Lookup};
 use crate::sync::MutexExt as _;
 
@@ -147,6 +148,9 @@ pub async fn record(
     let in_hub = async {
         let kv = DirectKv::new(js, js_domain, OWNERS_BUCKET).await?;
         match kv.put_as(&key, value.clone(), &id).await {
+            Err(e) if bus::is_store_full(e.as_ref()) => {
+                Err(bus::explain_full(e, &format!("$KV.{OWNERS_BUCKET}.{key}")))
+            }
             Err(e) if !format!("{e:#}").contains(RECORDED) => {
                 Err(e).context("recording it (with credentials, `ants init` as the human creates the bucket)")
             }
@@ -155,6 +159,8 @@ pub async fn record(
     };
     let unreachable = match in_hub.await {
         Ok(()) => return Ok(()),
+        // The hub is in reach: the outbox would only pile up what its full store refuses.
+        Err(e) if bus::is_store_full(e.as_ref()) => return Err(e),
         Err(e) => e,
     };
     let mut headers = HeaderMap::new();
@@ -193,6 +199,7 @@ pub async fn record_for_human(
     let key = assisted_owner_key(thread, to, human, assistant);
     let kv = DirectKv::new(js, js_domain, OWNERS_BUCKET).await?;
     match kv.put_as(&key, human.to_string(), &owner_record_id(&key)).await {
+        Err(e) if bus::is_store_full(e.as_ref()) => Err(bus::explain_full(e, &format!("$KV.{OWNERS_BUCKET}.{key}"))),
         Err(e) if !format!("{e:#}").contains(RECORDED) => Err(e).context("recording the thread's owner"),
         _ => Ok(()),
     }
