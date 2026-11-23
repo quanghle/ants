@@ -18,6 +18,7 @@ use ants_proto::{ChannelEntry, ChannelPost, Envelope, Humans, UserId, Uuid};
 
 pub use entries::{Channels, Stored, list, load};
 pub use prompt::{TRIAGE_RULES, description_note, owner_note, prompt, quoted, resume_note, triage_prompt};
+pub(crate) use threads::from_start;
 pub use threads::{CLOCK_SLACK, Context, Earlier, MAX_CONTEXT, Threads, read_back, thread_start};
 
 pub use crate::stream::reading::Reading;
