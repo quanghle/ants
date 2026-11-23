@@ -1,5 +1,5 @@
 //! Tests of thread metadata: archived and done threads coming back on a new message, old marks and titles forgotten
-//! with their threads, and sealed titles.
+//! with their threads, sealed titles, and stored titles read without control or reordering characters.
 
 use std::collections::HashSet;
 
@@ -213,6 +213,30 @@ async fn the_markers_of_cleared_and_pruned_titles_go_with_their_threads() {
     assert_eq!(meta.kv.keys("title.*").await.unwrap(), left, "the markers of threads gone expire");
     assert!(meta.adopt_title(&cleared, "Fix the build", &dev_a).await.unwrap().is_some());
     assert_eq!(meta.adopt_title(&alive, "Fix the build", &dev_a).await.unwrap(), None, "a live thread's clear wins");
+}
+
+/// A title put past `ants thread title`, with escape sequences and bidi overrides, reads as one line without them;
+/// one holding nothing else reads as no title.
+#[tokio::test]
+async fn a_stored_title_reads_without_control_or_reordering_characters() {
+    let Some(server) = crate::test_support::Server::start() else { return };
+    let alice = "alice".parse::<UserId>().unwrap();
+    let (_, js) = server.connect_as(&alice, Role::Human).await;
+    js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
+    let meta = Meta::open(&js, None, &alice).await.unwrap();
+    let raw = |thread: &ThreadId, title: &str| ThreadTitle {
+        thread_id: thread.clone(),
+        title: title.to_owned(),
+        by: alice.clone(),
+        at: Utc::now(),
+        sealed: None,
+        on_behalf_of: None,
+    };
+    let (spoofed, empty) = (ThreadId::generate(), ThreadId::generate());
+    meta.put_title(&raw(&spoofed, "\u{1b}]0;pwned\u{7}Fix\u{202e}\u{2066} the\u{1b}[2J\nbuild\u{9b}")).await.unwrap();
+    meta.put_title(&raw(&empty, "\u{202e}\u{1b}")).await.unwrap();
+    assert_eq!(meta.title(&spoofed).await.unwrap().unwrap().title, "]0;pwnedFix the[2J build");
+    assert_eq!(meta.title(&empty).await.unwrap(), None);
 }
 
 /// The title of a thread between two humans whose messages are sealed is sealed for both: each opens it, a

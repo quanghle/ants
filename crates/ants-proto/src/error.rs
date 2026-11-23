@@ -27,7 +27,10 @@ pub enum Error {
     ForeignChannel { kind: &'static str, channel: ChannelId, at: String },
     #[error("invalid machine name {0:?}: use 1-64 of letters, digits, '-' and '_', starting with a letter or digit")]
     InvalidMachine(String),
-    #[error("invalid thread title {0:?}: use one line of 1-{MAX_TITLE} characters")]
+    #[error(
+        "invalid thread title {0:?}: use one line of 1-{MAX_TITLE} characters, without control characters or \
+         characters reordering text"
+    )]
     InvalidTitle(String),
     #[error("a channel's description of {0} characters is too long: at most {MAX_CHANNEL_DESCRIPTION}")]
     LongDescription(usize),
