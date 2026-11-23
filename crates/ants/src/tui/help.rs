@@ -1,6 +1,7 @@
-//! The help over the screen: the keys of the views on screen and of the command bar, then those that act everywhere, from the key table
-//! ([`keymap`]), wrapped to the width, those that cannot act now dim with why. `↑↓` `PgUp` `PgDn` scroll it; `Esc`, `q`
-//! or `?` close it; other keys do nothing.
+//! The help over the screen: the keys of the views on screen and of the command bar, then those that act everywhere,
+//! from the key table ([`keymap`]), wrapped to the width, those that cannot act now dim with why. `↑↓` `j` `k` `PgUp`
+//! `PgDn` `Home` `End` scroll it ([`select::step`](super::select::step)); `Esc`, `q` or `?` close it; other keys do
+//! nothing.
 
 use std::cell::Cell;
 
@@ -14,6 +15,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use super::keymap::{self, Entry, View};
 use super::markdown;
 use super::model::{Key, Model};
+use super::select::{PAGE, step};
 use super::style::{block, dim};
 
 /// The help's last line, under the rows scrolled.
@@ -22,8 +24,6 @@ pub const CLOSE: &str = "↑↓ PgUp PgDn scroll · Esc, q or ? closes this help
 const WIDTH: u16 = 100;
 /// How wide the column of keys is.
 const LABEL: usize = 11;
-/// How many rows PgUp and PgDn scroll.
-const PAGE: u16 = 10;
 
 #[derive(Debug, Default)]
 pub struct Help {
@@ -36,15 +36,12 @@ pub struct Help {
 impl Help {
     /// Take `key`: whether the help stays open.
     pub fn key(&mut self, key: Key) -> bool {
-        let most = self.scrollable.get();
-        self.scroll = match key {
-            Key::Esc | Key::Char('q' | '?') => return false,
-            Key::Up => self.scroll.saturating_sub(1),
-            Key::Down => self.scroll.saturating_add(1).min(most),
-            Key::PageUp => self.scroll.saturating_sub(PAGE),
-            Key::PageDown => self.scroll.saturating_add(PAGE).min(most),
-            _ => self.scroll,
-        };
+        if let Key::Esc | Key::Char('q' | '?') = key {
+            return false;
+        }
+        if let Some(to) = step(key, usize::from(self.scroll), Some(PAGE)) {
+            self.scroll = u16::try_from(to).unwrap_or(u16::MAX).min(self.scrollable.get());
+        }
         true
     }
 

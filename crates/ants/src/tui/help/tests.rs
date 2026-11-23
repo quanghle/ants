@@ -238,3 +238,25 @@ fn on_an_ant_the_help_lists_the_keys_of_every_pane() {
         assert!(rows.iter().any(|r| r.starts_with(&row)), "no {label}: {rows:#?}");
     }
 }
+
+#[test]
+fn the_help_scrolls_by_row_by_page_and_to_either_end_within_its_rows() {
+    let mut help = Help::default();
+    help.scrollable.set(25);
+    let steps = [
+        (Key::Up, 0),
+        (Key::Char('j'), 1),
+        (Key::Down, 2),
+        (Key::Char('k'), 1),
+        (Key::PageDown, 11),
+        (Key::PageUp, 1),
+        (Key::End, 25),
+        (Key::Down, 25),
+        (Key::Char('x'), 25),
+        (Key::Home, 0),
+    ];
+    for (key, scroll) in steps {
+        assert!(help.key(key), "{key:?} keeps the help");
+        assert_eq!(help.scroll, scroll, "{key:?}");
+    }
+}

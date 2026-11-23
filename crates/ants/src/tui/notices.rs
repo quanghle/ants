@@ -1,5 +1,6 @@
 //! The notices of the run over the screen, the latest first, each in full with its time, an error after
-//! [`style::ERROR_MARK`]. `↑↓` `PgUp` `PgDn` scroll them; `Esc`, `q` or `N` close them; other keys do nothing.
+//! [`style::ERROR_MARK`]. `↑↓` `j` `k` `PgUp` `PgDn` `Home` `End` scroll
+//! them ([`select::step`](super::select::step)); `Esc`, `q` or `N` close them; other keys do nothing.
 
 use std::cell::Cell;
 
@@ -12,6 +13,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use super::help::centered;
 use super::markdown;
 use super::model::{Key, Level, Notice};
+use super::select::{PAGE, step};
 use super::style::{self, block, dim};
 
 /// The last line, under the notices scrolled.
@@ -20,8 +22,6 @@ pub const CLOSE: &str = "↑↓ PgUp PgDn scroll · Esc, q or N closes the notic
 pub const KEPT: usize = 200;
 /// How wide the notices are at most.
 const WIDTH: u16 = 100;
-/// How many rows PgUp and PgDn scroll.
-const PAGE: u16 = 10;
 /// How wide the column of times is.
 const TIME: usize = 8;
 
@@ -36,15 +36,12 @@ pub struct Log {
 impl Log {
     /// Take `key`: whether the notices stay open.
     pub fn key(&mut self, key: Key) -> bool {
-        let most = self.scrollable.get();
-        self.scroll = match key {
-            Key::Esc | Key::Char('q' | 'N') => return false,
-            Key::Up => self.scroll.saturating_sub(1),
-            Key::Down => self.scroll.saturating_add(1).min(most),
-            Key::PageUp => self.scroll.saturating_sub(PAGE),
-            Key::PageDown => self.scroll.saturating_add(PAGE).min(most),
-            _ => self.scroll,
-        };
+        if let Key::Esc | Key::Char('q' | 'N') = key {
+            return false;
+        }
+        if let Some(to) = step(key, usize::from(self.scroll), Some(PAGE)) {
+            self.scroll = u16::try_from(to).unwrap_or(u16::MAX).min(self.scrollable.get());
+        }
         true
     }
 
@@ -116,7 +113,7 @@ mod tests {
         assert!(shown.contains("far too long a reason far too long a reason"), "in full: {shown}");
         assert!(shown.contains("           reason "), "none of it cut: {shown}");
         assert!(shown.contains(CLOSE), "{shown}");
-        assert_eq!(m.key(Key::Char('j'), at(5)), None, "other keys do nothing");
+        assert_eq!(m.key(Key::Char('x'), at(5)), None, "other keys do nothing");
         assert!(m.overlays.iter().any(|o| matches!(o, crate::tui::model::Overlay::Log(_))));
         assert_eq!(m.key(Key::Char('q'), at(5)), None, "q closes the notices");
         assert!(m.overlays.is_empty());
@@ -135,6 +132,28 @@ mod tests {
         m.paste("hello", at(2));
         assert_eq!((m.bar.text(), m.bar.focused), (String::new(), false), "the bar takes none of it");
         assert!(!m.overlays.is_empty(), "the notices still show");
+    }
+
+    #[test]
+    fn the_notices_scroll_by_row_by_page_and_to_either_end_within_their_rows() {
+        let mut log = Log::default();
+        log.scrollable.set(25);
+        let steps = [
+            (Key::Up, 0),
+            (Key::Char('j'), 1),
+            (Key::Down, 2),
+            (Key::Char('k'), 1),
+            (Key::PageDown, 11),
+            (Key::PageUp, 1),
+            (Key::End, 25),
+            (Key::Down, 25),
+            (Key::Char('x'), 25),
+            (Key::Home, 0),
+        ];
+        for (key, scroll) in steps {
+            assert!(log.key(key), "{key:?} keeps the notices");
+            assert_eq!(log.scroll, scroll, "{key:?}");
+        }
     }
 
     #[test]
