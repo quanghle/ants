@@ -558,7 +558,7 @@ async fn keep_answer(bus: &Bus, ask: &Envelope, seq: u64) {
     use crate::delivery::attempts::Given;
     bus.attempts.start(seq, ask).await.unwrap();
     let (text, title) = ("s1: done before".to_owned(), Some("Kept".to_owned()));
-    let given = Given { text, limit: None, unanswered: None, tokens: 0, title };
+    let given = Given { text, limit: None, unanswered: None, tokens: 0, title, files: None };
     bus.answered.keep_given(ask, &given).await.unwrap();
 }
 
