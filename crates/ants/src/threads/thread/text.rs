@@ -3,13 +3,16 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ants_proto::{Answered, DecidedBy, NoReplyWhy, Pick, PromptEnd, TimelineEnd, UserId};
+use ants_proto::{Answered, DecidedBy, MAX_TITLE, NoReplyWhy, Pick, PromptEnd, TimelineEnd, UserId};
 use chrono::{DateTime, Utc};
 
 use super::entry::{Entry, Kind};
 use super::summaries::Summary;
 use super::{NoReply, ToolCall, ToolRejection};
 use crate::messages::attachments;
+
+/// How many characters of a note on an entry, or of a tool call's status, [`render`] shows.
+const NOTE: usize = 1000;
 
 pub(crate) fn time(at: DateTime<Utc>) -> String {
     at.format("%Y-%m-%d %H:%M:%S").to_string()
@@ -43,7 +46,7 @@ pub fn table(threads: &[Summary]) -> String {
                 row.push(if states.is_empty() { "-".to_owned() } else { states.join(",") });
             }
             if titled {
-                row.push(t.title.clone().unwrap_or_else(|| "-".to_owned()));
+                row.push(t.title.as_deref().map_or_else(|| "-".to_owned(), |t| ants_proto::one_line(t, MAX_TITLE)));
             }
             row.push(t.opening.clone());
             row
@@ -61,7 +64,7 @@ pub fn table(threads: &[Summary]) -> String {
         lines.push(cells.join("  ").trim_end().to_owned());
         if let Some(thread) = i.checked_sub(1).map(|i| &threads[i]) {
             for line in thread.matched.iter().chain(&thread.escalated) {
-                lines.push(format!("    {line}"));
+                lines.push(format!("    {}", ants_proto::one_line(line, usize::MAX)));
             }
         }
     }
@@ -89,7 +92,7 @@ pub fn render(entries: &[Entry]) -> String {
     let mut out = String::new();
     let (mut under, mut day) = (false, None);
     for e in entries {
-        let text = body(e, entries);
+        let text = ants_proto::lines(&body(e, entries));
         let mut lines = text.lines();
         let first = lines.next().unwrap_or("");
         let at = match day {
@@ -210,7 +213,7 @@ fn ended(tool: &ToolCall) -> String {
         (Some("completed"), Some(took)) => format!(" · {took}"),
         (Some("completed"), None) => String::new(),
         (Some("failed"), Some(took)) => format!(" · failed after {took}"),
-        (Some(status), _) => format!(" · {}", status.replace('_', " ")),
+        (Some(status), _) => format!(" · {}", ants_proto::one_line(&status.replace('_', " "), NOTE)),
         (None, _) => " · started".to_owned(),
     }
 }
@@ -261,7 +264,7 @@ pub(crate) fn call_label(kind: Option<&str>, title: &str) -> (String, Option<Str
 /// message, post or note, its note, what it answers, its time and its id.
 pub fn heading(e: &Entry) -> String {
     let forged = if e.forged { " (forged)" } else { "" };
-    let note = e.note.as_ref().map_or_default(|n| format!(" [{n}]"));
+    let note = e.note.as_ref().map_or_default(|n| format!(" [{}]", ants_proto::one_line(n, NOTE)));
     let answering = e.answer.as_ref().map_or_default(|a| {
         let picks: Vec<String> = a
             .picks

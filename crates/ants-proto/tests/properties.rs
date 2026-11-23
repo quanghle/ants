@@ -510,7 +510,7 @@ proptest! {
 
     #[test]
     fn titles_are_trimmed_single_lines(
-        title in prop_oneof![any::<String>(), "[ \ta-z\n\u{2028}\u{2029}]{0,130}"],
+        title in prop_oneof![any::<String>(), "[ \ta-z\n\u{2028}\u{2029}\u{202e}\u{2066}]{0,130}"],
         thread in thread(),
         by in user(),
     ) {
@@ -518,7 +518,7 @@ proptest! {
             Ok(set) => {
                 prop_assert_eq!(set.title.as_str(), title.trim());
                 prop_assert!((1..=ants_proto::MAX_TITLE).contains(&set.title.chars().count()));
-                let breaks_line = |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}');
+                let breaks_line = |c: char| !ants_proto::shown(c) || matches!(c, '\u{2028}' | '\u{2029}');
                 prop_assert!(!set.title.chars().any(breaks_line));
                 prop_assert_eq!(ThreadTitle::new(thread, &set.title, by).unwrap().title, set.title);
             }

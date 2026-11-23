@@ -361,8 +361,9 @@ impl Meta {
         Ok(())
     }
 
-    /// The title of `thread`, if it has one, opened if sealed ([`sealed::read_title`]). An entry naming another
-    /// thread than its key is no title.
+    /// The title of `thread`, if it has one, opened if sealed ([`sealed::read_title`]), as one line without control
+    /// characters or those reordering text, which an entry put past `ants thread title` may hold. An entry naming
+    /// another thread than its key is no title, nor one left empty.
     pub async fn title(&self, thread: &ThreadId) -> Result<Option<ThreadTitle>> {
         let title = match self.kv.lookup(title_key(thread)).await.context("reading the title")? {
             Lookup::NoBucket => bail!(MISSING),
@@ -372,7 +373,11 @@ impl Meta {
             }
         };
         match title {
-            Some(title) => Ok(Some(sealed::read_title(title, self.keyring.as_deref()).await)),
+            Some(title) => {
+                let mut title = sealed::read_title(title, self.keyring.as_deref()).await;
+                title.title = ants_proto::one_line(&title.title, ants_proto::MAX_TITLE);
+                Ok(Some(title).filter(|t| !t.title.is_empty()))
+            }
             None => Ok(None),
         }
     }

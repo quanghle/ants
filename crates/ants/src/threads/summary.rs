@@ -230,7 +230,11 @@ fn print_tldr(tldr: &ThreadSummary, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string(tldr)?);
     } else {
         let (thread, by, at) = (&tldr.thread_id, &tldr.by, thread::time(tldr.at));
-        println!("TL;DR of thread {thread} by {by}, {at} UTC, {} tokens:\n{}", tldr.tokens, tldr.text);
+        println!(
+            "TL;DR of thread {thread} by {by}, {at} UTC, {} tokens:\n{}",
+            tldr.tokens,
+            ants_proto::lines(&tldr.text)
+        );
     }
     Ok(())
 }

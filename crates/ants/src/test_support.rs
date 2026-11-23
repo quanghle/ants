@@ -4,6 +4,7 @@
 
 pub(crate) mod colony;
 pub(crate) mod github;
+pub(crate) mod hostile;
 pub(crate) mod live;
 pub(crate) mod orders;
 pub(crate) mod presence;

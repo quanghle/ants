@@ -288,17 +288,32 @@ async fn read(
         tracing::warn!("no channel #{channel}; showing the posts kept for #{channel} anyway");
     }
     let thread = thread::resolve(pick.thread, nats, js).await?;
-    let posts = channel::read_from(js, &nats.me, channel, 0).await?;
-    let mut threads = channel::threads(posts.iter().map(|(_, post)| post.clone()).collect());
-    let mut left_out = 0;
-    if let Some(thread) = &thread {
-        threads.retain(|t| t.id == *thread);
-    } else if let Some(archive) = archive(nats, js, pick.archived).await? {
-        let hidden = archive.hidden(posts.iter().map(|(seq, post)| (*seq, post)));
-        let all = threads.len();
-        threads.retain(|t| hidden.contains(&t.id) == pick.archived);
-        left_out = all - threads.len();
-    }
+    let archive = match thread {
+        Some(_) => None,
+        None => archive(nats, js, pick.archived).await?,
+    };
+    let shown = |posts: &[(u64, ants_proto::ChannelPost)]| {
+        let mut threads = channel::threads(posts.iter().map(|(_, post)| post.clone()).collect());
+        let mut left_out = 0;
+        if let Some(archive) = &archive {
+            let hidden = archive.hidden(posts.iter().map(|(seq, post)| (*seq, post)));
+            let all = threads.len();
+            threads.retain(|t| hidden.contains(&t.id) == pick.archived);
+            left_out = all - threads.len();
+        }
+        (threads, left_out)
+    };
+    let read = match (&thread, pick.limit) {
+        (Some(thread), _) => channel::read_thread(js, &nats.me, channel, thread).await?,
+        // The last `limit` threads started among the posts read are the channel's last: those whose start came before
+        // them come first.
+        (None, Some(limit)) => {
+            let enough = |posts: &[_]| shown(posts).0.iter().filter(|t| t.has_start()).count() >= limit;
+            channel::read_latest(js, &nats.me, channel, enough).await?
+        }
+        (None, None) => channel::read_all(js, &nats.me, channel).await?,
+    };
+    let (mut threads, left_out) = shown(&read.posts);
     if let Some(limit) = pick.limit {
         threads.drain(..threads.len().saturating_sub(limit));
     }
@@ -317,7 +332,7 @@ async fn read(
     }
     print!("{}", channel::render(&threads, &|post| by.get(&post.id).cloned().unwrap_or_else(|| post.from.to_string())));
     if !peek && reads::allowed(nats) {
-        mark_read(js, &nats.me.id, channel, &posts, &threads).await;
+        mark_read(js, &nats.me.id, channel, &read, &threads).await;
     }
     Ok(())
 }
@@ -380,11 +395,12 @@ async fn mark_read(
     js: &async_nats::jetstream::Context,
     human: &UserId,
     channel: &ChannelId,
-    posts: &[(u64, ants_proto::ChannelPost)],
+    read: &channel::Read,
     threads: &[channel::Thread],
 ) {
     let printed: HashSet<&ants_proto::ThreadId> = threads.iter().map(|t| &t.id).collect();
-    let marks: Vec<u64> = posts.iter().filter(|(_, p)| printed.contains(&p.thread_id)).map(|(seq, _)| *seq).collect();
+    let marks: Vec<u64> =
+        read.posts.iter().filter(|(_, p)| printed.contains(&p.thread_id)).map(|(seq, _)| *seq).collect();
     let marked = async {
         reads::ChannelReads::open(js, human)
             .await?
@@ -392,8 +408,11 @@ async fn mark_read(
                 for seq in &marks {
                     markers.mark(channel, *seq);
                 }
-                // Every post kept was read, so what the marker covers has no gap.
-                markers.compact(channel, posts.iter().map(|(seq, _)| *seq));
+                // Every post was read from `read.from` on, so what the marker covers has no gap once it reaches it.
+                let below = markers.channels.get(channel).map_or(0, |m| m.below);
+                if read.from <= below.saturating_add(1) {
+                    markers.compact(channel, read.seqs.iter().copied());
+                }
             })
             .await
     };

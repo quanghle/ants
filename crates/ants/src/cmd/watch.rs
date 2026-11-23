@@ -190,7 +190,7 @@ impl Printer {
     /// A whole line, after ending any streamed text.
     fn line(&mut self, line: &str) -> String {
         let end = if self.streaming.take().is_some() { "\n" } else { "" };
-        format!("{end}{line}\n")
+        format!("{end}{}\n", crate::text::printable(line))
     }
 
     fn status(&mut self, event: &StatusEvent, forged: &str) -> String {
@@ -276,11 +276,11 @@ impl Printer {
             return self.line(&format!("[{thread}] {named} {verb}{forged}: {text}"));
         }
         if self.streaming.as_ref() == Some(&key) {
-            return text.clone();
+            return crate::text::printable(text);
         }
         let start = self.line(&format!("[{thread}] {named} {verb}: "));
         self.streaming = Some(key);
-        format!("{}{text}", start.trim_end_matches('\n'))
+        format!("{}{}", start.trim_end_matches('\n'), crate::text::printable(text))
     }
 }
 
@@ -330,6 +330,25 @@ mod tests {
             "[t1] dev-a says: Hello\n[t1] dev-a thinks: hmm\n[t1] dev-a tool cargo test (execute): in_progress\n\
              [t1] dev-a says: done\n[t1] dev-a: idle\n"
         );
+    }
+
+    #[test]
+    fn watched_text_prints_without_control_or_reordering_characters() {
+        use crate::test_support::hostile::{HOSTILE, assert_printable};
+        let (a, t1): (UserId, ThreadId) = ("dev-a".parse().unwrap(), "t1".parse().unwrap());
+        let says =
+            |text: &str| StatusEvent::new(a.clone(), t1.clone(), StatusUpdate::Message { text: text.to_owned() });
+        let mut printer = Printer::default();
+        let mut post = ChannelPost::new("ops".parse().unwrap(), a.clone(), HOSTILE);
+        post.thread_id = t1.clone();
+        let out: String = [
+            printer.status(&says(HOSTILE), ""),
+            printer.status(&says(HOSTILE), ""),
+            printer.line(&channel_line(&post, &Acting::Own, "")),
+        ]
+        .concat();
+        assert_printable(&out);
+        assert!(out.starts_with("[t1] dev-a says: [2J]0;pwned]52;c;cHduZWQ=spoof31m\nline two[2J"), "{out:?}");
     }
 
     #[test]

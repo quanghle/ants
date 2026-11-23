@@ -203,7 +203,7 @@ pub fn render(entries: &[Entry], grep: Option<&str>) -> String {
     let mut out = String::new();
     for e in entries {
         let forged = if e.forged { " (forged)" } else { "" };
-        let note = e.note.as_ref().map_or_default(|n| format!(" [{n}]"));
+        let note = e.note.as_ref().map_or_default(|n| format!(" [{}]", ants_proto::one_line(n, LINE)));
         let id = e.id.map_or_default(|id| format!(" (message {id})"));
         let line = grep.and_then(|grep| matched(&e.text, grep)).unwrap_or(&e.text);
         let _ = writeln!(

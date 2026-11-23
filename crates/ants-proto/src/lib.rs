@@ -155,7 +155,7 @@ pub use shared::{
     is_shared_field,
 };
 pub use status::{DecidedBy, MAX_TOOL_PATHS, PlanStep, State, StatusEvent, StatusUpdate, StepStage};
-pub use text::{lines, one_line};
+pub use text::{lines, one_line, shown};
 pub use threads::{
     Archived, Mark, Reminder, Reminders, SNOOZE_MAX, SealedTitle, Snooze, THREAD_UNDONE, ThreadDone, ThreadMarks,
     ThreadSnoozes, ThreadSummary, ThreadTitle,

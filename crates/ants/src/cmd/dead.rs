@@ -121,5 +121,14 @@ mod tests {
 
         let letter = DeadLetter::of_payload("dev-a".parse().unwrap(), 4, 1, "not an envelope", b"{oops");
         assert!(dead_row(13, &letter).ends_with("\tnot an envelope\t{oops"));
+
+        let junk = crate::test_support::hostile::HOSTILE;
+        let letter = DeadLetter::of_payload("dev-a".parse().unwrap(), 4, 1, junk, junk.as_bytes());
+        let row = dead_row(14, &letter);
+        let fields: Vec<&str> = row.split('\t').collect();
+        assert_eq!(fields.len(), 8, "{row:?}");
+        for field in fields {
+            crate::test_support::hostile::assert_printable(&format!("{field} spoof"));
+        }
     }
 }

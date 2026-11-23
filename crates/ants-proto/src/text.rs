@@ -30,8 +30,9 @@ pub fn lines(text: &str) -> String {
     lines[first..=last].join("\n")
 }
 
-/// Whether `c` may stand in text someone else wrote: not a control character, nor one reordering text.
-fn shown(c: char) -> bool {
+/// Whether `c` may stand in text someone else wrote: not a control character, nor one reordering text (the bidi
+/// marks, embeddings, overrides and isolates U+061C, U+200E, U+200F, U+202A-U+202E and U+2066-U+2069).
+pub fn shown(c: char) -> bool {
     !c.is_control()
         && !matches!(c, '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }

@@ -42,7 +42,7 @@ pub struct SealedTitle {
 
 impl ThreadTitle {
     /// `title`, trimmed, set on `thread_id` by `by` now: one line of 1 to [`MAX_TITLE`] characters, no control
-    /// characters or Unicode line and paragraph separators.
+    /// characters, characters reordering text ([`crate::shown`]) or Unicode line and paragraph separators.
     pub fn new(thread_id: ThreadId, title: &str, by: UserId) -> Result<Self, Error> {
         let trimmed = title.trim();
         let count = trimmed.chars().count();
@@ -87,7 +87,7 @@ impl ThreadSummary {
 }
 
 fn breaks_title(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+    !crate::shown(c) || matches!(c, '\u{2028}' | '\u{2029}')
 }
 
 /// A thread marked done, under its [`done_key`] in [`THREADS_BUCKET`]: one state per thread, shared by every human,
@@ -551,6 +551,12 @@ mod tests {
         assert_eq!(marks_key(&p("alice")), "marks.alice");
         for bad in ["", "  ", "two\nlines", "two\u{2028}lines", "two\u{2029}paragraphs", &"x".repeat(MAX_TITLE + 1)] {
             assert!(ThreadTitle::new(ThreadId::generate(), bad, p("alice")).is_err(), "{bad:?}");
+        }
+        for reorder in ['\u{61c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}'] {
+            let bad = format!("{reorder}evil");
+            let refused = ThreadTitle::new(ThreadId::generate(), &bad, p("alice")).unwrap_err();
+            assert_eq!(refused, Error::InvalidTitle(bad), "{reorder:?}");
+            assert!(refused.to_string().contains("characters reordering text"), "{refused}");
         }
         assert!(ThreadTitle::new(ThreadId::generate(), &"é".repeat(MAX_TITLE), p("alice")).is_ok());
     }
