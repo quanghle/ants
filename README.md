@@ -95,7 +95,7 @@ ants trail run deploy --follow                      # start and follow a run, it
 ants                                                # full-screen chat with mouse, clipboard and background alerts (also: ants chat)
 ```
 
-`ants setup --managed-nats` instead has `ants daemon` start, supervise and stop that `nats-server` itself, with no separate NATS service ([docs/operations.md](docs/operations.md#managed-nats-server)).
+`ants setup --managed-nats` instead has `ants daemon` start, supervise and stop that `nats-server` itself, with no separate NATS service ([docs/operations.md](docs/operations.md#managed-nats-server)). `ants setup --web` adds a loopback WebSocket listener to that `nats-server`, taking only the page of `ants web` ([docs/operations.md](docs/operations.md#websocket-listeners-for-pages)).
 
 Join an existing team hub as a human using shared bootstrap credentials ([docs/auth.md](docs/auth.md#registering-humans)):
 

@@ -144,6 +144,11 @@ fn a_switched_uplink_takes_a_reload_and_anything_else_a_restart() {
     assert_eq!(switch(&proxied(&tcp)), Action::Restart, "the proxy of a kept remote");
     let listen = render(Leaf { listen: "127.0.0.1:4333", ..leaf(&tcp, &creds, &server_conf) });
     assert_eq!(switch(&listen), Action::Restart);
+    let web = with_web(&first, "127.0.0.1:4222").unwrap();
+    assert_eq!(switch(&web), Action::Restart, "the listener for the page of `ants web`");
+    assert_eq!(super::switch(Some(&web), &web), Action::Reload, "the same listener again");
+    let listener = web::Listener::read(&web).unwrap();
+    assert_eq!((listener.listen.as_str(), listener.origins), ("127.0.0.1:4281", vec![web::origin()]));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -572,4 +577,27 @@ async fn a_leaf_offline_during_a_push_catches_up_from_a_hub_with_a_full_resolver
     assert!(watched(&leaf_node.url, &team.a).await.is_err(), "the leaf still takes dev-a's credentials");
     b_client.flush().await.unwrap();
     assert!(b_closed.try_recv().is_err(), "dev-b's connection was closed");
+}
+
+#[test]
+fn nats_server_takes_a_leaf_configuration_with_the_listener_for_the_page() {
+    if !ants_test_support::have("nats-server") {
+        return;
+    }
+    let (dir, creds) = team();
+    let (server_conf, conf) = (dir.join(auth::SERVER_CONF), dir.join("leaf.conf"));
+    let tcp = ["nats-leaf://127.0.0.1:7422".to_owned()];
+    let config = leaf(&tcp, &creds, &server_conf);
+    write_with_web(&config, &conf).unwrap();
+    let with_listener = fs::read_to_string(&conf).unwrap();
+    assert_eq!(web::Listener::read(&with_listener).unwrap().origins, [web::origin()]);
+    // Checks the configuration and exits, listening nowhere.
+    let checked = Command::new("nats-server").arg("-t").arg("-c").arg(&conf).output().unwrap();
+    assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
+
+    write_with_web(&config, &conf).unwrap();
+    assert_eq!(fs::read_to_string(&conf).unwrap(), with_listener, "a second run changes nothing");
+    write(&config, &conf).unwrap();
+    assert_eq!(web::Listener::read(&fs::read_to_string(&conf).unwrap()), None, "a run without --web drops it");
+    let _ = fs::remove_dir_all(&dir);
 }

@@ -9,7 +9,7 @@ use clap::Subcommand;
 use crate::auth;
 use crate::auth::team_dir;
 use crate::connection::Connection;
-use crate::node::{leaf, members, natsd, outbox};
+use crate::node::{leaf, members, natsd, outbox, web as node_web};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum LeafCommand {
@@ -46,6 +46,10 @@ pub(crate) enum LeafCommand {
         /// Address for the machine's ants processes; loopback only.
         #[arg(long, default_value = leaf::DEFAULT_LISTEN)]
         listen: String,
+        /// Also listen for the page of `ants web`: a WebSocket listener on port 4281 of the --listen host, taking
+        /// pages of the origin `ants web` serves (http://127.0.0.1:4280) only. A run without it drops the listener.
+        #[arg(long)]
+        web: bool,
         /// Where to write the configuration (default: ~/.config/ants/leaf.conf).
         #[arg(long)]
         out: Option<PathBuf>,
@@ -72,6 +76,11 @@ pub(crate) enum LeafCommand {
     },
 }
 
+/// The line saying where the page of `ants web` connects on a leaf node whose clients connect to `listen`.
+fn pages(listen: &str) -> Result<String> {
+    Ok(format!("the page of `ants web`: ws://{}, taken from {} only\n", node_web::listen(listen)?, node_web::origin()))
+}
+
 pub(crate) async fn run(conn: &Connection<'_>, command: LeafCommand) -> Result<()> {
     let domain = conn.js_domain;
     let nats = || conn.nats();
@@ -86,6 +95,7 @@ pub(crate) async fn run(conn: &Connection<'_>, command: LeafCommand) -> Result<(
             ca_file,
             proxy,
             listen,
+            web,
             out,
         } => {
             let dir = team_dir(dir)?;
@@ -116,17 +126,19 @@ pub(crate) async fn run(conn: &Connection<'_>, command: LeafCommand) -> Result<(
                 listen: &listen,
             };
             let old = std::fs::read_to_string(&out).ok();
-            leaf::write(&config, &out)?;
+            let write = if web { leaf::write_with_web } else { leaf::write };
+            write(&config, &out)?;
             ants_daemon::secrets::creds::warn(&creds);
             ants_daemon::secrets::creds::warn(&auth::leaf_store_creds(&creds));
             system_creds.as_deref().map(ants_daemon::secrets::creds::warn);
             let new = std::fs::read_to_string(&out).with_context(|| format!("reading {}", out.display()))?;
             let taken = leaf::take(&out, old.as_deref(), &new, |action| natsd::apply(&out, action));
+            let pages = if web { pages(&listen)? } else { String::new() };
             println!(
                 "{}\n{taken}\n\
                  switch the uplink: run this again\n\
                  clients on this machine: nats://{listen} (the default) with the hub's --js-domain\n\
-                 once the leaf is up: ants leaf outbox {machine}{1}",
+                 {pages}once the leaf is up: ants leaf outbox {machine}{1}",
                 out.display(),
                 if default_out { String::new() } else { format!(" --leaf-config {}", out.display()) }
             );

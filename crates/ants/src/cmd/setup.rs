@@ -4,6 +4,9 @@
 //! host credentials, the daemon service, the shell completions, and last `ants doctor`. It never overwrites a file: one already there is reported
 //! and kept.
 //!
+//! With `--web` the local nats-server also takes the page of `ants web`: its configuration, the one file a re-run adds
+//! to, gets a loopback WebSocket listener for that page's origin alone ([`web`]).
+//!
 //! With `--managed-nats` the daemon is the nats-server's only owner: the new config file's `[nats_server]` names its
 //! configuration, no nats-server service is installed, and the hub's stream and buckets wait for the daemon service
 //! to start it.
@@ -23,7 +26,8 @@ use anyhow::{Context as _, Result, bail};
 use crate::cmd::harness::HarnessPick;
 use crate::completions::{self, Shell};
 use crate::connection::{Connection, Nats};
-use crate::node::natsd::bundled;
+use crate::node::natsd::{self, bundled};
+use crate::node::web as page;
 use crate::service::{self, Action, Installed, Outcome, Service, Services, State, Values};
 use crate::{auth, doctor};
 
@@ -58,6 +62,11 @@ pub struct SetupArgs {
     /// configuration, and no nats-server service is installed, the daemon service being its only owner.
     #[arg(long)]
     pub managed_nats: bool,
+    /// Also take the page of `ants web`: add a WebSocket listener on port 4281 of the local nats-server's loopback
+    /// host to its configuration, for pages of the origin `ants web` serves (http://127.0.0.1:4280) only, and
+    /// restart a server running it. On a leaf node, `ants leaf config --web` does.
+    #[arg(long)]
+    pub web: bool,
     /// Install and start no services; print how to start nats-server, or with --managed-nats the daemon, instead.
     #[arg(long)]
     pub no_services: bool,
@@ -152,32 +161,31 @@ pub async fn run(connection: &Connection<'_>, args: SetupArgs) -> Result<()> {
                  --managed-nats"
             );
         }
-        None => report.step(
-            Mark::Skip,
-            "nats-server",
-            format!("{} is not on this machine: no local nats-server set up", connection.nats),
-        ),
+        None => {
+            report.step(
+                Mark::Skip,
+                "nats-server",
+                format!("{} is not on this machine: no local nats-server set up", connection.nats),
+            );
+            web_elsewhere(&mut report, args, connection.nats);
+        }
         Some(listen) if args.managed_nats => {
             let conf = if leaf_conf.exists() {
-                report.step(
-                    Mark::Skip,
-                    "nats-server",
-                    format!("the leaf node of {} is the machine's nats-server", leaf_conf.display()),
-                );
+                leaf_node(&mut report, args, &leaf_conf);
                 &leaf_conf
             } else {
                 nats_config(&mut report, &nats_conf, listen, &home);
+                web(&mut report, args, &nats_conf, listen).await;
                 &nats_conf
             };
             managed = managed_nats(&mut report, args, &mut services, conf, listen, &config_path).await?;
         }
-        Some(_) if leaf_conf.exists() => report.step(
-            Mark::Skip,
-            "nats-server",
-            format!("the leaf node of {} is the machine's nats-server", leaf_conf.display()),
-        ),
+        Some(_) if leaf_conf.exists() => {
+            leaf_node(&mut report, args, &leaf_conf);
+        }
         Some(listen) => {
             nats_config(&mut report, &nats_conf, listen, &home);
+            web(&mut report, args, &nats_conf, listen).await;
             started = nats_service(&mut report, args, &mut services, &nats_conf, listen, values).await;
         }
     }
@@ -334,6 +342,139 @@ fn nats_config(report: &mut Report, path: &Path, listen: &str, home: &Path) {
             format!("{} (JetStream in {})", path.display(), store.display()),
         ),
         Err(e) => report.step(Mark::Fail, "nats-server config", format!("{e:#}")),
+    }
+}
+
+/// The step of --web.
+const WEB_STEP: &str = "web listener";
+
+/// With --web, have the local nats-server of `conf`, whose clients connect to `listen`, take the page of `ants web`:
+/// add the loopback WebSocket listener to `conf` ([`web_listener`]) and restart a server listening already, through
+/// the service or the daemon running `conf`, as nats-server reloads no change of a WebSocket listener. One not
+/// started yet reads the file at its start.
+async fn web(report: &mut Report, args: &SetupArgs, conf: &Path, listen: &str) {
+    if !args.web || !web_listener(report, conf, listen) || !listening(listen).await {
+        return;
+    }
+    let by_hand = format!("stop it and run `nats-server -c {}`", conf.display());
+    match natsd::apply(conf, Action::Restart) {
+        Outcome::Done(command) => {
+            report.step(Mark::Done, WEB_STEP, format!("nats-server restarted to listen there ({command})"));
+            // The restart is under way: the old server may still listen.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            wait_listening(listen).await;
+        }
+        Outcome::Failed(command, e) => report.step(
+            Mark::Fail,
+            WEB_STEP,
+            format!("`{command}` failed ({e}): restart the nats-server on {listen} to listen there ({by_hand})"),
+        ),
+        Outcome::NotRunning | Outcome::Unmanaged => report.step(
+            Mark::Skip,
+            WEB_STEP,
+            format!(
+                "neither a service nor a daemon here runs the server on {listen}: restart it to listen there \
+                 ({by_hand})"
+            ),
+        ),
+    }
+}
+
+/// Add the loopback WebSocket listener for the page of `ants web` to the nats-server configuration at `conf`, whose
+/// clients connect to `listen`, unless it has one for that page's origin; a listener for other origins is kept, and
+/// fails the step. Returns whether it changed the file.
+fn web_listener(report: &mut Report, conf: &Path, listen: &str) -> bool {
+    let (shown, origin) = (conf.display(), page::origin());
+    let at = match page::listen(listen) {
+        Ok(at) => at,
+        Err(e) => {
+            report.step(Mark::Fail, WEB_STEP, format!("{e:#}"));
+            return false;
+        }
+    };
+    let added = format!("{shown}: ws://{at} takes pages of {origin} only, as `ants web` serves it");
+    let text = match std::fs::read_to_string(conf) {
+        Ok(text) => text,
+        // The file a dry run did not write.
+        Err(_) if report.dry_run => {
+            report.step(Mark::Done, WEB_STEP, added);
+            return false;
+        }
+        Err(e) => {
+            report.step(Mark::Fail, WEB_STEP, format!("reading {shown}: {e}"));
+            return false;
+        }
+    };
+    match page::add(&text, at, &origin) {
+        page::Added::There => {
+            report.step(Mark::Exists, WEB_STEP, format!("{shown} takes pages of {origin} already"));
+            false
+        }
+        page::Added::Other(origins) => {
+            let takes = match origins.as_slice() {
+                [] => "any origin".to_owned(),
+                origins => origins.join(", "),
+            };
+            let how = format!(
+                "{shown} has a websocket listener already, taking pages of {takes}; kept: add {} to its \
+                 allowed_origins and restart nats-server",
+                quoted(&origin)
+            );
+            report.step(Mark::Fail, WEB_STEP, how);
+            false
+        }
+        page::Added::New(_) if report.dry_run => {
+            report.step(Mark::Done, WEB_STEP, added);
+            false
+        }
+        page::Added::New(text) => match std::fs::write(conf, text) {
+            Ok(()) => {
+                report.step(Mark::Done, WEB_STEP, added);
+                true
+            }
+            Err(e) => {
+                report.step(Mark::Fail, WEB_STEP, format!("writing {shown}: {e}"));
+                false
+            }
+        },
+    }
+}
+
+/// With --web and a server on another machine: nothing here to add a listener to.
+fn web_elsewhere(report: &mut Report, args: &SetupArgs, nats: &str) {
+    if args.web {
+        let how = format!(
+            "{nats} is not on this machine: --web adds a listener to a local nats-server; a hub names the page's \
+             origin in its websocket block (docs/transport.md)"
+        );
+        report.step(Mark::Fail, WEB_STEP, how);
+    }
+}
+
+/// Report the leaf node of `leaf_conf` as the machine's nats-server, none being set up beside it, and with --web
+/// whether it takes the page of `ants web` ([`web_on_leaf`]).
+fn leaf_node(report: &mut Report, args: &SetupArgs, leaf_conf: &Path) {
+    let how = format!("the leaf node of {} is the machine's nats-server", leaf_conf.display());
+    report.step(Mark::Skip, "nats-server", how);
+    web_on_leaf(report, args, leaf_conf);
+}
+
+/// With --web on a machine whose nats-server is the leaf node of `leaf_conf`: whether it takes the page of
+/// `ants web`, which `ants leaf config --web` writes, that file being its to write.
+fn web_on_leaf(report: &mut Report, args: &SetupArgs, leaf_conf: &Path) {
+    if !args.web {
+        return;
+    }
+    let (shown, origin) = (leaf_conf.display(), page::origin());
+    let taken = std::fs::read_to_string(leaf_conf)
+        .is_ok_and(|text| page::Listener::read(&text).is_some_and(|listener| listener.takes(&origin)));
+    if taken {
+        report.step(Mark::Exists, WEB_STEP, format!("{shown} takes pages of {origin} already"));
+    } else {
+        let how = format!(
+            "the leaf node of {shown} is the machine's nats-server: run `ants leaf config MACHINE --uplink URL --web`"
+        );
+        report.step(Mark::Fail, WEB_STEP, how);
     }
 }
 
@@ -886,6 +1027,7 @@ mod tests {
             config: None,
             nats_server: nats_server.map(PathBuf::from),
             managed_nats: true,
+            web: false,
             no_services: false,
             no_harness: true,
             no_completions: true,
@@ -918,6 +1060,46 @@ mod tests {
         );
         assert!(checks[0].fix.is_empty() && checks[1].fix.is_empty());
         assert_eq!(checks[2].fix, ["a fix"], "a failure of its own");
+    }
+
+    #[test]
+    fn web_adds_the_listener_once_and_a_second_run_changes_nothing() {
+        let home = ants_test_support::scratch_dir("setup-web").canonicalize().unwrap();
+        let (conf, leaf_conf) = (home.join("nats.conf"), home.join("leaf.conf"));
+        let listen = "127.0.0.1:4222";
+        let mut report = Report { dry_run: true, failed: 0 };
+        nats_config(&mut report, &conf, listen, &home);
+        assert!(!web_listener(&mut report, &conf, listen));
+        assert!(!conf.exists(), "a dry run writes nothing");
+
+        let mut report = Report { dry_run: false, failed: 0 };
+        nats_config(&mut report, &conf, listen, &home);
+        let plain = std::fs::read_to_string(&conf).unwrap();
+        assert!(web_listener(&mut report, &conf, listen), "the first run adds it");
+        let first = std::fs::read_to_string(&conf).unwrap();
+        let block = page::block("127.0.0.1:4281".parse().unwrap(), "http://127.0.0.1:4280");
+        assert_eq!(first, format!("{plain}{block}"));
+
+        nats_config(&mut report, &conf, listen, &home);
+        assert!(!web_listener(&mut report, &conf, listen), "the second run changes nothing");
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), first);
+        assert_eq!(report.failed, 0);
+
+        let open = format!("{plain}websocket {{\n  port: 8080\n  no_tls: true\n}}\n");
+        std::fs::write(&conf, &open).unwrap();
+        assert!(!web_listener(&mut report, &conf, listen));
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), open, "another listener is kept");
+        assert_eq!(report.failed, 1);
+
+        let args = SetupArgs { web: true, ..managed_args(None) };
+        std::fs::write(&leaf_conf, &plain).unwrap();
+        web_on_leaf(&mut report, &args, &leaf_conf);
+        assert_eq!(report.failed, 2, "a leaf node's listener is `ants leaf config --web`'s to write");
+        std::fs::write(&leaf_conf, &first).unwrap();
+        web_on_leaf(&mut report, &args, &leaf_conf);
+        assert_eq!(std::fs::read_to_string(&leaf_conf).unwrap(), first);
+        assert_eq!(report.failed, 2);
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]

@@ -28,6 +28,7 @@ use self::services::{check_services, check_webhooks};
 pub use self::trails::trail_worker;
 use self::trails::{check_runs, check_worker};
 use self::transports::{check_transports, installed_transports, same_address};
+use self::web::check_web_listeners;
 use crate::auth;
 use crate::people::humans::{Me, Rights};
 use crate::release::update;
@@ -42,6 +43,7 @@ mod server;
 mod services;
 mod trails;
 mod transports;
+mod web;
 
 /// How long a network check may take.
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -133,8 +135,8 @@ pub struct Setup {
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
 /// buckets, the versions of ants running across the team, the JetStream storage, each ant's credentials, harness,
 /// workdir and reactions responder, the trail worker and the runs of trails stuck, the hub's account resolver and store
-/// account, the team keys' backup, the leaf node and outbox, the installed services, the webhooks' config file and notification
-/// sinks, and the Dev Tunnel and HTTPS bridge services installed.
+/// account, the team keys' backup, the leaf node and outbox, the installed services, the WebSocket listeners' origins, the
+/// webhooks' config file and notification sinks, and the Dev Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
     let mut checks = Vec::new();
@@ -212,6 +214,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
         (check_services(setup, &mut services, managed), installed_transports(&mut services))
     };
     checks.extend(services);
+    checks.extend(check_web_listeners(setup, managed));
     checks.extend(check_webhooks(&setup.webhooks).await);
     checks.extend(check_transports(transports, now).await);
     checks
