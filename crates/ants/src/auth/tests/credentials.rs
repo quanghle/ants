@@ -40,7 +40,7 @@ fn no_user_device_or_enrollment_takes_a_reserved_name() {
         assert!(sign_added(&team, &user, None, &key, "worker", &p("lead")).is_err(), "{name}");
         assert!(!out.exists() || name == "bootstrap", "{name}");
     }
-    let issued = revoke::issued(&team).unwrap();
+    let issued = issued::issued(&team).unwrap();
     assert_eq!(issued.iter().map(|i| i.kind).collect::<Vec<_>>(), [Kind::Bootstrap], "only the bootstrap credentials");
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -83,7 +83,7 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
             (verified(&renewed.jwt).unwrap().sub, renewed.previous.as_str()),
             (new.public_key(), &*key.public_key())
         );
-        let line = revoke::issued(&team).unwrap().pop().unwrap();
+        let line = issued::issued(&team).unwrap().pop().unwrap();
         assert_eq!((line.key, line.renewed_from), (new.public_key(), Some(key.public_key())), "{name}");
         renewed
     };
@@ -99,7 +99,7 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     )
     .unwrap();
     assert_eq!(renewed("alice").finding.device, device);
-    let devices = revoke::devices(&team, "alice").unwrap();
+    let devices = issued::devices(&team, "alice").unwrap();
     assert_eq!(devices.len(), 1, "one device, renewed: {devices:?}");
     assert_eq!(devices[0].label.as_deref(), Some("laptop"));
     let destinations = [Destination::Ant(p("dev-a")), Destination::Channel("ops".parse().unwrap())];
@@ -111,7 +111,7 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     let audit = renewed("audit");
     assert_eq!((&audit.finding.kind, audit.finding.js_domain.as_ref()), (&creds::Kind::Observer, Some(&hub)));
     assert_eq!(audit.finding.renew(), ["ants auth user audit --observer --js-domain hub"]);
-    assert_eq!(revoke::issued(&team).unwrap().pop().unwrap().kind, Kind::Observer);
+    assert_eq!(issued::issued(&team).unwrap().pop().unwrap().kind, Kind::Observer);
     issue_channel_manager(&team, None, &out("channel-manager")).unwrap();
     renewed("channel-manager");
     let m1: Machine = "m1".parse().unwrap();
@@ -149,7 +149,7 @@ fn a_human_device_binds_its_encryption_key_and_renewal_keeps_it_or_adds_one() {
     let human = || Permissions::for_user(&p("alice"), Role::Human);
     let new = || KeyPair::new_user().public_key();
     let bound = |jwt: &str| creds::Finding::from_jwt(jwt).unwrap().xkey;
-    let registered = || revoke::issued(&team).unwrap().pop().unwrap().xkey;
+    let registered = || issued::issued(&team).unwrap().pop().unwrap().xkey;
 
     issue_device(&team, &p("alice"), Kind::Human, human(), Some("laptop"), &out("alice")).unwrap();
     let (jwt, _) = read_creds(&out("alice")).unwrap();
@@ -166,7 +166,7 @@ fn a_human_device_binds_its_encryption_key_and_renewal_keeps_it_or_adds_one() {
     assert_eq!(bound(&unbound), None, "signed for a key generated elsewhere, without --xkey");
     let added = renew(&team, &unbound, &new(), Some(&other)).unwrap();
     assert_eq!((bound(&added.jwt), registered()), (Some(other.clone()), Some(other.clone())));
-    let devices = revoke::devices(&team, "alice").unwrap();
+    let devices = issued::devices(&team, "alice").unwrap();
     assert_eq!(devices.iter().map(|d| d.xkey.clone()).collect::<Vec<_>>(), [Some(laptop), Some(other.clone())]);
 
     issue(&team, &p("dev-a"), Role::Ant, None, &out("dev-a")).unwrap();
@@ -214,7 +214,7 @@ fn an_admin_s_device_carries_the_role_through_renewal_until_revoked() {
     let new = KeyPair::new_user().public_key();
     let renewed = renew(&team, &jwt, &new, None).unwrap();
     assert!(renewed.finding.admin, "the renewal keeps the role");
-    let admins = |now| revoke::admins(&team, now).unwrap().into_iter().map(|a| a.key).collect::<Vec<_>>();
+    let admins = |now| issued::admins(&team, now).unwrap().into_iter().map(|a| a.key).collect::<Vec<_>>();
     assert_eq!(admins(now().unwrap()), [key.public_key(), new.clone()], "the phone's are no admin's");
     revoke::revoke(&team, None, std::slice::from_ref(&new)).unwrap();
     assert_eq!(admins(now().unwrap()), [key.public_key()]);
@@ -267,13 +267,13 @@ fn an_ant_becomes_a_human_s_only_assistant_through_its_user_jwt() {
 
     let renewed = renew(&team, &jwt, &KeyPair::new_user().public_key(), None).unwrap();
     assert_eq!(renewed.finding.kind, creds::Kind::Assistant { of: alice.clone() });
-    let line = revoke::issued(&team).unwrap().pop().unwrap();
+    let line = issued::issued(&team).unwrap().pop().unwrap();
     assert_eq!((line.kind, line.assistant_of), (Kind::Assistant, Some(alice.clone())));
     let listed: Vec<(String, bool)> =
-        revoke::assistants(&team, "alice").unwrap().into_iter().map(|(i, revoked)| (i.key, revoked)).collect();
+        issued::assistants(&team, "alice").unwrap().into_iter().map(|(i, revoked)| (i.key, revoked)).collect();
     assert_eq!(listed, [(key.public_key(), false), (verified_key(&renewed.jwt), false)]);
     revoke::revoke(&team, Some("pa"), &[]).unwrap();
-    assert!(revoke::assistants(&team, "alice").unwrap().iter().all(|(_, revoked)| *revoked));
+    assert!(issued::assistants(&team, "alice").unwrap().iter().all(|(_, revoked)| *revoked));
     check_assistant(&team, &pb, &alice).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }

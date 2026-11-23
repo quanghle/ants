@@ -13,7 +13,7 @@ use nkeys::KeyPair;
 use serde_json::json;
 
 use crate::auth::{self, NewDevice, issue_device_with, issue_host};
-use crate::credentials::revoke::Kind;
+use crate::credentials::issued::Kind;
 use crate::node::members::{self, EnrollApprover};
 use crate::signing::signer::{Options, serve};
 use crate::test_support::Server;

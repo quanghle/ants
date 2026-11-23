@@ -18,7 +18,7 @@ use tokio::time::timeout;
 
 use super::offboard::{Offboarded, Offboarder};
 use super::*;
-use crate::credentials::{renew, revoke};
+use crate::credentials::{issued, renew, revoke};
 use crate::signing::signer;
 use crate::test_support::Server;
 use crate::test_support::github::fake;
@@ -285,7 +285,7 @@ async fn a_github_user_under_the_policy_registers_a_device_and_holds_the_name() 
         assert_eq!(claims.name, "alice");
         let ttl = claims.exp.unwrap() - auth::now().unwrap();
         assert!(ttl > 7 * 86_400 - 60 && ttl <= 7 * 86_400, "{ttl}");
-        let record = revoke::issued(&team).unwrap().pop().unwrap();
+        let record = issued::issued(&team).unwrap().pop().unwrap();
         assert_eq!(record.github, Some(GithubAccount { id: 1, login: "octocat".into() }));
         assert_eq!((record.grant, record.label.as_deref()), (Some(Grant::Org("acme".into())), Some("laptop")));
 
@@ -317,7 +317,7 @@ async fn outside_the_policy_a_human_decides_and_an_approval_stands_until_the_nam
     let asking = async {
         let (answers, ()) = tokio::join!(register("carol"), decide(&js, &stream, "mallory", Verdict::AllowOnce));
         assert!(waited(&answers) && signed(&answers), "{answers:?}");
-        let record = revoke::issued(&team).unwrap().pop().unwrap();
+        let record = issued::issued(&team).unwrap().pop().unwrap();
         assert_eq!(record.github, Some(GithubAccount { id: 2, login: "mallory".into() }));
         assert_eq!((record.name.as_str(), record.grant), ("carol", Some(Grant::Approval("human".into()))));
         let carol = Device::new("carol");
@@ -330,7 +330,7 @@ async fn outside_the_policy_a_human_decides_and_an_approval_stands_until_the_nam
         let (answers, ()) = tokio::join!(register("dave"), decide(&js, &stream, "eve", Verdict::Reject));
         assert!(waited(&answers), "{answers:?}");
         assert!(refusal(&answers).contains("a human rejected the registration"), "{answers:?}");
-        assert!(!revoke::issued(&team).unwrap().iter().any(|i| i.name == "dave"), "a rejected human is not signed");
+        assert!(!issued::issued(&team).unwrap().iter().any(|i| i.name == "dave"), "a rejected human is not signed");
 
         revoke::revoke(&team, Some("carol"), &[]).unwrap();
         let (answers, ()) = tokio::join!(register("carol"), decide(&js, &stream, "mallory", Verdict::Reject));
@@ -368,7 +368,7 @@ async fn the_signer_renews_a_registered_device_while_its_grant_holds_and_revokes
         let renewed = renewed.unwrap();
         assert_eq!(auth::verified(&renewed).unwrap().sub, key.public_key());
         assert!(Finding::from_jwt(&renewed).unwrap().registered, "still marked");
-        let record = revoke::issued(&team).unwrap().pop().unwrap();
+        let record = issued::issued(&team).unwrap().pop().unwrap();
         assert_eq!(record.renewed_from, Some(alice.key.public_key()));
         assert_eq!((record.github.map(|g| g.id), record.grant), (Some(1), Some(Grant::Org("acme".into()))));
 
@@ -422,7 +422,7 @@ async fn a_web_device_registers_with_web_credentials_and_keeps_them_through_rene
         binding.sign();
         let reason = refusal(&binding.ask(&client, WAIT).await);
         assert!(reason.contains("a web device binds no encryption key"), "{reason}");
-        assert!(revoke::issued(&team).unwrap().iter().all(|i| i.name != "alice"), "nothing signed");
+        assert!(issued::issued(&team).unwrap().iter().all(|i| i.name != "alice"), "nothing signed");
 
         let alice = Device::web("alice");
         let answers = alice.ask(&client, WAIT).await;
@@ -434,7 +434,7 @@ async fn a_web_device_registers_with_web_credentials_and_keeps_them_through_rene
         assert_eq!(rights(&jwt), web_rights);
         let ttl = lifetime(&jwt);
         assert!(ttl > WEB_TTL - 60 && ttl <= WEB_TTL, "the web lifetime, not the 7 d of other devices: {ttl}");
-        let record = revoke::issued(&team).unwrap().pop().unwrap();
+        let record = issued::issued(&team).unwrap().pop().unwrap();
         assert_eq!((record.web, record.admin, record.label.as_deref()), (true, false, Some("browser")));
         assert_eq!(record.grant, Some(Grant::Org("acme".into())));
 
@@ -446,9 +446,9 @@ async fn a_web_device_registers_with_web_credentials_and_keeps_them_through_rene
         assert_eq!(rights(&renewed), web_rights);
         let ttl = lifetime(&renewed);
         assert!(ttl > WEB_TTL - 60 && ttl <= WEB_TTL, "{ttl}");
-        let record = revoke::issued(&team).unwrap().pop().unwrap();
+        let record = issued::issued(&team).unwrap().pop().unwrap();
         assert_eq!((record.web, record.renewed_from), (true, Some(alice.key.public_key())));
-        let devices = revoke::devices(&team, "alice").unwrap();
+        let devices = issued::devices(&team, "alice").unwrap();
         assert_eq!(devices.iter().map(|d| (d.web, d.key.clone())).collect::<Vec<_>>(), [(true, key.public_key())]);
 
         let laptop = Device::new("alice");

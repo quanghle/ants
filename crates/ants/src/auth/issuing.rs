@@ -18,7 +18,7 @@ use super::claims::{check_user_key, user_jwt, verified_body};
 use super::files::{creds, creds_jwt, creds_with, load, seed, write_secret};
 use super::uplink::allowed;
 use super::{ACCOUNT_SEED, check_not_reserved};
-use crate::credentials::revoke::{self, Issued, Kind};
+use crate::credentials::issued::{self, Issued, Kind};
 
 /// Issue a new NATS user for `user`, an ant or a human, in `role`, for the hub's JetStream domain if it has one, and
 /// write its `.creds` file to `out`. Earlier credentials stay valid.
@@ -28,7 +28,7 @@ pub fn issue(dir: &Path, user: &UserId, role: Role, js_domain: Option<&JsDomain>
 }
 
 /// Issue a new NATS user for `user`, of `kind`, with `permissions`, write its `.creds` file to `out` and record its
-/// key ([`revoke::record`]). A human's are for a new device ([`issue_device`]).
+/// key ([`issued::record`]). A human's are for a new device ([`issue_device`]).
 #[cfg(test)]
 pub fn issue_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permissions, out: &Path) -> Result<()> {
     issue_device(dir, user, kind, permissions, None, out).map(drop)
@@ -99,7 +99,7 @@ pub fn issue_device_with(
     let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, extra, new.expires_at)?;
     write_secret(out, &creds_with(&jwt, &seed(&key)?, xkey.as_ref())?)?;
     let issued = Issued::new(&key.public_key(), user.as_str(), kind, new.expires_at)?;
-    revoke::record(dir, &new.record(issued, device, bound))?;
+    issued::record(dir, &new.record(issued, device, bound))?;
     Ok(device)
 }
 
@@ -146,7 +146,7 @@ pub(super) fn device_claims(
         let tags: Vec<String> = new.assistant_of.iter().map(AssistantOf::tag).collect();
         return Ok((None, if tags.is_empty() { json!({}) } else { json!({ "tags": tags }) }));
     }
-    new.label.map(revoke::check_label).transpose()?;
+    new.label.map(issued::check_label).transpose()?;
     let device = DeviceId::generate();
     let tags = human_tags(Some(&device), xkey, new.grant.is_some(), new.admin, new.web);
     Ok((Some(device), json!({ "tags": tags })))
@@ -221,7 +221,7 @@ pub fn sign_builtin(dir: &Path, builtin: BuiltinAnt, js_domain: Option<&JsDomain
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let permissions = Permissions::for_user(&name, Role::Ant).with_js_domain(js_domain);
     let jwt = user_jwt(&account, public_key, name.as_str(), permissions, json!({}), None)?;
-    revoke::record(dir, &Issued::new(public_key, name.as_str(), Kind::Ant, None)?)?;
+    issued::record(dir, &Issued::new(public_key, name.as_str(), Kind::Ant, None)?)?;
     Ok(jwt)
 }
 
@@ -245,7 +245,7 @@ pub fn sign_channel_manager(dir: &Path, js_domain: Option<&JsDomain>, public_key
     let answer_once = json!({ "resp": { "max": 1, "ttl": ttl } });
     let name = UserId::channel_manager();
     let jwt = user_jwt(&account, public_key, name.as_str(), permissions, answer_once, None)?;
-    revoke::record(dir, &Issued::new(public_key, name.as_str(), Kind::ChannelManager, None)?)?;
+    issued::record(dir, &Issued::new(public_key, name.as_str(), Kind::ChannelManager, None)?)?;
     Ok(jwt)
 }
 
@@ -266,7 +266,7 @@ pub fn sign_host(dir: &Path, machine: &Machine, js_domain: Option<&JsDomain>, pu
     let permissions = Permissions::for_host(machine).with_js_domain(js_domain);
     let name = ants_proto::host_user(machine);
     let jwt = user_jwt(&account, public_key, &name, permissions, json!({}), None)?;
-    revoke::record(dir, &Issued::new(public_key, &name, Kind::Host, None)?)?;
+    issued::record(dir, &Issued::new(public_key, &name, Kind::Host, None)?)?;
     Ok(jwt)
 }
 
@@ -283,7 +283,7 @@ pub fn sign_user(
 }
 
 /// Sign the user JWT of `user`, of `kind`, with `permissions` for `public_key`, a user NKey generated on another
-/// machine, and record the key ([`revoke::record`]). A human's are for a new device ([`sign_device`]).
+/// machine, and record the key ([`issued::record`]). A human's are for a new device ([`sign_device`]).
 pub fn sign_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permissions, public_key: &str) -> Result<String> {
     sign_device(dir, user, kind, permissions, None, public_key, None).map(|(jwt, _)| jwt)
 }
@@ -319,7 +319,7 @@ pub fn sign_device_with(
     let (device, extra) = device_claims(kind, new, xkey)?;
     let jwt = user_jwt(&account, public_key, user.as_str(), permissions, extra, new.expires_at)?;
     let issued = Issued::new(public_key, user.as_str(), kind, new.expires_at)?;
-    revoke::record(dir, &new.record(issued, device, xkey.cloned()))?;
+    issued::record(dir, &new.record(issued, device, xkey.cloned()))?;
     Ok((jwt, device))
 }
 
@@ -343,7 +343,7 @@ pub fn sign_added(
         added_by: Some(manager.clone()),
         ..Issued::new(public_key, ant.as_str(), Kind::Ant, None)?
     };
-    revoke::record(dir, &issued)?;
+    issued::record(dir, &issued)?;
     Ok(jwt)
 }
 
@@ -369,7 +369,7 @@ pub fn sign_ordered(
     };
     let jwt = user_jwt(&account, public_key, ant.as_str(), permissions.with_js_domain(js_domain), extra, None)?;
     let issued = Issued::new(public_key, ant.as_str(), kind, None)?;
-    revoke::record(dir, &Issued { order: Some(order), assistant_of: assistant_of.cloned(), ..issued })?;
+    issued::record(dir, &Issued { order: Some(order), assistant_of: assistant_of.cloned(), ..issued })?;
     Ok(jwt)
 }
 

@@ -43,7 +43,7 @@ fn credentials_must_be_the_schedule_s_own() {
     crate::auth::issue_with(
         &dir.join("auth"),
         &p("other"),
-        crate::credentials::revoke::Kind::Webhook,
+        crate::credentials::issued::Kind::Webhook,
         permissions,
         &out,
     )

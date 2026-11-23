@@ -18,7 +18,9 @@ use super::{
     ACCOUNT_SEED, MAX_CONTROL_LINE, MAX_UPLINK_JWT, STORE_SEED, SYSTEM_SEED, assistants, check_not_reserved, leaf_role,
     members,
 };
-use crate::credentials::revoke::{self, Issued, Kind};
+use crate::credentials::issued::{self, Issued, Kind};
+use crate::credentials::push;
+use crate::credentials::revoke;
 use crate::node::members::EnrollApprover;
 
 /// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
@@ -72,7 +74,7 @@ pub fn issue_leaf(
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
     let issued = Issued::new(&user.public_key(), &name, Kind::Leaf, exp)?;
     let members = crate::node::members::Members::new(members, webhooks, approver);
-    revoke::record(dir, &Issued { members: Some(members), ..issued })?;
+    issued::record(dir, &Issued { members: Some(members), ..issued })?;
     issue_leaf_store(dir, machine, exp, &leaf_store_creds(out))?;
     issue_leaf_system(dir, machine, &account.public_key(), exp, &leaf_system_creds(out))
 }
@@ -95,7 +97,7 @@ fn issue_leaf_store(dir: &Path, machine: &Machine, exp: Option<u64>, out: &Path)
     let name = leaf_user(machine);
     let jwt = user_jwt(&store, &user.public_key(), &name, permissions, only_leaf, exp)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
-    revoke::record(dir, &Issued::new(&user.public_key(), &name, Kind::LeafStore, exp)?)
+    issued::record(dir, &Issued::new(&user.public_key(), &name, Kind::LeafStore, exp)?)
 }
 
 /// Where [`issue_leaf`] writes the system account credentials of a leaf node whose uplink credentials are at
@@ -106,7 +108,7 @@ pub fn leaf_system_creds(uplink: &Path) -> PathBuf {
 
 /// Write to `out` the credentials of the system account for the second uplink of `machine`'s leaf node, through which
 /// the account updates `ants auth push` sends the hub reach the leaf: they hear those of `account` only, answer only
-/// the push ([`revoke::PUSH_INBOX`]), and connect only as a leaf node. They also let the leaf's `full` resolver ask
+/// the push ([`push::PUSH_INBOX`]), and connect only as a leaf node. They also let the leaf's `full` resolver ask
 /// the hub's for the accounts it holds ([`PACK_REQUEST`]) and hear the answers on the leaf's own system inbox only
 /// ([`system_inbox`]), which catches a leaf up on the pushes it missed while offline. They expire at `exp`, if ever.
 /// Recorded as [`Kind::LeafSystem`], so revoking the uplink by name revokes them too, in the system account.
@@ -120,14 +122,14 @@ pub(super) fn issue_leaf_system(
     let system = load(&dir.join(SYSTEM_SEED))?;
     let user = KeyPair::new_user();
     let permissions = Permissions {
-        publish: vec![format!("{}.>", revoke::PUSH_INBOX), PACK_REQUEST.to_owned()],
+        publish: vec![format!("{}.>", push::PUSH_INBOX), PACK_REQUEST.to_owned()],
         subscribe: vec![format!("$SYS.REQ.ACCOUNT.{account}.CLAIMS.UPDATE"), format!("{}.*", system_inbox(machine))],
     };
     let only_leaf = json!({ "allowed_connection_types": LEAF_CONNECTIONS });
     let name = leaf_user(machine);
     let jwt = user_jwt(&system, &user.public_key(), &name, permissions, only_leaf, exp)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
-    revoke::record(dir, &Issued::new(&user.public_key(), &name, Kind::LeafSystem, exp)?)
+    issued::record(dir, &Issued::new(&user.public_key(), &name, Kind::LeafSystem, exp)?)
 }
 
 /// What a `full` resolver periodically sends the other servers of its system account, with the hash of the accounts

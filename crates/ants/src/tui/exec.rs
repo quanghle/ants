@@ -794,7 +794,7 @@ mod tests {
         use ants_proto::Role;
 
         use crate::auth::{NewDevice, issue_device_with};
-        use crate::credentials::revoke::Kind;
+        use crate::credentials::issued::Kind;
         use crate::test_support::orders::{WAIT, host_of_m1, with_signer};
         use crate::tui::model::Action;
 

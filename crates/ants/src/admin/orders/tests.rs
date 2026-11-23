@@ -9,7 +9,7 @@ use ants_proto::{FieldChange, MACHINES_BUCKET, Permissions, Role};
 
 use super::*;
 use crate::auth::{NewDevice, issue_device_with, issue_host};
-use crate::credentials::revoke::Kind;
+use crate::credentials::issued::Kind;
 use crate::test_support::Server;
 use crate::test_support::orders::{WAIT, host_of_m1, host_of_m1_serving, p};
 

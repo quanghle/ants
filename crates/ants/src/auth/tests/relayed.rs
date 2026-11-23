@@ -295,7 +295,7 @@ async fn an_answer_the_server_sent_onto_a_subject_an_ant_or_a_webhook_may_not_pu
     bus::open_stream(&b_js, &dev_b).await.unwrap();
     let creds = server.dir().join("github.creds");
     let permissions = Permissions::for_webhook(&hook, &[Destination::Ant(dev_b.clone())]);
-    let kind = crate::credentials::revoke::Kind::Webhook;
+    let kind = crate::credentials::issued::Kind::Webhook;
     issue_with(&server.dir().join("auth"), &hook, kind, permissions, &creds).unwrap();
     let (w, _) = server.watched_with(&hook, &creds).await;
     let (ant_own, hook_own) = (format!("$KV.{TRAIL_RUNS_BUCKET}.dev-a.x"), format!("$KV.{WEBHOOKS_BUCKET}.github.x"));

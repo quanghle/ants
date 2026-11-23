@@ -127,9 +127,9 @@ async fn a_webhook_approval_gives_a_webhooks_credentials_for_its_destination() {
     crate::webhook::check_creds("webhook", &hook, Some(&out), &to).unwrap();
     let other = Destination::Ant(p("dev-b"));
     assert!(crate::webhook::check_creds("webhook", &hook, Some(&out), &other).is_err());
-    let issued = revoke::issued(&team).unwrap();
+    let issued = issued::issued(&team).unwrap();
     let record = issued.iter().find(|i| i.key == user.public_key()).unwrap();
-    assert_eq!(record.kind, revoke::Kind::Webhook);
+    assert_eq!(record.kind, issued::Kind::Webhook);
 }
 
 /// Publish `request` for dev-a with the enrollment credentials at `creds`, as a machine would, signed as given.
@@ -260,7 +260,7 @@ async fn an_approval_grants_the_host_credentials_of_the_asking_machine_only() {
     assert_eq!(host, HostApproved::Granted(m("m1")));
     let claims = auth::verified(&jwt.unwrap()).unwrap();
     assert_eq!((claims.name.as_str(), claims.sub.as_str()), ("host-m1", key.as_str()));
-    let issued = revoke::issued(&team).unwrap();
+    let issued = issued::issued(&team).unwrap();
     assert!(issued.iter().any(|i| i.key == key && i.kind == Kind::Host && i.name == "host-m1"), "{issued:?}");
 
     let (jwt, host, _) = ask("dev-b", "m1", None, true).await;
@@ -496,7 +496,7 @@ async fn an_ant_the_uplink_has_no_room_for_is_neither_signed_nor_recorded() {
     let uplink = server.dir().join("leaf-m1.creds");
     crate::test_support::uplink_for_most_ants(&team, &m1, None, &uplink);
     let before = std::fs::read_to_string(&uplink).unwrap();
-    let (members_before, issued_before) = (members::issued(&team, &m1).unwrap(), revoke::issued(&team).unwrap().len());
+    let (members_before, issued_before) = (members::issued(&team, &m1).unwrap(), issued::issued(&team).unwrap().len());
     let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
     let (leaf, user) = (Leaf { machine: m1.clone(), creds: uplink.clone() }, KeyPair::new_user());
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -517,7 +517,7 @@ async fn an_ant_the_uplink_has_no_room_for_is_neither_signed_nor_recorded() {
     assert!(err.contains("would take") && err.contains("another leaf node"), "{err}");
     let asked = format!("{:#}", asked.unwrap_err());
     assert!(asked.contains("stopped before an answer came"), "no answer: {asked}");
-    let issued = revoke::issued(&team).unwrap();
+    let issued = issued::issued(&team).unwrap();
     assert!(!issued.iter().any(|i| i.name == "dev-xx"), "dev-xx is not signed");
     assert_eq!(issued.len(), issued_before);
     assert_eq!(members::issued(&team, &m1).unwrap(), members_before, "dev-xx is not among m1's members");

@@ -22,7 +22,7 @@
 //! The signer trusts only what it can check itself: the request is signed by the manager's credentials of the team's
 //! account, and its template is read from the signer's own config file ([`config::signer_templates`]), never taken
 //! from the manager's machine. How many ants a template has is counted from the keys the team issued
-//! ([`revoke::Issued::template`]), live ones only.
+//! ([`issued::Issued::template`]), live ones only.
 
 use ants_daemon::bus::relayed;
 use std::collections::{BTreeSet, HashMap};
@@ -46,6 +46,7 @@ use futures::StreamExt as _;
 
 use crate::auth;
 use crate::credentials::enroll::Approver;
+use crate::credentials::issued;
 use crate::credentials::revoke;
 use crate::node::{members, outbox};
 use crate::signing::registrar::{self, Registrar};
@@ -432,7 +433,7 @@ impl Signer<'_> {
         let push_error = if revoked.is_empty() {
             None
         } else {
-            crate::credentials::revoke::push(self.url, self.dir).await.err().map(|e| format!("{e:#}"))
+            crate::credentials::push::push(self.url, self.dir).await.err().map(|e| format!("{e:#}"))
         };
         if push_error.is_none() {
             super::retire::clean_consumers(self.url, approver.js_domain(), self.dir, name).await;
@@ -587,11 +588,11 @@ pub fn revoke_added(
     manager: Option<&UserId>,
     key: Option<&str>,
 ) -> Result<Vec<revoke::Revoked>> {
-    let added = |i: &revoke::Issued| {
+    let added = |i: &issued::Issued| {
         i.name == name.as_str() && i.template.is_some() && manager.is_none_or(|m| i.added_by.as_ref() == Some(m))
     };
     let by = manager.map_or_default(|m| format!(" by {m}"));
-    let issued = revoke::issued(dir)?;
+    let issued = issued::issued(dir)?;
     let before = match key {
         Some(key) => {
             issued.iter().filter(|i| i.key == key && added(i)).map(|i| i.issued_at).max().with_context(|| {
@@ -601,7 +602,7 @@ pub fn revoke_added(
         None if issued.iter().any(added) => u64::MAX,
         None => bail!("the team issued no credentials of {name} as an ant added from a template{by}"),
     };
-    let live: Vec<revoke::Issued> =
+    let live: Vec<issued::Issued> =
         live(dir)?.into_iter().filter(|i| i.name == name.as_str() && i.issued_at <= before).collect();
     if let Some(other) = live.iter().find(|i| !added(i)) {
         bail!("the team holds credentials of {name} not issued for an ant added{by} (key {})", other.key);
@@ -614,10 +615,10 @@ pub fn revoke_added(
 }
 
 /// The keys the team issued that are neither revoked nor expired.
-pub(crate) fn live(dir: &Path) -> Result<Vec<revoke::Issued>> {
+pub(crate) fn live(dir: &Path) -> Result<Vec<issued::Issued>> {
     let revoked: BTreeSet<String> = revoke::revoked(dir)?.into_iter().map(|r| r.key).collect();
     let now = auth::now()?;
-    let issued = revoke::issued(dir)?;
+    let issued = issued::issued(dir)?;
     Ok(issued.into_iter().filter(|i| !revoked.contains(&i.key) && i.expires_at.is_none_or(|exp| exp > now)).collect())
 }
 
@@ -625,7 +626,7 @@ pub(crate) fn live(dir: &Path) -> Result<Vec<revoke::Issued>> {
 /// room under its `max_ants` among the live keys `issued`, and bounds what is asked; else why not.
 fn policy(
     templates: &[AntTemplate],
-    issued: &[revoke::Issued],
+    issued: &[issued::Issued],
     request: &AntRequest,
     asked: &Request,
 ) -> Result<(), String> {
@@ -766,7 +767,7 @@ mod tests {
         let signed = signed.unwrap();
         assert_eq!(events, [(p("lead-a"), Event::Approved { human: false })]);
         assert_eq!(signed.leaf_jwt, None);
-        let issued = revoke::issued(&team).unwrap();
+        let issued = issued::issued(&team).unwrap();
         let record = issued.iter().find(|i| i.name == "lead-a").unwrap();
         assert_eq!((record.key.as_str(), record.template.as_deref()), (user.public_key().as_str(), Some("worker")));
         assert_eq!(record.added_by, Some(p("lead")));
@@ -882,7 +883,7 @@ mod tests {
         let err = format!("{:#}", rejected.unwrap_err());
         assert!(err.contains("a human rejected the request"), "{err}");
         assert!(matches!(&events[..], [(_, Event::Asked { .. }), (_, Event::Refused(_))]), "{events:?}");
-        assert!(!revoke::issued(&team).unwrap().iter().any(|i| i.name == "lead-b"), "a rejected ant is not signed");
+        assert!(!issued::issued(&team).unwrap().iter().any(|i| i.name == "lead-b"), "a rejected ant is not signed");
     }
 
     /// Behind a leaf node whose uplink the hub would refuse with one more ant, a request is refused at once, before
@@ -913,7 +914,7 @@ mod tests {
         assert!(err.contains("the signer refused lead-a: the uplink of the leaf node m1 cannot carry lead-a"), "{err}");
         assert!(err.contains("would take") && err.contains("another leaf node"), "{err}");
         assert!(matches!(&events[..], [(_, Event::Refused(_))]), "no human asked: {events:?}");
-        assert!(!revoke::issued(&team).unwrap().iter().any(|i| i.name == "lead-a"), "nothing signed");
+        assert!(!issued::issued(&team).unwrap().iter().any(|i| i.name == "lead-a"), "nothing signed");
         assert_eq!(std::fs::read_to_string(&uplink).unwrap(), before);
     }
 }

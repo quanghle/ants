@@ -2,7 +2,7 @@
 //! `ants leaf outbox`: a run naming none takes those of the last one, and `--add-*` and `--remove-*` change them.
 //!
 //! `ants auth leaf` runs where the team keys are. It keeps the members in the line of the registry
-//! ([`revoke::ISSUED`]) recording the uplink key it issues, and `ants enroll approve`, there too, adds an ant enrolled
+//! ([`issued::ISSUED`]) recording the uplink key it issues, and `ants enroll approve`, there too, adds an ant enrolled
 //! through the leaf node with a later line for that key.
 //!
 //! `ants leaf outbox` runs on the machine itself: the uplink credentials of its leaf node configuration name its
@@ -17,7 +17,7 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::auth;
-use crate::credentials::revoke::{self, Issued, Kind};
+use crate::credentials::issued::{self, Issued, Kind};
 use crate::node::leaf;
 
 /// The members of a machine's leaf node, as a line of the registry keeps them.
@@ -272,7 +272,7 @@ impl From<OutboxArgs> for Change {
 /// The latest line of the registry of `dir` for an uplink of `machine`'s leaf node.
 fn latest(dir: &Path, machine: &Machine) -> Result<Option<Issued>> {
     let name = auth::leaf_user(machine);
-    Ok(revoke::issued(dir)?.into_iter().rev().find(|i| i.name == name && i.kind == Kind::Leaf))
+    Ok(issued::issued(dir)?.into_iter().rev().find(|i| i.name == name && i.kind == Kind::Leaf))
 }
 
 /// The members `ants auth leaf` last issued the uplink of `machine` for, from the team directory `dir`, with the ants
@@ -290,7 +290,7 @@ pub fn enrolled(dir: &Path, machine: &Machine, ant: &UserId) -> Result<()> {
     if !members.holds(ant) {
         members.ants.push(ant.clone());
     }
-    revoke::record(dir, &line)
+    issued::record(dir, &line)
 }
 
 /// Drop `ant`, retired, from the members of `machine`'s leaf node in the registry of `dir`, with a later line for the
@@ -299,7 +299,7 @@ pub fn retired(dir: &Path, machine: &Machine, ant: &UserId) -> Result<bool> {
     let Some(mut line) = latest(dir, machine)? else { return Ok(false) };
     let Some(members) = line.members.as_mut().filter(|m| m.ants.contains(ant)) else { return Ok(false) };
     members.ants.retain(|a| a != ant);
-    revoke::record(dir, &line)?;
+    issued::record(dir, &line)?;
     Ok(true)
 }
 
@@ -307,7 +307,7 @@ pub fn retired(dir: &Path, machine: &Machine, ant: &UserId) -> Result<bool> {
 pub fn ever(dir: &Path, machine: &Machine) -> Result<Vec<UserId>> {
     let name = auth::leaf_user(machine);
     let mut ants: Vec<UserId> = Vec::new();
-    for line in revoke::issued(dir)?.into_iter().filter(|i| i.name == name && i.kind == Kind::Leaf) {
+    for line in issued::issued(dir)?.into_iter().filter(|i| i.name == name && i.kind == Kind::Leaf) {
         for ant in line.members.into_iter().flat_map(|m| m.ants) {
             if !ants.contains(&ant) {
                 ants.push(ant);
@@ -322,7 +322,7 @@ pub fn ever(dir: &Path, machine: &Machine) -> Result<Vec<UserId>> {
 pub fn behind(dir: &Path, ant: &UserId) -> Result<Vec<Machine>> {
     let mut seen = Vec::new();
     let mut behind = Vec::new();
-    for line in revoke::issued(dir)?.into_iter().rev().filter(|i| i.kind == Kind::Leaf) {
+    for line in issued::issued(dir)?.into_iter().rev().filter(|i| i.kind == Kind::Leaf) {
         if seen.contains(&line.name) {
             continue;
         }
@@ -424,7 +424,7 @@ mod tests {
         enrolled(&team, &m1, &p("dev-c")).unwrap();
         let with_c = Members { ants: users(&["dev-a", "dev-c"]), ..kept.clone() };
         assert_eq!(issued(&team, &m1).unwrap(), Some(with_c), "the enrolled ant joins");
-        let listed = revoke::listing(&team, auth::now().unwrap()).unwrap();
+        let listed = crate::credentials::listing::listing(&team, auth::now().unwrap()).unwrap();
         let uplinks: Vec<_> = listed.iter().filter(|l| l.issued.kind == Kind::Leaf).collect();
         assert!(uplinks.len() == 1 && !uplinks[0].reissued, "the same key, once: {listed:?}");
         assert!(enrolled(&team, &"m2".parse().unwrap(), &p("dev-c")).is_err(), "no uplink of m2 issued");

@@ -265,7 +265,7 @@ async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
         issue_with(
             &team,
             hook,
-            crate::credentials::revoke::Kind::Webhook,
+            crate::credentials::issued::Kind::Webhook,
             permissions.with_js_domain(Some(&domain)),
             &team.join(format!("{hook}.creds")),
         )
@@ -453,7 +453,7 @@ async fn a_human_behind_a_leaf_node_stores_decisions_on_approval_requests() {
     decide(&UserId::signer(), "at first").await;
     creds(&p("carol"));
     crate::credentials::revoke::revoke(&team, Some("carol"), &[]).unwrap();
-    crate::credentials::revoke::push(&hub.url, &team).await.unwrap();
+    crate::credentials::push::push(&hub.url, &team).await.unwrap();
     // The hub withdraws the interest and sends it again, once the uplink allows it.
     let probe = subject::approval_decision(&UserId::signer(), &ants_proto::Uuid::now_v7());
     ants_test_support::eventually_within(Duration::from_secs(5), "the interest crosses the uplink again", async || {

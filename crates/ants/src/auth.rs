@@ -27,7 +27,8 @@ use serde_json::json;
 use self::claims::{jwt, user_jwt};
 use self::files::{creds, load};
 use self::short_lived::APPROVER_TTL;
-use crate::credentials::revoke::{self, Issued, Kind};
+use crate::credentials::issued::{self, Issued, Kind};
+use crate::credentials::revoke;
 
 pub(crate) use self::claims::now;
 #[cfg(test)]
@@ -259,20 +260,20 @@ pub fn check_assistant(dir: &Path, user: &UserId, human: &UserId) -> Result<()> 
     if user.is_human() {
         bail!("{user} is a human; an assistant is an ant");
     }
-    let issued = revoke::issued(dir)?;
+    let issued = issued::issued(dir)?;
     let live = live_in(dir)?;
-    let named = |i: &&revoke::Issued, name: &UserId| i.name == name.as_str();
-    if !human.is_human() && !issued.iter().any(|i| named(&i, human) && i.kind == revoke::Kind::Human) {
+    let named = |i: &&issued::Issued, name: &UserId| i.name == name.as_str();
+    if !human.is_human() && !issued.iter().any(|i| named(&i, human) && i.kind == issued::Kind::Human) {
         bail!("{human} is not a human of the team: issue its credentials with `ants auth user {human} --human` first");
     }
     let mine = issued.iter().filter(|i| named(i, user));
-    if let Some(i) = mine.clone().find(|i| i.kind == revoke::Kind::Human) {
+    if let Some(i) = mine.clone().find(|i| i.kind == issued::Kind::Human) {
         bail!("{user} holds a human's credentials ({}); an assistant is an ant", i.key);
     }
     if mine.clone().any(|i| i.template.is_some()) {
         bail!("{user} is an ant a manager added from a template; such an ant cannot be an assistant");
     }
-    let assisting = |i: &&revoke::Issued| i.kind == revoke::Kind::Assistant && live(i);
+    let assisting = |i: &&issued::Issued| i.kind == issued::Kind::Assistant && live(i);
     if let Some(i) = mine.filter(assisting).find(|i| i.assistant_of.as_ref() != Some(human)) {
         let of = i.assistant_of.as_ref().map_or("another human", UserId::as_str);
         bail!("{user} is the assistant of {of} ({}): revoke those credentials first", i.key);
@@ -299,7 +300,7 @@ fn live_in(dir: &Path) -> Result<impl Fn(&Issued) -> bool> {
 /// them, each with its human.
 fn assistants(dir: &Path) -> Result<BTreeMap<UserId, UserId>> {
     let live = live_in(dir)?;
-    let issued = revoke::issued(dir)?;
+    let issued = issued::issued(dir)?;
     let assisting = issued.into_iter().filter(|i| i.kind == Kind::Assistant && live(i));
     Ok(assisting.filter_map(|i| Some((i.name.parse().ok()?, i.assistant_of?))).collect())
 }

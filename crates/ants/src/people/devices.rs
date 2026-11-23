@@ -22,6 +22,7 @@ use async_nats::jetstream::stream::DirectGetErrorKind;
 use async_nats::jetstream::{self, kv};
 
 use crate::auth;
+use crate::credentials::issued;
 use crate::credentials::revoke;
 
 /// How long `ants auth revoke` and `ants auth push` wait for the hub to take the revocation records.
@@ -109,11 +110,11 @@ pub async fn publish_or_warn(js: &jetstream::Context, own: &Own) {
 /// of an ant's, whose shared settings readers take only signed with a key without one, and of every key the registry
 /// does not know, which may be one.
 fn device_revocations(dir: &Path) -> Result<Vec<DeviceRevocation>> {
-    let issued = revoke::issued(dir)?;
+    let issued = issued::issued(dir)?;
     let human_or_unknown = |key: &str| {
         let mut known = issued.iter().filter(|i| i.key == key).peekable();
         known.peek().is_none()
-            || known.any(|i| matches!(i.kind, revoke::Kind::Human | revoke::Kind::Assistant | revoke::Kind::Ant))
+            || known.any(|i| matches!(i.kind, issued::Kind::Human | issued::Kind::Assistant | issued::Kind::Ant))
     };
     let revoked = revoke::revoked(dir)?.into_iter().filter(|r| human_or_unknown(&r.key));
     Ok(revoked.map(|r| DeviceRevocation { key: r.key, revoked_at: r.revoked_at }).collect())

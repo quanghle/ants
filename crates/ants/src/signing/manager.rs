@@ -257,6 +257,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
+    use crate::credentials::issued;
     use crate::credentials::revoke;
     use crate::test_support::Server;
     use crate::{serve, tools};
@@ -349,7 +350,7 @@ mod tests {
             let request = Request { model: Some("gpt-9".to_owned()), ..Request::default() };
             let err = format!("{:#}", manager.add(ask("lead-a", "worker", request)).await.unwrap_err());
             assert!(err.contains("refused by the template of this machine's config file"), "{err}");
-            assert!(!revoke::issued(&team).unwrap().iter().any(|i| i.name == "lead-a"));
+            assert!(!issued::issued(&team).unwrap().iter().any(|i| i.name == "lead-a"));
 
             // Within the signer's policy: signed at once, listed, and served after the reload.
             let said = manager.add(ask("lead-a", "worker", Request::default())).await.unwrap();

@@ -1,10 +1,17 @@
-//! Tests of revocation: names and devices revoked, renewals listed, connections dropped, resolvers keeping revocations,
-//! GitHub bindings and grants, predecessors, and leaf uplinks.
+//! Tests of revocation: names and devices revoked, connections dropped, resolvers keeping revocations, approval
+//! grants withdrawn, and leaf uplinks.
 
+use std::collections::BTreeSet;
+use std::time::Duration;
+
+use ants_daemon::bus::relayed;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::*;
+use crate::credentials::issued::{device_keys, devices, rename, standing_approval};
+use crate::credentials::listing::listing;
+use crate::credentials::push::{connect_system, push};
 use crate::test_support::Server;
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -46,48 +53,6 @@ fn revoking_a_name_takes_all_its_keys_and_drops_revocations_once_expired() {
     apply_at(&team, auth::now().unwrap() + 601).unwrap();
     let left: Vec<Option<String>> = revoked(&team).unwrap().into_iter().map(|r| r.name).collect();
     assert_eq!(left, vec![Some("alice".to_owned()); 2]);
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn the_listing_names_the_renewal_of_credentials_in_use_that_are_outdated_or_expire_soon() {
-    let dir = ants_test_support::scratch_dir("issued");
-    let team = dir.join("auth");
-    auth::init(&team).unwrap();
-    let ant =
-        |name: &str, out: &Path| auth::issue(&team, &name.parse().unwrap(), ants_proto::Role::Ant, None, out).unwrap();
-    ant("dev-a", &dir.join("dev-a-old.creds"));
-    ant("dev-a", &team.join("dev-a.creds"));
-    ant("dev-b", &dir.join("dev-b.creds"));
-    ant("dev-c", &team.join("dev-c.creds"));
-    auth::issue_enrollment(&team, &"dev-d".parse().unwrap(), Duration::from_secs(60), &dir.join("e.creds")).unwrap();
-    let now = auth::now().unwrap();
-    // dev-a's keys carry an older permissions version; dev-b's expires in a day.
-    let lines: String = issued(&team)
-        .unwrap()
-        .into_iter()
-        .map(|i| match i.name.as_str() {
-            "dev-a" => Issued { perms: ants_proto::PermissionsVersion(0), ..i },
-            "dev-b" => Issued { expires_at: Some(now + 86_400), ..i },
-            _ => i,
-        })
-        .map(|i| serde_json::to_string(&i).unwrap() + "\n")
-        .collect();
-    fs::write(team.join(ISSUED), lines).unwrap();
-
-    let listed = listing(&team, now).unwrap();
-    let summary: Vec<(&str, bool, bool, bool, Vec<String>)> =
-        listed.iter().map(|l| (l.issued.name.as_str(), l.reissued, l.outdated, l.expiring, l.renew.clone())).collect();
-    assert_eq!(
-        summary,
-        [
-            ("dev-a", true, true, false, vec![]),
-            ("dev-a", false, true, false, vec!["ants auth user dev-a".to_owned()]),
-            ("dev-b", false, false, true, vec!["ants auth user dev-b [--js-domain DOMAIN]".to_owned()]),
-            ("dev-c", false, false, false, vec![]),
-            ("enroll-dev-d", false, false, true, vec![]),
-        ]
-    );
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -292,33 +257,6 @@ async fn a_human_s_devices_are_listed_relabelled_and_revoked_one_by_one() {
 }
 
 #[test]
-fn a_github_binding_and_its_grant_are_listed_with_the_device_and_kept_on_renewal() {
-    use ants_daemon::config::registration::{GithubAccount, Grant};
-    let dir = ants_test_support::scratch_dir("binding");
-    let team = dir.join("auth");
-    auth::init(&team).unwrap();
-    let alice: ants_proto::UserId = "alice".parse().unwrap();
-    let new = auth::NewDevice {
-        label: Some("Laptop"),
-        github: Some(GithubAccount { id: 42, login: "octocat".into() }),
-        grant: Some(Grant::Org("acme".into())),
-        ..auth::NewDevice::default()
-    };
-    let key = nkeys::KeyPair::new_user();
-    let permissions = ants_proto::Permissions::for_user(&alice, ants_proto::Role::Human);
-    let (jwt, device) =
-        auth::sign_device_with(&team, &alice, Kind::Human, permissions, &new, &key.public_key(), None).unwrap();
-
-    let listed = devices(&team, "alice").unwrap();
-    assert_eq!(listed.len(), 1);
-    assert_eq!((listed[0].github.as_deref(), listed[0].grant.as_ref()), (Some("octocat"), new.grant.as_ref()));
-    auth::renew(&team, &jwt, &nkeys::KeyPair::new_user().public_key(), None).unwrap();
-    let renewed = issued(&team).unwrap().pop().unwrap();
-    assert_eq!(renewed.device, device);
-    assert_eq!((renewed.github, renewed.grant), (new.github, new.grant));
-}
-
-#[test]
 fn revoking_a_name_withdraws_its_approval_grants_but_revoking_a_device_does_not() {
     use ants_daemon::config::registration::{GithubAccount, Grant};
     let dir = ants_test_support::scratch_dir("withdraw");
@@ -354,47 +292,6 @@ fn revoking_a_name_withdraws_its_approval_grants_but_revoking_a_device_does_not(
     assert!(after.iter().all(|i| i.github.as_ref() == Some(&binding)), "the binding stays");
     rename(&team, "carol", "phone", "Phone").unwrap();
     assert_eq!(standing_approval(&issued(&team).unwrap(), "carol", 7), None, "a relabelled device stays withdrawn");
-}
-
-/// `--earlier` follows a key back through the keys it was renewed from, live ones only, and none of another holder's.
-#[test]
-fn the_keys_a_key_was_renewed_from_are_its_live_predecessors() {
-    let dir = ants_test_support::scratch_dir("renewed-from");
-    let team = dir.join("auth");
-    auth::init(&team).unwrap();
-    let ant = |name: &str| {
-        let out = dir.join(format!("{name}.creds"));
-        auth::issue(&team, &name.parse().unwrap(), ants_proto::Role::Ant, None, &out).unwrap();
-        auth::read_creds(&out).unwrap()
-    };
-    let renewed = |jwt: &str| {
-        let key = nkeys::KeyPair::new_user();
-        (auth::renew(&team, jwt, &key.public_key(), None).unwrap().jwt, key.public_key())
-    };
-    let (jwt, first) = ant("dev-a");
-    let first = first.public_key();
-    let (jwt, second) = renewed(&jwt);
-    let (_, third) = renewed(&jwt);
-    ant("dev-b");
-
-    let mut earlier = renewed_from(&team, std::slice::from_ref(&third)).unwrap();
-    earlier.sort();
-    let mut expected = vec![first.clone(), second.clone()];
-    expected.sort();
-    assert_eq!(earlier, expected);
-    assert!(renewed_from(&team, std::slice::from_ref(&first)).unwrap().is_empty());
-    // What a renewal's hint revokes for the key it replaced reaches back, never forward to the new key.
-    assert_eq!(renewed_from(&team, std::slice::from_ref(&second)).unwrap(), std::slice::from_ref(&first));
-    revoke(&team, None, std::slice::from_ref(&first)).unwrap();
-    assert_eq!(renewed_from(&team, std::slice::from_ref(&third)).unwrap(), [second]);
-
-    let mut keys = vec![third];
-    keys.extend(renewed_from(&team, &keys).unwrap());
-    revoke(&team, None, &keys).unwrap();
-    let live = crate::signing::signer::live(&team).unwrap();
-    assert!(!live.iter().any(|i| i.name == "dev-a"), "{live:?}");
-    assert!(live.iter().any(|i| i.name == "dev-b"));
-    fs::remove_dir_all(dir).unwrap();
 }
 
 /// The revoked keys of the account `key` in the `server.conf` of `team`.

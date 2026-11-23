@@ -4,7 +4,7 @@
 //! signs a human's credentials for the request's key when the GitHub user falls under the signer's `[registration]`
 //! policy and may hold the name asked for ([`binding`]). A user outside the policy waits for the humans: the signer
 //! asks them with an approval request of the reserved user [`UserId::signer`], and signs once one allows it. The
-//! approval stands for that user and name until every key of the name is revoked ([`revoke::standing_approval`]), so
+//! approval stands for that user and name until every key of the name is revoked ([`issued::standing_approval`]), so
 //! the user's other devices sign at once.
 //!
 //! Requests are core NATS messages and stored nowhere: the machine repeats its request every
@@ -13,7 +13,7 @@
 //! [`MAX_REGISTRATIONS`] at once. The user's GitHub token stays in the task that reads the user with it.
 //!
 //! The signer also answers the renewal requests ([`RenewRequest`]) of the credentials a registration granted
-//! ([`revoke::registered`]), which `ants enroll renew` leaves to it: an organization or team grant renews only while
+//! ([`issued::registered`]), which `ants enroll renew` leaves to it: an organization or team grant renews only while
 //! the signer's own GitHub token finds the user still a member under the policy, reread; else the signer refuses,
 //! revokes every key of the name and pushes the account. An approval grant renews while it stands; an email-domain
 //! grant, which only the user's token shows, is refused, naming `ants login`.
@@ -26,10 +26,10 @@
 //! policy ([`Github::sees_policy`]). Each name revoked so is recorded in [`OFFBOARDED`].
 //!
 //! [`binding`]: crate::signing::binding
-//! [`revoke::standing_approval`]: crate::credentials::revoke::standing_approval
+//! [`issued::standing_approval`]: crate::credentials::issued::standing_approval
 //! [`LoginReply`]: ants_proto::LoginReply
 //! [`MAX_REGISTRATIONS`]: ants_proto::MAX_REGISTRATIONS
-//! [`revoke::registered`]: crate::credentials::revoke::registered
+//! [`issued::registered`]: crate::credentials::issued::registered
 //! [`swept`]: offboard::swept
 //! [`Github`]: crate::signing::github::Github
 //! [`Github::sees_policy`]: crate::signing::github::Github::sees_policy

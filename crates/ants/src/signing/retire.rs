@@ -17,7 +17,7 @@ use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::Context;
 
 use crate::credentials::enroll;
-use crate::credentials::revoke::{self, Kind};
+use crate::credentials::issued::{self, Kind};
 use crate::node::{members, natsd, outbox};
 use crate::service::{Action, Outcome};
 use crate::{add, auth};
@@ -241,7 +241,7 @@ async fn leave_here(
         Ok((jwt, _)) => jwt,
         Err(e) => return left(e),
     };
-    let assistant_of = match revoke::issued(dir) {
+    let assistant_of = match issued::issued(dir) {
         Ok(issued) => issued
             .into_iter()
             .rfind(|i| i.name == ant.as_str() && matches!(i.kind, Kind::Ant | Kind::Assistant))
@@ -450,7 +450,7 @@ mod tests {
             Outcome::Done("kill -HUP".to_owned())
         };
         let (old, key) = auth::read_creds(&m1_uplink).unwrap();
-        revoke::revoke(&team, Some("dev-c"), &[]).unwrap();
+        crate::credentials::revoke::revoke(&team, Some("dev-c"), &[]).unwrap();
 
         let said = leave_leaves_with(&team, &p("dev-c"), None, local(&conf, &m1, &m1_uplink), reload).await;
         let [said] = said.as_slice() else { panic!("{said:?}") };

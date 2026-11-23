@@ -24,7 +24,7 @@ use serde_json::{Map, Value, json};
 use super::{Local, Sealing, check, ended_sealing, put, read, replaced, risky, signing_creds};
 use crate::admin::orders::{self, Sent};
 use crate::connection::Nats;
-use crate::credentials::{keys, revoke};
+use crate::credentials::{issued, keys, revoke};
 use crate::people::humans;
 use crate::service::{Action, Outcome, Service, Services, failure, manual};
 use crate::signing::retire;
@@ -404,7 +404,7 @@ async fn issue(
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    let kind = revoke::Kind::Assistant;
+    let kind = issued::Kind::Assistant;
     if store_key {
         let key = nkeys::KeyPair::new_user();
         let (jwt, _) = auth::sign_device_with(dir, ant, kind, permissions, &new, &key.public_key(), None)?;
@@ -561,7 +561,7 @@ impl Dedicated {
         let dir = crate::auth::team_dir(dir)?;
         let revoked = match auth::account_key(&dir) {
             Ok(_) => {
-                let known = revoke::issued(&dir)?.iter().any(|i| i.name == name.as_str());
+                let known = issued::issued(&dir)?.iter().any(|i| i.name == name.as_str());
                 let revoked = revoke::revoke(&dir, known.then_some(name.as_str()), std::slice::from_ref(&self.key))?;
                 for r in &revoked {
                     println!("revoked {} ({name})", r.key);
@@ -762,7 +762,7 @@ mod tests {
         let admin_creds = server.dir().join("alice-admin.creds");
         let admin = auth::NewDevice { label: Some("laptop"), admin: true, ..auth::NewDevice::default() };
         let rights = Permissions::for_user(&alice, Role::Human);
-        auth::issue_device_with(&team, &alice, revoke::Kind::Human, rights, &admin, &admin_creds).unwrap();
+        auth::issue_device_with(&team, &alice, issued::Kind::Human, rights, &admin, &admin_creds).unwrap();
         let nats = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
         let (_, js) = nats.connect("test").await.unwrap();
         let (path, home) = (server.dir().join("config.toml"), server.dir().join("pa-home"));
@@ -782,9 +782,9 @@ mod tests {
         let out = server.dir().join("alice-assistant.creds");
         let finding = Finding::from_creds(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert_eq!((finding.name.as_str(), &finding.kind), ("alice-assistant", &Kind::Assistant { of: alice.clone() }));
-        let issued = revoke::issued(&team).unwrap();
+        let issued = issued::issued(&team).unwrap();
         let signed = issued.iter().find(|i| i.key == finding.key).expect("the signer records the key");
-        assert_eq!((signed.kind, signed.assistant_of.as_ref()), (revoke::Kind::Assistant, Some(&alice)));
+        assert_eq!((signed.kind, signed.assistant_of.as_ref()), (issued::Kind::Assistant, Some(&alice)));
         assert!(signed.order.is_some());
         let ant = config::load(&path).unwrap().ants.into_iter().find(|a| a.name == pa).expect("listed");
         assert_eq!((ant.workdir, ant.model.as_deref()), (home.canonicalize().unwrap(), Some("gpt-5")));

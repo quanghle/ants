@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 use crate::admin::orders::outcome;
 use crate::admin::orders::tests::send;
 use crate::auth::{NewDevice, issue_device_with};
-use crate::credentials::revoke::{self, Kind};
+use crate::credentials::issued::{self, Kind};
+use crate::credentials::revoke;
 use crate::test_support::Server;
 use crate::test_support::orders::{SIGNED, WAIT, host_of_m1, p, with_signer, with_signer_at};
 
@@ -82,7 +83,7 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
     let result = added.result.unwrap();
     assert_eq!((finding.name.as_str(), Some(finding.key.as_str())), ("dev-b", result["key"].as_str()));
     assert!(!server.dir().join("dev-b.nk").exists(), "the waiting key goes once the credentials hold it");
-    let issued = revoke::issued(&team).unwrap();
+    let issued = issued::issued(&team).unwrap();
     let signed = issued.iter().find(|i| i.key == finding.key).expect("the signer records the key");
     assert_eq!((signed.name.as_str(), signed.kind, signed.order), ("dev-b", Kind::Ant, Some(order.id)));
     let edited = std::fs::read_to_string(&path).unwrap();

@@ -10,7 +10,7 @@ use crate::test_support::Server;
 use ants_daemon::Harnesses;
 
 use crate::auth::{NewDevice, issue_device_with, issue_host};
-use crate::credentials::revoke::Kind;
+use crate::credentials::issued::Kind;
 use crate::test_support::orders::{WAIT, host_of_m1};
 
 fn a(text: &str) -> Assignment {

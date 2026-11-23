@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use crate::admin::orders::tests::send;
 use crate::auth::{NewDevice, issue_device_with};
-use crate::credentials::revoke::Kind;
+use crate::credentials::issued::Kind;
 use crate::test_support::Server;
 use crate::test_support::orders::{SIGNED, with_signer};
 use crate::test_support::orders::{WAIT, host_of_m1_serving, p};

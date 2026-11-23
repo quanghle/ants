@@ -31,7 +31,7 @@ use nkeys::{KeyPair, XKey};
 use crate::auth;
 use crate::connection::Connection;
 use crate::credentials::enroll::Approver;
-use crate::credentials::{keys, revoke};
+use crate::credentials::{issued, keys};
 use crate::node::{leaf, natsd};
 use crate::service::{Action, Outcome, Service, Services, failure};
 
@@ -331,10 +331,10 @@ impl Approver {
     }
 
     /// A checked renewal request of `msg` for `ants enroll renew`, or why it is ignored: credentials a registration
-    /// granted are `ants signer`'s to renew ([`revoke::registered`]).
+    /// granted are `ants signer`'s to renew ([`issued::registered`]).
     pub(crate) fn renewal(&self, msg: &async_nats::Message) -> Result<RenewRequest> {
         let (request, current) = self.checked_renewal(msg)?;
-        if revoke::registered(&revoke::issued(&self.dir)?, &current.sub).is_some() {
+        if issued::registered(&issued::issued(&self.dir)?, &current.sub).is_some() {
             bail!(
                 "renewal request of {}: a registration granted the credentials, which ants signer renews",
                 request.name
@@ -505,6 +505,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
+    use crate::credentials::issued;
     use crate::credentials::revoke;
     use crate::node::members::EnrollApprover;
     use crate::test_support::Server;
@@ -546,7 +547,7 @@ mod tests {
         assert_eq!((renewed_jwt, key.public_key()), (jwt, user.public_key()));
         let (client, _) = bus::connect(&server.url, Some(&creds), None, &p("dev-a"), "test").await.unwrap();
         client.flush().await.unwrap();
-        let line = revoke::issued(&team).unwrap().pop().unwrap();
+        let line = issued::issued(&team).unwrap().pop().unwrap();
         assert_eq!((line.key, line.renewed_from), (user.public_key(), Some(old_key.public_key())));
     }
 
@@ -597,7 +598,7 @@ mod tests {
         let creds = server.dir().join("alice.creds");
         let first = KeyPair::new_user();
         let rights = ants_proto::Permissions::for_user(&p("alice"), Role::Human);
-        let human = revoke::Kind::Human;
+        let human = issued::Kind::Human;
         let (jwt, _) = auth::sign_device(&team, &p("alice"), human, rights, None, &first.public_key(), None).unwrap();
         auth::replace_creds(&creds, &jwt, &first, None).unwrap();
         let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();

@@ -24,7 +24,7 @@ use serde::Deserialize;
 
 use crate::cas;
 use crate::connection::Nats;
-use crate::credentials::revoke;
+use crate::credentials::issued;
 use crate::people::{devices, humans};
 use crate::{auth, colony};
 
@@ -77,7 +77,7 @@ impl Local {
                 None
             }
         });
-        let issued = team.map(revoke::issued).transpose().unwrap_or_else(|e| {
+        let issued = team.map(issued::issued).transpose().unwrap_or_else(|e| {
             tracing::warn!("reading the team's registry: {e:#}");
             None
         });

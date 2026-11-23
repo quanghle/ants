@@ -432,7 +432,7 @@ fn web_credentials_carry_the_tag_never_the_admin_role_nor_an_encryption_key_and_
     assert_eq!((&finding.kind, finding.web, finding.admin, &finding.xkey), (&CredsKind::Human, true, false, &None));
     assert_eq!(finding.holder(), "human alice (web device)");
     assert!(creds::xkey_of(&std::fs::read_to_string(&out).unwrap()).is_none(), "a web device holds no xkey");
-    let record = revoke::issued(&team).unwrap().pop().unwrap();
+    let record = issued::issued(&team).unwrap().pop().unwrap();
     assert_eq!((record.web, record.admin, record.xkey, record.device), (true, false, None, Some(device)));
     let account = account_key(&team).unwrap();
     let signature = BASE64URL_NOPAD.encode(&key.sign(b"an order").unwrap());
@@ -450,7 +450,7 @@ fn web_credentials_carry_the_tag_never_the_admin_role_nor_an_encryption_key_and_
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
     let err = sign_device_with(&team, &p("dev-a"), Kind::Ant, ant, &plain, &new(), None).unwrap_err().to_string();
     assert!(err.contains("only a human's device"), "{err}");
-    assert_eq!(revoke::issued(&team).unwrap().len(), 1, "nothing refused was recorded");
+    assert_eq!(issued::issued(&team).unwrap().len(), 1, "nothing refused was recorded");
 
     // A renewal keeps the device, its label, the tag and the rights, and binds no key.
     let err = renew(&team, &jwt, &new(), Some(&xkey)).unwrap_err().to_string();
@@ -461,7 +461,7 @@ fn web_credentials_carry_the_tag_never_the_admin_role_nor_an_encryption_key_and_
     assert!(finding.same_credentials(&renewed.finding));
     assert_eq!((renewed.finding.device, renewed.finding.key.as_str()), (Some(device), next.as_str()));
     assert_eq!(allowed(&verified_body(&renewed.jwt).unwrap().1), web());
-    let record = revoke::issued(&team).unwrap().pop().unwrap();
+    let record = issued::issued(&team).unwrap().pop().unwrap();
     assert_eq!((record.web, record.key.as_str(), record.device), (true, next.as_str(), Some(device)));
     assert_eq!((record.label.as_deref(), record.renewed_from), (Some("browser"), Some(key.public_key())));
     // And the lifetime: as long from now as the earlier credentials had from their issue.
@@ -475,13 +475,13 @@ fn web_credentials_carry_the_tag_never_the_admin_role_nor_an_encryption_key_and_
     // `ants auth devices` marks them, beside the human's other devices.
     let human = Permissions::for_user(&alice, Role::Human);
     issue_device(&team, &alice, Kind::Human, human, Some("laptop"), &dir.join("alice.creds")).unwrap();
-    let devices = revoke::devices(&team, "alice").unwrap();
+    let devices = issued::devices(&team, "alice").unwrap();
     let listed: Vec<(Option<&str>, bool)> = devices.iter().map(|d| (d.label.as_deref(), d.web)).collect();
     assert_eq!(listed, [(Some("browser"), true), (None, true), (Some("laptop"), false)]);
     assert_eq!(serde_json::to_value(&devices[0]).unwrap()["web"], true);
     assert!(serde_json::to_value(&devices[2]).unwrap().get("web").is_none());
-    assert_eq!((revoke::marks(&devices[0]), revoke::marks(&devices[2])), ("  web".to_owned(), String::new()));
-    let listing = revoke::listing(&team, now().unwrap()).unwrap();
+    assert_eq!((issued::marks(&devices[0]), issued::marks(&devices[2])), ("  web".to_owned(), String::new()));
+    let listing = crate::credentials::listing::listing(&team, now().unwrap()).unwrap();
     let expiring = listing.iter().find(|l| l.issued.key == phone).unwrap();
     assert!(expiring.expiring && expiring.issued.web, "{expiring:?}");
     assert_eq!(expiring.renew, ["ants auth user alice --human --web --public-key KEY [--js-domain DOMAIN]"]);

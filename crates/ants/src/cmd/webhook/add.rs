@@ -12,7 +12,7 @@ use data_encoding::HEXLOWER;
 use nkeys::KeyPair;
 
 use crate::auth;
-use crate::credentials::{enroll, revoke};
+use crate::credentials::{enroll, issued};
 use crate::service::{Action, Outcome, Service, Services, failure};
 use crate::webhook::{self, Config, Listing};
 
@@ -170,7 +170,7 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
         None => {
             let domain = js_domain.or(listing.js_domain.as_ref());
             let permissions = Permissions::for_webhook(name, std::slice::from_ref(&destination)).with_js_domain(domain);
-            auth::issue_device(&team, name, revoke::Kind::Webhook, permissions, None, &out)?;
+            auth::issue_device(&team, name, issued::Kind::Webhook, permissions, None, &out)?;
         }
         Some(enrollment) => {
             let url = args.hub.as_deref().unwrap_or(nats);

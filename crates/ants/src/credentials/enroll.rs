@@ -34,8 +34,9 @@ use futures::StreamExt as _;
 use nkeys::KeyPair;
 
 use crate::auth;
+use crate::credentials::issued;
+use crate::credentials::issued::Kind;
 use crate::credentials::revoke;
-use crate::credentials::revoke::Kind;
 use crate::node::{members, outbox};
 
 /// How long `ants enroll` listens for requests: one repeat of every machine still asking, and some slack.
@@ -628,7 +629,7 @@ impl Approver {
         }
         let name = host_user(machine);
         if let Some(other) =
-            revoke::issued(dir)?.iter().find(|i| i.key == key && (i.name != name || i.kind != Kind::Host))
+            issued::issued(dir)?.iter().find(|i| i.key == key && (i.name != name || i.kind != Kind::Host))
         {
             bail!("the key {key} was issued to {} already", other.name);
         }
@@ -661,7 +662,7 @@ impl Approver {
             bail!("{webhook} asks through the leaf node of {}; a webhook connects to the hub", leaf.machine);
         }
         let permissions = Permissions::for_webhook(webhook, destinations).with_js_domain(self.js_domain.as_ref());
-        let jwt = auth::sign_with(dir, webhook, revoke::Kind::Webhook, permissions, &request.public_key)?;
+        let jwt = auth::sign_with(dir, webhook, issued::Kind::Webhook, permissions, &request.public_key)?;
         self.send(&request, jwt, None, None).await
     }
 

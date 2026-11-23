@@ -12,7 +12,7 @@ async fn bootstrap_credentials_only_ask_the_signer_to_register_and_hear_its_answ
     assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&out).unwrap().permissions()) & 0o777, 0o644);
     let finding = Finding::from_creds(&std::fs::read_to_string(&out).unwrap()).unwrap();
     assert_eq!((finding.kind, finding.key.as_str(), finding.js_domain), (CredsKind::Bootstrap, key.as_str(), None));
-    let issued = revoke::issued(&team).unwrap();
+    let issued = issued::issued(&team).unwrap();
     assert!(issued.iter().any(|i| i.key == key && i.kind == Kind::Bootstrap && i.name == "bootstrap"), "{issued:?}");
 
     let signer_file = server.dir().join("signer.creds");

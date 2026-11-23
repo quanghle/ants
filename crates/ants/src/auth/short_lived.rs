@@ -14,7 +14,7 @@ use super::claims::{now, user_jwt};
 use super::files::{creds, load, seed, write_secret};
 use super::uplink::merge;
 use super::{ACCOUNT_SEED, check_not_reserved};
-use crate::credentials::revoke::{self, Issued, Kind};
+use crate::credentials::issued::{self, Issued, Kind};
 
 /// Issue the enrollment credentials of `ant`, valid for `ttl` (zero: with no expiry), and write their `.creds` file
 /// to `out`: they may only ask for the ant's credentials and hear the answer ([`Permissions::for_enrollment`]).
@@ -30,7 +30,7 @@ pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> 
     let name = ants_proto::enrollment_user(ant);
     let jwt = user_jwt(&account, &user.public_key(), &name, Permissions::for_enrollment(ant), json!({}), exp)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
-    revoke::record(dir, &Issued::new(&user.public_key(), &name, Kind::Enrollment, exp)?)?;
+    issued::record(dir, &Issued::new(&user.public_key(), &name, Kind::Enrollment, exp)?)?;
     Ok(exp)
 }
 
@@ -52,7 +52,7 @@ pub fn issue_bootstrap(dir: &Path, ttl: Duration, out: &Path) -> Result<(String,
     fs::write(out, creds(&jwt, &seed(&user)?)).with_context(|| format!("writing {}", out.display()))?;
     #[cfg(unix)]
     fs::set_permissions(out, std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
-    revoke::record(dir, &Issued::new(&user.public_key(), name, Kind::Bootstrap, exp)?)?;
+    issued::record(dir, &Issued::new(&user.public_key(), name, Kind::Bootstrap, exp)?)?;
     Ok((user.public_key(), exp))
 }
 
