@@ -27,7 +27,7 @@ async fn decided_update(statuses: &mut async_nats::Subscriber) -> (Verdict, Deci
 }
 
 /// [`decided_update`], with the assistant that decided for the human.
-async fn decided_via(statuses: &mut async_nats::Subscriber) -> Settled {
+async fn decided_via(statuses: &mut async_nats::Subscriber) -> (Verdict, DecidedBy, Option<UserId>, Option<UserId>) {
     let mut next = async || {
         let msg = timeout(WAIT, statuses.next()).await.unwrap().unwrap();
         serde_json::from_slice::<ants_proto::StatusEvent>(&msg.payload).unwrap().update

@@ -50,7 +50,6 @@
 
 use crate::bus::relayed;
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::mem::DropGuard;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -72,6 +71,10 @@ use crate::people::assistant_first::AssistantFirst;
 use crate::people::humans::{Registry, Withdrawal};
 use crate::permission::{Approver, Offer};
 use crate::sync::MutexExt as _;
+
+mod text;
+
+use text::{assistant_text, chain_text, decided_notice, expired_member_notice, expired_notice};
 
 /// How long a tool request waits for a human by default.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
@@ -112,15 +115,40 @@ struct Listening {
 /// The requests waiting for a decision, by id, with where a decision offered on each goes.
 type Waiting = Arc<Mutex<HashMap<Uuid, (ApprovalRequest, mpsc::UnboundedSender<Offered>)>>>;
 
-/// What settled a request: the verdict, who gave it, the ant of the chain or human that did, and the assistant
-/// that decided for that human.
-type Settled = (Verdict, DecidedBy, Option<UserId>, Option<UserId>);
+/// What settled a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Settled {
+    verdict: Verdict,
+    /// Who gave it.
+    by: DecidedBy,
+    /// The ant of the chain or the human that did.
+    decider: Option<UserId>,
+    /// The assistant that decided for that human.
+    via: Option<UserId>,
+}
 
-/// The message being answered on each thread, naming whom a request of its turn that expires is told of.
-type Answering = Arc<Mutex<HashMap<ThreadId, Envelope>>>;
+impl Settled {
+    /// By `verdict` of `from`, an ant of the ant's chain.
+    fn chain(from: UserId, verdict: Verdict) -> Self {
+        Self { verdict, by: DecidedBy::Chain, decider: Some(from), via: None }
+    }
 
-/// How many tool requests the turn on each thread asked so far.
-type Asked = Arc<Mutex<HashMap<ThreadId, u32>>>;
+    /// By the decision `held` its human consents to. A verdict the harness did not offer counts as a rejection.
+    fn consented(request: &ApprovalRequest, held: Held) -> Self {
+        let Held { human, assistant, verdict } = held;
+        let verdict = request.decide(verdict).verdict;
+        Self { verdict, by: DecidedBy::Human, decider: Some(human), via: Some(assistant) }
+    }
+
+    /// By nobody's decision in time: rejected.
+    fn expired() -> Self {
+        Self { verdict: Verdict::Reject, by: DecidedBy::Expiry, decider: None, via: None }
+    }
+}
+
+/// The message being answered on each thread, naming whom a request of its turn that expires is told of, and how
+/// many tool requests that turn asked so far.
+type Answering = Arc<Mutex<HashMap<ThreadId, (Envelope, u32)>>>;
 
 /// Asks the humans on `ants.approvals.<ant>`, and the ant's chain.
 #[derive(Clone)]
@@ -135,7 +163,6 @@ pub struct NatsApprover {
     /// Who is a human, and who is told of an expired request on a thread with no owner.
     humans: Registry,
     answering: Answering,
-    asked: Asked,
     /// Finds the assistant of the human a request waits for, which gets the request too; none asks no assistant.
     assistants: Option<AssistantFirst>,
 }
@@ -168,8 +195,8 @@ impl From<Offered> for Heard {
 
 impl NatsApprover {
     pub fn new(client: async_nats::Client, js: jetstream::Context, ant: UserId, timeout: Duration) -> Self {
-        let (chain, waiting, humans, answering, asked) = Default::default();
-        Self { client, js, ant, timeout, chain, waiting, humans, answering, asked, assistants: None }
+        let (chain, waiting, humans, answering) = Default::default();
+        Self { client, js, ant, timeout, chain, waiting, humans, answering, assistants: None }
     }
 
     /// The same, also sending each request to the assistant of the human it waits for, which `assistants` finds.
@@ -194,21 +221,25 @@ impl NatsApprover {
     /// that expires unanswered is told to the owner it names, and carries its creator and the thread it links to.
     pub fn begin(&self, envelope: &Envelope) -> Turn {
         let thread = envelope.thread_id.clone();
-        self.answering.locked().insert(thread.clone(), envelope.clone());
-        self.asked.locked().insert(thread.clone(), 0);
-        Turn { answering: self.answering.clone(), asked: self.asked.clone(), thread }
+        self.answering.locked().insert(thread.clone(), (envelope.clone(), 0));
+        Turn { answering: self.answering.clone(), thread }
+    }
+
+    /// What `of` reads of the message being answered on `thread`, if one is.
+    fn answering<R>(&self, thread: &ThreadId, of: impl FnOnce(&Envelope) -> R) -> Option<R> {
+        self.answering.locked().get(thread).map(|(envelope, _)| of(envelope))
     }
 
     /// How many tool requests the turn begun on `thread` asked so far: 0 with none begun.
     pub fn asked(&self, thread: &ThreadId) -> u32 {
-        self.asked.locked().get(thread).copied().unwrap_or(0)
+        self.answering.locked().get(thread).map_or(0, |(_, asked)| *asked)
     }
 
     /// Tell the thread's owner, else the default human, and the ants of the chain `asked` about it, that `request`
     /// expired unanswered and was rejected. Stored before the ant goes on, so before the message being answered is
     /// acked; failing to, it only warns.
     async fn tell_expired(&self, request: &ApprovalRequest, asked: &[UserId]) {
-        let answering = self.answering.locked().get(&request.thread_id).cloned();
+        let answering = self.answering(&request.thread_id, Envelope::clone);
         let notice = expired_notice(&self.ant, request, self.timeout, answering.as_ref(), &self.humans);
         let id = format!("approval-expired-{}-{}", self.ant, request.id);
         let allow = answering.and_then(|e| e.allow);
@@ -236,18 +267,13 @@ impl NatsApprover {
         }
     }
 
-    /// Keep on the thread's timeline that `request` was rejected `by` `decider`, `via` its assistant, under the message
-    /// being answered there, for the ant's dreams, whose packets show it ([`TimelineEntry::Rejected`]). Best effort,
-    /// stored before the ant goes on.
-    async fn tell_rejected(
-        &self,
-        request: &ApprovalRequest,
-        by: DecidedBy,
-        decider: Option<UserId>,
-        via: Option<UserId>,
-    ) {
-        let message = self.answering.locked().get(&request.thread_id).map_or(Uuid::nil(), |e| e.id);
+    /// Keep on the thread's timeline that `request` was rejected as `settled` says, by its decider, via its assistant,
+    /// under the message being answered there, for the ant's dreams, whose packets show it
+    /// ([`TimelineEntry::Rejected`]). Best effort, stored before the ant goes on.
+    async fn tell_rejected(&self, request: &ApprovalRequest, settled: &Settled) {
+        let message = self.answering(&request.thread_id, |e| e.id).unwrap_or(Uuid::nil());
         let (kind, title) = (request.tool.kind.clone(), request.tool.title.clone());
+        let Settled { by, decider, via, .. } = settled.clone();
         let rejection = TimelineRejection { request: request.id, kind, title, by, decider, via }.bounded();
         let entries = vec![TimelineEntry::Rejected(rejection)];
         let record = Timeline::new(self.ant.clone(), request.thread_id.clone(), message, entries, 0);
@@ -299,12 +325,12 @@ impl NatsApprover {
             return Ok(Vec::new());
         };
         let text = chain_text(request, &to);
-        let answering = self.answering.locked().get(&request.thread_id).map(|e| e.allow.clone());
+        let allow = self.answering(&request.thread_id, |e| e.allow.clone()).flatten();
         for member in &to {
             let envelope =
                 Envelope::on_thread(request.thread_id.clone(), self.ant.clone(), member.clone(), text.clone())
                     .with_escalation(Some((*escalation).clone()))
-                    .with_allow(answering.clone().flatten());
+                    .with_allow(allow.clone());
             let id = format!("approval-{}-{}-{member}", self.ant, request.id);
             bus::store(&self.js, envelope.subject(), &envelope, &id).await?;
             crate::monitoring::status::escalated(&self.client, &envelope);
@@ -322,11 +348,11 @@ impl NatsApprover {
             return None;
         }
         let escalation = Escalation::of_request(request).to_assistant(assistant.clone(), human.clone());
-        let answering = self.answering.locked().get(&request.thread_id).and_then(|e| e.allow.clone());
+        let allow = self.answering(&request.thread_id, |e| e.allow.clone()).flatten();
         let text = assistant_text(request, &assistant, human);
         let envelope = Envelope::on_thread(request.thread_id.clone(), self.ant.clone(), assistant.clone(), text)
             .with_escalation(Some(escalation))
-            .with_allow(answering);
+            .with_allow(allow);
         let id = format!("approval-{}-{}-{assistant}", self.ant, request.id);
         match bus::store(&self.js, envelope.subject(), &envelope, &id).await {
             Ok(_) => {
@@ -369,10 +395,8 @@ impl NatsApprover {
     }
 
     async fn ask(&self, thread: ThreadId, tool: ToolCall, (options, labels): Offer) -> Result<Verdict> {
-        let human = {
-            let answering = self.answering.locked();
-            self.humans.owner_or_default(answering.get(&thread).and_then(|e| e.owner.as_ref()))
-        };
+        let owner = self.answering(&thread, |e| e.owner.clone()).flatten();
+        let human = self.humans.owner_or_default(owner.as_ref());
         let request = ApprovalRequest::new(self.ant.clone(), thread, tool, options, self.timeout)
             .labelled(labels)
             .for_human(Some(human.clone()), self.chain.stand_in.clone());
@@ -392,7 +416,7 @@ impl NatsApprover {
             self.waiting.locked().remove(&id);
         });
         self.store(&request).await?;
-        if let Some(asked) = self.asked.locked().get_mut(&request.thread_id) {
+        if let Some((_, asked)) = self.answering.locked().get_mut(&request.thread_id) {
             *asked += 1;
         }
         let mut asked = self.ask_chain_logged(&request).await;
@@ -406,14 +430,15 @@ impl NatsApprover {
                 Err(_) => {
                     tracing::info!(request = %request.id, "approval request expired; rejecting");
                     self.tell_expired(&request, &asked).await;
-                    Some((Verdict::Reject, DecidedBy::Expiry, None, None))
+                    Some(Settled::expired())
                 }
             };
-        let verdict = decided.as_ref().map_or(Verdict::Reject, |(verdict, ..)| *verdict);
-        if let Some((verdict, by, decider, via)) = decided {
+        let verdict = decided.as_ref().map_or(Verdict::Reject, |settled| settled.verdict);
+        if let Some(settled) = decided {
             if verdict == Verdict::Reject {
-                self.tell_rejected(&request, by, decider.clone(), via.clone()).await;
+                self.tell_rejected(&request, &settled).await;
             }
+            let Settled { verdict, by, decider, via } = settled;
             let decided = StatusUpdate::Decided { request_id: request.id, verdict, by, decider, via };
             crate::monitoring::status::publish(&self.client, &self.ant, &request.thread_id, decided);
         }
@@ -480,10 +505,17 @@ impl NatsApprover {
                     continue;
                 }
             };
-            self.tell_decided(request, &decision).await;
-            // A verdict the harness did not offer counts as a rejection.
-            return Some((request.decide(decision.verdict).verdict, DecidedBy::Human, decision.by, None));
+            return Some(self.settle_human(request, decision).await);
         }
+    }
+
+    /// How `request` is settled by `decision`, a human's the stream stored, which comes before any other: the human
+    /// the request waited for is told when another one decided it. A verdict the harness did not offer counts as a
+    /// rejection.
+    async fn settle_human(&self, request: &ApprovalRequest, decision: ApprovalDecision) -> Settled {
+        self.tell_decided(request, &decision).await;
+        let verdict = request.decide(decision.verdict).verdict;
+        Settled { verdict, by: DecidedBy::Human, decider: decision.by, via: None }
     }
 
     /// How `request` is settled by `decision` of `from` in its ant's chain, unless a decision of a human stored by now
@@ -494,11 +526,10 @@ impl NatsApprover {
             None
         });
         if let Some(human) = human {
-            self.tell_decided(request, &human).await;
-            return (request.decide(human.verdict).verdict, DecidedBy::Human, human.by, None);
+            return self.settle_human(request, human).await;
         }
         tracing::info!(request = %request.id, %from, verdict = decision.verdict.as_str(), "decided by the ant's chain");
-        (decision.verdict, DecidedBy::Chain, Some(from), None)
+        Settled::chain(from, decision.verdict)
     }
 
     /// How `request` is settled by a decision of `held` its human consents to now ([`Self::consented`]), unless a
@@ -506,11 +537,9 @@ impl NatsApprover {
     async fn settle_held(&self, request: &ApprovalRequest, held: &mut Vec<Held>) -> Option<Settled> {
         let consented = self.consented(request, held)?;
         if let Ok(Some(human)) = self.stored(request).await {
-            self.tell_decided(request, &human).await;
-            return Some((request.decide(human.verdict).verdict, DecidedBy::Human, human.by, None));
+            return Some(self.settle_human(request, human).await);
         }
-        let Held { human, assistant, verdict } = consented;
-        Some((request.decide(verdict).verdict, DecidedBy::Human, Some(human), Some(assistant)))
+        Some(Settled::consented(request, consented))
     }
 
     /// The decision of `held` that takes effect, as its human consents to it now: confirmed by the human's signed
@@ -615,90 +644,13 @@ impl NatsApprover {
 /// See [`NatsApprover::begin`].
 pub struct Turn {
     answering: Answering,
-    asked: Asked,
     thread: ThreadId,
 }
 
 impl Drop for Turn {
     fn drop(&mut self) {
         self.answering.locked().remove(&self.thread);
-        self.asked.locked().remove(&self.thread);
     }
-}
-
-/// The message on `request`'s thread that tells its owner, else the default human of `humans`, that the request
-/// expired unanswered after `timeout` and was rejected. `answering` is the message the ant was answering, naming the
-/// thread's owner and creator. On a thread of its own, naming the request's, so that `ants ask --wait` on the request's
-/// thread still waits for the ant's reply that follows. It carries the request's escalation, for `ants webhook serve`
-/// to push it.
-fn expired_notice(
-    ant: &UserId,
-    request: &ApprovalRequest,
-    timeout: Duration,
-    answering: Option<&Envelope>,
-    humans: &Registry,
-) -> Envelope {
-    let owner = humans.human_owner(answering.and_then(|e| e.owner.as_ref()));
-    let (id, thread, tool) = (request.id, &request.thread_id, &request.tool);
-    let mut text = format!(
-        "[ants] Tool request {ant}/{id} on thread {thread} expired unanswered after {} and was rejected: {} ({}). \
-         {ant} goes on without it.",
-        ants_proto::duration::format(timeout),
-        tool.title,
-        tool.kind,
-    );
-    if !tool.locations.is_empty() {
-        let _ = write!(text, "\nFiles: {}", tool.locations.join(", "));
-    }
-    let _ = write!(
-        text,
-        "\nTo retry, ask again with `ants ask --thread {thread} @{ant} TEXT` and decide the new request in time \
-         (`ants tools list -f`). To wait longer, raise {ant}'s approval_timeout; to let such calls run unasked, add \
-         an allow rule matching them."
-    );
-    let to = owner.clone().unwrap_or_else(|| humans.default_human().clone());
-    Envelope::new(ant.clone(), to, text)
-        .with_owner(owner)
-        .with_creator(answering.and_then(|e| humans.ant_creator(e.creator.as_ref())))
-        .with_origin_thread(answering.and_then(|e| e.origin_thread.clone()))
-        .with_escalation(Some(Escalation::of_request(request)))
-}
-
-/// The message that tells the human `request` waited for that the human `decision` names, another one, decided it: on
-/// a thread of its own, as [`expired_notice`] is, and carrying no escalation, as nothing is left to decide. None for a
-/// decision naming no human, or the one the request waited for.
-fn decided_notice(request: &ApprovalRequest, decision: &ApprovalDecision) -> Option<Envelope> {
-    let (Some(human), Some(by)) = (&request.human, &decision.by) else { return None };
-    if by == human {
-        return None;
-    }
-    let (ant, id, thread, tool) = (&request.ant, request.id, &request.thread_id, &request.tool);
-    let text = format!(
-        "[ants] {by} decided tool request {ant}/{id} on thread {thread} in place of {human}: {}. Tool: {} ({}).",
-        request.decide(decision.verdict).verdict.as_str(),
-        tool.title,
-        tool.kind,
-    );
-    Some(
-        Envelope::new(ant.clone(), human.clone(), text)
-            .with_owner(Some(human.clone()))
-            .as_notice(ants_proto::NoticeKind::InPlace),
-    )
-}
-
-/// The message on `request`'s thread that tells `member`, an ant of the chain asked to decide it, that it expired
-/// unanswered after `timeout` and was rejected. It carries no escalation: there is nothing left to decide.
-fn expired_member_notice(ant: &UserId, request: &ApprovalRequest, timeout: Duration, member: &UserId) -> Envelope {
-    let (id, thread, tool) = (request.id, &request.thread_id, &request.tool);
-    let text = format!(
-        "[ants] Approval request {id} on thread {thread} expired unanswered after {} and was rejected: {} ({}). \
-         {ant} goes on without it; decide_approval no longer applies to it, and no answer is needed.",
-        ants_proto::duration::format(timeout),
-        tool.title,
-        tool.kind,
-    );
-    Envelope::on_thread(thread.clone(), ant.clone(), member.clone(), text)
-        .as_notice(ants_proto::NoticeKind::RequestExpired)
 }
 
 /// The next message of `subscriber`, if there is one; without one, never.
@@ -706,55 +658,6 @@ async fn next_message(subscriber: &mut Option<bus::LiveInbox>) -> Option<async_n
     match subscriber {
         Some(subscriber) => subscriber.next().await,
         None => std::future::pending().await,
-    }
-}
-
-/// What every ant of the chain, `to`, gets about `request`: how to decide it, and the tool call.
-fn chain_text(request: &ApprovalRequest, to: &[UserId]) -> String {
-    let verdicts: Vec<&str> = request.options.iter().map(|v| v.as_str()).collect();
-    let to: Vec<&str> = to.iter().map(UserId::as_str).collect();
-    let (ant, id, thread) = (&request.ant, request.id, &request.thread_id);
-    let mut text = format!(
-        "[ants] Approval request {id} on thread {thread}: {ant} asks to run a tool outside its allowlist. Sent to \
-         {}; any of them decides with the decide_approval tool ({}). Humans may decide too, with `ants tools \
-         approve {ant}/{id}` or `ants tools reject {ant}/{id}`; the first decision wins. Without one by {} the \
-         request is rejected.",
-        to.join(", "),
-        verdicts.join(", "),
-        request.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    );
-    tool_lines(&mut text, request);
-    text
-}
-
-/// What the assistant of `human`, the human `request` waits for, gets about it: how to decide it for the human, and
-/// the tool call.
-fn assistant_text(request: &ApprovalRequest, assistant: &UserId, human: &UserId) -> String {
-    let verdicts: Vec<&str> = request.options.iter().map(|v| v.as_str()).collect();
-    let (ant, id, thread) = (&request.ant, request.id, &request.thread_id);
-    let mut text = format!(
-        "[ants] Tool request {ant}/{id} on thread {thread}: {ant} asks to run a tool outside its allowlist and waits \
-         for {human}, who has the request too; it comes to {assistant}, the assistant of {human}, first. Decide it \
-         for {human} with decide_for_human {ant}/{id} ({}), which takes effect once {human} confirms it or a \
-         pre-allow rule covers it, or leave it to {human}. Without a decision by {} the request is rejected.",
-        verdicts.join(", "),
-        request.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    );
-    tool_lines(&mut text, request);
-    text
-}
-
-/// Add to `text` the tool call of `request`.
-fn tool_lines(text: &mut String, request: &ApprovalRequest) {
-    let _ = write!(text, "\n\nTool: {} ({})", request.tool.title, request.tool.kind);
-    if !request.tool.locations.is_empty() {
-        let _ = write!(text, "\nFiles: {}", request.tool.locations.join(", "));
-    }
-    if let Some(input) = &request.tool.input {
-        let _ = write!(text, "\nInput: {input}");
-    }
-    if let Some(always) = request.label(Verdict::AllowAlways) {
-        let _ = write!(text, "\nallow_always: {always}");
     }
 }
 
