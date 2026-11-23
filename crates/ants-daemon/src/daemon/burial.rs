@@ -47,7 +47,8 @@ impl Inbox<'_> {
     /// Bury `msg` as `dead` ([`dead::bury_letter`]), or, [`Letter::Kept`] in the machine's outbox on an earlier delivery,
     /// as the letter the hub's stream may hold already ([`dead::bury_kept`]). A dead letter kept in the machine's outbox is
     /// noted in `buried`, so the redelivery buries it again, even in a restarted daemon; on the last delivery, with its
-    /// ack subject, for [`Inbox::finish_buried`].
+    /// ack subject, for [`Inbox::finish_buried`]. The answer or reply kept on the machine for the message's retry is
+    /// forgotten: none follows.
     pub(super) async fn bury_letter(
         &self,
         incoming: &Incoming,
@@ -79,6 +80,7 @@ impl Inbox<'_> {
             Burial::Hub(_) => self.buried.forget(&incoming.envelope).await,
             Burial::Outbox => self.keep_letter(incoming, msg, dead).await,
         }
+        self.answered.forget_kept(&incoming.envelope).await;
         Ok(())
     }
 
