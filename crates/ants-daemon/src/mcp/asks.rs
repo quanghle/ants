@@ -53,7 +53,7 @@ impl Stored {
     }
 }
 
-/// What a message from the inbox consumer is to the asks ([`Hub::claim`]).
+/// What a message from the inbox consumer is to the asks ([`Mcp::claim`](super::Mcp::claim)).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Claim {
     /// An ordinary message.
