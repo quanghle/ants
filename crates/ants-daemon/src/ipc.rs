@@ -1,5 +1,6 @@
 //! The local endpoint of a daemon's MCP server that `ants mcp` bridges a harness's stdio to, which only the daemon's
-//! user may connect to: a Unix socket with mode 0600 in the daemon's home, or on Windows a named pipe with an
+//! user may connect to: a Unix socket with mode 0600 in the daemon's home, or, when that path is too long for a Unix
+//! socket, in a directory of the user's own with mode 0700 under the runtime directory; on Windows a named pipe with an
 //! unguessable name, an access list admitting only the daemon's user, and remote clients refused.
 
 use std::io;
@@ -20,14 +21,82 @@ mod unix {
     /// Whether a connection may be half-closed, so the other side sees the end of what was sent and still answers.
     pub const HALF_CLOSE: bool = true;
 
-    /// Listens on `<home>/mcp.sock`.
+    /// The longest path a Unix socket takes, in bytes: `sun_path` holds it and its NUL.
+    pub const MAX_PATH: usize = if cfg!(any(target_os = "linux", target_os = "android")) { 107 } else { 103 };
+
+    /// Listens on `<home>/mcp.sock`, or on the socket [`address`] names when that path is too long.
     pub struct Listener(UnixListener);
 
+    /// Where the daemon serving the ant at `home` listens: `<home>/mcp.sock`, unless that path is longer than a Unix
+    /// socket takes (`MAX_PATH`); then `ants-<uid>/<hash of home>.sock` in `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else
+    /// `/tmp`, the first where it fits, refusing a directory another user owns or others may enter. Creates nothing:
+    /// binding creates that directory, mode 0700.
+    pub fn address(home: &Path) -> Result<PathBuf> {
+        locate(home, false)
+    }
+
+    fn locate(home: &Path, create: bool) -> Result<PathBuf> {
+        let path = home.join("mcp.sock");
+        if fits(&path) {
+            return Ok(path);
+        }
+        let runtime = ["XDG_RUNTIME_DIR", "TMPDIR"].into_iter().filter_map(std::env::var_os).map(PathBuf::from);
+        let runtime = runtime.filter(|dir| dir.is_absolute()).chain([PathBuf::from("/tmp")]);
+        let mut tried = Vec::new();
+        for dir in runtime {
+            match in_runtime(&dir, home, create) {
+                Ok(path) => return Ok(path),
+                Err(e) => tried.push(format!("{e:#}")),
+            }
+        }
+        anyhow::bail!(
+            "{} is longer than a Unix socket takes ({MAX_PATH} bytes), and no runtime directory serves instead: {}",
+            path.display(),
+            tried.join("; ")
+        )
+    }
+
+    fn fits(path: &Path) -> bool {
+        use std::os::unix::ffi::OsStrExt as _;
+        path.as_os_str().as_bytes().len() <= MAX_PATH
+    }
+
+    /// The socket of the daemon serving the ant at `home` under the runtime directory `runtime`, its directory
+    /// created if `create`.
+    pub(crate) fn in_runtime(runtime: &Path, home: &Path, create: bool) -> Result<PathBuf> {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+        let uid = rustix::process::getuid().as_raw();
+        let dir = runtime.join(format!("ants-{uid}"));
+        let hash = ring::digest::digest(&ring::digest::SHA256, home.as_os_str().as_bytes());
+        let path = dir.join(format!("{}.sock", &data_encoding::HEXLOWER.encode(hash.as_ref())[..16]));
+        anyhow::ensure!(fits(&path), "{} is too long too", path.display());
+        let created = if create { std::fs::DirBuilder::new().mode(0o700).create(&dir) } else { Ok(()) };
+        match created {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e).with_context(|| format!("creating {}", dir.display())),
+        }
+        let meta = match std::fs::symlink_metadata(&dir) {
+            Err(e) if !create && e.kind() == io::ErrorKind::NotFound => return Ok(path),
+            meta => meta.with_context(|| format!("reading {}", dir.display()))?,
+        };
+        anyhow::ensure!(meta.is_dir(), "{} is no directory", dir.display());
+        anyhow::ensure!(meta.uid() == uid, "{} belongs to another user", dir.display());
+        anyhow::ensure!(
+            meta.mode() & 0o077 == 0,
+            "others may enter {} (mode {:o})",
+            dir.display(),
+            meta.mode() & 0o777
+        );
+        Ok(path)
+    }
+
     impl Listener {
-        /// Listen in `home`, replacing a socket left behind; returns the address to [`connect`] to.
+        /// Listen for the ant at `home`, replacing a socket left behind; returns the address to [`connect`] to.
         pub fn bind(home: &Path) -> Result<(Self, PathBuf)> {
             use std::os::unix::fs::PermissionsExt as _;
-            let path = home.join("mcp.sock");
+            let path = locate(home, true)?;
             // A socket left behind, as a rule none; one that stays fails the bind.
             let _ = std::fs::remove_file(&path);
             let listener = UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
@@ -182,5 +251,34 @@ mod windows {
         // SAFETY: allocated by ConvertSidToStringSidW, no longer used.
         unsafe { LocalFree(text as HLOCAL) };
         Ok(sid)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    #[test]
+    fn a_home_too_long_for_a_socket_binds_in_a_directory_of_the_user_s_own() {
+        // Short, as a runtime directory is.
+        let runtime = Path::new("/tmp").join(format!("ants-ipc-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&runtime);
+        std::fs::create_dir(&runtime).unwrap();
+        let home = Path::new("/home").join("deep".repeat(30));
+        assert_eq!(address(Path::new("/home/dev")).unwrap(), Path::new("/home/dev/mcp.sock"));
+
+        let path = in_runtime(&runtime, &home, false).unwrap();
+        assert!(!path.parent().unwrap().exists(), "an address alone creates nothing");
+        assert_eq!(in_runtime(&runtime, &home, true).unwrap(), path);
+        let dir = path.parent().unwrap();
+        assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_ne!(in_runtime(&runtime, Path::new("/home/other"), false).unwrap(), path, "one socket per home");
+
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let open = in_runtime(&runtime, &home, true).unwrap_err();
+        assert!(format!("{open:#}").contains("others may enter"), "{open:#}");
+        std::fs::remove_dir_all(&runtime).unwrap();
     }
 }

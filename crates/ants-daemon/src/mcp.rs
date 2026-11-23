@@ -80,6 +80,10 @@ mod tools;
 mod trails;
 mod turn;
 
+/// Where the MCP socket of the ant at a home goes: `<home>/mcp.sock`, else, that path too long for a Unix socket, one in
+/// the runtime directory.
+#[cfg(unix)]
+pub use crate::ipc::address as socket_address;
 pub use asks::Claim;
 pub use assist::{HumanMessage, HumanSealing, HumanStore, jetstream_store};
 pub use attach::{FileAccess, jetstream_files};

@@ -102,6 +102,9 @@ impl fmt::Display for Limited {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
             LimitKind::Quota => write!(f, "{} is out of quota: {}", self.harness, self.detail),
+            LimitKind::OpenFiles => {
+                write!(f, "{} cannot start, the daemon out of open files: {}", self.harness, self.detail)
+            }
             _ => write!(f, "{} is rate limited: {}", self.harness, self.detail),
         }
     }

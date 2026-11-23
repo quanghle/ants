@@ -38,6 +38,36 @@ async fn the_socket_serves_the_tools_after_the_token() {
     assert!(ClientConfig::default().serve(stranger).await.is_err());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_home_too_long_for_a_socket_serves_the_tools_from_the_runtime_directory() {
+    let home = home("long");
+    let long = home.join("a-home-nested-deep-enough-that-its-mcp-socket-path-is-past-sun-len".repeat(2));
+    std::fs::create_dir_all(&long).unwrap();
+    assert!(long.join("mcp.sock").as_os_str().len() > ipc::MAX_PATH);
+    let (mcp, mut sent) = start(&long).await;
+    let current = from_human();
+    let _turn = mcp.begin(&current);
+    let [McpServer::Stdio(server)] =
+        &mcp.servers()(&crate::harness::McpSession::test(&current.thread_id, Path::new("/"), false))[..]
+    else {
+        panic!("stdio")
+    };
+    let socket = Path::new(&server.args[2]);
+    assert!(socket.as_os_str().len() <= ipc::MAX_PATH, "{}", socket.display());
+    assert!(!socket.starts_with(&long), "{}", socket.display());
+    let token = &server.env.iter().find(|e| e.name == TOKEN_ENV).unwrap().value;
+    let mut stream = ipc::connect(socket).await.unwrap();
+    stream.write_all(format!("{token}\n").as_bytes()).await.unwrap();
+    let client = ClientConfig::default().serve(stream).await.unwrap();
+    let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "human", "text": "done"})).await;
+    assert!(ok, "{text}");
+    assert!(sent.recv().await.unwrap().to.is_human());
+    drop(client);
+    drop(mcp);
+    assert!(!socket.exists(), "the socket is removed with the server");
+}
+
 /// Fake harnesses that note the MCP servers each session gets and, on a prompt, send the prompt's text to dev-b
 /// through the HTTP one.
 fn fake_pool(mcp: &Mcp, http: bool, seen: Arc<StdMutex<Vec<Vec<McpServer>>>>) -> Pool {

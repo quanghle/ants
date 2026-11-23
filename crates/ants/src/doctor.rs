@@ -18,8 +18,8 @@ use async_nats::jetstream;
 use serde::Serialize;
 
 use self::ants::{
-    check_ants, check_bypassed, check_host, check_machine_name, check_reactions, check_sense_kept, check_sense_logs,
-    check_shared_workdirs, check_trail_saves,
+    check_ants, check_bypassed, check_host, check_machine_name, check_mcp_sockets, check_open_files, check_reactions,
+    check_sense_kept, check_sense_logs, check_shared_workdirs, check_trail_saves,
 };
 use self::credentials::{check_backup, check_cli_creds};
 use self::leaf_node::{Leaf, check_leaf};
@@ -190,6 +190,8 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.extend(check_sense_kept(kept_host, ants, &hostname, colony, chrono::Utc::now()));
     checks.extend(host.and_then(|host| check_machine_name(host, &hostname)));
     checks.extend(check_shared_workdirs(ants, &setup.config));
+    checks.extend(check_mcp_sockets(ants, &setup.config));
+    checks.extend(check_open_files(ants, ants_daemon::limits::files::reachable()));
     checks.extend(check_sense_logs(ants));
     checks.extend(reactions);
     checks.extend(trail_saves);

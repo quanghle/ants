@@ -19,6 +19,7 @@ use crate::files::Attached;
 use crate::harness::{Prompt, SignedOut, Spend, Steering};
 use crate::limits::breaker::StartFailed;
 use crate::limits::fallback::OnFallback;
+use crate::limits::files;
 use crate::limits::overflow::ContextOverflow;
 use crate::limits::ratelimit::Limited;
 use crate::monitoring::status::{self, Status};
@@ -309,6 +310,11 @@ impl Inbox<'_> {
         worked: bool,
     ) -> Result<()> {
         let envelope = &incoming.envelope;
+        // The machine out of open files is no fault of the message: it waits as for a provider limit.
+        let e = match files::held(self.pool.launch().harness_name(), &e).filter(|_| !e.is::<OnFallback>()) {
+            Some(held) => anyhow::Error::new(held),
+            None => e,
+        };
         // Nothing ran: the harness turned the prompt away for want of signing in, so the attempt never started, and
         // the message can be withdrawn while it waits.
         if e.is::<SignedOut>() && !cut_off && !worked {
