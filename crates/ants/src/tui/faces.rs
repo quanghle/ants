@@ -173,15 +173,18 @@ impl Looks {
 /// How long after a message from an ant arrives its head nods.
 const NODS_FOR: Duration = Duration::from_secs(4);
 
-/// What `ant` does at `now`, as its head shows it: offline when no daemon serving it beats or its harness is signed
-/// out; stuck when its harness keeps failing to start or a prompt of it failed; paused while an admin paused it or a
+/// What `ant` does at `now`, as its head shows it: offline when no daemon serving it beats, its daemon cannot serve
+/// it or its harness is signed out; stuck when its harness keeps failing to start or a prompt of it failed; paused while an admin paused it or a
 /// provider limit holds it back; waiting on a human for a tool request or a question; nodding a few seconds after a message from it
 /// arrived; chewing on a tool call; thinking; else idle.
 pub fn mood(data: &Data, ant: &UserId, now: DateTime<Utc>) -> Mood {
     let entries: Vec<&ColonyEntry> =
         data.live.colony.iter().filter(|e| e.ant == *ant && colony::State::of(e, now) == colony::State::Live).collect();
     let stands: Vec<(&Stand, bool)> = data.live.progress.values().filter_map(|p| p.status.stand(ant)).collect();
-    if entries.is_empty() || entries.iter().any(|e| e.signed_out.is_some()) || stands.iter().any(|(_, out)| *out) {
+    if entries.is_empty()
+        || entries.iter().any(|e| e.signed_out.is_some() || e.unserved.is_some())
+        || stands.iter().any(|(_, out)| *out)
+    {
         return Mood::Offline;
     }
     if entries.iter().any(|e| e.failing.is_some()) || stands.iter().any(|(s, _)| **s == Stand::Failed) {

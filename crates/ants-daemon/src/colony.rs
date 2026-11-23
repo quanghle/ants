@@ -282,6 +282,7 @@ pub async fn entry(config: &Config) -> ColonyEntry {
         signed_out: None,
         limited: None,
         failing: None,
+        unserved: None,
         fallback: None,
         memory_low: None,
         paused: config.pause.get(),
@@ -304,6 +305,45 @@ pub async fn register(
     let kv = bus::ensure_colony(js, COLONY_TTL).await?;
     entry.heartbeat_at = Utc::now();
     Registration::start_with(kv, entry, COLONY_HEARTBEAT, Some(workload)).await
+}
+
+/// Keep `entry`, of an ant whose serving failed ([`ColonyEntry::unserved`]), in the colony: put it now and again every
+/// `every`, so it neither turns stale nor expires while the daemon waits to serve the ant again. Never returns; a put
+/// that fails is warned of and tried at the next beat.
+pub async fn stand_unserved(js: &jetstream::Context, mut entry: ColonyEntry, every: Duration) {
+    let mut ticks = tokio::time::interval(every);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut kv = None;
+    loop {
+        ticks.tick().await;
+        if kv.is_none() {
+            match bus::ensure_colony(js, COLONY_TTL).await {
+                Ok(store) => kv = Some(store),
+                Err(e) => beat_failed(&entry, e),
+            }
+        }
+        if let Some(kv) = &kv {
+            entry.heartbeat_at = Utc::now();
+            if let Err(e) = put(kv, &entry).await {
+                beat_failed(&entry, e);
+            }
+        }
+    }
+}
+
+/// Remove `entry`, put by [`stand_unserved`], unless the colony holds another entry for its ant now.
+pub async fn leave_unserved(js: &jetstream::Context, entry: &ColonyEntry) -> Result<()> {
+    let kv = bus::ensure_colony(js, COLONY_TTL).await?;
+    let key = entry.key();
+    let Some(found) = kv.guarded_entry(key).await.with_context(|| format!("reading {key} in the colony"))? else {
+        return Ok(());
+    };
+    let ours = found.operation == kv::Operation::Put
+        && serde_json::from_slice::<ColonyEntry>(&found.value).is_ok_and(|e| e.instance == entry.instance);
+    if ours {
+        kv.delete_expect_revision(key, Some(found.revision)).await?;
+    }
+    Ok(())
 }
 
 /// Whether a daemon may start serving an ant as `ours` without serving it twice, when the ant's colony entry is
@@ -692,8 +732,8 @@ pub fn naming_as_sage<'a>(ant: &UserId, entries: &'a [ColonyEntry], now: DateTim
     entries.iter().find(|entry| entry.ant != *ant && entry.sage.as_ref() == Some(ant) && is_live(entry, now))
 }
 
-/// The ant `request`, needing `capability`, goes to, of the entries other than `asking` that advertise it: ants not
-/// paused before paused ones, then ants whose harness is signed in and starting before those signed out or failing to
+/// The ant `request`, needing `capability`, goes to, of the entries other than `asking` that advertise it: ants served
+/// before those their daemon cannot serve, then ants not paused before paused ones, then ants whose harness is signed in and starting before those signed out or failing to
 /// start, then those held back by no provider limit before limited ones, unless a fallback answers for them, then
 /// those answered by their own harness before those answered by a fallback, then live entries before stale ones, then
 /// idle ants before those of an activity unknown to this daemon (newer daemons) and those working, then the fewest
@@ -720,6 +760,7 @@ pub(crate) fn pick<'a>(
                 Activity::Working => 2,
             };
             (
+                e.unserved.is_some(),
                 e.paused.is_some(),
                 (e.signed_out.is_some() || e.failing.is_some()) && e.fallback.is_none(),
                 e.limited.is_some() && e.fallback.is_none(),
@@ -817,6 +858,7 @@ mod tests {
             signed_out: None,
             limited: None,
             failing: None,
+            unserved: None,
             fallback: None,
             memory_low: None,
             model: None,

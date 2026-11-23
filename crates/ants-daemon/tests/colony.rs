@@ -43,6 +43,7 @@ fn entry_on(ant: &str, machine: &str) -> ColonyEntry {
         signed_out: None,
         limited: None,
         failing: None,
+        unserved: None,
         fallback: None,
         memory_low: None,
         model: None,

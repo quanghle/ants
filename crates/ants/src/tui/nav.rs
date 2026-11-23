@@ -71,7 +71,7 @@ pub fn marker(entries: &[&ColonyEntry], now: DateTime<Utc>) -> (&'static str, Co
     let live: Vec<&&ColonyEntry> =
         entries.iter().filter(|e| colony::State::of(e, now) == colony::State::Live).collect();
     let Some(entry) = live.first() else { return ("○", Color::DarkGray) };
-    if entry.signed_out.is_some() || entry.failing.is_some() {
+    if entry.unserved.is_some() || entry.signed_out.is_some() || entry.failing.is_some() {
         return ("✕", style::ERROR);
     }
     if entry.paused.is_some() {

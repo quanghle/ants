@@ -28,6 +28,7 @@ pub(crate) fn entry(ant: &str, started: i64, beat: i64, now: DateTime<Utc>) -> C
         signed_out: None,
         limited: None,
         failing: None,
+        unserved: None,
         fallback: None,
         memory_low: None,
         model: None,

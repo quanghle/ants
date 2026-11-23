@@ -3,7 +3,7 @@
 //! `ants ask` and the MCP tools warn at send time of an ant the colony lists no live daemon for; when the ant's daemon
 //! goes away later, or never comes, the message waits in the ant's inbox consumer with no word. A [`Watch`] reads back
 //! the messages one user sent ([`subject::inbox_from`]), and finds those still waiting ([`MessageMark`]: none,
-//! started or retrying) [`AFTER`] they were sent, for an ant it has seen absent from the colony, or paused, for [`AFTER`] too: the watcher
+//! started or retrying) [`AFTER`] they were sent, for an ant it has seen absent from the colony, unserved or paused, for [`AFTER`] too: the watcher
 //! of an ant is its daemon, that of a human `ants webhook serve` or `ants inbox --follow`. Whoever tells of a message
 //! first creates its marker ([`unserved_key`]), so it is told once across watchers and restarts.
 
@@ -333,20 +333,26 @@ impl Watch {
         Ok(())
     }
 
-    /// Note which ants messages wait for are absent from `entries`, the colony at `now`, or paused there (since
-    /// their pause), and the capabilities of those live.
+    /// Note which ants messages wait for are absent from `entries`, the colony at `now`, listed there unserved (since
+    /// serving first failed) or paused (since their pause), and the capabilities of those live.
     fn observe(&mut self, entries: &[ColonyEntry], now: DateTime<Utc>) {
         let live: Vec<&ColonyEntry> = entries.iter().filter(|e| crate::colony::is_live(e, now)).collect();
         for entry in &live {
             self.capabilities.insert(entry.ant.clone(), entry.capabilities.clone());
         }
-        let paused: HashMap<&UserId, DateTime<Utc>> =
-            live.iter().filter_map(|e| Some((&e.ant, e.paused.as_ref()?.since))).collect();
-        let served: HashSet<&UserId> = live.iter().filter(|e| e.paused.is_none()).map(|e| &e.ant).collect();
+        let unserved: HashMap<&UserId, DateTime<Utc>> =
+            live.iter().filter_map(|e| Some((&e.ant, e.unserved.as_ref()?.since))).collect();
+        let paused: HashMap<&UserId, DateTime<Utc>> = live
+            .iter()
+            .filter(|e| e.unserved.is_none())
+            .filter_map(|e| Some((&e.ant, e.paused.as_ref()?.since)))
+            .collect();
+        let served: HashSet<&UserId> =
+            live.iter().filter(|e| e.paused.is_none() && e.unserved.is_none()).map(|e| &e.ant).collect();
         let awaited: HashSet<&UserId> = self.sent.values().map(|sent| &sent.to).collect();
         self.absent_since.retain(|ant, _| awaited.contains(ant) && !served.contains(ant));
         for ant in awaited.into_iter().filter(|ant| !served.contains(ant)) {
-            let since = paused.get(ant).copied().unwrap_or(now);
+            let since = unserved.get(ant).or_else(|| paused.get(ant)).copied().unwrap_or(now);
             self.absent_since.entry(ant.clone()).and_modify(|at| *at = (*at).min(since)).or_insert(since);
         }
         self.paused = paused.into_keys().cloned().collect();
@@ -409,12 +415,13 @@ fn sent(
     })
 }
 
-/// The live ants of `entries` but `not`, not paused, advertising some of `capabilities`: the most shared first, then by
+/// The live ants of `entries` but `not`, served and not paused, advertising some of `capabilities`: the most shared first, then by
 /// id.
 fn peers(capabilities: &[String], entries: &[ColonyEntry], not: &[&UserId], now: DateTime<Utc>) -> Vec<Peer> {
     let mut peers: Vec<Peer> = entries
         .iter()
-        .filter(|e| !not.contains(&&e.ant) && crate::colony::is_live(e, now) && e.paused.is_none())
+        .filter(|e| !not.contains(&&e.ant) && crate::colony::is_live(e, now))
+        .filter(|e| e.paused.is_none() && e.unserved.is_none())
         .filter_map(|e| {
             let shared: Vec<String> =
                 capabilities.iter().filter(|c| crate::colony::has_capability(e, c)).cloned().collect();
@@ -482,6 +489,10 @@ mod tests {
             entry("dev-e", &["rust", "docs"], stale),
             entry("dev-f", &["go"], now),
             ColonyEntry { paused: Some(ants_proto::Paused { since: now, by: None }), ..entry("dev-g", &["rust"], now) },
+            ColonyEntry {
+                unserved: Some(ants_proto::Unserved { since: now, error: "full".to_owned(), retry_at: now }),
+                ..entry("dev-h", &["rust", "docs"], now)
+            },
         ];
         let capabilities = ["rust".to_owned(), "docs".to_owned()];
         let found = peers(&capabilities, &entries, &[&p("dev-a"), &p("dev-b")], now);
@@ -542,7 +553,7 @@ mod tests {
 
     /// The watch of an ant's messages tells once of the one waiting for an ant absent long enough, suggesting the
     /// live ants with its capabilities, and not of one finished, nor of one to an ant served; nor does another watch.
-    /// An ant paused long enough counts as absent since its pause.
+    /// An ant paused long enough counts as absent since its pause, one its daemon cannot serve since serving failed.
     #[tokio::test]
     async fn tells_once_of_a_message_waiting_for_an_absent_ant() {
         let Some(server) = NatsServer::start() else { return };
@@ -555,10 +566,15 @@ mod tests {
         // dev-b is live at first, then gone; dev-c and dev-d stay, dev-c paused at last.
         let gone = Arc::new(Mutex::new(false));
         let paused = Arc::new(Mutex::new(None));
+        let unserved = Arc::new(Mutex::new(None));
         let colony: Colony = {
-            let (gone, paused) = (gone.clone(), paused.clone());
+            let (gone, paused, unserved) = (gone.clone(), paused.clone(), unserved.clone());
             Arc::new(move || {
-                let dev_c = ColonyEntry { paused: paused.locked().clone(), ..entry("dev-c", &[], later(60)) };
+                let dev_c = ColonyEntry {
+                    paused: paused.locked().clone(),
+                    unserved: unserved.locked().clone(),
+                    ..entry("dev-c", &[], later(60))
+                };
                 let mut entries = vec![dev_c, entry("dev-d", &["rust"], later(60))];
                 if !*gone.locked() {
                     entries.push(entry("dev-b", &["rust"], t0));
@@ -603,6 +619,15 @@ mod tests {
             [(&dev_c, true, later(10))]
         );
         *paused.locked() = None;
+        assert_eq!(watch.check(&is_human, later(27)).await.unwrap(), [], "served again");
+        let error = "a server error".to_owned();
+        *unserved.locked() = Some(ants_proto::Unserved { since: later(20), error, retry_at: later(37) });
+        let found = watch.check(&is_human, later(36)).await.unwrap();
+        assert_eq!(
+            found.iter().map(|f| (&f.ant, f.paused, f.absent_since)).collect::<Vec<_>>(),
+            [(&dev_c, false, later(20))]
+        );
+        *unserved.locked() = None;
 
         // Another watcher, or the same one restarted, finds it told.
         let mut other = new_watch().await;

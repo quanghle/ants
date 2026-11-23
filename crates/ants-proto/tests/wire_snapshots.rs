@@ -333,6 +333,11 @@ fn colony() {
             signed_out: Some(SignInNeeded { since: at(2), sign_in: Some("copilot login".to_owned()) }),
             limited: Some(HarnessLimit { kind: LimitKind::RateLimit, since: at(3), until: at(8) }),
             failing: Some(HarnessFailing { since: at(4), error: "harness exited".to_owned() }),
+            unserved: Some(Unserved {
+                since: at(4),
+                error: "the ANTS stream holds its 10000 consumers".to_owned(),
+                retry_at: at(7),
+            }),
             fallback: Some(ServingFallback { name: "claude:sonnet".to_owned(), since: at(5) }),
             memory_low: Some(MemoryLow { since: at(5), available: 805_306_368, max_harnesses: 1 }),
             model: Some(AntModel {

@@ -232,6 +232,34 @@ fn a_provider_limit_counts_only_while_it_outlasts_the_wait() {
     assert!(described.contains(", failing, paused)\n  paused since 2026-01-01T00:00:00Z: dev-q takes"), "{described}");
 }
 
+#[test]
+fn an_ant_its_daemon_cannot_serve_is_told_with_why_and_when_it_is_tried_again() {
+    let now = chrono::Utc::now();
+    let since = "2026-01-01T00:00:00Z".parse().unwrap();
+    let retry_at = "2026-01-01T00:01:00Z".parse().unwrap();
+    let mut entry = listed("dev-q", &["rust"]);
+    entry.paused = Some(ants_proto::Paused { since, by: None });
+    entry.unserved = Some(ants_proto::Unserved { since, error: "a server error".to_owned(), retry_at });
+    let why = why_unserved(&user("dev-q"), Some(&entry), now, Duration::from_mins(30)).expect("not served");
+    assert_eq!(
+        why,
+        "the daemon of dev-q on m1 cannot serve it since 2026-01-01T00:00:00Z (a server error): messages to dev-q \
+         wait queued; serving is tried again at 2026-01-01T00:01:00Z"
+    );
+    let described = describe(&[&entry]);
+    assert!(
+        described.contains(
+            "(copilot on m1, unserved)\n  not served since 2026-01-01T00:00:00Z (a server error): messages to dev-q \
+             wait queued; serving is tried again at 2026-01-01T00:01:00Z"
+        ),
+        "{described}"
+    );
+    let served = listed("dev-r", &["rust"]);
+    let entries = [ants_proto::ColonyEntry { paused: None, ..entry }, served];
+    let picked = crate::colony::pick(&entries, "rust", "", &user("dev-a"), now).map(|e| e.ant.as_str());
+    assert_eq!(picked, Some("dev-r"), "a served ant first");
+}
+
 #[tokio::test]
 async fn messages_to_an_ant_no_daemon_serves_say_so() {
     let mut stale = listed("dev-c", &["rust"]);

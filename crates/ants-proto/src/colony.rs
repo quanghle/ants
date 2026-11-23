@@ -82,6 +82,11 @@ pub struct ColonyEntry {
     /// check starts it. Missing otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failing: Option<HarnessFailing>,
+    /// Set while the daemon cannot serve the ant, its serving failed on a passing error (the `ANTS` stream at its
+    /// consumer limit, a server error): no inbox is read and messages to the ant wait queued until serving, tried again
+    /// at `retry_at`, succeeds. The workload fields are then empty. Missing while the ant is served.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unserved: Option<Unserved>,
     /// Set while a fallback of the ant answers its messages, its own harness signed out, out of quota or failing to
     /// start. Missing otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -179,6 +184,17 @@ pub struct HarnessFailing {
     pub since: DateTime<Utc>,
     /// The harness's last error.
     pub error: String,
+}
+
+/// An ant its daemon cannot serve for now, as its colony entry reports it ([`ColonyEntry::unserved`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unserved {
+    /// When serving first failed since the ant was last served.
+    pub since: DateTime<Utc>,
+    /// The last error serving it.
+    pub error: String,
+    /// When serving is tried again.
+    pub retry_at: DateTime<Utc>,
 }
 
 /// A provider limit an ant's harness ran into, as its colony entry reports it ([`ColonyEntry::limited`]).
@@ -314,6 +330,7 @@ mod tests {
             signed_out: None,
             limited: None,
             failing: None,
+            unserved: None,
             fallback: None,
             memory_low: None,
             model: None,
@@ -339,6 +356,7 @@ mod tests {
         assert!(json.contains(r#""version":"0.3.1","perms":2"#), "{json}");
         assert!(!json.contains("workdir") && !json.contains("escalate_to"), "{json}");
         assert!(!json.contains("signed_out") && !json.contains("limited") && !json.contains("failing"), "{json}");
+        assert!(!json.contains("unserved"), "{json}");
         assert!(!json.contains("agent") && !json.contains("fallback") && !json.contains("memory_low"), "{json}");
         assert!(!json.contains("model") && !json.contains("paused") && !json.contains("sage"), "{json}");
         assert!(!json.contains("profile") && !json.contains("sense_unkept"), "{json}");
@@ -391,6 +409,14 @@ mod tests {
             ..entry.clone()
         };
         round_trips(&failing, r#""failing":{"since":"2026-01-01T00:00:00Z","error":"copilot: not found"}"#);
+        let unserved = ColonyEntry {
+            unserved: Some(Unserved { since, error: "consumer limit".to_owned(), retry_at: until }),
+            ..entry.clone()
+        };
+        round_trips(
+            &unserved,
+            r#""unserved":{"since":"2026-01-01T00:00:00Z","error":"consumer limit","retry_at":"2026-01-01T00:15:00Z"}"#,
+        );
         let fallback = ColonyEntry {
             fallback: Some(ServingFallback { name: "claude:sonnet".to_owned(), since }),
             ..entry.clone()

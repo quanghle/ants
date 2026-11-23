@@ -52,7 +52,7 @@ pub fn about(e: &ColonyEntry, now: DateTime<Utc>) -> Vec<(&'static str, String)>
 }
 
 /// What holds `ant` back now, one line each: its move to another bus (`moved`), no daemon serving it, a stale entry, a
-/// harness signed out, failing to start or held by a provider limit, a fallback answering for it, low memory on its
+/// daemon that cannot serve it (why, and when it is tried again), a harness signed out, failing to start or held by a provider limit, a fallback answering for it, low memory on its
 /// machine, sense keeping none of its data. Empty when nothing does.
 pub fn holds(ant: &UserId, entry: Option<&ColonyEntry>, moved: Option<&MovedMark>, now: DateTime<Utc>) -> Vec<String> {
     if let Some(mark) = moved {
@@ -287,5 +287,21 @@ mod tests {
         let lines = holds(&ant, Some(&e), Some(&mark), now());
         assert_eq!(lines.len(), 1, "a moved ant is held by its move alone: {lines:?}");
         assert!(lines[0].starts_with("dev-a was moved to another bus by alice 5m ago"), "{lines:?}");
+    }
+
+    #[test]
+    fn an_ant_its_daemon_cannot_serve_is_held_with_why_and_when_it_is_tried_again() {
+        let ant: UserId = "dev-a".parse().unwrap();
+        let mut e = entry("dev-a", 60, 3, now());
+        e.unserved = Some(ants_proto::Unserved {
+            since: now() - chrono::Duration::seconds(30),
+            error: "a server error".to_owned(),
+            retry_at: now() + chrono::Duration::seconds(8),
+        });
+        assert_eq!(state(Some(&e), None, now()), "live, unserved");
+        assert_eq!(
+            holds(&ant, Some(&e), None, now()),
+            ["not served on m1 for 30s (a server error); messages to dev-a wait queued, tried again in 8s."]
+        );
     }
 }

@@ -39,6 +39,7 @@ async fn ants_write_their_own_colony_entry_and_everyone_reads_the_colony() {
         signed_out: None,
         limited: None,
         failing: None,
+        unserved: None,
         fallback: None,
         memory_low: None,
         model: None,

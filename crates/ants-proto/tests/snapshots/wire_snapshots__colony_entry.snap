@@ -44,6 +44,11 @@ expression: value
     "since": "2025-01-01T12:04:00Z",
     "error": "harness exited"
   },
+  "unserved": {
+    "since": "2025-01-01T12:04:00Z",
+    "error": "the ANTS stream holds its 10000 consumers",
+    "retry_at": "2025-01-01T12:07:00Z"
+  },
   "fallback": {
     "name": "claude:sonnet",
     "since": "2025-01-01T12:05:00Z"

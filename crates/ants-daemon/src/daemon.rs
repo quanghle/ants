@@ -98,6 +98,8 @@ const GROWN_WAIT: Duration = Duration::from_secs(10);
 /// failure in a row up to [`RETRY_AT_MOST`].
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_AT_MOST: Duration = Duration::from_secs(60);
+/// How long a daemon stopping while its ant waits to be served again tries to remove the ant's colony entry.
+const LEAVE_WITHIN: Duration = Duration::from_secs(2);
 
 /// A few progress periods, so one late or lost progress ack does not redeliver a message still in hand.
 const fn ack_wait(progress_every: Duration) -> Duration {
@@ -127,7 +129,9 @@ impl Stop {
 /// and serving the ant with its provider among `providers`, those of the process. Serving that fails, as when the
 /// `ANTS` stream is at its consumer limit or the server stumbles, is tried again, after a wait doubling from
 /// 1 s up to 60 s while it keeps failing; only an error of the ant's configuration
-/// ([`Misconfigured`]) ends it.
+/// ([`Misconfigured`]) ends it. While it waits, the ant's colony entry says why and when it is tried again
+/// ([`ants_proto::ColonyEntry::unserved`]), but for a built-in ant, whose entry would keep the other daemons serving it
+/// from taking over.
 pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts, providers: &Providers) -> Result<()> {
     let _serving = crate::monitoring::metrics::ant(&config.ant).serving();
     let _served = restarts.serve(&config.ant);
@@ -136,26 +140,66 @@ pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts, provide
         tracing::warn!(ant = %config.ant, fix = harness.gated_fix(), "{detail}");
     }
     let config = settle_worktrees(config).await;
-    let mut retry = RETRY_FIRST;
+    let (mut retry, mut failed_since) = (RETRY_FIRST, None);
     loop {
         let started = tokio::time::Instant::now();
-        match Box::pin(serve(&config, stop, restarts, providers)).await {
+        let mut connected = None;
+        match Box::pin(serve(&config, stop, restarts, providers, &mut connected)).await {
             Ok(Served::Stopped) => return Ok(()),
             Ok(Served::HandedOver) => tracing::info!("another daemon serves the ant; waiting for it to stop"),
             Ok(Served::Moved) => tracing::info!("the ant moved to another bus; waiting for `ants ant unseal`"),
             Err(e) if e.downcast_ref::<Misconfigured>().is_some() => return Err(e),
             Err(e) => {
                 if started.elapsed() > RETRY_AT_MOST {
-                    retry = RETRY_FIRST;
+                    (retry, failed_since) = (RETRY_FIRST, None);
                 }
                 let error = format!("{e:#}");
                 tracing::warn!(error, retry_in = ?retry, "the ant could not be served; trying again");
-                tokio::select! {
-                    () = tokio::time::sleep(retry) => {}
-                    () = stopped(stop) => return Ok(()),
+                let since = *failed_since.get_or_insert_with(chrono::Utc::now);
+                let js = connected.filter(|_| config.presence.builtin.is_none());
+                if !wait_unserved(&config, js.as_ref(), Unserved { since, error, retry_in: retry }, stop).await {
+                    return Ok(());
                 }
                 retry = retry.saturating_mul(2).min(RETRY_AT_MOST);
+                continue;
             }
+        }
+        failed_since = None;
+    }
+}
+
+/// Why and since when serving the ant failed, and how long until it is tried again.
+struct Unserved {
+    since: chrono::DateTime<chrono::Utc>,
+    error: String,
+    retry_in: Duration,
+}
+
+/// Wait `unserved.retry_in` before serving the ant again, its colony entry over `js` saying why
+/// ([`colony::stand_unserved`]) when given: true, or false on a stop, the entry then removed.
+async fn wait_unserved(config: &Config, js: Option<&jetstream::Context>, unserved: Unserved, stop: &Stop) -> bool {
+    let Unserved { since, error, retry_in } = unserved;
+    let mut entry = colony::entry(config).await;
+    let retry_at = chrono::Duration::from_std(retry_in).map_or(entry.started_at, |wait| entry.started_at + wait);
+    entry.unserved = Some(ants_proto::Unserved { since, error, retry_at });
+    let standing = async {
+        match js {
+            Some(js) => colony::stand_unserved(js, entry.clone(), ants_proto::COLONY_HEARTBEAT).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        () = tokio::time::sleep(retry_in) => true,
+        () = standing => true,
+        () = stopped(stop) => {
+            if let Some(js) = js {
+                match tokio::time::timeout(LEAVE_WITHIN, colony::leave_unserved(js, &entry)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!(error = format!("{e:#}"), "leaving the colony; the entry expires on its own"),
+                    Err(_) => tracing::warn!("leaving the colony took too long; the entry expires on its own"),
+                }
+            }
+            false
         }
     }
 }
@@ -184,7 +228,14 @@ enum Served {
 /// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its colony entry. A stop by a
 /// retirement marked while served ([`events::mark_retired`]) deletes the ant's channel and done consumers
 /// ([`bus::forget_retired`]) before it leaves the colony, which the retirement waits for to revoke its credentials.
-async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Providers) -> Result<Served> {
+/// The connection made is left in `connected`, for the colony entry of an ant whose serving failed.
+async fn serve(
+    config: &Config,
+    stop: &Stop,
+    restarts: &Restarts,
+    providers: &Providers,
+    connected: &mut Option<jetstream::Context>,
+) -> Result<Served> {
     let allow = Allowlist::parse(&config.policy.allow).context(Misconfigured("the ant's `allow` rules"))?;
     // A mark left by an earlier retirement the ant was served again after, which a provider taking no events keeps.
     let retired_before = events::retirement(&config.storage.home).await;
@@ -192,6 +243,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
         tracing::info!("stopped before connecting");
         return Ok(Served::Stopped);
     };
+    *connected = Some(js.clone());
     if !unsealed(config, &js, stop).await {
         return Ok(Served::Stopped);
     }

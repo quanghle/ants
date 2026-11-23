@@ -70,7 +70,7 @@ pub use chanadm::{ChannelAdminOutcome, ChannelAdminReply, ChannelAdminRequest, C
 pub use channels::{ChannelEntry, ChannelPost, ThreadOrigin};
 pub use colony::{
     Activity, AntModel, ColonyEntry, HarnessAgent, HarnessFailing, HarnessLimit, LimitKind, MemoryLow, Paused,
-    ServingFallback, SignInNeeded,
+    ServingFallback, SignInNeeded, Unserved,
 };
 pub use consent::{
     Act, ActAnswer, CONFIRMATIONS, Confirmations, ConfirmedAct, ConsentApplied, ConsentError, ConsentKey, Consents,

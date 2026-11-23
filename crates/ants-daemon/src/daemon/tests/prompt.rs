@@ -690,6 +690,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         signed_out: None,
         limited: None,
         failing: None,
+        unserved: None,
         fallback: None,
         memory_low: None,
         model: None,
