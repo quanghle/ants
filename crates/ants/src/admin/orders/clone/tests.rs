@@ -89,8 +89,9 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
     let origins = OriginStore::kv(a_kv, dev_a.clone());
     let hooked = Origin { by: Starter::Webhook { user: p("gh-hook") }, channel: None };
     origins.put(&talked, &hooked).await.unwrap();
-    for (thread, session) in [(&talked, "s-talk"), (&worked, "s-work")] {
-        let stored = Stored { session: session.to_owned().into(), harness: "copilot".to_owned(), cloned: false };
+    for (thread, session, cwd) in [(&talked, "s-talk", &repo), (&worked, "s-work", &tree)] {
+        let (session, cwd) = (session.to_owned().into(), cwd.clone());
+        let stored = Stored { session, harness: "copilot".to_owned(), cwd, cloned: false };
         store.put(thread, stored).await.unwrap();
     }
     let identity = Identity::new(&a_js, None, &dev_a).await.unwrap();
@@ -183,6 +184,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
         let c_store = SessionStore::kv(c_kv.clone(), dev_c.clone());
         let stored = c_store.get(&worked).await.unwrap().expect("the session is stored for dev-c");
         assert_eq!((stored.session.to_string().as_str(), stored.cloned), ("s-work", true));
+        assert_eq!(stored.cwd, copy, "the session works in dev-c's worktree");
         let c_origins = OriginStore::kv(c_kv, dev_c.clone());
         assert_eq!(c_origins.get(&talked).await.unwrap(), Some(hooked), "the thread stays the webhook's");
         assert_eq!(c_origins.get(&worked).await.unwrap(), None);

@@ -129,6 +129,11 @@ impl Launch {
         Self { thread: Some(thread.clone()), ..self.clone() }.reporting()
     }
 
+    /// The directory its sessions work in.
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
     /// The same launch, with sessions working in `cwd`.
     #[must_use]
     pub fn in_dir(self, cwd: PathBuf) -> Self {

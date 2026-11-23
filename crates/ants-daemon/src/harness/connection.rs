@@ -226,7 +226,7 @@ impl Connected<'_> {
         let mut retry = rebuild.is_none();
         let ended = loop {
             let too_many = self.observe(id, limits, spend.as_ref(), progress.as_ref());
-            let text = self.compose(rebuild, &briefed, &mut history, (from.as_deref(), &text), &lines).await;
+            let text = self.compose(rebuild.as_ref(), &briefed, &mut history, (from.as_deref(), &text), &lines).await;
             let content = std::iter::once(ContentBlock::Text(TextContent::new(text))).chain(images.iter().cloned());
             let request = self.cx.send_request(PromptRequest::new(id.clone(), content.collect())).block_task();
             let bounds = Bounds { limits, too_many: &too_many, stop: &mut stop, steers: &mut steers };
@@ -306,7 +306,7 @@ impl Connected<'_> {
     /// the first three opens with a header naming its sender ([`message_header`]), so the harness tells it from them.
     async fn compose(
         &self,
-        rebuild: Option<Rebuild>,
+        rebuild: Option<&Rebuild>,
         briefed: &str,
         history: &mut Option<History>,
         (from, text): (Option<&str>, &str),

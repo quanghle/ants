@@ -50,6 +50,16 @@ pub(super) async fn worktrees(home: &Path, copies: &[ThreadCopy]) -> Result<Vec<
 }
 
 impl Tree {
+    /// Where the clone's session of the thread works in the worktree added again in `new_home`: at the place the
+    /// session cloned worked at, in `was`, in this one.
+    pub(super) fn session_dir(&self, new_home: &Path, was: &Path) -> PathBuf {
+        let to = new_home.join("worktrees").join(self.thread.as_str());
+        match was.strip_prefix(&self.from) {
+            Ok(within) => to.join(within),
+            Err(_) => to,
+        }
+    }
+
     /// Add the worktree again in `new_home`, the home of `new` copied from `src_home`, on its own branch: the branch.
     pub(super) async fn add(&self, src_home: &Path, new_home: &Path, new: &UserId, done: &mut Done) -> Result<String> {
         let repo = match self.common.strip_prefix(src_home) {

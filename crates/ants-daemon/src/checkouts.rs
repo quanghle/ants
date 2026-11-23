@@ -109,7 +109,8 @@ impl Checkouts {
         prepared
     }
 
-    fn review_dir(&self, thread: &ThreadId) -> PathBuf {
+    /// The directory of the checkouts of the review on `thread`, there or not.
+    pub(crate) fn review_dir(&self, thread: &ThreadId) -> PathBuf {
         self.dir.join(thread.as_str())
     }
 }
