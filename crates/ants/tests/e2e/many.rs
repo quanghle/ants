@@ -11,9 +11,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ants_proto::{SESSIONS_BUCKET, UserId};
-use ants_test_support::{NatsServer, have, scratch_dir};
+use ants_test_support::{NatsServer, have, wait_until};
 
-use super::{ANTS, Killed, link_self, run};
+use super::{Fixture, count_tokens, run, wait_answered};
 
 /// Sent at once, at most this many `ants ask` at a time.
 const BATCH: usize = 32;
@@ -26,19 +26,14 @@ pub fn many_ants_in_worktrees_answer_once_and_clean_up() {
     let Some(server) = NatsServer::start() else { return };
     let stress: usize = std::env::var("ANTS_STRESS").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
     let (count, threads) = (12 * stress.max(1), 3 + stress);
-    let dir = scratch_dir("many");
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    link_self(&bin, "copilot");
+    let fixture = Fixture::new("many", &server, "copilot");
+    let dir = &fixture.dir;
     let path = std::env::join_paths(
-        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
+        std::iter::once(fixture.bin.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
     )
     .unwrap();
-    let ants = |args: &[&str]| {
-        let mut command = Command::new(ANTS);
-        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
-        command
-    };
+    let ants = |args: &[&str]| fixture.ants(args);
     let init = run(ants(&["init"]));
     assert!(init.status.success(), "ants init: {}", String::from_utf8_lossy(&init.stderr));
 
@@ -66,27 +61,19 @@ pub fn many_ants_in_worktrees_answer_once_and_clean_up() {
     }
     std::fs::write(dir.join("config.toml"), config).unwrap();
     let start_daemon = |run: usize| {
-        let log = std::fs::File::create(dir.join(format!("daemon.{run}.log"))).unwrap();
-        let child = ants(&["daemon", "--config"])
-            .arg(dir.join("config.toml"))
-            .env("PATH", &path)
-            .env("ANTS_TEST_PROMPT_DELAY_MS", "20")
-            .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .unwrap();
-        Killed(child)
+        let mut command = ants(&["daemon", "--config"]);
+        command.arg(dir.join("config.toml")).env("PATH", &path).env("ANTS_TEST_PROMPT_DELAY_MS", "20");
+        fixture.spawn_daemon(&mut command, &format!("daemon.{run}.log"))
     };
     let logs = |run: usize| {
         super::flood::tail(&std::fs::read_to_string(dir.join(format!("daemon.{run}.log"))).unwrap_or_default(), 60)
     };
-    let mut daemon = start_daemon(1);
+    let daemon = start_daemon(1);
     let limit = Duration::from_secs(60 + 60 * stress as u64);
-    let start = Instant::now();
-    while served(&ants) < count {
-        assert!(start.elapsed() < limit, "not every ant in the colony after {limit:?}\n{}", logs(1));
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    wait_until(limit, Duration::from_millis(200), || {
+        let all = served(&ants) == count;
+        all.then_some(()).ok_or_else(|| format!("not every ant in the colony\n{}", logs(1)))
+    });
 
     // A new thread per message, every ant's threads at once.
     let asks: Vec<(String, String)> = names
@@ -112,14 +99,8 @@ pub fn many_ants_in_worktrees_answer_once_and_clean_up() {
         }
     }
 
-    let start = Instant::now();
-    let mut answered = answers(&ants);
-    while sent.iter().any(|(_, token, _)| !answered.contains_key(token)) {
-        let missing: Vec<_> = sent.iter().filter(|(_, t, _)| !answered.contains_key(t)).take(10).collect();
-        assert!(start.elapsed() < limit, "unanswered after {limit:?}, such as {missing:?}\n{}", logs(1));
-        std::thread::sleep(Duration::from_secs(1));
-        answered = answers(&ants);
-    }
+    let tokens: Vec<&str> = sent.iter().map(|(_, token, _)| token.as_str()).collect();
+    wait_answered(limit, Duration::from_secs(1), &tokens, || answers(&ants), || logs(1));
     std::thread::sleep(Duration::from_secs(2));
     let twice: Vec<_> = answers(&ants).into_iter().filter(|(_, n)| *n > 1).collect();
     assert!(twice.is_empty(), "answered more than once: {twice:?}\n{}", logs(1));
@@ -127,14 +108,13 @@ pub fn many_ants_in_worktrees_answer_once_and_clean_up() {
     let shared: Vec<_> =
         sent.iter().filter(|(name, _, thread)| !worktree(name, thread).join(".git").is_file()).collect();
     assert!(shared.is_empty(), "threads without a worktree of their own: {shared:?}\n{}", logs(1));
-    assert!(daemon.0.try_wait().unwrap().is_none(), "the daemon exited\n{}", logs(1));
+    assert!(daemon.running(), "the daemon exited\n{}", logs(1));
     let log = std::fs::read_to_string(dir.join("daemon.1.log")).unwrap();
     let unbriefed = log.lines().filter(|line| line.contains("the provider sent no brief")).count();
     assert_eq!(unbriefed, 0, "sessions started without the brief\n{}", logs(1));
 
     // With the sessions gone, the next daemon removes every worktree, and every branch, none holding commits.
-    let _ = daemon.0.kill();
-    let _ = daemon.0.wait();
+    daemon.kill();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "e2e").await.unwrap();
@@ -203,23 +183,8 @@ fn served(ants: &impl Fn(&[&str]) -> Command) -> usize {
 
 /// How many replies, by any ant, carry each token.
 fn answers(ants: &impl Fn(&[&str]) -> Command) -> HashMap<String, usize> {
-    let search = ants(&["thread", "search", "--since", "1h", "--limit", "100000", "--json"]).output().unwrap();
-    assert!(search.status.success(), "ants thread search: {}", String::from_utf8_lossy(&search.stderr));
-    let mut counts = HashMap::new();
-    for line in String::from_utf8_lossy(&search.stdout).lines() {
-        let entry: serde_json::Value = serde_json::from_str(line).unwrap();
-        if matches!(entry["from"].as_str(), None | Some("human")) {
-            continue;
-        }
-        let text = entry["text"].as_str().unwrap_or_default();
-        let tokens: HashSet<&str> = text
-            .match_indices("tok-m")
-            .filter_map(|(at, _)| text.get(at..at + 10))
-            .filter(|token| token[5..].bytes().all(|b| b.is_ascii_digit()))
-            .collect();
-        for token in tokens {
-            *counts.entry(token.to_owned()).or_insert(0) += 1;
-        }
-    }
-    counts
+    let mut search = ants(&["thread", "search", "--since", "1h", "--limit", "100000", "--json"]);
+    count_tokens(&mut search, None, |text| {
+        text.get(..10).filter(|token| token.starts_with("tok-m") && token[5..].bytes().all(|b| b.is_ascii_digit()))
+    })
 }

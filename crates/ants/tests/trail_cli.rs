@@ -11,7 +11,7 @@ use ants_daemon::hub;
 use ants_daemon::people::humans::Registry;
 use ants_daemon::trail::{Conducting, Trails};
 use ants_proto::{Envelope, Role, UserId};
-use ants_test_support::{NatsServer, scratch_dir};
+use ants_test_support::{NatsServer, ants_command, scratch_dir};
 use tokio::io::{AsyncBufReadExt as _, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::mpsc;
@@ -101,15 +101,8 @@ impl Conductor {
 
 /// `ants --nats URL ARGS…` as the human, with a home of its own.
 fn ants(server: &NatsServer, home: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(ANTS);
-    command
-        .args(["--nats", &server.url])
-        .args(args)
-        .env_remove("ANTS_CREDS")
-        .env_remove("ANTS_CONFIG")
-        .env("HOME", home)
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
+    let mut command = Command::from(ants_command(ANTS));
+    command.args(["--nats", &server.url]).args(args).env("HOME", home).stdin(Stdio::null()).kill_on_drop(true);
     command
 }
 

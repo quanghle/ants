@@ -7,11 +7,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use ants_test_support::{NatsServer, scratch_dir};
+use ants_test_support::NatsServer;
 
-use super::{ANTS, Killed, link_self, run};
+use super::{Fixture, count_tokens, run, wait_answered};
 
 /// Sent at once, at most this many `ants ask` at a time.
 const BATCH: usize = 32;
@@ -20,33 +20,23 @@ pub fn a_flood_of_messages_is_answered_once_each() {
     let Some(server) = NatsServer::start() else { return };
     let stress: usize = std::env::var("ANTS_STRESS").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
     let scale = stress.max(1);
-    let dir = scratch_dir("flood");
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    link_self(&bin, "copilot");
-    let ants = |args: &[&str]| {
-        let mut command = Command::new(ANTS);
-        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
-        command
-    };
+    let fixture = Fixture::new("flood", &server, "copilot");
+    let dir = &fixture.dir;
+    let ants = |args: &[&str]| fixture.ants(args);
     let init = run(ants(&["init"]));
     assert!(init.status.success(), "ants init: {}", String::from_utf8_lossy(&init.stderr));
 
     let start_daemon = |run: usize| {
-        let log = std::fs::File::create(dir.join(format!("daemon.{run}.log"))).unwrap();
-        let child = ants(&["daemon", "--harness", "copilot", "--max-harnesses", "4"])
+        let mut command = ants(&["daemon", "--harness", "copilot", "--max-harnesses", "4"]);
+        command
             .arg("--home")
             .arg(dir.join("home"))
             .arg("--workdir")
-            .arg(&dir)
+            .arg(dir)
             .env("ANTS_ANT", "dev-a")
-            .env("PATH", &bin)
-            .env("ANTS_TEST_PROMPT_DELAY_MS", if stress > 0 { "300" } else { "20" })
-            .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .unwrap();
-        Killed(child)
+            .env("PATH", &fixture.bin)
+            .env("ANTS_TEST_PROMPT_DELAY_MS", if stress > 0 { "300" } else { "20" });
+        fixture.spawn_daemon(&mut command, &format!("daemon.{run}.log"))
     };
     let logs = || {
         let mut all = String::new();
@@ -99,8 +89,7 @@ pub fn a_flood_of_messages_is_answered_once_each() {
         assert!(!withdrawn.is_empty(), "nothing withdrawn of {} waiting\n{}", waiting.len(), logs());
         for run in [2, 3] {
             std::thread::sleep(Duration::from_secs(2));
-            let _ = daemon.0.kill();
-            let _ = daemon.0.wait();
+            daemon.kill();
             daemon = start_daemon(run);
         }
     }
@@ -109,21 +98,14 @@ pub fn a_flood_of_messages_is_answered_once_each() {
     let expected: Vec<&str> =
         sent.iter().map(|(token, ..)| token.as_str()).filter(|token| !withdrawn.contains(*token)).collect();
     let limit = Duration::from_secs(60 + 300 * stress as u64);
-    let start = Instant::now();
-    let mut answered = answers(&ants);
-    while expected.iter().any(|token| !answered.contains_key(*token)) {
-        let missing: Vec<_> = expected.iter().filter(|token| !answered.contains_key(**token)).take(10).collect();
-        assert!(start.elapsed() < limit, "unanswered after {limit:?}, such as {missing:?}\n{}", logs());
-        std::thread::sleep(Duration::from_secs(1));
-        answered = answers(&ants);
-    }
+    wait_answered(limit, Duration::from_secs(1), &expected, || answers(&ants), logs);
     std::thread::sleep(Duration::from_secs(2));
     let answered = answers(&ants);
     let twice: Vec<_> = answered.iter().filter(|(_, n)| **n > 1).collect();
     assert!(twice.is_empty(), "answered more than once: {twice:?}\n{}", logs());
     let despite: Vec<_> = withdrawn.iter().filter(|token| answered.contains_key(*token)).collect();
     assert!(despite.is_empty(), "answered though withdrawn: {despite:?}\n{}", logs());
-    assert!(daemon.0.try_wait().unwrap().is_none(), "the daemon exited\n{}", logs());
+    assert!(daemon.running(), "the daemon exited\n{}", logs());
 }
 
 /// Run `ants ask` with each of `asks`' arguments, [`BATCH`] at a time; each message's token, thread and id.
@@ -154,27 +136,12 @@ fn send_all(ants: &impl Fn(&[&str]) -> Command, asks: Vec<Vec<String>>) -> Vec<(
 
 /// How many of dev-a's replies carry each token.
 fn answers(ants: &impl Fn(&[&str]) -> Command) -> HashMap<String, usize> {
-    // Read as it runs: the replies, each carrying the sense brief, fill a pipe `run` would leave unread.
-    let search = ants(&["thread", "search", "--from", "dev-a", "--since", "1h", "--limit", "100000", "--json"])
-        .output()
-        .unwrap();
-    assert!(search.status.success(), "ants thread search: {}", String::from_utf8_lossy(&search.stderr));
-    let mut counts = HashMap::new();
-    for line in String::from_utf8_lossy(&search.stdout).lines() {
-        let entry: serde_json::Value = serde_json::from_str(line).unwrap();
-        let text = entry["text"].as_str().unwrap_or_default();
-        let tokens: HashSet<&str> = text
-            .match_indices("tok-")
-            .filter_map(|(at, _)| text.get(at..at + 10))
-            .filter(|token| {
-                token[4..5].chars().all(|c| c == 't' || c == 's') && token[5..].bytes().all(|b| b.is_ascii_digit())
-            })
-            .collect();
-        for token in tokens {
-            *counts.entry(token.to_owned()).or_insert(0) += 1;
-        }
-    }
-    counts
+    let mut search = ants(&["thread", "search", "--from", "dev-a", "--since", "1h", "--limit", "100000", "--json"]);
+    count_tokens(&mut search, Some("dev-a"), |text| {
+        text.get(..10).filter(|token| {
+            token[4..5].chars().all(|c| c == 't' || c == 's') && token[5..].bytes().all(|b| b.is_ascii_digit())
+        })
+    })
 }
 
 pub fn tail(text: &str, lines: usize) -> String {
