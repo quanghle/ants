@@ -19,11 +19,11 @@ use std::time::{Duration, Instant};
 
 use ants_proto::provider::BoxFuture;
 use ants_proto::{JsDomain, Machine, SenseId, UserId};
-use ants_sense::cache::Cache;
 use ants_sense::export::{self, SenseExport};
 use ants_sense::home::Home;
 use ants_sense::identity;
 use ants_sense::log::{AntLog, EventLog, LogErrorKind};
+use ants_sense::store::Cache;
 use ants_sense::store::{Items, Shared, Store, StoreError, Stores, is_offline};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;

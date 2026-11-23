@@ -46,7 +46,10 @@ windows-sys = "0.61.2"
 unused_dependencies = "warn"
 
 [workspace.lints.clippy]
-# Lint suppressions are `#[expect(lint, reason = "...")]`, which fails once the lint no longer fires.
+# Lint suppressions are `#[expect(lint, reason = "...")]`, which fails once the lint no longer fires. Two crate-level
+# allows stay, the `allow(linker_messages)` of crates/ants/src/main.rs and crates/ants-daemon/src/lib.rs: the lint
+# fires only where a binary is linked, on macOS, so an expect there is unfulfilled under `cargo check` and
+# `cargo clippy`, which link nothing.
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 duration_suboptimal_units = "warn"

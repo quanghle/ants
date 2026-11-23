@@ -19,6 +19,11 @@ use crate::tools::{Answer, Handler};
 /// The items of an ant over a log of `L`, unsigned and verified against no account.
 pub type Kept<L = MemoryLog> = Shared<L, Unsigned, AccountVerifier<NoRevocations>>;
 
+/// What a test outside sense makes a proposal with.
+pub mod proposal {
+    pub use crate::proposal::{Decided, Proposal, ProposalItem, Status, propose};
+}
+
 /// The one store of every ant.
 pub struct One(pub Arc<dyn Items>);
 

@@ -89,5 +89,5 @@ skipped checks.
 ## Docs
 
 - `README.md` and `docs/` document what exists on main: update them with any change to the CLI, config file, wire or
-  services.
+  services. A test of the `ants` crate fails while a long flag of a command is named in neither.
 - User-facing text (docs, CLI messages) avoids pronouns: impersonal or imperative phrasing.

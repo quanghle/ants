@@ -94,7 +94,13 @@ fn proxy_urls_and_offsets_parse() {
     assert_eq!(parse_proxy("http://proxy:3128").unwrap(), ("proxy:3128".to_owned(), None));
     let (dial, auth) = parse_proxy("http://me:pw@proxy/").unwrap();
     assert_eq!((dial.as_str(), auth.as_deref()), ("proxy:80", Some("Basic bWU6cHc=")));
-    assert!(parse_proxy("socks5://proxy:1080").is_err());
+    let error = parse_proxy("socks5://proxy:1080").unwrap_err().to_string();
+    assert_eq!(
+        error, "\"socks5://proxy:1080\": expected http://host:port",
+        "naming no flag: HTTPS_PROXY gives one too"
+    );
+    let remote = Remote::new("https://hub/bridge", None, &[], Some("http://proxy:3128/x")).err().unwrap();
+    assert_eq!(format!("{remote:#}"), "--proxy: \"http://proxy:3128/x\": expected http://host:port");
     assert_eq!(offset("x=1&off=42"), Some(42));
     assert!(Remote::new("wss://hub/bridge", None, &[], None).is_err());
     assert!(Remote::new("https://hub/bridge?x=1", None, &[], None).is_err());

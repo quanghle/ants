@@ -32,7 +32,7 @@ pub const TOOLS: [&str; 10] =
 pub struct Calls {
     /// The week's Monday (UTC).
     pub week: NaiveDate,
-    /// The tool, without its `sense_` prefix: one of [`TOOLS`].
+    /// The tool, without its `sense_` prefix: one of `TOOLS`.
     pub tool: &'static str,
     pub calls: u32,
 }

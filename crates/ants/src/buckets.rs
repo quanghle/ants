@@ -66,12 +66,19 @@ async fn timed_after(
             Err(GetsError::Status { status, description }) => bail!("reading {bucket}: {status} {description:?}"),
             Err(GetsError::Malformed(why)) => bail!(why),
         };
-        let deleted = stored.headers.iter().any(|(name, _)| name == "KV-Operation");
+        let deleted = deleted(&stored.headers);
         if let Some(key) = subject::kv_key(bucket, &stored.subject) {
             let value = (!deleted).then_some((stored.payload, stored.stored_at));
             last.insert(key.to_owned(), (stored.seq, value));
         }
     }
+}
+
+/// Whether the `headers` a writer stored a KV entry with mark it deleted or purged: by the first `KV-Operation`, as
+/// the daemons and `ants-client` read it, which a put may carry too.
+fn deleted(headers: &[(String, String)]) -> bool {
+    let operation = headers.iter().find(|(name, _)| name == "KV-Operation");
+    operation.is_some_and(|(_, operation)| ["DEL", "PURGE"].contains(&operation.as_str()))
 }
 
 /// What a writer last put under each key, by the sequence of that message, deleted keys left out, in the order put.
@@ -84,3 +91,20 @@ fn in_put_order(last: Entries) -> Vec<(String, Vec<u8>, DateTime<Utc>)> {
 
 /// Each key's last message a writer put: its sequence, and its value and when it was put, None for a delete.
 type Entries = HashMap<String, (u64, Option<(Vec<u8>, DateTime<Utc>)>)>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_entry_is_deleted_by_its_first_kv_operation_of_del_or_purge_alone() {
+        let headers = |all: &[(&str, &str)]| -> Vec<(String, String)> {
+            all.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect()
+        };
+        assert!(deleted(&headers(&[("KV-Operation", "DEL")])) && deleted(&headers(&[("KV-Operation", "PURGE")])));
+        assert!(!deleted(&headers(&[])) && !deleted(&headers(&[("Nats-TTL", "5")])));
+        assert!(!deleted(&headers(&[("KV-Operation", "PUT")])), "a put naming its operation");
+        assert!(!deleted(&headers(&[("KV-Operation", "PUT"), ("KV-Operation", "DEL")])), "the first value counts");
+        assert!(!deleted(&headers(&[("kv-operation", "DEL")])), "the exact name");
+    }
+}

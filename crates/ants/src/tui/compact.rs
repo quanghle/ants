@@ -140,7 +140,8 @@ impl Model {
             Key::Up | Key::Down | Key::Char('j' | 'k') | Key::PageUp | Key::PageDown | Key::Home | Key::End => {
                 return None;
             }
-            Key::Tab | Key::Esc => return None,
+            // The digest is no key of the top item, and the pane has no room to draw it.
+            Key::Tab | Key::Esc | Key::Char('s') => return None,
             _ => {}
         }
         // Home again, its selection on the top item.
@@ -207,6 +208,22 @@ mod tests {
         assert!(!m.compact && m.asking().is_some_and(|a| a.full), "the request in full in the full view");
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(asked.clone())), "its thread");
         assert!(matches!(m.page(), Page::Thread(page) if page.history.thread == asked));
+    }
+
+    #[test]
+    fn s_opens_no_digest_the_pane_could_not_draw() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.compact = true;
+        let mut opening = message(1, &thread, "alice", "dev-a", "deploy");
+        opening.owner = Some(user("alice"));
+        m.stored(vec![opening, message(2, &thread, "dev-a", "alice", "deployed")], at(2));
+        let before = pane(&m, at(3));
+        assert_eq!(m.key(Key::Char('s'), at(3)), None, "no digest asked for");
+        assert!(m.compact && !m.digest_shown(), "nor opened unseen");
+        assert_eq!(pane(&m, at(3)), before);
+        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(thread)), "Enter opens the top item, not a digest's");
+        assert!(!m.compact && !m.digest_shown());
     }
 
     #[test]

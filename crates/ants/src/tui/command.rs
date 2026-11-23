@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use super::approvals::Asking;
 use super::exec::{Job, Quoted};
 use super::model::{Action, Focus, Key, Model, Page};
-use super::{attach, complete, snooze};
+use super::{attach, complete};
 use crate::tools;
 
 mod bar;

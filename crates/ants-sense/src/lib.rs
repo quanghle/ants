@@ -4,6 +4,8 @@
 //!
 //! sense asks nothing of humans: no approvals, gates, review queues or notifications.
 
+#![warn(unnameable_types)]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -16,7 +18,7 @@ use ants_proto::provider::{
 };
 
 pub(crate) mod brief;
-pub mod cache;
+pub(crate) mod cache;
 pub mod dream;
 pub mod export;
 pub(crate) mod fork;
@@ -27,7 +29,7 @@ pub mod log;
 pub mod memory;
 pub mod persona;
 pub(crate) mod promise;
-pub mod proposal;
+pub(crate) mod proposal;
 pub(crate) mod records;
 pub mod remind;
 pub(crate) mod sanitize;

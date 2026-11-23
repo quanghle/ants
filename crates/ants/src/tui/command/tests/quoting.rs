@@ -78,6 +78,8 @@ fn f_forwards_the_selected_message_else_the_thread_s_tldr() {
     assert_eq!(m.key(Key::Enter, at(2)), None, "following the latest, the thread goes, by its TL;DR");
     let refused = &m.ui.bar.status.as_ref().unwrap().text;
     assert_eq!(*refused, format!("no TL;DR of thread {thread} yet: S or /tldr asks for one, then /forward again"));
+    let dimmed = Some("no message selected and no TL;DR of the thread yet".to_owned());
+    assert_eq!(m.unfit("forward", at(2)), dimmed, "as the palette dims it");
     let tldr = ants_proto::ThreadSummary {
         thread_id: thread.clone(),
         text: "deployed".into(),
@@ -88,6 +90,7 @@ fn f_forwards_the_selected_message_else_the_thread_s_tldr() {
         tokens: 9,
     };
     m.data.cards.tldr.insert(thread, tldr.clone());
+    assert_eq!(m.unfit("forward", at(2)), None);
     let source = forward::Source::Thread(Box::new(tldr));
     let job = Job::Forward { to: user("dev-b"), source, note: String::new() };
     assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, "/forward @dev-b".into())));

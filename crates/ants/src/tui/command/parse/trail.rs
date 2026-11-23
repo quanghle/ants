@@ -58,22 +58,22 @@ pub(super) fn read(args: &str) -> Result<Trail, Option<String>> {
         }
         ("tips", rest) => flags("/trail tips", rest).map(|args| Trail::Job(Job::Tips(args))),
         ("runs", "") => Ok(Trail::Job(Job::Runs)),
-        ("run", rest) if !rest.is_empty() => trail_run(rest),
+        ("run", rest) if !rest.is_empty() => run(rest),
         ("stop", run) if !run.is_empty() && !run.contains(char::is_whitespace) => {
             run.parse().map(|run| Trail::Job(Job::Stop(run))).map_err(|e: String| Some(e))
         }
-        ("resume", rest) if !rest.is_empty() => trail_resume(rest),
+        ("resume", rest) if !rest.is_empty() => resume(rest),
         _ => Err(None),
     }
 }
 
 /// The run `/trail run`'s `args` ask for: the trail's name, then the conductor and the options of `ants trail run` in
 /// any order, then the script's args; None for its usage.
-fn trail_run(args: &str) -> Result<Trail, Option<String>> {
+fn run(args: &str) -> Result<Trail, Option<String>> {
     let error = |e: &dyn std::fmt::Display| Some(e.to_string());
     let (name, rest) = first_word(args);
     let trail = name.parse().map_err(|e| error(&e))?;
-    let (TrailOptions { conductor, limits, thread }, rest) = trail_options(rest, true)?;
+    let (Options { conductor, limits, thread }, rest) = options(rest, true)?;
     let limits = limits.over(TrailLimits::DEFAULT).map_err(|e| error(&e))?;
     let args = match rest {
         "" => None,
@@ -84,10 +84,10 @@ fn trail_run(args: &str) -> Result<Trail, Option<String>> {
 
 /// The resume `/trail resume`'s `args` ask for: the run, then the options of `ants trail resume` naming limits; None
 /// for its usage.
-fn trail_resume(args: &str) -> Result<Trail, Option<String>> {
+fn resume(args: &str) -> Result<Trail, Option<String>> {
     let (run, rest) = first_word(args);
     let run = run.parse().map_err(|e: String| Some(e))?;
-    let (TrailOptions { limits, .. }, rest) = trail_options(rest, false)?;
+    let (Options { limits, .. }, rest) = options(rest, false)?;
     if !rest.is_empty() {
         return Err(None);
     }
@@ -97,7 +97,7 @@ fn trail_resume(args: &str) -> Result<Trail, Option<String>> {
 
 /// The options of `/trail run`, else of `/trail resume`.
 #[derive(Default)]
-struct TrailOptions {
+struct Options {
     conductor: Option<UserId>,
     limits: LimitArgs,
     thread: Option<OnThread>,
@@ -105,9 +105,9 @@ struct TrailOptions {
 
 /// The options at the start of `rest`, in any order, and the text after them: the limits `ants trail run` and `ants
 /// trail resume` take, and for `/trail run` (`run`) its conductor and thread too.
-fn trail_options(mut rest: &str, run: bool) -> Result<(TrailOptions, &str), Option<String>> {
+fn options(mut rest: &str, run: bool) -> Result<(Options, &str), Option<String>> {
     let error = |e: &dyn std::fmt::Display| Some(e.to_string());
-    let mut options = TrailOptions::default();
+    let mut options = Options::default();
     loop {
         let (word, after) = first_word(rest);
         if let Some(ant) = word.strip_prefix('@').filter(|_| run) {

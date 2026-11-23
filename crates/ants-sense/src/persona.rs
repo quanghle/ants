@@ -1,7 +1,7 @@
 //! The ant's persona (requirement ants-x39hk.6.5): its values, voice, boundaries and working style, and the profile
 //! in which it tells the colony what it is good for, one item of kind [`PERSONA`]. Only `sense_identity` changes it
-//! (`propose`), and only through a proposal ([`crate::proposal`]) the ant confirms in a dream
-//! [`crate::proposal::CONFIRM_AFTER_HOURS`] or more later, at most once in [`PERSONA_EVERY_HOURS`]; each revision keeps
+//! (`propose`), and only through a proposal (`crate::proposal`) the ant confirms in a dream
+//! `crate::proposal::CONFIRM_AFTER_HOURS` or more later, at most once in [`PERSONA_EVERY_HOURS`]; each revision keeps
 //! the reason of its proposal. The brief shows it after the identity, and so does `sense_identity` without arguments;
 //! the daemon serving the ant publishes the confirmed profile in its colony entry ([`profile`]).
 

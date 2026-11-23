@@ -9,13 +9,14 @@ use ants_proto::{Machine, SenseId, UserId};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::cache::{Cache, CacheError, Hit, Pending};
+use crate::cache::Pending;
+pub use crate::cache::{Built, Cache, CacheError, Hit};
 use crate::dream::ReviewTally;
 use crate::export::SenseExport;
 use crate::items::{Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, Values};
 use crate::log::{APPEND_TRIES, AntLog, Checked, EventLog, LogError, LogErrorKind, Position, Signer, Stored, Verifier};
-use crate::thread::calls::Calls;
-use crate::thread::experience::Experience;
+pub use crate::thread::calls::Calls;
+pub use crate::thread::experience::{Experience, Tally as ExperienceTally};
 
 mod items;
 mod shared;
@@ -497,7 +498,7 @@ pub fn is_offline(error: &LogError) -> bool {
 }
 
 /// Whether the log in `log` still holds the message the cache `built` was last built from, unchanged.
-async fn holds(log: &impl EventLog, built: &crate::cache::Built) -> Result<bool, LogError> {
+async fn holds(log: &impl EventLog, built: &Built) -> Result<bool, LogError> {
     let Some(Position { sequence, tip, .. }) = &built.position else { return Ok(true) };
     if log.last_sequence(&built.sense).await? < *sequence {
         return Ok(false);

@@ -6,11 +6,10 @@ use std::time::Duration;
 use ants_proto::{ChannelId, ChannelNotify, Reaction, ThreadId, UserId};
 use chrono::TimeDelta;
 
-use super::snooze;
 use crate::admin::orders::{add, clone};
 use crate::threads::thread_meta::Marking;
 use crate::tui::exec::{AddAnt, CloneAnt};
-use crate::tui::notify;
+use crate::tui::{notify, snooze};
 
 mod trail;
 
@@ -46,6 +45,8 @@ pub enum Needs {
     Attachment,
     /// A dead letter selected, or on the thread open or selected.
     Letter,
+    /// A message selected on the thread open, else a TL;DR of the thread open or selected.
+    Forwardable,
 }
 
 const fn row(name: &'static str, args: &'static str, about: &'static str, needs: Needs) -> Row {
@@ -96,7 +97,7 @@ pub const COMMANDS: &[Row] = &[
         "forward",
         "@ANT [TEXT]",
         "hand the selected message, else the thread's TL;DR, to an ant on a new thread",
-        Needs::Thread,
+        Needs::Forwardable,
     ),
     row("attach", "PATH", "attach a file to the next message", Needs::Nothing),
     row("detach", "", "drop the files attached", Needs::Nothing),

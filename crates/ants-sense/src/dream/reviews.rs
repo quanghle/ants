@@ -94,7 +94,7 @@ pub struct ReviewedFinding {
     /// Applied, whether what the ant wrote for it still holds.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub holds: bool,
-    /// The ant's reason for its last verdict, as told with it ([`told_reason`]): the reviewed ant's text, untrusted.
+    /// The ant's reason for its last verdict, as told with it (`told_reason`): the reviewed ant's text, untrusted.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
     /// When its verdict or outcome was last told.
@@ -358,7 +358,7 @@ fn per(spent: ReviewSpend, count: u32) -> ReviewSpend {
     ReviewSpend { tokens: spent.tokens / count, cost_micros: spent.cost_micros / count }
 }
 
-/// A sage's tally of its reviews, from their records ([`review_tally`]).
+/// A sage's tally of its reviews, from their records ([`Items::review_tally`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReviewTally {
     pub reviews: u32,

@@ -5,7 +5,7 @@ use ants_proto::{
     ColonyEntry, Envelope, FindingOutcome, FindingVerdict, NoticeKind, ReviewCommit, ReviewOutcomes, ThreadId,
 };
 use ants_sense::dream::{self, ColonyTrail, ColonyTrails, Commit, Dream, REVIEW_BEGIN, Review, Signs, Tally, Thread};
-use ants_sense::proposal;
+use ants_sense::testing::proposal;
 use chrono::DateTime;
 
 use super::super::dreams::{Dreams, fit_review, review_answer, review_given, review_received, serving_sage};

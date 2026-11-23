@@ -109,7 +109,7 @@ impl Native for Claude {
 
     fn validate(harness: &Harness) -> anyhow::Result<()> {
         if let Some(mode) = harness.mode.as_deref().filter(|mode| !MODES.contains(mode)) {
-            bail!("protocol claude takes mode {}, not {mode}", MODES.join(", "));
+            bail!("protocol claude takes mode {}, not {mode}", crate::harness::one_of(MODES));
         }
         let context = harness.context.values().flat_map(|value| &value.args);
         for arg in harness.args.iter().chain(context) {

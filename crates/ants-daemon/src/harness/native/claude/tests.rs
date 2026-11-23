@@ -590,7 +590,7 @@ fn claude_errors_reach_the_daemons_classifiers() {
 fn claude_definitions_are_checked() {
     let err = |table: &str| format!("{:#}", define(&format!("command = \"claude\"\n{table}")).unwrap_err());
     let mode = err("mode = \"ask\"");
-    let modes = "default, manual, acceptEdits, plan, auto, dontAsk, bypassPermissions, not ask";
+    let modes = "default, manual, acceptEdits, plan, auto, dontAsk or bypassPermissions, not ask";
     assert!(mode.contains(&format!("protocol claude takes mode {modes}")), "{mode}");
     let own = err("args = [\"--permission-mode\", \"plan\"]");
     assert!(own.contains("protocol claude passes --permission-mode itself"), "{own}");

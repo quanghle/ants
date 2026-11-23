@@ -102,20 +102,7 @@ impl Model {
                 Ok(None)
             }
             Slash::Forward { to, note } => {
-                let chosen = match self.page() {
-                    Page::Thread(page) => page.chosen().cloned(),
-                    _ => None,
-                };
-                let source = match chosen {
-                    Some(entry) => forward::Source::Message(Box::new(entry)),
-                    None => {
-                        let thread = self.target(now)?;
-                        let tldr = self.data.cards.tldr.get(&thread).ok_or_else(|| {
-                            format!("no TL;DR of thread {thread} yet: S or /tldr asks for one, then /forward again")
-                        })?;
-                        forward::Source::Thread(Box::new(tldr.clone()))
-                    }
-                };
+                let source = self.forwardable(now)?;
                 source.check().map_err(|e| format!("{e:#}"))?;
                 run(Job::Forward { to, source, note })
             }
@@ -159,6 +146,7 @@ impl Model {
             Needs::Question => _ = self.question(now)?,
             Needs::Attachment => _ = self.marked()?,
             Needs::Letter => _ = self.letter(None, now)?,
+            Needs::Forwardable => _ = self.forwardable(now)?,
         }
         Ok(())
     }
@@ -205,6 +193,22 @@ impl Model {
             });
         }
         Ok((thread, ants))
+    }
+
+    /// What `/forward` hands on: the message selected on the thread open, else the TL;DR of the thread slash commands
+    /// act on.
+    fn forwardable(&self, now: DateTime<Utc>) -> Result<forward::Source, Unmet> {
+        if let Page::Thread(page) = self.page()
+            && let Some(entry) = page.chosen()
+        {
+            return Ok(forward::Source::Message(Box::new(entry.clone())));
+        }
+        let thread = self.target(now)?;
+        let tldr = self.data.cards.tldr.get(&thread).ok_or_else(|| Unmet {
+            told: format!("no TL;DR of thread {thread} yet: S or /tldr asks for one, then /forward again"),
+            listed: Some("no message selected and no TL;DR of the thread yet".to_owned()),
+        })?;
+        Ok(forward::Source::Thread(Box::new(tldr.clone())))
     }
 
     /// Whether a thread is open, as `/later` needs to reply on it.

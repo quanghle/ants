@@ -1,7 +1,7 @@
 //! The ant's skills (requirement ants-x39hk.6.7), in the Agent Skills layout: a skill is a directory named after it
 //! holding `SKILL.md`, whose front matter gives its `name` and `description`, and the files it refers to. Each is one
 //! item of kind [`SKILL`] named after it, its files in its values. Only `sense_skill` creates, changes or removes one,
-//! through a proposal ([`crate::proposal`]) the ant confirms in a later dream; each revision keeps the reason of its
+//! through a proposal (`crate::proposal`) the ant confirms in a later dream; each revision keeps the reason of its
 //! proposal.
 //!
 //! The confirmed skills are also files, `<home>/.sense/skills/<name>/`, which the ant's export carries
