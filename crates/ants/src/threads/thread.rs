@@ -29,7 +29,7 @@ pub use self::pick::{Pick, recent_threads, resolve};
 pub use self::summaries::Summary;
 pub(crate) use self::summaries::{Select, Threads};
 pub use self::text::{Shown, answers_to, render, table};
-pub(crate) use self::text::{answer_line, call_label, time, took};
+pub(crate) use self::text::{answer_line, call_label, time};
 pub use ants_client::entry::{Entry, Kind, NoReply, ToolCall, ToolRejection, last_reopening};
 pub use message::{MessagePick, find as find_message, recent_messages};
 

@@ -3,6 +3,7 @@
 //! keeps under its own name in [`HUMANS_BUCKET`]. The daemon that applies an act verifies them; see
 //! `ants_daemon::approvals` and, for admin orders held by their machine's daemon, `ants_daemon::admin::held`.
 
+use ants_client::text::spelling;
 use ants_daemon::Allowlist;
 use ants_daemon::admin::held::held_orders;
 use ants_daemon::bus::relayed::GuardedKv as _;
@@ -58,7 +59,7 @@ pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool) -> Result<(
                     "{}  {} chose {} for {human}; {}: {}; expires in {}",
                     tools::qualified(request),
                     a.assistant,
-                    tools::spelling(a.verdict),
+                    spelling(a.verdict),
                     request.tool.kind,
                     request.tool.title.lines().next().unwrap_or_default(),
                     tools::left(request.expires_at, now)
@@ -102,7 +103,7 @@ pub(crate) async fn answer_decision(
         bail!("{assistant}, the assistant of {human}, decided nothing on {}", tools::qualified(request));
     };
     record(js, creds, human, &assistant, held.act(request), answer, request.expires_at).await?;
-    let (verdict, id) = (tools::spelling(held.verdict), tools::qualified(request));
+    let (verdict, id) = (spelling(held.verdict), tools::qualified(request));
     Ok(match answer {
         ActAnswer::Confirm => format!("confirmed: {assistant}'s {verdict} on request {id} takes effect for {human}"),
         ActAnswer::Deny => format!("denied: {assistant}'s {verdict} on request {id} is dropped"),

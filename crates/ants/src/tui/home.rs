@@ -222,7 +222,7 @@ fn asker(data: &Data, item: &Item, request: &ApprovalRequest) -> String {
 /// page `o` opens.
 fn decided(data: &Data, request: &ApprovalRequest, mut text: String) -> String {
     for held in data.live.held.get(&(request.ant.clone(), request.id)).into_iter().flatten() {
-        let (assistant, human, verdict) = (&held.assistant, &held.human, crate::tools::spelling(held.verdict));
+        let (assistant, human, verdict) = (&held.assistant, &held.human, ants_client::text::spelling(held.verdict));
         let _ = write!(text, " · {assistant} chose {verdict} for {human}");
         if human == data.me() {
             text.push_str(": o lists it");

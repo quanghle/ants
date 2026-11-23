@@ -90,7 +90,7 @@ pub(crate) fn dead_row(seq: u64, letter: &DeadLetter) -> String {
     let time = letter.died_at.format("%Y-%m-%d %H:%M:%S");
     let (thread, from, text) = match &letter.envelope {
         Some(e) => {
-            let text = e.sealed.as_deref().map_or_else(|| e.text.clone(), crate::people::sealed::size_note);
+            let text = e.sealed.as_deref().map_or_else(|| e.text.clone(), ants_client::sealed::size_note);
             (e.thread_id.as_str(), e.from.as_str(), text)
         }
         None => ("-", "-", letter.payload.clone().unwrap_or_default()),

@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use ants_client::entry::PromptEnded;
 use ants_client::sealed::State;
-pub(crate) use ants_client::text::took;
+use ants_client::text::took;
 use ants_proto::{
     Acting, Answer, Answered, Attachment, AttachmentHandle, ChannelId, DecidedBy, MAX_TITLE, NoReplyWhy, NoticeKind,
     Pick, PromptEnd, Questions, Quote, Reacted, SummaryRequest, ThreadId, TimelineEnd, UserId, Uuid,

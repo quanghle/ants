@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ants_client::text::spelling;
 use ants_proto::{Act, ActAnswer, AdminOrder, ApprovalRequest, ORDER_HOLD, UserId, Uuid};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -96,7 +97,7 @@ impl Item {
         match self {
             Self::Order(o) => format!("{} of {} on {}", o.op.describe(), o.ant, o.machine),
             Self::Decision(d) => {
-                format!("{} on {}'s {}", tools::spelling(d.act.verdict), d.request.ant, d.request.tool.kind)
+                format!("{} on {}'s {}", spelling(d.act.verdict), d.request.ant, d.request.tool.kind)
             }
         }
     }
@@ -109,7 +110,7 @@ impl Item {
             Self::Decision(d) => format!(
                 "{}'s {} on request {} ({}: {})",
                 d.act.assistant,
-                tools::spelling(d.act.verdict),
+                spelling(d.act.verdict),
                 self.qualified(),
                 d.request.tool.kind,
                 d.request.tool.title.lines().next().unwrap_or_default()
@@ -309,7 +310,7 @@ impl Page {
                         format!(
                             "{} chose {} on {}'s {}: {}",
                             d.act.assistant,
-                            tools::spelling(d.act.verdict),
+                            spelling(d.act.verdict),
                             d.request.ant,
                             d.request.tool.kind,
                             d.request.tool.title.lines().next().unwrap_or_default()

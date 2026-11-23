@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use ants_client::text::spelling;
 use ants_proto::{ApprovalRequest, UserId, Uuid, Verdict, subject};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -204,7 +205,7 @@ impl Answers {
         match tools::answer_request(&bus.js, &bus.stream, action.seq, &request, action.verdict, &action.by, now).await {
             Ok(decision) => {
                 tracing::info!(human = %action.by, request = id, verdict = decision.verdict.as_str(), "decided on a link");
-                let body = format!("{details}<p>Stored: {}.</p>", html(tools::spelling(decision.verdict)));
+                let body = format!("{details}<p>Stored: {}.</p>", html(spelling(decision.verdict)));
                 Ok(page(StatusCode::OK, &format!("{what}: {id}"), &body))
             }
             Err(e)
@@ -224,9 +225,9 @@ impl Answers {
 pub(super) fn settled(state: &tools::State) -> String {
     match state {
         tools::State::Pending => "Pending.".to_owned(),
-        tools::State::Decided(d) => format!("Already answered: {}.", tools::spelling(d.verdict)),
+        tools::State::Decided(d) => format!("Already answered: {}.", spelling(d.verdict)),
         tools::State::DecidedByAnt(by, d) => {
-            format!("Already answered by {}: {}.", tools::deciders(by, d), tools::spelling(d.verdict))
+            format!("Already answered by {}: {}.", tools::deciders(by, d), spelling(d.verdict))
         }
         tools::State::Expired => "Expired: its ant rejected it.".to_owned(),
     }

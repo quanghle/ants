@@ -4,7 +4,7 @@
 use std::assert_matches;
 use std::path::Path;
 
-use ants_proto::{Away, DeviceId, Escalation, EscalationReason, ThreadId, ToolCall, Verdict};
+use ants_proto::{Away, DeviceId, Envelope, Escalation, EscalationReason, ThreadId, ToolCall, Verdict};
 use data_encoding::HEXLOWER;
 #[cfg(unix)]
 use http_body_util::BodyExt as _;

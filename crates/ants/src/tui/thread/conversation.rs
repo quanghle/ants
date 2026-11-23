@@ -455,7 +455,7 @@ impl Shown<'_> {
             let took = if turn.running {
                 turn.started().map(|at| crate::colony::short(crate::colony::since(at, self.now)))
             } else {
-                turn.took().and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map(crate::threads::thread::took)
+                turn.took().and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map(ants_client::text::took)
             };
             let took = took.map_or_default(|took| format!(" · {took}"));
             said.push(Span::styled(format!("{}{took}", summary(&turn.calls)), style::dim()));
@@ -677,7 +677,7 @@ pub(super) fn busy() -> Style {
 
 /// How long a call that ended took.
 fn took(call: &Call) -> String {
-    call.duration.and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map_or_default(crate::threads::thread::took)
+    call.duration.and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map_or_default(ants_client::text::took)
 }
 
 /// The local hour and minute of `at`.

@@ -39,6 +39,7 @@
 //! `ants tools list --follow` and `ants inbox --follow` follow the requests alike ([`follow`]); the inbox also shows
 //! how each ends.
 
+use ants_client::text::spelling;
 use ants_daemon::bus::relayed::{self, GuardedKv as _, Read};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -61,8 +62,6 @@ use chrono::{DateTime, TimeDelta, Utc};
 mod following;
 
 pub use following::{Update, follow, render};
-
-pub(crate) use ants_client::text::spelling;
 
 fn options(request: &ApprovalRequest) -> String {
     request.options.iter().map(|v| spelling(*v)).collect::<Vec<_>>().join("|")

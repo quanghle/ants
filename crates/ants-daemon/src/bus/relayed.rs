@@ -18,7 +18,7 @@
 //! they take async-nats messages.
 
 use ants_client::relayed as checks;
-pub use ants_client::relayed::{DIRECT_HEADERS, Read};
+pub use ants_client::relayed::Read;
 use async_nats::{HeaderMap, Message};
 
 mod gets;

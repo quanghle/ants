@@ -347,8 +347,14 @@ pub fn status_event(message: &Message) -> Option<StatusEvent> {
     if relayed::heard_relayed(message.reply.as_deref(), message.header_names()) {
         return None;
     }
-    let event = serde_json::from_slice::<StatusEvent>(&message.payload).ok()?;
-    event.check_subject(&message.subject).ok().map(|()| event)
+    status_on(&message.subject, &message.payload)
+}
+
+/// The update `payload`, on the status subject `subject`, tells; none for one that does not parse, and one naming
+/// another ant or thread than its subject.
+pub fn status_on(subject: &str, payload: &[u8]) -> Option<StatusEvent> {
+    let event = serde_json::from_slice::<StatusEvent>(payload).ok()?;
+    event.check_subject(subject).ok().map(|()| event)
 }
 
 /// The envelope `message`, heard live on an inbox subject, carries; none for one a stream relayed, one that parses
