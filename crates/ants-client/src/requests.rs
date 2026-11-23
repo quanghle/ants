@@ -308,7 +308,7 @@ pub const COLONY_BATCH: usize = 1024;
 /// The batched direct get of the last entry of each ant in the colony bucket, its answers to come on `reply`, as no
 /// consumer of a web device's lists them.
 pub fn colony_get(domain: Option<&JsDomain>, reply: String) -> Message {
-    let request = serde_json::json!({ "multi_last": [format!("$KV.{COLONY_BUCKET}.>")], "batch": COLONY_BATCH });
+    let request = serde_json::json!({ "multi_last": [subject::kv_all(COLONY_BUCKET)], "batch": COLONY_BATCH });
     let payload = serde_json::to_vec(&request).unwrap_or_default();
     Message { reply: Some(reply), ..Message::new(format!("{}DIRECT.GET.KV_{COLONY_BUCKET}", api(domain)), payload) }
 }
