@@ -17,7 +17,7 @@ ants-trail.workspace = true
 anyhow.workspace = true
 async-nats = { workspace = true, features = ["ring", "jetstream", "kv", "nkeys", "websockets", "nuid", "server_2_10", "server_2_11", "server_2_12", "server_2_14"] }
 chrono = { workspace = true, features = ["clock"] }
-crypto_secretbox = { version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "salsa20"] }
+crypto_secretbox.workspace = true
 data-encoding.workspace = true
 futures.workspace = true
 # Copilot CLI's server protocol (crate::harness::native::copilot), without features: no bundled CLI, TLS or HTTP. Pinned
@@ -26,9 +26,9 @@ github-copilot-sdk = { version = "=1.0.29", default-features = false }
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
-jiff = { version = "0.2.39", default-features = false, features = ["std", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
-nkeys = { version = "0.4.5", features = ["xkeys"] }
-ring = "0.17.14"
+jiff.workspace = true
+nkeys = { workspace = true, features = ["xkeys"] }
+ring.workspace = true
 rmcp = { workspace = true, features = ["server", "macros", "transport-streamable-http-server"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -47,13 +47,13 @@ rustix = { version = "1.1.6", default-features = false, features = ["std", "proc
 # The keychain holding NKey seeds (crate::keystore), rustls-native-certs already bringing it in; sysctl for the memory
 # available (crate::pressure).
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2.191"
+libc.workspace = true
 security-framework = { version = "3.7.0", default-features = false }
 
 # The Windows Credential Manager holding NKey seeds (crate::keystore), the MCP pipe's access list (crate::ipc) and the
 # memory available (crate::pressure).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [dev-dependencies]
 ants-sense = { workspace = true, features = ["test-support"] }

@@ -8,13 +8,13 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-use ants_test_support::{NatsServer, scratch_dir};
+use ants_test_support::{NatsServer, wait_until};
 use async_nats::jetstream;
 
-use super::{ANTS, Killed, link_self, run};
+use super::{Fixture, run};
 
 /// The hub's `max_file_store`.
 const STORE: u64 = 16 << 20;
@@ -30,15 +30,9 @@ pub fn a_full_hub_answers_once_space_returns() {
     }) else {
         return;
     };
-    let dir = scratch_dir("full");
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    link_self(&bin, "copilot");
-    let ants = |args: &[&str]| {
-        let mut command = Command::new(ANTS);
-        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
-        command
-    };
+    let fixture = Fixture::new("full", &server, "copilot");
+    let dir = &fixture.dir;
+    let ants = |args: &[&str]| fixture.ants(args);
     let init = run(ants(&["init"]));
     assert!(init.status.success(), "ants init: {}", String::from_utf8_lossy(&init.stderr));
     let config = dir.join("config.toml");
@@ -52,18 +46,10 @@ pub fn a_full_hub_answers_once_space_returns() {
         ),
     )
     .unwrap();
-    let log = std::fs::File::create(dir.join("daemon.log")).unwrap();
-    let daemon = ants(&["daemon"])
-        .arg("--config")
-        .arg(&config)
-        .env("PATH", &bin)
-        .env("ANTS_TEST_PROMPT_DELAY_MS", "3000")
-        .stdout(Stdio::null())
-        .stderr(log)
-        .spawn()
-        .unwrap();
-    let daemon = Killed(daemon);
-    let logs = || super::flood::tail(&std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default(), 40);
+    let mut daemon = ants(&["daemon"]);
+    daemon.arg("--config").arg(&config).env("PATH", &fixture.bin).env("ANTS_TEST_PROMPT_DELAY_MS", "3000");
+    let daemon = fixture.spawn_daemon(&mut daemon, "daemon.log");
+    let logs = || super::flood::tail(&daemon.log(), 40);
     let warm = run(ants(&["ask", "--wait", "--timeout", "60s", "@dev-a", "warmup"]));
     assert!(warm.status.success(), "ants ask: {}\n{}", String::from_utf8_lossy(&warm.stderr), logs());
 
@@ -104,16 +90,15 @@ pub fn a_full_hub_answers_once_space_returns() {
     assert!(!refused.status.success() && stderr.contains(full_store), "ants ask --attach on a full hub: {stderr}");
 
     // The replies fail to store and their messages wait in hand, with the daemon idle meanwhile.
-    let cpu = cpu_seconds(daemon.0.id());
+    let cpu = cpu_seconds(daemon.pid());
     let full = Instant::now();
-    let stalled = |log: &str| log.contains("store is full; messages wait in hand");
-    while !stalled(&std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default()) {
-        assert!(full.elapsed() < Duration::from_secs(30), "replies not refused\n{}", logs());
-        std::thread::sleep(Duration::from_millis(500));
-    }
+    wait_until(Duration::from_secs(30), Duration::from_millis(500), || {
+        let stalled = daemon.log().contains("store is full; messages wait in hand");
+        stalled.then_some(()).ok_or_else(|| format!("replies not refused\n{}", logs()))
+    });
     let stress: u64 = std::env::var("ANTS_STRESS").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
     std::thread::sleep(Duration::from_secs(if stress == 0 { 3 } else { stress * 5 * 30 + 30 }));
-    if let (Some(before), Some(after)) = (cpu, cpu_seconds(daemon.0.id())) {
+    if let (Some(before), Some(after)) = (cpu, cpu_seconds(daemon.pid())) {
         let busy = after - before;
         assert!(busy < full.elapsed().as_secs_f64() / 2.0, "the daemon spun {busy:.1} s on a full store\n{}", logs());
     }
@@ -157,8 +142,7 @@ pub fn a_full_hub_answers_once_space_returns() {
     let dead = run(ants(&["dead", "list"]));
     let dead = String::from_utf8_lossy(&dead.stdout);
     assert_eq!(dead.trim(), "no dead letters", "{}", logs());
-    let mut daemon = daemon;
-    assert!(daemon.0.try_wait().unwrap().is_none(), "the daemon exited\n{}", logs());
+    assert!(daemon.running(), "the daemon exited\n{}", logs());
 }
 
 /// Publish up to `count` messages of `size` bytes into the filler stream; JetStream's error for the first one it

@@ -5,19 +5,19 @@
 //! By default a few seconds of churn under light traffic. `ANTS_STRESS=N` churns N times as long, with more senders and
 //! prompts of 200 ms.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ants_daemon::sync::MutexExt as _;
-use ants_test_support::{NatsServer, free_port, scratch_dir};
+use ants_test_support::{NatsServer, free_port};
 
-use super::{ANTS, Killed, get, link_self, run};
+use super::{Fixture, count_tokens, get, run, wait_answered};
 
 /// Ants listed and unlisted besides dev-a, which stays listed.
 const CHURNED: usize = 3;
@@ -29,15 +29,11 @@ pub fn reloads_under_traffic_lose_no_message() {
     }
     let Some(server) = NatsServer::start() else { return };
     let stress: u64 = std::env::var("ANTS_STRESS").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
-    let dir = scratch_dir("churn");
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    link_self(&bin, "copilot");
-    let url = server.url.clone();
-    let ants = move |args: &[&str]| {
-        let mut command = Command::new(ANTS);
-        command.args(["--nats", &url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
-        command
+    let fixture = Fixture::new("churn", &server, "copilot");
+    let dir = &fixture.dir;
+    let ants = {
+        let fixture = fixture.clone();
+        move |args: &[&str]| fixture.ants(args)
     };
     let init = run(ants(&["init"]));
     assert!(init.status.success(), "ants init: {}", String::from_utf8_lossy(&init.stderr));
@@ -61,19 +57,14 @@ pub fn reloads_under_traffic_lose_no_message() {
     };
     let mut listed = [true; CHURNED];
     std::fs::write(&config, render(&listed, 0)).unwrap();
-    let log = std::fs::File::create(dir.join("daemon.log")).unwrap();
-    let daemon = ants(&["daemon"])
+    let mut daemon = ants(&["daemon"]);
+    daemon
         .arg("--config")
         .arg(&config)
-        .env("PATH", &bin)
-        .env("ANTS_TEST_PROMPT_DELAY_MS", if stress > 0 { "200" } else { "20" })
-        .stdout(Stdio::null())
-        .stderr(log)
-        .spawn()
-        .unwrap();
-    let pid = daemon.id().to_string();
-    let mut daemon = Killed(daemon);
-    let logs = || super::flood::tail(&std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default(), 60);
+        .env("PATH", &fixture.bin)
+        .env("ANTS_TEST_PROMPT_DELAY_MS", if stress > 0 { "200" } else { "20" });
+    let daemon = fixture.spawn_daemon(&mut daemon, "daemon.log");
+    let logs = || super::flood::tail(&daemon.log(), 60);
     let warm = run(ants(&["ask", "--wait", "--timeout", "60s", "@dev-a", "warmup"]));
     assert!(warm.status.success(), "ants ask: {}\n{}", String::from_utf8_lossy(&warm.stderr), logs());
 
@@ -119,7 +110,7 @@ pub fn reloads_under_traffic_lose_no_message() {
 
     // Churn: one ant toggled per reload, dev-a's whoami changed every third, and every file written in place in
     // pieces with a second SIGHUP in the middle, so some reloads read it half written and are refused.
-    let hup = || assert!(Command::new("kill").args(["-HUP", &pid]).status().unwrap().success());
+    let hup = || daemon.signal("-HUP");
     let until = Instant::now() + Duration::from_secs(6 + 30 * stress);
     let mut generation = 0;
     let mut reloads = 0;
@@ -132,7 +123,7 @@ pub fn reloads_under_traffic_lose_no_message() {
         hup();
         reloads += 1;
         std::thread::sleep(Duration::from_millis(150));
-        assert!(alive(&mut daemon), "the daemon exited\n{}", logs());
+        assert!(daemon.running(), "the daemon exited\n{}", logs());
     }
     stop.store(true, Ordering::Relaxed);
     for sender in senders {
@@ -146,24 +137,14 @@ pub fn reloads_under_traffic_lose_no_message() {
 
     let sent = sent.locked().clone();
     let limit = Duration::from_secs(120 + 600 * stress);
-    let start = Instant::now();
-    let mut answered = answers(&ants);
-    while sent.iter().any(|token| !answered.contains_key(token)) {
-        let missing: Vec<_> = sent.iter().filter(|token| !answered.contains_key(*token)).take(10).collect();
-        assert!(start.elapsed() < limit, "unanswered after {limit:?}, such as {missing:?}\n{}", logs());
-        std::thread::sleep(Duration::from_secs(1));
-        answered = answers(&ants);
-    }
+    let tokens: Vec<&str> = sent.iter().map(String::as_str).collect();
+    wait_answered(limit, Duration::from_secs(1), &tokens, || answers(&ants), logs);
     std::thread::sleep(Duration::from_secs(2));
     let twice: Vec<_> = answers(&ants).into_iter().filter(|(_, n)| *n > 1).collect();
     assert!(twice.is_empty(), "answered more than once: {twice:?}\n{}", logs());
-    let log = std::fs::read_to_string(dir.join("daemon.log")).unwrap();
+    let log = daemon.log();
     assert!(log.contains("reload failed; serving the ants as before"), "no reload read a half-written file: {reloads}");
-    assert!(alive(&mut daemon), "the daemon exited\n{}", logs());
-}
-
-fn alive(daemon: &mut Killed) -> bool {
-    daemon.0.try_wait().unwrap().is_none()
+    assert!(daemon.running(), "the daemon exited\n{}", logs());
 }
 
 /// Write `text` over `path` in place, 64 bytes at a time, calling `midway` halfway and leaving the file half written
@@ -184,30 +165,13 @@ fn write_in_pieces(path: &Path, text: &str, midway: &impl Fn()) {
 
 /// How many replies, by any ant, carry each token.
 fn answers(ants: &impl Fn(&[&str]) -> Command) -> HashMap<String, usize> {
-    let search = ants(&["thread", "search", "--since", "1h", "--limit", "100000", "--json"]).output().unwrap();
-    assert!(search.status.success(), "ants thread search: {}", String::from_utf8_lossy(&search.stderr));
-    let mut counts = HashMap::new();
-    for line in String::from_utf8_lossy(&search.stdout).lines() {
-        let entry: serde_json::Value = serde_json::from_str(line).unwrap();
-        if matches!(entry["from"].as_str(), None | Some("human")) {
-            continue;
-        }
-        let text = entry["text"].as_str().unwrap_or_default();
-        let tokens: HashSet<&str> = text
-            .match_indices("tok-")
-            .filter_map(|(at, _)| {
-                let rest = &text[at + 4..];
-                let (sender, n) = rest.split_once('x')?;
-                let n = n.get(..5)?;
-                ((1..=3).contains(&sender.len())
-                    && sender.bytes().all(|b| b.is_ascii_digit())
-                    && n.bytes().all(|b| b.is_ascii_digit()))
-                .then(|| &text[at..at + 4 + sender.len() + 1 + 5])
-            })
-            .collect();
-        for token in tokens {
-            *counts.entry(token.to_owned()).or_insert(0) += 1;
-        }
-    }
-    counts
+    let mut search = ants(&["thread", "search", "--since", "1h", "--limit", "100000", "--json"]);
+    count_tokens(&mut search, None, |text| {
+        let (sender, n) = text[4..].split_once('x')?;
+        let n = n.get(..5)?;
+        ((1..=3).contains(&sender.len())
+            && sender.bytes().all(|b| b.is_ascii_digit())
+            && n.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| &text[..4 + sender.len() + 1 + 5])
+    })
 }

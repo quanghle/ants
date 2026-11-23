@@ -1,5 +1,6 @@
 //! Test helpers shared by the ants crates (dev-dependency only): external tools, a throwaway nats-server, a scripted
-//! stub CLI ([`StubCli`]), waits for a condition ([`eventually`]), a client's transport over async-nats
+//! stub CLI ([`StubCli`]), the `ants` command free of the caller's `ANTS_*` variables ([`ants_command`]), waits for a
+//! condition ([`eventually`], and [`wait_until`] without a runtime), a client's transport over async-nats
 //! ([`NatsTransport`]) and sample records ([`trail_run`]).
 //!
 //! A test that needs `nats-server` skips when the tool is not on PATH, unless [`REQUIRE_TOOLS`] is set to `1`
@@ -103,6 +104,32 @@ pub async fn eventually_within(limit: Duration, what: &str, mut check: impl Asyn
         assert!(start.elapsed() < limit, "{what}: timed out after {limit:?}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Wait until `check` gives a value, polling `every` so often for up to `limit`, without an async runtime; panics
+/// with the state `check` last described otherwise.
+pub fn wait_until<T>(limit: Duration, every: Duration, mut check: impl FnMut() -> Result<T, String>) -> T {
+    let start = std::time::Instant::now();
+    loop {
+        match check() {
+            Ok(value) => return value,
+            Err(state) => assert!(start.elapsed() < limit, "timed out after {limit:?}: {state}"),
+        }
+        std::thread::sleep(every);
+    }
+}
+
+/// The command running the `ants` executable `program` with none of the `ANTS_*` variables of this process, so what
+/// the calling shell exports (`ANTS_CREDS`, `ANTS_CONFIG`, `ANTS_JS_DOMAIN`, `ANTS_ANT`, `ANTS_METRICS`, …) changes
+/// nothing of what a test runs: a test sets the ones it means.
+pub fn ants_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(|name| name.starts_with("ANTS_")) {
+            command.env_remove(name);
+        }
+    }
+    command
 }
 
 /// Whether [`JS_ACK_FC_V2`] asks for v2 ack and flow control subjects.

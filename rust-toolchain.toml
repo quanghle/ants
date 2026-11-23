@@ -1,4 +1,6 @@
-# Keep in step with `rust-version` in Cargo.toml and the `toolchain:` of every job in .github/workflows/ci.yml.
+# Keep in step with `rust-version` in Cargo.toml and the `toolchain:` of every job in .github/workflows/ci.yml. The
+# Rust image of contrib/container-demo/Containerfile and contrib/e2e/Containerfile follows by itself: their
+# RUST_VERSION is the channel below, passed by scripts/demo-containers.sh and scripts/e2e.sh.
 [toolchain]
 channel = "1.100"
 components = ["rustfmt", "clippy"]

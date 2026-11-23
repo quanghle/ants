@@ -151,7 +151,12 @@ check_claude_env() {
 }
 
 build() (
-    local context
+    local context rust_version nats_version
+    # The base images follow the pins: the toolchain of rust-toolchain.toml, the nats-server of nats-server.sha256.
+    rust_version=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$root/rust-toolchain.toml")
+    nats_version=$("$root/scripts/nats-server.sh" --version)
+    nats_version=${nats_version#v}
+    [ -n "$rust_version" ] && [ -n "$nats_version" ] || die "no pinned Rust toolchain or nats-server version"
     context=$(mktemp -d "$state/build.XXXXXX")
     trap 'rm -rf "$context"' EXIT
     cp "$root/Cargo.toml" "$root/Cargo.lock" "$root/rust-toolchain.toml" "$context/"
@@ -159,6 +164,7 @@ build() (
     mkdir -p "$context/contrib"
     cp -R "$root/contrib/e2e" "$root/contrib/launchd" "$root/contrib/systemd" "$context/contrib/"
     container build --cpus 4 --memory 8g --tag "$image" --file "$context/contrib/e2e/Containerfile" \
+        --build-arg "RUST_VERSION=$rust_version" --build-arg "NATS_VERSION=$nats_version" \
         --build-arg "CLAUDE_VERSION=${ANTS_E2E_CLAUDE_VERSION:-2.1.330}" \
         --build-arg "CLAUDE_ACP_VERSION=${ANTS_E2E_CLAUDE_ACP_VERSION:-0.107.0}" "$context"
 )

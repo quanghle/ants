@@ -4,7 +4,7 @@
 //! By default a few seconds of flapping. `ANTS_STRESS=N` flaps N times as long with prompts of 200 ms, and cuts the
 //! uplink once for longer than the ack wait (60 s), so a stress run takes minutes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ants_daemon::sync::MutexExt as _;
-use ants_test_support::{NatsServer, free_port, scratch_dir};
+use ants_test_support::{NatsServer, ants_command, free_port, scratch_dir, wait_until};
 
-use super::{ANTS, Killed, link_self, run};
+use super::{ANTS, Daemon, Killed, count_tokens, link_self, run, wait_answered};
 
 #[expect(clippy::too_many_lines, reason = "one scenario: the hub, the leaf, the senders, the flaps, then the answers")]
 pub fn a_flapping_uplink_loses_no_message() {
@@ -67,23 +67,19 @@ pub fn a_flapping_uplink_loses_no_message() {
     let _leaf = Killed(leaf.spawn().unwrap());
     let leaf_url = format!("nats://{listen}");
     // The leaf node connects to the hub in the background.
-    let started = Instant::now();
-    loop {
+    wait_until(Duration::from_secs(30), Duration::from_millis(500), || {
         let out = run(as_user("alice", &hub.url, &["leaf", "outbox", "m1", "--leaf-config", &leaf_conf]));
         if out.status.success() {
-            break;
+            return Ok(());
         }
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(started.elapsed() < Duration::from_secs(30), "ants leaf outbox: {err}");
-        std::thread::sleep(Duration::from_millis(500));
-    }
+        Err(format!("ants leaf outbox: {}", String::from_utf8_lossy(&out.stderr)))
+    });
 
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     link_self(&bin, "copilot");
     let home = dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let log = std::fs::File::create(dir.join("daemon.log")).unwrap();
     let mut daemon = as_user("dev-a", &leaf_url, &["daemon", "--harness", "copilot", "--provider", "none"]);
     daemon
         .arg("--home")
@@ -92,11 +88,9 @@ pub fn a_flapping_uplink_loses_no_message() {
         .arg(&home)
         .env("ANTS_ANT", "dev-a")
         .env("PATH", &bin)
-        .env("ANTS_TEST_PROMPT_DELAY_MS", if stress > 0 { "200" } else { "20" })
-        .stdout(Stdio::null())
-        .stderr(log);
-    let mut daemon = Killed(daemon.spawn().unwrap());
-    let logs = || super::flood::tail(&std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default(), 60);
+        .env("ANTS_TEST_PROMPT_DELAY_MS", if stress > 0 { "200" } else { "20" });
+    let daemon = Daemon::spawn(&mut daemon, dir.join("daemon.log"));
+    let logs = || super::flood::tail(&daemon.log(), 60);
     for (who, url) in [("alice", &hub.url), ("bob", &leaf_url)] {
         let warm = run(as_user(who, url, &["ask", "--wait", "--timeout", "50s", "@dev-a", "warmup"]));
         assert!(warm.status.success(), "{who}'s warmup: {}\n{}", String::from_utf8_lossy(&warm.stderr), logs());
@@ -139,7 +133,7 @@ pub fn a_flapping_uplink_loses_no_message() {
         std::thread::sleep(down);
         proxy.restore();
         flap += 1;
-        assert!(daemon.0.try_wait().unwrap().is_none(), "the daemon exited\n{}", logs());
+        assert!(daemon.running(), "the daemon exited\n{}", logs());
     }
     stop.store(true, Ordering::Relaxed);
     for sender in senders {
@@ -149,14 +143,8 @@ pub fn a_flapping_uplink_loses_no_message() {
     let sent = sent.locked().clone();
     let limit = Duration::from_secs(180 + 600 * stress);
     let answers = || answers(&users, &hub.url);
-    let start = Instant::now();
-    let mut answered = answers();
-    while sent.iter().any(|token| !answered.contains_key(token)) {
-        let missing: Vec<_> = sent.iter().filter(|token| !answered.contains_key(*token)).take(10).collect();
-        assert!(start.elapsed() < limit, "unanswered after {limit:?}, such as {missing:?}\n{}", logs());
-        std::thread::sleep(Duration::from_secs(2));
-        answered = answers();
-    }
+    let tokens: Vec<&str> = sent.iter().map(String::as_str).collect();
+    wait_answered(limit, Duration::from_secs(2), &tokens, answers, logs);
     std::thread::sleep(Duration::from_secs(2));
     let twice: Vec<_> = answers().into_iter().filter(|(_, n)| *n > 1).collect();
     assert!(twice.is_empty(), "answered more than once: {twice:?}\n{}", logs());
@@ -166,7 +154,7 @@ pub fn a_flapping_uplink_loses_no_message() {
     let dead = String::from_utf8_lossy(&dead.stdout);
     assert!(dead.trim().is_empty(), "dead letters after {flap} flaps:\n{dead}\n{}", logs());
     assert!(proxy.cuts.load(Ordering::Relaxed) > 0, "the uplink never flapped");
-    assert!(daemon.0.try_wait().unwrap().is_none(), "the daemon exited\n{}", logs());
+    assert!(daemon.running(), "the daemon exited\n{}", logs());
 }
 
 /// The `ants` commands of a team whose auth directory and users' credentials are in a directory.
@@ -176,11 +164,8 @@ struct Users(PathBuf);
 impl Users {
     /// `ants` with the team's auth directory, for the hub's domain.
     fn base(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(ANTS);
+        let mut command = ants_command(ANTS);
         command.args(args).env("ANTS_AUTH_DIR", self.0.join("team")).env("ANTS_JS_DOMAIN", "hub");
-        for name in ["ANTS_CREDS", "ANTS_CONFIG", "ANTS_NATS_URL"] {
-            command.env_remove(name);
-        }
         command
     }
 
@@ -195,29 +180,11 @@ impl Users {
 /// How many of dev-a's replies carry each token, as alice finds them on the hub.
 fn answers(users: &Users, hub: &str) -> HashMap<String, usize> {
     let search = ["thread", "search", "--since", "1h", "--limit", "100000", "--json"];
-    let out = users.user("alice", hub, &search).output().unwrap();
-    assert!(out.status.success(), "ants thread search: {}", String::from_utf8_lossy(&out.stderr));
-    let mut counts = HashMap::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let entry: serde_json::Value = serde_json::from_str(line).unwrap();
-        if entry["from"].as_str() != Some("dev-a") {
-            continue;
-        }
-        let text = entry["text"].as_str().unwrap_or_default();
-        let tokens: HashSet<&str> = text
-            .match_indices("tok-")
-            .filter_map(|(at, _)| {
-                let token = text.get(at..at + 11)?;
-                let rest = token.as_bytes();
-                (matches!(rest[4], b'a' | b'b') && rest[5] == b'x' && rest[6..].iter().all(u8::is_ascii_digit))
-                    .then_some(token)
-            })
-            .collect();
-        for token in tokens {
-            *counts.entry(token.to_owned()).or_insert(0) += 1;
-        }
-    }
-    counts
+    count_tokens(&mut users.user("alice", hub, &search), Some("dev-a"), |text| {
+        let token = text.get(..11)?;
+        let rest = token.as_bytes();
+        (matches!(rest[4], b'a' | b'b') && rest[5] == b'x' && rest[6..].iter().all(u8::is_ascii_digit)).then_some(token)
+    })
 }
 
 /// A TCP proxy in front of the hub's leafnode port: [`Proxy::cut`] drops every connection through it and refuses new

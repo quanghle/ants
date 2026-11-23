@@ -397,9 +397,9 @@ async fn a_run_tells_its_route_on_its_thread_in_its_end_and_in_ants_trail_show()
     assert_eq!((header.route_text(), steps), (route.to_owned(), vec![2, 1, 0]), "the child's step is its leg's");
 
     let show = |json: bool| {
-        let mut command = tokio::process::Command::new(ants_binary());
-        command.args(["--nats", &server.url, "trail", "show", run.as_str()]).env("HOME", &dir).env_remove("ANTS_CREDS");
-        command.env_remove("ANTS_CONFIG").args(json.then_some("--json"));
+        let mut command = tokio::process::Command::from(ants_test_support::ants_command(ants_binary()));
+        command.args(["--nats", &server.url, "trail", "show", run.as_str()]).env("HOME", &dir);
+        command.args(json.then_some("--json"));
         command.output()
     };
     let shown = show(false).await.unwrap();

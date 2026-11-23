@@ -8,13 +8,12 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ants_proto::{DEFAULT_TURN_BUDGET, UserId, parse_mentions};
-use ants_test_support::{NatsServer, scratch_dir};
+use ants_test_support::NatsServer;
 
-use super::{ANTS, Killed, link_self, run};
+use super::{Fixture, run};
 
 #[expect(clippy::too_many_lines, reason = "one scenario: the daemon, the storms, then what they did")]
 pub fn a_channel_storm_ends_at_the_turn_budget() {
@@ -22,14 +21,11 @@ pub fn a_channel_storm_ends_at_the_turn_budget() {
     let stress: usize = std::env::var("ANTS_STRESS").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
     let members = 6 + 6 * stress;
     let storms = 1 + stress;
-    let dir = scratch_dir("storm");
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    link_self(&bin, "copilot");
+    let fixture = Fixture::new("storm", &server, "copilot");
+    let dir = &fixture.dir;
     let ants = |args: &[&str]| {
-        let mut command = Command::new(ANTS);
-        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
-        command.env("HOME", &dir);
+        let mut command = fixture.ants(args);
+        command.env("HOME", dir);
         command
     };
     let ok = |args: &[&str]| {
@@ -48,21 +44,16 @@ pub fn a_channel_storm_ends_at_the_turn_budget() {
             write!(config, "\n[[ant]]\nname = \"{name}\"\nworkdir = {home:?}\nhome = {home:?}\nmax_harnesses = 2\n");
     }
     std::fs::write(dir.join("config.toml"), config).unwrap();
-    let log = std::fs::File::create(dir.join("daemon.log")).unwrap();
-    let _daemon = Killed(
-        ants(&["daemon"])
-            .arg("--config")
-            .arg(dir.join("config.toml"))
-            .env("PATH", &bin)
-            .env("RUST_LOG", "info")
-            .env("NO_COLOR", "1")
-            .env("ANTS_TEST_PROMPT_DELAY_MS", "20")
-            .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .unwrap(),
-    );
-    let read_log = || std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
+    let mut daemon = ants(&["daemon"]);
+    daemon
+        .arg("--config")
+        .arg(dir.join("config.toml"))
+        .env("PATH", &fixture.bin)
+        .env("RUST_LOG", "info")
+        .env("NO_COLOR", "1")
+        .env("ANTS_TEST_PROMPT_DELAY_MS", "20");
+    let daemon = fixture.spawn_daemon(&mut daemon, "daemon.log");
+    let read_log = || daemon.log();
     let logs = || super::flood::tail(&read_log(), 60);
     // The messenger serves once it holds its colony entry; both answering means both serve.
     for to in [&["@s0", "warmup"][..], &["warmup"]] {
