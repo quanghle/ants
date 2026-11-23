@@ -52,9 +52,14 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
         home: Option<PathBuf>,
     ) -> Result<Self, LogError> {
         let kept = match &home {
-            Some(home) => {
-                super::read_status(home).map_err(|e| LogError::integrity(format!("reading the chain status: {e}")))?
-            }
+            Some(home) => match super::read_status(home) {
+                Ok(kept) => kept,
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    tracing::warn!(home = %home.display(), error = %e, "the sense chain status kept is unreadable");
+                    None
+                }
+                Err(e) => return Err(LogError::integrity(format!("reading the chain status: {e}"))),
+            },
             None => None,
         };
         let seen = kept.as_ref().filter(|status| status.sense == sense).and_then(|status| status.seen.clone());

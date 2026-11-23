@@ -153,6 +153,12 @@ permission, fails the call. The cache is never the source of truth: a cache miss
 sense id or incarnation of the stream, or built from a message the log no longer holds unchanged, is built again from
 the log when the ant's items open. One that may hold writes not yet appended is never replaced.
 
+Disk writes stay off the daemon's runtime thread: the cache commits in the background, in order, and in SQLite's WAL
+mode (`cache.db-wal` and `cache.db-shm` beside it) syncs to disk only at checkpoints, so a power loss may lose its last
+commits but never leaves it inconsistent: those are read again from the log. A write waiting for the log is the
+exception, synced as it is kept. `.sense/chain.json` is written whole but unsynced, as often as an event is appended;
+one left empty or unreadable by a power loss counts as no status kept, and is written again at the next read.
+
 While the machine's host connection is down:
 
 - an ant whose cache exists keeps working: reads and briefs come from the cache, and writes are accepted, kept in the

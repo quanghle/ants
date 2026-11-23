@@ -122,9 +122,13 @@ impl Host for Wakes {
     }
 }
 
+/// Let the scheduler run until it waits again, the cache writes it awaits in the blocking pool included.
 async fn settle() {
-    for _ in 0..20 {
-        tokio::task::yield_now().await;
+    for _ in 0..10 {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
 

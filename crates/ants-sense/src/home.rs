@@ -95,13 +95,29 @@ impl Home {
 /// Write `bytes` to `file`, one of a home's sense files, whole: beside it first and synced, then renamed over it, the
 /// directory synced too, so neither a crash nor a power loss leaves it part written.
 pub(crate) fn write(file: &Path, bytes: &[u8]) -> io::Result<()> {
+    replace(file, bytes, true)
+}
+
+/// Write `bytes` to `file`, one of a home's sense files often written again, whole: beside it first, then renamed over
+/// it, synced to disk neither, so a crash never leaves it part written, and a power loss may leave it as it was or
+/// empty.
+pub(crate) fn write_unsynced(file: &Path, bytes: &[u8]) -> io::Result<()> {
+    replace(file, bytes, false)
+}
+
+fn replace(file: &Path, bytes: &[u8], sync: bool) -> io::Result<()> {
     let dir = file.parent().expect("a file in a directory");
     std::fs::create_dir_all(dir)?;
     let mut beside = file.as_os_str().to_owned();
     beside.push(".new");
     let mut new = std::fs::File::create(&beside)?;
     new.write_all(bytes)?;
-    new.sync_all()?;
+    if sync {
+        new.sync_all()?;
+    }
     std::fs::rename(&beside, file)?;
-    std::fs::File::open(dir)?.sync_all()
+    if sync {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }

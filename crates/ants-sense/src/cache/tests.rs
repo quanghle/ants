@@ -1,5 +1,5 @@
 //! Tests of the cache: searches are words only, a cache of another schema or unreadable is replaced, pending writes
-//! prevent replacing it, and applying nothing new writes nothing.
+//! prevent replacing it, applying nothing new writes nothing, and writes commit off the caller's thread.
 
 use super::*;
 
@@ -17,12 +17,12 @@ fn a_search_is_words_only() {
     );
 }
 
-#[test]
-fn a_cache_of_another_schema_or_unreadable_is_replaced_with_an_empty_one() {
+#[tokio::test]
+async fn a_cache_of_another_schema_or_unreadable_is_replaced_with_an_empty_one() {
     let home = ants_test_support::scratch_dir("sense-cache-schema");
-    let mut cache = Cache::open(&home).unwrap();
+    let cache = Cache::open(&home).unwrap();
     let sense = SenseId::new();
-    cache.reset(&sense, "one").unwrap();
+    cache.reset(&sense, "one").await.unwrap();
     drop(cache);
     let built = Cache::open(&home).unwrap().built().unwrap();
     assert_eq!(built, Some(Built { sense, incarnation: "one".into(), position: None }), "kept");
@@ -37,16 +37,16 @@ fn a_cache_of_another_schema_or_unreadable_is_replaced_with_an_empty_one() {
     std::fs::remove_dir_all(&home).unwrap();
 }
 
-#[test]
-fn pending_writes_prevent_replacing_a_corrupt_missing_or_different_log_cache() {
+#[tokio::test]
+async fn pending_writes_prevent_replacing_a_corrupt_missing_or_different_log_cache() {
     let home = ants_test_support::scratch_dir("sense-cache-pending");
-    let mut cache = Cache::open(&home).unwrap();
+    let cache = Cache::open(&home).unwrap();
     let sense = SenseId::new();
-    cache.reset(&sense, "one").unwrap();
+    cache.reset(&sense, "one").await.unwrap();
     let change = Change::create("note", serde_json::json!({"title":"local"}).as_object().unwrap().clone(), "t");
     let pending = Pending::new(ITEM_EVENT, serde_json::to_value(change).unwrap(), "m1".parse().unwrap());
-    cache.enqueue(&pending).unwrap();
-    assert!(cache.reset(&sense, "two").is_err());
+    cache.enqueue(&pending).await.unwrap();
+    assert!(cache.reset(&sense, "two").await.is_err());
     drop(cache);
     let file = Home::new(&home).cache();
     std::fs::write(&file, b"corrupt with pending writes").unwrap();
@@ -58,19 +58,46 @@ fn pending_writes_prevent_replacing_a_corrupt_missing_or_different_log_cache() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
-#[test]
-fn applying_nothing_where_the_cache_was_built_to_writes_nothing() {
+#[tokio::test]
+async fn applying_nothing_where_the_cache_was_built_to_writes_nothing() {
     let home = ants_test_support::scratch_dir("sense-cache-nothing");
-    let mut cache = Cache::open(&home).unwrap();
-    cache.reset(&SenseId::new(), "one").unwrap();
+    let cache = Cache::open(&home).unwrap();
+    cache.reset(&SenseId::new(), "one").await.unwrap();
     let tip = crate::log::Mark { index: 1, sha256: "00".into() };
     let position = Position { sequence: 1, tip, events: 1, bytes: 10, broken: None, ant: None };
-    cache.apply(&[], Some(&position)).unwrap();
-    let written = cache.db.total_changes();
-    cache.apply(&[], Some(&position)).unwrap();
-    assert_eq!(cache.db.total_changes(), written, "nothing written");
+    cache.apply(&[], Some(&position)).await.unwrap();
+    let written = cache.db().total_changes();
+    cache.apply(&[], Some(&position)).await.unwrap();
+    assert_eq!(cache.db().total_changes(), written, "nothing written");
     let further = Position { sequence: 2, ..position };
-    cache.apply(&[], Some(&further)).unwrap();
+    cache.apply(&[], Some(&further)).await.unwrap();
     assert_eq!(cache.built().unwrap().unwrap().position, Some(further), "a position moved on is kept");
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn writes_commit_off_the_caller_s_thread() {
+    let home = ants_test_support::scratch_dir("sense-cache-thread");
+    let cache = Cache::open(&home).unwrap();
+    let committed = Arc::new(Mutex::new(Vec::new()));
+    let noted = committed.clone();
+    let hook = move || {
+        noted.lock().unwrap().push(std::thread::current().id());
+        false
+    };
+    cache.db().commit_hook(Some(hook)).unwrap();
+    let sense = SenseId::new();
+    cache.reset(&sense, "one").await.unwrap();
+    let tip = crate::log::Mark { index: 1, sha256: "00".into() };
+    let position = Position { sequence: 1, tip, events: 1, bytes: 10, broken: None, ant: None };
+    cache.apply(&[], Some(&position)).await.unwrap();
+    cache.set_context(&serde_json::json!({"machine": "m1"})).await.unwrap();
+    let change = Change::create("note", serde_json::json!({"title":"local"}).as_object().unwrap().clone(), "t");
+    let pending = Pending::new(ITEM_EVENT, serde_json::to_value(change).unwrap(), "m1".parse().unwrap());
+    cache.enqueue(&pending).await.unwrap();
+    let committed = committed.lock().unwrap().clone();
+    assert_eq!(committed.len(), 4, "each write committed");
+    assert!(!committed.contains(&std::thread::current().id()), "no write committed on the caller's thread");
+    assert_eq!(cache.get(&pending.revisions().unwrap()[0].change.id).unwrap().unwrap().text("title"), "local");
     std::fs::remove_dir_all(home).unwrap();
 }
