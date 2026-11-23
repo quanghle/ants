@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,6 +42,10 @@ const MAX_CONNECTIONS: usize = 8;
 pub trait Source: Send + Sync + 'static {
     /// Whether `/healthz` answers 200: the NATS connections are up.
     fn healthy(&self) -> bool;
+    /// Why `/healthz` answers 503, once [`Source::healthy`] said it does.
+    fn unhealthy(&self) -> String {
+        "not connected to NATS".to_owned()
+    }
     /// Write the metrics.
     fn render(&self, out: &mut Exposition);
 }
@@ -122,7 +126,7 @@ pub fn route(method: &Method, path: &str, source: &dyn Source) -> (StatusCode, &
         return if source.healthy() {
             (StatusCode::OK, TEXT, "ok\n".to_owned())
         } else {
-            (StatusCode::SERVICE_UNAVAILABLE, TEXT, "unhealthy: not connected to NATS\n".to_owned())
+            (StatusCode::SERVICE_UNAVAILABLE, TEXT, format!("unhealthy: {}\n", source.unhealthy()))
         };
     }
     let mut out = Exposition::default();
@@ -240,12 +244,17 @@ pub fn memory_available(bytes: u64) {
     *MEMORY_AVAILABLE.locked() = Some(bytes);
 }
 
+/// Whether this process connected an ant once ([`Ant::connected`]): until then, its health waits for one.
+static CONNECTED_ONCE: AtomicBool = AtomicBool::new(false);
+
 /// What one ant's daemon did and is doing.
 #[derive(Default)]
 pub struct Ant {
     /// Daemons serving the ant: the ant is reported while one is.
     serving: AtomicUsize,
     live: Mutex<Option<Live>>,
+    /// Whether the ant was connected since it was last not served: until then it is starting, left out of health.
+    connected_once: AtomicBool,
     prompts_in_flight: AtomicU64,
     prompts: AtomicU64,
     retries: AtomicU64,
@@ -265,7 +274,9 @@ pub struct Serving(Arc<Ant>);
 
 impl Drop for Serving {
     fn drop(&mut self) {
-        self.0.serving.fetch_sub(1, Ordering::Relaxed);
+        if self.0.serving.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.0.connected_once.store(false, Ordering::Relaxed);
+        }
     }
 }
 
@@ -288,7 +299,8 @@ impl Drop for Prompting<'_> {
 }
 
 impl Ant {
-    /// Report the ant until the guard drops; until [`Ant::connected`], as not connected.
+    /// Report the ant until the guard drops; until [`Ant::connected`], as not connected, and as starting, which leaves
+    /// it out of the daemon's health.
     pub fn serving(self: &Arc<Self>) -> Serving {
         self.serving.fetch_add(1, Ordering::Relaxed);
         Serving(self.clone())
@@ -297,6 +309,8 @@ impl Ant {
     /// Report `client`'s connection state and `workload` until the guard drops.
     pub fn connected(self: &Arc<Self>, client: async_nats::Client, workload: Arc<Workload>) -> Connected {
         *self.live.locked() = Some(Live { client, workload });
+        self.connected_once.store(true, Ordering::Relaxed);
+        CONNECTED_ONCE.store(true, Ordering::Relaxed);
         Connected(self.clone())
     }
 
@@ -335,7 +349,8 @@ impl Ant {
     }
 }
 
-/// The ants this process serves: healthy while it serves at least one and every one is connected.
+/// The ants this process serves: healthy while it serves at least one, connected an ant once, and every one is
+/// connected, but those still starting, not yet connected since they were served ([`Ant::serving`]).
 pub struct Daemon;
 
 impl Daemon {
@@ -346,12 +361,33 @@ impl Daemon {
             .map(|(n, a)| (n.clone(), a.clone()))
             .collect()
     }
+
+    /// The ants among `serving` that were connected and are not now.
+    fn disconnected(serving: &[(UserId, Arc<Ant>)]) -> Vec<UserId> {
+        serving
+            .iter()
+            .filter(|(_, ant)| ant.connected_once.load(Ordering::Relaxed) && !ant.is_connected())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
 }
 
 impl Source for Daemon {
     fn healthy(&self) -> bool {
         let serving = Self::serving();
-        !serving.is_empty() && serving.iter().all(|(_, ant)| ant.is_connected())
+        !serving.is_empty() && CONNECTED_ONCE.load(Ordering::Relaxed) && Self::disconnected(&serving).is_empty()
+    }
+
+    fn unhealthy(&self) -> String {
+        let serving = Self::serving();
+        if serving.is_empty() {
+            return "no ant served".to_owned();
+        }
+        let names: Vec<_> = Self::disconnected(&serving).iter().map(ToString::to_string).collect();
+        if names.is_empty() {
+            return "no ant connected to NATS yet".to_owned();
+        }
+        format!("not connected to NATS: {}", names.join(", "))
     }
 
     fn render(&self, out: &mut Exposition) {
@@ -503,6 +539,42 @@ mod tests {
         assert_eq!(get("/metrics/", &healthy).0, StatusCode::NOT_FOUND);
     }
 
+    /// An ant served but not yet connected, as one a reload just started, is left out of health; one that was
+    /// connected and lost its connection makes the daemon unhealthy, named, until it is no longer served.
+    #[tokio::test]
+    async fn an_ant_starting_is_left_out_of_health_and_one_disconnected_is_named() {
+        let Some(mut server) = ants_test_support::NatsServer::start() else { return };
+        let (started, starting) = ("health-started".parse().unwrap(), "health-starting".parse().unwrap());
+        let (a, b) = (ant(&started), ant(&starting));
+        let (serving_a, _serving_b) = (a.serving(), b.serving());
+        let client = async_nats::connect(&server.url).await.unwrap();
+        let connected = a.connected(client.clone(), Arc::default());
+        let both = || vec![(started.clone(), a.clone()), (starting.clone(), b.clone())];
+        assert_eq!(Daemon::disconnected(&both()), Vec::<UserId>::new(), "the one starting is left out");
+
+        server.stop();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while super::connected(&client) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the connection is lost");
+        assert_eq!(Daemon::disconnected(&both()), std::slice::from_ref(&started));
+        assert!(!Daemon.healthy());
+        let body = route(&Method::GET, "/healthz", &Daemon);
+        assert_eq!(body.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            body.2.starts_with("unhealthy: not connected to NATS: ") && body.2.contains("health-started"),
+            "{body:?}"
+        );
+        assert!(!body.2.contains("health-starting"), "{body:?}");
+
+        drop((connected, serving_a));
+        let _served_again = a.serving();
+        assert_eq!(Daemon::disconnected(&both()), Vec::<UserId>::new(), "served again, it is starting");
+    }
+
     #[test]
     fn an_ant_is_reported_while_served_with_its_counters() {
         let name: UserId = "metrics-unit".parse().unwrap();
@@ -533,7 +605,7 @@ mod tests {
         ] {
             assert!(text.lines().any(|l| l == line), "no {line:?} in\n{text}");
         }
-        assert!(!Daemon.healthy() || !text.contains("ants_nats_connected{ant=\"metrics-unit\"} 0"));
+        assert!(Daemon::disconnected(&[(name, ant.clone())]).is_empty(), "never connected: starting");
         drop(prompting);
         assert!(rendered().contains("ants_prompts_in_flight{ant=\"metrics-unit\"} 0"));
         drop(serving);

@@ -109,7 +109,7 @@ With a [`[nats_server]`](config.md#managed-nats-server) table in its config file
 
 `ants daemon`, `ants webhook serve`, `ants bridge serve`, `ants bridge connect`, and `ants dead watch` expose unauthenticated loopback HTTP health and Prometheus metrics when `--metrics ADDR` (`ANTS_METRICS` on daemon) or config `metrics` is set (read at startup):
 
-- `GET /healthz`: `200 ok` when healthy (daemon: ≥ 1 ant served and all NATS connections up; webhook: all webhook and human connections up; bridge: running; dead watch: NATS connection up), else `503`.
+- `GET /healthz`: `200 ok` when healthy (daemon: ≥ 1 ant served, one connected to NATS since the daemon started, and the connection of each ant served up, an ant counted from its first connection on, so an ant a reload starts or restarts leaves it at 200; webhook: all webhook and human connections up; bridge: running; dead watch: NATS connection up), else `503` with the reason: for a daemon `unhealthy: not connected to NATS: ANT, ...` naming the ants that lost their connection, `unhealthy: no ant connected to NATS yet` until the first connects, or `unhealthy: no ant served`.
 - `GET /metrics`: Prometheus text format (`text/plain; version=0.0.4`).
 
 | Metric | Type | Labels | Description |

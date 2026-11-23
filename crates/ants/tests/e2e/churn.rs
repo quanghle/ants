@@ -1,5 +1,6 @@
 //! Reloads under traffic: ants listed and unlisted, a busy ant's settings changed and the file read half written, by
-//! SIGHUP while messages flow; each message answered exactly once once every ant is listed again.
+//! SIGHUP while messages flow; each message answered exactly once once every ant is listed again, and `/healthz` at
+//! 200 throughout, an ant a reload starts left out of health until it connects.
 //!
 //! By default a few seconds of churn under light traffic. `ANTS_STRESS=N` churns N times as long, with more senders and
 //! prompts of 200 ms.
@@ -14,9 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ants_daemon::sync::MutexExt as _;
-use ants_test_support::{NatsServer, scratch_dir};
+use ants_test_support::{NatsServer, free_port, scratch_dir};
 
-use super::{ANTS, Killed, link_self, run};
+use super::{ANTS, Killed, get, link_self, run};
 
 /// Ants listed and unlisted besides dev-a, which stays listed.
 const CHURNED: usize = 3;
@@ -42,8 +43,9 @@ pub fn reloads_under_traffic_lose_no_message() {
     assert!(init.status.success(), "ants init: {}", String::from_utf8_lossy(&init.stderr));
 
     let config = dir.join("config.toml");
+    let metrics = format!("127.0.0.1:{}", free_port());
     let render = |listed: &[bool], generation: usize| {
-        let mut text = "messenger = false\nsage = \"none\"\nharness = \"copilot\"\n".to_owned();
+        let mut text = format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\nmetrics = {metrics:?}\n");
         let names =
             std::iter::once("dev-a".to_owned()).chain((0..CHURNED).filter(|i| listed[*i]).map(|i| format!("c-{i}")));
         for name in names {
@@ -97,6 +99,24 @@ pub fn reloads_under_traffic_lose_no_message() {
         })
         .collect();
 
+    // Health probes, every one while the churn starts ants and stops them answered 200.
+    let unhealthy = Arc::new(Mutex::new(Vec::new()));
+    let prober = {
+        let (stop, unhealthy, metrics) = (stop.clone(), unhealthy.clone(), metrics.clone());
+        std::thread::spawn(move || {
+            let mut probes = 0;
+            while !stop.load(Ordering::Relaxed) {
+                let (status, body) = get(&metrics, "/healthz");
+                if status != 200 {
+                    unhealthy.locked().push(format!("{status} {body}"));
+                }
+                probes += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            probes
+        })
+    };
+
     // Churn: one ant toggled per reload, dev-a's whoami changed every third, and every file written in place in
     // pieces with a second SIGHUP in the middle, so some reloads read it half written and are refused.
     let hup = || assert!(Command::new("kill").args(["-HUP", &pid]).status().unwrap().success());
@@ -118,6 +138,9 @@ pub fn reloads_under_traffic_lose_no_message() {
     for sender in senders {
         sender.join().unwrap();
     }
+    let probes = prober.join().unwrap();
+    let unhealthy = unhealthy.locked().clone();
+    assert!(unhealthy.is_empty(), "{} of {probes} health probes failed: {unhealthy:?}\n{}", unhealthy.len(), logs());
     std::fs::write(&config, render(&[true; CHURNED], generation)).unwrap();
     hup();
 
