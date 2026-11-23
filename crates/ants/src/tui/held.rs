@@ -493,7 +493,7 @@ mod tests {
         m.key(Key::Char('a'), at(3));
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "one answer at a time");
 
-        m.held(Event::Done(Box::new(deny), Ok("denied: pa's order … is refused".to_owned())), at(4));
+        m.held_event(Event::Done(Box::new(deny), Ok("denied: pa's order … is refused".to_owned())), at(4));
         assert!(screen(&m, 140, 30, at(4)).contains("denied: pa's order … is refused"), "the outcome is a notice");
         assert!(m.data.held.busy.is_none());
         let shown = screen(&m, 140, 30, at(4));
@@ -504,14 +504,14 @@ mod tests {
         m.key(Key::Up, at(4));
         m.key(Key::Char('a'), at(4));
         assert_eq!(m.key(Key::Char('y'), at(4)), Some(Action::Answer(confirm.clone())));
-        m.held(Event::Done(Box::new(confirm), Err("refused".to_owned())), at(5));
+        m.held_event(Event::Done(Box::new(confirm), Err("refused".to_owned())), at(5));
         assert_eq!(
             m.data.held.answer(&Item::Order(Box::new(pause.clone()))),
             None,
             "a failed answer leaves the order waiting"
         );
 
-        m.held(Event::Read(Ok(vec![pause])), at(6));
+        m.held_event(Event::Read(Ok(vec![pause])), at(6));
         assert!(m.data.held.answered.is_empty(), "the order the daemon decided goes");
         m.key(Key::Esc, at(6));
         let shown = screen(&m, 140, 30, at(6));
@@ -566,13 +566,13 @@ mod tests {
         let described = format!("deny pa's allow-once on request dev-a/{} (execute: git push)", push.id);
         assert!(shown.contains(&format!("y to {described}")), "{shown}");
         assert_eq!(m.key(Key::Char('y'), at(6)), Some(Action::Answer(deny.clone())));
-        m.held(Event::Done(Box::new(deny), Ok("denied".to_owned())), at(7));
+        m.held_event(Event::Done(Box::new(deny), Ok("denied".to_owned())), at(7));
         let shown = screen(&m, 140, 30, at(7));
         assert!(shown.contains("denied, to be dropped"), "{shown}");
         m.key(Key::Char('a'), at(7));
         assert_eq!(m.key(Key::Char('y'), at(7)), None, "a decision answered is not answered again");
 
-        m.held(Event::Read(Ok(vec![pause.clone()])), at(8));
+        m.held_event(Event::Read(Ok(vec![pause.clone()])), at(8));
         assert_eq!(m.data.held.answer(&decision), Some(ActAnswer::Deny), "gathering the orders keeps it");
         m.take(crate::live::Event::Approval(Update::Held(push, Vec::new())), at(8));
         assert!(m.data.held.answered.is_empty(), "the decision dropped goes, its answer with it");

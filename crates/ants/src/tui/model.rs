@@ -12,23 +12,20 @@ use ants_proto::{
 use chrono::{DateTime, TimeDelta, Utc};
 use ratatui::text::Span;
 
-use super::acts::{Acted, Change};
+use super::acts::Change;
 use super::approvals::{self, Asking};
-use super::command::{self, Bar, Tone};
+use super::command::{self, Bar};
 use super::exec::{Job, Quoted};
 use super::notices;
-use super::react;
-use super::reads::{Levels, Mark, Read};
+use super::reads::{Levels, Mark};
 use super::work::{Facts, Filter};
 use super::{
-    ant, cards, catchup, channel, credentials, dm, faces, fold, held, home, images, mcp, memories, nav, people, search,
-    settings, steps, thread, timeline, tree, work,
+    ant, cards, catchup, channel, credentials, dm, faces, fold, held, home, images, nav, people, search, settings,
+    steps, thread, timeline, tree, work,
 };
-use crate::live::{self, State};
-use crate::text::excerpt;
-use crate::threads::thread::Entry;
-use crate::tools::Update;
+use crate::live::State;
 
+mod intake;
 mod keys;
 mod page;
 mod prompt;
@@ -489,48 +486,6 @@ impl Model {
         self.ui.notice.as_ref().filter(|n| n.level == Level::Error || now - n.at < NOTICE_FOR)
     }
 
-    /// Take in what the live feed read or heard.
-    pub fn take(&mut self, event: live::Event, now: DateTime<Utc>) -> Vec<Action> {
-        match event {
-            live::Event::Stored(Ok(entries)) => {
-                let reached = self.reached(now);
-                return reached.into_iter().chain(self.stored(entries, now)).collect();
-            }
-            live::Event::Stored(Err(e)) => self.failed("", &e, now),
-            live::Event::Status(event) => {
-                self.data.live.status(&event, now);
-                self.data.calls.status(&event);
-                self.data.steps.status(&event);
-            }
-            live::Event::Following => self.data.live.approvals_reset(),
-            live::Event::Approval(update) => self.approval(update, now),
-            live::Event::Decided(outcome) => return self.answered(outcome, now).into_iter().collect(),
-            live::Event::FollowEnded(Ok(())) => {}
-            live::Event::FollowEnded(Err(e)) => self.failed("following the tool requests", &e, now),
-            live::Event::Colony(Ok(entries)) => self.data.live.colony(entries, now),
-            live::Event::Colony(Err(e)) => self.failed("reading the colony", &e, now),
-            live::Event::History(thread, read) => {
-                let read = read.map(|entries| self.tools(entries));
-                for entry in read.iter().flatten() {
-                    self.data.delegations.add(entry);
-                }
-                let page = self.pages.iter_mut().rev().find_map(|page| match page {
-                    Page::Thread(page) if page.history.thread == thread => Some(page),
-                    _ => None,
-                });
-                if let Some(page) = page
-                    && let Err(e) = page.history.loaded(&thread, read)
-                {
-                    self.failed(&format!("reading thread {thread}"), &e, now);
-                }
-                if self.open() == Some(&thread) {
-                    return self.shown_reactions().into_iter().collect();
-                }
-            }
-        }
-        Vec::new()
-    }
-
     /// Read the reactions to the messages of the view shown: a channel's posts or a thread's messages.
     fn shown_reactions(&self) -> Option<Action> {
         match self.page() {
@@ -540,216 +495,11 @@ impl Model {
         }
     }
 
-    /// Take the messages read from the stream. Marks read the human's new messages on an open thread, and reads the
-    /// reactions to a shown channel's new posts.
-    pub fn stored(&mut self, entries: Vec<Entry>, now: DateTime<Utc>) -> Vec<Action> {
-        let entries = self.tools(entries);
-        let data = &mut self.data;
-        data.live.stored(&entries, now);
-        let me = data.live.me.clone();
-        let mut posted = false;
-        for entry in &entries {
-            data.facts.add(entry, &me);
-            data.people.dms.add(entry, &me);
-            posted |= data.feeds.add(entry);
-            data.activity.stored(entry, &data.feeds);
-            data.delegations.add(entry);
-        }
-        let mut actions = Vec::new();
-        for page in &mut self.pages {
-            if let Page::Thread(page) = page {
-                let thread = page.history.thread.clone();
-                if entries.iter().any(|e| e.thread_id == thread && work::to(e, &me)) {
-                    actions.push(Action::MarkRead(thread));
-                }
-                page.history.stored(entries.clone());
-            }
-        }
-        let shown = match self.page() {
-            Page::Channel(_) => posted,
-            Page::Thread(page) => entries.iter().any(|e| e.thread_id == page.history.thread),
-            _ => false,
-        };
-        actions.extend(self.shown_reactions().filter(|_| shown));
-        actions
-    }
-
-    /// Take the tool calls and ends with no reply among `entries` into those of their threads, an end into what its
-    /// thread's messages tell too: the other entries.
-    fn tools(&mut self, entries: Vec<Entry>) -> Vec<Entry> {
-        let (tools, entries): (Vec<Entry>, Vec<Entry>) = entries.into_iter().partition(|e| e.kind.on_timeline());
-        let me = self.data.live.me.clone();
-        for tool in &tools {
-            self.data.calls.stored(tool);
-            if tool.kind == crate::threads::thread::Kind::NoReply {
-                self.data.facts.add(tool, &me);
-            }
-        }
-        entries
-    }
-
-    /// Take word from following the tool requests: a settled request keeps its card a while, unless decided here.
-    fn approval(&mut self, update: Update, now: DateTime<Utc>) {
-        self.data.live.approval(&update);
-        let held = held::items(&self.data);
-        self.data.held.settled(&held);
-        if let Update::Resolved(request, state) = update {
-            if let Some(asking) = self.asking_mut()
-                && !asking.settled(&request, &state)
-            {
-                self.unask();
-                let how = approvals::how(&state, &request.ant);
-                self.notify(format!("request {} {how}", crate::tools::qualified(&request)), Level::Info, now);
-            }
-            if !self.data.settled.decided_here(&request, &state, self.data.me()) {
-                self.data.settled.add(request, state, now);
-            }
-        }
-    }
-
-    /// Take the outcome of storing a decision: the line saying so, or why it was not stored, the first decision
-    /// winning. A rejection with a note sends the note once stored; refused, the note comes back into the bar, to go as
-    /// a reply on the request's thread if wanted.
-    fn answered(&mut self, outcome: anyhow::Result<String>, now: DateTime<Utc>) -> Option<Action> {
-        let Some(asking) = self.asking_mut().filter(|a| a.storing) else {
-            self.decided(outcome);
-            return None;
-        };
-        asking.storing = false;
-        let note = asking.note.take().map(|note| (note, Box::new(asking.request.clone())));
-        if outcome.is_ok() || !asking.full {
-            self.unask();
-        }
-        match (outcome, note) {
-            (Ok(line), None) => self.notify(line, Level::Info, now),
-            (Err(e), None) => self.notify(format!("{e:#}"), Level::Error, now),
-            (Ok(line), Some((note, request))) => {
-                self.notify(line, Level::Info, now);
-                self.ui.bar.set_status(format!("sending the note to {}…", request.ant), Tone::Busy);
-                let job = command::note_job(&request, &note);
-                self.ui.bar.sending_note(&note, request);
-                return Some(Action::Run(job, note));
-            }
-            (Err(e), Some((note, request))) => {
-                self.notify(format!("{e:#}"), Level::Error, now);
-                let why = format!("{e:#}; the note was not sent");
-                if !self.ui.bar.is_empty() {
-                    self.ui.bar.set_status(why, Tone::Error);
-                    return None;
-                }
-                self.ui.bar.set_status(format!("{why}: Enter sends it to {} as a reply", request.ant), Tone::Error);
-                self.ui.bar.set_text(&note);
-                self.ui.bar.noting = Some(command::Note::Reply(request));
-                self.ui.bar.focused = true;
-            }
-        }
-        None
-    }
-
     /// The thread shown, if one is.
     pub fn open(&self) -> Option<&ThreadId> {
         match self.page() {
             Page::Thread(page) => Some(&page.history.thread),
             _ => None,
-        }
-    }
-
-    /// Take what was done to or read of the open thread besides its messages.
-    pub fn acted(&mut self, acted: Acted, now: DateTime<Utc>) {
-        match acted {
-            Acted::About(thread, Ok(about)) => {
-                if self.data.live.marks != about.marks {
-                    self.data.live.marks.clone_from(&about.marks);
-                    self.data.live.reorder(now);
-                }
-                match &about.done {
-                    Some(done) => self.data.cards.done.insert(thread.clone(), done.clone()),
-                    None => self.data.cards.done.remove(&thread),
-                };
-                for page in &mut self.pages {
-                    if let Page::Thread(page) = page
-                        && page.history.thread == thread
-                    {
-                        page.about = Some(about.clone());
-                    }
-                }
-            }
-            Acted::About(thread, Err(e)) => tracing::debug!(%thread, "reading the thread's marks: {e:#}"),
-            Acted::Changed(thread, change, Ok(changed)) => {
-                let line = format!("thread {} {}", excerpt(&self.data.title(&thread), 40), change.done_line(changed));
-                self.notify(line, Level::Info, now);
-            }
-            Acted::Changed(thread, _, Err(e)) => {
-                self.notify(format!("changing thread {thread}: {e:#}"), Level::Error, now);
-            }
-        }
-    }
-
-    /// Take what the UI read besides the live feed.
-    pub fn read(&mut self, read: Read, now: DateTime<Utc>) {
-        let data = &mut self.data;
-        match read {
-            Read::Marker(Ok(marker)) => data.marker = Some(marker),
-            Read::Marker(Err(e)) => self.failed("reading what was read", &e, now),
-            Read::ChannelMarkers(Ok(markers)) | Read::ChannelMarked(_, Ok(markers)) => {
-                data.channel_reads = Some(markers);
-            }
-            Read::ChannelMarkers(Err(e)) => self.failed("reading which channel posts were read", &e, now),
-            Read::ChannelMarked(channel, Err(e)) => {
-                self.notify(format!("marking #{channel} read: {e:#}"), Level::Error, now);
-            }
-            Read::Directory(Ok((channels, humans))) => {
-                let me = data.me().clone();
-                let channels: Vec<ChannelEntry> = channels.into_iter().filter(|c| c.members.contains(&me)).collect();
-                data.activity.directory(&data.channels, &channels, now);
-                data.channels = channels;
-                data.humans = Some(humans);
-            }
-            Read::Directory(Err(e)) => self.failed("reading the channels", &e, now),
-            Read::Levels(levels) => data.channel_levels = levels,
-            Read::Marked(_, Ok(())) => {}
-            Read::Unmarked(thread, Ok(())) => {
-                let line = format!("thread {} marked unread", excerpt(&self.data.title(&thread), 40));
-                self.notify(line, Level::Info, now);
-            }
-            Read::Unmarked(thread, Err(e)) => {
-                self.notify(format!("marking thread {thread} unread: {e:#}"), Level::Error, now);
-            }
-            Read::Marked(thread, Err(e)) => {
-                self.notify(format!("marking thread {thread} read: {e:#}"), Level::Error, now);
-            }
-            Read::Reactions(watched, reactions) => {
-                data.activity.reactions(&watched, &reactions, &data.feeds, now);
-                data.reactions = reactions;
-            }
-            Read::Reacted(message, reaction, remove, Ok(changed)) => {
-                self.notify(react::done_line(message, &reaction, remove, changed), Level::Info, now);
-            }
-            Read::Reacted(message, reaction, _, Err(e)) => {
-                self.notify(format!("reacting {reaction} to message {message}: {e:#}"), Level::Error, now);
-            }
-        }
-    }
-
-    /// Look at `now` at the states of the threads of the human's channels, for their activity.
-    pub fn look(&mut self, now: DateTime<Utc>) {
-        let mut activity = std::mem::take(&mut self.data.activity);
-        activity.look(&self.data, now);
-        self.data.activity = activity;
-    }
-
-    /// Take what was read of the threads besides their messages.
-    pub fn cards(&mut self, read: cards::Read, now: DateTime<Utc>) {
-        if let Some(failed) = self.data.cards.take(read) {
-            self.notify(failed, Level::Error, now);
-        }
-    }
-
-    /// Take what was read of the other humans.
-    pub fn people(&mut self, event: people::Event, now: DateTime<Utc>) {
-        let people::Event::Online(read) = event;
-        if let Some(text) = self.data.people.read(read) {
-            self.notify(text, Level::Error, now);
         }
     }
 
@@ -795,33 +545,6 @@ impl Model {
         Some(thread)
     }
 
-    /// Take the connection's state at `now`: once it is back, what was missed meanwhile is read again.
-    pub fn link(&mut self, connected: bool, now: DateTime<Utc>) -> Option<Action> {
-        if !self.data.live.link(connected, now) {
-            return None;
-        }
-        self.notify("reconnected: reading what changed meanwhile", Level::Info, now);
-        Some(Action::Refresh)
-    }
-
-    /// Take a read the hub's JetStream answered at `now`: once it is back in reach, what was missed meanwhile is read
-    /// again.
-    fn reached(&mut self, now: DateTime<Utc>) -> Option<Action> {
-        if !self.data.live.reached() {
-            return None;
-        }
-        self.notify("hub reached again: reading what changed meanwhile", Level::Info, now);
-        Some(Action::Refresh)
-    }
-
-    /// Tell that `what` failed with `e` at `now`, unless the hub's JetStream did not answer: the header shows it out of
-    /// reach instead, and the read is tried again on its own.
-    fn failed(&mut self, what: &str, e: &anyhow::Error, now: DateTime<Utc>) {
-        if let Some(text) = self.data.live.failed(what, e, now) {
-            self.notify(text, Level::Error, now);
-        }
-    }
-
     /// Select `item` in the nav, showing its view.
     pub fn select(&mut self, item: nav::Item) -> Option<Action> {
         self.ui.mouse.forget(0);
@@ -833,27 +556,12 @@ impl Model {
     /// Run the search `query` asks for, listing its matches over the view; or why the query is refused.
     pub fn search(&mut self, query: String, now: DateTime<Utc>) -> Result<Action, String> {
         let search = search::parse(&query, now)?;
-        for page in &mut self.pages {
-            if let Page::Search(page) = page
-                && page.found.is_none()
-            {
-                page.found = Some(Err("stopped for a later search".to_owned()));
-            }
+        for page in self.pages_mut::<search::Page>().filter(|page| page.found.is_none()) {
+            page.found = Some(Err("stopped for a later search".to_owned()));
         }
         self.push(Page::Search(search::Page::new(query, &search)));
         self.focus = Focus::View;
         Ok(Action::Search(search))
-    }
-
-    /// Take the matches of the search run last.
-    pub fn found(&mut self, found: anyhow::Result<(Vec<Entry>, usize)>) {
-        let page = self.pages.iter_mut().rev().find_map(|page| match page {
-            Page::Search(page) if page.found.is_none() => Some(page),
-            _ => None,
-        });
-        if let Some(page) = page {
-            page.found(found);
-        }
     }
 
     /// Show the delegation tree of `thread` over the view.
@@ -862,159 +570,9 @@ impl Model {
         self.focus = Focus::View;
     }
 
-    /// The root of the delegation tree shown, and the threads known of it, for its links and spend to be read.
-    pub fn tree_shown(&self) -> Option<(ThreadId, Vec<ThreadId>)> {
-        let Page::Tree(page) = self.page() else { return None };
-        Some((page.root.clone(), self.data.delegations.threads(&page.root)))
-    }
-
-    /// The thread shown and the ants known on it, for the steps of the runs they conduct reporting there to be read.
-    pub fn steps_wanted(&self) -> Option<(ThreadId, Vec<UserId>)> {
-        let Page::Thread(page) = self.page() else { return None };
-        let thread = &page.history.thread;
-        let data = &self.data;
-        let summary = data.live.summary(thread).into_iter().flat_map(|s| &s.users);
-        let senders = page.history.entries.iter().filter_map(|e| e.from.as_ref());
-        let conductors = data.steps.of(thread).iter().map(|s| &s.conductor);
-        let mut ants: Vec<UserId> =
-            summary.chain(senders).chain(conductors).filter(|u| !data.is_human(u)).cloned().collect();
-        ants.sort();
-        ants.dedup();
-        Some((thread.clone(), ants))
-    }
-
-    /// Take the steps read of the runs reporting on a thread.
-    pub fn steps_read(&mut self, steps::Event(thread, read): steps::Event, now: DateTime<Utc>) {
-        match read {
-            Ok(read) => self.data.steps.read(&thread, read, now),
-            Err(e) => tracing::debug!(%thread, "reading the steps of the runs reporting on the thread: {e:#}"),
-        }
-    }
-
-    /// The ant shown, for its queue to be read.
     /// Whether the view drawn last shows a spinner that moves, so that the screen is drawn at its frame rate.
     pub fn spinning(&self) -> bool {
         self.data.looks.animates() && matches!(self.page(), Page::Thread(page) if page.spinning.get())
-    }
-
-    pub fn ant_shown(&self) -> Option<UserId> {
-        let Page::Ant(page) = self.page() else { return None };
-        Some(page.ant.clone())
-    }
-
-    /// The ant whose settings pane shows, and whether its settings are to be read.
-    pub fn settings_shown(&self) -> Option<(UserId, bool)> {
-        let Page::Ant(page) = self.page() else { return None };
-        (page.pane == ant::Pane::Settings).then(|| (page.ant.clone(), page.settings.reading.is_none()))
-    }
-
-    /// Take in what a read of an ant's settings or orders, or an order changing them, brought.
-    pub fn settings_event(&mut self, event: settings::Event) {
-        let mut event = Some(event);
-        for page in self.pages.iter_mut().rev() {
-            if let Page::Ant(page) = page
-                && event.as_ref().is_some_and(|e| e.ant() == &page.ant)
-                && let Some(event) = event.take()
-            {
-                page.settings.take(event);
-            }
-        }
-    }
-
-    /// Take in what a gathering of the credentials asked for, or an answer to one, brought.
-    pub fn credentials(&mut self, event: credentials::Event, now: DateTime<Utc>) {
-        match self.data.credentials.take(event, now) {
-            Some(Ok(done)) => self.notify(done, Level::Info, now),
-            Some(Err(e)) => self.notify(e, Level::Error, now),
-            None => {}
-        }
-    }
-
-    /// Take in what a gathering of the held admin orders, or an answer to one or to a held decision, brought.
-    pub fn held(&mut self, event: held::Event, now: DateTime<Utc>) {
-        let done = self.data.held.take(event, now);
-        let held = held::items(&self.data);
-        self.data.held.settled(&held);
-        match done {
-            Some(Ok(done)) => self.notify(done, Level::Info, now),
-            Some(Err(e)) => self.notify(e, Level::Error, now),
-            None => {}
-        }
-    }
-
-    /// The ant whose memories the view wants read, and at which asking: the shown ant's, on its memories pane.
-    pub fn memories_wanted(&self) -> Option<(UserId, u32)> {
-        let Page::Ant(page) = self.page() else { return None };
-        (page.pane == ant::Pane::Memories).then(|| (page.ant.clone(), page.memories.asked))
-    }
-
-    /// What the view wants of an ant's MCP servers: the shown ant's, on its MCP pane.
-    pub fn mcp_wanted(&self) -> Option<mcp::Wanted> {
-        let Page::Ant(page) = self.page() else { return None };
-        (page.pane == ant::Pane::Mcp).then(|| mcp::Wanted {
-            ant: page.ant.clone(),
-            asked: page.mcp.asked,
-            sign: page.mcp.sign_wanted(),
-        })
-    }
-
-    /// Take in what an order about an ant's MCP servers brought.
-    pub fn mcp_event(&mut self, event: mcp::Event) {
-        for page in &mut self.pages {
-            let Page::Ant(page) = page else { continue };
-            match &event {
-                mcp::Event::Read(ant, asked, read) if *ant == page.ant => page.mcp.read(*asked, read),
-                mcp::Event::Signed(ant, sign, signed) if *ant == page.ant => page.mcp.signed(*sign, signed),
-                _ => {}
-            }
-        }
-    }
-
-    /// Take in what a read of an ant's memories brought.
-    pub fn memories_event(&mut self, memories::Event(ant, asked, read): memories::Event) {
-        for page in &mut self.pages {
-            if let Page::Ant(page) = page
-                && page.ant == ant
-            {
-                page.memories.read(&ant, asked, &read);
-            }
-        }
-    }
-
-    /// Take in what a read of an ant's queue brought.
-    pub fn ant_event(&mut self, event: ant::Event) {
-        let ant::Event::Queue(ant, queue) = event;
-        for page in &mut self.pages {
-            if let Page::Ant(page) = page
-                && page.ant == ant
-            {
-                page.queue = queue.clone();
-            }
-        }
-    }
-
-    /// Take in what the delegation trees' reads and cancels brought.
-    pub fn tree_event(&mut self, event: tree::Event, now: DateTime<Utc>) {
-        match event {
-            tree::Event::Read(root, links, spend) => {
-                for page in &mut self.pages {
-                    if let Page::Tree(page) = page
-                        && page.root == root
-                    {
-                        if let Some(links) = &links {
-                            page.links.clone_from(links);
-                        }
-                        if spend.is_some() {
-                            page.spend.clone_from(&spend);
-                        }
-                    }
-                }
-            }
-            tree::Event::Cancelled(outcomes) => {
-                let (text, level) = tree::notice(&outcomes);
-                self.notify(text, level, now);
-            }
-        }
     }
 }
 
@@ -1023,8 +581,11 @@ mod tests {
     use ants_proto::{ChannelPost, Verdict};
 
     use super::*;
-    use crate::live::Link;
+    use crate::live::{self, Link};
     use crate::test_support::live::{at, message, request, user};
+    use crate::tools::Update;
+    use crate::tui::acts::Acted;
+    use crate::tui::reads::Read;
     use crate::tui::test_support::{model, post};
 
     #[test]
@@ -1151,11 +712,11 @@ mod tests {
 
         let mut about = crate::tui::acts::About::default();
         about.marks.archive(&thread, 3);
-        m.acted(Acted::About(thread.clone(), Ok(about.clone())), at(4));
+        m.acts_event(Acted::About(thread.clone(), Ok(about.clone())), at(4));
         assert!(m.data.live.order.is_empty(), "archived, the thread leaves the work");
         let Page::Thread(page) = m.page() else { panic!("not a thread") };
         assert_eq!(page.about, Some(about));
-        m.acted(Acted::Changed(thread.clone(), Change::Archive(true), Ok(true)), at(5));
+        m.acts_event(Acted::Changed(thread.clone(), Change::Archive(true), Ok(true)), at(5));
         assert!(
             m.notice_at(at(5))
                 .is_some_and(|n| n.text == "thread deploy archived; its messages and its work stay as they are")
@@ -1218,7 +779,7 @@ mod tests {
         let Page::Search(earlier) = &m.pages[1] else { panic!("not a search") };
         assert_eq!(earlier.found, Some(Err("stopped for a later search".to_owned())));
         let found = message(1, &thread, "dev-a", "alice", "deployed");
-        m.found(Ok((vec![found], 0)));
+        m.search_event(Ok((vec![found], 0)));
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(thread)));
         assert_eq!(m.page().name(), "thread");
         m.key(Key::Esc, at(3));

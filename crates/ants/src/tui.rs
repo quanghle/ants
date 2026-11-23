@@ -383,7 +383,7 @@ impl Chat {
     /// Move the head of the ant shown to its next frame; whether the frame changed.
     fn animate(&mut self, started: Instant) -> bool {
         let now = Utc::now();
-        let shown = self.model.ant_shown().map(|ant| {
+        let shown = self.model.ant_wanted().map(|ant| {
             let mood = faces::mood(&self.model.data, &ant, now);
             (ant, mood)
         });

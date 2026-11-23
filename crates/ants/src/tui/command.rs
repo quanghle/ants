@@ -1132,7 +1132,7 @@ mod tests {
         m.ui.bar.set_text("/tree");
         m.key(Key::Enter, at(1));
         assert_eq!(m.page().name(), "tree");
-        assert_eq!(m.tree_shown().unwrap().0, thread);
+        assert_eq!(m.tree_wanted().unwrap().0, thread);
     }
 
     #[test]

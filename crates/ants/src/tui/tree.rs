@@ -345,12 +345,12 @@ mod tests {
         m.key(Key::Up, at(9));
         assert_eq!(m.key(Key::Char('t'), at(9)), None);
         assert_eq!(m.page().name(), "tree");
-        assert_eq!(m.tree_shown(), Some((root.clone(), vec![root.clone(), spun])));
+        assert_eq!(m.tree_wanted(), Some((root.clone(), vec![root.clone(), spun])));
         m.tree_event(Event::Read(root, Some(vec![link("dev-a", "docs", None)]), None), at(9));
         let View::Tree(page) = m.page() else { panic!("not a tree") };
         assert_eq!(page.tree(&m.data, at(9)).ants, 4, "the links read show");
         m.key(Key::Esc, at(9));
-        assert_eq!((m.page().name(), m.tree_shown()), ("thread", None));
+        assert_eq!((m.page().name(), m.tree_wanted()), ("thread", None));
     }
 
     #[test]

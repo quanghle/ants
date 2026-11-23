@@ -10,7 +10,7 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 
 use super::{Data, Key, Model, Page, To, Ui};
-use crate::tui::{keymap, style};
+use crate::tui::{ant, keymap, search, style, thread, tree};
 
 impl Page {
     /// Take `key`: where it leads, if anywhere.
@@ -160,5 +160,29 @@ impl Page {
     /// Close what the view finds or has being written, else drop what it asked to confirm: whether anything was.
     pub fn close(&mut self, data: &Data) -> bool {
         self.typed(Key::Esc, data).is_some() || self.disarm()
+    }
+}
+
+/// A kind of view, to find those of it among the views opened.
+pub(in crate::tui) trait Stacked: Sized + 'static {
+    fn of(page: &mut Page) -> Option<&mut Self>;
+}
+
+macro_rules! stacked {
+    ($($variant:ident: $page:ty),*) => {$(
+        impl Stacked for $page {
+            fn of(page: &mut Page) -> Option<&mut Self> {
+                if let Page::$variant(page) = page { Some(page) } else { None }
+            }
+        }
+    )*};
+}
+
+stacked!(Thread: thread::Page, Search: search::Page, Tree: tree::Page, Ant: ant::Page);
+
+impl Model {
+    /// The views of the kind `P` among those opened, the shown one last.
+    pub(in crate::tui) fn pages_mut<P: Stacked>(&mut self) -> impl DoubleEndedIterator<Item = &mut P> {
+        self.pages.iter_mut().filter_map(P::of)
     }
 }

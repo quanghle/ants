@@ -784,7 +784,7 @@ mod tests {
         m.select(nav::Item::Ant(user("dev-a")));
         m.key(Key::Right, at(3));
         assert!(screen(&m, 160, 36, at(3)).contains("asking the daemon of dev-a…"));
-        assert_eq!(m.ant_shown(), Some(user("dev-a")));
+        assert_eq!(m.ant_wanted(), Some(user("dev-a")));
         m.ant_event(Event::Queue(user("dev-b"), Queue::Unanswered));
         m.ant_event(Event::Queue(user("dev-a"), Queue::Unanswered));
         assert!(screen(&m, 160, 36, at(3)).contains("no daemon serving dev-a answered within 5s"));

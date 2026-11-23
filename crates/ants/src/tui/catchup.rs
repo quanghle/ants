@@ -344,7 +344,7 @@ impl Model {
     }
 
     /// Take how a summary request went.
-    pub fn summarised(&mut self, summarised: Summarised, now: DateTime<Utc>) {
+    pub fn summary_event(&mut self, summarised: Summarised, now: DateTime<Utc>) {
         let Summarised { ask, result, warnings } = summarised;
         let warned = |line: String| {
             if warnings.is_empty() {
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(m.key(Key::Char('s'), at(30)), Some(Action::Summarise(Ask::Digest(at(10)))));
         assert!(screen(&m, 140, 30, at(30)).contains("asking for a digest…"));
         let got = Got::Digest { by: user("messenger"), text: "Two deploys **landed**.".into(), tokens: 42 };
-        m.summarised(Summarised { ask: Ask::Digest(at(10)), result: Ok(got), warnings: Vec::new() }, at(31));
+        m.summary_event(Summarised { ask: Ask::Digest(at(10)), result: Ok(got), warnings: Vec::new() }, at(31));
         let shown = screen(&m, 140, 30, at(31));
         assert!(shown.contains("messenger · 42 tokens") && shown.contains("Two deploys landed."), "{shown}");
         assert_eq!(m.key(Key::Char('j'), at(31)), None);
@@ -604,7 +604,7 @@ mod tests {
         m.digest(Some("2h"), at(7200)).unwrap();
         let text: String = (0..60).map(|n| format!("paragraph {n:02}\n\n")).collect();
         let got = Got::Digest { by: user("messenger"), text, tokens: 42 };
-        m.summarised(Summarised { ask: Ask::Digest(at(0)), result: Ok(got), warnings: Vec::new() }, at(7201));
+        m.summary_event(Summarised { ask: Ask::Digest(at(0)), result: Ok(got), warnings: Vec::new() }, at(7201));
         let draw = |m: &Model| screen(m, 80, 24, at(7201));
         let first = draw(&m);
         assert!(first.contains("paragraph 00") && !first.contains("paragraph 59"), "{first}");
@@ -673,7 +673,7 @@ mod tests {
             tokens: 9,
         };
         let ask = Ask::Tldr { thread: thread.clone(), ahead: false };
-        m.summarised(Summarised { ask, result: Ok(Got::Tldr(tldr)), warnings: Vec::new() }, at(4));
+        m.summary_event(Summarised { ask, result: Ok(Got::Tldr(tldr)), warnings: Vec::new() }, at(4));
         let shown = screen(&m, 140, 30, at(64));
         assert!(shown.contains("TL;DR (messenger, 1m ago, S asks for a new one)"), "{shown}");
         assert!(shown.contains("Deployed to staging."), "{shown}");
@@ -693,9 +693,9 @@ mod tests {
         assert_eq!(m.ahead(at(20)), Some(Action::Summarise(ask(&new))));
         assert_eq!(m.ahead(at(20)), None, "one at a time");
         let failed = Summarised { ask: ask(&new), result: Err(anyhow!("no reply")), warnings: Vec::new() };
-        m.summarised(failed, at(21));
+        m.summary_event(failed, at(21));
         assert_eq!(m.ahead(at(21)), Some(Action::Summarise(ask(&old))), "a failed one waits for a newer entry");
-        m.summarised(Summarised { ask: ask(&old), result: Ok(Got::Spent(500)), warnings: Vec::new() }, at(22));
+        m.summary_event(Summarised { ask: ask(&old), result: Ok(Got::Spent(500)), warnings: Vec::new() }, at(22));
         m.stored(vec![message(30, &new, "dev-a", "alice", "more")], at(30));
         assert_eq!(m.ahead(at(30)), None, "stopped for the UTC day");
         assert!(m.ahead(at(30) + TimeDelta::days(1)).is_some());
