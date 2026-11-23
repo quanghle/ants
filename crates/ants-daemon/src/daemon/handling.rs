@@ -77,6 +77,9 @@ impl Inbox<'_> {
         if self.settled_before(Handling { incoming: &incoming, msg: &msg, seq }).await {
             return (thread, Handled::Done);
         }
+        if self.late_taken(Handling { incoming: &incoming, msg: &msg, seq }).await {
+            return (thread, Handled::Done);
+        }
         let envelope = &incoming.envelope;
         let attempt = Attempt::of(delivered, MAX_ATTEMPTS);
         // Taken up before anything is done for it, unless a human withdrew it first (`ants withdraw`).
@@ -177,6 +180,29 @@ impl Inbox<'_> {
             Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
         }
         true
+    }
+
+    /// Whether `incoming` is a late reply to `ask_ant` that `check_inbox` took while it waited its turn, now acked
+    /// unprompted. Failing to tell, it is prompted.
+    async fn late_taken(&self, Handling { incoming, msg, seq }: Handling<'_>) -> bool {
+        let envelope = &incoming.envelope;
+        let Some(mcp) = self.mcp.filter(|_| incoming.late) else { return false };
+        let thread = &envelope.thread_id;
+        match mcp.late_turn(envelope).await {
+            Ok(true) => false,
+            Ok(false) => {
+                tracing::info!(%thread, from = %envelope.from, "check_inbox took the late reply; not prompting it");
+                match self.done(msg, seq).await {
+                    Ok(()) => self.attempts.finish(envelope).await,
+                    Err(e) => tracing::warn!(%thread, error = format!("{e:#}"), "acking a late reply"),
+                }
+                true
+            }
+            Err(e) => {
+                tracing::warn!(%thread, error = format!("{e:#}"), "noting the prompt of a late reply");
+                false
+            }
+        }
     }
 
     /// Handle the message at stream sequence `seq`, taken up: answer it, or bury it when overdue. Marks it finished

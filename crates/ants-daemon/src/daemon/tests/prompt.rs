@@ -445,27 +445,30 @@ fn a_kept_branch_is_told_to_the_thread_owner_else_the_default_human() {
     assert_eq!((&notice.to, notice.owner.as_ref()), (&UserId::human(), Some(&UserId::human())));
 }
 
-#[tokio::test]
-async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
-    let Some((mut bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch();
-    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-    let dev_b: UserId = "dev-b".parse().unwrap();
-    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
-    // Two ask_ant calls on t1 that gave up, remembered across a restart.
-    let asks = [1, 2].map(|_| Envelope::on_thread(t1.clone(), bus.dev.clone(), dev_b.clone(), "?"));
+/// Start the MCP server of `bus`'s ant with `stored` as its `mcp.json`, as left by an earlier run.
+async fn with_mcp_state(bus: &mut Bus, stored: &serde_json::Value) {
     let home = bus._server.dir().join("late");
     std::fs::create_dir_all(&home).unwrap();
-    let stored = serde_json::json!({"asks": asks.iter().map(|a| (a.id, &a.to)).collect::<Vec<_>>(), "late": []});
     std::fs::write(home.join("mcp.json"), stored.to_string()).unwrap();
     let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
     let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
     let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
     bus.mcp = Some(mcp.unwrap());
-    for ask in &asks {
-        let reply = ask.reply(dev_b.clone(), "late", Role::Ant).unwrap();
-        bus::publish_json(&bus.js, reply.subject(), &reply, None).await.unwrap();
-    }
+}
+
+#[tokio::test]
+async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
+    let Some((mut bus, mut replies)) = Bus::start().await else { return };
+    let (launch, _log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    // Two late replies on t1 kept by an earlier run, their prompts still to come.
+    let late = [1, 2].map(|_| {
+        let ask = Envelope::on_thread(t1.clone(), bus.dev.clone(), dev_b.clone(), "?");
+        ask.reply(dev_b.clone(), "late", Role::Ant).unwrap()
+    });
+    with_mcp_state(&mut bus, &serde_json::json!({"asks": [], "late": late})).await;
     bus.send(&t1, "a").await;
     bus.send(&t2, "b").await;
 
@@ -478,8 +481,54 @@ async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.locked().answered.len(), 2, "the late replies are no prompts");
     assert_eq!(bus.unacked().await, 0);
+}
+
+#[tokio::test]
+async fn a_late_reply_arriving_as_the_asking_turn_ends_is_prompted_after_it_to_pass_the_answer_on() {
+    use super::super::prompt::text::late_reply_note;
+    use ants_proto::{NoReplyWhy, TimelineEntry};
+
+    let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let [mut to_dev_b] = inboxes(&bus, std::slice::from_ref(&dev_b).try_into().unwrap()).await;
+    let thread = ThreadId::generate();
+    // An ask_ant call of the turn on the thread that gave up, and one whose late reply check_inbox took.
+    let [ask, read] = [1, 2].map(|_| Envelope::on_thread(thread.clone(), bus.dev.clone(), dev_b.clone(), "?"));
+    let taken = read.reply(dev_b.clone(), "read already", Role::Ant).unwrap();
+    let asks = [(ask.id, &ask.to)];
+    with_mcp_state(&mut bus, &serde_json::json!({"asks": asks, "late": [], "taken": [taken.id]})).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        bus.send(&thread, "hold: what is 6*7?").await;
+        while log.locked().prompted == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The reply lands while the asking turn runs, after its last check_inbox.
+        let reply = ask.reply(dev_b.clone(), "42", Role::Ant).unwrap();
+        let seq = bus::publish_json(&bus.js, reply.subject(), &reply, None).await.unwrap();
+        let taken_seq = bus::publish_json(&bus.js, taken.subject(), &taken, None).await.unwrap();
+        gate.add_permits(1);
+        let answered = next_envelope(&mut to_human).await;
+        assert!(answered.text.ends_with("hold: what is 6*7?"), "{}", answered.text);
+
+        let (message, entry) = no_reply_on(&bus, &thread).await;
+        let TimelineEntry::NoReply { why: NoReplyWhy::ReplyToOwn, text, .. } = entry else { panic!("{entry:?}") };
+        let prompt = format!("{}\n\n42", late_reply_note(&dev_b, false));
+        assert!(message == reply.id && text.ends_with(&format!(": {prompt}")), "{text}");
+        bus.until_acked(seq).await;
+        bus.until_acked(taken_seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+    let prompts = log.locked().prompts.clone();
+    assert_eq!(prompts.len(), 2, "the reply check_inbox took is no prompt: {prompts:?}");
+    let quiet = Duration::from_millis(200);
+    assert!(timeout(quiet, to_dev_b.next()).await.is_err(), "nothing goes back to dev-b");
 }
 
 #[tokio::test]

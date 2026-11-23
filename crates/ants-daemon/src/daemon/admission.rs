@@ -8,6 +8,7 @@ use async_nats::jetstream;
 use crate::bus;
 use crate::bus::relayed::{self, Read};
 use crate::channel::{self, Channels, Threads, Wake};
+use crate::mcp::Claim;
 use crate::people::humans::Registry;
 
 use super::{Inbox, Incoming, OWNER_LANDS_WITHIN, Posted, STREAM_SOURCE, Steered, stream_seq};
@@ -187,10 +188,11 @@ impl Inbox<'_> {
         }
         envelope.owner = self.humans.human_owner(envelope.owner.as_ref());
         envelope.creator = self.humans.ant_creator(envelope.creator.as_ref());
-        if self.claim(&envelope, msg).await {
-            return None;
-        }
-        Some(Incoming { envelope, post: None, resume: None, steered: Steered::No })
+        let late = match self.claim(&envelope, msg).await {
+            Some(late) => late,
+            None => return None,
+        };
+        Some(Incoming { envelope, post: None, resume: None, steered: Steered::No, late })
     }
 
     /// Check the `on_behalf_of` of `envelope`, which arrived on its sender's subject: a forged one is cleared, so the
@@ -277,7 +279,7 @@ impl Inbox<'_> {
         origin.apply(&mut post);
         let envelope = channel::as_envelope(&post, self.ant);
         let posted = Some(Box::new(Posted { post, triage, owned, description }));
-        Some(Incoming { envelope, post: posted, resume: None, steered: Steered::No })
+        Some(Incoming { envelope, post: posted, resume: None, steered: Steered::No, late: false })
     }
 
     /// Notify the human members `post`, in `msg`, @mentions ([`Threads::notify_mentioned`]) before the post is acked,
@@ -363,24 +365,26 @@ impl Inbox<'_> {
         }
     }
 
-    /// Whether `envelope` is a reply to an `ask_ant` call, now handed over and acked. It must not wait in its
-    /// thread's queue: the prompt that asked is in flight on that thread.
-    async fn claim(&self, envelope: &Envelope, msg: &jetstream::Message) -> bool {
-        let Some(mcp) = self.mcp else { return false };
+    /// What `envelope` is to the `ask_ant` calls: `None` for a reply handed over and acked, which must not wait in its
+    /// thread's queue, as the prompt that asked is in flight on that thread; else whether it is a late reply, kept for
+    /// `check_inbox` and prompted on its thread when its turn comes there.
+    async fn claim(&self, envelope: &Envelope, msg: &jetstream::Message) -> Option<bool> {
+        let Some(mcp) = self.mcp else { return Some(false) };
         match mcp.claim(envelope).await {
-            Ok(false) => false,
-            Ok(true) => {
+            Ok(Claim::No) => Some(false),
+            Ok(Claim::Late) => Some(true),
+            Ok(Claim::Taken) => {
                 match bus::double_ack(self.client, msg).await {
                     // Finished, not left waiting to the watcher of its sender ([`unserved`]).
                     Ok(()) => self.attempts.finish(envelope).await,
                     Err(e) => tracing::warn!(error = %e, "acking a reply to ask_ant"),
                 }
-                true
+                None
             }
             Err(e) => {
                 tracing::warn!(error = format!("{e:#}"), "keeping a reply to ask_ant");
                 bus::nak(msg, Some(self.pacing.retry_delay)).await;
-                true
+                None
             }
         }
     }

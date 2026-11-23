@@ -336,7 +336,7 @@ impl Tools {
 
     #[tool(description = "Ask another ant and wait for its reply, which is returned. The question goes on the \
         current thread and spends one turn of its budget. A reply that arrives after the wait gives up is kept for \
-        check_inbox. When no daemon serves the ant now (no colony entry, a stale one, or a harness signed out) the \
+        check_inbox, and once the turn ends is prompted on this thread. When no daemon serves the ant now (no colony entry, a stale one, or a harness signed out) the \
         call is refused at once with nothing sent, saying why and naming ants from the colony to ask instead. \
         `attach` lists files in the working directory to attach, as for send_message.")]
     async fn ask_ant(

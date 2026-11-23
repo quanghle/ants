@@ -671,9 +671,15 @@ M5() {
     container exec "$name-client" cat /tmp/out.txt | has "$t" "out.txt"
 }
 
+# messenger_said THREAD TEXT: a message of system-messenger on the thread holds TEXT
+messenger_said() {
+    alice thread show "$1" --json \
+        | jq --exit-status --slurp --arg t "$2" 'any(.[]; .from == "system-messenger" and (.text // "" | contains($t)))'
+}
+
 scenario M6 P1 "An unaddressed message is routed by the messenger"
 M6() {
-    local t out
+    local t out th
     t=$(tok)
     out=$(alice ask --wait --timeout 5m \
         "For an ant with capability leaf: read node.txt in your working directory and reply with ROUTED-$t and its content." 2>&1)
@@ -682,9 +688,10 @@ M6() {
     if grep -qF node=leaf <<<"$out"; then
         has "ROUTED-$t" <<<"$out"
     else
-        # The route gave up while leaf-ant was busy; its reply came after the messenger's last check_inbox.
-        alice thread show "$(thread <<<"$out")" | has "ROUTED-$t" "leaf-ant's reply on the thread"
-        known ants-qsc53 "the messenger's route gave up and leaf-ant's late reply never reached alice"
+        # The route gave up while leaf-ant was busy: its late reply is prompted to the messenger, which passes it on.
+        th=$(thread <<<"$out")
+        alice thread show "$th" | has "ROUTED-$t" "leaf-ant's reply on the thread"
+        eventually 300 messenger_said "$th" "ROUTED-$t"
     fi
     out=$(alice thread search --from system-messenger --since 10m)
     printf '%s\n' "$out"

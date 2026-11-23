@@ -70,7 +70,12 @@ impl Inbox<'_> {
         let text = match self.answer_line(envelope, humans).await {
             Some(line) => format!("{line}\n\n{text}"),
             None if let Some(spent) = own => {
-                format!("{}\n\n{text}", own_reply_note(&envelope.from, incoming.post.is_some(), spent))
+                let note = if incoming.late {
+                    late_reply_note(&envelope.from, spent)
+                } else {
+                    own_reply_note(&envelope.from, incoming.post.is_some(), spent)
+                };
+                format!("{note}\n\n{text}")
             }
             None => text,
         };
@@ -213,6 +218,21 @@ pub(in crate::daemon) fn own_reply_note(from: &UserId, post: bool, spent: bool) 
     format!(
         "[ants] {from} replied to {what}; the answer to this prompt is not sent back. {going_on} continues the \
          exchange; complete ends the turn."
+    )
+}
+
+/// The `[ants]` line starting the prompt of `from`'s reply to an `ask_ant` or `route` call that gave up: its answer
+/// is not sent back, and the ant passes the answer on to whoever asked on the thread.
+pub(in crate::daemon) fn late_reply_note(from: &UserId, spent: bool) -> String {
+    let going_on = if spent {
+        "send_message to a human who asked, or escalate, as the thread has no turns left for ants"
+    } else {
+        "send_message (or post_channel on a channel's thread)"
+    };
+    format!(
+        "[ants] {from} replied to an ask_ant or route call on this thread after the call gave up; the answer to this \
+         prompt is not sent back. Pass the answer on to whoever asked on this thread with {going_on}; complete ends \
+         the turn."
     )
 }
 

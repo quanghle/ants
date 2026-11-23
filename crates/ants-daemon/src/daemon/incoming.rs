@@ -24,6 +24,8 @@ pub(super) struct Incoming {
     pub(super) resume: Option<ChannelId>,
     /// How the message steered its thread.
     pub(super) steered: Steered,
+    /// Whether it is a reply to an `ask_ant` or `route` call that gave up ([`crate::mcp::Claim::Late`]).
+    pub(super) late: bool,
 }
 
 /// Whether a message steers its thread: one that does goes ahead of the messages waiting there, after those that

@@ -487,9 +487,9 @@ alice thread search --from system-messenger --since 10m
 ```
 
 **Expect** `ants ask` prints `to system-messenger`; a reply holding `ROUTED-$t` reaches alice; the search shows a
-message of `system-messenger` to `leaf-ant` (or `gate-ant`, neither of the hub's ants). Known: when the leaf's ant is
-busy past the route's wait, its reply comes after the messenger's last `check_inbox` and never reaches alice, though it
-is on the thread (ants-qsc53).
+message of `system-messenger` to `leaf-ant` (or `gate-ant`, neither of the hub's ants). When the leaf's ant is busy past
+the route's wait, the messenger first tells alice the answer did not come; the late reply is then prompted to the
+messenger on the thread, and within 5 minutes a message of `system-messenger` passes `ROUTED-$t` on to alice.
 
 ## A. Ant to ant across machines
 

@@ -1,7 +1,8 @@
 //! How a reply to `ask_ant` reaches the call waiting for it. The asks waiting on a reply are kept in
 //! `<home>/mcp.json`, with the replies that came after their call gave up, so both survive a restart. A reply reaches
-//! the call off the live subscription to the inbox ([`Hub::route`]) or from the inbox consumer ([`Hub::claim`]); one
-//! that comes too late waits for `check_inbox` ([`Hub::take_late`]).
+//! the call off the live subscription to the inbox ([`Hub::route`]) or from the inbox consumer ([`Hub::claim`]). One
+//! that comes too late waits for `check_inbox` ([`Hub::take_late`]) and is prompted on its thread once its turn comes
+//! there, unless `check_inbox` took it first ([`Hub::late_turn`]).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -15,7 +16,7 @@ use super::Hub;
 
 /// Asks remembered for their replies; the oldest are forgotten first.
 const MAX_ASKS: usize = 1024;
-/// Late replies kept for `check_inbox`; the oldest are dropped first.
+/// Late replies kept for `check_inbox`, and those taken or prompted since; the oldest are dropped first.
 const MAX_LATE: usize = 256;
 /// Replies taken by a waiting call that the inbox consumer has not handed over yet.
 const MAX_ROUTED: usize = 1024;
@@ -30,6 +31,12 @@ pub(super) struct Stored {
     /// Replies a waiting call took, oldest first, until the inbox consumer hands them over.
     #[serde(default)]
     pub(super) routed: Vec<Uuid>,
+    /// Late replies `check_inbox` took, oldest first: their prompt is skipped.
+    #[serde(default)]
+    pub(super) taken: Vec<Uuid>,
+    /// Late replies whose prompt began, oldest first: a redelivery is prompted again.
+    #[serde(default)]
+    pub(super) prompted: Vec<Uuid>,
 }
 
 impl Stored {
@@ -40,6 +47,29 @@ impl Stored {
     fn forget(&mut self, ask: Uuid) {
         self.asks.retain(|(id, _)| *id != ask);
     }
+
+    fn is_late(&self, reply: Uuid) -> bool {
+        self.late.iter().any(|e| e.id == reply) || self.prompted.contains(&reply)
+    }
+}
+
+/// What a message from the inbox consumer is to the asks ([`Hub::claim`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Claim {
+    /// An ordinary message.
+    No,
+    /// The reply of a call, handed over, or a late one `check_inbox` took: acked, never prompted.
+    Taken,
+    /// A reply that came after its call gave up, kept for `check_inbox`: prompted on its thread when its turn comes
+    /// there, so it is not acked now.
+    Late,
+}
+
+/// Push `id` onto `ids`, dropping the oldest beyond `max`.
+fn push_bounded(ids: &mut Vec<Uuid>, id: Uuid, max: usize) {
+    ids.push(id);
+    let excess = ids.len().saturating_sub(max);
+    ids.drain(..excess);
 }
 
 pub(super) struct Asks {
@@ -85,7 +115,8 @@ impl Hub {
         self.asks.lock().await.waiting.remove(&envelope.id);
         rx.try_recv().map_err(|_| {
             format!(
-                "no reply from {} within {}s; a reply that comes later shows up in check_inbox",
+                "no reply from {} within {}s; a reply that comes later shows up in check_inbox, and once this turn \
+                 ends is prompted on this thread",
                 envelope.to,
                 wait.as_secs()
             )
@@ -102,9 +133,7 @@ impl Hub {
         let Some(waiter) = asks.waiting.remove(&ask) else { return };
         let id = envelope.id;
         if waiter.send(envelope).is_ok() {
-            asks.stored.routed.push(id);
-            let excess = asks.stored.routed.len().saturating_sub(MAX_ROUTED);
-            asks.stored.routed.drain(..excess);
+            push_bounded(&mut asks.stored.routed, id, MAX_ROUTED);
             // Kept so that after a restart the inbox consumer's copy is not shown again; losing it only risks that.
             if let Err(e) = self.save(&asks.stored).await {
                 tracing::warn!(error = format!("{e:#}"), "saving MCP state");
@@ -112,11 +141,17 @@ impl Hub {
         }
     }
 
-    pub(super) async fn claim(&self, envelope: &Envelope) -> Result<bool> {
-        let Some(ask) = envelope.in_reply_to else { return Ok(false) };
+    pub(super) async fn claim(&self, envelope: &Envelope) -> Result<Claim> {
+        let Some(ask) = envelope.in_reply_to else { return Ok(Claim::No) };
         let mut asks = self.asks.lock().await;
+        if asks.stored.taken.contains(&envelope.id) {
+            return Ok(Claim::Taken);
+        }
+        if asks.stored.is_late(envelope.id) {
+            return Ok(Claim::Late);
+        }
         if asks.stored.asked(ask) != Some(&envelope.from) {
-            return Ok(false);
+            return Ok(Claim::No);
         }
         asks.stored.forget(ask);
         let routed = asks.stored.routed.len();
@@ -128,17 +163,40 @@ impl Hub {
             if let Err(e) = self.save(&asks.stored).await {
                 tracing::warn!(error = format!("{e:#}"), "saving MCP state");
             }
-            return Ok(true);
+            return Ok(Claim::Taken);
         }
-        if !asks.stored.late.iter().any(|e| e.id == envelope.id) {
-            tracing::info!(thread = %envelope.thread_id, from = %envelope.from, "keeping a late reply for check_inbox");
-            asks.stored.late.push(envelope.clone());
-            let excess = asks.stored.late.len().saturating_sub(MAX_LATE);
-            asks.stored.late.drain(..excess);
-        }
+        tracing::info!(thread = %envelope.thread_id, from = %envelope.from, "keeping a late reply for check_inbox and a prompt");
+        asks.stored.late.push(envelope.clone());
+        let excess = asks.stored.late.len().saturating_sub(MAX_LATE);
+        asks.stored.late.drain(..excess);
         if let Err(e) = self.save(&asks.stored).await {
             // Not acked, so it comes again; it must still count as a reply then.
+            asks.stored.late.retain(|e| e.id != envelope.id);
             asks.stored.asks.push((ask, envelope.from.clone()));
+            return Err(e);
+        }
+        Ok(Claim::Late)
+    }
+
+    /// Whether the late reply `envelope` is still to be prompted as its turn comes: not when `check_inbox` took it.
+    /// From now on `check_inbox` no longer shows it, and a redelivery is prompted again.
+    pub(super) async fn late_turn(&self, envelope: &Envelope) -> Result<bool> {
+        let mut asks = self.asks.lock().await;
+        if asks.stored.taken.contains(&envelope.id) {
+            return Ok(false);
+        }
+        if asks.stored.prompted.contains(&envelope.id) {
+            return Ok(true);
+        }
+        let Some(at) = asks.stored.late.iter().position(|e| e.id == envelope.id) else {
+            // Dropped from the full list unread: prompted all the same.
+            return Ok(true);
+        };
+        let kept = asks.stored.late.remove(at);
+        push_bounded(&mut asks.stored.prompted, envelope.id, MAX_LATE);
+        if let Err(e) = self.save(&asks.stored).await {
+            asks.stored.prompted.retain(|id| *id != envelope.id);
+            asks.stored.late.insert(at, kept);
             return Err(e);
         }
         Ok(true)
@@ -150,7 +208,12 @@ impl Hub {
         let (taken, kept) =
             std::mem::take(&mut asks.stored.late).into_iter().partition(|e| thread.is_none_or(|t| &e.thread_id == t));
         asks.stored.late = kept;
+        let ids: Vec<Uuid> = taken.iter().map(|e| e.id).collect();
+        for id in &ids {
+            push_bounded(&mut asks.stored.taken, *id, MAX_LATE);
+        }
         if let Err(e) = self.save(&asks.stored).await {
+            asks.stored.taken.retain(|id| !ids.contains(id));
             asks.stored.late.extend(taken);
             return Err(e);
         }

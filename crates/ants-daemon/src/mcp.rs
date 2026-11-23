@@ -80,6 +80,7 @@ mod tools;
 mod trails;
 mod turn;
 
+pub use asks::Claim;
 pub use assist::{HumanMessage, HumanSealing, HumanStore, jetstream_store};
 pub use attach::{FileAccess, jetstream_files};
 pub use channels::{ChannelAccess, jetstream_channels};
@@ -336,10 +337,16 @@ impl Mcp {
         }));
     }
 
-    /// Whether `envelope`, from the inbox consumer, answers an `ask_ant` call; then it is no prompt but the call's
-    /// reply, or kept for `check_inbox` when the call gave up. True means it is handled and may be acked.
-    pub async fn claim(&self, envelope: &Envelope) -> Result<bool> {
+    /// Whether `envelope`, from the inbox consumer, answers an `ask_ant` call: then it is no prompt but the call's
+    /// reply, or, when the call gave up, kept for `check_inbox` and prompted once its turn comes on its thread.
+    pub async fn claim(&self, envelope: &Envelope) -> Result<Claim> {
         self.hub.claim(envelope).await
+    }
+
+    /// Whether `envelope`, a late reply ([`Claim::Late`]) whose turn came, is to be prompted: not when `check_inbox`
+    /// took it first.
+    pub async fn late_turn(&self, envelope: &Envelope) -> Result<bool> {
+        self.hub.late_turn(envelope).await
     }
 
     /// Let `manage_channel` reach the channels through `admin`; without it the tool is refused.
