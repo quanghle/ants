@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn only_the_web_tag_marks_web_credentials() {
-        assert!(is_web(["ants-perms:2", "ants-web"]));
+        assert!(is_web(["ants-perms:1", "ants-web"]));
         assert!(is_web(["ANTS-WEB"]));
         assert!(!is_web(["ants-web:x", "ants-webhook", "ants-device:x"]));
     }
