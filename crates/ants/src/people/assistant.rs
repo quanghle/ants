@@ -372,8 +372,8 @@ pub(crate) async fn designated(js: &jetstream::Context, account: Option<&str>, h
             return None;
         }
     };
-    match grant.verify(&assistant_grant_key(human), account, Utc::now()) {
-        Ok(verified) => verified.assistant,
+    match ants_client::sending::designated(&grant, account, human, Utc::now()) {
+        Ok(assistant) => assistant,
         Err(e) => {
             tracing::warn!("not honouring the assistant grant of {human}: {e}");
             None

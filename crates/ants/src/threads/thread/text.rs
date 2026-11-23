@@ -1,14 +1,13 @@
 //! Threads and their entries as text: the table of `ants thread list`, and the entries of `ants thread show`.
 
 use std::fmt::Write as _;
-use std::time::Duration;
 
+pub(crate) use ants_client::text::took;
 use ants_proto::{Answered, DecidedBy, MAX_TITLE, NoReplyWhy, Pick, PromptEnd, TimelineEnd, UserId};
 use chrono::{DateTime, Utc};
 
-use super::entry::{Entry, Kind};
 use super::summaries::Summary;
-use super::{NoReply, ToolCall, ToolRejection};
+use super::{Entry, Kind, NoReply, ToolCall, ToolRejection};
 use crate::messages::attachments;
 
 /// How many characters of a note on an entry, or of a tool call's status, [`render`] shows.
@@ -215,15 +214,6 @@ fn ended(tool: &ToolCall) -> String {
         (Some("failed"), Some(took)) => format!(" · failed after {took}"),
         (Some(status), _) => format!(" · {}", ants_proto::one_line(&status.replace('_', " "), NOTE)),
         (None, _) => " · started".to_owned(),
-    }
-}
-
-/// How long a tool call took: `840ms`, `2.1s`, `3m`.
-pub(crate) fn took(ms: u64) -> String {
-    match ms {
-        0..1000 => format!("{ms}ms"),
-        1000..60_000 => format!("{:.1}s", Duration::from_millis(ms).as_secs_f64()),
-        _ => ants_proto::duration::format(Duration::from_millis(ms)),
     }
 }
 

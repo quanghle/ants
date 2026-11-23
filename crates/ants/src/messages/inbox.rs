@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
+use ants_client::inbox::{CONFLICTS, mark_read as mark_in, mark_unread, marker_of, parse};
 use ants_daemon::bus;
 use ants_daemon::delivery::unserved;
 use ants_daemon::people::humans::Registry;
@@ -30,8 +31,6 @@ use crate::people::sealed::{Keyring, State};
 
 /// How often a followed inbox is read again with no message announced, against an announcement missed.
 const RESCAN: Duration = Duration::from_secs(30);
-/// How many times a mark is tried again after another device moved the marker first.
-const CONFLICTS: usize = 16;
 
 /// Which unread messages to take, and whether taking them marks them read.
 #[derive(Debug, Clone, Default)]
@@ -131,7 +130,7 @@ impl Inbox {
         if entry.operation != Operation::Put {
             return Ok((ReadMarker::default(), entry.revision));
         }
-        let marker = serde_json::from_slice(&entry.value).unwrap_or_else(|e| {
+        let marker = marker_of(&entry.value).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "a malformed read marker; starting over");
             ReadMarker::default()
         });
@@ -140,20 +139,13 @@ impl Inbox {
 
     /// Mark the messages at `seqs` read, on top of whatever other devices marked meanwhile.
     async fn mark(&self, seqs: &[u64]) -> Result<()> {
-        self.change(seqs, "marking read", |marker| {
-            seqs.iter().for_each(|seq| marker.mark(*seq));
-            // The sequences read cover the inbox from `start` on only.
-            if self.start.is_some_and(|start| marker.below + 1 >= start) {
-                marker.compact(self.seqs.iter().copied());
-            }
-        })
-        .await
+        self.change(seqs, "marking read", |marker| mark_in(marker, seqs, self.start, &self.seqs)).await
     }
 
     /// Mark the messages at `seqs` unread again on all the human's devices, on top of whatever other devices marked
     /// meanwhile.
     pub async fn unmark(&self, seqs: &[u64]) -> Result<()> {
-        self.change(seqs, "marking unread", |marker| seqs.iter().for_each(|seq| marker.unmark(*seq))).await
+        self.change(seqs, "marking unread", |marker| mark_unread(marker, seqs)).await
     }
 
     /// Change the marker with `change` for `seqs`, `doing` so as errors say, by compare-and-set.
@@ -325,13 +317,6 @@ impl Inbox {
         }
         Ok(())
     }
-}
-
-/// The envelope of a message stored on `subject`, unless malformed or its sender forged.
-fn parse(subject: &str, payload: &[u8]) -> Result<Envelope, String> {
-    let envelope = serde_json::from_slice::<Envelope>(payload).map_err(|e| e.to_string())?;
-    envelope.check_subject(subject).map_err(|e| format!("forged sender: {e}"))?;
-    Ok(envelope)
 }
 
 /// Mark `reply`, already shown by `ants ask --wait`, read in the inbox of `human`. JetStream may store it a moment

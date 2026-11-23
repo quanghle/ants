@@ -159,6 +159,7 @@ name = "ants"
 version = "0.3.0"
 dependencies = [
  "agent-client-protocol",
+ "ants-client",
  "ants-daemon",
  "ants-proto",
  "ants-sense",
@@ -198,10 +199,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ants-client"
+version = "0.3.0"
+dependencies = [
+ "ants-proto",
+ "chrono",
+ "data-encoding",
+ "futures",
+ "nkeys",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "ants-daemon"
 version = "0.3.0"
 dependencies = [
  "agent-client-protocol",
+ "ants-client",
  "ants-proto",
  "ants-sense",
  "ants-test-support",
@@ -240,6 +256,7 @@ version = "0.3.0"
 dependencies = [
  "chrono",
  "data-encoding",
+ "getrandom 0.2.17",
  "insta",
  "nkeys",
  "proptest",
@@ -1565,8 +1582,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]

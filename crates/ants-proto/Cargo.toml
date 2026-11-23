@@ -18,6 +18,13 @@ sha2 = { version = "0.10.9", default-features = false }
 thiserror = "2.0.21"
 uuid = { workspace = true, features = ["v4", "v7", "serde"] }
 
+# A browser's clock and randomness (ants-client builds for wasm32-unknown-unknown): chrono's and uuid's come from
+# JavaScript there, and so does that of getrandom 0.2, which nkeys draws from.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+chrono = { workspace = true, features = ["wasmbind"] }
+getrandom = { version = "0.2.17", features = ["js"] }
+uuid = { workspace = true, features = ["js"] }
+
 [dev-dependencies]
 insta = { version = "1.49.0", default-features = false, features = ["json"] }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }

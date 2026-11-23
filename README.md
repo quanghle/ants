@@ -145,12 +145,12 @@ ants ask --wait @dev-b "run the test suite"
 
 ## Contributing
 
-Workspace crates: `ants-proto` (wire types and NATS permissions, no I/O), `ants-sense` (built-in identity, memory and work provider), `ants-trail` (trails: Python scripts run by Monty in one-shot `ants subprocess` workers), `ants-daemon` (bus, ACP pool, delivery, approvals, MCP server), `ants` (CLI and service binary), and `ants-test-support` (test helpers).
+Workspace crates: `ants-proto` (wire types and NATS permissions, no I/O), `ants-client` (what a human's client shows and sends, with no I/O, and its reads and writes over a transport trait; also built for `wasm32-unknown-unknown`), `ants-sense` (built-in identity, memory and work provider), `ants-trail` (trails: Python scripts run by Monty in one-shot `ants subprocess` workers), `ants-daemon` (bus, ACP pool, delivery, approvals, MCP server), `ants` (CLI and service binary), and `ants-test-support` (test helpers).
 
 Run the full CI check suite locally before submitting changes (`rust-toolchain.toml` pins Rust 1.100):
 
 ```sh
-scripts/check.sh               # fmt, clippy, test (v1 + JS ack/FC v2), and cargo-deny with warnings denied
+scripts/check.sh               # fmt, clippy, the wasm32 check of ants-client, test (v1 + JS ack/FC v2), and cargo-deny with warnings denied
 scripts/check.sh --footprint   # also the release build and the idle footprint check
 ```
 

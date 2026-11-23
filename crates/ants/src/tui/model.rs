@@ -260,7 +260,7 @@ impl Data {
 
     /// Whether the human's inbox message at `seq` is unread; not while the read marker is unknown.
     pub fn unread(&self, seq: u64) -> bool {
-        self.marker.as_ref().is_some_and(|m| !m.is_read(seq))
+        ants_client::inbox::unread(self.marker.as_ref(), seq)
     }
 
     /// The title a human set on the thread, else the title an ant suggested, else its opening line; after a lock

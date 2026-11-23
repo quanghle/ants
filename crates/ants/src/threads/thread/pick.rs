@@ -13,10 +13,8 @@ use async_nats::jetstream::stream::LastRawMessageErrorKind;
 use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
 
-use super::entry::Entry;
-use super::parser::Parser;
 use super::text::time;
-use super::{LATE, LISTED, RECENT, window};
+use super::{Entry, LATE, LISTED, Parser, RECENT, window};
 use crate::connection::Nats;
 use crate::text::excerpt;
 use crate::threads::thread_meta;

@@ -10,7 +10,6 @@ use ants_proto::ChannelId;
 use anyhow::Result;
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
-use clap::ValueEnum as _;
 use futures::FutureExt as _;
 use futures::future::LocalBoxFuture;
 use ratatui::Frame;
@@ -53,7 +52,7 @@ pub fn parse(query: &str, now: DateTime<Utc>) -> Result<Search, String> {
             }
             "type" => {
                 for kind in value.split(',') {
-                    search.kinds.insert(Kind::from_str(kind, true).map_err(|_| unknown_type(kind))?);
+                    search.kinds.insert(kind.parse::<Kind>().map_err(|_| unknown_type(kind))?);
                 }
             }
             "since" => since = Some(search::parse_when(value)?),
@@ -70,8 +69,7 @@ pub fn parse(query: &str, now: DateTime<Utc>) -> Result<Search, String> {
 }
 
 fn unknown_type(kind: &str) -> String {
-    let kinds: Vec<String> =
-        Kind::value_variants().iter().filter_map(|k| Some(k.to_possible_value()?.get_name().to_owned())).collect();
+    let kinds = Kind::MESSAGES.map(Kind::as_str);
     format!("type:{kind} is none of {}", kinds.join(", "))
 }
 

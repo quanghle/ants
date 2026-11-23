@@ -89,7 +89,7 @@ pub(crate) enum ThreadCommand {
         #[arg(long, value_name = "CHANNEL", add = ArgValueCandidates::new(completions::channels))]
         channel: Option<ChannelId>,
         /// Only messages of these kinds (repeat or separate with commas).
-        #[arg(long = "type", value_name = "TYPE", value_enum, value_delimiter = ',')]
+        #[arg(long = "type", value_name = "TYPE", value_parser = thread::kind_parser(), value_delimiter = ',')]
         kinds: Vec<thread::Kind>,
         /// From when: a duration back from now (90m, 2h, 3d; 0 for everything the stream keeps), an RFC 3339 time, or
         /// a date or date and time in UTC (2026-11-14, 2026-11-14 09:30); by default 24h before --until.

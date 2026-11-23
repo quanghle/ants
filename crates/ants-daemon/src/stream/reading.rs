@@ -10,6 +10,7 @@
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
+use ants_client::requests::{NUM_PENDING, Position};
 use ants_proto::{Role, STREAM, Uuid, spare_readers};
 use anyhow::{Context as _, Result};
 use async_nats::StatusCode;
@@ -254,20 +255,6 @@ async fn read_through(consumer: &consumer::PullConsumer, mut take: impl Take) ->
     Ok(())
 }
 
-/// Where a read by direct gets goes on from: the first message on the filter at or after `seq`, or stored at or after
-/// `since` when nothing was read yet.
-struct Position {
-    seq: u64,
-    since: Option<String>,
-}
-
-impl Position {
-    /// After the message stored at `seq`.
-    fn after(&mut self, seq: u64) {
-        (self.seq, self.since) = (seq + 1, None);
-    }
-}
-
 async fn read_by_gets(
     js: &jetstream::Context,
     filter: &str,
@@ -275,14 +262,9 @@ async fn read_by_gets(
     take: impl Take,
 ) -> Result<()> {
     let at = match start {
-        consumer::DeliverPolicy::All => Position { seq: 1, since: None },
-        consumer::DeliverPolicy::ByStartSequence { start_sequence } => {
-            Position { seq: start_sequence.max(1), since: None }
-        }
-        consumer::DeliverPolicy::ByStartTime { start_time } => {
-            let time = chrono::DateTime::<chrono::Utc>::from(SystemTime::from(start_time));
-            Position { seq: 0, since: Some(time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)) }
-        }
+        consumer::DeliverPolicy::All => Position::all(),
+        consumer::DeliverPolicy::ByStartSequence { start_sequence } => Position::from_seq(start_sequence),
+        consumer::DeliverPolicy::ByStartTime { start_time } => Position::since(SystemTime::from(start_time).into()),
         other => anyhow::bail!("reading from {other:?}"),
     };
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
@@ -290,25 +272,8 @@ async fn read_by_gets(
     read_by_batches(js, filter, at, last, take).await
 }
 
-/// Messages asked for at once by a direct get, and the bytes they come to at most (a larger message comes alone).
-const DIRECT_BATCH: usize = 256;
-const DIRECT_BATCH_BYTES: usize = 4 << 20;
-const NUM_PENDING: &str = "Nats-Num-Pending";
-
-/// A batched direct get: up to `batch` messages on `next_by_subj`, the first at or after `seq`, or stored at or after
-/// `start_time`, followed by an end of batch.
-#[derive(serde::Serialize)]
-struct BatchGet<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    seq: Option<u64>,
-    next_by_subj: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    start_time: Option<String>,
-    batch: usize,
-    max_bytes: usize,
-}
-
-/// Read up to `last` by batched direct gets (`$JS.API.DIRECT.GET.ANTS`), one request per batch.
+/// Read up to `last` by batched direct gets (`$JS.API.DIRECT.GET.ANTS`), one request per batch, each the request a
+/// human's client of any kind sends ([`Position::request`]).
 async fn read_by_batches(
     js: &jetstream::Context,
     filter: &str,
@@ -322,14 +287,8 @@ async fn read_by_batches(
     #[expect(clippy::disallowed_methods, reason = "direct gets' answers, which the stream sends")]
     let mut replies = client.subscribe(inbox.clone()).await?;
     while at.seq <= last {
-        let request = BatchGet {
-            seq: (at.seq > 0).then_some(at.seq),
-            next_by_subj: filter,
-            start_time: at.since.clone(),
-            batch: DIRECT_BATCH,
-            max_bytes: DIRECT_BATCH_BYTES,
-        };
-        let request = async_nats::Request::new().inbox(inbox.clone()).payload(serde_json::to_vec(&request)?.into());
+        let request = serde_json::to_vec(&at.request(filter))?;
+        let request = async_nats::Request::new().inbox(inbox.clone()).payload(request.into());
         js.send_request(format!("DIRECT.GET.{STREAM}"), request).await?;
         let mut got = 0;
         loop {
@@ -525,7 +484,7 @@ mod tests {
         assert_eq!(headers.get(async_nats::header::NATS_MESSAGE_ID).unwrap().as_str(), "id-0", "at {seq}");
         let names: Vec<&str> = headers.iter().map(|(name, _)| name.as_ref()).collect();
         assert_eq!(names, ["Nats-Msg-Id"], "as published");
-        let batches = sent.len().div_ceil(DIRECT_BATCH);
+        let batches = sent.len().div_ceil(ants_client::requests::DIRECT_BATCH);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while requests() < batches {
             assert!(tokio::time::Instant::now() < deadline, "{} of {batches} requests seen", requests());

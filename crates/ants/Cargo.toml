@@ -10,6 +10,7 @@ description = "ants: agent teams messaging over NATS, from the terminal"
 
 [dependencies]
 ants-proto.workspace = true
+ants-client.workspace = true
 ants-sense.workspace = true
 ants-trail.workspace = true
 ants-daemon = { path = "../ants-daemon" }

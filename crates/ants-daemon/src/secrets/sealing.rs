@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub use ants_client::sealed::State;
 use ants_proto::{
     Attachment, DeviceId, DeviceKey, Envelope, SEALED_VERSION, Sealed, SealedBody, SealedKey, SealedTitle, ThreadTitle,
     UserId,
@@ -18,7 +19,6 @@ use crypto_secretbox::aead::{Aead as _, AeadCore as _, KeyInit as _, OsRng};
 use crypto_secretbox::{Key, Nonce, XSalsa20Poly1305};
 use data_encoding::BASE64;
 use nkeys::XKey;
-use serde::Serialize;
 
 use crate::people::devices::{Directory, Lookup};
 use crate::people::humans::Registry;
@@ -27,29 +27,6 @@ use crate::people::humans::Registry;
 pub const KEY_LEN: usize = 32;
 /// The size of the nonce a sealed body starts with.
 pub const NONCE_LEN: usize = 24;
-
-/// What a reader makes of a sealed message, as `--json` output says it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum State {
-    Opened,
-    /// Not sealed for the reader's device, or not openable by this reader.
-    Unreadable,
-    /// Its key or body does not open with the verified key of the sending device it names, which has none, or its
-    /// body disagrees with its envelope.
-    Forged,
-}
-
-impl State {
-    /// What a reader shows of a message it does not open.
-    pub fn placeholder(self) -> &'static str {
-        match self {
-            Self::Opened => "",
-            Self::Unreadable => "[sealed]",
-            Self::Forged => "[forged]",
-        }
-    }
-}
 
 /// What opening one sealed message, or title, gives.
 #[derive(Debug, Clone, PartialEq, Eq)]

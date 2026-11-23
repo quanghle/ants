@@ -18,7 +18,6 @@ use ants_proto::{ChannelId, UserId};
 use anyhow::{Result, bail};
 use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
-use clap::ValueEnum as _;
 
 use crate::threads::thread::{self, Entry, Kind, Parser};
 
@@ -98,7 +97,7 @@ impl Search {
     /// are on a channel; posts, notes and tool requests have no recipient).
     fn kinds(&self) -> BTreeSet<Kind> {
         let mut kinds: BTreeSet<Kind> =
-            if self.kinds.is_empty() { Kind::value_variants().iter().copied().collect() } else { self.kinds.clone() };
+            if self.kinds.is_empty() { Kind::MESSAGES.into_iter().collect() } else { self.kinds.clone() };
         if self.channel.is_some() {
             kinds.retain(|k| matches!(k, Kind::Post | Kind::Mention));
         }

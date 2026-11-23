@@ -143,9 +143,7 @@ pub struct Fact {
 }
 
 /// Whether `entry` is in the inbox of `me`.
-pub fn to(entry: &Entry, me: &UserId) -> bool {
-    matches!(entry.kind, Kind::Message | Kind::Escalation | Kind::Mention) && entry.to.as_ref() == Some(me)
-}
+pub use ants_client::inbox::holds as to;
 
 /// What the messages read tell of each thread.
 #[derive(Debug, Default)]
