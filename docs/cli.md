@@ -138,7 +138,7 @@ A quoted reply (`ants ask --reply-to`, `ants post --reply-to`, or `>` in the `an
 | `SSL_CERT_FILE` | TLS / `ants bridge connect` | PEM CA bundle trusted by `rustls` |
 | `ANTS_REQUIRE_TOOLS` | `cargo test` | When `1`, fail instead of skipping when `nats-server` is missing |
 | `ANTS_TEST_JS_ACK_FC_V2` | `cargo test` | When `1`, enable `js_ack_fc_v2: true` on test `nats-server`s |
-| `ANTS_STRESS` | `cargo test` (`e2e` flood and churn tests) | `N` scales them: the flood sends N times the messages, 300 ms per prompt, and kills the daemon twice while they drain; the churn reloads N times as long under more traffic; unset, small runs |
+| `ANTS_STRESS` | `cargo test` (`e2e` flood, churn and leaf-flap tests) | `N` scales them: the flood sends N times the messages, 300 ms per prompt, and kills the daemon twice while they drain; the churn reloads N times as long under more traffic; the leaf flap cuts the uplink N times as long, 200 ms per prompt, with one 75 s outage; unset, small runs |
 
 [`contrib/skills/ants/SKILL.md`](../contrib/skills/ants/SKILL.md) teaches external coding agents to use the `ants` CLI (`copilot skill add contrib/skills/ants/SKILL.md`).
 
