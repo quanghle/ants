@@ -106,10 +106,10 @@ impl Planned {
             return (Some(self), None);
         }
         if key != Key::Char('y') {
-            model.bar.set_status("the run is not started", Tone::Done);
+            model.ui.bar.set_status("the run is not started", Tone::Done);
             return (None, None);
         }
-        model.bar.set_status(format!("asking {} to start the run…", self.start.conductor), Tone::Busy);
+        model.ui.bar.set_status(format!("asking {} to start the run…", self.start.conductor), Tone::Busy);
         (None, Some(Action::Run(Job::TrailStart(Box::new(self.start)), String::new())))
     }
 }

@@ -682,7 +682,7 @@ mod tests {
         assert_eq!(m.page().name(), "work");
         m.key(Key::Esc, at(3));
         m.key(Key::Char('a'), at(3));
-        assert!(m.bar.focused && m.bar.text() == "@dev-a ", "a opens the bar on the ant");
+        assert!(m.ui.bar.focused && m.ui.bar.text() == "@dev-a ", "a opens the bar on the ant");
         m.key(Key::Esc, at(3));
         m.focus = crate::tui::model::Focus::View;
         assert_eq!(m.key(Key::Char('r'), at(3)), None);

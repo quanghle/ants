@@ -182,18 +182,18 @@ mod tests {
         model.pages.push(super::super::model::Page::Thread(page));
         let now = crate::test_support::live::at(1);
         model.key(Key::Up, now);
-        model.bar.set_text("unsent draft");
+        model.ui.bar.set_text("unsent draft");
         assert_eq!(model.key(Key::Char('y'), now), None);
         assert!(model.copying().is_some());
         model.paste("not added", now);
-        assert_eq!(model.bar.text(), "unsent draft");
+        assert_eq!(model.ui.bar.text(), "unsent draft");
         model.key(Key::Down, now);
         assert_eq!(model.key(Key::Enter, now), Some(Action::Copy("example\n".to_owned())));
         assert!(model.copying().is_none());
         model.key(Key::Char('y'), now);
         model.key(Key::Interrupt, now);
         assert!(model.copying().is_none());
-        assert_eq!(model.bar.text(), "unsent draft");
+        assert_eq!(model.ui.bar.text(), "unsent draft");
     }
 
     #[cfg(unix)]

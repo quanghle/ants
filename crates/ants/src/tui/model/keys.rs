@@ -1,7 +1,7 @@
 //! How a key changes the model: which of the prompts, the bar, the nav or the shown view takes it, and where a view's
 //! key leads ([`To`]).
 
-use ants_proto::{ApprovalRequest, Verdict};
+use ants_proto::{ApprovalRequest, ChannelId, Verdict};
 use chrono::{DateTime, Utc};
 
 use super::{Action, Focus, Key, Level, Model, Overlay, Page, Prompt, QUIT_WITHIN, To};
@@ -33,7 +33,7 @@ impl Model {
     fn dispatch(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         self.follow_drafts();
         let quitting = self.quitting.take().is_some_and(|at| now - at < QUIT_WITHIN);
-        self.notice.take_if(|n| n.level == Level::Error);
+        self.ui.notice.take_if(|n| n.level == Level::Error);
         if key == Key::Interrupt {
             return self.ctrl_c(quitting, now);
         }
@@ -52,7 +52,7 @@ impl Model {
         if let Some(taken) = self.overlay_key(key) {
             return taken;
         }
-        if self.catchup.shown() {
+        if self.digest_shown() {
             return self.digest_key(key);
         }
         if let Some(taken) = self.prompt_key(key, now) {
@@ -66,7 +66,7 @@ impl Model {
         {
             page.toggle_waiting();
             self.focus = Focus::View;
-            self.bar.focused = false;
+            self.ui.bar.focused = false;
             return None;
         }
         if key == Key::Ctrl('t') {
@@ -75,13 +75,13 @@ impl Model {
         if let Some(action) = self.typed_key(key, now) {
             return action;
         }
-        if !self.bar.focused
+        if !self.ui.bar.focused
             && self.focus == Focus::View
             && let Some(action) = self.card_key(key, now)
         {
             return action;
         }
-        if self.bar.focused
+        if self.ui.bar.focused
             && self.focus == Focus::View
             && matches!(key, Key::PageUp | Key::PageDown | Key::CtrlHome | Key::CtrlEnd)
             && matches!(self.page(), Page::Thread(_))
@@ -97,9 +97,9 @@ impl Model {
         match key {
             Key::Char('q') => self.quit(now),
             Key::Char('/') | Key::Ctrl('f') => {
-                self.bar.focused = true;
-                if self.bar.is_empty() {
-                    self.bar.set_text(if key == Key::Ctrl('f') { "/search " } else { "/" });
+                self.ui.bar.focused = true;
+                if self.ui.bar.is_empty() {
+                    self.ui.bar.set_text(if key == Key::Ctrl('f') { "/search " } else { "/" });
                 }
                 None
             }
@@ -129,7 +129,7 @@ impl Model {
     /// Take `key` if it is typed into what the view on screen holds: the text found in a thread, an ant's prompt
     /// or a channel's editor.
     fn typed_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
-        if self.bar.focused || self.focus != Focus::View {
+        if self.ui.bar.focused || self.focus != Focus::View {
             return None;
         }
         match self.pages.last_mut()? {
@@ -154,7 +154,7 @@ impl Model {
     /// Whether the help, the notices, the digest or a tool request in full covers the view.
     fn overlaid(&self) -> bool {
         self.covered()
-            || self.catchup.shown()
+            || self.digest_shown()
             || self.asking.as_ref().is_some_and(Asking::takes_keys)
             || matches!(self.page(), Page::Thread(page) if page.listing())
     }
@@ -166,7 +166,7 @@ impl Model {
             self.closed_by_q = Some(now);
             return None;
         }
-        if !self.bar.is_empty() {
+        if !self.ui.bar.is_empty() {
             self.notify("q quits with the bar empty: Ctrl-C empties it".to_owned(), Level::Info, now);
             return None;
         }
@@ -179,7 +179,7 @@ impl Model {
         if self.close(now) {
             return None;
         }
-        if !self.bar.is_empty() || self.bar.quoting.is_some() || self.bar.noting.is_some() {
+        if !self.ui.bar.is_empty() || self.ui.bar.quoting.is_some() || self.ui.bar.noting.is_some() {
             self.empty_into_history();
             return None;
         }
@@ -196,8 +196,8 @@ impl Model {
         if self.close_overlay() {
             return true;
         }
-        if let Some(digest) = self.catchup.digest.as_mut().filter(|d| d.shown) {
-            digest.shown = false;
+        if self.digest_shown() {
+            self.ui.digest.on = false;
             return true;
         }
         if self.asking.as_ref().is_some_and(Asking::takes_keys) {
@@ -207,8 +207,8 @@ impl Model {
         if self.prompt.take().is_some() {
             return true;
         }
-        if self.bar.focused && !self.completions().is_empty() {
-            self.bar.pick.closed = true;
+        if self.ui.bar.focused && !self.completions().is_empty() {
+            self.ui.bar.pick.closed = true;
             return true;
         }
         if !self.palette(now).is_empty() {
@@ -219,10 +219,10 @@ impl Model {
             && page.listing()
         {
             page.toggle_waiting();
-            self.bar.focused = false;
+            self.ui.bar.focused = false;
             return true;
         }
-        if self.bar.focused || self.focus != Focus::View {
+        if self.ui.bar.focused || self.focus != Focus::View {
             return false;
         }
         let data = &self.data;
@@ -238,9 +238,9 @@ impl Model {
         if text.is_empty()
             || self.compact
             || self.drops_paste()
-            || self.catchup.shown()
+            || self.digest_shown()
             || self.asking.as_ref().is_some_and(Asking::takes_keys)
-            || (!self.bar.focused && matches!(self.page(), Page::Thread(page) if page.listing()))
+            || (!self.ui.bar.focused && matches!(self.page(), Page::Thread(page) if page.listing()))
         {
             return;
         }
@@ -248,7 +248,7 @@ impl Model {
         if self.prompt_paste(&line, now) {
             return;
         }
-        if !self.bar.focused
+        if !self.ui.bar.focused
             && self.focus == Focus::View
             && (self.card_paste(&line, now) || self.pages.last_mut().is_some_and(|page| write(page, &line)))
         {
@@ -309,13 +309,13 @@ impl Model {
             self.notify(refusal, Level::Error, now);
             return None;
         }
-        if !self.bar.is_empty() && self.bar.noting.as_ref().is_none_or(|note| note.request() != &request) {
-            self.bar.set_status("the bar holds a draft: send or clear it before writing a note", Tone::Error);
+        if !self.ui.bar.is_empty() && self.ui.bar.noting.as_ref().is_none_or(|note| note.request() != &request) {
+            self.ui.bar.set_status("the bar holds a draft: send or clear it before writing a note", Tone::Error);
             return None;
         }
-        self.bar.noting = Some(Note::Reject(Box::new(request)));
-        self.bar.quoting = None;
-        self.bar.focused = true;
+        self.ui.bar.noting = Some(Note::Reject(Box::new(request)));
+        self.ui.bar.quoting = None;
+        self.ui.bar.focused = true;
         None
     }
 
@@ -438,7 +438,7 @@ impl Model {
             }
             To::Interrupt(thread) => self.interrupt(thread),
             To::Reply(thread) => {
-                self.bar.focused = true;
+                self.ui.bar.focused = true;
                 self.go(To::Thread(thread), now)
             }
             To::Quote(thread, quoted, mention) => {
@@ -450,12 +450,12 @@ impl Model {
             To::Remind(thread, message) => self.remind(thread, message),
             To::Unremind(thread) => Some(self.set_reminder(thread, None)),
             To::Write => {
-                self.bar.focused = true;
+                self.ui.bar.focused = true;
                 None
             }
             To::Bar(text) => {
-                self.bar.set_text(&text);
-                self.bar.focused = true;
+                self.ui.bar.set_text(&text);
+                self.ui.bar.focused = true;
                 None
             }
             To::Forward => self.go(To::Bar("/forward @".to_owned()), now),
@@ -476,10 +476,16 @@ impl Model {
             }
             To::Do(action) => self.run(action),
             To::Refused(why) => {
-                self.bar.set_status(why, Tone::Error);
+                self.ui.bar.set_status(why, Tone::Error);
                 None
             }
         }
+    }
+
+    /// Show `tab` of `channel`, by key or click: the action keeping it on the device.
+    pub fn choose_tab(&mut self, channel: ChannelId, tab: channel::Tab) -> Action {
+        channel::keep_tab(&mut self.ui.channel_tabs, channel.clone(), tab);
+        Action::KeepChannelTab(channel, tab)
     }
 
     /// The action a view's key asks for, once marked busy where it is shown and on the bar.
@@ -494,23 +500,20 @@ impl Model {
                 Some(Action::Answer(answer))
             }
             Action::Run(Job::Open(listed), text) => {
-                self.bar.set_status(format!("opening {}…", listed.attachment.name), Tone::Busy);
+                self.ui.bar.set_status(format!("opening {}…", listed.attachment.name), Tone::Busy);
                 Some(Action::Run(Job::Open(listed), text))
             }
-            Action::Run(Job::Withdraw { edit: Some(_), .. }, _) if !self.bar.is_empty() => {
-                self.bar.set_status("the bar holds a draft: send or clear it before editing a message", Tone::Error);
+            Action::Run(Job::Withdraw { edit: Some(_), .. }, _) if !self.ui.bar.is_empty() => {
+                self.ui.bar.set_status("the bar holds a draft: send or clear it before editing a message", Tone::Error);
                 None
             }
-            Action::KeepChannelTab(channel, tab) => {
-                channel::keep_tab(&mut self.ui.channel_tabs, channel.clone(), tab);
-                Some(Action::KeepChannelTab(channel, tab))
-            }
+            Action::KeepChannelTab(channel, tab) => Some(self.choose_tab(channel, tab)),
             Action::Run(Job::ChannelNotify { channel, level }, _) => {
-                self.bar.set_status("running…", Tone::Busy);
+                self.ui.bar.set_status("running…", Tone::Busy);
                 Some(self.set_level(channel, level))
             }
             action @ Action::Run(..) => {
-                self.bar.set_status("running…", Tone::Busy);
+                self.ui.bar.set_status("running…", Tone::Busy);
                 Some(action)
             }
             action => Some(action),

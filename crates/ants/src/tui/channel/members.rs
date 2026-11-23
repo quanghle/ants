@@ -381,7 +381,7 @@ mod tests {
     }
 
     fn status(m: &Model) -> (String, Tone) {
-        let status = m.bar.status.as_ref().expect("a status");
+        let status = m.ui.bar.status.as_ref().expect("a status");
         (status.text.clone(), status.tone)
     }
 
@@ -399,7 +399,7 @@ mod tests {
         let Page::Channel(page) = m.page() else { panic!() };
         assert_eq!(page.prompt().unwrap(), "↑↓ row · Enter edit · a add · d remove or clear · Esc close");
         assert_eq!(keys(&mut m, [Key::Char('q'), Key::Char('n'), Key::Char('/')]), None, "taken by the editor");
-        assert!(!m.bar.focused && editor(&m).is_some());
+        assert!(!m.ui.bar.focused && editor(&m).is_some());
         keys(&mut m, [Key::Esc]);
         assert!(editor(&m).is_none(), "closed");
         assert!(matches!(m.page(), Page::Channel(_)), "still on the channel");
@@ -442,7 +442,7 @@ mod tests {
         let mut m = ops();
         keys(&mut m, [Key::Up, Key::Char('M')]);
         m.paste("dd", at(1));
-        assert!(!m.bar.focused && m.bar.is_empty() && editor(&m).unwrap().typing.is_none(), "dropped");
+        assert!(!m.ui.bar.focused && m.ui.bar.is_empty() && editor(&m).unwrap().typing.is_none(), "dropped");
         keys(&mut m, [Key::Char('a')]);
         m.paste("dev-b\n", at(1));
         assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text.text(), "@dev-b ");
@@ -545,7 +545,7 @@ mod tests {
         let refused = anyhow::anyhow!("no permission to write ants_channels");
         m.outcome(Outcome { result: Err(refused), text: String::new(), quoting: None });
         assert_eq!(status(&m), ("no permission to write ants_channels".to_owned(), Tone::Error));
-        assert!(!m.bar.focused && editor(&m).is_some(), "the editor stays");
+        assert!(!m.ui.bar.focused && editor(&m).is_some(), "the editor stays");
         let entry = ChannelEntry { members: vec![user("alice")], ..m.data.channels[0].clone() };
         m.read(Read::Directory(Ok((vec![entry], m.data.humans.clone().unwrap()))), at(2));
         let shown = channel_screen(&m, 130, 30);

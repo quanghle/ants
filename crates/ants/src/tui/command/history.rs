@@ -157,19 +157,19 @@ impl Model {
     /// Empty the bar into its history, and so the draft of the conversation shown: what Esc twice and Ctrl-C do to a
     /// bar holding text.
     pub fn empty_into_history(&mut self) {
-        let text = self.bar.text();
+        let text = self.ui.bar.text();
         self.push_history(&text);
-        self.bar.clear();
+        self.ui.bar.clear();
         self.ui.history.browsing = None;
         self.follow_drafts();
         if !text.trim().is_empty() {
-            self.bar.set_status("kept in the history: Ctrl-P recalls the text", Tone::Done);
+            self.ui.bar.set_status("kept in the history: Ctrl-P recalls the text", Tone::Done);
         }
     }
 
     /// Note that the bar's `key` at `now` left it holding text, so that another Esc soon empties it.
     pub(super) fn escaped(&mut self, key: Key, now: DateTime<Utc>) {
-        if key == Key::Esc && !self.bar.focused && !self.bar.is_empty() {
+        if key == Key::Esc && !self.ui.bar.focused && !self.ui.bar.is_empty() {
             self.ui.history.escaped = Some(now);
         }
     }
@@ -177,7 +177,7 @@ impl Model {
     /// Take `key` at `now` when it is the second Esc on a bar holding text, emptying it into its history.
     pub fn esc_again(&mut self, key: Key, now: DateTime<Utc>) -> bool {
         let escaped = self.ui.history.escaped.take();
-        if key != Key::Esc || self.bar.is_empty() || !escaped.is_some_and(|at| now - at <= ESC_AGAIN) {
+        if key != Key::Esc || self.ui.bar.is_empty() || !escaped.is_some_and(|at| now - at <= ESC_AGAIN) {
             return false;
         }
         self.empty_into_history();
@@ -195,22 +195,22 @@ impl Model {
             Key::Ctrl('p') => {
                 let at = history.browsing.as_ref().map_or(0, |(at, _)| at + 1);
                 let Some(text) = history.texts.get(at).map(|kept| kept.text.clone()) else { return true };
-                let before = history.browsing.take().map_or_else(|| self.bar.text(), |(_, before)| before);
+                let before = history.browsing.take().map_or_else(|| self.ui.bar.text(), |(_, before)| before);
                 history.browsing = Some((at, before));
-                self.bar.set_text(&text);
+                self.ui.bar.set_text(&text);
             }
             Key::Ctrl('n') => match history.browsing.take() {
-                Some((0, before)) => self.bar.set_text(&before),
+                Some((0, before)) => self.ui.bar.set_text(&before),
                 Some((at, before)) => {
                     let text = history.texts.get(at - 1).map_or_else(String::new, |kept| kept.text.clone());
                     history.browsing = Some((at - 1, before));
-                    self.bar.set_text(&text);
+                    self.ui.bar.set_text(&text);
                 }
                 None => {}
             },
             Key::Ctrl('r') => {
                 history.browsing = None;
-                history.searching = Some(Search { query: String::new(), at: None, before: self.bar.text() });
+                history.searching = Some(Search { query: String::new(), at: None, before: self.ui.bar.text() });
             }
             _ => {
                 history.browsing = None;
@@ -234,7 +234,7 @@ impl Model {
             }
             Key::Ctrl('r') => (query, at.map_or(0, |at| at + 1)),
             Key::Esc | Key::Ctrl('g') => {
-                self.bar.set_text(&before);
+                self.ui.bar.set_text(&before);
                 return true;
             }
             Key::Enter => return true,
@@ -248,7 +248,7 @@ impl Model {
         };
         history.searching = Some(Search { query, at: found, before });
         if let Some(text) = text {
-            self.bar.set_text(&text);
+            self.ui.bar.set_text(&text);
         }
         true
     }
@@ -269,8 +269,8 @@ impl Model {
         for KeptDraft { conversation, text } in kept.drafts {
             let draft = Draft::of(&text, None, None);
             if conversation == *self.ui.drafts.here() {
-                if self.bar.is_empty() {
-                    self.bar.swap(draft);
+                if self.ui.bar.is_empty() {
+                    self.ui.bar.swap(draft);
                 }
             } else {
                 self.ui.drafts.keep(conversation, draft);
@@ -291,7 +291,7 @@ impl Model {
     fn write_history(&self, path: &Path) -> Result<()> {
         let ui = &self.ui;
         let sent = ui.history.texts.iter().filter(|kept| !kept.private).map(|kept| kept.text.clone()).collect();
-        let here = (ui.drafts.here(), self.bar.text());
+        let here = (ui.drafts.here(), self.ui.bar.text());
         let kept = ui.drafts.kept().map(|(conversation, draft)| (conversation, draft.text()));
         let drafts = std::iter::once(here)
             .chain(kept)
@@ -316,10 +316,10 @@ mod tests {
     use crate::tui::{dm, thread};
 
     fn sent(m: &mut Model, text: &str) {
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(m, text);
         m.key(Key::Enter, at(1));
-        assert!(m.bar.is_empty(), "{text}: {:?}", m.bar.status);
+        assert!(m.ui.bar.is_empty(), "{text}: {:?}", m.ui.bar.status);
     }
 
     #[test]
@@ -328,18 +328,18 @@ mod tests {
         sent(&mut m, "@dev-a deploy");
         sent(&mut m, "/search deploy");
         sent(&mut m, "@dev-a deploy");
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(&mut m, "half");
         m.key(Key::Ctrl('p'), at(1));
-        assert_eq!(m.bar.text(), "@dev-a deploy", "the latest, sent twice, once");
+        assert_eq!(m.ui.bar.text(), "@dev-a deploy", "the latest, sent twice, once");
         m.key(Key::Ctrl('p'), at(1));
-        assert_eq!(m.bar.text(), "/search deploy");
+        assert_eq!(m.ui.bar.text(), "/search deploy");
         m.key(Key::Ctrl('p'), at(1));
-        assert_eq!(m.bar.text(), "/search deploy", "none earlier");
+        assert_eq!(m.ui.bar.text(), "/search deploy", "none earlier");
         m.key(Key::Ctrl('n'), at(1));
-        assert_eq!(m.bar.text(), "@dev-a deploy");
+        assert_eq!(m.ui.bar.text(), "@dev-a deploy");
         m.key(Key::Ctrl('n'), at(1));
-        assert_eq!(m.bar.text(), "half", "back to the text typed");
+        assert_eq!(m.ui.bar.text(), "half", "back to the text typed");
     }
 
     #[test]
@@ -348,55 +348,55 @@ mod tests {
         for text in ["@dev-a deploy the site", "@dev-b review", "@dev-a deploy the docs"] {
             sent(&mut m, text);
         }
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(&mut m, "draft");
         m.key(Key::Ctrl('r'), at(1));
         typed(&mut m, "DEPLOY");
-        assert_eq!(m.bar.text(), "@dev-a deploy the docs");
+        assert_eq!(m.ui.bar.text(), "@dev-a deploy the docs");
         assert_eq!(m.bar_title(), "search sent \"DEPLOY\"");
         m.key(Key::Ctrl('r'), at(1));
-        assert_eq!(m.bar.text(), "@dev-a deploy the site", "an earlier one");
+        assert_eq!(m.ui.bar.text(), "@dev-a deploy the site", "an earlier one");
         m.key(Key::Ctrl('r'), at(1));
-        assert_eq!(m.bar.text(), "@dev-a deploy the site", "none earlier");
+        assert_eq!(m.ui.bar.text(), "@dev-a deploy the site", "none earlier");
         typed(&mut m, "x");
         assert_eq!(m.bar_title(), "search sent \"DEPLOYx\": no match");
         m.key(Key::Esc, at(1));
-        assert_eq!((m.bar.text().as_str(), m.bar.focused), ("draft", true), "Esc puts the text back");
+        assert_eq!((m.ui.bar.text().as_str(), m.ui.bar.focused), ("draft", true), "Esc puts the text back");
         m.key(Key::Ctrl('r'), at(1));
         typed(&mut m, "review");
         m.key(Key::Enter, at(1));
-        assert_eq!(m.bar.text(), "@dev-b review", "Enter takes it, sending nothing");
+        assert_eq!(m.ui.bar.text(), "@dev-b review", "Enter takes it, sending nothing");
         assert_eq!(m.bar_title(), "to dev-b on a new thread");
     }
 
     #[test]
     fn esc_twice_empties_the_bar_into_the_history() {
         let mut m = model();
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(&mut m, "@dev-a later maybe");
         m.key(Key::Esc, at(1));
-        assert!(!m.bar.focused && m.bar.text() == "@dev-a later maybe", "one Esc leaves the bar");
+        assert!(!m.ui.bar.focused && m.ui.bar.text() == "@dev-a later maybe", "one Esc leaves the bar");
         m.key(Key::Esc, at(1));
-        assert!(m.bar.is_empty());
-        m.bar.focused = true;
+        assert!(m.ui.bar.is_empty());
+        m.ui.bar.focused = true;
         m.key(Key::Ctrl('p'), at(1));
-        assert_eq!(m.bar.text(), "@dev-a later maybe");
+        assert_eq!(m.ui.bar.text(), "@dev-a later maybe");
         m.key(Key::Esc, at(1));
         m.key(Key::Esc, at(3));
-        assert_eq!(m.bar.text(), "@dev-a later maybe", "too late for a second Esc");
+        assert_eq!(m.ui.bar.text(), "@dev-a later maybe", "too late for a second Esc");
     }
 
     #[test]
     fn ctrl_c_empties_the_bar_into_the_history() {
         let mut m = model();
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(&mut m, "@dev-a later maybe");
         m.key(Key::Interrupt, at(1));
-        assert!(m.bar.is_empty(), "Ctrl-C empties the bar");
+        assert!(m.ui.bar.is_empty(), "Ctrl-C empties the bar");
         assert!(!m.ui.drafts.holds(m.ui.drafts.here()), "and so the draft");
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         m.key(Key::Ctrl('p'), at(2));
-        assert_eq!(m.bar.text(), "@dev-a later maybe", "Ctrl-P recalls it");
+        assert_eq!(m.ui.bar.text(), "@dev-a later maybe", "Ctrl-P recalls it");
     }
 
     #[test]
@@ -436,14 +436,14 @@ mod tests {
 
         let mut m = model();
         m.load_history(Some(path));
-        assert_eq!(m.bar.text(), "who owns billing?", "home's draft");
-        m.bar.focused = true;
-        m.bar.set_text("");
+        assert_eq!(m.ui.bar.text(), "who owns billing?", "home's draft");
+        m.ui.bar.focused = true;
+        m.ui.bar.set_text("");
         m.key(Key::Ctrl('p'), at(1));
-        assert_eq!(m.bar.text(), "@dev-a deploy the site");
+        assert_eq!(m.ui.bar.text(), "@dev-a deploy the site");
         m.pages.push(Page::Thread(thread::Page::new(ours)));
         m.follow_drafts();
-        assert_eq!(m.bar.text(), "ship it", "the thread's draft is in its bar");
+        assert_eq!(m.ui.bar.text(), "ship it", "the thread's draft is in its bar");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -458,12 +458,12 @@ mod tests {
         assert_eq!(m.target(), Ok(theirs), "home selects the thread between two humans");
         sent(&mut m, "/title Bob surprise party");
         sent(&mut m, "/search budget");
-        m.bar.focused = true;
+        m.ui.bar.focused = true;
         typed(&mut m, "/title Bob cake");
         m.key(Key::Esc, at(1));
         m.key(Key::Esc, at(1));
-        assert!(m.bar.is_empty(), "Esc twice empties the bar into the history");
-        m.bar.focused = true;
+        assert!(m.ui.bar.is_empty(), "Esc twice empties the bar into the history");
+        m.ui.bar.focused = true;
         typed(&mut m, "/title Bob balloons");
         m.keep_history();
         let kept = std::fs::read_to_string(&path).unwrap();
@@ -471,9 +471,9 @@ mod tests {
             assert!(!kept.contains(private), "{private} is in {kept}");
         }
         assert!(kept.contains("/search budget"), "a command acting on no thread is kept: {kept}");
-        m.bar.set_text("");
+        m.ui.bar.set_text("");
         m.key(Key::Ctrl('p'), at(1));
-        assert_eq!(m.bar.text(), "/title Bob cake", "kept for the run");
+        assert_eq!(m.ui.bar.text(), "/title Bob cake", "kept for the run");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

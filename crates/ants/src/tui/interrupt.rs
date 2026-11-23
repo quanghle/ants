@@ -49,10 +49,10 @@ impl Model {
     fn interrupted(&mut self, thread: ThreadId) -> Option<Action> {
         let ants = self.running(&thread);
         if ants.is_empty() {
-            self.bar.set_status(format!("no ant runs a prompt on thread {thread}"), Tone::Error);
+            self.ui.bar.set_status(format!("no ant runs a prompt on thread {thread}"), Tone::Error);
             return None;
         }
-        self.bar.set_status("cancelling…", Tone::Busy);
+        self.ui.bar.set_status("cancelling…", Tone::Busy);
         Some(Action::Run(Job::Cancel { thread, ants }, String::new()))
     }
 
@@ -94,7 +94,7 @@ mod tests {
             Some(Action::Run(job, String::new()))
         };
         assert_eq!(m.key(Key::Char('x'), at(2)), cancel(&["dev-a"]), "no progress heard: ask the thread's ants");
-        assert_eq!(m.bar.status.as_ref().map(|s| s.text.as_str()), Some("cancelling…"));
+        assert_eq!(m.ui.bar.status.as_ref().map(|s| s.text.as_str()), Some("cancelling…"));
 
         let thinking = StatusEvent::new(user("dev-b"), thread.clone(), StatusUpdate::Thought { text: "hm".into() });
         m.take(live::Event::Status(thinking), at(3));
@@ -117,9 +117,9 @@ mod tests {
         };
         m.outcome(outcome);
         assert_eq!(
-            m.bar.status.as_ref().map(|s| s.text.clone()),
+            m.ui.bar.status.as_ref().map(|s| s.text.clone()),
             Some(format!("dev-b has no prompt running on thread {thread}"))
         );
-        assert!(!m.bar.focused && m.bar.is_empty(), "the bar stays as it was");
+        assert!(!m.ui.bar.focused && m.ui.bar.is_empty(), "the bar stays as it was");
     }
 }

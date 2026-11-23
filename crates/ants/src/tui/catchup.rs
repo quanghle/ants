@@ -129,7 +129,14 @@ pub struct Digest {
     pub since: DateTime<Utc>,
     /// The digest once in: the ant that wrote it, its text and tokens; or why there is none.
     pub got: Option<Result<(UserId, String, u64), String>>,
-    pub shown: bool,
+}
+
+/// How the digest overlay shows, kept in [`Ui`](super::model::Ui).
+#[derive(Debug, Default)]
+pub struct Shown {
+    /// Whether it shows, once a digest was asked for.
+    pub on: bool,
+    /// How many rows it is scrolled down.
     pub top: u16,
     /// How far it could scroll when last drawn: its wrapped rows past those showing.
     scrollable: Cell<u16>,
@@ -156,11 +163,6 @@ impl Catchup {
     /// When home's first line counts from, at `now`.
     pub fn from(&self, now: DateTime<Utc>) -> DateTime<Utc> {
         self.since.unwrap_or(now - BEFORE)
-    }
-
-    /// Whether the digest overlay shows.
-    pub fn shown(&self) -> bool {
-        self.digest.as_ref().is_some_and(|d| d.shown)
     }
 }
 
@@ -244,7 +246,8 @@ fn current(data: &Data, thread: &ThreadId, tldr: &ThreadSummary) -> bool {
 
 /// Draw the digest overlay, if shown.
 pub fn draw_digest(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
-    let Some(digest) = model.catchup.digest.as_ref().filter(|d| d.shown) else { return };
+    let Some(digest) = model.catchup.digest.as_ref().filter(|_| model.ui.digest.on) else { return };
+    let shown = &model.ui.digest;
     let area = frame.area();
     let (width, height) = (area.width.saturating_sub(8).min(100), area.height.saturating_sub(4));
     let area = Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - height) / 2, width, height };
@@ -264,30 +267,33 @@ pub fn draw_digest(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     lines.push(Line::raw(""));
     lines.extend(wrap(Span::styled("j/k scroll · s asks again · any other key closes", style::dim())));
     let scrollable = u16::try_from(lines.len()).unwrap_or(u16::MAX).saturating_sub(height.saturating_sub(2));
-    digest.scrollable.set(scrollable);
+    shown.scrollable.set(scrollable);
     frame.render_widget(Clear, area);
-    let paragraph = Paragraph::new(lines).block(style::block(title, true)).scroll((digest.top.min(scrollable), 0));
+    let paragraph = Paragraph::new(lines).block(style::block(title, true)).scroll((shown.top.min(scrollable), 0));
     frame.render_widget(paragraph, area);
 }
 
 impl Model {
+    /// Whether the digest overlay shows.
+    pub fn digest_shown(&self) -> bool {
+        self.catchup.digest.is_some() && self.ui.digest.on
+    }
+
     /// Ask for a new TL;DR of `thread`.
     pub fn tldr(&mut self, thread: ThreadId) -> Option<Action> {
         if !self.catchup.asking.insert(thread.clone()) {
-            self.bar.set_status(format!("a TL;DR of thread {thread} is being asked for"), Tone::Busy);
+            self.ui.bar.set_status(format!("a TL;DR of thread {thread} is being asked for"), Tone::Busy);
             return None;
         }
-        self.bar.set_status(format!("asking for a TL;DR of thread {thread}…"), Tone::Busy);
+        self.ui.bar.set_status(format!("asking for a TL;DR of thread {thread}…"), Tone::Busy);
         Some(Action::Summarise(Ask::Tldr { thread, ahead: false }))
     }
 
     /// Show the digest of the span home's first line counts: the one kept if it is of that span, else a new one.
     pub fn home_digest(&mut self, now: DateTime<Utc>) -> Option<Action> {
         let since = self.catchup.from(now);
-        if let Some(digest) =
-            self.catchup.digest.as_mut().filter(|d| d.since == since && !matches!(d.got, Some(Err(_))))
-        {
-            digest.shown = true;
+        if self.catchup.digest.as_ref().is_some_and(|d| d.since == since && !matches!(d.got, Some(Err(_)))) {
+            self.ui.digest.on = true;
             return None;
         }
         Some(self.ask_digest(since))
@@ -307,20 +313,22 @@ impl Model {
     }
 
     fn ask_digest(&mut self, since: DateTime<Utc>) -> Action {
-        self.catchup.digest = Some(Digest { since, got: None, shown: true, top: 0, scrollable: Cell::default() });
+        self.catchup.digest = Some(Digest { since, got: None });
+        self.ui.digest = Shown { on: true, ..Shown::default() };
         Action::Summarise(Ask::Digest(since))
     }
 
     /// The keys while the digest shows: j/k scroll, within its rows as last drawn, s asks again, any other closes it.
     pub fn digest_key(&mut self, key: Key) -> Option<Action> {
-        let digest = self.catchup.digest.as_mut()?;
+        let digest = self.catchup.digest.as_ref()?;
         if key == Key::Char('s') && digest.got.is_some() {
             let since = digest.since;
             return Some(self.ask_digest(since));
         }
-        match step(key, usize::from(digest.top), Some(PAGE)) {
-            Some(top) => digest.top = u16::try_from(top).unwrap_or(u16::MAX).min(digest.scrollable.get()),
-            None => digest.shown = false,
+        let shown = &mut self.ui.digest;
+        match step(key, usize::from(shown.top), Some(PAGE)) {
+            Some(top) => shown.top = u16::try_from(top).unwrap_or(u16::MAX).min(shown.scrollable.get()),
+            None => shown.on = false,
         }
         None
     }
@@ -359,7 +367,7 @@ impl Model {
                     Err(e) => Some((format!("{e:#}"), Tone::Error)),
                 };
                 if let Some((text, tone)) = told.filter(|_| !ahead) {
-                    self.bar.set_status(text, tone);
+                    self.ui.bar.set_status(text, tone);
                 }
             }
             Ask::Digest(since) => {
@@ -372,7 +380,7 @@ impl Model {
                     Ok(_) => Err("no digest came".to_owned()),
                     Err(e) => Err(format!("{e:#}")),
                 });
-                let shown = digest.shown;
+                let shown = self.ui.digest.on;
                 if !warnings.is_empty() {
                     self.notify(warnings.join(" · "), Level::Error, now);
                 }
@@ -568,11 +576,11 @@ mod tests {
         let shown = screen(&m, 140, 30, at(31));
         assert!(shown.contains("messenger · 42 tokens") && shown.contains("Two deploys landed."), "{shown}");
         assert_eq!(m.key(Key::Char('j'), at(31)), None);
-        assert!(m.catchup.shown(), "j scrolls");
+        assert!(m.digest_shown(), "j scrolls");
         assert_eq!(m.key(Key::Esc, at(31)), None);
-        assert!(!m.catchup.shown() && matches!(m.page(), Page::Home(_)), "Esc closes the digest only");
+        assert!(!m.digest_shown() && matches!(m.page(), Page::Home(_)), "Esc closes the digest only");
         assert_eq!(m.key(Key::Char('s'), at(32)), None, "the digest of the span is kept");
-        assert!(m.catchup.shown());
+        assert!(m.digest_shown());
         m.key(Key::Esc, at(32));
 
         let action = m.digest(Some("2h"), at(7200)).unwrap();
@@ -607,17 +615,17 @@ mod tests {
         ];
         for (key, top) in steps {
             assert_eq!(m.digest_key(key), None);
-            let digest = m.catchup.digest.as_ref().unwrap();
-            assert!(digest.shown && digest.top == top, "{key:?}: {digest:?}");
+            let shown = &m.ui.digest;
+            assert!(m.digest_shown() && shown.top == top, "{key:?}: {shown:?}");
         }
         m.digest_key(Key::End);
         let last = draw(&m);
         assert!(last.contains("paragraph 59") && last.contains("any other key closes"), "{last}");
         assert!(!last.contains("paragraph 50"), "the bottom rows fill the overlay: {last}");
         for key in [Key::Char('x'), Key::Esc] {
-            m.catchup.digest.as_mut().unwrap().shown = true;
+            m.ui.digest.on = true;
             assert_eq!(m.digest_key(key), None);
-            assert!(!m.catchup.digest.as_ref().unwrap().shown, "{key:?} closes it");
+            assert!(!m.digest_shown(), "{key:?} closes it");
         }
     }
 
@@ -628,11 +636,11 @@ mod tests {
         screen(&m, 80, 24, at(7200));
         for key in [Key::Char('j'), Key::PageDown, Key::End] {
             assert_eq!(m.digest_key(key), None);
-            let digest = m.catchup.digest.as_ref().unwrap();
-            assert!(digest.shown && digest.top == 0, "{key:?}: {digest:?}");
+            let shown = &m.ui.digest;
+            assert!(m.digest_shown() && shown.top == 0, "{key:?}: {shown:?}");
         }
         assert_eq!(m.digest_key(Key::Char('s')), None, "s asks again only once a digest came");
-        assert!(!m.catchup.digest.as_ref().unwrap().shown, "s closes it");
+        assert!(!m.digest_shown(), "s closes it");
     }
 
     #[test]

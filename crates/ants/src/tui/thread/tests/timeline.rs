@@ -89,7 +89,7 @@ fn t_cycles_a_finished_turn_s_calls_from_one_line_to_each_to_none() {
     };
     assert!(shown(&m).contains("  ⎿ ● dev-a  Ran 2 commands · 10.0s · 1 failed"), "{}", shown(&m));
 
-    m.selecting = Some(m.conversation());
+    m.ui.selecting = Some(m.conversation());
     assert_eq!(m.key(Key::Char('T'), at(40)), Some(Action::KeepTools(Tools::None)));
     assert_eq!(m.notice_at(at(40)).map(|n| n.text.as_str()), Some("tool calls: none"));
     let none = shown(&m);
@@ -231,7 +231,7 @@ fn a_runs_steps_show_where_they_started_and_enter_opens_the_thread_of_the_one_se
 
     m.pages.push(crate::tui::model::Page::Thread(page));
     m.focus = crate::tui::model::Focus::View;
-    m.selecting = Some(m.conversation());
+    m.ui.selecting = Some(m.conversation());
     let footer = crate::tui::keymap::footer(&m, at(10), 200).to_string();
     assert!(footer.contains("Enter step thread"), "{footer}");
     let (open, ants) = m.steps_wanted().unwrap();

@@ -102,7 +102,7 @@ impl Overlay {
     fn draw(&self, frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         match self {
             Self::Help(help) => help.draw(frame, model, now),
-            Self::Log(log) => log.draw(frame, &model.notices),
+            Self::Log(log) => log.draw(frame, &model.ui.notices),
             Self::Copy(picker) => picker.draw(frame, &model.ui.mouse),
         }
     }

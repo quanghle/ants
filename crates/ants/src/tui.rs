@@ -282,7 +282,7 @@ async fn reach(nats: &crate::connection::Nats<'_>) -> Result<(async_nats::Client
 
 fn appearance(model: &mut Model) -> Result<ants_daemon::config::CliDefaults> {
     let cli = crate::defaults::cli()?;
-    model.data.images = images::Images::new(cli.inline_images);
+    model.ui.inline_images = cli.inline_images;
     // Before the alternate screen takes the terminal, which then answers no query of its background.
     model.data.looks = faces::Looks::of_terminal();
     Ok(cli)
@@ -293,7 +293,7 @@ fn restore(model: &mut Model, kept: catchup::ChatState) {
     model.catchup.since = kept.ended;
     model.ui.tools = kept.tools;
     model.ui.channel_tabs = kept.channel_tabs;
-    model.fold.folds = kept.folds;
+    model.ui.fold.folds = kept.folds;
 }
 
 /// The key `key` is to the UI, if any.

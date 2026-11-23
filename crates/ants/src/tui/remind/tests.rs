@@ -32,14 +32,14 @@ fn reminders_lists_them_in_the_pager_from_any_view() {
     let mut m = model();
     assert!(m.target().is_err() && m.unfit("reminders", at(1)).is_none(), "no thread needed");
     m.follow_drafts();
-    m.bar.focused = true;
-    m.bar.set_text("/reminders");
+    m.ui.bar.focused = true;
+    m.ui.bar.set_text("/reminders");
     assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(Job::Reminders, "/reminders".to_owned())));
     let line = "2 reminders, 1 due: the pager lists them".to_owned();
     let listed = Done { line: line.clone(), page: Some("TABLE".to_owned()), ..Done::default() };
     let outcome = Outcome { result: Ok(listed), text: "/reminders".to_owned(), quoting: None };
     assert_eq!(m.outcome(outcome), Some(Action::Page("TABLE".to_owned())));
-    assert_eq!(m.bar.status.as_ref().map(|s| s.text.as_str()), Some(line.as_str()));
+    assert_eq!(m.ui.bar.status.as_ref().map(|s| s.text.as_str()), Some(line.as_str()));
 }
 
 /// The job lists every reminder of the human, those not due yet too, soonest due first, with the lines of `ants

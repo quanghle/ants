@@ -38,8 +38,8 @@ fn first_leg(trail: &TrailName, script: &str) -> TrailLeg {
 /// Send `text` from the bar of the view shown.
 fn run(m: &mut Model, text: &str) -> Option<Action> {
     m.follow_drafts();
-    m.bar.focused = true;
-    m.bar.set_text(text);
+    m.ui.bar.focused = true;
+    m.ui.bar.set_text(text);
     m.key(Key::Enter, at(1))
 }
 
@@ -169,7 +169,7 @@ fn trail_run_reports_on_a_thread_read_the_latest_or_the_one_open() {
     m.stored(vec![message(1, &older, "alice", "dev-a", "a"), message(2, &newer, "alice", "dev-a", "b")], at(1));
     let thread = |m: &mut Model, text: &str| match run(m, text) {
         Some(Action::Run(Job::TrailPlan { thread, limits, .. }, _)) => Ok((thread, limits.steps)),
-        _ => Err(m.bar.status.as_ref().unwrap().text.clone()),
+        _ => Err(m.ui.bar.status.as_ref().unwrap().text.clone()),
     };
     assert_eq!(thread(&mut m, "/trail run review --thread 0190a --steps 10"), Ok((Some(older.clone()), 10)));
     assert_eq!(thread(&mut m, "/trail run review --thread last"), Ok((Some(newer), 50)));

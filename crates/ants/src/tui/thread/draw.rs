@@ -24,7 +24,7 @@ impl Page {
             return;
         }
         let thread = &self.history.thread;
-        let (area, panel) = if model.fold.panel(frame.area().width) {
+        let (area, panel) = if model.ui.fold.panel(frame.area().width) {
             let [left, right] = Layout::horizontal([Constraint::Min(20), Constraint::Length(PANEL_WIDTH)]).areas(area);
             (left, Some(right))
         } else {

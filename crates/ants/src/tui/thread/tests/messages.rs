@@ -165,7 +165,7 @@ fn an_image_encoded_draws_under_its_line_and_the_others_keep_theirs() {
     page.history.loaded(&thread, Ok(vec![sent.clone()])).unwrap();
     let before = screen(&page, &m, 80, at(3));
 
-    m.data.images = images::Images::new(true);
+    m.ui.inline_images = true;
     assert_eq!(images::wanted(&m), Vec::new(), "only for the open thread");
     let image = crate::tui::test_support::halfblocks(&png);
     m.data.images.insert(sent.attachments[0].handle.clone(), Some(image));

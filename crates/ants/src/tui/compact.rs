@@ -152,7 +152,7 @@ impl Model {
         let action = self.view_key(key, now);
         // Opened, replying in the bar, a request shown in full or an allow-all asked to confirm: the full view shows it.
         let armed = matches!(self.page(), Page::Home(home) if home.prompt().is_some());
-        if key == Key::Enter || self.bar.focused || self.asking.as_ref().is_some_and(|a| a.full) || armed {
+        if key == Key::Enter || self.ui.bar.focused || self.asking.as_ref().is_some_and(|a| a.full) || armed {
             self.compact = false;
         }
         action

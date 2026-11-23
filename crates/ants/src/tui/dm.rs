@@ -298,12 +298,16 @@ mod tests {
         assert_eq!(shown.matches("┌ > to bob on a new thread, sealed ─").count(), 1, "the bar writes to bob: {shown}");
 
         assert_eq!(m.key(Key::Char('n'), at(2)), None);
-        assert_eq!((m.bar.text().as_str(), m.bar.focused), ("n", true), "with nothing selected, a key is written");
+        assert_eq!(
+            (m.ui.bar.text().as_str(), m.ui.bar.focused),
+            ("n", true),
+            "with nothing selected, a key is written"
+        );
         m.key(Key::Ctrl('u'), at(2));
         m.key(Key::Esc, at(2));
         m.key(Key::Up, at(2));
         assert_eq!(m.key(Key::Char('n'), at(2)), None);
-        assert!(m.bar.focused && m.bar.is_empty(), "with a thread selected, n focuses the bar");
+        assert!(m.ui.bar.focused && m.ui.bar.is_empty(), "with a thread selected, n focuses the bar");
         let want = exercise(|typed| match typed {
             Typed::Key(key) => _ = m.key(key, at(2)),
             Typed::Paste(text) => m.paste(text, at(2)),

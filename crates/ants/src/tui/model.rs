@@ -201,8 +201,9 @@ pub struct Data {
 }
 
 /// The state of the UI that the views read and mark beside [`Data`], when drawn or taking keys: where they were drawn,
-/// how the thread and channel views show, the bar's drafts and history. None of it comes from the bus; the views
-/// themselves, the nav, the focus, the folds and the bar are the [`Model`]'s.
+/// how the thread and channel views show, the folds, the command bar with its drafts and history, what Up selected,
+/// the notices and how the digest shows. None of it comes from the bus; the views themselves, the overlays, the nav
+/// and the focus are the [`Model`]'s.
 #[derive(Default)]
 pub struct Ui {
     /// Where the last frame drew what the mouse can point at, and the viewports' scroll.
@@ -215,6 +216,21 @@ pub struct Ui {
     pub drafts: command::Drafts,
     /// The texts sent from the bar, which it recalls.
     pub history: command::History,
+    /// The command bar.
+    pub bar: Bar,
+    /// Whether the nav and the thread's side panel show.
+    pub fold: fold::Fold,
+    /// The conversation whose message or post Up selected, the view's single keys acting on it; else, in a thread, a
+    /// channel's feed or a DM, a printable key is written in the bar ([`Model::typing`]).
+    pub selecting: Option<command::Conversation>,
+    /// The latest notice: an error until a key is pressed, else for [`NOTICE_FOR`].
+    pub notice: Option<Notice>,
+    /// The notices of the run, the earliest first, [`notices::KEPT`] at most.
+    pub notices: Vec<Notice>,
+    /// Whether the digest shows, and how far it is scrolled.
+    pub digest: catchup::Shown,
+    /// Whether the thread view draws image attachments (`[cli]` `inline_images`).
+    pub inline_images: bool,
 }
 
 impl Data {
@@ -375,11 +391,6 @@ pub struct Model {
     pub pages: Vec<Page>,
     /// What shows over the whole screen, the latest on top.
     pub overlays: Vec<Overlay>,
-    /// The latest notice: an error until a key is pressed, else for [`NOTICE_FOR`].
-    pub notice: Option<Notice>,
-    /// The notices of the run, the earliest first, [`notices::KEPT`] at most.
-    pub notices: Vec<Notice>,
-    pub bar: Bar,
     /// The tool request being answered.
     pub asking: Option<Asking>,
     /// The prompt in the footer taking the keys.
@@ -388,13 +399,8 @@ pub struct Model {
     pub catchup: catchup::Catchup,
     /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
     pub compact: bool,
-    /// Whether the nav and the thread's side panel show.
-    pub fold: fold::Fold,
     /// When Ctrl-C, nothing being open and the bar empty, asked for a second one to quit.
     pub quitting: Option<DateTime<Utc>>,
-    /// The conversation whose message or post Up selected, the view's single keys acting on it; else, in a thread, a
-    /// channel's feed or a DM, a printable key is written in the bar ([`Model::typing`]).
-    pub selecting: Option<command::Conversation>,
     /// When q last closed the help, the notices, the digest or a tool request, or came again soon after: a q that soon
     /// never quits.
     closed_by_q: Option<DateTime<Utc>>,
@@ -435,16 +441,11 @@ impl Model {
             nav,
             focus: Focus::View,
             overlays: Vec::new(),
-            notice: None,
-            notices: Vec::new(),
-            bar: Bar::default(),
             asking: None,
             prompt: None,
             catchup: catchup::Catchup::default(),
             compact: false,
-            fold: fold::Fold::default(),
             quitting: None,
-            selecting: None,
             closed_by_q: None,
         }
     }
@@ -468,12 +469,12 @@ impl Model {
     /// Show a notice, unless an error waits for a key and it is none, and keep it with the notices of the run.
     pub fn notify(&mut self, text: impl Into<String>, level: Level, now: DateTime<Utc>) {
         let notice = Notice { text: text.into(), at: now, level };
-        if self.notices.len() == notices::KEPT {
-            self.notices.remove(0);
+        if self.ui.notices.len() == notices::KEPT {
+            self.ui.notices.remove(0);
         }
-        self.notices.push(notice.clone());
-        if level == Level::Error || self.notice.as_ref().is_none_or(|n| n.level != Level::Error) {
-            self.notice = Some(notice);
+        self.ui.notices.push(notice.clone());
+        if level == Level::Error || self.ui.notice.as_ref().is_none_or(|n| n.level != Level::Error) {
+            self.ui.notice = Some(notice);
         }
     }
 
@@ -484,7 +485,7 @@ impl Model {
 
     /// The notice to show at `now`, if one is recent.
     pub fn notice_at(&self, now: DateTime<Utc>) -> Option<&Notice> {
-        self.notice.as_ref().filter(|n| n.level == Level::Error || now - n.at < NOTICE_FOR)
+        self.ui.notice.as_ref().filter(|n| n.level == Level::Error || now - n.at < NOTICE_FOR)
     }
 
     /// Take in what the live feed read or heard.
@@ -623,22 +624,22 @@ impl Model {
             (Err(e), None) => self.notify(format!("{e:#}"), Level::Error, now),
             (Ok(line), Some((note, request))) => {
                 self.notify(line, Level::Info, now);
-                self.bar.set_status(format!("sending the note to {}…", request.ant), Tone::Busy);
+                self.ui.bar.set_status(format!("sending the note to {}…", request.ant), Tone::Busy);
                 let job = command::note_job(&request, &note);
-                self.bar.sending_note(&note, request);
+                self.ui.bar.sending_note(&note, request);
                 return Some(Action::Run(job, note));
             }
             (Err(e), Some((note, request))) => {
                 self.notify(format!("{e:#}"), Level::Error, now);
                 let why = format!("{e:#}; the note was not sent");
-                if !self.bar.is_empty() {
-                    self.bar.set_status(why, Tone::Error);
+                if !self.ui.bar.is_empty() {
+                    self.ui.bar.set_status(why, Tone::Error);
                     return None;
                 }
-                self.bar.set_status(format!("{why}: Enter sends it to {} as a reply", request.ant), Tone::Error);
-                self.bar.set_text(&note);
-                self.bar.noting = Some(command::Note::Reply(request));
-                self.bar.focused = true;
+                self.ui.bar.set_status(format!("{why}: Enter sends it to {} as a reply", request.ant), Tone::Error);
+                self.ui.bar.set_text(&note);
+                self.ui.bar.noting = Some(command::Note::Reply(request));
+                self.ui.bar.focused = true;
             }
         }
         None
@@ -1061,11 +1062,11 @@ mod tests {
         m.key(Key::Char('?'), at(0));
         assert_eq!(m.key(Key::Interrupt, at(0)), None, "Ctrl-C closes the help");
         assert!(m.help().is_none());
-        m.bar.set_text("draft");
+        m.ui.bar.set_text("draft");
         assert_eq!(m.key(Key::Char('q'), at(2)), None, "q quits with an empty bar only");
-        assert_eq!(m.bar.text(), "draft");
+        assert_eq!(m.ui.bar.text(), "draft");
         assert_eq!(m.key(Key::Interrupt, at(3)), None);
-        assert_eq!(m.bar.text(), "", "the first Ctrl-C empties the bar");
+        assert_eq!(m.ui.bar.text(), "", "the first Ctrl-C empties the bar");
         assert_eq!(m.key(Key::Interrupt, at(3) + TimeDelta::milliseconds(500)), None, "the second asks for a third");
         assert!(m.quitting_at(at(4)));
         assert!(!m.quitting_at(at(5)), "for a second");
@@ -1166,7 +1167,7 @@ mod tests {
         let mut m = model();
         m.key(Key::Tab, at(0));
         assert_eq!(m.key(Key::Ctrl('f'), at(0)), None);
-        assert_eq!((m.bar.focused, m.bar.text()), (true, "/search ".to_owned()));
+        assert_eq!((m.ui.bar.focused, m.ui.bar.text()), (true, "/search ".to_owned()));
         m.key(Key::Esc, at(0));
         let messages =
             vec![message(1, &thread, "alice", "dev-a", "deploy"), message(2, &thread, "dev-a", "alice", "deployed")];
@@ -1183,12 +1184,12 @@ mod tests {
         for c in "oy".chars() {
             assert_eq!(m.key(Key::Char(c), at(2)), None);
         }
-        assert!(!m.bar.focused, "the footer takes the text");
+        assert!(!m.ui.bar.focused, "the footer takes the text");
         assert!(footer(&m).starts_with(" find: deploy_ · 3 found"), "with the title: {}", footer(&m));
         m.key(Key::Enter, at(2));
         assert!(footer(&m).contains(" of 3"), "{}", footer(&m));
         m.key(Key::Esc, at(2));
-        assert_eq!((m.page().name(), m.bar.focused), ("thread", false), "Esc ends the find, the thread stays");
+        assert_eq!((m.page().name(), m.ui.bar.focused), ("thread", false), "Esc ends the find, the thread stays");
         assert!(!footer(&m).starts_with(" find"), "{}", footer(&m));
     }
 
@@ -1202,13 +1203,13 @@ mod tests {
             assert_eq!(m.key(Key::Char(c), at(0)), None, "keys go to the command bar");
         }
         assert_eq!(m.key(Key::Enter, at(0)), None);
-        let error = m.bar.status.as_ref().map(|s| s.text.clone());
+        let error = m.ui.bar.status.as_ref().map(|s| s.text.clone());
         assert!(error.is_some_and(|e| e.starts_with("invalid time \"soon\"")), "a refused query stays");
-        assert_eq!(m.bar.text(), "/search deploy since:soon");
+        assert_eq!(m.ui.bar.text(), "/search deploy since:soon");
         m.key(Key::Ctrl('w'), at(0));
         let Some(Action::Search(search)) = m.key(Key::Enter, at(0)) else { panic!("no search") };
         assert_eq!(search.grep.as_deref(), Some("deploy"));
-        assert_eq!((m.bar.focused, m.page().name(), m.focus), (false, "search", Focus::View));
+        assert_eq!((m.ui.bar.focused, m.page().name(), m.focus), (false, "search", Focus::View));
 
         m.key(Key::Ctrl('f'), at(1));
         m.key(Key::Char('d'), at(1));
@@ -1223,9 +1224,9 @@ mod tests {
         assert_eq!(m.page().name(), "search", "Esc goes back to the matches");
         m.key(Key::Ctrl('f'), at(4));
         m.key(Key::Esc, at(4));
-        assert!(!m.bar.focused, "Esc leaves the bar");
+        assert!(!m.ui.bar.focused, "Esc leaves the bar");
         m.key(Key::Ctrl('f'), at(4));
-        assert_eq!((m.bar.focused, m.bar.text()), (true, "/search ".to_owned()), "a draft in the bar stays");
+        assert_eq!((m.ui.bar.focused, m.ui.bar.text()), (true, "/search ".to_owned()), "a draft in the bar stays");
         m.key(Key::Esc, at(4));
         assert_eq!(m.key(Key::Char('q'), at(4)), None, "q keeps the draft");
     }

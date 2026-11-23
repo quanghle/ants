@@ -1022,7 +1022,7 @@ mod tests {
         m.key(Key::Down, at(3));
         m.key(Key::Down, at(3));
         assert_eq!(m.key(Key::Enter, at(3)), None);
-        assert!(m.bar.focused && m.bar.text() == "/answer ", "an empty typed answer goes through the bar");
+        assert!(m.ui.bar.focused && m.ui.bar.text() == "/answer ", "an empty typed answer goes through the bar");
         m.key(Key::Esc, at(3));
         assert!(
             screen(&m, 140, 30, at(3)).contains("› type an answer"),
@@ -1031,7 +1031,7 @@ mod tests {
         m.key(Key::Esc, at(5));
 
         assert_eq!(m.key(Key::Char('r'), at(3)), Some(Action::Open(asked.clone())), "r replies on the thread");
-        assert!(m.bar.focused);
+        assert!(m.ui.bar.focused);
         m.key(Key::Esc, at(3));
         m.key(Key::Esc, at(3));
 
@@ -1088,9 +1088,9 @@ mod tests {
         m.key(Key::Down, at(3));
         m.key(Key::Down, at(3));
         assert_eq!(m.key(Key::Enter, at(3)), None);
-        assert!(m.bar.focused && m.bar.text() == "/answer ", "an empty typed answer goes through the bar");
+        assert!(m.ui.bar.focused && m.ui.bar.text() == "/answer ", "an empty typed answer goes through the bar");
         m.key(Key::Esc, at(3));
-        assert!(!m.bar.focused);
+        assert!(!m.ui.bar.focused);
         let shown = screen(&m, 140, 30, at(3));
         assert!(shown.contains("› type an answer"), "the card keeps the focus: {shown}");
 
@@ -1123,7 +1123,7 @@ mod tests {
         m.key(Key::Down, at(3));
         m.key(Key::Down, at(3));
         assert_eq!(m.key(Key::Enter, at(3)), None);
-        assert_eq!(m.bar.text(), "/answer ");
+        assert_eq!(m.ui.bar.text(), "/answer ");
         m.stored(vec![asking(2, "Tag?")], at(3));
         for c in "later".chars() {
             m.key(Key::Char(c), at(3));
@@ -1179,7 +1179,7 @@ mod tests {
 
         m.key(Key::End, at(8));
         assert_eq!(m.key(Key::Char('r'), at(8)), Some(Action::Open(done)));
-        assert!(m.bar.focused, "the bar open to follow up on the thread");
+        assert!(m.ui.bar.focused, "the bar open to follow up on the thread");
     }
 
     #[test]
@@ -1190,12 +1190,12 @@ mod tests {
         opening.owner = Some(user("alice"));
         m.stored(vec![opening, message(2, &thread, "dev-a", "alice", "deployed")], at(2));
         assert_eq!(m.key(Key::Char('f'), at(3)), None);
-        assert_eq!((m.bar.text(), m.bar.focused, m.page().name()), ("/forward @".to_owned(), true, "home"));
+        assert_eq!((m.ui.bar.text(), m.ui.bar.focused, m.page().name()), ("/forward @".to_owned(), true, "home"));
         for c in "dev-b".chars() {
             m.key(Key::Char(c), at(3));
         }
         assert_eq!(m.key(Key::Enter, at(3)), None, "no TL;DR kept yet");
-        let refused = &m.bar.status.as_ref().unwrap().text;
+        let refused = &m.ui.bar.status.as_ref().unwrap().text;
         assert!(refused.starts_with(&format!("no TL;DR of thread {thread} yet")), "{refused}");
     }
 

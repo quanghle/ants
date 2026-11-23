@@ -174,7 +174,7 @@ fn a_listed_questions_typed_answer_stays_on_that_question_and_refuses_one_answer
             m.key(Key::Down, at(10));
         }
         m.key(Key::Enter, at(10));
-        assert_eq!(m.bar.text(), "/answer ");
+        assert_eq!(m.ui.bar.text(), "/answer ");
         if settled {
             let mut answer = message(3, &older.thread_id, "alice", "dev-a", "no");
             answer.answer = Some(Answer { question: older.id.unwrap(), picks: vec![Pick::option(2)] });
@@ -186,8 +186,8 @@ fn a_listed_questions_typed_answer_stays_on_that_question_and_refuses_one_answer
         let result = m.key(Key::Enter, at(10));
         if settled {
             assert_eq!(result, None, "never answer the newer question instead");
-            assert_eq!(m.bar.text(), "/answer after lunch", "keep the refused answer");
-            assert!(m.bar.status.as_ref().is_some_and(|s| s.tone == crate::tui::command::Tone::Error));
+            assert_eq!(m.ui.bar.text(), "/answer after lunch", "keep the refused answer");
+            assert!(m.ui.bar.status.as_ref().is_some_and(|s| s.tone == crate::tui::command::Tone::Error));
         } else {
             let job = Job::Answer {
                 thread: older.thread_id,
@@ -207,9 +207,9 @@ fn a_focused_card_keeps_the_focus_through_the_bar_and_a_card_gone_takes_the_key_
     m.key(Key::Down, at(10));
     m.key(Key::Down, at(10));
     assert_eq!(m.key(Key::Enter, at(10)), None);
-    assert!(m.bar.focused && m.bar.text() == "/answer ", "an empty typed answer goes through the bar");
+    assert!(m.ui.bar.focused && m.ui.bar.text() == "/answer ", "an empty typed answer goes through the bar");
     m.key(Key::Esc, at(10));
-    assert!(!m.bar.focused);
+    assert!(!m.ui.bar.focused);
     let shown = waiting_screen(&m, 100, 20);
     assert!(shown.contains("› type an answer"), "the card keeps the focus: {shown}");
 
@@ -249,13 +249,13 @@ fn the_waiting_list_keeps_composition_and_uses_its_own_help_and_palette_keys() {
     for c in "draft".chars() {
         m.key(Key::Char(c), at(10));
     }
-    assert!(m.bar.focused);
+    assert!(m.ui.bar.focused);
     m.key(Key::Ctrl('l'), at(10));
-    assert!(!m.bar.focused && !m.typing());
-    assert_eq!(m.bar.text(), "draft");
+    assert!(!m.ui.bar.focused && !m.typing());
+    assert_eq!(m.ui.bar.text(), "draft");
     m.key(Key::Char('a'), at(10));
     m.paste("not an answer", at(10));
-    assert_eq!(m.bar.text(), "draft");
+    assert_eq!(m.ui.bar.text(), "draft");
     assert!(m.asking.is_none(), "a hidden request is not answered");
     assert_eq!(crate::tui::keymap::views(&m), vec![crate::tui::keymap::View::Pending]);
     m.key(Key::Char('?'), at(10));
@@ -263,15 +263,15 @@ fn the_waiting_list_keeps_composition_and_uses_its_own_help_and_palette_keys() {
     m.key(Key::Esc, at(10));
     for close in [Key::Esc, Key::Char('q'), Key::Interrupt, Key::Ctrl('l')] {
         assert_eq!(m.key(close, at(10)), None);
-        assert!(m.typing() && m.bar.text() == "draft", "{close:?}");
+        assert!(m.typing() && m.ui.bar.text() == "draft", "{close:?}");
         m.key(Key::Ctrl('l'), at(10));
     }
     m.key(Key::Esc, at(10));
     m.key(Key::Char('!'), at(10));
-    assert_eq!(m.bar.text(), "draft!", "type-to-compose resumes");
+    assert_eq!(m.ui.bar.text(), "draft!", "type-to-compose resumes");
 
-    m.bar.set_text("");
-    m.bar.focused = false;
+    m.ui.bar.set_text("");
+    m.ui.bar.focused = false;
     m.key(Key::Ctrl('k'), at(10));
     for c in "waiting".chars() {
         m.key(Key::Char(c), at(10));

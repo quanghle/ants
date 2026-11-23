@@ -74,7 +74,7 @@ impl Entry {
     fn written(&self, model: &Model) -> bool {
         let letter = matches!(self.keys.first(), Some(Key::Char(c)) if !matches!(c, '?' | '@' | '#' | '/'));
         let stepping = finding(model) && self.keys.iter().all(|k| matches!(k, Key::Char('n' | 'N')));
-        letter && !stepping && !model.bar.focused && model.typing()
+        letter && !stepping && !model.ui.bar.focused && model.typing()
     }
 
     /// The row as the footer shows it: "label short".
