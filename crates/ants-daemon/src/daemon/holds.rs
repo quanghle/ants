@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use ants_proto::State;
+use async_nats::jetstream;
 
 use crate::bus;
 use crate::harness::{self, SignedOut};
@@ -32,6 +33,37 @@ pub(super) struct Holds {
     pub(super) mcp_sign_ins: mcp_sign_in::Untold,
     /// Whether messages wait in hand for the hub to store what they need, holding the messages.
     pub(super) stall: Stall,
+    /// The messages never to be answered whose dead letter waits in hand for the hub.
+    pub(super) junk: Junk,
+}
+
+/// Messages never to be answered ([`Inbox::bury_unanswerable`]) whose dead letter the hub could not take, its store
+/// full or out of reach, each with why it is buried: held in hand, spending no delivery, until the hub is tried again
+/// ([`Inbox::hub_back`]).
+#[derive(Default)]
+pub(super) struct Junk(std::sync::Mutex<Vec<(jetstream::Message, String)>>);
+
+impl Junk {
+    /// Hold `msg`, buried for `error`, in place of an earlier delivery of it held already.
+    pub(super) fn hold(&self, msg: &jetstream::Message, error: &str) {
+        let mut held = self.0.locked();
+        held.retain(|(kept, _)| super::stream_seq(kept) != super::stream_seq(msg));
+        held.push((msg.clone(), error.to_owned()));
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.locked().is_empty()
+    }
+
+    /// The messages held, to tell the server they are still being worked on.
+    pub(super) fn messages(&self) -> Vec<jetstream::Message> {
+        self.0.locked().iter().map(|(msg, _)| msg.clone()).collect()
+    }
+
+    /// Take the messages held, to bury them again.
+    fn take(&self) -> Vec<(jetstream::Message, String)> {
+        std::mem::take(&mut *self.0.locked())
+    }
 }
 
 /// What of the hub a message waits for in hand, its handling having failed only for it.
@@ -113,6 +145,24 @@ impl Inbox<'_> {
         tokio::time::sleep(self.pacing.store_every).await;
         tracing::info!("trying the messages waiting for the hub again");
         self.holds.stall.off();
+    }
+
+    /// Hold `msg`, never to be answered, whose dead letter for `error` the hub could not take for `why`, with `e`.
+    pub(super) fn hold_junk(&self, msg: &jetstream::Message, error: &str, why: Stalled, e: &anyhow::Error) {
+        self.holds.junk.hold(msg, error);
+        let error = format!("{e:#}");
+        if self.holds.stall.on(why) {
+            tracing::warn!(%error, "{why}; messages wait in hand, spending no attempt, until it takes them");
+        } else {
+            tracing::info!(%error, "{why}; the dead letter of a message never to be answered waits in hand");
+        }
+    }
+
+    /// Bury again the messages never to be answered held for the hub ([`Self::hold_junk`]).
+    pub(super) async fn bury_held_junk(&self) {
+        for (msg, error) in self.holds.junk.take() {
+            self.bury_unanswerable(&msg, &error).await;
+        }
     }
 
     /// Why the ant's own harness cannot answer now, if it cannot: messages go to a fallback meanwhile, if one is up.

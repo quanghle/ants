@@ -144,6 +144,10 @@ impl Inbox<'_> {
         let mut paused = self.pause.subscribe();
         let mut drift = self.drift.subscribe();
         loop {
+            // A message never to be answered whose dead letter waits for the hub is buried again when it is tried.
+            if !self.holds.junk.is_empty() && stalling.is_terminated() {
+                stalling.set(self.hub_back().fuse());
+            }
             let retry_deadline = threads.values().filter_map(|t| t.retry.as_ref().map(|r| r.until)).min();
             // Every fallback was turned away lately: the first to be tried again lets the messages on.
             let now = tokio::time::Instant::now();
@@ -157,7 +161,12 @@ impl Inbox<'_> {
                 _ = evict.tick() => {
                     self.pool.evict_idle(Instant::now());
                 }
-                _ = progress.tick() => ack_progress(&threads).await,
+                _ = progress.tick() => {
+                    ack_progress(&threads).await;
+                    for msg in self.holds.junk.messages() {
+                        bus::progress(&msg).await;
+                    }
+                }
                 () = sleep_until(retry_deadline), if retry_deadline.is_some() => {
                     give_up_retries(&mut threads);
                     ready = Some(threads.keys().cloned().collect());
@@ -165,7 +174,10 @@ impl Inbox<'_> {
                 () = &mut signing_in => ready = Some(threads.keys().cloned().collect()),
                 () = &mut lifting => ready = Some(threads.keys().cloned().collect()),
                 () = &mut repairing => ready = Some(threads.keys().cloned().collect()),
-                () = &mut stalling => ready = Some(threads.keys().cloned().collect()),
+                () = &mut stalling => {
+                    self.bury_held_junk().await;
+                    ready = Some(threads.keys().cloned().collect());
+                }
                 Ok(()) = paused.changed() => ready = Some(threads.keys().cloned().collect()),
                 Ok(()) = drift.changed() => self.workload.set_drift(drift.borrow_and_update().clone()),
                 () = sleep_until(fallback_up), if fallback_up.is_some() => ready = Some(threads.keys().cloned().collect()),

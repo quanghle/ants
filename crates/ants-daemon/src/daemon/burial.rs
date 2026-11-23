@@ -18,16 +18,20 @@ pub(super) enum Letter {
 }
 
 impl Inbox<'_> {
-    /// Dead-letter a message that is never to be prompted with, keeping only an excerpt of its payload.
+    /// Dead-letter a message that is never to be prompted with, keeping only an excerpt of its payload. One whose dead
+    /// letter the hub cannot take, its store full or out of reach, waits in hand until it can ([`Inbox::hold_junk`]).
     pub(super) async fn bury_unanswerable(&self, msg: &jetstream::Message, error: &str) {
         tracing::warn!(error, subject = %msg.subject, "dead-lettering a message without answering it");
         match dead::bury(self.js, self.ant, msg, None, error).await {
             Ok(_) => self.metrics.buried(),
-            Err(e) => {
-                // Never redelivered, dead letter or not.
-                tracing::warn!(error = format!("{e:#}"), "dead-lettering");
-                bus::term(msg).await;
-            }
+            Err(e) => match self.stalled_by(&e).await {
+                Some(why) => self.hold_junk(msg, error, why, &e),
+                None => {
+                    // Never redelivered, dead letter or not.
+                    tracing::warn!(error = format!("{e:#}"), "dead-lettering");
+                    bus::term(msg).await;
+                }
+            },
         }
     }
 

@@ -1,5 +1,6 @@
-//! A hub whose JetStream file store is full: replies and dead letters it refuses wait in hand, spending no attempt
-//! and prompting no harness again, until it has room.
+//! A hub whose JetStream file store is full: replies, escalations and dead letters it refuses wait in hand, spending
+//! no attempt and prompting no harness again, until it has room; and what is stored of a message near `max_payload`
+//! fits.
 
 use super::*;
 
@@ -137,6 +138,50 @@ async fn a_dead_letter_refused_by_a_full_store_is_buried_once_there_is_room() {
     assert_eq!(letters[0].1.stream_seq, seq);
     assert!(letters[0].1.error.contains("doomed"), "{}", letters[0].1.error);
     assert!(bus.buried.get(&doomed).await.is_none(), "forgotten once terminated");
+    assert_eq!(bus.unacked().await, 0);
+}
+
+/// A message never to be answered met while the store is full waits in hand, spending no delivery, and is kept as a
+/// dead letter once the store has room.
+#[tokio::test]
+async fn junk_met_while_the_store_is_full_is_a_dead_letter_once_there_is_room() {
+    let Some((bus, _)) = start_small().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let junk = subject::inbox(&bus.dev, &UserId::human());
+    let seq = bus.js.publish(junk, "not an envelope".into()).await.unwrap().await.unwrap().sequence;
+    fill(&bus.js).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let name = ants_proto::inbox_consumer(&bus.dev);
+        let delivered = async {
+            loop {
+                if let Ok(mut consumer) = bus.stream.get_consumer::<jetstream::consumer::pull::Config>(&name).await
+                    && consumer.info().await.unwrap().delivered.stream_sequence >= seq
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        timeout(WAIT, delivered).await.expect("the junk delivered");
+        // Several retries of the store pass.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(dead::list(&bus.stream).await.unwrap().is_empty(), "not stored while full");
+        let consumer = bus.consumer().await;
+        assert_eq!((consumer.num_redelivered, consumer.num_ack_pending), (0, 1), "in hand, not redelivered");
+        free(&bus.js).await;
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let letters = dead::list(&bus.stream).await.unwrap();
+    assert_eq!(letters.len(), 1, "{letters:?}");
+    assert_eq!(letters[0].1.stream_seq, seq);
+    assert!(letters[0].1.error.contains("not an envelope"), "{}", letters[0].1.error);
+    assert_eq!(log.locked().prompted, 0);
+    assert_eq!(bus.consumer().await.num_redelivered, 0, "no delivery spent");
     assert_eq!(bus.unacked().await, 0);
 }
 
