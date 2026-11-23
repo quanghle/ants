@@ -105,6 +105,32 @@ async fn a_thread_whose_worktree_fails_waits_rather_than_share_the_workdir() {
 }
 
 #[tokio::test]
+async fn threads_get_worktrees_once_the_repository_has_a_commit_and_those_sharing_the_workdir_stay() {
+    if !ants_test_support::have("git") {
+        return;
+    }
+    let dir = ants_test_support::scratch_dir("pool-worktrees-unborn").canonicalize().unwrap();
+    let (repo, home) = (dir.join("repo"), dir.join("home"));
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("file"), "one").unwrap();
+    crate::test_support::run(&repo, &["init", "--quiet", "--initial-branch=main"]);
+    let (launch, log, _) = fake::launch();
+    let worktrees = Worktrees::find(&"dev-a".parse().unwrap(), &repo, &home).await.unwrap();
+    let pool = Pool::new(launch.in_dir(repo.clone()), SessionStore::memory(), 4, IDLE).with_worktrees(worktrees);
+    pool.prompt(&thread(1), "a").await.unwrap();
+    crate::test_support::run(&repo, &["add", "."]);
+    crate::test_support::commit(&repo, "first");
+    pool.prompt(&thread(2), "b").await.unwrap();
+    pool.evict_idle(Instant::now() + IDLE * 2);
+    pool.prompt(&thread(1), "c").await.unwrap();
+    let cwds = [repo.clone(), home.join("worktrees/t2"), repo.clone()];
+    assert_eq!(log.locked().cwds, cwds, "no restart; session/load of the first thread where it started");
+    assert_eq!(pool.branch_ahead(&thread(1)).await, None, "no branch");
+    assert_eq!(pool.prune_worktrees().await.removed, 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn a_thread_under_review_works_among_its_checkouts() {
     let Some(repo) = crate::test_support::repo("pool-checkouts") else { return };
     let home = repo.parent().unwrap().join("home");
