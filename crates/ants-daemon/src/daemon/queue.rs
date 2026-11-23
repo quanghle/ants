@@ -247,6 +247,9 @@ impl Inbox<'_> {
         if t.holds(stream_seq(&msg)) {
             // The copy in hand gets the ack: the server tracks a message by its stream sequence.
             tracing::debug!(%thread, "ignoring a redelivery of a message in hand");
+            if let Ok(info) = msg.info() {
+                self.holds.uncounted.add(info.stream_sequence, info.delivered);
+            }
             return None;
         }
         if t.retry.as_ref().is_some_and(|r| Some(r.seq) == stream_seq(&msg)) {
