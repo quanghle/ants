@@ -19,7 +19,7 @@ use super::select::{PAGE, step};
 use super::style::{block, dim};
 
 /// The help's last line, under the rows scrolled.
-pub const CLOSE: &str = "↑↓ PgUp PgDn scroll · Esc, q or ? closes this help";
+pub const CLOSE: &str = "↑↓ j k PgUp PgDn Home End scroll · Esc, q or ? closes this help";
 /// How wide the help is at most.
 const WIDTH: u16 = 100;
 /// How wide the column of keys is.

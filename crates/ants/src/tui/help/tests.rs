@@ -249,7 +249,7 @@ fn every_function_stepping_through_the_shared_stepping_has_its_keys_checked() {
             if base == "tests.rs" || !base.ends_with(".rs") {
                 continue;
             }
-            let text = std::fs::read_to_string(&path).expect("a source");
+            let text = std::fs::read_to_string(&path).expect("a source").replace("\r\n", "\n");
             let code = text.split("\n#[cfg(test)]\nmod tests").next().unwrap_or_default();
             let file = path.strip_prefix(&tui).expect("under tui/").to_string_lossy().replace('\\', "/");
             for (start, _) in code.match_indices("fn ") {

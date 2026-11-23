@@ -17,7 +17,7 @@ use super::select::{PAGE, step};
 use super::style::{self, block, dim};
 
 /// The last line, under the notices scrolled.
-pub const CLOSE: &str = "↑↓ PgUp PgDn scroll · Esc, q or N closes the notices";
+pub const CLOSE: &str = "↑↓ j k PgUp PgDn Home End scroll · Esc, q or N closes the notices";
 /// How many notices of the run are kept, the earliest dropped first.
 pub const KEPT: usize = 200;
 /// How wide the notices are at most.

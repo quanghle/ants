@@ -123,7 +123,7 @@ pub struct Summarised {
     pub warnings: Vec<String>,
 }
 
-/// The digest overlay.
+/// The digest's data: since when it gathers and what it got; its shown state lives in `Ui`.
 #[derive(Debug)]
 pub struct Digest {
     pub since: DateTime<Utc>,
