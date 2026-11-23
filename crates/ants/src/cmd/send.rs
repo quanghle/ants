@@ -1,5 +1,6 @@
 //! `ants ask`, `ants post`, `ants notes`, `ants react` and `ants answer`: what the CLI's human sends.
 
+use ants_client::inbox::ParseError;
 use ants_daemon::bus;
 use ants_daemon::bus::relayed;
 use ants_daemon::records::{owners, reactions};
@@ -379,15 +380,13 @@ fn print_sent(stored: bus::Stored, envelope: &Envelope, unaddressed: Option<&Rec
 /// The replies in `inbox` on `thread`, those with a forged sender skipped.
 fn replies_on(inbox: bus::LiveInbox, thread: ThreadId) -> impl futures::Stream<Item = Envelope> {
     inbox.filter_map(move |msg| {
-        let reply = match serde_json::from_slice::<Envelope>(&msg.payload) {
-            Ok(reply) => match reply.check_subject(&msg.subject) {
-                Ok(()) => (reply.thread_id == thread).then_some(reply),
-                Err(e) => {
-                    tracing::warn!("ignoring a reply with a forged sender: {e}");
-                    None
-                }
-            },
-            Err(_) => None,
+        let reply = match ants_client::inbox::parse(&msg.subject, &msg.payload) {
+            Ok(reply) => (reply.thread_id == thread).then_some(reply),
+            Err(ParseError::Forged(e)) => {
+                tracing::warn!("ignoring a reply with a forged sender: {e}");
+                None
+            }
+            Err(ParseError::Malformed(_)) => None,
         };
         std::future::ready(reply)
     })
