@@ -8,6 +8,14 @@
 //! node reconnect the uplink ([`pull_anew`]). Dropping the old reply subject's subscription withdraws its interest: the
 //! stream's next heartbeat to the old request then reaches nobody, which drops the mapping, and the stream drops the
 //! request; a message the stream delivers to it before that comes again only after its ack wait.
+//!
+//! A server that leaf nodes may join (nats-server 2.15.3) takes a pull request as heard for 2 s after it came, whoever
+//! listens for its answer. A message that becomes deliverable in that time after the requester went, stored then or its
+//! ack wait over, is delivered into the request again and again, some 500,000 times a second, each delivery taken
+//! back but for the consumer's delivery sequence and one count of the message's deliveries, until the request is 2 s
+//! old. No request of a client stops that: a request cannot be withdrawn but by leaving its reply subject, which is
+//! what the server overlooks. An ack wait ends well after those 2 s under the daemon's settings (60 s, progress acks
+//! every 20 s), so an uplink down past the ack wait has the hub deliver nothing.
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};

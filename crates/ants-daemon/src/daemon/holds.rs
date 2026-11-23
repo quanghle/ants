@@ -43,14 +43,30 @@ pub(super) struct Holds {
 /// full or out of reach, each with why it is buried: held in hand, spending no delivery, until the hub is tried again
 /// ([`Inbox::hub_back`]).
 #[derive(Default)]
-pub(super) struct Junk(std::sync::Mutex<Vec<(jetstream::Message, String)>>);
+pub(super) struct Junk(std::sync::Mutex<Vec<HeldJunk>>);
+
+struct HeldJunk {
+    msg: jetstream::Message,
+    error: String,
+    /// Whether its dead letter is in the machine's outbox, and counted: only the hub's copy and the message's
+    /// termination are left.
+    kept: bool,
+}
 
 impl Junk {
-    /// Hold `msg`, buried for `error`, in place of an earlier delivery of it held already.
-    pub(super) fn hold(&self, msg: &jetstream::Message, error: &str) {
+    /// Hold `msg`, buried for `error`, its dead letter `kept` in the machine's outbox or nowhere yet.
+    fn hold(&self, msg: &jetstream::Message, error: &str, kept: bool) {
+        self.0.locked().push(HeldJunk { msg: msg.clone(), error: error.to_owned(), kept });
+    }
+
+    /// Let go of the delivery held of the message `msg` is of, if any, `msg` being buried in its place: whether its
+    /// dead letter is in the machine's outbox already.
+    pub(super) fn release(&self, msg: &jetstream::Message) -> bool {
         let mut held = self.0.locked();
-        held.retain(|(kept, _)| super::stream_seq(kept) != super::stream_seq(msg));
-        held.push((msg.clone(), error.to_owned()));
+        let seq = super::stream_seq(msg);
+        let kept = held.iter().any(|junk| junk.kept && super::stream_seq(&junk.msg) == seq);
+        held.retain(|junk| super::stream_seq(&junk.msg) != seq);
+        kept
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -59,12 +75,12 @@ impl Junk {
 
     /// The messages held, to tell the server they are still being worked on.
     pub(super) fn messages(&self) -> Vec<jetstream::Message> {
-        self.0.locked().iter().map(|(msg, _)| msg.clone()).collect()
+        self.0.locked().iter().map(|junk| junk.msg.clone()).collect()
     }
 
-    /// Take the messages held, to bury them again.
-    fn take(&self) -> Vec<(jetstream::Message, String)> {
-        std::mem::take(&mut *self.0.locked())
+    /// The messages held, each with why it is buried, to bury them again.
+    fn held(&self) -> Vec<(jetstream::Message, String)> {
+        self.0.locked().iter().map(|junk| (junk.msg.clone(), junk.error.clone())).collect()
     }
 }
 
@@ -176,20 +192,20 @@ impl Inbox<'_> {
         self.holds.stall.off();
     }
 
-    /// Hold `msg`, never to be answered, whose dead letter for `error` the hub could not take for `why`, with `e`.
-    pub(super) fn hold_junk(&self, msg: &jetstream::Message, error: &str, why: Stalled, e: &anyhow::Error) {
-        self.holds.junk.hold(msg, error);
-        let error = format!("{e:#}");
+    /// Hold `msg`, never to be answered, whose dead letter for `error` the hub could not take for `why`, as `detail`
+    /// says: `kept` in the machine's outbox, or nowhere yet.
+    pub(super) fn hold_junk(&self, msg: &jetstream::Message, error: &str, kept: bool, why: Stalled, detail: &str) {
+        self.holds.junk.hold(msg, error, kept);
         if self.holds.stall.on(why) {
-            tracing::warn!(%error, "{why}; messages wait in hand, spending no attempt, until it takes them");
+            tracing::warn!(error = detail, "{why}; messages wait in hand, spending no attempt, until it takes them");
         } else {
-            tracing::info!(%error, "{why}; the dead letter of a message never to be answered waits in hand");
+            tracing::info!(error = detail, "{why}; the dead letter of a message never to be answered waits in hand");
         }
     }
 
     /// Bury again the messages never to be answered held for the hub ([`Self::hold_junk`]).
     pub(super) async fn bury_held_junk(&self) {
-        for (msg, error) in self.holds.junk.take() {
+        for (msg, error) in self.holds.junk.held() {
             self.bury_unanswerable(&msg, &error).await;
         }
     }

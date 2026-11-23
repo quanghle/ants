@@ -24,10 +24,15 @@ struct Uplinked {
 impl Uplinked {
     /// The hub, for [`Bus::connect`] through [`Uplinked::url`], and its leaf node with the uplink up.
     async fn start() -> Option<(Server, Self)> {
+        Self::start_with("").await
+    }
+
+    /// [`Uplinked::start`], the hub's `jetstream` block having `limits` too.
+    async fn start_with(limits: &str) -> Option<(Server, Self)> {
         let (uplink_port, dead_port) = (free_port(), free_port());
         let hub = Server::spawn_with(|dir| {
             format!(
-                "jetstream {{ store_dir: {:?}, domain: hub }}\nleafnodes {{ listen: \"127.0.0.1:{uplink_port}\" }}\n",
+                "jetstream {{ store_dir: {:?}, domain: hub{limits} }}\nleafnodes {{ listen: \"127.0.0.1:{uplink_port}\" }}\n",
                 dir.join("js")
             )
         })?;
@@ -506,7 +511,8 @@ async fn a_direct_get_tells_a_missing_bucket_from_the_hub_out_of_reach() {
 /// dev-a's daemon on a leaf node holds a message in hand, the hub out of reach, for longer than the ack wait: the hub
 /// redelivers it once the uplink is back, the new pull request ahead of the next progress ack, which raises the
 /// server's delivered count, as nats-server counts every delivery. That delivery, of a message in hand, is no attempt:
-/// the message, failing every attempt after, still gets all its attempts before it becomes a dead letter.
+/// the message, failing every attempt after, still gets all its attempts before it becomes a dead letter. The nak of
+/// the copy in hand, an older delivery than the one ignored, has the retry come after the retry delay, not the ack wait.
 #[tokio::test]
 async fn a_message_held_past_the_ack_wait_keeps_its_attempts() {
     let Some((hub, uplinked)) = Uplinked::start().await else { return };
@@ -517,7 +523,7 @@ async fn a_message_held_past_the_ack_wait_keeps_its_attempts() {
     let doomed = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "doomed b");
     bus::publish_json(&uplinked.hub_js, hold.subject(), &hold, None).await.unwrap();
     let seq = bus::publish_json(&uplinked.hub_js, doomed.subject(), &doomed, None).await.unwrap();
-    let (progress_every, ack_wait) = (Duration::from_secs(1), Duration::from_secs(3));
+    let (progress_every, ack_wait) = (Duration::from_secs(2), Duration::from_secs(6));
     let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
 
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -532,7 +538,17 @@ async fn a_message_held_past_the_ack_wait_keeps_its_attempts() {
         uplinked.switch(Link::Up).await;
         // As the daemon's pull request, through the uplink back, comes before its next progress ack.
         bus::pull_anew();
-        gate.add_permits(MAX_ATTEMPTS as usize);
+        until("the first attempt", || log.locked().doomed == 1).await;
+        // The delivery the daemon ignores comes before the copy in hand fails.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        gate.add_permits(1);
+        until("the first attempt to fail", || log.locked().doomed_failed == 1).await;
+        let failed = std::time::Instant::now();
+        until("the retry", || log.locked().doomed == 2).await;
+        let waited = failed.elapsed();
+        println!("retried {waited:?} after the nak of the copy in hand (ack wait {ack_wait:?})");
+        assert!(waited < ack_wait / 2, "retried after the ack wait, not the retry delay: {waited:?}");
+        gate.add_permits(MAX_ATTEMPTS as usize - 1);
         timeout(WAIT * 2, async {
             while dead::list(&stream).await.unwrap().is_empty() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -548,4 +564,117 @@ async fn a_message_held_past_the_ack_wait_keeps_its_attempts() {
     assert_eq!(letters[0].1.stream_seq, seq);
     assert!(letters[0].1.deliveries > MAX_ATTEMPTS as u64, "the server counted the delivery in hand");
     assert_eq!(log.locked().doomed_failed, MAX_ATTEMPTS as usize, "every attempt prompted");
+}
+
+/// dev-a's daemon on a leaf node holds a message never to be answered, the hub's store full, when the leaf's uplink is
+/// cut: its dead letter goes to the machine's outbox, and the message stays in hand, counted as buried once. Once the
+/// uplink is back the daemon stores the dead letter in the hub's stream and terminates the message, without a
+/// redelivery of it.
+#[tokio::test]
+async fn junk_whose_dead_letter_is_kept_in_the_outbox_is_terminated_once_the_uplink_is_back() {
+    let limits = format!(", max_file_store: {}, max_memory_store: 8MB", store::STORE);
+    let Some((hub, uplinked)) = Uplinked::start_with(&limits).await else { return };
+    let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let junk = subject::inbox(&bus.dev, &UserId::human());
+    let seq = uplinked.hub_js.publish(junk, "not an envelope".into()).await.unwrap().await.unwrap().sequence;
+    store::fill(&uplinked.hub_js).await;
+    // No redelivery for want of an ack within the test: any spends a delivery.
+    let (progress_every, ack_wait) = (Duration::from_millis(200), WAIT * 3);
+    let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let name = ants_proto::inbox_consumer(&bus.dev);
+        timeout(WAIT, async {
+            loop {
+                if let Ok(mut consumer) = stream.get_consumer::<jetstream::consumer::pull::Config>(&name).await
+                    && consumer.info().await.unwrap().delivered.stream_sequence >= seq
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the junk delivered");
+        // The store refuses its dead letter at least once.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        uplinked.switch(Link::Down).await;
+        timeout(WAIT, async {
+            while uplinked.kept().await == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the dead letter is kept in the outbox");
+        // Several retries of the store, 300 ms apart in the tests, pass.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(bus.metrics.dead_letters(), 1, "counted once while the hub is out of reach");
+        assert_eq!(uplinked.kept().await, 1, "kept in the outbox once");
+        store::free(&uplinked.hub_js).await;
+        uplinked.switch(Link::Up).await;
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
+    let letters = dead::list(&stream).await.unwrap();
+    assert_eq!(letters.len(), 1, "{letters:?}");
+    assert_eq!(letters[0].1.stream_seq, seq);
+    assert!(letters[0].1.error.contains("not an envelope"), "{}", letters[0].1.error);
+    assert_eq!(bus.metrics.dead_letters(), 1, "counted once");
+    assert_eq!(log.locked().prompted, 0);
+    let consumer = bus.consumer().await;
+    assert_eq!((consumer.num_redelivered, consumer.num_ack_pending), (0, 0), "terminated, no delivery spent");
+}
+
+/// nats-server takes a pull request as heard for this long after it came, whoever listens for its answer
+/// ([`bus::pull`](crate::bus::pull)).
+const PULL_GRACE: Duration = Duration::from_secs(2);
+
+/// dev-a's daemon on a leaf node has messages in hand when the leaf's uplink is cut for longer than the ack wait: the
+/// hub, whose stream dropped the daemon's pull requests when the uplink went, delivers nothing, however long the
+/// messages' ack wait is over; the consumer's delivery sequence stands still. The ack wait ends, and the uplink goes,
+/// after the server's grace for the daemon's last pull request, as with the daemon's own 60 s ack wait.
+#[tokio::test]
+async fn a_leaf_outage_past_the_ack_wait_has_the_hub_deliver_nothing() {
+    let Some((hub, uplinked)) = Uplinked::start().await else { return };
+    let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
+    let (launch, log, gate) = fake::launch();
+    let t1 = ThreadId::generate();
+    let hold = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
+    let next = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "b");
+    bus::publish_json(&uplinked.hub_js, hold.subject(), &hold, None).await.unwrap();
+    bus::publish_json(&uplinked.hub_js, next.subject(), &next, None).await.unwrap();
+    let (progress_every, ack_wait) = (Duration::from_secs(1), Duration::from_secs(3));
+    let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
+    // As the hub has it: the daemon's own reads go through the uplink.
+    let delivered = async || {
+        let name = ants_proto::inbox_consumer(&bus.dev);
+        let mut consumer: PullConsumer = stream.get_consumer(&name).await.unwrap();
+        let info = consumer.info().await.unwrap();
+        (info.delivered.consumer_sequence, info.num_waiting)
+    };
+
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to start", || log.locked().prompted == 1).await;
+        tokio::time::sleep(PULL_GRACE + Duration::from_secs(1)).await;
+        let (before, _) = delivered().await;
+        assert_eq!(before, 2, "both messages delivered once");
+        uplinked.switch(Link::Down).await;
+        tokio::time::sleep(ack_wait * 2).await;
+        let (after, waiting) = delivered().await;
+        println!("the consumer's delivery sequence went from {before} to {after} over an outage of {:?}", ack_wait * 2);
+        assert_eq!(waiting, 0, "the stream dropped the daemon's pull requests");
+        assert_eq!(after, before, "the hub delivered while the uplink was down");
+        uplinked.switch(Link::Up).await;
+        gate.add_permits(2);
+        until("the answers", || log.locked().answered.len() == 2).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
+    assert_eq!(log.locked().answered, ["hold a", "b"], "each prompted once");
 }

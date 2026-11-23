@@ -5,7 +5,7 @@
 use super::*;
 
 /// The hub's `max_file_store`.
-const STORE: u64 = 16 << 20;
+pub(super) const STORE: u64 = 16 << 20;
 /// The stream that fills the store, besides the ants' own.
 const FILLER: &str = "FILLER";
 
@@ -19,7 +19,7 @@ async fn start_small() -> Option<(Bus, async_nats::Subscriber)> {
 }
 
 /// Fill the hub's file store until JetStream refuses a write for want of room.
-async fn fill(js: &jetstream::Context) {
+pub(super) async fn fill(js: &jetstream::Context) {
     let config = jetstream::stream::Config {
         name: FILLER.to_owned(),
         subjects: vec!["filler.>".to_owned()],
@@ -42,7 +42,7 @@ async fn fill(js: &jetstream::Context) {
 }
 
 /// Free the hub's file store [`fill`] filled.
-async fn free(js: &jetstream::Context) {
+pub(super) async fn free(js: &jetstream::Context) {
     js.delete_stream(FILLER).await.unwrap();
 }
 

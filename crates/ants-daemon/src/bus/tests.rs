@@ -494,3 +494,44 @@ async fn a_full_store_is_named_with_the_setting_to_raise() {
     let other = anyhow::anyhow!("something else");
     assert_eq!(format!("{:#}", explain_full(other, "files.x")), "something else");
 }
+
+/// A nak of an older delivery of a message, with a delay, sets when the message comes next, as a nak of its newest
+/// delivery would: the daemon, whose copy in hand outlived a newer delivery it ignored, has its retry after the retry
+/// delay, not the ack wait. Others acked meanwhile, moving the consumer's ack floor, change nothing.
+#[tokio::test]
+async fn a_nak_of_an_older_delivery_sets_the_retry_delay() {
+    let Some(server) = NatsServer::start() else {
+        return;
+    };
+    let (dev, human) = (dev(), UserId::human());
+    let (_client, js) = connect(&server.url, None, None, &dev, "test").await.unwrap();
+    let stream = ensure_stream(&js).await.unwrap();
+    let (ack_wait, retry_delay) = (Duration::from_secs(3), Duration::from_millis(500));
+    let mut messages = inbox_consumer(&stream, &dev, ack_wait, 6, 4).await.unwrap();
+    publish(&js, &Envelope::new(human.clone(), dev.clone(), "held")).await.unwrap();
+    let mut next = async || {
+        let msg = tokio::time::timeout(ack_wait * 3, messages.next()).await.expect("no delivery").unwrap().unwrap();
+        (serde_json::from_slice::<Envelope>(&msg.payload).unwrap().text, msg.info().unwrap().delivered, msg)
+    };
+    let (text, delivered, older) = next().await;
+    assert_eq!((text.as_str(), delivered), ("held", 1));
+    // Acked while the first is in hand: the ack floor stays below a message still pending.
+    publish(&js, &Envelope::new(human, dev, "other")).await.unwrap();
+    let (text, _, other) = next().await;
+    assert_eq!(text, "other");
+    double_ack(&js.client(), &other).await.unwrap();
+    // Its ack wait over, the server delivers the first again: the delivery a daemon ignores.
+    let (text, delivered, _newer) = next().await;
+    assert_eq!((text.as_str(), delivered), ("held", 2));
+
+    let naked = std::time::Instant::now();
+    nak(&older, Some(retry_delay)).await;
+    let (text, delivered, _) = next().await;
+    let waited = naked.elapsed();
+    println!(
+        "redelivered {waited:?} after the nak of the older delivery (delay {retry_delay:?}, ack wait {ack_wait:?})"
+    );
+    assert_eq!((text.as_str(), delivered), ("held", 3));
+    assert!(waited >= retry_delay, "before the delay: {waited:?}");
+    assert!(waited < ack_wait - Duration::from_secs(1), "after the ack wait, not the delay: {waited:?}");
+}
