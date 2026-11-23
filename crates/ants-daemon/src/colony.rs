@@ -64,17 +64,15 @@ pub async fn entry(config: &Config) -> ColonyEntry {
 
 /// Host name of this machine, as `hostname` prints it.
 pub async fn machine() -> String {
-    let output = tokio::process::Command::new("hostname").output().await;
-    match output {
-        Ok(out) if out.status.success() => {
-            let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-            if !name.is_empty() {
-                return name;
-            }
-        }
-        _ => {}
-    }
-    std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME")).unwrap_or_else(|_| "unknown".to_owned())
+    printed(tokio::process::Command::new("hostname").output().await)
+        .or_else(|| std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME")).ok())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+/// The host name a run of `hostname` printed, if it succeeded and printed one.
+pub(crate) fn printed(output: std::io::Result<std::process::Output>) -> Option<String> {
+    let out = output.ok().filter(|out| out.status.success())?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|name| !name.is_empty())
 }
 
 #[cfg(test)]

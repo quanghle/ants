@@ -144,8 +144,8 @@ fn default_host_creds(dir: &Path, machine: Option<&Machine>, fallback: Option<&M
     })
 }
 
-/// This machine's host name, as `hostname` prints it.
+/// This machine's host name, as `hostname` prints it, read without a runtime ([`crate::colony::machine`] reads it
+/// with one).
 pub(super) fn hostname() -> Option<String> {
-    let out = std::process::Command::new("hostname").output().ok().filter(|out| out.status.success())?;
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|name| !name.is_empty())
+    crate::colony::printed(std::process::Command::new("hostname").output())
 }

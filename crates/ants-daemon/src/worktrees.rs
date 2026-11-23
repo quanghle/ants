@@ -19,7 +19,7 @@
 //! Ants of one daemon may share a repository. Git does not take a `git worktree prune` beside a `git worktree add` on
 //! one repository (the prune removes the add's half-made registration), so the removals, prunes and branch deletions
 //! of a repository go alone across the daemon, by its git common directory. Adds do run beside each other,
-//! [`ADDS_AT_ONCE`] at a time: git takes the longer for one the more worktrees the repository has, which a burst of
+//! `ADDS_AT_ONCE` at a time: git takes the longer for one the more worktrees the repository has, which a burst of
 //! new threads of many ants would otherwise wait for one after the other. An add that fails anyway, as with another
 //! process's git racing it, is tried once more, alone, and a branch made by an add that failed is deleted; an add git
 //! does not finish within [`ADD_TIMEOUT`] is stopped, and failed. Fetches of one repository go one at a time, apart
@@ -56,7 +56,7 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 pub const ADD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How many `git worktree add` run at once in one repository, across the daemon's ants.
-pub const ADDS_AT_ONCE: u32 = 4;
+const ADDS_AT_ONCE: u32 = 4;
 
 /// Where a thread's new branch starts: the ant config key `worktree_base`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]

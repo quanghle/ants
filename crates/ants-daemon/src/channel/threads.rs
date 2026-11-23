@@ -23,7 +23,7 @@ use crate::records::owners::Owners;
 use crate::sync::MutexExt as _;
 
 /// Most earlier posts a prompt shows; older unseen ones are counted instead.
-pub const MAX_CONTEXT: usize = 50;
+const MAX_CONTEXT: usize = 50;
 /// Slack for the clocks of a poster and the server, when a read starts at the time a post was sent, such as a thread's
 /// start.
 pub const CLOCK_SLACK: Duration = Duration::from_secs(300);
