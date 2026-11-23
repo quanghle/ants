@@ -2,6 +2,7 @@
 
 use std::time::{Duration, SystemTime};
 
+use ants_daemon::secrets::same;
 use anyhow::Result;
 use data_encoding::{BASE64, HEXLOWER, HEXLOWER_PERMISSIVE};
 use hyper::http::{HeaderMap, HeaderName, StatusCode, header};
@@ -52,11 +53,11 @@ impl Webhook {
                 .get(header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "))
-                .is_some_and(|given| crate::node::bridge::same(given.trim().as_bytes(), token.as_bytes())),
+                .is_some_and(|given| same(given.trim().as_bytes(), token.as_bytes())),
             Auth::Token { secret, header } => headers
                 .get(header)
                 .and_then(|v| v.to_str().ok())
-                .is_some_and(|given| crate::node::bridge::same(given.trim().as_bytes(), secret.as_bytes())),
+                .is_some_and(|given| same(given.trim().as_bytes(), secret.as_bytes())),
             Auth::Standard { tolerance, .. } => {
                 headers.get(WEBHOOK_ID).is_some_and(|id| !id.is_empty())
                     && headers.contains_key(WEBHOOK_SIGNATURE)
@@ -92,7 +93,7 @@ impl Webhook {
                     .split_ascii_whitespace()
                     .filter_map(|signature| signature.strip_prefix("v1,"))
                     .filter_map(|signature| BASE64.decode(signature.as_bytes()).ok())
-                    .any(|signature| crate::node::bridge::same(&signature, expected.as_ref()))
+                    .any(|signature| same(&signature, expected.as_ref()))
             }
             Auth::Bearer(_) | Auth::Token { .. } => true,
         }

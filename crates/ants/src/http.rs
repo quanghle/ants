@@ -1,15 +1,20 @@
 //! A minimal HTTP/1.1 client over rustls, for the few calls ants makes to web services: notification sinks, GitHub,
-//! and the downloads of `ants update` ([`download`]).
+//! and the downloads of `ants update` ([`download`]); and what it shares with the bridge's client: the TLS client
+//! and the tunnel through an HTTP CONNECT proxy.
 
-use std::sync::OnceLock;
+use std::fmt::Write as _;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use data_encoding::BASE64;
 use http_body_util::{BodyExt as _, Full, Limited};
 use hyper::body::Bytes;
 use hyper::http::{HeaderMap, Method, Request, StatusCode, Uri, header};
 use hyper_util::rt::TokioIo;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::ServerName;
 
 fn tls() -> Result<TlsConnector> {
@@ -17,11 +22,77 @@ fn tls() -> Result<TlsConnector> {
     if let Some(tls) = TLS.get() {
         return Ok(tls.clone());
     }
-    let tls = crate::node::bridge::tls_connector()?;
+    let tls = tls_connector()?;
     Ok(TLS.get_or_init(|| tls).clone())
 }
 
-trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+/// A TLS client trusting the CA certificates of the system, or of the PEM file `SSL_CERT_FILE` names.
+pub(crate) fn tls_connector() -> Result<TlsConnector> {
+    let mut roots = rustls::RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    let (added, _) = roots.add_parsable_certificates(native.certs);
+    if added == 0 {
+        bail!("no trusted CA certificates found (errors: {:?}); SSL_CERT_FILE names a PEM file of them", native.errors);
+    }
+    client_config(roots)
+}
+
+/// A TLS client trusting `roots`, speaking HTTP/1.1.
+pub(crate) fn client_config(roots: rustls::RootCertStore) -> Result<TlsConnector> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(TlsConnector::from(Arc::new(config)))
+}
+
+/// `host:port` and the Proxy-Authorization of a CONNECT proxy URL.
+pub(crate) fn parse_proxy(proxy: &str) -> Result<(String, Option<String>)> {
+    let rest =
+        proxy.strip_prefix("http://").with_context(|| format!("--proxy {proxy:?}: expected http://host:port"))?;
+    let authority = rest.trim_end_matches('/');
+    let (auth, host) = match authority.rsplit_once('@') {
+        Some((user, host)) => (Some(format!("Basic {}", BASE64.encode(user.as_bytes()))), host),
+        None => (None, authority),
+    };
+    if host.is_empty() || host.contains('/') {
+        bail!("--proxy {proxy:?}: expected http://host:port");
+    }
+    let dial = if host.rsplit_once(':').is_some_and(|(_, port)| port.parse::<u16>().is_ok()) {
+        host.to_owned()
+    } else {
+        format!("{host}:80")
+    };
+    Ok((dial, auth))
+}
+
+/// Ask the proxy on `tcp` for a tunnel to `authority`.
+pub(crate) async fn tunnel(tcp: &mut TcpStream, authority: &str, auth: Option<&str>) -> Result<()> {
+    let mut head = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
+    if let Some(auth) = auth {
+        let _ = write!(head, "Proxy-Authorization: {auth}\r\n");
+    }
+    head += "\r\n";
+    tcp.write_all(head.as_bytes()).await?;
+    // Byte by byte, so nothing after the head is read away from the tunnel.
+    let mut answer = Vec::new();
+    while !answer.ends_with(b"\r\n\r\n") {
+        if answer.len() > 8192 {
+            bail!("proxy answer too long");
+        }
+        answer.push(tcp.read_u8().await.context("proxy closed the connection")?);
+    }
+    let status = String::from_utf8_lossy(answer.split(|b| *b == b'\n').next().unwrap_or_default()).trim().to_owned();
+    if !status.split(' ').nth(1).is_some_and(|code| code.starts_with('2')) {
+        bail!("proxy refused the tunnel to {authority}: {status}");
+    }
+    Ok(())
+}
+
+/// A connection to a server, plain or under TLS.
+pub(crate) trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
 
 /// `method` on `url` (https://, or http://), with `headers` and `body` of its content type if any: the status of the
@@ -61,7 +132,7 @@ pub(crate) async fn download(url: &str, headers: &[(&str, String)], limit: usize
     let proxy = env_var(&["HTTPS_PROXY", "https_proxy"])
         .map(|proxy| {
             let proxy = if proxy.contains("://") { proxy } else { format!("http://{proxy}") };
-            crate::node::bridge::parse_proxy(&proxy).context("HTTPS_PROXY")
+            parse_proxy(&proxy).context("HTTPS_PROXY")
         })
         .transpose()?;
     let no_proxy = env_var(&["NO_PROXY", "no_proxy"]).unwrap_or_default();
@@ -128,7 +199,7 @@ async fn request(
     let io: Box<dyn Io> = match proxy {
         Some((dial, auth)) if https => {
             let mut tcp = TcpStream::connect(dial.as_str()).await.with_context(|| format!("connecting to {dial}"))?;
-            crate::node::bridge::tunnel(&mut tcp, &format!("{host}:{port}"), auth.as_deref()).await?;
+            tunnel(&mut tcp, &format!("{host}:{port}"), auth.as_deref()).await?;
             let name = ServerName::try_from(bare_host.to_owned()).context("the URL's host name")?;
             Box::new(tls()?.connect(name, tcp).await.context("TLS handshake")?)
         }
