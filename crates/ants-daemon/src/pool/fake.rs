@@ -21,7 +21,31 @@ use tokio::sync::Semaphore;
 use crate::harness::{Launch, SteerRequest, SteerResponse, advertise_steering};
 use crate::sync::MutexExt as _;
 
-/// What the fake harnesses were asked to do, across all their "processes".
+/// What tests set the fake harnesses to do, read as each request arrives.
+#[derive(Default, Debug)]
+pub struct Knobs {
+    /// While set, opening a session or prompting fails with ACP's `auth_required`, as a harness that is not
+    /// signed in does.
+    pub signed_out: bool,
+    /// While set, session/load fails, as with a harness whose session store was cleared.
+    pub lose_sessions: bool,
+    /// While set, prompts stream this text and fail with it, as Claude's adapter reports a provider limit.
+    pub limited: Option<String>,
+    /// Whether [`Knobs::limited`] ends the prompt as its reply instead, as Copilot CLI and Antigravity do.
+    pub limited_reply: bool,
+    /// While set, the handshake fails, as with a broken install.
+    pub broken: bool,
+    /// While set, the handshake fails with this error, as when the daemon runs out of open files.
+    pub broken_with: Option<String>,
+    /// While set, harnesses starting advertise that they take images in prompts.
+    pub takes_images: bool,
+    /// While set, harnesses starting advertise session/fork.
+    pub forks: bool,
+    /// While set, harnesses starting advertise `_ants/steer`.
+    pub steers: bool,
+}
+
+/// What the fake harnesses were asked to do, across all their "processes", and what tests set them to do.
 #[derive(Default, Debug)]
 pub struct Log {
     pub starts: usize,
@@ -41,29 +65,12 @@ pub struct Log {
     pub doomed: usize,
     pub doomed_failed: usize,
     flaky_failed: Vec<String>,
-    /// While set, opening a session or prompting fails with ACP's `auth_required`, as a harness that is not
-    /// signed in does.
-    pub signed_out: bool,
-    /// While set, session/load fails, as with a harness whose session store was cleared.
-    pub lose_sessions: bool,
-    /// While set, prompts stream this text and fail with it, as Claude's adapter reports a provider limit.
-    pub limited: Option<String>,
-    /// Whether [`Log::limited`] ends the prompt as its reply instead, as Copilot CLI and Antigravity do.
-    pub limited_reply: bool,
-    /// While set, the handshake fails, as with a broken install.
-    pub broken: bool,
-    /// While set, the handshake fails with this error, as when the daemon runs out of open files.
-    pub broken_with: Option<String>,
-    /// While set, harnesses starting advertise that they take images in prompts.
-    pub takes_images: bool,
+    /// What tests set the harnesses to do.
+    pub knobs: Knobs,
     /// The images prompts carried after their text, as media type and base64 data, in order.
     pub images: Vec<(String, String)>,
-    /// While set, harnesses starting advertise session/fork.
-    pub forks: bool,
     /// The sessions forked, each with the working directory of its fork, in order; fork `n` is session `f<n>`.
     pub forked: Vec<(String, PathBuf)>,
-    /// While set, harnesses starting advertise `_ants/steer`.
-    pub steers: bool,
     /// The texts running prompts took as steers, in order.
     pub steered: Vec<String>,
 }
@@ -74,11 +81,11 @@ pub struct Log {
 /// in a prompt make it report spend and work: `tools N` starts N tool calls, `cost X` reports X as the session's
 /// cost, `tokens N` reports N tokens in the response, and `stall` replies `partial` and waits for session/cancel.
 /// `overflows` fails as a prompt that outgrew the context window, and so does `overflow` unless the session was
-/// rebuilt for it. While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that is not signed
+/// rebuilt for it. While [`Knobs::signed_out`] is set, sessions and prompts fail as with a harness that is not signed
 /// in, and a prompt with the word `sign-out` starts its `tools N`, then sets it and fails so; while
-/// [`Log::limited`] is, prompts start their `tools N`, then stream its text and fail with it, or end with it as
-/// their reply; while [`Log::broken`] is, the handshake fails; while [`Log::takes_images`] is, harnesses starting
-/// take images, which they log; while [`Log::steers`] is, harnesses starting take steers into a running prompt,
+/// [`Knobs::limited`] is, prompts start their `tools N`, then stream its text and fail with it, or end with it as
+/// their reply; while [`Knobs::broken`] is, the handshake fails; while [`Knobs::takes_images`] is, harnesses starting
+/// take images, which they log; while [`Knobs::steers`] is, harnesses starting take steers into a running prompt,
 /// whose reply ends with a line `+ <steer>` for each, though they refuse a steer ending with `refused`. `ask TOOL`
 /// asks permission to run the ants MCP tool TOOL, the reply ending with a line `asked TOOL: <option picked>`. They
 /// can load stored sessions.
@@ -163,15 +170,15 @@ struct Fake {
 impl Fake {
     fn initialize(&self, init: InitializeRequest, responder: Responder<InitializeResponse>) -> Result<(), Error> {
         let log = self.log.locked();
-        if log.broken {
+        if log.knobs.broken {
             return responder.respond_with_internal_error("broken install");
         }
-        if let Some(error) = &log.broken_with {
+        if let Some(error) = &log.knobs.broken_with {
             return responder.respond_with_internal_error(error.clone());
         }
-        let prompts = PromptCapabilities::new().image(log.takes_images);
-        let fork = log.forks.then(SessionForkCapabilities::new);
-        let steers = log.steers;
+        let prompts = PromptCapabilities::new().image(log.knobs.takes_images);
+        let fork = log.knobs.forks.then(SessionForkCapabilities::new);
+        let steers = log.knobs.steers;
         drop(log);
         let capabilities = AgentCapabilities::new()
             .load_session(self.sessions == Sessions::Loadable)
@@ -203,7 +210,7 @@ impl Fake {
 
     fn new_session(&self, new: NewSessionRequest, responder: Responder<NewSessionResponse>) -> Result<(), Error> {
         let mut log = self.log.locked();
-        if log.signed_out {
+        if log.knobs.signed_out {
             return responder.respond_with_error(Error::auth_required());
         }
         log.new_sessions += 1;
@@ -218,10 +225,10 @@ impl Fake {
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
         let mut log = self.log.locked();
-        if log.signed_out {
+        if log.knobs.signed_out {
             return responder.respond_with_error(Error::auth_required());
         }
-        if log.lose_sessions {
+        if log.knobs.lose_sessions {
             return responder.respond_with_internal_error("Session not found");
         }
         log.loaded.push(load.session_id.to_string());
@@ -245,14 +252,14 @@ impl Fake {
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
         let mut log = self.log.locked();
-        if log.signed_out {
+        if log.knobs.signed_out {
             return responder.respond_with_error(Error::auth_required());
         }
         log.prompted += 1;
         let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
         let words: Vec<&str> = t.text.split_whitespace().collect();
         let signs_out = words.contains(&"sign-out");
-        if signs_out || log.limited.is_some() {
+        if signs_out || log.knobs.limited.is_some() {
             // Tools run before the sign-out or the limit is met.
             let tools = words.windows(2).find(|w| w[0] == "tools").and_then(|w| w[1].parse().ok());
             for i in 0..tools.unwrap_or(0u64) {
@@ -261,12 +268,12 @@ impl Fake {
             }
         }
         if signs_out {
-            log.signed_out = true;
+            log.knobs.signed_out = true;
             return responder.respond_with_error(Error::auth_required());
         }
-        if let Some(limited) = &log.limited {
+        if let Some(limited) = &log.knobs.limited {
             cx.send_notification(chunk(&prompt.session_id, limited))?;
-            if log.limited_reply {
+            if log.knobs.limited_reply {
                 return responder.respond(PromptResponse::new(StopReason::EndTurn));
             }
             let error = Error::internal_error().data(limited.clone());

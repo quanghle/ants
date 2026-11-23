@@ -71,7 +71,7 @@ impl Hub {
             let ant = &self.ant;
             let other = [&sealed.from, &sealed.to].into_iter().find(|u| **u != human && *u != ant).cloned();
             let other = other.ok_or_else(|| format!("thread {thread} carries sealed messages with no other party"))?;
-            let sealing = self.sealing.get().ok_or_else(|| {
+            let sealing = self.assist.sealing.get().ok_or_else(|| {
                 format!("thread {thread} carries sealed messages, and {human} has not enrolled {ant} as one of its devices, so the title is not sealed; no title is set")
             })?;
             sealing.seal_title(&human, &other, &mut title).await.map_err(|e| format!("{e:#}; no title is set"))?;

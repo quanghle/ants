@@ -114,7 +114,7 @@ impl Hub {
         if envelope.sealed.is_none() {
             return shown(envelope);
         }
-        let Some(sealing) = self.sealing.get() else { return State::Unreadable.placeholder().to_owned() };
+        let Some(sealing) = self.assist.sealing.get() else { return State::Unreadable.placeholder().to_owned() };
         match sealing.open(human, envelope).await {
             Ok(Opening::Opened(body)) => body.text,
             Ok(opening @ (Opening::Unreadable | Opening::Forged(_))) => opening.state().placeholder().to_owned(),
@@ -283,7 +283,7 @@ impl Hub {
         }
         let sealed = !args.plaintext;
         if sealed {
-            let sealing = self.sealing.get().ok_or_else(|| {
+            let sealing = self.assist.sealing.get().ok_or_else(|| {
                 format!("{human} has not enrolled {} as one of its devices, so nothing is sealed; nothing sent: set plaintext to send it unsealed", self.ant)
             })?;
             sealing

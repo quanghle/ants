@@ -257,71 +257,52 @@ async fn serve(
     let _watching = humans.watch(js.clone(), crate::people::humans::RETRY);
     let shared = Bus { config, client: &client, js: &js, humans: &humans, providers };
     let (services, launch) = services(shared, allow, &entry.machine).await?;
-    let Services {
-        redactor,
-        approver,
-        colony,
-        reading,
-        notes,
-        sessions_kv,
-        ledger,
-        escalator,
-        identity,
-        lifecycle,
-        ..
-    } = &services;
+    let Services { redactor, reading, sessions_kv, lifecycle, .. } = &services;
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(*reading);
     let storage = storage_watcher(config, &js, sessions_kv);
     let sessions = SessionStore::kv(sessions_kv.clone(), config.ant.clone());
     let (outbox, attempts_kv) = (services.outbox.clone(), services.attempts_kv.clone());
     let _waking = wake::serve(providers, &config.ant, &js, outbox, sessions.clone(), attempts_kv.clone()).await;
-    let (answered, buried) = delivery_marks(&config.storage.home).await;
+    let marks = delivery_marks(attempts_kv, &config.ant, &config.storage.home).await;
     let pool = harness_pool(config, launch, sessions, &workload).await.with_lifecycle(lifecycle.clone());
     let publisher = publisher(config, &js, redactor, &pool).await;
     let (messages, channels) = inbox_messages(&js, &stream, config).await?;
-    let sense = providers.sense_of(&config.provider);
-    let registration = enter_colony(&js, entry.clone(), claimed, &workload, sense).await?;
+    let provider = services.provider(providers.sense_of(&config.provider));
+    let registration = enter_colony(&js, entry.clone(), claimed, &workload, provider.sense).await?;
     let inbox = Inbox {
         client: &client,
         js: &js,
         ant: &config.ant,
-        builtin: config.presence.builtin,
+        settings: config.inbox(),
         reading: *reading,
         machine: &entry.machine,
         pool: &pool,
         running: Running::default(),
         restarts,
-        attempts: &Attempts::new(attempts_kv, config.ant.clone()),
-        answered: &answered,
-        buried: &buried,
+        marks: &marks,
         mcp: Some(&services.mcp),
-        approvals: Some(approver),
+        approvals: Some(&services.approver),
         publisher: publisher.as_ref(),
         redactor,
         workload: &workload,
-        pause: &config.pause,
-        drift: &config.drift,
         metrics,
-        limits: config.harness.limits,
-        ledger,
-        escalator,
-        notes: notes.as_ref(),
+        ledger: &services.ledger,
+        escalator: &services.escalator,
+        notes: services.notes.as_ref(),
         threads: &threads,
-        colony,
+        colony: &services.colony,
         humans: &humans,
         behalf: Records::new(js.clone(), config.connection.js_domain.clone(), account()),
         pacing: Pacing::default(),
         holds: holds::Holds { mcp_sign_ins: services.mcp_sign_ins.clone(), ..holds::Holds::default() },
-        identity: identity.as_ref(),
-        home: &config.storage.home,
-        lifecycle: lifecycle.as_ref(),
-        sense,
+        provider,
         trails: trails(shared, &services).await,
     };
-    let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
+    let beside = Beside { config, stop, registration: &registration, storage: &storage };
+    let served = Box::pin(serve_inbox(&inbox, messages, channels, beside)).await?;
     forget_if_retired(&served, config, &js, retired_before).await;
-    wind_down(&served, registration, pool, lifecycle.as_ref(), growth(config, identity.as_ref(), providers)).await;
+    wind_down(&served, registration, pool, lifecycle.as_ref(), growth(config, provider.identity, providers)).await;
     Ok(served)
 }
 
@@ -366,21 +347,25 @@ fn dreaming(inbox: &Inbox<'_>, config: &Config) -> std::sync::Arc<dyn crate::sen
     })
 }
 
+/// What the ant's inbox is served beside, as [`serve`] has it.
+#[derive(Clone, Copy)]
+struct Beside<'a> {
+    config: &'a Config,
+    stop: &'a Stop,
+    /// The ant's place in the colony, which another daemon may take over.
+    registration: &'a colony::Registration,
+    /// The watch of the room the ant's records have left.
+    storage: &'a crate::monitoring::storage::Watcher,
+}
+
 /// Serve the inbox, and the ant's watches beside it, until a stop, the hand-over or the move: which one ended it. A
 /// hand-over or a move drains the ant as a first stop does.
-async fn serve_inbox<S, E>(
-    inbox: &Inbox<'_>,
-    messages: S,
-    channels: Channels,
-    config: &Config,
-    stop: &Stop,
-    registration: &colony::Registration,
-    storage: &crate::monitoring::storage::Watcher,
-) -> Result<Served>
+async fn serve_inbox<S, E>(inbox: &Inbox<'_>, messages: S, channels: Channels, beside: Beside<'_>) -> Result<Served>
 where
     S: Stream<Item = Result<jetstream::Message, E>> + Unpin,
     E: Display,
 {
+    let Beside { config, stop, registration, storage } = beside;
     log_serving(config);
     let mut unserved = unserved::Watch::new(
         inbox.js,
@@ -391,9 +376,12 @@ where
     )
     .await?
     .reading(inbox.reading);
-    let _sense_workdirs = inbox.sense.zip(inbox.mcp).map(|(sense, mcp)| sense.workdirs(&config.ant, mcp.workdirs()));
-    let scheduler =
-        inbox.sense.map(|sense| sense.schedule(config, inbox.machine, dreaming(inbox, config), inbox.workload.clone()));
+    let _sense_workdirs =
+        inbox.provider.sense.zip(inbox.mcp).map(|(sense, mcp)| sense.workdirs(&config.ant, mcp.workdirs()));
+    let scheduler = inbox
+        .provider
+        .sense
+        .map(|sense| sense.schedule(config, inbox.machine, dreaming(inbox, config), inbox.workload.clone()));
     let (stopping, moving, mut asked) = (std::cell::Cell::new(false), std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request, the hand-over or the move, after which the prompts in flight finish;
     // the second only Ctrl-C or a stop request.
@@ -402,8 +390,9 @@ where
         let (first, stopping, moving) = (asked == 1, &stopping, &moving);
         let scheduler = scheduler.as_ref();
         async move {
-            let moved =
-                or_pending(inbox.identity.map(|identity| identity.moved(crate::profile::identity::MOVED_EVERY)));
+            let moved = or_pending(
+                inbox.provider.identity.map(|identity| identity.moved(crate::profile::identity::MOVED_EVERY)),
+            );
             tokio::select! {
                 () = stopped(stop) => stopping.set(true),
                 () = registration.lost(), if first => {
@@ -430,11 +419,11 @@ where
         () = inbox.hear_clones() => {}
         () = inbox.hear_mcp() => {}
         () = inbox.conduct_trails() => {}
-        () = or_pending(inbox.sense.map(|sense| sense.publish(&config.ant, inbox.workload))) => {}
+        () = or_pending(inbox.provider.sense.map(|sense| sense.publish(&config.ant, inbox.workload))) => {}
         () = crate::secrets::creds::recheck(config.connection.creds.as_deref()) => {}
         () = storage.watch(crate::monitoring::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
-        () = events::done::hear(inbox.js, inbox.ant, inbox.lifecycle, async |thread| {
+        () = events::done::hear(inbox.js, inbox.ant, inbox.provider.lifecycle, async |thread| {
             inbox.pool.has_session(thread).await
         }) => {}
     }
@@ -542,11 +531,57 @@ struct Running {
     unnarrowed: Unnarrowed,
 }
 
+/// What is kept of the deliveries of the ant's messages: the attempts on the bus, and on the machine the answers and
+/// the dead letters still to be stored.
+struct Marks {
+    attempts: Attempts,
+    answered: Answered,
+    /// Messages whose dead letter waits in the machine's outbox, to bury again on their redelivery.
+    buried: Buried,
+}
+
+impl Marks {
+    /// The marks of `ant`, its attempts in `attempts` and the rest in its `home`.
+    fn new(attempts: crate::records::direct_kv::DirectKv, ant: &UserId, home: &std::path::Path) -> Self {
+        Self {
+            attempts: Attempts::new(attempts, ant.clone()),
+            answered: Answered::new(home),
+            buried: Buried::new(home),
+        }
+    }
+}
+
+/// What the inbox takes of the ant's settings ([`Config::inbox`]).
+#[derive(Clone, Copy)]
+struct InboxSettings<'a> {
+    builtin: Option<BuiltinAnt>,
+    /// Whether the ant is paused: then no prompt starts, the messages in hand waiting.
+    pause: &'a crate::pause::Pause,
+    /// The ant's drift, which its colony entry reports as it changes.
+    drift: &'a crate::profile::shared::Drift,
+    limits: PromptLimits,
+    /// The ant's home, where a clone's copy of its threads' history is ([`crate::stream::history::cloned`]).
+    home: &'a std::path::Path,
+}
+
+/// The ant's identity record and what its provider takes of its inbox.
+#[derive(Clone, Copy)]
+struct Provider<'a> {
+    /// The ant's identity record, which counts each prompt completed; None when it cannot be read.
+    identity: Option<&'a Identity>,
+    /// Told of the threads the ant starts ([`Inbox::thread_started`]); None when its provider takes no events.
+    lifecycle: Option<&'a Lifecycle>,
+    /// The ant's sense, which takes its sage's answers to the reviews of its dreams ([`Inbox::arrived`]) and is told
+    /// of its growth ([`Inbox::count_prompt`]); None when sense is not its provider.
+    sense: Option<&'a crate::sense::Sense>,
+}
+
 struct Inbox<'a> {
     client: &'a async_nats::Client,
     js: &'a jetstream::Context,
     ant: &'a UserId,
-    builtin: Option<BuiltinAnt>,
+    /// What the inbox takes of the ant's settings.
+    settings: InboxSettings<'a>,
     /// How the daemon reads through the ant's own readers ([`Reading::daemon`]).
     reading: Reading,
     /// The machine its notices name, as its colony entry does.
@@ -556,10 +591,8 @@ struct Inbox<'a> {
     running: Running,
     /// Where admin orders to restart the ant's harnesses arrive.
     restarts: &'a Restarts,
-    attempts: &'a Attempts,
-    answered: &'a Answered,
-    /// Messages whose dead letter waits in the machine's outbox, to bury again on their redelivery.
-    buried: &'a Buried,
+    /// What is kept of the deliveries of the ant's messages.
+    marks: &'a Marks,
     mcp: Option<&'a Mcp>,
     /// Takes the decisions ants of the ant's chain send on its tool requests.
     approvals: Option<&'a NatsApprover>,
@@ -569,13 +602,8 @@ struct Inbox<'a> {
     redactor: &'a Redactor,
     /// Counts the messages being handled and the live harnesses, for the colony.
     workload: &'a std::sync::Arc<colony::Workload>,
-    /// Whether the ant is paused: then no prompt starts, the messages in hand waiting.
-    pause: &'a crate::pause::Pause,
-    /// The ant's drift, which its colony entry reports as it changes.
-    drift: &'a crate::profile::shared::Drift,
     /// The ant's counters, for monitoring.
     metrics: std::sync::Arc<crate::monitoring::metrics::Ant>,
-    limits: PromptLimits,
     ledger: &'a Ledger,
     /// Sends what the ant cannot settle up its chain, and notes the answers.
     escalator: &'a Escalator,
@@ -592,15 +620,8 @@ struct Inbox<'a> {
     pacing: Pacing,
     /// What holds the messages while the ant's own harness cannot answer, and the sign-ins to tell.
     holds: holds::Holds,
-    /// The ant's identity record, which counts each prompt completed; None when it cannot be read.
-    identity: Option<&'a Identity>,
-    /// The ant's home, where a clone's copy of its threads' history is ([`crate::stream::history::cloned`]).
-    home: &'a std::path::Path,
-    /// Told of the threads the ant starts ([`Inbox::thread_started`]); None when its provider takes no events.
-    lifecycle: Option<&'a Lifecycle>,
-    /// The ant's sense, which takes its sage's answers to the reviews of its dreams ([`Inbox::arrived`]) and is told
-    /// of its growth ([`Inbox::count_prompt`]); None when sense is not its provider.
-    sense: Option<&'a crate::sense::Sense>,
+    /// The ant's identity record and what its provider takes of its inbox.
+    provider: Provider<'a>,
     /// The trails the ant conducts, which take the replies to their steps ([`Inbox::arrived`]); None when the bus
     /// keeps no runs.
     trails: Option<Trails>,

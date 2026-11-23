@@ -187,8 +187,8 @@ impl Inbox<'_> {
         let mut waits = Waits::new();
         let mut asks = self.queue_asks().await;
         let mut answering = FuturesUnordered::new();
-        let mut paused = self.pause.subscribe();
-        let mut drift = self.drift.subscribe();
+        let mut paused = self.settings.pause.subscribe();
+        let mut drift = self.settings.drift.subscribe();
         loop {
             let junk_waits = !self.holds.junk.is_empty() && waits.stalling.is_terminated();
             let retry_deadline = threads.values().filter_map(|t| t.retry.as_ref().map(|r| r.until)).min();
@@ -241,32 +241,53 @@ impl Inbox<'_> {
                     }
                 }
             }
-            let pause = paused.borrow_and_update().clone();
-            let held = self.holds_messages(pause.is_some());
-            self.workload.set_paused(pause);
-            let ready = match ready {
-                Ready::None => Vec::new(),
-                Ready::Thread(thread) => vec![thread],
-                Ready::All => threads.keys().cloned().collect(),
-            };
-            for thread in ready.into_iter().filter(|_| !held) {
-                while let Some((incoming, msg)) = next_turn(&mut threads, thread.clone()) {
-                    if let Some(t) = threads.get_mut(&thread) {
-                        self.queue_moved(&thread, t, incoming.envelope.id);
-                    }
-                    let joiner = (incoming.steered == Steered::Joining).then_some(incoming.envelope.id);
-                    running.push(self.handle(incoming, msg).map(move |(thread, handled)| (thread, handled, joiner)));
-                }
+            for (incoming, msg) in self.next_turns(&mut threads, ready, &mut paused) {
+                let joiner = (incoming.steered == Steered::Joining).then_some(incoming.envelope.id);
+                running.push(self.handle(incoming, msg).map(move |(thread, handled)| (thread, handled, joiner)));
             }
-            // Not those awaiting a redelivery, which may take a while.
-            let in_hand = threads.iter().filter(|(_, t)| t.retry.is_none()).map(|(thread, _)| thread.clone());
-            self.pool.set_in_hand(in_hand.collect());
-            self.workload.set_harnesses(self.pool.live());
+            self.report_in_hand(&threads);
         }
 
         drop(messages);
         hand_back_waiting(threads).await;
         finish(running, stop).await;
+    }
+
+    /// The messages whose turn has come on the threads `ready` names, in the order they start, those behind them told
+    /// where they stand: none while the messages are held ([`Inbox::holds_messages`]). The colony is told of the
+    /// pause as `paused` has it.
+    fn next_turns(
+        &self,
+        threads: &mut HashMap<ThreadId, Thread>,
+        ready: Ready,
+        paused: &mut tokio::sync::watch::Receiver<Option<ants_proto::Paused>>,
+    ) -> Vec<InHand> {
+        let pause = paused.borrow_and_update().clone();
+        let held = self.holds_messages(pause.is_some());
+        self.workload.set_paused(pause);
+        let ready = match ready {
+            Ready::Thread(thread) if !held => vec![thread],
+            Ready::All if !held => threads.keys().cloned().collect(),
+            _ => Vec::new(),
+        };
+        let mut turns = Vec::new();
+        for thread in ready {
+            while let Some((incoming, msg)) = next_turn(threads, thread.clone()) {
+                if let Some(t) = threads.get_mut(&thread) {
+                    self.queue_moved(&thread, t, incoming.envelope.id);
+                }
+                turns.push((incoming, msg));
+            }
+        }
+        turns
+    }
+
+    /// Tell the pool of the threads in hand, and the colony of the harnesses live.
+    fn report_in_hand(&self, threads: &HashMap<ThreadId, Thread>) {
+        // Not those awaiting a redelivery, which may take a while.
+        let in_hand = threads.iter().filter(|(_, t)| t.retry.is_none()).map(|(thread, _)| thread.clone());
+        self.pool.set_in_hand(in_hand.collect());
+        self.workload.set_harnesses(self.pool.live());
     }
 
     /// Whether the messages wait in hand: while the harness is signed out, a provider limit holds or the harness keeps

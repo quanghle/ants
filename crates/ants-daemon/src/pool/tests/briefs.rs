@@ -34,7 +34,7 @@ async fn the_brief_follows_the_instructions_when_a_session_starts_or_is_loaded_o
     assert_eq!((reasons(&fake), reasons(&loaded)), (vec![BriefReason::Started], vec![BriefReason::Loaded]));
     pool.shutdown().await;
 
-    log.locked().lose_sessions = true;
+    log.locked().knobs.lose_sessions = true;
     let pool = Pool::new(launch, store, 4, IDLE);
     let (prompt, rebuilt) = briefed(brief, "d").await;
     let reply = pool.run(&thread(1), prompt).await.unwrap().text;

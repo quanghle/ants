@@ -586,7 +586,7 @@ async fn attachments_reach_a_harness_taking_images_as_images_and_any_other_as_a_
     let Some((bus, mut replies)) = Bus::start().await else { return };
     bus.js.create_stream(crate::hub::files_config()).await.unwrap();
     let (launch, log, _) = fake::launch();
-    log.locked().takes_images = true;
+    log.locked().knobs.takes_images = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut posts) = bus.channel("ops", &["dev-a"]).await;
     let line = |a: &Attachment, handle: &AttachmentHandle| {
@@ -616,7 +616,7 @@ async fn attachments_reach_a_harness_taking_images_as_images_and_any_other_as_a_
         bus.post(&post).await;
         next_post(&mut posts).await;
         // A harness started now takes no images.
-        log.locked().takes_images = false;
+        log.locked().knobs.takes_images = false;
         let mut plain = Envelope::on_thread(ThreadId::generate(), UserId::human(), bus.dev.clone(), "again");
         plain.attachments = vec![attach(&bus, |id| plain.attachment_handle(id), "shot.png", "image/png", b"x").await];
         bus::publish_json(&bus.js, plain.subject(), &plain, None).await.unwrap();

@@ -6,7 +6,7 @@ use super::*;
 async fn messages_wait_unspent_while_the_harness_is_signed_out() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
-    log.locked().signed_out = true;
+    log.locked().knobs.signed_out = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     let mut statuses = bus.client.subscribe(subject::status_of(&bus.dev)).await.unwrap();
@@ -42,7 +42,7 @@ async fn messages_wait_unspent_while_the_harness_is_signed_out() {
         assert_eq!(bus.consumer().await.num_redelivered, 0);
         assert_eq!(log.locked().prompted, 0);
 
-        log.locked().signed_out = false;
+        log.locked().knobs.signed_out = false;
         let mut answered = vec![next_reply(&mut replies).await, next_reply(&mut replies).await];
         answered.push(next_reply(&mut replies).await);
         answered.sort_by_key(|(_, text)| text.clone());
@@ -51,11 +51,11 @@ async fn messages_wait_unspent_while_the_harness_is_signed_out() {
         assert_eq!(bus.workload.signed_out(), None, "signed in again: the colony no longer shows it");
 
         // Signed out again once it worked: a live harness turns the prompt away, and a human is told again.
-        log.locked().signed_out = true;
+        log.locked().knobs.signed_out = true;
         bus.send(&t1, "d").await;
         signed_out(&next_envelope(&mut replies).await);
         assert!(bus.workload.signed_out().is_some_and(|s| s.since > shown.since), "a new signed-out period");
-        log.locked().signed_out = false;
+        log.locked().knobs.signed_out = false;
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "d".to_owned()));
         ctrl_c.add_permits(1);
     };
@@ -73,7 +73,7 @@ async fn a_fallback_answers_while_the_harness_is_signed_out() {
     let (launch, log, _) = fake::launch();
     let (spare, spare_log, _) = fake::launch();
     let spare = spare.named("spare");
-    log.locked().signed_out = true;
+    log.locked().knobs.signed_out = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE).with_fallbacks(vec![("spare".to_owned(), spare)]);
     let thread = ThreadId::generate();
     let (_, seq) = bus.send(&thread, "a").await;
@@ -96,7 +96,7 @@ async fn a_fallback_answers_while_the_harness_is_signed_out() {
 
         // The fallback turned away too: the message waits, the owner told once, until one answers.
         let mut passed_over = async |text: &str| {
-            spare_log.locked().signed_out = true;
+            spare_log.locked().knobs.signed_out = true;
             bus.send(&thread, text).await;
             let notice = next_envelope(&mut replies).await;
             assert_eq!(notice.thread_id, thread);
@@ -111,7 +111,7 @@ async fn a_fallback_answers_while_the_harness_is_signed_out() {
             let starts = spare_log.locked().starts;
             until("the fallback tried again", || spare_log.locked().starts > starts).await;
             assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "told once");
-            spare_log.locked().signed_out = false;
+            spare_log.locked().knobs.signed_out = false;
             let reply = next_envelope(&mut replies).await;
             assert!(reply.text.contains(&format!("{text}\n\n[ants] Answered by fallback spare")), "{reply:?}");
         };
@@ -120,7 +120,7 @@ async fn a_fallback_answers_while_the_harness_is_signed_out() {
         passed_over("b2").await;
 
         // Signed in again: the thread goes back to the ant's own harness, rebuilt from its history.
-        log.locked().signed_out = false;
+        log.locked().knobs.signed_out = false;
         until("the fallback stood down", || bus.workload.fallback().is_none()).await;
         bus.send(&thread, "c").await;
         let reply = next_envelope(&mut replies).await;
@@ -141,7 +141,7 @@ async fn a_fallback_answers_while_the_harness_is_signed_out() {
 async fn messages_wait_unspent_while_the_harness_keeps_failing_to_start() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
-    log.locked().broken = true;
+    log.locked().knobs.broken = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     let (_, seq) = bus.send(&t1, "a").await;
@@ -167,19 +167,19 @@ async fn messages_wait_unspent_while_the_harness_keeps_failing_to_start() {
         assert_eq!(bus.consumer().await.num_redelivered, redelivered);
         assert!(bus.workload.failing().is_some_and(|f| f.since == shown.since), "the same failing period");
 
-        log.locked().broken = false;
+        log.locked().knobs.broken = false;
         let mut answered = vec![next_reply(&mut replies).await, next_reply(&mut replies).await];
         answered.sort_by_key(|(_, text)| text.clone());
         assert_eq!(answered, [(t1.clone(), "a".to_owned()), (t2.clone(), "c".to_owned())]);
         assert_eq!(bus.workload.failing(), None, "started again: the colony no longer shows it");
 
         // Once messages get through, a lone failure is tried again as before, holding nothing.
-        log.locked().broken = true;
+        log.locked().knobs.broken = true;
         let t3 = ThreadId::generate();
         let starts = log.locked().starts;
         bus.send(&t3, "d").await;
         until("a failed start", || log.locked().starts > starts).await;
-        log.locked().broken = false;
+        log.locked().knobs.broken = false;
         assert_eq!(next_reply(&mut replies).await, (t3.clone(), "d".to_owned()));
         assert_eq!(bus.workload.failing(), None);
         ctrl_c.add_permits(1);
@@ -196,7 +196,7 @@ async fn messages_wait_unspent_while_the_harness_keeps_failing_to_start() {
 async fn messages_wait_unspent_while_the_daemon_is_out_of_open_files() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
-    log.locked().broken_with = Some("Too many open files (os error 24)".to_owned());
+    log.locked().knobs.broken_with = Some("Too many open files (os error 24)".to_owned());
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     let (_, seq) = bus.send(&t1, "a").await;
@@ -223,7 +223,7 @@ async fn messages_wait_unspent_while_the_daemon_is_out_of_open_files() {
         assert!(!bus.marked(seq).await, "no attempt is recorded");
         assert_eq!(bus.consumer().await.num_redelivered, 0);
 
-        log.locked().broken_with = None;
+        log.locked().knobs.broken_with = None;
         let mut answered = vec![next_reply(&mut replies).await, next_reply(&mut replies).await];
         answered.sort_by_key(|(_, text)| text.clone());
         assert_eq!(answered, [(t1.clone(), "a".to_owned()), (t2.clone(), "c".to_owned())]);
@@ -239,7 +239,7 @@ async fn messages_wait_unspent_while_the_daemon_is_out_of_open_files() {
 async fn messages_wait_unspent_through_a_provider_rate_limit() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
-    log.locked().limited = Some("API Error: 429 Too Many Requests, retry after 0.2s".to_owned());
+    log.locked().knobs.limited = Some("API Error: 429 Too Many Requests, retry after 0.2s".to_owned());
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     let (_, seq) = bus.send(&t1, "a").await;
@@ -266,7 +266,7 @@ async fn messages_wait_unspent_through_a_provider_rate_limit() {
         assert!(!bus.marked(seq).await, "no attempt is recorded");
         assert_eq!(bus.consumer().await.num_redelivered, 0);
 
-        log.locked().limited = None;
+        log.locked().knobs.limited = None;
         let mut answered = vec![next_reply(&mut replies).await, next_reply(&mut replies).await];
         answered.push(next_reply(&mut replies).await);
         answered.sort_by_key(|(_, text)| text.clone());
@@ -290,7 +290,7 @@ async fn an_exhausted_quota_is_told_once_and_spends_no_attempt() {
                      details.";
     {
         let mut faked = log.locked();
-        (faked.limited, faked.limited_reply) = (Some(error.to_owned()), true);
+        (faked.knobs.limited, faked.knobs.limited_reply) = (Some(error.to_owned()), true);
     }
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let thread = ThreadId::generate();
@@ -308,7 +308,7 @@ async fn an_exhausted_quota_is_told_once_and_spends_no_attempt() {
         assert!(!bus.marked(seq).await, "no attempt is recorded");
         assert_eq!(bus.consumer().await.num_redelivered, 0);
 
-        log.locked().limited = None;
+        log.locked().knobs.limited = None;
         assert_eq!(next_reply(&mut replies).await, (thread.clone(), "a".to_owned()));
         until("the limit cleared", || bus.workload.limited().is_none()).await;
         ctrl_c.add_permits(1);

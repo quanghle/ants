@@ -78,9 +78,9 @@ async fn a_reply_refused_by_a_full_store_is_sent_once_there_is_room_unprompted_a
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(stored().await.is_empty(), "no reply stored while full");
         assert_eq!(log.locked().prompted, 1, "neither prompted again nor the next message");
-        let marker = bus.attempts.get(seq, &held).await.unwrap();
+        let marker = bus.marks.attempts.get(seq, &held).await.unwrap();
         assert!(matches!(marker, Some(crate::delivery::attempts::Marker::Started)), "no reply could be recorded");
-        assert!(bus.answered.unsent(&held).await.is_some(), "the reply is kept on the machine");
+        assert!(bus.marks.answered.unsent(&held).await.is_some(), "the reply is kept on the machine");
         let consumer = bus.consumer().await;
         assert_eq!((consumer.num_redelivered, consumer.num_ack_pending), (0, 2), "both in hand, none redelivered");
 
@@ -94,7 +94,7 @@ async fn a_reply_refused_by_a_full_store_is_sent_once_there_is_room_unprompted_a
     assert_eq!(log.locked().prompted, 2);
     assert_eq!(bus.consumer().await.num_redelivered, 0, "no attempt spent");
     assert!(dead::list(&bus.stream).await.unwrap().is_empty());
-    assert!(bus.answered.unsent(&held).await.is_none(), "forgotten once sent");
+    assert!(bus.marks.answered.unsent(&held).await.is_none(), "forgotten once sent");
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -118,7 +118,7 @@ async fn a_dead_letter_refused_by_a_full_store_is_buried_once_there_is_room() {
         gate.add_permits(1);
         until("the last attempt to fail", || log.locked().doomed_failed == attempts).await;
         tokio::time::sleep(Duration::from_secs(2)).await;
-        let kept = bus.buried.get(&doomed).await.expect("the dead letter is kept on the machine");
+        let kept = bus.marks.buried.get(&doomed).await.expect("the dead letter is kept on the machine");
         assert!(kept.dead.error.contains("doomed"), "{}", kept.dead.error);
         assert!(dead::list(&bus.stream).await.unwrap().is_empty(), "not stored while full");
         assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "nobody told yet");
@@ -137,7 +137,7 @@ async fn a_dead_letter_refused_by_a_full_store_is_buried_once_there_is_room() {
     assert_eq!(letters.len(), 1, "{letters:?}");
     assert_eq!(letters[0].1.stream_seq, seq);
     assert!(letters[0].1.error.contains("doomed"), "{}", letters[0].1.error);
-    assert!(bus.buried.get(&doomed).await.is_none(), "forgotten once terminated");
+    assert!(bus.marks.buried.get(&doomed).await.is_none(), "forgotten once terminated");
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -224,7 +224,7 @@ async fn an_answer_whose_escalation_a_full_store_refuses_is_sent_once_there_is_r
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(stored_texts(&bus, &to_human).await.is_empty(), "no escalation stored while full");
         assert!(stored_texts(&bus, &to_dev_b).await.is_empty(), "no reply stored while full");
-        let given = bus.answered.given(&held).await.expect("the answer is kept on the machine");
+        let given = bus.marks.answered.given(&held).await.expect("the answer is kept on the machine");
         assert_eq!(given.limit.as_deref(), Some(cap));
         assert_eq!(bus.consumer().await.num_redelivered, 0, "in hand, not redelivered");
 
@@ -237,7 +237,7 @@ async fn an_answer_whose_escalation_a_full_store_refuses_is_sent_once_there_is_r
     assert_eq!(stored_texts(&bus, &to_dev_b).await, [format!("partial\n\n[ants] {cap}; the prompt was cancelled.")]);
     let escalations = stored_texts(&bus, &to_human).await;
     assert_eq!(escalations, [format!("{cap}; needs a decision. Last message from dev-b:\nhold cost 2 stall")]);
-    assert!(bus.answered.given(&held).await.is_none(), "forgotten once the reply is recorded");
+    assert!(bus.marks.answered.given(&held).await.is_none(), "forgotten once the reply is recorded");
     assert!(dead::list(&bus.stream).await.unwrap().is_empty());
     assert_eq!(bus.unacked().await, 0);
 }
@@ -256,7 +256,7 @@ async fn a_joined_prompt_a_full_store_refuses_the_outcome_of_is_settled_once_the
     let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
     bus.mcp = Some(mcp.unwrap());
     let (launch, log, gate) = fake::launch();
-    log.locked().steers = true;
+    log.locked().knobs.steers = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let dev_b: UserId = "dev-b".parse().unwrap();
     let thread = ThreadId::generate();
@@ -280,8 +280,8 @@ async fn a_joined_prompt_a_full_store_refuses_the_outcome_of_is_settled_once_the
         assert!(stored_on(&bus, &to_human).await.is_empty(), "no escalation stored while full");
         assert!(stored_on(&bus, &to_dev_b).await.is_empty(), "neither notice nor reply stored while full");
         assert_eq!(log.locked().prompted, 1, "neither message prompted again");
-        assert!(bus.answered.unsent(&first).await.is_some(), "the notice is kept on the machine");
-        let given = bus.answered.given(&joining).await.expect("the answer is kept on the machine");
+        assert!(bus.marks.answered.unsent(&first).await.is_some(), "the notice is kept on the machine");
+        let given = bus.marks.answered.given(&joining).await.expect("the answer is kept on the machine");
         assert_eq!((given.limit.as_deref(), given.title.as_deref()), (Some(cap), Some("Fix the build")));
 
         free(&bus.js).await;
@@ -306,8 +306,8 @@ async fn a_joined_prompt_a_full_store_refuses_the_outcome_of_is_settled_once_the
     );
     let escalations = stored_texts(&bus, &to_human).await;
     assert_eq!(escalations, [format!("{cap}; needs a decision. Last message from dev-b:\nb")]);
-    assert!(bus.answered.unsent(&first).await.is_none(), "forgotten once sent");
-    assert!(bus.answered.given(&joining).await.is_none(), "forgotten once the reply is recorded");
+    assert!(bus.marks.answered.unsent(&first).await.is_none(), "forgotten once sent");
+    assert!(bus.marks.answered.given(&joining).await.is_none(), "forgotten once the reply is recorded");
     assert!(dead::list(&bus.stream).await.unwrap().is_empty());
     assert_eq!(bus.unacked().await, 0);
 }
@@ -362,7 +362,7 @@ async fn reply_from_a_kept_answer_with_a_file(attached: Attached) -> Option<(Bus
         // Several retries of the store pass.
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(stored_on(&bus, &to_dev_b).await.is_empty(), "no reply stored while full");
-        let given = bus.answered.given(&held).await.expect("the answer is kept on the machine");
+        let given = bus.marks.answered.given(&held).await.expect("the answer is kept on the machine");
         let files = given.files.expect("kept with the file the turn attached");
         assert_eq!(files.paths, ["report.md"]);
         let stored = files.stored.map(|stored| stored.files.into_iter().map(|file| file.name).collect::<Vec<_>>());
@@ -378,7 +378,7 @@ async fn reply_from_a_kept_answer_with_a_file(attached: Attached) -> Option<(Bus
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(log.locked().prompted, 1, "prompted once");
     let [reply] = &stored_on(&bus, &to_dev_b).await[..] else { panic!("one reply") };
-    assert!(bus.answered.given(&held).await.is_none(), "forgotten once the reply is recorded");
+    assert!(bus.marks.answered.given(&held).await.is_none(), "forgotten once the reply is recorded");
     assert!(dead::list(&bus.stream).await.unwrap().is_empty());
     assert_eq!(bus.unacked().await, 0);
     let reply = reply.clone();

@@ -313,8 +313,7 @@ impl Watch {
         let filter = subject::inbox_from(sender);
         let reader = sent_reader(sender);
         let reading = self.reading;
-        let _one =
-            if reading == Reading::Consumer { Some(crate::stream::history::SENT_READS.lock().await) } else { None };
+        let _one = crate::stream::history::sent_turn(reading).await;
         let role = self.role;
         reading::read_back(&self.js, &reader, reading, &filter, start, |seq, _, subject, payload| {
             next = Some(seq + 1);

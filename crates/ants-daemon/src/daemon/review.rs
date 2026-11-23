@@ -66,7 +66,7 @@ impl Inbox<'_> {
         let Some(reply) = Box::pin(self.reply_for(h, read, (text, None), &mut None, None)).await? else {
             return Ok(());
         };
-        if let Err(e) = self.attempts.replied(seq, envelope, &reply).await {
+        if let Err(e) = self.marks.attempts.replied(seq, envelope, &reply).await {
             tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "recording the reply");
         }
         self.deliver(h, &reply).await

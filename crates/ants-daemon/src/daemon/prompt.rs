@@ -155,7 +155,7 @@ impl Inbox<'_> {
     /// Add the prompt just completed to the ant's identity record, telling the ant's sense of the record when the ant
     /// reached its next stage; a failure only warns.
     async fn count_prompt(&self) {
-        let Some(identity) = self.identity else { return };
+        let Some(identity) = self.provider.identity else { return };
         let record = match identity.count_prompt().await {
             Ok(Some(record)) => record,
             Ok(None) => return,
@@ -164,7 +164,7 @@ impl Inbox<'_> {
                 return;
             }
         };
-        if let Some(sense) = self.sense
+        if let Some(sense) = self.provider.sense
             && Stage::of(record.prompts.saturating_sub(1)) != record.stage()
             && let Err(e) = sense.grown(self.ant, &record).await
         {
@@ -198,7 +198,7 @@ impl Inbox<'_> {
             None => None,
         };
         // The harness answered an earlier attempt, whose reply a later step failed to make or record.
-        if let Some(given) = self.answered.given(envelope).await {
+        if let Some(given) = self.marks.answered.given(envelope).await {
             tracing::info!(%thread, "sending the answer the harness gave an earlier attempt");
             return Box::pin(self.send_given(h, read, given, true)).await;
         }
@@ -211,7 +211,7 @@ impl Inbox<'_> {
         self.settle_origin(incoming).await?;
         if !cut_off {
             // Durable before the harness can run anything.
-            self.attempts.start(seq, envelope).await?;
+            self.marks.attempts.start(seq, envelope).await?;
         }
         if let Some(why) = self.unheld_review(incoming) {
             return Box::pin(self.decline_review(h, read, &why)).await;
@@ -303,7 +303,7 @@ impl Inbox<'_> {
             Ok(reply) => reply,
             Err(e) => {
                 if (!kept || given.files != files)
-                    && let Err(keep) = self.answered.keep_given(envelope, &given).await
+                    && let Err(keep) = self.marks.answered.keep_given(envelope, &given).await
                 {
                     tracing::warn!(thread = %envelope.thread_id, error = format!("{keep:#}"), "keeping the answer");
                 }
@@ -312,7 +312,7 @@ impl Inbox<'_> {
         };
         let Some(reply) = reply else {
             if kept {
-                self.answered.forget_given(envelope).await;
+                self.marks.answered.forget_given(envelope).await;
             }
             return Ok(());
         };
@@ -321,7 +321,7 @@ impl Inbox<'_> {
         // prompted again.
         self.record_reply(seq, envelope, &reply).await;
         if kept {
-            self.answered.forget_given(envelope).await;
+            self.marks.answered.forget_given(envelope).await;
         }
         self.deliver(h, &reply).await
     }
@@ -364,9 +364,9 @@ impl Inbox<'_> {
     /// instead, for the retry to send.
     pub(super) async fn record_reply(&self, seq: u64, envelope: &Envelope, reply: &Reply) {
         let thread = &envelope.thread_id;
-        if let Err(e) = self.attempts.replied(seq, envelope, reply).await {
+        if let Err(e) = self.marks.attempts.replied(seq, envelope, reply).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "recording the reply");
-            if let Err(e) = self.answered.keep_unsent(envelope, reply).await {
+            if let Err(e) = self.marks.answered.keep_unsent(envelope, reply).await {
                 tracing::warn!(%thread, error = format!("{e:#}"), "keeping the reply");
             }
         }
@@ -423,22 +423,22 @@ impl Inbox<'_> {
         // Nothing ran: the harness turned the prompt away for want of signing in, so the attempt never started, and
         // the message can be withdrawn while it waits.
         if e.is::<SignedOut>() && !cut_off && !worked {
-            self.attempts.forget(seq).await;
-            self.attempts.release(envelope).await;
+            self.marks.attempts.forget(seq).await;
+            self.marks.attempts.release(envelope).await;
             return Err(e);
         }
         // Nothing ran: the harness did not start, or its thread's worktree could not be made. Its retry, or the message
         // held for the harness to start, carries no cut-off warning.
         if e.is::<StartFailed>() || e.is::<WorktreeFailed>() {
             if !cut_off {
-                self.attempts.forget(seq).await;
+                self.marks.attempts.forget(seq).await;
             }
             return Err(e);
         }
         // A provider limit spends no attempt. The marker stays when tools may have run, to warn the retry.
         if e.is::<Limited>() && !cut_off && !worked {
-            self.attempts.forget(seq).await;
-            self.attempts.release(envelope).await;
+            self.marks.attempts.forget(seq).await;
+            self.marks.attempts.release(envelope).await;
             return Err(e);
         }
         // Held for a sign-in or a provider limit after tools may have run: withdrawable until its retry, as after a
@@ -446,7 +446,7 @@ impl Inbox<'_> {
         if e.is::<SignedOut>() || e.is::<Limited>() {
             if !e.is::<OnFallback>() {
                 let held = if e.is::<SignedOut>() { Hold::SignIn } else { Hold::ProviderLimit };
-                self.attempts.retrying(envelope, Some(held)).await;
+                self.marks.attempts.retrying(envelope, Some(held)).await;
             }
             return Err(e);
         }
@@ -454,7 +454,7 @@ impl Inbox<'_> {
         if e.is::<ContextOverflow>() {
             self.escalate(incoming, &e.to_string(), EscalationReason::ContextWindow, seq, None).await?;
             bus::double_ack(self.client, msg).await?;
-            self.attempts.forget(seq).await;
+            self.marks.attempts.forget(seq).await;
             status::state(self.client, self.ant, &envelope.thread_id, State::Failed);
             return Ok(());
         }
@@ -479,7 +479,7 @@ impl Inbox<'_> {
             // Out of turns: escalate the thread instead of spending another prompt.
             self.escalate(incoming, "Turn budget spent", EscalationReason::TurnBudget, seq, None).await?;
             bus::double_ack(self.client, msg).await?;
-            self.attempts.forget(seq).await;
+            self.marks.attempts.forget(seq).await;
             return Ok(true);
         }
         match self.ledger.reached(thread).await {
@@ -487,7 +487,7 @@ impl Inbox<'_> {
                 // Out of allowance: the same, until a human or the escalation's leader answers, or the day ends.
                 self.escalate(incoming, &cap, EscalationReason::Cap, seq, None).await?;
                 bus::double_ack(self.client, msg).await?;
-                self.attempts.forget(seq).await;
+                self.marks.attempts.forget(seq).await;
                 Ok(true)
             }
             Ok(None) => Ok(false),
@@ -525,7 +525,7 @@ impl Inbox<'_> {
         let prompt = Prompt {
             text,
             from: Some(envelope.from.to_string()),
-            limits: self.limits,
+            limits: self.settings.limits,
             spend: Some(spend_tx),
             stop: Some(stop),
             progress: Some(progress_tx),
@@ -624,7 +624,7 @@ impl Inbox<'_> {
             channel: incoming.post.as_ref().map(|posted| posted.post.channel.clone()).or(incoming.resume.clone()),
             before: seq,
             reading: self.reading,
-            home: Some(self.home.to_owned()),
+            home: Some(self.settings.home.to_owned()),
         }
     }
 

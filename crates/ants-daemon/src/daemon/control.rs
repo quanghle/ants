@@ -158,7 +158,7 @@ impl Inbox<'_> {
         let (by, thread, ant) = (&request.by, &request.thread_id, self.ant);
         let (answer, text) = match request.withdraw {
             Some(message) => {
-                let found = self.attempts.withdraw(&message, by, Some(human)).await?;
+                let found = self.marks.attempts.withdraw(&message, by, Some(human)).await?;
                 match found {
                     None => {
                         tracing::info!(%thread, %by, %human, %message, "withdrew a message for an assistant's human");
@@ -238,17 +238,17 @@ impl Inbox<'_> {
         loop {
             let mut request = listening.next().await;
             let snapshot = async {
-                while self.pause.get().is_none() || self.workload.handling() > 0 {
+                while self.settings.pause.get().is_none() || self.workload.handling() > 0 {
                     tokio::time::sleep(CLONE_WAIT_CHECK).await;
                 }
                 tracing::info!(new = %request.new, "reading a snapshot of the ant for a clone");
                 let source = crate::clone::Source {
                     js: self.js,
                     ant: self.ant,
-                    home: self.home,
+                    home: self.settings.home,
                     store: self.pool.store(),
                     origins: self.mcp.and_then(crate::mcp::Mcp::origin_store),
-                    identity: self.identity,
+                    identity: self.provider.identity,
                     launch: Some(self.pool.launch().clone()),
                     reading: self.reading,
                 };

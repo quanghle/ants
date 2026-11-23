@@ -125,7 +125,7 @@ impl Inbox<'_> {
         match e.downcast_ref::<StartFailed>() {
             Some(failed) => {
                 if let Some(hold) = self.holds.breaker.failed(&thread, &self.redactor.redact(&failed.detail)) {
-                    self.attempts.release(&arrived.envelope).await;
+                    self.marks.attempts.release(&arrived.envelope).await;
                     self.wait_for_repair(&arrived, failed, hold).await;
                     return (thread, Handled::Broken(Box::new((arrived, msg))));
                 }
@@ -159,8 +159,8 @@ impl Inbox<'_> {
             let error = if stalled.is_some() { overdue() } else { format!("{e:#}") };
             match self.bury(&incoming, &msg, &error).await {
                 Ok(()) => {
-                    self.attempts.forget(seq).await;
-                    self.attempts.finish(&incoming.envelope).await;
+                    self.marks.attempts.forget(seq).await;
+                    self.marks.attempts.finish(&incoming.envelope).await;
                     return (thread, Handled::Done);
                 }
                 // Kept on the machine ([`Inbox::bury_letter`]): buried once the hub takes it.
@@ -171,9 +171,9 @@ impl Inbox<'_> {
         }
         // Withdrawable until its redelivery, unless that only sends the reply it stored again.
         if delivered < MAX_DELIVER
-            && !matches!(self.attempts.get(seq, &incoming.envelope).await, Ok(Some(Marker::Replied(_))))
+            && !matches!(self.marks.attempts.get(seq, &incoming.envelope).await, Ok(Some(Marker::Replied(_))))
         {
-            self.attempts.retrying(&incoming.envelope, None).await;
+            self.marks.attempts.retrying(&incoming.envelope, None).await;
         }
         bus::nak(&msg, Some(self.pacing.retry_delay)).await;
         self.metrics.retried();
@@ -199,27 +199,27 @@ impl Inbox<'_> {
     async fn settled_before(&self, Handling { incoming, msg, seq }: Handling<'_>) -> Result<bool> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
-        if self.answered.has(envelope).await {
+        if self.marks.answered.has(envelope).await {
             // Its ack failed, as while a leaf node's uplink is down; its reply is in the stream or on its way there.
             tracing::info!(%thread, "acking a message whose reply is stored already");
             match bus::double_ack(self.client, msg).await {
                 Ok(()) => {
-                    self.attempts.forget(seq).await;
-                    self.attempts.finish(envelope).await;
-                    self.answered.forget(envelope).await;
+                    self.marks.attempts.forget(seq).await;
+                    self.marks.attempts.finish(envelope).await;
+                    self.marks.answered.forget(envelope).await;
                 }
                 Err(e) => tracing::warn!(%thread, error = %e, "acking a message whose reply is stored"),
             }
             return Ok(true);
         }
-        let Some(kept) = self.buried.get(envelope).await else { return Ok(false) };
+        let Some(kept) = self.marks.buried.get(envelope).await else { return Ok(false) };
         // Its dead letter went to the machine's outbox while the hub was out of reach, or was kept on the machine while
         // the hub could not store it; the redelivery, or the retry of the message held in hand, finishes it.
         tracing::info!(%thread, "burying a message whose dead letter is kept");
         match self.bury_letter(incoming, msg, &kept.dead, Letter::Kept).await {
             Ok(()) => {
-                self.attempts.forget(seq).await;
-                self.attempts.finish(envelope).await;
+                self.marks.attempts.forget(seq).await;
+                self.marks.attempts.finish(envelope).await;
             }
             Err(e) if self.stalled_by(&e).await.is_some() => return Err(e),
             Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
@@ -238,7 +238,7 @@ impl Inbox<'_> {
             Ok(false) => {
                 tracing::info!(%thread, from = %envelope.from, "check_inbox took the late reply; not prompting it");
                 match self.done(msg, seq).await {
-                    Ok(()) => self.attempts.finish(envelope).await,
+                    Ok(()) => self.marks.attempts.finish(envelope).await,
                     Err(e) => tracing::warn!(%thread, error = format!("{e:#}"), "acking a late reply"),
                 }
                 true
@@ -254,19 +254,19 @@ impl Inbox<'_> {
     /// attempt left its reply or the harness's answer to send. Marks it finished once it is acked or buried.
     async fn take(&self, incoming: &mut Incoming, msg: &jetstream::Message, seq: u64, attempt: Attempt) -> Result<()> {
         // A reply the hub refused to record with the attempt marker is kept on the machine.
-        let marker = match self.answered.unsent(&incoming.envelope).await {
+        let marker = match self.marks.answered.unsent(&incoming.envelope).await {
             Some(reply) => Some(Marker::Replied(Box::new(reply))),
-            None => self.attempts.get(seq, &incoming.envelope).await?,
+            None => self.marks.attempts.get(seq, &incoming.envelope).await?,
         };
         // An overdue message is answered only with what an earlier attempt left: its reply, or the harness's answer.
         if attempt == Attempt::Overdue
             && !matches!(marker, Some(Marker::Replied(_)))
-            && self.answered.given(&incoming.envelope).await.is_none()
+            && self.marks.answered.given(&incoming.envelope).await.is_none()
         {
             match self.bury(incoming, msg, &overdue()).await {
                 Ok(()) => {
-                    self.attempts.forget(seq).await;
-                    self.attempts.finish(&incoming.envelope).await;
+                    self.marks.attempts.forget(seq).await;
+                    self.marks.attempts.finish(&incoming.envelope).await;
                 }
                 Err(e) if self.stalled_by(&e).await.is_some() => return Err(e),
                 Err(e) => {
@@ -289,7 +289,7 @@ impl Inbox<'_> {
                 _ => Box::pin(self.decline_review(h, None, "a sage is reviewed by no one")).await?,
             },
         }
-        self.attempts.finish(&incoming.envelope).await;
+        self.marks.attempts.finish(&incoming.envelope).await;
         Ok(())
     }
 
@@ -300,7 +300,7 @@ impl Inbox<'_> {
     /// while no daemon answered ([`crate::delivery::attempts::record_withdrawal`]), honoured as a cancel request is:
     /// while the human's grant names the assistant.
     async fn take_up(&self, envelope: &Envelope) -> Result<Option<Withdrawal>> {
-        let held = match self.attempts.take_up(envelope).await? {
+        let held = match self.marks.attempts.take_up(envelope).await? {
             TakenUp::Withdrawn { by, on_behalf_of, held } => {
                 return Ok(Some(Withdrawal { by, on_behalf_of, recorded: false, held }));
             }
@@ -311,7 +311,9 @@ impl Inbox<'_> {
         humans.dedup();
         for human in humans {
             let Some(assistant) = self.humans.assistant(human) else { continue };
-            let Some((claimed, started)) = self.attempts.withdrawal_by(envelope, &assistant).await? else { continue };
+            let Some((claimed, started)) = self.marks.attempts.withdrawal_by(envelope, &assistant).await? else {
+                continue;
+            };
             if &claimed != human {
                 tracing::warn!(%assistant, %claimed, %human, "ignoring a withdrawal for a human the message is not of");
                 continue;
@@ -319,7 +321,7 @@ impl Inbox<'_> {
             if self.assisted(&assistant, Some(&claimed), "withdrawal").await.is_none() {
                 continue;
             }
-            if self.attempts.withdraw_started(envelope, &assistant, &claimed, started, held).await? {
+            if self.marks.attempts.withdraw_started(envelope, &assistant, &claimed, started, held).await? {
                 return Ok(Some(Withdrawal { by: assistant, on_behalf_of: Some(claimed), recorded: true, held }));
             }
             tracing::warn!(message = %envelope.id, "the mark of a message changed while honouring its withdrawal");
@@ -341,7 +343,7 @@ impl Inbox<'_> {
         tracing::info!(%thread, %by, ?on_behalf_of, message = %envelope.id, "acking a withdrawn message unprompted");
         let ant = self.ant;
         // A failed attempt leaves its marker, to warn the retry.
-        let before = match (withdrawal.held, self.attempts.get(seq, envelope).await) {
+        let before = match (withdrawal.held, self.marks.attempts.get(seq, envelope).await) {
             (Some(held), _) => format!("before {ant} retried it after holding it for {held}"),
             (None, Ok(Some(_))) => format!("before {ant} retried it after a failed attempt"),
             (None, Ok(None) | Err(_)) => format!("before {ant} was prompted with it"),
@@ -383,7 +385,7 @@ impl Inbox<'_> {
             bus::store(self.js, told.subject(), &told, &format!("on-behalf-withdrawn-{message}")).await?;
         }
         self.done(msg, seq).await?;
-        self.answered.forget_kept(envelope).await;
+        self.marks.answered.forget_kept(envelope).await;
         Ok(())
     }
 
@@ -413,7 +415,7 @@ impl Inbox<'_> {
             return Ok(Arrival::Quiet);
         }
         let sender = self.humans.sender_role(&incoming.envelope);
-        if let Some(sense) = self.sense.filter(|_| incoming.post.is_none() && sender == Role::Ant)
+        if let Some(sense) = self.provider.sense.filter(|_| incoming.post.is_none() && sender == Role::Ant)
             && let Some(prompt) = sense.review_answer(self.ant, &mut incoming.envelope).await?
         {
             return Ok(if prompt { Arrival::Prompt } else { Arrival::Quiet });
@@ -437,7 +439,7 @@ impl Inbox<'_> {
                     Arrival::DeclineReview
                 });
             }
-            if let Some(sense) = self.sense {
+            if let Some(sense) = self.provider.sense {
                 sense.review_received(self.ant, &incoming.envelope).await?;
             }
         }
@@ -503,7 +505,7 @@ impl Inbox<'_> {
     /// Tell the ant's provider of the thread of `incoming` when it has no session yet: a thread new to the ant, or one
     /// whose session expired. Told again, with the same id, when the message is handled again.
     async fn thread_started(&self, incoming: &Incoming) {
-        let Some(lifecycle) = self.lifecycle else { return };
+        let Some(lifecycle) = self.provider.lifecycle else { return };
         let envelope = &incoming.envelope;
         if self.pool.has_session(&envelope.thread_id).await {
             return;
@@ -515,7 +517,7 @@ impl Inbox<'_> {
     /// Ack the message at stream sequence `seq`, which needs no reply.
     pub(super) async fn done(&self, msg: &jetstream::Message, seq: u64) -> Result<()> {
         bus::double_ack(self.client, msg).await?;
-        self.attempts.forget(seq).await;
+        self.marks.attempts.forget(seq).await;
         Ok(())
     }
 }

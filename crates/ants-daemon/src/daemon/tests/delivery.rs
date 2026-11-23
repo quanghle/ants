@@ -668,7 +668,7 @@ async fn a_human_joining_a_running_review_gets_the_answer_and_the_sage_records_i
     let Some((mut bus, mut to_human)) = Bus::start().await else { return };
     let _hosting = bus.keep_sense();
     let (launch, log, gate) = fake::launch();
-    log.locked().steers = true;
+    log.locked().knobs.steers = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let dev_b: UserId = "dev-b".parse().unwrap();
     let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();

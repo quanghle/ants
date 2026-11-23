@@ -57,9 +57,7 @@ struct Bus {
     client: async_nats::Client,
     js: jetstream::Context,
     stream: jetstream::stream::Stream,
-    attempts: Attempts,
-    answered: Answered,
-    buried: Buried,
+    marks: Marks,
     markers: crate::records::direct_kv::DirectKv,
     dev: UserId,
     limits: PromptLimits,
@@ -106,9 +104,7 @@ impl Bus {
         let (client, js) = bus::connect(url, None, js_domain, &dev, "test").await.unwrap();
         let stream = bus::ensure_stream(&js).await.unwrap();
         let markers = bus::ensure_attempts(&js, js_domain, &dev).await.unwrap();
-        let attempts = Attempts::new(markers.clone(), dev.clone());
-        let answered = Answered::new(&server.dir().join("dev-a"));
-        let buried = Buried::new(&server.dir().join("dev-a"));
+        let marks = Marks::new(markers.clone(), &dev, &server.dir().join("dev-a"));
         let replies = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
         client.flush().await.unwrap();
         let ledger = Arc::new(Ledger::memory(dev.clone(), Caps::default()));
@@ -126,9 +122,7 @@ impl Bus {
             client,
             js,
             stream,
-            attempts,
-            answered,
-            buried,
+            marks,
             markers,
             dev,
             limits,
@@ -307,24 +301,25 @@ impl Bus {
             client: &self.client,
             js: &self.js,
             ant: &self.dev,
-            builtin: self.builtin,
+            settings: InboxSettings {
+                builtin: self.builtin,
+                pause: &self.pause,
+                drift: &crate::profile::shared::Drift::default(),
+                limits: self.limits,
+                home: &home,
+            },
             reading: crate::stream::reading::Reading::Consumer,
             machine: "test-machine",
             pool,
             running: Running::default(),
             restarts: &self.restarts,
-            attempts: &self.attempts,
-            answered: &self.answered,
-            buried: &self.buried,
+            marks: &self.marks,
             mcp: self.mcp.as_ref(),
             approvals: None,
             publisher: self.publisher.as_ref(),
             redactor: &self.redactor,
             workload: &self.workload,
-            pause: &self.pause,
-            drift: &crate::profile::shared::Drift::default(),
             metrics: self.metrics.clone(),
-            limits: self.limits,
             ledger: &self.ledger,
             escalator: &escalator,
             notes: &notes,
@@ -348,10 +343,11 @@ impl Bus {
                 store_every: Duration::from_millis(300),
             },
             holds: super::holds::Holds::default(),
-            identity: self.identity.as_ref(),
-            home: &home,
-            lifecycle: self.lifecycle.as_ref(),
-            sense: self.sense.as_ref(),
+            provider: Provider {
+                identity: self.identity.as_ref(),
+                lifecycle: self.lifecycle.as_ref(),
+                sense: self.sense.as_ref(),
+            },
             trails: self.trails.clone(),
         };
         let stop = || {

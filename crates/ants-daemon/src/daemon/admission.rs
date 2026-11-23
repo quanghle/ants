@@ -376,7 +376,7 @@ impl Inbox<'_> {
             Ok(Claim::Taken) => {
                 match bus::double_ack(self.client, msg).await {
                     // Finished, not left waiting to the watcher of its sender ([`unserved`]).
-                    Ok(()) => self.attempts.finish(envelope).await,
+                    Ok(()) => self.marks.attempts.finish(envelope).await,
                     Err(e) => tracing::warn!(error = %e, "acking a reply to ask_ant"),
                 }
                 None

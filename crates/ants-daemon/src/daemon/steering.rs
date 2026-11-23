@@ -109,14 +109,14 @@ impl Inbox<'_> {
             Some(Joined::Superseded(by, id)) => self.superseded(h, own, (&by, id)).await.map(|()| None),
             Some(Joined::Refused) => {
                 if !cut_off {
-                    self.attempts.forget(seq).await;
+                    self.marks.attempts.forget(seq).await;
                 }
-                self.attempts.release(envelope).await;
+                self.marks.attempts.release(envelope).await;
                 Err(Requeue.into())
             }
             // The prompt failed: the retry is warned it was cut off.
             None => {
-                self.attempts.retrying(envelope, None).await;
+                self.marks.attempts.retrying(envelope, None).await;
                 Err(Requeue.into())
             }
         }

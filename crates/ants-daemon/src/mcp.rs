@@ -174,7 +174,6 @@ impl Mcp {
             requester: OnceLock::new(),
             reaction_asker: OnceLock::new(),
             assist: Assist::default(),
-            sealing: OnceLock::new(),
             attach: Attach::default(),
             provided: Provided::default(),
             trails: OnceLock::new(),
@@ -253,7 +252,7 @@ impl Mcp {
     /// Open the human's sealed messages and seal those sent for it to humans through `sealing`, which does so only
     /// while the human enrolled the ant as one of its devices; without it none is opened or sealed.
     pub fn with_sealing(&self, sealing: Arc<dyn HumanSealing>) {
-        let _ = self.hub.sealing.set(sealing);
+        let _ = self.hub.assist.sealing.set(sealing);
     }
 
     /// Store and read attachments through `files`, attaching and saving files in `workdir`, or the directory a
@@ -416,6 +415,8 @@ struct Assist {
     human: OnceLock<UserId>,
     /// What the tools acting for that human read and write through.
     store: OnceLock<Arc<dyn HumanStore>>,
+    /// What opens and seals that human's sealed messages.
+    sealing: OnceLock<Arc<dyn HumanSealing>>,
 }
 
 /// Attaching files to what the tools send, and what one message carries.
@@ -453,8 +454,6 @@ struct Hub {
     requester: OnceLock<AntRequester>,
     reaction_asker: OnceLock<ReactionAsker>,
     assist: Assist,
-    /// What opens and seals the sealed messages of the human the ant assists.
-    sealing: OnceLock<Arc<dyn HumanSealing>>,
     attach: Attach,
     provided: Provided,
     /// The runs the ant conducts ([`Mcp::with_trails`]).

@@ -279,7 +279,7 @@ async fn messages_join_a_prompt_whose_harness_takes_steers_and_the_last_gets_the
     let Some((bus, _)) = Bus::start().await else { return };
     let mut replies = bus.replies().await;
     let (launch, log, gate) = fake::launch();
-    log.locked().steers = true;
+    log.locked().knobs.steers = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let (a, _) = bus.send(&t1, "hold a").await;
@@ -323,7 +323,7 @@ async fn a_steer_the_harness_refuses_waits_for_the_prompt_and_runs_next() {
     let Some((bus, _)) = Bus::start().await else { return };
     let mut replies = bus.replies().await;
     let (launch, log, gate) = fake::launch();
-    log.locked().steers = true;
+    log.locked().knobs.steers = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let (a, _) = bus.send(&t1, "hold a").await;
@@ -449,7 +449,7 @@ async fn a_human_reply_marked_queue_waits_behind_the_running_prompt() {
 async fn a_channel_post_a_steer_took_the_answer_from_gets_no_notice_post() {
     let Some((bus, _)) = Bus::start().await else { return };
     let (launch, log, gate) = fake::launch();
-    log.locked().steers = true;
+    log.locked().knobs.steers = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut replies) = bus.channel("ops", &["human", "dev-a"]).await;
     let root = ChannelPost::new(ops.clone(), UserId::human(), "@dev-a a\nhold: a");
