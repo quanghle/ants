@@ -373,7 +373,7 @@ impl Dreaming for Daemon {
             let Some(repo) = crate::provider::context::repository(&self.workdir) else { return Vec::new() };
             let at = async |name: &str| {
                 let args = ["rev-parse", "--verify", "--quiet", name];
-                let commit = crate::worktrees::run("git", &self.workdir, args, &[], Some(GIT_TIMEOUT)).await.ok()?;
+                let commit = crate::process::run("git", &self.workdir, args, &[], Some(GIT_TIMEOUT)).await.ok()?;
                 Some(commit.trim().to_owned()).filter(|commit| !commit.is_empty())
             };
             let mut commits = Vec::new();
@@ -482,7 +482,7 @@ pub(super) async fn review_commits(workdir: &Path, commits: &[Commit]) -> Vec<Re
         None
     } else {
         let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
-        let dir = crate::worktrees::run("git", workdir, args, &[], Some(GIT_TIMEOUT)).await;
+        let dir = crate::process::run("git", workdir, args, &[], Some(GIT_TIMEOUT)).await;
         dir.inspect_err(|e| tracing::info!(error = format!("{e:#}"), "the review names no local repository"))
             .ok()
             .map(|dir| dir.trim().to_owned())

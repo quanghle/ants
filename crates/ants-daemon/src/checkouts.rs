@@ -15,6 +15,7 @@ use ants_proto::{Envelope, ReviewCommit, ThreadId};
 use anyhow::{Result, bail};
 use tokio::time::Instant;
 
+use crate::process;
 use crate::worktrees::FETCH_TIMEOUT;
 
 /// The most commits a review checks out.
@@ -145,7 +146,7 @@ async fn init(dir: &Path) -> Result<PathBuf> {
     if !store.join("HEAD").is_file() {
         std::fs::create_dir_all(dir)?;
         let args = [OsStr::new("init"), "--bare".as_ref(), "--quiet".as_ref(), store.as_os_str()];
-        crate::worktrees::run("git", dir, args, &[], Some(GIT_TIMEOUT)).await?;
+        process::run("git", dir, args, &[], Some(GIT_TIMEOUT)).await?;
     }
     Ok(store)
 }
@@ -215,7 +216,7 @@ where
     let named = [OsStr::new("--git-dir"), store.as_os_str()];
     let args: Vec<_> =
         named.into_iter().map(OsStr::to_owned).chain(args.into_iter().map(|a| a.as_ref().to_owned())).collect();
-    crate::worktrees::run("git", store, args, env, Some(timeout)).await.map(drop)
+    process::run("git", store, args, env, Some(timeout)).await.map(drop)
 }
 
 /// Whether `id` is a full commit id: 40 or 64 lowercase hexadecimal digits.

@@ -15,6 +15,7 @@ mod ipc;
 pub mod mcp;
 pub mod permission;
 pub mod pool;
+mod process;
 mod publish;
 pub mod worktrees;
 
