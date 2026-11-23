@@ -115,7 +115,8 @@ fn posts_group_by_thread_with_replies_indented() {
     let orphan = at(ChannelPost::on_thread(ops(), "t1".parse().unwrap(), p("dev-b"), "lost root"), 5);
     let grouped = threads(vec![a.clone(), b.clone(), a1.clone(), c1.clone(), c.clone(), orphan.clone()]);
     let ids: Vec<&ThreadId> = grouped.iter().map(|t| &t.id).collect();
-    assert_eq!(ids, [&a.thread_id, &b.thread_id, &c.thread_id, &orphan.thread_id]);
+    assert_eq!(ids, [&orphan.thread_id, &a.thread_id, &b.thread_id, &c.thread_id], "one started before all first");
+    let grouped = [&grouped[1..], &grouped[..1]].concat();
     assert_eq!(grouped[0].posts, [a.clone(), a1]);
     assert_eq!(grouped[2].posts, [c, c1]);
     assert!(!grouped[3].has_start());
@@ -380,6 +381,47 @@ async fn a_mention_of_a_human_member_reaches_its_inbox_once() {
     let shown = crate::messages::inbox::render(&unread[1], &ants_proto::Acting::Own, &[], None);
     assert!(shown.contains(&format!("dev-a mentioned bob in #ops on thread {}", ant_post.thread_id)), "{shown}");
     assert!(shown.contains(&format!("`ants post ops --thread {} ...`", ant_post.thread_id)), "{shown}");
+}
+
+/// `ants channel read --thread` reads from the thread's start on, and `--limit` from the latest posts back only as far
+/// as enough threads started: a thread started before those read comes first, so is never among the last.
+#[tokio::test]
+async fn reads_of_a_thread_or_the_latest_threads_read_from_where_they_start() {
+    let Some(server) = Server::start() else { return };
+    let alice = p("alice");
+    let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+    bus::ensure_stream(&js).await.unwrap();
+    let me = Me { id: alice.clone(), role: ants_proto::Role::Human, assistant_of: None };
+    let store = async |post: &ChannelPost| bus::store(&js, post.subject(), post, &post.id.to_string()).await.unwrap();
+    let old = ChannelPost::new(ops(), alice.clone(), "old");
+    store(&old).await;
+    for i in 0..2 * LATEST {
+        store(&ChannelPost::new("dev".parse().unwrap(), alice.clone(), format!("filler {i}"))).await;
+    }
+    let (b, c) = (ChannelPost::new(ops(), alice.clone(), "b"), ChannelPost::new(ops(), alice.clone(), "c"));
+    store(&b).await;
+    let late = old.reply(alice.clone(), "late reply", &[], &Humans::default()).unwrap();
+    store(&late).await;
+    store(&c).await;
+
+    let started =
+        |n: usize| move |posts: &[(u64, ChannelPost)]| posts.iter().filter(|(_, p)| p.starts_thread()).count() >= n;
+    let latest = read_latest(&js, &me, &ops(), started(2)).await.unwrap();
+    assert!(latest.from > 1, "not every post read");
+    let ids: Vec<Uuid> = latest.posts.iter().map(|(_, p)| p.id).collect();
+    assert_eq!(ids, [b.id, late.id, c.id]);
+    let grouped = threads(latest.posts.into_iter().map(|(_, p)| p).collect());
+    assert_eq!(grouped.iter().map(|t| &t.id).collect::<Vec<_>>(), [&old.thread_id, &b.thread_id, &c.thread_id]);
+    let all = read_latest(&js, &me, &ops(), started(3)).await.unwrap();
+    assert_eq!((all.from, all.posts.len(), all.seqs.len()), (0, 4, 4), "read further back, to the oldest post");
+
+    let thread = read_thread(&js, &me, &ops(), &old.thread_id).await.unwrap();
+    assert_eq!(thread.posts.iter().map(|(_, p)| p.id).collect::<Vec<_>>(), [old.id, late.id]);
+    assert_eq!((thread.from, thread.seqs.len()), (thread.posts[0].0, 4), "every post from its start read, one kept");
+    let orphan = ChannelPost::on_thread(ops(), "t1".parse().unwrap(), alice.clone(), "lost root");
+    store(&orphan).await;
+    let thread = read_thread(&js, &me, &ops(), &orphan.thread_id).await.unwrap();
+    assert_eq!((thread.from, thread.posts.len()), (0, 1), "no start in its id: read from the oldest post");
 }
 
 /// alice's channel read markers, with her credentials: shared by her devices, kept per channel, and counting her

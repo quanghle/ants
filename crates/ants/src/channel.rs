@@ -484,6 +484,88 @@ pub async fn read_from(
     Ok(posts)
 }
 
+/// How many stream sequences back [`read_latest`] reads first; each read further back reads [`WIDER`] times as many.
+const LATEST: u64 = if cfg!(test) { 64 } else { 4096 };
+const WIDER: u64 = 8;
+
+/// Posts of a channel read from some point on, as `ants channel read` reads them.
+#[derive(Debug, Default)]
+pub struct Read {
+    /// The posts kept, oldest first, each with its sequence.
+    pub posts: Vec<(u64, ChannelPost)>,
+    /// The sequence of every post read, kept or not, oldest first.
+    pub seqs: Vec<u64>,
+    /// The sequence from which every post of the channel was read: 0 when every one kept was.
+    pub from: u64,
+}
+
+/// The posts of `thread` in `channel`, read from when the thread started ([`ants_daemon::channel::thread_start`]),
+/// else from the channel's oldest post kept, as [`read_from`] reads.
+pub async fn read_thread(js: &jetstream::Context, reader: &Me, channel: &ChannelId, thread: &ThreadId) -> Result<Read> {
+    let Some(start) = ants_daemon::channel::thread_start(thread) else {
+        return read_kept(js, reader, channel, consumer::DeliverPolicy::All, |p| p.thread_id == *thread).await;
+    };
+    let start = consumer::DeliverPolicy::ByStartTime { start_time: start.into() };
+    let mut read = read_kept(js, reader, channel, start, |p| p.thread_id == *thread).await?;
+    read.from = read.seqs.first().copied().unwrap_or(u64::MAX);
+    Ok(read)
+}
+
+/// The latest posts of `channel`, read as [`read_from`] reads: those of the last [`LATEST`] stream sequences, then of
+/// ever more of them, until `enough` holds of the posts read or every post kept is.
+pub async fn read_latest(
+    js: &jetstream::Context,
+    reader: &Me,
+    channel: &ChannelId,
+    enough: impl Fn(&[(u64, ChannelPost)]) -> bool,
+) -> Result<Read> {
+    let room = subject::chan_room(channel);
+    let reader_name = ants_proto::chan_reader(&reader.id);
+    let last = match ants_daemon::stream::reading::last_sequence(js, &reader_name, reader.reading(), &room).await {
+        Ok(last) => last,
+        Err(e) => {
+            tracing::debug!("reading every post of {channel}, the last stream sequence unknown: {e:#}");
+            0
+        }
+    };
+    let mut back = LATEST;
+    while back < last {
+        let from = last - back + 1;
+        let start = consumer::DeliverPolicy::ByStartSequence { start_sequence: from };
+        let read = read_kept(js, reader, channel, start, |_| true).await?;
+        if enough(&read.posts) {
+            return Ok(Read { from, ..read });
+        }
+        back = back.saturating_mul(WIDER);
+    }
+    read_all(js, reader, channel).await
+}
+
+/// Every post of `channel` kept, as [`read_from`] reads them.
+pub async fn read_all(js: &jetstream::Context, reader: &Me, channel: &ChannelId) -> Result<Read> {
+    read_kept(js, reader, channel, consumer::DeliverPolicy::All, |_| true).await
+}
+
+/// The posts of `channel` stored from `start` on that `keep` keeps, with the sequences of all, as [`read_from`] reads.
+async fn read_kept(
+    js: &jetstream::Context,
+    reader: &Me,
+    channel: &ChannelId,
+    start: consumer::DeliverPolicy,
+    keep: impl Fn(&ChannelPost) -> bool,
+) -> Result<Read> {
+    let mut read = Read::default();
+    scan(js, reader, channel, start, |seq, post| {
+        read.seqs.push(seq);
+        if keep(&post) {
+            read.posts.push((seq, post));
+        }
+        ControlFlow::Continue(())
+    })
+    .await?;
+    Ok(read)
+}
+
 /// Hand the posts of `channel` kept in the stream from `start` on, oldest first, each with its sequence, to `take`
 /// until it breaks, read as [`read_from`] does.
 async fn scan(
@@ -543,13 +625,18 @@ impl Archive {
     }
 }
 
-/// `posts` grouped by thread, the threads in the order their first post came.
+/// `posts` grouped by thread, the threads in the order their first post came, those without the post that started
+/// them first: it came before every post among `posts`, so they started before the others did.
 pub fn threads(posts: Vec<ChannelPost>) -> Vec<Thread> {
     let mut threads: Vec<Thread> = Vec::new();
+    let mut index: HashMap<ThreadId, usize> = HashMap::new();
     for post in posts {
-        match threads.iter_mut().find(|t| t.id == post.thread_id) {
-            Some(thread) => thread.posts.push(post),
-            None => threads.push(Thread { id: post.thread_id.clone(), posts: vec![post] }),
+        match index.get(&post.thread_id) {
+            Some(&i) => threads[i].posts.push(post),
+            None => {
+                index.insert(post.thread_id.clone(), threads.len());
+                threads.push(Thread { id: post.thread_id.clone(), posts: vec![post] });
+            }
         }
     }
     for thread in &mut threads {
@@ -558,6 +645,7 @@ pub fn threads(posts: Vec<ChannelPost>) -> Vec<Thread> {
             thread.posts.insert(0, start);
         }
     }
+    threads.sort_by_key(Thread::has_start);
     threads
 }
 
