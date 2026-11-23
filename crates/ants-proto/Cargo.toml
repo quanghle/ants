@@ -11,11 +11,11 @@ description = "The ants wire contract: message envelope, subjects, stream and bu
 [dependencies]
 chrono = { workspace = true, features = ["clock", "std", "serde"] }
 data-encoding.workspace = true
-nkeys = "0.4.5"
+nkeys.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = { version = "0.10.9", default-features = false }
-thiserror = "2.0.21"
+sha2.workspace = true
+thiserror.workspace = true
 uuid = { workspace = true, features = ["v4", "v7", "serde"] }
 
 # A browser's clock and randomness (ants-client builds for wasm32-unknown-unknown): chrono's and uuid's come from

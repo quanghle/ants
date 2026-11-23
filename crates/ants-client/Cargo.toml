@@ -13,11 +13,11 @@ ants-proto.workspace = true
 chrono = { workspace = true, features = ["std", "serde"] }
 serde.workspace = true
 serde_json.workspace = true
-thiserror = "2.0.21"
+thiserror.workspace = true
 
 [dev-dependencies]
 data-encoding.workspace = true
-nkeys = "0.4.5"
+nkeys.workspace = true
 futures = { workspace = true, features = ["executor"] }
 
 [lints]
