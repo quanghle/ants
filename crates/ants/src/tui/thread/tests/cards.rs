@@ -85,7 +85,7 @@ fn the_card_the_keys_answer_shows_whole_the_others_counted_and_the_conversation_
     let shown = crate::test_support::render::rendered(100, 24, |f| crate::tui::frame::draw(f, &m, at(5)));
     assert!(shown.contains("a allow · r reject"), "a message selected: {shown}");
     assert_eq!(m.key(Key::Char('1'), at(5)), None, "the question's card is not on screen");
-    assert!(m.asking.is_none());
+    assert!(m.asking().is_none());
     assert_eq!(m.key(Key::Char('a'), at(5)), Some(Action::Decide(Box::new(push), Verdict::AllowOnce)));
 
     m.data.live.approvals.clear();
@@ -123,9 +123,9 @@ fn enter_focuses_the_question_card_once_no_tool_request_waits_and_esc_leaves_it(
     );
     m.key(Key::Up, at(2));
     assert_eq!(m.key(Key::Char('1'), at(2)), None, "no key answers a card not on screen");
-    assert!(m.asking.is_none());
+    assert!(m.asking().is_none());
     m.key(Key::Enter, at(2));
-    assert!(m.asking.as_ref().is_some_and(|a| a.request == push), "the tool request first");
+    assert!(m.asking().is_some_and(|a| a.request == push), "the tool request first");
     m.key(Key::Esc, at(2));
     m.data.live.approvals.clear();
 

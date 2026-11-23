@@ -164,7 +164,7 @@ impl Model {
             }
             Note::Reject(request) => request,
         };
-        if let Some(storing) = self.asking.as_ref().filter(|a| a.storing) {
+        if let Some(storing) = self.asking().filter(|a| a.storing) {
             let id = tools::qualified(&storing.request);
             self.ui.bar.set_status(
                 format!("storing the decision on request {id}: send the note once it is stored"),
@@ -182,7 +182,7 @@ impl Model {
             }
         };
         asking.note = Some(text);
-        self.asking = Some(asking);
+        self.ask(asking);
         self.ui.bar.set_text("");
         self.ui.bar.noting = None;
         self.ui.bar.focused = false;
@@ -913,14 +913,14 @@ mod tests {
         typed(&mut m, note);
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Decide(Box::new(push.clone()), Verdict::Reject)));
         assert!(m.ui.bar.is_empty() && m.ui.bar.noting.is_none() && !m.ui.bar.focused);
-        assert!(m.asking.as_ref().is_some_and(|a| a.storing && a.note.as_deref() == Some(note)));
-        assert!(m.asking.as_ref().and_then(Asking::status).unwrap().to_string().contains("then sending the note"));
+        assert!(m.asking().is_some_and(|a| a.storing && a.note.as_deref() == Some(note)));
+        assert!(m.asking().and_then(Asking::status).unwrap().to_string().contains("then sending the note"));
 
         let sent = m.take(live::Event::Decided(Ok("rejected".into())), at(1));
         let ask =
             Job::Ask { to: push.ant.clone(), thread: Some(push.thread_id.clone()), text: note.into(), quote: None };
         assert_eq!(sent, [Action::Run(ask.clone(), note.into())], "the note goes once the rejection is stored");
-        assert!(m.asking.is_none());
+        assert!(m.asking().is_none());
         m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text: note.into(), quoting: None });
         assert_eq!((m.ui.bar.text(), &m.ui.bar.noting), (note.to_owned(), &Some(Note::Reply(Box::new(push)))));
         assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(ask, note.into())), "sent again as a reply");
@@ -940,7 +940,7 @@ mod tests {
         assert_eq!((m.ui.bar.text(), &m.ui.bar.noting), (note.to_owned(), &Some(Note::Reply(Box::new(push.clone())))));
         let status = m.ui.bar.status.as_ref().unwrap();
         assert!(status.text.contains("by bob") && status.text.contains("the note was not sent"), "{}", status.text);
-        assert!(m.ui.bar.focused && m.asking.is_none());
+        assert!(m.ui.bar.focused && m.asking().is_none());
         let ask = Job::Ask { to: push.ant.clone(), thread: Some(push.thread_id), text: note.into(), quote: None };
         assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(ask, note.into())), "Enter sends it as a reply");
         assert!(m.ui.bar.is_empty() && m.ui.bar.noting.is_none());

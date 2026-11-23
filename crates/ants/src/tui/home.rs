@@ -347,7 +347,7 @@ impl Page {
                     let enter = (i.requests.len() > 1).then(|| group_keys(i));
                     let card = |rows| {
                         let (keyed, room) = ((at == selected, false), (width, rows));
-                        approvals::lines(card, model.asking.as_ref(), keyed, now, room, enter.as_deref())
+                        approvals::lines(card, model.asking(), keyed, now, room, enter.as_deref())
                     };
                     // The card the keys answer gives what its request asks the lines left on screen by its others,
                     // none when even those do not show.
@@ -512,7 +512,7 @@ mod tests {
         );
 
         assert_eq!(m.key(Key::Enter, at(4)), None);
-        assert!(m.asking.is_none(), "Enter lists the group's requests");
+        assert!(m.asking().is_none(), "Enter lists the group's requests");
         let shown = screen(&m, 140, 30, at(4));
         let expected = "pa chose allow-once for alice: o lists it";
         assert!(shown.contains("dev-a asks to run 2 tools") && shown.contains("Enter collapses"), "{shown}");
@@ -529,7 +529,7 @@ mod tests {
             "the assistant's decision waits for consent"
         );
         assert_eq!(m.key(Key::Char('a'), at(4)), None);
-        assert!(m.asking.is_none(), "the group's head answers nothing");
+        assert!(m.asking().is_none(), "the group's head answers nothing");
 
         m.key(Key::Down, at(4));
         m.key(Key::Down, at(4));
@@ -543,7 +543,7 @@ mod tests {
         assert_eq!(m.key(Key::Char('a'), at(4)), None, "one decision stored at a time");
         assert!(m.notice_at(at(4)).is_some_and(|n| n.text.contains("answer again once it is stored")));
         m.take(Event::Decided(Ok("rejected".to_owned())), at(5));
-        assert!(m.asking.is_none(), "the decision stored ends the answering");
+        assert!(m.asking().is_none(), "the decision stored ends the answering");
         m.take(Event::Approval(Update::Resolved(second, State::Expired)), at(5));
         assert_eq!(items(&m.data, at(5)).len(), 4, "the settled request keeps its card a while");
         assert_eq!(waiting(&m.data, at(5)).len(), 3);
@@ -551,7 +551,7 @@ mod tests {
 
         m.key(Key::Home, at(5));
         assert_eq!(m.key(Key::Enter, at(5)), None);
-        assert!(m.asking.as_ref().is_some_and(|a| a.full && a.request == push), "Enter shows the request in full");
+        assert!(m.asking().is_some_and(|a| a.full && a.request == push), "Enter shows the request in full");
         m.key(Key::Esc, at(5));
         let mut decision = ants_proto::ApprovalDecision::new(push.id, push.ant.clone(), Verdict::AllowOnce);
         decision.by = Some(user("alice"));
@@ -586,14 +586,14 @@ mod tests {
         assert_eq!(m.key(Key::Char('l'), at(4)), None);
         let shown = screen(&m, 140, 30, at(4));
         assert!(shown.contains("y allows once 2 execute requests of dev-a on the thread"), "{shown}");
-        assert!(m.asking.is_none(), "nothing stored before y");
+        assert!(m.asking().is_none(), "nothing stored before y");
         m.key(Key::Esc, at(4));
         assert!(!screen(&m, 140, 30, at(4)).contains("y allows once"), "Esc drops it");
         assert_eq!(m.key(Key::Char('y'), at(4)), None, "y alone allows nothing");
 
         m.key(Key::Char('l'), at(4));
         assert_eq!(m.key(Key::Char('y'), at(4)), Some(Action::AllowAll(vec![push.clone(), test.clone()])));
-        let asking = m.asking.as_ref().expect("the batch being stored");
+        let asking = m.asking().expect("the batch being stored");
         assert!(asking.storing && asking.request == push && asking.batch == [test], "{asking:?}");
         assert!(
             screen(&m, 140, 30, at(4)).contains("allowing them once, one by one…"),
@@ -602,11 +602,11 @@ mod tests {
         assert_eq!(m.key(Key::Char('a'), at(4)), None, "one decision stored at a time");
         assert!(m.notice_at(at(4)).is_some_and(|n| n.text.contains("answer again once it is stored")));
         m.take(Event::Approval(Update::Resolved(push, State::Expired)), at(5));
-        assert!(m.asking.is_some(), "word of a request of the batch keeps it storing");
+        assert!(m.asking().is_some(), "word of a request of the batch keeps it storing");
         let line = "allowed once 1 of 2 execute requests of dev-a; 1 answered already";
         m.key(Key::Up, at(5));
         m.take(Event::Decided(Ok(line.to_owned())), at(5));
-        assert!(m.asking.is_none(), "the batch stored ends the answering");
+        assert!(m.asking().is_none(), "the batch stored ends the answering");
         assert_eq!(m.notice_at(at(5)).map(|n| n.text.clone()), Some(line.to_owned()), "one combined line");
 
         m.key(Key::End, at(5));
@@ -654,7 +654,7 @@ mod tests {
         let shown = crate::test_support::render::rendered(100, 30, |f| crate::tui::frame::draw(f, &m, at(0)));
         assert!(shown.contains("more lines: Enter shows them"), "{shown}");
         assert_eq!(m.key(Key::Char('a'), at(0)), None);
-        assert!(m.asking.as_ref().is_some_and(|a| a.full), "a shows the request in full");
+        assert!(m.asking().is_some_and(|a| a.full), "a shows the request in full");
         assert_eq!(m.key(Key::Char('a'), at(0)), Some(Action::Decide(Box::new(long), Verdict::AllowOnce)));
     }
 
@@ -674,7 +674,7 @@ mod tests {
             let shown = crate::test_support::render::rendered(100, height, |f| crate::tui::frame::draw(f, &m, at(0)));
             assert!(!shown.contains("w059"), "{shown}");
             assert_eq!(m.key(Key::Char('a'), at(0)), None, "{shown}");
-            assert!(m.asking.as_ref().is_some_and(|a| a.full), "a shows the request in full: {shown}");
+            assert!(m.asking().is_some_and(|a| a.full), "a shows the request in full: {shown}");
         }
     }
 

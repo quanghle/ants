@@ -227,7 +227,7 @@ pub struct Ui {
     pub notice: Option<Notice>,
     /// The notices of the run, the earliest first, [`notices::KEPT`] at most.
     pub notices: Vec<Notice>,
-    /// Whether the digest shows, and how far it is scrolled.
+    /// How far the digest is scrolled, kept while it does not show.
     pub digest: catchup::Shown,
     /// Whether the thread view draws image attachments (`[cli]` `inline_images`).
     pub inline_images: bool,
@@ -391,8 +391,9 @@ pub struct Model {
     pub pages: Vec<Page>,
     /// What shows over the whole screen, the latest on top.
     pub overlays: Vec<Overlay>,
-    /// The tool request being answered.
-    pub asking: Option<Asking>,
+    /// The tool request whose decision is being stored, not shown in full: shown so, it is an overlay
+    /// ([`Model::asking`]).
+    storing: Option<Asking>,
     /// The prompt in the footer taking the keys.
     pub prompt: Option<Prompt>,
     /// The catch-up summaries: the span home's first line counts, the TL;DRs asked for, the digest.
@@ -441,7 +442,7 @@ impl Model {
             nav,
             focus: Focus::View,
             overlays: Vec::new(),
-            asking: None,
+            storing: None,
             prompt: None,
             catchup: catchup::Catchup::default(),
             compact: false,
@@ -593,10 +594,10 @@ impl Model {
         let held = held::items(&self.data);
         self.data.held.settled(&held);
         if let Update::Resolved(request, state) = update {
-            if let Some(asking) = &mut self.asking
+            if let Some(asking) = self.asking_mut()
                 && !asking.settled(&request, &state)
             {
-                self.asking = None;
+                self.unask();
                 let how = approvals::how(&state, &request.ant);
                 self.notify(format!("request {} {how}", crate::tools::qualified(&request)), Level::Info, now);
             }
@@ -610,14 +611,14 @@ impl Model {
     /// winning. A rejection with a note sends the note once stored; refused, the note comes back into the bar, to go as
     /// a reply on the request's thread if wanted.
     fn answered(&mut self, outcome: anyhow::Result<String>, now: DateTime<Utc>) -> Option<Action> {
-        let Some(asking) = self.asking.as_mut().filter(|a| a.storing) else {
+        let Some(asking) = self.asking_mut().filter(|a| a.storing) else {
             self.decided(outcome);
             return None;
         };
         asking.storing = false;
         let note = asking.note.take().map(|note| (note, Box::new(asking.request.clone())));
         if outcome.is_ok() || !asking.full {
-            self.asking = None;
+            self.unask();
         }
         match (outcome, note) {
             (Ok(line), None) => self.notify(line, Level::Info, now),

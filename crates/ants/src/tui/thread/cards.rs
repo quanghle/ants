@@ -104,7 +104,7 @@ pub(super) fn draw_cards(
     let (title, lines, style, rows, carded) = match shows {
         Shows::Request(at) => {
             let card = requests[at];
-            let lines = |rows| approvals::lines(card, model.asking.as_ref(), (true, writing), now, (width, rows), None);
+            let lines = |rows| approvals::lines(card, model.asking(), (true, writing), now, (width, rows), None);
             let rows = (1..=approvals::CARD_LINES).rev().find(|rows| lines(*rows).len() <= room).unwrap_or(1);
             // On a view too short for the card, it gives the request fewer lines, none when even its others do not
             // show.

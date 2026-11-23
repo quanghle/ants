@@ -54,6 +54,18 @@ impl Page {
         }
     }
 
+    /// Whether a list of the view's own covers it, taking its keys: a thread's waiting cards.
+    pub fn covers(&self) -> bool {
+        matches!(self, Self::Thread(page) if page.listing())
+    }
+
+    /// Show the list covering the view, or close it: whether the view has one.
+    pub fn toggle_cover(&mut self) -> bool {
+        let Self::Thread(page) = self else { return false };
+        page.toggle_waiting();
+        true
+    }
+
     /// Whether the view waits for the `y` confirming what one of its keys asked for.
     pub fn armed(&self) -> bool {
         match self {

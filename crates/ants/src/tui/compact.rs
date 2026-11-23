@@ -102,7 +102,7 @@ fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>, width: u
         line.spans.insert(0, Span::raw("     "));
         return line;
     }
-    if let Some(line) = model.asking.as_ref().and_then(super::approvals::Asking::status) {
+    if let Some(line) = model.asking().and_then(super::approvals::Asking::status) {
         return line;
     }
     let Some(top) = items.first() else {
@@ -152,7 +152,7 @@ impl Model {
         let action = self.view_key(key, now);
         // Opened, replying in the bar, a request shown in full or an allow-all asked to confirm: the full view shows it.
         let armed = matches!(self.page(), Page::Home(home) if home.prompt().is_some());
-        if key == Key::Enter || self.ui.bar.focused || self.asking.as_ref().is_some_and(|a| a.full) || armed {
+        if key == Key::Enter || self.ui.bar.focused || self.asking().is_some_and(|a| a.full) || armed {
             self.compact = false;
         }
         action
@@ -203,9 +203,9 @@ mod tests {
         let storing = format!("storing the decision on request {}…", crate::tools::qualified(&push));
         assert!(pane(&m, at(3)).contains(&storing), "the top request is answered in the pane");
         m.take(crate::live::Event::Decided(Err(anyhow::anyhow!("request was already answered"))), at(3));
-        assert!(m.asking.is_none() && pane(&m, at(3)).contains("request was already answered"));
+        assert!(m.asking().is_none() && pane(&m, at(3)).contains("request was already answered"));
         assert_eq!(m.key(Key::Enter, at(3)), None);
-        assert!(!m.compact && m.asking.as_ref().is_some_and(|a| a.full), "the request in full in the full view");
+        assert!(!m.compact && m.asking().is_some_and(|a| a.full), "the request in full in the full view");
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(asked.clone())), "its thread");
         assert!(matches!(m.page(), Page::Thread(page) if page.history.thread == asked));
     }
@@ -230,7 +230,7 @@ mod tests {
         let _ = crate::test_support::render::rendered(140, 30, |f| crate::tui::frame::draw(f, &m, at(3)));
         m.compact = true;
         assert_eq!(m.key(Key::Char('a'), at(3)), None);
-        assert!(!m.compact && m.asking.as_ref().is_some_and(|a| a.full), "the request in full in the full view");
+        assert!(!m.compact && m.asking().is_some_and(|a| a.full), "the request in full in the full view");
         assert_eq!(m.key(Key::Char('a'), at(3)), Some(Action::Decide(Box::new(push), Verdict::AllowOnce)));
     }
 }

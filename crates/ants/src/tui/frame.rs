@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::model::{Focus, Level, Model, Notice, Page};
 use super::style::{self, dim};
-use super::{approvals, catchup, compact, keymap, nav, palette};
+use super::{compact, keymap, nav, palette};
 
 /// How wide the nav is.
 const NAV_WIDTH: u16 = 24;
@@ -63,14 +63,6 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     // After the view: a thread's find counts the matches it drew.
     let footer_lines = error.unwrap_or_else(|| vec![footer_line(model, now, width)]);
     frame.render_widget(Paragraph::new(footer_lines), footer);
-    if let Some(asking) = model.asking.as_ref().filter(|a| a.full) {
-        ui.mouse.add(frame.area(), super::mouse::Target::Overlay);
-        approvals::draw_full(frame, asking, now);
-    }
-    if model.digest_shown() {
-        ui.mouse.add(frame.area(), super::mouse::Target::Overlay);
-    }
-    catchup::draw_digest(frame, model, now);
     model.draw_over(frame, now);
 }
 
