@@ -628,3 +628,53 @@ async fn junk_whose_dead_letter_is_kept_in_the_outbox_is_terminated_once_the_upl
     let consumer = bus.consumer().await;
     assert_eq!((consumer.num_redelivered, consumer.num_ack_pending), (0, 0), "terminated, no delivery spent");
 }
+
+/// nats-server takes a pull request as heard for this long after it came, whoever listens for its answer
+/// ([`bus::pull`](crate::bus::pull)).
+const PULL_GRACE: Duration = Duration::from_secs(2);
+
+/// dev-a's daemon on a leaf node has messages in hand when the leaf's uplink is cut for longer than the ack wait: the
+/// hub, whose stream dropped the daemon's pull requests when the uplink went, delivers nothing, however long the
+/// messages' ack wait is over; the consumer's delivery sequence stands still. The ack wait ends, and the uplink goes,
+/// after the server's grace for the daemon's last pull request, as with the daemon's own 60 s ack wait.
+#[tokio::test]
+async fn a_leaf_outage_past_the_ack_wait_has_the_hub_deliver_nothing() {
+    let Some((hub, uplinked)) = Uplinked::start().await else { return };
+    let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
+    let (launch, log, gate) = fake::launch();
+    let t1 = ThreadId::generate();
+    let hold = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
+    let next = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "b");
+    bus::publish_json(&uplinked.hub_js, hold.subject(), &hold, None).await.unwrap();
+    bus::publish_json(&uplinked.hub_js, next.subject(), &next, None).await.unwrap();
+    let (progress_every, ack_wait) = (Duration::from_secs(1), Duration::from_secs(3));
+    let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
+    // As the hub has it: the daemon's own reads go through the uplink.
+    let delivered = async || {
+        let name = ants_proto::inbox_consumer(&bus.dev);
+        let mut consumer: PullConsumer = stream.get_consumer(&name).await.unwrap();
+        let info = consumer.info().await.unwrap();
+        (info.delivered.consumer_sequence, info.num_waiting)
+    };
+
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to start", || log.locked().prompted == 1).await;
+        tokio::time::sleep(PULL_GRACE + Duration::from_secs(1)).await;
+        let (before, _) = delivered().await;
+        assert_eq!(before, 2, "both messages delivered once");
+        uplinked.switch(Link::Down).await;
+        tokio::time::sleep(ack_wait * 2).await;
+        let (after, waiting) = delivered().await;
+        println!("the consumer's delivery sequence went from {before} to {after} over an outage of {:?}", ack_wait * 2);
+        assert_eq!(waiting, 0, "the stream dropped the daemon's pull requests");
+        assert_eq!(after, before, "the hub delivered while the uplink was down");
+        uplinked.switch(Link::Up).await;
+        gate.add_permits(2);
+        until("the answers", || log.locked().answered.len() == 2).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
+    assert_eq!(log.locked().answered, ["hold a", "b"], "each prompted once");
+}
