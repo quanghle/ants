@@ -8,12 +8,9 @@ use tokio::time::timeout;
 
 use super::*;
 use crate::people::humans::TestDevice;
+use ants_test_support::user as p;
 
 const WAIT: Duration = Duration::from_secs(10);
-
-fn p(name: &str) -> UserId {
-    name.parse().unwrap()
-}
 
 /// A human's assistant sets and clears a channel's description for it, announced as the assistant's; an ant the
 /// human's grant does not name, a claim for a human with no grant, the channel's owner and an assistant asking for

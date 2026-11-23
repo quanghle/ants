@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use ants_daemon::bus;
 use ants_daemon::colony::{self, Registration, Workload};
 use ants_proto::{Activity, ColonyEntry, MemoryLow, SignInNeeded, UserId};
-use ants_test_support::{NatsServer as Server, eventually_within};
+use ants_test_support::{NatsServer as Server, colony_entry, eventually_within};
 use async_nats::jetstream::kv;
 
 fn entry(ant: &str) -> ColonyEntry {
@@ -19,37 +19,11 @@ fn entry(ant: &str) -> ColonyEntry {
 /// An entry of a daemon run of its own on `machine`.
 fn entry_on(ant: &str, machine: &str) -> ColonyEntry {
     static RUNS: AtomicUsize = AtomicUsize::new(0);
-    let now = chrono::Utc::now();
     ColonyEntry {
-        ant: ant.parse().unwrap(),
-        machine: machine.to_owned(),
         instance: format!("run-{}", RUNS.fetch_add(1, Ordering::Relaxed)),
-        harness: "copilot".to_owned(),
-        agent: None,
         capabilities: vec!["rust".to_owned()],
         whoami: Some("Maintain the Rust backend.".to_owned()),
-        profile: None,
-        sense_unkept: None,
-        workdir: None,
-        started_at: now,
-        heartbeat_at: now,
-        activity: ants_proto::Activity::Idle,
-        handling: 0,
-        harnesses: 0,
-        escalate_to: Vec::new(),
-        sage: None,
-        version: ants_proto::ANTS_VERSION.to_owned(),
-        perms: ants_proto::PERMISSIONS_VERSION,
-        signed_out: None,
-        limited: None,
-        failing: None,
-        unserved: None,
-        fallback: None,
-        memory_low: None,
-        model: None,
-        paused: None,
-        drift: Vec::new(),
-        mcp: false,
+        ..colony_entry(ant, machine)
     }
 }
 

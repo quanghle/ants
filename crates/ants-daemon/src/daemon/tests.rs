@@ -227,38 +227,7 @@ impl Bus {
     /// Publish `ant` in the colony, live, its entry as `set` makes it.
     async fn put_colony_with(&self, ant: &UserId, set: impl FnOnce(&mut ants_proto::ColonyEntry)) {
         let colony = bus::ensure_colony(&self.js, ants_proto::COLONY_TTL).await.unwrap();
-        let now = chrono::Utc::now();
-        let mut entry = ants_proto::ColonyEntry {
-            ant: ant.clone(),
-            machine: "m".to_owned(),
-            instance: "run-1".to_owned(),
-            harness: "copilot".to_owned(),
-            agent: None,
-            capabilities: Vec::new(),
-            whoami: None,
-            profile: None,
-            sense_unkept: None,
-            workdir: None,
-            started_at: now,
-            heartbeat_at: now,
-            activity: ants_proto::Activity::Idle,
-            handling: 0,
-            harnesses: 0,
-            escalate_to: Vec::new(),
-            sage: None,
-            version: ants_proto::ANTS_VERSION.to_owned(),
-            perms: ants_proto::PERMISSIONS_VERSION,
-            signed_out: None,
-            limited: None,
-            failing: None,
-            unserved: None,
-            fallback: None,
-            memory_low: None,
-            model: None,
-            paused: None,
-            drift: Vec::new(),
-            mcp: false,
-        };
+        let mut entry = ants_test_support::colony_entry(ant.as_str(), "m");
         set(&mut entry);
         colony.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     }

@@ -8,13 +8,10 @@ use super::*;
 use crate::persona::{PERSONA, persona_id};
 use crate::skill::{SKILL, skill_id};
 use crate::thread::record::record_event;
+use ants_test_support::user;
 
 fn at(hour: u32) -> DateTime<Utc> {
     format!("2025-01-02T{hour:02}:00:00Z").parse().unwrap()
-}
-
-fn user(name: &str) -> UserId {
-    name.parse().unwrap()
 }
 
 /// Note thread `n` started by `by` at `hour` on January 2.

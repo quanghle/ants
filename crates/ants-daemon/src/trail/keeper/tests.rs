@@ -8,10 +8,7 @@ use serde_json::json;
 
 use super::*;
 use crate::bus;
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
+use ants_test_support::user as p;
 
 fn trail(name: &str, by: &str) -> SavedTrail {
     SavedTrail {

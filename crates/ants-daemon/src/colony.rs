@@ -86,37 +86,10 @@ mod tests {
     }
 
     pub(super) fn entry_on(ant: &str, machine: &str, capabilities: &[&str]) -> ColonyEntry {
-        let now = Utc::now();
         ColonyEntry {
-            ant: ant.parse().unwrap(),
-            machine: machine.to_owned(),
             instance: format!("{ant}@{machine}"),
-            harness: "copilot".to_owned(),
-            agent: None,
             capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
-            whoami: None,
-            profile: None,
-            sense_unkept: None,
-            workdir: None,
-            started_at: now,
-            heartbeat_at: now,
-            activity: Activity::Idle,
-            handling: 0,
-            harnesses: 0,
-            escalate_to: Vec::new(),
-            sage: None,
-            version: ANTS_VERSION.to_owned(),
-            perms: PERMISSIONS_VERSION,
-            signed_out: None,
-            limited: None,
-            failing: None,
-            unserved: None,
-            fallback: None,
-            memory_low: None,
-            model: None,
-            paused: None,
-            drift: Vec::new(),
-            mcp: false,
+            ..ants_test_support::colony_entry(ant, machine)
         }
     }
 

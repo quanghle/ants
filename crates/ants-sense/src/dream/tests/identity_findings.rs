@@ -15,10 +15,7 @@ use crate::records::{Record, SELF_MODEL, record_id};
 use crate::skill::{SKILL, skill_id};
 use crate::thread::experience;
 use crate::thread::record::record_event;
-
-fn user(name: &str) -> UserId {
-    name.parse().unwrap()
-}
+use ants_test_support::user;
 
 fn webhook() -> Starter {
     Starter::Webhook { user: user("hook") }

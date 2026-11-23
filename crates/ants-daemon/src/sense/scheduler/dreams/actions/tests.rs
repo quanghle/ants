@@ -14,10 +14,7 @@ use crate::bus;
 use crate::provider::origins::OriginStore;
 use crate::stream::history::{self, ReviewRecords};
 use crate::stream::reading::Reading;
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
+use ants_test_support::user as p;
 
 fn sent(n: u128, opening: &str) -> Sent {
     Sent { id: Uuid::from_u128(n), opening: opening.to_owned() }

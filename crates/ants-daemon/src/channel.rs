@@ -100,10 +100,7 @@ pub(crate) fn review_source_key(ant: &UserId, post: Uuid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    pub(super) fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
+    pub(super) use ants_test_support::user as p;
 
     pub(super) fn ops() -> ChannelEntry {
         let mut entry = ChannelEntry::new("ops".parse().unwrap());

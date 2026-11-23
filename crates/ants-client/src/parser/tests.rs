@@ -12,11 +12,8 @@ use serde::Serialize;
 
 use super::*;
 use crate::entry::last_reopening;
+use crate::p;
 use crate::sealed::State;
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 fn t(s: &str) -> ThreadId {
     s.parse().unwrap()

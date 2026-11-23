@@ -127,10 +127,7 @@ mod tests {
     use ants_proto::{Question, Questions};
 
     use super::*;
-
-    fn user(name: &str) -> UserId {
-        name.parse().unwrap()
-    }
+    use ants_test_support::user;
 
     fn question(text: &str, free_text: bool) -> Envelope {
         let options = ["yes".to_owned(), "not yet".to_owned()];

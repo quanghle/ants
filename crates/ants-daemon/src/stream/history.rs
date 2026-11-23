@@ -275,10 +275,7 @@ const SOURCES: [Source; 4] = [Source::Received, Source::Sent, Source::Notes, Sou
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    pub(super) fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
+    pub(super) use ants_test_support::user as p;
 
     #[test]
     fn the_budget_is_set_or_follows_the_context_window() {

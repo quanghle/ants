@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{EnvVariable, McpServer, McpServerStdio, SessionId};
 use ants_proto::{LimitKind, StatusUpdate, ThreadId};
-use ants_test_support::scratch_dir;
+use ants_test_support::{eventually_within, scratch_dir};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::unix::pipe;
@@ -377,13 +377,7 @@ async fn copilot_sessions_get_the_ants_skills_as_a_skill_directory() {
 
 /// Wait for `done`, for at most 10 seconds.
 async fn until(mut done: impl FnMut() -> bool) {
-    for _ in 0..1000 {
-        if done() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("not done within 10s");
+    eventually_within(Duration::from_secs(10), "not done", async || done()).await;
 }
 
 #[tokio::test]

@@ -165,6 +165,7 @@ pub fn settled(earlier: Option<Origin>, now: Origin) -> Origin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ants_test_support::user;
 
     fn message(from: &str) -> Envelope {
         Envelope::on_thread("t1".parse().unwrap(), from.parse().unwrap(), "dev-a".parse().unwrap(), "hi")
@@ -172,10 +173,6 @@ mod tests {
 
     fn by(envelope: &Envelope) -> Starter {
         origin(envelope, None, &Humans::default()).by
-    }
-
-    fn user(name: &str) -> UserId {
-        name.parse().unwrap()
     }
 
     #[test]

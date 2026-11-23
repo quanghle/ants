@@ -410,10 +410,7 @@ mod tests {
 
     use super::*;
     use crate::{bus, hub};
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
+    use ants_test_support::user as p;
 
     fn r(s: &str) -> Reaction {
         s.parse().unwrap()

@@ -7,10 +7,7 @@ use chrono::TimeDelta;
 
 use super::*;
 use crate::people::humans::TestDevice;
-
-fn user(name: &str) -> UserId {
-    name.parse().unwrap()
-}
+use ants_test_support::user;
 
 fn grant(humans: &Registry, device: &TestDevice, assistant: Option<&str>) {
     let alice = user("alice");

@@ -32,6 +32,12 @@ pub mod site;
 pub mod text;
 pub mod transport;
 
+/// The user named `s`, for the crate's tests.
+#[cfg(test)]
+fn p(s: &str) -> ants_proto::UserId {
+    s.parse().unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     //! Tests of what the crate may depend on: no NATS client, runtime, terminal or browser binding.

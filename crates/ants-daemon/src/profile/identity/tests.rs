@@ -5,10 +5,7 @@ use ants_test_support::NatsServer;
 
 use super::*;
 use crate::bus;
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
+use ants_test_support::user as p;
 
 /// The first daemon to start an ant creates its record; one starting it later, here or elsewhere, keeps it.
 #[tokio::test]

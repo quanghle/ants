@@ -204,13 +204,10 @@ mod tests {
     use crate::log::MemoryLog;
 
     use crate::thread::record::record_event;
+    use ants_test_support::user as name;
 
     fn day(day: u32, hour: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2025, 1, day, hour, 0, 0).unwrap()
-    }
-
-    fn name(name: &str) -> UserId {
-        name.parse().unwrap()
     }
 
     fn started(by: Starter, repo: Option<&str>) -> EventKind {

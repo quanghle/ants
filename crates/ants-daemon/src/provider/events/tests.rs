@@ -12,6 +12,7 @@ use ants_proto::provider::{
 use tokio::time::Instant;
 
 use super::*;
+use ants_test_support::user as p;
 
 /// A provider recording the events it takes, failing the first `failing` calls.
 #[derive(Default)]
@@ -82,10 +83,6 @@ pub(crate) async fn outbox_to(provider: Arc<Recording>) -> Outbox {
 /// An outbox whose provider is never connected.
 fn outbox_to_none() -> Outbox {
     Outbox::with_retry(Arc::new(|_| Box::pin(std::future::ready(None))), Duration::from_millis(1), Duration::ZERO)
-}
-
-fn p(name: &str) -> UserId {
-    name.parse().unwrap()
 }
 
 fn t(name: &str) -> ThreadId {

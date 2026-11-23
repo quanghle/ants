@@ -82,36 +82,5 @@ impl AssistantFirst {
 /// A colony entry of `ant` that a daemon serves now.
 #[cfg(test)]
 pub fn live(ant: &UserId) -> ants_proto::ColonyEntry {
-    let now = chrono::Utc::now();
-    ants_proto::ColonyEntry {
-        ant: ant.clone(),
-        machine: "m1".to_owned(),
-        instance: "run-1".to_owned(),
-        harness: "copilot".to_owned(),
-        agent: None,
-        capabilities: Vec::new(),
-        whoami: None,
-        profile: None,
-        sense_unkept: None,
-        workdir: None,
-        started_at: now,
-        heartbeat_at: now,
-        activity: ants_proto::Activity::Idle,
-        handling: 0,
-        harnesses: 0,
-        escalate_to: Vec::new(),
-        sage: None,
-        version: ants_proto::ANTS_VERSION.to_owned(),
-        perms: ants_proto::PERMISSIONS_VERSION,
-        signed_out: None,
-        limited: None,
-        failing: None,
-        unserved: None,
-        fallback: None,
-        memory_low: None,
-        model: None,
-        paused: None,
-        drift: Vec::new(),
-        mcp: false,
-    }
+    ants_test_support::colony_entry(ant.as_str(), "m1")
 }

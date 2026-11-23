@@ -168,37 +168,11 @@ mod tests {
     fn the_triage_prompt_has_the_rules_and_the_members_with_their_roles() {
         let (mut entry, root) = (ops(), post("human", "the build is red"));
         entry.add_member(p("alice"));
-        let now = chrono::Utc::now();
         let a = ColonyEntry {
-            ant: p("dev-a"),
-            machine: "m".to_owned(),
-            instance: "run-1".to_owned(),
-            harness: "copilot".to_owned(),
-            agent: None,
             capabilities: vec!["rust".to_owned(), "ci".to_owned()],
             whoami: Some("Keeps the build\ngreen.".to_owned()),
             profile: Some("Good for flaky\ntests.".to_owned()),
-            sense_unkept: None,
-            workdir: None,
-            started_at: now,
-            heartbeat_at: now,
-            activity: ants_proto::Activity::Idle,
-            handling: 0,
-            harnesses: 0,
-            escalate_to: Vec::new(),
-            sage: None,
-            version: ants_proto::ANTS_VERSION.to_owned(),
-            perms: ants_proto::PERMISSIONS_VERSION,
-            signed_out: None,
-            limited: None,
-            failing: None,
-            unserved: None,
-            fallback: None,
-            memory_low: None,
-            model: None,
-            paused: None,
-            drift: Vec::new(),
-            mcp: false,
+            ..ants_test_support::colony_entry("dev-a", "m")
         };
         let context = Context { posts: vec![post("dev-b", "earlier")], ..Context::default() };
         let text = triage_prompt(&root, &entry, &[a], &humans(), &context, 7);

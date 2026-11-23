@@ -195,10 +195,7 @@ mod tests {
     use ants_proto::{PlanStep, TimelineEntry};
 
     use super::*;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
+    use ants_test_support::user as p;
 
     fn call(id: &str, title: &str, status: &str, minute: i64, duration_ms: Option<u64>) -> TimelineEntry {
         TimelineEntry::Tool(TimelineCall {

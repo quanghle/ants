@@ -93,11 +93,8 @@ mod tests {
     use chrono::DateTime;
 
     use super::*;
+    use crate::p;
     use crate::parser::Parser;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     fn entries(envelopes: &[(String, Envelope)]) -> Vec<Entry> {
         let mut parser = Parser::default();

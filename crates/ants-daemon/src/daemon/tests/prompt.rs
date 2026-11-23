@@ -666,37 +666,10 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
     let mut replies = bus.client.subscribe(subject::chan(&entry.channel, &bus.dev)).await.unwrap();
     bus.client.flush().await.unwrap();
     let colony = bus::ensure_colony(&bus.js, ants_proto::COLONY_TTL).await.unwrap();
-    let now = chrono::Utc::now();
     let dev_b = ants_proto::ColonyEntry {
-        ant: "dev-b".parse().unwrap(),
-        machine: "m".to_owned(),
-        instance: "run-1".to_owned(),
-        harness: "copilot".to_owned(),
-        agent: None,
         capabilities: vec!["ci".to_owned()],
         whoami: Some("Keeps the build green.".to_owned()),
-        profile: None,
-        sense_unkept: None,
-        workdir: None,
-        started_at: now,
-        heartbeat_at: now,
-        activity: ants_proto::Activity::Idle,
-        handling: 0,
-        harnesses: 0,
-        escalate_to: Vec::new(),
-        sage: None,
-        version: ants_proto::ANTS_VERSION.to_owned(),
-        perms: ants_proto::PERMISSIONS_VERSION,
-        signed_out: None,
-        limited: None,
-        failing: None,
-        unserved: None,
-        fallback: None,
-        memory_low: None,
-        model: None,
-        paused: None,
-        drift: Vec::new(),
-        mcp: false,
+        ..ants_test_support::colony_entry("dev-b", "m")
     };
     colony.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
     let post = ChannelPost::new(entry.channel.clone(), UserId::human(), "the build is red");

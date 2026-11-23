@@ -449,10 +449,7 @@ impl Drop for Watching {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn user(name: &str) -> UserId {
-        name.parse().unwrap()
-    }
+    use ants_test_support::user;
 
     #[test]
     fn humans_without_an_entry() {

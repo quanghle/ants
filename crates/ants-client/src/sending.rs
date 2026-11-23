@@ -113,10 +113,7 @@ pub(crate) fn compose(me: &UserId, to: UserId, send: Send) -> Result<Envelope, E
 mod tests {
     use super::*;
     use crate::error::ErrorKind;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
+    use crate::p;
 
     #[test]
     fn a_message_naming_no_one_goes_to_the_assistant_while_its_grant_stands_else_to_the_messenger() {

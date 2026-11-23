@@ -584,10 +584,7 @@ fn glob(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn id(name: &str) -> UserId {
-        name.parse().unwrap()
-    }
+    use ants_test_support::user as id;
 
     fn dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).canonicalize().unwrap()
