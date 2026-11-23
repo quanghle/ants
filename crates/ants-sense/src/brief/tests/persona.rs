@@ -1,3 +1,6 @@
+//! Tests of the persona and skills in the brief: the persona follows the identity, skills precede the core loop and
+//! shorten to their names within the budget.
+
 use super::*;
 use crate::items::Values;
 use crate::persona::{PERSONA, persona_id};

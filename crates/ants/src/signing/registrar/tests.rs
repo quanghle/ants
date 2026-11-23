@@ -1,3 +1,6 @@
+//! Tests of device registration: GitHub users under the policy, human decisions outside it, renewals while the grant
+//! holds, and the sweep revoking members who left.
+
 use std::future::pending;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

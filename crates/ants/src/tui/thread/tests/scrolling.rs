@@ -1,3 +1,6 @@
+//! Tests of scrolling the thread view: a message found by search selected at the top, messages taller than the view,
+//! and messages arriving while scrolled up.
+
 use super::*;
 
 #[test]

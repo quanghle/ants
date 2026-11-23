@@ -1,3 +1,6 @@
+//! Tests of admin orders end to end: each decided once with why, sent through a leaf's uplink, retire, restart, set,
+//! pause, resume and read memories orders, and the orders table.
+
 use ants_daemon::admin::ConfigFile;
 use ants_daemon::admin::restart::{Restarted, Restarts};
 use ants_daemon::host::{self, Host};

@@ -1,3 +1,6 @@
+//! Tests of `rate_trail` and `find_trails`: what a rating names and replaces, inline runs, trails no longer saved, and
+//! found trails' records, descriptions and untrusted ratings.
+
 use ants_proto::{RatingSummary, RunId, Saver, TrailName, TrailRating};
 use ants_test_support::trail_run;
 use chrono::{Duration, TimeZone as _};

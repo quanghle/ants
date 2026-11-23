@@ -1,3 +1,6 @@
+//! Tests of the brief: section order, the thread's repository memories, an empty ant, cache syncs and log failures,
+//! cuts within the budget, handoffs, returns and revivals; with fixtures for the submodules.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

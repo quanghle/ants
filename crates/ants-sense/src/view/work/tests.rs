@@ -1,3 +1,6 @@
+//! Tests of the open work view: findings, commitments, reminders and tasks listed without writing, no entry without
+//! open work, and lists cut past their caps.
+
 use std::sync::Arc;
 
 use serde_json::{Value, json};

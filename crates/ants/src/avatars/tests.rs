@@ -1,3 +1,6 @@
+//! Tests of avatars as the CLI shows them: described with their growth, look-alikes warned of, colours following the
+//! terminal, and humans restyling an ant.
+
 use ants_daemon::profile::identity::Identity;
 use ants_proto::SenseId;
 use chrono::{TimeZone as _, Utc};

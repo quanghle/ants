@@ -1,3 +1,6 @@
+//! Tests of `sense_recall`: scoring and ranking, the scopes read, statuses left out, framing, a memory read in full
+//! with provenance and history, refusals and snippets.
+
 use std::sync::Arc;
 
 use ants_proto::provider::{CallContext, Format, Output, Starter};

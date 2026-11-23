@@ -1,3 +1,6 @@
+//! Tests of enrollment requests carrying an order: the signer signs for the machine an order names only, and on a
+//! leaf's machine renews the uplink to carry the ant.
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

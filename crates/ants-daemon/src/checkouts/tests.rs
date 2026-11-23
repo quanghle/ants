@@ -1,3 +1,6 @@
+//! Tests of review checkouts: a commit checked out from the sender's repository until dropped, commits out of reach, a
+//! review naming none, clearing, and which remote names make URLs.
+
 use std::path::Path;
 
 use ants_proto::{Envelope, ReviewCommit, ThreadId, UserId};

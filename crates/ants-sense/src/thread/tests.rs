@@ -1,3 +1,6 @@
+//! Tests of checkpoints and handoffs: the register and its revisions, handoffs and their episode memories,
+//! acknowledgements, the sanitizer and limits, and cuts on character boundaries.
+
 use ants_proto::provider::Starter;
 
 use super::*;

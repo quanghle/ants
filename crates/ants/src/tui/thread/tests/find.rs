@@ -1,3 +1,5 @@
+//! Tests of finding in the thread view: Ctrl-F marks the matches and steps to them, scrolling by line.
+
 use ratatui::style::Modifier;
 
 use super::*;

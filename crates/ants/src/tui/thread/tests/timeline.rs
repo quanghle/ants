@@ -1,3 +1,6 @@
+//! Tests of the thread view's timeline: delegations nested, prompts ended with no reply, turns' calls cycled and
+//! summed, the spinner, and trail runs' steps.
+
 use super::*;
 use crate::tui::thread::conversation::{Item, Timed, glyphs, hm, rows};
 

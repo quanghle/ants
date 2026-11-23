@@ -1,3 +1,6 @@
+//! Tests of the ant's identity record against nats-server: created only when absent, prompts counted across a standby
+//! takeover and a forget, and a moved mark holding the ant.
+
 use ants_test_support::NatsServer;
 
 use super::*;

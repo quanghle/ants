@@ -1,3 +1,6 @@
+//! Tests of the sage's record of its reviews: tallies of what came of its findings, review batches and their overflow,
+//! eligible targets, and verdict reasons bounded and redacted.
+
 use std::time::Duration as Pause;
 
 use ants_proto::FindingVerdict::{Applied, Rejected};

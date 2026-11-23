@@ -45,7 +45,9 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - Modules are `x.rs` with submodules in `x/`, never `x/mod.rs`. Unit tests of `x.rs` start inline
   (`#[cfg(test)] mod tests { … }` at its end); once they outgrow the code they test, they move to `x/tests.rs`
   (`#[cfg(test)] mod tests;`); once that grows too large, `x/tests.rs` keeps the shared helpers and declares
-  submodules in `x/tests/`, one per behaviour (`x/tests/routing.rs`, …).
+  submodules in `x/tests/`, one per behaviour (`x/tests/routing.rs`, …). Test modules, `x/tests.rs`, its
+  submodules and integration tests alike, open with a `//!` doc saying what behaviour they test, like any other
+  module.
 
 ## Checks
 

@@ -1,3 +1,6 @@
+//! Tests of daily maintenance: salience with use and disuse, ages counting active time only, decay and retirement, the
+//! run's cap, core memory promotion and demotion, and near-duplicate clusters.
+
 use std::sync::Arc;
 
 use ants_proto::provider::{CallContext, Event, EventKind};

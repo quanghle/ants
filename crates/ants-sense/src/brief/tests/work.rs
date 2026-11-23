@@ -1,3 +1,6 @@
+//! Tests of personal work in the brief: its place, open commitments, ready tasks and claims, expired claims, reminder
+//! firings until acknowledged, and cuts within UTF-8 byte budgets.
+
 use chrono::Duration;
 
 use super::*;

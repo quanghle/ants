@@ -1,3 +1,6 @@
+//! Tests of sense exports and imports: landing under the same sense id, damaged exports refused, logs already holding
+//! events, renames, moves across buses, anchors, skill files, and thread records.
+
 use ants_proto::{SenseId, UserId};
 use serde_json::json;
 

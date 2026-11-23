@@ -1,3 +1,6 @@
+//! Tests of commitments: overdue ones first and resolution terminal, renegotiation linking the replacement, invalid
+//! terms and stale revisions, and automatic reminders.
+
 use ants_proto::provider::CallContext;
 
 use super::*;

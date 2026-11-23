@@ -1,3 +1,6 @@
+//! Tests of a packet's identity section: the persona and its proposal, the starters' records, skills and experience,
+//! and its cut to titles after threads are left out.
+
 use ants_proto::provider::{Origin, Starter};
 use uuid::Uuid;
 

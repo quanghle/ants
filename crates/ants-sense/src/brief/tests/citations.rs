@@ -1,3 +1,6 @@
+//! Tests of citations in the brief: both brief routes recheck cited lines and keep their warnings when memories
+//! shorten.
+
 use std::path::PathBuf;
 
 use super::*;

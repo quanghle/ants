@@ -1,3 +1,5 @@
+//! Tests of messages in the thread view: reactions, markdown, quoted replies, sealed messages, attachments and images.
+
 use super::*;
 use crate::tui::images;
 

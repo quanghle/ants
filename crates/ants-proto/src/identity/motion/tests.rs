@@ -1,3 +1,5 @@
+//! Tests of avatar motion: it follows the mood the same everywhere.
+
 use std::collections::HashSet;
 
 use super::*;

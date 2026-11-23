@@ -1,3 +1,6 @@
+//! Tests of trail findings: suggested outlines and their bounds, the cap, untrusted ones, trails saved on trusted
+//! ground and counted as dream writes, and late answers' findings.
+
 use ants_proto::TrailName;
 use ants_proto::provider::{Origin, Starter};
 

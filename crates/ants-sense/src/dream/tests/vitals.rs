@@ -1,3 +1,6 @@
+//! Tests of vital signs in dreams: kept per period and shown beside earlier dreams, left out by thread for room,
+//! changes against the mean, and vital findings gathered and resting.
+
 use std::collections::BTreeMap;
 
 use super::*;

@@ -1,3 +1,6 @@
+//! Tests of held orders: an order an assistant sent waits for its human to consent, and expires before the humans are
+//! read.
+
 use ants_proto::{AdminOp, AssistantGrant, Confirmations, PreAllow, UserId, confirmations_key, pre_allow_key};
 
 use chrono::TimeDelta;

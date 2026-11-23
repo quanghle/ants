@@ -1,3 +1,6 @@
+//! Tests of a sage's track record: earlier findings with their verdicts and what became of them, the signs before and
+//! since, active-day windows, and shrinking over the budget.
+
 use std::collections::BTreeMap;
 use std::time::Duration as Pause;
 

@@ -1,3 +1,6 @@
+//! Tests of the user services: launchd and systemd reloads and restarts, service states, the logrotate agent, units
+//! reading back what was installed, installing, and the manual commands.
+
 use super::*;
 use std::sync::{Arc, Mutex};
 

@@ -1,3 +1,6 @@
+//! Tests of catch-up summaries: a request's entries and their bounds, and a TL;DR asked, kept while current and its
+//! thread left out.
+
 use std::time::Duration;
 
 use ants_proto::{Role, ThreadMarks};

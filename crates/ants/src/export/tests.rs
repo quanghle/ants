@@ -1,3 +1,6 @@
+//! Tests of `ants ant export` and `ants ant import`: an export packs the home's memories and leaves out its work, and
+//! an ant moves to another bus with its identity and memories.
+
 use std::collections::BTreeMap;
 
 use ants_proto::Role;

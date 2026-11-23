@@ -1,3 +1,6 @@
+//! Tests of the colony's saved trails in a dream: listed in a sage's packet by rating, left out for room, and trail
+//! findings and verdicts holding while their trails are saved and rated.
+
 use std::collections::BTreeMap;
 
 use ants_proto::{Counts, FindingOutcome, FindingVerdict, TrailName};

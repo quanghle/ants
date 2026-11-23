@@ -1,3 +1,6 @@
+//! Tests of reminders: pending deliveries across restarts, refires and snoozes, recurring deadlines, condition
+//! reservations, the active limit, triggers refused, trusted origins, and stale revisions.
+
 use std::sync::Arc;
 
 use ants_proto::provider::{CallContext, Starter};

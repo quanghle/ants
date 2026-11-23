@@ -1,3 +1,6 @@
+//! Tests of notifications: sinks, quiet hours, mutes, snoozes, stand-ins, digests, folded replies, questions, sealed
+//! messages, signed links, buttons, and exec and http sinks.
+
 use std::assert_matches;
 use std::path::Path;
 

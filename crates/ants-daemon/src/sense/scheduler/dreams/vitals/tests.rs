@@ -1,3 +1,5 @@
+//! Tests of a thread's vital signs: its ends counted with their calls, requests and marking done.
+
 use ants_proto::{CallCount, ThreadId, TimelineEnd, UserId, Uuid};
 use chrono::Utc;
 

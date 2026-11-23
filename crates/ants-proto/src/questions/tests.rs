@@ -1,3 +1,6 @@
+//! Tests of questions and answers: their bounds and wire defaults, the envelope text, picks parsed from text and the
+//! command line, and valid or invalid answers.
+
 use super::*;
 use crate::p;
 

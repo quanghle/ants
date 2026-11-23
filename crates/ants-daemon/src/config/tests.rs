@@ -1,3 +1,6 @@
+//! Tests of the daemon config file: parsing ants, harnesses, templates, the host, CLI, storage, trails and schedule
+//! tables with their defaults and checks, and editing the file in place.
+
 use ants_proto::Machine;
 
 use super::cli::cli_login_text;

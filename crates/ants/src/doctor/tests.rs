@@ -1,3 +1,6 @@
+//! Tests of `ants doctor`: the hub, versions, harnesses, shared settings, sense, leaf, keys, tunnels, bridges, webhook,
+//! services and config checks, and how a check renders.
+
 mod trails;
 
 use ants_daemon::config::Ant;

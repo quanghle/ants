@@ -1,3 +1,6 @@
+//! Tests of `ants auth move-stores`: a hub moved to the store account keeps every entry, and streams already there are
+//! replaced only when asked.
+
 use ants_daemon::hub;
 use ants_proto::{STREAM, UserId, subject};
 

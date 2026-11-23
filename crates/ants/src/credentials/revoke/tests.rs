@@ -1,3 +1,6 @@
+//! Tests of revocation: names and devices revoked, renewals listed, connections dropped, resolvers keeping revocations,
+//! GitHub bindings and grants, predecessors, and leaf uplinks.
+
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 

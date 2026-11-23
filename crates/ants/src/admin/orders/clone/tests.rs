@@ -1,3 +1,5 @@
+//! Tests of clone orders: an ant copied under a new name, and a failed clone undone.
+
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 

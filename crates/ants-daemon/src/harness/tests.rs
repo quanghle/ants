@@ -1,3 +1,6 @@
+//! Tests of the ACP client: harness modes and launch settings, sign-in and missing harnesses, permission requests,
+//! history budgets, definitions, tool gating, review variants, models and skills.
+
 use std::assert_matches;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

@@ -1,3 +1,6 @@
+//! Tests of which built-in ants a machine serves: only where their own credentials are on a server taking credentials,
+//! what `--creds` stands for, and a file of the CLI's credentials alone.
+
 use super::*;
 use crate::config::parse;
 

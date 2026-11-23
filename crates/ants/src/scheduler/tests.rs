@@ -1,3 +1,6 @@
+//! Tests of schedules: their own credentials, catch-up of missed firings, firings sent once across daemons and
+//! restarts, trail schedules, and channel schedules' mentions.
+
 use ants_daemon::bus;
 use ants_daemon::records::owners::Owners;
 use ants_daemon::schedule::{Mentions, When};

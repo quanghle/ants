@@ -1,3 +1,6 @@
+//! Tests of memories: repository scopes, validation and stamping, untrusted sources, duplicates, superseding, the core
+//! cap and redacted secrets.
+
 use std::sync::Arc;
 
 use ants_proto::provider::{CallContext, Format, Output, Starter};

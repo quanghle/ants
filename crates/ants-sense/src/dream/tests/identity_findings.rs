@@ -1,3 +1,6 @@
+//! Tests of identity findings: a missing persona or self-model, relationship records, a stale self-model, a clone's
+//! inheritance, their place within the cap, and their verdicts.
+
 use std::ops::Range;
 
 use ants_proto::SenseId;

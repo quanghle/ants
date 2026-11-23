@@ -1,3 +1,6 @@
+//! Tests of the sense data published in colony entries: why sense keeps none of an ant's data, warned once each, and
+//! the profile read in time for the first entry.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;

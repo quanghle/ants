@@ -1,3 +1,6 @@
+//! Tests of lifecycle events told to providers: order per ant, acks and retries under the same id, a capped queue kept
+//! across restarts, renames, and providers without events.
+
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

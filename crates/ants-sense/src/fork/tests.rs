@@ -1,3 +1,6 @@
+//! Tests of forking an identity on clone: what a clone keeps marked inherited and drops, the source as cloned, retries,
+//! ants sense keeps nothing of, and records written anew.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

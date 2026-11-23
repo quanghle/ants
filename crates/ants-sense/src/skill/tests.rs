@@ -1,3 +1,6 @@
+//! Tests of skills: front matter, names and paths within the skill, confirmation by a later dream with versions kept,
+//! untrusted proposals refused, and the skill files matching the confirmed skills.
+
 use std::sync::Arc;
 
 use serde_json::{Map, json};

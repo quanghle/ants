@@ -1,3 +1,6 @@
+//! Tests of `ants daemon`: picking the ants from the file and flags, the host and sense links coming back, credentials,
+//! reloads starting, stopping, pausing or restarting ants and schedules.
+
 use std::path::{Path, PathBuf};
 
 use ants_daemon::config::Ant;

@@ -1,3 +1,6 @@
+//! Tests of the NATS connection and JetStream objects: waiting for a server, leaf or credential store, failing at once
+//! on what retrying cannot cure, missing streams naming `ants init`, credentials in URLs, and live inbox readers.
+
 use std::path::Path;
 
 use ants_proto::{COLONY_BUCKET, Envelope, STREAM, UserId, inbox_prefix, subject};

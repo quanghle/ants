@@ -1,3 +1,6 @@
+//! Tests of provider export and import orders: an export stores the provider's export for the admin, an import goes to
+//! the provider of the same name only, and orders name an ant of the config.
+
 use std::sync::Arc;
 
 use ants_proto::provider::Capabilities;

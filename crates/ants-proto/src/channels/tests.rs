@@ -1,3 +1,6 @@
+//! Tests of channels: posts checked against their subject, turns spent, mentions waking ants and notifying humans,
+//! webhook posts triaged, and the owner, creator and origin threads keep.
+
 use super::*;
 use crate::{HumanEntry, Role, mention_key, p};
 

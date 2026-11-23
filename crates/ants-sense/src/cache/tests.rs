@@ -1,3 +1,6 @@
+//! Tests of the cache: searches are words only, a cache of another schema or unreadable is replaced, and pending writes
+//! prevent replacing it.
+
 use super::*;
 
 #[test]

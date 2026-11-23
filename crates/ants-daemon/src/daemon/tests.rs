@@ -1,3 +1,6 @@
+//! Tests of the inbox loop of one ant: the fixtures running a daemon against nats-server with a fake harness, and its
+//! behaviours, one submodule each.
+
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::path::PathBuf;

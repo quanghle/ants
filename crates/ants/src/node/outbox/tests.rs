@@ -1,3 +1,6 @@
+//! Tests of `ants leaf outbox`: what a leaf kept while its uplink was down reaching the hub, post waiters, intake
+//! reports, admissions, removed ants, attachments, and restarts.
+
 use std::assert_matches;
 use std::process::Command;
 

@@ -1,3 +1,6 @@
+//! Tests of `/trail`: starting a run after its limits are shown, run reports on a thread, and the jobs listing,
+//! showing, starting, stopping and resuming as `ants trail` does, and tips.
+
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     Role, RunId, RunState, SavedTrail, Saver, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TrailAction,

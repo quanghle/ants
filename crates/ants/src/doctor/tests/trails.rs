@@ -1,3 +1,6 @@
+//! Tests of the doctor's trail checks: stuck runs and the commands moving them on, child runs, runs past their wall
+//! time, every conductor's runs read, and the worker started as a daemon does.
+
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     ColonyEntry, PendingCall, Role, RunLimit, RunState, TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLeg,

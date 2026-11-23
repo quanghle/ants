@@ -1,3 +1,6 @@
+//! Tests of `ants thread`: every kind of stored message on its thread, forged messages, titles, listing, picking by id,
+//! replies and forwards, tool calls and requests, prompt ends, and sealed messages.
+
 use std::assert_matches;
 
 use ants_daemon::channel::CLOCK_SLACK;

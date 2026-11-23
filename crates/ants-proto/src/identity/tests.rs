@@ -1,3 +1,5 @@
+//! Tests of the identity record: it round-trips and names its key, and stages grow with prompts.
+
 use super::*;
 
 #[test]

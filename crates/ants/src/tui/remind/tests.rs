@@ -1,3 +1,6 @@
+//! Tests of reminders in the views: `b` asks when and sets the reminder with its note, and `/reminders` lists them as
+//! `ants remind list` does.
+
 use super::*;
 use crate::test_support::live::{at, user};
 use crate::tui::exec::{Exec, Job, Outcome};

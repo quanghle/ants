@@ -1,3 +1,6 @@
+//! Tests of the MCP tools of harness sessions: the fixtures serving them to a fake session over HTTP, and the tools,
+//! one submodule each.
+
 use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;

@@ -1,3 +1,6 @@
+//! Tests of personal tasks: external references, the ready list, relationship validation, expected revisions, and
+//! compare-and-set guards on the graph.
+
 use std::sync::Arc;
 
 use ants_proto::SenseId;

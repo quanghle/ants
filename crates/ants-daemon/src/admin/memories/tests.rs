@@ -1,3 +1,6 @@
+//! Tests of the read memories order: the memory files' globs and caps, the provider's memories, a failing provider
+//! noted, the harnesses' default files, bd memories, and answers from a fresh config.
+
 use std::sync::{Arc, Mutex};
 
 use ants_proto::provider::{

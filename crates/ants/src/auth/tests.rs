@@ -1,3 +1,6 @@
+//! Tests of team credentials against nats-server: the fixtures connecting as each user and watching for permission
+//! violations, and the rights of each, one submodule per area.
+
 use std::assert_matches;
 use std::time::Duration;
 

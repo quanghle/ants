@@ -1,3 +1,6 @@
+//! Tests of the waiting list (Ctrl-L): opening the selected card, older questions, scrolling and stepping, typed
+//! answers, focus through the bar, and its own keys.
+
 use super::*;
 
 fn waiting_model() -> (Model, [ApprovalRequest; 2], [Entry; 2]) {

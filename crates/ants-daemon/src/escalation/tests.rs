@@ -1,3 +1,6 @@
+//! Tests of escalations up the origin chain: where they start and climb, leaders' answers, notices, reminders backing
+//! off, snoozes, and assistants passing them on to their humans.
+
 use super::*;
 
 fn p(name: &str) -> UserId {
