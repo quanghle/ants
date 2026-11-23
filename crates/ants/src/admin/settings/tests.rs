@@ -1,5 +1,5 @@
-//! Tests of an ant's settings by order: assignments, orders expecting what was read, reading and changing settings, and
-//! shared settings created, served and verified.
+//! Tests of an ant's settings by order: assignments, orders expecting what was read, reading and changing settings, a
+//! read held for consent, and shared settings created, served and verified.
 
 use ants_daemon::admin::ConfigFile;
 use ants_proto::{FieldChange, Hidden, Permissions, Role};
@@ -240,6 +240,52 @@ async fn sets_at_once_on_an_ant_never_read_wait_for_the_pending_read() {
     assert_eq!(reads, 1, "no second read sent while one waits");
     drop(ants);
     tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+}
+
+/// A read the daemon holds for a human's consent, as it does an assistant's, is waited for like one it has not taken
+/// yet, and told as waiting for that consent, not as refused.
+#[tokio::test]
+async fn a_read_held_for_consent_is_waited_for_and_told_as_waiting() {
+    let Some(server) = Server::start() else { return };
+    let (alice, bob, dev_a) = ("alice".parse().unwrap(), "bob".parse().unwrap(), "dev-a".parse::<UserId>().unwrap());
+    let (_, h_js) = server.connect_as(&bob, Role::Human).await;
+    ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
+    h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+    let admin_creds = server.dir().join("alice-admin.creds");
+    let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let rights = Permissions::for_user(&alice, Role::Human);
+    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &admin_creds).unwrap();
+    let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let (_, js) = admin.connect("test").await.unwrap();
+
+    let m1: Machine = "m1".parse().unwrap();
+    let (mut order, none) =
+        orders::tests::send(&admin, &js, Some(m1.clone()), &dev_a, AdminOp::ReadSettings, Duration::ZERO)
+            .await
+            .unwrap();
+    assert_eq!(none, None, "no daemon of m1");
+    order.on_behalf_of = Some(bob);
+    let machines = DirectKv::new(&host_js(&server, &m1).await, None, ants_proto::MACHINES_BUCKET).await.unwrap();
+    let key = ants_proto::admin_outcome_key(&m1, &dev_a, &order.id);
+    let record = async |state| {
+        let outcome = ants_proto::AdminOutcome::of(&order, state, None, None);
+        machines.put(&key, serde_json::to_vec(&outcome).unwrap()).await.unwrap();
+    };
+    record(OrderState::Held).await;
+    let listed = decided(&js, &dev_a, order.id, Duration::from_millis(300)).await.unwrap();
+    let held = listed.iter().find(|o| o.id == order.id);
+    assert_eq!(held.map(|o| o.state), Some(OrderState::Held), "as it stands once the wait ran out");
+    assert_eq!(waited(held, &m1).as_deref(), Some("the read waits for the consent of bob, held by the daemon of m1"));
+
+    let applied = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        record(OrderState::Applied).await;
+    };
+    let (listed, ()) = tokio::join!(decided(&js, &dev_a, order.id, WAIT), applied);
+    let listed = listed.unwrap();
+    let applied = listed.iter().find(|o| o.id == order.id);
+    assert_eq!(applied.map(|o| o.state), Some(OrderState::Applied), "waited for while held");
+    assert_eq!(waited(applied, &m1), None);
 }
 
 /// The first daemon of an ant to start creates its shared settings from its config; an admin's change of one

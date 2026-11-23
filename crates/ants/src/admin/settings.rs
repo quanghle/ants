@@ -267,7 +267,8 @@ fn admin_tagged(creds: &Path) -> bool {
 
 /// Read `ant`'s settings: with an admin's credentials, afresh, waiting up to `wait` for the daemon of its machine;
 /// else, or when that daemon does not answer in time, refuses or is away, as last read. A read still pending is not
-/// sent again: while none was ever applied, its outcome is waited for up to `wait`.
+/// sent again: while none was ever applied, its outcome is waited for up to `wait`, also once the daemon holds it for
+/// a human's consent, as it does an assistant's.
 pub async fn read(nats: &Nats<'_>, js: &jetstream::Context, ant: &UserId, wait: Duration) -> Result<Reading> {
     let mut orders = orders::orders_of(js, ant).await?;
     let now: DateTime<Utc> = SystemTime::now().into();
@@ -280,13 +281,7 @@ pub async fn read(nats: &Nats<'_>, js: &jetstream::Context, ant: &UserId, wait: 
     } else if let Some(waiting) = waiting {
         let (id, machine) = (waiting.id, waiting.machine.clone());
         orders = decided(js, ant, id, wait).await?;
-        match orders.iter().find(|o| o.id == id) {
-            Some(o) if o.state == OrderState::Applied => None,
-            Some(o) if o.state != OrderState::Pending => {
-                Some(format!("the daemon of {machine} refused the read: {}", orders::reason(&o.reason)))
-            }
-            _ => Some(format!("the read waits for the daemon of {machine}")),
-        }
+        waited(orders.iter().find(|o| o.id == id), &machine)
     } else {
         let sent = async { Admin::of(nats)?.send(js, None, ant, AdminOp::ReadSettings, wait).await };
         match sent.await {
@@ -312,12 +307,30 @@ pub async fn read(nats: &Nats<'_>, js: &jetstream::Context, ant: &UserId, wait: 
     Ok(Reading { read: Read::last(&orders), stale, orders, shared })
 }
 
-/// The orders to `ant` once the order `id` is decided, or as they stand after `wait`.
+/// What to tell of the read `order` to the daemon of `machine` once waited for: nothing when applied, and of one an
+/// assistant sent, held by the daemon, whose consent it waits for.
+fn waited(order: Option<&Listed>, machine: &Machine) -> Option<String> {
+    let Some(order) = order else { return Some(format!("the read waits for the daemon of {machine}")) };
+    match order.state {
+        OrderState::Applied => None,
+        OrderState::Refused => {
+            Some(format!("the daemon of {machine} refused the read: {}", orders::reason(&order.reason)))
+        }
+        OrderState::Held => {
+            let human = order.on_behalf_of.as_ref().map_or_else(|| "a human".to_owned(), ToString::to_string);
+            Some(format!("the read waits for the consent of {human}, held by the daemon of {machine}"))
+        }
+        OrderState::Pending => Some(format!("the read waits for the daemon of {machine}")),
+    }
+}
+
+/// The orders to `ant` once the order `id` is decided, or as they stand after `wait`: one the daemon holds for a
+/// human's consent is not decided yet.
 async fn decided(js: &jetstream::Context, ant: &UserId, id: Uuid, wait: Duration) -> Result<Vec<Listed>> {
     let started = tokio::time::Instant::now();
     loop {
         let orders = orders::orders_of(js, ant).await?;
-        let pending = orders.iter().any(|o| o.id == id && o.state == OrderState::Pending);
+        let pending = orders.iter().any(|o| o.id == id && matches!(o.state, OrderState::Pending | OrderState::Held));
         if !pending || started.elapsed() >= wait {
             return Ok(orders);
         }
