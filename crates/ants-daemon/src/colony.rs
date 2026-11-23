@@ -510,6 +510,7 @@ async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, ent
                 && entry.limited == workload.limited()
                 && entry.failing == workload.failing()
                 && entry.fallback == workload.fallback()
+                && entry.memory_low == workload.memory_low()
                 && entry.paused == workload.paused()
                 && entry.drift == workload.drift()
                 && entry.profile == workload.profile()

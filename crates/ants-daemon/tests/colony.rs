@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use ants_daemon::bus;
 use ants_daemon::colony::{self, Registration, Workload};
-use ants_proto::{Activity, ColonyEntry, SignInNeeded, UserId};
+use ants_proto::{Activity, ColonyEntry, MemoryLow, SignInNeeded, UserId};
 use ants_test_support::{NatsServer as Server, eventually_within};
 use async_nats::jetstream::kv;
 
@@ -161,6 +161,28 @@ async fn a_signed_out_harness_shows_until_it_signs_in_before_the_next_beat() {
     wait_signed_out(&kv, "dev-a", Some(&out), Duration::from_secs(5)).await;
     workload.set_signed_out(None);
     wait_signed_out(&kv, "dev-a", None, Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn memory_turning_low_or_recovering_shows_before_the_next_beat() {
+    let Some(server) = Server::start() else { return };
+    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
+    let workload = Arc::new(Workload::default());
+    let beat = Duration::from_secs(60);
+    let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone())).await.unwrap();
+    assert_eq!(read(&kv, "dev-a").await.unwrap().memory_low, None);
+
+    let limit = Duration::from_secs(5);
+    let low = Some(MemoryLow { since: chrono::Utc::now(), available: 900 << 20, max_harnesses: 1 });
+    workload.set_memory_low(low.clone());
+    eventually_within(limit, "dev-a low on memory", async || {
+        read(&kv, "dev-a").await.expect("listed").memory_low == low
+    })
+    .await;
+    workload.set_memory_low(None);
+    let recovered = async || read(&kv, "dev-a").await.expect("listed").memory_low.is_none();
+    eventually_within(limit, "dev-a recovered", recovered).await;
 }
 
 /// The built-in messenger waits while another daemon serves the messenger, on this machine or another, takes over once
