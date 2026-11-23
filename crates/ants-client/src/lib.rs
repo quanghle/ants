@@ -9,13 +9,15 @@
 //! - those reads and writes themselves ([`client`]), over a transport of four calls that names no runtime
 //!   ([`transport`]).
 //!
-//! Beside them, what the server of a page tells it of where to connect ([`site`]).
+//! Beside them, what the server of a page tells it of where to connect ([`site`]), and a device's credentials, their
+//! registration and their renewal ([`device`]).
 //!
 //! The crate builds natively and for `wasm32-unknown-unknown`. A binding, for a browser or another platform, wraps
 //! [`client::Client`] and implements [`transport::Transport`]; nothing here names the binding's types.
 
 pub mod attachments;
 pub mod client;
+pub mod device;
 pub mod entry;
 pub mod inbox;
 pub mod parser;

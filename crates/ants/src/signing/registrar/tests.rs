@@ -462,6 +462,117 @@ async fn a_web_device_registers_with_web_credentials_and_keeps_them_through_rene
     registering(&server, &team, &config, asking).await;
 }
 
+/// Publish `request` on `transport`, again each [`REPEAT`] without an answer, until `answer` makes one of a message on
+/// `replies` that settles it (`settled`): every answer made, in order.
+async fn asked<T>(
+    transport: &ants_test_support::NatsTransport,
+    request: &ants_client::Message,
+    replies: String,
+    answer: impl Fn(&ants_client::Message) -> Option<T>,
+    settled: impl Fn(&T) -> bool,
+) -> Vec<T> {
+    use ants_client::transport::Transport as _;
+    let mut replies = transport.subscribe(replies).await.unwrap();
+    transport.publish(request.clone()).await.unwrap();
+    let mut answers = Vec::new();
+    loop {
+        match replies.next(Some(REPEAT)).await {
+            Ok(message) => {
+                let Some(answered) = answer(&message) else { continue };
+                let done = settled(&answered);
+                answers.push(answered);
+                if done {
+                    return answers;
+                }
+            }
+            Err(ants_client::TransportError::TimedOut) => transport.publish(request.clone()).await.unwrap(),
+            Err(e) => panic!("{e}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_page_registers_and_renews_its_device_with_the_requests_of_ants_client() {
+    use ants_client::device::registration::{Registration, Step};
+    use ants_client::device::renewal::Renewal;
+    use ants_client::device::{Bootstrap, Error as DeviceError};
+    use ants_client::transport::{Connect, Transport as _};
+    use ants_test_support::NatsTransport;
+
+    let Some(server) = Server::start() else { return };
+    let team = server.dir().join("auth");
+    let url = github_checking(&[(1, "octocat", "o@example.com", true); 3], Arc::new(AtomicBool::new(true))).await;
+    let token = server.dir().join("github-token");
+    std::fs::write(&token, "signer").unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&token, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let config = server.dir().join("config.toml");
+    std::fs::write(&config, format!("{}token_file = \"github-token\"\n", policy(&url))).unwrap();
+    let creds = server.dir().join("bootstrap.creds");
+    auth::issue_bootstrap(&team, Duration::ZERO, &creds).unwrap();
+    let bootstrap = Bootstrap::read(&std::fs::read_to_string(&creds).unwrap()).unwrap();
+    assert_eq!(bootstrap.account(), auth::account_key(&team).unwrap());
+    let carrier = NatsTransport::new(&server.url, Some(&creds));
+    carrier.connect(Connect { name: "ants-web".into(), inbox_prefix: "_INBOX".into() }).await.unwrap();
+    let alice = p("alice");
+
+    let asking = async {
+        let register = async |key: &KeyPair, github: &str| {
+            let label = Some("browser".to_owned());
+            let mut registration =
+                Registration::new(alice.clone(), key.public_key(), label, &bootstrap, github).unwrap();
+            registration.sign(BASE64URL_NOPAD.encode(&key.sign(&registration.signed()).unwrap()));
+            let settled =
+                |step: &Result<Step, DeviceError>| !matches!(step, Ok(Step::Verify { .. } | Step::Waiting { .. }));
+            asked(&carrier, &registration.request(), registration.replies(), |m| registration.answer(m), settled).await
+        };
+
+        // A page trusting github.com shows no page of another GitHub.
+        let phished = register(&KeyPair::new_user(), "https://github.com").await;
+        let trusted = "https://github.com/login/device".to_owned();
+        assert_eq!(phished, [Err(DeviceError::NotShown { trusted })]);
+
+        // Trusting the team's, it shows that one's page and code, then takes the JWT of its key.
+        let key = KeyPair::new_user();
+        let mut steps = register(&key, "https://GitHub.example/").await;
+        let Some(Ok(Step::Signed { jwt, credentials })) = steps.pop() else { panic!("not signed: {steps:?}") };
+        let page = "https://github.example/login/device".to_owned();
+        assert!(
+            matches!(&steps[..], [Ok(Step::Verify { page: shown, user_code, .. })] if *shown == page && user_code.starts_with("CODE-")),
+            "{steps:?}"
+        );
+        assert_eq!((&credentials.human, credentials.public_key.as_str()), (&alice, key.public_key().as_str()));
+        assert_eq!((credentials.account.as_str(), &credentials.domain), (bootstrap.account(), &None));
+        let device = credentials.device.expect("a device");
+        assert_eq!(credentials.revoke_command(), format!("ants auth revoke --key {}", key.public_key()));
+        let record = revoke::issued(&team).unwrap().pop().unwrap();
+        assert_eq!((record.web, record.device, record.label.as_deref()), (true, Some(device), Some("browser")));
+
+        // Connected as the device, it asks for its credentials renewed for a new key, signed by the current one.
+        let path = server.dir().join("alice-web.creds");
+        auth::write_creds(&path, &jwt, &key).unwrap();
+        let page = NatsTransport::new(&server.url, Some(&path));
+        page.connect(Connect { name: "ants-web".into(), inbox_prefix: ants_proto::inbox_prefix(&alice) })
+            .await
+            .unwrap();
+        let next = KeyPair::new_user();
+        let mut renewal = Renewal::new(&credentials, &jwt, next.public_key(), "a browser".into());
+        renewal.sign(BASE64URL_NOPAD.encode(&key.sign(&renewal.signed()).unwrap()));
+        let mut renewed = asked(&page, &renewal.request(), renewal.replies(), |m| renewal.answer(m), |_| true).await;
+        let renewed = renewed.pop().unwrap().unwrap();
+        let again = renewed.credentials;
+        assert_eq!(
+            (&again.human, again.public_key.as_str(), again.device),
+            (&alice, next.public_key().as_str(), Some(device))
+        );
+        assert!(again.expires_at >= credentials.expires_at);
+        let record = revoke::issued(&team).unwrap().pop().unwrap();
+        assert_eq!((record.web, record.renewed_from), (true, Some(key.public_key())));
+        assert!(page.server_errors().is_empty() && carrier.server_errors().is_empty(), "nothing refused");
+    };
+    registering(&server, &team, &config, asking).await;
+}
+
 /// The lines of [`OFFBOARDED`] in `team`.
 fn offboarded(team: &Path) -> Vec<Offboarded> {
     let text = std::fs::read_to_string(team.join(OFFBOARDED)).unwrap_or_default();

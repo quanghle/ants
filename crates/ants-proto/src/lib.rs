@@ -129,7 +129,9 @@ pub use memories::{
     BdMemories, BdMemory, CoreMemories, MEMORIES_CAP, MEMORIES_FRESH, MEMORY_FILE_CAP, Memories, MemoryFile,
     ProviderMemories, Skipped,
 };
-pub use permissions::{Destination, LeafRole, PERMISSIONS_VERSION, Permissions, PermissionsVersion, WEB_TAG, is_web};
+pub use permissions::{
+    Destination, LeafRole, PERMISSIONS_VERSION, Permissions, PermissionsVersion, WEB_TAG, is_web, js_domain_of,
+};
 pub use presence::{
     DeviceId, DeviceKey, DeviceRevocation, Following, Presence, REVOKED_DEVICES, device_entry_key, device_entry_of,
     presence_key, revoked_device_key,

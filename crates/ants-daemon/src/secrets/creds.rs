@@ -730,13 +730,7 @@ fn kind(name: &str, publish: &[String], subscribe: &[String], leaf_only: bool) -
 
 /// The JetStream domain the publish allowances name, as [`ants_proto::Permissions::with_js_domain`] adds them.
 fn js_domain(publish: &[String]) -> Option<JsDomain> {
-    publish.iter().find_map(|s| {
-        let (domain, rest) = s.strip_prefix("$JS.")?.split_once('.')?;
-        if domain == "API" || domain == "*" || !rest.starts_with("API.") {
-            return None;
-        }
-        domain.parse().ok()
-    })
+    ants_proto::js_domain_of(publish.iter().map(String::as_str))
 }
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ants_client::device::registration::{GITHUB_URL, device_page};
 use ants_client::site::{self, Site};
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
@@ -78,6 +79,11 @@ enum WebCommand {
         /// `ants signer`. Without them, the page has a device's JWT pasted in.
         #[arg(long, value_name = "FILE")]
         bootstrap: Option<PathBuf>,
+        /// The GitHub the page trusts to sign in at while it registers (https://HOST): it shows a sign-in page only
+        /// when it is this GitHub's device login page, <URL>/login/device. Give a GitHub Enterprise Server's URL when
+        /// the hub's `[registration]` names one.
+        #[arg(long, value_name = "URL", default_value = GITHUB_URL, requires = "bootstrap")]
+        github_url: String,
     },
 }
 
@@ -124,9 +130,11 @@ impl Page {
 pub(crate) async fn run(args: WebArgs) -> Result<()> {
     let page = Page::embedded()?;
     match args.command {
-        Some(WebCommand::Export { dir, server, bootstrap }) => {
+        Some(WebCommand::Export { dir, server, bootstrap, github_url }) => {
+            device_page(&github_url).map_err(|e| anyhow::anyhow!("--github-url {e}"))?;
             let bootstrap = bootstrap.as_deref().map(read_bootstrap).transpose()?;
-            print!("{}", export(page, &dir, Site { server: websocket(&server)?, bootstrap })?);
+            let github_url = bootstrap.is_some().then_some(github_url);
+            print!("{}", export(page, &dir, Site { server: websocket(&server)?, bootstrap, github_url })?);
             Ok(())
         }
         None => serve_args(page, args.serve).await,
@@ -154,7 +162,7 @@ async fn serve_args(page: Page, args: ServeArgs) -> Result<()> {
         }
     };
     let listener = TcpListener::bind(listen).await.with_context(|| format!("listening on {listen}"))?;
-    let served = Served::new(page, listen, Site { server, bootstrap: None });
+    let served = Served::new(page, listen, Site { server, bootstrap: None, github_url: None });
     println!(
         "serving the page of ants {} ({}) on {origin}, connecting to {}, until Ctrl-C",
         page.version(),

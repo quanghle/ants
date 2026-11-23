@@ -2,7 +2,10 @@
 //! marked by the user JWT tag [`WEB_TAG`], with the rights the page's views use and no other of a human's.
 
 use super::{Permissions, kv_stream};
-use crate::{HUMANS_BUCKET, OWNERS_BUCKET, READ_BUCKET, STREAM, UserId, assistant_grant_key, inbox_prefix, subject};
+use crate::{
+    COLONY_BUCKET, HUMANS_BUCKET, OWNERS_BUCKET, READ_BUCKET, STREAM, UserId, assistant_grant_key, inbox_prefix,
+    subject,
+};
 #[cfg(doc)]
 use crate::{PRESENCE_BUCKET, ReadMarker, Role};
 
@@ -25,7 +28,8 @@ impl Permissions {
     /// subject, in batches; reads and puts, by compare-and-set, its own [`ReadMarker`] and no channel reads; puts its
     /// own devices' presence ([`PRESENCE_BUCKET`]) and reads none; reads and puts its own entry among the humans
     /// ([`HUMANS_BUCKET`]), as a human's first connection does, and reads its own assistant grant there, which names
-    /// whom an unaddressed message goes to, writing none; and asks for its own renewal. It hears its reply inboxes,
+    /// whom an unaddressed message goes to, writing none; reads the colony's entries ([`COLONY_BUCKET`]) by batched
+    /// direct gets of the last of each, as no consumer lists them; and asks for its own renewal. It hears its reply inboxes,
     /// the messages to it and those sent under its name, every ant's status and the answers to its renewal.
     ///
     /// It gets no stream info, creates, updates and purges no stream or bucket, deletes no message, creates no
@@ -46,6 +50,7 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{humans}.{entry}"),
             entry,
             format!("$JS.API.DIRECT.GET.{humans}.$KV.{HUMANS_BUCKET}.{}", assistant_grant_key(human)),
+            format!("$JS.API.DIRECT.GET.{}", kv_stream(COLONY_BUCKET)),
             subject::renew(human.as_str()),
         ];
         let subscribe = vec![
@@ -83,6 +88,7 @@ mod tests {
                 "$JS.API.DIRECT.GET.KV_ants_humans.$KV.ants_humans.alice",
                 "$KV.ants_humans.alice",
                 "$JS.API.DIRECT.GET.KV_ants_humans.$KV.ants_humans.alice.assistant",
+                "$JS.API.DIRECT.GET.KV_ants_colony",
                 "ants.renew.alice",
             ]
         );
@@ -115,6 +121,9 @@ mod tests {
             "$JS.API.STREAM.CREATE.KV_ants_read".to_owned(),
             "$JS.API.STREAM.UPDATE.KV_ants_humans".to_owned(),
             "$JS.API.STREAM.PURGE.KV_ants_presence".to_owned(),
+            "$JS.API.STREAM.INFO.KV_ants_colony".to_owned(),
+            "$JS.API.CONSUMER.CREATE.KV_ants_colony".to_owned(),
+            subject::colony(&dev_a),
             format!("$JS.API.STREAM.CREATE.{}", crate::OUTBOX_STREAM),
             format!("$JS.m1.API.STREAM.CREATE.{}", crate::OUTBOX_STREAM),
             format!("$JS.API.STREAM.UPDATE.{}", crate::INTAKE_STREAM),
@@ -170,6 +179,7 @@ mod tests {
                 "$JS.hub.API.DIRECT.GET.KV_ants_humans.$KV.ants_humans.alice",
                 "$JS.hub.API.$KV.ants_humans.alice",
                 "$JS.hub.API.DIRECT.GET.KV_ants_humans.$KV.ants_humans.alice.assistant",
+                "$JS.hub.API.DIRECT.GET.KV_ants_colony",
             ]
         );
     }

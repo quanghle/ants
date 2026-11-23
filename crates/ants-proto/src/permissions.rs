@@ -18,6 +18,7 @@ mod services;
 mod user;
 mod web;
 
+pub use domain::js_domain_of;
 pub use hooks::Destination;
 pub use leaf::LeafRole;
 pub use web::{WEB_TAG, is_web};

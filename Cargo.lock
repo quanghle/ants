@@ -206,6 +206,7 @@ dependencies = [
  "chrono",
  "data-encoding",
  "futures",
+ "getrandom 0.2.17",
  "nkeys",
  "serde",
  "serde_json",

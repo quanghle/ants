@@ -1,7 +1,8 @@
 //! A human's reads and writes over a [`Transport`], as `ants ask`, `ants inbox` and `ants chat` make them with
 //! async-nats: the stream read back window by window ([`Client::reader`]), a message sent with its thread's owner
 //! recorded first and stored once the stream acks it ([`Client::send`]), the human's read marker moved by
-//! compare-and-set ([`Client::mark_read`]), and what is heard live ([`Client::status`], [`Client::inbox`]).
+//! compare-and-set ([`Client::mark_read`]), and what is heard live ([`Client::status`], [`Client::inbox`]); beside
+//! them the colony as it is now ([`Client::colony`]) and a device's presence ([`Client::present`]).
 //!
 //! This is what a binding wraps, for a browser or another platform: [`Client`], [`Reader`] and the feeds carry no
 //! lifetime or type parameter, and what their calls take and return are owned values that serialize.
@@ -11,7 +12,10 @@
 
 use std::rc::Rc;
 
-use ants_proto::{AssistantGrant, Envelope, JsDomain, ReadMarker, StatusEvent, ThreadId, UserId, Uuid, subject};
+use ants_proto::{
+    AssistantGrant, ColonyEntry, DeviceId, Envelope, Following, JsDomain, Presence, ReadMarker, StatusEvent, ThreadId,
+    UserId, Uuid, subject,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -254,6 +258,48 @@ impl Client {
         let Some(owner) = &envelope.owner else { return Ok(()) };
         let record = requests::owner_record(self.domain(), &envelope.thread_id, &envelope.to, owner);
         requests::owner_recorded(&self.request(WHAT, record).await?)
+    }
+
+    /// The colony as it is now: the entry of each ant served, by name, read by a batched direct get of the last of
+    /// each. Entries that do not parse are passed over.
+    pub async fn colony(&self) -> Result<Vec<ColonyEntry>, Error> {
+        const WHAT: &str = "reading the colony";
+        let reply = format!("{}.{}", ants_proto::inbox_prefix(&self.session.human), Uuid::now_v7().simple());
+        let mut answers = self.subscribe(WHAT, reply.clone()).await?;
+        let get = requests::colony_get(self.domain(), reply);
+        self.transport.publish(get).await.map_err(|e| Error::transport(WHAT, e))?;
+        let mut entries = Vec::new();
+        loop {
+            let answer = answers.next(Some(REQUEST_WAIT)).await.map_err(|e| Error::transport(WHAT, e))?;
+            match requests::batch_answer(answer)? {
+                Got::Stored(stored) => entries.extend(requests::colony_entry(&stored)),
+                Got::Relayed(_) => {}
+                Got::End { .. } | Got::Nothing => break,
+            }
+        }
+        entries.sort_by(|a, b| a.ant.cmp(&b.ant));
+        Ok(entries)
+    }
+
+    /// The presence of the human's `device` while it follows the inbox, as a page open on it does: put it with
+    /// [`Client::present`] every [`ants_proto::PRESENCE_HEARTBEAT`], and delete it with [`Client::absent`] on
+    /// leaving.
+    pub fn presence(&self, device: DeviceId) -> Presence {
+        Presence::new(self.session.human.clone(), device, Following::Inbox)
+    }
+
+    /// Put `presence`, resolving once stored.
+    pub async fn present(&self, presence: &Presence) -> Result<(), Error> {
+        const WHAT: &str = "putting the device's presence";
+        let answer = self.request(WHAT, requests::presence_put(self.domain(), presence)).await?;
+        requests::stored(WHAT, &answer).map(|_| ())
+    }
+
+    /// Delete `presence`, resolving once stored.
+    pub async fn absent(&self, presence: &Presence) -> Result<(), Error> {
+        const WHAT: &str = "deleting the device's presence";
+        let answer = self.request(WHAT, requests::presence_delete(self.domain(), presence)).await?;
+        requests::stored(WHAT, &answer).map(|_| ())
     }
 
     /// The live progress of every ant on `thread`, from now on.
