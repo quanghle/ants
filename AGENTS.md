@@ -27,7 +27,7 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
   runner, no NATS), `ants-client` (what a human's client derives from what it reads, its requests and its reads and
   writes over a transport trait: no I/O, no runtime, built for wasm32 too, used by the daemon, the CLI, `ants chat`
   and the web client), `ants-daemon` (NATS + ACP), `ants` (binary), `ants-test-support` (dev-only test helpers: tools
-  on PATH, throwaway nats-server).
+  on PATH, throwaway nats-server, `ants-client`'s transport over async-nats).
 - The daemon reaches `ants-sense` only through its `sense` module (`crates/ants-daemon/src/sense.rs`), the `ants`
   crate through that module and, for the files of an ant's home, the few files `sense/tests.rs` lists.
 - Keep the footprint small: tokio current-thread, minimal features, no per-session helper processes; the one
@@ -44,9 +44,9 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - Modules are `x.rs` with submodules in `x/`, never `x/mod.rs`. Unit tests of `x.rs` start inline
   (`#[cfg(test)] mod tests { … }` at its end); once they outgrow the code they test, they move to `x/tests.rs`
   (`#[cfg(test)] mod tests;`); once that grows too large, `x/tests.rs` keeps the shared helpers and declares
-  submodules in `x/tests/`, one per behaviour (`x/tests/routing.rs`, …). Test modules, `x/tests.rs`, its
+  submodules in `x/tests/`, one per behaviour (`x/tests/routing.rs`, …). Test files, `x/tests.rs`, its
   submodules and integration tests alike, open with a `//!` doc saying what behaviour they test, like any other
-  module.
+  module; an inline `mod tests { … }` needs none, sitting under the doc of the module it tests.
 
 ## Checks
 

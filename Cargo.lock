@@ -291,8 +291,11 @@ dependencies = [
 name = "ants-test-support"
 version = "0.3.0"
 dependencies = [
+ "ants-client",
  "ants-proto",
+ "async-nats",
  "chrono",
+ "futures",
  "serde_json",
  "tokio",
 ]
