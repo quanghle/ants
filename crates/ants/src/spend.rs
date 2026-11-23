@@ -232,20 +232,7 @@ pub async fn today(js: &jetstream::Context, kv: &DirectKv) -> Result<Vec<(UserId
 fn layout(header: &[&str], rows: Vec<Vec<String>>) -> String {
     let rows: Vec<Vec<String>> =
         std::iter::once(header.iter().map(|h| (*h).to_owned()).collect()).chain(rows).collect();
-    let mut widths = vec![0; header.len()];
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
-    let lines: Vec<String> = rows
-        .iter()
-        .map(|row| {
-            let cells: Vec<String> = row.iter().zip(&widths).map(|(cell, width)| format!("{cell:width$}")).collect();
-            cells.join("  ").trim_end().to_owned()
-        })
-        .collect();
-    lines.join("\n")
+    crate::text::columns(&rows)
 }
 
 /// One row per ant: what it spent today, against its daily caps, and in all `days` days.

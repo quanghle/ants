@@ -395,20 +395,7 @@ pub fn table(entries: &[ColonyEntry], now: DateTime<Utc>) -> String {
             ]
         }))
         .collect();
-    let mut widths = [0; 15];
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
-    let lines: Vec<String> = rows
-        .iter()
-        .map(|row| {
-            let cells: Vec<String> = row.iter().zip(widths).map(|(cell, width)| format!("{cell:width$}")).collect();
-            cells.join("  ").trim_end().to_owned()
-        })
-        .collect();
-    lines.join("\n")
+    crate::text::columns(&rows)
 }
 
 /// An entry as one JSON object, with its `state` added, and from the ant's identity record in `faces` when it has one,

@@ -159,16 +159,9 @@ pub fn table(threads: &[Summary]) -> String {
             row
         }))
         .collect();
-    let mut widths = vec![0; rows[0].len()];
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
     let mut lines = Vec::new();
-    for (i, row) in rows.iter().enumerate() {
-        let cells: Vec<String> = row.iter().zip(&widths).map(|(cell, &width)| format!("{cell:width$}")).collect();
-        lines.push(cells.join("  ").trim_end().to_owned());
+    for (i, row) in crate::text::column_lines(&rows).into_iter().enumerate() {
+        lines.push(row);
         if let Some(thread) = i.checked_sub(1).map(|i| &threads[i]) {
             for line in thread.matched.iter().chain(&thread.escalated) {
                 lines.push(format!("    {}", ants_proto::one_line(line, usize::MAX)));

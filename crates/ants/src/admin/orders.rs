@@ -389,20 +389,7 @@ pub(crate) fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
             ]
         }))
         .collect();
-    let mut widths = [0; 5];
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
-    let lines: Vec<String> = rows
-        .iter()
-        .map(|row| {
-            let cells: Vec<String> = row.iter().zip(widths).map(|(cell, width)| format!("{cell:width$}")).collect();
-            cells.join("  ").trim_end().to_owned()
-        })
-        .collect();
-    lines.join("\n")
+    crate::text::columns(&rows)
 }
 
 #[cfg(test)]

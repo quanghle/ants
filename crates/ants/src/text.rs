@@ -1,4 +1,4 @@
-//! Text helpers the commands and the terminal UI share: excerpts and one-line notes.
+//! Text helpers the commands and the terminal UI share: excerpts, one-line notes and tables in columns.
 
 pub use ants_proto::one_line;
 
@@ -32,6 +32,28 @@ pub fn after_colon(text: &str) -> String {
         return format!(" {}", text.trim_start());
     }
     text.lines().fold(String::new(), |out, line| format!("{out}\n  {line}"))
+}
+
+/// `rows` as columns two spaces apart, each as wide as its widest cell, without trailing blanks.
+pub fn columns(rows: &[impl AsRef<[String]>]) -> String {
+    column_lines(rows).join("\n")
+}
+
+/// The lines of [`columns`], one per row, for a table with other lines between its rows.
+pub fn column_lines(rows: &[impl AsRef<[String]>]) -> Vec<String> {
+    let mut widths: Vec<usize> = Vec::new();
+    for row in rows {
+        let row = row.as_ref();
+        widths.resize(widths.len().max(row.len()), 0);
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    let line = |row: &[String]| {
+        let cells: Vec<String> = row.iter().zip(&widths).map(|(cell, &width)| format!("{cell:width$}")).collect();
+        cells.join("  ").trim_end().to_owned()
+    };
+    rows.iter().map(|row| line(row.as_ref())).collect()
 }
 
 #[cfg(test)]

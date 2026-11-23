@@ -88,7 +88,7 @@ pub(crate) fn render(board: &TipBoard, args: &TipsArgs, script: Option<&str>, no
     out.push('\n');
     let header = ["TIP", "KEY", "WRITER", "VOTES", "STATUS", "WRITTEN"].map(str::to_owned);
     let rows: Vec<[String; 6]> = std::iter::once(header).chain(listed.iter().map(|r| row(r, now))).collect();
-    let table = super::columns(&rows);
+    let table = crate::text::columns(&rows);
     let mut lines = table.lines();
     let _ = writeln!(out, "{}", lines.next().unwrap_or_default());
     for (line, ranked) in lines.zip(&listed) {

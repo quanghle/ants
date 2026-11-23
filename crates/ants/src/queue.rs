@@ -265,18 +265,7 @@ fn cells(m: &Waiting, now: DateTime<Utc>) -> Vec<String> {
 
 /// `rows`, the first a header, in columns as wide as their widest cell.
 fn grid(rows: impl Iterator<Item = Vec<String>>) -> String {
-    let rows: Vec<Vec<String>> = rows.collect();
-    let mut widths = vec![0; rows.first().map_or(0, Vec::len)];
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
-    let lines = rows.iter().map(|row| {
-        let cells: Vec<String> = row.iter().zip(&widths).map(|(cell, &width)| format!("{cell:width$}")).collect();
-        cells.join("  ").trim_end().to_owned()
-    });
-    lines.collect::<Vec<_>>().join("\n")
+    crate::text::columns(&rows.collect::<Vec<_>>())
 }
 
 #[cfg(test)]

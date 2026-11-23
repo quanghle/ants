@@ -294,7 +294,7 @@ pub(crate) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
             vec![trail.name.to_string(), source, by, at, from, phases, waypoints, description, counts, latest]
         })
         .collect();
-    super::columns(&filled(&header, &["FROM RUN", "WAYPOINTS", "RATINGS", "LATEST"], rows))
+    crate::text::columns(&filled(&header, &["FROM RUN", "WAYPOINTS", "RATINGS", "LATEST"], rows))
 }
 
 /// `rows` under `header`, without the `optional` columns that no row fills, all of whose cells are `-`.
