@@ -27,7 +27,8 @@ prepare() {
             ants auth leaf "$node" --ant "$node-ant" --human human --dir "$team"
         fi
         cp "$team/server.conf" "$team/human.creds" "$team/$node-ant.creds" "$team/host-$node.creds" \
-            "$team/leaf-$node.creds" "$team/leaf-$node.system.creds" "/demo/$node/auth/"
+            "$team/leaf-$node.creds" "$team/leaf-$node.store.creds" "$team/leaf-$node.system.creds" \
+            "/demo/$node/auth/"
     done
 }
 
@@ -85,8 +86,6 @@ EOF
 
 if [ "$node" = hub ]; then
     cat >> /demo/config.toml <<'EOF'
-tasks = "Track tasks and durable memories in bd (BD_DB names the database). Start with bd prime. Use bd ready, bd create, bd claim, bd close for tasks; bd remember to store a memory and bd memories to search them."
-env = { BD_DB = "/demo/work/.bd/bd.db" }
 
 # The assistant acts with the human's privileges, and a native harness runs its tools unasked, so the model gets
 # only Copilot's file reading and search tools and the ants MCP tools: no shell, edits or web search. mcp:* also
@@ -109,9 +108,6 @@ args = [
 ]
 env = { COPILOT_AUTO_UPDATE = "false" }
 EOF
-    if [ ! -f /demo/work/.bd/bd.db ]; then
-        bd init --prefix demo -C /demo/work
-    fi
     cat > /demo/nats.conf <<'EOF'
 server_name: demo-hub
 listen: 127.0.0.1:4222

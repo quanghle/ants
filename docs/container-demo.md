@@ -19,9 +19,8 @@ one `ants daemon` serving exactly one ant. Every ant runs Copilot through its
 and local JetStream domains `leaf-a` and `leaf-b`. Only the hub holds the team signing keys. The demo human `human` is
 an [admin](auth.md#admins), and each node's daemon runs with
 [host credentials](auth.md#machine-host-credentials) for its machine (`hub`, `leaf-a`, `leaf-b`), so admin orders such as
-`ants ant pause`, `ants ant set` and `ants ant restart` reach every ant. `hub-ant` tracks tasks and durable memories in
-[bd](https://github.com/quanghle/bd-sync): its `BD_DB` names `/demo/work/.bd/bd.db`, created on the hub's first start,
-and its `tasks` memory says to use bd. The hub also runs `human`'s [personal assistant](auth.md#dedicated-assistant),
+`ants ant pause`, `ants ant set` and `ants ant restart` reach every ant. Every ant keeps its memories, tasks and
+reminders in [sense](sense.md), ants' built-in provider, its data written with its node's host credentials. The hub also runs `human`'s [personal assistant](auth.md#dedicated-assistant),
 `human-assistant`, enabled on every hub start (`ants assistant enable`, which keeps what earlier runs left), working in
 `/demo/assistant`. A native harness runs its tools unasked, so the daemon's allow rules and `human`'s approvals do
 not apply; instead the assistant's harness, `copilot-assistant`, limits the model to Copilot's `view`, `grep` and
@@ -41,12 +40,11 @@ the hub to remain reachable; it does not provision [store-and-forward outboxes](
   The script takes the first of `container`, `docker`, `podman`, `wslc` and `wslc.exe` on `PATH`;
   `ANTS_DEMO_RUNTIME` names another (`ANTS_DEMO_RUNTIME=podman`). The image builds for the host's architecture, arm64
   or amd64.
-- Network access to the image registries, Debian packages, crates.io, npm, GitHub releases and GitHub Copilot.
+- Network access to the image registries, Debian packages, crates.io, npm and GitHub Copilot.
 - A GitHub account with Copilot CLI access. Real prompts use the account's model allowance.
 
 No host Rust, Node.js, NATS or Copilot installation is required. The image builds the workspace with the pinned Rust
-toolchain and `Cargo.lock`, and installs NATS 2.15.3, Copilot CLI 1.0.112 and the static bd v0.8.0 release, checked against
-the release's `SHA256SUMS`. The Rust image tag must track
+toolchain and `Cargo.lock`, and installs NATS 2.15.3 and Copilot CLI 1.0.112. The Rust image tag must track
 `rust-toolchain.toml` when that toolchain changes. Client telemetry, OpenTelemetry and automatic Copilot updates are
 disabled; GitHub's server-side service accounting is unaffected.
 
@@ -63,7 +61,7 @@ scripts/demo-containers.sh smoke
 Apple container's build VM gets four CPUs and 8 GiB for the release build;
 under Docker, Podman or wslc, give the engine's VM or WSL comparable resources. The first build downloads dependencies and compiles a Linux release
 binary. `up` also builds when the image is absent; rerun `build` after source changes. The smoke check verifies all four
-live Copilot-backed ants, the assistant's grant and their MCP sockets, pauses and resumes each ant by admin order from the hub, checks that `hub-ant`'s bd database reads (`ants ant memories`),
+live Copilot-backed ants, the assistant's grant and their MCP sockets, pauses and resumes each ant by admin order from the hub, checks that each node's ant keeps its sense data (`ants ant memories`),
 then sends notes
 from every node, reading them from every other node through the hub. It makes no model calls and needs no Copilot
 sign-in.
@@ -113,4 +111,4 @@ networks and volumes: a demo started with one is stopped with the same one.
 `ANTS_DEMO_NAME` changes the resource prefix (default `ants-demo`); `ANTS_DEMO_STATE` changes the host directory holding
 the ownership marker, temporary build context and smoke logs (default `~/.local/share/ants/container-demo/`).
 Set both for a second independent demo. Nonempty directories without the demo marker and resources belonging
-to another state directory are refused. `ANTS_DEMO_COPILOT_VERSION` changes the npm version and `ANTS_DEMO_BD_VERSION` the bd release tag on the next `build`.
+to another state directory are refused. `ANTS_DEMO_COPILOT_VERSION` changes the npm version on the next `build`.
