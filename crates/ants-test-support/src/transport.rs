@@ -16,7 +16,8 @@ use futures::StreamExt as _;
 ///
 /// Two things differ from what the trait asks. A subscription resolves once written out, which the server may not
 /// have read yet: a test that waits for another connection's publish makes a round trip first. And a message's
-/// headers come in no order, as async-nats keeps them in a map.
+/// headers come in no order of their names, as async-nats keeps them in a map: only the values of one name are in
+/// the order the message carries them.
 pub struct NatsTransport {
     url: String,
     creds: Option<PathBuf>,

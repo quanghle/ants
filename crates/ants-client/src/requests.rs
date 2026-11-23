@@ -412,7 +412,9 @@ mod tests {
         assert_eq!(stored.stored_at.to_rfc3339(), "2026-11-20T10:00:00.500+00:00");
         assert_eq!(stored.headers, [("Nats-Msg-Id".to_owned(), "m1".to_owned())], "as its writer stored them");
 
-        let relayed = got("8", "{}").header("Nats-Stream", "KV_ants_read").header("Nats-Sequence", "3");
+        let relayed = Message::new("_INBOX.alice.x", "{}").header("Nats-Stream", "KV_ants_read");
+        let relayed = relayed.header("Nats-Sequence", "3");
+        let relayed = Message { headers: [relayed.headers, got("8", "").headers].concat(), ..relayed };
         assert_eq!(batch_answer(relayed).unwrap(), Got::Relayed(8));
         assert_eq!(batch_answer(got("9", r#"{"stream":"ANTS","seq":2}"#)).unwrap(), Got::Relayed(9), "an ack stored");
 
@@ -424,6 +426,35 @@ mod tests {
         let refused = Message { status: Some(408), description: Some("Bad Request".into()), ..Message::default() };
         assert!(matches!(batch_answer(refused), Err(Error::Status { status: 408, .. })));
         assert!(matches!(batch_answer(Message::new("x", "{}")), Err(Error::Malformed { .. })), "no sequence");
+    }
+
+    /// The stream's headers a writer stored under other cases of their names, and a time under the stream's own.
+    fn decoys(message: Message) -> Message {
+        message
+            .header("nats-stream", "KV_ants_read")
+            .header("NATS-STREAM", "KV_ants_read")
+            .header("nats-subject", "ants.inbox.alice.dev-b")
+            .header("Nats-subject", "ants.inbox.alice.dev-b")
+            .header("nats-sequence", "1")
+            .header("NATS-Sequence", "2")
+            .header("nats-time-stamp", "2020-01-01T00:00:00Z")
+            .header("Nats-Time-Stamp", "2020-01-01T00:00:00Z")
+    }
+
+    #[test]
+    fn a_stored_message_s_own_headers_under_the_stream_s_names_are_never_read_as_the_stream_s() {
+        let own = decoys(Message::new("_INBOX.alice.x", r#"{"text":"hi"}"#)).header("Nats-Msg-Id", "m1");
+        let answer = Message { headers: [own.headers, got("7", "").headers].concat(), ..own };
+        let Got::Stored(stored) = batch_answer(answer.clone()).unwrap() else { panic!("a stored message") };
+        assert_eq!((stored.seq, stored.subject.as_str()), (7, "ants.inbox.alice.dev-a"), "where the stream has it");
+        assert_eq!(stored.stored_at.to_rfc3339(), "2026-11-20T10:00:00.500+00:00");
+        assert_eq!(stored.headers, [("Nats-Msg-Id".to_owned(), "m1".to_owned())]);
+
+        let entry = kv_entry("reading", answer.clone()).unwrap();
+        assert_eq!(entry.revision, 7);
+
+        let twice = answer.header("Nats-Sequence", "9");
+        assert_eq!(batch_answer(twice).unwrap(), Got::Relayed(9), "the stream's own name twice, its value the last");
     }
 
     #[test]
