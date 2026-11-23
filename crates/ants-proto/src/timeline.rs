@@ -113,6 +113,7 @@ pub enum PromptEnd {
 }
 
 impl PromptEnd {
+    /// Its name on the wire, as serde writes it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Replied => "replied",

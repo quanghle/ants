@@ -142,6 +142,7 @@ pub enum TipVerdict {
 impl TipVerdict {
     pub const ALL: [Self; 3] = [Self::Helpful, Self::Stale, Self::Wrong];
 
+    /// Its name on the wire, as serde writes it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Helpful => "helpful",

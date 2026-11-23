@@ -125,6 +125,7 @@ pub enum Following {
 }
 
 impl Following {
+    /// Its name on the wire, as serde writes it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Inbox => "inbox",
