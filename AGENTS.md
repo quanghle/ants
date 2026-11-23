@@ -40,6 +40,12 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
   downloads and CI's tests all take it from there.
 - The web client's front end and its browser bindings (the crate `ants-web`) live in the repo `ants-web`, beside this
   one and local for now; its work and its spec (area web) are tracked in this repo's bd.
+- `crates/ants/web.sha256` pins the page of the web client, by its bundle's SHA-256, the ants-web commit built and the
+  ants version it is built for. `scripts/web.sh` builds the pinned page from the ants-web checkout beside this one
+  into `target/web`, which `cargo build --release --features web` embeds (`crates/ants/build.rs` checks the digest and
+  the version again); release builds turn the feature on, and fail while ants-web publishes no releases.
+  `scripts/web.sh --pin` builds the committed ants-web checkout and pins its page: do so with each change of the
+  workspace version (a test fails until then) and of ants-client that the page is built against.
 - Comment only code that needs clarification.
 - Modules are `x.rs` with submodules in `x/`, never `x/mod.rs`. Unit tests of `x.rs` start inline
   (`#[cfg(test)] mod tests { … }` at its end); once they outgrow the code they test, they move to `x/tests.rs`

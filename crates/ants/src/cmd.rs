@@ -53,6 +53,7 @@ pub(crate) mod thread;
 pub(crate) mod tools;
 pub(crate) mod trail;
 pub(crate) mod watch;
+pub(crate) mod web;
 pub(crate) mod webhook;
 
 use anyhow::Result;
@@ -119,6 +120,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::Leaf(command) => leaf::run(&conn, command).await,
         Command::Bridge(command) => bridge::run(command).await,
         Command::Hook(command) => hook::run(&nats()?, command).await,
+        Command::Web(args) => web::run(args).await,
         Command::Webhook(command) => webhook::run(&conn, command).await,
     }
 }

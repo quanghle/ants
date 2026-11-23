@@ -43,6 +43,15 @@ unicode-width = "0.2.3"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
+[features]
+# Embed the page of the web client, served by `ants web` and written by `ants web export`: the bundle scripts/web.sh
+# puts in target/web, checked against web.sha256 (build.rs). Release builds turn it on; without it, a build needs
+# neither the bundle nor Node.
+web = ["dep:ring"]
+
+[build-dependencies]
+ring = { version = "0.17.14", optional = true }
+
 [dev-dependencies]
 agent-client-protocol = { workspace = true, features = ["stdio"] }
 ants-test-support.workspace = true

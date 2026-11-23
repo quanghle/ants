@@ -51,7 +51,7 @@ See [docs/architecture.md](docs/architecture.md) for the store/subject model, de
 
 ## Install a release
 
-Each `v*` tag publishes [release](https://github.com/quanghle/ants/releases) archives of the `ants` binary for Linux x86_64 and arm64 (glibc 2.43+), macOS arm64 and Windows x86_64, with `SHA256SUMS` and build provenance attestations. Each archive also holds the [nats-server](https://github.com/nats-io/nats-server) release ants is tested with (pinned in [`crates/ants/nats-server.sha256`](crates/ants/nats-server.sha256)) and its license, `LICENSE-nats-server`:
+Each `v*` tag publishes [release](https://github.com/quanghle/ants/releases) archives of the `ants` binary for Linux x86_64 and arm64 (glibc 2.43+), macOS arm64 and Windows x86_64, with `SHA256SUMS` and build provenance attestations. Each archive also holds the [nats-server](https://github.com/nats-io/nats-server) release ants is tested with (pinned in [`crates/ants/nats-server.sha256`](crates/ants/nats-server.sha256)) and its license, `LICENSE-nats-server`; the `ants` binary embeds the page of the web client pinned in [`crates/ants/web.sha256`](crates/ants/web.sha256), which `ants web` serves:
 
 ```sh
 tag=v0.3.0 target=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
@@ -61,7 +61,7 @@ tar -xzf "ants-$tag-$target.tar.gz"
 install "ants-$tag-$target/ants" "ants-$tag-$target/nats-server" ~/.local/bin/
 ```
 
-Windows takes `ants-$tag-x86_64-pc-windows-msvc.zip`. Once installed, `ants update` replaces the binary, and the nats-server beside it, with the latest release (`ants update --check` only tells whether one is out; see [docs/operations.md](docs/operations.md#updating-from-a-release)). A release needs the same harness CLIs as a build from source (below). To cut a release, set `version` in `Cargo.toml`, merge, then push the tag `v<version>` (a suffix such as `-rc.1` makes a pre-release). The Release workflow reruns CI's checks unless CI already passed on that commit pushed to main; running it by hand only checks and builds. Release notes list the bd work closed and the requirements added since the previous release, from the committed `.bd/issues.jsonl`; `scripts/release-notes.sh v<version>` previews them. Notes over GitHub's 125000-character limit only count the requirements and attach the full notes as `release-notes.md`.
+Windows takes `ants-$tag-x86_64-pc-windows-msvc.zip`. Once installed, `ants update` replaces the binary, and the nats-server beside it, with the latest release (`ants update --check` only tells whether one is out; see [docs/operations.md](docs/operations.md#updating-from-a-release)). A release needs the same harness CLIs as a build from source (below). To cut a release, set `version` in `Cargo.toml`, pin the page built for it (`scripts/web.sh --pin`, [docs/operations.md](docs/operations.md#the-web-clients-page)), merge, then push the tag `v<version>` (a suffix such as `-rc.1` makes a pre-release). The Release workflow reruns CI's checks unless CI already passed on that commit pushed to main; running it by hand only checks and builds. Release notes list the bd work closed and the requirements added since the previous release, from the committed `.bd/issues.jsonl`; `scripts/release-notes.sh v<version>` previews them. Notes over GitHub's 125000-character limit only count the requirements and attach the full notes as `release-notes.md`.
 
 ## Install from source
 
@@ -76,6 +76,8 @@ git clone https://github.com/quanghle/ants.git
 cd ants
 cargo install --locked --path crates/ants
 ```
+
+A binary built so has no page of the web client, which needs the ants-web checkout to build: `scripts/web.sh` and `cargo install --locked --path crates/ants --features web` embed it ([docs/operations.md](docs/operations.md#the-web-clients-page)).
 
 Platform notes (Windows named pipes, cross-builds), automatic binary upgrade draining, and launchd/systemd service installation live in [docs/operations.md](docs/operations.md).
 
@@ -95,7 +97,7 @@ ants trail run deploy --follow                      # start and follow a run, it
 ants                                                # full-screen chat with mouse, clipboard and background alerts (also: ants chat)
 ```
 
-`ants setup --managed-nats` instead has `ants daemon` start, supervise and stop that `nats-server` itself, with no separate NATS service ([docs/operations.md](docs/operations.md#managed-nats-server)). `ants setup --web` adds a loopback WebSocket listener to that `nats-server`, taking only the page of `ants web` ([docs/operations.md](docs/operations.md#websocket-listeners-for-pages)).
+`ants setup --managed-nats` instead has `ants daemon` start, supervise and stop that `nats-server` itself, with no separate NATS service ([docs/operations.md](docs/operations.md#managed-nats-server)). `ants setup --web` adds a loopback WebSocket listener to that `nats-server`, taking only the page of `ants web`, which serves the web client from a release binary on `http://127.0.0.1:4280` ([docs/operations.md](docs/operations.md#websocket-listeners-for-pages), [the page](docs/operations.md#the-web-clients-page)).
 
 Join an existing team hub as a human using shared bootstrap credentials ([docs/auth.md](docs/auth.md#registering-humans)):
 

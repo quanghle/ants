@@ -1,0 +1,6 @@
+# The page of the web client a build with the `web` feature embeds (release builds turn it on): the SHA-256 of the
+# bundle the repo ants-web builds (its scripts/build.sh prints it), the ants-web commit built, and the ants version the
+# page is built for, which has to be the binary's. `scripts/web.sh --pin` writes this line; `scripts/web.sh` puts the
+# pinned bundle in target/web, where crates/ants/build.rs takes it, and the build fails on a bundle of another digest
+# or built for another ants version.
+2f490485a0e04a8da23f06bfb4bcaa10d565c19f1adb19d2ed0d2221f6fe8cb7  ants-web ac9d69b for ants 0.3.0
