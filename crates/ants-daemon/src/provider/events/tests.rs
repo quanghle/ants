@@ -1,5 +1,6 @@
-//! Tests of lifecycle events told to providers: order per ant, acks and retries under the same id, calls going on while
-//! the queues are held, a capped queue kept across restarts, renames, and providers without events.
+//! Tests of lifecycle events told to providers: order per ant, acks and retries under the same id, an ant's events
+//! stored and told while another ant's queue is held, a call going on while its own is, a capped queue kept across
+//! restarts, renames, a queue file read again, and providers without events.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7,6 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ants_proto::provider::{
     Ack, Capabilities, Host, InitializeParams, InitializeResult, Provider, Rebuilt, WakeRequest, Woken,
 };
+
+use tokio::time::Instant;
 
 use super::*;
 
@@ -128,7 +131,7 @@ async fn each_ant_s_events_arrive_in_order_and_leave_the_queue_once_acked() {
     assert_eq!(of("dev-a"), [Some(t("t0")), Some(t("t1")), Some(t("t2"))]);
     assert_eq!(of("dev-b").len(), 3);
     for _ in 0..100 {
-        if outbox.pending(&p("dev-a")).await.is_empty() && outbox.pending(&p("dev-b")).await.is_empty() {
+        if outbox.pending(&a).await.is_empty() && outbox.pending(&b).await.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -137,18 +140,61 @@ async fn each_ant_s_events_arrive_in_order_and_leave_the_queue_once_acked() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Wait until the queue of `home` holds no event.
+async fn drained(outbox: &Outbox, home: &Path) {
+    for _ in 0..1_000 {
+        if outbox.pending(home).await.is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    panic!("events left in the queue of {}", home.display());
+}
+
 #[tokio::test]
-async fn a_call_in_flight_goes_on_while_the_delivering_task_waits_for_the_queues() {
+async fn an_ant_s_events_are_stored_and_told_while_another_ant_s_queue_is_held() {
+    let dir = ants_test_support::scratch_dir("events-apart");
+    let provider = Recording::taking_events();
+    let outbox = outbox_to(provider.clone()).await;
+    let (a, b) = (dir.join("a"), dir.join("b"));
+    outbox.push(&a, event(Uuid::new_v4(), &p("dev-a"), "ida", None, EventKind::AntAdded)).await;
+    took(&provider, 1).await;
+    drained(&outbox, &a).await;
+    // As dev-a's queue file being written: its queue is held.
+    let queue = outbox.queue(&a);
+    let held = queue.state.lock().await;
+    let storing = outbox.push(&a, event(Uuid::new_v4(), &p("dev-a"), "ida", None, EventKind::SessionLost));
+    let mut storing = std::pin::pin!(storing);
+    assert!(futures::poll!(&mut storing).is_pending(), "an ant's own event waits for its queue");
+    for n in 0..3 {
+        let thread = t(&format!("t{n}"));
+        let pushing =
+            outbox.push(&b, event(Uuid::new_v4(), &p("dev-b"), "idb", Some(&thread), EventKind::ThreadExpired));
+        tokio::time::timeout(Duration::from_secs(5), pushing).await.expect("stored while dev-a's queue is held");
+    }
+    took(&provider, 4).await;
+    drained(&outbox, &b).await;
+    let got = provider.got.locked().clone();
+    let threads: Vec<_> = got[1..].iter().map(|e| e.thread.clone()).collect();
+    assert_eq!(threads, [Some(t("t0")), Some(t("t1")), Some(t("t2"))]);
+    assert!(!queue_file(&b).exists(), "acked and gone from the file meanwhile");
+    drop(held);
+    storing.await;
+    took(&provider, 5).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_call_in_flight_goes_on_while_its_queue_is_held() {
     let dir = ants_test_support::scratch_dir("events-held");
     let gate = Arc::new(Notify::new());
     let provider = Arc::new(Recording { events: true, gate: Some(gate.clone()), ..Recording::default() });
     let outbox = outbox_to(provider.clone()).await;
     outbox.push(&dir, event(Uuid::new_v4(), &p("dev-a"), "ida", None, EventKind::ThreadExpired)).await;
     took(&provider, 1).await;
-    // As a burst of events being stored holds the queues: the delivering task, woken, waits for them.
-    let queues = outbox.0.queues.lock().await;
-    outbox.wake();
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    // As the ant's next event being stored holds its queue.
+    let queue = outbox.queue(&dir);
+    let held = queue.state.lock().await;
     gate.notify_one();
     for _ in 0..1_000 {
         if provider.answered.load(Ordering::Relaxed) > 0 {
@@ -156,15 +202,38 @@ async fn a_call_in_flight_goes_on_while_the_delivering_task_waits_for_the_queues
         }
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    assert_eq!(provider.answered.load(Ordering::Relaxed), 1, "the call ended while the queues were held");
-    drop(queues);
-    for _ in 0..1_000 {
-        if outbox.pending(&p("dev-a")).await.is_empty() {
-            break;
+    assert_eq!(provider.answered.load(Ordering::Relaxed), 1, "the call ended while the queue was held");
+    drop(held);
+    drained(&outbox, &dir).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_burst_over_many_ants_is_told_in_order_per_ant() {
+    let dir = ants_test_support::scratch_dir("events-burst");
+    let provider = Recording::taking_events();
+    let outbox = outbox_to(provider.clone()).await;
+    let (ants, each) = (40, 5);
+    let pushing = (0..ants).map(|a| {
+        let (outbox, home, ant) = (outbox.clone(), dir.join(format!("h{a}")), p(&format!("dev-{a}")));
+        async move {
+            for n in 0..each {
+                let thread = t(&format!("t{n}"));
+                outbox.push(&home, event(Uuid::new_v4(), &ant, "id", Some(&thread), EventKind::ThreadExpired)).await;
+            }
         }
-        tokio::time::sleep(Duration::from_millis(1)).await;
+    });
+    futures::future::join_all(pushing).await;
+    took(&provider, ants * each).await;
+    let got = provider.got.locked().clone();
+    assert_eq!(got.len(), ants * each, "each told once");
+    for a in 0..ants {
+        let (ant, home) = (p(&format!("dev-{a}")), dir.join(format!("h{a}")));
+        let threads: Vec<_> = got.iter().filter(|e| e.ant == ant).map(|e| e.thread.clone().unwrap()).collect();
+        assert_eq!(threads, (0..each).map(|n| t(&format!("t{n}"))).collect::<Vec<_>>(), "{ant}");
+        drained(&outbox, &home).await;
+        assert!(!queue_file(&home).exists());
     }
-    assert!(outbox.pending(&p("dev-a")).await.is_empty(), "the event left the queue once acked");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -324,6 +393,54 @@ async fn events_queued_under_an_earlier_name_are_told_of_the_renamed_ant() {
     );
     assert!(got.iter().all(|e| e.ant == p("dev-b")), "{got:?}");
     assert_eq!(got[0].identity, "ida", "an event keeps the identity it happened to");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// An ant served under a new name by the process that read its queue under the old one: the event in flight, acked
+/// under the old name, is told again under the new one with the rest.
+#[tokio::test]
+async fn events_of_a_queue_read_under_an_earlier_name_are_told_of_the_renamed_ant() {
+    let dir = ants_test_support::scratch_dir("events-renamed-open");
+    let gate = Arc::new(Notify::new());
+    let provider = Arc::new(Recording { events: true, gate: Some(gate.clone()), ..Recording::default() });
+    let outbox = outbox_to(provider.clone()).await;
+    let first = event(Uuid::new_v4(), &p("dev-a"), "ida", None, EventKind::SessionLost);
+    outbox.push(&dir, first.clone()).await;
+    outbox.push(&dir, event(Uuid::new_v4(), &p("dev-a"), "ida", None, EventKind::ThreadExpired)).await;
+    took(&provider, 1).await;
+    std::fs::create_dir_all(dir.join(crate::sense::DIR)).unwrap();
+    std::fs::write(dir.join(crate::sense::DIR).join("names"), "dev-a\n").unwrap();
+    outbox.open(&p("dev-b"), &dir).await;
+    assert!(queued(&dir).iter().all(|e| e.ant == p("dev-b")), "the file holds the events under the new name");
+    for told in 1..=3 {
+        took(&provider, told).await;
+        gate.notify_one();
+    }
+    drained(&outbox, &dir).await;
+    let got = provider.got.locked().clone();
+    let told: Vec<_> = got.iter().map(|e| (e.ant.as_str(), e.id == first.id)).collect();
+    assert_eq!(told, [("dev-a", true), ("dev-b", true), ("dev-b", false)]);
+    assert_eq!(outbox.0.queues.locked().len(), 1, "one queue a file");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Events queued in a home by another process ([`arrived`]) after its queue was read are told once the ant is served
+/// there again, none lost to the next write of the file.
+#[tokio::test]
+async fn an_ant_served_again_is_told_of_the_events_its_file_got_meanwhile() {
+    let dir = ants_test_support::scratch_dir("events-reread");
+    let provider = Recording::taking_events();
+    let outbox = outbox_to(provider.clone()).await;
+    let ant = p("dev-a");
+    Lifecycle::open(&outbox, &ant, "ida", &dir).await.unwrap();
+    took(&provider, 1).await;
+    drained(&outbox, &dir).await;
+    let cloned = EventKind::AntCloned { from: p("dev-z"), from_identity: "idz".to_owned() };
+    arrived(&dir, &ant, "ida", vec![cloned.clone()]).unwrap();
+    let lifecycle = Lifecycle::open(&outbox, &ant, "ida", &dir).await.unwrap();
+    lifecycle.emit(EventKind::SessionLost, None).await;
+    took(&provider, 3).await;
+    assert_eq!(provider.kinds(), [EventKind::AntAdded, cloned, EventKind::SessionLost]);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

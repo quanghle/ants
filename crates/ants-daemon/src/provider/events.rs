@@ -3,16 +3,20 @@
 //! happened, to which ant and identity, on which thread and when: never what a message, prompt or reply said.
 //!
 //! An ant's events wait in its home, one JSON [`Event`] a line in [`QUEUE`], from when they happen until its provider
-//! acks them, so a restarted daemon tells those left. One task delivers the events of every ant ([`Outbox`]), each call
-//! of a provider a task of its own, an ant's next only once its provider acked the one before, retrying with a backoff
-//! while the provider fails or is not connected. Past [`CAP`] waiting, an ant's oldest go, with a warning. An ant renamed takes the events queued under
-//! its earlier names, as its provider serves it under its new one.
+//! acks them, so a restarted daemon tells those left. Each home's queue has a lock, a file and, while it holds
+//! events, a delivering task of its own ([`Outbox`]), so storing or telling one ant's events waits for no other
+//! ant's; its file is read and written whole in the blocking pool, an event stored before whoever tells of it goes
+//! on. The task tells the ant's next event only once its provider acked the one before, retrying with a backoff while
+//! the provider fails or is not connected, and holds the queue's lock between the calls only. Past [`CAP`] waiting,
+//! an ant's oldest go, with a warning. An ant renamed takes the events queued under its earlier names, as its
+//! provider serves it under its new one.
 //!
 //! Beside the queue, [`IDENTITY`] holds the id of the identity record the provider was told of, so a daemon tells of an
 //! ant new to its home ([`EventKind::AntAdded`]) once; and [`RETIRED`] marks an ant retired ([`mark_retired`]) until
 //! a daemon serves it again ([`EventKind::AntRevived`]).
 
 use std::collections::{HashMap, VecDeque};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,13 +25,9 @@ use ants_proto::provider::{BoxFuture, Capability, Connected, Event, EventKind, O
 use ants_proto::{ThreadId, UserId};
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
-use futures::StreamExt as _;
-use futures::stream::FuturesUnordered;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::sync::MutexExt as _;
@@ -55,28 +55,34 @@ pub const RETIRED_WAIT: Duration = Duration::from_secs(10);
 /// What connects the provider of an ant: [`super::Providers::of`] in the daemon.
 pub type Resolve = Arc<dyn Fn(UserId) -> BoxFuture<'static, Option<Connected>> + Send + Sync>;
 
-/// The queues of the ants' events and the one task delivering them, started on the first event: one a process
+/// The queues of the ants' events, each delivered by a task of its own while it holds any: one a process
 /// ([`super::Providers::outbox`]).
 #[derive(Clone)]
 pub struct Outbox(Arc<Inner>);
 
 struct Inner {
     resolve: Resolve,
-    queues: tokio::sync::Mutex<HashMap<UserId, Queue>>,
-    wake: Notify,
-    /// Notified each time a sent event settles ([`Inner::settle`]).
-    settled: Notify,
-    task: std::sync::Mutex<Option<JoinHandle<()>>>,
+    /// The queues by their file, held only to find one: no ant's queue waits for another's.
+    queues: std::sync::Mutex<HashMap<PathBuf, Arc<Queue>>>,
     retry: (Duration, Duration),
 }
 
-/// An ant's events not yet acked, as its queue file holds them.
+/// The queue of the ant of one home: its file is read and written only under `state`.
 struct Queue {
     file: PathBuf,
+    state: tokio::sync::Mutex<State>,
+    /// Notified each time a sent event settles.
+    settled: Notify,
+}
+
+/// An ant's events not yet acked, as its queue file holds them.
+#[derive(Default)]
+struct State {
+    /// The name the ant is served under: none until the file is read.
+    ant: Option<UserId>,
     events: VecDeque<Event>,
-    sending: bool,
-    retry_at: Option<Instant>,
-    backoff: Duration,
+    /// The task delivering the events, none once it found no event left.
+    task: Option<JoinHandle<()>>,
 }
 
 /// What came of sending an event.
@@ -87,8 +93,6 @@ enum Sent {
     Failed(String),
 }
 
-type Sending = BoxFuture<'static, (UserId, Uuid, Sent)>;
-
 impl Outbox {
     pub fn new(resolve: Resolve) -> Self {
         Self::with_retry(resolve, FIRST_RETRY, LAST_RETRY)
@@ -96,14 +100,7 @@ impl Outbox {
 
     /// An outbox retrying after `first`, doubling up to `last`.
     pub fn with_retry(resolve: Resolve, first: Duration, last: Duration) -> Self {
-        Self(Arc::new(Inner {
-            resolve,
-            queues: tokio::sync::Mutex::default(),
-            wake: Notify::new(),
-            settled: Notify::new(),
-            task: std::sync::Mutex::default(),
-            retry: (first, last),
-        }))
+        Self(Arc::new(Inner { resolve, queues: std::sync::Mutex::default(), retry: (first, last) }))
     }
 
     /// Whether `ant`'s provider may take events: false only when it is connected without agreeing on them.
@@ -111,23 +108,13 @@ impl Outbox {
         (self.0.resolve)(ant.clone()).await.is_none_or(|provider| provider.has(Capability::Events))
     }
 
-    /// Read the queue of `ant`, whose home is `home`, from its file, unless read already, and deliver what it holds:
-    /// the events queued under an earlier name of the ant as its own ([`Queue::read`]), and no queue read under
-    /// another name from the same file any more.
+    /// Read the queue of `ant`, whose home is `home`, from its file, and deliver what it holds: the events queued
+    /// under an earlier name of the ant as its own ([`State::read`]), also when the queue was read under that name.
     pub(crate) async fn open(&self, ant: &UserId, home: &Path) {
-        let mut queues = self.0.queues.lock().await;
-        if queues.contains_key(ant) {
-            return;
-        }
-        let file = queue_file(home);
-        queues.retain(|_, queue| queue.file != file);
-        let queue = Queue::read(home, ant, self.0.retry.0).await;
-        let pending = !queue.events.is_empty();
-        queues.insert(ant.clone(), queue);
-        drop(queues);
-        if pending {
-            self.wake();
-        }
+        let queue = self.queue(home);
+        let mut state = queue.state.lock().await;
+        state.read(&queue.file, home, ant).await;
+        self.deliver(&queue, &mut state);
     }
 
     /// Queue `event` for its ant, whose home is `home`, stored before it returns, and deliver it.
@@ -140,128 +127,106 @@ impl Outbox {
     /// [`Outbox::push`], failing when the event could not be stored: it is delivered all the same while the process
     /// runs.
     pub async fn store(&self, home: &Path, event: Event) -> Result<()> {
-        let mut queues = self.0.queues.lock().await;
-        let queue = match queues.entry(event.ant.clone()) {
-            std::collections::hash_map::Entry::Occupied(queue) => queue.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(Queue::read(home, &event.ant, self.0.retry.0).await)
-            }
-        };
-        let stored = queue.push(event).await;
-        drop(queues);
-        self.wake();
+        let queue = self.queue(home);
+        let mut state = queue.state.lock().await;
+        if state.ant.is_none() {
+            state.read(&queue.file, home, &event.ant).await;
+        }
+        let stored = state.push(&queue.file, event).await;
+        self.deliver(&queue, &mut state);
         stored
     }
 
-    /// The events of `ant` not yet acked.
-    pub async fn pending(&self, ant: &UserId) -> Vec<Event> {
-        self.0.queues.lock().await.get(ant).map_or_else(Vec::new, |queue| queue.events.iter().cloned().collect())
+    /// The events not yet acked of the ant whose home is `home`.
+    pub async fn pending(&self, home: &Path) -> Vec<Event> {
+        match self.known(home) {
+            Some(queue) => queue.state.lock().await.events.iter().cloned().collect(),
+            None => Vec::new(),
+        }
     }
 
-    /// Wait up to `wait` for `ant`'s event `id` to leave its queue, acked or dropped: whether it did.
-    pub async fn delivered(&self, ant: &UserId, id: Uuid, wait: Duration) -> bool {
+    /// Wait up to `wait` for the event `id` of the ant whose home is `home` to leave its queue, acked or dropped:
+    /// whether it did.
+    pub async fn delivered(&self, home: &Path, id: Uuid, wait: Duration) -> bool {
+        let Some(queue) = self.known(home) else { return true };
         let waiting = async {
             loop {
-                let settled = self.0.settled.notified();
+                let settled = queue.settled.notified();
                 let mut settled = std::pin::pin!(settled);
                 settled.as_mut().enable();
-                let queues = self.0.queues.lock().await;
-                if !queues.get(ant).is_some_and(|queue| queue.events.iter().any(|event| event.id == id)) {
+                let state = queue.state.lock().await;
+                if state.events.iter().all(|event| event.id != id) {
                     return;
                 }
-                drop(queues);
+                drop(state);
                 settled.await;
             }
         };
         tokio::time::timeout(wait, waiting).await.is_ok()
     }
 
-    /// Wake the delivering task, starting it when not running: on the first event, or after the runtime it ran on
-    /// stopped.
-    fn wake(&self) {
-        let mut task = self.0.task.locked();
-        if task.as_ref().is_none_or(JoinHandle::is_finished) {
-            *task = Some(tokio::spawn(deliver(self.0.clone())));
+    /// The queue of the ant whose home is `home`, its file not read yet when new.
+    fn queue(&self, home: &Path) -> Arc<Queue> {
+        let file = queue_file(home);
+        let mut queues = self.0.queues.locked();
+        let queue = queues.entry(file).or_insert_with_key(|file| {
+            Arc::new(Queue { file: file.clone(), state: tokio::sync::Mutex::default(), settled: Notify::new() })
+        });
+        queue.clone()
+    }
+
+    /// The queue of the ant whose home is `home`, if any was read.
+    fn known(&self, home: &Path) -> Option<Arc<Queue>> {
+        self.0.queues.locked().get(&queue_file(home)).cloned()
+    }
+
+    /// Start the task delivering `queue`, whose `state` the caller holds, when it has events and no task: on its
+    /// first event, or after the runtime its task ran on stopped.
+    fn deliver(&self, queue: &Arc<Queue>, state: &mut State) {
+        if !state.events.is_empty() && state.task.as_ref().is_none_or(JoinHandle::is_finished) {
+            state.task = Some(tokio::spawn(deliver(self.0.clone(), queue.clone())));
         }
-        drop(task);
-        self.0.wake.notify_one();
     }
 }
 
-/// Deliver the events of every ant for good: each ant's first, once due, while none of its is in flight.
-async fn deliver(inner: Arc<Inner>) {
-    let mut sending: FuturesUnordered<Sending> = FuturesUnordered::new();
+/// Deliver the events of `queue` until none is left: its first, the next once the provider acked it, sent again after
+/// a backoff while it fails. The queue is held between the calls only, never across one.
+async fn deliver(inner: Arc<Inner>, queue: Arc<Queue>) {
+    let mut backoff = inner.retry.0;
     loop {
-        let next = inner.send_due(&mut sending).await;
-        tokio::select! {
-            Some((ant, id, sent)) = sending.next() => inner.settle(&ant, id, sent).await,
-            () = inner.wake.notified() => {}
-            () = tokio::time::sleep_until(next.unwrap_or_else(Instant::now)), if next.is_some() => {}
-        }
-    }
-}
-
-impl Inner {
-    /// Send the first event of each ant that has none in flight and is due, returning when the next is due.
-    async fn send_due(&self, sending: &mut FuturesUnordered<Sending>) -> Option<Instant> {
-        let now = Instant::now();
-        let mut next: Option<Instant> = None;
-        for (ant, queue) in self.queues.lock().await.iter_mut() {
-            let Some(event) = queue.events.front().filter(|_| !queue.sending) else { continue };
-            if let Some(at) = queue.retry_at.filter(|at| *at > now) {
-                next = Some(next.map_or(at, |next| next.min(at)));
-                continue;
-            }
-            queue.sending = true;
-            let (resolve, ant, event) = (self.resolve.clone(), ant.clone(), event.clone());
-            let (id, of) = (event.id, ant.clone());
-            // A task of its own: the call goes on while this one waits for the queues, which a burst of events
-            // holds for seconds, and a call left unpolled would keep what it holds of its provider, as sense's
-            // turn at the ant's log, from the ant's other calls.
-            let call = tokio::spawn(async move {
-                match resolve(of).await {
-                    None => Sent::Failed("no provider connected".to_owned()),
-                    Some(provider) => match tokio::time::timeout(CALL_WAIT, provider.event(event)).await {
-                        Ok(Ok(_)) => Sent::Acked,
-                        Ok(Err(e)) if e.code == RpcError::NOT_AGREED => Sent::NotAgreed,
-                        Ok(Err(e)) => Sent::Failed(e.to_string()),
-                        Err(_) => Sent::Failed(format!("no ack within {}s", CALL_WAIT.as_secs())),
-                    },
-                }
-            });
-            sending.push(Box::pin(async move {
-                let sent = call.await.unwrap_or_else(|e| Sent::Failed(format!("the call ended: {e}")));
-                (ant, id, sent)
-            }));
-        }
-        next
-    }
-
-    /// Take what came of sending `ant`'s event `id`: drop it once acked, else retry it after the backoff.
-    async fn settle(&self, ant: &UserId, id: Uuid, sent: Sent) {
-        self.settle_queue(ant, id, sent).await;
-        self.settled.notify_waiters();
-    }
-
-    async fn settle_queue(&self, ant: &UserId, id: Uuid, sent: Sent) {
-        let mut queues = self.queues.lock().await;
-        let Some(queue) = queues.get_mut(ant) else { return };
-        queue.sending = false;
+        let mut state = queue.state.lock().await;
+        let (Some(ant), Some(event)) = (state.ant.clone(), state.events.front().cloned()) else {
+            state.task = None;
+            return;
+        };
+        drop(state);
+        let id = event.id;
+        let sent = match (inner.resolve)(ant.clone()).await {
+            None => Sent::Failed("no provider connected".to_owned()),
+            Some(provider) => match tokio::time::timeout(CALL_WAIT, provider.event(event)).await {
+                Ok(Ok(_)) => Sent::Acked,
+                Ok(Err(e)) if e.code == RpcError::NOT_AGREED => Sent::NotAgreed,
+                Ok(Err(e)) => Sent::Failed(e.to_string()),
+                Err(_) => Sent::Failed(format!("no ack within {}s", CALL_WAIT.as_secs())),
+            },
+        };
+        let mut state = queue.state.lock().await;
+        let mut retry_in = None;
         match sent {
             Sent::Acked => {
-                if queue.events.front().is_some_and(|first| first.id == id) {
-                    queue.events.pop_front();
-                    queue.store().await;
+                // An event told under a name the ant has left since stays, to be told under its current one.
+                if state.events.front().is_some_and(|first| first.id == id && first.ant == ant) {
+                    state.events.pop_front();
+                    state.store(&queue.file).await;
                 }
-                (queue.retry_at, queue.backoff) = (None, self.retry.0);
+                backoff = inner.retry.0;
             }
             Sent::NotAgreed => {
-                tracing::info!(%ant, dropped = queue.events.len(), "the provider takes no events; dropping the ant's");
-                queue.events.clear();
-                queue.store().await;
+                tracing::info!(%ant, dropped = state.events.len(), "the provider takes no events; dropping the ant's");
+                state.events.clear();
+                state.store(&queue.file).await;
             }
             Sent::Failed(why) => {
-                let backoff = queue.backoff;
                 tracing::warn!(
                     %ant,
                     event = %id,
@@ -269,67 +234,65 @@ impl Inner {
                     retry_in = backoff.as_secs_f64(),
                     "telling the provider of a lifecycle event"
                 );
-                queue.retry_at = Some(Instant::now() + backoff);
-                queue.backoff = (backoff * 2).min(self.retry.1);
+                retry_in = Some(backoff);
+                backoff = (backoff * 2).min(inner.retry.1);
             }
+        }
+        drop(state);
+        queue.settled.notify_waiters();
+        if let Some(retry_in) = retry_in {
+            tokio::time::sleep(retry_in).await;
         }
     }
 }
 
-impl Queue {
-    /// The queue of `ant` in `home`, its events queued under an earlier name of the ant
-    /// ([`crate::sense::earlier_names`]) told as its own, as the name they carry is no longer served: written again
-    /// when any was.
-    async fn read(home: &Path, ant: &UserId, backoff: Duration) -> Self {
-        let file = queue_file(home);
-        let mut events: VecDeque<Event> = VecDeque::new();
-        match tokio::fs::read_to_string(&file).await {
-            Ok(text) => {
-                for line in text.lines().filter(|line| !line.trim().is_empty()) {
-                    match serde_json::from_str(line) {
-                        Ok(event) => events.push_back(event),
-                        Err(e) => tracing::warn!(file = %file.display(), error = %e, "skipping an unreadable event"),
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(file = %file.display(), error = %e, "reading the queue of lifecycle events"),
+impl State {
+    /// Read the events of `ant` from `file`, the queue of its home `home`: those queued under an earlier name of the
+    /// ant ([`crate::sense::earlier_names`]) told as its own, as the name they carry is no longer served, the file
+    /// written again when any was.
+    async fn read(&mut self, file: &Path, home: &Path, ant: &UserId) {
+        self.events = blocking(read(file.to_owned())).await;
+        self.ant = Some(ant.clone());
+        let renamed = rename(home, ant, &mut self.events);
+        if self.trim(file) > 0 || renamed {
+            self.store(file).await;
         }
-        let renamed = rename(home, ant, &mut events);
-        let mut queue = Self { file, events, sending: false, retry_at: None, backoff };
-        if queue.trim() > 0 || renamed {
-            queue.store().await;
-        }
-        queue
     }
 
-    /// Add `event`, appended to the file, or the file written again when the oldest went past [`CAP`].
-    async fn push(&mut self, event: Event) -> Result<()> {
+    /// Add `event`, appended to `file`, or the file written again when the oldest went past [`CAP`].
+    async fn push(&mut self, file: &Path, event: Event) -> Result<()> {
         let line = serde_json::to_string(&event).context("writing a lifecycle event")? + "\n";
         self.events.push_back(event);
-        if self.trim() > 0 {
-            let file = self.file.display();
-            return rewrite(&self.file, &self.events).await.with_context(|| format!("writing {file}"));
+        if self.trim(file) > 0 {
+            return self.rewrite(file).await.with_context(|| format!("writing {}", file.display()));
         }
-        let file = self.file.display();
-        append(&self.file, line.as_bytes()).await.with_context(|| format!("appending to {file}"))
+        blocking(append(file.to_owned(), line)).await.with_context(|| format!("appending to {}", file.display()))
     }
 
     /// Drop the oldest events past [`CAP`]: how many.
-    fn trim(&mut self) -> usize {
+    fn trim(&mut self, file: &Path) -> usize {
         let over = self.events.len().saturating_sub(CAP);
         if over > 0 {
             self.events.drain(..over);
-            tracing::warn!(file = %self.file.display(), dropped = over, "dropping the oldest lifecycle events past the cap");
+            tracing::warn!(file = %file.display(), dropped = over, "dropping the oldest lifecycle events past the cap");
         }
         over
     }
 
-    /// Write the file again with the events left, removed when none is.
-    async fn store(&self) {
-        if let Err(e) = rewrite(&self.file, &self.events).await {
-            tracing::warn!(file = %self.file.display(), error = format!("{e:#}"), "storing the lifecycle events");
+    /// Write `file` again with the events left, removed when none is.
+    async fn store(&self, file: &Path) {
+        if let Err(e) = self.rewrite(file).await {
+            tracing::warn!(file = %file.display(), error = format!("{e:#}"), "storing the lifecycle events");
         }
+    }
+
+    async fn rewrite(&self, file: &Path) -> Result<()> {
+        let mut text = String::new();
+        for event in &self.events {
+            text += &serde_json::to_string(event)?;
+            text.push('\n');
+        }
+        blocking(rewrite(file.to_owned(), text)).await
     }
 }
 
@@ -357,34 +320,63 @@ fn rename(home: &Path, ant: &UserId, events: &mut VecDeque<Event>) -> bool {
     renamed
 }
 
-async fn append(file: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(dir) = file.parent() {
-        tokio::fs::create_dir_all(dir).await?;
+/// Run `work`, the whole of one read or write of a queue file, off the runtime's thread: done once this returns, and
+/// done all the same when the caller stops waiting.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(done) => done,
+        Err(e) => std::panic::resume_unwind(e.into_panic()),
     }
-    let mut out = tokio::fs::OpenOptions::new().create(true).append(true).open(file).await?;
-    out.write_all(bytes).await?;
-    out.sync_data().await?;
-    Ok(())
 }
 
-async fn rewrite(file: &Path, events: &VecDeque<Event>) -> Result<()> {
-    if events.is_empty() {
-        return match tokio::fs::remove_file(file).await {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
-            _ => Ok(()),
-        };
+/// The events `file` holds.
+fn read(file: PathBuf) -> impl FnOnce() -> VecDeque<Event> {
+    move || {
+        let mut events = VecDeque::new();
+        match std::fs::read_to_string(&file) {
+            Ok(text) => {
+                for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                    match serde_json::from_str(line) {
+                        Ok(event) => events.push_back(event),
+                        Err(e) => tracing::warn!(file = %file.display(), error = %e, "skipping an unreadable event"),
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(file = %file.display(), error = %e, "reading the queue of lifecycle events"),
+        }
+        events
     }
-    let mut text = String::new();
-    for event in events {
-        text += &serde_json::to_string(event)?;
-        text.push('\n');
+}
+
+fn append(file: PathBuf, line: String) -> impl FnOnce() -> Result<()> {
+    move || {
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut out = std::fs::OpenOptions::new().create(true).append(true).open(&file)?;
+        out.write_all(line.as_bytes())?;
+        out.sync_data()?;
+        Ok(())
     }
-    let tmp = file.with_extension("jsonl.tmp");
-    let mut out = tokio::fs::File::create(&tmp).await?;
-    out.write_all(text.as_bytes()).await?;
-    out.sync_all().await?;
-    tokio::fs::rename(&tmp, file).await?;
-    Ok(())
+}
+
+/// Write `file` again as `text`, removed when that is empty.
+fn rewrite(file: PathBuf, text: String) -> impl FnOnce() -> Result<()> {
+    move || {
+        if text.is_empty() {
+            return match std::fs::remove_file(&file) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+                _ => Ok(()),
+            };
+        }
+        let tmp = file.with_extension("jsonl.tmp");
+        let mut out = std::fs::File::create(&tmp)?;
+        out.write_all(text.as_bytes())?;
+        out.sync_all()?;
+        std::fs::rename(&tmp, &file)?;
+        Ok(())
+    }
 }
 
 fn queue_file(home: &Path) -> PathBuf {
@@ -501,7 +493,7 @@ impl Lifecycle {
         if let Err(e) = write_retired(&self.home, &told) {
             tracing::warn!(error = format!("{e:#}"), "noting the retirement of the ant told");
         }
-        if !self.outbox.delivered(&self.ant, told.id, wait).await {
+        if !self.outbox.delivered(&self.home, told.id, wait).await {
             tracing::warn!(waited = wait.as_secs_f64(), "the provider has not acked the retirement of the ant yet");
         }
     }
