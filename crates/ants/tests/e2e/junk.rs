@@ -1,4 +1,4 @@
-//! Oversized and malformed input: the CLI refuses a message past the server's payload limit, more than 8
+//! Oversized and malformed input: the CLI refuses a message past the server's payload limit, suggesting --attach, more than 8
 //! attachments and a file past 8 MiB; junk published straight onto an ant's inbox and channel subjects (truncated
 //! JSON, wrong types, absurd values, forged senders, huge headers) is dead-lettered or dropped once, never
 //! redelivered, and the ant answers the next good message.
@@ -71,7 +71,9 @@ pub fn junk_on_the_subjects_is_dead_lettered_once_and_the_ant_answers_on() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success() && stderr.contains(says), "{args:?} not refused with {says:?}: {stderr}");
     };
-    refused(&["ask", "--file", "-", "@dev-a"], Some(vec![b'x'; 1_100_000]), "exceeded");
+    let too_long = "one message carries at most 1023 KiB: put the text in a file and send it with --attach instead";
+    refused(&["ask", "--file", "-", "@dev-a"], Some(vec![b'x'; 1_100_000]), too_long);
+    refused(&["post", "#general", "--file", "-"], Some(vec![b'x'; 1_100_000]), too_long);
     let files = dir.join("files");
     std::fs::create_dir_all(&files).unwrap();
     let mut many = vec!["ask"];

@@ -105,7 +105,8 @@ async fn load_one(root: &Path, path: &str, redactor: &Redactor) -> Result<Loaded
     if !metadata.is_file() {
         return Err("it is no regular file".to_owned());
     }
-    let too_big = |size: u64| format!("it is {} long, over the 8 MiB an attachment holds", size_text(size));
+    let too_big =
+        |size: u64| format!("it is {size} bytes long, over the {MAX_ATTACHMENT_SIZE} (8 MiB) an attachment holds");
     if metadata.len() > MAX_ATTACHMENT_SIZE {
         return Err(too_big(metadata.len()));
     }

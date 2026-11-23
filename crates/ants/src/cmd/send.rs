@@ -318,6 +318,7 @@ pub(crate) async fn ask(nats: &Nats<'_>, args: AskArgs) -> Result<()> {
         envelope.quote = Some(r.quote(false));
     }
     let (envelope, files) = (envelope, files);
+    check_fits(&js, &envelope)?;
     // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
     // reach.
     let inbox = if replies.wait || replies.follow {
@@ -536,6 +537,7 @@ pub(crate) async fn post(nats: &Nats<'_>, args: PostArgs) -> Result<()> {
         tracing::warn!("{warning}");
     }
     let post = &posting.post;
+    check_fits(&js, post)?;
     // Subscribe first so a fast reply is not missed.
     let room = if replies.wait || replies.follow {
         Some(relayed::subscribe(&client, subject::chan_room(&post.channel)).await?)
@@ -702,9 +704,29 @@ pub(crate) async fn post_notes(
 ) -> Result<NotesPost> {
     let mut post = NotesPost::new(thread, me.clone(), text);
     post.attachments = attachments::references(files);
+    check_fits(js, &post)?;
     attachments::store(js, files, |id| post.attachment_handle(id)).await?;
     notes::publish(js, &post, None).await?;
     Ok(post)
+}
+
+/// Room a message leaves for its headers within the server's `max_payload`.
+const HEADER_ROOM: u64 = 1024;
+
+/// Refuse `message` when its JSON is longer than one NATS message carries, the `max_payload` of the server `js` is
+/// connected to less [`HEADER_ROOM`], before anything of it is stored.
+pub(crate) fn check_fits(js: &jetstream::Context, message: &impl serde::Serialize) -> Result<()> {
+    let max_payload = js.client().server_info().max_payload as u64;
+    let len = serde_json::to_vec(message)?.len() as u64;
+    let max = max_payload.saturating_sub(HEADER_ROOM);
+    if max_payload == 0 || len <= max {
+        return Ok(());
+    }
+    let (len, max) = attachments::sizes(len, max);
+    bail!(
+        "the message is {len}; one message carries at most {max}: put the text in a file and send it with --attach \
+         instead"
+    )
 }
 
 /// What `ants notes` prints once it posted `post`.

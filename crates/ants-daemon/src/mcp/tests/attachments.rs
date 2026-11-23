@@ -70,7 +70,7 @@ async fn attach_sends_files_from_the_working_directory_only() {
         #[cfg(unix)]
         (serde_json::json!(["pipe"]), "no regular file"),
         (serde_json::json!(["notes.txt", "gone.txt"]), "cannot attach \"gone.txt\""),
-        (serde_json::json!(["big.bin"]), "over the 8 MiB"),
+        (serde_json::json!(["big.bin"]), "it is 8388609 bytes long, over the 8388608 (8 MiB)"),
         (nine, "at most 8 files"),
     ] {
         let (ok, text) = call(&client, "send_message", send(attach)).await;

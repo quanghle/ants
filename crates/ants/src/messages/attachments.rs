@@ -69,7 +69,10 @@ pub fn read(path: &Path) -> Result<File> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {shown} to attach it"))?;
     let meta = file.metadata().with_context(|| format!("reading {shown}"))?;
     ensure!(meta.is_file(), no_file());
-    let too_big = |len| format!("{shown} is {}: an attachment is at most {}", size(len), size(MAX_ATTACHMENT_SIZE));
+    let too_big = |len| {
+        let (len, max) = sizes(len, MAX_ATTACHMENT_SIZE);
+        format!("{shown} is {len}: an attachment is at most {max}")
+    };
     ensure!(meta.len() <= MAX_ATTACHMENT_SIZE, too_big(meta.len()));
     let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or_default());
     file.take(MAX_ATTACHMENT_SIZE + 1).read_to_end(&mut bytes).with_context(|| format!("reading {shown}"))?;
@@ -81,12 +84,8 @@ pub fn read(path: &Path) -> Result<File> {
 /// `text` to attach as the file `name`, of at most [`MAX_ATTACHMENT_SIZE`] bytes, of the media type its name gives.
 pub fn text(name: &str, text: &str) -> Result<File> {
     let len = text.len() as u64;
-    ensure!(
-        len <= MAX_ATTACHMENT_SIZE,
-        "{name} would be {}: an attachment is at most {}",
-        size(len),
-        size(MAX_ATTACHMENT_SIZE)
-    );
+    let (shown, max) = sizes(len, MAX_ATTACHMENT_SIZE);
+    ensure!(len <= MAX_ATTACHMENT_SIZE, "{name} would be {shown}: an attachment is at most {max}");
     let bytes = text.as_bytes().to_vec();
     let attachment = files::reference(name, guess_mime(name), &bytes).with_context(|| format!("attaching {name}"))?;
     Ok(File { attachment, bytes })
@@ -124,6 +123,12 @@ pub fn size(bytes: u64) -> String {
     } else {
         scaled(KIB * KIB, "MiB")
     }
+}
+
+/// `len` and `limit` for people ([`size`]), as exact bytes when they would read the same.
+pub fn sizes(len: u64, limit: u64) -> (String, String) {
+    let (shown, max) = (size(len), size(limit));
+    if shown == max && len != limit { (format!("{len} bytes"), format!("{limit} bytes")) } else { (shown, max) }
 }
 
 /// An attachment as a message lists it: its reference, the handle naming where its bytes are, and why it is unavailable
@@ -439,7 +444,10 @@ mod tests {
         let big = dir.join("big.bin");
         std::fs::File::create(&big).unwrap().set_len(MAX_ATTACHMENT_SIZE + 1).unwrap();
         let refused = super::read(&big).unwrap_err().to_string();
-        assert!(refused.contains("is 8.0 MiB: an attachment is at most 8.0 MiB"), "{refused}");
+        assert!(refused.contains("is 8388609 bytes: an attachment is at most 8388608 bytes"), "{refused}");
+        std::fs::File::create(&big).unwrap().set_len(MAX_ATTACHMENT_SIZE * 2).unwrap();
+        let refused = super::read(&big).unwrap_err().to_string();
+        assert!(refused.contains("is 16 MiB: an attachment is at most 8.0 MiB"), "{refused}");
         std::fs::File::create(&big).unwrap().set_len(MAX_ATTACHMENT_SIZE).unwrap();
         assert_eq!(super::read(&big).unwrap().attachment.size, MAX_ATTACHMENT_SIZE);
 
