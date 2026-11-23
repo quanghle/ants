@@ -167,7 +167,7 @@ mod tests {
             })
             .await;
             ants_test_support::eventually("the provider outbox drained", async || {
-                outbox.pending(&ant).await.is_empty()
+                outbox.pending(&home).await.is_empty()
             })
             .await;
         };

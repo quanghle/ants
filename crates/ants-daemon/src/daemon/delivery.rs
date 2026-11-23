@@ -10,7 +10,7 @@ use anyhow::Result;
 
 use crate::bus;
 use crate::channel::{Context, Earlier};
-use crate::delivery::attempts::Reply;
+use crate::delivery::attempts::{GivenFiles, Reply, StoredFiles};
 use crate::escalation::{self, Route};
 use crate::monitoring::status;
 use crate::stream::notes;
@@ -92,14 +92,16 @@ impl Inbox<'_> {
         Ok(())
     }
 
-    /// The reply carrying `text`, the answer to `incoming`, and `title`, the one the turn suggested for the thread,
-    /// whatever kind of reply it is: `None` when the answer went up the chain or nowhere instead, and the message is
-    /// done with.
+    /// The reply carrying `text`, the answer to `incoming`, `title`, the one the turn suggested for the thread, and
+    /// `files`, those it attached, whatever kind of reply it is: `None` when the answer went up the chain or nowhere
+    /// instead, and the message is done with. `files` are stored under the reply's handles, and left as stored, so
+    /// the reply made again after a later step failed carries the same ones.
     pub(super) async fn reply_for(
         &self,
         h @ Handling { incoming, msg, seq }: Handling<'_>,
         read: Option<Context>,
         (text, title): (String, Option<String>),
+        files: &mut Option<GivenFiles>,
         limit: Option<&String>,
     ) -> Result<Option<Reply>> {
         let envelope = &incoming.envelope;
@@ -144,7 +146,7 @@ impl Inbox<'_> {
                 let mut reply = envelope.reply(self.ant.clone(), text, self.humans.sender_role(envelope))?;
                 match escalation::route(self.ant, envelope).map(|(_, route)| route) {
                     Some(Route::Notes) => {
-                        let Some(post) = self.notes_reply(h, reply.text, title.clone()).await? else {
+                        let Some(post) = self.notes_reply(h, reply.text, title.clone(), files).await? else {
                             return Ok(None);
                         };
                         Reply::Notes(post)
@@ -163,12 +165,12 @@ impl Inbox<'_> {
                 if let Some(mcp) = self.mcp {
                     message.trail_spent = Box::pin(mcp.trail_spent(envelope, &message)).await;
                 }
-                let (attachments, left_out) = self.reply_files(thread, |id| message.attachment_handle(id)).await;
+                let (attachments, left_out) = self.reply_files(thread, files, |id| message.attachment_handle(id)).await;
                 let text = with_left_out(message.text, left_out);
                 Reply::Message(Box::new(Envelope { title, text, attachments, ..*message }))
             }
             Reply::Post(post) => {
-                let (attachments, left_out) = self.reply_files(thread, |id| post.attachment_handle(id)).await;
+                let (attachments, left_out) = self.reply_files(thread, files, |id| post.attachment_handle(id)).await;
                 let text = with_left_out(post.text, left_out);
                 Reply::Post(ChannelPost { title, text, attachments, ..post })
             }
@@ -260,19 +262,20 @@ impl Inbox<'_> {
         Ok(Some(post))
     }
 
-    /// The post of `text` to the notes of the thread of `incoming`, with `title` and the files the session attached:
+    /// The post of `text` to the notes of the thread of `incoming`, with `title` and `files`, those the turn attached:
     /// `None` when the notes are out of turns, the escalation carrying the answer, and the message is done with.
     async fn notes_reply(
         &self,
         Handling { incoming, msg, seq }: Handling<'_>,
         text: String,
         title: Option<String>,
+        files: &mut Option<GivenFiles>,
     ) -> Result<Option<NotesPost>> {
         let thread = &incoming.envelope.thread_id;
         let (store, budget) = (self.notes, incoming.envelope.turn_budget);
         let ant = self.ant.clone();
         let handle_of = |id| AttachmentHandle { from: ant.clone(), scope: AttachmentScope::Notes(thread.clone()), id };
-        let (files, left_out) = self.reply_files(thread, handle_of).await;
+        let (files, left_out) = self.reply_files(thread, files, handle_of).await;
         let text = with_left_out(text, left_out);
         let posted = notes::spend(store, thread, self.ant, &text, budget, title, files).await?;
         if posted.is_none() {
@@ -283,16 +286,29 @@ impl Inbox<'_> {
         Ok(posted)
     }
 
-    /// Store the files the session of `thread` attached to its final answer under the handles `handle_of` gives,
-    /// returning their references, else none and why they are left out.
+    /// The references of `files`, those the turn on `thread` attached to its final answer, stored under the handles
+    /// `handle_of` gives unless an earlier attempt at the reply stored them there, else none and why they are left
+    /// out. Once stored, `files` holds their references.
     async fn reply_files(
         &self,
         thread: &ThreadId,
+        files: &mut Option<GivenFiles>,
         handle_of: impl Fn(Uuid) -> AttachmentHandle,
     ) -> (Vec<Attachment>, Option<String>) {
-        let Some(mcp) = self.mcp else { return (Vec::new(), None) };
-        match mcp.reply_files(thread, handle_of).await {
-            Ok(files) => (files, None),
+        let Some(given) = files else { return (Vec::new(), None) };
+        let under = handle_of(Uuid::nil()).to_string();
+        if let Some(stored) = given.stored.as_ref().filter(|stored| stored.under == under) {
+            return (stored.files.clone(), None);
+        }
+        let stored = match self.mcp {
+            Some(mcp) => mcp.store_reply_files(&given.dir, &given.paths, handle_of).await,
+            None => Err("attachments are not available here".to_owned()),
+        };
+        match stored {
+            Ok(stored) => {
+                given.stored = Some(StoredFiles { under, files: stored.clone() });
+                (stored, None)
+            }
             Err(why) => {
                 tracing::warn!(%thread, error = why, "attaching files to the answer");
                 (Vec::new(), Some(why))

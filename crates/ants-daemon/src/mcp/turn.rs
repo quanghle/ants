@@ -1,9 +1,10 @@
 //! The turn of a thread's session: the message it handles ([`Mcp::begin`]), which what the session sends meanwhile
 //! follows on from, and what the final answer of the turn carries besides its text: the title `suggest_thread_title`
-//! suggests for the thread ([`Mcp::take_title`]) and the files `attach_to_reply` attaches ([`Mcp::reply_files`]).
+//! suggests for the thread ([`Mcp::take_title`]) and the files `attach_to_reply` attaches ([`Mcp::take_reply_files`]).
 //! `complete` ends the turn with no reply at all ([`Mcp::take_completed`]). The messages a thread handles tell where it
 //! came from, which the calls of the provider's tools carry, settled before they are handled ([`Mcp::settle_origin`]).
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ants_proto::{Attachment, AttachmentHandle, Envelope, ThreadId, ThreadTitle, Uuid};
@@ -39,18 +40,27 @@ impl Mcp {
         self.hub.sessions.locked().turns.get_mut(thread)?.completed.take()
     }
 
-    /// Store the files the session of `thread` attached to the final answer of its turn (`attach_to_reply`), read
-    /// again from the directory the thread works in and confined to it as `attach` is, under the handles `handle_of`
-    /// gives their ids, those of the answer, and return their references for it to carry: none when it attached
-    /// none. Fails, the files left out, when one cannot be read or stored now.
-    pub async fn reply_files(
+    /// Take the files the session of `thread` attached to the final answer of its turn (`attach_to_reply`), while the
+    /// turn lasts: the directory the thread works in and their paths in it, for [`Mcp::store_reply_files`]. None when
+    /// it attached none.
+    pub fn take_reply_files(&self, thread: &ThreadId) -> Option<(PathBuf, Vec<String>)> {
+        let paths = self.hub.sessions.locked().turns.get_mut(thread)?.reply_files.take()?;
+        // Files are attached only where the attachments' store is available.
+        let (_, dir) = self.hub.files(thread).ok()?;
+        Some((dir, paths))
+    }
+
+    /// Store the files at `paths`, those a turn attached to its final answer ([`Mcp::take_reply_files`]), read again
+    /// from `dir`, the directory its thread worked in, and confined to it as `attach` is, under the handles `handle_of`
+    /// gives their ids, those of the answer, and return their references for it to carry. Fails, the files left out,
+    /// when one cannot be read or stored now.
+    pub async fn store_reply_files(
         &self,
-        thread: &ThreadId,
+        dir: &Path,
+        paths: &[String],
         handle_of: impl Fn(Uuid) -> AttachmentHandle,
     ) -> Result<Vec<Attachment>, String> {
-        let paths = self.hub.sessions.locked().turns.get_mut(thread).and_then(|turn| turn.reply_files.take());
-        let Some(paths) = paths else { return Ok(Vec::new()) };
-        let loaded = self.hub.load_files(thread, &paths).await?;
+        let loaded = self.hub.load_from(dir, paths).await?;
         self.hub.store_files(loaded, handle_of).await
     }
 
@@ -197,7 +207,7 @@ impl Hub {
     }
 
     /// Have the final answer of the turn on `thread` carry the files at `paths`, in place of any given earlier in the
-    /// turn; none for no paths. They are checked now, and read again as the answer is sent ([`Mcp::reply_files`]).
+    /// turn; none for no paths. They are checked now, and read again as the answer is sent ([`Mcp::store_reply_files`]).
     async fn attach_to_reply(&self, thread: &ThreadId, paths: Vec<String>) -> Result<String, String> {
         {
             let mut sessions = self.sessions.locked();

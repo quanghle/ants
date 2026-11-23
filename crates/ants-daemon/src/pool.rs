@@ -12,10 +12,17 @@
 //! harness is another one's moves to a new harness once that one is idle, and a session that last ran in another
 //! harness, as stored beside it, is not resumed: the new one starts over from the thread's history.
 //!
+//! A session stays in the directory it was created in, stored beside it: the ant's workdir, or the thread's git
+//! worktree ([`Worktrees`]). A thread whose stored session worked in the workdir stays there when threads get worktrees,
+//! as its session started while the repository had no commit or worktrees were off, until that session expires. A
+//! stored session whose directory the thread no longer works in, as with worktrees turned off or the workdir changed,
+//! is not resumed: a new one starts over from the thread's history, told where the earlier one worked.
+//!
 //! A restart ([`Pool::restart`]) stops the idle harnesses at once and each busy one once its prompts end; the thread's
 //! next prompt starts a new harness, which resumes its session.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -45,11 +52,14 @@ pub const BURST: usize = 8;
 /// Longest the idle harness of a thread with messages in hand is kept for its next prompt while other threads wait.
 pub const KEEP_FOR: Duration = Duration::from_secs(5);
 
-/// A thread's stored session and the harness it ran in, so a restarted daemon resumes it only in that harness.
+/// A thread's stored session, the harness it ran in and the directory it was created in, so a restarted daemon
+/// resumes it only in that harness and there.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stored {
     pub session: SessionId,
     pub harness: String,
+    /// The directory the session was created in: the thread works there for as long as the session is stored.
+    pub cwd: PathBuf,
     /// Set by a clone order for a session it could not fork: the clone's first session of the thread starts over,
     /// seeded from the thread's history ([`Rebuild::Cloned`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -117,6 +127,8 @@ impl SessionStore {
 
 struct Live {
     session: Arc<Session>,
+    /// The directory its harness works in.
+    cwd: PathBuf,
     /// The fallback it runs, `None` for the ant's own harness.
     fallback: Option<usize>,
     /// Whether it runs a review's prompts ([`Launch::for_review`]).
@@ -137,7 +149,8 @@ enum Slot {
 }
 
 enum Claim {
-    Live(Arc<Session>),
+    /// The session, and the directory its harness works in.
+    Live(Arc<Session>, PathBuf),
     Start,
     /// Until a harness frees, starts or stops, or until the time given, when an idle one is no longer kept.
     Wait(Option<Instant>),
@@ -371,7 +384,8 @@ impl Pool {
                 lifecycle.emit(EventKind::SessionRebuilt { reason: Rebuilt::Overflow }, Some(thread)).await;
             }
             let harness = self.launch_on(fallback)?.harness_name().to_owned();
-            if let Err(e) = self.store.put(thread, Stored { session: after, harness, cloned: false }).await {
+            let stored = Stored { session: after, harness, cwd: lease.cwd.clone(), cloned: false };
+            if let Err(e) = self.store.put(thread, stored).await {
                 tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
             }
         }
@@ -518,9 +532,9 @@ impl Pool {
             let mut changed = pin!(self.changed.notified());
             changed.as_mut().enable();
             match self.claim(thread, fallback, review) {
-                Claim::Live(session) => {
+                Claim::Live(session, cwd) => {
                     tell(began);
-                    return Ok(Lease { pool: self, thread: thread.clone(), session, rebuilt: false });
+                    return Ok(Lease { pool: self, thread: thread.clone(), session, cwd, rebuilt: false });
                 }
                 Claim::Start => {
                     tell(began);
@@ -546,7 +560,7 @@ impl Pool {
             {
                 live.busy += 1;
                 live.turns += 1;
-                return Claim::Live(live.session.clone());
+                return Claim::Live(live.session.clone(), live.cwd.clone());
             }
             // A dead harness with a prompt in flight is about to fail it; take over once it has.
             Some(Slot::Ready(Live { busy: 1.., .. }) | Slot::Starting) => return Claim::Wait(None),
@@ -575,8 +589,44 @@ impl Pool {
         }
     }
 
+    /// The directory the thread's session works in, and the one its stored session was created in, `was`, when that is
+    /// another: its review's checkouts while it has some, then `was` when that is `workdir`, even when threads get
+    /// worktrees, then the thread's worktree when threads get one, else `workdir`.
+    async fn directory(
+        &self,
+        thread: &ThreadId,
+        workdir: &Path,
+        was: Option<&Path>,
+    ) -> Result<(PathBuf, Option<PathBuf>)> {
+        if let Some(dir) = self.checkouts.as_ref().and_then(|checkouts| checkouts.workdir(thread)) {
+            return Ok((dir, None));
+        }
+        // A session created among a review's checkouts, since removed, goes on wherever the thread works.
+        let reviewed = self.checkouts.as_ref().map(|checkouts| checkouts.review_dir(thread));
+        let was = was.filter(|was| reviewed.as_deref() != Some(*was));
+        let stays = was.is_some_and(|was| same_dir(was, workdir));
+        let dir = match self.worktrees() {
+            Some(_) if stays => {
+                tracing::info!(%thread, workdir = %workdir.display(), "the thread stays in the shared workdir");
+                workdir.to_owned()
+            }
+            // Never in the workdir other threads share, which the worktree is there to keep them out of.
+            Some(worktrees) => match worktrees.checkout(thread).await {
+                Ok(dir) => dir,
+                Err(e) => {
+                    tracing::warn!(%thread, error = format!("{e:#}"), "the thread's git worktree failed; its message waits");
+                    return Err(e.context(WorktreeFailed));
+                }
+            },
+            None => workdir.to_owned(),
+        };
+        let left = was.filter(|was| !same_dir(was, &dir)).map(Path::to_owned);
+        Ok((dir, left))
+    }
+
     /// Start the harness of a thread claimed as [`Slot::Starting`] on `fallback`, for a review if `review`, resuming
-    /// its stored session unless that last ran in another harness.
+    /// its stored session unless that last ran in another harness or in a directory the thread no longer works in
+    /// ([`Pool::directory`]).
     async fn start(&self, thread: &ThreadId, fallback: Option<usize>, review: bool) -> Result<Lease<'_>> {
         let mut starting = Starting { pool: self, thread, done: false };
         let restarts = self.restarts.load(Ordering::Relaxed);
@@ -594,24 +644,18 @@ impl Pool {
         let stored = self.store.get(thread).await?;
         let moved = stored.as_ref().is_some_and(|stored| stored.harness != harness);
         let cloned = stored.as_ref().is_some_and(|stored| stored.cloned);
-        let resume = stored.filter(|_| !moved && !cloned).map(|stored| stored.session);
-        let mut launch = launch.for_thread(thread);
-        if let Some(dir) = self.checkouts.as_ref().and_then(|checkouts| checkouts.workdir(thread)) {
-            launch = launch.in_dir(dir);
-        } else if let Some(worktrees) = self.worktrees.as_ref().filter(|_| self.isolate) {
-            // Never in the workdir other threads share, which the worktree is there to keep them out of.
-            match worktrees.checkout(thread).await {
-                Ok(dir) => launch = launch.in_dir(dir),
-                Err(e) => {
-                    tracing::warn!(%thread, error = format!("{e:#}"), "the thread's git worktree failed; its message waits");
-                    return Err(e.context(WorktreeFailed));
-                }
-            }
-        }
+        let was = stored.as_ref().map(|stored| stored.cwd.as_path());
+        let (cwd, left) = self.directory(thread, launch.cwd(), was).await?;
+        let resume =
+            stored.as_ref().filter(|_| !moved && !cloned && left.is_none()).map(|stored| stored.session.clone());
+        let launch = launch.for_thread(thread).in_dir(cwd.clone());
         let session = if moved {
             Session::start_over(&launch, Rebuild::Moved).await?
         } else if cloned {
             Session::start_over(&launch, Rebuild::Cloned).await?
+        } else if let Some(left) = left {
+            tracing::info!(%thread, left = %left.display(), cwd = %cwd.display(), "the session starts over in another directory");
+            Session::start_over(&launch, Rebuild::Relocated(left)).await?
         } else {
             Session::start(&launch, resume.clone()).await?
         };
@@ -627,20 +671,28 @@ impl Pool {
             lifecycle.emit(EventKind::SessionLost, Some(thread)).await;
             lifecycle.emit(EventKind::SessionRebuilt { reason: Rebuilt::Lost }, Some(thread)).await;
         }
+        // A session resumed among a review's checkouts keeps the directory it was created in.
+        let resumed = resume.is_some() && !lost;
+        let created_in = stored.filter(|_| resumed).map_or_else(|| cwd.clone(), |stored| stored.cwd);
         // Stored on every start, so the key of a thread still in use does not age out. Losing it only costs the
         // thread its history after the next stop, so the prompt goes ahead.
-        if let Err(e) =
-            self.store.put(thread, Stored { session: session.id(), harness: harness.to_owned(), cloned: false }).await
-        {
+        let stored = Stored { session: session.id(), harness: harness.to_owned(), cwd: created_in, cloned: false };
+        if let Err(e) = self.store.put(thread, stored).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
         }
         let session = Arc::new(session);
-        let last_used = Instant::now();
-        let live = Live { session: session.clone(), fallback, review, last_used, busy: 1, restarts, turns: 1 };
+        let (running, last_used) = (session.clone(), Instant::now());
+        let live =
+            Live { session: running, cwd: cwd.clone(), fallback, review, last_used, busy: 1, restarts, turns: 1 };
         self.slots().insert(thread.clone(), Slot::Ready(live));
         starting.done = true;
-        Ok(Lease { pool: self, thread: thread.clone(), session, rebuilt: lost })
+        Ok(Lease { pool: self, thread: thread.clone(), session, cwd, rebuilt: lost })
     }
+}
+
+/// Whether `a` and `b` are one directory, however spelled.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
 /// Stop the least recently used harness that has no prompt in flight and is not kept for the next prompt of its
@@ -677,6 +729,8 @@ struct Lease<'a> {
     pool: &'a Pool,
     thread: ThreadId,
     session: Arc<Session>,
+    /// The directory its harness works in.
+    cwd: PathBuf,
     /// Whether the session was started anew, the harness having lost the stored one.
     rebuilt: bool,
 }

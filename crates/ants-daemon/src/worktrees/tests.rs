@@ -258,13 +258,10 @@ async fn a_repository_without_commits_is_shared_until_it_has_one() {
     run(&repo, &["add", "."]);
     commit(&repo, "first");
     assert_eq!(top.checkout(&b).await.unwrap(), home.join("worktrees/b"), "a new thread, once there is a commit");
-    assert_eq!(top.checkout(&a).await.unwrap(), repo, "a thread that started in the workdir stays there");
     assert_eq!(top.checkout(&c).await.unwrap(), home.join("worktrees/c"));
-    assert_eq!((top.sharing(), top.threads()), (vec![a.clone()], vec![b, c]));
-    assert_eq!(below.checkout(&a).await.unwrap(), repo.join("sub"));
+    assert_eq!(top.threads(), [b, c]);
     assert_eq!(below.checkout(&thread("d")).await.unwrap(), dir.join("home-b/worktrees/d/sub"));
-    let again = Worktrees::find(&ant(), &repo, &home).await.unwrap();
-    assert_eq!(again.checkout(&a).await.unwrap(), home.join("worktrees/a"), "as after a daemon restart");
+    assert_eq!(top.checkout(&a).await.unwrap(), home.join("worktrees/a"), "only its stored session keeps it out");
     std::fs::remove_dir_all(dir).unwrap();
 }
 

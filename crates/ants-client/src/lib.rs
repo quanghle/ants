@@ -9,6 +9,8 @@
 //! - those reads and writes themselves ([`client`]), over a transport of four calls that names no runtime
 //!   ([`transport`]).
 //!
+//! Beside them, what the server of a page tells it of where to connect ([`site`]).
+//!
 //! The crate builds natively and for `wasm32-unknown-unknown`. A binding, for a browser or another platform, wraps
 //! [`client::Client`] and implements [`transport::Transport`]; nothing here names the binding's types.
 
@@ -21,6 +23,7 @@ pub mod relayed;
 pub mod requests;
 pub mod sealed;
 pub mod sending;
+pub mod site;
 pub mod text;
 pub mod transport;
 

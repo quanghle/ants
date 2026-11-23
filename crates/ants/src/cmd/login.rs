@@ -167,7 +167,7 @@ fn not_shown(page: &str) -> anyhow::Error {
 }
 
 /// The account of the bootstrap credentials at `path`: the issuer of the JWTs `ants login` takes.
-fn bootstrap_account(path: &Path) -> Result<String> {
+pub(crate) fn bootstrap_account(path: &Path) -> Result<String> {
     let get = || {
         format!(
             "reading the bootstrap credentials {}: get the team's bootstrap.creds (`ants auth bootstrap` on the \

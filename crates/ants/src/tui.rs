@@ -10,7 +10,7 @@ mod acts;
 mod ant;
 mod approvals;
 mod armed;
-mod attach;
+pub(crate) mod attach;
 mod cards;
 mod catchup;
 mod channel;

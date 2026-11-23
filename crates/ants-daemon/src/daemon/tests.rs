@@ -606,13 +606,24 @@ async fn ends_on(bus: &Bus, thread: &ThreadId, n: usize) -> Vec<(Uuid, ants_prot
 
 /// Call the tool `name` of `mcp` with `args`, as the session of `thread` does.
 async fn call_tool(mcp: &Mcp, thread: &ThreadId, name: &'static str, args: serde_json::Value) -> CallToolResult {
+    call_tool_in(mcp, thread, std::path::Path::new("/"), name, args).await
+}
+
+/// [`call_tool`], of a session working in `dir`.
+async fn call_tool_in(
+    mcp: &Mcp,
+    thread: &ThreadId,
+    dir: &std::path::Path,
+    name: &'static str,
+    args: serde_json::Value,
+) -> CallToolResult {
     use agent_client_protocol::v1::schema::McpServer;
     use rmcp::ServiceExt as _;
     use rmcp::model::{CallToolRequestParams, ClientConfig};
     use rmcp::transport::StreamableHttpClientTransport;
     use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 
-    let servers = mcp.servers()(&crate::harness::McpSession::test(thread, std::path::Path::new("/"), true));
+    let servers = mcp.servers()(&crate::harness::McpSession::test(thread, dir, true));
     let [McpServer::Http(server)] = &servers[..] else { panic!("one HTTP server") };
     let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
     let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str()).auth_header(token);

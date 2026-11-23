@@ -312,6 +312,118 @@ async fn a_joined_prompt_a_full_store_refuses_the_outcome_of_is_settled_once_the
     assert_eq!(bus.unacked().await, 0);
 }
 
+/// What becomes of the file a turn attached to its answer before the retry makes the reply from the kept answer.
+#[derive(PartialEq)]
+enum Attached {
+    /// Stored by the first try, in an attachments' store with room, and deleted from the working directory since.
+    Stored,
+    /// Refused by the full store, and still in the working directory.
+    Refused,
+    /// Refused by the full store, and deleted from the working directory since.
+    RefusedAndGone,
+}
+
+/// The reply to a message whose turn attached `report.md` with `attach_to_reply` and whose prompt was cut at a cap
+/// the full store refused the escalation of: made, once the store has room, from the answer kept on the machine, the
+/// harness prompted once.
+async fn reply_from_a_kept_answer_with_a_file(attached: Attached) -> Option<(Bus, Envelope)> {
+    use jetstream::stream::StorageType;
+
+    let (mut bus, _) = start_small().await?;
+    bus.ledger = Arc::new(Ledger::memory(bus.dev.clone(), Caps { thread_cost: Some(1.0), ..Caps::default() }));
+    // In memory, the attachments' store has room while the file store is full.
+    let storage = if attached == Attached::Stored { StorageType::Memory } else { StorageType::File };
+    bus.js.create_stream(jetstream::stream::Config { storage, ..crate::hub::files_config() }).await.unwrap();
+    let home = bus._server.dir().join("kept-files");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("report.md"), "# done").unwrap();
+    let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
+    let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await.unwrap();
+    mcp.with_files(crate::mcp::jetstream_files(bus.js.clone()), home.clone());
+    bus.mcp = Some(mcp);
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let thread = ThreadId::generate();
+    let (held, seq) = bus.send_from(dev_b.clone(), &thread, "hold cost 2 stall").await;
+    let to_dev_b = subject::inbox(&dev_b, &bus.dev);
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to start", || log.locked().prompted == 1).await;
+        let files = serde_json::json!({"attach": ["report.md"]});
+        let attach = call_tool_in(bus.mcp.as_ref().unwrap(), &thread, &work, "attach_to_reply", files).await;
+        assert_ne!(attach.is_error, Some(true), "{attach:?}");
+        fill(&bus.js).await;
+        gate.add_permits(1);
+        until("the prompt to be cancelled", || log.locked().cancelled == 1).await;
+        // Several retries of the store pass.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(stored_on(&bus, &to_dev_b).await.is_empty(), "no reply stored while full");
+        let given = bus.answered.given(&held).await.expect("the answer is kept on the machine");
+        let files = given.files.expect("kept with the file the turn attached");
+        assert_eq!(files.paths, ["report.md"]);
+        let stored = files.stored.map(|stored| stored.files.into_iter().map(|file| file.name).collect::<Vec<_>>());
+        assert_eq!(stored, (attached == Attached::Stored).then(|| vec!["report.md".to_owned()]));
+        if attached != Attached::Refused {
+            std::fs::remove_file(work.join("report.md")).unwrap();
+        }
+
+        free(&bus.js).await;
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().prompted, 1, "prompted once");
+    let [reply] = &stored_on(&bus, &to_dev_b).await[..] else { panic!("one reply") };
+    assert!(bus.answered.given(&held).await.is_none(), "forgotten once the reply is recorded");
+    assert!(dead::list(&bus.stream).await.unwrap().is_empty());
+    assert_eq!(bus.unacked().await, 0);
+    let reply = reply.clone();
+    Some((bus, reply))
+}
+
+/// The text of an answer cut at the thread's cost cap.
+const CUT_AT_CAP: &str = "partial\n\n[ants] Thread cost cap reached (2.00 of 1.00 since a human's last message); the \
+                          prompt was cancelled.";
+
+/// The file `reply` carries, read from the attachments' store.
+async fn file_of(bus: &Bus, reply: &Envelope) -> Vec<u8> {
+    let [report] = &reply.attachments[..] else { panic!("{reply:?}") };
+    assert_eq!((report.name.as_str(), report.mime.as_str()), ("report.md", "text/markdown"));
+    crate::files::get(&bus.js, &reply.attachment_handle(report.id), Some(report)).await.unwrap().1
+}
+
+/// A reply made from a kept answer carries the files its turn attached as the failed try stored them: they are
+/// neither read from the working directory nor stored again.
+#[tokio::test]
+async fn a_reply_made_from_a_kept_answer_carries_the_files_its_first_try_stored() {
+    let Some((bus, reply)) = Box::pin(reply_from_a_kept_answer_with_a_file(Attached::Stored)).await else { return };
+    assert_eq!(reply.text, CUT_AT_CAP);
+    assert_eq!(file_of(&bus, &reply).await, b"# done");
+}
+
+/// A reply made from a kept answer whose files the first try could not store reads and stores them then.
+#[tokio::test]
+async fn a_reply_made_from_a_kept_answer_stores_the_files_its_first_try_could_not() {
+    let Some((bus, reply)) = Box::pin(reply_from_a_kept_answer_with_a_file(Attached::Refused)).await else { return };
+    assert_eq!(reply.text, CUT_AT_CAP);
+    assert_eq!(file_of(&bus, &reply).await, b"# done");
+}
+
+/// A reply made from a kept answer whose files were never stored and are gone since says they are left out.
+#[tokio::test]
+async fn a_reply_made_from_a_kept_answer_says_its_files_are_left_out_when_they_are_gone() {
+    let Some((_bus, reply)) = Box::pin(reply_from_a_kept_answer_with_a_file(Attached::RefusedAndGone)).await else {
+        return;
+    };
+    assert!(reply.attachments.is_empty(), "{reply:?}");
+    let left_out = format!("{CUT_AT_CAP}\n\n[ants] The files attached to this answer are left out: cannot attach");
+    assert!(reply.text.starts_with(&left_out), "{}", reply.text);
+}
+
 /// A reply past the server's `max_payload` is cut to fit, with a line telling so, and sent once.
 #[tokio::test]
 async fn a_reply_past_max_payload_is_cut_to_fit_and_sent_once() {

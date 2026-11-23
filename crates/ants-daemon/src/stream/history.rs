@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::SystemTime;
 
@@ -37,7 +38,7 @@ where
 }
 
 /// Why a session's context is rebuilt from the thread's history.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rebuild {
     /// The thread's earlier session could not be resumed, so a new one started.
     Lost,
@@ -47,6 +48,8 @@ pub enum Rebuild {
     Moved,
     /// The ant is a clone of another, whose session of the thread could not be forked ([`crate::clone`]).
     Cloned,
+    /// The thread's earlier session worked in the directory given, where the thread no longer works (`crate::pool`).
+    Relocated(PathBuf),
 }
 
 /// Most bytes of history a prompt shows when neither a budget nor the context window is known; older entries are
@@ -80,8 +83,16 @@ async fn sent_turn(reading: Reading) -> Option<tokio::sync::MutexGuard<'static, 
 
 /// What a prompt in a session rebuilt for `why` starts with: why, and the thread's history within `budget` bytes, or
 /// half of it after a context overflow so that the new session has room to spare.
-pub(crate) async fn seed(why: Rebuild, history: Option<History>, budget: usize) -> String {
+pub(crate) async fn seed(why: &Rebuild, history: Option<History>, budget: usize) -> String {
+    let relocated;
     let (what, budget) = match why {
+        Rebuild::Relocated(from) => {
+            let from = from.display();
+            relocated = format!(
+                "The earlier session of this thread worked in another directory, {from}, so this one starts over"
+            );
+            (relocated.as_str(), budget)
+        }
         Rebuild::Lost => ("The earlier session of this thread could not be resumed, so this one starts over", budget),
         Rebuild::Overflow => {
             ("The session of this thread outgrew the model's context window, so this one starts over", budget / 2)
@@ -282,7 +293,7 @@ mod tests {
     #[tokio::test]
     async fn a_seed_after_an_overflow_takes_half_the_budget() {
         let history = || Some(from_fn(|budget| async move { budget.to_string() }));
-        assert!(seed(Rebuild::Lost, history(), 1000).await.ends_with("history.\n\n1000"));
-        assert!(seed(Rebuild::Overflow, history(), 1000).await.ends_with("history.\n\n500"));
+        assert!(seed(&Rebuild::Lost, history(), 1000).await.ends_with("history.\n\n1000"));
+        assert!(seed(&Rebuild::Overflow, history(), 1000).await.ends_with("history.\n\n500"));
     }
 }

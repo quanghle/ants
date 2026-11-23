@@ -95,9 +95,9 @@ pub async fn open(js: &jetstream::Context, keyring: Option<&Keyring>, listed: &L
     Ok(format!("opened {} ({}) with {viewer}", listed.attachment.name, attachments::size(listed.size())))
 }
 
-/// Open the file at `path` with the system's viewer ([`opener`]): the viewer's name.
+/// Open the file or URL at `path` with the system's viewer ([`opener`]): the viewer's name.
 #[cfg(not(windows))]
-async fn view(path: PathBuf) -> Result<&'static str> {
+pub(crate) async fn view(path: PathBuf) -> Result<&'static str> {
     let opener = opener();
     let status = tokio::process::Command::new(opener)
         .arg(&path)
@@ -113,9 +113,9 @@ async fn view(path: PathBuf) -> Result<&'static str> {
     Ok(opener)
 }
 
-/// Open the file at `path` with the app Windows associates with its type, as Explorer does: the viewer's name.
+/// Open the file or URL at `path` with the app Windows associates with its type, as Explorer does: the viewer's name.
 #[cfg(windows)]
-async fn view(path: PathBuf) -> Result<&'static str> {
+pub(crate) async fn view(path: PathBuf) -> Result<&'static str> {
     tokio::task::spawn_blocking(move || shell_open(&path)).await.context("opening the file")??;
     Ok("its default app")
 }

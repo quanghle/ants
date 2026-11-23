@@ -155,6 +155,10 @@ const CLI: &[(&str, Chat)] = &[
     ("auth", Exempt("issues and revokes credentials with the team's keys, on the machine holding them")),
     ("leaf", Exempt("the leaf node of the machine running it")),
     ("bridge", Exempt(SERVICE)),
+    (
+        "web",
+        Exempt("serves the web client's page, another client of the human, or writes it for a hub's reverse proxy"),
+    ),
     ("webhook", Exempt("the webhooks service, its push sinks and webhooks, where its config file and credentials are")),
     ("hook", Exempt(SERVICE)),
 ];

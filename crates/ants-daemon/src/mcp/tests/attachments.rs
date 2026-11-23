@@ -125,39 +125,41 @@ async fn attach_to_reply_names_the_files_the_turns_answer_carries() {
     let (ok, text) = attach(serde_json::json!(["../secret.txt"])).await;
     assert!(!ok && text.contains("outside the working directory") && text.ends_with("nothing attached"), "{text}");
     assert!(stored.locked().is_empty(), "stored only as the answer is sent");
-    let files = mcp.reply_files(thread, handle_of).await.unwrap();
+    let (dir, paths) = mcp.take_reply_files(thread).expect("the files attached");
+    assert_eq!((dir.as_path(), &paths[..]), (work.as_path(), &["a.txt".to_owned()][..]));
+    let files = mcp.store_reply_files(&dir, &paths, handle_of).await.unwrap();
     let got: Vec<_> = files.iter().map(|a| (a.name.as_str(), a.size)).collect();
     assert_eq!(got, [("a.txt", 2)], "the failed call left the earlier files");
     let held = stored.locked().get(&reply.attachment_handle(files[0].id)).cloned().unwrap();
     assert_eq!(held, (files[0].clone(), b"aa".to_vec()), "stored under the answer's handle");
-    assert_eq!(mcp.reply_files(thread, handle_of).await.unwrap(), [], "taken by the answer");
+    assert_eq!(mcp.take_reply_files(thread), None, "taken by the answer");
 
     // A later call replaces them, an empty one clears them.
     let (ok, _) = attach(serde_json::json!(["a.txt"])).await;
     assert!(ok);
     let (ok, _) = attach(serde_json::json!(["b.txt"])).await;
     assert!(ok);
-    let files = mcp.reply_files(thread, handle_of).await.unwrap();
-    assert_eq!(files.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["b.txt"]);
+    assert_eq!(mcp.take_reply_files(thread), Some((work.clone(), vec!["b.txt".to_owned()])));
     let (ok, _) = attach(serde_json::json!(["a.txt"])).await;
     assert!(ok);
     let (ok, text) = attach(serde_json::json!([])).await;
     assert!(ok && text.contains("carries no files"), "{text}");
-    assert_eq!(mcp.reply_files(thread, handle_of).await.unwrap(), []);
+    assert_eq!(mcp.take_reply_files(thread), None);
 
-    // The files are read again as the answer is sent.
+    // The files are read again as the answer is sent, even once the turn is over.
     let (ok, _) = attach(serde_json::json!(["b.txt"])).await;
     assert!(ok);
+    let (dir, paths) = mcp.take_reply_files(thread).unwrap();
     std::fs::remove_file(work.join("b.txt")).unwrap();
-    let why = mcp.reply_files(thread, handle_of).await.unwrap_err();
+    let why = mcp.store_reply_files(&dir, &paths, handle_of).await.unwrap_err();
     assert!(why.contains("cannot attach \"b.txt\""), "{why}");
 
-    // And forgotten with the turn.
+    // And forgotten with the turn, unless taken.
     let (ok, _) = attach(serde_json::json!(["a.txt"])).await;
     assert!(ok);
     drop(turn);
     let _turn = mcp.begin(&current);
-    assert_eq!(mcp.reply_files(thread, handle_of).await.unwrap(), []);
+    assert_eq!(mcp.take_reply_files(thread), None);
 }
 
 #[tokio::test]

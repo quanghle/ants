@@ -13,7 +13,8 @@
 //!
 //! A repository with no commit has nothing to start a branch from: its threads work in the workdir, shared, until it
 //! has one. From then on each new thread gets its worktree, while the threads that started in the workdir stay there,
-//! where their sessions are.
+//! where their sessions are: the pool asks for no worktree for a thread whose stored session worked in the workdir
+//! (`crate::pool`).
 //!
 //! Ants of one daemon may share a repository. Git does not take a `git worktree prune` beside a `git worktree add` on
 //! one repository (the prune removes the add's half-made registration), so the removals, prunes and branch deletions
@@ -26,7 +27,6 @@
 //! remote. A branch of the ant left without a worktree, as by a daemon killed while adding one, is deleted once its
 //! thread has no session, unless it holds commits.
 
-use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,7 +40,6 @@ use tokio::sync::Mutex;
 
 use self::repository::{Repository, repository};
 use crate::process::{git, run};
-use crate::sync::MutexExt as _;
 
 mod branches;
 mod policy;
@@ -113,8 +112,6 @@ pub struct Worktrees {
     workdir: PathBuf,
     /// Whether the repository was seen with a commit: looked for at each new thread until there is one.
     born: AtomicBool,
-    /// The threads that started in the workdir, the repository having no commit then, and stay there.
-    sharing: std::sync::Mutex<HashSet<ThreadId>>,
     /// A directory per thread.
     dir: PathBuf,
     /// One change to the worktrees at a time, so a thread's worktree is never removed while it is being set up.
@@ -206,7 +203,6 @@ impl Worktrees {
             within,
             workdir: PathBuf::new(),
             born: AtomicBool::new(true),
-            sharing: std::sync::Mutex::default(),
             dir,
             changing: Mutex::new(()),
             repository: repository(common),
@@ -223,12 +219,13 @@ impl Worktrees {
     }
 
     /// The directory the thread works in, in its worktree, which is created when missing. The workdir instead, shared,
-    /// for a thread starting while the repository has no commit, and from then on for that thread.
+    /// while the repository has no commit: whoever asks keeps a thread that started there in it.
     pub async fn checkout(&self, thread: &ThreadId) -> Result<PathBuf> {
         let _changing = self.changing.lock().await;
         let path = self.path(thread);
         if !path.join(".git").is_file() {
-            if self.shares(thread).await {
+            if self.unborn().await {
+                tracing::info!(%thread, workdir = %self.workdir.display(), "the thread works in the shared workdir");
                 return Ok(self.workdir.clone());
             }
             let began = Instant::now();
@@ -247,30 +244,20 @@ impl Worktrees {
         Ok(cwd)
     }
 
-    /// Whether the thread works in the workdir: it started there, or starts now and the repository still has no commit.
-    async fn shares(&self, thread: &ThreadId) -> bool {
-        if !self.born.load(Ordering::Relaxed) {
-            if !has_commit(&self.repo).await {
-                if self.sharing.locked().insert(thread.clone()) {
-                    tracing::info!(%thread, workdir = %self.workdir.display(), "the thread works in the shared workdir");
-                }
-                return true;
-            }
-            self.born.store(true, Ordering::Relaxed);
-            tracing::info!(
-                repo = %self.repo.display(),
-                sharing = self.sharing.locked().len(),
-                "the repository has a commit now: giving each new thread its own git worktree"
-            );
+    /// Whether the repository still has no commit, looked for until there is one.
+    async fn unborn(&self) -> bool {
+        if self.born.load(Ordering::Relaxed) {
+            return false;
         }
-        self.sharing.locked().contains(thread)
-    }
-
-    /// The threads working in the workdir, as the repository had no commit when they started.
-    pub fn sharing(&self) -> Vec<ThreadId> {
-        let mut threads: Vec<ThreadId> = self.sharing.locked().iter().cloned().collect();
-        threads.sort();
-        threads
+        if !has_commit(&self.repo).await {
+            return true;
+        }
+        self.born.store(true, Ordering::Relaxed);
+        tracing::info!(
+            repo = %self.repo.display(),
+            "the repository has a commit now: giving each new thread its own git worktree"
+        );
+        false
     }
 
     /// Remove the worktree of each thread `expired` tells, one at a time, and tell how many were removed and which

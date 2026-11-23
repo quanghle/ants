@@ -13,7 +13,7 @@ use async_nats::jetstream;
 
 use crate::bus;
 use crate::channel::{Context, Earlier};
-use crate::delivery::attempts::{Given, Marker, Reply};
+use crate::delivery::attempts::{Given, GivenFiles, Marker, Reply};
 use crate::escalation::Stuck;
 use crate::files::Attached;
 use crate::harness::{Prompt, SignedOut, Spend, Steering};
@@ -277,28 +277,34 @@ impl Inbox<'_> {
         let notice = notice.into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = fit_to(self.redactor.redact(&text).into_owned(), reply_room(self.client));
-        // Taken while the turn lasts, and kept with the answer, so a retry's reply carries it too.
+        // Taken while the turn lasts, and kept with the answer, so a retry's reply carries them too.
         let title = self.mcp.and_then(|mcp| mcp.take_title(thread));
-        let given = Given { text, limit, unanswered, tokens: measured.tokens, title };
+        let files = self.mcp.and_then(|mcp| mcp.take_reply_files(thread));
+        let files = files.map(|(dir, paths)| GivenFiles { dir, paths, stored: None });
+        let given = Given { text, limit, unanswered, tokens: measured.tokens, title, files };
         Box::pin(self.send_given(h, read, given, false)).await
     }
 
     /// Answer `incoming` with `given`, the answer its harness gave, `kept` on the machine by an earlier attempt or not:
     /// end the turn with no reply, or make the reply, escalate the limit the prompt reached, record the reply and
     /// deliver it. A step failing before the reply is recorded keeps the answer on the machine ([`Answered::keep_given`](
-    /// crate::delivery::attempts::Answered::keep_given)), so the retry sends it rather than prompting again.
+    /// crate::delivery::attempts::Answered::keep_given)), so the retry sends it rather than prompting again, with the
+    /// files the turn attached as the failed reply stored them.
     pub(super) async fn send_given(
         &self,
         h @ Handling { incoming, seq, .. }: Handling<'_>,
         read: Option<Context>,
-        given: Given,
+        mut given: Given,
         kept: bool,
     ) -> Result<()> {
         let envelope = &incoming.envelope;
-        let reply = match Box::pin(self.reply_of(h, read, &given)).await {
+        let files = given.files.clone();
+        let reply = match Box::pin(self.reply_of(h, read, &mut given)).await {
             Ok(reply) => reply,
             Err(e) => {
-                if !kept && let Err(keep) = self.answered.keep_given(envelope, &given).await {
+                if (!kept || given.files != files)
+                    && let Err(keep) = self.answered.keep_given(envelope, &given).await
+                {
                     tracing::warn!(thread = %envelope.thread_id, error = format!("{keep:#}"), "keeping the answer");
                 }
                 return Err(e);
@@ -322,20 +328,22 @@ impl Inbox<'_> {
 
     /// The reply of `given`, the harness's answer to `incoming`, with the limit the prompt reached escalated; `None`
     /// when the turn ends with no reply, or the answer went up the chain or nowhere instead, and the message is done
-    /// with.
+    /// with. The files of `given` are left as the reply stored them.
     async fn reply_of(
         &self,
         h @ Handling { incoming, seq, .. }: Handling<'_>,
         read: Option<Context>,
-        given: &Given,
+        given: &mut Given,
     ) -> Result<Option<Reply>> {
         let envelope = &incoming.envelope;
-        let Given { text, limit, unanswered, tokens, title } = given.clone();
+        let Given { text, limit, unanswered, tokens, title, files: _ } = given.clone();
         if let Some(unanswered) = unanswered {
             self.end_unanswered(h, unanswered, text, limit.as_ref()).await?;
             return Ok(None);
         }
-        let Some(mut reply) = Box::pin(self.reply_for(h, read, (text, title), limit.as_ref())).await? else {
+        let Some(mut reply) =
+            Box::pin(self.reply_for(h, read, (text, title), &mut given.files, limit.as_ref())).await?
+        else {
             return Ok(None);
         };
         if let Reply::Message(message) = &mut reply {

@@ -14,7 +14,7 @@ use crate::cmd::{
     bridge::BridgeCommand, channel::ChannelCommand, dead::DeadCommand, doctor, enroll::EnrollCommand,
     harness::HarnessCommand, hook::HookCommand, inbox, keys::KeysCommand, leaf::LeafCommand, login,
     notify::NotifyCommand, remind::RemindCommand, send, setup, signer, spend::SpendArgs, thread::ThreadCommand,
-    tools::ToolsCommand, trail::TrailCommand, webhook::WebhookCommand,
+    tools::ToolsCommand, trail::TrailCommand, web, webhook::WebhookCommand,
 };
 use crate::credentials::renew;
 use crate::messages::{attachments, progress};
@@ -376,6 +376,10 @@ pub(crate) enum Command {
     /// Carry a leaf node's uplink over plain HTTPS requests, for networks whose proxies block WebSocket.
     #[command(subcommand)]
     Bridge(BridgeCommand),
+    /// Serve the page of the web client on loopback while it runs and open the browser on it, or write it for a hub's
+    /// reverse proxy (`ants web export`). The page connects to the machine's WebSocket listener, which `ants setup
+    /// --web` or `ants leaf config --web` adds. Only binaries built with the page have it: release binaries do.
+    Web(web::WebArgs),
     /// Take events from outside services over HTTP and deliver each to the ant or channel its webhook names.
     #[command(subcommand)]
     Webhook(WebhookCommand),

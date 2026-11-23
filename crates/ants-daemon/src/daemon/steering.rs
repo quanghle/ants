@@ -206,7 +206,7 @@ impl Inbox<'_> {
         let Some(notice) = notice.flatten() else {
             let reason = format!("message {id} from {by} took the answer");
             let unanswered = Some((NoReplyWhy::Steered, Some(reason)));
-            let given = Given { text: String::new(), limit: None, unanswered, tokens: 0, title: None };
+            let given = Given { text: String::new(), limit: None, unanswered, tokens: 0, title: None, files: None };
             return Box::pin(self.send_given(h, None, given, false)).await;
         };
         let reply = Reply::Message(Box::new(notice.as_notice(NoticeKind::Steered)));
