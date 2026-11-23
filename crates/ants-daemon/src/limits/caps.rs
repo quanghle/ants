@@ -250,11 +250,26 @@ pub struct Pending {
     /// goes on ([`ants_proto::EscalationReason::Question`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<Box<ants_proto::Questions>>,
-    /// The message id the escalation last went out under ([`crate::escalation::Stuck::id`]), if it went out at this
-    /// level: the stuck ant escalating the thread again for want of turns or allowance, under another id, sends
-    /// nothing more until the escalation is answered.
+    /// The message the escalation last went out under, if it went out at this level: the stuck ant escalating the
+    /// thread again for want of turns or allowance, under another id, sends nothing more until the escalation is
+    /// answered, or, out of allowance, until the next UTC day.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sent_as: Option<String>,
+    pub sent: Option<Sent>,
+}
+
+/// A message id an escalation went out under ([`crate::escalation::Stuck::id`]), and on which UTC day.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sent {
+    pub id: String,
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+}
+
+impl Sent {
+    /// Sent under `id` today.
+    pub fn now(id: &str) -> Self {
+        Self { id: id.to_owned(), day: today() }
+    }
 }
 
 impl Pending {
@@ -596,7 +611,7 @@ impl Ledger {
             Some(p) if escalation.level > p.escalation.level => {
                 (p.escalation, p.to, p.renewed_by, p.deadline) = (escalation.clone(), to, None, deadline);
                 // A member sent this level, not the stuck ant: the ant's next stuck message sends it once.
-                p.sent_as = None;
+                p.sent = None;
                 (true, true)
             }
             _ => (false, false),
@@ -853,7 +868,7 @@ fn cost_increase(spent: &mut ThreadSpend, session: &SessionId, total: f64) -> f6
     increase
 }
 
-fn today() -> String {
+pub(crate) fn today() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
 
@@ -1078,7 +1093,7 @@ mod tests {
             summary,
             channel: None,
             question: None,
-            sent_as: None,
+            sent: None,
         }
     }
 
