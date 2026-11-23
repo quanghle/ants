@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use ants_client::inbox::{CONFLICTS, mark_read as mark_in, mark_unread, marker_of, parse};
+use ants_client::inbox::{CONFLICTS, ParseError, mark_read as mark_in, mark_unread, marker_of, parse};
 use ants_daemon::bus;
 use ants_daemon::delivery::unserved;
 use ants_daemon::people::humans::Registry;
@@ -74,7 +74,7 @@ pub async fn ensure_bucket(js: &jetstream::Context) -> Result<kv::Store> {
 }
 
 /// A message to the human, unless malformed or forged.
-type Message = (u64, Result<Envelope, String>);
+type Message = (u64, Result<Envelope, ParseError>);
 
 pub struct Inbox {
     js: jetstream::Context,

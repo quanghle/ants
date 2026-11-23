@@ -12,17 +12,28 @@ use crate::entry::{Entry, Kind};
 /// How many times a change of the marker is tried again after another device moved it first.
 pub const CONFLICTS: usize = 16;
 
+/// Why a stored message is no message of an inbox.
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    /// It is no [`Envelope`].
+    #[error("{0}")]
+    Malformed(serde_json::Error),
+    /// Its subject names another sender, or another recipient, than it does.
+    #[error("forged sender: {0}")]
+    Forged(ants_proto::Error),
+}
+
 /// The envelope of a message stored on `subject`, unless malformed or its sender forged.
-pub fn parse(subject: &str, payload: &[u8]) -> Result<Envelope, String> {
-    let envelope = serde_json::from_slice::<Envelope>(payload).map_err(|e| e.to_string())?;
-    envelope.check_subject(subject).map_err(|e| format!("forged sender: {e}"))?;
+pub fn parse(subject: &str, payload: &[u8]) -> Result<Envelope, ParseError> {
+    let envelope = serde_json::from_slice::<Envelope>(payload).map_err(ParseError::Malformed)?;
+    envelope.check_subject(subject).map_err(ParseError::Forged)?;
     Ok(envelope)
 }
 
 /// The marker stored as `value`; why not for a malformed one, which a reader starts over from
 /// ([`ReadMarker::default`]).
-pub fn marker_of(value: &[u8]) -> Result<ReadMarker, String> {
-    serde_json::from_slice(value).map_err(|e| e.to_string())
+pub fn marker_of(value: &[u8]) -> Result<ReadMarker, serde_json::Error> {
+    serde_json::from_slice(value)
 }
 
 /// Mark the messages at `seqs` read in `marker`. `inbox` holds the sequences, in order, of every inbox message of the
@@ -104,8 +115,8 @@ mod tests {
         let ask = Envelope::new(p("alice"), p("dev-a"), "fix it");
         let payload = serde_json::to_vec(&ask).unwrap();
         assert_eq!(parse(&ask.subject(), &payload).unwrap(), ask);
-        assert!(parse("ants.inbox.dev-a.bob", &payload).unwrap_err().starts_with("forged sender"));
-        assert!(parse(&ask.subject(), b"not json").is_err());
+        assert!(matches!(parse("ants.inbox.dev-a.bob", &payload), Err(ParseError::Forged(_))));
+        assert!(matches!(parse(&ask.subject(), b"not json"), Err(ParseError::Malformed(_))));
         assert!(parse(&ask.subject(), br#"{"stream":"ANTS","seq":2}"#).is_err(), "no envelope");
     }
 

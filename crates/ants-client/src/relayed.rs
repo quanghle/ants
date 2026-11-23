@@ -22,9 +22,9 @@
 use serde_json::Value;
 
 /// The headers a stream adds to each message it sends to a direct get's reply subject.
-pub const STREAM_HEADERS: [&str; 3] = ["Nats-Stream", "Nats-Subject", "Nats-Sequence"];
+pub(crate) const STREAM_HEADERS: [&str; 3] = ["Nats-Stream", "Nats-Subject", "Nats-Sequence"];
 /// Every header a direct get adds, a batched one's included.
-pub const DIRECT_HEADERS: [&str; 6] =
+pub(crate) const DIRECT_HEADERS: [&str; 6] =
     ["Nats-Stream", "Nats-Subject", "Nats-Sequence", "Nats-Time-Stamp", "Nats-Num-Pending", "Nats-Last-Sequence"];
 /// The fields of a publish's ack, or of its refusal.
 const ACK_FIELDS: [&str; 8] = ["stream", "seq", "domain", "duplicate", "val", "batch", "count", "error"];

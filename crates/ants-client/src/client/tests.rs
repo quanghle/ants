@@ -14,6 +14,7 @@ use nkeys::KeyPair;
 
 use super::*;
 use crate::entry::Kind;
+use crate::error::ErrorKind;
 use crate::sealed::State;
 use crate::transport::{Pending, TransportError};
 
@@ -290,7 +291,7 @@ fn a_send_records_the_thread_s_owner_and_is_sent_once_the_stream_acks_it() {
     let unanswered = Error::transport("sending the message", TransportError::NoResponders);
     assert_eq!(failed, unanswered);
     assert_eq!(failed.to_string(), "sending the message: nobody answers");
-    assert!(matches!(block_on(client.send(ask(" "))), Err(Error::Invalid(_))), "no text");
+    assert!(matches!(block_on(client.send(ask(" "))).unwrap_err().kind, ErrorKind::Invalid(_)), "no text");
 }
 
 /// A server with no JetStream.
@@ -465,7 +466,7 @@ fn reading_marks_read_on_every_device_by_compare_and_set() {
     let moving = (0..inbox::CONFLICTS as u64).map(|n| ReadMarker { below: 100 + n, ..ReadMarker::default() });
     server.0.borrow_mut().racing.extend(moving);
     let failed = block_on(client.mark_read(MarkRead { seqs: vec![200], ..MarkRead::default() })).unwrap_err();
-    assert_eq!(failed, Error::Conflict { what: "marking read".into() });
+    assert_eq!(failed, Error { what: "marking read".into(), kind: ErrorKind::Conflict });
     // One that does not parse is started over from.
     server.put("$KV.ants_read.alice", "not json");
     assert_eq!(block_on(client.marker()).unwrap().marker, ReadMarker::default());

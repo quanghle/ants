@@ -1,21 +1,21 @@
 //! Reading stored messages into [`Entry`]s as the CLI's human reads them ([`Parser`]): the entries are ants-client's
-//! ([`ants_client::Parser`]), with the lookups the CLI makes for them, opening sealed messages with the keyring of its
+//! ([`ants_client::parser::Parser`]), with the lookups the CLI makes for them, opening sealed messages with the keyring of its
 //! device and checking who acts on whose behalf.
 
 use std::sync::Arc;
 
-use ants_client::{Lookups, NoLookups};
+use ants_client::parser::{Lookups, NoLookups};
 use ants_proto::{Acting, Envelope, UserId, subject};
 use chrono::{DateTime, Utc};
 
 use super::Entry;
 use crate::people::sealed;
 
-/// Turns stored messages into [`Entry`]s, in stream order ([`ants_client::Parser`]). A sealed message between two
+/// Turns stored messages into [`Entry`]s, in stream order ([`ants_client::parser::Parser`]). A sealed message between two
 /// humans is opened with the keyring given ([`Parser::opening`]); without one, it shows as `[sealed]`.
 #[derive(Default)]
 pub struct Parser {
-    entries: ants_client::Parser,
+    entries: ants_client::parser::Parser,
     looked_up: LookedUp,
 }
 

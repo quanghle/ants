@@ -1,12 +1,12 @@
 //! What a human sends: who gets a message naming no one ([`unaddressed`]), the human's assistant while its grant
 //! stands ([`designated`]), else the messenger, and the [`Envelope`] of a message as `ants ask` sends it
-//! ([`ask_envelope`], [`compose`]).
+//! ([`ask_envelope`], `compose`).
 
 use ants_proto::{AssistantGrant, Envelope, GrantError, Quote, ThreadId, UserId, Uuid, assistant_grant_key};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::requests::Error;
+use crate::error::Error;
 
 /// Who a message goes to, with the human it assists when it got the message as that human's assistant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,13 +92,14 @@ pub struct Send {
 
 /// The envelope of `send` from the human `me` to `to`, as `ants ask` makes it; refused with no text, or to wait on
 /// no thread.
-pub fn compose(me: &UserId, to: UserId, send: Send) -> Result<Envelope, Error> {
+pub(crate) fn compose(me: &UserId, to: UserId, send: Send) -> Result<Envelope, Error> {
+    const WHAT: &str = "sending the message";
     let Send { thread, text, reply_to, queue, .. } = send;
     if text.trim().is_empty() {
-        return Err(Error::Invalid("a message needs text".to_owned()));
+        return Err(Error::invalid(WHAT, "a message needs text"));
     }
     if queue && thread.is_none() {
-        return Err(Error::Invalid("a message waits behind a prompt on an existing thread only".to_owned()));
+        return Err(Error::invalid(WHAT, "a message waits behind a prompt on an existing thread only"));
     }
     let mut envelope = ask_envelope(me, true, thread, to, text);
     if let Some(ReplyTo { id, quote }) = reply_to {
@@ -111,6 +112,7 @@ pub fn compose(me: &UserId, to: UserId, send: Send) -> Result<Envelope, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorKind;
 
     fn p(s: &str) -> UserId {
         s.parse().unwrap()
@@ -147,8 +149,8 @@ mod tests {
         assert_eq!((later.in_reply_to, later.quote), (Some(first.id), Some(quote)));
 
         let nowhere = Send { text: "later".into(), queue: true, ..Send::default() };
-        assert!(matches!(compose(&alice, dev_a.clone(), nowhere), Err(Error::Invalid(_))));
-        assert!(matches!(compose(&alice, dev_a.clone(), Send::default()), Err(Error::Invalid(_))));
+        assert!(matches!(compose(&alice, dev_a.clone(), nowhere).unwrap_err().kind, ErrorKind::Invalid(_)));
+        assert!(matches!(compose(&alice, dev_a.clone(), Send::default()).unwrap_err().kind, ErrorKind::Invalid(_)));
         assert_eq!(ask_envelope(&dev_a, false, None, alice, "hi".into()).owner, None, "an ant's thread has no owner");
     }
 }
