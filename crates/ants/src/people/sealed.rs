@@ -55,8 +55,9 @@ pub fn seal(
     let key = XSalsa20Poly1305::generate_key(&mut OsRng);
     let mut attachments = std::mem::take(&mut envelope.attachments);
     for file in files.iter_mut() {
+        let id = file.attachment.id;
         let (reference, stored) = seal_file(&key, file)?;
-        match attachments.iter_mut().find(|a| a.id == reference.id) {
+        match attachments.iter_mut().find(|a| a.id == id) {
             Some(attachment) => *attachment = reference,
             None => attachments.push(reference),
         }
@@ -81,11 +82,11 @@ fn seal_file(key: &Key, file: &File) -> Result<(Attachment, File)> {
         attachments::size(MAX_ATTACHMENT_SIZE),
         SealedAttachment::OVERHEAD
     );
-    let stored = Attachment {
-        id: file.attachment.id,
-        ..files::reference(SealedAttachment::STORED_NAME, Attachment::UNKNOWN_MIME, &bytes)?
-    };
+    // Its id comes from the ciphertext, which a fresh nonce makes differ on every try: the bytes stored under one
+    // handle never change.
+    let stored = files::reference(SealedAttachment::STORED_NAME, Attachment::UNKNOWN_MIME, &bytes)?;
     let reference = Attachment {
+        id: stored.id,
         size: stored.size,
         sha256: stored.sha256.clone(),
         sealed: Some(SealedAttachment { nonce: BASE64.encode(&nonce) }),
@@ -715,7 +716,8 @@ mod tests {
 
         let [stored] = sealed_files.as_slice() else { panic!("not one file: {sealed_files:?}") };
         let a = &stored.attachment;
-        assert_eq!((a.id, a.name.as_str(), a.mime.as_str()), (file.attachment.id, "sealed", Attachment::UNKNOWN_MIME));
+        assert_eq!((a.name.as_str(), a.mime.as_str()), ("sealed", Attachment::UNKNOWN_MIME));
+        assert_ne!(a.id, file.attachment.id, "an id of the ciphertext's, unlike on any other try");
         assert_eq!((a.size, a.sha256.as_str()), (plain.len() as u64 + 16, files::sha256(&stored.bytes).as_str()));
         assert!(a.sealed.is_none(), "the store holds no nonce");
         assert!(!stored.bytes.windows(plain.len()).any(|w| w == plain.as_slice()));

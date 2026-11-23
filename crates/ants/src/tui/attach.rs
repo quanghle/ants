@@ -351,6 +351,7 @@ impl Staged {
             attachments::size(file.attachment.size)
         );
         self.files.push(file);
+        ants_daemon::files::distinct(self.files.iter_mut().map(|f| &mut f.attachment));
         line
     }
 

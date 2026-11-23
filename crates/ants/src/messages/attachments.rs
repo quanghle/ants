@@ -39,21 +39,24 @@ impl Attach {
     }
 }
 
-/// A file to attach: its reference, with a fresh id, and its bytes.
+/// A file to attach: its reference, its id derived from it ([`files::attachment_id`]), and its bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct File {
     pub attachment: Attachment,
     pub bytes: Vec<u8>,
 }
 
-/// Read the files at `paths` to attach to one message: at most [`MAX_ATTACHMENTS`], each read with [`read`].
+/// Read the files at `paths` to attach to one message: at most [`MAX_ATTACHMENTS`], each read with [`read`], each with
+/// an id of its own ([`files::distinct`]).
 pub fn read_all(paths: &[PathBuf]) -> Result<Vec<File>> {
     ensure!(
         paths.len() <= MAX_ATTACHMENTS,
         "{} files to attach: a message carries at most {MAX_ATTACHMENTS}",
         paths.len()
     );
-    paths.iter().map(|path| read(path)).collect()
+    let mut files: Vec<File> = paths.iter().map(|path| read(path)).collect::<Result<_>>()?;
+    files::distinct(files.iter_mut().map(|f| &mut f.attachment));
+    Ok(files)
 }
 
 /// Read the file at `path` to attach: a regular file of at most [`MAX_ATTACHMENT_SIZE`] bytes, named by its base name,

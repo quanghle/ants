@@ -61,7 +61,7 @@ pub fn jetstream_files(js: async_nats::jetstream::Context) -> FileAccess {
     }
 }
 
-/// A file read to attach: its reference, with a fresh id, and its bytes.
+/// A file read to attach: its reference, its id derived from it ([`crate::files::attachment_id`]), and its bytes.
 pub(super) struct Loaded {
     pub attachment: Attachment,
     pub bytes: Arc<[u8]>,
@@ -84,6 +84,7 @@ pub(super) async fn load(dir: &Path, paths: &[String], redactor: &Redactor) -> R
             load_one(&root, path.trim(), redactor).await.map_err(|why| format!("cannot attach {path:?}: {why}"))?;
         loaded.push(file);
     }
+    crate::files::distinct(loaded.iter_mut().map(|l| &mut l.attachment));
     Ok(loaded)
 }
 

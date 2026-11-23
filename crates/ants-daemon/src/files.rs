@@ -31,9 +31,47 @@ pub fn sha256(bytes: &[u8]) -> String {
     HEXLOWER.encode(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
 }
 
-/// The reference of a new attachment of `bytes` named `name` of media type `mime`, with a fresh id.
+/// The time an attachment id holds ([`attachment_id`]) is rounded down to a multiple of this.
+pub const ID_PERIOD: Duration = Duration::from_hours(1);
+
+/// The reference of a new attachment of `bytes` named `name` of media type `mime`, with the id [`attachment_id`]
+/// derives from them and the current [`ID_PERIOD`].
 pub fn reference(name: &str, mime: &str, bytes: &[u8]) -> Result<Attachment> {
-    Ok(Attachment::new(name, mime, bytes.len() as u64, sha256(bytes))?)
+    let mut attachment = Attachment::new(name, mime, bytes.len() as u64, sha256(bytes))?;
+    let now = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+    let period = ID_PERIOD.as_millis() as u64;
+    attachment.id = attachment_id(&attachment, now - now % period, 0);
+    Ok(attachment)
+}
+
+/// The id of `attachment` made in the [`ID_PERIOD`] starting at `period` (Unix milliseconds), the `nth` of the same
+/// file on one message: a UUIDv7 of that time whose other bits come from the SHA-256 of its name, media type and bytes'
+/// SHA-256, `period` and `nth`. A message sent again in the same period, after a store refused part of the first try,
+/// so stores its attachments under the same handles, where the chunks already stored are kept ([`put`]); a file's
+/// bytes never differ under one handle, as the handle's id names their digest.
+pub fn attachment_id(attachment: &Attachment, period: u64, nth: u32) -> Uuid {
+    let Attachment { name, mime, sha256, .. } = attachment;
+    let seed = format!("ants attachment\0{name}\0{mime}\0{sha256}\0{period}\0{nth}");
+    let digest = ring::digest::digest(&ring::digest::SHA256, seed.as_bytes());
+    let bits: [u8; 10] = digest.as_ref()[..10].try_into().expect("a SHA-256 has 32 bytes");
+    uuid::Builder::from_unix_timestamp_millis(period, &bits).into_uuid()
+}
+
+/// Give each of `attachments`, those of one message, an id of its own: one repeating an earlier one's, the same file
+/// attached again, takes the next [`attachment_id`] of its period not taken.
+pub fn distinct<'a>(attachments: impl IntoIterator<Item = &'a mut Attachment>) {
+    let mut taken = std::collections::HashSet::new();
+    for attachment in attachments {
+        let period = attachment.id.get_timestamp().map_or(0, |t| {
+            let (secs, nanos) = t.to_unix();
+            secs * 1000 + u64::from(nanos / 1_000_000)
+        });
+        let mut nth = 0;
+        while !taken.insert(attachment.id) {
+            nth += 1;
+            attachment.id = attachment_id(attachment, period, nth);
+        }
+    }
 }
 
 /// The `Nats-Msg-Id` of chunk `n` under `handle`, the same for every copy of it, so the store keeps one.
@@ -43,7 +81,7 @@ pub fn chunk_id(handle: &AttachmentHandle, n: usize) -> String {
 
 /// Store `bytes`, those of `attachment`, under `handle`, chunk by chunk, the first carrying the reference
 /// ([`ATTACHMENT_HEADER`]), and say where. Each chunk is stored once: a chunk found there already was stored by an
-/// earlier try, as only the sender writes under its handles and each attachment has a fresh id.
+/// earlier try, as only the sender writes under its handles and an id names the bytes it holds ([`attachment_id`]).
 ///
 /// A chunk the hub's store does not take as its publish finds no stream (the leaf node's uplink is down) or none in
 /// time is kept in the machine's outbox instead ([`AttachmentHandle::outbox_chunk_subject`]), for the hub to source
@@ -160,13 +198,15 @@ pub async fn get_stored(
     get_within(js, handle, expected, wait).await
 }
 
-/// Whether the attachment under `handle`, made at the time in its id, or the message carrying it, stored at `stored`,
-/// is within [`RECENT`] of `now`. A time ahead of `now`, from a clock running ahead, is recent.
+/// Whether the attachment under `handle`, made in the [`ID_PERIOD`] starting at the time in its id, or the message
+/// carrying it, stored at `stored`, is within [`RECENT`] of `now`. A time ahead of `now`, from a clock running ahead,
+/// is recent.
 pub fn recent(handle: &AttachmentHandle, stored: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
-    let made = handle.id.get_timestamp().and_then(|t| {
+    let period = handle.id.get_timestamp().and_then(|t| {
         let (secs, nanos) = t.to_unix();
         DateTime::from_timestamp(i64::try_from(secs).ok()?, nanos)
     });
+    let made = period.map(|at| at + chrono::Duration::from_std(ID_PERIOD).expect("an hour"));
     let recent = chrono::Duration::from_std(RECENT).expect("an hour");
     made.into_iter().chain(stored).any(|at| now - at < recent)
 }
@@ -400,6 +440,71 @@ mod tests {
     }
 
     #[test]
+    fn an_attachment_id_names_the_file_and_its_period() {
+        let shot = reference("shot.png", "image/png", b"png").unwrap();
+        assert_eq!(shot.id.get_version_num(), 7);
+        assert_eq!(reference("shot.png", "image/png", b"png").unwrap().id, shot.id, "the same file, the same id");
+        for other in [
+            reference("shot.png", "image/png", b"other").unwrap(),
+            reference("other.png", "image/png", b"png").unwrap(),
+            reference("shot.png", "image/webp", b"png").unwrap(),
+        ] {
+            assert_ne!(other.id, shot.id, "{other:?}");
+        }
+        let period = ID_PERIOD.as_millis() as u64;
+        let (secs, nanos) = shot.id.get_timestamp().unwrap().to_unix();
+        let at = secs * 1000 + u64::from(nanos / 1_000_000);
+        assert_eq!(at % period, 0, "the period's start");
+        assert_ne!(attachment_id(&shot, at + period, 0), shot.id, "another period");
+
+        let mut twice = [shot.clone(), reference("log.txt", "text/plain", b"log").unwrap(), shot.clone()];
+        distinct(twice.iter_mut());
+        assert_eq!((twice[0].id, twice[2].id), (shot.id, attachment_id(&shot, at, 1)));
+        let mut again = [shot.clone(), shot.clone(), shot];
+        distinct(again.iter_mut());
+        assert_eq!(again[1].id, twice[2].id, "the same each time");
+        assert_eq!(again.iter().map(|a| a.id).collect::<std::collections::HashSet<_>>().len(), 3);
+    }
+
+    /// A store too full for an attachment keeps the chunks it took; the same file sent again stores only the rest.
+    #[tokio::test]
+    async fn an_attachment_sent_again_after_a_full_store_stores_no_second_copy() {
+        let Some(server) = NatsServer::spawn_with(|dir| {
+            format!("jetstream {{ store_dir: {:?}, max_file_store: 1MB }}\n", dir.join("js"))
+        }) else {
+            return;
+        };
+        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let files = js.create_stream(hub::files_config()).await.unwrap();
+        let filler = jetstream::stream::Config {
+            name: "FILLER".to_owned(),
+            subjects: vec!["filler".to_owned()],
+            ..Default::default()
+        };
+        js.create_stream(filler).await.unwrap();
+        js.publish("filler", vec![b'f'; 600_000].into()).await.unwrap().await.unwrap();
+        let bytes: Vec<u8> = (0..ATTACHMENT_CHUNK * 5).map(|i| i as u8).collect();
+        let handle_of = |attachment: &Attachment| AttachmentHandle {
+            from: "alice".parse().unwrap(),
+            scope: AttachmentScope::Inbox("dev-a".parse().unwrap()),
+            id: attachment.id,
+        };
+
+        let first = reference("big.bin", Attachment::UNKNOWN_MIME, &bytes).unwrap();
+        let refused = put(&js, &handle_of(&first), &first, &bytes).await.unwrap_err();
+        assert!(bus::is_store_full(refused.as_ref()), "{refused:#}");
+        let kept = files.get_info().await.unwrap().state.messages;
+        assert!(kept < 5, "{kept} chunks taken");
+
+        js.delete_stream("FILLER").await.unwrap();
+        let again = reference("big.bin", Attachment::UNKNOWN_MIME, &bytes).unwrap();
+        assert_eq!(again.id, first.id, "the same handle");
+        put(&js, &handle_of(&again), &again, &bytes).await.unwrap();
+        assert_eq!(files.get_info().await.unwrap().state.messages, 5, "one copy of each chunk");
+        assert_eq!(get(&js, &handle_of(&again), Some(&again)).await.unwrap().1, bytes);
+    }
+
+    #[test]
     fn missing_chunks_are_waited_for_when_the_attachment_or_its_message_is_recent() {
         let now = Utc::now();
         let at = |ago: chrono::Duration| {
@@ -419,6 +524,9 @@ mod tests {
         assert!(recent(&at(minute), None, now));
         assert!(recent(&at(-minute), None, now), "a clock ahead");
         assert!(!recent(&at(day), None, now));
+        let period = chrono::Duration::from_std(ID_PERIOD).unwrap();
+        assert!(recent(&at(minute + period), None, now), "made late in the period its id names");
+        assert!(!recent(&at(minute * 2 + period * 2), None, now));
         assert!(recent(&at(day), Some(now - minute), now), "kept in an outbox for a day, stored just now");
         assert!(!recent(&at(day), Some(now - day), now));
     }

@@ -88,8 +88,8 @@ impl Source {
     }
 
     /// The attachments of a forwarded message, read and opened with `keyring` as `ants attachment get` does, to store
-    /// again for the new message, with fresh ids; then `extra`, those attached besides. At most [`MAX_ATTACHMENTS`] in
-    /// all.
+    /// again for the new message under its own handles ([`ants_daemon::files::reference`]); then `extra`, those attached
+    /// besides, each with an id of its own ([`ants_daemon::files::distinct`]). At most [`MAX_ATTACHMENTS`] in all.
     pub async fn files(
         &self,
         js: &jetstream::Context,
@@ -112,6 +112,7 @@ impl Source {
             files.push(File { attachment, bytes });
         }
         files.extend(extra);
+        ants_daemon::files::distinct(files.iter_mut().map(|f| &mut f.attachment));
         Ok(files)
     }
 }
