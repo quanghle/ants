@@ -7,7 +7,7 @@ use std::io::IsTerminal as _;
 use std::time::Duration;
 
 use ants_daemon::config::Theme as ThemeSetting;
-use ants_daemon::records::direct_kv::{DirectKv, Lookup};
+use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{
     AntIdentity, Avatar, Frame, IDENTITIES_BUCKET, INCARNATION_KEY, JsDomain, Palette, Rgb, SeedSource, Stage, Theme,
     UserId, hue_named,
@@ -20,6 +20,8 @@ pub type Identities = BTreeMap<UserId, AntIdentity>;
 
 /// How long [`read_or_none`] reads before giving up, so that an unreachable bucket does not hold up a command.
 const READ_TIMEOUT: Duration = Duration::from_secs(3);
+/// How often a compare-and-set of an identity record is tried again when another writer changed it in between.
+const ATTEMPTS: usize = 5;
 
 /// Every ant's identity record, read with a human's credentials by direct gets of the bucket's stream.
 pub async fn read(js: &jetstream::Context) -> Result<Identities> {
@@ -276,21 +278,27 @@ pub async fn change(
     mut edit: impl FnMut(&mut AntIdentity) -> Result<()>,
 ) -> Result<AntIdentity> {
     let kv = DirectKv::whole(js, js_domain, IDENTITIES_BUCKET).await?;
-    for _ in 0..5 {
-        let (found, last) = kv.lookup_last(ant.as_str()).await?;
-        let mut record = match found {
-            Lookup::NoBucket => bail!("no {IDENTITIES_BUCKET} bucket: `ants init` creates it"),
-            Lookup::NoValue => bail!("{ant} has no identity record: its daemon creates one when it starts"),
-            Lookup::Value(value) => {
-                let record: AntIdentity =
-                    serde_json::from_slice(&value).with_context(|| format!("reading the identity of {ant}"))?;
-                record.check_key(ant.as_str())?;
-                record
-            }
-        };
-        edit(&mut record)?;
+    let absent = format!("{ant} has no identity record: its daemon creates one when it starts");
+    Ok(change_in(&kv, ant, &absent, |record| edit(record).map(|()| true)).await?.0)
+}
+
+/// Make `edit` to the identity record of `ant` in `kv` by compare-and-set, reading the record again when another
+/// writer came first, and storing it only if `edit` says it changed it: the record as edited, and whether it was
+/// stored. Without a record, the error is `absent`.
+pub(crate) async fn change_in(
+    kv: &DirectKv,
+    ant: &UserId,
+    absent: &str,
+    mut edit: impl FnMut(&mut AntIdentity) -> Result<bool>,
+) -> Result<(AntIdentity, bool)> {
+    for _ in 0..ATTEMPTS {
+        let (record, last) = crate::export::read(kv, ant).await?;
+        let mut record = record.with_context(|| absent.to_owned())?;
+        if !edit(&mut record)? {
+            return Ok((record, false));
+        }
         if kv.update(ant.as_str(), serde_json::to_vec(&record)?, last).await? {
-            return Ok(record);
+            return Ok((record, true));
         }
     }
     bail!("the identity of {ant} kept changing while being updated")

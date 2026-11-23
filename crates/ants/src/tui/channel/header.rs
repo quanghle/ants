@@ -89,7 +89,7 @@ fn about(entry: Option<&ChannelEntry>, width: usize, rows: usize) -> Vec<Line<'s
     let room = rows.saturating_sub(1).max(1);
     let mut lines = match &entry.description {
         Some(text) => {
-            let mut wrapped = crate::tui::question::wrap(text, width);
+            let mut wrapped = style::rows(text, width);
             if wrapped.len() > room {
                 wrapped.truncate(room);
                 let last = wrapped.last_mut().expect("a line");

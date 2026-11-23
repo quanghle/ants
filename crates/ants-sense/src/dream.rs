@@ -206,11 +206,12 @@ struct Record {
 }
 
 impl ItemValues for Record {
-    const KIND: &str = "record of the last dream";
+    const KINDS: &[&str] = &[DREAMS];
+    const LABEL: &str = "record of the last dream";
 }
 
 impl ItemValues for Dream {
-    const KIND: &str = DREAM;
+    const KINDS: &[&str] = &[DREAM];
 }
 
 /// A dream, as its item holds it.

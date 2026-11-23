@@ -359,6 +359,31 @@ async fn the_client_s_reads_and_writes_pass(server: &Server, domain: Option<&JsD
     let unmarked = client.mark_unread(vec![replied]).await.unwrap();
     assert!(unmarked.revision > marked.revision && !unmarked.marker.is_read(replied), "{unmarked:?}");
 
+    // A message stored with the stream's headers under other cases of their names, and a time under the stream's
+    // own: read where and when the stream has it, from who its subject says.
+    let decoyed = reply.reply(dev_a.clone(), "again", Role::Human).unwrap();
+    let mut headers = msg_id(&decoyed.id.to_string());
+    for (name, value) in [
+        ("nats-stream", "KV_ants_read"),
+        ("NATS-STREAM", "KV_ants_read"),
+        ("nats-subject", "ants.inbox.alice.dev-b"),
+        ("Nats-subject", "ants.inbox.alice.dev-b"),
+        ("nats-sequence", "1"),
+        ("NATS-Sequence", "2"),
+        ("nats-time-stamp", "2020-01-01T00:00:00Z"),
+        ("Nats-Time-Stamp", "2020-01-01T00:00:00Z"),
+    ] {
+        headers.append(name, value);
+    }
+    let payload = serde_json::to_vec(&decoyed).unwrap();
+    let ack = d_js.publish_with_headers(decoyed.subject(), headers, payload.into()).await.unwrap().await.unwrap();
+    let mut reader = client.reader(Window { from_seq: Some(ack.sequence), ..Window::default() });
+    let page = timeout(WAIT, reader.next()).await.expect("no page").unwrap();
+    assert_eq!((page.entries.len(), page.skipped, page.relayed, page.done), (1, 0, 0, true));
+    let entry = &page.entries[0];
+    assert_eq!((entry.seq, entry.from.as_ref(), entry.text.as_str()), (ack.sequence, Some(&dev_a), "again"));
+    assert!(entry.stored_at > chrono::Utc::now() - chrono::Duration::hours(1), "{}", entry.stored_at);
+
     // The server answers a connection in order: the refusal of this publish is the first it sent, so it refused
     // nothing the client did.
     let denied = subject::read_marker(&bob);

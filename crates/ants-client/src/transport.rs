@@ -21,7 +21,7 @@ pub struct Message {
     /// The subject answers go to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<String>,
-    /// The headers in the order the message carries them, a name once per value.
+    /// The headers, a name once per value, the values of one name in the order the message carries them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<(String, String)>,
     #[serde(default)]
@@ -47,9 +47,11 @@ impl Message {
         self
     }
 
-    /// The first value of the header `name`, whatever its case.
+    /// The last value of the header named exactly `name`. nats-server tells header names apart by case and adds its
+    /// own headers after those a message was stored with, so this is the server's value of a header it adds, never
+    /// one a writer stored under the name or under another case of it.
     pub fn header_value(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(header, _)| header.eq_ignore_ascii_case(name)).map(|(_, value)| value.as_str())
+        self.headers.iter().rfind(|(header, _)| header == name).map(|(_, value)| value.as_str())
     }
 
     /// The names of its headers, one per value.

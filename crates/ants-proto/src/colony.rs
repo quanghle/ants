@@ -224,6 +224,7 @@ pub enum LimitKind {
 }
 
 impl LimitKind {
+    /// What a human reads of it: a label, not its name on the wire.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RateLimit => "rate-limited",
@@ -271,6 +272,7 @@ pub enum Activity {
 }
 
 impl Activity {
+    /// Its name on the wire, as serde writes it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",

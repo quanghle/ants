@@ -12,6 +12,7 @@ use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::{self, kv};
 use chrono::{DateTime, TimeDelta, Utc};
 
+use crate::cas;
 use crate::connection::Nats;
 use crate::threads::thread;
 
@@ -65,10 +66,9 @@ pub(crate) async fn update(
         let now = Utc::now();
         change(&mut prefs, now);
         prefs.prune(now);
-        match kv.update(human.as_str(), serde_json::to_vec(&prefs)?.into(), revision).await {
-            Ok(_) => return Ok(prefs),
-            Err(e) if e.kind() == kv::UpdateErrorKind::WrongLastRevision => continue,
-            Err(e) => return Err(e).context("storing the snooze and muted threads"),
+        let stored = cas::update(&kv, human.as_str(), serde_json::to_vec(&prefs)?, revision).await;
+        if stored.context("storing the snooze and muted threads")? {
+            return Ok(prefs);
         }
     }
     bail!("storing the snooze and muted threads: another device kept changing them")

@@ -6,7 +6,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::Page;
-use super::conversation::{busy, cut, hm};
+use super::conversation::{busy, hm};
 use crate::threads::thread::{Entry, Kind};
 use crate::tui::model::Data;
 use crate::tui::style;
@@ -69,7 +69,7 @@ impl Page {
         let rest = rest.iter().map(|r| format!(" · {r}")).collect::<String>();
         Line::from(vec![
             Span::styled(label, Style::new().fg(state.color())),
-            Span::styled(cut(&rest, width.saturating_sub(label.chars().count())), style::dim()),
+            Span::styled(style::fit(&rest, width.saturating_sub(label.chars().count())), style::dim()),
         ])
     }
 
@@ -79,8 +79,9 @@ impl Page {
         let thread = &self.history.thread;
         let summary = data.live.summary(thread);
         let label = |name: &str| Span::styled(format!("{name:<7}"), style::dim());
-        let field =
-            |name: &str, value: String| Line::from(vec![label(name), Span::raw(cut(&value, width.saturating_sub(7)))]);
+        let field = |name: &str, value: String| {
+            Line::from(vec![label(name), Span::raw(style::fit(&value, width.saturating_sub(7)))])
+        };
         let state = data.state(thread);
         let mut lines =
             vec![Line::from(vec![label("STATE"), Span::styled(state.label(), Style::new().fg(state.color()))])];
@@ -96,7 +97,10 @@ impl Page {
             match progress.and_then(|p| p.status.of(ant)) {
                 Some(stand) => lines.push(Line::from(vec![
                     Span::raw(format!("  {ant} ")),
-                    Span::styled(cut(&format!("◐ {stand}"), width.saturating_sub(ant.as_str().len() + 3)), busy()),
+                    Span::styled(
+                        style::fit(&format!("◐ {stand}"), width.saturating_sub(ant.as_str().len() + 3)),
+                        busy(),
+                    ),
                 ])),
                 None => lines.push(Line::raw(format!("  {ant}"))),
             }

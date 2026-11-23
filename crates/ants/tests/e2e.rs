@@ -4,12 +4,14 @@
 //! `stub-adapter` one a config file defines as a harness, it serves ACP on stdio and answers every prompt with
 //! `stub: <prompt>`.
 
-#![allow(clippy::disallowed_methods, reason = "tests read and hear as they please")]
+#![expect(clippy::disallowed_methods, reason = "tests read and hear as they please")]
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
-use std::path::Path;
-use std::process::{Child, Command, Output, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::v1::schema::{
@@ -22,10 +24,12 @@ use agent_client_protocol::{Agent, Stdio as AcpStdio};
 use ants_daemon::profile::identity::Identity;
 use ants_daemon::sync::MutexExt as _;
 use ants_proto::{SenseId, UserId};
-use ants_test_support::{NatsServer, free_port, scratch_dir};
+use ants_test_support::{NatsServer, ants_command, free_port, scratch_dir, wait_until};
 
 const ANTS: &str = env!("CARGO_BIN_EXE_ants");
 const WAIT: Duration = Duration::from_secs(60);
+/// How often a wait looks again.
+const POLL: Duration = Duration::from_millis(100);
 
 #[path = "e2e/churn.rs"]
 mod churn;
@@ -113,19 +117,12 @@ fn custom_whoami_and_tools_reach_the_harness() {
 #[expect(clippy::too_many_lines, reason = "one scenario against one server, each step building on the ones before")]
 fn exercise_daemon(custom_tools: bool) {
     let Some(server) = NatsServer::start() else { return };
-    let dir = scratch_dir("e2e");
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    link_self(&bin, "copilot");
-    let ants = |args: &[&str]| {
-        let mut command = Command::new(ANTS);
-        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
-        command
-    };
+    let fixture = Fixture::new("e2e", &server, "copilot");
+    let dir = &fixture.dir;
+    let ants = |args: &[&str]| fixture.ants(args);
     let init = run(ants(&["init"]));
     assert!(init.status.success(), "ants init: {}", String::from_utf8_lossy(&init.stderr));
 
-    let log = std::fs::File::create(dir.join("daemon.log")).unwrap();
     let home = dir.join("home");
     let metrics = format!("127.0.0.1:{}", free_port());
     let mut command = ants(&["daemon"]);
@@ -145,22 +142,13 @@ fn exercise_daemon(custom_tools: bool) {
         .unwrap();
         command.arg("--config").arg(config);
     } else {
-        command.env("ANTS_ANT", "dev-a").arg("--home").arg(&home).arg("--workdir").arg(&dir);
+        command.env("ANTS_ANT", "dev-a").arg("--home").arg(&home).arg("--workdir").arg(dir);
         command.arg("--harness").arg("copilot");
         command.arg("--metrics").arg(&metrics);
     }
-    let daemon = command
-        .env("PATH", &bin)
-        .env_remove("BD_DB")
-        .env_remove("BD_REMOTE")
-        .env_remove("ANTS_TEST_TOOL_DB")
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(log)
-        .spawn()
-        .unwrap();
-    let daemon = Killed(daemon);
-    let daemon_log = || std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
+    command.env("PATH", &fixture.bin).env_remove("BD_DB").env_remove("BD_REMOTE").env("RUST_LOG", "info");
+    let daemon = fixture.spawn_daemon(&mut command, "daemon.log");
+    let daemon_log = || daemon.log();
 
     let ask = run(ants(&["ask", "--wait", "@dev-a", "hello", "there"]));
     let stdout = String::from_utf8_lossy(&ask.stdout);
@@ -260,18 +248,14 @@ fn exercise_daemon(custom_tools: bool) {
     let (status, health) = get(&metrics, "/healthz");
     assert_eq!((status, health.as_str()), (200, "ok\n"), "daemon log:\n{}", daemon_log());
     // A prompt leaves the in-flight gauge as it ends, which may be after its answer was read.
-    let start = Instant::now();
-    let exposition = loop {
+    let exposition = wait_until(WAIT, POLL, || {
         let (status, exposition) = get(&metrics, "/metrics");
         assert_eq!(status, 200);
         let settled = ["ants_prompts_total{ant=\"dev-a\"} 1", "ants_prompts_in_flight{ant=\"dev-a\"} 0"]
             .iter()
             .all(|line| exposition.lines().any(|l| l == *line));
-        if settled || start.elapsed() > WAIT {
-            break exposition;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
+        if settled { Ok(exposition) } else { Err(exposition) }
+    });
     for line in [
         "# TYPE ants_nats_connected gauge",
         "ants_nats_connected{ant=\"dev-a\"} 1",
@@ -323,23 +307,14 @@ fn exercise_daemon(custom_tools: bool) {
     assert!(String::from_utf8_lossy(&inbox.stdout).contains("stub:"), "the latest reply is unread again: {inbox:?}");
 
     // Service managers stop it with SIGTERM: a clean stop, as on Ctrl-C.
-    let mut daemon = daemon;
-    let term = Command::new("kill").arg("-TERM").arg(daemon.0.id().to_string()).status().unwrap();
-    assert!(term.success());
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = daemon.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(start.elapsed() < WAIT, "daemon still running after SIGTERM\ndaemon log:\n{}", daemon_log());
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    daemon.signal("-TERM");
+    let status = daemon.wait_exit();
     assert!(status.success(), "daemon after SIGTERM: {status}\ndaemon log:\n{}", daemon_log());
     assert!(daemon_log().contains("stopped"), "daemon log:\n{}", daemon_log());
 
     drop(daemon);
     drop(server);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[expect(clippy::too_many_lines, reason = "one scenario against one server, each step building on the ones before")]
@@ -347,11 +322,7 @@ fn channels_are_managed_posted_to_and_read() {
     use std::io::BufRead as _;
 
     let Some(server) = NatsServer::start() else { return };
-    let ants = |args: &[&str]| {
-        let mut command = Command::new(ANTS);
-        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
-        command
-    };
+    let ants = |args: &[&str]| ants_at(&server.url, args);
     let ok = |args: &[&str]| {
         let out = run(ants(args));
         let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -407,10 +378,8 @@ fn channels_are_managed_posted_to_and_read() {
     assert!(!warned.contains("@dev-c"), "{warned}");
 
     // `--follow` prints the posts on the thread as they come.
-    let mut waiting = Command::new(ANTS);
-    waiting.args(["--nats", &server.url, "post", "--follow", "--timeout", "30s", "ops", "anyone?"]);
-    let mut waiting =
-        Killed(waiting.env_remove("ANTS_CREDS").stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+    let mut waiting = ants(&["post", "--follow", "--timeout", "30s", "ops", "anyone?"]);
+    let mut waiting = Killed(waiting.stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
     let mut lines = std::io::BufReader::new(waiting.0.stdout.take().unwrap()).lines();
     let waited = lines.next().unwrap().unwrap().strip_prefix("thread ").unwrap().to_owned();
     assert!(lines.next().unwrap().unwrap().starts_with("message "));
@@ -479,8 +448,7 @@ fn files_are_attached_listed_and_saved() {
     let Some(server) = NatsServer::start() else { return };
     let dir = scratch_dir("attach");
     let ants = |args: &[&str]| {
-        let mut command = Command::new(ANTS);
-        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
+        let mut command = ants_at(&server.url, args);
         command.current_dir(&dir);
         command
     };
@@ -556,83 +524,50 @@ fn files_are_attached_listed_and_saved() {
 /// 75, which the service units restart on.
 fn a_daemon_exits_once_its_executable_was_replaced() {
     let Some(server) = NatsServer::start() else { return };
-    let dir = scratch_dir("upgrade");
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    link_self(&bin, "copilot");
+    let fixture = Fixture::new("upgrade", &server, "copilot");
+    let (dir, bin) = (&fixture.dir, &fixture.bin);
     let installed = bin.join("ants");
     std::fs::copy(ANTS, &installed).unwrap();
-    let log = || std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
-    let mut daemon = Command::new(&installed);
+    let mut daemon = ants_command(&installed);
     daemon
         .args(["--nats", &server.url, "daemon", "--ant", "dev-a", "--harness", "copilot", "--upgrade-check", "1s"])
         .arg("--workdir")
-        .arg(&dir)
+        .arg(dir)
         .arg("--home")
         .arg(dir.join("home"))
-        .env_remove("ANTS_CREDS")
-        .env_remove("ANTS_CONFIG")
-        .env_remove("ANTS_UPGRADE_CHECK")
-        .env("PATH", &bin)
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(std::fs::File::create(dir.join("daemon.log")).unwrap());
-    let mut daemon = Killed(daemon.spawn().unwrap());
-    let start = Instant::now();
-    while !log().contains("serving inbox") {
-        assert!(start.elapsed() < WAIT, "daemon log:\n{}", log());
-        std::thread::sleep(Duration::from_millis(100));
-    }
+        .env("PATH", bin)
+        .env("RUST_LOG", "info");
+    let daemon = fixture.spawn_daemon(&mut daemon, "daemon.log");
+    daemon.wait_log("serving inbox", 1);
     std::thread::sleep(Duration::from_millis(1500));
-    assert!(daemon.0.try_wait().unwrap().is_none(), "exited unreplaced\ndaemon log:\n{}", log());
+    assert!(daemon.running(), "exited unreplaced\ndaemon log:\n{}", daemon.log());
 
     let staged = bin.join(".ants-new");
     std::fs::copy(ANTS, &staged).unwrap();
     std::fs::rename(&staged, &installed).unwrap();
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = daemon.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(start.elapsed() < WAIT, "still running\ndaemon log:\n{}", log());
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    assert_eq!(status.code(), Some(75), "daemon log:\n{}", log());
-    let log = log();
+    let status = daemon.wait_exit();
+    assert_eq!(status.code(), Some(75), "daemon log:\n{}", daemon.log());
+    let log = daemon.log();
     assert!(log.contains("the executable was replaced") && log.contains("stopped"), "{log}");
     drop(server);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn the_builtin_messenger_has_a_standby_and_the_short_name_is_ordinary() {
     let Some(server) = NatsServer::start() else { return };
-    let dir = scratch_dir("handover");
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    link_self(&bin, "copilot");
-    let ants = |args: &[&str]| {
-        let mut command = Command::new(ANTS);
-        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
-        command
-    };
+    let fixture = Fixture::new("handover", &server, "copilot");
+    let dir = &fixture.dir;
+    let ants = |args: &[&str]| fixture.ants(args);
     assert!(run(ants(&["init"])).status.success());
-    let log = |name: &str| std::fs::read_to_string(dir.join(format!("{name}.log"))).unwrap_or_default();
+    let log = |name: &str| read_log(&dir.join(format!("{name}.log")));
     let logs = || format!("primary log:\n{}\nstandby log:\n{}", log("primary"), log("standby"));
     let daemon = |name: &str, config: &str| {
         let (path, home) = (dir.join(format!("{name}.toml")), dir.join(name));
         std::fs::write(&path, config).unwrap();
         std::fs::create_dir_all(&home).unwrap();
-        let log = std::fs::File::create(dir.join(format!("{name}.log"))).unwrap();
         let mut command = ants(&["daemon", "--config"]);
-        command.arg(path).env("HOME", home).env("PATH", &bin).env("RUST_LOG", "info");
-        Killed(command.stdout(Stdio::null()).stderr(log).spawn().unwrap())
-    };
-    let wait_for = |name: &str, text: &str, times: usize| {
-        let start = Instant::now();
-        while log(name).matches(text).count() < times {
-            assert!(start.elapsed() < WAIT, "{name} log lacks {text:?} {times} times\n{}", logs());
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        command.arg(path).env("HOME", home).env("PATH", &fixture.bin).env("RUST_LOG", "info");
+        fixture.spawn_daemon(&mut command, &format!("{name}.log"))
     };
     let served_from = || {
         let colony = run(ants(&["colony", "--json"]));
@@ -656,34 +591,31 @@ fn the_builtin_messenger_has_a_standby_and_the_short_name_is_ordinary() {
         );
     };
 
-    let mut primary = daemon(
+    let primary = daemon(
         "primary",
         &format!("harness = \"copilot\"\nsage = \"none\"\n[[ant]]\nname = \"messenger\"\nworkdir = {dir:?}\n"),
     );
-    wait_for("primary", "serving inbox", 2);
-    let _standby = daemon("standby", "harness = \"copilot\"\n");
+    primary.wait_log("serving inbox", 2);
+    let standby = daemon("standby", "harness = \"copilot\"\n");
     assert!(served_from().ends_with("primary/.ants/agents/system-messenger"), "{}", logs());
     ask("first");
     let ordinary = run(ants(&["ask", "--wait", "@messenger", "ordinary request"]));
     let stdout = unbriefed(&String::from_utf8_lossy(&ordinary.stdout));
     assert!(stdout.contains("messenger: stub: ordinary request") && !stdout.contains("[ants] Route"), "{stdout}");
 
-    assert!(Command::new("kill").arg("-TERM").arg(primary.0.id().to_string()).status().unwrap().success());
-    primary.0.wait().unwrap();
-    wait_for("standby", "serving inbox", 1);
+    primary.signal("-TERM");
+    primary.wait_exit();
+    standby.wait_log("serving inbox", 1);
     assert!(served_from().ends_with("standby/.ants/agents/system-messenger"), "{}", logs());
     ask("second");
     drop(server);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn the_last_messenger_drains_when_its_credentials_are_removed() {
     let ants = |home: &Path, args: &[&str]| {
-        let mut command = Command::new(ANTS);
+        let mut command = ants_command(ANTS);
         command.args(args).env("HOME", home);
-        for var in ["ANTS_ANT", "ANTS_AUTH_DIR", "ANTS_CONFIG", "ANTS_CREDS", "ANTS_JS_DOMAIN", "ANTS_NATS_URL"] {
-            command.env_remove(var);
-        }
         command
     };
     let ok = |command| {
@@ -720,43 +652,23 @@ fn the_last_messenger_drains_when_its_credentials_are_removed() {
     )
     .unwrap();
     let daemon = || ants(home, &["--nats", &server.url, "daemon", "--config", config.to_str().unwrap()]);
-    let log_path = home.join("daemon.log");
-    let log = || std::fs::read_to_string(&log_path).unwrap_or_default();
-    let wait_for = |what: &str, done: &mut dyn FnMut() -> bool| {
-        let start = Instant::now();
-        while !done() {
-            assert!(start.elapsed() < WAIT, "{what}\ndaemon log:\n{}", log());
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    };
-    let mut serving = Killed(
-        daemon()
-            .env("RUST_LOG", "info")
-            .stdout(Stdio::null())
-            .stderr(std::fs::File::create(&log_path).unwrap())
-            .spawn()
-            .unwrap(),
-    );
-    wait_for("messenger did not start", &mut || log().contains("serving inbox"));
+    let serving = Daemon::spawn(daemon().env("RUST_LOG", "info"), home.join("daemon.log"));
+    let log = || serving.log();
+    serving.wait_log("serving inbox", 1);
     let ask = human_on_bus(&["ask", "--wait", "finish this request"]);
     let reply = std::thread::spawn(move || run(ask));
-    wait_for("prompt is not in flight", &mut || gate.is_file());
+    wait_until(WAIT, POLL, || {
+        gate.is_file().then_some(()).ok_or_else(|| format!("prompt is not in flight\ndaemon log:\n{}", log()))
+    });
 
     std::fs::remove_file(auth.join("system-messenger.creds")).unwrap();
-    wait_for("messenger did not start draining after credentials removal", &mut || {
-        let log = log();
-        log.contains("the credentials of a built-in ant or the host changed")
-            && log.contains("stopping the ant no longer listed")
-    });
-    assert!(serving.0.try_wait().unwrap().is_none(), "exited with a prompt still in flight:\n{}", log());
+    serving.wait_log("the credentials of a built-in ant or the host changed", 1);
+    serving.wait_log("stopping the ant no longer listed", 1);
+    assert!(serving.running(), "exited with a prompt still in flight:\n{}", log());
     std::fs::write(gate.with_extension("release"), "").unwrap();
 
-    let mut status = None;
-    wait_for("daemon did not exit after the last ant drained", &mut || {
-        status = serving.0.try_wait().unwrap();
-        status.is_some()
-    });
-    assert!(status.unwrap().success(), "{}", log());
+    let status = serving.wait_exit();
+    assert!(status.success(), "{}", log());
     let reply = reply.join().unwrap();
     let stdout = String::from_utf8_lossy(&reply.stdout);
     assert!(
@@ -771,13 +683,10 @@ fn the_last_messenger_drains_when_its_credentials_are_removed() {
     assert!(!startup.status.success() && stderr.contains("nothing to serve on this machine"), "{stderr}");
 }
 
-#[expect(clippy::too_many_lines, reason = "one scenario against one server, each step building on the ones before")]
 fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     let Some(server) = NatsServer::start() else { return };
-    let dir = scratch_dir("adapter");
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    link_self(&bin, "stub-adapter");
+    let fixture = Fixture::new("adapter", &server, "stub-adapter");
+    let dir = &fixture.dir;
     let (user_home, home) = (dir.join("user"), dir.join("dev-a"));
     std::fs::create_dir_all(&user_home).unwrap();
     let config = dir.join("config.toml");
@@ -791,15 +700,8 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     std::fs::write(&config, &original).unwrap();
     // Neither the daemon nor the CLI finds the adapter on PATH: the definition's path, relative to the file, does.
     let ants = |args: &[&str]| {
-        let mut command = Command::new(ANTS);
-        command
-            .args(["--nats", &server.url])
-            .args(args)
-            .env_remove("ANTS_CREDS")
-            .env_remove("ANTS_CONFIG")
-            .env_remove("ANTS_TEST_ADAPTER")
-            .env("HOME", &user_home)
-            .env("PATH", "/usr/bin:/bin");
+        let mut command = fixture.ants(args);
+        command.env("HOME", &user_home).env("PATH", "/usr/bin:/bin");
         command
     };
     let stdout = |output: &Output| String::from_utf8_lossy(&output.stdout).into_owned();
@@ -819,10 +721,9 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     assert!(!unknown.status.success());
     assert!(stderr(&unknown).contains("unknown harness \"nope\""), "{}", stderr(&unknown));
 
-    let log = std::fs::File::create(dir.join("daemon.log")).unwrap();
     let mut command = ants(&["daemon", "--config", config.to_str().unwrap()]);
-    let _daemon = Killed(command.env("RUST_LOG", "info").stdout(Stdio::null()).stderr(log).spawn().unwrap());
-    let daemon_log = || std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
+    let daemon = fixture.spawn_daemon(command.env("RUST_LOG", "info"), "daemon.log");
+    let daemon_log = || daemon.log();
     let ask = |args: &[&str], expected: &str| {
         let ask = run(ants(&[&["ask", "--wait"], args].concat()));
         let said = unbriefed(&stdout(&ask));
@@ -848,15 +749,8 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     assert!(dev_b.contains("harness = \"stubby\"\n"), "{text}");
 
     // SIGHUP reloads the file: dev-c newly listed starts, dev-a changed restarts, the messenger carries on.
-    let wait_for = |text: &str, times: usize| {
-        let start = Instant::now();
-        while daemon_log().matches(text).count() < times {
-            assert!(start.elapsed() < WAIT, "daemon log lacks {text:?} {times} times:\n{}", daemon_log());
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    };
-    let hangup =
-        || assert!(Command::new("kill").arg("-HUP").arg(_daemon.0.id().to_string()).status().unwrap().success());
+    let wait_for = |text: &str, times: usize| daemon.wait_log(text, times);
+    let hangup = || daemon.signal("-HUP");
     let listed = |text: &str| {
         let changed = original.replace("OVERRIDDEN = \"ant\"", "OVERRIDDEN = \"changed\"");
         std::fs::write(&config, format!("{changed}{text}")).unwrap();
@@ -884,13 +778,12 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     hangup();
     wait_for("config reloaded", 2);
     wait_for("stopping the ant no longer listed", 1);
-    let start = Instant::now();
-    while stdout(&run(ants(&["colony", "--json"]))).contains("\"dev-c\"") {
-        assert!(start.elapsed() < WAIT, "dev-c still in the colony\ndaemon log:\n{}", daemon_log());
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_until(WAIT, POLL, || {
+        let left = !stdout(&run(ants(&["colony", "--json"]))).contains("\"dev-c\"");
+        left.then_some(()).ok_or_else(|| format!("dev-c still in the colony\ndaemon log:\n{}", daemon_log()))
+    });
     drop(server);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// `ants setup` against a running server, in a scratch home and without services, twice: the second run keeps what
@@ -914,12 +807,9 @@ fn setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_thr
     let none = std::env::join_paths(&others).unwrap();
     let codex = std::env::join_paths(std::iter::once(bin).chain(others)).unwrap();
     let ants_on = |path: &std::ffi::OsStr, args: &[&str]| {
-        let mut command = Command::new(ANTS);
+        let mut command = ants_command(ANTS);
         command.args(args).env("HOME", &home).env("PATH", path).env("SHELL", "/bin/bash").current_dir(&home);
-        for var in ["ANTS_CREDS", "ANTS_CONFIG", "ANTS_NATS_URL", "ANTS_JS_DOMAIN", "XDG_DATA_HOME", "XDG_CONFIG_HOME"]
-        {
-            command.env_remove(var);
-        }
+        command.env_remove("XDG_DATA_HOME").env_remove("XDG_CONFIG_HOME");
         command
     };
     let ants = |args: &[&str]| ants_on(&codex, args);
@@ -1009,15 +899,9 @@ fn a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread() {
     use futures::StreamExt as _;
 
     let Some(server) = NatsServer::start() else { return };
-    let dir = scratch_dir("trail");
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    link_self(&bin, "copilot");
-    let ants = |args: &[&str]| {
-        let mut command = Command::new(ANTS);
-        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
-        command
-    };
+    let fixture = Fixture::new("trail", &server, "copilot");
+    let dir = &fixture.dir;
+    let ants = |args: &[&str]| fixture.ants(args);
     assert!(run(ants(&["init"])).status.success());
     let metrics = format!("127.0.0.1:{}", free_port());
     let mut config = format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\nmetrics = {metrics:?}\n");
@@ -1027,17 +911,11 @@ fn a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread() {
         let _ = write!(config, "[[ant]]\nname = {name:?}\nworkdir = {workdir:?}\nhome = {home:?}\n");
     }
     std::fs::write(dir.join("config.toml"), config).unwrap();
-    let log = || std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
     let mut daemon = ants(&["daemon", "--config"]);
-    daemon.arg(dir.join("config.toml")).env("HOME", &dir).env("PATH", &bin).env("RUST_LOG", "info");
-    let _daemon = Killed(
-        daemon.stdout(Stdio::null()).stderr(std::fs::File::create(dir.join("daemon.log")).unwrap()).spawn().unwrap(),
-    );
-    let start = Instant::now();
-    while log().matches("serving inbox").count() < 2 {
-        assert!(start.elapsed() < WAIT, "daemon log:\n{}", log());
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    daemon.arg(dir.join("config.toml")).env("HOME", dir).env("PATH", &fixture.bin).env("RUST_LOG", "info");
+    let daemon = fixture.spawn_daemon(&mut daemon, "daemon.log");
+    let log = || daemon.log();
+    daemon.wait_log("serving inbox", 2);
 
     let script = "meta = {\"name\": \"e2e\", \"description\": \"one step\", \"phases\": [\"asking\"]}\n\
                   phase(\"asking\")\nlog(\"to dev-b\")\nawait agent(\"say hi\", ant=\"dev-b\")\n";
@@ -1060,53 +938,190 @@ fn a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread() {
     });
     let TrailOutcome::Started { run: started } = outcome else { panic!("not started: {outcome:?}\n{}", log()) };
 
-    let start = Instant::now();
-    let shown = loop {
-        let shown = run(ants(&["thread", "show", thread.as_str()]));
-        let shown = String::from_utf8_lossy(&shown.stdout).into_owned();
+    let show = || String::from_utf8_lossy(&run(ants(&["thread", "show", thread.as_str()])).stdout).into_owned();
+    let shown = wait_until(WAIT, 2 * POLL, || {
+        let shown = show();
         if shown.contains(" is done (") {
-            break shown;
+            return Ok(shown);
         }
-        assert!(start.elapsed() < WAIT, "the run did not end:\n{shown}\ndaemon log:\n{}", log());
-        std::thread::sleep(Duration::from_millis(200));
-    };
+        Err(format!("the run did not end:\n{shown}\ndaemon log:\n{}", log()))
+    });
     let done = format!("Run {started} of an inline script is done (1 steps, 1 turns):");
     assert!(shown.contains("dev-a -> notes") && shown.contains("phase: asking\n  log: to dev-b"), "{shown}");
     assert!(shown.contains("dev-a -> human") && shown.contains(&done) && shown.contains("stub: "), "{shown}");
     // The invitation to rate the run, then the stub's answer to it, which goes to the run's owner.
     let invited = format!("rate_trail(run: \"{started}\"");
-    let start = Instant::now();
-    loop {
-        let shown = run(ants(&["thread", "show", thread.as_str()]));
-        let shown = String::from_utf8_lossy(&shown.stdout).into_owned();
+    wait_until(WAIT, 2 * POLL, || {
+        let shown = show();
         if shown.contains("dev-a -> dev-a") && shown.matches(&invited).count() >= 2 {
-            break;
+            return Ok(());
         }
-        assert!(start.elapsed() < WAIT, "dev-a was not invited to rate the run:\n{shown}\ndaemon log:\n{}", log());
-        std::thread::sleep(Duration::from_millis(200));
-    }
+        Err(format!("dev-a was not invited to rate the run:\n{shown}\ndaemon log:\n{}", log()))
+    });
     // A prompt is counted as it ends, which may be after its reply arrived.
-    let start = Instant::now();
     let prompted = |ant: &str, n: u32| format!("ants_prompts_total{{ant=\"{ant}\"}} {n}");
-    let exposition = loop {
+    let exposition = wait_until(WAIT, POLL, || {
         let (_, exposition) = get(&metrics, "/metrics");
-        if exposition.lines().any(|l| l == prompted("dev-b", 1))
-            && exposition.lines().any(|l| l == prompted("dev-a", 1))
-        {
-            break exposition;
-        }
-        assert!(start.elapsed() < WAIT, "{exposition}");
-        std::thread::sleep(Duration::from_millis(50));
-    };
+        let both = ["dev-b", "dev-a"].iter().all(|ant| exposition.lines().any(|l| l == prompted(ant, 1)));
+        if both { Ok(exposition) } else { Err(exposition) }
+    });
     assert!(
         !exposition.contains(&prompted("dev-a", 2)),
         "dev-a was prompted by more than the invitation: {exposition}"
     );
     drop(server);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Run `command` to completion, killing it after [`WAIT`].
+/// `ants --nats URL ARGS…`, with no `ANTS_*` variable of the calling shell.
+fn ants_at(url: &str, args: &[&str]) -> Command {
+    let mut command = ants_command(ANTS);
+    command.args(["--nats", url]).args(args);
+    command
+}
+
+/// A scenario's scratch directory, the stub harness linked in its `bin`, and its server.
+#[derive(Clone)]
+struct Fixture {
+    dir: PathBuf,
+    bin: PathBuf,
+    url: String,
+}
+
+impl Fixture {
+    /// A scratch directory named after `name`, the stub harness as `stub` in its `bin`. The scenario removes it.
+    fn new(name: &str, server: &NatsServer, stub: &str) -> Self {
+        let dir = scratch_dir(name);
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        link_self(&bin, stub);
+        Self { dir, bin, url: server.url.clone() }
+    }
+
+    /// `ants ARGS…` against the scenario's server (see [`ants_at`]).
+    fn ants(&self, args: &[&str]) -> Command {
+        ants_at(&self.url, args)
+    }
+
+    /// Start `command`, a daemon, its log in the file `log` of the directory.
+    fn spawn_daemon(&self, command: &mut Command, log: &str) -> Daemon {
+        Daemon::spawn(command, self.dir.join(log))
+    }
+}
+
+/// The text of the log at `path`, empty before it exists.
+fn read_log(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// A daemon killed on drop, so a failed assertion does not leave it running, and the file its log goes to.
+struct Daemon {
+    child: RefCell<Child>,
+    log: PathBuf,
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+impl Daemon {
+    /// Start `command` with its standard error in the new file `log`.
+    fn spawn(command: &mut Command, log: PathBuf) -> Self {
+        let child = command.stdout(Stdio::null()).stderr(std::fs::File::create(&log).unwrap()).spawn().unwrap();
+        Self { child: RefCell::new(child), log }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.borrow().id()
+    }
+
+    fn log(&self) -> String {
+        read_log(&self.log)
+    }
+
+    /// Wait until the log holds `text` `times` times.
+    fn wait_log(&self, text: &str, times: usize) {
+        wait_until(WAIT, POLL, || {
+            let log = self.log();
+            if log.matches(text).count() >= times {
+                return Ok(());
+            }
+            Err(format!("the daemon's log lacks {text:?} {times} times:\n{log}"))
+        });
+    }
+
+    /// Send it `signal`, as `kill` names it (`-TERM`).
+    fn signal(&self, signal: &str) {
+        assert!(Command::new("kill").arg(signal).arg(self.pid().to_string()).status().unwrap().success());
+    }
+
+    fn running(&self) -> bool {
+        self.child.borrow_mut().try_wait().unwrap().is_none()
+    }
+
+    /// Wait until it exits by itself: its status.
+    fn wait_exit(&self) -> ExitStatus {
+        wait_until(WAIT, POLL, || {
+            let status = self.child.borrow_mut().try_wait().unwrap();
+            status.ok_or_else(|| format!("the daemon is still running\ndaemon log:\n{}", self.log()))
+        })
+    }
+
+    /// Kill it (SIGKILL) and wait until it is gone.
+    fn kill(&self) {
+        let mut child = self.child.borrow_mut();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// How many of the replies `search` prints (`ants thread search … --json`) carry each token, a reply counting once
+/// for a token: the replies of `from`, or of every ant when None. `token_at` gives the token that a text starting
+/// with `tok-` opens with, if it is one of the scenario's.
+fn count_tokens(
+    search: &mut Command,
+    from: Option<&str>,
+    token_at: impl Fn(&str) -> Option<&str>,
+) -> HashMap<String, usize> {
+    // Read as it runs: the replies, each carrying the sense brief, fill a pipe `run` would leave unread.
+    let search = search.output().unwrap();
+    assert!(search.status.success(), "ants thread search: {}", String::from_utf8_lossy(&search.stderr));
+    let mut counts = HashMap::new();
+    for line in String::from_utf8_lossy(&search.stdout).lines() {
+        let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+        let by = entry["from"].as_str();
+        if from.map_or(matches!(by, None | Some("human")), |from| by != Some(from)) {
+            continue;
+        }
+        let text = entry["text"].as_str().unwrap_or_default();
+        let tokens: HashSet<&str> = text.match_indices("tok-").filter_map(|(at, _)| token_at(&text[at..])).collect();
+        for token in tokens {
+            *counts.entry(token.to_owned()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// Wait until `answers` counts every one of `tokens`, looking `every` so often for up to `limit`: the counts.
+fn wait_answered(
+    limit: Duration,
+    every: Duration,
+    tokens: &[&str],
+    answers: impl Fn() -> HashMap<String, usize>,
+    logs: impl Fn() -> String,
+) -> HashMap<String, usize> {
+    wait_until(limit, every, || {
+        let answered = answers();
+        let missing: Vec<_> = tokens.iter().filter(|token| !answered.contains_key(**token)).take(10).collect();
+        if missing.is_empty() {
+            return Ok(answered);
+        }
+        Err(format!("unanswered, such as {missing:?}\n{}", logs()))
+    })
+}
+
 /// `GET path` on `addr` over a raw connection: the status and body.
 fn get(addr: &str, path: &str) -> (u16, String) {
     let mut stream = std::net::TcpStream::connect(addr).unwrap();
@@ -1134,6 +1149,7 @@ fn unbriefed(text: &str) -> String {
     }
 }
 
+/// Run `command` to completion, killing it after [`WAIT`].
 fn run(mut command: Command) -> Output {
     let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let start = Instant::now();

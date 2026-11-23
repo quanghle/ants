@@ -50,6 +50,7 @@ pub enum RatingOutcome {
 impl RatingOutcome {
     pub const ALL: [Self; 3] = [Self::Worked, Self::Partly, Self::Failed];
 
+    /// Its name on the wire, as serde writes it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Worked => "worked",

@@ -7,9 +7,10 @@ use ratatui::Frame;
 use ratatui::text::Line;
 
 use super::{Action, Data, Key, Model};
+use crate::tui::approvals::{self, Asking};
 use crate::tui::help::Help;
 use crate::tui::react::{self, Pick, Picker};
-use crate::tui::{clipboard, dead, interrupt, notices, snooze, trail};
+use crate::tui::{catchup, clipboard, dead, interrupt, notices, snooze, trail};
 
 /// A prompt in the footer taking the keys, at most one at a time.
 #[derive(Debug)]
@@ -83,33 +84,27 @@ pub enum Overlay {
     Log(notices::Log),
     /// The parts of a message to copy.
     Copy(clipboard::Picker),
+    /// The tool request being answered, while it shows in full.
+    Request(Box<Asking>),
+    /// The catch-up digest, scrolled as [`Ui::digest`](super::Ui::digest) has it.
+    Digest,
 }
 
 impl Overlay {
-    /// Take `key`: what is done, and whether the overlay stays open.
-    fn key(&mut self, key: Key) -> (bool, Option<Action>) {
-        match self {
-            Self::Help(help) => (help.key(key), None),
-            Self::Log(log) => (log.key(key), None),
-            Self::Copy(_) if matches!(key, Key::Esc | Key::Char('q')) => (false, None),
-            Self::Copy(picker) => {
-                let action = picker.key(key);
-                (action.is_none(), action)
-            }
-        }
-    }
-
     fn draw(&self, frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         match self {
             Self::Help(help) => help.draw(frame, model, now),
             Self::Log(log) => log.draw(frame, &model.ui.notices),
             Self::Copy(picker) => picker.draw(frame, &model.ui.mouse),
+            Self::Request(asking) => approvals::draw_full(frame, asking, now),
+            Self::Digest => catchup::draw_digest(frame, model, now),
         }
     }
 }
 
 impl Model {
     /// The help, while shown.
+    #[cfg(test)]
     pub fn help(&self) -> Option<&Help> {
         self.overlays.iter().find_map(|o| if let Overlay::Help(help) = o { Some(help) } else { None })
     }
@@ -124,15 +119,59 @@ impl Model {
         self.overlays.push(overlay);
     }
 
+    /// The tool request being answered, shown in full or its decision being stored.
+    pub fn asking(&self) -> Option<&Asking> {
+        let full =
+            self.overlays.iter().find_map(|o| if let Overlay::Request(asking) = o { Some(&**asking) } else { None });
+        full.or(self.storing.as_ref())
+    }
+
+    pub(in crate::tui) fn asking_mut(&mut self) -> Option<&mut Asking> {
+        let full = self
+            .overlays
+            .iter_mut()
+            .find_map(|o| if let Overlay::Request(asking) = o { Some(&mut **asking) } else { None });
+        full.or(self.storing.as_mut())
+    }
+
+    /// Answer the request `asking` holds, in place of the one being answered if any: over the screen while it shows in
+    /// full.
+    pub(in crate::tui) fn ask(&mut self, asking: Asking) {
+        self.unask();
+        if asking.full {
+            self.overlays.push(Overlay::Request(Box::new(asking)));
+        } else {
+            self.storing = Some(asking);
+        }
+    }
+
+    /// End the answering: the request that was being answered, if any.
+    pub(in crate::tui) fn unask(&mut self) -> Option<Asking> {
+        let full = self.overlays.iter().position(|o| matches!(o, Overlay::Request(_)));
+        if let Some(Overlay::Request(asking)) = full.map(|at| self.overlays.remove(at)) {
+            return Some(*asking);
+        }
+        self.storing.take()
+    }
+
     /// Whether a box over the view takes the keys: an overlay, or a prompt covering the view.
     pub(in crate::tui) fn covered(&self) -> bool {
         !self.overlays.is_empty() || self.prompt.as_ref().is_some_and(Prompt::covers)
     }
 
     /// Take `key` in the overlay on top, if any.
-    pub(super) fn overlay_key(&mut self, key: Key) -> Option<Option<Action>> {
-        let top = self.overlays.last_mut()?;
-        let (open, action) = top.key(key);
+    pub(super) fn overlay_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
+        let (open, action) = match self.overlays.last_mut()? {
+            Overlay::Request(_) => return Some(self.answer(key, now)),
+            Overlay::Digest => return Some(self.digest_key(key)),
+            Overlay::Help(help) => (help.key(key), None),
+            Overlay::Log(log) => (log.key(key), None),
+            Overlay::Copy(_) if matches!(key, Key::Esc | Key::Char('q')) => (false, None),
+            Overlay::Copy(picker) => {
+                let action = picker.key(key);
+                (action.is_none(), action)
+            }
+        };
         if !open {
             self.overlays.pop();
         }
@@ -149,9 +188,14 @@ impl Model {
         Some(action)
     }
 
-    /// Close the overlay on top: whether one was open.
-    pub(super) fn close_overlay(&mut self) -> bool {
-        self.overlays.pop().is_some()
+    /// Close the overlay on top, a tool request in full as Esc closes it: whether one was open.
+    pub(super) fn close_overlay(&mut self, now: DateTime<Utc>) -> bool {
+        match self.overlays.last() {
+            None => return false,
+            Some(Overlay::Request(_)) => _ = self.answer(Key::Esc, now),
+            Some(_) => _ = self.overlays.pop(),
+        }
+        true
     }
 
     /// Whether text pasted is dropped: an overlay shows, or a prompt only answered by keys asks.

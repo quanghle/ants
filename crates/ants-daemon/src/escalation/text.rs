@@ -9,6 +9,13 @@ use crate::limits::caps::Pending;
 
 /// Bytes a notice leaves under the server's `max_payload`, for its headers.
 const NOTICE_HEADROOM: usize = 1024;
+/// Most of an escalation's text kept for the escalations that follow it up.
+const SUMMARY_CHARS: usize = 4000;
+
+/// What is kept of `text`, an escalation's, for the escalations that follow it up.
+pub(super) fn summary(text: &str) -> String {
+    text.chars().take(SUMMARY_CHARS).collect()
+}
 
 /// `notice` with its text cut to fit `max_payload`, its headers aside, ending with an `[ants]` line telling of the cut
 /// when it is cut: an escalation or notice quoting a message near the limit would be over it whole.

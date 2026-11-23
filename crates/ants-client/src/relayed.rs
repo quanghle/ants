@@ -15,6 +15,9 @@
 //! an answer is taken as the server's, not its writer's; writers store none of those.
 //!
 //! Headers are given by name, one name per value a message carries, whatever the client that read them keeps them in.
+//! nats-server tells names apart by case: a header a writer stored under another case of one of the stream's names is
+//! the writer's own, not counted here, and a reader takes the stream's by their exact names, the last value of each
+//! ([`crate::transport::Message::header_value`]).
 
 use serde_json::Value;
 
@@ -112,6 +115,25 @@ mod tests {
             ("Nats-Subject", "$KV.ants_trails.deploy"),
         ];
         assert!(relayed(&forged, "{}", Read::DirectGet), "stored as a direct get answered");
+    }
+
+    #[test]
+    fn a_stream_s_header_under_another_case_is_its_writer_s_and_counts_as_none_of_the_stream_s() {
+        let mut stored = vec![
+            ("nats-stream", "KV_ants_trail_runs"),
+            ("NATS-STREAM", "KV_ants_trail_runs"),
+            ("nats-subject", "$KV.ants_trail_runs.dev-a.x"),
+            ("Nats-subject", "$KV.ants_trail_runs.dev-a.x"),
+            ("nats-sequence", "1"),
+            ("NATS-Sequence", "2"),
+        ];
+        assert!(!heard_relayed(None, names(&stored)), "no stream sends those");
+        assert!(!relayed(&stored, "{}", Read::Consumer));
+        stored.extend(GET);
+        assert!(!relayed(&stored, "{}", Read::DirectGet), "the get's own, once each");
+        assert!(relayed(&stored, "", Read::DirectGet), "nor is any a header of its own");
+        stored.push(("Nats-Subject", "$KV.ants_trails.deploy"));
+        assert!(relayed(&stored, "{}", Read::DirectGet));
     }
 
     #[test]

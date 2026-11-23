@@ -1,7 +1,7 @@
 //! Tool-call timelines: what an ant did while it worked on a message, stored compactly so a thread's history can show
 //! it after the live status updates are gone.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{DecidedBy, Error, MAX_TOOL_PATHS, PlanStep, ThreadId, UserId, subject};
+
+mod merged;
+
+pub use merged::{MergedCall, MergedEnd, MergedNoReply, MergedRejection, Timelines};
 
 /// The most entries a [`Timeline`] record holds.
 pub const MAX_TIMELINE_ENTRIES: usize = 50;
@@ -39,24 +43,14 @@ pub struct Timeline {
     pub message: Uuid,
     pub entries: Vec<TimelineEntry>,
     /// How many tool calls of the prompt were left out so far, past [`MAX_TIMELINE_CALLS`].
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub omitted: u32,
     pub at: DateTime<Utc>,
 }
 
-#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if takes a reference")]
-fn is_zero(n: &u32) -> bool {
-    *n == 0
-}
-
-#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if takes a reference")]
-fn is_zero_u64(n: &u64) -> bool {
-    *n == 0
-}
-
-#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if takes a reference")]
-fn is_zero_f64(n: &f64) -> bool {
-    *n == 0.0
+/// Whether `value` is its type's default, which a record leaves out.
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 /// One entry of a [`Timeline`] record, tagged by `type`.
@@ -119,6 +113,7 @@ pub enum PromptEnd {
 }
 
 impl PromptEnd {
+    /// Its name on the wire, as serde writes it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Replied => "replied",
@@ -138,13 +133,13 @@ pub struct TimelineEnd {
     /// How long the prompt ran, from when it got its thread's harness: a wait for a free one is not counted.
     pub duration_ms: u64,
     /// The tokens the harness reported the prompt spent.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub tokens: u64,
     /// The cost in US dollars the harness reported the prompt spent.
-    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub cost: f64,
     /// How many tool requests the prompt asked of humans or the ant's chain.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub asked: u32,
     /// Whether the thread's session was rebuilt for the prompt: lost, or outgrown and started anew.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -154,7 +149,7 @@ pub struct TimelineEnd {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub calls: BTreeMap<String, CallCount>,
     /// How many of the prompt's tool calls called the built-in sense's own tools (`sense_<tool>`).
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub sense_calls: u32,
 }
 
@@ -162,7 +157,7 @@ pub struct TimelineEnd {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallCount {
     pub calls: u32,
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub failed: u32,
 }
 
@@ -276,165 +271,6 @@ impl Timeline {
             user: self.ant.clone(),
             at: format!("{subject} (thread {})", self.thread_id),
         })
-    }
-}
-
-/// A tool call of a thread's timeline, merged from its records.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MergedCall {
-    pub ant: UserId,
-    pub thread_id: ThreadId,
-    /// The message whose prompt made the call.
-    pub message: Uuid,
-    pub call: TimelineCall,
-}
-
-/// A prompt of a thread's timeline that ended with no reply sent ([`TimelineEntry::NoReply`]), as its latest record
-/// has it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MergedNoReply {
-    pub ant: UserId,
-    pub thread_id: ThreadId,
-    /// The message whose prompt ended so.
-    pub message: Uuid,
-    pub why: NoReplyWhy,
-    pub reason: Option<String>,
-    /// The turn's final text, which went to nobody.
-    pub text: String,
-    /// When the record saying so was made.
-    pub at: DateTime<Utc>,
-}
-
-/// A tool request of a thread's timeline that was rejected ([`TimelineEntry::Rejected`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MergedRejection {
-    pub ant: UserId,
-    pub thread_id: ThreadId,
-    /// The message whose prompt asked for the tool.
-    pub message: Uuid,
-    pub rejection: TimelineRejection,
-    /// When the record saying so was made.
-    pub at: DateTime<Utc>,
-}
-
-/// How a prompt of a thread's timeline ended ([`TimelineEntry::Ended`]).
-#[derive(Debug, Clone, PartialEq)]
-pub struct MergedEnd {
-    pub ant: UserId,
-    pub thread_id: ThreadId,
-    /// The message whose prompt ended so.
-    pub message: Uuid,
-    pub end: TimelineEnd,
-    /// When the record saying so was made.
-    pub at: DateTime<Utc>,
-}
-
-/// The tool calls, plans, rejected tool requests, ends with no reply and prompt ends of [`Timeline`] records, merged:
-/// fed in the order they were stored, each call, plan and end with no reply is as its latest record has it. Calls are
-/// keyed by ant, message and call id, since a channel post reaches several ants under one message id; plans and ends
-/// with no reply by ant and message; rejections by ant and request. Every prompt end is kept, a message prompted again
-/// having one per run.
-#[derive(Debug, Clone, Default)]
-pub struct Timelines {
-    calls: Vec<MergedCall>,
-    index: HashMap<(UserId, Uuid, String), usize>,
-    plans: HashMap<(UserId, Uuid), Vec<PlanStep>>,
-    omitted: HashMap<(UserId, Uuid), u32>,
-    no_replies: Vec<MergedNoReply>,
-    rejections: Vec<MergedRejection>,
-    ends: Vec<MergedEnd>,
-}
-
-impl Timelines {
-    /// Merge `record`, stored on `subject`; a record forged for another ant or thread is dropped. Whether it was kept.
-    pub fn add(&mut self, subject: &str, record: Timeline) -> bool {
-        if record.check_subject(subject).is_err() {
-            return false;
-        }
-        let Timeline { ant, thread_id, message, entries, omitted, at } = record;
-        if omitted > 0 {
-            self.omitted.insert((ant.clone(), message), omitted);
-        }
-        for entry in entries {
-            match entry {
-                TimelineEntry::Tool(call) => {
-                    let key = (ant.clone(), message, call.id.clone());
-                    if let Some(&i) = self.index.get(&key) {
-                        self.calls[i].call = call;
-                    } else {
-                        self.index.insert(key, self.calls.len());
-                        let (ant, thread_id) = (ant.clone(), thread_id.clone());
-                        self.calls.push(MergedCall { ant, thread_id, message, call });
-                    }
-                }
-                TimelineEntry::Plan { steps } => {
-                    self.plans.insert((ant.clone(), message), steps);
-                }
-                TimelineEntry::NoReply { why, reason, text } => {
-                    let (ant, thread_id) = (ant.clone(), thread_id.clone());
-                    let end = MergedNoReply { ant, thread_id, message, why, reason, text, at };
-                    match self.no_replies.iter_mut().find(|n| n.ant == end.ant && n.message == message) {
-                        Some(had) => *had = end,
-                        None => self.no_replies.push(end),
-                    }
-                }
-                TimelineEntry::Rejected(rejection) => {
-                    let request = rejection.request;
-                    let (ant, thread_id) = (ant.clone(), thread_id.clone());
-                    let rejected = MergedRejection { ant, thread_id, message, rejection, at };
-                    let had =
-                        self.rejections.iter_mut().find(|r| r.ant == rejected.ant && r.rejection.request == request);
-                    match had {
-                        Some(had) => *had = rejected,
-                        None => self.rejections.push(rejected),
-                    }
-                }
-                TimelineEntry::Ended(end) => {
-                    let (ant, thread_id) = (ant.clone(), thread_id.clone());
-                    self.ends.push(MergedEnd { ant, thread_id, message, end, at });
-                }
-                TimelineEntry::Unknown => {}
-            }
-        }
-        true
-    }
-
-    /// Every call, in the order first stored.
-    pub fn calls(&self) -> &[MergedCall] {
-        &self.calls
-    }
-
-    /// Every prompt that ended with no reply sent, in the order first stored.
-    pub fn no_replies(&self) -> &[MergedNoReply] {
-        &self.no_replies
-    }
-
-    /// Every tool request rejected, in the order first stored.
-    pub fn rejections(&self) -> &[MergedRejection] {
-        &self.rejections
-    }
-
-    /// How every prompt ended, in the order stored.
-    pub fn ends(&self) -> &[MergedEnd] {
-        &self.ends
-    }
-
-    /// The plan of `ant` for `message` as last stored, if any.
-    pub fn plan(&self, ant: &UserId, message: Uuid) -> Option<&[PlanStep]> {
-        self.plans.get(&(ant.clone(), message)).map(Vec::as_slice)
-    }
-
-    /// How many calls of `ant` for `message` were left out of its records.
-    pub fn omitted(&self, ant: &UserId, message: Uuid) -> u32 {
-        self.omitted.get(&(ant.clone(), message)).copied().unwrap_or(0)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.calls.is_empty()
-            && self.plans.is_empty()
-            && self.no_replies.is_empty()
-            && self.rejections.is_empty()
-            && self.ends.is_empty()
     }
 }
 

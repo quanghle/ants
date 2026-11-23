@@ -30,6 +30,7 @@ pub enum State {
 }
 
 impl State {
+    /// Its name on the wire, as serde writes it.
     pub fn as_str(self) -> &'static str {
         match self {
             State::Working => "working",
@@ -54,6 +55,7 @@ pub enum DecidedBy {
 }
 
 impl DecidedBy {
+    /// Its name on the wire, as serde writes it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Human => "human",
@@ -78,6 +80,7 @@ pub enum StepStage {
 }
 
 impl StepStage {
+    /// Its name on the wire, as serde writes it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Started => "started",

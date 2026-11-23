@@ -231,8 +231,8 @@ impl Hub {
     /// The attachments' store, and the directory the sessions of `thread` work in: its worktree, else the ant's
     /// workdir.
     pub(super) fn files(&self, thread: &ThreadId) -> Result<(&FileAccess, PathBuf), String> {
-        let (files, workdir) = self.files.get().ok_or("attachments are not available here")?;
-        let dir = self.sessions.locked().dirs.get(thread).cloned();
+        let (files, workdir) = self.attach.files.get().ok_or("attachments are not available here")?;
+        let dir = self.sessions.locked().opened.get(thread).map(|opened| opened.dir.clone());
         Ok((files, dir.unwrap_or_else(|| workdir.clone())))
     }
 
@@ -253,7 +253,7 @@ impl Hub {
     /// Read the files at `paths` in `dir`, confined to it, to attach them.
     pub(super) async fn load_from(&self, dir: &Path, paths: &[String]) -> Result<Vec<Loaded>, String> {
         let off = Redactor::off();
-        let redactor = self.redactor.get().map_or(&off, |r| r.as_ref());
+        let redactor = self.attach.redactor.get().map_or(&off, |r| r.as_ref());
         load(dir, paths, redactor).await
     }
 
@@ -275,7 +275,7 @@ impl Hub {
         if loaded.is_empty() {
             return Ok(Vec::new());
         }
-        let (files, _) = self.files.get().ok_or("attachments are not available here")?;
+        let (files, _) = self.attach.files.get().ok_or("attachments are not available here")?;
         store(files, loaded, handle_of).await
     }
 
@@ -287,8 +287,11 @@ impl Hub {
         if !handle.readable_by(&self.ant) {
             return Err(format!("attachment {handle} is on a message {} does not read", self.ant));
         }
-        let stored =
-            self.sessions.locked().carried.get(thread).filter(|(handles, _)| handles.contains(&handle)).map(|c| c.1);
+        let stored = {
+            let sessions = self.sessions.locked();
+            let carried = sessions.turns.get(thread).and_then(|turn| turn.carried.as_ref());
+            carried.filter(|(handles, _)| handles.contains(&handle)).map(|c| c.1)
+        };
         let (attachment, bytes) = (files.get)(handle.clone(), stored).await.map_err(|e| format!("{e:#}"))?;
         let about = describe(&attachment);
         if attachment.is_image() {

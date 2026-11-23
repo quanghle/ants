@@ -5,9 +5,10 @@
     allow(linker_messages, reason = "a debug binary's unwind tables outgrow what ld64 encodes compactly (16 MB)")
 )]
 #![expect(rustdoc::invalid_html_tags, reason = "clap help text names placeholders as <dir>")]
-#![cfg_attr(test, allow(clippy::disallowed_methods, reason = "tests read and hear as they please"))]
+#![cfg_attr(test, expect(clippy::disallowed_methods, reason = "tests read and hear as they please"))]
 
 // The command line, and how it reaches NATS.
+mod cas;
 mod cli;
 mod cmd;
 mod completions;

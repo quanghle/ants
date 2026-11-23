@@ -29,7 +29,7 @@ impl Hub {
     /// Escalate `thread` for `issue`: up its origin chain or, for the leader of the escalation group the thread's
     /// message is from, one level above that escalation. Returns where it went.
     async fn escalate(&self, thread: &ThreadId, issue: String) -> Result<String, String> {
-        let current = self.sessions.locked().current.get(thread).cloned();
+        let current = self.sessions.locked().current(thread).cloned();
         let current =
             current.ok_or("no message is being handled on this thread; escalations go out only while one is")?;
         if let Some(e) = current.escalation.as_deref().filter(|e| e.reason == EscalationReason::Approval)
@@ -114,7 +114,7 @@ impl Hub {
     async fn decide_approval(&self, thread: &ThreadId, verdict: &str) -> Result<String, String> {
         let verdict: Verdict = serde_json::from_value(serde_json::Value::String(verdict.trim().replace('-', "_")))
             .map_err(|_| format!("unknown verdict {verdict}: allow_once, allow_always or reject"))?;
-        let current = self.sessions.locked().current.get(thread).cloned();
+        let current = self.sessions.locked().current(thread).cloned();
         let current =
             current.ok_or("no message is being handled on this thread; decisions go out only while one is")?;
         let request = current.escalation.as_deref().filter(|e| e.reason == EscalationReason::Approval);

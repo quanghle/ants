@@ -6,42 +6,42 @@ use ants_proto::{
     Reacted, SummaryRequest, ThreadId, TimelineEnd, UserId, Uuid,
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::attachments;
 use crate::sealed;
 use crate::text::took;
 
 /// A tool call an ant stored on its timeline, as a [`Kind::Tool`] entry has it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     /// The call's id, unique within its prompt.
     pub call_id: String,
     /// The message whose prompt made the call.
     pub message: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
 }
 
 /// A prompt an ant ended with no reply sent, from its timeline, as a [`Kind::NoReply`] entry has it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoReply {
     /// The message whose prompt ended so.
     pub message: Uuid,
     pub why: NoReplyWhy,
     /// The reason the ant gave to `complete`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
 
 /// How a prompt of an ant ended and what it took, from its timeline, as a [`Kind::Ended`] entry has it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromptEnded {
     /// The message whose prompt ended so.
     pub message: Uuid,
@@ -53,22 +53,22 @@ pub struct PromptEnded {
 impl Eq for PromptEnded {}
 
 /// A tool request that was rejected or expired, as a [`Kind::Rejected`] entry has it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolRejection {
     /// The message whose prompt asked for the tool.
     pub message: Uuid,
     pub request: Uuid,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_kind: String,
     pub by: DecidedBy,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decider: Option<UserId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<UserId>,
 }
 
 /// What a stored message on a thread is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// An inbox message, between ants or between an ant and a human.
@@ -155,64 +155,64 @@ pub fn last_reopening(entries: &[Entry]) -> u64 {
     entries.iter().filter(|e| e.kind.reopens()).map(|e| e.seq).max().unwrap_or(0)
 }
 
-/// One stored message on a thread, as `ants thread show` prints it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// One stored message on a thread, as a reader shows it. It serializes in full, and reads back as it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub seq: u64,
-    /// The message's id, which `ants react` takes: none for a tool request or a dead letter.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The message's id, which a reaction to it names: none for a tool request or a dead letter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<Uuid>,
     /// When the stream stored it.
     pub stored_at: DateTime<Utc>,
     pub kind: Kind,
     pub thread_id: ThreadId,
     /// The sender; none for a human's decision on a tool request, which does not say which human decided.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<UserId>,
     /// The recipient of an inbox message, the ant a decision or dead letter is for.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<UserId>,
     /// The channel of a post or of the post a mention tells of.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ChannelId>,
     /// The users a channel post @mentions.
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<UserId>,
     /// The thread's owner as the message names it.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<UserId>,
     /// What the kind adds: an escalation's level and chain, a tool request's id, a dead letter's error.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub text: String,
     /// The quote of the message or post an inbox message or channel post replies to, as its sender gave it
     /// ([`Envelope::quote`]); a sealed one's only when opened.
     ///
     /// [`Envelope::quote`]: ants_proto::Envelope::quote
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote: Option<Quote>,
     /// The files attached to an inbox message, channel post, notes post or dead letter, each with its handle.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<attachments::Listed>,
     /// The subject it was stored on names another sender (or ant) than the message: the message is forged.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub forged: bool,
-    /// For whom the sender, an assistant, sent an inbox message, as the CLI checked its `on_behalf_of`
+    /// For whom the sender, an assistant, sent an inbox message, as the reader checked its `on_behalf_of`
     /// ([`crate::parser::Lookups::acting`]): a claim not honoured is forged, and the message the sender's own.
-    #[serde(skip_serializing_if = "Acting::is_own")]
+    #[serde(default, skip_serializing_if = "Acting::is_own")]
     pub acting: Acting,
-    /// What the CLI made of a sealed message between two humans: opened, its text the message's; else its text
+    /// What the reader made of a sealed message between two humans: opened, its text the message's; else its text
     /// `[sealed]` or `[forged]` ([`sealed::State::placeholder`]).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed: Option<sealed::State>,
     /// The reactions to the message, each with who reacted so.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<Reacted>,
     /// The reason of the escalation an inbox message carries, which the note spells out.
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<EscalationReason>,
     /// The stuck ant of the escalation an inbox message carries.
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck: Option<UserId>,
     /// The title an inbox message, channel post or notes post that is not forged suggests for its thread
     /// ([`Envelope::title`], [`ChannelPost::title`], [`NotesPost::title`]).
@@ -220,66 +220,66 @@ pub struct Entry {
     /// [`Envelope::title`]: ants_proto::Envelope::title
     /// [`ChannelPost::title`]: ants_proto::ChannelPost::title
     /// [`NotesPost::title`]: ants_proto::NotesPost::title
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_title: Option<String>,
     /// The summary request an inbox message that is not forged carries, or answers ([`Envelope::summary`]).
     ///
     /// [`Envelope::summary`]: ants_proto::Envelope::summary
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<SummaryRequest>,
     /// The questions an inbox message that is not forged asks, if valid ([`Envelope::asks`]).
     ///
     /// [`Envelope::asks`]: ants_proto::Envelope::asks
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<Questions>,
     /// The answer an inbox message that is not forged gives a question read before it, if valid
     /// ([`Envelope::answers`]); an invalid one, or one to a question not read, leaves an ordinary message.
     ///
     /// [`Envelope::answers`]: ants_proto::Envelope::answers
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<Answer>,
     /// A tool call's details, its title the text and its ant the sender.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<ToolCall>,
     /// Why a prompt ended with no reply sent, its ant the sender and its final text the text.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_reply: Option<NoReply>,
     /// A rejected or expired tool request, its title the text and the requesting ant the sender.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected: Option<Box<ToolRejection>>,
     /// How a prompt ended and what it took, its ant the sender.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended: Option<Box<PromptEnded>>,
     /// The ant-to-ant turns an inbox message, channel post or notes post leaves on its thread.
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turns: Option<u32>,
     /// An inbox message a webhook or schedule sent ([`Envelope::webhook`]).
     ///
     /// [`Envelope::webhook`]: ants_proto::Envelope::webhook
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
     /// The provider whose wake request an inbox message that is not forged is ([`Envelope::wake_provider`]).
     ///
     /// [`Envelope::wake_provider`]: ants_proto::Envelope::wake_provider
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// The thread an inbox message's thread was spun off ([`Envelope::origin_thread`]).
     ///
     /// [`Envelope::origin_thread`]: ants_proto::Envelope::origin_thread
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<ThreadId>,
     /// The message an inbox message, or the post a channel post, answers ([`Envelope::in_reply_to`],
     /// [`ChannelPost::in_reply_to`]).
     ///
     /// [`Envelope::in_reply_to`]: ants_proto::Envelope::in_reply_to
     /// [`ChannelPost::in_reply_to`]: ants_proto::ChannelPost::in_reply_to
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<Uuid>,
     /// The daemon notice an inbox message that is not forged is ([`Envelope::notice`]): a line of the system's, not an
     /// ant's answer.
     ///
     /// [`Envelope::notice`]: ants_proto::Envelope::notice
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<NoticeKind>,
 }
 
@@ -323,7 +323,7 @@ impl Entry {
         }
     }
 
-    /// Whether `--grep` looks at its text: not that of a sealed message the CLI did not open.
+    /// Whether a search looks at its text: not that of a sealed message the reader did not open.
     pub fn matchable(&self) -> bool {
         self.sealed.is_none_or(|state| state == sealed::State::Opened)
     }
@@ -419,5 +419,97 @@ impl Entry {
     /// The users it was between.
     pub fn users(&self) -> impl Iterator<Item = &UserId> {
         self.from.iter().chain(&self.to)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// An entry with every field set to other than what [`Entry::new`] leaves it.
+    fn full() -> Entry {
+        let user = |name: &str| name.parse::<UserId>().unwrap();
+        let id = Uuid::from_u128;
+        let at = DateTime::from_timestamp(1_700_000_000, 5_000_000).unwrap();
+        let thread: ThreadId = "t1".parse().unwrap();
+        let attachment = ants_proto::Attachment {
+            id: id(9),
+            ..ants_proto::Attachment::new("a.txt", "text/plain", 1, "ab".repeat(32)).unwrap()
+        };
+        let listed = attachments::Listed {
+            handle: format!("alice.inbox.dev-a.{}", id(9)).parse().unwrap(),
+            attachment,
+            unavailable: Some("its id is repeated".into()),
+            stored: Some(at),
+        };
+        let question = ants_proto::Question::new("Ship?", &["yes".to_owned(), "no".to_owned()], true).unwrap();
+        let end = serde_json::from_value(json!({ "how": "replied", "duration_ms": 5, "tokens": 7 })).unwrap();
+        Entry {
+            id: Some(id(1)),
+            from: Some(user("alice")),
+            to: Some(user("dev-a")),
+            channel: Some("ops".parse().unwrap()),
+            mentions: vec![user("bob")],
+            owner: Some(user("alice")),
+            note: Some("a note".into()),
+            text: "hi".into(),
+            quote: Some(Quote::new(user("dev-a"), "earlier")),
+            attachments: vec![listed],
+            forged: true,
+            acting: Acting::For(user("carol")),
+            sealed: Some(sealed::State::Opened),
+            reactions: vec![Reacted::new("eyes".parse().unwrap(), vec![user("bob")])],
+            reason: Some(EscalationReason::Cap),
+            stuck: Some(user("dev-b")),
+            suggested_title: Some("A title".into()),
+            summary: Some(SummaryRequest::thread(thread.clone(), 4)),
+            question: Some(Questions::new(vec![question]).unwrap()),
+            answer: Some(Answer { question: id(2), picks: vec![ants_proto::Pick::option(1)] }),
+            tool: Some(ToolCall {
+                call_id: "c1".into(),
+                message: id(3),
+                tool_kind: Some("execute".into()),
+                status: Some("completed".into()),
+                duration_ms: Some(12),
+                paths: vec!["src/lib.rs".into()],
+            }),
+            no_reply: Some(NoReply { message: id(4), why: NoReplyWhy::Completed, reason: Some("done".into()) }),
+            rejected: Some(Box::new(ToolRejection {
+                message: id(5),
+                request: id(6),
+                tool_kind: "execute".into(),
+                by: DecidedBy::Chain,
+                decider: Some(user("lead")),
+                via: Some(user("pa")),
+            })),
+            ended: Some(Box::new(PromptEnded { message: id(7), end })),
+            turns: Some(3),
+            webhook: true,
+            provider: Some("sense".into()),
+            origin: Some("t0".parse().unwrap()),
+            in_reply_to: Some(id(8)),
+            notice: Some(NoticeKind::Spend),
+            ..Entry::new(42, at, Kind::Message, thread)
+        }
+    }
+
+    #[test]
+    fn an_entry_reads_back_from_what_it_serializes_to_with_every_field() {
+        let entry = full();
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 34, "a field left out: {json}");
+        assert_eq!(json["attachments"][0]["stored"], "2023-11-14T22:13:20.005Z");
+        assert_eq!((&json["in_reply_to"], &json["turns"]), (&json!(Uuid::from_u128(8)), &json!(3)));
+        assert_eq!(serde_json::from_value::<Entry>(json).unwrap(), entry);
+
+        let bare = Entry::new(1, entry.stored_at, Kind::NoReply, entry.thread_id);
+        let json = serde_json::to_value(&bare).unwrap();
+        assert_eq!(
+            json,
+            json!({ "seq": 1, "stored_at": bare.stored_at, "kind": "no_reply", "thread_id": "t1", "text": "" })
+        );
+        assert_eq!(serde_json::from_value::<Entry>(json).unwrap(), bare);
     }
 }

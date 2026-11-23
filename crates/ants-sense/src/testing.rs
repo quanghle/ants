@@ -1,6 +1,7 @@
 //! What the tests of sense, and of the daemon's sense module, share: an ant's items kept in memory ([`store`]),
-//! sense keeping them as the items of every ant ([`fixture`]), and calls of its tools ([`call`]).
+//! sense keeping them as the items of every ant ([`fixture`]) or of the ants named ([`ByAnt`]), and calls of its tools ([`call`]).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ants_proto::provider::{BoxFuture, CallContext, Format, Origin, Starter, ToolCall};
@@ -24,6 +25,16 @@ pub struct One(pub Arc<dyn Items>);
 impl Stores for One {
     fn items<'a>(&'a self, _: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         Box::pin(std::future::ready(Ok(self.0.clone())))
+    }
+}
+
+/// The items of the ants sense keeps, and none of any other.
+pub struct ByAnt(pub HashMap<UserId, Arc<dyn Items>>);
+
+impl Stores for ByAnt {
+    fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
+        let items = self.0.get(ant).cloned().ok_or_else(|| StoreError::NotKept(ant.to_string()));
+        Box::pin(std::future::ready(items))
     }
 }
 

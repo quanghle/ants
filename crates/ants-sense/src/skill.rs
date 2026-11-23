@@ -89,7 +89,7 @@ struct Version {
 }
 
 impl ItemValues for Version {
-    const KIND: &str = SKILL;
+    const KINDS: &[&str] = &[SKILL];
 }
 
 impl Version {

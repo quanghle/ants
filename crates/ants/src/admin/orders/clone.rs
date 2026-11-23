@@ -4,13 +4,13 @@
 
 use std::time::Duration;
 
-use ants_proto::{AdminOp, Machine, OrderState, UserId};
+use ants_proto::{AdminOp, Machine, UserId};
 use anyhow::{Result, bail};
 use async_nats::jetstream;
 use clap_complete::engine::ArgValueCandidates;
 use serde_json::{Map, Value};
 
-use super::Admin;
+use super::{Admin, Sent};
 use crate::completions;
 use crate::connection::Nats;
 use crate::serve::AntOptions;
@@ -52,12 +52,13 @@ pub async fn clone(
     wait: Duration,
 ) -> Result<String> {
     let op = AdminOp::Clone { new: new.clone(), settings };
-    let (order, outcome) = admin.send(js, machine, src, op, wait).await?;
-    let Some(outcome) = outcome else { return Ok(super::pending_note(&order)) };
-    if outcome.state != OrderState::Applied {
-        bail!("the daemon of {} refused to clone {src} as {new}: {}", order.machine, super::reason(&outcome));
+    match admin.send(js, machine, src, op, wait).await? {
+        Sent::Pending(order) => Ok(super::pending_note(&order)),
+        Sent::Refused(order, outcome) => {
+            bail!("the daemon of {} refused to clone {src} as {new}: {}", order.machine, super::reason(&outcome.reason))
+        }
+        Sent::Applied(order, outcome) => Ok(summary(src, new, &order.machine, &outcome.result.unwrap_or_default())),
     }
-    Ok(summary(src, new, &order.machine, &outcome.result.unwrap_or_default()))
 }
 
 /// What the clone did, a line each.

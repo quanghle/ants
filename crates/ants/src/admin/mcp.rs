@@ -5,12 +5,12 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ants_proto::{AdminOp, MCP_FRESH, Machine, McpReport, McpSignIn, McpStatus, OrderState, UserId};
-use anyhow::{Result, bail};
+use ants_proto::{AdminOp, MCP_FRESH, Machine, McpReport, McpSignIn, McpStatus, UserId};
+use anyhow::Result;
 use async_nats::jetstream;
 use serde::de::DeserializeOwned;
 
-use crate::admin::orders;
+use crate::admin::orders::{Admin, Asked};
 use crate::connection::Nats;
 
 /// How long the CLI waits for the daemon's answer: the harness starts, and its servers have some seconds to.
@@ -47,26 +47,13 @@ async fn ask<T: DeserializeOwned>(
     ant: &UserId,
     op: AdminOp,
 ) -> Result<T> {
-    let what = op.describe();
-    let (order, outcome) = orders::send(nats, js, machine, ant, op, WAIT).await?;
-    let Some(outcome) = outcome else {
-        bail!(
-            "the daemon of {} did not answer within {}s: it reads MCP servers only while online, and the order is \
-             refused as stale once it waited {}m",
-            order.machine,
-            WAIT.as_secs(),
-            MCP_FRESH.num_minutes()
-        );
+    let asked = Asked {
+        online: "it reads MCP servers only while online",
+        fresh: MCP_FRESH,
+        to: &format!("{} of {ant}", op.describe()),
+        lacking: "a result",
     };
-    match (outcome.state, outcome.result) {
-        (OrderState::Applied, Some(result)) => Ok(serde_json::from_value(result)?),
-        (OrderState::Applied, None) => bail!("the daemon of {} answered without a result", order.machine),
-        (_, _) => bail!(
-            "the daemon of {} refused to {what} of {ant}: {}",
-            order.machine,
-            outcome.reason.as_deref().unwrap_or("no reason given")
-        ),
-    }
+    Admin::of(nats)?.ask(js, machine, ant, op, WAIT, &asked).await
 }
 
 /// `ants ant mcp ANT`: the MCP servers of `ant` as text, or with `json` as one JSON object; with `sign_in`, sign in to

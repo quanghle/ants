@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use ants_client::Lookups;
+use ants_client::{Lookups, NoLookups};
 use ants_proto::{Acting, Envelope, UserId, subject};
 use chrono::{DateTime, Utc};
 
@@ -34,10 +34,9 @@ impl Lookups for LookedUp {
     /// What `from`'s act claiming `claim` comes to, as checked by [`Parser::learn`]: without a checker, any claim is
     /// forged.
     fn acting(&self, from: &UserId, claim: Option<&UserId>) -> Acting {
-        match (&self.behalf, claim) {
-            (_, None) => Acting::Own,
-            (Some(behalf), claim) => behalf.acting(from, claim),
-            (None, Some(human)) => Acting::Forged(human.clone()),
+        match &self.behalf {
+            Some(behalf) => behalf.acting(from, claim),
+            None => NoLookups.acting(from, claim),
         }
     }
 }

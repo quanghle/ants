@@ -149,8 +149,7 @@ impl Native for Stub {
     }
 
     async fn start(cli: Cli) -> Result<Self, Error> {
-        let mut process = cli.spawn(["--stub"], None)?;
-        let (stdin, stdout) = process.take_io().ok_or_else(|| failed("no stdio"))?;
+        let (process, stdin, stdout) = cli.spawn(["--stub"], None)?;
         let (rpc, incoming) = Rpc::new(stdout, stdin, true);
         let mode = cli.mode().map(str::to_owned);
         let (flush_tx, flushes) = mpsc::unbounded_channel();

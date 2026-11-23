@@ -7,11 +7,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_daemon::profile::identity;
-use ants_proto::{AdminOp, Machine, Memories, OrderState, UserId};
-use anyhow::{Result, bail};
+use ants_proto::{AdminOp, MEMORIES_FRESH, Machine, Memories, UserId};
+use anyhow::Result;
 use async_nats::jetstream;
 
-use crate::admin::orders;
+use crate::admin::orders::{Admin, Asked};
 use crate::connection::Nats;
 use crate::messages::attachments::size;
 
@@ -27,25 +27,13 @@ pub async fn read(
     ant: &UserId,
 ) -> Result<Memories> {
     let op = AdminOp::ReadMemories { identity: identity::id_of(js, nats.domain, ant).await };
-    let (order, outcome) = orders::send(nats, js, machine, ant, op, WAIT).await?;
-    let Some(outcome) = outcome else {
-        bail!(
-            "the daemon of {} did not answer within {}s: memories are read only while it is online, and the order is \
-             refused as stale once it waited {}m",
-            order.machine,
-            WAIT.as_secs(),
-            ants_proto::MEMORIES_FRESH.num_minutes()
-        );
+    let asked = Asked {
+        online: "memories are read only while it is online",
+        fresh: MEMORIES_FRESH,
+        to: &format!("read the memories of {ant}"),
+        lacking: "memories",
     };
-    match (outcome.state, outcome.result) {
-        (OrderState::Applied, Some(result)) => Ok(serde_json::from_value(result)?),
-        (OrderState::Applied, None) => bail!("the daemon of {} answered without memories", order.machine),
-        (_, _) => bail!(
-            "the daemon of {} refused to read the memories of {ant}: {}",
-            order.machine,
-            outcome.reason.as_deref().unwrap_or("no reason given")
-        ),
-    }
+    Admin::of(nats)?.ask(js, machine, ant, op, WAIT, &asked).await
 }
 
 /// `ants ant memories ANT`: the memories of `ant` as text, or with `json` as one JSON object.

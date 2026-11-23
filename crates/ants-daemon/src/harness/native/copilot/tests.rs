@@ -16,12 +16,16 @@ use tokio::net::unix::pipe;
 use tokio::sync::{mpsc, oneshot};
 
 use super::*;
+use crate::harness::native::Protocol;
+use crate::harness::native::tests::{define, launch, run};
 use crate::harness::{
     Harnesses, Launch, McpSignIn, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork,
     handshake, parse_definitions,
 };
 use crate::limits::ratelimit::Limited;
 use crate::permission::{Allowlist, PermissionPolicy};
+
+mod sign_in;
 
 /// How the played server answers a request: its result or error message, the notifications it sends next, and whether
 /// it then closes its output, as a CLI exiting does.
@@ -166,10 +170,8 @@ impl Played {
             dir.display()
         );
         ants_test_support::executable(&relay, &text);
-        let definition = format!(
-            "[harnesses.native]\ncommand = {relay:?}\nprotocol = \"copilot-sdk\"\nsign_in = \"copilot login\"\n{table}"
-        );
-        let harness = Harnesses::builtin().define(parse_definitions(&definition).unwrap()).unwrap().get("native");
+        let definition = format!("command = {relay:?}\nsign_in = \"copilot login\"\n{table}");
+        let harness = define("native", Protocol::CopilotSdk, &definition).unwrap();
         let requests = Requests::default();
         let script: Arc<Mutex<Script>> = Arc::new(Mutex::new(Box::new(script)));
         let (served, read) = (dir.clone(), requests.clone());
@@ -184,13 +186,12 @@ impl Played {
                 runs.spawn(serve(served.clone(), run, script.clone(), read.clone()));
             }
         });
-        Self { dir, harness: harness.unwrap(), requests, server }
+        Self { dir, harness, requests, server }
     }
 
     /// A launch of the harness working in the scratch directory, with the ant's `settings`.
     fn launch(&self, settings: ModelSettings) -> Launch {
-        let allow_all = PermissionPolicy::new(Allowlist::parse(&["*"]).unwrap(), None);
-        Launch::new(self.harness.clone(), self.dir.clone(), vec![], allow_all, settings)
+        launch(&self.harness, &self.dir, &[], settings)
     }
 
     /// The params of the requests of `method` read so far.
@@ -284,27 +285,17 @@ async fn copilot_turns_stream_through_the_translator() {
     let session = Session::start(&launch, None).await.unwrap();
     let agent = session.agent().unwrap();
     assert_eq!((agent.name.as_str(), agent.version.as_str()), ("GitHub Copilot CLI", "1.0.112"));
-    let (progress, mut status) = mpsc::channel(64);
-    let (spend, mut spent) = mpsc::unbounded_channel();
-    let prompt = Prompt { progress: Some(progress), spend: Some(spend), ..Prompt::new("What is this?") };
-    assert_eq!(session.run(prompt).await.unwrap().text, "Let me look.\n\nIt is a heading.");
+    let (reply, updates, spends) = run(&session, Prompt::new("What is this?")).await;
+    assert_eq!(reply.unwrap(), "Let me look.\n\nIt is a heading.");
     let id = session.id();
     session.close().await;
 
-    let mut updates = Vec::new();
-    while let Ok(update) = status.try_recv() {
-        updates.push(update);
-    }
     assert_eq!(updates.iter().filter(|u| matches!(u, StatusUpdate::Thought { .. })).count(), 1, "{updates:?}");
     let viewed = |u: &StatusUpdate| {
         matches!(u, StatusUpdate::Tool { id, title, paths: Some(paths), .. }
             if id == "t1" && title.as_deref() == Some("View file") && paths == &["/w/a.md"])
     };
     assert!(updates.iter().any(viewed), "{updates:?}");
-    let mut spends = Vec::new();
-    while let Ok(spend) = spent.try_recv() {
-        spends.push(spend);
-    }
     let cost = 1_776_500_000.0 * USD_PER_NANO_AIU;
     assert_eq!(spends, [Spend::Cost { session: id.clone(), total: cost }, Spend::Tokens(14_001)]);
 
@@ -384,39 +375,6 @@ async fn copilot_sessions_get_the_ants_skills_as_a_skill_directory() {
     assert_eq!(played.requests("session.resume")[0]["skillDirectories"], json!([skills]));
 }
 
-/// The servers each sign-in to an MCP server of `played` named, by the session signing in.
-fn signed_in(played: &Played, session: &str) -> Vec<Value> {
-    let logins = played.requests("session.mcp.oauth.login");
-    logins.iter().filter(|login| login["sessionId"] == session).map(|login| login["serverName"].clone()).collect()
-}
-
-/// The answer to `session.mcp.list` of session `params` listing `servers` as pending, then their status changing to
-/// each of `statuses`, as the CLI starts them.
-fn listing(params: &Value, servers: &[&str], statuses: &[(&str, Value)]) -> Answer {
-    let id = &params["sessionId"];
-    let listed: Vec<_> = servers.iter().map(|name| json!({ "name": name, "status": "pending" })).collect();
-    let changed = statuses.iter().map(|(server, status)| {
-        let mut data = json!({ "serverName": server });
-        data.as_object_mut().unwrap().extend(status.as_object().unwrap().clone());
-        event(id, "session.mcp_server_status_changed", data)
-    });
-    Answer::ok(json!({ "servers": listed })).then(changed.collect())
-}
-
-/// A launch of `played` for a thread, and the sign-ins its sessions report.
-fn reporting(played: &Played) -> (Launch, Arc<Mutex<Vec<McpSignIn>>>) {
-    let told = Arc::new(Mutex::new(Vec::new()));
-    let sink = told.clone();
-    let thread: ThreadId = "t1".parse().unwrap();
-    let launch = played.launch(ModelSettings::default()).for_thread(&thread).with_mcp_sign_ins(Arc::new(
-        move |on: &ThreadId, store: &str, sign_ins| {
-            assert!(*on == thread && store.ends_with("/copilot"), "{on} {store}");
-            sink.lock().unwrap().extend(sign_ins);
-        },
-    ));
-    (launch, told)
-}
-
 /// Wait for `done`, for at most 10 seconds.
 async fn until(mut done: impl FnMut() -> bool) {
     for _ in 0..1000 {
@@ -426,185 +384,6 @@ async fn until(mut done: impl FnMut() -> bool) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("not done within 10s");
-}
-
-#[tokio::test]
-async fn copilot_sessions_sign_in_to_the_listed_mcp_servers_needing_it_once_they_settle() {
-    // icm signs in with the credentials the CLI keeps, ado needs a browser, kusto fails to start and bluebird is no
-    // server of the session.
-    let table = r#"mcp_sign_in = ["icm", "ado", "kusto", "bluebird"]"#;
-    let played = Played::new("copilot-mcp-sign-in", table, |method, params| match method {
-        "session.mcp.list" => Some(listing(
-            params,
-            &["icm", "ado", "kusto"],
-            &[
-                ("icm", json!({ "status": "connected" })),
-                ("ado", json!({ "status": "needs-auth" })),
-                (
-                    "kusto",
-                    json!({ "status": "failed", "error": "no kusto-mcp", "errorClassification": "os_not_found" }),
-                ),
-            ],
-        )),
-        "session.mcp.oauth.login" => Some(Answer::ok(json!({ "authorizationUrl": "https://login.example/ado" }))),
-        "session.send" => {
-            let id = &params["sessionId"];
-            let mut events = vec![event(
-                id,
-                "session.mcp_server_status_changed",
-                json!({ "serverName": "ado", "status": "connected" }),
-            )];
-            events.extend(idle(id, false));
-            Some(default_answer(method, params).then(events))
-        }
-        _ => None,
-    });
-    let (launch, told) = reporting(&played);
-    let ado = || McpSignIn::Browser { server: "ado".to_owned(), url: "https://login.example/ado".to_owned() };
-    let failed = |server: &str, error: &str| McpSignIn::Failed { server: server.to_owned(), error: error.to_owned() };
-
-    let first = Session::start(&launch, None).await.expect("opens whatever its sign-ins come to");
-    assert_eq!(signed_in(&played, &first.id().0), [json!("ado")], "only the server needing it");
-    let mut opened = std::mem::take(&mut *told.lock().unwrap());
-    opened.sort_by(|a, b| a.server().cmp(b.server()));
-    assert_eq!(
-        opened,
-        [
-            ado(),
-            failed("bluebird", "not configured in the session"),
-            McpSignIn::SignedIn { server: "icm".to_owned() },
-            failed("kusto", "no kusto-mcp (os_not_found)"),
-        ]
-    );
-
-    // While ado's browser sign-in waits, sessions of other CLIs answer it rather than starting another; a fork signs
-    // in to none, the session/load following it does.
-    let loaded = Session::start(&launch, Some(SessionId::new("s1"))).await.unwrap();
-    assert_eq!(signed_in(&played, "s1"), [] as [Value; 0]);
-    assert!(told.lock().unwrap().contains(&ado()));
-    fork(&launch, &SessionId::new("s1")).await.unwrap().expect("the CLI forks");
-    assert!(played.requests("session.mcp.list").iter().all(|list| list["sessionId"] != "forked"));
-
-    // ado connects once the browser came back to the first session: the session still open is told.
-    first.run(Prompt::new("go")).await.unwrap();
-    let changed = || played.requests("session.mcp.oauth.authenticationStateChanged");
-    until(|| !changed().is_empty()).await;
-    assert_eq!(changed(), [json!({ "sessionId": "s1", "serverName": "ado" })]);
-    let again = Session::start(&launch, None).await.unwrap();
-    assert_eq!(signed_in(&played, &again.id().0), [json!("ado")], "no browser waits any more");
-    for session in [first, loaded, again] {
-        session.close().await;
-    }
-}
-
-#[tokio::test]
-async fn a_copilot_sign_in_its_mcp_server_was_reconfigured_during_runs_again_once_it_settles() {
-    let logins = Arc::new(Mutex::new(0));
-    let counted = logins.clone();
-    let played = Played::new("copilot-mcp-reconfigured", r#"mcp_sign_in = ["ado"]"#, move |method, params| {
-        let id = &params["sessionId"];
-        match method {
-            "session.mcp.list" => Some(listing(params, &["ado"], &[("ado", json!({ "status": "needs-auth" }))])),
-            "session.mcp.oauth.login" => {
-                let mut logins = counted.lock().unwrap();
-                *logins += 1;
-                let answer = Answer::ok(json!({ "authorizationUrl": format!("https://login.example/{logins}") }));
-                // The session's MCP configuration changes under the first, restarting the server.
-                Some(if *logins > 1 {
-                    answer
-                } else {
-                    answer.then(vec![
-                        event(id, "session.mcp_server_needs_reconnect", json!({ "serverName": "ado" })),
-                        event(
-                            id,
-                            "session.mcp_server_status_changed",
-                            json!({ "serverName": "ado", "status": "pending" }),
-                        ),
-                        event(
-                            id,
-                            "session.mcp_server_status_changed",
-                            json!({ "serverName": "ado", "status": "needs-auth" }),
-                        ),
-                    ])
-                })
-            }
-            _ => None,
-        }
-    });
-    let (launch, told) = reporting(&played);
-    let session = Session::start(&launch, None).await.unwrap();
-    assert_eq!(*logins.lock().unwrap(), 2);
-    let browser = McpSignIn::Browser { server: "ado".to_owned(), url: "https://login.example/2".to_owned() };
-    assert_eq!(*told.lock().unwrap(), [browser], "the cancelled sign-in neither failed nor handed out");
-    session.close().await;
-}
-
-#[tokio::test]
-async fn a_copilot_sign_in_whose_browser_came_back_at_once_signs_in_without_a_notice() {
-    // s1 has ado connected; in later sessions it needs authentication, the identity provider's live session completing
-    // the browser's redirect as soon as the sign-in answers its address.
-    let played = Played::new("copilot-mcp-at-once", r#"mcp_sign_in = ["ado"]"#, |method, params| {
-        let id = &params["sessionId"];
-        match method {
-            "session.mcp.list" if *id == "s1" => {
-                Some(listing(params, &["ado"], &[("ado", json!({ "status": "connected" }))]))
-            }
-            "session.mcp.list" => Some(listing(params, &["ado"], &[("ado", json!({ "status": "needs-auth" }))])),
-            "session.mcp.oauth.login" => {
-                Some(Answer::ok(json!({ "authorizationUrl": "https://login.example/ado" })).then(vec![event(
-                    id,
-                    "session.mcp_server_status_changed",
-                    json!({ "serverName": "ado", "status": "connected" }),
-                )]))
-            }
-            _ => None,
-        }
-    });
-    let (launch, told) = reporting(&played);
-    let s1 = Session::start(&launch, Some(SessionId::new("s1"))).await.unwrap();
-    let other = Session::start(&launch, None).await.unwrap();
-    assert_eq!(signed_in(&played, &other.id().0), [json!("ado")]);
-    let changed = || played.requests("session.mcp.oauth.authenticationStateChanged");
-    until(|| !changed().is_empty()).await;
-    assert_eq!(changed(), [json!({ "sessionId": "s1", "serverName": "ado" })]);
-    let signed = McpSignIn::SignedIn { server: "ado".to_owned() };
-    assert!(told.lock().unwrap().iter().all(|sign_in| *sign_in == signed), "{:?}", told.lock().unwrap());
-
-    // No browser sign-in is left waiting for a third session to be handed.
-    let third = Session::start(&launch, None).await.unwrap();
-    assert_eq!(signed_in(&played, &third.id().0), [json!("ado")]);
-    for session in [s1, other, third] {
-        session.close().await;
-    }
-}
-
-#[tokio::test]
-async fn a_listed_mcp_server_needing_authentication_after_its_session_opened_signs_in() {
-    let played = Played::new("copilot-mcp-later", r#"mcp_sign_in = ["icm"]"#, |method, params| match method {
-        "session.mcp.list" => Some(listing(params, &["icm"], &[("icm", json!({ "status": "connected" }))])),
-        "session.mcp.oauth.login" => Some(Answer::ok(json!({ "authorizationUrl": "https://login.example/icm" }))),
-        "session.send" => {
-            // Its credentials could not be renewed.
-            let id = &params["sessionId"];
-            let mut events = vec![event(
-                id,
-                "session.mcp_server_status_changed",
-                json!({ "serverName": "icm", "status": "needs-auth" }),
-            )];
-            events.extend(idle(id, false));
-            Some(default_answer(method, params).then(events))
-        }
-        _ => None,
-    });
-    let (launch, told) = reporting(&played);
-    let session = Session::start(&launch, None).await.unwrap();
-    assert_eq!(signed_in(&played, &session.id().0), [] as [Value; 0], "connected");
-    assert_eq!(*told.lock().unwrap(), [McpSignIn::SignedIn { server: "icm".to_owned() }]);
-    session.run(Prompt::new("go")).await.unwrap();
-    let browser = McpSignIn::Browser { server: "icm".to_owned(), url: "https://login.example/icm".to_owned() };
-    until(|| told.lock().unwrap().contains(&browser)).await;
-    assert_eq!(signed_in(&played, &session.id().0), [json!("icm")]);
-    session.close().await;
 }
 
 #[tokio::test]

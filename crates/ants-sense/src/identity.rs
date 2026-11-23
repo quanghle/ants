@@ -187,7 +187,7 @@ pub struct ClonedFrom {
 }
 
 impl ItemValues for Card {
-    const KIND: &str = CARD;
+    const KINDS: &[&str] = &[CARD];
 }
 
 impl Card {

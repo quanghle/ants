@@ -4,7 +4,7 @@
     all(test, target_os = "macos"),
     allow(linker_messages, reason = "a test binary's unwind tables outgrow what ld64 encodes compactly (16 MB)")
 )]
-#![cfg_attr(test, allow(clippy::disallowed_methods, reason = "tests read and hear as they please"))]
+#![cfg_attr(test, expect(clippy::disallowed_methods, reason = "tests read and hear as they please"))]
 
 // An ant served: its inbox loop, the harness sessions it prompts and the worktrees they work in, the tools of those
 // harnesses, and what a thread committed.
@@ -15,6 +15,7 @@ mod ipc;
 pub mod mcp;
 pub mod permission;
 pub mod pool;
+mod process;
 mod publish;
 pub mod worktrees;
 

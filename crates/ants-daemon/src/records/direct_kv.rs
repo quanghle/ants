@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use ants_client::requests::{DIRECT_BATCH, Position, Stored};
 use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::context::{PublishError, PublishErrorKind};
@@ -22,7 +23,7 @@ use async_nats::jetstream::{self, consumer};
 use async_nats::{HeaderMap, RequestErrorKind, StatusCode};
 use futures::{StreamExt as _, TryStreamExt as _};
 
-use crate::bus::relayed::{self, Read};
+use crate::bus::relayed::{self, Gets, GetsError, Got, Read};
 
 /// The header marking a KV delete or purge, and its values.
 const KV_OPERATION: &str = "KV-Operation";
@@ -31,11 +32,6 @@ const DELETED: [&str; 2] = ["DEL", "PURGE"];
 const EXPECTED_LAST_SUBJECT_SEQUENCE: &str = "Nats-Expected-Last-Subject-Sequence";
 /// The header making the stream refuse a message unless its last message has the given sequence.
 const EXPECTED_LAST_SEQUENCE: &str = "Nats-Expected-Last-Sequence";
-/// The header of the messages left of a batched direct get, on the status ending each batch.
-const NUM_PENDING: &str = "Nats-Num-Pending";
-/// Messages a [`DirectKv::scan`] asks for at once, and the bytes they come to at most (a larger message comes alone).
-const BATCH: usize = 256;
-const BATCH_BYTES: usize = 4 << 20;
 /// How often [`DirectKv::put_sequenced`] tries while other keys keep changing.
 const SEQUENCED_TRIES: usize = 10;
 /// The header making the stream remove a message after the given number of seconds, if it allows per-message TTLs.
@@ -199,9 +195,10 @@ impl DirectKv {
         match past {
             Past::Gets => {
                 let mut last = None;
-                self.each_stored(key, |msg, relayed| {
-                    if !relayed {
-                        last = Some(Put { payload: msg.payload.to_vec(), headers: msg.headers, time: msg.time.into() });
+                self.each_stored(key, |got| {
+                    if let Got::Stored(stored) = got {
+                        let (headers, time) = (headers_of(&stored), stored.stored_at.into());
+                        last = Some(Put { payload: stored.payload, headers, time });
                     }
                 })
                 .await?;
@@ -232,7 +229,8 @@ impl DirectKv {
         let read = async {
             let (mut left, mut last) = (consumer.cached_info().num_pending, None);
             while left > 0 {
-                let mut batch = consumer.fetch().max_messages(left.min(BATCH as u64) as usize).messages().await?;
+                let mut batch =
+                    consumer.fetch().max_messages(left.min(DIRECT_BATCH as u64) as usize).messages().await?;
                 let mut got = 0;
                 while let Some(msg) = batch.next().await {
                     let msg = msg.map_err(|e| anyhow!(e))?;
@@ -487,13 +485,16 @@ impl DirectKv {
     pub async fn scan(&self, filter: &str, mut each: impl FnMut(&str, &[u8])) -> Result<()> {
         let prefix = self.subject("");
         let mut last: HashMap<String, (u64, Option<Vec<u8>>)> = HashMap::new();
-        self.each_stored(filter, |msg, relayed| {
-            if relayed {
-                tracing::warn!(subject = %msg.subject, "skipping an entry a stream relayed");
-            } else if let Some(key) = msg.subject.strip_prefix(prefix.as_str()) {
-                let value = (!is_deleted(&msg.headers)).then(|| msg.payload.to_vec());
-                last.insert(key.to_owned(), (msg.sequence, value));
+        self.each_stored(filter, |got| match got {
+            Got::Stored(stored) => {
+                if let Some(key) = stored.subject.strip_prefix(prefix.as_str()) {
+                    let operation = stored.headers.iter().find(|(name, _)| name == KV_OPERATION);
+                    let deleted = operation.is_some_and(|(_, op)| DELETED.contains(&op.as_str()));
+                    last.insert(key.to_owned(), (stored.seq, (!deleted).then_some(stored.payload)));
+                }
             }
+            Got::Relayed { subject, .. } => tracing::warn!(%subject, "skipping an entry a stream relayed"),
+            Got::More | Got::End => {}
         })
         .await?;
         let mut entries: Vec<_> = last.into_iter().filter_map(|(key, (seq, value))| Some((seq, key, value?))).collect();
@@ -504,51 +505,27 @@ impl DirectKv {
         Ok(())
     }
 
-    /// Hand `each` every message stored under the keys matching `filter`, oldest first, and whether a stream relayed
-    /// it: batched direct gets naming no subject ([`DirectKv::whole`]).
-    async fn each_stored(&self, filter: &str, mut each: impl FnMut(StreamMessage, bool)) -> Result<()> {
+    /// Hand `each` every message stored under the keys matching `filter`, oldest first, those a stream relayed
+    /// among them: batched direct gets naming no subject ([`DirectKv::whole`]).
+    async fn each_stored(&self, filter: &str, mut each: impl FnMut(Got)) -> Result<()> {
         let bucket = &self.bucket;
-        let client = self.js.client();
-        let wait = client.timeout().unwrap_or(Duration::from_secs(10));
-        let inbox = client.new_inbox();
-        #[expect(clippy::disallowed_methods, reason = "direct gets' answers, which the stream sends")]
-        let mut replies = client.subscribe(inbox.clone()).await?;
-        let mut seq = 1;
+        let mut gets = Gets::open(&self.js, &format!("KV_{bucket}"), self.subject(filter), Position::all()).await?;
         loop {
-            let request = serde_json::json!({
-                "seq": seq,
-                "next_by_subj": self.subject(filter),
-                "batch": BATCH,
-                "max_bytes": BATCH_BYTES,
-            });
-            let request = async_nats::Request::new().inbox(inbox.clone()).payload(request.to_string().into());
-            self.js
-                .send_request(format!("DIRECT.GET.KV_{bucket}"), request)
-                .await
-                .with_context(|| format!("reading {filter} of {bucket}"))?;
-            let mut got = 0;
-            loop {
-                let Ok(Some(msg)) = tokio::time::timeout(wait, replies.next()).await else {
-                    bail!("no answer reading {filter} of {bucket} (`ants init` creates it)");
-                };
-                match msg.status {
-                    None => {}
-                    Some(StatusCode::NOT_FOUND) => return Ok(()),
-                    Some(StatusCode::NO_RESPONDERS) => bail!("there is no bucket {bucket}: `ants init` creates it"),
-                    Some(status) if status.as_u16() == 204 => {
-                        let pending = msg.headers.as_ref().and_then(|h| h.get(NUM_PENDING));
-                        if got == 0 || pending.is_some_and(|n| n.as_str() == "0") {
-                            return Ok(());
-                        }
-                        break;
-                    }
-                    Some(status) => bail!("reading {filter} of {bucket}: answered {status} {:?}", msg.description),
+            match gets.next().await {
+                Ok(Got::End) => return Ok(()),
+                Ok(Got::More) => {}
+                Ok(got) => each(got),
+                Err(GetsError::Send(e)) => return Err(e).with_context(|| format!("reading {filter} of {bucket}")),
+                Err(GetsError::Unanswered) => {
+                    bail!("no answer reading {filter} of {bucket} (`ants init` creates it)")
                 }
-                got += 1;
-                let relayed = relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::DirectGet);
-                let msg = StreamMessage::try_from(msg).map_err(|e| anyhow!(e))?;
-                seq = msg.sequence + 1;
-                each(msg, relayed);
+                Err(GetsError::Status { status: StatusCode::NO_RESPONDERS, .. }) => {
+                    bail!("there is no bucket {bucket}: `ants init` creates it")
+                }
+                Err(GetsError::Status { status, description }) => {
+                    bail!("reading {filter} of {bucket}: answered {status} {description:?}")
+                }
+                Err(GetsError::Malformed(why)) => bail!(why),
             }
         }
     }
@@ -566,6 +543,15 @@ impl DirectKv {
 fn reported_last(refused: &PublishError) -> Option<u64> {
     let refusal = std::error::Error::source(refused)?.downcast_ref::<jetstream::Error>()?;
     refusal.to_string().strip_prefix("wrong last sequence: ")?.split(' ').next()?.parse().ok()
+}
+
+/// The headers the writer of `stored` stored with it.
+fn headers_of(stored: &Stored) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for (name, value) in &stored.headers {
+        headers.append(name.as_str(), value.as_str());
+    }
+    headers
 }
 
 fn is_deleted(headers: &HeaderMap) -> bool {

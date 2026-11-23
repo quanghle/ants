@@ -39,6 +39,34 @@ use measured::{Measured, stored_every};
 /// How many steers wait at most for the harness to take them into the running prompt.
 const STEERS: usize = 8;
 
+/// The daemon's ends of what a prompt is run with: what it streams back, and what stops and steers it.
+struct Taps {
+    spend: tokio::sync::mpsc::UnboundedReceiver<Spend>,
+    /// Stops the prompt, once, with why.
+    stop: Option<tokio::sync::oneshot::Sender<String>>,
+    updates: tokio::sync::mpsc::Receiver<StatusUpdate>,
+    /// Fires as the prompt starts in a session whose harness takes steers.
+    ready: futures::future::Fuse<tokio::sync::oneshot::Receiver<()>>,
+    steer: tokio::sync::mpsc::Sender<crate::harness::Steer>,
+}
+
+/// What a prompt streamed, taken in as it comes: its status, told on the thread, and its tool calls, kept for the
+/// timeline.
+struct Streamed<'a> {
+    status: Status<'a>,
+    calls: crate::monitoring::timeline::Collector<'a>,
+    /// Whether a tool call started, so tools may have run; streamed text, such as a harness's error, runs nothing.
+    worked: bool,
+}
+
+impl Streamed<'_> {
+    fn take(&mut self, update: StatusUpdate) {
+        self.worked |= matches!(update, StatusUpdate::Tool { .. });
+        self.calls.push(&update, chrono::Utc::now());
+        self.status.push(update);
+    }
+}
+
 /// What came of running a prompt.
 pub(super) struct Ran {
     pub(super) reply: Result<crate::harness::Reply>,
@@ -482,30 +510,18 @@ impl Inbox<'_> {
         Some(completed)
     }
 
-    /// Run the prompt `text` for `incoming`, streaming its status, recording its spend, renewing the message's ack wait
-    /// and cancelling it on request or at a cap.
-    async fn run_prompt(
-        &self,
-        Handling { incoming, msg, seq }: Handling<'_>,
-        text: String,
-        mut flush: tokio::time::Interval,
-    ) -> Ran {
+    /// The prompt `text` for the message handled, the daemon's ends of it, and its measures, which begin once its
+    /// brief and channel note are read.
+    async fn tapped(&self, Handling { incoming, msg, seq }: Handling<'_>, text: String) -> (Prompt, Taps, Measured) {
         let envelope = &incoming.envelope;
-        let thread = &envelope.thread_id;
-        let (spend_tx, mut spend) = tokio::sync::mpsc::unbounded_channel();
+        let (spend_tx, spend) = tokio::sync::mpsc::unbounded_channel();
         let (stop_tx, stop) = tokio::sync::oneshot::channel();
-        let (mut stop_tx, mut reached) = (Some(stop_tx), None);
-        let (progress_tx, mut streamed) = tokio::sync::mpsc::channel(status::BUFFER);
-        let mut status = Status::new(self.client, self.ant, thread, self.redactor);
-        let every = self.pacing.timeline_every;
-        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut calls = crate::monitoring::timeline::Collector::new(self.ant, thread, envelope.id, self.redactor);
+        let (progress_tx, updates) = tokio::sync::mpsc::channel(status::BUFFER);
         let history = self.history_of(incoming, seq);
         let (brief, channel) = tokio::join!(self.briefing(incoming), self.channel_note(incoming));
         let (ready_tx, ready) = tokio::sync::oneshot::channel();
         let (steer_tx, steers) = tokio::sync::mpsc::channel(STEERS);
-        let (mut measured, began) = Measured::new(envelope.id);
+        let (measured, began) = Measured::new(envelope.id);
         let prompt = Prompt {
             text,
             from: Some(envelope.from.to_string()),
@@ -520,12 +536,31 @@ impl Inbox<'_> {
             channel,
             began: Some(began),
         };
-        let mut ready = futures::FutureExt::fuse(ready);
+        let ready = futures::FutureExt::fuse(ready);
+        (prompt, Taps { spend, stop: Some(stop_tx), updates, ready, steer: steer_tx }, measured)
+    }
+
+    /// Run the prompt `text` for `incoming`, streaming its status, recording its spend, renewing the message's ack wait
+    /// and cancelling it on request or at a cap.
+    async fn run_prompt(&self, handling: Handling<'_>, text: String, mut flush: tokio::time::Interval) -> Ran {
+        let Handling { incoming, msg, .. } = handling;
+        let envelope = &incoming.envelope;
+        let thread = &envelope.thread_id;
+        let mut streamed = Streamed {
+            status: Status::new(self.client, self.ant, thread, self.redactor),
+            calls: crate::monitoring::timeline::Collector::new(self.ant, thread, envelope.id, self.redactor),
+            worked: false,
+        };
+        let every = self.pacing.timeline_every;
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let (prompt, taps, mut measured) = self.tapped(handling, text).await;
+        let Taps { mut spend, stop: mut stop_tx, mut updates, mut ready, steer: steer_tx } = taps;
         let mut joins = None;
         let mut taking = futures::stream::FuturesUnordered::new();
         let mut joined = Vec::new();
         let (cancellable, mut cancel) = self.running.cancels.register(thread);
-        let (mut cancelled_by, mut cut_by_cancel) = (None, false);
+        let (mut cancelled_by, mut cut_by_cancel, mut reached) = (None, false, None);
         let prompting = self.metrics.prompting();
         let fallback = self.fallback(tokio::time::Instant::now());
         if let Some(i) = fallback {
@@ -534,19 +569,13 @@ impl Inbox<'_> {
         let prompt = self.telling_mcp_sign_ins(incoming, self.pool.run_on(thread, prompt, fallback));
         tokio::pin!(prompt);
         let mut progress = self.progress();
-        // Whether a tool call started, so tools may have run; streamed text, such as a harness's error, runs nothing.
-        let mut worked = false;
         let reply = loop {
             tokio::select! {
                 r = &mut prompt => break r,
-                Some(update) = streamed.recv() => {
-                    worked |= matches!(update, StatusUpdate::Tool { .. });
-                    calls.push(&update, chrono::Utc::now());
-                    status.push(update);
-                }
-                _ = flush.tick() => status.flush_settled(),
-                () = stored_every(&calls, &mut tick) => {
-                    if let Some(record) = calls.take() {
+                Some(update) = updates.recv() => streamed.take(update),
+                _ = flush.tick() => streamed.status.flush_settled(),
+                () = stored_every(&streamed.calls, &mut tick) => {
+                    if let Some(record) = streamed.calls.take() {
                         crate::monitoring::timeline::store(self.js, record);
                     }
                 }
@@ -572,20 +601,18 @@ impl Inbox<'_> {
                 _ = progress.tick() => bus::progress(msg).await,
             }
         };
-        while let Ok(update) = streamed.try_recv() {
-            worked |= matches!(update, StatusUpdate::Tool { .. });
-            calls.push(&update, chrono::Utc::now());
-            status.push(update);
+        while let Ok(update) = updates.try_recv() {
+            streamed.take(update);
         }
-        measured.end(&calls);
-        status.flush();
-        while let Some(record) = calls.take() {
+        measured.end(&streamed.calls);
+        streamed.status.flush();
+        while let Some(record) = streamed.calls.take() {
             crate::monitoring::timeline::store(self.js, record);
         }
         drop(steer_tx);
         self.joins_ended(joins, taking, &mut joined).await;
         drop((cancellable, prompting));
-        Ran { reply, cancelled_by, cut_by_cancel, worked, reached, spend, fallback, measured, joined }
+        Ran { reply, cancelled_by, cut_by_cancel, worked: streamed.worked, reached, spend, fallback, measured, joined }
     }
 
     /// The history of the thread of `incoming` before stream sequence `seq`, for a harness rebuilding a lost session.

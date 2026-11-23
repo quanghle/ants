@@ -10,7 +10,6 @@ use ants_proto::{NoticeKind, StepStage, UserId, Uuid};
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar as _;
 
 use crate::people::sealed;
 use crate::threads::thread::{Entry, Kind};
@@ -371,7 +370,7 @@ impl Shown<'_> {
         head.spans.extend(self.heading(e, entries, top));
         let text = e.text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
         let room = self.width.saturating_sub(head.width() + 2 + BELOW.len() + STAMP);
-        head.spans.push(Span::raw(format!("  {}", cut(text, room))));
+        head.spans.push(Span::raw(format!("  {}", style::fit(text, room))));
         head.spans.push(Span::styled(BELOW, style::dim()));
         lines.push(self.stamped(head, e.stored_at));
     }
@@ -455,7 +454,7 @@ impl Shown<'_> {
             let took = if turn.running {
                 turn.started().map(|at| crate::colony::short(crate::colony::since(at, self.now)))
             } else {
-                turn.took().and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map(crate::threads::thread::took)
+                turn.took().and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map(ants_client::text::took)
             };
             let took = took.map_or_default(|took| format!(" · {took}"));
             said.push(Span::styled(format!("{}{took}", summary(&turn.calls)), style::dim()));
@@ -481,14 +480,14 @@ impl Shown<'_> {
         }
         lines.push(match turn.started() {
             Some(at) => self.stamped(line, at),
-            None => clip(line, self.width),
+            None => style::clip(line, self.width),
         });
         if turn.running {
             let latest = &turn.calls[turn.calls.len().saturating_sub(LATEST)..];
             for (n, call) in latest.iter().enumerate() {
                 let mut line = Line::raw(if n == 0 { format!("{rest}{UNDER}") } else { format!("{rest}  ") });
                 line.spans.extend(self.call(call, false));
-                lines.push(clip(line, self.width));
+                lines.push(style::clip(line, self.width));
             }
         }
     }
@@ -544,9 +543,9 @@ impl Shown<'_> {
     /// `line` with the local time of `at` dim at its right edge, cut to leave room for it; on a narrow view only cut.
     fn stamped(&self, line: Line<'static>, at: DateTime<Utc>) -> Line<'static> {
         if self.width < STAMPED_FROM + STAMP {
-            return clip(line, self.width);
+            return style::clip(line, self.width);
         }
-        let mut line = clip(line, self.width - STAMP);
+        let mut line = style::clip(line, self.width - STAMP);
         let time = hm(at);
         let pad = self.width.saturating_sub(line.width() + time.chars().count());
         line.spans.push(Span::raw(" ".repeat(pad)));
@@ -642,7 +641,7 @@ pub(super) fn body(e: &Entry, entries: &[Entry]) -> String {
 /// dim line on the message it replies to, if it quotes one.
 fn text(e: &Entry, entries: &[Entry], width: usize) -> Vec<Line<'static>> {
     let text = body(e, entries);
-    let mut lines: Vec<_> = e.quote.iter().map(|q| Line::styled(cut(&q.line(), width), style::dim())).collect();
+    let mut lines: Vec<_> = e.quote.iter().map(|q| Line::styled(style::fit(&q.line(), width), style::dim())).collect();
     match e.kind {
         Kind::Message | Kind::Escalation | Kind::Mention | Kind::Post | Kind::Note if e.question.is_none() => {
             lines.extend(markdown::render(&text, width));
@@ -677,51 +676,10 @@ pub(super) fn busy() -> Style {
 
 /// How long a call that ended took.
 fn took(call: &Call) -> String {
-    call.duration.and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map_or_default(crate::threads::thread::took)
+    call.duration.and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map_or_default(ants_client::text::took)
 }
 
 /// The local hour and minute of `at`.
 pub(super) fn hm(at: DateTime<Utc>) -> String {
     at.with_timezone(&Local).format("%H:%M").to_string()
-}
-
-/// `text` in at most `width` characters, an ellipsis ending it when cut.
-pub(super) fn cut(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_owned();
-    }
-    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
-}
-
-/// `line` in at most `width` columns, an ellipsis ending it when cut.
-fn clip(line: Line<'static>, width: usize) -> Line<'static> {
-    if line.width() <= width {
-        return line;
-    }
-    let style = line.style;
-    let mut left = width.saturating_sub(1);
-    let mut spans = Vec::new();
-    for span in line.spans {
-        let wide = span.width();
-        if wide <= left {
-            left -= wide;
-            spans.push(span);
-            continue;
-        }
-        let mut kept = String::new();
-        for c in span.content.chars() {
-            let wide = c.width().unwrap_or(0);
-            if wide > left {
-                break;
-            }
-            left -= wide;
-            kept.push(c);
-        }
-        kept.push('…');
-        spans.push(Span::styled(kept, span.style));
-        break;
-    }
-    Line::from(spans).style(style)
 }

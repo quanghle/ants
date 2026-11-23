@@ -105,7 +105,7 @@ impl Hub {
         match id.map(str::trim).filter(|m| !m.is_empty()) {
             Some(id) => id.parse().map_err(|e| format!("message_id {id:?}: {e}")),
             None => {
-                let current = self.sessions.locked().current.get(thread).map(|e| e.id);
+                let current = self.sessions.locked().current(thread).map(|e| e.id);
                 current.ok_or_else(|| {
                     "no message is being handled on this thread; name the message by message_id".to_owned()
                 })

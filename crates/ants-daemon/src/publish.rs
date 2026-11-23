@@ -17,9 +17,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::permission::PermissionPolicy;
+use crate::process;
 use crate::records::direct_kv::{DirectKv, Lookup};
 use crate::secrets::redact::Redactor;
-use crate::worktrees::{self, Branch, Worktrees};
+use crate::worktrees::{Branch, Worktrees};
 
 /// Longest a push may take.
 pub const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -196,7 +197,7 @@ impl Publisher {
             ("GH_NO_UPDATE_NOTIFIER", "1"),
             ("NO_COLOR", "1"),
         ];
-        worktrees::run(&self.gh, dir, args, &env, Some(self.gh_timeout)).await
+        process::run(&self.gh, dir, args, &env, Some(self.gh_timeout)).await
     }
 
     /// The title of `thread`, if it has one the ant's credentials may read, not sealed between humans.

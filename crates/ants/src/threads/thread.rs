@@ -28,8 +28,8 @@ pub use self::parser::Parser;
 pub use self::pick::{Pick, recent_threads, resolve};
 pub use self::summaries::Summary;
 pub(crate) use self::summaries::{Select, Threads};
-pub(crate) use self::text::{answer_line, call_label, time, took};
-pub use self::text::{answers_to, render, table};
+pub use self::text::{Shown, answers_to, render, table};
+pub(crate) use self::text::{answer_line, call_label, time};
 pub use ants_client::entry::{Entry, Kind, NoReply, ToolCall, ToolRejection, last_reopening};
 pub use message::{MessagePick, find as find_message, recent_messages};
 
@@ -453,7 +453,7 @@ pub async fn show(nats: &Nats<'_>, pick: Pick, since: Option<Duration>, json: bo
     };
     if json {
         for entry in &entries {
-            println!("{}", serde_json::to_string(entry)?);
+            println!("{}", serde_json::to_string(&Shown::of(entry))?);
         }
     } else if entries.is_empty() {
         println!("no messages on thread {thread}");

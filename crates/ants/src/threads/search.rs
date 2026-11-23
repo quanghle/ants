@@ -248,7 +248,7 @@ pub async fn search(
     let (entries, omitted) = search.run(&js, Parser::opening(keyring).checking(Some(behalf))).await?;
     if json {
         for entry in &entries {
-            println!("{}", serde_json::to_string(entry)?);
+            println!("{}", serde_json::to_string(&thread::Shown::of(entry))?);
         }
     } else if entries.is_empty() {
         println!("no matching messages");

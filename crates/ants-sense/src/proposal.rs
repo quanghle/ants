@@ -113,7 +113,7 @@ pub struct Proposal {
 }
 
 impl ItemValues for Proposal {
-    const KIND: &str = PROPOSAL;
+    const KINDS: &[&str] = &[PROPOSAL];
 }
 
 impl Proposal {
@@ -132,11 +132,7 @@ pub struct ProposalItem {
 
 impl ProposalItem {
     pub fn of(item: Item) -> Option<Self> {
-        if item.kind != PROPOSAL {
-            return None;
-        }
-        let proposal = Proposal::of(&item).ok()?;
-        Some(Self { item, proposal })
+        Some(Self { proposal: Proposal::held(&item)?, item })
     }
 
     pub fn id(&self) -> &ItemId {
@@ -197,14 +193,6 @@ pub async fn pending(items: &dyn Items) -> Result<Vec<ProposalItem>, StoreError>
 /// The pending proposal of `target`, if any.
 pub async fn pending_for(items: &dyn Items, target: &ItemId) -> Result<Option<ProposalItem>, StoreError> {
     Ok(pending(items).await?.into_iter().find(|found| &found.proposal.target == target))
-}
-
-/// The proposals of `target`, the newest first.
-pub async fn of_target(items: &dyn Items, target: &ItemId) -> Result<Vec<ProposalItem>, StoreError> {
-    let found = items.list_by(PROPOSAL, "target", Some(&json!(target)), usize::MAX).await?;
-    let mut all: Vec<_> = found.into_iter().filter_map(ProposalItem::of).collect();
-    all.sort_by(|a, b| (b.proposal.writer.at, b.id()).cmp(&(a.proposal.writer.at, a.id())));
-    Ok(all)
 }
 
 /// Refuse a proposal made in `context` in answer to `finding`, if given, when it rests on untrusted text

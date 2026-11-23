@@ -1,6 +1,7 @@
 //! Following the tool requests ([`follow`]): the pending ones, then each new one and how each reported one ends, as
 //! `ants tools list --follow` and `ants inbox --follow` show them ([`render`]).
 
+use ants_client::text::spelling;
 use ants_daemon::bus::relayed::{self, Heard, Read};
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -13,7 +14,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use futures::StreamExt as _;
 use futures::stream::SelectAll;
 
-use super::{HeldAct, State, commands, deciders, excerpt, left, pending_at, qualified, spelling, standing};
+use super::{HeldAct, State, commands, deciders, excerpt, left, pending_at, qualified, standing};
 
 /// What following the tool requests reports.
 #[derive(Debug, Clone, PartialEq, Eq)]

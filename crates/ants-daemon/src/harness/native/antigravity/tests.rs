@@ -7,18 +7,18 @@ use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{HttpHeader, McpServer, McpServerHttp, SessionId};
 use ants_proto::{HarnessAgent, LimitKind, StatusUpdate, ThreadId};
-use ants_test_support::{StubCli, scratch_dir};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use super::*;
+use crate::harness::native::Protocol;
+use crate::harness::native::tests::StubHarness;
 use crate::harness::{
     Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, handshake, parse_definitions,
 };
 use crate::limits::breaker::StartFailed;
 use crate::limits::overflow::ContextOverflow;
 use crate::limits::ratelimit::Limited;
-use crate::permission::{Allowlist, PermissionPolicy};
 
 const RATE_LIMITED: &str = "agent executor error: generating and executing: Error 429, Message: Resource has been \
                             exhausted (e.g. check quota)., Status: RESOURCE_EXHAUSTED, Details: []";
@@ -62,30 +62,21 @@ fn lines(lines: &[&str]) -> Vec<String> {
     lines.iter().map(|&line| line.to_owned()).collect()
 }
 
-/// A harness of protocol antigravity run by a stub `agy` in a scratch directory, removed on drop.
-struct Agy {
-    dir: PathBuf,
-    cli: StubCli,
-    harness: Arc<Harness>,
-}
+/// A harness of protocol antigravity run by a stub `agy`.
+struct Agy(StubHarness);
 
-impl Drop for Agy {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+impl std::ops::Deref for Agy {
+    type Target = StubHarness;
+
+    fn deref(&self) -> &StubHarness {
+        &self.0
     }
 }
 
 impl Agy {
     /// `[harnesses.agy]` of protocol antigravity, with `table` added.
     fn new(name: &str, table: &str) -> Self {
-        let dir = scratch_dir(name).canonicalize().unwrap();
-        let cli = StubCli::new(&dir, "agy");
-        let text = format!(
-            "[harnesses.agy]\ncommand = {:?}\nprotocol = \"antigravity\"\nsign_in = \"agy\"\n{table}",
-            cli.path()
-        );
-        let harness = Harnesses::builtin().define(parse_definitions(&text).unwrap()).unwrap().get("agy").unwrap();
-        Self { dir, cli, harness }
+        Self(StubHarness::new(name, "agy", Protocol::Antigravity, "agy", &format!("sign_in = \"agy\"\n{table}")))
     }
 
     fn launch(&self, settings: ModelSettings) -> Launch {
@@ -94,9 +85,7 @@ impl Agy {
 
     /// A launch with GEMINI_API_KEY `key` (none when empty), the daemon's left out.
     fn launch_with_key(&self, key: &str, settings: ModelSettings) -> Launch {
-        let allow_all = PermissionPolicy::new(Allowlist::parse(&["*"]).unwrap(), None);
-        let env = vec![(API_KEY.to_owned(), key.to_owned())];
-        Launch::new(self.harness.clone(), self.dir.clone(), env, allow_all, settings)
+        self.0.launch(&[(API_KEY, key)], settings)
     }
 
     /// Script run `run` as `agy --version`.
@@ -111,7 +100,7 @@ impl Agy {
 
     /// The prompts run `run` read.
     fn prompts(&self, run: usize) -> Vec<Value> {
-        self.cli.received(run).iter().map(|line| serde_json::from_str(line).unwrap()).collect()
+        self.received(run)
     }
 
     /// The value run `run` got after `flag`.

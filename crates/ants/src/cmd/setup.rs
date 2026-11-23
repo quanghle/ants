@@ -26,6 +26,7 @@ use anyhow::{Context as _, Result, bail};
 use crate::cmd::harness::HarnessPick;
 use crate::completions::{self, Shell};
 use crate::connection::{Connection, Nats};
+use crate::node::conf::quote as quoted;
 use crate::node::natsd::{self, bundled};
 use crate::node::web as page;
 use crate::service::{self, Action, Installed, Outcome, Service, Services, State, Values};
@@ -983,11 +984,6 @@ async fn wait_listening(listen: &str) {
     while !listening(listen).await && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-}
-
-/// `text` as a quoted string, for nats-server configuration and TOML alike.
-fn quoted(text: &str) -> String {
-    serde_json::Value::String(text.to_owned()).to_string()
 }
 
 /// Write `text` to a new file at `path`; fails when there is one.

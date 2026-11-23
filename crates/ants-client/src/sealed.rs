@@ -5,7 +5,7 @@
 use ants_proto::{Envelope, Sealed};
 use serde::{Deserialize, Serialize};
 
-/// What a reader makes of a sealed message, as `--json` output says it.
+/// What a reader makes of a sealed message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
@@ -28,7 +28,7 @@ impl State {
     }
 }
 
-/// How the ciphertext of a message shows where nothing is opened: `ants watch` and dead letters.
+/// How the ciphertext of a message shows where nothing is opened, as on a dead letter.
 pub fn size_note(sealed: &Sealed) -> String {
     format!("[sealed, {} bytes]", sealed.size())
 }

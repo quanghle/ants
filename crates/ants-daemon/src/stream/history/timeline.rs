@@ -1,5 +1,5 @@
 //! The tool-call timeline an ant stored on its threads ([`ants_proto::Timeline`]), read back by its daemon through the
-//! ant's own [`sent_reader`] for its dreams' review packets ([`super::active`]).
+//! ant's own [`sent_reader`] for its dreams' review packets ([`super::active()`]).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -38,7 +38,7 @@ pub(super) async fn read(
     until: SystemTime,
 ) -> Result<BTreeMap<ThreadId, Thread>> {
     let mut threads: BTreeMap<ThreadId, Thread> = BTreeMap::new();
-    let _one = if reading == Reading::Consumer { Some(super::SENT_READS.lock().await) } else { None };
+    let _one = super::sent_turn(reading).await;
     let (reader, filter) = (sent_reader(ant), subject::timeline_from(ant));
     reading::read_back(js, &reader, reading, &filter, start, |_, stored, subject, payload| {
         if stored > until {

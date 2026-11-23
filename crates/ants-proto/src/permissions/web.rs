@@ -3,11 +3,11 @@
 
 use super::{Permissions, kv_stream};
 use crate::{
-    COLONY_BUCKET, HUMANS_BUCKET, OWNERS_BUCKET, READ_BUCKET, STREAM, UserId, assistant_grant_key, inbox_prefix,
+    COLONY_BUCKET, HUMANS_BUCKET, OWNERS_BUCKET, READ_BUCKET, Role, STREAM, UserId, assistant_grant_key, inbox_prefix,
     subject,
 };
 #[cfg(doc)]
-use crate::{PRESENCE_BUCKET, ReadMarker, Role};
+use crate::{PRESENCE_BUCKET, ReadMarker};
 
 /// The user JWT tag of web credentials: a human's device that is a page of the web client, with the rights of
 /// [`Permissions::for_web`] and never the admin role ([`crate::ADMIN_TAG`]).
@@ -61,6 +61,12 @@ impl Permissions {
             subject::renew_reply(human.as_str()),
         ];
         Self { publish, subscribe }
+    }
+
+    /// What the credentials of a device of `human` allow: a web device's ([`Permissions::for_web`]) when `web`, else
+    /// a human's ([`Permissions::for_user`] in [`Role::Human`]).
+    pub fn for_human_device(human: &UserId, web: bool) -> Self {
+        if web { Self::for_web(human) } else { Self::for_user(human, Role::Human) }
     }
 }
 

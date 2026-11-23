@@ -117,7 +117,6 @@ impl Unverified {
     }
 }
 
-#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if takes a reference")]
 fn is_zero(n: &usize) -> bool {
     *n == 0
 }

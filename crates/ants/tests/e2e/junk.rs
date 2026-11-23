@@ -4,15 +4,15 @@
 //! redelivered, and the ant answers the next good message; a message near the payload limit, whose echo is past it,
 //! is answered once with the reply cut to fit.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use ants_proto::Uuid;
-use ants_test_support::{NatsServer, scratch_dir};
+use ants_test_support::NatsServer;
 use async_nats::HeaderMap;
 use serde_json::{Value, json};
 
-use super::{ANTS, Killed, link_self, run};
+use super::{Fixture, run};
 
 /// What goes onto the subjects, and whether the ant's daemon dead-letters it (else it is prompted, or a channel post
 /// dropped).
@@ -26,31 +26,21 @@ struct Junk {
 #[expect(clippy::too_many_lines, reason = "one scenario: refusals, then junk, then a good message")]
 pub fn junk_on_the_subjects_is_dead_lettered_once_and_the_ant_answers_on() {
     let Some(server) = NatsServer::start() else { return };
-    let dir = scratch_dir("junk");
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    link_self(&bin, "copilot");
-    let ants = |args: &[&str]| {
-        let mut command = Command::new(ANTS);
-        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
-        command
-    };
+    let fixture = Fixture::new("junk", &server, "copilot");
+    let dir = &fixture.dir;
+    let ants = |args: &[&str]| fixture.ants(args);
     let init = run(ants(&["init"]));
     assert!(init.status.success(), "ants init: {}", String::from_utf8_lossy(&init.stderr));
     let log = dir.join("daemon.log");
-    let mut daemon = Killed(
-        ants(&["daemon", "--harness", "copilot"])
-            .arg("--home")
-            .arg(dir.join("home"))
-            .arg("--workdir")
-            .arg(&dir)
-            .env("ANTS_ANT", "dev-a")
-            .env("PATH", &bin)
-            .stdout(Stdio::null())
-            .stderr(std::fs::File::create(&log).unwrap())
-            .spawn()
-            .unwrap(),
-    );
+    let mut daemon = ants(&["daemon", "--harness", "copilot"]);
+    daemon
+        .arg("--home")
+        .arg(dir.join("home"))
+        .arg("--workdir")
+        .arg(dir)
+        .env("ANTS_ANT", "dev-a")
+        .env("PATH", &fixture.bin);
+    let daemon = fixture.spawn_daemon(&mut daemon, "daemon.log");
     let tail =
         || std::fs::read_to_string(&log).unwrap_or_default().lines().rev().take(30).collect::<Vec<_>>().join("\n");
     let ask = |words: &str| run(ants(&["ask", "--wait", "--timeout", "60s", "@dev-a", words]));
@@ -219,5 +209,5 @@ pub fn junk_on_the_subjects_is_dead_lettered_once_and_the_ant_answers_on() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
-    assert!(daemon.0.try_wait().unwrap().is_none(), "the daemon exited\n{}", tail());
+    assert!(daemon.running(), "the daemon exited\n{}", tail());
 }

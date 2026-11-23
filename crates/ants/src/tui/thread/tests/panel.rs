@@ -83,3 +83,18 @@ fn keys_move_the_selection_copy_it_and_toggle_how_the_human_holds_the_thread() {
     data.live.marks.archive(&thread, 7);
     assert_eq!(page.key(Key::Char('e'), data, at(8)), change(Change::Archive(false)));
 }
+
+#[test]
+fn what_an_ant_does_in_wide_characters_is_cut_to_the_panel_s_columns() {
+    let thread = ThreadId::generate();
+    let mut m = model();
+    m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
+    let call = tool(&thread, "dev-a", "c1", Some(&"テスト".repeat(20)), "in_progress", 2);
+    m.data.live.status(&call, at(2));
+    let mut page = Page::new(thread.clone());
+    page.history.loaded(&thread, Ok(vec![message(1, &thread, "alice", "dev-a", "deploy the site")])).unwrap();
+    let lines = page.panel(&m.data, &[], at(3), 30);
+    let doing = lines.iter().find(|l| l.to_string().contains("テスト")).expect("what the ant does");
+    assert!(doing.to_string().ends_with('…'), "{doing}");
+    assert!(lines.iter().all(|l| l.width() <= 30), "{lines:?}");
+}

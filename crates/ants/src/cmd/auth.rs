@@ -649,8 +649,10 @@ fn user_rights(
             let destinations: Vec<Destination> = to.chain(channels.into_iter().map(Destination::Channel)).collect();
             Permissions::for_webhook(user, &destinations)
         }
-        _ if web => Permissions::for_web(user),
-        _ => Permissions::for_user(user, auth::role(user, human)),
+        _ => match auth::role(user, human) {
+            ants_proto::Role::Human => Permissions::for_human_device(user, web),
+            role => Permissions::for_user(user, role),
+        },
     }
     .with_js_domain(domain);
     Ok((kind, permissions))

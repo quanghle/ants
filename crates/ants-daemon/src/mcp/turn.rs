@@ -16,7 +16,7 @@ use rmcp::{ErrorData, RoleServer, schemars, tool, tool_router};
 use serde::Deserialize;
 
 use super::tools::{Tools, text};
-use super::{Hub, Mcp, attach};
+use super::{Hub, Mcp, TurnState, attach};
 use crate::sync::MutexExt as _;
 
 /// Most characters the reason given to `complete` has.
@@ -32,19 +32,19 @@ pub struct Completed {
 impl Mcp {
     /// Take the title the session of `thread` suggested for it during the turn, for the reply to carry.
     pub fn take_title(&self, thread: &ThreadId) -> Option<String> {
-        self.hub.sessions.locked().titles.remove(thread)
+        self.hub.sessions.locked().turns.get_mut(thread)?.title.take()
     }
 
     /// Take whether the session of `thread` called `complete` during the turn: then its final answer goes to nobody.
     pub fn take_completed(&self, thread: &ThreadId) -> Option<Completed> {
-        self.hub.sessions.locked().completed.remove(thread)
+        self.hub.sessions.locked().turns.get_mut(thread)?.completed.take()
     }
 
     /// Take the files the session of `thread` attached to the final answer of its turn (`attach_to_reply`), while the
     /// turn lasts: the directory the thread works in and their paths in it, for [`Mcp::store_reply_files`]. None when
     /// it attached none.
     pub fn take_reply_files(&self, thread: &ThreadId) -> Option<(PathBuf, Vec<String>)> {
-        let paths = self.hub.sessions.locked().reply_files.remove(thread)?;
+        let paths = self.hub.sessions.locked().turns.get_mut(thread)?.reply_files.take()?;
         // Files are attached only where the attachments' store is available.
         let (_, dir) = self.hub.files(thread).ok()?;
         Some((dir, paths))
@@ -67,7 +67,10 @@ impl Mcp {
     /// Mark `envelope` as the message its thread is handling until the guard drops. Messages the thread's session
     /// sends meanwhile follow on from it, and spend its turn budget.
     pub fn begin(&self, envelope: &Envelope) -> Turn {
-        self.hub.sessions.locked().current.insert(envelope.thread_id.clone(), envelope.clone());
+        let mut sessions = self.hub.sessions.locked();
+        let turn = sessions.turns.entry(envelope.thread_id.clone());
+        turn.and_modify(|turn| turn.current = envelope.clone()).or_insert_with(|| TurnState::of(envelope.clone()));
+        drop(sessions);
         Turn { hub: self.hub.clone(), thread: envelope.thread_id.clone() }
     }
 
@@ -77,12 +80,10 @@ impl Mcp {
     pub fn steer_to(&self, envelope: &Envelope, handles: Vec<AttachmentHandle>, stored: Option<DateTime<Utc>>) {
         let thread = &envelope.thread_id;
         let mut sessions = self.hub.sessions.locked();
-        if !sessions.current.contains_key(thread) {
-            return;
-        }
-        sessions.current.insert(thread.clone(), envelope.clone());
+        let Some(turn) = sessions.turns.get_mut(thread) else { return };
+        turn.current = envelope.clone();
         let Some(stored) = stored.filter(|_| !handles.is_empty()) else { return };
-        let carried = sessions.carried.entry(thread.clone()).or_insert_with(|| (Vec::new(), stored));
+        let carried = turn.carried.get_or_insert_with(|| (Vec::new(), stored));
         carried.0.extend(handles);
         carried.1 = carried.1.max(stored);
     }
@@ -99,8 +100,10 @@ impl Turn {
     /// waits for their chunks still on their way as long as that time says ([`crate::files::get_stored`]).
     #[must_use]
     pub fn carrying(self, handles: Vec<AttachmentHandle>, stored: Option<DateTime<Utc>>) -> Self {
-        if let Some(stored) = stored.filter(|_| !handles.is_empty()) {
-            self.hub.sessions.locked().carried.insert(self.thread.clone(), (handles, stored));
+        if let Some(stored) = stored.filter(|_| !handles.is_empty())
+            && let Some(turn) = self.hub.sessions.locked().turns.get_mut(&self.thread)
+        {
+            turn.carried = Some((handles, stored));
         }
         self
     }
@@ -108,12 +111,7 @@ impl Turn {
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        let mut sessions = self.hub.sessions.locked();
-        sessions.current.remove(&self.thread);
-        sessions.titles.remove(&self.thread);
-        sessions.completed.remove(&self.thread);
-        sessions.reply_files.remove(&self.thread);
-        sessions.carried.remove(&self.thread);
+        self.hub.sessions.locked().turns.remove(&self.thread);
     }
 }
 
@@ -171,7 +169,7 @@ impl Hub {
     /// in the turn, then react `check` to that message. Refused, nothing recorded, for a message always answered.
     async fn complete(&self, thread: &ThreadId, reason: Option<&str>) -> Result<String, String> {
         let reason = completion_reason(reason)?;
-        let current = self.sessions.locked().current.get(thread).cloned();
+        let current = self.sessions.locked().current(thread).cloned();
         let current =
             current.ok_or("no message is being handled on this thread; a turn is completed only while one is")?;
         if let Some(why) = always_answered(self, &current) {
@@ -179,10 +177,9 @@ impl Hub {
         }
         {
             let mut sessions = self.sessions.locked();
-            if sessions.current.get(thread).map(|e| e.id) != Some(current.id) {
-                return Err("the turn ended before it was completed".to_owned());
-            }
-            sessions.completed.insert(thread.clone(), Completed { reason });
+            let turn = sessions.turns.get_mut(thread).filter(|turn| turn.current.id == current.id);
+            let turn = turn.ok_or("the turn ended before it was completed")?;
+            turn.completed = Some(Completed { reason });
         }
         let reacted = self.react(thread, super::reactions::React::current("check")).await;
         let note = reacted.err().map_or_default(|e| format!(" The check reaction to the message was not made: {e}."));
@@ -197,10 +194,11 @@ impl Hub {
     fn suggest_title(&self, thread: &ThreadId, title: &str) -> Result<String, String> {
         let title = ThreadTitle::new(thread.clone(), title, self.ant.clone()).map_err(|e| e.to_string())?;
         let mut sessions = self.sessions.locked();
-        if !sessions.current.contains_key(thread) {
-            return Err("no message is being handled on this thread; a title is suggested only while one is".to_owned());
-        }
-        sessions.titles.insert(thread.clone(), title.title.clone());
+        let turn = sessions
+            .turns
+            .get_mut(thread)
+            .ok_or("no message is being handled on this thread; a title is suggested only while one is")?;
+        turn.title = Some(title.title.clone());
         Ok(format!(
             "The reply on thread {thread} suggests the title {:?}. It becomes the thread's title when a human lists or \
              shows the thread, unless the thread has or had another title.",
@@ -211,22 +209,20 @@ impl Hub {
     /// Have the final answer of the turn on `thread` carry the files at `paths`, in place of any given earlier in the
     /// turn; none for no paths. They are checked now, and read again as the answer is sent ([`Mcp::store_reply_files`]).
     async fn attach_to_reply(&self, thread: &ThreadId, paths: Vec<String>) -> Result<String, String> {
-        if !self.sessions.locked().current.contains_key(thread) {
-            return Err(
-                "no message is being handled on this thread; files are attached to its answer only while one is"
-                    .to_owned(),
-            );
-        }
-        if paths.is_empty() {
-            self.sessions.locked().reply_files.remove(thread);
-            return Ok("The final answer of this turn carries no files.".to_owned());
+        {
+            let mut sessions = self.sessions.locked();
+            let turn = sessions.turns.get_mut(thread).ok_or(
+                "no message is being handled on this thread; files are attached to its answer only while one is",
+            )?;
+            if paths.is_empty() {
+                turn.reply_files = None;
+                return Ok("The final answer of this turn carries no files.".to_owned());
+            }
         }
         let loaded = self.load_files(thread, &paths).await.map_err(|e| format!("{e}; nothing attached"))?;
         let mut sessions = self.sessions.locked();
-        if !sessions.current.contains_key(thread) {
-            return Err("the turn ended before the files were attached".to_owned());
-        }
-        sessions.reply_files.insert(thread.clone(), paths);
+        let turn = sessions.turns.get_mut(thread).ok_or("the turn ended before the files were attached")?;
+        turn.reply_files = Some(paths);
         let named: Vec<String> = loaded.iter().map(|l| attach::describe(&l.attachment)).collect();
         Ok(format!(
             "The final answer of this turn carries {}. They are read again from the working directory as the answer is \

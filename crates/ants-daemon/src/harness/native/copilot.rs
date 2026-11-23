@@ -11,7 +11,6 @@
 //! newer CLIs.
 
 use std::collections::HashSet;
-use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -19,33 +18,36 @@ use std::task::{Context, Poll};
 
 use agent_client_protocol::Error;
 use agent_client_protocol::v1::schema::{
-    ContentBlock, PromptResponse, StopReason, ToolCall, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, Usage,
+    ContentBlock, PromptResponse, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
 use ants_proto::{McpServerState, McpStatus};
 use anyhow::bail;
 use github_copilot_sdk as sdk;
-use sdk::handler::PermissionResult;
 use sdk::session::Session;
 use sdk::subscription::{EventSubscription, RecvErrorKind};
-use sdk::types::{PermissionRequestKind, RequestId};
 use sdk::{
-    Attachment, DeliveryMode, ErrorKind, MessageOptions, PermissionRequestData, ProtocolErrorKind, ResumeSessionConfig,
-    SessionConfig, SessionEvent, SessionId, SetModelOptions,
+    DeliveryMode, ErrorKind, ProtocolErrorKind, ResumeSessionConfig, SessionConfig, SessionEvent, SessionId,
+    SetModelOptions,
 };
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{mpsc, watch};
 
+use self::args::SessionArgs;
+use self::permissions::{Asking, Permissions};
+use self::turn::{Turn, message, text, tokens, tool_call};
+use super::turn::Spent;
 use super::{
-    Cli, Harness, Info, Native, NativeSession, Open, Process, Setting, Updates, approve, based_id, context_overflow,
-    cost_base, deny_approval, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out,
-    unsupported,
+    Cli, Harness, Info, Native, NativeSession, Open, Process, Setting, Updates, based_id, cost_base, failed, is_flag,
+    mcp_servers_json, signed_out, unsupported,
 };
 use crate::harness::mcp_sign_in::Report;
 use crate::sync::MutexExt as _;
 
+mod args;
 mod mcp_sign_in;
+mod permissions;
+mod turn;
 
 /// The release of github-copilot-sdk linked, as pinned in ants-daemon's Cargo.toml: the CLI must speak its protocol.
 const SDK_VERSION: &str = "1.0.29";
@@ -58,9 +60,6 @@ const SERVER_ARGS: [&str; 4] = ["--server", "--stdio", "--no-auto-update", "--di
 const FOREIGN_ARGS: [&str; 9] =
     ["--acp", "-p", "--prompt", "-i", "--interactive", "--resume", "-r", "--continue", "--connect"];
 
-/// Permission rules the CLI's server ignores, its sessions taking their tools from the SDK.
-const IGNORED_ARGS: [&str; 2] = ["--allow-tool", "--deny-tool"];
-
 /// US dollars of a nano AI credit, the unit the CLI counts a session's cost in: an AI credit is US$0.01.
 const USD_PER_NANO_AIU: f64 = 1e-11;
 
@@ -70,110 +69,6 @@ const NAME: &str = "GitHub Copilot CLI";
 pub(crate) struct Copilot {
     shared: Arc<Shared>,
     version: String,
-}
-
-/// What the definition's arguments set of each session rather than of the CLI, whose server ignores them on its
-/// command line: the tools left to the model (`--available-tools`, `--excluded-tools`, each tool named, or several
-/// separated by commas), the context tier (`--context`) and MCP servers added to the session's own
-/// (`--additional-mcp-config`, as JSON or `@` a file of it, each naming them in `mcpServers`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct SessionArgs {
-    available: Option<Vec<String>>,
-    excluded: Option<Vec<String>>,
-    context: Option<String>,
-    mcp: Vec<String>,
-}
-
-impl SessionArgs {
-    /// Take them out of `cli_args`, leaving the CLI's own; an error names an argument it cannot take.
-    fn take(cli_args: &mut Vec<String>) -> Result<Self, String> {
-        let mut taken = Self::default();
-        let mut rest = Vec::new();
-        let mut args = std::mem::take(cli_args).into_iter().peekable();
-        while let Some(arg) = args.next() {
-            let (flag, value) = match arg.split_once('=') {
-                Some((flag, value)) if flag.starts_with("--") => (flag.to_owned(), Some(value.to_owned())),
-                _ => (arg.clone(), None),
-            };
-            let tools = match flag.as_str() {
-                "--available-tools" => &mut taken.available,
-                "--excluded-tools" => &mut taken.excluded,
-                "--context" => {
-                    let tier = value.or_else(|| args.next_if(|next| !next.starts_with('-')));
-                    taken.context = Some(tier.ok_or("--context takes a tier")?);
-                    continue;
-                }
-                "--additional-mcp-config" => {
-                    let config = value.or_else(|| args.next()).ok_or("--additional-mcp-config takes JSON or @FILE")?;
-                    if !config.starts_with('@') {
-                        mcp_config(&config)?;
-                    }
-                    taken.mcp.push(config);
-                    continue;
-                }
-                flag if IGNORED_ARGS.contains(&flag) => {
-                    return Err(format!(
-                        "the CLI's server ignores {flag}: choose the tools with --available-tools or --excluded-tools"
-                    ));
-                }
-                _ => {
-                    rest.push(arg);
-                    continue;
-                }
-            };
-            let mut names = value.into_iter().collect::<Vec<_>>();
-            if names.is_empty() {
-                while let Some(next) = args.next_if(|next| !next.starts_with('-')) {
-                    names.push(next);
-                }
-            }
-            let names = names.iter().flat_map(|names| names.split(',')).map(str::trim).filter(|n| !n.is_empty());
-            let tools = tools.get_or_insert_default();
-            for name in names {
-                if name == "*" {
-                    return Err(format!("{flag} takes builtin:*, mcp:* or custom:* rather than *"));
-                }
-                tools.push(name.to_owned());
-            }
-        }
-        *cli_args = rest;
-        Ok(taken)
-    }
-
-    /// The servers `--additional-mcp-config` adds, those of a later one over an earlier one's, reading its files.
-    fn mcp_servers(&self) -> Result<Map<String, Value>, String> {
-        let mut servers = Map::new();
-        for config in &self.mcp {
-            let read = match config.strip_prefix('@') {
-                Some(path) => std::fs::read_to_string(path)
-                    .map_err(|e| format!("--additional-mcp-config: reading {path}: {e}"))
-                    .and_then(|text| mcp_config(&text).map_err(|e| format!("{e} in {path}")))?,
-                None => mcp_config(config)?,
-            };
-            servers.extend(read);
-        }
-        Ok(servers)
-    }
-}
-
-/// The servers of an MCP configuration, as `--additional-mcp-config` takes it: `{"mcpServers": {NAME: SERVER}}`, a
-/// server without a `type` being `stdio` with a `command`, else `http`.
-fn mcp_config(text: &str) -> Result<Map<String, Value>, String> {
-    let config: Value = serde_json::from_str(text).map_err(|e| format!("--additional-mcp-config: {e}"))?;
-    let Some(Value::Object(servers)) = config.get("mcpServers") else {
-        return Err("--additional-mcp-config takes an object of servers in mcpServers".to_owned());
-    };
-    let mut servers = servers.clone();
-    for (name, server) in &mut servers {
-        let Value::Object(server) = server else {
-            return Err(format!("--additional-mcp-config: server {name} is no object"));
-        };
-        if !server.contains_key("type") {
-            let kind = if server.contains_key("command") { "stdio" } else { "http" };
-            server.insert("type".to_owned(), kind.into());
-        }
-    }
-    Ok(servers)
 }
 
 /// One CLI and the SDK's client of it, shared by its sessions.
@@ -191,11 +86,12 @@ struct Shared {
 impl Shared {
     /// The error answering a failed SDK call: how the CLI exited once its output ended, else the SDK's error.
     async fn error(&self, e: &sdk::Error) -> Error {
-        if e.is_transport_failure() || *self.closed.borrow() {
-            self.process.lock().await.exited().await
-        } else {
-            failed(e)
-        }
+        if e.is_transport_failure() || *self.closed.borrow() { self.exited().await } else { failed(e) }
+    }
+
+    /// The error of the CLI's output ending.
+    async fn exited(&self) -> Error {
+        self.process.lock().await.exited().await
     }
 
     /// Wait for the CLI's output to end.
@@ -237,77 +133,6 @@ impl Shared {
     fn permissions(&self, asking: Asking) -> Arc<dyn sdk::handler::PermissionHandler> {
         Arc::new(Permissions { cli: self.cli.clone(), asking })
     }
-}
-
-/// Where the permission requests of a session go: the prompt running, if any.
-type Asking = Arc<Mutex<Option<Updates>>>;
-
-/// The handler answering a session's permission requests: one that managed policy says a human must decide is
-/// denied; else every one is approved, as the tools left to the model are the ones the definition enables, unless the
-/// ant asks ants about its tools, when ants decide ([`approve`]).
-struct Permissions {
-    cli: Cli,
-    asking: Asking,
-}
-
-impl sdk::handler::PermissionHandler for Permissions {
-    fn handle<'a, 'b>(
-        &'a self,
-        _session: SessionId,
-        _request: RequestId,
-        data: PermissionRequestData,
-    ) -> Pin<Box<dyn Future<Output = PermissionResult> + Send + 'b>>
-    where
-        'a: 'b,
-        Self: 'b,
-    {
-        Box::pin(async move {
-            let described = data.extra.get("permissionRequest").unwrap_or(&data.extra).to_string();
-            if data.managed_approval_required == Some(true) {
-                deny_approval(&self.cli, &described);
-                return PermissionResult::reject(None);
-            }
-            if !self.cli.asks() {
-                tracing::debug!(
-                    harness = self.cli.name(),
-                    request = described,
-                    "approved a tool request of the harness"
-                );
-                return PermissionResult::approve_once();
-            }
-            let updates = self.asking.locked().clone();
-            if approve(&self.cli, updates, asked_call(&data), &described).await {
-                PermissionResult::approve_once()
-            } else {
-                PermissionResult::reject(Some("The ant's tool permissions did not allow it.".to_owned()))
-            }
-        })
-    }
-}
-
-/// The tool call a permission request of the CLI asks to run, by the id of the one it reported.
-fn asked_call(data: &PermissionRequestData) -> ToolCallUpdate {
-    let request = data.extra.get("permissionRequest").unwrap_or(&data.extra);
-    let text = |key: &str| request[key].as_str().unwrap_or_default().to_owned();
-    let (kind, title, path) = match data.kind {
-        Some(PermissionRequestKind::Shell) => (ToolKind::Execute, text("fullCommandText"), None),
-        Some(PermissionRequestKind::Write) => {
-            (ToolKind::Edit, format!("Write {}", text("fileName")), Some(text("fileName")))
-        }
-        Some(PermissionRequestKind::Read) => (ToolKind::Read, format!("Read {}", text("path")), Some(text("path"))),
-        Some(PermissionRequestKind::Url) => (ToolKind::Fetch, format!("Fetch {}", text("url")), None),
-        Some(PermissionRequestKind::Mcp) => {
-            (ToolKind::Other, format!("{}/{}", text("serverName"), text("toolName")), None)
-        }
-        _ => (ToolKind::Other, text("intention"), None),
-    };
-    let id = data.tool_call_id.clone().or_else(|| request["toolCallId"].as_str().map(str::to_owned));
-    let fields = ToolCallUpdateFields::new()
-        .kind(kind)
-        .title(title)
-        .raw_input(request.clone())
-        .locations(path.filter(|path| !path.is_empty()).map(|path| vec![ToolCallLocation::new(path)]));
-    ToolCallUpdate::new(id.unwrap_or_else(|| "permission".to_owned()), fields)
 }
 
 /// The settings every session opens with, whether new, resumed or forked: streamed replies, the session's working
@@ -363,9 +188,7 @@ impl Native for Copilot {
                  (--available-tools, --excluded-tools)"
             );
         }
-        let foreign = |arg: &&String| {
-            FOREIGN_ARGS.iter().any(|f| arg == f || arg.strip_prefix(f).is_some_and(|rest| rest.starts_with('=')))
-        };
+        let foreign = |arg: &&String| FOREIGN_ARGS.iter().any(|flag| is_flag(arg, flag));
         if let Some(arg) = harness.args.iter().find(foreign) {
             bail!("protocol copilot-sdk runs the CLI's server, which {arg} in args would replace");
         }
@@ -376,11 +199,12 @@ impl Native for Copilot {
         Ok(())
     }
 
-    async fn start(mut cli: Cli) -> Result<Self, Error> {
-        let args = SessionArgs::take(&mut cli.args).map_err(failed)?;
+    async fn start(cli: Cli) -> Result<Self, Error> {
+        let mut own = cli.args().to_vec();
+        let args = SessionArgs::take(&mut own).map_err(failed)?;
+        let cli = cli.with_args(own);
         let mcp = args.mcp_servers().map_err(failed)?;
-        let mut process = cli.spawn(SERVER_ARGS, None)?;
-        let (stdin, stdout) = process.take_io().ok_or_else(|| failed("no stdio"))?;
+        let (process, stdin, stdout) = cli.spawn(SERVER_ARGS, None)?;
         let (closing, closed) = watch::channel(false);
         let cwd = std::env::current_dir().unwrap_or_default();
         let entra =
@@ -500,10 +324,8 @@ pub(crate) struct CopilotSession {
     /// The model and reasoning effort it runs, if set.
     model: Mutex<Option<String>>,
     effort: Mutex<Option<String>>,
-    /// The tokens of the context window used and its size, and the session's cost in US dollars, as last reported.
-    usage: Mutex<(u64, u64, Option<f64>)>,
-    /// The cost in US dollars the CLI carried over from the session's parent, which its totals include.
-    base: f64,
+    /// The context window's use and the session's cost, as last reported.
+    spent: Mutex<Spent>,
     steers: Steers,
     /// The session, for sign-ins to MCP servers.
     opened: Arc<mcp_sign_in::Opened>,
@@ -606,8 +428,7 @@ impl CopilotSession {
             router,
             model: Mutex::new(model),
             effort: Mutex::new(effort),
-            usage: Mutex::default(),
-            base,
+            spent: Mutex::new(Spent::from(base)),
             steers: Steers::default(),
             opened,
             watcher,
@@ -619,13 +440,13 @@ impl CopilotSession {
     }
 
     /// Report the context window's use and the session's cost, as `change` updates them.
-    fn usage(&self, updates: &Updates, change: impl FnOnce(&mut (u64, u64, Option<f64>))) {
-        let (used, size, cost) = {
-            let mut usage = self.usage.locked();
-            change(&mut usage);
-            *usage
+    fn spent(&self, updates: &Updates, change: impl FnOnce(&mut Spent)) {
+        let spent = {
+            let mut spent = self.spent.locked();
+            change(&mut spent);
+            *spent
         };
-        updates.usage(used, size, cost);
+        spent.report(updates);
     }
 
     /// Translate an event of the prompt running; what the prompt comes to once the session is idle.
@@ -640,18 +461,14 @@ impl CopilotSession {
         let main = event.agent_id.is_none();
         match event.event_type.as_str() {
             "assistant.message_delta" if main => {
-                turn.streamed.insert(text(data, "messageId").to_owned());
-                turn.reply(updates, text(data, "messageId"), text(data, "deltaContent"));
+                turn.reply.delta(updates, text(data, "messageId"), text(data, "deltaContent"));
             }
-            "assistant.message" if main && !turn.streamed.contains(text(data, "messageId")) => {
-                turn.reply(updates, text(data, "messageId"), text(data, "content"));
-            }
+            "assistant.message" if main => turn.reply.whole(updates, text(data, "messageId"), text(data, "content")),
             "assistant.reasoning_delta" if main => {
-                turn.streamed.insert(text(data, "reasoningId").to_owned());
-                updates.thought(text(data, "deltaContent"));
+                turn.reply.thought_delta(updates, text(data, "reasoningId"), text(data, "deltaContent"));
             }
-            "assistant.reasoning" if main && !turn.streamed.contains(text(data, "reasoningId")) => {
-                updates.thought(text(data, "content"));
+            "assistant.reasoning" if main => {
+                turn.reply.whole_thought(updates, text(data, "reasoningId"), text(data, "content"));
             }
             "tool.execution_start" => updates.tool_call(tool_call(data)),
             "tool.execution_complete" => {
@@ -659,15 +476,17 @@ impl CopilotSession {
                 let fields = ToolCallUpdateFields::new().status(status);
                 updates.tool_update(ToolCallUpdate::new(text(data, "toolCallId").to_owned(), fields));
             }
-            "assistant.usage" => turn.tokens.add(data),
-            "session.usage_info" => self.usage(updates, |usage| {
-                usage.0 = data["currentTokens"].as_u64().unwrap_or(usage.0);
-                usage.1 = data["tokenLimit"].as_u64().unwrap_or(usage.1);
+            "assistant.usage" => {
+                turn.calls += 1;
+                turn.tokens.add(tokens(data));
+            }
+            "session.usage_info" => self.spent(updates, |spent| {
+                spent.used = data["currentTokens"].as_u64().unwrap_or(spent.used);
+                spent.size = data["tokenLimit"].as_u64().unwrap_or(spent.size);
             }),
             "session.usage_checkpoint" => {
                 if let Some(nano) = data["totalNanoAiu"].as_f64() {
-                    let cost = (nano * USD_PER_NANO_AIU - self.base).max(0.0);
-                    self.usage(updates, |usage| usage.2 = Some(cost));
+                    self.spent(updates, |spent| spent.cost = Some((nano * USD_PER_NANO_AIU - spent.base).max(0.0)));
                 }
             }
             "user.message" if main => {
@@ -729,7 +548,7 @@ impl<T> Drop for Running<'_, T> {
 
 impl NativeSession for CopilotSession {
     fn id(&self) -> String {
-        based_id(self.session.id(), self.base)
+        based_id(self.session.id(), self.spent.locked().base)
     }
 
     async fn mcp_servers(&self) -> Result<Vec<McpServerState>, Error> {
@@ -777,7 +596,7 @@ impl NativeSession for CopilotSession {
                 }
                 () = self.shared.ended() => None,
             };
-            let Some(event) = event else { return Err(self.shared.process.lock().await.exited().await) };
+            let Some(event) = event else { return Err(self.shared.exited().await) };
             if let Some(done) = self.translate(&mut turn, &event, &updates) {
                 return done;
             }
@@ -836,168 +655,6 @@ impl NativeSession for CopilotSession {
         *self.model.locked() = Some(model);
         *self.effort.locked() = effort;
         Ok(())
-    }
-}
-
-/// The message sending a prompt: its text, and its images attached.
-fn message(prompt: Vec<ContentBlock>) -> MessageOptions {
-    let text = prompt_text(&prompt);
-    let images: Vec<Attachment> = prompt
-        .into_iter()
-        .filter_map(|block| match block {
-            ContentBlock::Image(image) => {
-                Some(Attachment::Blob { data: image.data, mime_type: image.mime_type, display_name: None })
-            }
-            _ => None,
-        })
-        .collect();
-    let message = MessageOptions::new(text);
-    if images.is_empty() { message } else { message.with_attachments(images) }
-}
-
-/// The string `key` of an event's data, empty if it has none.
-fn text<'a>(data: &'a Value, key: &str) -> &'a str {
-    data[key].as_str().unwrap_or_default()
-}
-
-/// A tool call the CLI started, named by its title, kind and the file it works on.
-fn tool_call(data: &Value) -> ToolCall {
-    let name = text(data, "toolName");
-    let title = data["toolTitle"].as_str().filter(|title| !title.is_empty()).unwrap_or(name);
-    let arguments = &data["arguments"];
-    let mut call = ToolCall::new(text(data, "toolCallId").to_owned(), title)
-        .kind(tool_kind(name))
-        .status(ToolCallStatus::InProgress);
-    if !arguments.is_null() {
-        call = call.raw_input(arguments.clone());
-    }
-    if let Some(path) = arguments["path"].as_str() {
-        call = call.locations(vec![ToolCallLocation::new(path)]);
-    }
-    call
-}
-
-/// The kind of the CLI's built-in tool `name`.
-fn tool_kind(name: &str) -> ToolKind {
-    match name {
-        "bash" | "read_bash" | "write_bash" | "stop_bash" | "powershell" | "read_powershell" | "write_powershell"
-        | "stop_powershell" => ToolKind::Execute,
-        "view" | "read" => ToolKind::Read,
-        "edit" | "create" | "str_replace" | "apply_patch" => ToolKind::Edit,
-        "grep" | "glob" | "rg" | "search" => ToolKind::Search,
-        "web_fetch" | "fetch" => ToolKind::Fetch,
-        _ => ToolKind::Other,
-    }
-}
-
-/// The tokens a prompt used, summed over the model calls of its turn.
-#[derive(Default)]
-struct Tokens {
-    calls: u64,
-    input: u64,
-    output: u64,
-    cache_read: u64,
-    cache_write: u64,
-    reasoning: u64,
-}
-
-impl Tokens {
-    /// Add a model call's `assistant.usage`.
-    fn add(&mut self, data: &Value) {
-        let count = |key: &str| data[key].as_u64().unwrap_or_default();
-        self.calls += 1;
-        self.input += count("inputTokens");
-        self.output += count("outputTokens");
-        self.cache_read += count("cacheReadTokens");
-        self.cache_write += count("cacheWriteTokens");
-        self.reasoning += count("reasoningTokens");
-    }
-
-    fn usage(&self) -> Option<Usage> {
-        let some = |n: u64| (n > 0).then_some(n);
-        (self.calls > 0).then(|| {
-            Usage::new(self.input + self.output, self.input, self.output)
-                .thought_tokens(some(self.reasoning))
-                .cached_read_tokens(some(self.cache_read))
-                .cached_write_tokens(some(self.cache_write))
-        })
-    }
-}
-
-/// What a prompt's turn came to so far.
-#[derive(Default)]
-struct Turn {
-    /// The ids of the messages and reasoning streamed in pieces, whose whole is not repeated.
-    streamed: HashSet<String>,
-    /// The message the reply last came from, if any.
-    message: Option<String>,
-    tokens: Tokens,
-    /// The first error ending the turn.
-    error: Option<Error>,
-    /// The last error of a model call the CLI retries.
-    retried: Option<Error>,
-    /// Whether the last `session.idle` said the turn was aborted, once one came.
-    idle: Option<bool>,
-}
-
-impl Turn {
-    /// Add `piece` of message `id` to the reply, after a blank line when it starts another message.
-    fn reply(&mut self, updates: &Updates, id: &str, piece: &str) {
-        if piece.is_empty() {
-            return;
-        }
-        match &self.message {
-            Some(last) if last == id => {}
-            Some(_) => updates.message("\n\n"),
-            None => {}
-        }
-        self.message = Some(id.to_owned());
-        updates.message(piece);
-    }
-
-    /// Note a `session.error`.
-    fn failed(&mut self, data: &Value) {
-        let error = turn_error(data);
-        if data["errorType"] == "model_call" {
-            tracing::debug!(error = %error, "the Copilot CLI retries a failed model call");
-            self.retried = Some(error);
-        } else if self.error.is_none() {
-            self.error = Some(error);
-        }
-    }
-
-    /// What the prompt comes to at its last `session.idle`: cancelled if aborted, else the error that ended the turn,
-    /// or the last failed model call of a turn that ended without a reply.
-    fn end(&mut self) -> Result<PromptResponse, Error> {
-        let stop = if self.idle == Some(true) {
-            StopReason::Cancelled
-        } else if let Some(error) = self.error.take() {
-            return Err(error);
-        } else if let Some(error) = self.retried.take().filter(|_| self.message.is_none() && self.tokens.calls == 0) {
-            return Err(error);
-        } else {
-            StopReason::EndTurn
-        };
-        Ok(PromptResponse::new(stop).usage(self.tokens.usage()))
-    }
-}
-
-/// The error a `session.error` reports, by its type: not signed in, a rate limit, a weekly limit or exhausted quota
-/// (of AI credits or premium requests), a context overflow, or another failure.
-fn turn_error(data: &Value) -> Error {
-    let message = data["message"].as_str().filter(|m| !m.is_empty()).unwrap_or("Copilot CLI failed");
-    let status = data["statusCode"].as_u64().and_then(|status| u16::try_from(status).ok());
-    if data["remediation"] == "sign_in" {
-        return signed_out(message);
-    }
-    match (text(data, "errorType"), text(data, "errorCode")) {
-        ("authentication", _) => signed_out(message),
-        ("rate_limit", "user_weekly_rate_limited") => quota_exhausted(None, format!("weekly limit: {message}")),
-        ("rate_limit", _) => rate_limited(status, None, message),
-        ("quota", _) => quota_exhausted(None, message),
-        ("context_limit", _) => context_overflow(message),
-        (_, _) if matches!(status, Some(429)) => rate_limited(status, None, message),
-        _ => failed(message),
     }
 }
 

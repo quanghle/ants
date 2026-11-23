@@ -10,15 +10,14 @@
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
-use ants_client::requests::{NUM_PENDING, Position};
+use ants_client::requests::{Position, Stored};
 use ants_proto::{Role, STREAM, Uuid, spare_readers};
 use anyhow::{Context as _, Result};
-use async_nats::StatusCode;
 use async_nats::jetstream::stream::ConsumerCreateStrictErrorKind;
 use async_nats::jetstream::{self, consumer};
 use futures::StreamExt as _;
 
-use crate::bus::relayed::{self, Read};
+use crate::bus::relayed::{self, Gets, GetsError, Got, Read};
 
 /// How long a reader consumer left behind by an interrupted read lives on.
 const INACTIVE: Duration = Duration::from_secs(30);
@@ -272,74 +271,50 @@ async fn read_by_gets(
     read_by_batches(js, filter, at, last, take).await
 }
 
-/// Read up to `last` by batched direct gets (`$JS.API.DIRECT.GET.ANTS`), one request per batch, each the request a
-/// human's client of any kind sends ([`Position::request`]).
+/// Read up to `last` by batched direct gets ([`Gets`]), each the request a human's client of any kind sends.
 async fn read_by_batches(
     js: &jetstream::Context,
     filter: &str,
-    mut at: Position,
+    at: Position,
     last: u64,
     mut take: impl Take,
 ) -> Result<()> {
-    let client = js.client();
-    let wait = client.timeout().unwrap_or(Duration::from_secs(10));
-    let inbox = client.new_inbox();
-    #[expect(clippy::disallowed_methods, reason = "direct gets' answers, which the stream sends")]
-    let mut replies = client.subscribe(inbox.clone()).await?;
-    while at.seq <= last {
-        let request = serde_json::to_vec(&at.request(filter))?;
-        let request = async_nats::Request::new().inbox(inbox.clone()).payload(request.into());
-        js.send_request(format!("DIRECT.GET.{STREAM}"), request).await?;
-        let mut got = 0;
-        loop {
-            let Ok(Some(msg)) = tokio::time::timeout(wait, replies.next()).await else {
-                anyhow::bail!("no answer to a direct get of {STREAM}");
-            };
-            match msg.status {
-                None => {}
-                Some(StatusCode::NOT_FOUND) => return Ok(()),
-                Some(status) if status.as_u16() == 204 => {
-                    let pending = msg.headers.as_ref().and_then(|h| h.get(NUM_PENDING)).map(|n| n.as_str().parse());
-                    if got == 0 || matches!(pending, Some(Ok(0u64))) {
-                        return Ok(());
-                    }
-                    break;
-                }
-                Some(status) => {
-                    anyhow::bail!("a direct get of {STREAM} answered {status} {:?}", msg.description);
-                }
+    let mut gets = Gets::open(js, STREAM, filter, at).await?;
+    while gets.at().seq <= last {
+        let got = gets.next().await.map_err(|e| match e {
+            GetsError::Send(e) => anyhow::anyhow!(e),
+            GetsError::Unanswered => anyhow::anyhow!("no answer to a direct get of {STREAM}"),
+            GetsError::Status { status, description } => {
+                anyhow::anyhow!("a direct get of {STREAM} answered {status} {description:?}")
             }
-            got += 1;
-            let relayed = relayed::stored_relayed(msg.headers.as_ref(), &msg.payload, Read::DirectGet);
-            let msg = jetstream::message::StreamMessage::try_from(msg).map_err(|e| anyhow::anyhow!(e))?;
-            if msg.sequence > last {
-                return Ok(());
-            }
-            if relayed {
-                let (subject, seq) = (&msg.subject, msg.sequence);
+            GetsError::Malformed(why) => anyhow::anyhow!(why),
+        })?;
+        let stored = match got {
+            Got::End => return Ok(()),
+            Got::More => continue,
+            Got::Relayed { seq, .. } if seq > last => return Ok(()),
+            Got::Relayed { seq, subject } => {
                 tracing::warn!(%subject, seq, "skipping a message a stream relayed");
-                at.after(seq);
                 continue;
             }
-            let mut headers = async_nats::HeaderMap::new();
-            for (name, values) in msg.headers.iter() {
-                if !relayed::DIRECT_HEADERS.iter().any(|h| AsRef::<str>::as_ref(name).eq_ignore_ascii_case(h)) {
-                    values.iter().for_each(|value| headers.append(name.clone(), value.clone()));
-                }
-            }
-            let (sequence, stored) = (msg.sequence, msg.time.into());
-            at.after(sequence);
-            if take.take(sequence, stored, published(msg, headers)).await.is_break() {
-                return Ok(());
-            }
+            Got::Stored(stored) if stored.seq > last => return Ok(()),
+            Got::Stored(stored) => stored,
+        };
+        let (sequence, stored_at) = (stored.seq, stored.stored_at.into());
+        if take.take(sequence, stored_at, published(stored)).await.is_break() {
+            return Ok(());
         }
     }
     Ok(())
 }
 
-/// `msg` as it was published, with `headers` and no reply subject.
-fn published(msg: jetstream::message::StreamMessage, headers: async_nats::HeaderMap) -> async_nats::Message {
-    let (subject, payload, headers) = (msg.subject, msg.payload, Some(headers));
+/// `stored` as it was published, with the headers its writer stored and no reply subject.
+fn published(stored: Stored) -> async_nats::Message {
+    let mut headers = async_nats::HeaderMap::new();
+    for (name, value) in &stored.headers {
+        headers.append(name.as_str(), value.as_str());
+    }
+    let (subject, payload, headers) = (stored.subject.into(), stored.payload.into(), Some(headers));
     async_nats::Message { subject, reply: None, payload, headers, status: None, description: None, length: 0 }
 }
 

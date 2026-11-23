@@ -107,7 +107,7 @@ impl Page {
 
     pub fn toggle_waiting(&mut self) {
         self.listing = self.listing.is_none().then(List::default);
-        self.answering = None;
+        self.answering.leave();
     }
 
     pub(super) fn waiting_key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<Option<To>> {
@@ -128,7 +128,7 @@ impl Page {
                 return Some(match items.get(at) {
                     Some(Item::Request(request)) => Some(To::Ask((*request).clone(), None)),
                     Some(Item::Question(card)) => {
-                        self.answering = Some(question::Cursor::new(card.asked.id?, card.question));
+                        self.answering.set(Some(question::Cursor::new(card.asked.id?, card.question)));
                         self.listing = None;
                         None
                     }

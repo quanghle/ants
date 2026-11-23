@@ -47,7 +47,7 @@ pub struct Record {
 }
 
 impl ItemValues for Record {
-    const KIND: &str = KIND;
+    const KINDS: &[&str] = &[KIND];
 }
 
 impl Record {

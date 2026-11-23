@@ -395,11 +395,11 @@ impl Io {
                     if !settings::may_order(&nats) {
                         anyhow::bail!("changing settings needs a human device's admin credentials");
                     }
-                    let (order, outcome) = orders::send(&nats, &js, Some(machine), &to, op, settings::SET_WAIT).await?;
-                    Ok(match outcome {
-                        Some(o) if o.state == OrderState::Applied => Sent::Applied(order.id),
-                        Some(o) => Sent::Refused(order.id, o.reason.unwrap_or_default()),
-                        None => Sent::Pending(order.id, order.machine),
+                    let admin = orders::Admin::of(&nats)?;
+                    Ok(match admin.send(&js, Some(machine), &to, op, settings::SET_WAIT).await? {
+                        orders::Sent::Applied(order, _) => Sent::Applied(order.id),
+                        orders::Sent::Refused(order, o) => Sent::Refused(order.id, o.reason.unwrap_or_default()),
+                        orders::Sent::Pending(order) => Sent::Pending(order.id, order.machine),
                     })
                 };
                 let sent = async move {
@@ -469,10 +469,10 @@ mod tests {
         m.select(nav::Item::Ant(user("dev-a")));
         m.focus = Focus::View;
         m.key(Key::Left, at(3));
-        assert_eq!(m.settings_shown(), Some((user("dev-a"), true)), "the pane asks for a read");
+        assert_eq!(m.settings_wanted(), Some((user("dev-a"), true)), "the pane asks for a read");
         assert!(screen(&m, 160, 36, at(3)).contains("reading the settings of dev-a…"));
         m.settings_event(Event::Read(user("dev-a"), Ok(reading())));
-        assert_eq!(m.settings_shown(), Some((user("dev-a"), false)));
+        assert_eq!(m.settings_wanted(), Some((user("dev-a"), false)));
         let shown = screen(&m, 160, 36, at(3));
         assert!(shown.contains("settings (2)") && shown.contains("config.toml on m1, read 2s ago"), "{shown}");
         assert!(shown.contains("env.API_TOKEN = \"[redacted]\"  (secret)"), "{shown}");
@@ -520,7 +520,7 @@ mod tests {
         assert!(screen(&m, 160, 36, at(3)).contains("\"nope\" sets nothing"), "{}", screen(&m, 160, 36, at(3)));
         m.key(Key::Esc, at(3));
         assert_eq!(m.key(Key::Char('R'), at(3)), Some(Action::Refresh));
-        assert_eq!(m.settings_shown(), Some((user("dev-a"), true)));
+        assert_eq!(m.settings_wanted(), Some((user("dev-a"), true)));
     }
 
     #[test]

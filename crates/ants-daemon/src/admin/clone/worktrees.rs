@@ -86,5 +86,5 @@ impl Tree {
 }
 
 pub(super) async fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    crate::worktrees::run("git", dir, args, &[("GIT_TERMINAL_PROMPT", "0")], Some(GIT_WAIT)).await
+    crate::process::remote_git(dir, args, GIT_WAIT).await
 }

@@ -267,7 +267,7 @@ async fn task_offline_claims_never_queue_and_acknowledged_claims_survive_post_ap
         assert_eq!(items.history(&id).await.unwrap().len(), 2);
     }
     let current = items.get(&id).await.unwrap().unwrap();
-    let mut provisional = Task::held(&current).unwrap();
+    let mut provisional = Task::valid(&current).unwrap();
     provisional.lease = Some(Lease {
         thread: "t2".parse().unwrap(),
         expires_at: "2025-01-01T12:25:00Z".parse::<DateTime<Utc>>().unwrap(),

@@ -1,6 +1,5 @@
 //! Text helpers the commands and the terminal UI share: excerpts and one-line notes.
 
-pub use ants_client::text::escalation_note;
 pub use ants_proto::one_line;
 
 /// The first line of `text`, words someone else wrote, cut to `max` characters, `…` marking what is left out: tabs

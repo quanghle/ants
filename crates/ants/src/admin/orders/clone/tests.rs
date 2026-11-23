@@ -17,7 +17,7 @@ use ants_proto::{
 };
 use serde_json::{Value, json};
 
-use crate::admin::orders::send;
+use crate::admin::orders::tests::send;
 use crate::auth::{NewDevice, issue_device_with};
 use crate::credentials::revoke::Kind;
 use crate::test_support::Server;

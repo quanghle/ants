@@ -2,6 +2,7 @@
 //! off, snoozes, and assistants passing them on to their humans.
 
 use super::*;
+use crate::records::heed::Heeded;
 
 fn p(name: &str) -> UserId {
     name.parse().unwrap()

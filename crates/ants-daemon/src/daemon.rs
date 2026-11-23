@@ -402,12 +402,8 @@ where
         let (first, stopping, moving) = (asked == 1, &stopping, &moving);
         let scheduler = scheduler.as_ref();
         async move {
-            let moved = async {
-                match inbox.identity {
-                    Some(identity) => identity.moved(crate::profile::identity::MOVED_EVERY).await,
-                    None => std::future::pending().await,
-                }
-            };
+            let moved =
+                or_pending(inbox.identity.map(|identity| identity.moved(crate::profile::identity::MOVED_EVERY)));
             tokio::select! {
                 () = stopped(stop) => stopping.set(true),
                 () = registration.lost(), if first => {
@@ -433,21 +429,8 @@ where
         () = inbox.hear_restarts() => {}
         () = inbox.hear_clones() => {}
         () = inbox.hear_mcp() => {}
-        () = async {
-            match &inbox.trails {
-                Some(trails) => {
-                    let _conducted = inbox.restarts.conduct(inbox.ant, trails);
-                    trails.serve().await;
-                }
-                None => std::future::pending().await,
-            }
-        } => {}
-        () = async {
-            match inbox.sense {
-                Some(sense) => sense.publish(&config.ant, inbox.workload).await,
-                None => std::future::pending().await,
-            }
-        } => {}
+        () = inbox.conduct_trails() => {}
+        () = or_pending(inbox.sense.map(|sense| sense.publish(&config.ant, inbox.workload))) => {}
         () = crate::secrets::creds::recheck(config.connection.creds.as_deref()) => {}
         () = storage.watch(crate::monitoring::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
@@ -467,6 +450,14 @@ where
     } else {
         Served::Stopped
     })
+}
+
+/// `work` when there is some, else nothing, ever: what a service the ant may lack does beside its inbox.
+async fn or_pending(work: Option<impl Future<Output = ()>>) {
+    match work {
+        Some(work) => work.await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Ctrl-C, SIGTERM or a request on `stop`, whichever comes first.
@@ -618,6 +609,14 @@ struct Inbox<'a> {
 impl Inbox<'_> {
     fn progress(&self) -> tokio::time::Interval {
         tokio::time::interval_at(tokio::time::Instant::now() + self.pacing.progress_every, self.pacing.progress_every)
+    }
+
+    /// Conduct the ant's trails, the orders about their runs reaching them meanwhile; nothing, ever, when the bus
+    /// keeps no runs.
+    async fn conduct_trails(&self) {
+        let Some(trails) = &self.trails else { return std::future::pending().await };
+        let _conducted = self.restarts.conduct(self.ant, trails);
+        trails.serve().await;
     }
 
     /// Wait for `work`, telling the server meanwhile that `msg` is still being worked on.

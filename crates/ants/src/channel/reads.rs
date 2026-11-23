@@ -8,8 +8,9 @@ use ants_daemon::bus::relayed::GuardedKv as _;
 use ants_proto::{ChannelId, ChannelNotify, ChannelReadMarkers, Humans, ReadMarker, UserId, channel_reads_key};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
-use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
+use async_nats::jetstream::kv::{self, Operation};
 
+use crate::cas;
 use crate::people::humans::Me;
 
 /// How many times a change is tried again after another device moved the markers first.
@@ -58,10 +59,9 @@ impl ChannelReads {
             if markers == had {
                 return Ok(markers);
             }
-            match self.kv.update(&self.key, serde_json::to_vec(&markers)?.into(), revision).await {
-                Ok(_) => return Ok(markers),
-                Err(e) if e.kind() == UpdateErrorKind::WrongLastRevision => continue,
-                Err(e) => return Err(e).context("marking channel posts read"),
+            let stored = cas::update(&self.kv, &self.key, serde_json::to_vec(&markers)?, revision).await;
+            if stored.context("marking channel posts read")? {
+                return Ok(markers);
             }
         }
         bail!("marking channel posts read: the channel read markers kept moving")

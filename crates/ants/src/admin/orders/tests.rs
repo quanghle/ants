@@ -13,6 +13,19 @@ use crate::credentials::revoke::Kind;
 use crate::test_support::Server;
 use crate::test_support::orders::{WAIT, host_of_m1, host_of_m1_serving, p};
 
+/// Send `op` as [`Admin::send`] does, signed with the admin credentials of `nats`: the order, and its outcome as the
+/// daemon recorded it.
+pub(crate) async fn send(
+    nats: &Nats<'_>,
+    js: &jetstream::Context,
+    machine: Option<Machine>,
+    ant: &UserId,
+    op: AdminOp,
+    wait: Duration,
+) -> Result<(AdminOrder, Option<AdminOutcome>)> {
+    Admin::of(nats)?.outcome_of(js, machine, ant, op, wait).await
+}
+
 /// An admin's order reaches the daemon of the ant's machine, which records its outcome; one a human without the
 /// role signed, it refuses with the reason, and every order while its config says `[admin] remote = false`. An
 /// order to a machine whose daemon is away waits, pending. Only humans send orders, and only the machine's host
@@ -326,7 +339,7 @@ async fn a_restart_order_restarts_the_harnesses_of_an_ant_its_machine_serves() {
     let (order, applied) = sent.unwrap();
     let applied = applied.expect("the daemon decides once the restart is under way");
     assert_eq!((applied.state, applied.reason.as_deref()), (OrderState::Applied, None));
-    let told = crate::admin::restart::told(&order, Some(applied)).unwrap();
+    let told = crate::admin::restart::told(Sent::of(order, Some(applied))).unwrap();
     assert_eq!(
         told,
         "restarting dev-a on m1: 1 idle harness stopped, 1 working stops once the prompt ends (1 cancelled)"

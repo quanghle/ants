@@ -141,13 +141,20 @@ pub fn changed(before: &Values, after: Values) -> Values {
 
 /// What an item of one kind holds, as a struct its values are read into and written from.
 pub trait ItemValues: Serialize + DeserializeOwned {
-    /// What it is called in the error naming an item unreadable as one.
-    const KIND: &'static str;
+    /// The kinds of the items holding it.
+    const KINDS: &'static [&'static str];
+    /// What it is called in the error naming an item unreadable as one: its first kind, unless it says otherwise.
+    const LABEL: &'static str = Self::KINDS[0];
 
     /// What `item` holds; unavailable when its values are no such struct.
     fn of(item: &Item) -> Result<Self, StoreError> {
         serde_json::from_value(Value::Object(item.values.clone()))
-            .map_err(|e| StoreError::Unavailable(format!("unreadable {} {}: {e}", Self::KIND, item.id)))
+            .map_err(|e| StoreError::Unavailable(format!("unreadable {} {}: {e}", Self::LABEL, item.id)))
+    }
+
+    /// What `item` holds; none for an item of another kind or unreadable as one.
+    fn held(item: &Item) -> Option<Self> {
+        Self::KINDS.contains(&item.kind.as_str()).then(|| Self::of(item).ok()).flatten()
     }
 
     /// The values of an item holding it.

@@ -13,7 +13,7 @@ use ratatui::style::{Style, Stylize as _};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
-use super::command::{COMMANDS, Tone};
+use super::command::{COMMANDS, Row, Tone};
 use super::complete::{self, narrow};
 use super::keymap;
 use super::model::{Action, Key, Model};
@@ -56,11 +56,11 @@ impl Model {
         let Some(typed) = self.palette_typed() else {
             return Vec::new();
         };
-        let commands = COMMANDS.iter().map(|&(name, args, what)| {
+        let commands = COMMANDS.iter().map(|&Row { name, args, about, .. }| {
             let run = args.is_empty() || args.starts_with('[');
             let entry = Entry {
                 word: format!("/{name}"),
-                detail: format!("{args:<24}{what}"),
+                detail: format!("{args:<24}{about}"),
                 why: self.unfit(name, now),
                 act: Act::Command { name, run },
             };

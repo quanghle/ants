@@ -15,6 +15,7 @@ use ants_proto::{Answered, Pick, Question, Questions, ThreadId, Uuid};
 use chrono::{DateTime, TimeDelta, Utc};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr as _;
 
 use super::exec::Job;
 use super::input::Input;
@@ -287,19 +288,67 @@ impl Cursor {
     }
 }
 
-/// Take `key` on the card `focus` holds the cursor of, of questions asked on `thread` while the card still shows,
-/// `None` once it is gone: where it leads, if the card takes it. A card gone takes the key, meant for it rather than
-/// for whatever shows now, and ends the focus; the card keeps it while the bar takes its answer, and ends it once
-/// it leaves for anywhere else.
-pub fn focused(focus: &mut Option<Cursor>, key: Key, thread: Option<&ThreadId>) -> Option<Option<To>> {
-    let Some(thread) = thread else { return focus.take().map(|_| None) };
-    match focus.as_mut()?.key(key, thread) {
-        None => Some(None),
-        Some(Some(to @ To::Bar(_))) => Some(Some(to)),
-        Some(to) => {
-            *focus = None;
-            Some(to)
+/// The focus on a question card of a view: the cursor on it, once Enter or a number focused it.
+#[derive(Debug, Default)]
+pub struct Focus(Option<Cursor>);
+
+impl Focus {
+    pub fn cursor(&self) -> Option<&Cursor> {
+        self.0.as_ref()
+    }
+
+    /// Whether a card has the focus, still showing or not.
+    pub fn on(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Focus the card `cursor` is on, or none.
+    pub fn set(&mut self, cursor: Option<Cursor>) {
+        self.0 = cursor;
+    }
+
+    pub fn leave(&mut self) {
+        self.0 = None;
+    }
+
+    /// Take `key` on the card it holds the cursor of, of questions asked on `thread` while the card still shows,
+    /// `None` once it is gone: where it leads, if the card takes it. A card gone takes the key, meant for it rather
+    /// than for whatever shows now, and ends the focus; the card keeps it while the bar takes its answer, and ends it
+    /// once it leaves for anywhere else.
+    pub fn key(&mut self, key: Key, thread: Option<&ThreadId>) -> Option<Option<To>> {
+        let Some(thread) = thread else { return self.0.take().map(|_| None) };
+        match self.0.as_mut()?.key(key, thread) {
+            None => Some(None),
+            Some(Some(to @ To::Bar(_))) => Some(Some(to)),
+            Some(to) => {
+                self.0 = None;
+                Some(to)
+            }
         }
+    }
+
+    /// Where a number led on a card not focused ([`key`], [`thread_key`]): somewhere, or nowhere with the card
+    /// focused on the pick made.
+    pub fn keyed(&mut self, keyed: Option<Keyed>) -> Option<To> {
+        match keyed? {
+            Keyed::To(to) => Some(*to),
+            Keyed::Focus(cursor) => {
+                self.0 = Some(cursor);
+                None
+            }
+        }
+    }
+
+    /// Type `text` pasted on the focused card, while `shown`: whether it took it.
+    pub fn paste(&mut self, text: &str, shown: bool) -> bool {
+        shown && self.0.as_mut().is_some_and(|cursor| cursor.paste(text))
+    }
+
+    /// Move to the row `at` of the card of the message `question`, as a click on it does: whether that card has the
+    /// focus.
+    pub fn mouse_select(&mut self, question: Uuid, at: usize) -> bool {
+        let cursor = self.0.as_mut().filter(|cursor| cursor.question == question);
+        cursor.map(|cursor| cursor.mouse_select(at)).is_some()
     }
 }
 
@@ -378,9 +427,9 @@ fn rows(question: &Question, tab: &Tab, focused: bool, width: usize) -> Vec<Line
     let mut row = |n: usize, head: String, text: &str, style: Style| {
         let here = at == Some(n);
         let head = format!("{}{head}", if here { "› " } else { "  " });
-        let indent = head.chars().count();
+        let indent = head.width();
         let style = if here { style.fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { style };
-        for (i, part) in wrap(text, width.saturating_sub(indent)).into_iter().enumerate() {
+        for (i, part) in style::rows(text, width.saturating_sub(indent)).into_iter().enumerate() {
             let start = if i == 0 { head.clone() } else { " ".repeat(indent) };
             lines.push(Line::styled(format!("{start}{part}"), style));
         }
@@ -435,36 +484,7 @@ pub fn mouse_regions(
 
 /// A question's `text` in lines at most `width` wide, each of its lines wrapped.
 fn wrapped(text: &str, width: usize) -> impl Iterator<Item = Line<'static>> {
-    text.lines().flat_map(move |line| wrap(line, width)).map(Line::raw)
-}
-
-/// `text` in lines at most `width` wide, broken between words where it can be.
-pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        let (have, more) = (line.chars().count(), word.chars().count());
-        if have > 0 && have + 1 + more > width {
-            lines.push(std::mem::take(&mut line));
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        let mut chars = word.chars().peekable();
-        while chars.peek().is_some() {
-            let room = width - line.chars().count();
-            if room == 0 {
-                lines.push(std::mem::take(&mut line));
-                continue;
-            }
-            line.extend(chars.by_ref().take(room));
-        }
-    }
-    if !line.is_empty() || lines.is_empty() {
-        lines.push(line);
-    }
-    lines
+    text.lines().flat_map(move |line| style::rows(line, width)).map(Line::raw)
 }
 
 /// A card of questions at the bottom of a thread.

@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-pub use ants_client::sealed::State;
+use ants_client::sealed::State;
 use ants_proto::{
     Attachment, DeviceId, DeviceKey, Envelope, SEALED_VERSION, Sealed, SealedBody, SealedKey, SealedTitle, ThreadTitle,
     UserId,

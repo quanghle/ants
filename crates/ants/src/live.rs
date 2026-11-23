@@ -12,6 +12,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ants_client::text::spelling;
 use ants_daemon::bus::relayed;
 use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{ApprovalRequest, ColonyEntry, STREAM, StatusEvent, ThreadId, ThreadMarks, UserId, Verdict, subject};
@@ -152,7 +153,7 @@ pub fn refusal(request: &ApprovalRequest, state: &tools::State, verdict: Verdict
     if *state != tools::State::Pending {
         Some(format!("request {id} is answered already"))
     } else if !request.options.contains(&verdict) {
-        Some(format!("{} is not offered for request {id}", tools::spelling(verdict)))
+        Some(format!("{} is not offered for request {id}", spelling(verdict)))
     } else {
         None
     }
@@ -164,7 +165,7 @@ async fn decide(js: jetstream::Context, request: ApprovalRequest, verdict: Verdi
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let (seq, request) = tools::find(&stream, &tools::qualified(&request)).await?;
     let decision = tools::answer_request(&js, &stream, seq, &request, verdict, &by, Utc::now()).await?;
-    let mut text = format!("answered request {}/{}: {}", decision.ant, decision.request_id, tools::spelling(verdict));
+    let mut text = format!("answered request {}/{}: {}", decision.ant, decision.request_id, spelling(verdict));
     if verdict != Verdict::Reject
         && let Ok(Some(suggestion)) = tools::suggestion(&stream, seq, &request).await
     {
@@ -398,7 +399,7 @@ impl Feed {
     /// Take in `msg`, heard on the ants traffic: a status event, or else a hint that the stream has more to read.
     fn heard(&mut self, msg: &async_nats::Message) -> Option<StatusEvent> {
         if msg.subject.starts_with("ants.status.") {
-            serde_json::from_slice::<StatusEvent>(&msg.payload).ok().filter(|e| e.check_subject(&msg.subject).is_ok())
+            ants_client::requests::status_on(&msg.subject, &msg.payload)
         } else {
             self.tail_wanted = true;
             None

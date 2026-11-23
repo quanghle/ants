@@ -5,12 +5,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ants_daemon::config::{self, Ant};
-use ants_proto::{AdminOp, Machine, OrderState, UserId};
+use ants_proto::{AdminOp, Machine, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use serde_json::{Map, Value};
 
-use super::Admin;
+use super::{Admin, Sent};
 use crate::connection::Nats;
 use crate::serve::AntOptions;
 
@@ -65,11 +65,13 @@ pub async fn add(
     wait: Duration,
 ) -> Result<String> {
     let op = AdminOp::Add { settings, assistant_of: None };
-    let (order, outcome) = admin.send(js, Some(machine.clone()), name, op, wait).await?;
-    let Some(outcome) = outcome else { return Ok(super::pending_note(&order)) };
-    if outcome.state != OrderState::Applied {
-        bail!("the daemon of {machine} refused to add {name}: {}", super::reason(&outcome));
-    }
+    let outcome = match admin.send(js, Some(machine.clone()), name, op, wait).await? {
+        Sent::Pending(order) => return Ok(super::pending_note(&order)),
+        Sent::Refused(_, outcome) => {
+            bail!("the daemon of {machine} refused to add {name}: {}", super::reason(&outcome.reason))
+        }
+        Sent::Applied(_, outcome) => outcome,
+    };
     let key = outcome.result.as_ref().and_then(|r| r["key"].as_str()).map(|k| format!(" with key {k}"));
     Ok(format!("{name} added on {machine}{}; its daemon starts it.", key.unwrap_or_default()))
 }

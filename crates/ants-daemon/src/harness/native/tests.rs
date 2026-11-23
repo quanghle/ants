@@ -1,21 +1,27 @@
 //! Tests of native harness protocols behind the in-process ACP agent: prompts, steering, sessions, context overflow,
-//! cancels, sign-in, limits, approvals, shutdown, JSON-RPC routing and MCP servers.
+//! cancels, sign-in, limits, approvals, shutdown, JSON-RPC routing and MCP servers. The harness run by a stub CLI
+//! ([`StubHarness`]) is the fixture of every protocol's tests.
 
 use std::assert_matches;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::ErrorCode;
-use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio, SessionId};
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{
+    EnvVariable, HttpHeader, McpServerHttp, McpServerStdio, NewSessionRequest, PromptRequest, SessionId, TextContent,
+};
+use agent_client_protocol::{Channel, ErrorCode};
 use ants_proto::{HarnessAgent, LimitKind, StatusUpdate, ThreadId};
 use ants_test_support::{StubCli, scratch_dir};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
+use super::translator::Translator;
 use super::*;
 use crate::harness::{
-    Harnesses, Launch, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
+    Harnesses, Launch, Prompt, Readiness, Session, SignedOut, Spend, Steer, SteerRequest, Steering, fork, handshake,
     parse_definitions,
 };
 use crate::limits::ratelimit::Limited;
@@ -54,43 +60,90 @@ fn end_turn(id: u64, tokens: u64) -> String {
     ok(id, json!({ "stop": "end_turn", "tokens": tokens }))
 }
 
-/// A harness of the stub protocol run by a stub CLI in a scratch directory, removed on drop.
-struct Fixture {
-    dir: PathBuf,
-    cli: StubCli,
-    harness: Arc<Harness>,
+/// The harness a config file defines as `[harnesses.<name>]` of `protocol`, with `table` added.
+pub(super) fn define(name: &str, protocol: Protocol, table: &str) -> anyhow::Result<Arc<Harness>> {
+    let text = format!("[harnesses.{name}]\nprotocol = \"{protocol}\"\n{table}");
+    Ok(Harnesses::builtin().define(parse_definitions(&text)?)?.get(name).unwrap())
 }
 
-impl Drop for Fixture {
+/// A launch of `harness` working in `dir` with the ant's `env`, every tool allowed were the harness to ask.
+pub(super) fn launch(harness: &Arc<Harness>, dir: &Path, env: &[(&str, &str)], settings: ModelSettings) -> Launch {
+    let env = env.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect();
+    Launch::new(harness.clone(), dir.to_owned(), env, PermissionPolicy::allow_all(), settings)
+}
+
+/// A harness of a native protocol run by a stub CLI in a scratch directory, removed on drop: what the tests of each
+/// protocol build their own fixture on.
+pub(super) struct StubHarness {
+    pub dir: PathBuf,
+    pub cli: StubCli,
+    pub harness: Arc<Harness>,
+}
+
+impl Drop for StubHarness {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl StubHarness {
+    /// `[harnesses.<harness>]` of `protocol` in the scratch directory `name`, its command a stub CLI named `command`,
+    /// with `table` added.
+    pub(super) fn new(name: &str, harness: &str, protocol: Protocol, command: &str, table: &str) -> Self {
+        let dir = scratch_dir(name).canonicalize().unwrap();
+        let cli = StubCli::new(&dir, command);
+        let harness = define(harness, protocol, &format!("command = {:?}\n{table}", cli.path())).unwrap();
+        Self { dir, cli, harness }
+    }
+
+    /// A launch of the harness working in the scratch directory with the ant's `env`, every tool allowed were the
+    /// harness to ask.
+    pub(super) fn launch(&self, env: &[(&str, &str)], settings: ModelSettings) -> Launch {
+        launch(&self.harness, &self.dir, env, settings)
+    }
+
+    /// What run `run` of the CLI read, as JSON.
+    pub(super) fn received(&self, run: usize) -> Vec<Value> {
+        self.cli.received(run).iter().map(|line| serde_json::from_str(line).unwrap()).collect()
+    }
+}
+
+/// Run `prompt`, collecting its status updates and spend.
+pub(super) async fn run(session: &Session, prompt: Prompt) -> (anyhow::Result<String>, Vec<StatusUpdate>, Vec<Spend>) {
+    let (progress, mut status) = mpsc::channel(64);
+    let (spend, mut spent) = mpsc::unbounded_channel();
+    let reply = session.run(Prompt { progress: Some(progress), spend: Some(spend), ..prompt }).await;
+    let (mut updates, mut spends) = (Vec::new(), Vec::new());
+    while let Ok(update) = status.try_recv() {
+        updates.push(update);
+    }
+    while let Ok(spend) = spent.try_recv() {
+        spends.push(spend);
+    }
+    (reply.map(|reply| reply.text), updates, spends)
+}
+
+/// A harness of the stub protocol run by a stub CLI.
+struct Fixture(StubHarness);
+
+impl std::ops::Deref for Fixture {
+    type Target = StubHarness;
+
+    fn deref(&self) -> &StubHarness {
+        &self.0
     }
 }
 
 impl Fixture {
     /// `[harnesses.native]` of protocol stub, with `table` added.
     fn new(name: &str, table: &str) -> Self {
-        let dir = scratch_dir(name).canonicalize().unwrap();
-        let cli = StubCli::new(&dir, "stub-cli");
-        let text = format!(
-            "[harnesses.native]\ncommand = {:?}\nprotocol = \"stub\"\nsign_in = \"stub-cli login\"\n{table}",
-            cli.path()
-        );
-        let harness = Harnesses::builtin().define(parse_definitions(&text).unwrap()).unwrap().get("native").unwrap();
-        Self { dir, cli, harness }
+        let table = format!("sign_in = \"stub-cli login\"\n{table}");
+        Self(StubHarness::new(name, "native", Protocol::Stub, "stub-cli", &table))
     }
 
-    /// A launch of the harness working in the scratch directory, with `SHARED=ant` in the ant's environment and every
-    /// tool allowed, were the harness to ask.
+    /// A launch of the harness with `SHARED=ant` in the ant's environment.
     fn launch(&self, settings: ModelSettings) -> Launch {
-        let allow_all = PermissionPolicy::new(Allowlist::parse(&["*"]).unwrap(), None);
-        let env = vec![("SHARED".to_owned(), "ant".to_owned())];
-        Launch::new(self.harness.clone(), self.dir.clone(), env, allow_all, settings)
-    }
-
-    /// What run `run` of the CLI read, as JSON.
-    fn received(&self, run: usize) -> Vec<Value> {
-        self.cli.received(run).iter().map(|line| serde_json::from_str(line).unwrap()).collect()
+        self.0.launch(&[("SHARED", "ant")], settings)
     }
 }
 
@@ -341,12 +394,14 @@ async fn a_stopped_cli_has_its_grace_to_exit_then_is_killed() {
     script(&native, Some(1), &[vec![]]);
     script(&native, Some(2), &[vec!["!sleep 30".to_owned()]]);
     let cli = Cli::new(&native.harness, &[], &ModelSettings::default());
-    let mut exits = cli.spawn(["--stub"], Some(&native.dir)).unwrap();
+    let (mut exits, stdin, _stdout) = cli.spawn(["--stub"], Some(&native.dir)).unwrap();
+    drop(stdin);
     assert!(
         exits.stop(Duration::from_secs(10)).await.is_some_and(|status| status.success()),
         "at the end of its input"
     );
-    let mut sleeps = cli.spawn(["--stub"], None).unwrap();
+    let (mut sleeps, stdin, _stdout) = cli.spawn(["--stub"], None).unwrap();
+    drop(stdin);
     let started = std::time::Instant::now();
     assert_eq!(sleeps.stop(Duration::from_millis(200)).await, None, "killed");
     assert!(started.elapsed() < Duration::from_secs(10));
@@ -497,7 +552,29 @@ async fn a_native_cli_reports_its_mcp_servers_and_signs_them_in_on_the_loopback(
     assert_eq!(received[3]["params"], json!({ "session": "p1", "server": "github" }));
 
     let acp = Harnesses::builtin().get("copilot").unwrap();
-    let policy = PermissionPolicy::new(Allowlist::parse(&["*"]).unwrap(), None);
-    let acp = Launch::new(acp, native.dir.clone(), vec![], policy, ModelSettings::default());
+    let acp = Launch::new(acp, native.dir.clone(), vec![], PermissionPolicy::allow_all(), ModelSettings::default());
     assert!(crate::harness::open_mcp(&acp).await.unwrap().is_none(), "ACP reports no MCP servers");
+}
+
+#[tokio::test]
+async fn a_prompt_dropped_mid_turn_no_longer_counts_as_running() {
+    let native = Fixture::new("native-dropped-prompt", "");
+    let steering = ok(1, json!({ "name": "stub-cli", "version": "1.2.3", "steer": true }));
+    let accepted = ok(4, json!({ "accepted": true }));
+    script(&native, None, &[vec![], vec![steering], vec![opened("n1")], vec![], vec![accepted]]);
+    let cli = Cli::new(&native.harness, &[], &ModelSettings::default());
+    let translator = Arc::new(Translator::<stub::Stub>::new(cli));
+    translator.clone().initialize(InitializeRequest::new(ProtocolVersion::V1)).await.unwrap();
+    let session = translator.clone().new_session(NewSessionRequest::new(native.dir.clone())).await.unwrap().session_id;
+    let said = |text: &str| vec![ContentBlock::Text(TextContent::new(text))];
+    // The translator runs a prompt in a task of the connection, which nothing drops while it is open.
+    let (ours, _client) = Channel::duplex();
+    let dropped = async |cx: ConnectionTo<Client>| {
+        let prompt = translator.clone().prompt(PromptRequest::new(session.clone(), said("hello")), cx);
+        assert!(tokio::time::timeout(Duration::from_millis(200), prompt).await.is_err(), "the turn does not end");
+        let steer = SteerRequest { session_id: session.clone(), prompt: said("more") };
+        assert!(!translator.clone().steer(steer).await?.accepted, "no prompt runs to take a steer");
+        Ok(())
+    };
+    Agent.v1().name("test").connect_with(ours, dropped).await.unwrap();
 }

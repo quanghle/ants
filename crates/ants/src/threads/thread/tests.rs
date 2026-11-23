@@ -157,7 +157,7 @@ fn a_question_shows_its_options_and_the_valid_answers_to_it() {
     assert!(shown.contains(&format!("[answers {} as typed]", asked.id)), "{shown}");
     let unanswered = render(&read[..1]);
     assert!(unanswered.contains(&format!("\n  (`ants answer {} N|TEXT` answers it)\n", asked.id)), "{unanswered}");
-    let json = serde_json::to_value(&read[0]).unwrap();
+    let json = serde_json::to_value(Shown::of(&read[0])).unwrap();
     assert_eq!(json["question"]["questions"][0]["options"][1]["label"], "not yet");
 }
 

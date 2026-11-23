@@ -81,7 +81,7 @@ struct TrailTips {
 impl Hub {
     /// The message `thread` handles.
     pub(super) fn handling(&self, thread: &ThreadId) -> Option<Envelope> {
-        self.sessions.locked().current.get(thread).cloned()
+        self.sessions.locked().current(thread).cloned()
     }
 
     /// Whether `thread`, handling `current`, is trusted, its origin computed as `run_trail` computes it: a step of a

@@ -98,11 +98,7 @@ pub fn notice(text: &str, error: bool, width: u16) -> Line<'static> {
 /// ellipsis ending the last when cut.
 pub fn error(text: &str, width: u16) -> Vec<Line<'static>> {
     let width = usize::from(width).saturating_sub(1).max(1);
-    let words = [Span::raw(format!("{ERROR_MARK}{}", text.replace('\n', " ")))];
-    let mut rows: Vec<String> = super::markdown::wrap(&words, width)
-        .into_iter()
-        .map(|row| row.iter().map(|s| s.content.as_ref()).collect())
-        .collect();
+    let mut rows = rows(&format!("{ERROR_MARK}{}", text.replace('\n', " ")), width);
     if rows.len() > ERROR_LINES {
         let rest = rows.split_off(ERROR_LINES - 1).join(" ");
         rows.push(fit(&rest, width));
@@ -115,24 +111,34 @@ pub const ERROR_LINES: usize = 3;
 
 /// `text` in at most `width` columns, an ellipsis ending it when cut.
 pub fn fit(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_owned();
+    match width {
+        _ if text.width() <= width => text.to_owned(),
+        0 => String::new(),
+        _ => ellipsed(text, width - 1),
     }
-    let mut left = width.saturating_sub(1);
+}
+
+/// The start of `text` that fits in `room` columns, without the whitespace ending it, then an ellipsis.
+fn ellipsed(text: &str, mut room: usize) -> String {
     let mut kept: String = text
         .chars()
         .take_while(|c| {
             let wide = c.width().unwrap_or(0);
-            let fits = wide <= left;
-            left = left.saturating_sub(wide);
+            let fits = wide <= room;
+            room = room.saturating_sub(wide);
             fits
         })
         .collect();
-    if width > 0 {
-        kept.truncate(kept.trim_end().len());
-        kept.push('…');
-    }
+    kept.truncate(kept.trim_end().len());
+    kept.push('…');
     kept
+}
+
+/// `text` in `width` columns: cut as [`fit`] cuts it, else spaces filling what it leaves.
+pub fn column(text: &str, width: usize) -> String {
+    let mut text = fit(text, width);
+    text.extend(std::iter::repeat_n(' ', width.saturating_sub(text.width())));
+    text
 }
 
 /// `line` in at most `width` columns, an ellipsis ending it when cut, each span keeping its style.
@@ -140,20 +146,35 @@ pub fn clip(line: Line<'static>, width: usize) -> Line<'static> {
     if line.width() <= width {
         return line;
     }
-    let mut left = width;
-    let mut spans = Vec::new();
     let Line { style, alignment, spans: all } = line;
-    for span in all {
+    let mut left = width.saturating_sub(1);
+    let mut spans = Vec::new();
+    for span in all.into_iter().take_while(|_| width > 0) {
         let wide = span.width();
-        if wide < left {
+        if wide <= left {
             left -= wide;
             spans.push(span);
             continue;
         }
-        spans.push(Span::styled(fit(&span.content, left), span.style));
+        spans.push(Span::styled(ellipsed(&span.content, left), span.style));
         break;
     }
     Line { style, alignment, spans }
+}
+
+/// `lines` wrapped at words into rows at most `width` columns wide, each row keeping the style of its line.
+pub fn wrapped(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    let rows = |line: Line<'static>| {
+        let style = line.style;
+        super::markdown::wrap(&line.spans, width.max(1)).into_iter().map(move |spans| Line::from(spans).style(style))
+    };
+    lines.into_iter().flat_map(rows).collect()
+}
+
+/// `text`, one line, wrapped at words into rows at most `width` columns wide.
+pub fn rows(text: &str, width: usize) -> Vec<String> {
+    let rows = super::markdown::wrap(&[Span::raw(text.to_owned())], width.max(1));
+    rows.into_iter().map(|row| row.iter().map(|s| s.content.as_ref()).collect()).collect()
 }
 
 /// The hints of `keys`, apart by ` · `, that fit whole in `width` columns: the last ones dropped.

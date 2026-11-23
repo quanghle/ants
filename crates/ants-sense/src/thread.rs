@@ -6,7 +6,7 @@
 //! by compare-and-set on its revision: the ant passes the revision it read (none for the thread's first), and a
 //! checkpoint from another revision is refused with the current register.
 //!
-//! A handoff is an item of kind [`HANDOFF`], written in one event with the episode memory it links ([`EPISODE`]). It
+//! A handoff is an item of kind [`HANDOFF`], written in one event with the episode memory it links ([`Handoff::episode`]). It
 //! stays unacknowledged, shown in every brief of the ant ([`unacknowledged`]), until a later checkpoint on its thread,
 //! or a checkpoint on another thread naming it in `acknowledges`, sets its [`ACKNOWLEDGED`] value.
 //!
@@ -43,8 +43,6 @@ pub const CHECKPOINT: &str = "checkpoint";
 pub const HANDOFF: &str = "handoff";
 /// The value of a register or handoff naming its thread.
 pub const THREAD: &str = "thread";
-/// The value of a handoff naming its episode memory.
-pub const EPISODE: &str = "episode";
 /// The value of an acknowledged handoff: the thread and time of the checkpoint acknowledging it.
 pub const ACKNOWLEDGED: &str = "acknowledged";
 /// The tool call showing the thread's whole resume register and every unacknowledged handoff.
@@ -91,14 +89,13 @@ struct Checkpointed {
 }
 
 impl ItemValues for Checkpointed {
-    const KIND: &str = CHECKPOINT;
+    const KINDS: &[&str] = &[CHECKPOINT];
 }
 
 impl Register {
     /// The register `item` holds; none for an item of another kind.
     pub fn of(item: &Item) -> Option<Self> {
-        (item.kind == CHECKPOINT).then_some(())?;
-        let Checkpointed { thread, goal, step, next, blockers, branch, questions, .. } = Checkpointed::of(item).ok()?;
+        let Checkpointed { thread, goal, step, next, blockers, branch, questions, .. } = Checkpointed::held(item)?;
         Some(Self {
             id: item.id.clone(),
             revision: item.revision,
@@ -208,15 +205,14 @@ struct Handed {
 }
 
 impl ItemValues for Handed {
-    const KIND: &str = HANDOFF;
+    const KINDS: &[&str] = &[HANDOFF];
 }
 
 impl Handoff {
     /// The handoff `item` holds; none for an item of another kind.
     pub fn of(item: &Item) -> Option<Self> {
-        (item.kind == HANDOFF).then_some(())?;
         let Handed { thread, done, in_flight, next, promises, decisions, files, episode, acknowledged, .. } =
-            Handed::of(item).ok()?;
+            Handed::held(item)?;
         Some(Self {
             id: item.id.clone(),
             thread,

@@ -103,7 +103,7 @@ struct Ballot {
 }
 
 impl ItemValues for Ballot {
-    const KIND: &str = VOTE;
+    const KINDS: &[&str] = &[VOTE];
 }
 
 /// Answers a `sense_vote` call.

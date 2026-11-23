@@ -17,7 +17,7 @@ mod steer;
 
 pub use catalog::{BUILTIN_HARNESSES, Harnesses, Unset, parse_definitions};
 pub(crate) use definition::validate_env;
-pub use definition::{ContextValue, Harness, Tools, allows_all};
+pub use definition::{Harness, Tools, allows_all};
 #[cfg(test)]
 pub(crate) use launch::{Connector, fakes};
 pub use launch::{Launch, McpServers, McpSession};
@@ -33,12 +33,6 @@ pub use session::{
 pub use sign_in::{Handshake, Readiness, SignedOut, check, handshake};
 pub use skills::Skills;
 pub(crate) use steer::{SteerRequest, SteerResponse, advertise as advertise_steering};
-
-// The tests of the native translators take these through this module.
-#[cfg(all(test, unix))]
-use crate::limits::breaker::StartFailed;
-#[cfg(all(test, unix))]
-use ants_proto::PlanStep;
 
 #[cfg(test)]
 mod tests;

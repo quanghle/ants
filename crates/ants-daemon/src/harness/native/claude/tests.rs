@@ -1,22 +1,24 @@
 //! The claude protocol against a stub CLI playing the events Claude Code 2.1.325 was seen to send (trimmed).
 
 use std::assert_matches;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::ErrorCode;
-use agent_client_protocol::v1::schema::{EnvVariable, McpServer, McpServerStdio, SessionId};
-use ants_proto::{HarnessAgent, LimitKind, StatusUpdate, ThreadId};
-use ants_test_support::{StubCli, scratch_dir};
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{EnvVariable, McpServer, McpServerStdio, SessionId, TextContent};
+use agent_client_protocol::{Agent, Channel, Client, ErrorCode};
+use ants_proto::{HarnessAgent, LimitKind, PlanStep, StatusUpdate, ThreadId};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
+use super::failure::error;
 use super::*;
+use crate::harness::native::Protocol;
+use crate::harness::native::tests::{StubHarness, run};
 use crate::harness::{
-    Harnesses, Launch, ModelSettings, PlanStep, Prompt, Readiness, Session, SignedOut, Spend, StartFailed, Steer,
-    Steering, fork, handshake, parse_definitions,
+    Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
 };
+use crate::limits::breaker::StartFailed;
 use crate::limits::ratelimit::Limited;
 use crate::permission::{Allowlist, PermissionPolicy};
 
@@ -108,26 +110,22 @@ fn failure(kind: &str, status: Option<u16>, message: &str, terminal: &str) -> Ve
     vec![init(), event(synthetic), result(0.0, fields)]
 }
 
-/// A harness of protocol claude run by a stub CLI in a scratch directory, removed on drop.
-struct Fixture {
-    dir: PathBuf,
-    cli: StubCli,
-    harness: Arc<Harness>,
-}
+/// A harness of protocol claude run by a stub CLI.
+struct Fixture(StubHarness);
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+impl std::ops::Deref for Fixture {
+    type Target = StubHarness;
+
+    fn deref(&self) -> &StubHarness {
+        &self.0
     }
 }
 
 impl Fixture {
     /// `[harnesses.claude-native]` of protocol claude, with `table` added.
     fn new(name: &str, table: &str) -> Self {
-        let dir = scratch_dir(name).canonicalize().unwrap();
-        let cli = StubCli::new(&dir, "claude");
-        let harness = define(&format!("command = {:?}\nsign_in = \"claude login\"\n{table}", cli.path())).unwrap();
-        Self { dir, cli, harness }
+        let table = format!("sign_in = \"claude login\"\n{table}");
+        Self(StubHarness::new(name, "claude-native", Protocol::Claude, "claude", &table))
     }
 
     fn launch(&self, settings: ModelSettings) -> Launch {
@@ -137,13 +135,13 @@ impl Fixture {
     /// A launch with no credentials but ANTHROPIC_API_KEY `key` (none when empty), the ones of the daemon's
     /// environment and home left out.
     fn launch_with_key(&self, key: &str, settings: ModelSettings) -> Launch {
-        let allow_all = PermissionPolicy::new(Allowlist::parse(&["*"]).unwrap(), None);
-        let env = [("CLAUDE_CONFIG_DIR", self.dir.to_str().unwrap()), ("ANTHROPIC_API_KEY", key)]
-            .into_iter()
-            .chain([("ANTHROPIC_AUTH_TOKEN", ""), ("CLAUDE_CODE_OAUTH_TOKEN", "")])
-            .map(|(name, value)| (name.to_owned(), value.to_owned()))
-            .collect();
-        Launch::new(self.harness.clone(), self.dir.clone(), env, allow_all, settings)
+        let env = [
+            ("CLAUDE_CONFIG_DIR", self.dir.to_str().unwrap()),
+            ("ANTHROPIC_API_KEY", key),
+            ("ANTHROPIC_AUTH_TOKEN", ""),
+            ("CLAUDE_CODE_OAUTH_TOKEN", ""),
+        ];
+        self.0.launch(&env, settings)
     }
 
     /// Have run `run` (every run when None) print the version, then play `blocks` after each line it reads: a
@@ -153,31 +151,10 @@ impl Fixture {
         all.extend(blocks.iter().cloned());
         self.cli.script(run, &all);
     }
-
-    /// What run `run` read, as JSON.
-    fn received(&self, run: usize) -> Vec<Value> {
-        self.cli.received(run).iter().map(|line| serde_json::from_str(line).unwrap()).collect()
-    }
 }
 
 fn define(table: &str) -> anyhow::Result<Arc<Harness>> {
-    let text = format!("[harnesses.claude-native]\nprotocol = \"claude\"\n{table}");
-    Ok(Harnesses::builtin().define(parse_definitions(&text)?)?.get("claude-native").unwrap())
-}
-
-/// Run `prompt`, collecting its status updates and spend.
-async fn run(session: &Session, prompt: Prompt) -> (anyhow::Result<String>, Vec<StatusUpdate>, Vec<Spend>) {
-    let (progress, mut status) = mpsc::channel(64);
-    let (spend, mut spent) = mpsc::unbounded_channel();
-    let reply = session.run(Prompt { progress: Some(progress), spend: Some(spend), ..prompt }).await;
-    let (mut updates, mut spends) = (Vec::new(), Vec::new());
-    while let Ok(update) = status.try_recv() {
-        updates.push(update);
-    }
-    while let Ok(spend) = spent.try_recv() {
-        spends.push(spend);
-    }
-    (reply.map(|reply| reply.text), updates, spends)
+    crate::harness::native::tests::define("claude-native", Protocol::Claude, table)
 }
 
 /// The arguments every session's CLI gets first.
@@ -623,4 +600,35 @@ fn claude_definitions_are_checked() {
         assert!(define(&format!("command = \"claude\"\nmode = {mode:?}")).unwrap().bypasses_permissions());
     }
     assert!(define("command = \"claude\"\nargs = [\"--allowedTools=Read\", \"-p\"]").is_ok());
+}
+
+#[tokio::test]
+async fn a_prompt_dropped_mid_turn_leaves_no_turn_running() {
+    let fixture = Fixture::new("claude-dropped-prompt", "");
+    fixture.script(None, &[vec![signed_in()], vec![init(), text("Hel")]]);
+    let claude = Claude::start(Cli::new(&fixture.harness, &[], &ModelSettings::default())).await.unwrap();
+    let open = Open { cwd: fixture.dir.clone(), mcp_servers: Vec::new(), sign_ins: None, skills: None };
+    let session = claude.new_session(open).await.unwrap();
+    let said = |text: &str| vec![ContentBlock::Text(TextContent::new(text))];
+    // The session is prompted without the translator, whose own task of a prompt nothing drops.
+    let (ours, _client) = Channel::duplex();
+    let dropped = async |cx: ConnectionTo<Client>| {
+        let updates = Updates::new(cx, SessionId::new("s"));
+        let mut prompt = Box::pin(session.prompt(said("hello"), updates));
+        let turn_runs = async {
+            while !session.steers.locked().open {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            done = &mut prompt => panic!("the turn has no result: {done:?}"),
+            () = turn_runs => {}
+        }
+        drop(prompt);
+        assert!(session.running.borrow().is_none(), "no turn to interrupt");
+        assert!(session.shared.asking.locked().is_none(), "nowhere to send tool requests");
+        assert!(!session.steer(said("more")).await?, "no turn takes a steer");
+        Ok(())
+    };
+    Agent.v1().name("test").connect_with(ours, dropped).await.unwrap();
 }

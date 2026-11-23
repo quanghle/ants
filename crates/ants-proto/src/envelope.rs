@@ -8,13 +8,25 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    Answer, ApprovalDecision, ApprovalRequest, Attachment, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans,
-    Questions, Role, RunId, Sealed, ThreadId, TrailSpent, TrailStart, TrailStep, UserId, subject,
+    Answer, ApprovalDecision, ApprovalRequest, Attachment, DEFAULT_TURN_BUDGET, Error, Escalation, Humans, Questions,
+    Role, RunId, Sealed, ThreadId, TrailSpent, TrailStart, TrailStep, UserId, subject,
 };
 #[cfg(doc)]
 use crate::{
     ChannelPost, LINKS_BUCKET, MAX_TITLE, OWNERS_BUCKET, REVIEW_ALLOW, THREADS_BUCKET, ThreadOrigin, ThreadSummary,
     ThreadTitle, Verdict, WEBHOOK_ALLOW, owner_key, summary_key, title_key,
+};
+
+mod mention;
+mod notes;
+mod notice;
+mod review;
+
+pub use mention::{Mention, Quote, parse_mentions};
+pub use notes::NotesPost;
+pub use notice::NoticeKind;
+pub use review::{
+    FindingOutcome, FindingVerdict, MAX_OUTCOME_REASON, MAX_REVIEW_FINDINGS_BYTES, ReviewCommit, ReviewOutcomes,
 };
 
 /// One message between ants, or between an ant and a human.
@@ -182,139 +194,6 @@ pub struct Envelope {
     pub sent_at: DateTime<Utc>,
 }
 
-/// The dream a review message asks a review of and what is new in the outcomes of the reviewer's earlier findings
-/// ([`Envelope::review_outcomes`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewOutcomes {
-    /// The number of the sender's dream under review.
-    pub dream: u64,
-    /// A batch of earlier findings whose verdict or outcome changed since the sender last told it, oldest first,
-    /// each once, up to [`MAX_REVIEW_FINDINGS_BYTES`] bytes as a compact JSON array.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub findings: Vec<FindingOutcome>,
-    /// The sage's finding ids in the sender's earlier-findings window, before the packet's display limit.
-    /// Only these ids are eligible targets of a follow-up; an absent list grants no links.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub earlier_findings: Vec<String>,
-}
-
-/// Where one of a reviewer's earlier findings stands with the ant it reviewed ([`ReviewOutcomes::findings`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FindingOutcome {
-    /// The finding's id, `<dream>.<n>`: the n-th finding of the reviewer's answer to the review of that dream.
-    pub finding: String,
-    pub verdict: FindingVerdict,
-    /// Whether the change applying it still holds; only for an applied finding.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub holds: bool,
-    /// The sender's reason for its verdict, at most [`MAX_OUTCOME_REASON`] characters: the sender's text, untrusted.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub reason: String,
-}
-
-/// The most characters of a verdict's reason ([`FindingOutcome::reason`]) a sender tells and a receiver keeps.
-pub const MAX_OUTCOME_REASON: usize = 200;
-
-/// The most bytes of the compact JSON `review_outcomes.findings` array sent on one review.
-pub const MAX_REVIEW_FINDINGS_BYTES: usize = 64 * 1024;
-
-/// An ant's verdict on a reviewer's finding ([`FindingOutcome::verdict`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FindingVerdict {
-    Applied,
-    Rejected,
-    Deferred,
-}
-
-/// A commit a dream's review packet names ([`Envelope::review_commits`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewCommit {
-    /// The repository's normalized git remote, such as `github.com/owner/repo`.
-    pub repo: String,
-    /// The full commit id.
-    pub commit: String,
-    /// The thread whose worktree is at it; none for the ant's workdir.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread: Option<ThreadId>,
-    /// The repository's git directory on the machine of the sender's daemon, for a recipient on the same machine to
-    /// fetch the commit from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local: Option<String>,
-}
-
-/// What a daemon's notice ([`Envelope::notice`]) tells of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NoticeKind {
-    /// The ant's spend passed the warning share of a cap.
-    Spend,
-    /// The ant's harness is signed out: messages wait, or go to its fallbacks.
-    SignedOut,
-    /// The ant's harness is out of quota: messages wait, or go to its fallbacks.
-    Quota,
-    /// The ant's harness keeps failing to start.
-    Failing,
-    /// Every fallback of the ant turns messages away while its own harness cannot serve.
-    NoFallback,
-    /// The ant gave up on a message or post after its deliveries.
-    GaveUp,
-    /// A message was withdrawn from the ant's queue before it answered it.
-    Withdrawn,
-    /// A thread's session expired and its git worktree was removed, its branch kept.
-    Expired,
-    /// Messages the ant sent wait for an ant no daemon serves.
-    Unserved,
-    /// A human's assistant acted for the human.
-    Assistant,
-    /// Another human decided a tool request, or answered an escalation, in place of the one it reached.
-    InPlace,
-    /// A tool request an ant of the chain was asked to decide expired unanswered.
-    RequestExpired,
-    /// A later message steered the prompt answering a message, so the answer goes to that one.
-    Steered,
-    /// An MCP server the ant's harness signs in to as its sessions open needs a browser sign-in, or failed to sign
-    /// in: the ant answers without the server meanwhile.
-    McpSignIn,
-    /// A run the ant started with `run_trail` while answering a trail step ended or stopped: the notice, on the step's
-    /// thread to its conductor, tells what the runs started answering the step spent ([`Envelope::trail_spent`]).
-    RunSpent,
-}
-
-impl NoticeKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Spend => "spend",
-            Self::SignedOut => "signed_out",
-            Self::Quota => "quota",
-            Self::Failing => "failing",
-            Self::NoFallback => "no_fallback",
-            Self::GaveUp => "gave_up",
-            Self::Withdrawn => "withdrawn",
-            Self::Expired => "expired",
-            Self::Unserved => "unserved",
-            Self::Assistant => "assistant",
-            Self::InPlace => "in_place",
-            Self::RequestExpired => "request_expired",
-            Self::Steered => "steered",
-            Self::McpSignIn => "mcp_sign_in",
-            Self::RunSpent => "run_spent",
-        }
-    }
-
-    /// Whether it needs a human to act: to sign the ant's harness or one of its MCP servers in, wait for or raise its
-    /// quota, mend its harness or replay the message given up on.
-    pub fn needs_action(self) -> bool {
-        self.holds_thread() || self == Self::McpSignIn
-    }
-
-    /// Whether the ant answers nothing on the thread until a human acts ([`NoticeKind::needs_action`]): what the
-    /// thread is stuck on. An MCP server to sign in to holds nothing: the ant answers without it.
-    pub fn holds_thread(self) -> bool {
-        matches!(self, Self::SignedOut | Self::Quota | Self::Failing | Self::NoFallback | Self::GaveUp)
-    }
-}
-
 /// What a summary request ([`Envelope::summary`]) asks to summarise: the entries of one thread, a TL;DR stored under
 /// the thread's [`summary_key`] in [`THREADS_BUCKET`] ([`ThreadSummary`]), or of every thread with entries since a
 /// time, a digest nobody stores. Either covers the entries up to the ANTS stream sequence `upto`.
@@ -357,59 +236,6 @@ impl SummaryRequest {
             SummaryOf::Since(_) => None,
         }
     }
-}
-
-/// A short quote of the message or post a human's reply answers ([`Envelope::quote`], [`ChannelPost::quote`]): its
-/// author and an excerpt of its text, so the recipient sees what is answered even when it never held that message.
-/// It is the sender's word only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Quote {
-    pub from: UserId,
-    /// The excerpt, none when the quoted message was sealed and the reply is not ([`Quote::withheld`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-}
-
-impl Quote {
-    /// How many characters of the quoted text an excerpt keeps.
-    pub const MAX: usize = 160;
-
-    /// The quote of `text` by `from`: its whitespace collapsed to single spaces, cut to [`Quote::MAX`] characters with
-    /// an ellipsis.
-    pub fn new(from: UserId, text: &str) -> Self {
-        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let text = match line.char_indices().nth(Self::MAX) {
-            Some((cut, _)) => format!("{}…", &line[..cut]),
-            None => line,
-        };
-        Self { from, text: Some(text) }
-    }
-
-    /// The quote without its excerpt: a sealed message's text never goes in the clear.
-    #[must_use]
-    pub fn withheld(self) -> Self {
-        Self { text: None, ..self }
-    }
-
-    /// The line a view shows above the reply: `↪ replying to <author>: <excerpt>`, or without the excerpt.
-    pub fn line(&self) -> String {
-        match &self.text {
-            Some(text) => format!("↪ replying to {}: {text}", self.from),
-            None => format!("↪ replying to {}", self.from),
-        }
-    }
-}
-
-/// Where the channel post a mention notice tells of is ([`Envelope::mention`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Mention {
-    pub channel: ChannelId,
-    /// The post's id.
-    pub post: Uuid,
-    /// The post's author, when the notice is relayed by another ([`ChannelPost::relayed_notice`]): the envelope's
-    /// `from` sent it. It is the sender's word only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub author: Option<UserId>,
 }
 
 impl Envelope {
@@ -661,120 +487,6 @@ impl Envelope {
         }
         Err(Error::WrongSubject { subject: subject.to_owned(), from: self.from.clone(), to: self.to.clone() })
     }
-}
-
-/// A post to the notes of a thread, on [`subject::notes`]: one shared board per thread, where the ants on it coordinate
-/// together; a post wakes nobody, and each of them can read the whole board.
-///
-/// Posts spend the thread's turn budget like messages between ants do, and each carries what is left. The post that
-/// spends the last turn hands the thread to the human, and the notes take no more ant posts until the human posts
-/// there with a fresh budget.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NotesPost {
-    pub id: Uuid,
-    pub thread_id: ThreadId,
-    pub from: UserId,
-    pub text: String,
-    /// Turns left in the notes after this post.
-    pub turn_budget: u32,
-    /// The title the posting ant suggests for the thread, as [`Envelope::title`]: an ant's reply posted to the notes
-    /// carries the one its MCP tool suggest_thread_title took.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// The files attached to the post, stored before it under its [`NotesPost::attachment_handle`]s.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<Attachment>,
-    /// The human the author, its assistant, posts for, as [`Envelope::on_behalf_of`]: a reader honours it only as
-    /// [`crate::Acting`] tells.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_behalf_of: Option<UserId>,
-    pub sent_at: DateTime<Utc>,
-}
-
-impl NotesPost {
-    /// A post with a fresh budget, as the human posts.
-    pub fn new(thread_id: ThreadId, from: UserId, text: impl Into<String>) -> Self {
-        Self {
-            id: Uuid::now_v7(),
-            thread_id,
-            from,
-            text: text.into(),
-            turn_budget: DEFAULT_TURN_BUDGET,
-            title: None,
-            attachments: Vec::new(),
-            on_behalf_of: None,
-            sent_at: Utc::now(),
-        }
-    }
-
-    /// The same, posted for `human` by its assistant ([`NotesPost::on_behalf_of`]).
-    #[must_use]
-    pub fn on_behalf(self, human: Option<UserId>) -> Self {
-        Self { on_behalf_of: human, ..self }
-    }
-
-    /// An ant's post, spending one turn of what is left: the lower of `budget`, the turns of the message the ant
-    /// is handling, and those the notes' `last` post left. Fails when none are left.
-    pub fn spend(
-        thread_id: ThreadId,
-        from: UserId,
-        text: impl Into<String>,
-        budget: u32,
-        last: Option<&NotesPost>,
-    ) -> Result<Self, Error> {
-        let left = last.map_or(budget, |last| last.turn_budget.min(budget));
-        let turn_budget = left.checked_sub(1).ok_or_else(|| Error::BudgetExhausted(thread_id.clone()))?;
-        Ok(Self { turn_budget, ..Self::new(thread_id, from, text) })
-    }
-
-    pub fn subject(&self) -> String {
-        subject::notes(&self.thread_id, &self.from)
-    }
-
-    /// Check that the post arrived on its own [`NotesPost::subject`]. Credentials pin the sender token of a notes
-    /// subject, so a `from` that disagrees with it is forged.
-    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
-        if subject == self.subject() {
-            return Ok(());
-        }
-        Err(Error::WrongNotesSubject {
-            subject: subject.to_owned(),
-            from: self.from.clone(),
-            thread: self.thread_id.clone(),
-        })
-    }
-}
-
-/// The users `text` @mentions, in the order of their first mention.
-///
-/// A mention is `@` and a user id, with the `@` at the start of the text or after whitespace or an opening bracket
-/// or quote, so an address such as `a@b` mentions nobody. Punctuation after the id (`,.:;!?)` and the like) ends it;
-/// a letter, `_`, `@` or a dot followed by a letter or digit (`@host.example`) means it was no user id.
-pub fn parse_mentions(text: &str) -> Vec<UserId> {
-    let mut found: Vec<UserId> = Vec::new();
-    let mut prev: Option<char> = None;
-    for (i, c) in text.char_indices() {
-        if c == '@' && prev.is_none_or(|p| p.is_whitespace() || "([{<\"'`".contains(p)) {
-            let rest = &text[i + 1..];
-            let end =
-                rest.find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')).unwrap_or(rest.len());
-            let (name, after) = rest.split_at(end);
-            let mut after = after.chars();
-            let glued = match after.next() {
-                Some(c) if c.is_alphanumeric() || c == '_' || c == '@' => true,
-                Some('.') => after.next().is_some_and(char::is_alphanumeric),
-                _ => false,
-            };
-            if !glued
-                && let Ok(id) = name.parse::<UserId>()
-                && !found.contains(&id)
-            {
-                found.push(id);
-            }
-        }
-        prev = Some(c);
-    }
-    found
 }
 
 #[cfg(test)]
