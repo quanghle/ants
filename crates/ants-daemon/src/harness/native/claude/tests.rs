@@ -13,6 +13,7 @@ use ants_test_support::{StubCli, scratch_dir};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
+use super::failure::error;
 use super::*;
 use crate::harness::{
     Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
@@ -638,7 +639,7 @@ async fn a_prompt_dropped_mid_turn_leaves_no_turn_running() {
     // The session is prompted without the translator, whose own task of a prompt nothing drops.
     let (ours, _client) = Channel::duplex();
     let dropped = async |cx: ConnectionTo<Client>| {
-        let updates = Updates { cx, session: SessionId::new("s") };
+        let updates = Updates::new(cx, SessionId::new("s"));
         let mut prompt = Box::pin(session.prompt(said("hello"), updates));
         let turn_runs = async {
             while !session.steers.locked().open {

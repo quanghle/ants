@@ -14,49 +14,40 @@
 
 mod antigravity;
 mod claude;
+mod cli;
 mod codex;
 mod copilot;
+mod failure;
 mod io;
-pub(crate) use io::is_loopback;
 mod rpc;
 #[cfg(test)]
 mod stub;
 #[cfg(all(test, unix))]
 mod tests;
+mod translator;
 mod turn;
+mod updates;
 
-use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use agent_client_protocol::v1::schema::{
-    AgentCapabilities, AuthMethod, AuthMethodAgent, CancelNotification, CloseSessionRequest, CloseSessionResponse,
-    ContentBlock, ContentChunk, Cost, ForkSessionRequest, ForkSessionResponse, Implementation, InitializeRequest,
-    InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PromptCapabilities, PromptRequest,
-    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, SessionCapabilities, SessionCloseCapabilities,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionForkCapabilities, SessionId,
-    SessionMode, SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, TextContent, ToolCall,
-    ToolCallUpdate, UsageUpdate,
-};
-use agent_client_protocol::v1::{ConnectionTo, Responder};
-use agent_client_protocol::{AcpAgent, Agent, Client, DynConnectTo, Error, ErrorCode, JsonRpcResponse};
+use agent_client_protocol::v1::schema::{ContentBlock, InitializeRequest, McpServer, PromptResponse};
+use agent_client_protocol::{AcpAgent, Agent, Client, DynConnectTo, Error};
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+pub(crate) use cli::{Cli, is_flag};
+pub(crate) use failure::{context_overflow, failed, quota_exhausted, rate_limited, signed_out, unsupported};
+pub(crate) use io::is_loopback;
 pub(crate) use io::{JsonLines, JsonWriter, Process};
 #[cfg(test)]
 pub(crate) use rpc::RpcError;
 pub(crate) use rpc::{Incoming, Rpc};
+pub(crate) use updates::{Updates, approve, deny_approval};
 
 use super::mcp_sign_in::Report;
-use super::{Harness, ModelSettings, SteerRequest, SteerResponse, advertise_steering, skills};
-use crate::sync::MutexExt as _;
+use super::{Harness, ModelSettings};
 
 /// The protocol a harness definition's CLI speaks on stdio: its `protocol` key.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -119,7 +110,7 @@ impl Registration {
     fn of<N: Native>() -> Self {
         Self {
             validate: N::validate,
-            connect: connect::<N>,
+            connect: translator::connect::<N>,
             mcp: N::MCP.then_some(open_host::<N> as OpenHost),
             asks: N::ASKS,
         }
@@ -169,7 +160,7 @@ pub(crate) fn agent(
 ) -> DynConnectTo<Client> {
     match registration(harness.protocol) {
         Ok(None) => DynConnectTo::new(AcpAgent::new(harness.process(env, settings))),
-        Ok(Some(registration)) => (registration.connect)(Cli { report, ..Cli::new(harness, env, settings) }),
+        Ok(Some(registration)) => (registration.connect)(Cli::new(harness, env, settings).reporting(report)),
         Err(e) => refusing(format!("harness {harness}: {e}")),
     }
 }
@@ -247,90 +238,6 @@ fn refusing(detail: String) -> DynConnectTo<Client> {
     ))
 }
 
-/// A native CLI as an ant runs it: the definition with the ant's environment and model settings.
-#[derive(Debug, Clone)]
-pub(crate) struct Cli {
-    harness: Arc<Harness>,
-    /// The executable: the command, else on Windows the file found on `PATH`.
-    program: PathBuf,
-    /// The definition's arguments and those of the ant's `context`.
-    args: Vec<String>,
-    /// The definition's environment with the ant's over it, added to the daemon's.
-    env: BTreeMap<String, String>,
-    /// The ant's model, with the suffix its `context` selects.
-    model: Option<String>,
-    effort: Option<String>,
-    /// Where its sessions serving a thread report their sign-ins to MCP servers.
-    report: Option<Report>,
-}
-
-impl Cli {
-    fn new(harness: &Harness, env: &[(String, String)], settings: &ModelSettings) -> Self {
-        Self {
-            harness: Arc::new(harness.clone()),
-            program: harness.executable(env),
-            args: harness.launch_args(settings),
-            env: harness.launch_env(env),
-            model: settings.model_id(harness),
-            effort: settings.reasoning_effort.clone(),
-            report: None,
-        }
-    }
-
-    /// The harness's name.
-    pub(crate) fn name(&self) -> &str {
-        self.harness.name()
-    }
-
-    /// The executable started.
-    pub(crate) fn program(&self) -> &std::path::Path {
-        &self.program
-    }
-
-    /// The definition's arguments and those of the ant's `context`, which [`Self::command`] passes after the
-    /// protocol's own.
-    pub(crate) fn args(&self) -> &[String] {
-        &self.args
-    }
-
-    /// The value environment variable `name` has for the CLI, unless unset or empty.
-    pub(crate) fn var(&self, name: &str) -> Option<String> {
-        let value = self.env.get(name).cloned().or_else(|| std::env::var(name).ok());
-        value.filter(|value| !value.is_empty())
-    }
-
-    /// The definition's `mode`: for a native protocol, the CLI's own permission mode.
-    pub(crate) fn mode(&self) -> Option<&str> {
-        self.harness.mode.as_deref()
-    }
-
-    /// Whether the ant asks ants about its tools (`tools = "ask"`): what the CLI would ask a human about goes to the
-    /// client ([`approve`]) rather than being denied.
-    pub(crate) fn asks(&self) -> bool {
-        self.harness.tools == super::Tools::Ask
-    }
-
-    /// The definition's `mcp_sign_in`: the MCP servers a session serving a thread signs in to as they need it.
-    pub(crate) fn mcp_sign_in(&self) -> &[String] {
-        &self.harness.mcp_sign_in
-    }
-
-    /// The definition's `entra_client_id`: the Microsoft Entra app registration for MCP servers signing in through Entra.
-    pub(crate) fn entra_client_id(&self) -> Option<&str> {
-        self.harness.entra_client_id.as_deref()
-    }
-
-    /// The model the ant runs, if it sets one, its `context`'s suffix included.
-    pub(crate) fn model(&self) -> Option<&str> {
-        self.model.as_deref()
-    }
-
-    /// The reasoning effort the ant runs at, if it sets one.
-    pub(crate) fn effort(&self) -> Option<&str> {
-        self.effort.as_deref()
-    }
-}
-
 /// What `initialize` says of a native CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Info {
@@ -370,7 +277,7 @@ pub(crate) enum Setting {
 }
 
 impl Setting {
-    fn id(self) -> &'static str {
+    pub(super) fn id(self) -> &'static str {
         match self {
             Self::Model => "model",
             Self::ReasoningEffort => "reasoning_effort",
@@ -428,9 +335,9 @@ pub(crate) trait Native: Sized + Send + Sync + 'static {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Credentials {
     /// Where the CLI keeps them.
-    place: String,
+    pub(super) place: String,
     /// A hash of them, which tells whether they changed.
-    fingerprint: u64,
+    pub(super) fingerprint: u64,
 }
 
 impl Credentials {
@@ -442,9 +349,6 @@ impl Credentials {
         Self { place: place.into(), fingerprint: hasher.finish() }
     }
 }
-
-/// Credentials a provider refused at a prompt, by where they are kept and their fingerprint: what the CLI said then.
-static REFUSED: Mutex<BTreeMap<(String, u64), String>> = Mutex::new(BTreeMap::new());
 
 /// A session of a native CLI.
 pub(crate) trait NativeSession: Send + Sync + 'static {
@@ -511,96 +415,6 @@ pub(crate) trait NativeSession: Send + Sync + 'static {
         let _ = value;
         async move { Err(unsupported(&format!("changing {} of an open session", setting.id()))) }
     }
-}
-
-/// Where a prompt's session updates go: the daemon's client, which streams them as status and reads the reply text,
-/// tool calls and cost from them.
-#[derive(Clone)]
-pub(crate) struct Updates {
-    cx: ConnectionTo<Client>,
-    session: SessionId,
-}
-
-impl Updates {
-    pub(crate) fn send(&self, update: SessionUpdate) {
-        if let Err(e) = self.cx.send_notification(SessionNotification::new(self.session.clone(), update)) {
-            tracing::debug!(error = %e, "session update");
-        }
-    }
-
-    /// A piece of the reply.
-    pub(crate) fn message(&self, text: impl Into<String>) {
-        self.send(SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(text)))));
-    }
-
-    /// A piece of the agent's reasoning.
-    pub(crate) fn thought(&self, text: impl Into<String>) {
-        self.send(SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(text)))));
-    }
-
-    /// A tool call started.
-    pub(crate) fn tool_call(&self, call: ToolCall) {
-        self.send(SessionUpdate::ToolCall(call));
-    }
-
-    /// What changed of a tool call.
-    pub(crate) fn tool_update(&self, update: ToolCallUpdate) {
-        self.send(SessionUpdate::ToolCallUpdate(update));
-    }
-
-    /// The agent's plan, whole.
-    pub(crate) fn plan(&self, plan: Plan) {
-        self.send(SessionUpdate::Plan(plan));
-    }
-
-    /// The context window's use, in tokens, and the session's cost so far in US dollars, which spending caps count.
-    pub(crate) fn usage(&self, used: u64, size: u64, cost_usd: Option<f64>) {
-        let usage = UsageUpdate::new(used, size).cost(cost_usd.map(|amount| Cost::new(amount, "USD")));
-        self.send(SessionUpdate::UsageUpdate(usage));
-    }
-
-    /// Ask the client whether the tool call `call` describes may run, offering allow once and reject: true only when
-    /// it allows. The answer comes from the ant's allow rules, else its approvers, so callers await it off the loop
-    /// reading the CLI.
-    pub(crate) async fn ask(&self, call: ToolCallUpdate) -> bool {
-        let options = vec![
-            PermissionOption::new(ALLOW, "Allow", PermissionOptionKind::AllowOnce),
-            PermissionOption::new(REJECT, "Reject", PermissionOptionKind::RejectOnce),
-        ];
-        let request = RequestPermissionRequest::new(self.session.clone(), call, options);
-        match self.cx.send_request(request).block_task().await {
-            Ok(response) => matches!(
-                response.outcome,
-                RequestPermissionOutcome::Selected(selected) if selected.option_id.0.as_ref() == ALLOW
-            ),
-            Err(e) => {
-                tracing::debug!(error = %e, "permission request");
-                false
-            }
-        }
-    }
-}
-
-/// The option ids of a permission request sent for a native CLI ([`Updates::ask`]).
-const ALLOW: &str = "allow";
-const REJECT: &str = "reject";
-
-/// Whether the tool call `call` describes, which the CLI asks to run, may: asked of the client through `updates`, the
-/// running prompt's, when the ant asks ants about its tools ([`Cli::asks`]), else denied ([`deny_approval`]).
-/// `request` describes it for the log.
-pub(crate) async fn approve(cli: &Cli, updates: Option<Updates>, call: ToolCallUpdate, request: &str) -> bool {
-    match updates.filter(|_| cli.asks()) {
-        Some(updates) => updates.ask(call).await,
-        None => {
-            deny_approval(cli, request);
-            false
-        }
-    }
-}
-
-/// Whether argument `arg` of a definition gives `flag`, alone or with its `=value`.
-pub(crate) fn is_flag(arg: &str, flag: &str) -> bool {
-    arg.strip_prefix(flag).is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
 }
 
 /// The text of a prompt's blocks, joined by blank lines.
@@ -670,58 +484,6 @@ pub(crate) fn mcp_status(word: Option<&str>) -> ants_proto::McpStatus {
     }
 }
 
-/// The CLI says it is not signed in: ACP's `auth_required`, which makes the daemon hold messages and name the
-/// definition's `sign_in`.
-pub(crate) fn signed_out(detail: impl fmt::Display) -> Error {
-    Error::new(ErrorCode::AUTH_REQUIRED, format!("not signed in: {detail}"))
-}
-
-/// The provider rate limited or is overloaded, with the HTTP status it answered and how long it says to wait, if
-/// known: a message [`crate::limits::ratelimit::classify`] reads as a rate limit and its retry hint.
-pub(crate) fn rate_limited(status: Option<u16>, retry_after: Option<Duration>, detail: impl fmt::Display) -> Error {
-    let status = status.map_or_default(|status| format!(" (status {status})"));
-    failed(format!("rate limit{status}: {detail}{}", hint(retry_after)))
-}
-
-/// The provider's quota or usage allowance is exhausted, until `retry_after` if known: a message
-/// [`crate::limits::ratelimit::classify`] reads as an exhausted quota (or, back within 5 minutes, as a rate limit).
-pub(crate) fn quota_exhausted(retry_after: Option<Duration>, detail: impl fmt::Display) -> Error {
-    failed(format!("quota exceeded: {detail}{}", hint(retry_after)))
-}
-
-/// The session outgrew the model's context window: a message [`crate::limits::overflow`] recognizes, so the daemon retries
-/// the prompt once in a new session seeded with the thread's history.
-pub(crate) fn context_overflow(detail: impl fmt::Display) -> Error {
-    failed(format!("context window exceeded: {detail}"))
-}
-
-/// Any other failure, `detail` naming it as the CLI did; the daemon still reads the common phrases of sign-in, limits
-/// and context overflow in it.
-pub(crate) fn failed(detail: impl fmt::Display) -> Error {
-    Error::new(ErrorCode::INTERNAL_ERROR, detail.to_string())
-}
-
-/// A request the protocol does not support.
-pub(crate) fn unsupported(what: &str) -> Error {
-    Error::new(ErrorCode::METHOD_NOT_FOUND, format!("{what} is not supported"))
-}
-
-fn hint(retry_after: Option<Duration>) -> String {
-    retry_after.map_or_default(|wait| format!("; retry after {}s", wait.as_secs().max(1)))
-}
-
-/// Log that a native approval request, `request` describing what the CLI asked to do, is denied; the caller answers
-/// the CLI with its protocol's denial. Unless the ant asks ants about its tools ([`approve`]), no tool request of a
-/// native protocol reaches `ants.approvals`: the definition's native permission settings decide what runs unasked,
-/// and what the CLI would ask a human about is denied at once rather than left waiting.
-pub(crate) fn deny_approval(cli: &Cli, request: &str) {
-    tracing::warn!(
-        harness = cli.name(),
-        request,
-        "denied a tool request of the harness: its definition's native permission settings decide which tools run"
-    );
-}
-
 /// The ACP id of a session the CLI knows as `id` whose cost totals start at `base` US dollars, carried over from the
 /// session it was forked from: `<id>~<base in micro-dollars>`. The daemon stores the ACP id in `ants_sessions`, so a
 /// fork resumed after a restart still reports only its own cost ([`cost_base`]).
@@ -736,303 +498,4 @@ pub(crate) fn cost_base(id: &str) -> (&str, f64) {
         Some((cli, Ok(micros))) if !cli.is_empty() => (cli, micros as f64 / 1e6),
         _ => (id, 0.0),
     }
-}
-
-/// An open session, with the model and reasoning effort it runs.
-struct Live<S> {
-    session: Arc<S>,
-    settings: Mutex<BTreeMap<&'static str, String>>,
-    /// The prompts running in it.
-    prompts: AtomicUsize,
-}
-
-/// A prompt running in a session, counted until it ends, however it does.
-struct Prompting<'a>(&'a AtomicUsize);
-
-impl<'a> Prompting<'a> {
-    fn new(prompts: &'a AtomicUsize) -> Self {
-        prompts.fetch_add(1, Ordering::Relaxed);
-        Self(prompts)
-    }
-}
-
-impl Drop for Prompting<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-/// The ACP agent side of one connection.
-struct Translator<N: Native> {
-    cli: Cli,
-    native: tokio::sync::OnceCell<N>,
-    sessions: Mutex<HashMap<SessionId, Arc<Live<N::Session>>>>,
-}
-
-/// The in-process ACP agent translating to protocol `N` for `cli`.
-fn connect<N: Native>(cli: Cli) -> DynConnectTo<Client> {
-    let name = cli.name().to_owned();
-    let t = Arc::new(Translator::<N> { cli, native: tokio::sync::OnceCell::new(), sessions: Mutex::default() });
-    let [t1, t2, t3, t4, t5, t6, t7, t8, t9, t10] = [(); 10].map(|()| t.clone());
-    DynConnectTo::new(
-        Agent
-            .v1()
-            .name(name)
-            .on_receive_request(
-                async move |r: InitializeRequest, responder, cx| answer(&cx, responder, t1.clone().initialize(r)),
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |r: NewSessionRequest, responder, cx| answer(&cx, responder, t2.clone().new_session(r)),
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |r: LoadSessionRequest, responder, cx| answer(&cx, responder, t3.clone().load_session(r)),
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |r: ForkSessionRequest, responder, cx| answer(&cx, responder, t4.clone().fork_session(r)),
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |r: PromptRequest, responder, cx| {
-                    let work = t5.clone().prompt(r, cx.clone());
-                    answer(&cx, responder, work)
-                },
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_notification(
-                async move |n: CancelNotification, cx| {
-                    let live = t6.live(&n.session_id);
-                    cx.spawn(async move {
-                        match live {
-                            Ok(live) => live.session.cancel().await,
-                            Err(e) => tracing::debug!(error = %e, "session/cancel"),
-                        }
-                        Ok(())
-                    })
-                },
-                agent_client_protocol::on_receive_notification!(),
-            )
-            .on_receive_request(
-                async move |r: CloseSessionRequest, responder, cx| answer(&cx, responder, t9.clone().close_session(r)),
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |r: SetSessionModeRequest, responder, cx| answer(&cx, responder, t7.clone().set_mode(r)),
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |r: SetSessionConfigOptionRequest, responder, cx| {
-                    answer(&cx, responder, t8.clone().set_option(r))
-                },
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |r: SteerRequest, responder, cx| answer(&cx, responder, t10.clone().steer(r)),
-                agent_client_protocol::on_receive_request!(),
-            ),
-    )
-}
-
-/// Answer a request with what `work` comes to, off the dispatch loop so that it holds up no other message.
-fn answer<R: JsonRpcResponse>(
-    cx: &ConnectionTo<Client>,
-    responder: Responder<R>,
-    work: impl Future<Output = Result<R, Error>> + Send + 'static,
-) -> Result<(), Error> {
-    cx.spawn(async move { responder.respond_with_result(work.await) })
-}
-
-impl<N: Native> Translator<N> {
-    async fn initialize(self: Arc<Self>, init: InitializeRequest) -> Result<InitializeResponse, Error> {
-        let native = N::start(self.cli.clone()).await?;
-        let info = native.info();
-        if self.native.set(native).is_err() {
-            return Err(Error::new(ErrorCode::INVALID_REQUEST, "initialize was already called"));
-        }
-        let mut sessions = SessionCapabilities::new().close(SessionCloseCapabilities::new());
-        if info.fork {
-            sessions = sessions.fork(SessionForkCapabilities::new());
-        }
-        let capabilities = AgentCapabilities::new()
-            .load_session(info.load)
-            .session_capabilities(sessions)
-            .prompt_capabilities(PromptCapabilities::new().image(info.images))
-            .mcp_capabilities(McpCapabilities::new().http(info.http_mcp));
-        let capabilities = if info.steer { advertise_steering(capabilities) } else { capabilities };
-        let methods = self.cli.harness.sign_in().map(|command| {
-            AuthMethod::Agent(AuthMethodAgent::new("sign_in", "Sign in").description(command.to_owned()))
-        });
-        Ok(InitializeResponse::new(init.protocol_version)
-            .agent_info(Implementation::new(info.name, info.version))
-            .agent_capabilities(capabilities)
-            .auth_methods(methods.into_iter().collect()))
-    }
-
-    fn native(&self) -> Result<&N, Error> {
-        self.native.get().ok_or_else(|| Error::new(ErrorCode::INVALID_REQUEST, "initialize first"))
-    }
-
-    /// The CLI, to open a session with: signed out while its credentials are ones a provider refused at a prompt.
-    fn opening(&self) -> Result<&N, Error> {
-        let native = self.native()?;
-        let Some(Credentials { place, fingerprint }) = native.credentials() else { return Ok(native) };
-        match REFUSED.locked().get(&(place, fingerprint)) {
-            Some(refused) => Err(Error::new(ErrorCode::AUTH_REQUIRED, refused.clone())),
-            None => Ok(native),
-        }
-    }
-
-    /// Note that the provider refused the CLI's credentials at a prompt, which said `e`.
-    fn refused(&self, e: &Error) {
-        let Some(credentials) = self.native.get().and_then(N::credentials) else { return };
-        tracing::warn!(
-            harness = self.cli.name(),
-            credentials = credentials.place,
-            "credentials refused at a prompt; the harness stays signed out until they change"
-        );
-        let detail = format!("{} (refused at a prompt; {} unchanged since)", e.message, credentials.place);
-        REFUSED.locked().insert((credentials.place, credentials.fingerprint), detail);
-    }
-
-    fn live(&self, id: &SessionId) -> Result<Arc<Live<N::Session>>, Error> {
-        let live = self.sessions.locked().get(id).cloned();
-        live.ok_or_else(|| Error::new(ErrorCode::RESOURCE_NOT_FOUND, format!("no session {id}")))
-    }
-
-    /// Keep `session` open as `id`, with the ant's settings: the session modes and selectors to answer with.
-    fn opened(
-        &self,
-        id: SessionId,
-        session: N::Session,
-    ) -> (SessionId, Option<SessionModeState>, Vec<SessionConfigOption>) {
-        let mut settings = BTreeMap::new();
-        for (setting, value) in [(Setting::Model, self.cli.model()), (Setting::ReasoningEffort, self.cli.effort())] {
-            if let Some(value) = value {
-                settings.insert(setting.id(), value.to_owned());
-            }
-        }
-        let options = options(&settings);
-        let live = Live { session: Arc::new(session), settings: Mutex::new(settings), prompts: AtomicUsize::new(0) };
-        self.sessions.locked().insert(id.clone(), Arc::new(live));
-        let modes = self.cli.mode().map(|mode| {
-            SessionModeState::new(mode.to_owned(), vec![SessionMode::new(mode.to_owned(), mode.to_owned())])
-        });
-        (id, modes, options)
-    }
-
-    async fn new_session(self: Arc<Self>, request: NewSessionRequest) -> Result<NewSessionResponse, Error> {
-        let skills = skills::of_meta(request.meta.as_ref());
-        let open =
-            Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: self.cli.report.clone(), skills };
-        let session = self.opening()?.new_session(open).await?;
-        let (id, modes, options) = self.opened(SessionId::new(session.id()), session);
-        Ok(NewSessionResponse::new(id).modes(modes).config_options(options))
-    }
-
-    async fn load_session(self: Arc<Self>, request: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
-        let skills = skills::of_meta(request.meta.as_ref());
-        let open =
-            Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: self.cli.report.clone(), skills };
-        let session = self.opening()?.load_session(&request.session_id.0, open).await?;
-        let (_, modes, options) = self.opened(request.session_id, session);
-        Ok(LoadSessionResponse::new().modes(modes).config_options(options))
-    }
-
-    async fn fork_session(self: Arc<Self>, request: ForkSessionRequest) -> Result<ForkSessionResponse, Error> {
-        let native = self.opening()?;
-        if !native.info().fork {
-            return Err(unsupported("session/fork"));
-        }
-        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: None, skills: None };
-        let session = native.fork_session(&request.session_id.0, open).await?;
-        let (id, modes, options) = self.opened(SessionId::new(session.id()), session);
-        Ok(ForkSessionResponse::new(id).modes(modes).config_options(options))
-    }
-
-    async fn prompt(
-        self: Arc<Self>,
-        request: PromptRequest,
-        cx: ConnectionTo<Client>,
-    ) -> Result<PromptResponse, Error> {
-        let live = self.live(&request.session_id)?;
-        let updates = Updates { cx, session: request.session_id };
-        let prompting = Prompting::new(&live.prompts);
-        let done = live.session.prompt(request.prompt, updates).await;
-        drop(prompting);
-        if let Err(e) = &done
-            && e.code == ErrorCode::AUTH_REQUIRED
-        {
-            self.refused(e);
-        }
-        done
-    }
-
-    async fn steer(self: Arc<Self>, request: SteerRequest) -> Result<SteerResponse, Error> {
-        let live = self.live(&request.session_id)?;
-        let accepted = self.native()?.info().steer
-            && live.prompts.load(Ordering::Relaxed) > 0
-            && live.session.steer(request.prompt).await?;
-        Ok(SteerResponse { accepted })
-    }
-
-    /// Forget a session the daemon abandoned, as on a context overflow, cancelling its prompt if one runs: dropped, it
-    /// ends what runs for it alone, such as Claude Code's process or agy's and its private directory.
-    async fn close_session(self: Arc<Self>, request: CloseSessionRequest) -> Result<CloseSessionResponse, Error> {
-        let live = self.live(&request.session_id)?;
-        self.sessions.locked().remove(&request.session_id);
-        if live.prompts.load(Ordering::Relaxed) > 0 {
-            live.session.cancel().await;
-        }
-        live.session.close().await;
-        Ok(CloseSessionResponse::new())
-    }
-
-    async fn set_mode(self: Arc<Self>, request: SetSessionModeRequest) -> Result<SetSessionModeResponse, Error> {
-        self.live(&request.session_id)?;
-        match self.cli.mode() {
-            Some(mode) if *request.mode_id.0 == *mode => Ok(SetSessionModeResponse::new()),
-            _ => Err(failed(format!(
-                "harness {}: the session mode is the definition's mode, the CLI's permission mode",
-                self.cli.name()
-            ))),
-        }
-    }
-
-    async fn set_option(
-        self: Arc<Self>,
-        request: SetSessionConfigOptionRequest,
-    ) -> Result<SetSessionConfigOptionResponse, Error> {
-        let live = self.live(&request.session_id)?;
-        let setting = match &*request.config_id.0 {
-            "model" => Setting::Model,
-            "reasoning_effort" => Setting::ReasoningEffort,
-            other => return Err(Error::new(ErrorCode::INVALID_PARAMS, format!("no session setting {other}"))),
-        };
-        let Some(value) = request.value.as_value_id().map(|value| value.0.to_string()) else {
-            return Err(Error::new(ErrorCode::INVALID_PARAMS, format!("{} takes a value id", setting.id())));
-        };
-        let current = live.settings.locked().get(setting.id()).cloned();
-        if current.as_deref() != Some(value.as_str()) {
-            live.session.configure(setting, &value).await?;
-            live.settings.locked().insert(setting.id(), value);
-        }
-        Ok(SetSessionConfigOptionResponse::new(options(&live.settings.locked())))
-    }
-}
-
-/// The selectors of a session running `settings`, each offering the value it runs.
-fn options(settings: &BTreeMap<&'static str, String>) -> Vec<SessionConfigOption> {
-    settings
-        .iter()
-        .map(|(&id, value)| {
-            let (name, category) = match id {
-                "model" => ("Model", SessionConfigOptionCategory::Model),
-                _ => ("Reasoning effort", SessionConfigOptionCategory::ThoughtLevel),
-            };
-            let offered = vec![SessionConfigSelectOption::new(value.clone(), value.clone())];
-            SessionConfigOption::select(id, name, value.clone(), offered).category(category)
-        })
-        .collect()
 }

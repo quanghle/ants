@@ -12,29 +12,31 @@
 //! ([`super::approve`]). Cancel is Claude Code's `interrupt`; the process is killed when the
 //! turn does not end within [`INTERRUPT_GRACE`].
 
+mod control;
+mod failure;
+mod turn;
+
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use agent_client_protocol::Error;
-use agent_client_protocol::v1::schema::{
-    ContentBlock, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptResponse, StopReason, ToolCall,
-    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-};
+use agent_client_protocol::v1::schema::{ContentBlock, PromptResponse};
 use ants_proto::McpServerState;
 use anyhow::bail;
 use serde_json::{Value, json};
-use tokio::process::{ChildStdin, ChildStdout};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 
+use self::control::{Shared, control_request, read};
+use self::failure::{ended, error_text};
+use self::turn::{Turn, token_counts, window};
 use super::io::{older, probe_version};
-use super::turn::{Reply, Spent, Tokens};
+use super::turn::{Spent, Tokens};
 use super::{
-    Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates, approve,
-    based_id, context_overflow, cost_base, deny_approval, failed, is_flag, mcp_servers_json, quota_exhausted,
-    rate_limited, signed_out,
+    Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Updates, based_id, cost_base,
+    failed, is_flag, mcp_servers_json, signed_out,
 };
 use crate::harness::Skills;
 use crate::sync::MutexExt as _;
@@ -81,29 +83,6 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(10);
 
 /// How long a closed session's CLI has to exit, writing its cost totals to the transcript, before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(10);
-
-/// What a tool request Claude Code asks about is answered with, unless ants allow it.
-const DENIED: &str = "Denied: this harness runs only the tools its permission settings allow.";
-
-/// What a tool request ants were asked about and did not allow is answered with.
-const REJECTED: &str = "Rejected: the ant's allow rules and approvers did not allow this tool call.";
-
-/// The starts of Claude Code's messages of an exhausted plan, credit or spend allowance.
-const USAGE_LIMITS: &[&str] = &[
-    "You've hit your",
-    "You've reached your",
-    "You're out of usage credits",
-    "You're out of extra usage",
-    "Your org is out of usage",
-    "Your seat type doesn't include",
-    "Your usage allocation has been disabled",
-    "Your group's usage limit is set to $0",
-    "Credit balance is too low",
-    "requires usage credits",
-];
-
-/// The starts of Claude Code's messages of a conversation outgrowing the model's context window.
-const OVERFLOWS: &[&str] = &["Prompt is too long", "Context limit reached", "Context exceeds", "Request too large"];
 
 pub(crate) struct Claude {
     cli: Cli,
@@ -235,10 +214,7 @@ impl Claude {
             )));
         }
         let servers = mcp_servers_json(&open.mcp_servers);
-        let mut cli = self.cli.clone();
-        for (name, value) in ENV {
-            cli.env.entry((*name).to_owned()).or_insert_with(|| (*value).to_owned());
-        }
+        let cli = ENV.iter().fold(self.cli.clone(), |cli, (name, value)| cli.with_env_default(name, value));
         let (process, stdin, stdout) = cli.spawn(self.args(&how, &servers, open.skills.as_ref()), Some(&open.cwd))?;
         let (events, received) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
@@ -335,120 +311,6 @@ fn no_credentials(account: &Value) -> bool {
     account["tokenSource"] == "none"
         && account["apiKeySource"].as_str().is_none_or(|source| source == "none")
         && account["apiProvider"].as_str().is_none_or(|provider| provider == "firstParty")
-}
-
-/// What a session's process and its reader share.
-struct Shared {
-    cli: Cli,
-    /// The session's working directory, which tool titles are relative to.
-    cwd: PathBuf,
-    /// Where the tool requests of the turn running go, when the ant asks ants about its tools.
-    asking: Mutex<Option<Updates>>,
-    writer: JsonWriter<ChildStdin>,
-    /// Taken when the session closes.
-    process: tokio::sync::Mutex<Option<Process>>,
-    /// Control requests awaiting their response, by id; None once the CLI's output ended.
-    pending: Mutex<Option<HashMap<String, oneshot::Sender<Value>>>>,
-    requests: AtomicU64,
-}
-
-impl Shared {
-    /// Send control request `request` and await its response.
-    async fn control(&self, request: Value) -> Result<Value, Error> {
-        let id = format!("ants-{}", self.requests.fetch_add(1, Ordering::Relaxed) + 1);
-        let (tx, rx) = oneshot::channel();
-        let open = self.pending.locked().as_mut().map(|pending| pending.insert(id.clone(), tx)).is_some();
-        if !open {
-            return Err(self.exited().await);
-        }
-        let subtype = request["subtype"].as_str().unwrap_or_default().to_owned();
-        if self.writer.send(&control_request(&id, &request)).await.is_err() {
-            return Err(self.exited().await);
-        }
-        let Ok(response) = rx.await else { return Err(self.exited().await) };
-        if response["subtype"] == "success" {
-            Ok(response["response"].clone())
-        } else {
-            Err(failed(format!("{}: {subtype}: {}", self.cli.name(), response["error"].as_str().unwrap_or("failed"))))
-        }
-    }
-
-    /// Answer a control request of the CLI: a tool request as ants decide ([`approve`]), refusing anything else.
-    async fn answer(&self, message: &Value) {
-        let (id, request) = (&message["request_id"], &message["request"]);
-        let response = if request["subtype"] == "can_use_tool" {
-            let tool = request["tool_name"].as_str().unwrap_or("a tool");
-            let input = &request["input"];
-            let (kind, title) = describe(tool, input, &self.cwd);
-            let path = ["file_path", "notebook_path", "path"].iter().find_map(|key| input[key].as_str());
-            let fields = ToolCallUpdateFields::new()
-                .kind(kind)
-                .title(title)
-                .raw_input(input.clone())
-                .locations(path.map(|path| vec![ToolCallLocation::new(path)]));
-            let call_id = request["tool_use_id"].as_str().or(id.as_str()).unwrap_or_default();
-            let call = ToolCallUpdate::new(call_id.to_owned(), fields);
-            let updates = self.asking.locked().clone();
-            let decided = if approve(&self.cli, updates, call, &format!("{tool} {input}")).await {
-                json!({ "behavior": "allow", "updatedInput": input })
-            } else {
-                json!({ "behavior": "deny", "message": if self.cli.asks() { REJECTED } else { DENIED } })
-            };
-            json!({ "subtype": "success", "request_id": id, "response": decided })
-        } else {
-            let subtype = request["subtype"].as_str().unwrap_or_default();
-            json!({ "subtype": "error", "request_id": id, "error": format!("Unsupported control request subtype: {subtype}") })
-        };
-        if let Err(e) = self.writer.send(&json!({ "type": "control_response", "response": response })).await {
-            tracing::debug!(error = %e, "answering a control request of Claude Code");
-        }
-    }
-
-    /// The error of the CLI's output ending.
-    async fn exited(&self) -> Error {
-        match self.process.lock().await.as_mut() {
-            Some(process) => process.exited().await,
-            None => failed(format!("{} stopped", self.cli.name())),
-        }
-    }
-}
-
-/// Control request `request` as Claude Code reads it, the response coming under `id`.
-fn control_request(id: &str, request: &Value) -> Value {
-    json!({ "type": "control_request", "request_id": id, "request": request })
-}
-
-/// Read the CLI's output: responses to control requests to whoever awaits them, its own control requests answered,
-/// everything else to `events`.
-async fn read(mut lines: JsonLines<ChildStdout>, shared: Arc<Shared>, events: mpsc::UnboundedSender<Value>) {
-    loop {
-        let message = match lines.next().await {
-            Ok(Some(message)) => message,
-            Ok(None) => break,
-            Err(e) => {
-                tracing::warn!(harness = shared.cli.name(), error = %e, "reading Claude Code");
-                break;
-            }
-        };
-        match message["type"].as_str() {
-            Some("control_response") => {
-                let response = &message["response"];
-                let id = response["request_id"].as_str().unwrap_or_default();
-                let waiting = shared.pending.locked().as_mut().and_then(|pending| pending.remove(id));
-                if let Some(waiting) = waiting {
-                    let _ = waiting.send(response.clone());
-                }
-            }
-            // Answered off the loop, as ants may take a while to decide on a tool request.
-            Some("control_request") => {
-                let shared = shared.clone();
-                tokio::spawn(async move { shared.answer(&message).await });
-            }
-            Some("control_cancel_request") => {}
-            _ => super::io::forward(&events, message),
-        }
-    }
-    shared.pending.locked().take();
 }
 
 pub(crate) struct ClaudeSession {
@@ -704,295 +566,6 @@ fn content(prompt: &[ContentBlock]) -> Vec<Value> {
             _ => None,
         })
         .collect()
-}
-
-/// One turn's events, as they stream to the daemon.
-struct Turn<'a> {
-    cli: &'a Cli,
-    cwd: &'a Path,
-    updates: &'a Updates,
-    /// The model of the turn, from its `init` event.
-    model: Option<String>,
-    /// The reply: messages streamed as deltas, by id, are not sent again whole.
-    reply: Reply,
-    /// TodoWrite calls, sent as the plan rather than as tool calls.
-    todos: HashSet<String>,
-    /// Tokens in the context window as of the turn's last model call.
-    used: u64,
-    /// The kind of error of the turn's last assistant message, such as `rate_limit`.
-    error: Option<String>,
-    /// Claude Code's own message of the turn, such as an error's.
-    synthetic: Option<String>,
-    /// The last rate limit state reported.
-    limit: Option<Value>,
-    /// The results so far: a steer's turn follows one, its reply then parted from what came before by a blank line.
-    part: u64,
-}
-
-impl<'a> Turn<'a> {
-    fn new(cli: &'a Cli, cwd: &'a Path, updates: &'a Updates) -> Self {
-        Self {
-            cli,
-            cwd,
-            updates,
-            model: None,
-            reply: Reply::default(),
-            todos: HashSet::new(),
-            used: 0,
-            error: None,
-            synthetic: None,
-            limit: None,
-            part: 0,
-        }
-    }
-
-    /// Take an event of the CLI; the turn's result when it ends it.
-    fn event(&mut self, event: Value) -> Option<Value> {
-        // Subagents' own messages stay inside their Task call.
-        if !event["parent_tool_use_id"].is_null() {
-            return None;
-        }
-        match event["type"].as_str() {
-            Some("stream_event") => self.stream(&event["event"]),
-            Some("assistant") => self.assistant(&event),
-            Some("user") => self.tool_results(&event["message"]["content"]),
-            Some("system") => self.system(&event),
-            Some("rate_limit_event") => self.limit = Some(event["rate_limit_info"].clone()),
-            Some("result") => return Some(event),
-            _ => {}
-        }
-        None
-    }
-
-    fn stream(&mut self, event: &Value) {
-        match event["type"].as_str() {
-            Some("message_start") => {
-                if let Some(id) = event["message"]["id"].as_str() {
-                    self.reply.streams(id);
-                }
-            }
-            Some("content_block_delta") => {
-                let delta = &event["delta"];
-                match (delta["type"].as_str(), delta["text"].as_str(), delta["thinking"].as_str()) {
-                    (Some("text_delta"), Some(text), _) if !text.is_empty() => self.say(text),
-                    (Some("thinking_delta"), _, Some(thinking)) if !thinking.is_empty() => {
-                        self.updates.thought(thinking);
-                    }
-                    _ => {}
-                }
-            }
-            Some("message_delta") => {
-                let usage = &event["usage"];
-                let tokens =
-                    ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"];
-                self.used = tokens.iter().filter_map(|key| usage[key].as_u64()).sum();
-            }
-            _ => {}
-        }
-    }
-
-    fn assistant(&mut self, event: &Value) {
-        let message = &event["message"];
-        if let Some(kind) = event["error"].as_str() {
-            self.error = Some(kind.to_owned());
-        }
-        let synthetic = message["model"] == "<synthetic>";
-        let streamed = message["id"].as_str().is_some_and(|id| self.reply.streamed(id));
-        for block in message["content"].as_array().into_iter().flatten() {
-            match (block["type"].as_str(), block["text"].as_str()) {
-                (Some("text"), Some(text)) if synthetic => self.synthetic = Some(text.to_owned()),
-                (Some("text"), Some(text)) if !streamed && !text.is_empty() => self.say(text),
-                (Some("thinking"), _) if !streamed => {
-                    if let Some(thinking) = block["thinking"].as_str().filter(|thinking| !thinking.is_empty()) {
-                        self.updates.thought(thinking);
-                    }
-                }
-                (Some("tool_use"), _) => self.tool_use(block),
-                _ => {}
-            }
-        }
-    }
-
-    fn say(&mut self, text: &str) {
-        self.reply.say(self.updates, &self.part.to_string(), text);
-    }
-
-    fn tool_use(&mut self, block: &Value) {
-        let (Some(id), Some(name)) = (block["id"].as_str(), block["name"].as_str()) else { return };
-        let input = &block["input"];
-        if name == "TodoWrite" {
-            self.todos.insert(id.to_owned());
-            self.updates.plan(plan(input));
-            return;
-        }
-        let (kind, title) = describe(name, input, self.cwd);
-        let path = ["file_path", "notebook_path", "path"].iter().find_map(|key| input[key].as_str());
-        let line = input["offset"].as_u64().and_then(|line| u32::try_from(line.max(1)).ok());
-        let locations = path.map(|path| ToolCallLocation::new(path).line(line)).into_iter().collect();
-        let call =
-            ToolCall::new(id.to_owned(), title).kind(kind).status(ToolCallStatus::InProgress).raw_input(input.clone());
-        self.updates.tool_call(call.locations(locations));
-    }
-
-    fn tool_results(&self, content: &Value) {
-        for block in content.as_array().into_iter().flatten().filter(|block| block["type"] == "tool_result") {
-            let Some(id) = block["tool_use_id"].as_str().filter(|id| !self.todos.contains(*id)) else { continue };
-            let status = if block["is_error"] == true { ToolCallStatus::Failed } else { ToolCallStatus::Completed };
-            self.updates.tool_update(ToolCallUpdate::new(id.to_owned(), ToolCallUpdateFields::new().status(status)));
-        }
-    }
-
-    fn system(&mut self, event: &Value) {
-        match event["subtype"].as_str() {
-            Some("init") => {
-                self.model = event["model"].as_str().map(str::to_owned);
-                let failing = event["mcp_servers"].as_array().into_iter().flatten().filter(|s| s["status"] == "failed");
-                for server in failing {
-                    tracing::warn!(harness = self.cli.name(), server = %server["name"], "Claude Code failed to start an MCP server");
-                }
-            }
-            Some("permission_denied") => {
-                let tool = event["tool_name"].as_str().unwrap_or("a tool");
-                deny_approval(self.cli, &format!("{tool}: {}", event["message"].as_str().unwrap_or_default()));
-            }
-            Some("api_retry") => {
-                tracing::info!(harness = self.cli.name(), error = %event["error"], status = %event["error_status"], "Claude Code retries a model call");
-            }
-            _ => {}
-        }
-    }
-}
-
-/// What a tool call of Claude Code's tool `name` with `input` is shown as.
-fn describe(name: &str, input: &Value, cwd: &Path) -> (ToolKind, String) {
-    let text = |key: &str| input[key].as_str().unwrap_or_default();
-    let path = |key: &str| {
-        let path = Path::new(text(key));
-        path.strip_prefix(cwd).unwrap_or(path).display().to_string()
-    };
-    let (kind, title) = match name {
-        "Bash" | "PowerShell" => (ToolKind::Execute, text("command").to_owned()),
-        "Read" => (ToolKind::Read, format!("Read {}", path("file_path"))),
-        "Write" => (ToolKind::Edit, format!("Write {}", path("file_path"))),
-        "Edit" | "MultiEdit" => (ToolKind::Edit, format!("Edit {}", path("file_path"))),
-        "NotebookEdit" => (ToolKind::Edit, format!("Edit {}", path("notebook_path"))),
-        "Glob" => (ToolKind::Search, format!("Find {}", text("pattern"))),
-        "Grep" => (ToolKind::Search, format!("Search {}", text("pattern"))),
-        "ToolSearch" => (ToolKind::Search, format!("Find tools {}", text("query"))),
-        "WebFetch" => (ToolKind::Fetch, format!("Fetch {}", text("url"))),
-        "WebSearch" => (ToolKind::Fetch, format!("Search the web for {}", text("query"))),
-        "Task" | "Agent" => (ToolKind::Think, text("description").to_owned()),
-        "EnterPlanMode" | "ExitPlanMode" => (ToolKind::SwitchMode, String::new()),
-        "Skill" => (ToolKind::Other, format!("Load skill {}", text("skill"))),
-        _ => (ToolKind::Other, String::new()),
-    };
-    let title = if title.trim().is_empty() { name.to_owned() } else { title };
-    (kind, title)
-}
-
-/// The plan of a TodoWrite call: its todos, the one in progress by its active form.
-fn plan(input: &Value) -> Plan {
-    let entries = input["todos"].as_array().into_iter().flatten().map(|todo| {
-        let content = todo["content"].as_str().unwrap_or_default();
-        let (status, content) = match todo["status"].as_str() {
-            Some("in_progress") => (PlanEntryStatus::InProgress, todo["activeForm"].as_str().unwrap_or(content)),
-            Some("completed") => (PlanEntryStatus::Completed, content),
-            _ => (PlanEntryStatus::Pending, content),
-        };
-        PlanEntry::new(content, PlanEntryPriority::Medium, status)
-    });
-    Plan::new(entries.collect())
-}
-
-/// The context window of the turn's model, from its result.
-fn window(result: &Value, model: Option<&str>) -> Option<u64> {
-    let usage = result["modelUsage"].as_object()?;
-    let own = model.and_then(|model| usage.get(model)).and_then(|usage| usage["contextWindow"].as_u64());
-    own.or_else(|| usage.values().filter_map(|usage| usage["contextWindow"].as_u64()).max())
-}
-
-/// The tokens a turn used, every model's: what changed since the last result, else the turn's main calls.
-fn token_counts(result: &Value) -> Tokens {
-    let per_model = result["model_usage_since_last_result"].as_object().filter(|models| !models.is_empty());
-    let [input, output, cache_read, cache_write, thought] = match per_model {
-        Some(models) => {
-            ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "thinkingTokens"]
-                .map(|key| models.values().filter_map(|usage| usage[key].as_u64()).sum())
-        }
-        None => {
-            let usage = &result["usage"];
-            let keys = ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
-            let [input, output, read, write] = keys.map(|key| usage[key].as_u64().unwrap_or_default());
-            [input, output, read, write, usage["output_tokens_details"]["thinking_tokens"].as_u64().unwrap_or_default()]
-        }
-    };
-    Tokens { input, output, cache_read, cache_write, thought }
-}
-
-/// How a turn ended, from its result: a stop reason, or the error the daemon classifies.
-fn ended(result: &Value, turn: &Turn<'_>, interrupted: bool) -> Result<StopReason, Error> {
-    let terminal = result["terminal_reason"].as_str().unwrap_or_default();
-    if interrupted || matches!(terminal, "aborted_streaming" | "aborted_tools") {
-        return Ok(StopReason::Cancelled);
-    }
-    if result["subtype"] == "error_max_turns" {
-        return Ok(StopReason::MaxTurnRequests);
-    }
-    if result["is_error"] != true {
-        return Ok(match result["stop_reason"].as_str() {
-            Some("max_tokens") => StopReason::MaxTokens,
-            Some("refusal") => StopReason::Refusal,
-            _ => StopReason::EndTurn,
-        });
-    }
-    Err(error(result, turn.error.as_deref(), turn.synthetic.as_deref(), turn.limit.as_ref()))
-}
-
-/// The error of a failed turn's `result`, its last assistant message having been of error `kind` (such as
-/// `rate_limit`) and Claude Code's own message `synthetic`, with the last rate limit state `limit`.
-fn error(result: &Value, kind: Option<&str>, synthetic: Option<&str>, limit: Option<&Value>) -> Error {
-    let text = error_text(result, synthetic);
-    let kind = kind.unwrap_or_default();
-    let status = result["api_error_status"].as_u64();
-    if matches!(kind, "authentication_failed" | "oauth_org_not_allowed") || text.to_lowercase().contains("run /login") {
-        return signed_out(text);
-    }
-    let rejected = limit.is_some_and(|limit| limit["status"] == "rejected");
-    if matches!(kind, "billing_error" | "account_on_hold")
-        || rejected
-        || USAGE_LIMITS.iter().any(|start| text.contains(start))
-    {
-        return quota_exhausted(limit.and_then(resets), text);
-    }
-    if kind == "rate_limit" || status == Some(429) {
-        // Claude Code says a capacity limit is "not your usage limit", which would read as an exhausted quota.
-        return rate_limited(Some(429), None, text.replace(" (not your usage limit)", ""));
-    }
-    if kind == "overloaded" || status == Some(529) {
-        return rate_limited(Some(529), None, text);
-    }
-    if result["terminal_reason"] == "prompt_too_long" || OVERFLOWS.iter().any(|start| text.contains(start)) {
-        return context_overflow(text);
-    }
-    failed(text)
-}
-
-/// What a failed turn's `result` says: its message, else its errors, else Claude Code's own message.
-fn error_text(result: &Value, synthetic: Option<&str>) -> String {
-    if let Some(text) = result["result"].as_str().filter(|text| !text.is_empty()) {
-        return text.to_owned();
-    }
-    let errors: Vec<&str> = result["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-    if !errors.is_empty() {
-        return errors.join("; ");
-    }
-    synthetic.map_or_else(|| format!("Claude Code ended the turn with {}", result["subtype"]), str::to_owned)
-}
-
-/// How long until a rejected rate limit resets.
-fn resets(limit: &Value) -> Option<Duration> {
-    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(limit["resetsAt"].as_u64()?);
-    at.duration_since(SystemTime::now()).ok()
 }
 
 #[cfg(all(test, unix))]

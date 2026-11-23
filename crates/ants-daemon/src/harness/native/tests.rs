@@ -7,16 +7,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio, SessionId};
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{
+    EnvVariable, HttpHeader, McpServerHttp, McpServerStdio, NewSessionRequest, PromptRequest, SessionId, TextContent,
+};
 use agent_client_protocol::{Channel, ErrorCode};
 use ants_proto::{HarnessAgent, LimitKind, StatusUpdate, ThreadId};
 use ants_test_support::{StubCli, scratch_dir};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
+use super::translator::Translator;
 use super::*;
 use crate::harness::{
-    Harnesses, Launch, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
+    Harnesses, Launch, Prompt, Readiness, Session, SignedOut, Spend, Steer, SteerRequest, Steering, fork, handshake,
     parse_definitions,
 };
 use crate::limits::ratelimit::Limited;
@@ -512,8 +516,7 @@ async fn a_prompt_dropped_mid_turn_no_longer_counts_as_running() {
     let accepted = ok(4, json!({ "accepted": true }));
     script(&native, None, &[vec![], vec![steering], vec![opened("n1")], vec![], vec![accepted]]);
     let cli = Cli::new(&native.harness, &[], &ModelSettings::default());
-    let translator =
-        Arc::new(Translator::<stub::Stub> { cli, native: tokio::sync::OnceCell::new(), sessions: Mutex::default() });
+    let translator = Arc::new(Translator::<stub::Stub>::new(cli));
     translator.clone().initialize(InitializeRequest::new(ProtocolVersion::V1)).await.unwrap();
     let session = translator.clone().new_session(NewSessionRequest::new(native.dir.clone())).await.unwrap().session_id;
     let said = |text: &str| vec![ContentBlock::Text(TextContent::new(text))];

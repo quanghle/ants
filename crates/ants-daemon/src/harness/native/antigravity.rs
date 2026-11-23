@@ -97,8 +97,8 @@ impl Native for Antigravity {
         Ok(())
     }
 
-    async fn start(mut cli: Cli) -> Result<Self, Error> {
-        cli.env.entry(AUTO_UPDATE.to_owned()).or_insert_with(|| "true".to_owned());
+    async fn start(cli: Cli) -> Result<Self, Error> {
+        let cli = cli.with_env_default(AUTO_UPDATE, "true");
         let version = version(&cli).await?;
         Ok(Self { cli, version, spare: Mutex::default() })
     }
@@ -364,7 +364,7 @@ impl AgySession {
                 launch.extend([name.to_owned(), value.to_owned()]);
             }
         }
-        let cli = Cli { args, ..cli.clone() };
+        let cli = cli.with_args(args);
         let (running, id) = run(&cli, &launch, &open.cwd, resume).await?;
         Ok(Self {
             id,

@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::path::Path;
-use std::process::{ExitStatus, Stdio};
+use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,69 +31,12 @@ const EXIT_GRACE: Duration = Duration::from_secs(1);
 /// The longest line read; a longer one fails the input.
 const MAX_LINE: usize = 64 * 1024 * 1024;
 
-impl Cli {
-    /// The CLI's command: its executable, with `protocol_args` before the definition's arguments and those of the ant's
-    /// `context`, the definition's environment with the ant's over it, added to the daemon's. Its stdio is piped, it
-    /// runs without a shell, in a process group of its own on Unix (so a stop reaches what it starts) and without a
-    /// console window on Windows, and it is killed when dropped.
-    pub(crate) fn command<I, S>(&self, protocol_args: I) -> Command
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<std::ffi::OsStr>,
-    {
-        let mut command = Command::new(&self.program);
-        command
-            .args(protocol_args)
-            .args(&self.args)
-            .envs(&self.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
-        #[cfg(windows)]
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-        command
-    }
-
-    /// Start the CLI ([`Self::command`]) with `protocol_args`, working in `cwd`, else in the daemon's directory: the
-    /// process, and its stdin and stdout to speak to it through.
-    pub(crate) fn spawn<I, S>(
-        &self,
-        protocol_args: I,
-        cwd: Option<&Path>,
-    ) -> Result<(Process, ChildStdin, ChildStdout), Error>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<std::ffi::OsStr>,
-    {
-        let mut command = self.command(protocol_args);
-        if let Some(cwd) = cwd {
-            command.current_dir(cwd);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|e| super::failed(format!("{}: starting {}: {e}", self.name(), self.program.display())))?;
-        let stderr = child.stderr.take().map(|stderr| {
-            let tail = Arc::new(Mutex::new(VecDeque::new()));
-            let task = tokio::spawn(drain(stderr, self.name().to_owned(), tail.clone()));
-            (tail, task)
-        });
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            return Err(super::failed("no stdio"));
-        };
-        let process = Process { name: self.name().to_owned(), pid: child.id(), child: Some(child), stderr };
-        Ok((process, stdin, stdout))
-    }
-}
-
 /// How long a CLI's `--version` has to answer.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run the CLI's `--version`, without the definition's arguments: what it printed.
 pub(crate) async fn probe_version(cli: &Cli) -> Result<std::process::Output, Error> {
-    let bare = Cli { args: Vec::new(), ..cli.clone() };
+    let bare = cli.with_args(Vec::new());
     let program = cli.program().display();
     match tokio::time::timeout(VERSION_TIMEOUT, bare.command(["--version"]).output()).await {
         Ok(Ok(output)) => Ok(output),
@@ -163,6 +106,26 @@ pub(crate) struct Process {
 }
 
 impl Process {
+    /// Start `command`, the CLI of harness `name` whose executable is `program`: the process, and its stdin and stdout
+    /// to speak to it through.
+    pub(super) fn start(
+        name: &str,
+        program: &Path,
+        mut command: Command,
+    ) -> Result<(Self, ChildStdin, ChildStdout), Error> {
+        let mut child =
+            command.spawn().map_err(|e| super::failed(format!("{name}: starting {}: {e}", program.display())))?;
+        let stderr = child.stderr.take().map(|stderr| {
+            let tail = Arc::new(Mutex::new(VecDeque::new()));
+            let task = tokio::spawn(drain(stderr, name.to_owned(), tail.clone()));
+            (tail, task)
+        });
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            return Err(super::failed("no stdio"));
+        };
+        Ok((Self { name: name.to_owned(), pid: child.id(), child: Some(child), stderr }, stdin, stdout))
+    }
+
     /// The last of what it wrote to stderr.
     pub(crate) fn stderr(&self) -> String {
         let Some((tail, _)) = &self.stderr else { return String::new() };
