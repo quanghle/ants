@@ -69,12 +69,12 @@ pub async fn untrusted(
     Ok(None)
 }
 
-/// Why a write made in `context` in answer to a finding is refused ([`ground`]).
+/// Why a write made in `context` in answer to a finding is refused (`ground`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refused {
     /// No dream has the finding named.
     NotFound(String),
-    /// It rests on untrusted text, as [`untrusted`] tells.
+    /// It rests on untrusted text, as `untrusted` tells.
     Untrusted(String),
     /// The dream whose thread it is on, by number, made its [`MAX_DREAM_WRITES`].
     Cap(u64),

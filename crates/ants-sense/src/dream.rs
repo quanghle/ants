@@ -13,7 +13,7 @@
 //! sooner. Its findings, each with an id the ant answers by (`<dream>.<n>`), are the sage's when it answered with some,
 //! with those carried from earlier dreams, and otherwise the packet's own: contradicting votes, memories needing
 //! review, near duplicates, episodes to distill and pending persona and skill proposals made
-//! [`proposal::CONFIRM_AFTER_HOURS`] or more before (`gather::proposals`, [`crate::proposal`]), then what
+//! `proposal::CONFIRM_AFTER_HOURS` or more before (`gather::proposals`, `crate::proposal`), then what
 //! the ant's identity lacks for the work it did, from sense data alone (`identity_findings`), then, for a sage, how
 //! the findings it gave other ants fared, from the records of its reviews alone (`practice_findings`), then the vital
 //! signs of the work turned sharply for the worse (`vitals`). The ant answers each with `sense_dream` (`dream`) as
@@ -70,18 +70,24 @@ pub use count::{TrailGround, TrailRefused};
 pub use finding::{Finding, FindingKind, Judgement, Rested, SavedTrail, Verdict};
 use gather::Gathered;
 pub use gather::{Start, begin, proposal_due};
-pub(crate) use ground::{Making, Refused, ground};
+pub use ground::Refused;
+pub(crate) use ground::{Making, ground};
 pub(crate) use identity_findings::{
     OWN_AFTER_THREADS, PERSONA_AFTER_THREADS, RELATIONSHIP_AFTER_THREADS, SELF_MODEL_AFTER_THREADS, STALE_ACTIVE_DAYS,
 };
 pub(crate) use packet::finding_line;
 pub use packet::{Action, ColonyTrail, ColonyTrails, PACKET_BUDGET, Reader, Thread, packet};
-pub(crate) use review::{Advice, FOLLOW_UP, MAX_TRAIL_FINDINGS, REVIEW_END, TRAIL, parse};
-pub use review::{REVIEW_BEGIN, Review, Reviewed, answered, review_sent};
-pub(crate) use reviews::{FindingTally, REVIEW, ReviewTally, ReviewedFinding, review_tally, tally_lines};
-pub use reviews::{ReviewRecord, ReviewSpend, review_answered, review_received, review_record, review_records};
+pub use review::{
+    Advice, Evidence, FOLLOW_UP, FollowUp, Outline, REVIEW_BEGIN, Review, Reviewed, TRAIL, answered, review_sent,
+};
+pub(crate) use review::{MAX_TRAIL_FINDINGS, REVIEW_END, parse};
+pub use reviews::{
+    AntTally, FindingTally, KindTally, ReviewCost, ReviewRecord, ReviewSpend, ReviewTally, ReviewedFinding,
+    review_answered, review_received, review_record, review_records,
+};
+pub(crate) use reviews::{REVIEW, review_tally, tally_lines};
 pub(crate) use tool::{dream, schema};
-pub use vitals::{Signs, Tally};
+pub use vitals::{Ends, Signs, Tally};
 pub(crate) use vitals::{TREND, before, changes, trend};
 #[cfg(test)]
 pub(crate) use {
@@ -95,9 +101,8 @@ pub(crate) use {
         COSTLY_REVIEW_COST_MICROS, COSTLY_REVIEW_TOKENS, JUDGED_FINDINGS, PRACTICE_DAYS, QUOTED_REASONS,
         REJECTED_FINDINGS,
     },
-    review::{Evidence, FollowUp, MAX_LATE_FINDINGS},
-    reviews::{AntTally, KindTally, ReviewCost},
-    vitals::{CANCELLED_FINDING, CAPPED_FINDING, Ends, FAILED_MIN_CALLS, FAILED_SHARE_FLOOR, REJECTED_FINDING},
+    review::MAX_LATE_FINDINGS,
+    vitals::{CANCELLED_FINDING, CAPPED_FINDING, FAILED_MIN_CALLS, FAILED_SHARE_FLOOR, REJECTED_FINDING},
 };
 
 /// The kind of each dream's item ([`Dream`]).

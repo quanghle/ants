@@ -50,9 +50,9 @@ pub struct Outline {
 impl Outline {
     /// The outline `given` as a sage's answer holds it, `{"name", "description", "args": {"key": "example"},
     /// "phases": ["…"]}`, the name made a [`TrailName`] and each arg's an arg name, an example given as a number or a
-    /// boolean taken as its text, and text past its bounds cut ([`bounds`]): none when it holds no name, description or
-    /// phases, more than [`MAX_ARGS`] args or args whose names clash, or phases fewer than [`MIN_PHASES`] or more than
-    /// [`MAX_PHASES`], so it is kept or refused whole.
+    /// boolean taken as its text, and text past its bounds cut (`bounds`): none when it holds no name, description or
+    /// phases, more than `MAX_ARGS` args or args whose names clash, or phases fewer than `MIN_PHASES` or more than
+    /// `MAX_PHASES`, so it is kept or refused whole.
     pub fn read(given: &Value) -> Option<Self> {
         let object = given.as_object()?;
         let name = name(object.get("name")?.as_str()?)?;

@@ -33,7 +33,7 @@ pub struct ColonyTrails(Option<Vec<ColonyTrail>>);
 
 /// Where a trail an applied finding names stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Standing {
+pub(crate) enum Standing {
     /// The colony's saved trails could not be read.
     Unknown,
     /// No longer saved.
@@ -52,7 +52,7 @@ impl ColonyTrails {
     }
 
     /// Where trail `name` stands.
-    pub fn standing(&self, name: &TrailName) -> Standing {
+    pub(crate) fn standing(&self, name: &TrailName) -> Standing {
         match &self.0 {
             None => Standing::Unknown,
             Some(trails) => trails
@@ -83,7 +83,7 @@ impl ColonyTrails {
 impl Standing {
     /// Whether a finding applied by saving the trail holds: while the trail is saved and its ratings show no more
     /// failed than worked; none when not known.
-    pub fn holds(self) -> Option<bool> {
+    pub(crate) fn holds(self) -> Option<bool> {
         match self {
             Self::Unknown => None,
             Self::Removed => Some(false),
