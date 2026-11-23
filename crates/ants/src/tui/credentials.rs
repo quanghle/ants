@@ -27,7 +27,7 @@ use super::style;
 use crate::credentials::approver::{self, Approver};
 use crate::live::maybe;
 use crate::text::ago;
-use crate::{auth, machines};
+use crate::{ants::machines, auth};
 
 /// How often the requests are gathered; each gathering listens [`approver::LISTEN`], as machines repeat theirs.
 const GATHER_EVERY: Duration = Duration::from_secs(15);

@@ -19,7 +19,7 @@ use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 
-use crate::colony;
+use crate::ants::colony;
 use crate::connection::Nats;
 use crate::messages::{inbox, progress};
 use crate::threads::thread::{self, Pick};

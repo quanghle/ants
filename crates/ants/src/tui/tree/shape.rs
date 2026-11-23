@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 
 use super::super::model::Data;
 use super::super::work::ThreadState;
-use crate::spend::ThreadReport;
+use crate::ants::spend::ThreadReport;
 
 /// How many characters of a message's first line are kept.
 const LINE: usize = 120;

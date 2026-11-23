@@ -12,7 +12,7 @@ use crate::connection::{Connection, Nats};
 use crate::people::{humans, quiet};
 use crate::release::upgrade;
 use crate::threads::{thread, thread_meta};
-use crate::{channel, colony, completions};
+use crate::{ants::colony, channel, completions};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ChannelCommand {

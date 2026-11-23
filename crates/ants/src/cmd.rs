@@ -7,20 +7,20 @@
 //!   handler: what turns the arguments into calls, connects and prints. `cmd/send.rs` serves the commands that
 //!   send (`ask`, `post`, `notes`, `react`, `answer`). A module only one command uses lives in `cmd/`
 //!   whole (`cmd/setup.rs`, `cmd/webhook/add.rs`);
-//! - or in a top-level module, when one function there is the whole command (`colony::show`).
+//! - or in a module outside `cmd/`, when one function there is the whole command (`ants::colony::show`).
 //!
 //! Every handler has one shape: `handler(context, arguments)`. The context comes first: `&Nats` for a command that
 //! acts as the CLI's user, `&Connection` for one that needs the connection options or connects only for some of its
 //! subcommands, none for one that does not connect. The arguments follow, by value: the clap enum of the
 //! subcommands, the command's `clap::Args` struct, or the fields of a variant with three at most; a command with more
 //! gets an `Args` struct in its `cmd/NAME.rs`. The handler in `cmd/NAME.rs` is `run`; `cmd/send.rs` names one
-//! function after each command, and a top-level module (or `ants_daemon`, for `ants mcp`) names it for what it does
-//! (`queue::withdraw`).
+//! function after each command, and a module outside `cmd/` (or `ants_daemon`, for `ants mcp`) names it for what it
+//! does (`ants::queue::withdraw`).
 //!
 //! An arm boxes its handler's future (`Box::pin`) when clippy's `large_futures` flags awaiting it, either here or
 //! where `main.rs` awaits [`run`]: that future is at least as large as the largest one an arm awaits unboxed.
 //!
-//! Top-level modules hold the logic commands share with each other, the terminal UI, the daemon's services and the
+//! The modules outside `cmd/` hold the logic commands share with each other, the terminal UI, the daemon's services and the
 //! assistant: none of them imports from this module, but `cli.rs` for the clap types and tests that drive a command.
 //! The terminal UI ([`crate::tui`]: `ants`, `ants chat`, `ants status`) stays top-level for its size.
 
@@ -64,7 +64,10 @@ use crate::cli::{Cli, Command, DaemonCommand};
 use crate::connection::Connection;
 use crate::release::update;
 use crate::threads::summary;
-use crate::{add, colony, completions, machines, queue, tui};
+use crate::{
+    ants::{add, colony, machines, queue},
+    completions, tui,
+};
 
 /// Run the command `cli` names, or the terminal UI without one.
 pub(crate) async fn run(cli: Cli) -> Result<()> {

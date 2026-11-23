@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 
 pub use self::screen::{HeldLogs, Screen, bracket_pastes, keyboard, warning};
 pub use self::state::{History, Link, State};
-use crate::colony;
+use crate::ants::colony;
 use crate::threads::thread::{self, Parser};
 use crate::threads::thread_meta;
 use crate::tools::{self, Update};

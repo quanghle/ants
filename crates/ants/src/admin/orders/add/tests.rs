@@ -300,7 +300,7 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     let (ants, watched) = tokio::sync::watch::channel(vec![dev_a.clone()]);
     let task = tokio::spawn(host::run(host, watched));
     eventually("m1's daemon records its ants in the hub", async || {
-        !crate::machines::machines_of(&h_js, &dev_a).await.unwrap_or_default().is_empty()
+        !crate::ants::machines::machines_of(&h_js, &dev_a).await.unwrap_or_default().is_empty()
     })
     .await;
 

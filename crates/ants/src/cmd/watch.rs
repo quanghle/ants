@@ -11,7 +11,7 @@ use ants_proto::{
 use anyhow::{Result, bail};
 use futures::StreamExt as _;
 
-use crate::avatars::Faces;
+use crate::ants::avatars::Faces;
 use crate::connection::Nats;
 use crate::messages::reacted::reaction_line;
 use crate::threads::thread;
@@ -41,7 +41,7 @@ pub(crate) async fn run(nats: &Nats<'_>, target: String, thread: Option<thread::
     let (client, js) = nats.connect("ants-watch").await?;
     let filter = watch_filter(target, thread::resolve(thread, nats, &js).await?.as_ref())?;
     let mut sub = relayed::subscribe(&client, filter).await?;
-    let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(&js).await);
+    let faces = crate::ants::avatars::Faces::stdout(crate::ants::avatars::read_or_none(&js).await);
     let mut printer = Printer { faces: Some(faces), ..Printer::default() };
     let behalf = std::sync::Arc::new(crate::people::behalf::Checker::new(nats, &js));
     let _following = behalf.follow();

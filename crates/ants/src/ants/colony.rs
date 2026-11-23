@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 
-use crate::avatars::{self, Faces};
+use crate::ants::avatars::{self, Faces};
 use crate::text::{ago, short, since};
 
 /// How fresh an entry is, judged by its last heartbeat ([`colony::is_live`]).
@@ -427,7 +427,7 @@ pub async fn show(nats: &crate::connection::Nats<'_>, json: bool) -> Result<()> 
     let now = Utc::now();
     let moved: Vec<String> = identities
         .values()
-        .filter_map(|i| i.moved.as_ref().map(|mark| crate::export::moved_line(&i.ant, mark, now)))
+        .filter_map(|i| i.moved.as_ref().map(|mark| crate::ants::export::moved_line(&i.ant, mark, now)))
         .collect();
     let faces = Faces::stdout(identities);
     if json {

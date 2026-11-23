@@ -1,4 +1,4 @@
-//! The ant view: one ant at a glance, as `ants ant show` prints it ([`crate::ant`]). Above, in a box as high as its
+//! The ant view: one ant at a glance, as `ants ant show` prints it ([`crate::ants::ant`]). Above, in a box as high as its
 //! avatar head whose two columns scroll apart ([`Column`]), where and how it runs, as its colony entry tells, beside
 //! what holds it back, what it does now on each thread (as `ants watch ANT` follows it) and what it spent that UTC
 //! day; below, one pane at a time ([`Pane`]): its threads, the messages waiting for it, which [`Io`] asks its daemon
@@ -29,8 +29,8 @@ use super::select::{PAGE, Selection};
 use super::settings;
 use super::style;
 use super::work::{self, Filter};
+use crate::ants::queue::{self, Waiting};
 use crate::live::maybe;
-use crate::queue::{self, Waiting};
 use crate::text::ago;
 
 /// How often the shown ant's queue is asked for.
@@ -295,7 +295,7 @@ impl Page {
         let (mark, color) = super::nav::marker(&entry.into_iter().collect::<Vec<_>>(), now);
         let head = data.looks.head(&self.ant);
         let head_width = head.iter().flatten().map(Line::width).max().map_or(0, |w| w + 2);
-        let rows = entry.map_or(1, |e| crate::ant::about(e, now).len());
+        let rows = entry.map_or(1, |e| crate::ants::ant::about(e, now).len());
         let tall = u16::try_from(head.as_ref().map_or(rows, Vec::len) + 2).unwrap_or(u16::MAX);
         let [top, tabs, pane] =
             Layout::vertical([Constraint::Max(tall.min(area.height / 2)), Constraint::Length(1), Constraint::Min(3)])
@@ -307,13 +307,13 @@ impl Page {
         let title = match head {
             Some(head) => {
                 frame.render_widget(Paragraph::new(head).block(style::block(String::new(), false)), face);
-                format!(" {mark} {} · {} ", self.ant, crate::ant::state(entry, moved, now))
+                format!(" {mark} {} · {} ", self.ant, crate::ants::ant::state(entry, moved, now))
             }
             None => format!(
                 " {mark} {} {} · {} ",
                 data.looks.face(&self.ant).content,
                 self.ant,
-                crate::ant::state(entry, moved, now)
+                crate::ants::ant::state(entry, moved, now)
             ),
         };
 
@@ -461,7 +461,7 @@ fn about(entry: Option<&ColonyEntry>, now: DateTime<Utc>, width: usize) -> Vec<L
     let Some(entry) = entry else {
         return style::wrapped(vec![Line::styled("not in the colony: no daemon serves it now", style::dim())], width);
     };
-    let rows = crate::ant::about(entry, now);
+    let rows = crate::ants::ant::about(entry, now);
     let label = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
     let room = width.saturating_sub(label + 1);
     let mut lines = Vec::new();
@@ -485,7 +485,7 @@ fn about(entry: Option<&ColonyEntry>, now: DateTime<Utc>, width: usize) -> Vec<L
 fn status(ant: &UserId, entry: Option<&ColonyEntry>, data: &Data, now: DateTime<Utc>) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let moved = data.looks.identity(ant).and_then(|i| i.moved.as_ref());
-    let holds = crate::ant::holds(ant, entry, moved, now);
+    let holds = crate::ants::ant::holds(ant, entry, moved, now);
     if holds.is_empty() {
         lines.push(Line::styled(format!("nothing holds {ant} back"), style::dim()));
     }

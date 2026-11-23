@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use crate::buckets::latest_in;
 use crate::text::one_line;
-use crate::text::{short, since};
+use crate::text::{ago, short, since};
 
 /// What a trail's name is made of.
 const NAMES: &str = "a trail's name is 1-64 of a-z, 0-9 and '-'";
@@ -277,7 +277,7 @@ pub(crate) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
                 Source::Colony { saved_by, saved_from, saved_at } => (
                     "colony".to_owned(),
                     saved_by.to_string(),
-                    format!("{} ago", short(since(*saved_at, now))),
+                    ago(*saved_at, now),
                     saved_from.as_ref().map_or_else(|| "-".to_owned(), RunId::to_string),
                 ),
                 Source::Local { path } => {

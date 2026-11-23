@@ -807,7 +807,7 @@ mod tests {
         h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
         let (recorded, _) = signing(&server, &config, async {
             loop {
-                if let Some(holder) = crate::machines::holder(&h_js).await.unwrap() {
+                if let Some(holder) = crate::ants::machines::holder(&h_js).await.unwrap() {
                     break holder;
                 }
                 tokio::time::sleep(REPEAT).await;
@@ -816,7 +816,7 @@ mod tests {
         .await;
         assert_eq!(recorded.machine, "keybox".parse::<ants_proto::Machine>().unwrap());
         assert_eq!((recorded.hostname, recorded.version), (colony::machine().await, ANTS_VERSION.to_owned()));
-        assert_eq!(crate::machines::list(&h_js).await.unwrap(), [], "the record is no machine's");
+        assert_eq!(crate::ants::machines::list(&h_js).await.unwrap(), [], "the record is no machine's");
         let as_human = DirectKv::new(&h_js, None, MACHINES_BUCKET).await.unwrap();
         assert!(as_human.put(ACCOUNT_HOLDER_KEY, b"{}".to_vec()).await.is_err(), "a human only reads it");
     }

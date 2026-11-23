@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 
 /// The files of the ants crate naming `ants_sense`, for the files of an ant's home it lays out, and their tests.
 const ANTS_NAMING: [&str; 6] = [
-    "src/add.rs",
     "src/admin/orders/clone/tests.rs",
+    "src/ants/add.rs",
+    "src/ants/export.rs",
     "src/auth/tests/machines.rs",
     "src/doctor/ants.rs",
     "src/doctor/tests.rs",
-    "src/export.rs",
 ];
 
 fn sources(dir: &Path, found: &mut Vec<PathBuf>) {

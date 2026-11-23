@@ -518,7 +518,7 @@ async fn cancel_all(ctx: &Ctx, thread: &ThreadId, ants: Vec<UserId>) -> Result<D
 async fn withdraw(ctx: &Ctx, ants: &[UserId], message: Uuid, edit: Option<Edit>) -> Result<Done> {
     let (mut lines, mut warnings, mut failed) = (Vec::new(), Vec::new(), None);
     for ant in ants {
-        match crate::queue::withdrawn(&ctx.js, ctx.domain.as_ref(), &ctx.me.id, ant, message).await {
+        match crate::ants::queue::withdrawn(&ctx.js, ctx.domain.as_ref(), &ctx.me.id, ant, message).await {
             Ok(line) => lines.push(line),
             Err(e) if ants.len() > 1 => warnings.push(format!("{e:#}")),
             Err(e) => failed = Some(e),

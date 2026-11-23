@@ -15,7 +15,7 @@ use crate::live::Link;
 use crate::text::ago;
 use crate::threads::thread;
 use crate::tui::style::{self, block, dim};
-use crate::{colony, tools};
+use crate::{ants::colony, tools};
 
 /// How old the last read of the stream may be before it shows as stale: a few of the dashboard's periodic reads.
 const STALE: TimeDelta = TimeDelta::seconds(15);

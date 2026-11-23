@@ -35,7 +35,7 @@ use super::select::{PAGE, step};
 use super::style;
 use super::timeline::Tools;
 use super::work;
-use crate::colony;
+use crate::ants::colony;
 use crate::messages::send;
 use crate::people::humans;
 use crate::text::ago;

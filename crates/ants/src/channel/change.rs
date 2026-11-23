@@ -6,7 +6,7 @@ use ants_proto::{ChannelEntry, ChannelId, Humans, UserId};
 use anyhow::Result;
 use async_nats::jetstream::{self, kv};
 
-use crate::colony;
+use crate::ants::colony;
 
 /// What to change of a channel's entry; what is not given stays.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

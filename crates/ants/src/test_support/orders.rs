@@ -9,8 +9,8 @@ use ants_proto::UserId;
 use anyhow::Result;
 use async_nats::jetstream;
 
+use crate::ants::machines;
 use crate::auth::issue_host;
-use crate::machines;
 use crate::test_support::Server;
 
 /// How long a test waits for a daemon to decide an order. An order delivered to a pull request that went silent comes

@@ -17,7 +17,7 @@ use chrono::Utc;
 use nkeys::KeyPair;
 
 use crate::signing::{retire, signer};
-use crate::{add, auth};
+use crate::{ants::add, auth};
 
 /// Where and how a manager ant's daemon adds ants.
 #[derive(Debug, Clone)]

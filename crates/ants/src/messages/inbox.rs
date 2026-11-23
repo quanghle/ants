@@ -27,7 +27,7 @@ use async_nats::jetstream::consumer::DeliverPolicy;
 use async_nats::jetstream::kv::{self, Operation};
 use futures::{FutureExt as _, StreamExt as _};
 
-use crate::avatars::Faces;
+use crate::ants::avatars::Faces;
 use crate::cas;
 use crate::messages::attachments;
 use crate::people::sealed::Keyring;
@@ -569,8 +569,8 @@ mod tests {
     fn an_ant_s_face_comes_before_its_name() {
         let dev_a: UserId = "dev-a".parse().unwrap();
         let record = ants_proto::AntIdentity::new(dev_a.clone(), "a-id".to_owned(), chrono::Utc::now());
-        let identities = crate::avatars::Identities::from([(dev_a.clone(), record)]);
-        let faces = Faces::new(identities, crate::avatars::Depth::Plain, ants_proto::Theme::Dark);
+        let identities = crate::ants::avatars::Identities::from([(dev_a.clone(), record)]);
+        let faces = Faces::new(identities, crate::ants::avatars::Depth::Plain, ants_proto::Theme::Dark);
         let face = ants_proto::Avatar::derive("a-id").face();
         let reply = Envelope::new(dev_a, UserId::human(), "done");
         let shown = render(&reply, &Acting::Own, &[], Some(&faces));

@@ -40,8 +40,8 @@ use chrono::{DateTime, Utc};
 use data_encoding::BASE64;
 use serde::{Deserialize, Serialize};
 
-use crate::add::{self, AddArgs};
 use crate::admin::settings::SharedRecord;
+use crate::ants::add::{self, AddArgs};
 use crate::serve::AntOptions;
 
 mod provider;
@@ -433,7 +433,7 @@ pub(crate) async fn read(kv: &DirectKv, ant: &UserId) -> Result<(Option<AntIdent
 /// Set or clear the moved mark of `ant`'s identity record by compare-and-set: whether it changed.
 async fn mark_moved(kv: &DirectKv, ant: &UserId, mark: Option<MovedMark>) -> Result<bool> {
     let absent = format!("{ant} has no identity record");
-    let marked = crate::avatars::change_in(kv, ant, &absent, |record| {
+    let marked = crate::ants::avatars::change_in(kv, ant, &absent, |record| {
         if record.moved.is_some() == mark.is_some() {
             return Ok(false);
         }
@@ -678,7 +678,7 @@ async fn create(js: &async_nats::jetstream::Context, kv: &DirectKv, identity: &A
     if let (Some(_), _) = read(kv, name).await? {
         bail!("the bus holds an ant named {name} already: --as NEW imports it under another name");
     }
-    let held = crate::avatars::read(js).await?;
+    let held = crate::ants::avatars::read(js).await?;
     if let Some(same) = held.values().find(|record| record.id == identity.id) {
         bail!(
             "the bus holds this ant already, as {}: one bus never holds two copies of an ant; after a move, \

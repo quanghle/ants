@@ -13,7 +13,7 @@ use super::search::{self, Searches};
 use super::{
     ant, cards, catchup, credentials, faces, held, images, mcp, memories, people, settings, steps, thread, tree,
 };
-use crate::avatars::Identities;
+use crate::ants::avatars::Identities;
 use crate::text::excerpt;
 
 pub struct Watched {

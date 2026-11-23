@@ -292,7 +292,7 @@ pub(crate) async fn change_in(
     mut edit: impl FnMut(&mut AntIdentity) -> Result<bool>,
 ) -> Result<(AntIdentity, bool)> {
     for _ in 0..ATTEMPTS {
-        let (record, last) = crate::export::read(kv, ant).await?;
+        let (record, last) = crate::ants::export::read(kv, ant).await?;
         let mut record = record.with_context(|| absent.to_owned())?;
         if !edit(&mut record)? {
             return Ok((record, false));

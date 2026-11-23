@@ -17,7 +17,7 @@ use super::credentials::{check_key, check_xkey};
 use super::server::{check_store_account, consumer_limit, consumers, storage_check, supported_server};
 use super::transports::leafnode_info;
 use super::*;
-use crate::avatars::{Depth, Faces};
+use crate::ants::avatars::{Depth, Faces};
 use crate::credentials::{backup, issued};
 #[cfg(unix)]
 use crate::node::bridge;
@@ -232,7 +232,7 @@ fn ants_looking_alike_are_warned_of() {
         (check.status, check.detail.as_str()),
         (Status::Ok, "2 ants in the colony, each with a face of its own")
     );
-    let mut identities = crate::avatars::Identities::new();
+    let mut identities = crate::ants::avatars::Identities::new();
     for e in &entries {
         let mut record = ants_proto::AntIdentity::new(e.ant.clone(), format!("{}-id", e.ant), now);
         record.avatar = Some("twin".to_owned());

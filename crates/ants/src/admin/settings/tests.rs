@@ -389,7 +389,7 @@ async fn the_shared_settings_are_created_once_changed_by_orders_and_served_on_ev
     ants.send_replace(vec![dev_a.clone()]);
     tokio::time::timeout(WAIT, async {
         loop {
-            let records = crate::machines::list(&js).await.unwrap();
+            let records = crate::ants::machines::list(&js).await.unwrap();
             if records.iter().any(|r| r.drift.get(&dev_a).is_some_and(|d| d == &["model"])) {
                 break;
             }

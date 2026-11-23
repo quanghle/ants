@@ -190,7 +190,7 @@ async fn read(nats: &crate::connection::Nats<'_>, js: &jetstream::Context, deadl
         let stream = js.get_stream(STREAM).await?;
         crate::tools::pending(js, &stream, Utc::now()).await
     });
-    let colony = within(deadline, crate::colony::list(js));
+    let colony = within(deadline, crate::ants::colony::list(js));
     let ((threads, cards), marker, humans, approvals, colony) =
         futures::join!(threads_and_cards, marker, humans, approvals, colony);
     Parts { threads, marker, humans, approvals, colony, cards }
