@@ -1,3 +1,5 @@
+//! Tests of avatar palettes: they match the prototype and fall back to the 256-colour palette.
+
 use super::*;
 
 #[test]

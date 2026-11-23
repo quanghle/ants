@@ -1,3 +1,6 @@
+//! Tests of the brief's cuts over its budget: the work goes first, then the core loop, relationships, self-model and
+//! persona, a full persona and the records kept whole while room allows.
+
 use super::*;
 use crate::items::Values;
 use crate::persona::{FIELDS, MAX_FIELD_BYTES, PERSONA, persona_id};

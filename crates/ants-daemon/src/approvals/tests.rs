@@ -1,3 +1,6 @@
+//! Tests of tool request escalation: decisions by the humans, the chain and assistants, the first decision winning,
+//! silence rejecting, and expired requests told to the owner or chain.
+
 use std::collections::BTreeMap;
 
 use ants_proto::{EscalationReason, subject};

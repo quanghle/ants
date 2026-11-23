@@ -1,3 +1,6 @@
+//! Tests of records in the brief: the self-model and participants' records, their shortening and cuts, a review's
+//! brief, and room kept for memories of the thread's starter or the ant under review.
+
 use super::*;
 
 async fn record(sense: &Sense, kind: &str, who: &str, body: &str) {

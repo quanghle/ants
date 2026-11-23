@@ -1,3 +1,6 @@
+//! Tests of the trail keeper: it writes and removes only an ant's own trails, and records only an ant's own finished
+//! run as a trail's source.
+
 use ants_proto::{RunState, TrailLeg};
 use ants_test_support::{NatsServer, trail_leg, trail_run};
 use chrono::Utc;

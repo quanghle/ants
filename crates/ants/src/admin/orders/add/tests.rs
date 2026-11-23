@@ -1,3 +1,6 @@
+//! Tests of add orders: the flags of `ants ant add`, an ant added and retired, other orders decided meanwhile, a leaf's
+//! uplink renewed, and concurrent adds.
+
 use std::time::Duration;
 
 use ants_daemon::admin::ConfigFile;

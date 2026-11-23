@@ -1,3 +1,6 @@
+//! Tests of the `ants subprocess` worker: call ids and labels, events, fixed clock and random, errors and tracebacks,
+//! resumes under their own limits, the caps on output, notes, calls and steps, and bad requests.
+
 use ants_proto::{CallAnswer, MAX_STEP_LABEL, RunLimit, TrailFunction};
 use serde_json::{Value, json};
 

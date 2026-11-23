@@ -1,3 +1,6 @@
+//! Tests of the store: revisions and expected ones, past values, raced writes, items of known ids, listing and search,
+//! cache rebuilds, atomic writes, and how sense reaches an ant's items.
+
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

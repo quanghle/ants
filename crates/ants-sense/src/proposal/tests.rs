@@ -1,3 +1,6 @@
+//! Tests of proposals: persona proposals offered and confirmed, the daily change limit and versions kept, the published
+//! profile, rejected, superseded and stale proposals, and untrusted ones refused.
+
 use std::sync::Arc;
 
 use ants_proto::provider::{CallContext, Format, Origin, Output, Provider as _, Starter, ToolCall};

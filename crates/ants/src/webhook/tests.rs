@@ -1,3 +1,6 @@
+//! Tests of `ants webhook serve`: config, signatures, templates, delivery once, channel mentions, reloads, refusals and
+//! timeouts, stops, and notifying humans with their links, pushes and digests.
+
 use std::assert_matches;
 use std::fmt::Write as _;
 use std::net::SocketAddr;

@@ -1,3 +1,6 @@
+//! Tests of condition probes as the scheduler runs them: source threads and workdirs, sense events, reservations on
+//! takeover, command and gh checks, and cancelling a probe with its child process.
+
 use ants_sense::Workdirs;
 #[cfg(unix)]
 use ants_sense::items::ItemValues;

@@ -1,3 +1,6 @@
+//! Tests of the permissions each kind of credentials carries: renewals, ant requests, JetStream domains, leaves and
+//! outboxes, assistants, webhooks, observers, and every bucket and subject's readers and writers.
+
 use chrono::Utc;
 
 use super::*;

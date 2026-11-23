@@ -1,3 +1,6 @@
+//! Tests of sense's durable schedule in the daemon: sleeping and waking, dormant ants, retried deliveries, takeovers,
+//! source threads, maintenance runs and the published profile.
+
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};

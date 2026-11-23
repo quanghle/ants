@@ -1,3 +1,6 @@
+//! Tests of the sanitizer: each kind of secret redacted, ordinary text kept, hidden characters stripped, one-line
+//! titles, limits on the text as given, multibyte text, and idempotence.
+
 use super::*;
 
 const BODY: Limit = Limit::Bytes(4096);

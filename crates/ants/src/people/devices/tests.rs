@@ -1,3 +1,6 @@
+//! Tests of the devices directory: keys taken only from verified JWTs, recorded revocations, published devices, a
+//! missing bucket, and an ant revoked by name.
+
 use ants_daemon::people::devices::verify;
 use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{DeviceKey, Permissions, Role};

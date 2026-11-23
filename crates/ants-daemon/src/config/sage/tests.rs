@@ -1,3 +1,6 @@
+//! Tests of who reviews each ant: the built-in sage by default and served only while named, an ant named as a sage
+//! having none, and the `sage` setting naming an ant or none.
+
 use std::path::Path;
 
 use super::*;

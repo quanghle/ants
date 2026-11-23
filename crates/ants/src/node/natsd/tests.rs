@@ -1,3 +1,6 @@
+//! Tests of the managed nats-server: start, readiness and stop, JetStream data across restarts, the lock, occupied
+//! ports, bad executables and configurations, restarts and give-up, and leaf reloads.
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

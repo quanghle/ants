@@ -1,3 +1,6 @@
+//! Tests of a sage's review: the review text's redaction and truncation, findings read from the answer, follow-ups,
+//! untrusted findings, identity and late findings kept, and late answers.
+
 use ants_proto::FindingVerdict;
 use ants_proto::provider::Starter;
 

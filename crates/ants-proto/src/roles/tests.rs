@@ -1,3 +1,6 @@
+//! Tests of roles: tags parse in either case, team members' user JWTs verify and others are refused, and admins' signed
+//! acts and assistants of a human verify.
+
 use serde_json::json;
 
 use super::*;

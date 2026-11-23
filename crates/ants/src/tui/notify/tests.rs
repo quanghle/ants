@@ -1,3 +1,6 @@
+//! Tests of `/notify`: snoozing, resuming and showing the holds from any view, the channel's level, the status line,
+//! and the jobs matching `ants notify`.
+
 use std::time::Duration;
 
 use ants_proto::{ChannelId, ChannelNotify, Role, ThreadId};

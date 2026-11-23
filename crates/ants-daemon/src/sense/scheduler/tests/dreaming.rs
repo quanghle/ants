@@ -1,3 +1,6 @@
+//! Tests of dreams as the scheduler runs them: when a dream begins, takeovers, vital signs, and the sage's review of
+//! the packet, its findings, declines and the ants it serves.
+
 use ants_proto::{
     ColonyEntry, Envelope, FindingOutcome, FindingVerdict, NoticeKind, ReviewCommit, ReviewOutcomes, ThreadId,
 };

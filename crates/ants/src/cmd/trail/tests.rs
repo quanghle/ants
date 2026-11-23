@@ -1,3 +1,5 @@
+//! Tests of `ants trail`: the shared fixtures, and its commands, one submodule each.
+
 mod ratings;
 mod records;
 mod run;

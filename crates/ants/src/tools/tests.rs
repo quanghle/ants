@@ -1,3 +1,6 @@
+//! Tests of `ants tools`: pending requests listed and answered, colliding ids, the first decision winning, rejection
+//! notes, chain decisions, allow rule suggestions, following, and time left.
+
 use std::time::Duration;
 
 use ants_daemon::bus;

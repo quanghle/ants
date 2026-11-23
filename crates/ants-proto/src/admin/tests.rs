@@ -1,3 +1,6 @@
+//! Tests of admin orders: JSON form and canonical signed lines, only admin-signed orders carried out, assistants'
+//! orders, order rules, outcomes, and changes expecting what was read.
+
 use std::assert_matches;
 
 use data_encoding::BASE64URL_NOPAD;

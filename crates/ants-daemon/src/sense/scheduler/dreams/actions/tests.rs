@@ -1,3 +1,6 @@
+//! Tests of the actions on threads gathered for review packets: failing reaction reads, who rejected a tool request or
+//! marked a thread done, explicit undo, and reopenings by unreadable entries.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

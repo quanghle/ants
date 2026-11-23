@@ -1,3 +1,6 @@
+//! Tests of the event log: chained and verified events, stale writers, rewritten or removed events, signing by the
+//! ant's unrevoked credentials, broken logs, size, and renamed ants.
+
 use std::collections::HashMap;
 use std::path::Path;
 

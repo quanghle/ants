@@ -1,3 +1,6 @@
+//! Tests of task claims: fences and heartbeats, invalid tokens, cross-thread reclaims, racing claims, and claims while
+//! offline.
+
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ants_proto::provider::{Output, Provider};

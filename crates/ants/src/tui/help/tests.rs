@@ -1,3 +1,6 @@
+//! Tests of the help: every key has a row in the table, key ranges are read, rows scroll into view at 80x24, the keys
+//! closing it, and an ant's panes.
+
 use ants_proto::ThreadId;
 
 use super::*;

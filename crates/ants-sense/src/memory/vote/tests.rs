@@ -1,3 +1,6 @@
+//! Tests of `sense_vote`: stale and helpful votes, one count per thread, wrong votes retiring a memory, and refused
+//! votes.
+
 use std::sync::Arc;
 
 use ants_proto::provider::{CallContext, Format, Output, Starter};

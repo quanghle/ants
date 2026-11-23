@@ -1,3 +1,6 @@
+//! Tests of `/dead`: replaying or dropping the stuck thread's dead letter, a dead letter gone before the read, and
+//! which dead letter is acted on.
+
 use ants_proto::ThreadId;
 
 use super::*;

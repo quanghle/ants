@@ -1,3 +1,6 @@
+//! Tests of the thread view's timeline and side panel: running calls beside the panel, and keys moving and copying the
+//! selection and toggling how the human holds the thread.
+
 use super::*;
 
 #[test]

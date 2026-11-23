@@ -1,3 +1,6 @@
+//! Tests of supervised providers: restart backoff, tools offered only while up and calls meanwhile saying why, a
+//! provider down at connect, an MCP server alone, and exited processes started again.
+
 use std::sync::Mutex;
 
 use ants_proto::provider::jsonrpc::{Message, Request, Response};

@@ -1,3 +1,6 @@
+//! Tests of the experience in the brief's identity: threads, days, people and repositories, kept to a few lines however
+//! long the names.
+
 use super::*;
 use crate::thread::experience::Tally;
 

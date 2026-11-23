@@ -1,3 +1,6 @@
+//! Tests of `ants assistant`: refused and wide grants, grants and withdrawals, sealing, what an assistant does for its
+//! human while granted, and its decisions and orders awaiting consent.
+
 use std::time::Duration;
 
 use ants_daemon::bus;

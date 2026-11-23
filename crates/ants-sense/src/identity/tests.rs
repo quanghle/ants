@@ -1,3 +1,6 @@
+//! Tests of sense identities and cards: the id minted once, cards written from lifecycle events and sessions, re-adds,
+//! renames, dormancy and revivals, repeated events, growth and shared logs.
+
 use std::sync::Arc;
 
 use ants_proto::provider::{BoxFuture, Brief, BriefReason, BriefRequest, Origin, Provider, Starter};

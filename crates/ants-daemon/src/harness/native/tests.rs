@@ -1,3 +1,6 @@
+//! Tests of native harness protocols behind the in-process ACP agent: prompts, steering, sessions, context overflow,
+//! cancels, sign-in, limits, approvals, shutdown, JSON-RPC routing and MCP servers.
+
 use std::assert_matches;
 use std::path::PathBuf;
 use std::sync::Arc;

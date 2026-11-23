@@ -1,3 +1,6 @@
+//! Tests of memories' citations: repositories, lines and hashes recorded, worktrees, rechecks and their warnings,
+//! missing files, unsafe paths and symlinks, legacy citations and missing baselines.
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

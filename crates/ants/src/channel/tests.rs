@@ -1,3 +1,6 @@
+//! Tests of channels as humans run them: sigils, the table, mentions, posts on threads, reading back by thread, webhook
+//! threads, and read markers.
+
 use std::time::Duration;
 
 use ants_proto::{ChannelNotify, ChannelReadMarkers, STREAM, chan_reader};

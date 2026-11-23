@@ -1,3 +1,6 @@
+//! Tests of thread metadata: archived and done threads coming back on a new message, old marks and titles forgotten
+//! with their threads, and sealed titles.
+
 use std::collections::HashSet;
 
 use ants_proto::{Envelope, Role, Uuid};

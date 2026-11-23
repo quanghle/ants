@@ -1,3 +1,6 @@
+//! Tests of sense's event logs on nats-server: gapless appends, stale writers, relayed streams, a stream of another
+//! config, signed chains, and revocations read from the devices bucket.
+
 use ants_proto::{DeviceRevocation, Machine, SenseId, UserId, revoked_device_key};
 use ants_sense::log::{AccountVerifier, AntLog, AppendError, EventLog, NoRevocations, Revocations, read_status};
 use ants_test_support::{NatsServer, scratch_dir};

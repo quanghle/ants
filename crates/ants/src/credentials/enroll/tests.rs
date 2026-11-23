@@ -1,3 +1,6 @@
+//! Tests of enrollment over NATS: what enrollment credentials ask for, approvals for ants, webhooks and machines,
+//! proofs, leaves, rejections, expiry and refusals.
+
 use std::future::pending;
 
 use ants_proto::{Machine, UserId};

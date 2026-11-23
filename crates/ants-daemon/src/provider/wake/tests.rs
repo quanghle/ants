@@ -1,3 +1,6 @@
+//! Tests of providers' wake requests: messages on the ant's threads or a new one, repeats sent once, retries under the
+//! same id, refusals, the hourly cap, and only ants served here woken.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol::v1::schema::SessionId;

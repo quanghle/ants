@@ -1,3 +1,6 @@
+//! Tests of the live view: verdicts and allow-all on tool requests, the feed reading, following and answering, and
+//! sealed messages from a device added since.
+
 use std::time::Duration;
 
 use ants_daemon::bus;

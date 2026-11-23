@@ -1,3 +1,6 @@
+//! Tests of `ants leaf config`: uplinks, rejected configurations, reloads and restarts, includes and paths, reaching
+//! the hub, renewed uplink credentials, and revocations reaching the leaf.
+
 use std::process::Command;
 use std::time::Duration;
 

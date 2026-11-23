@@ -1,3 +1,6 @@
+//! Tests of the harness pool: worktrees, the cap and idle stops, resumed, forked and rebuilt sessions, context
+//! overflow, time and tool call limits, low memory, restarts, briefs and instructions.
+
 use std::sync::Mutex;
 
 use ants_proto::provider::{BriefReason, Origin, Starter};

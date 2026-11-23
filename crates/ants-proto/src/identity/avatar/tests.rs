@@ -1,3 +1,6 @@
+//! Tests of avatars: derivation and every head pose matching the prototype, distinct head shapes, and the record
+//! seeding and colouring the avatar.
+
 use std::collections::HashSet;
 
 use super::*;

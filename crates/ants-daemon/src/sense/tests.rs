@@ -1,3 +1,6 @@
+//! Tests of the daemon's sense module: only it and the files it lists name `ants_sense`, and a call of sense's own
+//! tools is told by its title.
+
 use std::path::{Path, PathBuf};
 
 /// The files of the ants crate naming `ants_sense`, for the files of an ant's home it lays out, and their tests.

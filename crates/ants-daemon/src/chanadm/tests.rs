@@ -1,3 +1,5 @@
+//! Tests of the channel manager: only a human's assistant describes a channel for it.
+
 use std::time::Duration;
 
 use ants_proto::{AssistantGrant, AssistantRecord, ChannelId, ChannelOp, DEVICES_BUCKET, ThreadId};

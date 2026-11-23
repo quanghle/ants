@@ -1,3 +1,6 @@
+//! Tests of offline writes: queued batches keeping order across restarts, uncertain acks, remote conflicts, and which
+//! failures never queue a write.
+
 use std::sync::atomic::AtomicBool;
 
 use super::*;

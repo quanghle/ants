@@ -1,3 +1,6 @@
+//! Tests of a sage's own dream: findings on rejected kinds, recurring follow-ups, undone findings, unanswered or costly
+//! reviews, relationship records, and reviews listed by their records alone.
+
 use ants_proto::FindingVerdict::{Applied, Rejected};
 use ants_proto::provider::Starter;
 use ants_proto::{FindingOutcome, FindingVerdict};

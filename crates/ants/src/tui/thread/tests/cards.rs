@@ -1,3 +1,6 @@
+//! Tests of the thread view's cards: tool requests answered from their cards, the card the keys answer, and question
+//! cards, their focus, options, answers and wrapping.
+
 use super::*;
 
 #[test]

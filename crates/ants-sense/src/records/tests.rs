@@ -1,3 +1,6 @@
+//! Tests of the self-model and relationship records: compare-and-set replacement, refused records and revisions, one
+//! record per human or ant, sanitizing, recall and history.
+
 use ants_proto::provider::Starter;
 use serde_json::json;
 

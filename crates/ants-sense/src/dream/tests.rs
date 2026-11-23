@@ -1,3 +1,6 @@
+//! Tests of dreams: when one begins and closes, a sage's unanswered review, findings gathered, rejected and resting,
+//! verdicts, the write cap and the packet's budget; with fixtures for the submodules.
+
 use std::sync::Arc;
 
 use ants_proto::provider::{CallContext, Event, EventKind, Format, Output, Provider as _, ToolCall};

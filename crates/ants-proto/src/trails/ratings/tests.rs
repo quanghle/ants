@@ -1,3 +1,6 @@
+//! Tests of trail ratings and the finder: ratings' checks, wire form and weights, query matching, evidence, summaries,
+//! and how saved trails rank for a task.
+
 use chrono::TimeDelta;
 
 use super::*;

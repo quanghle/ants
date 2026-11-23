@@ -1,3 +1,6 @@
+//! Tests of condition probes: file fingerprints within the workdir and changes against a baseline, command checks and
+//! their timeouts, GitHub and bd checks, and git checks waiting on a reference.
+
 use ants_sense::log::MemoryLog;
 use ants_sense::testing;
 

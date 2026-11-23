@@ -1,3 +1,6 @@
+//! Tests of the frame: header, nav, view and keys, folding, text cut at the edge, tool requests over the view, the
+//! command bar, footers, errors, notices, and Ctrl-C.
+
 use ants_proto::ThreadId;
 
 use super::*;

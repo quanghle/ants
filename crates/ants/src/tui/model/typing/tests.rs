@@ -1,3 +1,6 @@
+//! Tests of typing in a conversation: text sent on the thread, keys acting on a selected message, `q` and `?` on the
+//! bar, and palette letters while writing.
+
 use ants_proto::ThreadId;
 
 use super::*;

@@ -1,3 +1,6 @@
+//! Tests of an ant's settings by order: assignments, orders expecting what was read, reading and changing settings, and
+//! shared settings created, served and verified.
+
 use ants_daemon::admin::ConfigFile;
 use ants_proto::{FieldChange, Hidden, Permissions, Role};
 use serde_json::json;

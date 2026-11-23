@@ -1,3 +1,6 @@
+//! Tests of withdrawing in the thread view: a waiting message's place in line, and `w` and `e` withdrawing a waiting
+//! message or a channel post from the ants not yet started.
+
 use super::*;
 
 #[test]

@@ -1,3 +1,6 @@
+//! Tests of the sense stores a process keeps: the host link and its retries, items opened on first use, identity
+//! records across re-adds, renames and revocations, exports, and caches serving while disconnected.
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ants_proto::provider::{
