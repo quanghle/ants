@@ -118,8 +118,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
         );
     }
     if model.ui.bar.focused {
-        let keys = "Enter send · Ctrl-J new line · Ctrl-G editor · / palette · Esc leave";
-        return keymap::prompt(keys, width, false);
+        return keymap::bar_footer(width);
     }
     if model.focus == Focus::View
         && let Some(line) = model.page().footer(&model.data, now, width)

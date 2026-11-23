@@ -20,7 +20,9 @@
 
 use std::cell::{Cell, RefCell};
 
-use ants_proto::{ApprovalRequest, Quote, ThreadId, UserId, Uuid, Verdict};
+use ants_client::attachments::Listed;
+use ants_client::entry::{Entry, Kind};
+use ants_proto::{ApprovalRequest, Quote, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 
 use super::acts::{About, Change};
@@ -28,8 +30,6 @@ use super::exec::{Edit, Job, Quoted};
 use super::model::{Action, Data, Key, To};
 use super::{approvals, attach, question};
 use crate::live::History;
-use crate::messages::attachments::Listed;
-use crate::threads::thread::{Entry, Kind};
 
 mod cards;
 mod conversation;
@@ -503,12 +503,6 @@ impl Page {
     }
 
     fn request_key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
-        let verdict = match key {
-            Key::Char('a') => Some(Verdict::AllowOnce),
-            Key::Char('A') => Some(Verdict::AllowAlways),
-            Key::Char('r') => Some(Verdict::Reject),
-            _ => None,
-        };
         let Some(oldest) = self.pending(data) else {
             if key == Key::Enter {
                 let keyed = question::keyed(data, &self.history.entries, now);
@@ -516,9 +510,7 @@ impl Page {
             }
             return None;
         };
-        // A request its card does not show whole opens in full, where the keys answer it.
-        let verdict = verdict.filter(|_| approvals::fits(oldest, self.card_room.get()));
-        Some(To::Ask(oldest.clone(), verdict))
+        Some(approvals::keyed(oldest.clone(), key, self.card_room.get()))
     }
 }
 

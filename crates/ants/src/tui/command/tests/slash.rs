@@ -181,7 +181,7 @@ fn save_saves_the_marked_attachment_of_the_open_thread() {
     let mut sent = message(1, &thread, "dev-a", "alice", "the log");
     let envelope = ants_proto::Envelope::new(user("dev-a"), user("alice"), "x");
     let log = ants_daemon::files::reference("build.log", "text/plain", b"ok").unwrap();
-    sent.attachments = crate::messages::attachments::listed(&[log], |id| envelope.attachment_handle(id));
+    sent.attachments = ants_client::attachments::listed(&[log], |id| envelope.attachment_handle(id));
     let Page::Thread(page) = m.pages.last_mut().unwrap() else { panic!() };
     page.history.loaded(&thread, Ok(vec![sent.clone()])).unwrap();
     let Ok(Command::Slash(save)) = parse("/save ~/logs") else { panic!() };
@@ -191,7 +191,7 @@ fn save_saves_the_marked_attachment_of_the_open_thread() {
 }
 
 /// A model showing the thread open with `entries` read.
-fn reading(thread: &ThreadId, entries: Vec<crate::threads::thread::Entry>) -> Model {
+fn reading(thread: &ThreadId, entries: Vec<ants_client::entry::Entry>) -> Model {
     let mut m = model();
     m.stored(entries.clone(), at(1));
     let mut page = thread::Page::new(thread.clone());
@@ -220,9 +220,9 @@ fn views() -> Vec<(&'static str, Model)> {
     let mut sent = message(2, &thread, "dev-a", "alice", "the log");
     let envelope = ants_proto::Envelope::new(user("dev-a"), user("alice"), "x");
     let log = ants_daemon::files::reference("build.log", "text/plain", b"ok").unwrap();
-    sent.attachments = attachments::listed(&[log], |id| envelope.attachment_handle(id));
+    sent.attachments = ants_client::attachments::listed(&[log], |id| envelope.attachment_handle(id));
     let mut dead = message(2, &thread, "alice", "dev-a", "deploy");
-    (dead.kind, dead.id) = (crate::threads::thread::Kind::Dead, None);
+    (dead.kind, dead.id) = (ants_client::entry::Kind::Dead, None);
     vec![
         ("nothing read", model()),
         ("a thread selected", selected),

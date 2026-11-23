@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use ants_client::entry::{Entry, Kind};
 use ants_proto::{ThreadId, UserId};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -15,10 +16,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use super::model::{Data, Key, Model, To};
-use super::select::{Selection, step};
+use super::select::Selection;
 use super::style::{self, ago};
-use crate::people::sealed::State;
-use crate::threads::thread::{Entry, Kind};
+use ants_client::sealed::State;
 
 /// The lock marking a sealed message between two humans, and a thread with one.
 pub const LOCK: &str = "🔒";
@@ -165,12 +165,11 @@ impl Page {
         let dms = shown(data, &self.with);
         let threads: Vec<ThreadId> = dms.iter().map(|dm| dm.thread.clone()).collect();
         let at = self.selected.at(&threads);
-        let to = match key {
+        match key {
             Key::Enter => return dms.get(at).map(|dm| To::Thread(dm.thread.clone())),
             Key::Char('n') => return Some(To::Write),
-            _ => step(key, at, None)?,
-        };
-        self.selected.select(&threads, to);
+            _ => _ = self.selected.step(key, &threads, None),
+        }
         None
     }
 
@@ -187,7 +186,7 @@ impl Page {
             let text = if data.live.stored_at.is_some() {
                 format!("no messages with {} yet: type one", self.with)
             } else {
-                "reading the stream…".to_owned()
+                style::READING.to_owned()
             };
             frame.render_widget(Paragraph::new(text).block(block), area);
         } else {

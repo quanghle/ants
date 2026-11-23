@@ -8,9 +8,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use ants_client::attachments::sizes;
-pub use ants_client::attachments::{Listed, size};
-#[cfg(test)]
-pub use ants_client::attachments::{listed, listed_on};
+use ants_client::attachments::{Listed, size};
 use ants_daemon::files;
 use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{
@@ -392,7 +390,7 @@ mod tests {
         let mut message = Envelope::new(alice.clone(), dev_a, "see attached");
         message.attachments = references(&attached);
         store(&js, &attached, |id| message.attachment_handle(id)).await.unwrap();
-        let [shown] = listed_on(&message.subject(), &message.attachments).try_into().unwrap();
+        let [shown] = ants_client::attachments::listed_on(&message.subject(), &message.attachments).try_into().unwrap();
         assert_eq!(shown.handle, message.attachment_handle(attached[0].attachment.id));
 
         let out = dir.join("out");

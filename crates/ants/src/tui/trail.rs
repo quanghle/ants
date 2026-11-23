@@ -17,7 +17,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use serde_json::Value;
 
 use super::command::Tone;
-use super::exec::{Ctx, Done, Job};
+use super::exec::{self, Ctx, Done};
 use super::help::{Help, centered};
 use super::keymap::{self, View};
 use super::model::{Action, Key, Model, Overlay};
@@ -110,12 +110,58 @@ impl Planned {
             return (None, None);
         }
         model.ui.bar.set_status(format!("asking {} to start the run…", self.start.conductor), Tone::Busy);
-        (None, Some(Action::Run(Job::TrailStart(Box::new(self.start)), String::new())))
+        (None, Some(Action::Run(exec::Job::Trail(Job::Start(Box::new(self.start))), String::new())))
+    }
+}
+
+/// What `/trail` asks of the saved trails and the runs of trails over the connection, as `ants trail` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Job {
+    List,
+    /// Show the saved trail, else the run, named.
+    Show(Shown),
+    /// List a trail's tips, or retire one.
+    Tips(TipsArgs),
+    Runs,
+    /// Plan a run of the saved trail `trail` with `args`, a JSON value, on `conductor`, else whom a message naming no
+    /// one goes to, under `limits`, reporting on `thread`, else a new one, as `ants trail run` sums it up before
+    /// asking to start it ([`Done::planned`]).
+    Plan {
+        trail: TrailName,
+        conductor: Option<UserId>,
+        args: Option<Value>,
+        limits: TrailLimits,
+        thread: Option<ThreadId>,
+    },
+    /// Ask the conductor to start the run planned, as `ants trail run` does once confirmed.
+    Start(Box<start::Start>),
+    Stop(Pick),
+    /// Resume the run `run`, under its own limits with those `limits` gives instead.
+    Resume {
+        run: Pick,
+        limits: LimitArgs,
+    },
+}
+
+impl Job {
+    pub(super) async fn run(self, ctx: &Ctx) -> Result<Done> {
+        match self {
+            Self::List => trails(ctx).await,
+            Self::Show(what) => shown(ctx, what).await,
+            Self::Tips(args) => tips(ctx, &args).await,
+            Self::Runs => listed(ctx).await,
+            Self::Plan { trail, conductor, args, limits, thread } => {
+                planned(ctx, &trail, conductor, args, limits, thread).await
+            }
+            Self::Start(start) => started(ctx, &start).await,
+            Self::Stop(run) => stopped(ctx, &run).await,
+            Self::Resume { run, limits } => resumed(ctx, &run, limits).await,
+        }
     }
 }
 
 /// The saved trails, as `ants trail list` lists them, for the pager.
-pub async fn trails(ctx: &Ctx) -> Result<Done> {
+async fn trails(ctx: &Ctx) -> Result<Done> {
     let listed = cli::saved_trails(&ctx.js).await?;
     let line = match listed.len() {
         0 => return Ok(Done { line: "no saved trails".to_owned(), ..Done::default() }),
@@ -126,7 +172,7 @@ pub async fn trails(ctx: &Ctx) -> Result<Done> {
 }
 
 /// The saved trail `what` names, else the run, as `ants trail show` shows it, for the pager.
-pub async fn shown(ctx: &Ctx, what: Shown) -> Result<Done> {
+async fn shown(ctx: &Ctx, what: Shown) -> Result<Done> {
     let now = Utc::now();
     let (page, shows) = match cli::find(&ctx.js, what, ctx.me.role.is_human()).await? {
         cli::Found::Trail(found) => (saved::render(&found, now), "its meta and script"),
@@ -138,7 +184,7 @@ pub async fn shown(ctx: &Ctx, what: Shown) -> Result<Done> {
 
 /// The tips of a trail, as `ants trail tips` lists them, for the pager; or the tip retired, as `ants trail tips
 /// --retire` retires it.
-pub async fn tips(ctx: &Ctx, args: &TipsArgs) -> Result<Done> {
+async fn tips(ctx: &Ctx, args: &TipsArgs) -> Result<Done> {
     let now = Utc::now();
     if let Some(id) = &args.retire {
         if !ctx.me.role.is_human() {
@@ -157,7 +203,7 @@ pub async fn tips(ctx: &Ctx, args: &TipsArgs) -> Result<Done> {
 
 /// The runs of trails conductors recorded, as `ants trail runs` lists them, then the top tips of their trails, for the
 /// pager.
-pub async fn listed(ctx: &Ctx) -> Result<Done> {
+async fn listed(ctx: &Ctx) -> Result<Done> {
     let listed = runs::list(&ctx.js, None).await?;
     if listed.is_empty() {
         return Ok(Done { line: "no runs of trails".to_owned(), ..Done::default() });
@@ -217,7 +263,7 @@ fn top_tips(board: &TipBoard, script: Option<&str>, now: DateTime<Utc>) -> Strin
 
 /// Plan a run of the saved trail `name` with `args` on `conductor`, else whom a message naming no one goes to, under
 /// `limits`, reporting on `thread`, else a new one: summed up as `ants trail run` sums it up, for `y` to start.
-pub async fn planned(
+async fn planned(
     ctx: &Ctx,
     name: &TrailName,
     conductor: Option<UserId>,
@@ -240,14 +286,14 @@ pub async fn planned(
 }
 
 /// Ask the conductor to start the run `start`, showing its thread then.
-pub async fn started(ctx: &Ctx, start: &start::Start) -> Result<Done> {
+async fn started(ctx: &Ctx, start: &start::Start) -> Result<Done> {
     let run = start.ask(&ctx.client, &ctx.js, ctx.domain.as_ref(), &ctx.me.id).await?;
     Ok(Done { line: start.started(&run), open: Some(start.thread.clone()), ..Done::default() })
 }
 
 /// Stop the run `pick` names, as `ants trail stop` does: its first line, or, when steps are left waiting in other
 /// ants' queues, a count of them, the pager showing what `ants trail stop` prints, with how to withdraw each.
-pub async fn stopped(ctx: &Ctx, pick: &Pick) -> Result<Done> {
+async fn stopped(ctx: &Ctx, pick: &Pick) -> Result<Done> {
     let run = runs::pick(&ctx.js, pick).await?;
     let stop = control::stop(&ctx.client, &ctx.me.id, &run).await?;
     let said = stop.said(&run);
@@ -268,7 +314,7 @@ pub async fn stopped(ctx: &Ctx, pick: &Pick) -> Result<Done> {
 }
 
 /// Resume the run `pick` names under its own limits with those `limits` gives instead, as `ants trail resume` does.
-pub async fn resumed(ctx: &Ctx, pick: &Pick, limits: LimitArgs) -> Result<Done> {
+async fn resumed(ctx: &Ctx, pick: &Pick, limits: LimitArgs) -> Result<Done> {
     let run = runs::pick(&ctx.js, pick).await?;
     let limits = if limits.given() { Some(limits.over(run.limits)?) } else { None };
     Ok(Done { line: control::resume(&ctx.client, &ctx.me.id, &run, limits).await?, ..Done::default() })

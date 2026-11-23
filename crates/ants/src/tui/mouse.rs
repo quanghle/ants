@@ -96,6 +96,16 @@ impl Regions {
         self.hits.borrow_mut().push((area, target));
     }
 
+    /// Register what a click reaches on each of `rows`, a line each at the line given of what `area` shows scrolled
+    /// to `top`: those in view.
+    pub fn rows(&self, area: Rect, top: usize, rows: impl IntoIterator<Item = (usize, Target)>) {
+        for (line, target) in rows {
+            if line >= top && line < top + usize::from(area.height) {
+                self.add(Rect { y: area.y + (line - top) as u16, height: 1, ..area }, target);
+            }
+        }
+    }
+
     pub fn top(&self, id: Viewport, area: Rect, selected: usize, start: usize, end: usize, total: usize) -> usize {
         let key = self.stacked(id);
         self.scrolls.borrow_mut().push((area, key.clone()));
@@ -216,9 +226,7 @@ pub fn table(mouse: &Regions, id: Viewport, area: Rect, selected: usize, total: 
         height: area.height.saturating_sub(3),
     };
     let top = mouse.top(id, inner, selected, selected, selected + 1, total);
-    for row in top..total.min(top + usize::from(inner.height)) {
-        mouse.add(Rect { y: inner.y + (row - top) as u16, height: 1, ..inner }, Target::Row(row));
-    }
+    mouse.rows(inner, top, (top..total).take(usize::from(inner.height)).map(|row| (row, Target::Row(row))));
     top
 }
 
@@ -573,7 +581,9 @@ mod tests {
             "the wheel scrolls the help over the box"
         );
         m.key(Key::Esc, at(1));
-        let Some(Action::Run(super::super::exec::Job::TrailStart(asked), _)) = m.key(Key::Char('y'), at(1)) else {
+        let Some(Action::Run(super::super::exec::Job::Trail(crate::tui::trail::Job::Start(asked)), _)) =
+            m.key(Key::Char('y'), at(1))
+        else {
             panic!("y starts the run")
         };
         assert_eq!(*asked, start);

@@ -141,8 +141,8 @@ impl Editor {
             let selected = typing.pick.selected.min(candidates.len() - 1);
             let word = &candidates[selected].word;
             match key {
-                Key::Up => typing.pick.selected = selected.checked_sub(1).unwrap_or(candidates.len() - 1),
-                Key::Down => typing.pick.selected = (selected + 1) % candidates.len(),
+                Key::Up => typing.pick.up(candidates.len()),
+                Key::Down => typing.pick.down(candidates.len()),
                 Key::Esc => typing.pick.closed = true,
                 Key::Tab => typing.complete(word),
                 Key::Enter if typing.text.word().1 != *word => typing.complete(word),

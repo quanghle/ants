@@ -54,7 +54,7 @@ fn plain_text_replies_on_the_open_thread_and_else_goes_unaddressed() {
     let reply = Job::Reply { thread: thread.clone(), to: None, text: "go on".into(), quote: None };
     assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(reply, "go on".into())));
     let mut post = message(1, &thread, "dev-a", "ops", "hi");
-    (post.kind, post.channel) = (crate::threads::thread::Kind::Post, Some("ops".parse().unwrap()));
+    (post.kind, post.channel) = (ants_client::entry::Kind::Post, Some("ops".parse().unwrap()));
     m.stored(vec![post], at(1));
     typed(&mut m, "go on");
     let post =

@@ -11,7 +11,7 @@ use std::sync::{Mutex, OnceLock};
 use ants_daemon::secrets::keystore::{self, Store};
 use std::ops::ControlFlow;
 
-pub use ants_client::sealed::State;
+use ants_client::sealed::State;
 use ants_daemon::files;
 use ants_daemon::secrets::creds;
 pub use ants_daemon::secrets::sealing::Opening;

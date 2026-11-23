@@ -3,13 +3,14 @@
 
 use std::time::Duration;
 
-use ants_proto::{ChannelId, ChannelNotify, Machine, Reaction, ThreadId, UserId};
+use ants_proto::{ChannelId, ChannelNotify, Reaction, ThreadId, UserId};
 use chrono::TimeDelta;
-use serde_json::{Map, Value};
 
 use super::snooze;
 use crate::admin::orders::{add, clone};
 use crate::threads::thread_meta::Marking;
+use crate::tui::exec::{AddAnt, CloneAnt};
+use crate::tui::notify;
 
 mod trail;
 
@@ -197,23 +198,8 @@ pub enum Slash {
     Detach,
     /// Save the marked attachment of the selected message, to the path if given.
     Save(Option<String>),
-    /// Add the ant `name` on `machine` with `settings` by admin order, waiting up to `wait` for its outcome, as
-    /// `ants ant add` does.
-    Add {
-        name: UserId,
-        machine: Machine,
-        settings: Map<String, Value>,
-        wait: Duration,
-    },
-    /// Clone `src` as `new` with `settings` over its own by admin order to `machine`, else to the machine serving it,
-    /// waiting up to `wait` for its outcome, as `ants ant clone` does.
-    Clone {
-        src: UserId,
-        new: UserId,
-        machine: Option<Machine>,
-        settings: Map<String, Value>,
-        wait: Duration,
-    },
+    Add(AddAnt),
+    Clone(CloneAnt),
     /// Retire the ant by admin order.
     Retire(UserId),
     Dead(Dead),
@@ -226,10 +212,7 @@ pub enum Slash {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notify {
     Level(ChannelNotify),
-    /// Hold them back on every device this long.
-    Snooze(Duration),
-    Resume,
-    Status,
+    Push(notify::Job),
 }
 
 /// What `/dead` does with a dead letter, as `ants dead replay|drop` does: the one at the stream sequence given, else
@@ -374,12 +357,18 @@ fn slash(text: &str) -> Result<Slash, String> {
         "add" => {
             let args: add::Args = flags("/add", args).map_err(|why| why.unwrap_or_else(usage))?;
             let settings = add::settings(&args.name, &args.options).map_err(|e| format!("{e:#}"))?;
-            Ok(Slash::Add { name: args.name, machine: args.on, settings, wait: args.wait })
+            Ok(Slash::Add(AddAnt { name: args.name, machine: args.on, settings, wait: args.wait }))
         }
         "clone" => {
             let args: clone::Args = flags("/clone", args).map_err(|why| why.unwrap_or_else(usage))?;
             let settings = add::settings(&args.new, &args.options).map_err(|e| format!("{e:#}"))?;
-            Ok(Slash::Clone { src: args.src, new: args.new, machine: args.machine, settings, wait: args.wait })
+            Ok(Slash::Clone(CloneAnt {
+                src: args.src,
+                new: args.new,
+                machine: args.machine,
+                settings,
+                wait: args.wait,
+            }))
         }
         "retire" => {
             let ant = text()?;
@@ -397,9 +386,11 @@ fn slash(text: &str) -> Result<Slash, String> {
 fn notify(args: &str) -> Result<Notify, Option<String>> {
     match first_word(args) {
         ("", _) | ("snooze", "") => Err(None),
-        ("snooze", hold) => ants_proto::duration::parse(hold).map(Notify::Snooze).map_err(|e| Some(e.to_string())),
-        ("resume", "") => Ok(Notify::Resume),
-        ("status", "") => Ok(Notify::Status),
+        ("snooze", hold) => ants_proto::duration::parse(hold)
+            .map(|hold| Notify::Push(notify::Job::Snooze(hold)))
+            .map_err(|e| Some(e.to_string())),
+        ("resume", "") => Ok(Notify::Push(notify::Job::Resume)),
+        ("status", "") => Ok(Notify::Push(notify::Job::Status)),
         ("resume" | "status", _) => Err(None),
         _ => args.parse().map(Notify::Level).map_err(Some),
     }
@@ -456,7 +447,8 @@ fn goto(to: &str) -> Result<Goto, String> {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use serde_json::json;
+    use ants_proto::Machine;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::test_support::live::user;
@@ -499,9 +491,9 @@ pub(super) mod tests {
         assert_eq!(ok("/answer ship it"), Slash::Answer("ship it".into()));
         assert_eq!(ok("/mute 2h"), Slash::Mute(Some(Duration::from_hours(2))));
         assert_eq!(ok("/notify mentions"), Slash::Notify(Notify::Level(ChannelNotify::Mentions)));
-        assert_eq!(ok("/notify snooze 90m"), Slash::Notify(Notify::Snooze(Duration::from_mins(90))));
-        assert_eq!(ok("/NOTIFY resume"), Slash::Notify(Notify::Resume));
-        assert_eq!(ok("/notify status"), Slash::Notify(Notify::Status));
+        assert_eq!(ok("/notify snooze 90m"), Slash::Notify(Notify::Push(notify::Job::Snooze(Duration::from_mins(90)))));
+        assert_eq!(ok("/NOTIFY resume"), Slash::Notify(Notify::Push(notify::Job::Resume)));
+        assert_eq!(ok("/notify status"), Slash::Notify(Notify::Push(notify::Job::Status)));
         let usage = "usage: /notify all|humans|mentions | snooze DURATION | resume | status";
         for refused in ["/notify", "/notify snooze", "/notify resume now", "/notify status --json"] {
             assert_eq!(parse(refused).unwrap_err(), usage, "{refused}");
@@ -566,12 +558,15 @@ pub(super) mod tests {
         let add = ok("/add @dev-c --on m1 --model gpt-5 --whoami 'Reviews PRs' --capability rust,docs --wait 10m");
         let expected = json!({ "model": "gpt-5", "whoami": "Reviews PRs", "capabilities": ["rust", "docs"] });
         let wait = Duration::from_mins(10);
-        assert_eq!(add, Slash::Add { name: user("dev-c"), machine: m1.clone(), settings: settings(expected), wait });
+        assert_eq!(
+            add,
+            Slash::Add(AddAnt { name: user("dev-c"), machine: m1.clone(), settings: settings(expected), wait })
+        );
         let clone = ok("/CLONE dev-a @dev-c --machine m1 --home /srv/dev-c");
         let (src, new, machine) = (user("dev-a"), user("dev-c"), Some(m1));
         let settings = settings(json!({ "home": "/srv/dev-c" }));
-        assert_eq!(clone, Slash::Clone { src, new, machine, settings, wait: Duration::from_mins(40) });
-        let Slash::Add { wait, .. } = ok("/add dev-c --on m1") else { panic!("an add") };
+        assert_eq!(clone, Slash::Clone(CloneAnt { src, new, machine, settings, wait: Duration::from_mins(40) }));
+        let Slash::Add(AddAnt { wait, .. }) = ok("/add dev-c --on m1") else { panic!("an add") };
         assert_eq!(wait, Duration::from_mins(3), "the wait of ants ant add");
 
         assert_eq!(parse("/add").unwrap_err(), "usage: /add NAME --on MACHINE [FLAGS]");

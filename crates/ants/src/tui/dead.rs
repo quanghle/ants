@@ -4,6 +4,7 @@
 //! stuck item; a drop waits for `y`. A dead letter replayed or dropped, here or before the read, and the notice of it,
 //! leave the thread stuck no more.
 
+use ants_client::entry::{Entry, Kind};
 use ants_proto::NoticeKind;
 use chrono::{DateTime, Utc};
 use ratatui::style::{Color, Style};
@@ -13,7 +14,6 @@ use super::command::{Dead, Tone};
 use super::exec::Job;
 use super::model::{Action, Key, Model, Page, Prompt};
 use crate::text::excerpt;
-use crate::threads::thread::{Entry, Kind};
 
 /// A dead letter `/dead` acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]

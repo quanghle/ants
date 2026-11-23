@@ -38,6 +38,9 @@ pub fn block(title: String, focused: bool) -> Block<'static> {
     Block::bordered().title(title).border_style(style)
 }
 
+/// What a view with nothing to list shows until the stream is read.
+pub const READING: &str = "reading the stream…";
+
 /// The selected row's style, in tables and tabs.
 pub fn highlight(focused: bool) -> Style {
     if focused { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new().add_modifier(Modifier::BOLD) }

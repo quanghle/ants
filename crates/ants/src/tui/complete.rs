@@ -32,6 +32,18 @@ pub struct Pick {
     pub closed: bool,
 }
 
+impl Pick {
+    /// Select the completion above among `len`, at least one: from the first, the last.
+    pub fn up(&mut self, len: usize) {
+        self.selected = self.selected.min(len - 1).checked_sub(1).unwrap_or(len - 1);
+    }
+
+    /// Select the completion below among `len`, at least one: from the last, the first.
+    pub fn down(&mut self, len: usize) {
+        self.selected = (self.selected.min(len - 1) + 1) % len;
+    }
+}
+
 /// What the word typed so far completes: its sigil and the text after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Word<'a> {
@@ -136,8 +148,8 @@ impl Model {
         let pick = &mut self.ui.bar.pick;
         let selected = pick.selected.min(candidates.len() - 1);
         match key {
-            Key::Up => pick.selected = selected.checked_sub(1).unwrap_or(candidates.len() - 1),
-            Key::Down => pick.selected = (selected + 1) % candidates.len(),
+            Key::Up => pick.up(candidates.len()),
+            Key::Down => pick.down(candidates.len()),
             Key::Esc => pick.closed = true,
             Key::Tab => self.ui.bar.complete(&candidates[selected].word),
             Key::Enter if self.ui.bar.word().1 != candidates[selected].word => {

@@ -3,14 +3,36 @@
 //! ([`crate::people::quiet`]), beside `/notify all|humans|mentions`, the notify level of the channel on view, which
 //! the status lists too.
 
+use std::time::Duration;
+
 use ants_proto::NotifyPrefs;
 use anyhow::Result;
 
 use super::exec::{Ctx, Done};
 use crate::people::quiet;
 
+/// What `/notify` asks of the human's push notifications, as `ants notify` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Job {
+    /// Hold them back on every device this long.
+    Snooze(Duration),
+    Resume,
+    Status,
+}
+
+impl Job {
+    pub(super) async fn run(self, ctx: &Ctx) -> Result<Done> {
+        let me = &ctx.me.id;
+        match self {
+            Self::Snooze(hold) => Ok(Done::line(quiet::snoozed(&ctx.js, me, hold).await?)),
+            Self::Resume => Ok(Done::line(quiet::resumed(&ctx.js, me).await?)),
+            Self::Status => status(ctx).await,
+        }
+    }
+}
+
 /// What holds the human's push notifications back now, as `ants notify status` shows it.
-pub async fn status(ctx: &Ctx) -> Result<Done> {
+async fn status(ctx: &Ctx) -> Result<Done> {
     Ok(shown(&quiet::holding(&ctx.js, &ctx.me.id).await?))
 }
 

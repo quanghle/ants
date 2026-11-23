@@ -22,7 +22,7 @@ use ratatui::widgets::Paragraph;
 
 use super::armed::Armed;
 use super::model::{Action, Data, Key, Level, Model, To};
-use super::select::{PAGE, Selection, step};
+use super::select::{PAGE, Selection};
 use super::style;
 use crate::spend::ThreadReport;
 
@@ -91,7 +91,7 @@ impl Page {
         let tree = self.tree(data, now);
         let at = self.at(&tree);
         let armed = self.armed.take().is_some();
-        let to = match key {
+        match key {
             Key::Enter => return tree.nodes.get(at).map(|n| To::Thread(n.thread.clone())),
             Key::Char('x') => {
                 self.armed.arm(Some(()));
@@ -105,9 +105,8 @@ impl Page {
                     .collect();
                 return (!prompts.is_empty()).then_some(To::Do(Action::CancelSubtree(prompts)));
             }
-            _ => step(key, at, Some(PAGE))?,
-        };
-        self.selected.select(&nodes(&tree), to);
+            _ => _ = self.selected.step(key, &nodes(&tree), Some(PAGE)),
+        }
         None
     }
 
@@ -160,15 +159,9 @@ impl Page {
         total.extend(tree.spend.map(|s| format!("${:.2}", s.cost)));
         total.extend(tree.elapsed.map(crate::colony::short));
         lines.push(Line::from(vec![Span::styled("total  ", style::dim()), Span::raw(total.join(" · "))]));
-        let height = usize::from(area.height.saturating_sub(2));
         let inner = style::block(String::new(), focused).inner(area);
         let top = mouse.top(super::mouse::Viewport::Tree, inner, selected, selected, selected + 1, lines.len());
-        for n in 0..tree.nodes.len() {
-            let row = n + 1;
-            if row >= top && row < top + height {
-                mouse.add(Rect { y: inner.y + (row - top) as u16, height: 1, ..inner }, super::mouse::Target::Row(n));
-            }
-        }
+        mouse.rows(inner, top, (0..tree.nodes.len()).map(|n| (n + 1, super::mouse::Target::Row(n))));
         let title = format!(" delegation tree · {} ", data.title(&self.root));
         let paragraph = Paragraph::new(lines)
             .block(style::block(title, focused))

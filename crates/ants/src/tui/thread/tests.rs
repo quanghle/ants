@@ -1,12 +1,11 @@
 //! Tests of the thread view: the shared fixtures drawing it, and its behaviours, one submodule each.
 
-use ants_proto::{Answer, Pick, Question, ThreadDone};
+use ants_proto::{Answer, Pick, Question, ThreadDone, Verdict};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::conversation::body;
 use super::*;
-use crate::people::sealed;
 use crate::test_support::live::{at, message};
 use crate::tui::model::Model;
 use crate::tui::test_support::model;

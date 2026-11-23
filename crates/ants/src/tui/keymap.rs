@@ -188,6 +188,14 @@ pub fn footer(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
     fit(hints, width, true)
 }
 
+/// The footer of the focused bar at most `width` wide: the hints of its rows of the table, but for those in the help
+/// only, with the `/` that opens the palette before the last, which leaves the bar.
+pub fn bar_footer(width: u16) -> Line<'static> {
+    let mut hints: Vec<String> = BAR.iter().filter(|e| e.rank != HELP_ONLY).map(Entry::hint).collect();
+    hints.insert(hints.len().saturating_sub(1), "/ palette".to_owned());
+    fit(hints, width, false)
+}
+
 /// A prompt's keys, "·" between them, as many as fit whole in `width`, then "? help" when `help`.
 pub fn prompt(keys: &str, width: u16, help: bool) -> Line<'static> {
     fit(keys.split(" · ").map(str::to_owned), width, help)

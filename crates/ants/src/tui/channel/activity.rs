@@ -5,12 +5,12 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use ants_client::entry::{Entry, Kind};
 use ants_daemon::records::reactions::Reactions;
 use ants_proto::{ChannelEntry, ChannelId, Reaction, ThreadId, UserId, Uuid};
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::Feeds;
-use crate::threads::thread::{Entry, Kind};
 use crate::tui::model::Data;
 use crate::tui::work::ThreadState;
 

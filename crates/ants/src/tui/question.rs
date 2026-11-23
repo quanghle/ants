@@ -11,6 +11,7 @@
 
 use std::collections::BTreeSet;
 
+use ants_client::entry::Entry;
 use ants_proto::{Answered, Pick, Question, Questions, ThreadId, Uuid};
 use chrono::{DateTime, TimeDelta, Utc};
 use ratatui::style::{Color, Modifier, Style};
@@ -22,7 +23,7 @@ use super::input::Input;
 use super::model::{Action, Data, Key, To};
 use super::style;
 use crate::text::excerpt;
-use crate::threads::thread::{Entry, answer_line, answers_to};
+use crate::threads::thread::{answer_line, answers_to};
 
 /// How long a card stays at the bottom of its thread once answered.
 const ANSWERED_FOR: TimeDelta = TimeDelta::minutes(2);

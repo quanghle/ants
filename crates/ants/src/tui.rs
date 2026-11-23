@@ -596,6 +596,13 @@ impl Chat {
         }
     }
 
+    /// Keep `what` in the chat's state file as `change` sets it, a failure told in a notice.
+    fn keep(&mut self, what: &str, change: impl FnOnce(&mut catchup::ChatState)) {
+        if let Err(e) = catchup::state_path().and_then(|path| catchup::keep(&path, change)) {
+            self.model.notify(format!("keeping {what}: {e:#}"), Level::Error, Utc::now());
+        }
+    }
+
     fn act(&mut self, action: Action) -> ControlFlow<()> {
         match action {
             Action::Quit => return ControlFlow::Break(()),
@@ -636,22 +643,11 @@ impl Chat {
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::React(message, reaction, remove) => self.reads.react(message, reaction, remove),
             Action::Settings(ask) => self.watched.settings.ask(ask),
-            Action::KeepTools(tools) => {
-                if let Err(e) = catchup::state_path().and_then(|path| catchup::keep(&path, |kept| kept.tools = tools)) {
-                    self.model.notify(format!("keeping how tool calls show: {e:#}"), Level::Error, Utc::now());
-                }
-            }
+            Action::KeepTools(tools) => self.keep("how tool calls show", |kept| kept.tools = tools),
             Action::KeepChannelTab(channel, tab) => {
-                let kept = |kept: &mut catchup::ChatState| channel::keep_tab(&mut kept.channel_tabs, channel, tab);
-                if let Err(e) = catchup::state_path().and_then(|path| catchup::keep(&path, kept)) {
-                    self.model.notify(format!("keeping the channel's tab: {e:#}"), Level::Error, Utc::now());
-                }
+                self.keep("the channel's tab", |kept| channel::keep_tab(&mut kept.channel_tabs, channel, tab));
             }
-            Action::KeepFolds(folds) => {
-                if let Err(e) = catchup::state_path().and_then(|path| catchup::keep(&path, |kept| kept.folds = folds)) {
-                    self.model.notify(format!("keeping what folds: {e:#}"), Level::Error, Utc::now());
-                }
-            }
+            Action::KeepFolds(folds) => self.keep("what folds", |kept| kept.folds = folds),
             Action::Search(search) => self.watched.searches.start(search),
             Action::Summarise(ask) => self.watched.summaries.ask(ask),
             Action::CancelSubtree(prompts) => {

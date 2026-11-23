@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
+use ants_client::entry::{Entry, Kind};
 use ants_daemon::limits::caps::Spent;
 use ants_daemon::records::links::Passed;
 use ants_proto::{ThreadId, UserId};
@@ -12,7 +13,6 @@ use chrono::{DateTime, Utc};
 use super::super::model::Data;
 use super::super::work::ThreadState;
 use crate::spend::ThreadReport;
-use crate::threads::thread::{Entry, Kind};
 
 /// How many characters of a message's first line are kept.
 const LINE: usize = 120;

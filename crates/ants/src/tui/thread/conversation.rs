@@ -6,13 +6,12 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use ants_client::entry::{Entry, Kind};
 use ants_proto::{NoticeKind, StepStage, UserId, Uuid};
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use crate::people::sealed;
-use crate::threads::thread::{Entry, Kind};
 use crate::tui::model::Data;
 use crate::tui::steps::Step;
 use crate::tui::timeline::{Call, End, Tools};
@@ -348,7 +347,7 @@ impl Shown<'_> {
         if e.sealed.is_some() {
             head.push(Span::raw(format!("  {}", crate::tui::dm::LOCK)));
         }
-        if e.forged || e.sealed == Some(sealed::State::Forged) {
+        if e.forged || e.sealed == Some(ants_client::sealed::State::Forged) {
             head.push(Span::styled("  forged", Style::new().fg(Color::Red).bold()));
         }
         head

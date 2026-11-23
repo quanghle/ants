@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::Arc;
 
+use ants_client::attachments::Listed;
 use ants_proto::AttachmentHandle;
 use anyhow::Result;
 use async_nats::jetstream;
@@ -20,7 +21,7 @@ use ratatui_image::protocol::Protocol;
 use ratatui_image::{FilterType, Image, Resize};
 
 use super::model::{Model, Page};
-use crate::messages::attachments::{self, Listed};
+use crate::messages::attachments;
 use crate::people::sealed::Keyring;
 
 /// Widest an image is drawn, in cells.
@@ -228,7 +229,8 @@ mod tests {
         let message = Envelope::new(UserId::human(), "dev-a".parse().unwrap(), "look");
         let bytes = png(40, 40);
         let attachment = files::reference("shot.png", "image/png", &bytes).unwrap();
-        let [listed] = attachments::listed(&[attachment], |id| message.attachment_handle(id)).try_into().unwrap();
+        let [listed] =
+            ants_client::attachments::listed(&[attachment], |id| message.attachment_handle(id)).try_into().unwrap();
         let mut images = Images::default();
         let (mut lines, mut placed) = (vec![Line::raw("📎 shot.png")], Vec::new());
         place(&mut lines, &mut placed, &images, &listed, 2, 40);
@@ -267,7 +269,7 @@ mod tests {
         let mut message = Envelope::new(alice, "dev-a".parse().unwrap(), "see attached");
         message.attachments = attachments::references(&files);
         attachments::store(&js, &files, |id| message.attachment_handle(id)).await.unwrap();
-        let listed = attachments::listed_on(&message.subject(), &message.attachments);
+        let listed = ants_client::attachments::listed_on(&message.subject(), &message.attachments);
 
         let mut io = Io::new(Picker::halfblocks(), js, None);
         assert!(io.want(&listed));

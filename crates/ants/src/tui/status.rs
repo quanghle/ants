@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use ants_client::entry::Entry;
 use ants_daemon::limits::caps::Spent;
 use ants_proto::{Activity, STREAM, UserId};
 use anyhow::{Result, bail};
@@ -15,7 +16,7 @@ use super::home::{self, Why};
 use super::model::Model;
 use super::{SINCE, cards};
 use crate::live::{self, State};
-use crate::threads::thread::{Entry, Parser};
+use crate::threads::thread::Parser;
 use crate::tools::Update;
 
 /// How long `ants status` reads.

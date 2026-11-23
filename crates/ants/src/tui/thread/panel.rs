@@ -1,5 +1,6 @@
 //! The thread view's side panel, with what else is known of the thread, and its brief line when folded.
 
+use ants_client::entry::{Entry, Kind};
 use ants_proto::UserId;
 use chrono::{DateTime, Utc};
 use ratatui::style::Style;
@@ -7,7 +8,6 @@ use ratatui::text::{Line, Span};
 
 use super::Page;
 use super::conversation::{busy, hm};
-use crate::threads::thread::{Entry, Kind};
 use crate::tui::model::Data;
 use crate::tui::style;
 use crate::tui::timeline::Call;

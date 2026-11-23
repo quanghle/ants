@@ -151,7 +151,7 @@ fn the_fold_keys_have_rows_in_the_table() {
 
 /// The functions taking keys for the views of the key table: their file under `tui/`, their name and the views whose
 /// rows hold their keys.
-const TAKERS: [(&str, &str, &[View]); 24] = [
+const TAKERS: [(&str, &str, &[View]); 25] = [
     ("model/keys.rs", "nav_key", &[View::Nav]),
     ("thread/find.rs", "find_key", &[View::Thread]),
     ("command/bar.rs", "key", &[View::Bar]),
@@ -160,6 +160,7 @@ const TAKERS: [(&str, &str, &[View]); 24] = [
     ("command/history.rs", "search_key", &[View::Bar]),
     ("complete.rs", "complete_key", &[View::Bar]),
     ("approvals.rs", "key", &[View::Request]),
+    ("approvals.rs", "verdict", &[View::Request]),
     ("approvals/full.rs", "scrolled", &[View::Request]),
     ("home.rs", "key", &[View::Home]),
     ("work.rs", "key", &[View::Work]),
