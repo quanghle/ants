@@ -1,7 +1,7 @@
 //! How a key changes the model: which of the prompts, the bar, the nav or the shown view takes it, and where a view's
 //! key leads ([`To`]).
 
-use ants_proto::{ApprovalRequest, Verdict};
+use ants_proto::{ApprovalRequest, ChannelId, Verdict};
 use chrono::{DateTime, Utc};
 
 use super::{Action, Focus, Key, Level, Model, Overlay, Page, Prompt, QUIT_WITHIN, To};
@@ -482,6 +482,12 @@ impl Model {
         }
     }
 
+    /// Show `tab` of `channel`, by key or click: the action keeping it on the device.
+    pub fn choose_tab(&mut self, channel: ChannelId, tab: channel::Tab) -> Action {
+        channel::keep_tab(&mut self.ui.channel_tabs, channel.clone(), tab);
+        Action::KeepChannelTab(channel, tab)
+    }
+
     /// The action a view's key asks for, once marked busy where it is shown and on the bar.
     fn run(&mut self, action: Action) -> Option<Action> {
         match action {
@@ -501,10 +507,7 @@ impl Model {
                 self.bar.set_status("the bar holds a draft: send or clear it before editing a message", Tone::Error);
                 None
             }
-            Action::KeepChannelTab(channel, tab) => {
-                channel::keep_tab(&mut self.ui.channel_tabs, channel.clone(), tab);
-                Some(Action::KeepChannelTab(channel, tab))
-            }
+            Action::KeepChannelTab(channel, tab) => Some(self.choose_tab(channel, tab)),
             Action::Run(Job::ChannelNotify { channel, level }, _) => {
                 self.bar.set_status("running…", Tone::Busy);
                 Some(self.set_level(channel, level))

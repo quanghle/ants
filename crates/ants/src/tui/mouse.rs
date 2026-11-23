@@ -266,8 +266,7 @@ impl Mouse {
             Target::ChannelTab(tab) => {
                 let Page::Channel(page) = model.page() else { return None };
                 let channel = page.channel.clone();
-                model.ui.channel_tabs.insert(channel.clone(), tab);
-                Some(Action::KeepChannelTab(channel, tab))
+                Some(model.choose_tab(channel, tab))
             }
             Target::Copy(at) => {
                 model.copying()?.selected = at;
@@ -430,6 +429,24 @@ mod tests {
         assert_eq!(m.page().name(), "work");
         let shown = test_support::screen(&m, 160, 36, at(3));
         assert!(shown.contains("task 40"), "the work view keeps its own scroll: {shown}");
+    }
+
+    #[test]
+    fn a_clicked_tab_is_kept_as_one_chosen_by_key() {
+        let ops: ants_proto::ChannelId = "ops".parse().unwrap();
+        let mut m = test_support::model();
+        let lunch = ants_proto::ChannelPost::new(ops.clone(), crate::test_support::live::user("bob"), "lunch?");
+        m.stored(vec![test_support::post(1, &lunch)], at(1));
+        m.select(crate::tui::nav::Item::Channel(ops.clone()));
+        let mut mouse = Mouse::default();
+        draw(&m);
+        let event = click(&m, &Target::ChannelTab(channel::Tab::Idle));
+        assert_eq!(mouse.event(&mut m, event, at(1)), Some(Action::KeepChannelTab(ops.clone(), channel::Tab::Idle)));
+        assert_eq!(m.ui.channel_tabs.get(&ops), Some(&channel::Tab::Idle));
+        draw(&m);
+        let event = click(&m, &Target::ChannelTab(channel::Tab::All));
+        assert_eq!(mouse.event(&mut m, event, at(5)), Some(Action::KeepChannelTab(ops, channel::Tab::All)));
+        assert!(m.ui.channel_tabs.is_empty(), "the default is kept as none, as by key");
     }
 
     fn forty_tasks_of_dev_a() -> Model {
