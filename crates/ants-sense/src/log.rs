@@ -18,7 +18,7 @@ mod sign;
 mod status;
 mod store;
 
-pub use ant::{APPEND_TRIES, AntLog, Checked};
+pub use ant::{APPEND_TRIES, AntLog, Checked, STATUS_REFRESH};
 pub use chain::{Anchor, Break, Chain, Mark, Position, Verdict};
 pub use event::{EVENT_SIGNING_CONTEXT, Event, IMPORTED, RENAMED, Stored, sha256};
 pub use sign::{AccountVerifier, NoRevocations, Revocations, Signature, Signer, Unsigned, Verifier, VerifyError};

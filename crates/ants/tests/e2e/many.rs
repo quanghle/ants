@@ -1,6 +1,6 @@
 //! Many ants on one daemon, each in a git workdir of its own with worktrees on: every thread started at once gets its
-//! own worktree, every message is answered exactly once, and once the threads' sessions are gone a restarted daemon
-//! removes every worktree and branch.
+//! own worktree and its session's brief, every message is answered exactly once, and once the threads' sessions are
+//! gone a restarted daemon removes every worktree and branch.
 //!
 //! By default 12 ants with 3 threads each. `ANTS_STRESS=N` serves 12×N ants with 3+N threads each.
 
@@ -118,6 +118,9 @@ pub fn many_ants_in_worktrees_answer_once_and_clean_up() {
         sent.iter().filter(|(name, _, thread)| !worktree(name, thread).join(".git").is_file()).collect();
     assert!(shared.is_empty(), "threads without a worktree of their own: {shared:?}\n{}", logs(1));
     assert!(daemon.0.try_wait().unwrap().is_none(), "the daemon exited\n{}", logs(1));
+    let log = std::fs::read_to_string(dir.join("daemon.1.log")).unwrap();
+    let unbriefed = log.lines().filter(|line| line.contains("the provider sent no brief")).count();
+    assert_eq!(unbriefed, 0, "sessions started without the brief\n{}", logs(1));
 
     // With the sessions gone, the next daemon removes every worktree, and every branch, none holding commits.
     let _ = daemon.0.kill();

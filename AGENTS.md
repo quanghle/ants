@@ -74,8 +74,8 @@ skipped checks.
   backlog, reloads listing and unlisting ants and reading half-written files under traffic, a leaf node's uplink
   flapping with one outage past the ack wait, channel storms of 6 + 6N member ants each mentioning everyone, and 12×N
   ants in git worktrees on one daemon; every message answered once, a withdrawn one never, none a dead letter for an
-  outage, every storm ended by the thread's turn budget, every thread in a worktree of its own, each removed with its
-  branch.
+  outage, every storm ended by the thread's turn budget, every thread in a worktree of its own and its session briefed,
+  each worktree removed with its branch.
 - `cargo build --release` and `scripts/footprint.sh --ants target/release/ants --port 14722 --max-mb 10` with
   `--footprint`; the footprint check skips where `scripts/footprint.sh` cannot measure (Linux and macOS only, needs
   `nats-server`, and `footprint` on macOS).

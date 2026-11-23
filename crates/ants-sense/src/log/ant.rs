@@ -15,6 +15,8 @@ use super::{
 const READ_BATCH: usize = 256;
 /// How often [`AntLog::append`] tries while other writers keep appending.
 pub const APPEND_TRIES: usize = 10;
+/// How long a kept [`ChainStatus`] that only its time would change stays unwritten.
+pub const STATUS_REFRESH: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
 
 /// A message of the log and the event it holds, verified.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +35,8 @@ pub struct AntLog<L, S, V> {
     machine: Machine,
     chain: Chain,
     home: Option<PathBuf>,
+    /// The status last kept in the home.
+    kept: Option<ChainStatus>,
 }
 
 impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
@@ -53,9 +57,9 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
             }
             None => None,
         };
-        let seen = kept.filter(|status| status.sense == sense).and_then(|status| status.seen);
+        let seen = kept.as_ref().filter(|status| status.sense == sense).and_then(|status| status.seen.clone());
         let chain = Chain::new(sense, ant, seen);
-        Ok(Self { log, signer, verifier, machine, chain, home })
+        Ok(Self { log, signer, verifier, machine, chain, home, kept })
     }
 
     /// The log of an ant once named `earlier` too, whose events under those names it reads as its own
@@ -226,10 +230,21 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
         LogError::refused(format!("other writers kept appending to sense identity {}", self.chain.sense()))
     }
 
-    fn keep_status(&self) -> Result<(), LogError> {
+    /// Keep the status in the home, unless only its time changed since it was kept, less than [`STATUS_REFRESH`]
+    /// ago: each write is synced to disk, and every call to sense reads the log to its end.
+    fn keep_status(&mut self) -> Result<(), LogError> {
         let Some(home) = &self.home else { return Ok(()) };
-        super::write_status(home, &self.status())
-            .map_err(|e| LogError::integrity(format!("keeping the chain status: {e}")))
+        let status = self.status();
+        if let Some(kept) = &self.kept
+            && (ChainStatus { checked_at: status.checked_at, ..kept.clone() }) == status
+            && status.checked_at - kept.checked_at < STATUS_REFRESH
+        {
+            return Ok(());
+        }
+        super::write_status(home, &status)
+            .map_err(|e| LogError::integrity(format!("keeping the chain status: {e}")))?;
+        self.kept = Some(status);
+        Ok(())
     }
 }
 

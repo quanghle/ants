@@ -58,8 +58,9 @@ a thread whose origin is of a kind this version of sense does not know.
 - **The bus:** the ant's sense log, every change of its sense data, signed and hash-chained, in stream `ANTS_SENSE`
   ([Stores and subjects](architecture.md#stores-and-subjects)), reachable by machine hosts only. Nothing trims it.
 - **The ant's home:** `.sense/id` (the sense id), `.sense/names` (earlier names), `.sense/cache.db` (the cache of its
-  items), `.sense/chain.json` (the log as last verified), `.sense/skills/` (the confirmed skills), and, on a sage,
-  `reviews/` (the checkouts of the reviews running).
+  items), `.sense/chain.json` (the log as last verified: written again when that changes, else at most every 10
+  minutes), `.sense/skills/` (the confirmed skills), and, on a sage, `reviews/` (the checkouts of the reviews
+  running).
 - **The memories view:** `ants ant memories` and the memories pane of the ant view in `ants chat` show, under
   `memories of provider sense`, who the ant has become, read from its cache without noting a session or writing
   anything: its identity (card, experience and, for a sage, the tally of its reviews), its growth report, its persona
@@ -146,11 +147,11 @@ item moved on, with the current item to merge and try again.
 
 The cache, `.sense/cache.db` in the ant's home (SQLite with full-text search), holds the items as the log left them, so
 reads read no log: a call to sense (a tool call, a brief, an event) and a cycle of the ant's schedule catch the cache up
-with the log once, as they start, and a read reaches the log only to append writes still waiting for it. A log failing
-other than by being out of reach, as on a signature or a permission, fails the call. The cache is never the source of
-truth: a cache missing, unreadable, of another schema, sense id or incarnation of the stream, or built from a message
-the log no longer holds unchanged, is built again from the log when the ant's items open. One that may hold writes not
-yet appended is never replaced.
+with the log once, as they start, writing nothing to disk when the log holds nothing new, and a read reaches the log
+only to append writes still waiting for it. A log failing other than by being out of reach, as on a signature or a
+permission, fails the call. The cache is never the source of truth: a cache missing, unreadable, of another schema,
+sense id or incarnation of the stream, or built from a message the log no longer holds unchanged, is built again from
+the log when the ant's items open. One that may hold writes not yet appended is never replaced.
 
 While the machine's host connection is down:
 
