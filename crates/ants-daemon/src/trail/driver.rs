@@ -385,11 +385,7 @@ impl Trails {
                     continue;
                 }
             };
-            let turn_budget = match call.function {
-                TrailFunction::Agent => DEFAULT_TURN_BUDGET.min(turns),
-                TrailFunction::Human => DEFAULT_TURN_BUDGET,
-                TrailFunction::Trail | TrailFunction::Goto => 0,
-            };
+            let turn_budget = turn_budget_for(call.function, turns);
             if turn_budget == 0 && call.function == TrailFunction::Agent {
                 if self.holds_turns(&header) {
                     slot.book().starved = true;
@@ -401,18 +397,7 @@ impl Trails {
             if call.function == TrailFunction::Agent {
                 turns -= turn_budget;
             }
-            let pending = PendingCall {
-                call: call.call,
-                function: call.function,
-                args: call.args.clone(),
-                to,
-                thread: ThreadId::generate(),
-                message: Uuid::now_v7(),
-                sent_at: Utc::now(),
-                sent: false,
-                turn_budget,
-                retries: 0,
-            };
+            let pending = pending_for(call, to, turn_budget);
             if call.function != TrailFunction::Trail {
                 if let Err(error) = steps::envelope(&header, &pending, None) {
                     issued.answers.push(self.raise(&header.run, call, error).await?);
@@ -589,6 +574,32 @@ struct Issued {
     broke: Option<RunLimit>,
     /// Whether a call waits for turns no step it waits on will give back.
     out_of_turns: bool,
+}
+
+/// The turns the step of a call to `function` may spend, of the `turns` the run's tree has left: none for a call
+/// that prompts no ant and asks no human.
+fn turn_budget_for(function: TrailFunction, turns: u32) -> u32 {
+    match function {
+        TrailFunction::Agent => DEFAULT_TURN_BUDGET.min(turns),
+        TrailFunction::Human => DEFAULT_TURN_BUDGET,
+        TrailFunction::Trail | TrailFunction::Goto => 0,
+    }
+}
+
+/// The step of `call`, for `to` to answer within `turn_budget` turns, on a thread of its own and not sent yet.
+fn pending_for(call: &Call, to: ants_proto::UserId, turn_budget: u32) -> PendingCall {
+    PendingCall {
+        call: call.call,
+        function: call.function,
+        args: call.args.clone(),
+        to,
+        thread: ThreadId::generate(),
+        message: Uuid::now_v7(),
+        sent_at: Utc::now(),
+        sent: false,
+        turn_budget,
+        retries: 0,
+    }
 }
 
 /// Count `steps` sent to the run of `header` and to the leg it is on.

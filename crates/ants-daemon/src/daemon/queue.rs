@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use ants_proto::{ConsumerPlace, QueueRequest, QueuedMessage, State, StatusUpdate, ThreadId, Uuid, subject};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
-use futures::future::{FusedFuture as _, FutureExt as _};
+use futures::future::{BoxFuture, Fuse, FusedFuture as _, FutureExt as _};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
 use crate::channel::Channels;
@@ -64,6 +64,55 @@ enum Wait {
     Limit,
     Repair,
     Hub,
+}
+
+/// A wait under way, or none.
+type Waiting<'a> = Fuse<BoxFuture<'a, ()>>;
+
+/// What the messages handed back wait for ([`Wait`]), each wait under way once at most.
+struct Waits<'a> {
+    signing_in: Waiting<'a>,
+    lifting: Waiting<'a>,
+    repairing: Waiting<'a>,
+    stalling: Waiting<'a>,
+}
+
+impl<'a> Waits<'a> {
+    fn new() -> Self {
+        let none = Fuse::terminated;
+        Self { signing_in: none(), lifting: none(), repairing: none(), stalling: none() }
+    }
+
+    /// Start waiting for what `wait` names for the messages of `inbox`, unless that wait is under way.
+    fn start(&mut self, inbox: &'a Inbox<'_>, wait: Wait) {
+        fn begin<'a>(waiting: &mut Waiting<'a>, wait: impl Future<Output = ()> + Send + 'a) {
+            if waiting.is_terminated() {
+                *waiting = wait.boxed().fuse();
+            }
+        }
+        match wait {
+            Wait::SignIn => begin(&mut self.signing_in, inbox.signed_in()),
+            Wait::Limit => begin(&mut self.lifting, inbox.limit_passed()),
+            Wait::Repair => begin(&mut self.repairing, inbox.repaired()),
+            Wait::Hub => begin(&mut self.stalling, inbox.hub_back()),
+        }
+    }
+}
+
+/// The first of three waits to end.
+async fn any(a: &mut Waiting<'_>, b: &mut Waiting<'_>, c: &mut Waiting<'_>) {
+    tokio::select! {
+        () = a => {}
+        () = b => {}
+        () = c => {}
+    }
+}
+
+/// The threads whose next message may run after what the inbox loop took in.
+enum Ready {
+    None,
+    Thread(ThreadId),
+    All,
 }
 
 impl Thread {
@@ -134,23 +183,20 @@ impl Inbox<'_> {
         let mut progress = self.progress();
         let shutdown = stop();
         let finishing = self.finish_buried();
-        let signing_in = futures::future::Fuse::terminated();
-        let lifting = futures::future::Fuse::terminated();
-        let repairing = futures::future::Fuse::terminated();
-        let stalling = futures::future::Fuse::terminated();
-        tokio::pin!(shutdown, finishing, signing_in, lifting, repairing, stalling);
+        tokio::pin!(shutdown, finishing);
+        let mut waits = Waits::new();
         let mut asks = self.queue_asks().await;
         let mut answering = FuturesUnordered::new();
         let mut paused = self.pause.subscribe();
         let mut drift = self.drift.subscribe();
         loop {
-            let junk_waits = !self.holds.junk.is_empty() && stalling.is_terminated();
+            let junk_waits = !self.holds.junk.is_empty() && waits.stalling.is_terminated();
             let retry_deadline = threads.values().filter_map(|t| t.retry.as_ref().map(|r| r.until)).min();
             // Every fallback was turned away lately: the first to be tried again lets the messages on.
             let now = tokio::time::Instant::now();
             let fallback_up =
                 self.holds.failover.next_up(now).filter(|_| self.outage().is_some() && self.fallback(now).is_none());
-            let mut ready = None;
+            let mut ready = Ready::None;
             tokio::select! {
                 () = &mut shutdown => break,
                 () = &mut finishing => {}
@@ -161,16 +207,18 @@ impl Inbox<'_> {
                 _ = progress.tick() => ack_progress(&threads, self.holds.junk.messages()).await,
                 () = sleep_until(retry_deadline), if retry_deadline.is_some() => {
                     give_up_retries(&mut threads);
-                    ready = Some(threads.keys().cloned().collect());
+                    ready = Ready::All;
                 }
-                () = &mut signing_in => ready = Some(threads.keys().cloned().collect()),
-                () = &mut lifting => ready = Some(threads.keys().cloned().collect()),
-                () = &mut repairing => ready = Some(threads.keys().cloned().collect()),
-                () = std::future::ready(()), if junk_waits => stalling.set(self.hub_back().fuse()),
-                () = &mut stalling => ready = Some(self.hub_tried(&threads).await),
-                Ok(()) = paused.changed() => ready = Some(threads.keys().cloned().collect()),
+                () = any(&mut waits.signing_in, &mut waits.lifting, &mut waits.repairing) => ready = Ready::All,
+                () = std::future::ready(()), if junk_waits => waits.start(self, Wait::Hub),
+                () = &mut waits.stalling => {
+                    // The hub is tried again: so are the burials of the messages never to be answered held for it.
+                    Box::pin(self.bury_held_junk()).await;
+                    ready = Ready::All;
+                }
+                Ok(()) = paused.changed() => ready = Ready::All,
                 Ok(()) = drift.changed() => self.workload.set_drift(drift.borrow_and_update().clone()),
-                () = sleep_until(fallback_up), if fallback_up.is_some() => ready = Some(threads.keys().cloned().collect()),
+                () = sleep_until(fallback_up), if fallback_up.is_some() => ready = Ready::All,
                 Some(ask) = asks.next() => {
                     if let Some(request) = queue_request(&ask) {
                         answering.push(self.answer_queue(request, in_hand(&threads)));
@@ -178,14 +226,10 @@ impl Inbox<'_> {
                 }
                 Some(()) = answering.next(), if !answering.is_empty() => {}
                 Some((thread, handled, joiner)) = running.next(), if !running.is_empty() => {
-                    match handed_back(&mut threads, &thread, handled, joiner, &self.holds.stall) {
-                        Some(Wait::SignIn) if signing_in.is_terminated() => signing_in.set(self.signed_in().fuse()),
-                        Some(Wait::Limit) if lifting.is_terminated() => lifting.set(self.limit_passed().fuse()),
-                        Some(Wait::Repair) if repairing.is_terminated() => repairing.set(self.repaired().fuse()),
-                        Some(Wait::Hub) if stalling.is_terminated() => stalling.set(self.hub_back().fuse()),
-                        _ => {}
+                    if let Some(wait) = handed_back(&mut threads, &thread, handled, joiner, &self.holds.stall) {
+                        waits.start(self, wait);
                     }
-                    ready = Some(vec![thread]);
+                    ready = Ready::Thread(thread);
                 }
                 next = messages.next() => match next {
                     None => break,
@@ -193,21 +237,19 @@ impl Inbox<'_> {
                     Some(Ok(msg)) => {
                         let taken = Box::pin(self.take_in(msg, &mut channels, &mut threads)).await;
                         let Some(thread) = taken else { continue };
-                        ready = Some(vec![thread]);
+                        ready = Ready::Thread(thread);
                     }
                 }
             }
-            // While the harness is signed out, a provider limit holds or the harness keeps failing to start, messages
-            // wait in hand, unless a fallback answers them: the consumer's limit on them stops deliveries. A rate limit
-            // is waited out, as is a hub full or out of reach. Paused, they wait in hand, the consumers not pulled from.
-            let now = tokio::time::Instant::now();
             let pause = paused.borrow_and_update().clone();
-            let held = pause.is_some()
-                || self.holds.throttle.is_held() && !self.holds.throttle.is_quota_held()
-                || self.holds.stall.is_on()
-                || self.outage().is_some() && self.fallback(now).is_none();
+            let held = self.holds_messages(pause.is_some());
             self.workload.set_paused(pause);
-            for thread in ready.into_iter().flatten().filter(|_| !held) {
+            let ready = match ready {
+                Ready::None => Vec::new(),
+                Ready::Thread(thread) => vec![thread],
+                Ready::All => threads.keys().cloned().collect(),
+            };
+            for thread in ready.into_iter().filter(|_| !held) {
                 while let Some((incoming, msg)) = next_turn(&mut threads, thread.clone()) {
                     if let Some(t) = threads.get_mut(&thread) {
                         self.queue_moved(&thread, t, incoming.envelope.id);
@@ -224,21 +266,18 @@ impl Inbox<'_> {
 
         drop(messages);
         hand_back_waiting(threads).await;
-        if !running.is_empty() {
-            tracing::info!(prompts = running.len(), "finishing prompts in flight; Ctrl-C again stops now");
-            let drain = async { while running.next().await.is_some() {} };
-            tokio::select! {
-                () = drain => {}
-                () = stop() => tracing::warn!("stopping mid-prompt; those messages are redelivered"),
-            }
-        }
+        finish(running, stop).await;
     }
 
-    /// The hub is tried again ([`Inbox::hub_back`]): bury the messages never to be answered held for it again
-    /// ([`Inbox::bury_held_junk`]), and let every thread go on.
-    async fn hub_tried(&self, threads: &HashMap<ThreadId, Thread>) -> Vec<ThreadId> {
-        Box::pin(self.bury_held_junk()).await;
-        threads.keys().cloned().collect()
+    /// Whether the messages wait in hand: while the harness is signed out, a provider limit holds or the harness keeps
+    /// failing to start, unless a fallback answers them, the consumer's limit on them stopping deliveries. A rate
+    /// limit is waited out, as is a hub full or out of reach. `paused`, they wait in hand, the consumers not pulled
+    /// from.
+    fn holds_messages(&self, paused: bool) -> bool {
+        paused
+            || self.holds.throttle.is_held() && !self.holds.throttle.is_quota_held()
+            || self.holds.stall.is_on()
+            || self.outage().is_some() && self.fallback(tokio::time::Instant::now()).is_none()
     }
 
     /// Admit `msg` and queue it on its thread: the thread, or `None` when the message is not to be handled now.
@@ -550,6 +589,23 @@ fn queue_request(msg: &async_nats::Message) -> Option<QueueRequest> {
     }
     tracing::info!(by = %request.by, "listing the messages in hand");
     Some(request)
+}
+
+/// Finish the prompts in flight, `running`, unless `stop` resolves first.
+async fn finish<P, F>(mut running: FuturesUnordered<P>, mut stop: impl FnMut() -> F)
+where
+    P: Future,
+    F: Future<Output = ()>,
+{
+    if running.is_empty() {
+        return;
+    }
+    tracing::info!(prompts = running.len(), "finishing prompts in flight; Ctrl-C again stops now");
+    let drain = async { while running.next().await.is_some() {} };
+    tokio::select! {
+        () = drain => {}
+        () = stop() => tracing::warn!("stopping mid-prompt; those messages are redelivered"),
+    }
 }
 
 /// Hand the messages waiting on `threads` back at once rather than after the ack wait, oldest first.

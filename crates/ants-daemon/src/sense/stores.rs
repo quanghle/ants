@@ -339,8 +339,8 @@ impl SenseStores {
     fn opened<'a>(&'a self, ant: &'a UserId, sync: bool) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         Box::pin(async move {
             let asked = Instant::now();
-            let Of { items: slot, home, creds, link, route, named } = self.of(ant)?;
-            let files = Home::new(&home);
+            let of = self.of(ant)?;
+            let files = Home::new(&of.home);
             if files.awaits_import() {
                 return Err(StoreError::Unavailable(format!(
                     "the sense data of {ant} await their import: `ants ant import FILE --provider-only` imports them, \
@@ -348,80 +348,91 @@ impl SenseStores {
                     files.importing().display()
                 )));
             }
-            let mut current = slot.lock().await.clone();
-            if let Some(items) = &current
-                && sync
-            {
-                match items.sync_since(asked).await {
-                    Err(StoreError::Log(error))
-                        if error.kind == LogErrorKind::Incarnation && items.pending().await? == 0 =>
-                    {
-                        let mut opened = slot.lock().await;
-                        // Unless another call opened them again meanwhile.
-                        if opened.as_ref().is_some_and(|opened| Arc::ptr_eq(opened, items)) {
-                            *opened = None;
-                        }
-                        current = None;
-                    }
-                    // The items remain readable, including when a conflict requires explicit reconciliation.
-                    Ok(()) | Err(StoreError::Unavailable(_)) => {}
-                    // Out of reach the cache serves; reads meet any other failure as they append the writes pending.
-                    Err(StoreError::Log(error)) if is_offline(&error) || items.pending().await? > 0 => {}
-                    Err(error) => return Err(error),
-                }
-            }
+            let current = of.items.lock().await.clone();
+            let current = match current {
+                Some(items) if sync => resync(&of.items, items, asked).await?,
+                current => current,
+            };
             let items = match current {
                 Some(items) => items,
-                None => {
-                    let mut opened = slot.lock().await;
-                    match opened.clone() {
-                        // Another call opened them meanwhile, caught up as they open.
-                        Some(items) => items,
-                        None => {
-                            if link.is_none() && !files.cache().exists() {
-                                return Err(match self.state().host {
-                                    Host::Connecting => {
-                                        StoreError::Unavailable("the host connection is not up yet".into())
-                                    }
-                                    _ => StoreError::NotKept(
-                                        self.unkept.borrow().clone().unwrap_or_else(|| "no host connection".into()),
-                                    ),
-                                });
-                            }
-                            if let Named::Record(record) = &named {
-                                take_named(ant, &home, record).await?;
-                            }
-                            let mint = matches!(named, Named::Home);
-                            let items =
-                                open(ant, &home, creds.as_deref(), link.as_deref(), route, mint).await.map_err(
-                                    |e| StoreError::Unavailable(format!("opening the sense data of {ant}: {e:#}")),
-                                )?;
-                            *opened = Some(items.clone());
-                            items
-                        }
-                    }
-                }
+                None => self.open_slot(ant, &of).await?,
             };
-            if let Named::Record(record) = &named
-                && link
-                    .is_some_and(|link| link.js.client().connection_state() == async_nats::connection::State::Connected)
-            {
-                let mut opened = slot.lock().await;
-                // Unless a call that came with this one settled it meanwhile, or closed the items.
-                if !self.is_settled(ant, &slot) && opened.as_ref().is_some_and(|opened| Arc::ptr_eq(opened, &items)) {
-                    match settle(self, ant, &home, record, &*items).await {
-                        Ok(true) => self.settled(ant, &slot),
-                        // Settled on a later call, the record or the card unread meanwhile.
-                        Ok(false) => {}
-                        Err(refused) => {
-                            *opened = None;
-                            return Err(refused);
-                        }
-                    }
-                }
-            }
+            self.settle_named(ant, &of, &items).await?;
             Ok(items)
         })
+    }
+
+    /// Open the items of `ant` into their slot, caught up with their log as they open, unless another call opened
+    /// them meanwhile.
+    async fn open_slot(&self, ant: &UserId, of: &Of) -> Result<Opened, StoreError> {
+        let mut opened = of.items.lock().await;
+        if let Some(items) = opened.clone() {
+            return Ok(items);
+        }
+        if of.link.is_none() && !Home::new(&of.home).cache().exists() {
+            return Err(match self.state().host {
+                Host::Connecting => StoreError::Unavailable("the host connection is not up yet".into()),
+                _ => StoreError::NotKept(self.unkept.borrow().clone().unwrap_or_else(|| "no host connection".into())),
+            });
+        }
+        if let Named::Record(record) = &of.named {
+            take_named(ant, &of.home, record).await?;
+        }
+        let mint = matches!(of.named, Named::Home);
+        let items = open(ant, &of.home, of.creds.as_deref(), of.link.as_deref(), of.route.clone(), mint)
+            .await
+            .map_err(|e| StoreError::Unavailable(format!("opening the sense data of {ant}: {e:#}")))?;
+        *opened = Some(items.clone());
+        Ok(items)
+    }
+
+    /// Settle the sense id of `ant` with the one its identity record names, once per slot and only while the host
+    /// connection is up: `items`, refused, are closed.
+    async fn settle_named(&self, ant: &UserId, of: &Of, items: &Opened) -> Result<(), StoreError> {
+        let Named::Record(record) = &of.named else { return Ok(()) };
+        let connected = async_nats::connection::State::Connected;
+        if !of.link.as_ref().is_some_and(|link| link.js.client().connection_state() == connected) {
+            return Ok(());
+        }
+        let mut opened = of.items.lock().await;
+        // Unless a call that came with this one settled it meanwhile, or closed the items.
+        if self.is_settled(ant, &of.items) || !opened.as_ref().is_some_and(|opened| Arc::ptr_eq(opened, items)) {
+            return Ok(());
+        }
+        match settle(self, ant, &of.home, record, &**items).await {
+            Ok(true) => self.settled(ant, &of.items),
+            // Settled on a later call, the record or the card unread meanwhile.
+            Ok(false) => {}
+            Err(refused) => {
+                *opened = None;
+                return Err(refused);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Catch `items`, open in `slot`, up with their log, unless a catch-up since `asked` did: the items to serve, or none
+/// once their log began anew with no write of theirs pending, the slot emptied for them to open again.
+async fn resync(
+    slot: &tokio::sync::Mutex<Option<Opened>>,
+    items: Opened,
+    asked: Instant,
+) -> Result<Option<Opened>, StoreError> {
+    match items.sync_since(asked).await {
+        Err(StoreError::Log(error)) if error.kind == LogErrorKind::Incarnation && items.pending().await? == 0 => {
+            let mut opened = slot.lock().await;
+            // Unless another call opened them again meanwhile.
+            if opened.as_ref().is_some_and(|opened| Arc::ptr_eq(opened, &items)) {
+                *opened = None;
+            }
+            Ok(None)
+        }
+        // The items remain readable, including when a conflict requires explicit reconciliation.
+        Ok(()) | Err(StoreError::Unavailable(_)) => Ok(Some(items)),
+        // Out of reach the cache serves; reads meet any other failure as they append the writes pending.
+        Err(StoreError::Log(error)) if is_offline(&error) || items.pending().await? > 0 => Ok(Some(items)),
+        Err(error) => Err(error),
     }
 }
 
