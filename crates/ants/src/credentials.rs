@@ -5,5 +5,6 @@ pub(crate) mod age;
 pub(crate) mod backup;
 pub(crate) mod enroll;
 pub(crate) mod keys;
+pub(crate) mod push;
 pub(crate) mod renew;
 pub(crate) mod revoke;

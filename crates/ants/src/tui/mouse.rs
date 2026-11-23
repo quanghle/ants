@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn the_mouse_over_the_box_of_a_run_to_start_leaves_it_waiting_for_its_keys() {
-        use crate::cmd::trail::start::Start;
+        use crate::trails::start::Start;
         use ants_proto::{TrailLimits, TrailSource};
 
         let mut m = test_support::model();

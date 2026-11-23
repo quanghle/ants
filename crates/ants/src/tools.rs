@@ -762,7 +762,7 @@ pub async fn send_note(
     request: &ApprovalRequest,
     note: String,
 ) -> Result<(Envelope, bus::Stored, Vec<String>)> {
-    use crate::cmd::send;
+    use crate::messages::send;
     let envelope = send::ask_envelope(me, Some(request.thread_id.clone()), request.ant.clone(), note);
     let (warnings, _) = send::unserved(js, me, &envelope.to).await;
     let stored = send::deliver(js, domain, &envelope).await?;
@@ -822,7 +822,7 @@ pub async fn decide_request(
             .with_context(|| format!("request {} is rejected, but the note was not sent", qualified(&request)))?;
         warnings.iter().for_each(|w| tracing::warn!("{w}"));
         if stored == bus::Stored::Outbox {
-            println!("{}", crate::cmd::send::OUTBOX);
+            println!("{}", crate::messages::send::OUTBOX);
         }
         println!("sent the note to {ant} on thread {} (message {})", envelope.thread_id, envelope.id);
     }

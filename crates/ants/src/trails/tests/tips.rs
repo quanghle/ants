@@ -8,11 +8,12 @@ use async_nats::jetstream;
 use chrono::{DateTime, TimeDelta, Utc};
 use clap::Parser;
 
+use super::super::TipsArgs;
 use super::super::saved;
 use super::super::tips::{self, Json};
-use super::super::{TipsArgs, TrailCommand};
 use super::{human, p, script, write};
 use crate::cli::{Cli, Command};
+use crate::cmd::trail::TrailCommand;
 use crate::connection::Nats;
 use crate::test_support::Server;
 
@@ -186,7 +187,7 @@ async fn humans_retire_tips_whether_their_trail_is_saved_or_not_and_removing_it_
     let (_, ant_js) = ant.connect("test").await.unwrap();
     assert_eq!(tips::read(&ant_js, &name).await.unwrap().0.len(), 2, "an ant reads the tips");
     let retire = TipsArgs { retire: Some(current.id.clone()), ..args("deploy") };
-    let error = super::super::run(&ant, TrailCommand::Tips { tips: retire, json: false }).await.unwrap_err();
+    let error = crate::cmd::trail::run(&ant, TrailCommand::Tips { tips: retire, json: false }).await.unwrap_err();
     assert_eq!(error.to_string(), "retiring a tip needs a human's credentials; those of dev-a are an ant's");
 
     let at = Utc::now();

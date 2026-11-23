@@ -94,7 +94,15 @@ impl Shown {
 
 /// A change as a follow prints it: as `ants watch` does, with the message's sender and opening.
 fn line(change: &Change, name: &str) -> String {
-    format!("{} ({name})", crate::cmd::watch::reaction_line(change))
+    format!("{} ({name})", reaction_line(change))
+}
+
+/// A reaction added or removed as `ants watch` prints it, an assistant's for its human naming both
+/// ([`ants_proto::Acting::label`]).
+pub(crate) fn reaction_line(change: &Change) -> String {
+    let verb = if change.removed { "removed the reaction" } else { "reacted" };
+    let by = change.acting.label(change.by.as_str());
+    format!("{by} {verb} {} to message {}", change.reaction, change.message)
 }
 
 #[cfg(test)]

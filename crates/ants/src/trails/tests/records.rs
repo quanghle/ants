@@ -7,8 +7,9 @@ use ants_proto::{
 use chrono::{TimeDelta, Utc};
 use serde_json::json;
 
-use super::super::{Shown, TrailCommand, runs};
+use super::super::{Shown, runs};
 use super::{human, p, put, record, script};
+use crate::cmd::trail::TrailCommand;
 use crate::connection::Nats;
 use crate::test_support::Server;
 
@@ -242,8 +243,8 @@ async fn humans_list_and_show_the_runs_conductors_keep() {
     assert_eq!(error, format!("no run {absent}: `ants trail runs` lists the runs kept"));
     let creds = server.creds_as(&dev_a, Role::Ant);
     let ant = Nats::new(&server.url, Some(&creds), None).unwrap();
-    let error = super::super::run(&ant, TrailCommand::Runs { ant: None, json: false }).await.unwrap_err();
+    let error = crate::cmd::trail::run(&ant, TrailCommand::Runs { ant: None, json: false }).await.unwrap_err();
     assert!(error.to_string().starts_with("reading the runs of trails needs a human's"), "{error}");
     let show = TrailCommand::Show { what: Shown::Run(waiting.run), json: false, follow: false };
-    assert!(super::super::run(&ant, show).await.is_err());
+    assert!(crate::cmd::trail::run(&ant, show).await.is_err());
 }

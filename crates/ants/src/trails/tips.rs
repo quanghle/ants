@@ -238,7 +238,7 @@ pub(super) async fn purge(js: &jetstream::Context, name: &TrailName) -> Result<u
 }
 
 /// What `ants trail rm` adds to its line for the `purged` entries of tips and votes it removed with the trail.
-pub(super) fn purged(purged: u64) -> String {
+pub(crate) fn purged(purged: u64) -> String {
     match purged {
         0 => String::new(),
         1 => " and its tips: 1 entry".to_owned(),

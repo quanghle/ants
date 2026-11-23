@@ -60,7 +60,7 @@ fn a_replacing_record_is_issued_after_the_one_stored() {
 /// What a human sends naming no one goes to its assistant while the grant naming it verifies, else the messenger.
 #[tokio::test]
 async fn a_human_s_unaddressed_asks_go_to_its_assistant_while_its_grant_stands() {
-    use crate::cmd::send::{Recipient, unaddressed};
+    use crate::messages::send::{Recipient, unaddressed};
 
     let Some(server) = Server::start() else { return };
     let alice = p("alice");

@@ -55,6 +55,7 @@ mod people;
 mod release;
 mod signing;
 mod threads;
+mod trails;
 
 #[cfg(test)]
 mod test_support;
@@ -73,10 +74,10 @@ fn main() -> Result<()> {
     completions::answer();
     let result = run();
     if let Err(e) = &result
-        && e.downcast_ref::<cmd::trail::follow::Unread>().is_some()
+        && e.downcast_ref::<trails::follow::Unread>().is_some()
     {
         eprintln!("Error: {e:?}");
-        std::process::exit(cmd::trail::follow::UNREAD_STATUS);
+        std::process::exit(trails::follow::UNREAD_STATUS);
     }
     result
 }

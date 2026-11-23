@@ -13,8 +13,8 @@ use futures::future::LocalBoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 
-use crate::cmd::cancel::{CANCEL_GRACE, CANCEL_WAIT, cancel_outcome};
 use crate::live::maybe;
+use crate::messages::cancel::{CANCEL_GRACE, CANCEL_WAIT, cancel_outcome};
 use crate::spend::{self, ThreadReport};
 
 /// How often the shown tree's links and spend are read.

@@ -397,7 +397,7 @@ pub async fn retire(
             }
         } else {
             if !revoked.is_empty() {
-                crate::cmd::auth::push(url, js_domain, &dir).await?;
+                crate::credentials::push::push_and_report(url, js_domain, &dir).await?;
             }
             clean_consumers(url, js_domain, &dir, name).await;
         }

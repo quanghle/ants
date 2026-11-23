@@ -14,9 +14,10 @@ use serde_json::json;
 
 use super::super::follow::{Follower, Patience, Read, Records, UNREAD_STATUS, Unread, following};
 use super::super::start::{self, Plan, Trail};
-use super::super::{LimitArgs, RunArgs, TrailCommand, control, runs};
+use super::super::{LimitArgs, RunArgs, control, runs};
 use super::{human, p, put, record, script, write};
 use crate::cli::{Cli, Command};
+use crate::cmd::trail::TrailCommand;
 use crate::connection::Nats;
 use crate::test_support::Server;
 
@@ -441,7 +442,8 @@ async fn humans_stop_and_resume_runs_by_a_unique_start_of_their_id() {
 
     let creds = server.creds_as(&p("dev-a"), Role::Ant);
     let ant = Nats::new(&server.url, Some(&creds), None).unwrap();
-    let error = super::super::run(&ant, TrailCommand::Stop { run: pick("0190aaaa") }).await.unwrap_err().to_string();
+    let error =
+        crate::cmd::trail::run(&ant, TrailCommand::Stop { run: pick("0190aaaa") }).await.unwrap_err().to_string();
     assert!(error.starts_with("stopping a run needs a human's credentials"), "{error}");
 }
 

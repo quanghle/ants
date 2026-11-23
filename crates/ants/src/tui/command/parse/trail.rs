@@ -5,7 +5,7 @@ use ants_proto::{ThreadId, TrailLimits, TrailName, UserId};
 use serde_json::Value;
 
 use super::{first_word, flags};
-use crate::cmd::trail::LimitArgs;
+use crate::trails::LimitArgs;
 use crate::tui::trail::Job;
 
 /// What `/trail` asks of the saved trails and the runs of trails, as `ants trail` does.
@@ -77,7 +77,7 @@ fn trail_run(args: &str) -> Result<Trail, Option<String>> {
     let limits = limits.over(TrailLimits::DEFAULT).map_err(|e| error(&e))?;
     let args = match rest {
         "" => None,
-        json => Some(crate::cmd::trail::start::json_args(json).map_err(|e| Some(format!("ARGS {e}")))?),
+        json => Some(crate::trails::start::json_args(json).map_err(|e| Some(format!("ARGS {e}")))?),
     };
     Ok(Trail::Run { trail, conductor, args, limits, thread })
 }
@@ -170,8 +170,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::cmd::trail::{Shown, TipsArgs};
     use crate::test_support::live::user;
+    use crate::trails::{Shown, TipsArgs};
     use crate::tui::command::parse::{Command, Slash, parse};
 
     #[test]

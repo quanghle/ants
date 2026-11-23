@@ -6,9 +6,9 @@ use ants_proto::{ChannelId, ThreadId, UserId};
 use anyhow::{Result, anyhow};
 
 use super::{Ctx, Done, Quoted};
-use crate::cmd::send;
 use crate::messages::attachments::{self, File};
 use crate::messages::forward;
+use crate::messages::send;
 use crate::people::humans;
 use crate::threads::thread;
 use crate::tui::work::entries::{dm_with, reply_to, stuck};
