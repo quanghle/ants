@@ -63,7 +63,7 @@ impl Inbox<'_> {
         let envelope = &incoming.envelope;
         tracing::warn!(thread = %envelope.thread_id, from = %envelope.from, why, "declining a review");
         let text = format!("[ants] {} declines the review: {why}.", self.ant);
-        let Some(reply) = self.reply_for(h, read, text, None).await? else { return Ok(()) };
+        let Some(reply) = Box::pin(self.reply_for(h, read, text, None)).await? else { return Ok(()) };
         if let Err(e) = self.attempts.replied(seq, envelope, &reply).await {
             tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "recording the reply");
         }

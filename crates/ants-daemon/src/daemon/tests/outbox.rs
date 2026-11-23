@@ -420,3 +420,80 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
     assert!(notices[0].text.contains(&format!("ants dead replay {}", letters[0].0)), "{}", notices[0].text);
     assert!(bus.buried.get(&doomed).await.is_none(), "forgotten once terminated");
 }
+
+/// dev-a's daemon on a leaf node has a message in hand behind another on its thread when the leaf's uplink is cut:
+/// the message waits in hand, the hub out of reach, for as long as many retries of the store, then is answered once
+/// the uplink is back, without a delivery attempt spent or a dead letter.
+#[tokio::test]
+async fn a_message_in_hand_waits_out_the_hub_out_of_reach_spending_no_attempt() {
+    let Some((hub, uplinked)) = Uplinked::start().await else { return };
+    let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
+    let (launch, log, gate) = fake::launch();
+    let t1 = ThreadId::generate();
+    let hold = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
+    let next = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "b");
+    bus::publish_json(&uplinked.hub_js, hold.subject(), &hold, None).await.unwrap();
+    bus::publish_json(&uplinked.hub_js, next.subject(), &next, None).await.unwrap();
+    // No redelivery for want of an ack within the test: any is the daemon's own.
+    let (progress_every, ack_wait) = (Duration::from_millis(200), WAIT * 3);
+    let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
+
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to start", || log.locked().prompted == 1).await;
+        uplinked.switch(Link::Down).await;
+        gate.add_permits(1);
+        until("the answer", || log.locked().answered.len() == 1).await;
+        // Longer than MAX_ATTEMPTS retries of the store, 300 ms apart in the tests.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(log.locked().prompted, 1, "the next message is not prompted while the hub is out of reach");
+        uplinked.switch(Link::Up).await;
+        until("the next answer", || log.locked().answered.len() == 2).await;
+        timeout(WAIT, async {
+            while bus.unacked().await != 1 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the next message is not acked");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
+    assert_eq!(log.locked().answered, ["hold a", "b"], "each prompted once");
+    let consumer = bus.consumer().await;
+    assert_eq!(consumer.num_redelivered, 0, "no delivery attempt spent");
+    // Only the held message is left, whose ack failed while the uplink was down: its redelivery acks it.
+    assert_eq!(consumer.num_ack_pending, 1);
+    assert!(dead::list(&stream).await.unwrap().is_empty());
+    let (subject, mut from, mut answers) = (subject::inbox(&UserId::human(), &bus.dev), 1, 0);
+    while let Ok(msg) = stream.get_first_raw_message_by_subject(&subject, from).await {
+        from = msg.sequence + 1;
+        let reply: Envelope = serde_json::from_slice(&msg.payload).unwrap();
+        answers += usize::from(reply.in_reply_to == Some(next.id));
+    }
+    assert_eq!(answers, 1, "the next message answered once");
+}
+
+/// A direct get of a missing bucket reads as a missing bucket; through a leaf node whose uplink is down, as the hub
+/// out of reach, never a missing bucket.
+#[tokio::test]
+async fn a_direct_get_tells_a_missing_bucket_from_the_hub_out_of_reach() {
+    use crate::records::direct_kv::{DirectKv, Lookup};
+    let Some((_hub, uplinked)) = Uplinked::start().await else { return };
+    let domain: JsDomain = "hub".parse().unwrap();
+    bus::ensure_sessions(&uplinked.hub_js, None, &UserId::human()).await.unwrap();
+    let missing = DirectKv::new(&uplinked.hub_js, None, "nowhere").await.unwrap();
+    let through = DirectKv::new(&uplinked.through_leaf, Some(&domain), "nowhere").await.unwrap();
+    let there = DirectKv::new(&uplinked.through_leaf, Some(&domain), ants_proto::SESSIONS_BUCKET).await.unwrap();
+    assert!(matches!(missing.lookup("human.probe").await.unwrap(), Lookup::NoBucket));
+    assert!(matches!(there.lookup("human.probe").await.unwrap(), Lookup::NoValue));
+
+    uplinked.switch(Link::Down).await;
+    for kv in [&through, &there] {
+        let Err(e) = kv.lookup("human.probe").await else { panic!("the hub is out of reach") };
+        let text = format!("{e:#}");
+        assert!(bus::hub_out_of_reach(&e), "{text}");
+        assert!(text.contains("out of reach") && !text.contains("no bucket"), "{text}");
+    }
+}

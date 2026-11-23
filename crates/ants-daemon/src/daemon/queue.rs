@@ -63,6 +63,7 @@ enum Wait {
     SignIn,
     Limit,
     Repair,
+    Hub,
 }
 
 impl Thread {
@@ -136,7 +137,8 @@ impl Inbox<'_> {
         let signing_in = futures::future::Fuse::terminated();
         let lifting = futures::future::Fuse::terminated();
         let repairing = futures::future::Fuse::terminated();
-        tokio::pin!(shutdown, finishing, signing_in, lifting, repairing);
+        let stalling = futures::future::Fuse::terminated();
+        tokio::pin!(shutdown, finishing, signing_in, lifting, repairing, stalling);
         let mut asks = self.queue_asks().await;
         let mut answering = FuturesUnordered::new();
         let mut paused = self.pause.subscribe();
@@ -163,6 +165,7 @@ impl Inbox<'_> {
                 () = &mut signing_in => ready = Some(threads.keys().cloned().collect()),
                 () = &mut lifting => ready = Some(threads.keys().cloned().collect()),
                 () = &mut repairing => ready = Some(threads.keys().cloned().collect()),
+                () = &mut stalling => ready = Some(threads.keys().cloned().collect()),
                 Ok(()) = paused.changed() => ready = Some(threads.keys().cloned().collect()),
                 Ok(()) = drift.changed() => self.workload.set_drift(drift.borrow_and_update().clone()),
                 () = sleep_until(fallback_up), if fallback_up.is_some() => ready = Some(threads.keys().cloned().collect()),
@@ -173,10 +176,11 @@ impl Inbox<'_> {
                 }
                 Some(()) = answering.next(), if !answering.is_empty() => {}
                 Some((thread, handled, joiner)) = running.next(), if !running.is_empty() => {
-                    match handed_back(&mut threads, &thread, handled, joiner) {
+                    match handed_back(&mut threads, &thread, handled, joiner, &self.holds.stall) {
                         Some(Wait::SignIn) if signing_in.is_terminated() => signing_in.set(self.signed_in().fuse()),
                         Some(Wait::Limit) if lifting.is_terminated() => lifting.set(self.limit_passed().fuse()),
                         Some(Wait::Repair) if repairing.is_terminated() => repairing.set(self.repaired().fuse()),
+                        Some(Wait::Hub) if stalling.is_terminated() => stalling.set(self.hub_back().fuse()),
                         _ => {}
                     }
                     ready = Some(vec![thread]);
@@ -193,11 +197,12 @@ impl Inbox<'_> {
             }
             // While the harness is signed out, a provider limit holds or the harness keeps failing to start, messages
             // wait in hand, unless a fallback answers them: the consumer's limit on them stops deliveries. A rate limit
-            // is waited out. While the ant is paused they wait in hand too, and the consumers are not pulled from.
+            // is waited out, as is a hub full or out of reach. Paused, they wait in hand, the consumers not pulled from.
             let now = tokio::time::Instant::now();
             let pause = paused.borrow_and_update().clone();
             let held = pause.is_some()
                 || self.holds.throttle.is_held() && !self.holds.throttle.is_quota_held()
+                || self.holds.stall.is_on()
                 || self.outage().is_some() && self.fallback(now).is_none();
             self.workload.set_paused(pause);
             for thread in ready.into_iter().flatten().filter(|_| !held) {
@@ -236,7 +241,8 @@ impl Inbox<'_> {
         channels: &mut Channels,
         threads: &mut HashMap<ThreadId, Thread>,
     ) -> Option<ThreadId> {
-        let incoming = if is_post(&msg) { self.admit_post(&msg, channels).await } else { self.admit(&msg).await };
+        let incoming =
+            if is_post(&msg) { self.admit_post(&msg, channels).await } else { Box::pin(self.admit(&msg)).await };
         let incoming = incoming?;
         let thread = incoming.envelope.thread_id.clone();
         let t = threads.entry(thread.clone()).or_default();
@@ -391,7 +397,9 @@ fn handed_back(
     thread: &ThreadId,
     handled: Handled,
     joiner: Option<Uuid>,
+    stall: &super::holds::Stall,
 ) -> Option<Wait> {
+    stall.settled(&handled);
     let t = threads.entry(thread.clone()).or_default();
     match joiner {
         Some(id) => t.joining.retain(|joiner| joiner.id != id),
@@ -429,6 +437,10 @@ fn handed_back(
         Handled::Failover(held) => {
             t.waiting.push_front(*held);
             None
+        }
+        Handled::Stalled(held) => {
+            t.waiting.push_front(*held);
+            Some(Wait::Hub)
         }
     }
 }

@@ -56,9 +56,10 @@ const PACK_POLL: Duration = Duration::from_secs(1);
 /// What of an ant's home is not its memory, relative to the home: its worktrees, the daemon's delivery notes, MCP state
 /// and lifecycle events, a git repository's history and a bd task database. sense's files but its id and the ant's
 /// earlier names are left out too ([`Home::left_out`]).
-const LEFT_OUT: [&str; 9] = [
+const LEFT_OUT: [&str; 10] = [
     "worktrees",
     "answered",
+    "unsent",
     "buried",
     "mcp.json",
     "mcp.sock",

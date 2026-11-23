@@ -44,6 +44,7 @@ mod outbox;
 mod prompt;
 mod queue;
 mod served;
+mod store;
 
 /// How long a test waits for what it expects; generous, as the full suite loads the machine, and an expected arrival
 /// ends the wait.
@@ -340,6 +341,7 @@ impl Bus {
                     quota: ratelimit::Backoff { first: Duration::from_millis(200), max: Duration::from_millis(400) },
                 },
                 fallback_retry: Duration::from_millis(300),
+                store_every: Duration::from_millis(300),
             },
             holds: super::holds::Holds::default(),
             identity: self.identity.as_ref(),

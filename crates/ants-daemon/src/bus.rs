@@ -34,6 +34,59 @@ pub const RETENTION: Duration = Duration::from_hours(30 * 24);
 /// directly by the length of an outage plus that: a day covers outages overnight.
 pub const DUPLICATE_WINDOW: Duration = Duration::from_hours(24);
 
+/// Whether `e` is JetStream refusing to store a message for want of room: its "insufficient resources" answer (code
+/// 503, err_code 10023), as when the hub's file store reached `max_file_store`. Nothing is lost by waiting for room:
+/// the same write succeeds once there is.
+pub fn store_refused(e: &anyhow::Error) -> bool {
+    e.chain().any(|e| {
+        e.downcast_ref::<jetstream::Error>()
+            .is_some_and(|e| e.error_code() == jetstream::ErrorCode::INSUFFICIENT_RESOURCES)
+    })
+}
+
+/// Whether `e` is a publish refused for being larger than the server's `max_payload`: trying it again fails the same.
+pub fn too_large(e: &anyhow::Error) -> bool {
+    use async_nats::jetstream::context::{PublishError, PublishErrorKind};
+    e.chain().any(|e| {
+        e.downcast_ref::<PublishError>().is_some_and(|e| e.kind() == PublishErrorKind::MaxPayloadExceeded)
+            || e.downcast_ref::<async_nats::PublishError>()
+                .is_some_and(|e| e.kind() == async_nats::PublishErrorKind::MaxPayloadExceeded)
+    })
+}
+
+/// The hub's JetStream does not answer, as behind a leaf node whose uplink is down: what was asked of it is neither
+/// there nor missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutOfReach;
+
+impl std::fmt::Display for OutOfReach {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the hub's JetStream is out of reach")
+    }
+}
+
+impl std::error::Error for OutOfReach {}
+
+/// Whether `e` says the hub's JetStream is [`OutOfReach`].
+pub fn hub_out_of_reach(e: &anyhow::Error) -> bool {
+    e.chain().any(<dyn std::error::Error>::is::<OutOfReach>)
+}
+
+/// Whether the hub's JetStream, in the domain of `js`, answers a request every user's credentials allow
+/// ([`reach_jetstream`]); false behind a leaf node whose uplink is down. A connection whose reply inboxes name no
+/// user cannot ask that, and is taken to be in reach.
+pub async fn in_reach(js: &jetstream::Context) -> bool {
+    let inbox = js.client().new_inbox();
+    let named =
+        inbox.strip_prefix("_INBOX.").and_then(|rest| rest.split('.').next()?.parse::<ants_proto::UserId>().ok());
+    named.is_none() || uncaptured(js).await
+}
+
+/// The most bytes a message, headers included, may have on the connection of `client` (the server's `max_payload`).
+pub fn max_payload(client: &async_nats::Client) -> usize {
+    client.server_info().max_payload
+}
+
 /// Ack `msg` and wait until the server confirms it. [`jetstream::Message::double_ack`] takes the "no responders"
 /// status the client gets while a leaf node's uplink is down for a confirmation; this does not.
 pub async fn double_ack(client: &async_nats::Client, msg: &jetstream::Message) -> Result<()> {

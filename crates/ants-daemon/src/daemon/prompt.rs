@@ -25,6 +25,7 @@ use crate::monitoring::status::{self, Status};
 use crate::sync::MutexExt as _;
 
 use super::control::{Cancel, Why};
+use super::delivery::{fit_to, reply_room};
 use super::steering::{Join, next_join, steer};
 use super::{Handling, Inbox, Incoming, Steered};
 
@@ -240,11 +241,11 @@ impl Inbox<'_> {
         let notice = [fallback_notice, limit_notice, cancel_notice, branch_notice, publish_notice];
         let notice = notice.into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
-        let text = self.redactor.redact(&text).into_owned();
+        let text = fit_to(self.redactor.redact(&text).into_owned(), reply_room(self.client));
         if let Some(unanswered) = unanswered {
             return self.end_unanswered(h, unanswered, text, limit.as_ref()).await;
         }
-        let Some(mut reply) = self.reply_for(h, read, text, limit.as_ref()).await? else {
+        let Some(mut reply) = Box::pin(self.reply_for(h, read, text, limit.as_ref())).await? else {
             return Ok(());
         };
         if let Reply::Message(message) = &mut reply {
@@ -260,10 +261,21 @@ impl Inbox<'_> {
         // From here on a redelivery sends this reply rather than prompting again. Out of the hub's reach, as while a
         // leaf node's uplink is down, the reply still goes to the machine's outbox, and `answered` keeps it from being
         // prompted again.
-        if let Err(e) = self.attempts.replied(seq, envelope, &reply).await {
-            tracing::warn!(%thread, error = format!("{e:#}"), "recording the reply");
-        }
+        self.record_reply(seq, envelope, &reply).await;
         self.deliver(h, &reply).await
+    }
+
+    /// Record `reply` to `envelope`, the message at stream sequence `seq`, with its attempt marker, so a redelivery
+    /// sends it rather than prompting again; refused, as while the hub's store is full, it is kept on the machine
+    /// instead, for the retry to send.
+    async fn record_reply(&self, seq: u64, envelope: &Envelope, reply: &Reply) {
+        let thread = &envelope.thread_id;
+        if let Err(e) = self.attempts.replied(seq, envelope, reply).await {
+            tracing::warn!(%thread, error = format!("{e:#}"), "recording the reply");
+            if let Err(e) = self.answered.keep_unsent(envelope, reply).await {
+                tracing::warn!(%thread, error = format!("{e:#}"), "keeping the reply");
+            }
+        }
     }
 
     /// Narrow the tool rules on the thread of `envelope` to those it carries while the returned guard is held, unless

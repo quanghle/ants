@@ -1,7 +1,8 @@
 //! Oversized and malformed input: the CLI refuses a message past the server's payload limit, more than 8
 //! attachments and a file past 8 MiB; junk published straight onto an ant's inbox and channel subjects (truncated
 //! JSON, wrong types, absurd values, forged senders, huge headers) is dead-lettered or dropped once, never
-//! redelivered, and the ant answers the next good message.
+//! redelivered, and the ant answers the next good message; a message near the payload limit, whose echo is past it,
+//! is answered once with the reply cut to fit.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -178,6 +179,23 @@ pub fn junk_on_the_subjects_is_dead_lettered_once_and_the_ant_answers_on() {
     let good = ask("after the junk");
     let out = String::from_utf8_lossy(&good.stdout);
     assert!(good.status.success() && out.contains("stub: "), "no answer after the junk: {out}\n{}", tail());
+
+    // A message near the payload limit, whose echo is past it: one reply, cut to fit, prompted once (no redelivery
+    // below).
+    let mut near = ants(&["ask", "--wait", "--timeout", "60s", "--file", "-", "@dev-a"]);
+    let mut child = near.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), &vec![b'n'; 1_040_000]).unwrap();
+    let near = child.wait_with_output().unwrap();
+    let out = String::from_utf8_lossy(&near.stdout);
+    assert!(
+        near.status.success(),
+        "no answer to a near-limit message: {}\n{}",
+        String::from_utf8_lossy(&near.stderr),
+        tail()
+    );
+    assert_eq!(out.matches("stub: ").count(), 1, "one reply");
+    assert!(out.contains("[ants] This answer was cut to fit the bus's max_payload"), "{}", &out[out.len() - 300..]);
+    assert!(!std::fs::read_to_string(&log).unwrap().contains("max payload"), "{}", tail());
 
     // Every junk message settled at its first delivery: none pending, none redelivered, each malformed one a dead letter.
     let start = Instant::now();

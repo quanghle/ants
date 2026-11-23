@@ -291,6 +291,7 @@ impl Inbox<'_> {
             .add(request, reply)
             .await
             .inspect_err(|e| tracing::warn!(error = format!("{e:#}"), "noting the stored reply"));
+        self.answered.forget_unsent(request).await;
         match bus::double_ack(self.client, msg).await {
             Ok(()) => {
                 self.attempts.forget(seq).await;
@@ -311,6 +312,39 @@ fn with_left_out(text: String, left_out: Option<String>) -> String {
     match left_out {
         Some(why) => format!("{text}\n\n[ants] The files attached to this answer are left out: {why}."),
         None => text,
+    }
+}
+
+/// Bytes a reply leaves under the server's `max_payload` for all but its text: the envelope or post around it, its
+/// attachments and escalation, the attempt marker recording it, and the headers.
+const REPLY_HEADROOM: usize = 16 << 10;
+
+/// Bytes the text of a reply takes at most as JSON on the connection of `client` ([`fit_to`]).
+pub(super) fn reply_room(client: &async_nats::Client) -> usize {
+    bus::max_payload(client).saturating_sub(REPLY_HEADROOM)
+}
+
+/// `text`, the answer, cut to take at most `room` bytes as JSON, ending with an `[ants]` line telling of the cut when
+/// it is cut: a reply past the server's `max_payload` could be neither recorded nor sent.
+pub(super) fn fit_to(text: String, room: usize) -> String {
+    let size = |text: &str| serde_json::to_string(text).map_or(usize::MAX, |json| json.len());
+    let mut over = size(&text).saturating_sub(room);
+    if over == 0 {
+        return text;
+    }
+    let mut keep = text.len();
+    // Each byte cut shrinks the JSON by one or more, its escape included: a few rounds at most.
+    loop {
+        keep = text.floor_char_boundary(keep.saturating_sub(over));
+        let cut = format!(
+            "{}\n\n[ants] This answer was cut to fit the bus's max_payload: {keep} of its {} bytes are kept.",
+            &text[..keep],
+            text.len()
+        );
+        over = size(&cut).saturating_sub(room);
+        if over == 0 || keep == 0 {
+            return cut;
+        }
     }
 }
 
