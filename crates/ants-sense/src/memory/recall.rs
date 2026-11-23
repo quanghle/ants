@@ -134,7 +134,7 @@ pub async fn top(
 }
 
 /// The live memories of every scope, the best first ([`score`] without a query), up to `limit`: what the memories
-/// view shows humans after the core ones ([`crate::view`]).
+/// view shows humans after the core ones (`crate::view`).
 pub async fn top_of_all(items: &dyn Items, limit: usize, now: DateTime<Utc>) -> Result<Vec<Ranked>, StoreError> {
     let found = items.list(MEMORY, usize::MAX).await?;
     Ok(rank(found.into_iter().map(|item| (item, 1.0)), None, limit, now))

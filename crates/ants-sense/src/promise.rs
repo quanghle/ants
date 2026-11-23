@@ -87,7 +87,7 @@ pub struct Earlier {
 }
 
 impl ItemValues for Promise {
-    const KIND: &str = KIND;
+    const KINDS: &[&str] = &[KIND];
 }
 
 impl Promise {

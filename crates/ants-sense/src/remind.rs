@@ -160,7 +160,7 @@ pub struct Delivered {
 }
 
 impl ItemValues for Reminder {
-    const KIND: &str = KIND;
+    const KINDS: &[&str] = &[KIND];
 }
 
 impl Reminder {
@@ -649,7 +649,7 @@ pub(crate) async fn write_creations(
     if added == 0 {
         return Ok(items.write(writes, by).await?);
     }
-    let guard = &ItemId::named(Quota::KIND, "active");
+    let guard = &ItemId::named(QUOTA, "active");
     // Only a conflict on the quota is decided again: one on the writes given is the caller's to answer.
     read_modify_write(|| async move {
         let quota = items.get(guard).await?;
@@ -662,7 +662,7 @@ pub(crate) async fn write_creations(
         let mut batch = writes.to_vec();
         batch.push(Write::Put {
             id: guard.clone(),
-            kind: Quota::KIND.into(),
+            kind: QUOTA.into(),
             values: Quota { generation: revision + 1 }.values(),
             expected: Some(revision),
         });
@@ -680,6 +680,9 @@ pub(crate) async fn write_creations(
     .await?
 }
 
+/// The kind of the guard of the writes adding active reminders.
+const QUOTA: &str = "reminder-quota";
+
 /// The guard serializing the writes adding active reminders: each such write counts a generation more.
 #[derive(Serialize, Deserialize)]
 struct Quota {
@@ -687,7 +690,7 @@ struct Quota {
 }
 
 impl ItemValues for Quota {
-    const KIND: &str = "reminder-quota";
+    const KINDS: &[&str] = &[QUOTA];
 }
 
 /// The changes resuming the reminders paused while the ant was dormant, from `since` to `until`: each active one

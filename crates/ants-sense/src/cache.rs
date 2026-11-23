@@ -290,7 +290,7 @@ impl Cache {
         rows.map(|item| Ok(serde_json::from_str(&item?)?)).collect()
     }
 
-    /// The experience of the ant whose names are `own`, since `since` if given ([`crate::thread::experience`]).
+    /// The experience of the ant whose names are `own`, since `since` if given (`crate::thread::experience`).
     pub fn experience(
         &self,
         own: &[UserId],
@@ -305,7 +305,7 @@ impl Cache {
         crate::dream::reviews::count(&self.db(), top)
     }
 
-    /// The calls of sense's tools the ant's threads made since `since`, pending writes too ([`crate::thread::calls`]).
+    /// The calls of sense's tools the ant's threads made since `since`, pending writes too (`crate::thread::calls`).
     pub fn calls(&self, since: DateTime<Utc>) -> Result<Vec<Calls>, CacheError> {
         let pending = self.pending()?.into_iter().take(self.pending_ready()?);
         let pending = pending.map(|pending| pending.revisions()).collect::<Result<Vec<_>, _>>()?;

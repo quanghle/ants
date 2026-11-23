@@ -102,16 +102,13 @@ pub struct Task {
 }
 
 impl ItemValues for Task {
-    const KIND: &str = TASK;
+    const KINDS: &[&str] = &[TASK];
 }
 
 impl Task {
     /// The task `item` holds; none for an item of another kind, unreadable or holding no valid task.
-    pub fn held(item: &Item) -> Option<Self> {
-        if item.kind != TASK {
-            return None;
-        }
-        let task = Self::of(item).ok()?;
+    pub fn valid(item: &Item) -> Option<Self> {
+        let task = Self::held(item)?;
         let valid_lease = match (&task.lease, task.status) {
             (Some(lease), Status::InProgress) => (2..=item.revision).contains(&lease.claim_revision),
             (None, Status::InProgress) | (Some(_), _) => false,
@@ -130,7 +127,7 @@ pub struct TaskItem {
 
 impl TaskItem {
     pub fn of(item: Item) -> Option<Self> {
-        Some(Self { task: Task::held(&item)?, item })
+        Some(Self { task: Task::valid(&item)?, item })
     }
 
     pub fn id(&self) -> &ItemId {
