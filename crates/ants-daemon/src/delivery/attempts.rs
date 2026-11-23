@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    ChannelPost, Envelope, Hold, MessageMark, NoReplyWhy, NotesPost, ThreadId, UserId, Uuid, assisted_withdrawal_key,
-    attempt_key, message_mark_key,
+    Attachment, ChannelPost, Envelope, Hold, MessageMark, NoReplyWhy, NotesPost, ThreadId, UserId, Uuid,
+    assisted_withdrawal_key, attempt_key, message_mark_key,
 };
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -334,8 +334,8 @@ async fn mark(
 /// `<home>/unsent`, the replies the hub refused to store with their attempt marker, as while its JetStream store is
 /// full: the message's retry sends that reply rather than prompting the harness again. In `<home>/given`, the answers
 /// the harness gave whose reply a later step failed to build or record, as an escalation the full store refused
-/// ([`Given`]): the retry makes the reply of that answer rather than prompting again. A message withdrawn or
-/// dead-lettered keeps neither ([`Answered::forget_kept`]).
+/// ([`Given`]): the retry makes the reply of that answer, with the title and the files its turn gave it, rather than
+/// prompting again. A message withdrawn or dead-lettered keeps neither ([`Answered::forget_kept`]).
 pub struct Answered {
     stored: Notes,
     unsent: Notes,
@@ -359,6 +359,31 @@ pub struct Given {
     /// The title the turn suggested for the thread, for the reply to carry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The files the turn attached to the answer (`attach_to_reply`), for the reply to carry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<GivenFiles>,
+}
+
+/// The files a turn attached to its answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GivenFiles {
+    /// The directory the thread's session worked in, which the reply reads them from.
+    pub dir: PathBuf,
+    /// Their paths in it.
+    pub paths: Vec<String>,
+    /// Their references once an attempt at the reply stored them, for a retry's reply to carry, nothing stored again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored: Option<StoredFiles>,
+}
+
+/// The files of an answer in the attachments' store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredFiles {
+    /// Whose handles they are stored under: the handle of the reply's attachment of nil id, as a reply sent elsewhere
+    /// by then has other handles.
+    pub under: String,
+    /// Their references.
+    pub files: Vec<Attachment>,
 }
 
 impl Answered {

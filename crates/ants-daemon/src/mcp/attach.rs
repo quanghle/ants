@@ -230,7 +230,7 @@ struct ReadAttachment {
 impl Hub {
     /// The attachments' store, and the directory the sessions of `thread` work in: its worktree, else the ant's
     /// workdir.
-    fn files(&self, thread: &ThreadId) -> Result<(&FileAccess, PathBuf), String> {
+    pub(super) fn files(&self, thread: &ThreadId) -> Result<(&FileAccess, PathBuf), String> {
         let (files, workdir) = self.files.get().ok_or("attachments are not available here")?;
         let dir = self.sessions.locked().dirs.get(thread).cloned();
         Ok((files, dir.unwrap_or_else(|| workdir.clone())))
@@ -247,9 +247,14 @@ impl Hub {
             return Ok(Vec::new());
         }
         let (_, dir) = self.files(thread)?;
+        self.load_from(&dir, paths).await
+    }
+
+    /// Read the files at `paths` in `dir`, confined to it, to attach them.
+    pub(super) async fn load_from(&self, dir: &Path, paths: &[String]) -> Result<Vec<Loaded>, String> {
         let off = Redactor::off();
         let redactor = self.redactor.get().map_or(&off, |r| r.as_ref());
-        load(&dir, paths, redactor).await
+        load(dir, paths, redactor).await
     }
 
     /// Store `loaded` under the handles `handle_of` gives, returning the references for the message to carry.

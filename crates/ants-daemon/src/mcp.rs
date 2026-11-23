@@ -20,7 +20,7 @@
 //! `ask_human` asks the thread's owner, else the default human, a question with options ([`Envelope::question`]) and
 //! returns at once; the answer arrives as a later message ([`Envelope::answer`]).
 //! `send_message`, `ask_ant`, `route`, `post_channel` and `post_notes` attach files from the directory the thread's
-//! session works in, `attach_to_reply` attaches them to the turn's final answer ([`Mcp::reply_files`]), and
+//! session works in, `attach_to_reply` attaches them to the turn's final answer ([`Mcp::take_reply_files`]), and
 //! `read_attachment` reads an attachment of a message the ant reads (see `attach`).
 //!
 //! An assistant also gets the `*_for_human` tools, which act for its human while the human's grant names it: read the
