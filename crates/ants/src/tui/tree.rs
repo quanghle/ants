@@ -483,15 +483,15 @@ impl Page {
             };
             let turns = node.turns.map_or_else(|| "-".to_owned(), |t| t.to_string());
             let spend = node.spend.map_or_else(|| "-".to_owned(), |s| format!("${:.2}", s.cost));
-            let who = cut(&format!("{}{}", node.glyph, node.user), name);
+            let who = style::column(&format!("{}{}", node.glyph, node.user), name);
             let mut row = Line::from(vec![
-                Span::raw(format!("{who:<name$}  ")),
+                Span::raw(format!("{who}  ")),
                 Span::styled(
-                    format!("{:<line$}  ", cut(&text, line)),
+                    format!("{}  ", style::column(&text, line)),
                     if n == 0 { style::dim() } else { Style::new() },
                 ),
                 Span::raw(format!("{turns:>5}  {spend:>7}  ")),
-                Span::styled(cut(&node.state.label(), state), node.state.style()),
+                Span::styled(style::fit(&node.state.label(), state), node.state.style()),
             ]);
             if n == at {
                 row = row.style(style::highlight(focused));
@@ -519,16 +519,6 @@ impl Page {
             .scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
         frame.render_widget(paragraph, area);
     }
-}
-
-/// `text` in at most `width` characters, an ellipsis ending it when cut.
-fn cut(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_owned();
-    }
-    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
 }
 
 /// What the tree's reads and cancels brought.
@@ -834,6 +824,18 @@ mod tests {
         assert!(shown.contains("   └─ tester    spin-off: run the e2e suite"), "{shown}");
         assert!(shown.contains("total  3 ants · 3 turns used · $0.75 · 4s"), "{shown}");
         assert!(shown.contains("x cancel subtree"), "{shown}");
+    }
+
+    #[test]
+    fn a_title_in_wide_characters_is_cut_to_its_column_and_leaves_the_tree_s_other_columns() {
+        let mut m = model();
+        let root = ThreadId::generate();
+        let asked = message(1, &root, "alice", "dev-a", &"ログイン".repeat(30));
+        m.stored(vec![asked, message(2, &root, "dev-a", "alice", "fixed")], at(2));
+        m.tree(root);
+        let shown = crate::test_support::render::rendered(100, 12, |f| crate::tui::frame::draw(f, &m, at(9)));
+        let row = shown.lines().find(|l| l.contains("─ dev-a")).expect("the ant's row");
+        assert!(row.contains('ロ') && row.contains('…') && row.contains("answered"), "{shown}");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::super::{model::Key, select::step, style};
-use super::text::{asked, wrapped};
+use super::text::asked;
 use super::{Asking, how};
 use crate::tools::{self, State};
 
@@ -99,7 +99,7 @@ pub fn draw(f: &mut Frame, asking: &Asking, now: DateTime<Utc>) {
     let inner = block.inner(area);
     f.render_widget(Clear, area);
     f.render_widget(block, area);
-    let rows = wrapped(&body(asking, now), usize::from(inner.width));
+    let rows = style::wrapped(body(asking, now), usize::from(inner.width));
     let height = usize::from(inner.height);
     let (shown, below) = window(rows.len(), height, asking);
     let mut lines: Vec<Line> = rows[shown.0..shown.1].to_vec();

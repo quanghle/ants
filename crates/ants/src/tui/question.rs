@@ -15,6 +15,7 @@ use ants_proto::{Answered, Pick, Question, Questions, ThreadId, Uuid};
 use chrono::{DateTime, TimeDelta, Utc};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr as _;
 
 use super::exec::Job;
 use super::input::Input;
@@ -378,9 +379,9 @@ fn rows(question: &Question, tab: &Tab, focused: bool, width: usize) -> Vec<Line
     let mut row = |n: usize, head: String, text: &str, style: Style| {
         let here = at == Some(n);
         let head = format!("{}{head}", if here { "› " } else { "  " });
-        let indent = head.chars().count();
+        let indent = head.width();
         let style = if here { style.fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { style };
-        for (i, part) in wrap(text, width.saturating_sub(indent)).into_iter().enumerate() {
+        for (i, part) in style::rows(text, width.saturating_sub(indent)).into_iter().enumerate() {
             let start = if i == 0 { head.clone() } else { " ".repeat(indent) };
             lines.push(Line::styled(format!("{start}{part}"), style));
         }
@@ -435,36 +436,7 @@ pub fn mouse_regions(
 
 /// A question's `text` in lines at most `width` wide, each of its lines wrapped.
 fn wrapped(text: &str, width: usize) -> impl Iterator<Item = Line<'static>> {
-    text.lines().flat_map(move |line| wrap(line, width)).map(Line::raw)
-}
-
-/// `text` in lines at most `width` wide, broken between words where it can be.
-pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        let (have, more) = (line.chars().count(), word.chars().count());
-        if have > 0 && have + 1 + more > width {
-            lines.push(std::mem::take(&mut line));
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        let mut chars = word.chars().peekable();
-        while chars.peek().is_some() {
-            let room = width - line.chars().count();
-            if room == 0 {
-                lines.push(std::mem::take(&mut line));
-                continue;
-            }
-            line.extend(chars.by_ref().take(room));
-        }
-    }
-    if !line.is_empty() || lines.is_empty() {
-        lines.push(line);
-    }
-    lines
+    text.lines().flat_map(move |line| style::rows(line, width)).map(Line::raw)
 }
 
 /// A card of questions at the bottom of a thread.

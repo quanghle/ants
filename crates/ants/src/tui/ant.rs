@@ -324,7 +324,7 @@ impl Page {
         mouse.add(left, super::mouse::Target::AntColumn(0));
         let (width, height) = inner(right);
         let block = style::block(" now ".to_owned(), focused && self.column == Column::Now);
-        let status = wrapped(status(&self.ant, entry, data, now), width);
+        let status = style::wrapped(status(&self.ant, entry, data, now), width);
         frame.render_widget(self.scroll(Column::Now, status, height, block), right);
         mouse.add(right, super::mouse::Target::AntColumn(1));
         let threads = self.threads.rows(data).len();
@@ -459,7 +459,7 @@ impl Page {
 /// wrapped, under their labels, the other values cut.
 fn about(entry: Option<&ColonyEntry>, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
     let Some(entry) = entry else {
-        return wrapped(vec![Line::styled("not in the colony: no daemon serves it now", style::dim())], width);
+        return style::wrapped(vec![Line::styled("not in the colony: no daemon serves it now", style::dim())], width);
     };
     let rows = crate::ant::about(entry, now);
     let label = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
@@ -479,15 +479,6 @@ fn about(entry: Option<&ColonyEntry>, now: DateTime<Utc>, width: usize) -> Vec<L
         }
     }
     lines
-}
-
-/// `lines` wrapped between words into lines at most `width` wide.
-fn wrapped(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
-    let rows = |line: Line<'static>| {
-        let style = line.style;
-        markdown::wrap(&line.spans, width.max(1)).into_iter().map(move |spans| Line::from(spans).style(style))
-    };
-    lines.into_iter().flat_map(rows).collect()
 }
 
 /// What holds the ant back, what it does now on each thread, and what it spent that UTC day.

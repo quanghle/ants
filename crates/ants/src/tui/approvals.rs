@@ -127,7 +127,7 @@ fn card_text(request: &ApprovalRequest, width: usize) -> Vec<Line<'static>> {
     if let Some(first) = asked.first_mut() {
         first.spans.insert(0, Span::raw(format!("{}: ", request.tool.kind)));
     }
-    text::wrapped(&asked, width)
+    style::wrapped(asked, width)
 }
 
 /// Whether what `request` asks shows whole on the card the keys answer, as last drawn: `width` wide over `rows` lines;
@@ -160,17 +160,20 @@ pub fn lines(
         lines
     } else {
         let tool = format!("{}: {}", request.tool.kind, request.tool.title.replace('\n', " "));
-        vec![Line::raw(cut(&tool, width))]
+        vec![Line::raw(style::fit(&tool, width))]
     };
     if keyed && request.tool.input.is_none() && !request.tool.locations.is_empty() {
-        lines.push(Line::styled(cut(&format!("files {}", request.tool.locations.join(", ")), width), style::dim()));
+        lines.push(Line::styled(
+            style::fit(&format!("files {}", request.tool.locations.join(", ")), width),
+            style::dim(),
+        ));
     }
     if let Some(always) = request.label(Verdict::AllowAlways).filter(|_| card.settled.is_none()) {
-        lines.push(Line::styled(cut(&format!("A always: {always}"), width), style::dim()));
+        lines.push(Line::styled(style::fit(&format!("A always: {always}"), width), style::dim()));
     }
     let storing = asking.filter(|a| a.storing && a.answers(request));
     let last = match (card.settled, storing) {
-        (Some(state), _) => Line::styled(cut(&how(state, &request.ant), width), style::dim()),
+        (Some(state), _) => Line::styled(style::fit(&how(state, &request.ant), width), style::dim()),
         (None, Some(asking)) => Line::styled(asking.storing_what(), Style::new().fg(style::PENDING).bold()),
         (None, None) => {
             let left = format!("expires in {}", tools::left(request.expires_at, now));
@@ -366,16 +369,6 @@ pub fn draw_full(f: &mut Frame, asking: &Asking, now: DateTime<Utc>) {
     full::draw(f, asking, now);
 }
 
-/// `text` in at most `width` characters, an ellipsis ending it when cut.
-fn cut(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_owned();
-    }
-    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
-}
-
 #[cfg(test)]
 mod tests {
     use ants_proto::ApprovalDecision;
@@ -405,6 +398,15 @@ mod tests {
         assert_eq!(asking.key(Key::Char('A')), Answer::Decide(Verdict::AllowAlways), "allow always needs no more");
         assert!(asking.storing && asking.full && asking.status().is_none());
         assert_eq!(asking.key(Key::Char('r')), Answer::Keep, "one decision at a time");
+    }
+
+    #[test]
+    fn a_tool_s_title_in_wide_characters_is_cut_to_the_card_s_columns() {
+        let push = request("dev-a", &"デプロイ".repeat(20), vec![Verdict::AllowOnce]);
+        let card = Card { request: &push, settled: None };
+        let lines = lines(card, None, (false, false), at(0), (40, CARD_LINES));
+        assert!(lines.iter().all(|l| l.width() <= 40), "{:?}", text(&lines));
+        assert!(text(&lines)[0].ends_with('…'), "{:?}", text(&lines));
     }
 
     #[test]
@@ -486,7 +488,7 @@ mod tests {
         let shown = text(&lines(card, None, (true, false), at(10), (80, CARD_LINES)));
         assert_eq!(shown[1], format!("A always: {always}"), "{shown:?}");
         assert!(shown[2].starts_with("a allow · A always · r reject"), "{shown:?}");
-        assert_eq!(text(&lines(card, None, (true, false), at(10), (20, CARD_LINES)))[1], "A always: Yes, and …");
+        assert_eq!(text(&lines(card, None, (true, false), at(10), (20, CARD_LINES)))[1], "A always: Yes, and…");
         let full = tools::details(&push, &State::Pending, at(10));
         assert!(full.contains(&format!("\nalways   {always}\n")), "{full}");
 
