@@ -20,7 +20,7 @@ use std::task::{Context, Poll};
 use agent_client_protocol::Error;
 use agent_client_protocol::v1::schema::{
     ContentBlock, PromptResponse, StopReason, ToolCall, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, Usage,
+    ToolCallUpdateFields, ToolKind,
 };
 use ants_proto::{McpServerState, McpStatus};
 use anyhow::bail;
@@ -37,6 +37,7 @@ use serde_json::{Map, Value, json};
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{mpsc, watch};
 
+use super::turn::{Reply, Spent, Tokens};
 use super::{
     Cli, Harness, Info, Native, NativeSession, Open, Process, Setting, Updates, approve, based_id, context_overflow,
     cost_base, deny_approval, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out,
@@ -500,10 +501,8 @@ pub(crate) struct CopilotSession {
     /// The model and reasoning effort it runs, if set.
     model: Mutex<Option<String>>,
     effort: Mutex<Option<String>>,
-    /// The tokens of the context window used and its size, and the session's cost in US dollars, as last reported.
-    usage: Mutex<(u64, u64, Option<f64>)>,
-    /// The cost in US dollars the CLI carried over from the session's parent, which its totals include.
-    base: f64,
+    /// The context window's use and the session's cost, as last reported.
+    spent: Mutex<Spent>,
     steers: Steers,
     /// The session, for sign-ins to MCP servers.
     opened: Arc<mcp_sign_in::Opened>,
@@ -606,8 +605,7 @@ impl CopilotSession {
             router,
             model: Mutex::new(model),
             effort: Mutex::new(effort),
-            usage: Mutex::default(),
-            base,
+            spent: Mutex::new(Spent::from(base)),
             steers: Steers::default(),
             opened,
             watcher,
@@ -619,13 +617,13 @@ impl CopilotSession {
     }
 
     /// Report the context window's use and the session's cost, as `change` updates them.
-    fn usage(&self, updates: &Updates, change: impl FnOnce(&mut (u64, u64, Option<f64>))) {
-        let (used, size, cost) = {
-            let mut usage = self.usage.locked();
-            change(&mut usage);
-            *usage
+    fn spent(&self, updates: &Updates, change: impl FnOnce(&mut Spent)) {
+        let spent = {
+            let mut spent = self.spent.locked();
+            change(&mut spent);
+            *spent
         };
-        updates.usage(used, size, cost);
+        spent.report(updates);
     }
 
     /// Translate an event of the prompt running; what the prompt comes to once the session is idle.
@@ -640,18 +638,14 @@ impl CopilotSession {
         let main = event.agent_id.is_none();
         match event.event_type.as_str() {
             "assistant.message_delta" if main => {
-                turn.streamed.insert(text(data, "messageId").to_owned());
-                turn.reply(updates, text(data, "messageId"), text(data, "deltaContent"));
+                turn.reply.delta(updates, text(data, "messageId"), text(data, "deltaContent"));
             }
-            "assistant.message" if main && !turn.streamed.contains(text(data, "messageId")) => {
-                turn.reply(updates, text(data, "messageId"), text(data, "content"));
-            }
+            "assistant.message" if main => turn.reply.whole(updates, text(data, "messageId"), text(data, "content")),
             "assistant.reasoning_delta" if main => {
-                turn.streamed.insert(text(data, "reasoningId").to_owned());
-                updates.thought(text(data, "deltaContent"));
+                turn.reply.thought_delta(updates, text(data, "reasoningId"), text(data, "deltaContent"));
             }
-            "assistant.reasoning" if main && !turn.streamed.contains(text(data, "reasoningId")) => {
-                updates.thought(text(data, "content"));
+            "assistant.reasoning" if main => {
+                turn.reply.whole_thought(updates, text(data, "reasoningId"), text(data, "content"));
             }
             "tool.execution_start" => updates.tool_call(tool_call(data)),
             "tool.execution_complete" => {
@@ -659,15 +653,17 @@ impl CopilotSession {
                 let fields = ToolCallUpdateFields::new().status(status);
                 updates.tool_update(ToolCallUpdate::new(text(data, "toolCallId").to_owned(), fields));
             }
-            "assistant.usage" => turn.tokens.add(data),
-            "session.usage_info" => self.usage(updates, |usage| {
-                usage.0 = data["currentTokens"].as_u64().unwrap_or(usage.0);
-                usage.1 = data["tokenLimit"].as_u64().unwrap_or(usage.1);
+            "assistant.usage" => {
+                turn.calls += 1;
+                turn.tokens.add(tokens(data));
+            }
+            "session.usage_info" => self.spent(updates, |spent| {
+                spent.used = data["currentTokens"].as_u64().unwrap_or(spent.used);
+                spent.size = data["tokenLimit"].as_u64().unwrap_or(spent.size);
             }),
             "session.usage_checkpoint" => {
                 if let Some(nano) = data["totalNanoAiu"].as_f64() {
-                    let cost = (nano * USD_PER_NANO_AIU - self.base).max(0.0);
-                    self.usage(updates, |usage| usage.2 = Some(cost));
+                    self.spent(updates, |spent| spent.cost = Some((nano * USD_PER_NANO_AIU - spent.base).max(0.0)));
                 }
             }
             "user.message" if main => {
@@ -729,7 +725,7 @@ impl<T> Drop for Running<'_, T> {
 
 impl NativeSession for CopilotSession {
     fn id(&self) -> String {
-        based_id(self.session.id(), self.base)
+        based_id(self.session.id(), self.spent.locked().base)
     }
 
     async fn mcp_servers(&self) -> Result<Vec<McpServerState>, Error> {
@@ -890,48 +886,26 @@ fn tool_kind(name: &str) -> ToolKind {
     }
 }
 
-/// The tokens a prompt used, summed over the model calls of its turn.
-#[derive(Default)]
-struct Tokens {
-    calls: u64,
-    input: u64,
-    output: u64,
-    cache_read: u64,
-    cache_write: u64,
-    reasoning: u64,
-}
-
-impl Tokens {
-    /// Add a model call's `assistant.usage`.
-    fn add(&mut self, data: &Value) {
-        let count = |key: &str| data[key].as_u64().unwrap_or_default();
-        self.calls += 1;
-        self.input += count("inputTokens");
-        self.output += count("outputTokens");
-        self.cache_read += count("cacheReadTokens");
-        self.cache_write += count("cacheWriteTokens");
-        self.reasoning += count("reasoningTokens");
-    }
-
-    fn usage(&self) -> Option<Usage> {
-        let some = |n: u64| (n > 0).then_some(n);
-        (self.calls > 0).then(|| {
-            Usage::new(self.input + self.output, self.input, self.output)
-                .thought_tokens(some(self.reasoning))
-                .cached_read_tokens(some(self.cache_read))
-                .cached_write_tokens(some(self.cache_write))
-        })
+/// The tokens of a model call, from its `assistant.usage`.
+fn tokens(data: &Value) -> Tokens {
+    let count = |key: &str| data[key].as_u64().unwrap_or_default();
+    Tokens {
+        input: count("inputTokens"),
+        output: count("outputTokens"),
+        cache_read: count("cacheReadTokens"),
+        cache_write: count("cacheWriteTokens"),
+        thought: count("reasoningTokens"),
     }
 }
 
 /// What a prompt's turn came to so far.
 #[derive(Default)]
 struct Turn {
-    /// The ids of the messages and reasoning streamed in pieces, whose whole is not repeated.
-    streamed: HashSet<String>,
-    /// The message the reply last came from, if any.
-    message: Option<String>,
+    /// The reply and reasoning: what streamed in pieces is not repeated whole.
+    reply: Reply,
+    /// The tokens the prompt used, summed over the model calls of its turn, and how many those were.
     tokens: Tokens,
+    calls: u64,
     /// The first error ending the turn.
     error: Option<Error>,
     /// The last error of a model call the CLI retries.
@@ -941,20 +915,6 @@ struct Turn {
 }
 
 impl Turn {
-    /// Add `piece` of message `id` to the reply, after a blank line when it starts another message.
-    fn reply(&mut self, updates: &Updates, id: &str, piece: &str) {
-        if piece.is_empty() {
-            return;
-        }
-        match &self.message {
-            Some(last) if last == id => {}
-            Some(_) => updates.message("\n\n"),
-            None => {}
-        }
-        self.message = Some(id.to_owned());
-        updates.message(piece);
-    }
-
     /// Note a `session.error`.
     fn failed(&mut self, data: &Value) {
         let error = turn_error(data);
@@ -973,12 +933,13 @@ impl Turn {
             StopReason::Cancelled
         } else if let Some(error) = self.error.take() {
             return Err(error);
-        } else if let Some(error) = self.retried.take().filter(|_| self.message.is_none() && self.tokens.calls == 0) {
+        } else if let Some(error) = self.retried.take().filter(|_| !self.reply.said() && self.calls == 0) {
             return Err(error);
         } else {
             StopReason::EndTurn
         };
-        Ok(PromptResponse::new(stop).usage(self.tokens.usage()))
+        let usage = (self.calls > 0).then(|| self.tokens.usage(self.tokens.input + self.tokens.output));
+        Ok(PromptResponse::new(stop).usage(usage))
     }
 }
 

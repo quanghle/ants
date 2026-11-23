@@ -21,7 +21,7 @@ use std::time::{Duration, SystemTime};
 use agent_client_protocol::Error;
 use agent_client_protocol::v1::schema::{
     ContentBlock, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptResponse, StopReason, ToolCall,
-    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage,
+    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use ants_proto::McpServerState;
 use anyhow::bail;
@@ -30,6 +30,7 @@ use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::io::{older, probe_version};
+use super::turn::{Reply, Spent, Tokens};
 use super::{
     Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates, approve,
     based_id, context_overflow, cost_base, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited,
@@ -262,7 +263,7 @@ impl Claude {
             running: watch::channel(None).0,
             turns: AtomicU64::new(0),
             interrupted: AtomicBool::new(false),
-            spent: Mutex::new(Spent { base, ..Spent::default() }),
+            spent: Mutex::new(Spent::from(base)),
             steers: Mutex::default(),
         };
         let hello = session.shared.control(json!({ "subtype": "initialize", "hooks": null })).await?;
@@ -475,18 +476,6 @@ struct Steers {
     pending: HashSet<String>,
 }
 
-/// What the session reports of its context window and cost.
-#[derive(Debug, Default)]
-struct Spent {
-    /// The cost Claude Code carried over from the session's parent, which its totals include.
-    base: f64,
-    /// The session's cost so far as reported.
-    cost: f64,
-    /// Tokens in the context window as of the last model call, and the window's size.
-    used: u64,
-    size: u64,
-}
-
 impl Drop for ClaudeSession {
     fn drop(&mut self) {
         let reader = self.reader.take();
@@ -560,7 +549,7 @@ impl ClaudeSession {
         }
         self.steers.locked().open = true;
         let mut turn = Turn::new(&self.shared.cli, &self.cwd, updates);
-        let (mut counts, mut last, mut states) = ([0; 5], None, false);
+        let (mut counts, mut last, mut states) = (Tokens::default(), None, false);
         let result = loop {
             let Some(event) = events.recv().await else { return Err(self.shared.exited().await) };
             let idle = match (event["type"].as_str(), event["subtype"].as_str()) {
@@ -574,9 +563,9 @@ impl ClaudeSession {
                 }
                 _ => {
                     let Some(result) = turn.event(event) else { continue };
-                    counts = std::array::from_fn(|i| counts[i] + token_counts(&result)[i]);
+                    counts.add(token_counts(&result));
                     last = Some(result);
-                    turn.parted = true;
+                    turn.part += 1;
                     !states
                 }
             };
@@ -591,19 +580,21 @@ impl ClaudeSession {
             }
             last = Some(result);
         };
-        let (used, size, cost) = {
+        let spent = {
             let mut spent = self.spent.locked();
             let total = result["total_cost_usd"].as_f64().unwrap_or_default();
-            spent.cost = spent.cost.max(total - spent.base);
+            spent.cost = Some(spent.cost.unwrap_or_default().max(total - spent.base));
             spent.size = window(&result, turn.model.as_deref()).unwrap_or(spent.size);
             if turn.used > 0 {
                 spent.used = turn.used;
             }
-            (spent.used, spent.size, spent.cost)
+            *spent
         };
-        updates.usage(used, size, Some(cost));
+        spent.report(updates);
         let stop = ended(&result, &turn, self.interrupted.load(Ordering::Relaxed))?;
-        Ok(PromptResponse::new(stop).usage(tokens(counts)))
+        // The total counts the cache's tokens too.
+        let total = counts.input + counts.output + counts.cache_read + counts.cache_write;
+        Ok(PromptResponse::new(stop).usage(counts.usage(total)))
     }
 }
 
@@ -712,8 +703,8 @@ struct Turn<'a> {
     updates: &'a Updates,
     /// The model of the turn, from its `init` event.
     model: Option<String>,
-    /// Messages streamed as deltas, by id, whose whole blocks are not sent again.
-    streamed: HashSet<String>,
+    /// The reply: messages streamed as deltas, by id, are not sent again whole.
+    reply: Reply,
     /// TodoWrite calls, sent as the plan rather than as tool calls.
     todos: HashSet<String>,
     /// Tokens in the context window as of the turn's last model call.
@@ -724,10 +715,8 @@ struct Turn<'a> {
     synthetic: Option<String>,
     /// The last rate limit state reported.
     limit: Option<Value>,
-    /// Whether the reply said anything yet.
-    said: bool,
-    /// Whether a steer's turn followed a `result`, its reply then parted from what came before by a blank line.
-    parted: bool,
+    /// The results so far: a steer's turn follows one, its reply then parted from what came before by a blank line.
+    part: u64,
 }
 
 impl<'a> Turn<'a> {
@@ -737,14 +726,13 @@ impl<'a> Turn<'a> {
             cwd,
             updates,
             model: None,
-            streamed: HashSet::new(),
+            reply: Reply::default(),
             todos: HashSet::new(),
             used: 0,
             error: None,
             synthetic: None,
             limit: None,
-            said: false,
-            parted: false,
+            part: 0,
         }
     }
 
@@ -770,7 +758,7 @@ impl<'a> Turn<'a> {
         match event["type"].as_str() {
             Some("message_start") => {
                 if let Some(id) = event["message"]["id"].as_str() {
-                    self.streamed.insert(id.to_owned());
+                    self.reply.streams(id);
                 }
             }
             Some("content_block_delta") => {
@@ -799,7 +787,7 @@ impl<'a> Turn<'a> {
             self.error = Some(kind.to_owned());
         }
         let synthetic = message["model"] == "<synthetic>";
-        let streamed = message["id"].as_str().is_some_and(|id| self.streamed.contains(id));
+        let streamed = message["id"].as_str().is_some_and(|id| self.reply.streamed(id));
         for block in message["content"].as_array().into_iter().flatten() {
             match (block["type"].as_str(), block["text"].as_str()) {
                 (Some("text"), Some(text)) if synthetic => self.synthetic = Some(text.to_owned()),
@@ -816,11 +804,7 @@ impl<'a> Turn<'a> {
     }
 
     fn say(&mut self, text: &str) {
-        if std::mem::take(&mut self.parted) && self.said {
-            self.updates.message("\n\n");
-        }
-        self.said = true;
-        self.updates.message(text);
+        self.reply.say(self.updates, &self.part.to_string(), text);
     }
 
     fn tool_use(&mut self, block: &Value) {
@@ -917,11 +901,10 @@ fn window(result: &Value, model: Option<&str>) -> Option<u64> {
     own.or_else(|| usage.values().filter_map(|usage| usage["contextWindow"].as_u64()).max())
 }
 
-/// The tokens a turn used, every model's: what changed since the last result, else the turn's main calls; as input,
-/// output, cache read, cache write and thought tokens.
-fn token_counts(result: &Value) -> [u64; 5] {
+/// The tokens a turn used, every model's: what changed since the last result, else the turn's main calls.
+fn token_counts(result: &Value) -> Tokens {
     let per_model = result["model_usage_since_last_result"].as_object().filter(|models| !models.is_empty());
-    let [input, output, read, write, thought] = match per_model {
+    let [input, output, cache_read, cache_write, thought] = match per_model {
         Some(models) => {
             ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "thinkingTokens"]
                 .map(|key| models.values().filter_map(|usage| usage[key].as_u64()).sum())
@@ -933,15 +916,7 @@ fn token_counts(result: &Value) -> [u64; 5] {
             [input, output, read, write, usage["output_tokens_details"]["thinking_tokens"].as_u64().unwrap_or_default()]
         }
     };
-    [input, output, read, write, thought]
-}
-
-/// The usage of [`token_counts`] `counts`.
-fn tokens([input, output, read, write, thought]: [u64; 5]) -> Usage {
-    Usage::new(input + output + read + write, input, output)
-        .cached_read_tokens(read)
-        .cached_write_tokens(write)
-        .thought_tokens(thought)
+    Tokens { input, output, cache_read, cache_write, thought }
 }
 
 /// How a turn ended, from its result: a stop reason, or the error the daemon classifies.

@@ -10,7 +10,7 @@
 //! unless the ant asks ants about its tools: then its threads run with approval policy `on-request`, and the server's
 //! requests to run a command or change files go to ants ([`super::approve`]). A closed session unsubscribes from its thread (`thread/unsubscribe`), which the server then unloads.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -27,6 +27,7 @@ use tokio::process::ChildStdin;
 use tokio::sync::mpsc;
 
 use super::io::older;
+use super::turn::{Reply, ToolCalls};
 use super::{
     Cli, Credentials, Harness, Incoming, Info, Native, NativeSession, Open, Process, Rpc, Setting, Updates, approve,
     context_overflow, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited, signed_out,
@@ -606,36 +607,28 @@ fn input(prompt: &[ContentBlock]) -> Vec<Value> {
         .collect()
 }
 
-/// Token counts of a thread, as `thread/tokenUsage/updated` breaks them down.
+/// Token counts of a thread, as `thread/tokenUsage/updated` breaks them down, with the total the server counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Tokens {
     total: u64,
-    input: u64,
-    cached: u64,
-    output: u64,
-    reasoning: u64,
+    counts: super::turn::Tokens,
 }
 
 impl Tokens {
     fn of(breakdown: &Value) -> Self {
         let count = |key: &str| breakdown[key].as_u64().unwrap_or_default();
-        Self {
-            total: count("totalTokens"),
+        let counts = super::turn::Tokens {
             input: count("inputTokens"),
-            cached: count("cachedInputTokens"),
             output: count("outputTokens"),
-            reasoning: count("reasoningOutputTokens"),
-        }
+            cache_read: count("cachedInputTokens"),
+            cache_write: 0,
+            thought: count("reasoningOutputTokens"),
+        };
+        Self { total: count("totalTokens"), counts }
     }
 
     fn minus(self, before: Self) -> Self {
-        Self {
-            total: self.total.saturating_sub(before.total),
-            input: self.input.saturating_sub(before.input),
-            cached: self.cached.saturating_sub(before.cached),
-            output: self.output.saturating_sub(before.output),
-            reasoning: self.reasoning.saturating_sub(before.reasoning),
-        }
+        Self { total: self.total.saturating_sub(before.total), counts: self.counts.minus(before.counts) }
     }
 }
 
@@ -643,12 +636,10 @@ impl Tokens {
 struct Turn {
     id: String,
     updates: Updates,
-    /// The agent messages and reasoning items whose text came as deltas.
-    streamed: HashSet<String>,
+    /// The reply and reasoning: an agent message or reasoning item whose text came as deltas is not sent again.
+    reply: Reply,
     /// The tool calls announced.
-    tools: HashSet<String>,
-    /// The agent message whose text came last, to set the next one apart.
-    said: Option<String>,
+    tools: ToolCalls,
     /// The thread's token totals before the turn, and the latest.
     before: Option<Tokens>,
     latest: Option<Tokens>,
@@ -656,15 +647,7 @@ struct Turn {
 
 impl Turn {
     fn new(id: &str, updates: Updates, before: Option<Tokens>) -> Self {
-        Self {
-            id: id.to_owned(),
-            updates,
-            streamed: HashSet::new(),
-            tools: HashSet::new(),
-            said: None,
-            before,
-            latest: None,
-        }
+        Self { id: id.to_owned(), updates, reply: Reply::default(), tools: ToolCalls::default(), before, latest: None }
     }
 
     /// Handle a notification of the thread: the turn, once `turn/completed` ends it.
@@ -672,13 +655,13 @@ impl Turn {
         if params["turnId"].as_str().is_some_and(|turn| turn != self.id) {
             return None;
         }
-        let item = params["itemId"].as_str().unwrap_or_default().to_owned();
+        let item = params["itemId"].as_str().unwrap_or_default();
         let delta = params["delta"].as_str().unwrap_or_default();
         match method {
-            "item/agentMessage/delta" => self.say(&item, delta),
+            // An empty piece does not count as streaming: the message is then said whole.
+            "item/agentMessage/delta" if !delta.is_empty() => self.reply.delta(&self.updates, item, delta),
             "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
-                self.streamed.insert(item);
-                self.updates.thought(delta);
+                self.reply.thought_delta(&self.updates, item, delta);
             }
             "item/reasoning/summaryPartAdded" if params["summaryIndex"].as_u64().is_some_and(|i| i > 0) => {
                 self.updates.thought("\n\n");
@@ -695,51 +678,33 @@ impl Turn {
         None
     }
 
-    /// A piece of the text of agent message `item`, set apart from an earlier message's.
-    fn say(&mut self, item: &str, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        if self.said.as_deref() != Some(item) {
-            if self.said.is_some() {
-                self.updates.message("\n\n");
-            }
-            self.said = Some(item.to_owned());
-        }
-        self.streamed.insert(item.to_owned());
-        self.updates.message(text);
-    }
-
     fn started(&mut self, item: &Value) {
         if let Some(call) = tool_call(item) {
-            self.tools.insert(item["id"].as_str().unwrap_or_default().to_owned());
-            self.updates.tool_call(call.status(ToolCallStatus::InProgress));
+            self.tools.started(&self.updates, call.status(ToolCallStatus::InProgress));
         }
     }
 
     fn completed(&mut self, item: &Value) {
         let id = item["id"].as_str().unwrap_or_default();
         match item["type"].as_str() {
-            Some("agentMessage") if !self.streamed.contains(id) => {
-                self.say(id, item["text"].as_str().unwrap_or_default());
+            Some("agentMessage") => {
+                let text = item["text"].as_str().unwrap_or_default();
+                // Said once, whatever came of it before or comes after.
+                if !text.is_empty() && !self.reply.streamed(id) {
+                    self.reply.delta(&self.updates, id, text);
+                }
             }
-            Some("reasoning") if !self.streamed.contains(id) => {
+            Some("reasoning") => {
                 let parts = item["summary"].as_array().filter(|parts| !parts.is_empty()).or(item["content"].as_array());
                 let text: Vec<&str> = parts.into_iter().flatten().filter_map(Value::as_str).collect();
                 if !text.is_empty() {
-                    self.updates.thought(text.join("\n\n"));
+                    self.reply.whole_thought(&self.updates, id, text.join("\n\n"));
                 }
             }
             _ => {
                 let Some(call) = tool_call(item) else { return };
                 let (status, output) = outcome(item);
-                if self.tools.contains(id) {
-                    let fields = ToolCallUpdateFields::new().status(status).raw_output(output);
-                    self.updates.tool_update(ToolCallUpdate::new(id.to_owned(), fields));
-                } else {
-                    self.tools.insert(id.to_owned());
-                    self.updates.tool_call(call.status(status).raw_output(output));
-                }
+                self.tools.report(&self.updates, call, status, output);
             }
         }
     }
@@ -753,14 +718,10 @@ impl Turn {
         }
     }
 
-    /// The tokens the turn used.
+    /// The tokens the turn used, their total as the server counts it.
     fn usage(&self) -> Option<Usage> {
         let used = self.latest?.minus(self.before.unwrap_or_default());
-        Some(
-            Usage::new(used.total, used.input, used.output)
-                .cached_read_tokens(used.cached)
-                .thought_tokens(used.reasoning),
-        )
+        Some(used.counts.usage(used.total))
     }
 }
 

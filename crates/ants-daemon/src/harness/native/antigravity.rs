@@ -7,14 +7,12 @@
 //! session gets a private directory holding its settings (the definition's own `--settings` merged in) and, given to
 //! agy with `--add-dir`, `.agents/mcp_config.json` with ants' MCP servers; the directory goes with the session.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{
-    ContentBlock, PromptResponse, StopReason, ToolCall, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, Usage,
+    ContentBlock, PromptResponse, StopReason, ToolCall, ToolCallLocation, ToolCallStatus, ToolKind, Usage,
 };
 use agent_client_protocol::{Error, ErrorCode};
 use anyhow::bail;
@@ -23,6 +21,7 @@ use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
 use super::io::{older, probe_version};
+use super::turn::{Tokens, ToolCalls};
 use super::{
     Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates,
     context_overflow, deny_approval, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out,
@@ -453,21 +452,26 @@ fn failure(error: &str, stderr: &str) -> Error {
 /// What a turn's steps came to.
 #[derive(Default)]
 struct Steps {
-    /// Tokens: input, output, thinking, cached input read, total.
-    usage: [u64; 5],
+    /// The tokens its steps counted, and their total as agy counts it.
+    tokens: Tokens,
+    total: u64,
     /// The tool calls seen.
-    tools: HashSet<String>,
+    tools: ToolCalls,
     /// An API error the turn has not answered after.
     unanswered: bool,
 }
 
 impl Steps {
     fn step(&mut self, step: &Value, updates: &Updates) {
-        let usage = &step["usage"];
-        let counts = ["input_tokens", "output_tokens", "thinking_tokens", "cache_read_tokens", "total_tokens"];
-        for (sum, name) in self.usage.iter_mut().zip(counts) {
-            *sum += usage[name].as_u64().unwrap_or_default();
-        }
+        let count = |name: &str| step["usage"][name].as_u64().unwrap_or_default();
+        self.tokens.add(Tokens {
+            input: count("input_tokens"),
+            output: count("output_tokens"),
+            cache_read: count("cache_read_tokens"),
+            cache_write: 0,
+            thought: count("thinking_tokens"),
+        });
+        self.total += count("total_tokens");
         match step["step_type"].as_str() {
             Some("agent_response") => {
                 if let Some(text) = step["text_delta"].as_str().filter(|text| !text.is_empty()) {
@@ -497,16 +501,11 @@ impl Steps {
             (Value::String(output), _) => Some(output.clone().into()),
             _ => None,
         };
-        if self.tools.insert(id.clone()) {
-            updates.tool_call(described(id, step).status(status).raw_output(output));
-        } else {
-            updates.tool_update(ToolCallUpdate::new(id, ToolCallUpdateFields::new().status(status).raw_output(output)));
-        }
+        self.tools.report(updates, described(id, step), status, output);
     }
 
     fn usage(&self) -> Usage {
-        let [input, output, thinking, cached, total] = self.usage;
-        Usage::new(total, input, output).thought_tokens(thinking).cached_read_tokens(cached)
+        self.tokens.usage(self.total)
     }
 }
 

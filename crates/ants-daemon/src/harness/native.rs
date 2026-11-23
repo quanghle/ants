@@ -23,6 +23,7 @@ mod rpc;
 mod stub;
 #[cfg(all(test, unix))]
 mod tests;
+mod turn;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
