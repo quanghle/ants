@@ -700,7 +700,7 @@ pub fn naming_as_sage<'a>(ant: &UserId, entries: &'a [ColonyEntry], now: DateTim
 /// messages in hand, then the ant whose profile best matches `request` ([`match_scores`]), then the first by id. A
 /// profile, the ant's own untrusted words, thus only breaks a tie of all the rest. The same colony at the same time
 /// always gives the same answer.
-pub fn pick<'a>(
+pub(crate) fn pick<'a>(
     entries: &'a [ColonyEntry],
     capability: &str,
     request: &str,

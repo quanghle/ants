@@ -1,11 +1,11 @@
 //! Built-in sense (crate `ants-sense`) as the daemon runs it, the one place the daemon reaches it. What any provider
 //! gets, sense gets through [`crate::provider`] like the others: its tools, briefs, events, wake requests and export.
-//! The rest is sense's alone, behind [`Sense`]: the data it keeps of the ants a process serves ([`stores`]), over their
+//! The rest is sense's alone, behind [`Sense`]: the data it keeps of the ants a process serves (`stores`), over their
 //! event logs in the hub's stream ([`log`]); each ant's schedule of reminders, memory maintenance and dreams
-//! ([`scheduler`]); its sage's answers to the reviews of its dreams; the skills it offers the ant's harness; the
-//! workdirs of the ant's threads, through which it reaches the ant's files ([`workdirs`]); the ant's dreams as the
-//! trails it saves answer them ([`dreams`]); and what its colony entry shows of it: the profile the ant publishes, or
-//! why sense keeps none of its data ([`published`]). A home an ant takes over keeps the sense data in it
+//! (`scheduler`); its sage's answers to the reviews of its dreams; the skills it offers the ant's harness; the
+//! workdirs of the ant's threads, through which it reaches the ant's files (`workdirs`); the ant's dreams as the
+//! trails it saves answer them (`dreams`); and what its colony entry shows of it: the profile the ant publishes, or
+//! why sense keeps none of its data (`published`). A home an ant takes over keeps the sense data in it
 //! ([`take_over`]).
 
 use std::path::{Path, PathBuf};
@@ -53,7 +53,7 @@ impl Sense {
     }
 
     /// Serve the sense data of `ant`, whose home is `home` and whose credentials are at `creds`, if any
-    /// ([`SenseStores::serve`]).
+    /// (`SenseStores::serve`).
     pub fn serve(&self, ant: &UserId, home: &Path, creds: Option<PathBuf>) {
         self.stores.serve(ant, home, creds);
     }
@@ -172,7 +172,7 @@ impl Sense {
     }
 
     /// The process keeps none of its ants' data, for the reason `why`, as it makes no host connection and sense no link
-    /// of its own; with None, it may again ([`SenseStores::unkept`]). Each ant's colony entry and the daemon's log say
+    /// of its own; with None, it may again (`SenseStores::unkept`). Each ant's colony entry and the daemon's log say
     /// so.
     pub fn unkept(&self, why: Option<String>) {
         self.stores.unkept(why);

@@ -3,9 +3,9 @@
 //! (see [`crate::stream::notes`]), and `escalate` to send the thread up the ant's escalation chain (see
 //! [`crate::escalation`]). The tools of the ant's provider, what holds its identity, memory and work, come beside them,
 //! named with the provider's name as prefix (`sense_recall`), each call carrying the ant, its identity, the thread and
-//! where the thread came from (see [`provider`]).
+//! where the thread came from (see `provider`).
 //!
-//! `decide_approval` answers another ant's tool request that came up its chain (see [`crate::approvals`]).
+//! `decide_approval` answers another ant's tool request that came up its chain (see `crate::approvals`).
 //!
 //! `post_channel` starts a channel thread the ant creates: its escalations go up the ant's chain, whichever ant
 //! gets stuck on it (see [`ants_proto::Escalation::new_from`]).
@@ -21,14 +21,14 @@
 //! returns at once; the answer arrives as a later message ([`Envelope::answer`]).
 //! `send_message`, `ask_ant`, `route`, `post_channel` and `post_notes` attach files from the directory the thread's
 //! session works in, `attach_to_reply` attaches them to the turn's final answer ([`Mcp::reply_files`]), and
-//! `read_attachment` reads an attachment of a message the ant reads (see [`attach`]).
+//! `read_attachment` reads an attachment of a message the ant reads (see `attach`).
 //!
 //! An assistant also gets the `*_for_human` tools, which act for its human while the human's grant names it: read the
 //! human's home queue, answer questions, send, post in channels and thread notes, react, title, mark done and decide
-//! tool requests (see [`assist`]).
+//! tool requests (see `assist`).
 //!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
-//! servers, and a local socket that `ants mcp` bridges stdio to, for the others (see [`crate::ipc`]). The sessions of each thread get their
+//! servers, and a local socket that `ants mcp` bridges stdio to, for the others (see `crate::ipc`). The sessions of each thread get their
 //! own bearer token, which tells the tools which thread calls them.
 //!
 //! A reply to `ask_ant` lands in the ant's inbox like any message. It reaches the waiting call through a core NATS
@@ -136,7 +136,7 @@ impl Drop for Mcp {
 }
 
 impl Mcp {
-    /// Listen on a loopback port and on a local socket ([`ipc::Listener`]). What must survive a restart (asks waiting for a reply, late
+    /// Listen on a loopback port and on a local socket (`ipc::Listener`). What must survive a restart (asks waiting for a reply, late
     /// replies) lives in `<home>/mcp.json`. `humans` tells the humans the tools reach. Thread notes out of turns are
     /// escalated through `escalator`, without one straight to the thread's owner.
     pub async fn start(

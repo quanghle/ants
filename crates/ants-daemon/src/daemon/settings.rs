@@ -91,7 +91,7 @@ pub struct Pooling {
     /// A thread's harness stops after this long without a message, and resumes its session on the next one.
     pub idle_timeout: Duration,
     /// When memory is low, and the harnesses run at most while it is ([`crate::limits::pressure`]).
-    pub memory_pressure: crate::limits::pressure::Settings,
+    pub(crate) memory_pressure: crate::limits::pressure::Settings,
     /// Trail workers computing at once across the process's runs ([`crate::trail::Conducting::workers`]).
     pub trail_workers: usize,
 }
@@ -105,7 +105,7 @@ pub struct WorktreeSettings {
     /// Where a thread's new worktree branch starts ([`crate::worktrees::Worktrees::with_base`]).
     pub base: crate::worktrees::Base,
     /// What becomes of a thread's worktree branch holding new commits ([`crate::publish`]).
-    pub publish: Publish,
+    pub(crate) publish: Publish,
 }
 
 /// Who the ant answers to and what it may do unasked.

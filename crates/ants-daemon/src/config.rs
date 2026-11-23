@@ -340,7 +340,7 @@ pub fn load(path: &Path) -> Result<Loaded> {
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
 /// directory, apply the top-level `harness`, `nats`, `js_domain` and `human`, check that names are unique, workdirs
 /// exist and every harness named is defined, add the built-in messenger unless `messenger = false`,
-/// settle each ant's sage and add the built-in sage while an ant names it ([`sage::settle`]), leave
+/// settle each ant's sage and add the built-in sage while an ant names it (`sage::settle`), leave
 /// to another machine the built-in ants it doesn't serve ([`builtins`]), a harness being needed only by those it
 /// serves, and
 /// check the schedules, each named once and after no ant, with the top-level `nats`,

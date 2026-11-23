@@ -1,11 +1,11 @@
 //! The orders an assistant sent for its human ([`AdminOrder::on_behalf_of`]): verified as any order, held
-//! ([`OrderState::Held`]) until the human consents, and only then carried out ([`super::apply`]).
+//! ([`OrderState::Held`]) until the human consents, and only then carried out (`super::apply`).
 //!
 //! An order held is acked once its held outcome is stored, and kept, its credentials left out, in the machine's list
 //! of held orders ([`held_orders_key`]), which the daemon reads back on start. The human's consent is its signed
 //! answer to the order ([`Act::Order`]) or a pre-allow rule covering the order's kind ([`covers_order`]), by
 //! credentials that carry [`ADMIN_TAG`] and are not revoked, while the human's grant names the assistant and the
-//! assistant's credentials are not revoked either: [`review`] looks at every held order whenever a human's consent
+//! assistant's credentials are not revoked either: `review` looks at every held order whenever a human's consent
 //! records or grants change ([`Registry::consents`], [`Registry::withdrawals`]), an order is held, or every
 //! [`RECHECK`]. It replaces the held outcome with the order's applied or refused one: refused when the human denies
 //! it, its grant no longer names the assistant, or [`ORDER_HOLD`] passed.

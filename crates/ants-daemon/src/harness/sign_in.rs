@@ -32,7 +32,7 @@ const SIGNED_OUT_TEXTS: &[&str] = &[
 ];
 
 /// A harness that cannot work until a human signs it in, as its ACP handshake or a prompt said: ACP's
-/// `auth_required` error, or an error or stderr that says so ([`SIGNED_OUT_TEXTS`]). Nothing ran.
+/// `auth_required` error, or an error or stderr that says so (`SIGNED_OUT_TEXTS`). Nothing ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedOut {
     pub harness: String,

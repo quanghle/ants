@@ -74,9 +74,9 @@ pub struct Ant {
     pub context: Option<String>,
     /// Bytes of the thread's history a rebuilt session is seeded with, over the harness's and its context's.
     pub history_budget: Option<usize>,
-    /// Harnesses and models tried in order while the ant's own harness cannot serve ([`crate::limits::fallback`]):
+    /// Harnesses and models tried in order while the ant's own harness cannot serve (`crate::limits::fallback`):
     /// `<harness>`, `<harness>:<model>` or `:<model>` for another model of its own harness. Of an ant added from a
-    /// template, the template's, less any naming the ant's own harness and model ([`fallback::inherit`]).
+    /// template, the template's, less any naming the ant's own harness and model (`fallback::inherit`).
     #[serde(default)]
     pub fallback: Vec<String>,
     /// Same as `allow = ["*"]`.
@@ -148,7 +148,7 @@ pub struct Ant {
     /// The file's top-level `sage`.
     #[serde(skip)]
     pub file_sage: Sage,
-    /// Whether another ant of the file names it as its sage ([`super::sage::settle`]), so it has none of its own.
+    /// Whether another ant of the file names it as its sage (`super::sage::settle`), so it has none of its own.
     #[serde(skip)]
     pub is_sage: bool,
     /// The daily caps it shares with the other ants added from its template, if the template has any.
@@ -427,7 +427,7 @@ pub fn builtin_messenger(harness: Option<&str>, home: &Path) -> Ant {
     builtin(BuiltinAnt::Messenger, harness, home)
 }
 
-/// The ant a file serves while one of its ants names `system-sage` as its sage ([`super::sage::settle`]); set up,
+/// The ant a file serves while one of its ants names `system-sage` as its sage (`super::sage::settle`); set up,
 /// and left to another machine, as the built-in messenger is ([`builtin_messenger`]), with its own home and
 /// credentials. Its shared settings, such as its model and reasoning effort, change as any ant's.
 pub fn builtin_sage(harness: Option<&str>, home: &Path) -> Ant {

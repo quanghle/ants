@@ -20,11 +20,11 @@ pub enum FindingKind {
     Duplicates,
     /// An episode written since the last dream, whose lessons are to be distilled.
     Distill,
-    /// A pending persona or skill proposal ([`proposals`](super::gather::proposals)).
+    /// A pending persona or skill proposal (`gather::proposals`).
     Proposal,
-    /// A finding of the ant's sage ([`Advice`]).
+    /// A finding of the ant's sage (`Advice`).
     Sage,
-    /// No persona after some threads ([`identity_findings`](super::identity_findings)).
+    /// No persona after some threads (`identity_findings`).
     NoPersona,
     /// No self-model after some threads.
     NoSelfModel,
@@ -34,9 +34,9 @@ pub enum FindingKind {
     StaleSelfModel,
     /// A persona, self-model or skill still as a clone inherited it.
     Inherited,
-    /// A vital sign of the work turned sharply for the worse ([`vitals`](super::vitals)).
+    /// A vital sign of the work turned sharply for the worse (`vitals`).
     Vitals,
-    /// A kind of the findings a sage gave other ants, mostly rejected ([`practice_findings`](super::practice_findings)).
+    /// A kind of the findings a sage gave other ants, mostly rejected (`practice_findings`).
     RejectedKind,
     /// Findings a sage gave other ants, applied and later undone.
     UndoneFindings,
@@ -145,7 +145,7 @@ impl Finding {
     }
 
     /// Whether it is a sage's [`TRAIL`] finding, suggesting a saved trail.
-    pub fn suggests_trail(&self) -> bool {
+    pub(crate) fn suggests_trail(&self) -> bool {
         self.advice.as_ref().is_some_and(|advice| advice.kind == TRAIL)
     }
 }
@@ -200,7 +200,7 @@ impl Verdict {
     }
 }
 
-/// A trail saved on a dream thread ([`trail_saved`](super::count::trail_saved)).
+/// A trail saved on a dream thread (`count::trail_saved`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedTrail {
     pub name: TrailName,
@@ -210,7 +210,7 @@ pub struct SavedTrail {
     pub at: DateTime<Utc>,
 }
 
-/// A finding the ant rejected, or applied on a sage's practice ([`FindingKind::practice`]), kept with the record of
+/// A finding the ant rejected, or applied on a sage's practice (`FindingKind::practice`), kept with the record of
 /// the last dream: no dream gathers it again until what it is about changed since the verdict (one of its items, other
 /// than by a read, or the count it rests on) or [`REST_DAYS`](super::REST_DAYS) of the ant's active time passed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

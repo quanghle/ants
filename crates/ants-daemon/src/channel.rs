@@ -654,7 +654,7 @@ impl Threads {
     /// to it: it takes part in the thread ([`Threads::takes_part`]), or an ant that does passed the link on to it,
     /// directly or through ants it passed the link on to in turn ([`links::passed_on`]). None otherwise: no ant links
     /// its thread to a channel thread it has no link to, to take that thread's creator.
-    pub async fn origin_for(
+    pub(crate) async fn origin_for(
         &self,
         thread: &ThreadId,
         sender: &UserId,

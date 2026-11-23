@@ -275,7 +275,7 @@ impl Cache {
         experience::count(&self.db, own, since, top)
     }
 
-    /// The tally of the reviews the items record, with the `top` kinds and ants ([`crate::dream::review_tally`]).
+    /// The tally of the reviews the items record, with the `top` kinds and ants (`crate::dream::review_tally`).
     pub fn review_tally(&self, top: usize) -> Result<Option<ReviewTally>, CacheError> {
         crate::dream::reviews::count(&self.db, top)
     }

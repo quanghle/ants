@@ -242,7 +242,7 @@ impl Hub {
 
 impl super::Mcp {
     /// What `reply`, the final answer to `incoming`, tells the runs started answering it, a trail step, spent
-    /// ([`Hub::trail_spent`]).
+    /// (`Hub::trail_spent`).
     pub async fn trail_spent(&self, incoming: &Envelope, reply: &Envelope) -> Option<TrailSpent> {
         self.hub.trail_spent(Some(incoming), reply).await
     }

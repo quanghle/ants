@@ -154,7 +154,7 @@ impl<'a> Earlier<'a> {
 }
 
 /// The packet of `dream` for `reader`, covering `threads` (the most recently active first), with the vital signs of
-/// the dreams before ([`vitals::trend`]), the ant's identity and, for the ant, the verdicts on the last dream's
+/// the dreams before (`vitals::trend`), the ant's identity and, for the ant, the verdicts on the last dream's
 /// findings and the reviews it made of other ants since or, for the dream's sage, its earlier findings, judged by the
 /// colony's saved `trails` where they name trails, and those trails.
 pub async fn packet(

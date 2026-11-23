@@ -49,7 +49,7 @@ impl Redactor {
     /// The same, also redacting the values of `vars` whose name looks secret ([`secret_name`]) or that look like a
     /// token ([`token_like`]), short ones and paths aside ([`MIN_VALUE`]).
     #[must_use]
-    pub fn with_env<K: AsRef<str>, V: AsRef<str>>(self, vars: impl IntoIterator<Item = (K, V)>) -> Self {
+    pub(crate) fn with_env<K: AsRef<str>, V: AsRef<str>>(self, vars: impl IntoIterator<Item = (K, V)>) -> Self {
         self.with_values(vars, |name, value| secret_name(name) || token_like(value))
     }
 

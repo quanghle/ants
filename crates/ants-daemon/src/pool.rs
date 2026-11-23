@@ -2,9 +2,9 @@
 //!
 //! Threads run concurrently, each in its own harness. A harness with a prompt in flight is never stopped, so when the
 //! cap is reached and every live harness is busy, a new thread waits for one to finish. While memory is low
-//! ([`crate::limits::pressure`]) idle harnesses stop at once and the cap is lowered.
+//! (`crate::limits::pressure`) idle harnesses stop at once and the cap is lowered.
 //!
-//! A prompt runs on the ant's own harness or on one of its fallbacks ([`crate::limits::fallback`]). A thread whose live
+//! A prompt runs on the ant's own harness or on one of its fallbacks (`crate::limits::fallback`). A thread whose live
 //! harness is another one's moves to a new harness once that one is idle, and a session that last ran in another
 //! harness, as stored beside it, is not resumed: the new one starts over from the thread's history.
 //!
@@ -218,7 +218,7 @@ impl Pool {
     /// While `probe` tells of low memory by `settings`, stop idle harnesses at once and run at most
     /// [`pressure::Settings::max_harnesses`], checking at each [`Pool::evict_idle`]. Nothing when `settings` are off.
     #[must_use]
-    pub fn with_memory_pressure(self, settings: pressure::Settings, probe: pressure::Probe) -> Self {
+    pub(crate) fn with_memory_pressure(self, settings: pressure::Settings, probe: pressure::Probe) -> Self {
         if settings.is_off() {
             return self;
         }
@@ -334,7 +334,7 @@ impl Pool {
         self.run_on(thread, prompt, None).await
     }
 
-    /// [`Pool::run`] on `fallback`, `None` for the ant's own harness. An error on a fallback carries [`OnFallback`].
+    /// [`Pool::run`] on `fallback`, `None` for the ant's own harness. An error on a fallback carries `OnFallback`.
     pub async fn run_on(&self, thread: &ThreadId, mut prompt: Prompt, fallback: Option<usize>) -> Result<Reply> {
         let on = |e: anyhow::Error| match fallback.and_then(|i| Some((i, self.fallbacks.get(i)?))) {
             Some((index, (name, _))) => e.context(OnFallback { index, name: name.clone() }),

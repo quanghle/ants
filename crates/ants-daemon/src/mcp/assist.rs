@@ -115,8 +115,8 @@ pub trait HumanStore: Send + Sync {
     /// Record `human` as the owner of `thread` that the message `assistant` sends for it to `to` names.
     fn record_owner(&self, thread: ThreadId, to: UserId, human: UserId, assistant: UserId)
     -> BoxFuture<'_, Result<()>>;
-    /// The answers of the daemons of the ant to `request`, as many as come within [`ANSWER_WAIT`], and within
-    /// [`ANSWER_GRACE`] of the first.
+    /// The answers of the daemons of the ant to `request`, as many as come within `ANSWER_WAIT`, and within
+    /// `ANSWER_GRACE` of the first.
     fn cancel(&self, request: CancelRequest) -> BoxFuture<'_, Result<Vec<CancelReply>>>;
     /// The messages waiting for the ant of `request`, as `ants queue` lists them ([`queue::waiting`]) from the answers
     /// to `request`, gathered as [`HumanStore::cancel`] gathers them, with up to `shown` of those the ant's daemons

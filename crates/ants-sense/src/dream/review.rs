@@ -77,10 +77,10 @@ pub struct Review {
     pub answer: Option<Uuid>,
     /// The readable findings of the answer left out past its caps ([`Parsed::over`]).
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub over: usize,
+    pub(crate) over: usize,
     /// The findings of the answer left out as unreadable ([`Parsed::unreadable`]).
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub unreadable: usize,
+    pub(crate) unreadable: usize,
     /// What is new in the verdicts and outcomes of the sage's earlier findings since the ant's last review by it, as
     /// the message tells the sage ([`Dream::review_outcomes`]): set when the dream began, the same on every try.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -341,10 +341,10 @@ pub enum Reviewed {
 
 /// Take message `message` from `sage` on `thread`, holding `text`, or none when the sage's daemon failed to answer, as
 /// the answer to the review of the last dream: none when it is no such answer. Readable findings become the dream's,
-/// marked untrusted when they rest on untrusted text, with those it keeps ([`kept`]), and prompt the ant, the packet's
+/// marked untrusted when they rest on untrusted text, with those it keeps (`kept`), and prompt the ant, the packet's
 /// other findings held unshown ([`Dream::held`]); an answer without findings wakes nobody, all the packet's findings
 /// left for the next dream to offer again; an unreadable one falls back to the packet alone. The first
-/// [`MAX_LATE_FINDINGS`] readable findings of the first answer come after the ant was woken with the packet alone are
+/// `MAX_LATE_FINDINGS` readable findings of the first answer come after the ant was woken with the packet alone are
 /// kept, marked the same and late, for the next dream to offer ([`Review::late`]), the rest counted as left out; one
 /// come after the next dream began is no answer to the last dream's review. The same answer taken again gives the same.
 pub async fn answered(

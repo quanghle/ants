@@ -120,7 +120,7 @@ impl Link {
     }
 }
 
-/// A host connection starting, from [`SenseStores::hosting`] until dropped. Existing stores keep serving their
+/// A host connection starting, from `SenseStores::hosting` until dropped. Existing stores keep serving their
 /// caches until [`Hosting::up`] supplies a connection, then follow that connection without losing queued writes.
 pub struct Hosting {
     stores: Arc<SenseStores>,
@@ -129,7 +129,7 @@ pub struct Hosting {
 }
 
 impl Hosting {
-    /// The host connection is up as `link`: sense keeps its ants' data again ([`SenseStores::unkept`]).
+    /// The host connection is up as `link`: sense keeps its ants' data again (`SenseStores::unkept`).
     pub fn up(&self, link: Link) {
         let mut state = self.stores.state();
         if state.generation == self.generation {
@@ -155,7 +155,7 @@ impl Drop for Hosting {
     }
 }
 
-/// The host connection failed and is tried again, from [`SenseStores::retrying`] until dropped: the events of an ant
+/// The host connection failed and is tried again, from `SenseStores::retrying` until dropped: the events of an ant
 /// with no cache wait for it rather than being acked with no effect ([`Stores::link_retrying`]).
 pub struct Retrying {
     stores: Arc<SenseStores>,

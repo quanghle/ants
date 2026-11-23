@@ -79,7 +79,7 @@ pub(super) const RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// Like [`connect`], but waits for a server that cannot be reached yet, as the local nats-server when a service manager
 /// starts the daemon first: a refused, timed-out or unresolved connection is retried for as long as it takes, after
-/// [`RETRY_FIRST`] and then twice as long each time up to [`RETRY_MAX`], with a warning each time. Once connected it
+/// `RETRY_FIRST` and then twice as long each time up to `RETRY_MAX`, with a warning each time. Once connected it
 /// waits the same way for JetStream to answer, as a leaf node that listens before its uplink has joined the hub
 /// answers JetStream requests with no responders or not at all. JetStream answers when it looks up the info of the
 /// user's own inbox consumer ([`ants_proto::inbox_consumer`]) in the `ANTS` stream, found or not, which every user's

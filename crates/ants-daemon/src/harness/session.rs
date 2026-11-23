@@ -143,7 +143,7 @@ pub struct Session {
 impl Session {
     /// Start a harness and open a session in it: `resume` through session/load when the harness can, else a new one.
     /// A failure other than for want of signing in or a provider limit is a [`StartFailed`] one.
-    pub async fn start(launch: &Launch, resume: Option<SessionId>) -> Result<Self> {
+    pub(crate) async fn start(launch: &Launch, resume: Option<SessionId>) -> Result<Self> {
         Self::open(launch, resume, None).await
     }
 

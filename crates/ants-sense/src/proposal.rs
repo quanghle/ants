@@ -4,7 +4,7 @@
 //! made from. A target has at most one pending proposal, a new one superseding it.
 //!
 //! A dream beginning [`CONFIRM_AFTER_HOURS`] or more after the proposal offers it as a finding (`proposals` of
-//! [`crate::dream`]), and the ant decides it there with `sense_dream` ([`decide`]): applied confirms it, putting its
+//! [`crate::dream`]), and the ant decides it there with `sense_dream` (`decide`): applied confirms it, putting its
 //! version into its target, rejected discards it and deferred leaves it pending, offered again by the next dream. A
 //! proposal whose target changed meanwhile is confirmed no more. Every version stays in the target's revisions, each
 //! with its reason. Proposals on a thread of untrusted origin, in answer to untrusted findings, or naming none of the

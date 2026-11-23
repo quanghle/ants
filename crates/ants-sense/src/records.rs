@@ -4,9 +4,9 @@
 //! [`SELF_MODEL`], and one item of kind [`RELATIONSHIP`] per person, each id named after its scope ([`record_id`]) so
 //! writers starting one at once start the same item.
 //!
-//! The ant writes them with `sense_identity`, giving `self_model`, or `relationship` and `who` ([`replace`]); they
+//! The ant writes them with `sense_identity`, giving `self_model`, or `relationship` and `who` (`replace`); they
 //! take effect at once, with no dream to confirm them. `sense_identity` shows the self-model and the relationship
-//! records by title, and with `history` and `who` every revision of one ([`history`]); the brief shows the self-model
+//! records by title, and with `history` and `who` every revision of one (`history`); the brief shows the self-model
 //! after the identity and the records of the thread's participants after the tasks; `sense_recall` lists those of the
 //! people it searches and reads one by id.
 

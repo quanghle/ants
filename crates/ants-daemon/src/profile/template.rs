@@ -155,7 +155,7 @@ pub struct AntTemplate {
     pub publish: Publish,
     /// The fallbacks of its ants ([`crate::limits::fallback::inherit`]), whichever harness and model a request picks.
     #[serde(default)]
-    pub fallback: Vec<String>,
+    pub(crate) fallback: Vec<String>,
 }
 
 fn default_name_pattern() -> String {

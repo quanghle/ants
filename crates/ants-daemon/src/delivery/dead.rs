@@ -489,7 +489,7 @@ pub async fn watch(
 
 /// Dead-letter the message `advisory` names, unless it is not an ant's inbox message or channel post, is gone, or
 /// already is a dead letter. Returns the new dead letter and its stream sequence. The notice goes to the thread's owner,
-/// else the default human of `claims`, not up the ant's escalation chain, carrying a level-0 escalation ([`direct`]).
+/// else the default human of `claims`, not up the ant's escalation chain, carrying a level-0 escalation (`direct`).
 /// The owner and creator are checked as the
 /// ant's daemon checks them: an envelope's against `claims` ([`Claims::sender_claims`]), and a channel post's as the
 /// posts of its thread say ([`Threads::origin`]).

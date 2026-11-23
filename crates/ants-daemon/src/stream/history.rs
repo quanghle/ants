@@ -44,7 +44,7 @@ pub enum Rebuild {
     Lost,
     /// The session outgrew the model's context window, so the prompt runs again in a new one.
     Overflow,
-    /// The thread's earlier session ran in another harness, the ant's own or a fallback ([`crate::limits::fallback`]).
+    /// The thread's earlier session ran in another harness, the ant's own or a fallback (`crate::limits::fallback`).
     Moved,
     /// The ant is a clone of another, whose session of the thread could not be forked ([`crate::clone`]).
     Cloned,

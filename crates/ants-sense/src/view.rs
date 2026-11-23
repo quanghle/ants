@@ -2,14 +2,14 @@
 //! pane of the ant view show humans of who an ant has become. In order:
 //!
 //! 1. its identity: its card and experience, and the tally of the reviews it made as a sage;
-//! 2. its growth report ([`report`]): how its identity grew, in counts;
+//! 2. its growth report (`report`): how its identity grew, in counts;
 //! 3. its persona, with its pending proposal;
 //! 4. its self-model;
 //! 5. each relationship record;
 //! 6. its skills, by name and description;
 //! 7. its last dream: the title of its diary, with its verdict counts and the vital signs of its period, each with its
-//!    change against the mean of the dreams before ([`dream::changes`]);
-//! 8. its open work ([`work`]): the findings of its last dream unanswered or deferred, its sage's among them, and those
+//!    change against the mean of the dreams before (`dream::changes`);
+//! 8. its open work (`work`): the findings of its last dream unanswered or deferred, its sage's among them, and those
 //!    its sage gave late; its open commitments; its active reminders; its tasks not closed;
 //! 9. its core memories, then its top [`DEFAULT_LIMIT`] memories of every scope, as `sense_recall` ranks them without
 //!    a query.

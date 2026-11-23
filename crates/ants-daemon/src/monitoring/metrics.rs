@@ -4,7 +4,7 @@
 //!
 //! The daemon's counters ([`Ant`]) are kept per ant in one registry ([`ant`]) whether or not anything listens: a few
 //! atomics each. The JetStream storage usage [`crate::monitoring::storage`] last measured is kept beside them ([`stored`]), and so
-//! is the system memory [`crate::limits::pressure`] last read ([`memory_available`]).
+//! is the system memory `crate::limits::pressure` last read ([`memory_available`]).
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
