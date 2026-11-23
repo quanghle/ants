@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use ants_proto::{ChannelId, Escalation, ThreadId, UserId};
+use ants_proto::{ChannelId, Envelope, Escalation, ThreadId, UserId};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -67,6 +67,30 @@ impl Sent {
 }
 
 impl Pending {
+    /// `escalation` gone to `to`, about `summary`, for the thread of `notice`, which names its owner and creator
+    /// and may ask a question: not renewed, on no channel, and sent under no message id yet.
+    pub fn of(
+        escalation: Escalation,
+        to: Vec<UserId>,
+        deadline: Option<i64>,
+        notice: &Envelope,
+        summary: String,
+    ) -> Self {
+        Self {
+            escalation,
+            to,
+            renewed_by: None,
+            deadline,
+            owner: notice.owner.clone(),
+            creator: notice.creator.clone(),
+            origin_thread: notice.origin_thread.clone(),
+            summary,
+            channel: None,
+            question: notice.question.clone().map(Box::new),
+            sent: None,
+        }
+    }
+
     /// Whether it went to the thread's owner rather than up a chain.
     pub fn at_owner(&self) -> bool {
         self.to.is_empty()
