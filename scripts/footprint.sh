@@ -24,7 +24,8 @@
 # Env:      NATS_SERVER (default: nats-server on PATH), FOOTPRINT_DIR (parent of the scratch directory,
 #           default: $TMPDIR or /tmp), FOOTPRINT_SAMPLES (idle samples, 1 s apart, default 5),
 #           FOOTPRINT_ASK_TIMEOUT (seconds, default 180). ANTS_ANT, ANTS_CONFIG, ANTS_CREDS, ANTS_JS_DOMAIN and
-#           ANTS_METRICS are ignored.
+#           ANTS_METRICS are ignored, and HOME is a scratch directory: no config file, credentials or ant's
+#           home of whoever runs it is read.
 #
 # Private memory is RssAnon of /proc/PID/status on Linux and the physical footprint (`footprint`) on macOS.
 # Resident memory (`ps -o rss=`) is reported too: it is mostly the binary's clean, file-backed, shared code pages.
@@ -80,6 +81,8 @@ unset ANTS_ANT ANTS_CONFIG ANTS_CREDS ANTS_JS_DOMAIN ANTS_METRICS
 [ -z "$metrics" ] || command -v curl >/dev/null 2>&1 || die "curl not found, needed with --metrics"
 
 work=$(mktemp -d "${FOOTPRINT_DIR:-${TMPDIR:-/tmp}}/ants-footprint.XXXXXX")
+mkdir "$work/home"
+export HOME="$work/home"
 nats_pid=
 daemon_pid=
 ask_pid=
