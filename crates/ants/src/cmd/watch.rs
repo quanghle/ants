@@ -1,5 +1,7 @@
 //! `ants watch`: follow what ants do, as it happens.
 
+use ants_client::sealed::size_note;
+use ants_client::text::{escalation_note, spelling};
 use ants_daemon::bus::relayed;
 use ants_daemon::records::reactions;
 use ants_proto::{
@@ -11,9 +13,7 @@ use futures::StreamExt as _;
 
 use crate::avatars::Faces;
 use crate::connection::Nats;
-use crate::text::escalation_note;
 use crate::threads::thread;
-use crate::tools;
 
 /// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for an ant (one token), its
 /// status subjects.
@@ -82,7 +82,7 @@ pub(crate) async fn run(nats: &Nats<'_>, target: String, thread: Option<thread::
             printer.line(&request_line(&r, &forged(r.check_subject(&msg.subject).is_ok())))
         } else if let Ok(d) = serde_json::from_slice::<ApprovalDecision>(&msg.payload) {
             let forged = forged(d.subject() == msg.subject.as_str());
-            printer.line(&format!("{}/{}{forged}: answered {}", d.ant, d.request_id, tools::spelling(d.verdict)))
+            printer.line(&format!("{}/{}{forged}: answered {}", d.ant, d.request_id, spelling(d.verdict)))
         } else if let Ok(r) = serde_json::from_slice::<CancelRequest>(&msg.payload) {
             let forged = forged(r.check_subject(&msg.subject).is_ok());
             let by = behalf.label(&r.by, r.on_behalf_of.as_ref()).await;
@@ -151,10 +151,10 @@ pub(crate) fn envelope_line(e: &Envelope, acting: &Acting, forged: &str, faces: 
     let from = faces.and_then(|f| f.known(&e.from)).unwrap_or_else(|| e.from.to_string());
     let head = format!("[{}] {} -> {}{forged}", e.thread_id, acting.label(&from), e.to);
     if let Some(d) = &e.approval {
-        return format!("{head} decides {} on approval request {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
+        return format!("{head} decides {} on approval request {}/{}", spelling(d.verdict), d.ant, d.request_id);
     }
     if let Some(sealed) = &e.sealed {
-        return format!("{head}: {}", crate::people::sealed::size_note(sealed));
+        return format!("{head}: {}", size_note(sealed));
     }
     match &e.escalation {
         Some(x) => format!("{head} [{}]: {}", escalation_note(x), e.text),
@@ -164,7 +164,7 @@ pub(crate) fn envelope_line(e: &Envelope, acting: &Acting, forged: &str, faces: 
 
 /// A tool request as `ants watch` prints it.
 pub(crate) fn request_line(r: &ApprovalRequest, forged: &str) -> String {
-    let options = r.options.iter().map(|v| tools::spelling(*v)).collect::<Vec<_>>().join("|");
+    let options = r.options.iter().map(|v| spelling(*v)).collect::<Vec<_>>().join("|");
     let (thread, ant, id) = (&r.thread_id, &r.ant, r.id);
     format!("[{thread}] {ant}{forged} asks approval {ant}/{id} ({options}): {}: {}", r.tool.kind, r.tool.title)
 }
@@ -249,7 +249,7 @@ impl Printer {
                     .line(&format!("[{thread}] {named}{forged} asked {to} {first:?}{more} (message {message})"));
             }
             StatusUpdate::Decided { request_id, verdict, by, decider, via } => {
-                let verdict = tools::spelling(*verdict);
+                let verdict = spelling(*verdict);
                 let outcome = match (by, decider, via) {
                     (DecidedBy::Expiry, ..) => format!("expired: {verdict}"),
                     (DecidedBy::Human, Some(decider), Some(via)) => format!("decided {verdict} by {decider} via {via}"),

@@ -12,6 +12,8 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 
+use super::conf::{entries, quote, uncommented, unquote};
+
 /// The port `ants web` serves the page on by default: fixed, so that the page's origin, and what the browser keeps
 /// for it, stay.
 pub const PAGE_PORT: u16 = 4280;
@@ -133,85 +135,6 @@ pub fn authenticated(path: &Path) -> bool {
         })
     }
     names_auth(path, 4)
-}
-
-/// `text` without its comments: from a `#` outside a quoted string, or a `//` opening a line, to the line's end.
-fn uncommented(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for line in text.lines() {
-        if !line.trim_start().starts_with("//") {
-            let mut quote = None;
-            let end = line.char_indices().find_map(|(at, c)| {
-                match (quote, c) {
-                    (None, '#') => return Some(at),
-                    (None, '"' | '\'') => quote = Some(c),
-                    (Some(q), c) if q == c => quote = None,
-                    _ => {}
-                }
-                None
-            });
-            out.push_str(&line[..end.unwrap_or(line.len())]);
-        }
-        out.push('\n');
-    }
-    out
-}
-
-/// The entries of the nats-server configuration `text`, comments removed, at its top level: each key with its value,
-/// the inside of a `{ }` block or a `[ ]` list, else what follows up to a comma or the line's end.
-fn entries(text: &str) -> Vec<(&str, &str)> {
-    let mut entries = Vec::new();
-    let mut rest = text;
-    loop {
-        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || [',', ';', '}', ']'].contains(&c));
-        if rest.is_empty() {
-            return entries;
-        }
-        let key_end = rest.find(|c: char| c.is_whitespace() || [':', '=', '{', '['].contains(&c)).unwrap_or(rest.len());
-        let (key, after) = rest.split_at(key_end);
-        let after = after.trim_start_matches([' ', '\t']);
-        let after = after.strip_prefix([':', '=']).unwrap_or(after).trim_start_matches([' ', '\t']);
-        let (value, next) = match after.chars().next() {
-            Some(open @ ('{' | '[')) => {
-                let end = closing(after, open).unwrap_or(after.len());
-                (&after[1..end], &after[(end + 1).min(after.len())..])
-            }
-            _ => after.split_at(after.find(['\n', ',']).unwrap_or(after.len())),
-        };
-        entries.push((key, value));
-        rest = next;
-    }
-}
-
-/// Where the bracket opening `text` closes, brackets in quoted strings left out.
-fn closing(text: &str, open: char) -> Option<usize> {
-    let close = if open == '{' { '}' } else { ']' };
-    let (mut depth, mut quote) = (0_usize, None);
-    for (at, c) in text.char_indices() {
-        match (quote, c) {
-            (None, '"' | '\'') => quote = Some(c),
-            (Some(q), c) if q == c => quote = None,
-            (None, c) if c == open => depth += 1,
-            (None, c) if c == close => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(at);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// `value` without the quotes and spaces around it.
-fn unquote(value: &str) -> &str {
-    value.trim().trim_matches(['"', '\''])
-}
-
-/// A double-quoted string for the nats-server configuration, which takes JSON escapes.
-fn quote(s: &str) -> String {
-    serde_json::to_string(s).expect("a string serializes")
 }
 
 #[cfg(test)]

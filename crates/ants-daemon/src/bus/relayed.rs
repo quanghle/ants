@@ -18,12 +18,14 @@
 //! they take async-nats messages.
 
 use ants_client::relayed as checks;
-pub use ants_client::relayed::{DIRECT_HEADERS, Read};
+pub use ants_client::relayed::Read;
 use async_nats::{HeaderMap, Message};
 
+mod gets;
 mod heard;
 mod kv;
 
+pub use gets::{Gets, GetsError, Got};
 pub use heard::{Heard, queue_subscribe, request, subscribe, subscribe_all};
 pub use kv::{GuardedKv, Watch};
 
@@ -31,6 +33,21 @@ pub use kv::{GuardedKv, Watch};
 fn names(headers: Option<&HeaderMap>) -> impl Iterator<Item = &str> + Clone {
     let headers = headers.into_iter().flat_map(HeaderMap::iter);
     headers.flat_map(|(name, values)| std::iter::repeat_n(name.as_ref(), values.len()))
+}
+
+/// `msg` as ants-client's readers of answers take one ([`ants_client::requests`]): its headers a name once per value,
+/// the values of one name in the order the message carries them.
+fn message(msg: Message) -> ants_client::Message {
+    let headers = msg.headers.iter().flat_map(HeaderMap::iter);
+    let headers = headers.flat_map(|(name, values)| values.iter().map(move |v| (name.to_string(), v.to_string())));
+    ants_client::Message {
+        subject: msg.subject.to_string(),
+        reply: msg.reply.map(|reply| reply.to_string()),
+        headers: headers.collect(),
+        payload: msg.payload.into(),
+        status: msg.status.map(|status| status.as_u16()),
+        description: msg.description,
+    }
 }
 
 /// Whether `msg`, heard on a subject live, is one a stream sent: with any of the stream's headers, or a consumer's

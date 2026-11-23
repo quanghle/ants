@@ -148,11 +148,24 @@ pub(super) fn device_claims(
     }
     new.label.map(revoke::check_label).transpose()?;
     let device = DeviceId::generate();
-    let tags = std::iter::once(device.tag()).chain(xkey.map(DeviceKey::tag));
-    let tags = tags.chain(new.grant.is_some().then(|| REGISTERED_TAG.to_owned()));
-    let tags = tags.chain(new.admin.then(|| ADMIN_TAG.to_owned()));
-    let tags: Vec<String> = tags.chain(new.web.then(|| WEB_TAG.to_owned())).collect();
+    let tags = human_tags(Some(&device), xkey, new.grant.is_some(), new.admin, new.web);
     Ok((Some(device), json!({ "tags": tags })))
+}
+
+/// The tags of a human's credentials: its `device` if it has one and the encryption key `xkey` if it binds one, then
+/// [`REGISTERED_TAG`] when a registration granted them, [`ADMIN_TAG`] for an admin's and [`WEB_TAG`] for a web
+/// device's.
+pub(super) fn human_tags(
+    device: Option<&DeviceId>,
+    xkey: Option<&DeviceKey>,
+    registered: bool,
+    admin: bool,
+    web: bool,
+) -> Vec<String> {
+    let tags = device.map(DeviceId::tag).into_iter().chain(xkey.map(DeviceKey::tag));
+    let tags = tags.chain(registered.then(|| REGISTERED_TAG.to_owned()));
+    let tags = tags.chain(admin.then(|| ADMIN_TAG.to_owned()));
+    tags.chain(web.then(|| WEB_TAG.to_owned())).collect()
 }
 
 pub(super) fn with_device(

@@ -58,8 +58,8 @@ use ants_daemon::people::humans::{Registry, Watching};
 use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_daemon::sync::MutexExt as _;
 use ants_proto::{
-    ApprovalRequest, Envelope, Following, HeldNotices, JsDomain, NOTIFY_BUCKET, NotifyPrefs, Role, STREAM, UserId,
-    Uuid, held_key, notify_consumer, subject,
+    ApprovalRequest, Following, HeldNotices, JsDomain, NOTIFY_BUCKET, NotifyPrefs, Role, STREAM, UserId, Uuid,
+    held_key, notify_consumer, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer, kv, stream::Stream};
@@ -290,8 +290,8 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
     let now = Utc::now();
     let inbox = subject::parse_inbox(subject).is_some_and(|(to, _)| to == config.name);
     let notice = if inbox {
-        match serde_json::from_slice::<Envelope>(payload) {
-            Ok(envelope) if envelope.check_subject(subject).is_ok() && is_recent(&envelope.id, now) => {
+        match ants_client::inbox::parse(subject, payload) {
+            Ok(envelope) if is_recent(&envelope.id, now) => {
                 match (envelope.escalation.is_some(), envelope.question.is_some()) {
                     (true, _) if config.escalations => {
                         escalation_notice(&envelope).filter(|notice| !config.gets_relayed_request(&notice.about))

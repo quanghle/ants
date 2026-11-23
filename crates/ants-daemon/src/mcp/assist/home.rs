@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::time::SystemTime;
 
+use ants_client::sealed::State;
 use ants_proto::{
     ApprovalRequest, ChannelId, ChannelPost, Envelope, NotesPost, Pick, Reaction, ThreadId, UserId, Uuid, Verdict,
 };
@@ -113,11 +114,10 @@ impl Hub {
         if envelope.sealed.is_none() {
             return shown(envelope);
         }
-        let Some(sealing) = self.sealing.get() else { return "[sealed]".to_owned() };
+        let Some(sealing) = self.sealing.get() else { return State::Unreadable.placeholder().to_owned() };
         match sealing.open(human, envelope).await {
             Ok(Opening::Opened(body)) => body.text,
-            Ok(Opening::Unreadable) => "[sealed]".to_owned(),
-            Ok(Opening::Forged(_)) => "[forged]".to_owned(),
+            Ok(opening @ (Opening::Unreadable | Opening::Forged(_))) => opening.state().placeholder().to_owned(),
             Err(e) => format!("[sealed: {e:#}]"),
         }
     }

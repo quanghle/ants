@@ -6,15 +6,15 @@ use std::path::Path;
 
 use ants_daemon::config::registration::{GithubAccount, Grant};
 use ants_daemon::secrets::creds::{Finding, Kind as CredsKind};
-use ants_proto::{
-    ADMIN_TAG, AssistantOf, Destination, DeviceId, DeviceKey, Permissions, REGISTERED_TAG, Role, UserId, WEB_TAG,
-};
+use ants_proto::{AssistantOf, Destination, DeviceKey, Permissions, Role, UserId};
+#[cfg(doc)]
+use ants_proto::{REGISTERED_TAG, WEB_TAG};
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use serde_json::{Value, json};
 
 use super::claims::{check_user_key, now, user_jwt, verified_body};
 use super::files::load;
-use super::issuing::in_domain;
+use super::issuing::{human_tags, in_domain};
 use super::short_lived::signer_permissions;
 use super::uplink::{LEAF_CONNECTIONS, allowed, check_uplink_size, dedup, merge};
 use super::{ACCOUNT_SEED, assistants, leaf_role, members};
@@ -158,13 +158,8 @@ pub(super) fn renewed_rights(
     Ok(match &finding.kind {
         CredsKind::Ant => (Permissions::for_user(&user()?, Role::Ant), json!({})),
         CredsKind::Human => {
-            let tags = finding.device.iter().map(DeviceId::tag).chain(xkey.map(DeviceKey::tag));
-            let tags = tags.chain(registered.then(|| REGISTERED_TAG.to_owned()));
-            let tags = tags.chain(finding.admin.then(|| ADMIN_TAG.to_owned()));
-            let tags: Vec<String> = tags.chain(finding.web.then(|| WEB_TAG.to_owned())).collect();
-            let permissions =
-                if finding.web { Permissions::for_web(&user()?) } else { Permissions::for_user(&user()?, Role::Human) };
-            (permissions, json!({ "tags": tags }))
+            let tags = human_tags(finding.device.as_ref(), xkey, registered, finding.admin, finding.web);
+            (Permissions::for_human_device(&user()?, finding.web), json!({ "tags": tags }))
         }
         CredsKind::Assistant { of } => {
             (Permissions::for_assistant(&user()?, of), json!({ "tags": [AssistantOf::tag(of)] }))

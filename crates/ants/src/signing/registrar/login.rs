@@ -6,7 +6,7 @@ use std::time::Duration;
 use ants_daemon::config::registration::{GithubAccount, GithubUser, Grant, signer_registration};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, LOGIN_REPEAT, LoginAnswer, LoginReply, LoginRequest, MAX_REGISTRATIONS,
-    Permissions, Role, STREAM, ThreadId, ToolCall, UserId, Verdict,
+    Permissions, STREAM, ThreadId, ToolCall, UserId, Verdict,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::stream::DirectGetErrorKind;
@@ -226,9 +226,7 @@ impl Registrar<'_> {
             web: request.web,
             ..auth::NewDevice::default()
         };
-        let permissions =
-            if request.web { Permissions::for_web(name) } else { Permissions::for_user(name, Role::Human) };
-        let permissions = permissions.with_js_domain(self.js_domain);
+        let permissions = Permissions::for_human_device(name, request.web).with_js_domain(self.js_domain);
         let (jwt, _) = auth::sign_device_with(
             self.dir,
             name,

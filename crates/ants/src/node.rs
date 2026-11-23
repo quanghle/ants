@@ -3,6 +3,7 @@
 //! WebSocket listener pages connect to.
 
 pub(crate) mod bridge;
+pub(crate) mod conf;
 pub(crate) mod leaf;
 pub(crate) mod members;
 pub(crate) mod natsd;

@@ -11,11 +11,11 @@ use std::sync::{Mutex, OnceLock};
 use ants_daemon::secrets::keystore::{self, Store};
 use std::ops::ControlFlow;
 
-pub use ants_client::sealed::size_note;
+pub use ants_client::sealed::State;
 use ants_daemon::files;
 use ants_daemon::secrets::creds;
+pub use ants_daemon::secrets::sealing::Opening;
 use ants_daemon::secrets::sealing::{NONCE_LEN, open_message, open_plain, seal_envelope, seal_title};
-pub use ants_daemon::secrets::sealing::{Opening, State};
 use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{
     Attachment, AttachmentHandle, DEVICES_BUCKET, DeviceId, DeviceKey, Envelope, MAX_ATTACHMENT_SIZE, Sealed,
@@ -807,6 +807,6 @@ mod tests {
         let e = sealed(&message(&alice, &bob), &alice, &[&bob]);
         let sealed = e.sealed.unwrap();
         let size = BASE64.decode(sealed.body.as_bytes()).unwrap().len();
-        assert_eq!(size_note(&sealed), format!("[sealed, {size} bytes]"));
+        assert_eq!(ants_client::sealed::size_note(&sealed), format!("[sealed, {size} bytes]"));
     }
 }

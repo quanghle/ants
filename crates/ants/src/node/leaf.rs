@@ -32,6 +32,7 @@ use anyhow::{Context as _, Result, bail};
 use data_encoding::BASE64URL_NOPAD;
 use serde_json::Value;
 
+use crate::node::conf::{quote, value};
 use crate::node::web;
 use crate::service::{Action, Outcome, Service, failure, manual};
 
@@ -121,15 +122,6 @@ pub fn uses_credentials(text: &str, creds: &Path) -> bool {
         .filter_map(|line| line.trim().strip_prefix("credentials")?.trim_start().strip_prefix(':'))
         .filter_map(|value| serde_json::from_str::<String>(value.trim()).ok())
         .any(|named| normalize(Path::new(&named)).is_ok_and(|named| named == creds))
-}
-
-/// The quoted value of the first `key: "..."` line of `text`, the configuration at `path`.
-fn value(text: &str, path: &Path, key: &str) -> Result<String> {
-    let line = text
-        .lines()
-        .find_map(|line| line.trim().strip_prefix(key)?.trim_start().strip_prefix(':'))
-        .with_context(|| format!("{}: no {key} (written by `ants leaf config`?)", path.display()))?;
-    serde_json::from_str(line.trim()).with_context(|| format!("{}: unreadable {key}", path.display()))
 }
 
 /// How a running leaf node takes the configuration `new` in place of `old`, both as [`write()`] writes them. A reload
@@ -574,11 +566,6 @@ fn relative(dir: &Path, target: &Path) -> Result<PathBuf> {
     let mut rel: PathBuf = dir.components().skip(common).map(|_| Component::ParentDir).collect();
     rel.extend(target.components().skip(common));
     Ok(rel)
-}
-
-/// A double-quoted string for the nats-server configuration, which takes JSON escapes.
-fn quote(s: &str) -> String {
-    serde_json::to_string(s).expect("a string serializes")
 }
 
 #[cfg(test)]
