@@ -61,8 +61,8 @@ impl Cloning<'_> {
 }
 
 /// Store in `store`, the clone's, a session for each thread of `snapshot`, forked in the thread's worktree among
-/// `trees`, added again in `new_home`, else in `workdir`, or marked to start over: the threads forked, and those that
-/// start over.
+/// `trees`, added again in `new_home`, else in `workdir`, or marked to start over, with the directory it works in: the
+/// threads forked, and those that start over.
 async fn store_sessions(
     store: &SessionStore,
     snapshot: &Snapshot,
@@ -73,8 +73,10 @@ async fn store_sessions(
 ) -> Result<(Vec<String>, Vec<String>)> {
     let (mut forked, mut restart) = (Vec::new(), Vec::new());
     for copy in &snapshot.threads {
-        let tree = new_home.join("worktrees").join(copy.thread.as_str());
-        let cwd = if trees.iter().any(|t| t.thread == copy.thread) { tree } else { workdir.to_owned() };
+        let cwd = match trees.iter().find(|t| t.thread == copy.thread) {
+            Some(tree) => tree.session_dir(new_home, &copy.stored.cwd),
+            None => workdir.to_owned(),
+        };
         let stored = session(snapshot.launch.as_ref(), copy, cwd).await;
         if stored.cloned {
             restart.push(copy.thread.to_string());
@@ -114,13 +116,13 @@ pub(super) fn record_summary(record: &AntIdentity) -> Value {
 /// The session of the thread of `copy` for the clone: forked with `launch` in `cwd` if its harness can, else marked to
 /// start over.
 async fn session(launch: Option<&harness::Launch>, copy: &ThreadCopy, cwd: PathBuf) -> Stored {
-    let restart = Stored { cloned: true, ..copy.stored.clone() };
+    let restart = Stored { cloned: true, cwd: cwd.clone(), ..copy.stored.clone() };
     let Some(launch) = launch else { return restart };
     if launch.harness_name() != copy.stored.harness {
         return restart;
     }
-    match harness::fork(&launch.clone().in_dir(cwd), &copy.stored.session).await {
-        Ok(Some(session)) => Stored { session, harness: copy.stored.harness.clone(), cloned: false },
+    match harness::fork(&launch.clone().in_dir(cwd.clone()), &copy.stored.session).await {
+        Ok(Some(session)) => Stored { session, harness: copy.stored.harness.clone(), cwd, cloned: false },
         Ok(None) => restart,
         Err(e) => {
             tracing::warn!(thread = %copy.thread, error = format!("{e:#}"), "forking a session for a clone");
