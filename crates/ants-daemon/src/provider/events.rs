@@ -114,7 +114,7 @@ impl Outbox {
     /// Read the queue of `ant`, whose home is `home`, from its file, unless read already, and deliver what it holds:
     /// the events queued under an earlier name of the ant as its own ([`Queue::read`]), and no queue read under
     /// another name from the same file any more.
-    pub async fn open(&self, ant: &UserId, home: &Path) {
+    pub(crate) async fn open(&self, ant: &UserId, home: &Path) {
         let mut queues = self.0.queues.lock().await;
         if queues.contains_key(ant) {
             return;

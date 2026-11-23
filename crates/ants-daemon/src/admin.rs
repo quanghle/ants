@@ -1,20 +1,20 @@
 //! The admin orders to a machine's ants ([`AdminOrder`]), which its host connection ([`crate::host`]) takes from the
-//! hub's stream through the machine's own consumer ([`admin_consumer`]), up to [`IN_HAND`] at once, those to one ant in
-//! the order they were stored ([`hand`]). Each it verifies ([`AdminOrder::verify`]) and decides once, recording the
+//! hub's stream through the machine's own consumer ([`admin_consumer`]), up to `IN_HAND` at once, those to one ant in
+//! the order they were stored (`hand`). Each it verifies ([`AdminOrder::verify`]) and decides once, recording the
 //! outcome in [`MACHINES_BUCKET`] under the key of the machine and ant of the subject it came on and the order's id
 //! ([`admin_outcome_key`]), and acks it only after the outcome is stored. A message whose order already has an outcome,
 //! a replay, it acks without deciding again. It refuses every order while the config sets `[admin] remote = false`.
 //!
-//! It decides one order at a time ([`Turn`]), but for the waits of an order on something slow (an ant to stop or go
+//! It decides one order at a time (`Turn`), but for the waits of an order on something slow (an ant to stop or go
 //! idle, `ants signer` to answer), during which the orders to other ants are decided. Orders to add, retire or clone
 //! an ant, which change the machine's ants and the uplink of its leaf node, are carried out one at a time.
 //!
-//! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
+//! An order an admin signed it carries out (`apply`) with the module of its op: `set` edits the ant's settings in
 //! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once, and its shared settings in
-//! their record ([`crate::profile::shared`]); [`settings`] reads them;
-//! [`pause`] pauses or resumes the ant there; [`restart`] has the daemon serving the ant restart its harnesses;
-//! [`memories`] reads the ant's memories, only while online; [`add`] adds an ant to the config, its credentials signed
-//! by `ants signer` on the order, and [`retire`] removes one, its credentials revoked so; [`clone`] adds a copy of one;
+//! their record ([`crate::profile::shared`]); `settings` reads them;
+//! `pause` pauses or resumes the ant there; [`restart`] has the daemon serving the ant restart its harnesses;
+//! `memories` reads the ant's memories, only while online; `add` adds an ant to the config, its credentials signed
+//! by `ants signer` on the order, and `retire` removes one, its credentials revoked so; `clone` adds a copy of one;
 //! [`trail`] stops or resumes a trail run the ant conducts.
 
 use std::path::{Path, PathBuf};
@@ -176,8 +176,8 @@ impl PartialEq for ConfigFile {
 impl Eq for ConfigFile {}
 
 /// Take the orders to the machine's ants and record their outcomes, for as long as the connection `js` lasts:
-/// [`take`] again, after a pause, whenever it stops. `js_domain` is the domain `js` was made for.
-/// Meanwhile decide the orders held for a human's consent ([`held::keep`]).
+/// `take` again, after a pause, whenever it stops. `js_domain` is the domain `js` was made for.
+/// Meanwhile decide the orders held for a human's consent (`held::keep`).
 pub async fn serve(js: jetstream::Context, js_domain: Option<JsDomain>, orders: Orders) {
     let taking = async {
         let mut delay = RETRY_FIRST;

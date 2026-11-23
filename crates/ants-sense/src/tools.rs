@@ -39,7 +39,7 @@ pub struct ToolSpec {
     pub dream: Option<DreamWrite>,
 }
 
-/// How a tool's calls count as writes of a dream, made on its thread ([`crate::dream::counted`]).
+/// How a tool's calls count as writes of a dream, made on its thread (`crate::dream::counted`).
 #[derive(Debug, Clone, Copy)]
 pub struct DreamWrite {
     /// Whether a call writes what counts: a memory or a record.

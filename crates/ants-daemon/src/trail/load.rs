@@ -121,8 +121,8 @@ impl Trails {
 
     /// Continue the runs the conductor's index lists, their steps' threads known again before a reply to one may
     /// arrive. Each restored run gets a pass once [`Trails::serve`] runs. The runs left unrestored, all of them when
-    /// the index cannot be read, are tried again while the daemon lives ([`Trails::restore_again`]), and on demand
-    /// ([`Trails::restored`]).
+    /// the index cannot be read, are tried again while the daemon lives (`Trails::restore_again`), and on demand
+    /// (`Trails::restored`).
     pub async fn restore(&self) {
         if let Err(e) = self.restore_left().await {
             tracing::warn!(error = format!("{e:#}"), "reading the trail runs to continue");

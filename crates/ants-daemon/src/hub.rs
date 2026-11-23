@@ -10,7 +10,7 @@
 //! An object whose stream info the credentials do not get, as the presence and identities buckets for every human's, cannot be checked:
 //! [`init`] creates it all the same, which changes nothing when it exists as this version makes it, and denies the
 //! rollups of one created allowing them. Creating the identities bucket also writes its incarnation marker when absent
-//! ([`mark_incarnation`]), as does `ants init` for one already there as this version makes it if the credentials get
+//! (`mark_incarnation`), as does `ants init` for one already there as this version makes it if the credentials get
 //! its stream info.
 
 use std::fmt;

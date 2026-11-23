@@ -4,10 +4,6 @@
     all(test, target_os = "macos"),
     allow(linker_messages, reason = "a test binary's unwind tables outgrow what ld64 encodes compactly (16 MB)")
 )]
-#![expect(
-    rustdoc::private_intra_doc_links,
-    reason = "read with --document-private-items, where the links to private items resolve"
-)]
 #![cfg_attr(test, allow(clippy::disallowed_methods, reason = "tests read and hear as they please"))]
 
 // An ant served: its inbox loop, the harness sessions it prompts and the worktrees they work in, the tools of those
@@ -34,7 +30,7 @@ pub mod colony;
 pub mod files;
 pub mod host;
 pub mod hub;
-mod pause;
+pub mod pause;
 
 // Beyond one ant: escalations, tool requests escalated to humans, and channels.
 mod approvals;

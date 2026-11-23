@@ -5,38 +5,38 @@
 //! answered with nothing readable, to the ant itself on a new dream thread with the packet alone ([`Dream::wake_due`]).
 //! The sage's findings prompt the ant on the review thread inside a marked block ([`answered`]); an answer without
 //! findings wakes nobody, and the findings of one come after the ant was woken with the packet alone are offered in the
-//! next dream ([`Review::late`]), up to [`MAX_LATE_FINDINGS`](review::MAX_LATE_FINDINGS), in a marked block of their
+//! next dream ([`Review::late`]), up to `review::MAX_LATE_FINDINGS`, in a marked block of their
 //! own. The packet's findings a sage's answer leaves unshown are held for the next dream ([`Dream::held`]).
 //!
 //! sense runs no model: it only gathers what a review judges and records what the ant decides. Each dream is an item of
-//! kind [`DREAM`], numbered, the last one named by a record of kind [`DREAMS`], so a daemon taking over dreams no
+//! kind [`DREAM`], numbered, the last one named by a record of kind `DREAMS`, so a daemon taking over dreams no
 //! sooner. Its findings, each with an id the ant answers by (`<dream>.<n>`), are the sage's when it answered with some,
 //! with those carried from earlier dreams, and otherwise the packet's own: contradicting votes, memories needing
 //! review, near duplicates, episodes to distill and pending persona and skill proposals made
-//! [`proposal::CONFIRM_AFTER_HOURS`] or more before ([`proposals`](gather::proposals), [`crate::proposal`]), then what
-//! the ant's identity lacks for the work it did, from sense data alone ([`identity_findings`]), then, for a sage, how
-//! the findings it gave other ants fared, from the records of its reviews alone ([`practice_findings`]), then the vital
-//! signs of the work turned sharply for the worse ([`vitals`]). The ant answers each with `sense_dream` ([`dream`]) as
+//! [`proposal::CONFIRM_AFTER_HOURS`] or more before (`gather::proposals`, [`crate::proposal`]), then what
+//! the ant's identity lacks for the work it did, from sense data alone (`identity_findings`), then, for a sage, how
+//! the findings it gave other ants fared, from the records of its reviews alone (`practice_findings`), then the vital
+//! signs of the work turned sharply for the worse (`vitals`). The ant answers each with `sense_dream` (`dream`) as
 //! applied (naming the items it wrote), rejected or deferred, with a reason, applied confirming a proposal and rejected
 //! discarding it; the deferred and unanswered come again in the next dream while they still hold. A rejected finding
 //! rests ([`Rested`]), as does an applied one on a sage's practice, which no write of the sage changes: no dream
 //! gathers it again until what it is about changed since the verdict or [`REST_DAYS`] of the ant's active time passed.
 //! A ripe proposal no dream offered makes a dream due ([`proposal_due`]). Writes on the dream thread through the tools
 //! that change memories or records count toward [`MAX_DREAM_WRITES`], and are untrusted while a finding resting on
-//! untrusted text is open ([`counted`], [`Dream::untrusted_open`]); persona and skill proposals, and trails saved, are
-//! refused on untrusted ground ([`ground()`]). A sage's [`TRAIL`] finding is applied by saving the trail it suggests,
-//! which the daemon records on the dream thread ([`trail_saved`](count::trail_saved)), counted as a write, and naming
+//! untrusted text is open (`counted`, [`Dream::untrusted_open`]); persona and skill proposals, and trails saved, are
+//! refused on untrusted ground (`ground()`). A sage's `TRAIL` finding is applied by saving the trail it suggests,
+//! which the daemon records on the dream thread (`count::trail_saved`), counted as a write, and naming
 //! it in the verdict's trails; it holds while the trail stands in the colony's saved trails the daemon reads
 //! ([`ColonyTrails`]), which a sage's packet lists. Finishing a dream, or beginning the next one, writes its diary: an
 //! episode memory summarizing its verdicts. Each dream keeps the vital signs of the work it reviews, measured by the
 //! daemon as it begins ([`Signs`]).
 //!
 //! A sage's own dream covers the reviews it was asked as threads too ([`Covered::review`]), but its packet lists them
-//! by their records ([`reviewing()`](packet::reviewing)), leaving out their text, the packets of other ants' work: so
+//! by their records (`packet::reviewing()`), leaving out their text, the packets of other ants' work: so
 //! they make nothing of the dream untrusted, but for a finding on its practice quoting the reasons the ants reviewed
-//! gave for rejecting its findings ([`practice_findings`]). Each record keeps what its review thread spent
+//! gave for rejecting its findings (`practice_findings`). Each record keeps what its review thread spent
 //! ([`ReviewSpend`]), which the sage's tally shows a review and a finding still holding
-//! ([`ReviewCost`](reviews::ReviewCost)).
+//! (`reviews::ReviewCost`).
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
@@ -115,7 +115,7 @@ pub const MAX_FINDINGS: usize = 20;
 /// The dreams before the last on whose review thread a sage's answer is dropped, having come after the next dream
 /// began.
 pub const DROPPED_ANSWER_DREAMS: u64 = 5;
-/// The most writes through sense's tools a dream thread makes ([`counted`]).
+/// The most writes through sense's tools a dream thread makes (`counted`).
 pub const MAX_DREAM_WRITES: usize = 20;
 /// The days of the ant's active time a rejected finding rests unless what it is about changes ([`Rested`]).
 pub const REST_DAYS: i64 = 14;
@@ -174,7 +174,7 @@ pub struct Covered {
     pub thread: ThreadId,
     #[serde(default)]
     pub untrusted: bool,
-    /// A review asked of the ant: the packet lists it by its record ([`reviewing()`](packet::reviewing)), its text,
+    /// A review asked of the ant: the packet lists it by its record (`packet::reviewing()`), its text,
     /// another ant's work, left out.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub review: bool,
@@ -239,8 +239,8 @@ pub struct Dream {
     pub verdicts: Vec<Verdict>,
     /// The items written on the dream thread ([`counted`]), one per write.
     #[serde(default)]
-    pub writes: Vec<ItemId>,
-    /// The trails saved on the dream thread ([`trail_saved`](count::trail_saved)), each counted as a write.
+    pub(crate) writes: Vec<ItemId>,
+    /// The trails saved on the dream thread (`count::trail_saved`), each counted as a write.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trails: Vec<SavedTrail>,
     /// The packet's own findings a sage's answer left unshown, neither on the identity nor offered again

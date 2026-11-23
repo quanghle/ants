@@ -93,7 +93,7 @@ impl Protocol {
 
     /// Whether a translator speaks it to the CLI, not ACP: then the CLI's own permission settings decide which tools
     /// run, and only what it would ask a human about reaches ants, when the ant asks ([`asks`]).
-    pub fn is_native(self) -> bool {
+    pub(crate) fn is_native(self) -> bool {
         self != Self::Acp
     }
 }

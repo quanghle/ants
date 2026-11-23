@@ -91,7 +91,7 @@ impl HostSettings {
 
     /// The files the host credentials are looked for at where the `[host]` table names none, whether they exist or
     /// not: `host.creds`, then `host-<machine>.creds` for the table's `machine`, else for [`Self::fallback`] and the
-    /// first label of `hostname` ([`default_host_creds`]). A reload watches them come, go or change.
+    /// first label of `hostname` (`default_host_creds`). A reload watches them come, go or change.
     pub fn creds_candidates(&self, hostname: &str) -> Vec<PathBuf> {
         let Some(dir) = &self.looked_in else { return Vec::new() };
         let named = |machine: &Machine| dir.join(format!("{}.creds", ants_proto::host_user(machine)));

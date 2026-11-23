@@ -23,7 +23,7 @@
 //! restarts keep its level and deadline.
 //!
 //! What would reach a human goes first to the human's assistant, when one stands for it and can act
-//! ([`AssistantFirst`]): one level up, led by the assistant alone ([`Escalation::to_assistant`]). The assistant settles
+//! (`AssistantFirst`): one level up, led by the assistant alone ([`Escalation::to_assistant`]). The assistant settles
 //! it by answering the stuck ant on the thread, or acting for its human, or passes it on to its human with the escalate
 //! tool, which sends the stuck ant the escalation one level up, led by the human ([`Escalation::passed_on`]); the
 //! stuck ant's daemon then sends it to the human ([`Escalator::took_climb`]), as it does without an answer from the
@@ -92,7 +92,7 @@ pub type Sender = Arc<dyn Fn(Envelope, String) -> BoxFuture<'static, Result<Opti
 
 /// Stores through JetStream ([`bus::store_acked`]), first recording the link to a channel thread the envelope passes
 /// on, if any ([`links::pass_on`]), then tells of the escalation or question on the ant's status
-/// ([`status::escalated`]).
+/// (`status::escalated`).
 pub fn jetstream_sender(js: async_nats::jetstream::Context) -> Sender {
     Arc::new(move |envelope, id| {
         let js = js.clone();

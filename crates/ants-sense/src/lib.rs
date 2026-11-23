@@ -4,11 +4,6 @@
 //!
 //! sense asks nothing of humans: no approvals, gates, review queues or notifications.
 
-#![expect(
-    rustdoc::private_intra_doc_links,
-    reason = "read with --document-private-items, where the links to private items resolve"
-)]
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

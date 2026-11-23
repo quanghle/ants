@@ -56,10 +56,10 @@ pub struct ReviewRecord {
     pub findings: Vec<ReviewedFinding>,
     /// The readable findings of the answer left out past its caps ([`Parsed::over`](super::review::Parsed::over)).
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub over: usize,
+    pub(crate) over: usize,
     /// The findings of the answer left out as unreadable ([`Parsed::unreadable`](super::review::Parsed::unreadable)).
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub unreadable: usize,
+    pub(crate) unreadable: usize,
     /// What the review thread spent by the answer, when the sage's daemon knew.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spent: Option<ReviewSpend>,
@@ -204,7 +204,7 @@ pub async fn review_received(
 }
 
 /// Note in `items`, a sage's, its answer `text` at `at` to the review of `ant` on `thread`, which `spent` what its
-/// daemon knew: its findings, as the ant's daemon reads them ([`parse`]), by kind, a follow-up linked only to a target
+/// daemon knew: its findings, as the ant's daemon reads them (`parse`), by kind, a follow-up linked only to a target
 /// eligible in the request `asked`. Whether it changed the record: once answered, a review keeps its first answer.
 pub async fn review_answered(
     items: &dyn Items,

@@ -112,7 +112,7 @@ impl Launch {
     /// The same launch, for sessions reviewing for a sage: on the harness's review variant ([`Harness::reviewing`]),
     /// answering permission requests held to [`ants_proto::REVIEW_ALLOW`] ([`PermissionPolicy::for_review`]). None
     /// when the harness runs its tools unasked and sets no review.
-    pub fn for_review(&self) -> Option<Self> {
+    pub(crate) fn for_review(&self) -> Option<Self> {
         let harness = Arc::new(self.harness.reviewing()?);
         let policy = self.policy.for_review(self.harness.bypasses_permissions());
         Some(Self { harness, policy, ..self.clone() }.reporting())

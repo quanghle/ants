@@ -1,5 +1,5 @@
 //! [`AdminOp::StopTrail`] and [`AdminOp::ResumeTrail`]: stop or resume a trail run the ant conducts. The daemon serving
-//! the ant carries the order out as it answers a human's request on the ant's control subject ([`Trails::act`]), the
+//! the ant carries the order out as it answers a human's request on the ant's control subject (`Trails::act`), the
 //! admin in the human's place, and the outcome's `result` is that answer ([`TrailOutcome`]): applied once stopped, with
 //! the steps left in other ants' queues, or resumed; refused with the conductor's reason.
 //!

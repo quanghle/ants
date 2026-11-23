@@ -215,7 +215,7 @@ fn anchor_of(event: Event) -> Option<Anchor> {
     serde_json::from_value(event.data).ok()
 }
 
-/// Take `export` in as the log `log` reads, not read yet, once it verifies for the log's ant ([`verify`]): the log
+/// Take `export` in as the log `log` reads, not read yet, once it verifies for the log's ant (`verify`): the log
 /// must be empty or hold the export's first events as they are, as after an import cut short or on a move back to a
 /// bus the ant left. The events it does not hold are appended as they are, then an [`Anchor`] signed by the log's
 /// signer, after a rename when the ant is imported under another name. Nothing is merged: a log holding other events

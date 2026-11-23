@@ -133,8 +133,8 @@ impl Drop for Supervised {
 }
 
 impl Provider for Supervised {
-    /// Wait up to [`FIRST_START`] for a provider starting, then answer with what its run up agreed, else with what
-    /// it may declare ([`Supervised::declared`]), calls then failing until it is up.
+    /// Wait up to `FIRST_START` for a provider starting, then answer with what its run up agreed, else with what
+    /// it may declare (`Supervised::declared`), calls then failing until it is up.
     fn initialize(
         &self,
         params: InitializeParams,

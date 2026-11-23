@@ -1,13 +1,13 @@
 //! The brief (requirements ants-x39hk.8.8, ants-x39hk.8.9 and ants-x39hk.8.6): what an ant reads first in each session, and again on
-//! demand with `sense_brief`. Its sections come in a fixed order ([`sections`]): warnings when the ant's log is
+//! demand with `sense_brief`. Its sections come in a fixed order (`sections`): warnings when the ant's log is
 //! broken or over its size limit ([`SIZE_LIMIT`]), the identity with the experience counted from the ant's thread
 //! records ([`thread::experience`]), the persona, the self-model, the thread's resume register, the unacknowledged
 //! handoffs, open commitments, fired and upcoming reminders, claimed and ready tasks, the relationship records of the
 //! thread's participants, the core and top memories ([`STARTER_MEMORIES`] of them kept for memories of the human or
 //! ant who started the thread, or of the ant under review on a review), the skills index, and the core loop of tools.
 //!
-//! The brief stays within its byte budget ([`fit`]), cutting what other calls show before the ant's identity
-//! ([`Order`]): memories and skills are shortened to their titles first, then the work sections, memories and skills
+//! The brief stays within its byte budget (`fit`), cutting what other calls show before the ant's identity
+//! (`Order`): memories and skills are shortened to their titles first, then the work sections, memories and skills
 //! are cut, the longest first; then the core loop is shortened to the tool names; and only then are the relationship
 //! records, the self-model and the persona cut. Each cut section ends with a line naming the tool call that shows the
 //! rest, and the shortened core loop points to the tools' descriptions; the warnings and the identity are never cut.

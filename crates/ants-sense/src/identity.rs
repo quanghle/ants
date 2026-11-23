@@ -154,7 +154,7 @@ pub struct Card {
     /// The ids of the lifecycle events last applied, the latest last.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<Uuid>,
-    /// The dormancies it came back from, the latest last, up to [`DORMANCIES_KEPT`]: unlike [`Card::retired_at`],
+    /// The dormancies it came back from, the latest last, up to `DORMANCIES_KEPT`: unlike [`Card::retired_at`],
     /// kept after the brief told it of its return.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dormancies: Vec<Dormancy>,
@@ -335,7 +335,7 @@ pub async fn card(items: &dyn Items) -> Result<Option<Card>, StoreError> {
 }
 
 /// Apply the lifecycle event `event` to the card in `items`, made first when there is none: the card as it is then.
-/// An event ending the ant's dormancy resumes its reminders in the same write ([`remind::resumed`]).
+/// An event ending the ant's dormancy resumes its reminders in the same write (`remind::resumed`).
 pub async fn record_event(items: &dyn Items, event: &Event) -> Result<Card, StoreError> {
     let apply = |card: &mut Card| card.apply(event);
     read_modify_write(|| async move {

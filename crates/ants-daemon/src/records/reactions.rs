@@ -224,7 +224,7 @@ pub async fn watch(js: &jetstream::Context) -> Result<impl Stream<Item = Change>
 /// channel post stored with that id is on a subject the ant's credentials read ([`subject::readable_by`]). Senders
 /// choose ids, so a later copy of a message, which an ant can store on a subject it reads once it learned the id, is
 /// no proof; nobody learns an id before its message is stored. The read takes a human's credentials, and looks only
-/// at what was stored from [`CLOCK_SKEW`] before the time in the id (a UUIDv7's, as every ants id is) to
+/// at what was stored from `CLOCK_SKEW` before the time in the id (a UUIDv7's, as every ants id is) to
 /// [`DUPLICATE_WINDOW`] after it, the latest a message's copy from a leaf node's outbox may land: a copy stored once
 /// its message has gone is no proof either.
 pub async fn readable(js: &jetstream::Context, ant: &UserId, message: Uuid) -> Result<bool> {

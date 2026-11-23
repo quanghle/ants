@@ -12,7 +12,7 @@ use super::native::{self, Protocol};
 
 /// A named agent harness ants drives over ACP on stdio: an executable and its arguments, run directly (no shell),
 /// with the environment it adds, the session mode it must run in and the context settings it takes. A harness whose CLI
-/// speaks another protocol runs behind a translator ([`native`]).
+/// speaks another protocol runs behind a translator (`native`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Harness {
@@ -113,7 +113,7 @@ pub enum Tools {
     /// The harness runs as its arguments and mode make it, the built-ins approving every tool.
     #[default]
     AutoApprove,
-    /// The harness runs its [`Harness::ask`] variant and sends what it would ask a human to ants: the ant's allow
+    /// The harness runs its `Harness::ask` variant and sends what it would ask a human to ants: the ant's allow
     /// rules, then its approvers, else rejected.
     Ask,
 }
@@ -169,7 +169,7 @@ impl Harness {
         self.protocol
     }
 
-    /// Whether it runs its own tools without asking ants ([`Self::bypass_permissions`]), as a harness of a native
+    /// Whether it runs its own tools without asking ants (`Self::bypass_permissions`), as a harness of a native
     /// protocol does unless it asks ants ([`Tools::Ask`]): the CLI's own permission settings decide.
     pub fn bypasses_permissions(&self) -> bool {
         self.bypass_permissions || (self.protocol.is_native() && self.tools != Tools::Ask)
@@ -181,7 +181,7 @@ impl Harness {
     }
 
     /// The harness an ant runs with `tools`, else with the definition's: itself, approving its tools as its arguments
-    /// and mode make it, or its variant asking ants about them ([`Self::ask`]).
+    /// and mode make it, or its variant asking ants about them (`Self::ask`).
     pub fn with_tools(&self, tools: Option<Tools>) -> Result<Self> {
         match tools.unwrap_or(self.tools) {
             Tools::AutoApprove => Ok(Self { tools: Tools::AutoApprove, ..self.clone() }),
@@ -244,7 +244,7 @@ impl Harness {
         Some(format!("harness {} runs its tools unasked, so {gating} do not apply to them", self.name))
     }
 
-    /// The harness a review session runs: its [`Self::review`] variant, else itself when it asks before running tools.
+    /// The harness a review session runs: its `Self::review` variant, else itself when it asks before running tools.
     /// None when it runs them unasked and sets no review, so nothing holds a review to read-only tools.
     pub fn reviewing(&self) -> Option<Self> {
         let Some(review) = &self.review else { return (!self.bypasses_permissions()).then(|| self.clone()) };

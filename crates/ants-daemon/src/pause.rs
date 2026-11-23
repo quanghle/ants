@@ -1,5 +1,5 @@
 //! Pausing an ant: `paused = true` in its `[[ant]]` table, which an admin's pause order sets ([`crate::admin`]). The
-//! daemon serving a paused ant stops pulling from its consumers ([`pausable`]), so the messages to it wait queued in
+//! daemon serving a paused ant stops pulling from its consumers (`pausable`), so the messages to it wait queued in
 //! the stream, neither drained nor handed back, and starts no new prompt; the prompts running finish. Pausing or
 //! resuming changes the running ant in place ([`Pause::replace`]), restarting no harness.
 
@@ -96,7 +96,7 @@ impl Pausers {
 /// The items of the stream `open` opens, while `paused` holds none: `current` first, if open already. On a pause the
 /// items already delivered still come, then the stream is dropped, so the consumers it pulls from deliver no more; on
 /// resuming, `open` opens it again. A stream that fails to open is tried again after [`REOPEN_DELAY`].
-pub fn pausable<S, T, E>(
+pub(crate) fn pausable<S, T, E>(
     paused: watch::Receiver<Option<Paused>>,
     current: Option<S>,
     open: impl AsyncFnMut() -> Result<S>,

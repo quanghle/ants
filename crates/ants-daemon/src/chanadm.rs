@@ -220,7 +220,7 @@ fn changer(ant: &UserId, for_human: Option<&UserId>) -> String {
 
 /// The post announcing that `by` ([`changer`]) made the `changed` changes to `entry`'s channel: top-level, by the
 /// channel manager, naming users without `@` so it mentions, and wakes, nobody.
-pub fn announcement(by: &str, entry: &ChannelEntry, changed: &[String]) -> ChannelPost {
+pub(crate) fn announcement(by: &str, entry: &ChannelEntry, changed: &[String]) -> ChannelPost {
     let text = format!("{by} changed #{}: {}.", entry.channel, changed.join("; "));
     let mut post = ChannelPost::new(entry.channel.clone(), UserId::channel_manager(), text);
     post.mentions.clear();

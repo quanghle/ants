@@ -141,7 +141,7 @@ pub fn sent_notice(envelope: &Envelope, human: &UserId) -> Envelope {
 /// The message telling `human` that `envelope`, carrying `decision`, is its assistant's decision for it, verified by a
 /// reader, and that it holds until the human consents to it: no decision made for a human takes effect as the human's
 /// unconfirmed ([`crate::approvals`]). A [`report`] from the requesting ant.
-pub fn held_notice(envelope: &Envelope, decision: &ApprovalDecision, human: &UserId) -> Envelope {
+pub(crate) fn held_notice(envelope: &Envelope, decision: &ApprovalDecision, human: &UserId) -> Envelope {
     let (from, to, id) = (&envelope.from, &envelope.to, decision.request_id);
     let text = format!(
         "[ants] {from}, as the assistant of {human}, decided tool request {to}/{id} for {human}: {}. Held until \

@@ -32,7 +32,7 @@ pub async fn publish(js: &jetstream::Context, envelope: &Envelope) -> Result<Sto
 /// keeps one if the first publish did land after all, as long as the second arrives within its duplicate window
 /// ([`DUPLICATE_WINDOW`](super::DUPLICATE_WINDOW)).
 /// When no stream captures `subject` though the hub's JetStream answers ([`uncaptured`]), the error, or the warning
-/// for a message kept in the outbox, names the fixes ([`uncaptured_hint`]); the warning comes once per kind of subject.
+/// for a message kept in the outbox, names the fixes (`uncaptured_hint`); the warning comes once per kind of subject.
 pub async fn store<T: serde::Serialize>(
     js: &jetstream::Context,
     subject: String,
@@ -115,7 +115,7 @@ fn uncaptured_hint(subject: &str) -> String {
     )
 }
 
-/// `e`, the error of a publish to `subject`, with [`uncaptured_hint`] when `uncaptured`.
+/// `e`, the error of a publish to `subject`, with `uncaptured_hint` when `uncaptured`.
 pub fn explained(e: jetstream::context::PublishError, subject: &str, uncaptured: bool) -> anyhow::Error {
     let e = anyhow::Error::new(e);
     if uncaptured { e.context(uncaptured_hint(subject)) } else { e }
