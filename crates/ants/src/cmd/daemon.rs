@@ -23,6 +23,9 @@ pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Resul
     let hostname = ants_daemon::colony::machine().await;
     let startup = || serve::ants(args, &default_path, &hostname, conn.creds);
     let listed = startup()?;
+    ants_daemon::limits::files::raise_for(ants_daemon::limits::files::needed(
+        listed.ants.iter().map(|a| a.max_harnesses),
+    ));
     // The ants connect to the file's top-level nats, where it sets one: the address the managed server must answer.
     let local_url = listed.host.as_ref().and_then(|host| host.nats.clone()).unwrap_or_else(|| conn.nats.to_owned());
     let nats_server = listed.nats_server;

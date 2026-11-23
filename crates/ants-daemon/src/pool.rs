@@ -712,6 +712,8 @@ pub(crate) mod fake {
         pub limited_reply: bool,
         /// While set, the handshake fails, as with a broken install.
         pub broken: bool,
+        /// While set, the handshake fails with this error, as when the daemon runs out of open files.
+        pub broken_with: Option<String>,
         /// While set, harnesses starting advertise that they take images in prompts.
         pub takes_images: bool,
         /// The images prompts carried after their text, as media type and base64 data, in order.
@@ -823,6 +825,9 @@ pub(crate) mod fake {
             let log = self.log.locked();
             if log.broken {
                 return responder.respond_with_internal_error("broken install");
+            }
+            if let Some(error) = &log.broken_with {
+                return responder.respond_with_internal_error(error.clone());
             }
             let prompts = PromptCapabilities::new().image(log.takes_images);
             let fork = log.forks.then(SessionForkCapabilities::new);

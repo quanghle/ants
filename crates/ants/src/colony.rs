@@ -140,6 +140,7 @@ fn limited_line(e: &ColonyEntry, now: DateTime<Utc>) -> Option<String> {
     let what = match limited.kind {
         LimitKind::Quota => "out of quota",
         LimitKind::RateLimit => "rate limited",
+        LimitKind::OpenFiles => "out of open files on its machine",
         LimitKind::Unknown => "held back by a provider limit",
     };
     let wait = format!("messages to {} wait, spending no attempts", e.ant);

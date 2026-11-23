@@ -334,6 +334,7 @@ pub(crate) fn why_unserved(
         let what = match limited.kind {
             ants_proto::LimitKind::Quota => "is out of quota",
             ants_proto::LimitKind::RateLimit => "is rate limited",
+            ants_proto::LimitKind::OpenFiles => "is out of open files on its machine",
             ants_proto::LimitKind::Unknown => "is held back by a provider limit",
         };
         return Some(format!(

@@ -199,6 +199,9 @@ pub enum LimitKind {
     RateLimit,
     /// An exhausted quota or usage allowance, which may take hours or a plan change.
     Quota,
+    /// Not the provider's limit but the machine's: the daemon ran out of open files starting the harness, passing as
+    /// harnesses stop.
+    OpenFiles,
     /// A value from a newer daemon.
     #[serde(other)]
     Unknown,
@@ -209,6 +212,7 @@ impl LimitKind {
         match self {
             Self::RateLimit => "rate-limited",
             Self::Quota => "out-of-quota",
+            Self::OpenFiles => "out-of-files",
             Self::Unknown => "limited",
         }
     }

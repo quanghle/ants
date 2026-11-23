@@ -140,6 +140,10 @@ impl Inbox<'_> {
         let hold = self.holds.throttle.hit(limited, &self.pacing.backoffs);
         self.workload.set_limited(Some(hold.shown.clone()));
         let until = hold.shown.until;
+        if limited.kind == ants_proto::LimitKind::OpenFiles {
+            tracing::warn!(%thread, error = %limited, %until, "the daemon is out of open files; messages wait");
+            return;
+        }
         if !hold.tell {
             tracing::info!(%thread, error = %limited, %until, "provider limit; messages wait");
             return;

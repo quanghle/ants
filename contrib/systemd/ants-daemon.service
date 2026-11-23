@@ -16,6 +16,9 @@ ExecStart="@ANTS@" daemon --config "@CONFIG@"
 ExecReload=kill -HUP $MAINPID
 # The harness command (such as copilot or claude-agent-acp) and bd are looked up on this PATH.
 Environment="PATH=@PATH@" NO_COLOR=1
+# Open files: about 4 per ant and 3 per live harness; systemd's default soft limit of 1024 runs out near 250 ants. The
+# daemon raises its soft limit to the hard one at start in any case.
+LimitNOFILE=65536
 Restart=on-failure
 RestartSec=10
 # A replaced ants executable (an upgrade) exits with status 75, restarting onto the new one.

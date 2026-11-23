@@ -193,6 +193,49 @@ async fn messages_wait_unspent_while_the_harness_keeps_failing_to_start() {
 }
 
 #[tokio::test]
+async fn messages_wait_unspent_while_the_daemon_is_out_of_open_files() {
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    log.locked().broken_with = Some("Too many open files (os error 24)".to_owned());
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    let (_, seq) = bus.send(&t1, "a").await;
+    bus.send(&t2, "c").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        // Far more failed starts than open the breaker or spend every attempt.
+        until("starts tried again", || log.locked().starts >= MAX_DELIVER as usize * 2).await;
+        // Each backoff clears the hold until the next start meets it again.
+        let shown = timeout(WAIT, async {
+            loop {
+                if let Some(shown) = bus.workload.limited() {
+                    break shown;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the colony shows the hold");
+        assert_eq!(shown.kind, LimitKind::OpenFiles);
+        assert_eq!(bus.workload.failing(), None, "no harness breaker opens");
+        assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "the hold tells nobody");
+        assert!(!bus.marked(seq).await, "no attempt is recorded");
+        assert_eq!(bus.consumer().await.num_redelivered, 0);
+
+        log.locked().broken_with = None;
+        let mut answered = vec![next_reply(&mut replies).await, next_reply(&mut replies).await];
+        answered.sort_by_key(|(_, text)| text.clone());
+        assert_eq!(answered, [(t1.clone(), "a".to_owned()), (t2.clone(), "c".to_owned())]);
+        until("the hold cleared", || bus.workload.limited().is_none()).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert!(dead::list(&bus.stream).await.unwrap().is_empty());
+    assert_eq!(bus.unacked().await, 0);
+}
+
+#[tokio::test]
 async fn messages_wait_unspent_through_a_provider_rate_limit() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();

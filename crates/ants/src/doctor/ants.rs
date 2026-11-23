@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use ants_daemon::config::{self, Ant};
 use ants_daemon::harness::{self, Harnesses, Readiness};
+use ants_daemon::limits::files::{self, Limit};
 use ants_daemon::records::reactions;
 use ants_daemon::secrets::creds::{self, Kind};
 use ants_daemon::secrets::keystore;
@@ -267,6 +268,39 @@ pub(super) fn check_shared_workdirs(ants: &[Ant], config: &Path) -> Vec<Check> {
             Check::warn(format!("ant {} workdir", ant.name), detail, vec![fix])
         })
         .collect()
+}
+
+/// Whether the open-file limit a daemon started here would run with, its soft limit raised to the hard one
+/// ([`ants_daemon::limits::files::raise`]), is what `ants`, each running at most its `max_harnesses`, need. `limit` is
+/// that limit, None where there is none (Windows).
+pub(super) fn check_open_files(ants: &[Ant], limit: Option<Limit>) -> Option<Check> {
+    let limit = limit.filter(|_| !ants.is_empty())?;
+    let needed = files::needed(ants.iter().map(|ant| ant.max_harnesses));
+    let (soft, hard) = (files::show(limit.soft), files::show(limit.hard));
+    let detail = format!(
+        "a daemon here runs with an open-file limit of {soft} (hard {hard}); its {} ants need about {needed}",
+        ants.len()
+    );
+    if files::suffices(limit, needed) {
+        return Some(Check::ok("open files", detail));
+    }
+    let fix = if cfg!(target_os = "macos") {
+        vec![
+            format!(
+                "set SoftResourceLimits and HardResourceLimits NumberOfFiles to at least {needed} in the daemon's \
+                 launchd plist (contrib/launchd/ants.daemon.plist), then reload it"
+            ),
+            format!("raise kern.maxfilesperproc to at least {needed}: sudo sysctl kern.maxfilesperproc={needed}"),
+        ]
+    } else {
+        vec![
+            format!(
+                "set LimitNOFILE={needed} or more in the daemon's systemd unit (contrib/systemd/ants-daemon.service)"
+            ),
+            format!("raise the hard limit of the shell starting the daemon to at least {needed} (ulimit -Hn)"),
+        ]
+    };
+    Some(Check::warn("open files", format!("{detail}: harness starts may fail and messages wait"), fix))
 }
 
 /// The chain and size of each ant's sense event log, as the daemon serving it last verified it
