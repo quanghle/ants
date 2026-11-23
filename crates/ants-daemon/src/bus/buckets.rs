@@ -147,7 +147,7 @@ pub async fn inbox_consumer<I>(
     max_ack_pending: i64,
 ) -> Result<super::Pull> {
     let name = ants_proto::inbox_consumer(ant);
-    let consumer: PullConsumer = stream
+    let consumer = stream
         .create_consumer(pull::Config {
             durable_name: Some(name.clone()),
             filter_subject: subject::inbox_of(ant),
@@ -157,8 +157,11 @@ pub async fn inbox_consumer<I>(
             max_ack_pending,
             ..Default::default()
         })
-        .await
-        .with_context(|| format!("creating consumer {name}"))?;
+        .await;
+    let consumer: PullConsumer = match consumer {
+        Ok(consumer) => consumer,
+        Err(e) => return Err(creating(e, &name, stream).await),
+    };
     Ok(super::pull(consumer).await?)
 }
 
@@ -173,7 +176,7 @@ pub async fn chan_consumer<I>(
     max_ack_pending: i64,
 ) -> Result<super::Pull> {
     let name = ants_proto::chan_consumer(ant);
-    let consumer: PullConsumer = stream
+    let consumer = stream
         .create_consumer(pull::Config {
             durable_name: Some(name.clone()),
             filter_subject: subject::ALL_CHANNELS.to_owned(),
@@ -184,9 +187,31 @@ pub async fn chan_consumer<I>(
             max_ack_pending,
             ..Default::default()
         })
-        .await
-        .with_context(|| format!("creating consumer {name}"))?;
+        .await;
+    let consumer: PullConsumer = match consumer {
+        Ok(consumer) => consumer,
+        Err(e) => return Err(creating(e, &name, stream).await),
+    };
     Ok(super::pull(consumer).await?)
+}
+
+/// The error of creating the consumer `name` on the `ANTS` stream; when the stream is at its consumer limit, naming
+/// the stream and the limit, which the stream's info tells where the credentials allow it, else as `ants init` sets it.
+async fn creating<I>(e: stream::ConsumerError, name: &str, stream: &stream::Stream<I>) -> anyhow::Error {
+    let full =
+        matches!(e.kind(), ConsumerErrorKind::JetStream(e) if e.error_code() == ErrorCode::MAXIMUM_CONSUMERS_LIMIT);
+    let e = anyhow::Error::new(e).context(format!("creating consumer {name}"));
+    if !full {
+        return e;
+    }
+    let (stream, limit) = match stream.get_info().await {
+        Ok(info) => (info.config.name, info.config.max_consumers),
+        Err(_) => (STREAM.to_owned(), hub::MAX_CONSUMERS),
+    };
+    e.context(format!(
+        "the {stream} stream holds its {limit} consumers, its limit: `ants doctor` counts them; the ant is served once \
+         some are freed"
+    ))
 }
 
 /// Delete the durable consumers that keep for `ant` what reaches it while no daemon serves it, but its inbox's: its

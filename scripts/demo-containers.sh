@@ -7,7 +7,7 @@ usage() {
     cat <<'EOF'
 Usage: scripts/demo-containers.sh COMMAND [ARGS...]
 
-  build                 Build ants, NATS, Copilot and bd into a Linux image
+  build                 Build ants, NATS and Copilot into a Linux image
   up                    Start the hub and two leaves (build first if needed)
   login NODE            Sign in to Copilot on hub, leaf-a or leaf-b
   ants NODE ARGS...      Run ants on a node, with its demo human credentials
@@ -23,7 +23,6 @@ Environment:
   ANTS_DEMO_STATE            Dedicated state directory
                             (default: ~/.local/share/ants/container-demo)
   ANTS_DEMO_COPILOT_VERSION  Copilot npm version for build (default: 1.0.112)
-  ANTS_DEMO_BD_VERSION       bd release tag for build (default: v0.8.0)
 EOF
 }
 
@@ -101,8 +100,7 @@ build() (
     # Give Apple's build VM headroom for the release build.
     if [ -n "$apple" ]; then limits=(--cpus 4 --memory 8g); fi
     rt build ${limits[@]+"${limits[@]}"} --tag "$image" --file "$path/contrib/container-demo/Containerfile" \
-        --build-arg "COPILOT_VERSION=${ANTS_DEMO_COPILOT_VERSION:-1.0.112}" \
-        --build-arg "BD_VERSION=${ANTS_DEMO_BD_VERSION:-v0.8.0}" "$path"
+        --build-arg "COPILOT_VERSION=${ANTS_DEMO_COPILOT_VERSION:-1.0.112}" "$path"
 )
 
 logs() {
@@ -208,8 +206,11 @@ smoke() {
         run_ants hub ant pause "$node-ant" >/dev/null
         run_ants hub ant resume "$node-ant" >/dev/null
     done
-    run_ants hub ant memories hub-ant --json \
-        | jq --exit-status '.bd.db == "/demo/work/.bd/bd.db" and .bd.error == null' >/dev/null
+    for node in hub leaf-a leaf-b; do
+        run_ants hub ant memories "$node-ant" --json \
+            | jq --exit-status '.provider.provider == "sense" and .bd == null
+                and any(.provider.memories[]; .key | contains("(identity, self)"))' >/dev/null
+    done
     thread=$({ uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid; } | tr '[:upper:]' '[:lower:]')
     for node in hub leaf-a leaf-b; do
         text="demo smoke $thread from $node"
@@ -221,7 +222,7 @@ smoke() {
             grep --fixed-strings "demo smoke $thread from $source" "$state/smoke-$node.log" >/dev/null
         done
     done
-    printf 'Four Copilot-backed ants live (human-assistant granted) and obeyed admin orders; hub-ant has bd; all three nodes exchanged notes. No model calls made.\n'
+    printf 'Four Copilot-backed ants live (human-assistant granted) and obeyed admin orders; each node ant keeps its sense data; all three nodes exchanged notes. No model calls made.\n'
 }
 
 case "$command" in

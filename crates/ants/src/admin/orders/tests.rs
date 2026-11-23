@@ -16,7 +16,8 @@ use crate::test_support::orders::{WAIT, host_of_m1, host_of_m1_serving, p};
 /// An admin's order reaches the daemon of the ant's machine, which records its outcome; one a human without the
 /// role signed, it refuses with the reason, and every order while its config says `[admin] remote = false`. An
 /// order to a machine whose daemon is away waits, pending. Only humans send orders, and only the machine's host
-/// credentials record their outcomes, and only of orders to the machine.
+/// credentials record their outcomes, and only of orders to the machine. An order to an ant no machine lists names
+/// `ants machines`, and while no machine recorded itself, host credentials.
 #[tokio::test]
 async fn a_machine_s_daemon_decides_each_order_to_its_ants_once_and_records_why() {
     let Some(server) = Server::start() else { return };
@@ -31,7 +32,12 @@ async fn a_machine_s_daemon_decides_each_order_to_its_ants_once_and_records_why(
     issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
     let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
+    let unrecorded = send(&admin, &js, None, &dev_a, AdminOp::Pause, WAIT).await.unwrap_err().to_string();
+    assert!(unrecorded.contains("host credentials"), "no machine recorded itself: {unrecorded}");
     let (ants, task) = host_of_m1(&server, &js, true, None).await;
+    let unlisted = send(&admin, &js, None, &p("dev-z"), AdminOp::Pause, WAIT).await.unwrap_err().to_string();
+    assert!(unlisted.contains("no machine lists dev-z"), "{unlisted}");
+    assert!(unlisted.contains("`ants machines`") && !unlisted.contains("host credentials"), "{unlisted}");
 
     let (pause, paused) = send(&admin, &js, None, &dev_a, AdminOp::Pause, WAIT).await.unwrap();
     let paused = paused.expect("the daemon decides at once");

@@ -198,6 +198,49 @@ async fn an_admin_reads_the_settings_and_changes_them_expecting_what_was_read() 
     tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
 }
 
+/// Changes sent at once to an ant whose settings were never read, while a read waits for its machine's daemon, wait
+/// for that read's outcome and are then sent, each expecting what it read.
+#[tokio::test]
+async fn sets_at_once_on_an_ant_never_read_wait_for_the_pending_read() {
+    let Some(server) = Server::start() else { return };
+    let (alice, bob, dev_a) = ("alice".parse().unwrap(), "bob".parse().unwrap(), "dev-a".parse().unwrap());
+    let (_, h_js) = server.connect_as(&bob, Role::Human).await;
+    ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
+    h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+    h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+    let admin_creds = server.dir().join("alice-admin.creds");
+    let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let rights = Permissions::for_user(&alice, Role::Human);
+    issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &admin_creds).unwrap();
+    let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let (_, js) = admin.connect("test").await.unwrap();
+    let path = server.dir().join("config.toml");
+    std::fs::write(&path, FILE).unwrap();
+    let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
+    let config = Some(ConfigFile::new(path.clone(), triggers.edits()));
+
+    let m1: Machine = "m1".parse().unwrap();
+    let (_, none) = orders::send(&admin, &js, Some(m1), &dev_a, AdminOp::ReadSettings, Duration::ZERO).await.unwrap();
+    assert_eq!(none, None, "no daemon of m1 yet");
+    let (o3, debug) = ([a("model=o3")], [a("env.RUST_LOG=debug")]);
+    let model = set(&admin, &dev_a, &o3, WAIT);
+    let log = set(&admin, &dev_a, &debug, WAIT);
+    let host = async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        host_of_m1(&server, &js, true, config).await
+    };
+    let (model, log, (ants, task)) = tokio::join!(model, log, host);
+    model.expect("sent once the pending read is applied");
+    log.expect("sent once the pending read is applied");
+    let edited = std::fs::read_to_string(&path).unwrap();
+    assert!(edited.contains("model = \"o3\"") && edited.contains("RUST_LOG = \"debug\""), "{edited}");
+    let listed = orders::orders_of(&js, &dev_a).await.unwrap();
+    let reads = listed.iter().filter(|o| o.op == Some(AdminOp::ReadSettings)).count();
+    assert_eq!(reads, 1, "no second read sent while one waits");
+    drop(ants);
+    tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+}
+
 /// The first daemon of an ant to start creates its shared settings from its config; an admin's change of one
 /// lands in them, and in the config where it sets the field, and the daemon serves it, core memories included. A
 /// standby machine serves the shared settings over its own config's, telling which fields drift, as does the

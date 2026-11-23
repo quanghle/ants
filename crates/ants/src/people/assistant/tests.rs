@@ -255,6 +255,11 @@ async fn an_assistant_acts_for_its_human_only_while_grant_and_credentials_say_so
         let kept = ants_daemon::people::behalf::keep_record(&ant_js, None, ant, &assistant).await.unwrap();
         assert_eq!(kept, Some(alice.clone()));
     }
+    let account = devices::account_of(Some(&creds)).unwrap().unwrap();
+    let directory = ants_daemon::people::devices::Directory::open(&js, &account).await.unwrap();
+    for read in [directory.all().await, directory.devices(&[pa.clone(), pb.clone()]).await] {
+        assert!(read.unwrap().skipped.is_empty(), "an assistant's record is no device's entry to skip");
+    }
     let ant_creds = server.creds_as(&dev_a, Role::Ant);
     let (_, ant_js) = bus::connect(&server.url, Some(&ant_creds), None, &dev_a, "test").await.unwrap();
     assert_eq!(ants_daemon::people::behalf::keep_record(&ant_js, None, &dev_a, &ant_creds).await.unwrap(), None);
