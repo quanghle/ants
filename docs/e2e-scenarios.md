@@ -43,9 +43,11 @@ flowchart LR
 ```
 
 Three containers on one dedicated network, each with a volume of its own at `/demo`, `HOME=/demo/home`,
-`ANTS_JS_DOMAIN=hub`, no port published on the host. The image is the container demo's
-(`contrib/container-demo/Containerfile`) with Claude Code 2.1.325 or later (`npm install --global
-@anthropic-ai/claude-code`) in place of Copilot CLI.
+`ANTS_JS_DOMAIN=hub`, no port published on the host. The image is built from
+`contrib/e2e/Containerfile`: like the container demo's, `ants` built with the pinned Rust toolchain and the pinned
+`nats-server`, with, in place of Copilot CLI, Claude Code 2.1.330 and its ACP adapter `claude-agent-acp` 0.107.0 (the
+npm packages `@anthropic-ai/claude-code` and `@agentclientprotocol/claude-agent-acp`), `jq`, `procps`, `python3-pyte`
+and the GitHub stub (`contrib/e2e/github_stub.py`).
 
 | Container | Runs | Users and files |
 |---|---|---|

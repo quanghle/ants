@@ -87,7 +87,12 @@ run_ants() {
 }
 
 build() (
-    local context path limits=()
+    local context path limits=() rust_version nats_version
+    # The base images follow the pins: the toolchain of rust-toolchain.toml, the nats-server of nats-server.sha256.
+    rust_version=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$root/rust-toolchain.toml")
+    nats_version=$("$root/scripts/nats-server.sh" --version)
+    nats_version=${nats_version#v}
+    [ -n "$rust_version" ] && [ -n "$nats_version" ] || die "no pinned Rust toolchain or nats-server version"
     context=$(mktemp -d "$state/build.XXXXXX")
     trap 'rm -rf "$context"' EXIT
     cp "$root/Cargo.toml" "$root/Cargo.lock" "$root/rust-toolchain.toml" "$context/"
@@ -100,6 +105,7 @@ build() (
     # Give Apple's build VM headroom for the release build.
     if [ -n "$apple" ]; then limits=(--cpus 4 --memory 8g); fi
     rt build ${limits[@]+"${limits[@]}"} --tag "$image" --file "$path/contrib/container-demo/Containerfile" \
+        --build-arg "RUST_VERSION=$rust_version" --build-arg "NATS_VERSION=$nats_version" \
         --build-arg "COPILOT_VERSION=${ANTS_DEMO_COPILOT_VERSION:-1.0.112}" "$path"
 )
 

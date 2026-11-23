@@ -1,4 +1,9 @@
-FROM rust:1.100-slim-bookworm AS build
+# The pinned Rust toolchain (rust-toolchain.toml) and nats-server release (crates/ants/nats-server.sha256), passed by
+# scripts/e2e.sh: a build without them has no base images.
+ARG RUST_VERSION
+ARG NATS_VERSION
+
+FROM rust:${RUST_VERSION}-slim-bookworm AS build
 ENV CARGO_BUILD_JOBS=4 CARGO_BUILD_WARNINGS=deny RUSTUP_NO_UPDATE_CHECK=1 DO_NOT_TRACK=1
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
@@ -10,7 +15,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --locked --release -p ants && cp target/release/ants /ants
 
-FROM nats:2.15.3-alpine AS nats
+FROM nats:${NATS_VERSION}-alpine AS nats
 
 FROM node:24-bookworm-slim
 ARG CLAUDE_VERSION=2.1.330
