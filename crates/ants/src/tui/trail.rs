@@ -254,7 +254,7 @@ fn top_tips(board: &TipBoard, script: Option<&str>, now: DateTime<Utc>) -> Strin
         })
         .collect();
     let mut out = format!("\n\ntrail {trail}: {count}, which /trail tips {trail} lists");
-    for row in cli::columns(&rows).lines() {
+    for row in crate::text::columns(&rows).lines() {
         out.push_str("\n  ");
         out.push_str(row);
     }

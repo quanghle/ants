@@ -12,9 +12,9 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use serde::Serialize;
 
-use crate::colony::{short, since};
-use crate::machines::latest_in;
+use crate::buckets::latest_in;
 use crate::text::one_line;
+use crate::text::{short, since};
 
 /// What a trail's name is made of.
 const NAMES: &str = "a trail's name is 1-64 of a-z, 0-9 and '-'";
@@ -294,7 +294,7 @@ pub(crate) fn table(listed: &[Listed], now: DateTime<Utc>) -> String {
             vec![trail.name.to_string(), source, by, at, from, phases, waypoints, description, counts, latest]
         })
         .collect();
-    super::columns(&filled(&header, &["FROM RUN", "WAYPOINTS", "RATINGS", "LATEST"], rows))
+    crate::text::columns(&filled(&header, &["FROM RUN", "WAYPOINTS", "RATINGS", "LATEST"], rows))
 }
 
 /// `rows` under `header`, without the `optional` columns that no row fills, all of whose cells are `-`.

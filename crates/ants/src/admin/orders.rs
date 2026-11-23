@@ -25,8 +25,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::colony::{short, since};
 use crate::connection::Nats;
+use crate::text::ago;
 use crate::{auth, machines};
 
 /// How often [`Admin::send`] looks for the outcome of the order it sent.
@@ -381,7 +381,7 @@ pub(crate) fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
                 None => o.state.as_str().to_owned(),
             };
             [
-                o.sent_at.map_or_else(|| "-".to_owned(), |at| format!("{} ago", short(since(at, now)))),
+                o.sent_at.map_or_else(|| "-".to_owned(), |at| ago(at, now)),
                 o.by(),
                 o.machine.to_string(),
                 o.op.as_ref().map_or_else(|| "-".to_owned(), AdminOp::describe),
@@ -389,20 +389,7 @@ pub(crate) fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
             ]
         }))
         .collect();
-    let mut widths = [0; 5];
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
-    let lines: Vec<String> = rows
-        .iter()
-        .map(|row| {
-            let cells: Vec<String> = row.iter().zip(widths).map(|(cell, width)| format!("{cell:width$}")).collect();
-            cells.join("  ").trim_end().to_owned()
-        })
-        .collect();
-    lines.join("\n")
+    crate::text::columns(&rows)
 }
 
 #[cfg(test)]

@@ -43,7 +43,7 @@ static BUSY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 impl Manager {
     pub fn new(config: PathBuf, nats: String, creds: Option<PathBuf>, js_domain: Option<JsDomain>) -> Result<Self> {
         let keys = auth::default_dir()?;
-        let leaf_config = Some(keys.with_file_name("leaf.conf"));
+        let leaf_config = Some(crate::node::leaf::default_path()?);
         Ok(Self { config, nats, creds, js_domain, keys, leaf_config })
     }
 
@@ -83,7 +83,7 @@ impl Manager {
             ants_daemon::bus::connect(&self.nats, Some(creds), self.js_domain.as_ref(), &manager, "request_ant")
                 .await?;
         let leaf = match &self.leaf_config {
-            Some(path) if path.exists() => add::leaf_node(Some(path))?,
+            Some(path) if path.exists() => crate::node::leaf::uplink::leaf_node(Some(path))?,
             _ => None,
         };
         let settings = serde_json::to_string(&request)?;
@@ -104,7 +104,7 @@ impl Manager {
         if let (Some((conf, leaf)), Some(renewed)) = (leaf, signed.leaf_jwt.clone()) {
             let machine = &leaf.machine;
             // Before listing the ant, so its first connection finds the uplink carrying it.
-            let renew = move || add::renew_and_reconnect(&conf, &renewed);
+            let renew = move || crate::node::leaf::uplink::renew_and_reconnect(&conf, &renewed);
             let uplink = if let Some(said) = tokio::task::spawn_blocking(renew).await?? {
                 format!(" The uplink credentials of the leaf node {machine} were renewed to carry {name}: {said}.")
             } else {
@@ -155,7 +155,7 @@ impl Manager {
         let until = Utc::now() + RETIRE_WAIT;
         let template_name = template.as_deref().unwrap_or_default();
         let leaf = match &self.leaf_config {
-            Some(path) if path.exists() => add::leaf_node(Some(path))?,
+            Some(path) if path.exists() => crate::node::leaf::uplink::leaf_node(Some(path))?,
             _ => None,
         };
         let requester = signer::Requester {
@@ -217,7 +217,7 @@ async fn shrunk(
         }));
     };
     let asked = retired.leaf_asked;
-    let renew = move || add::shrink_and_reconnect(&conf, asked.as_deref(), &shrunk);
+    let renew = move || crate::node::leaf::uplink::shrink_and_reconnect(&conf, asked.as_deref(), &shrunk);
     Ok(Some(match tokio::task::spawn_blocking(renew).await? {
         Ok(Some(said)) => {
             format!("The uplink credentials of the leaf node {machine} were renewed without {name}: {said}.")

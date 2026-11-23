@@ -112,7 +112,7 @@ pub(crate) async fn run(conn: &Connection<'_>, command: LeafCommand) -> Result<(
             let default_out = out.is_none();
             let out = match out {
                 Some(out) => out,
-                None => auth::default_dir()?.with_file_name("leaf.conf"),
+                None => crate::node::leaf::default_path()?,
             };
             let config = leaf::Leaf {
                 machine: &machine,
@@ -157,7 +157,7 @@ pub(crate) async fn run(conn: &Connection<'_>, command: LeafCommand) -> Result<(
             } else {
                 let conf = match leaf_config {
                     Some(path) => path,
-                    None => auth::default_dir()?.with_file_name("leaf.conf"),
+                    None => crate::node::leaf::default_path()?,
                 };
                 let members = members::uplink(&conf, &machine).with_context(|| {
                     format!("no --ant or --human given: reading the members of {machine} from {}", conf.display())

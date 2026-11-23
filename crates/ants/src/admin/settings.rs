@@ -27,8 +27,8 @@ use serde_json::Value;
 
 use crate::admin::orders::{self, Admin, Listed, Sent};
 use crate::auth;
-use crate::colony::{short, since};
 use crate::connection::Nats;
+use crate::text::{short, since};
 
 /// How long a read of the settings waits for the daemon of the ant's machine before taking the last read.
 pub const READ_WAIT: Duration = Duration::from_secs(5);

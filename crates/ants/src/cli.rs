@@ -23,6 +23,9 @@ use crate::signing::retire;
 use crate::threads::thread;
 use crate::{add, completions, serve};
 
+/// The server `--nats` defaults to.
+pub(crate) const DEFAULT_NATS: &str = "nats://127.0.0.1:4222";
+
 /// The whole command line.
 pub(crate) type Cli = Ants<Command>;
 
@@ -33,7 +36,7 @@ pub(crate) type Cli = Ants<Command>;
 pub(crate) struct Ants<C: Subcommand> {
     /// NATS server: nats://, tls://, ws:// or wss://. Point it at the local leaf node where there is one.
     /// Unset, the config file's `[cli]` or top-level `nats` applies, except to `ants daemon` and `ants add`.
-    #[arg(long, global = true, env = "ANTS_NATS_URL", default_value = "nats://127.0.0.1:4222")]
+    #[arg(long, global = true, env = "ANTS_NATS_URL", default_value = DEFAULT_NATS)]
     pub(crate) nats: String,
 
     /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-user permissions.

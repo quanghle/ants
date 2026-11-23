@@ -12,8 +12,9 @@ use ratatui::widgets::{Block, Clear, ListState, Paragraph, Wrap};
 
 use super::model::{Detail, Level, Model, Pane};
 use crate::live::Link;
+use crate::text::ago;
 use crate::threads::thread;
-use crate::tui::style::{self, ago, block, dim};
+use crate::tui::style::{self, block, dim};
 use crate::{colony, tools};
 
 /// How old the last read of the stream may be before it shows as stale: a few of the dashboard's periodic reads.
@@ -84,7 +85,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
 fn draw_threads(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>) {
     let since = match model.live.since.as_secs() {
         0 => "all kept".to_owned(),
-        secs => format!("last {}", colony::short(std::time::Duration::from_secs(secs))),
+        secs => format!("last {}", crate::text::short(std::time::Duration::from_secs(secs))),
     };
     let focused = model.focus == Pane::Threads && model.detail.is_none();
     let title = format!(" Threads ({}, {since}) ", model.live.order.len());
@@ -157,7 +158,7 @@ fn draw_approvals(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Ut
 
 fn approval_row(request: &ApprovalRequest, now: DateTime<Utc>) -> String {
     let id: String = request.id.to_string().chars().take(8).collect();
-    let left = tools::left(request.expires_at, now);
+    let left = crate::text::left(request.expires_at, now);
     format!("{}/{id} {}: {} ({left} left)", request.ant, request.tool.kind, request.tool.title.replace('\n', " "))
 }
 

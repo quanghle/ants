@@ -13,9 +13,9 @@ use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 
-use crate::colony::{short, since};
-use crate::machines::latest_in;
+use crate::buckets::latest_in;
 use crate::text::one_line;
+use crate::text::{short, since};
 
 /// The ratings of every trail, those `conductor` gave for one.
 pub(crate) async fn read(js: &jetstream::Context, conductor: Option<&UserId>) -> Result<Vec<TrailRating>> {

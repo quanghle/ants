@@ -20,8 +20,9 @@ use ratatui::text::{Line, Span, Text};
 
 use super::listed::{Listed, Shown};
 use super::model::{Action, Data, Key, Model, To};
-use super::style::{self, ago};
+use super::style;
 use crate::live::maybe;
+use crate::text::ago;
 use crate::tools::{self, HeldAct};
 
 /// How often the held orders are gathered.
@@ -179,7 +180,7 @@ impl Answer {
 fn left(expires: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let delta = expires - now;
     match delta.num_days() {
-        0 => crate::tools::left(expires, now),
+        0 => crate::text::left(expires, now),
         days => format!("{days}d{:02}h", delta.num_hours() % 24),
     }
 }

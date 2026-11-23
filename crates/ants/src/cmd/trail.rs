@@ -271,7 +271,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
                     "replaced trail {}, saved by {} {} ago",
                     trail.name,
                     before.saved_by,
-                    crate::colony::short(crate::colony::since(before.saved_at, trail.saved_at))
+                    crate::text::short(crate::text::since(before.saved_at, trail.saved_at))
                 ),
                 None => println!("saved trail {}", trail.name),
             }
@@ -441,25 +441,4 @@ fn human(nats: &Nats<'_>, what: &str) -> Result<()> {
         bail!("{what} needs a human's credentials; those of {} are an ant's", nats.me.id);
     }
     Ok(())
-}
-
-/// `rows` as columns two spaces apart, each as wide as its widest cell, without trailing blanks.
-pub(crate) fn columns(rows: &[impl AsRef<[String]>]) -> String {
-    let mut widths: Vec<usize> = Vec::new();
-    for row in rows {
-        let row = row.as_ref();
-        widths.resize(widths.len().max(row.len()), 0);
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
-    let lines: Vec<String> = rows
-        .iter()
-        .map(|row| {
-            let cells: Vec<String> =
-                row.as_ref().iter().zip(&widths).map(|(cell, &width)| format!("{cell:width$}")).collect();
-            cells.join("  ").trim_end().to_owned()
-        })
-        .collect();
-    lines.join("\n")
 }

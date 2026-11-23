@@ -165,7 +165,8 @@ pub fn refusal(request: &ApprovalRequest, state: &tools::State, verdict: Verdict
 async fn decide(js: jetstream::Context, request: ApprovalRequest, verdict: Verdict, by: UserId) -> Result<String> {
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let (seq, request) = tools::find(&stream, &tools::qualified(&request)).await?;
-    let decision = tools::answer_request(&js, &stream, seq, &request, verdict, &by, Utc::now()).await?;
+    let answer = tools::Answer { seq, request: &request, verdict, by: &by, now: Utc::now() };
+    let decision = tools::answer_request(&js, &stream, &answer).await?;
     let mut text = format!("answered request {}/{}: {}", decision.ant, decision.request_id, spelling(verdict));
     if verdict != Verdict::Reject
         && let Ok(Some(suggestion)) = tools::suggestion(&stream, seq, &request).await
@@ -187,7 +188,9 @@ async fn allow_all(js: jetstream::Context, requests: Vec<ApprovalRequest>, by: U
             if tools::state(&js, &stream, seq, &request, Utc::now()).await? != tools::State::Pending {
                 return Ok(false);
             }
-            match tools::answer_request(&js, &stream, seq, &request, Verdict::AllowOnce, &by, Utc::now()).await {
+            let verdict = Verdict::AllowOnce;
+            let answer = tools::Answer { seq, request: &request, verdict, by: &by, now: Utc::now() };
+            match tools::answer_request(&js, &stream, &answer).await {
                 Ok(_) => Ok(true),
                 // Answered elsewhere between the check and the decision, the first decision winning.
                 Err(_) if tools::state(&js, &stream, seq, &request, Utc::now()).await? != tools::State::Pending => {

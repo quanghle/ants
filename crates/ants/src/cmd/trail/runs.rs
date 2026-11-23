@@ -18,8 +18,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::colony::{short, since};
-use crate::machines::{latest_in, latest_timed_in};
+use crate::buckets::{latest_in, latest_timed_in};
+use crate::text::ago;
 use crate::text::{after_colon, one_line};
 
 /// The runs `conductor` keeps, else those of every conductor, oldest first.
@@ -173,10 +173,6 @@ pub(crate) async fn session(js: &jetstream::Context, run: &TrailRun) -> Result<O
     Ok(latest_in(js, TRAIL_RUNS_BUCKET, &session).await?.iter().find_map(|(k, v)| parse(k, v)))
 }
 
-fn ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    format!("{} ago", short(since(at, now)))
-}
-
 fn local(at: DateTime<Utc>) -> String {
     at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string()
 }
@@ -212,7 +208,7 @@ pub(crate) fn table(runs: &[TrailRun], rated: &Rated, now: DateTime<Utc>) -> Str
             ]
         }))
         .collect();
-    super::columns(&rows)
+    crate::text::columns(&rows)
 }
 
 /// What a call of `function` with `args` asks, in short: its label ([`TrailFunction::label`]), else its prompt or
@@ -361,10 +357,10 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
         let _ = writeln!(out, "args: {}", one_line(&args.to_string(), 200));
     }
     let _ = writeln!(out, "\nroute: {}", r.route_text());
-    out.push_str(&indented(&super::columns(&legs(&r.route))));
+    out.push_str(&indented(&crate::text::columns(&legs(&r.route))));
     if !kids.is_empty() {
         out.push_str("\nchild runs:\n");
-        out.push_str(&indented(&super::columns(&children(kids))));
+        out.push_str(&indented(&crate::text::columns(&children(kids))));
     }
     if !pending.is_empty() {
         out.push_str("\npending calls:\n");
@@ -381,17 +377,17 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
                 ]
             })
             .collect();
-        out.push_str(&indented(&super::columns(&rows)));
+        out.push_str(&indented(&crate::text::columns(&rows)));
     }
     if !queued.is_empty() {
         out.push_str("\nqueued calls:\n");
         let row = |c: &QueuedCall| [c.call.to_string(), c.function.name().to_owned(), gist(c.function, &c.args)];
         let rows: Vec<[String; 3]> = queued.iter().map(row).collect();
-        out.push_str(&indented(&super::columns(&rows)));
+        out.push_str(&indented(&crate::text::columns(&rows)));
     }
     if !journal.is_empty() {
         out.push_str("\njournal:\n");
-        out.push_str(&indented(&super::columns(&answered(r, journal))));
+        out.push_str(&indented(&crate::text::columns(&answered(r, journal))));
     }
     if !ratings.is_empty() {
         out.push_str(&super::ratings::of_run_section(ratings, now));

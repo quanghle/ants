@@ -13,9 +13,9 @@ use chrono::{DateTime, Utc};
 
 use super::{Check, Connected, NETWORK_TIMEOUT};
 use crate::cmd::trail::runs;
-use crate::colony::{short, since};
 use crate::service::{Service, Services};
 use crate::text::one_line;
+use crate::text::{short, since};
 
 /// The most stuck runs listed, one check each.
 pub(super) const MAX_LISTED: usize = 10;

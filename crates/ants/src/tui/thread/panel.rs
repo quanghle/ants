@@ -113,7 +113,7 @@ impl Page {
         }
         let first = self.messages().next();
         if let Some(at) = summary.map(|s| s.first_at).or(first.map(|e| e.stored_at)) {
-            lines.push(field("AGE", crate::colony::short(crate::colony::since(at, now))));
+            lines.push(field("AGE", crate::text::short(crate::text::since(at, now))));
         }
         if let Some(first) = first {
             lines.push(field("FROM", format!("{} {}", origin(first, data), hm(first.stored_at))));

@@ -190,9 +190,9 @@ async fn an_order_to_another_ant_is_decided_while_an_add_waits_for_the_signer() 
 /// beside: its process, which a reload signals.
 static LEAF_NODE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 
-/// [`crate::add::renew_and_reconnect`], reloading the [`LEAF_NODE`] by SIGHUP rather than by its service.
+/// [`crate::node::leaf::uplink::renew_and_reconnect`], reloading the [`LEAF_NODE`] by SIGHUP rather than by its service.
 fn renew_and_signal(conf: &std::path::Path, renewed: &str) -> anyhow::Result<Option<String>> {
-    crate::add::renew_and_apply(conf, renewed, |_| {
+    crate::node::leaf::uplink::renew_and_apply(conf, renewed, |_| {
         let pid = LEAF_NODE.get().expect("the leaf node runs").to_string();
         let status = std::process::Command::new("kill").arg("-HUP").arg(pid).status().unwrap();
         assert!(status.success());
@@ -200,9 +200,9 @@ fn renew_and_signal(conf: &std::path::Path, renewed: &str) -> anyhow::Result<Opt
     })
 }
 
-/// [`crate::add::shrink_and_reconnect`], reloading the [`LEAF_NODE`] by SIGHUP rather than by its service.
+/// [`crate::node::leaf::uplink::shrink_and_reconnect`], reloading the [`LEAF_NODE`] by SIGHUP rather than by its service.
 fn shrink_and_signal(conf: &std::path::Path, asked: &str, shrunk: &str) -> anyhow::Result<Option<String>> {
-    crate::add::shrink_and_apply(conf, Some(asked), shrunk, |_| {
+    crate::node::leaf::uplink::shrink_and_apply(conf, Some(asked), shrunk, |_| {
         let pid = LEAF_NODE.get().expect("the leaf node runs").to_string();
         let status = std::process::Command::new("kill").arg("-HUP").arg(pid).status().unwrap();
         assert!(status.success());

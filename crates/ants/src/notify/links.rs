@@ -202,7 +202,8 @@ impl Answers {
             };
             return Ok(page(StatusCode::OK, &format!("{what}: {id}?"), &body));
         }
-        match tools::answer_request(&bus.js, &bus.stream, action.seq, &request, action.verdict, &action.by, now).await {
+        let answer = tools::Answer { seq: action.seq, request: &request, verdict: action.verdict, by: &action.by, now };
+        match tools::answer_request(&bus.js, &bus.stream, &answer).await {
             Ok(decision) => {
                 tracing::info!(human = %action.by, request = id, verdict = decision.verdict.as_str(), "decided on a link");
                 let body = format!("{details}<p>Stored: {}.</p>", html(spelling(decision.verdict)));

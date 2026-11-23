@@ -11,6 +11,7 @@ use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 
 use crate::avatars::{self, Faces};
+use crate::text::{ago, short, since};
 
 /// How fresh an entry is, judged by its last heartbeat ([`colony::is_live`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,22 +30,6 @@ impl State {
             Self::Live => "live",
             Self::Stale => "stale",
         }
-    }
-}
-
-/// Time from `then` to `now`, zero when a clock is ahead.
-pub(crate) fn since(then: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
-    (now - then).to_std().unwrap_or_default()
-}
-
-/// `duration` in its largest whole unit: `7s`, `3m`, `2h`, `5d`.
-pub(crate) fn short(duration: Duration) -> String {
-    let secs = duration.as_secs();
-    match secs {
-        0..60 => format!("{secs}s"),
-        60..3600 => format!("{}m", secs / 60),
-        3600..86_400 => format!("{}h", secs / 3600),
-        _ => format!("{}d", secs / 86_400),
     }
 }
 
@@ -384,7 +369,7 @@ pub fn table(entries: &[ColonyEntry], now: DateTime<Utc>) -> String {
                 e.machine.clone(),
                 e.version.clone(),
                 e.perms.to_string(),
-                format!("{} ago", short(since(e.heartbeat_at, now))),
+                ago(e.heartbeat_at, now),
                 short(since(e.started_at, now)),
                 if e.capabilities.is_empty() { "-".to_owned() } else { e.capabilities.join(",") },
                 chain(e),
@@ -395,20 +380,7 @@ pub fn table(entries: &[ColonyEntry], now: DateTime<Utc>) -> String {
             ]
         }))
         .collect();
-    let mut widths = [0; 15];
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
-    let lines: Vec<String> = rows
-        .iter()
-        .map(|row| {
-            let cells: Vec<String> = row.iter().zip(widths).map(|(cell, width)| format!("{cell:width$}")).collect();
-            cells.join("  ").trim_end().to_owned()
-        })
-        .collect();
-    lines.join("\n")
+    crate::text::columns(&rows)
 }
 
 /// An entry as one JSON object, with its `state` added, and from the ant's identity record in `faces` when it has one,

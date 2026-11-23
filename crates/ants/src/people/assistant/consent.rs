@@ -52,7 +52,7 @@ pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool) -> Result<(
                 Act::Order { machine: order.machine.clone(), ant: order.ant.clone(), id: order.id }.qualified(),
                 order.admin,
                 order.op.describe(),
-                tools::left(order.sent_at + ORDER_HOLD, now)
+                crate::text::left(order.sent_at + ORDER_HOLD, now)
             );
         }
         for (request, acts) in &held {
@@ -64,7 +64,7 @@ pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool) -> Result<(
                     spelling(a.verdict),
                     request.tool.kind,
                     request.tool.title.lines().next().unwrap_or_default(),
-                    tools::left(request.expires_at, now)
+                    crate::text::left(request.expires_at, now)
                 );
             }
         }

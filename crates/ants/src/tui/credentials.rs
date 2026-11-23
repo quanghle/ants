@@ -23,10 +23,11 @@ use tokio::time::Instant;
 
 use super::listed::{Listed, Shown};
 use super::model::{Action, Data, Key, Model, To};
-use super::style::{self, ago};
+use super::style;
 use crate::credentials::enroll::{self, Approver};
 use crate::credentials::renew;
 use crate::live::maybe;
+use crate::text::ago;
 use crate::{auth, machines};
 
 /// How often the requests are gathered; each gathering listens [`enroll::LISTEN`], as machines repeat theirs.

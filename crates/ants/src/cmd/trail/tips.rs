@@ -15,9 +15,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use super::TipsArgs;
-use crate::colony::{short, since};
-use crate::machines::latest_in;
+use crate::buckets::latest_in;
 use crate::text::one_line;
+use crate::text::{short, since};
 
 /// How many characters of a tip key a listing shows.
 const KEY_WIDTH: usize = 40;
@@ -88,7 +88,7 @@ pub(crate) fn render(board: &TipBoard, args: &TipsArgs, script: Option<&str>, no
     out.push('\n');
     let header = ["TIP", "KEY", "WRITER", "VOTES", "STATUS", "WRITTEN"].map(str::to_owned);
     let rows: Vec<[String; 6]> = std::iter::once(header).chain(listed.iter().map(|r| row(r, now))).collect();
-    let table = super::columns(&rows);
+    let table = crate::text::columns(&rows);
     let mut lines = table.lines();
     let _ = writeln!(out, "{}", lines.next().unwrap_or_default());
     for (line, ranked) in lines.zip(&listed) {

@@ -259,24 +259,13 @@ fn cells(m: &Waiting, now: DateTime<Utc>) -> Vec<String> {
         Some(channel) => format!("{} in #{channel}", m.from),
         None => m.from.to_string(),
     };
-    let age = crate::colony::short((now - m.sent_at).to_std().unwrap_or_default());
+    let age = crate::text::short(crate::text::since(m.sent_at, now));
     vec![m.id.to_string(), m.thread_id.to_string(), from, age, state(m)]
 }
 
 /// `rows`, the first a header, in columns as wide as their widest cell.
 fn grid(rows: impl Iterator<Item = Vec<String>>) -> String {
-    let rows: Vec<Vec<String>> = rows.collect();
-    let mut widths = vec![0; rows.first().map_or(0, Vec::len)];
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
-    let lines = rows.iter().map(|row| {
-        let cells: Vec<String> = row.iter().zip(&widths).map(|(cell, &width)| format!("{cell:width$}")).collect();
-        cells.join("  ").trim_end().to_owned()
-    });
-    lines.collect::<Vec<_>>().join("\n")
+    crate::text::columns(&rows.collect::<Vec<_>>())
 }
 
 #[cfg(test)]

@@ -76,7 +76,9 @@ fn body(asking: &Asking, now: DateTime<Utc>) -> Vec<Line<'static>> {
     let asked_at = request.requested_at.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S");
     lines.push(Line::styled(format!("asked    {asked_at}"), style::dim()));
     lines.push(match &asking.state {
-        State::Pending => Line::styled(format!("expires  in {}", tools::left(request.expires_at, now)), style::dim()),
+        State::Pending => {
+            Line::styled(format!("expires  in {}", crate::text::left(request.expires_at, now)), style::dim())
+        }
         state => Line::styled(format!("settled  {}", how(state, &request.ant)), Style::new().fg(style::PENDING)),
     });
     lines

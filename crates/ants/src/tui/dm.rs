@@ -17,7 +17,8 @@ use ratatui::widgets::Paragraph;
 
 use super::model::{Data, Key, Model, To};
 use super::select::Selection;
-use super::style::{self, ago};
+use super::style;
+use crate::text::ago;
 use ants_client::sealed::State;
 
 /// The lock marking a sealed message between two humans, and a thread with one.

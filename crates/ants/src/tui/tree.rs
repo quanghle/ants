@@ -157,7 +157,7 @@ impl Page {
         lines.push(Line::raw(""));
         let mut total = vec![format!("{} ants", tree.ants), format!("{} turns used", tree.turns)];
         total.extend(tree.spend.map(|s| format!("${:.2}", s.cost)));
-        total.extend(tree.elapsed.map(crate::colony::short));
+        total.extend(tree.elapsed.map(crate::text::short));
         lines.push(Line::from(vec![Span::styled("total  ", style::dim()), Span::raw(total.join(" · "))]));
         let inner = style::block(String::new(), focused).inner(area);
         let top = mouse.top(super::mouse::Viewport::Tree, inner, selected, selected, selected + 1, lines.len());

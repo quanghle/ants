@@ -8,6 +8,7 @@
 #![cfg_attr(test, expect(clippy::disallowed_methods, reason = "tests read and hear as they please"))]
 
 // The command line, and how it reaches NATS.
+mod buckets;
 mod cas;
 mod cli;
 mod cmd;

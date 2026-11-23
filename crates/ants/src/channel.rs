@@ -134,20 +134,7 @@ pub fn table(entries: &[ChannelEntry], unread: Option<&HashMap<ChannelId, reads:
             row.into_iter().chain(unread_label(e)).chain(description(e)).collect()
         }))
         .collect();
-    let mut widths = vec![0; rows[0].len()];
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
-    let lines: Vec<String> = rows
-        .iter()
-        .map(|row| {
-            let cells: Vec<String> = row.iter().zip(&widths).map(|(cell, width)| format!("{cell:width$}")).collect();
-            cells.join("  ").trim_end().to_owned()
-        })
-        .collect();
-    lines.join("\n")
+    crate::text::columns(&rows)
 }
 
 /// The users `post` @mentions, other than its author, that it neither wakes nor notifies, not being members of the

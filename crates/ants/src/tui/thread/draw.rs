@@ -12,8 +12,9 @@ use ratatui::widgets::Paragraph;
 use super::cards::draw_cards;
 use super::conversation::{self, Item, Shown, Timed, glyphs, rows};
 use super::{Laid, PANEL_WIDTH, Page, Picked, Scroll, Spot, find};
+use crate::text::ago;
 use crate::tui::model::{Data, Model};
-use crate::tui::style::{self, ago};
+use crate::tui::style;
 use crate::tui::{catchup, images, work};
 
 impl Page {

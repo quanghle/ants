@@ -383,7 +383,7 @@ async fn humans_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
     assert!(runs.put(&foreign, marker(&thread)).await.is_err(), "dev-a keeps no step under dev-b's runs");
     assert!(theirs.get(&key).await.is_err(), "dev-b reads none of dev-a's steps");
     let filter = format!("$KV.{TRAIL_RUNS_BUCKET}.{}*", trail_thread_steps_prefix(&dev_a, &thread));
-    let read = crate::machines::latest_in(&h_js, TRAIL_RUNS_BUCKET, &filter).await.unwrap();
+    let read = crate::buckets::latest_in(&h_js, TRAIL_RUNS_BUCKET, &filter).await.unwrap();
     assert_eq!(read, [(key.clone(), marker(&thread))], "a human reads the steps on one thread alone");
     assert!(all.put(&key, marker(&thread)).await.is_err(), "a human keeps no step");
 
@@ -400,10 +400,10 @@ async fn humans_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
         assert!(tips.put(&key, b"{}".to_vec()).await.is_err(), "dev-a writes no tip or vote of dev-b's: {key}");
     }
     let filter = format!("$KV.{TRAIL_TIPS_BUCKET}.deploy.>");
-    assert_eq!(crate::machines::latest_in(&b_js, TRAIL_TIPS_BUCKET, &filter).await.unwrap().len(), 2, "ants read all");
+    assert_eq!(crate::buckets::latest_in(&b_js, TRAIL_TIPS_BUCKET, &filter).await.unwrap().len(), 2, "ants read all");
     let stream = h_js.get_stream(format!("KV_{TRAIL_TIPS_BUCKET}")).await.unwrap();
     stream.purge().filter(&filter).await.unwrap();
-    assert!(crate::machines::latest_in(&b_js, TRAIL_TIPS_BUCKET, &filter).await.unwrap().is_empty(), "a human purges");
+    assert!(crate::buckets::latest_in(&b_js, TRAIL_TIPS_BUCKET, &filter).await.unwrap().is_empty(), "a human purges");
 
     let ratings = DirectKv::whole(&a_js, None, TRAIL_RATINGS_BUCKET).await.unwrap();
     ratings.put(trail_rating_key(&deploy, &dev_a, &run), b"{}".to_vec()).await.unwrap();
@@ -413,14 +413,14 @@ async fn humans_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
     assert!(as_human.put(&forged, b"{}".to_vec()).await.is_err(), "a human writes no rating");
     let filter = format!("$KV.{TRAIL_RATINGS_BUCKET}.deploy.>");
     assert_eq!(
-        crate::machines::latest_in(&b_js, TRAIL_RATINGS_BUCKET, &filter).await.unwrap().len(),
+        crate::buckets::latest_in(&b_js, TRAIL_RATINGS_BUCKET, &filter).await.unwrap().len(),
         1,
         "ants read all"
     );
     let stream = h_js.get_stream(format!("KV_{TRAIL_RATINGS_BUCKET}")).await.unwrap();
     stream.purge().filter(&filter).await.unwrap();
     assert!(
-        crate::machines::latest_in(&b_js, TRAIL_RATINGS_BUCKET, &filter).await.unwrap().is_empty(),
+        crate::buckets::latest_in(&b_js, TRAIL_RATINGS_BUCKET, &filter).await.unwrap().is_empty(),
         "a human purges"
     );
 }
