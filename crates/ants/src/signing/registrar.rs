@@ -139,7 +139,8 @@ pub enum Event {
 
 /// Print what the registrar did with `request`.
 pub fn print(request: &LoginRequest, event: &Event) {
-    let asked = format!("registration of {} (key {})", request.name, request.public_key);
+    let web = if request.web { " as a web device" } else { "" };
+    let asked = format!("registration of {}{web} (key {})", request.name, request.public_key);
     match event {
         Event::Started => println!("{asked}: waiting for a GitHub sign-in"),
         Event::Asked { login, id } => println!(

@@ -45,6 +45,7 @@ mod services;
 mod store;
 mod threads;
 mod uplink;
+mod web;
 
 const WAIT: Duration = Duration::from_secs(5);
 

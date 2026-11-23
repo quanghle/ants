@@ -299,6 +299,23 @@ fn identifiers() {
 }
 
 #[test]
+fn user_jwt_tags() {
+    let xkey: DeviceKey = "XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB".parse().unwrap();
+    snap(
+        "user_jwt_tags",
+        &vec![
+            PermissionsVersion(2).tag(),
+            device().tag(),
+            xkey.tag(),
+            REGISTERED_TAG.to_owned(),
+            ADMIN_TAG.to_owned(),
+            WEB_TAG.to_owned(),
+            AssistantOf::tag(&user("alice")),
+        ],
+    );
+}
+
+#[test]
 fn serving() {
     snap(
         "serving",
@@ -852,7 +869,22 @@ fn login() {
             public_key: "UDEF".to_owned(),
             reply_xkey: "XREPLY".to_owned(),
             xkey: Some("XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB".parse().unwrap()),
+            web: false,
             label: Some("Alice's laptop".to_owned()),
+            made_at: at(0),
+            expires_at: at(15),
+            signature: "c2lnLWxvZ2lu".to_owned(),
+        },
+    );
+    snap(
+        "login_request_web",
+        &LoginRequest {
+            name: user("alice"),
+            public_key: "UDEF".to_owned(),
+            reply_xkey: "XREPLY".to_owned(),
+            xkey: None,
+            web: true,
+            label: Some("Alice's phone browser".to_owned()),
             made_at: at(0),
             expires_at: at(15),
             signature: "c2lnLWxvZ2lu".to_owned(),

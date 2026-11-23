@@ -118,6 +118,9 @@ pub struct Issued {
     /// Whether a human's credentials carry the admin role ([`ants_proto::ADMIN_TAG`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub admin: bool,
+    /// Whether a human's credentials are a web device's ([`ants_proto::WEB_TAG`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub web: bool,
     /// The human an assistant's credentials make the ant the assistant of ([`ants_proto::AssistantOf`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_of: Option<ants_proto::UserId>,
@@ -148,6 +151,7 @@ impl Issued {
             grant: None,
             withdrawn: None,
             admin: false,
+            web: false,
             assistant_of: None,
             order: None,
         })
@@ -192,6 +196,9 @@ pub struct Device {
     /// Whether its credentials carry the admin role ([`ants_proto::ADMIN_TAG`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub admin: bool,
+    /// Whether it is a web device, a page of the web client ([`ants_proto::WEB_TAG`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub web: bool,
 }
 
 /// The devices of the human `name` in the registry of `dir`, oldest first: one per key issued to it as a human, but one
@@ -213,6 +220,7 @@ pub fn devices(dir: &Path, name: &str) -> Result<Vec<Device>> {
             github: one.github.map(|g| g.login),
             grant: one.grant,
             admin: one.admin,
+            web: one.web,
         };
         let same = |d: &Device| d.key == device.key || d.device == device.device;
         match found.iter_mut().find(|d| same(d)) {
@@ -292,8 +300,8 @@ pub fn rename(dir: &Path, name: &str, selector: &str, label: &str) -> Result<Dev
     Ok(Device { label: Some(label.to_owned()), ..device.clone() })
 }
 
-/// Print the devices of the human `name` in `dir`: id, label, key, encryption key, when issued, whether an admin's
-/// and whether revoked; with `json`, one JSON object per line. Then, but for `json`, the keys of its assistant's
+/// Print the devices of the human `name` in `dir`: id, label, key, encryption key, when issued, whether an admin's,
+/// whether a web device and whether revoked; with `json`, one JSON object per line. Then, but for `json`, the keys of its assistant's
 /// credentials ([`Kind::Assistant`]).
 pub fn list_devices(dir: &Path, name: &str, json: bool) -> Result<()> {
     let devices = devices(dir, name)?;
@@ -315,14 +323,19 @@ pub fn list_devices(dir: &Path, name: &str, json: bool) -> Result<()> {
             (Some(login), None) => format!("  github {login}"),
             (None, _) => String::new(),
         };
-        let admin = if d.admin { "  admin" } else { "" };
-        println!("{id}  {label}  {}  {xkey}  issued {}{github}{admin}{revoked}", d.key, time(d.issued_at));
+        println!("{id}  {label}  {}  {xkey}  issued {}{github}{}{revoked}", d.key, time(d.issued_at), marks(&d));
     }
     for (one, revoked) in assistants {
         let revoked = if revoked { "  revoked" } else { "" };
         println!("assistant {}  {}  issued {}{revoked}", one.name, one.key, time(one.issued_at));
     }
     Ok(())
+}
+
+/// What marks `device` in the list of `ants auth devices`: `admin` for an admin's, `web` for a web device.
+pub(crate) fn marks(device: &Device) -> String {
+    let marks = [(device.admin, "  admin"), (device.web, "  web")];
+    marks.into_iter().filter_map(|(marked, mark)| marked.then_some(mark)).collect()
 }
 
 /// The latest line of each key of the registry of `dir`, oldest first, keeping when its key was first issued.
@@ -653,6 +666,7 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
         }
         Kind::Ant => format!("ants auth user {name} {domain}"),
         Kind::Human if issued.admin => format!("ants auth user {name} --human --admin {domain}"),
+        Kind::Human if issued.web => format!("ants auth user {name} --human --web --public-key KEY {domain}"),
         Kind::Human => format!("ants auth user {name} --human {domain}"),
         Kind::Webhook => format!("ants auth user {name} --webhook --to ANT... --channel CHANNEL... {domain}"),
         Kind::Leaf | Kind::LeafStore | Kind::LeafSystem => {
@@ -711,6 +725,9 @@ pub fn list_issued(dir: &Path, json: bool) -> Result<()> {
         }
         if i.admin {
             kind.push_str(" (admin)");
+        }
+        if i.web {
+            kind.push_str(" (web)");
         }
         let expiry = match i.expires_at {
             Some(exp) if exp <= now => format!("expired {}", time(exp)),

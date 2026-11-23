@@ -41,7 +41,8 @@ impl Registrar<'_> {
         let key = request.public_key.clone();
         if let Some(flow) = self.flows.get_mut(&key) {
             let first = &flow.request;
-            if (&first.name, &first.label, &first.xkey) != (&request.name, &request.label, &request.xkey) {
+            let asked = |r: &LoginRequest| (r.name.clone(), r.label.clone(), r.xkey.clone(), r.web);
+            if asked(first) != asked(&request) {
                 tracing::warn!(key = %key, "ignoring a registration request unlike the earlier one of its key");
                 return Ok(());
             }
@@ -64,6 +65,9 @@ impl Registrar<'_> {
         let registration = signer_registration(self.config)
             .context("the signer's registration policy does not load")?
             .context("registration is not enabled on this team")?;
+        if let (true, Some(xkey)) = (request.web, &request.xkey) {
+            bail!("a web device binds no encryption key: the request names {xkey}");
+        }
         let running = self.flows.values().filter(|f| f.task.is_some() || f.asking.is_some()).count();
         if running >= MAX_REGISTRATIONS {
             bail!("the signer is busy with {running} registrations: try again in a few minutes");
@@ -206,21 +210,25 @@ impl Registrar<'_> {
     }
 
     /// Sign a human's credentials for `request`, of the GitHub user `account`, under `grant`, if registration is still
-    /// enabled and the name is the user's to hold: the JWT.
+    /// enabled and the name is the user's to hold: the JWT. A request for a web device gets web credentials
+    /// ([`Permissions::for_web`]) with the web lifetime of `[registration]`, never an admin's.
     fn sign(&self, request: &LoginRequest, account: &GithubAccount, grant: Grant) -> Result<String> {
         let registration =
             signer_registration(self.config)?.context("registration is no longer enabled on this team")?;
         let name = &request.name;
         binding::check_in(self.dir, name, account, Binder::Signer)?;
-        let expires_at = auth::now()? + registration.ttl.as_secs();
+        let expires_at = auth::now()? + registration.lifetime(request.web).as_secs();
         let new = auth::NewDevice {
             label: request.label.as_deref(),
             github: Some(account.clone()),
             grant: Some(grant),
             expires_at: Some(expires_at),
+            web: request.web,
             ..auth::NewDevice::default()
         };
-        let permissions = Permissions::for_user(name, Role::Human).with_js_domain(self.js_domain);
+        let permissions =
+            if request.web { Permissions::for_web(name) } else { Permissions::for_user(name, Role::Human) };
+        let permissions = permissions.with_js_domain(self.js_domain);
         let (jwt, _) = auth::sign_device_with(
             self.dir,
             name,
@@ -277,6 +285,7 @@ pub(super) fn approval_request(request: &LoginRequest, account: &GithubAccount, 
         "github": { "login": login, "id": id },
         "label": request.label,
         "key": request.public_key,
+        "web": request.web,
     });
     let tool = ToolCall { kind: "other".to_owned(), title, locations: Vec::new(), input: Some(input.to_string()) };
     ApprovalRequest::new(UserId::signer(), ThreadId::generate(), tool, vec![Verdict::AllowOnce], timeout)

@@ -36,6 +36,9 @@ fn verifies_a_team_members_user_jwt() {
     assert_eq!(verified.expires_at, Some(NOW + 60));
     assert!(verified.is_admin());
     assert_eq!(verified.assistant_of(), None);
+    let web = user_jwt(&account, &user, "alice", &["ants-admin", "ants-web"], Some(NOW + 60));
+    let web = verify_user_jwt(&web, [account.public_key().as_str()], NOW).unwrap();
+    assert!(!web.is_admin(), "a web device never holds the admin role");
 
     let other = KeyPair::new_account();
     let accounts = [other.public_key(), account.public_key()];

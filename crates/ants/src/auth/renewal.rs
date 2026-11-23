@@ -6,7 +6,9 @@ use std::path::Path;
 
 use ants_daemon::config::registration::{GithubAccount, Grant};
 use ants_daemon::secrets::creds::{Finding, Kind as CredsKind};
-use ants_proto::{ADMIN_TAG, AssistantOf, Destination, DeviceId, DeviceKey, Permissions, REGISTERED_TAG, Role, UserId};
+use ants_proto::{
+    ADMIN_TAG, AssistantOf, Destination, DeviceId, DeviceKey, Permissions, REGISTERED_TAG, Role, UserId, WEB_TAG,
+};
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use serde_json::{Value, json};
 
@@ -33,8 +35,10 @@ pub struct Renewed {
 /// generated where they are used: a JWT with the same name, kind, members, device, encryption key and JetStream
 /// domain, permissions as this version of ants gives them (so an upgrade applies), and as long a lifetime as `current`
 /// had, if it had an expiry. A human's credentials without an encryption key bind `xkey`, generated on the device,
-/// when given; credentials of others, or with a key already, refuse one. Recorded in the registry as renewed from the earlier key ([`Issued::renewed_from`]), with a leaf node's
-/// members ([`crate::node::members`]), so a later `ants auth leaf` keeps them.
+/// when given; credentials of others, a web device's, or those with a key already, refuse one. A web device's stay a
+/// web device's ([`WEB_TAG`], [`Permissions::for_web`]). Recorded in the registry as renewed from the earlier key
+/// ([`Issued::renewed_from`]), with a leaf node's members ([`crate::node::members`]), so a later `ants auth leaf`
+/// keeps them.
 ///
 /// Refused for credentials of another account, expired or revoked ones, enrollment and leaf system credentials, and
 /// for a new key revoked or already issued to other credentials. Proving that the holder has the seed of `current` is
@@ -87,6 +91,12 @@ pub(super) fn renew_as(
         if finding.kind != CredsKind::Human {
             bail!("{} bind no encryption key, as only a human's do: {xkey} refused", finding.holder());
         }
+        if finding.web {
+            bail!(
+                "the credentials of {} are a web device's, which bind no encryption key: {xkey} refused",
+                claims.name
+            );
+        }
         if let Some(bound) = &finding.xkey {
             bail!("the credentials of {} bind the encryption key {bound} already: {xkey} refused", claims.name);
         }
@@ -117,6 +127,7 @@ pub(super) fn renew_as(
     let mut record = inherited(Issued::new(public_key, name, kind, exp)?, previous, registered);
     record.renewed_from = Some(claims.sub.clone());
     record.admin = renewed.admin;
+    record.web = renewed.web;
     if let CredsKind::Assistant { of } = &renewed.kind {
         record.assistant_of = Some(of.clone());
     }
@@ -149,8 +160,11 @@ pub(super) fn renewed_rights(
         CredsKind::Human => {
             let tags = finding.device.iter().map(DeviceId::tag).chain(xkey.map(DeviceKey::tag));
             let tags = tags.chain(registered.then(|| REGISTERED_TAG.to_owned()));
-            let tags: Vec<String> = tags.chain(finding.admin.then(|| ADMIN_TAG.to_owned())).collect();
-            (Permissions::for_user(&user()?, Role::Human), json!({ "tags": tags }))
+            let tags = tags.chain(finding.admin.then(|| ADMIN_TAG.to_owned()));
+            let tags: Vec<String> = tags.chain(finding.web.then(|| WEB_TAG.to_owned())).collect();
+            let permissions =
+                if finding.web { Permissions::for_web(&user()?) } else { Permissions::for_user(&user()?, Role::Human) };
+            (permissions, json!({ "tags": tags }))
         }
         CredsKind::Assistant { of } => {
             (Permissions::for_assistant(&user()?, of), json!({ "tags": [AssistantOf::tag(of)] }))

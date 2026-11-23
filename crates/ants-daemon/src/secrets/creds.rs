@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use ants_proto::{
     AssistantOf, ChannelId, DeviceId, DeviceKey, ENROLL_INBOX, JsDomain, Machine, PERMISSIONS_VERSION,
-    PermissionsVersion, UserId, WEBHOOKS_BUCKET, inbox_prefix, is_admin, subject, tagged_registered,
+    PermissionsVersion, UserId, WEBHOOKS_BUCKET, inbox_prefix, is_admin, is_web, subject, tagged_registered,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::BASE64URL_NOPAD;
@@ -127,6 +127,10 @@ pub struct Finding {
     /// Whether they are a human's carrying the admin role ([`ants_proto::ADMIN_TAG`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub admin: bool,
+    /// Whether they are a human's web device's ([`ants_proto::WEB_TAG`]), with the rights of
+    /// [`ants_proto::Permissions::for_web`] only.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub web: bool,
 }
 
 impl Finding {
@@ -162,6 +166,18 @@ impl Finding {
             (Some(of), _) => bail!("{name}'s credentials say it assists {of} without an assistant's permissions"),
             (None, _) => {}
         }
+        let web = is_web(tag_list());
+        if web {
+            // Web credentials write no entry of the humans but their own, by which they are told from an ant's.
+            let own_entry = name.parse::<UserId>().ok().map(|human| subject::human_entry(&human));
+            if kind != Kind::Ant || !own_entry.is_some_and(|entry| publish.contains(&entry)) {
+                bail!("{name}'s credentials say they are a web device's without a web device's permissions");
+            }
+            if is_admin(tag_list()) {
+                bail!("{name}'s credentials are a web device's carrying the admin role, which none may");
+            }
+            kind = Kind::Human;
+        }
         let device = DeviceId::from_tags(tag_list());
         if kind == Kind::Human && device.is_none() {
             bail!("a human's credentials without a device id");
@@ -178,6 +194,7 @@ impl Finding {
             xkey: DeviceKey::from_tags(tags.iter().map(String::as_str)),
             registered,
             admin,
+            web,
             name,
             key,
         })
@@ -206,6 +223,7 @@ impl Finding {
         match &self.kind {
             Kind::Ant => format!("ant {}", self.name),
             Kind::Human if self.admin => format!("human {} (admin)", self.name),
+            Kind::Human if self.web => format!("human {} (web device)", self.name),
             Kind::Human => format!("human {}", self.name),
             Kind::Assistant { of } => format!("ant {}, assistant of {of}", self.name),
             Kind::Webhook { .. } => format!("webhook {}", self.name),
@@ -229,6 +247,9 @@ impl Finding {
                 vec![format!("ants auth builtin {}{domain}", builtin.name())]
             }
             Kind::Ant => vec![format!("ants auth user {}{domain}", self.name)],
+            Kind::Human if self.web => {
+                vec![format!("ants auth user {} --human --web --public-key KEY{domain}", self.name)]
+            }
             Kind::Human => {
                 let admin = if self.admin { " --admin" } else { "" };
                 vec![format!("ants auth user {} --human{admin}{domain}", self.name)]
@@ -261,8 +282,8 @@ impl Finding {
     }
 
     /// Whether `other` are the same credentials as these, for another key or with other permissions: the same name,
-    /// kind (members in any order, the human of an assistant), device, admin role and JetStream domain, as renewing
-    /// keeps them.
+    /// kind (members in any order, the human of an assistant, a human's web device), device, admin role and JetStream
+    /// domain, as renewing keeps them.
     pub fn same_credentials(&self, other: &Finding) -> bool {
         fn sorted(kind: &Kind) -> Kind {
             let mut kind = kind.clone();
@@ -284,6 +305,7 @@ impl Finding {
             && sorted(&self.kind) == sorted(&other.kind)
             && self.device == other.device
             && self.admin == other.admin
+            && self.web == other.web
             && self.js_domain == other.js_domain
     }
 
@@ -929,6 +951,40 @@ mod tests {
         let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
         let tags = [PERMISSIONS_VERSION.tag(), ants_proto::REGISTERED_TAG.to_owned()];
         assert!(!Finding::from_claims(&claims("dev-a", &ant, &tags, None)).unwrap().registered, "only a human's");
+    }
+
+    #[test]
+    fn a_web_device_s_credentials_are_a_human_s_told_by_their_tag_and_rights() {
+        let web = Permissions::for_web(&p("alice"));
+        let device = DeviceId::generate();
+        let tags = [PERMISSIONS_VERSION.tag(), device.tag(), ants_proto::WEB_TAG.to_owned()];
+        let finding = Finding::from_claims(&claims("alice", &web, &tags, None)).unwrap();
+        assert_eq!(
+            (&finding.kind, finding.device, finding.web, finding.admin),
+            (&Kind::Human, Some(device), true, false)
+        );
+        assert_eq!(finding.holder(), "human alice (web device)");
+        assert_eq!(finding.renew(), ["ants auth user alice --human --web --public-key KEY"]);
+        assert!(serde_json::to_value(&finding).unwrap()["web"] == true);
+        let hub: ants_proto::JsDomain = "hub".parse().unwrap();
+        let in_domain = Permissions::for_web(&p("alice")).with_js_domain(Some(&hub));
+        let in_domain = Finding::from_claims(&claims("alice", &in_domain, &tags, None)).unwrap();
+        assert_eq!((in_domain.web, in_domain.js_domain.as_ref()), (true, Some(&hub)));
+        assert!(!finding.same_credentials(&in_domain));
+
+        let human = Permissions::for_user(&p("alice"), Role::Human);
+        let full = Finding::from_claims(&claims("alice", &human, &tags[..2], None)).unwrap();
+        assert!(!full.web && !full.same_credentials(&finding) && !finding.same_credentials(&full));
+        assert!(serde_json::to_value(&full).unwrap().get("web").is_none());
+        assert!(Finding::from_claims(&claims("alice", &human, &tags, None)).is_err(), "the tag with a human's rights");
+        let ant = Permissions::for_user(&p("alice"), Role::Ant);
+        assert!(Finding::from_claims(&claims("alice", &ant, &tags, None)).is_err(), "the tag with an ant's rights");
+        let untagged = Finding::from_claims(&claims("alice", &web, &tags[..2], None)).unwrap();
+        assert!(!untagged.web && untagged.kind != Kind::Human, "the rights without the tag are no human's");
+        let no_device = [tags[0].clone(), tags[2].clone()];
+        assert!(Finding::from_claims(&claims("alice", &web, &no_device, None)).is_err(), "no device");
+        let admin = [tags[0].clone(), tags[1].clone(), tags[2].clone(), ants_proto::ADMIN_TAG.to_owned()];
+        assert!(Finding::from_claims(&claims("alice", &web, &admin, None)).is_err(), "never the admin role");
     }
 
     #[test]

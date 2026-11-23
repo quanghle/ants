@@ -1,5 +1,5 @@
-//! Tests of device registration: GitHub users under the policy, human decisions outside it, renewals while the grant
-//! holds, and the sweep revoking members who left.
+//! Tests of device registration: GitHub users under the policy, human decisions outside it, web devices, renewals
+//! while the grant holds, and the sweep revoking members who left.
 
 use std::future::pending;
 use std::path::PathBuf;
@@ -115,6 +115,20 @@ impl Device {
         request.xkey = Some(XKey::new().public_key().parse::<DeviceKey>().unwrap());
         request.signature = BASE64URL_NOPAD.encode(&key.sign(&request.signed()).unwrap());
         Self { key, reply, request }
+    }
+
+    /// As [`Device::new`], asking for a web device, which names no encryption key.
+    fn web(name: &str) -> Self {
+        let mut device = Self::new(name);
+        device.request.web = true;
+        device.request.xkey = None;
+        device.request.label = Some("browser".to_owned());
+        device.sign();
+        device
+    }
+
+    fn sign(&mut self) {
+        self.request.signature = BASE64URL_NOPAD.encode(&self.key.sign(&self.request.signed()).unwrap());
     }
 
     /// Ask every [`REPEAT`] until an answer settles the request or `within` passes: the answers opened.
@@ -376,6 +390,74 @@ async fn the_signer_renews_a_registered_device_while_its_grant_holds_and_revokes
         let offboarded = offboarded(&team);
         assert_eq!(offboarded.len(), 1, "{offboarded:?}");
         assert_eq!((offboarded[0].name.as_str(), offboarded[0].by), ("alice", Offboarder::Renewal));
+    };
+    registering(&server, &team, &config, asking).await;
+}
+
+#[tokio::test]
+async fn a_web_device_registers_with_web_credentials_and_keeps_them_through_renewal() {
+    let Some(server) = Server::start() else { return };
+    let team = server.dir().join("auth");
+    let still = Arc::new(AtomicBool::new(true));
+    let url = github_checking(&[(1, "octocat", "o@example.com", true); 3], still).await;
+    let token = server.dir().join("github-token");
+    std::fs::write(&token, "signer").unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&token, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let config = server.dir().join("config.toml");
+    std::fs::write(&config, format!("{}web_ttl = \"2d\"\ntoken_file = \"github-token\"\n", policy(&url))).unwrap();
+    let client = bootstrap(&server, &team).await;
+    const WEB_TTL: u64 = 2 * 86_400;
+    let lifetime = |jwt: &str| auth::verified(jwt).unwrap().exp.unwrap() - auth::now().unwrap();
+    let web_rights = ants_proto::Permissions::for_web(&p("alice"));
+    let rights = |jwt: &str| {
+        let nats = auth::verified_body(jwt).unwrap().1["nats"].take();
+        let list = |allow: &serde_json::Value| serde_json::from_value::<Vec<String>>(allow.clone()).unwrap();
+        ants_proto::Permissions { publish: list(&nats["pub"]["allow"]), subscribe: list(&nats["sub"]["allow"]) }
+    };
+
+    let asking = async {
+        let mut binding = Device::web("alice");
+        binding.request.xkey = Some(XKey::new().public_key().parse::<DeviceKey>().unwrap());
+        binding.sign();
+        let reason = refusal(&binding.ask(&client, WAIT).await);
+        assert!(reason.contains("a web device binds no encryption key"), "{reason}");
+        assert!(revoke::issued(&team).unwrap().iter().all(|i| i.name != "alice"), "nothing signed");
+
+        let alice = Device::web("alice");
+        let answers = alice.ask(&client, WAIT).await;
+        let path = creds(&server, &alice, &answers);
+        let (jwt, _) = auth::read_creds(&path).unwrap();
+        let finding = Finding::from_jwt(&jwt).unwrap();
+        assert_eq!((&finding.kind, finding.web, finding.admin), (&CredsKind::Human, true, false));
+        assert_eq!((finding.xkey.as_ref(), finding.registered), (None, true));
+        assert_eq!(rights(&jwt), web_rights);
+        let ttl = lifetime(&jwt);
+        assert!(ttl > WEB_TTL - 60 && ttl <= WEB_TTL, "the web lifetime, not the 7 d of other devices: {ttl}");
+        let record = revoke::issued(&team).unwrap().pop().unwrap();
+        assert_eq!((record.web, record.admin, record.label.as_deref()), (true, false, Some("browser")));
+        assert_eq!(record.grant, Some(Grant::Org("acme".into())));
+
+        let (key, renewed) = renewing(&server, &path).await;
+        let renewed = renewed.unwrap();
+        let again = Finding::from_jwt(&renewed).unwrap();
+        assert_eq!((again.key.as_str(), again.web, again.registered), (key.public_key().as_str(), true, true));
+        assert!(finding.same_credentials(&again) && again.xkey.is_none() && !again.admin);
+        assert_eq!(rights(&renewed), web_rights);
+        let ttl = lifetime(&renewed);
+        assert!(ttl > WEB_TTL - 60 && ttl <= WEB_TTL, "{ttl}");
+        let record = revoke::issued(&team).unwrap().pop().unwrap();
+        assert_eq!((record.web, record.renewed_from), (true, Some(alice.key.public_key())));
+        let devices = revoke::devices(&team, "alice").unwrap();
+        assert_eq!(devices.iter().map(|d| (d.web, d.key.clone())).collect::<Vec<_>>(), [(true, key.public_key())]);
+
+        let laptop = Device::new("alice");
+        let answers = laptop.ask(&client, WAIT).await;
+        let Some(LoginAnswer::Signed { jwt }) = answers.last() else { panic!("{answers:?}") };
+        let full = Finding::from_jwt(jwt).unwrap();
+        assert!(!full.web && full.xkey.is_some(), "another device of the human is no web device");
+        let ttl = lifetime(jwt);
+        assert!(ttl > 7 * 86_400 - 60, "{ttl}");
     };
     registering(&server, &team, &config, asking).await;
 }

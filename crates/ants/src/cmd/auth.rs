@@ -29,6 +29,7 @@ pub(crate) enum AuthCommand {
         dir: Option<PathBuf>,
     },
     /// Issue credentials for an ant, allowing only the subjects of its role, with --human for a human, a CLI user,
+    /// with --human --web for a human's web device, a page of the web client, with only the rights the page uses,
     /// with --webhook for a webhook of `ants webhook serve`, with --observer for a hook observing the team's
     /// events, or with --assistant-of for an ant assisting a human. `human` always gets a human's. Give the hub's
     /// --js-domain, if it has one, so they work with it.
@@ -271,6 +272,11 @@ pub(crate) struct UserArgs {
     /// the team's humans, on its first CLI connection.
     #[arg(long, conflicts_with = "webhook")]
     human: bool,
+    /// With --human (or for `human`): issue web credentials, for a device that is a page of the web client: only
+    /// the rights the page's views use, the same for every human, never the admin role and no encryption key. With
+    /// --public-key, the key the page shows.
+    #[arg(long, conflicts_with_all = ["observer", "webhook", "admin", "xkey", "store_key"])]
+    web: bool,
     /// Issue an observer's read-only credentials, for hooks (`ants hook run`, docs/hooks.md): it reads approval
     /// requests and decisions, dead letters, every ant's status updates (escalations among them) and the colony, and
     /// publishes nothing.
@@ -299,7 +305,8 @@ pub(crate) struct UserArgs {
     public_key: Option<String>,
     /// With --public-key, for a human: the public encryption key (X...) generated on the device beside its NKey,
     /// for the JWT to bind. Without it, credentials signed for a key generated elsewhere bind none until
-    /// `ants renew` adds one; generated credentials always bind a new one.
+    /// `ants renew` adds one; generated credentials always bind a new one. Refused with --web: a web device
+    /// binds none.
     #[arg(long, value_name = "XKEY", requires = "public_key")]
     xkey: Option<DeviceKey>,
     /// With --human (or for `human`): a label for the device the credentials are for, such as "Quang's laptop",
@@ -326,7 +333,7 @@ pub(crate) struct UserArgs {
     #[arg(
         long,
         value_name = "HUMAN",
-        conflicts_with_all = ["human", "observer", "webhook", "label", "github", "admin", "xkey"]
+        conflicts_with_all = ["human", "web", "observer", "webhook", "label", "github", "admin", "xkey"]
     )]
     assistant_of: Option<UserId>,
     /// With --github: the signer's config file, whose [registration] table names the GitHub API and the token to
@@ -487,6 +494,7 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
     let UserArgs {
         user,
         human,
+        web,
         observer,
         webhook,
         to,
@@ -508,16 +516,20 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
     if admin && auth::role(&user, human) != ants_proto::Role::Human {
         bail!("only a human's credentials carry the admin role: add --human");
     }
+    if web && auth::role(&user, human) != ants_proto::Role::Human {
+        bail!("only a human's device is a web device: add --human");
+    }
     if let Some(human) = &assistant_of {
         auth::check_assistant(&dir, &user, human)?;
     }
-    let kind = Kind { human, observer, webhook, assistant_of: assistant_of.as_ref() };
+    let kind = Kind { human, web, observer, webhook, assistant_of: assistant_of.as_ref() };
     let (kind, permissions) = user_rights(&user, kind, to, channels, domain)?;
     let github = match github {
         Some(login) => Some(github_binding(&dir, &user, &login, config).await?),
         None => None,
     };
-    let new = auth::NewDevice { label: label.as_deref(), github, admin, assistant_of, ..auth::NewDevice::default() };
+    let new =
+        auth::NewDevice { label: label.as_deref(), github, admin, web, assistant_of, ..auth::NewDevice::default() };
     if store_key {
         let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
         let key = nkeys::KeyPair::new_user();
@@ -599,6 +611,7 @@ fn move_stores(store_dir: &Path, server_conf: &Path, replace: bool) -> Result<()
 /// The kind of credentials `ants auth user` was asked for, by its flags.
 struct Kind<'a> {
     human: bool,
+    web: bool,
     observer: bool,
     webhook: bool,
     assistant_of: Option<&'a UserId>,
@@ -612,7 +625,7 @@ fn user_rights(
     channels: Vec<ChannelId>,
     domain: Option<&JsDomain>,
 ) -> Result<(revoke::Kind, Permissions)> {
-    let Kind { human, observer, webhook, assistant_of } = asked;
+    let Kind { human, web, observer, webhook, assistant_of } = asked;
     if let Some(of) = assistant_of {
         return Ok((revoke::Kind::Assistant, Permissions::for_assistant(user, of).with_js_domain(domain)));
     }
@@ -636,6 +649,7 @@ fn user_rights(
             let destinations: Vec<Destination> = to.chain(channels.into_iter().map(Destination::Channel)).collect();
             Permissions::for_webhook(user, &destinations)
         }
+        _ if web => Permissions::for_web(user),
         _ => Permissions::for_user(user, auth::role(user, human)),
     }
     .with_js_domain(domain);
@@ -935,6 +949,62 @@ mod tests {
         assert_eq!(retired_ants(&team, &revoked).unwrap(), ["dev-c".parse::<UserId>().unwrap()]);
         let revoked = revoke::revoke(&team, Some("alice"), &[]).unwrap();
         assert!(retired_ants(&team, &revoked).unwrap().is_empty(), "a human is no ant");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[derive(clap::Parser)]
+    struct UserCli {
+        #[command(flatten)]
+        args: UserArgs,
+    }
+
+    /// `ants auth user NAME --human --web` signs web credentials for the key a page shows, and is refused with
+    /// --admin, with an encryption key and for any other than a human.
+    #[tokio::test]
+    async fn auth_user_web_issues_a_human_s_web_device_refused_with_admin_or_an_encryption_key() {
+        use clap::Parser as _;
+        let dir = ants_test_support::scratch_dir("auth-user-web");
+        let team = dir.join("auth");
+        auth::init(&team).unwrap();
+        let conn = Connection { nats: "nats://127.0.0.1:1", creds: None, js_domain: None };
+        let key = nkeys::KeyPair::new_user().public_key();
+        let xkey = nkeys::XKey::new().public_key();
+        let parse = |name: &str, args: &[&str]| {
+            let fixed = ["user", name, "--dir", team.to_str().unwrap()];
+            UserCli::try_parse_from(fixed.into_iter().chain(args.iter().copied())).map(|cli| cli.args)
+        };
+        for refused in [
+            &["--human", "--web", "--admin"][..],
+            &["--human", "--web", "--public-key", &key, "--xkey", &xkey],
+            &["--human", "--web", "--store-key"],
+            &["--web", "--webhook", "--to", "dev-a"],
+            &["--web", "--observer"],
+            &["--web", "--assistant-of", "bob"],
+        ] {
+            assert!(parse("alice", refused).is_err(), "{refused:?}");
+        }
+        let err = issue_user(parse("alice", &["--web"]).unwrap(), &conn).await.unwrap_err().to_string();
+        assert!(err.contains("only a human's device is a web device"), "{err}");
+        assert!(revoke::issued(&team).unwrap().is_empty());
+
+        let out = dir.join("alice.jwt");
+        let signing = ["--human", "--web", "--label", "browser", "--public-key", &key, "--out", out.to_str().unwrap()];
+        issue_user(parse("alice", &signing).unwrap(), &conn).await.unwrap();
+        let jwt = std::fs::read_to_string(&out).unwrap();
+        let finding = ants_daemon::secrets::creds::Finding::from_jwt(jwt.trim()).unwrap();
+        assert_eq!((finding.key.as_str(), finding.web, finding.admin, finding.xkey), (key.as_str(), true, false, None));
+        assert_eq!(finding.expires_at, None, "as other credentials `ants auth user` issues");
+        let claims = ants_proto::verified_jwt(&jwt).unwrap().1;
+        let may = |subject: &str| crate::people::humans::may_publish(&claims, subject);
+        assert!(may("ants.inbox.*.alice") && !may("$JS.API.STREAM.CREATE.ANTS"));
+        // The default human needs no --human, and generated credentials hold no encryption key.
+        issue_user(parse("human", &["--web"]).unwrap(), &conn).await.unwrap();
+        let text = std::fs::read_to_string(team.join("human.creds")).unwrap();
+        assert!(ants_daemon::secrets::creds::Finding::from_creds(&text).unwrap().web);
+        assert!(ants_daemon::secrets::creds::xkey_of(&text).is_none());
+        let devices = revoke::devices(&team, "alice").unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!((devices[0].web, devices[0].label.as_deref()), (true, Some("browser")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

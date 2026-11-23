@@ -1,0 +1,13 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  "ants-perms:2",
+  "ants-device:019a7d2a-0000-7000-8000-000000000001",
+  "ants-xkey:XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB",
+  "ants-registered",
+  "ants-admin",
+  "ants-web",
+  "ants-assistant-of:alice"
+]
