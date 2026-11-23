@@ -7,7 +7,7 @@ use std::fmt::Display;
 use std::time::Duration;
 
 use ants_proto::{BuiltinAnt, Envelope, Role, TIMELINE_EVERY, UserId, subject};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use futures::stream::Stream;
 
@@ -92,6 +92,10 @@ const PRUNE_WORKTREES_EVERY: Duration = Duration::from_hours(1);
 const IN_HAND_PER_HARNESS: usize = 2;
 /// How long a daemon stopping waits for the ant's sense to note its growth ([`growth`]).
 const GROWN_WAIT: Duration = Duration::from_secs(10);
+/// The first wait before serving again an ant whose serving failed on a passing error ([`run_until`]), doubled on each
+/// failure in a row up to [`RETRY_AT_MOST`].
+const RETRY_FIRST: Duration = Duration::from_secs(1);
+const RETRY_AT_MOST: Duration = Duration::from_secs(60);
 
 /// A few progress periods, so one late or lost progress ack does not redeliver a message still in hand.
 const fn ack_wait(progress_every: Duration) -> Duration {
@@ -118,7 +122,10 @@ impl Stop {
 }
 
 /// [`run`], also stopping on `stop`'s request, restarting the ant's harnesses on the admin orders `restarts` passes on,
-/// and serving the ant with its provider among `providers`, those of the process.
+/// and serving the ant with its provider among `providers`, those of the process. Serving that fails, as when the
+/// `ANTS` stream is at its consumer limit or the server stumbles, is tried again, after a wait doubling from
+/// 1 s up to 60 s while it keeps failing; only an error of the ant's configuration
+/// ([`Misconfigured`]) ends it.
 pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts, providers: &Providers) -> Result<()> {
     let _serving = crate::monitoring::metrics::ant(&config.ant).serving();
     let _served = restarts.serve(&config.ant);
@@ -127,12 +134,38 @@ pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts, provide
         tracing::warn!(ant = %config.ant, fix = harness.gated_fix(), "{detail}");
     }
     let config = settle_worktrees(config).await;
+    let mut retry = RETRY_FIRST;
     loop {
-        match Box::pin(serve(&config, stop, restarts, providers)).await? {
-            Served::Stopped => return Ok(()),
-            Served::HandedOver => tracing::info!("another daemon serves the ant; waiting for it to stop"),
-            Served::Moved => tracing::info!("the ant moved to another bus; waiting for `ants ant unseal`"),
+        let started = tokio::time::Instant::now();
+        match Box::pin(serve(&config, stop, restarts, providers)).await {
+            Ok(Served::Stopped) => return Ok(()),
+            Ok(Served::HandedOver) => tracing::info!("another daemon serves the ant; waiting for it to stop"),
+            Ok(Served::Moved) => tracing::info!("the ant moved to another bus; waiting for `ants ant unseal`"),
+            Err(e) if e.downcast_ref::<Misconfigured>().is_some() => return Err(e),
+            Err(e) => {
+                if started.elapsed() > RETRY_AT_MOST {
+                    retry = RETRY_FIRST;
+                }
+                let error = format!("{e:#}");
+                tracing::warn!(error, retry_in = ?retry, "the ant could not be served; trying again");
+                tokio::select! {
+                    () = tokio::time::sleep(retry) => {}
+                    () = stopped(stop) => return Ok(()),
+                }
+                retry = retry.saturating_mul(2).min(RETRY_AT_MOST);
+            }
         }
+    }
+}
+
+/// An error of the ant's configuration, which serving it again would not mend: it stops serving the ant, until a
+/// reload lists it again.
+#[derive(Debug)]
+pub struct Misconfigured(pub &'static str);
+
+impl Display for Misconfigured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
     }
 }
 
@@ -150,7 +183,7 @@ enum Served {
 /// retirement marked while served ([`events::mark_retired`]) deletes the ant's channel and done consumers
 /// ([`bus::forget_retired`]) before it leaves the colony, which the retirement waits for to revoke its credentials.
 async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Providers) -> Result<Served> {
-    let allow = Allowlist::parse(&config.policy.allow)?;
+    let allow = Allowlist::parse(&config.policy.allow).context(Misconfigured("the ant's `allow` rules"))?;
     // A mark left by an earlier retirement the ant was served again after, which a provider taking no events keeps.
     let retired_before = events::retirement(&config.storage.home).await;
     let Some((client, js)) = connect(&config.connection, &config.ant, stop).await? else {
