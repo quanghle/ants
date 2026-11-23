@@ -23,6 +23,7 @@ fn pending(escalation: Escalation, to: &[&str], renewed: bool) -> Pending {
         summary: String::new(),
         channel: None,
         question: None,
+        sent_as: None,
     }
 }
 
@@ -44,10 +45,14 @@ fn step_from(ant: &str, origin: Option<&str>, carried: Option<&Escalation>, pend
     next_step(fresh, None, carried, pending)
 }
 
+fn climbs(from: Escalation) -> Step {
+    Step::Climb(Box::new(from))
+}
+
 #[test]
 fn a_first_escalation_starts_at_the_stuck_ant() {
     let new = Escalation::new(p("dev-a"), t(), EscalationReason::Cap);
-    assert_eq!(step("dev-a", None, None), Step::Climb(new));
+    assert_eq!(step("dev-a", None, None), climbs(new));
 }
 
 #[test]
@@ -55,11 +60,15 @@ fn one_answered_by_its_leader_climbs_and_one_waiting_goes_again() {
     let start = Escalation::new(p("dev-a"), t(), EscalationReason::TurnBudget);
     let one = level(&start, &["lead", "dev-b"]);
     let waiting = pending(one.clone(), &["lead", "dev-b"], false);
-    assert_eq!(step("dev-a", None, Some(&waiting)), Step::Again(waiting.clone()));
+    assert_eq!(step("dev-a", None, Some(&waiting)), Step::Again(Box::new(waiting.clone())));
     let climb = step("dev-a", Some(&one), Some(&pending(one.clone(), &["lead"], true)));
-    assert_eq!(climb, Step::Climb(Escalation { reason: EscalationReason::Cap, ..one.clone() }));
+    assert_eq!(climb, climbs(Escalation { reason: EscalationReason::Cap, ..one.clone() }));
     let owner = pending(one, &[], false);
-    assert_eq!(step("dev-a", None, Some(&owner)), Step::Again(owner.clone()), "a human has it until answering");
+    assert_eq!(
+        step("dev-a", None, Some(&owner)),
+        Step::Again(Box::new(owner.clone())),
+        "a human has it until answering"
+    );
 }
 
 #[test]
@@ -67,14 +76,11 @@ fn a_member_stuck_on_an_escalation_climbs_from_it() {
     let start = Escalation::new(p("dev-a"), t(), EscalationReason::TurnBudget);
     let one = level(&start, &["lead", "dev-b"]);
     let expected = Escalation { reason: EscalationReason::Cap, ..one.clone() };
-    assert_eq!(step("lead", Some(&one), None), Step::Climb(expected.clone()));
-    assert_eq!(step("dev-b", Some(&one), None), Step::Climb(expected));
+    assert_eq!(step("lead", Some(&one), None), climbs(expected.clone()));
+    assert_eq!(step("dev-b", Some(&one), None), climbs(expected));
     let two = level(&one, &["boss"]);
     let lower = pending(one.clone(), &["lead"], false);
-    assert_eq!(
-        step("dev-a", Some(&two), Some(&lower)),
-        Step::Climb(Escalation { reason: EscalationReason::Cap, ..two })
-    );
+    assert_eq!(step("dev-a", Some(&two), Some(&lower)), climbs(Escalation { reason: EscalationReason::Cap, ..two }));
     let other: ThreadId = "t2".parse().unwrap();
     let elsewhere = Escalation { thread_id: other, ..one };
     assert_eq!(step("lead", Some(&elsewhere), None), step("lead", None, None), "another thread's is no record");
@@ -84,22 +90,22 @@ fn a_member_stuck_on_an_escalation_climbs_from_it() {
 fn a_carried_escalation_a_human_ended_starts_afresh() {
     let start = Escalation::new(p("dev-a"), t(), EscalationReason::TurnBudget);
     let one = level(&start, &["lead"]);
-    assert_eq!(step("dev-a", Some(&one), None), Step::Climb(Escalation::new(p("dev-a"), t(), EscalationReason::Cap)));
+    assert_eq!(step("dev-a", Some(&one), None), climbs(Escalation::new(p("dev-a"), t(), EscalationReason::Cap)));
 }
 
 #[test]
 fn on_a_thread_another_ant_created_a_fresh_escalation_starts_at_the_creator() {
     let from_lead = Escalation::new_from(p("dev-a"), t(), EscalationReason::Cap, Some(&p("lead")));
-    assert_eq!(step_from("dev-a", Some("lead"), None, None), Step::Climb(from_lead.clone()));
+    assert_eq!(step_from("dev-a", Some("lead"), None, None), climbs(from_lead.clone()));
     let own = Escalation::new(p("lead"), t(), EscalationReason::Cap);
-    assert_eq!(step_from("lead", Some("lead"), None, None), Step::Climb(own), "the creator stuck on its own");
+    assert_eq!(step_from("lead", Some("lead"), None, None), climbs(own), "the creator stuck on its own");
 
     // Climbing on, and starting at the creator again once a human ended one.
     let one = level(&from_lead, &["boss"]);
     assert_eq!(members_at(&from_lead), [p("lead")]);
     let climb = step_from("boss", Some("lead"), Some(&one), None);
-    assert_eq!(climb, Step::Climb(Escalation { reason: EscalationReason::Cap, ..one.clone() }));
-    assert_eq!(step_from("dev-a", Some("lead"), Some(&one), None), Step::Climb(from_lead.clone()));
+    assert_eq!(climb, climbs(Escalation { reason: EscalationReason::Cap, ..one.clone() }));
+    assert_eq!(step_from("dev-a", Some("lead"), Some(&one), None), climbs(from_lead.clone()));
 
     let text = owner_text(&from_lead, &OwnerBecause::NoChain).unwrap();
     assert_eq!(text, "[ants] The escalation of dev-a starts at lead, which created thread t1 and has no escalate_to.");
@@ -214,6 +220,71 @@ async fn a_snooze_holds_the_reminder_back_and_a_read_escalation_ends_them() {
     assert_eq!(state.lock().unwrap().1, [vec![1], vec![1], vec![1, 2]], "checked against what reached alice");
     let ended = escalator.ledger.reset(&t()).await.unwrap();
     assert_eq!(ended.reached, Some(p("alice")), "still telling alice of another human's answer");
+}
+
+/// A stuck ant's escalator up `chain`, with an empty colony, and what it sends under which ids.
+/// What an escalator sent, under which message ids.
+type Recorded = Arc<std::sync::Mutex<Vec<(Envelope, String)>>>;
+
+fn recording(chain: &[&str]) -> (Escalator, Recorded) {
+    let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let into = sent.clone();
+    let send: Sender = Arc::new(move |envelope, id| {
+        into.lock().unwrap().push((envelope, id));
+        Box::pin(async { Ok(None) })
+    });
+    let colony: Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+    let humans = Registry::with(UserId::human(), &["alice"]);
+    let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::limits::caps::Caps::default()));
+    let chain = Chain { escalate_to: chain.iter().map(|s| p(s)).collect(), after: None, ..Default::default() };
+    (Escalator::new(p("dev-a"), chain, colony, humans, ledger, send), sent)
+}
+
+/// dev-a stuck on thread t1 for `reason`, on the message escalated under `id`.
+fn stuck_on(reason: EscalationReason, id: &str) -> Stuck {
+    let notice = Envelope::on_thread(t(), p("dev-a"), p("alice"), "Turn budget spent").with_owner(Some(p("alice")));
+    Stuck::new(reason, notice, id.to_owned(), None)
+}
+
+#[tokio::test]
+async fn a_thread_out_of_turns_escalates_once_per_level_whatever_wakes_the_ant() {
+    for chain in [&[][..], &["lead"]] {
+        let (escalator, sent) = recording(chain);
+        let first = escalator.escalate(stuck_on(EscalationReason::TurnBudget, "e-1")).await.unwrap();
+        let sends = sent.lock().unwrap().len();
+        assert!(sends >= 1, "{chain:?}");
+        // Every later message the ant is woken by, out of turns or allowance, finds the escalation waiting.
+        let reasons = [EscalationReason::TurnBudget, EscalationReason::Cap, EscalationReason::Notes];
+        for (i, reason) in reasons.into_iter().cycle().take(6).enumerate() {
+            let again = escalator.escalate(stuck_on(reason, &format!("e-{}", i + 2))).await.unwrap();
+            assert_eq!(again, first, "{chain:?}");
+        }
+        assert_eq!(sent.lock().unwrap().len(), sends, "nothing sent again up {chain:?}");
+        // A retry of the first, as after a failed send, sends it again under the same ids.
+        escalator.escalate(stuck_on(EscalationReason::TurnBudget, "e-1")).await.unwrap();
+        {
+            let sent = sent.lock().unwrap();
+            assert_eq!(sent.len(), 2 * sends, "{chain:?}");
+            assert_eq!(sent[sends].1, sent[0].1, "{chain:?}");
+        }
+        // Stuck for another reason, the ant still sends it.
+        escalator.escalate(stuck_on(EscalationReason::ContextWindow, "e-9")).await.unwrap();
+        assert_eq!(sent.lock().unwrap().len(), 3 * sends, "{chain:?}");
+    }
+
+    // Once the leader answered, the next one climbs, to alice, and the ones after wait for her.
+    let (escalator, sent) = recording(&["lead"]);
+    escalator.escalate(stuck_on(EscalationReason::TurnBudget, "e-1")).await.unwrap();
+    let carried = escalator.ledger.pending(&t()).await.unwrap().unwrap().escalation;
+    let mut answer = Envelope::on_thread(t(), p("lead"), p("dev-a"), "go on").with_escalation(Some(carried));
+    assert!(escalator.arrived(&mut answer, Role::Ant).await.unwrap());
+    sent.lock().unwrap().clear();
+    for id in ["e-2", "e-3", "e-4"] {
+        let up = escalator.escalate(stuck_on(EscalationReason::TurnBudget, id)).await.unwrap();
+        assert_eq!(up, Escalated::Owner(p("alice")));
+    }
+    let sent = sent.lock().unwrap();
+    assert_eq!(sent.iter().map(|(e, _)| &e.to).collect::<Vec<_>>(), [&p("alice")], "{sent:?}");
 }
 
 mod assistant_first {

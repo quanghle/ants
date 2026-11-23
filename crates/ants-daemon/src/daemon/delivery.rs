@@ -4,7 +4,7 @@
 
 use ants_proto::{
     Attachment, AttachmentHandle, AttachmentScope, ChannelPost, Envelope, Error as ProtoError, EscalationReason,
-    NoReplyWhy, NotesPost, Role, State, ThreadId, Timeline, TimelineEntry, UserId, Uuid,
+    NoReplyWhy, NotesPost, Role, State, ThreadId, Timeline, TimelineEntry, UserId, Uuid, subject,
 };
 use anyhow::Result;
 
@@ -16,6 +16,10 @@ use crate::monitoring::status;
 use crate::stream::notes;
 
 use super::{Handling, Inbox, Incoming};
+
+/// Reads of a channel thread a reply spending a turn makes, each after another post reached the channel first, before
+/// it is stored with the turns last read.
+const SPEND_TRIES: usize = 16;
 
 impl Inbox<'_> {
     /// Whether `incoming` is another ant's reply to a message or post the ant sent, which is prompted but not answered
@@ -195,15 +199,65 @@ impl Inbox<'_> {
         match post.reply(self.ant.clone(), text, &later, &humans) {
             Ok(post) => Ok(Some(post)),
             Err(ProtoError::BudgetExhausted(_)) => {
-                // The answer is not posted: the escalation carries it.
-                let why = "Turn budget spent before the answer was posted";
-                self.escalate(incoming, why, EscalationReason::TurnBudget, seq, Some(text)).await?;
-                bus::double_ack(self.client, msg).await?;
-                self.attempts.forget(seq).await;
+                self.unposted(Handling { incoming, msg, seq }, text).await?;
                 Ok(None)
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Escalate the thread of `incoming`, out of turns before its answer `text` was posted, with the answer, and be
+    /// done with the message.
+    async fn unposted(&self, Handling { incoming, msg, seq }: Handling<'_>, text: &str) -> Result<()> {
+        let why = "Turn budget spent before the answer was posted";
+        self.escalate(incoming, why, EscalationReason::TurnBudget, seq, Some(text)).await?;
+        bus::double_ack(self.client, msg).await?;
+        self.attempts.forget(seq).await;
+        Ok(())
+    }
+
+    /// Store `post`, the answer to the channel post `answered` of `h`, spending one of the thread's turns: the thread
+    /// is read again and the post stored with what is left only while no other post reached the channel since, else
+    /// read again, so members answering at once each spend a turn of their own. `None` when the turns ran out first,
+    /// the escalation carrying the answer, and the message is done with. One stored already, by an earlier attempt, is
+    /// not stored again.
+    async fn post_spending(
+        &self,
+        h @ Handling { incoming, seq, .. }: Handling<'_>,
+        answered: &ChannelPost,
+        mut post: ChannelPost,
+    ) -> Result<Option<ChannelPost>> {
+        let thread = &incoming.envelope.thread_id;
+        let id = reply_id(self.ant, &incoming.envelope);
+        let filter = subject::chan_room(&answered.channel);
+        for _ in 0..SPEND_TRIES {
+            let humans = self.humans.humans();
+            let read = match self.threads.context(answered, seq, Earlier::Omitted, &humans).await {
+                Ok(read) => read,
+                Err(e) => {
+                    tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns; posting");
+                    break;
+                }
+            };
+            if read.later.iter().any(|later| later.id == post.id) {
+                return Ok(Some(post));
+            }
+            post = match post.clone().spend(answered.turns_left(&read.later, &humans)) {
+                Ok(post) => post,
+                Err(ProtoError::BudgetExhausted(_)) => {
+                    self.unposted(h, &post.text).await?;
+                    return Ok(None);
+                }
+                Err(e) => return Err(e.into()),
+            };
+            match bus::store_expecting(self.js, post.subject(), &post, &id, &filter, read.last_seq).await? {
+                bus::Expected::Stored(_) => return Ok(Some(post)),
+                bus::Expected::Moved => {}
+            }
+        }
+        tracing::warn!(%thread, "the channel kept changing while posting; posting with the turns last read");
+        bus::store(self.js, post.subject(), &post, &id).await?;
+        Ok(Some(post))
     }
 
     /// The post of `text` to the notes of the thread of `incoming`, with `title` and the files the session attached:
@@ -267,13 +321,25 @@ impl Inbox<'_> {
     /// post it also notes that the posts on its thread up to it were shown, and of an answer to a review an ant asked,
     /// the findings it gives and what its thread spent in all, by the ledger, in the ant's sense
     /// ([`crate::sense::Sense::review_given`]).
-    pub(super) async fn deliver(&self, Handling { incoming, msg, seq }: Handling<'_>, reply: &Reply) -> Result<()> {
+    pub(super) async fn deliver(&self, h @ Handling { incoming, msg, seq }: Handling<'_>, reply: &Reply) -> Result<()> {
         let request = &incoming.envelope;
         // Store the reply before acking: a crash in between redelivers rather than loses the message. A post to thread
-        // notes is in the notes already.
-        if !matches!(reply, Reply::Notes(_)) {
-            bus::store(self.js, reply.subject(), reply, &reply_id(self.ant, request)).await?;
-        }
+        // notes is in the notes already; an answer to a channel post spends a turn of its thread as it is stored.
+        let spent;
+        let reply = match (reply, &incoming.post) {
+            (Reply::Notes(_), _) => reply,
+            (Reply::Post(post), Some(posted)) => {
+                // Boxed: rereading the thread would grow the future of every turn delivering a reply.
+                let spending = Box::pin(self.post_spending(h, &posted.post, post.clone()));
+                let Some(post) = spending.await? else { return Ok(()) };
+                spent = Reply::Post(post);
+                &spent
+            }
+            _ => {
+                bus::store(self.js, reply.subject(), reply, &reply_id(self.ant, request)).await?;
+                reply
+            }
+        };
         // After the store, so that a redelivery, sending the stored reply again, notes the answer it holds.
         if let Reply::Message(answer) = reply
             && answer.notice.is_none()

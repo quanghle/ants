@@ -250,6 +250,11 @@ pub struct Pending {
     /// goes on ([`ants_proto::EscalationReason::Question`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<Box<ants_proto::Questions>>,
+    /// The message id the escalation last went out under ([`crate::escalation::Stuck::id`]), if it went out at this
+    /// level: the stuck ant escalating the thread again for want of turns or allowance, under another id, sends
+    /// nothing more until the escalation is answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_as: Option<String>,
 }
 
 impl Pending {
@@ -590,6 +595,8 @@ impl Ledger {
         self.update(thread, |spent| match &mut spent.escalation {
             Some(p) if escalation.level > p.escalation.level => {
                 (p.escalation, p.to, p.renewed_by, p.deadline) = (escalation.clone(), to, None, deadline);
+                // A member sent this level, not the stuck ant: the ant's next stuck message sends it once.
+                p.sent_as = None;
                 (true, true)
             }
             _ => (false, false),
@@ -1071,6 +1078,7 @@ mod tests {
             summary,
             channel: None,
             question: None,
+            sent_as: None,
         }
     }
 

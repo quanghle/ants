@@ -19,8 +19,6 @@ use crate::stream::reading::{self, Reading};
 
 /// Reads of busy notes before [`spend`] gives up.
 const SPEND_TRIES: usize = 5;
-/// Header naming the subjects `Nats-Expected-Last-Subject-Sequence` applies to.
-const EXPECTED_LAST_SUBJECT: &str = "Nats-Expected-Last-Subject-Sequence-Subject";
 
 /// The notes of one thread: its posts, oldest first.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -112,7 +110,7 @@ pub async fn publish(js: &jetstream::Context, post: &NotesPost, last_seq: Option
     let message = jetstream::message::PublishMessage::build()
         .payload(serde_json::to_vec(post)?.into())
         .expected_last_subject_sequence(seq)
-        .header(EXPECTED_LAST_SUBJECT, subject::notes_of(&post.thread_id).as_str());
+        .header(bus::EXPECTED_LAST_SUBJECT, subject::notes_of(&post.thread_id).as_str());
     let ack = js.send_publish(post.subject(), message).await.context("posting")?;
     match ack.await {
         Ok(_) => Ok(true),

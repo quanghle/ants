@@ -67,7 +67,9 @@ mod text;
 mod time;
 
 pub use route::{Route, group, members_at, route};
-use step::{Fresh, Step, chain_of, next_step, passes_on, settled_question, supersede, superseded};
+use step::{
+    Fresh, Step, chain_of, next_step, passes_on, repeats, settled_question, supersede, superseded, waits_for_turns,
+};
 pub use text::group_note;
 use text::{chain_text, duration, join, notes_text, owner_text, reason_text, what_passes, why_text};
 use time::{millis, now_ms};
@@ -270,7 +272,8 @@ impl Escalator {
     /// another ant, else the ant's own. One that carries an escalation, met while working
     /// on it for another ant, goes one level above it, to its leader's chain. A thread whose escalation was
     /// answered by its leader goes one level higher too; one still waiting for its leader goes to the same members
-    /// again. The escalation is stored before it is sent, so a retry sends the same messages.
+    /// again, unless the ant is stuck for want of turns again on another message (`step::repeats`): it waits then,
+    /// sending nothing. The escalation is stored before it is sent, so a retry sends the same messages.
     pub async fn escalate(&self, stuck: Stuck) -> Result<Escalated> {
         self.escalate_explained(stuck).await.map(|(escalated, _)| escalated)
     }
@@ -295,18 +298,32 @@ impl Escalator {
         let step = next_step(fresh, stuck.request_id, stuck.carried.as_ref(), pending.as_ref());
         tracing::info!(%thread, reason = stuck.reason.as_str(), ?step, "escalating");
         match step {
-            Step::Again(pending) if pending.at_owner() => self.to_owner(&pending.escalation, None, &stuck).await,
-            Step::Again(pending) if !self.assistant_leads(&pending.escalation).await => {
+            Step::Again(pending) if !pending.at_owner() && !self.assistant_leads(&pending.escalation).await => {
                 let summary = stuck.notice.text.clone();
                 self.climb(pending.escalation, &summary, &stuck, true).await
             }
+            Step::Again(pending) if repeats(&pending, &stuck) => {
+                tracing::info!(%thread, reason = stuck.reason.as_str(), "the thread's escalation waits; not sent again");
+                let escalated = if pending.at_owner() {
+                    Escalated::Owner(stuck.notice.to.clone())
+                } else {
+                    chain_of(&pending.escalation, pending.to)
+                };
+                Ok((escalated, None))
+            }
             Step::Again(pending) => {
+                // Stored before it is sent, as a climb is, so a retry sends it again and a later post does not.
+                let pending = Pending { sent_as: Some(stuck.id.clone()), ..*pending };
+                self.ledger.set_pending(&thread, Some(pending.clone())).await?;
+                if pending.at_owner() {
+                    return self.to_owner(&pending.escalation, None, &stuck).await;
+                }
                 self.to_chain(&pending.escalation, &pending.to, &stuck.notice.text, &stuck).await?;
                 Ok((chain_of(&pending.escalation, pending.to), None))
             }
             Step::Climb(from) => {
                 let summary = stuck.notice.text.clone();
-                self.climb(from, &summary, &stuck, pending.is_some()).await
+                self.climb(*from, &summary, &stuck, pending.is_some()).await
             }
         }
     }
@@ -474,6 +491,7 @@ impl Escalator {
             summary: notice.text.chars().take(SUMMARY_CHARS).collect(),
             channel: None,
             question: notice.question.clone().map(Box::new),
+            sent_as: None,
         };
         self.ledger.set_pending(thread, Some(pending)).await?;
         if deadline.is_some() {
@@ -635,6 +653,7 @@ impl Escalator {
                     summary,
                     channel: stuck.channel.clone(),
                     question: stuck.notice.question.clone().map(Box::new),
+                    sent_as: Some(stuck.id.clone()),
                 };
                 self.ledger.set_pending(thread, Some(pending)).await?;
                 if deadline.is_some() {
@@ -648,7 +667,7 @@ impl Escalator {
                     OwnerBecause::PassedOn => from.passed_on().unwrap_or(from),
                     _ => from,
                 };
-                if from.level > 0 || had_pending {
+                if from.level > 0 || had_pending || waits_for_turns(stuck.reason) {
                     let pending = Pending {
                         escalation: from.clone(),
                         to: Vec::new(),
@@ -660,6 +679,7 @@ impl Escalator {
                         summary,
                         channel: stuck.channel.clone(),
                         question: stuck.notice.question.clone().map(Box::new),
+                        sent_as: Some(stuck.id.clone()),
                     };
                     self.ledger.set_pending(thread, Some(pending)).await?;
                 }

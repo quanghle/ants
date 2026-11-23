@@ -116,14 +116,16 @@ pub fn a_channel_storm_ends_at_the_turn_budget() {
     let mut summary = HashMap::new();
     for thread in mentioned.iter().chain(&triaged) {
         let by_ants: Vec<_> = on(&posts, thread, "post").into_iter().filter(|p| p["from"] != "human").collect();
-        // The storm ends: however the replies race, no member or messenger posts more often than the thread has
-        // turns. TODO(ants-bpu3b): racing replies spend the same turn; bound the posts by the budget once fixed.
-        let most = DEFAULT_TURN_BUDGET as usize * (members + 1);
+        // The storm ends at the thread's turn budget: however the replies race, each ant post spends a turn of its own.
+        let most = DEFAULT_TURN_BUDGET as usize;
         assert!(!by_ants.is_empty() && by_ants.len() <= most, "{} ant posts on {thread}\n{}", by_ants.len(), logs());
-        // Every member post spent from the same budget, so the storm ran out of turns and escalated to the human.
-        // TODO(ants-l9309): each woken member escalates again on every post it cannot answer; bound it once fixed.
+        let left: std::collections::HashSet<_> = by_ants.iter().map(|p| p["note"].as_str().unwrap()).collect();
+        assert_eq!(left.len(), by_ants.len(), "the same turn spent twice on {thread}: {left:?}");
+        // Every member post spent from the same budget, so the storm ran out of turns and escalated to the human: each
+        // member, and the messenger, once, however many posts woke it after.
         let escalations = on(&to_human, thread, "escalation").len();
         assert!(escalations >= 1, "no escalation on {thread}\n{}", logs());
+        assert!(escalations <= members + 1, "{escalations} escalations on {thread}\n{}", logs());
         let mentioning = by_ants.iter().filter(|p| parse_mentions(p["text"].as_str().unwrap()).contains(&human));
         assert_eq!(on(&to_human, thread, "mention").len(), mentioning.count(), "one notice per post mentioning");
         let prompts: usize = names.iter().map(|ant| prompted(ant, thread)).sum();

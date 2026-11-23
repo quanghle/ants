@@ -276,6 +276,9 @@ pub struct Context {
     pub later: Vec<ChannelPost>,
     /// Whether the post being answered answers one of the ant's own ([`ChannelPost::in_reply_to`]).
     pub answers_own: bool,
+    /// Stream sequence of the last post stored on the channel as the read ended, any thread's: a reply spending a turn
+    /// is stored only while it is still the last ([`crate::bus::store_expecting`]).
+    pub last_seq: u64,
 }
 
 /// Picks the context of a prompt from the posts of a channel, read in stream order.
@@ -328,7 +331,7 @@ impl<'a> Collect<'a> {
 
     fn done(self) -> Context {
         let answers_own = self.answered_own == Some(true);
-        Context { posts: self.posts.into(), skipped: self.skipped, later: self.later, answers_own }
+        Context { posts: self.posts.into(), skipped: self.skipped, later: self.later, answers_own, last_seq: 0 }
     }
 }
 
@@ -794,14 +797,15 @@ impl Threads {
             Some(Some(seen)) => consumer::DeliverPolicy::ByStartSequence { start_sequence: seen + 1 },
             Some(None) => from_start(&post.thread_id),
         };
-        self.scan(&subject::chan_room(&post.channel), start, &mut collect)
+        let last_seq = self
+            .scan(&subject::chan_room(&post.channel), start, &mut collect)
             .await
             .with_context(|| format!("reading thread {} of #{}", post.thread_id, post.channel))?;
         let unread = collect.answered_own.is_none() && earlier == Earlier::Unseen && !whole;
         // Only an ant's post (no human's, webhook's or assistant's for its human) goes unanswered as one answering
         // the ant's own.
         let by_ant = !post.webhook && post.on_behalf_of.is_none() && !humans.contains(&post.from);
-        let mut context = collect.done();
+        let mut context = Context { last_seq: last_seq.max(seq), ..collect.done() };
         if let Some(id) = post.in_reply_to.filter(|_| unread && by_ant) {
             context.answers_own = match self.author(post, id, seq).await {
                 Ok(author) => author.as_ref() == Some(&self.ant),
@@ -831,20 +835,26 @@ impl Threads {
         Ok(author.from)
     }
 
-    /// Read the channel posts on `filter` from `start` into `sink`, up to the last one stored as the read starts.
-    async fn scan(&self, filter: &str, start: consumer::DeliverPolicy, sink: &mut impl Sink) -> Result<()> {
+    /// Read the channel posts on `filter` from `start` into `sink`, up to the last one stored as the read starts,
+    /// returning the stream sequence of the last message read, 0 for none.
+    async fn scan(&self, filter: &str, start: consumer::DeliverPolicy, sink: &mut impl Sink) -> Result<u64> {
         let _one = match self.reading {
             Reading::Consumer => Some(self.one_read.lock().await),
             Reading::Spare | Reading::Gets => None,
         };
-        read_back(&self.js, &self.ant, self.reading, filter, start, |seq, stored, subject, post| match post {
-            Ok(post) => sink.take(seq, stored, post),
-            Err(error) => {
-                tracing::debug!(subject, error, "dropping a channel post");
-                ControlFlow::Continue(())
+        let mut last = 0;
+        read_back(&self.js, &self.ant, self.reading, filter, start, |seq, stored, subject, post| {
+            last = seq;
+            match post {
+                Ok(post) => sink.take(seq, stored, post),
+                Err(error) => {
+                    tracing::debug!(subject, error, "dropping a channel post");
+                    ControlFlow::Continue(())
+                }
             }
         })
-        .await
+        .await?;
+        Ok(last)
     }
 
     /// Stream sequence of the last post on `thread` the ant was shown.

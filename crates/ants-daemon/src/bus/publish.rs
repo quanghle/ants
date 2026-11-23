@@ -43,6 +43,43 @@ pub async fn store<T: serde::Serialize>(
     Ok(if ack.is_some() { Stored::Hub } else { Stored::Outbox })
 }
 
+/// Header naming the subjects `Nats-Expected-Last-Subject-Sequence` applies to, which may have wildcards.
+pub(crate) const EXPECTED_LAST_SUBJECT: &str = "Nats-Expected-Last-Subject-Sequence-Subject";
+
+/// What [`store_expecting`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expected {
+    /// Stored, in the hub's stream or, out of its reach, in the machine's outbox.
+    Stored(Stored),
+    /// Not stored: a message on `filter` came after the one expected.
+    Moved,
+}
+
+/// [`store`] `value` as JSON to `subject` under `msg_id`, only while the last message stored on `filter` is still the
+/// one at stream sequence `last_seq` (0: none is). Out of the hub's reach, only the hub knowing what came last, it goes
+/// to the machine's outbox regardless. JetStream checks the expectation before the duplicate window: a copy of a
+/// message stored under `msg_id` since `last_seq` is [`Expected::Moved`], the stored one among what came after.
+pub async fn store_expecting<T: serde::Serialize>(
+    js: &jetstream::Context,
+    subject: String,
+    value: &T,
+    msg_id: &str,
+    filter: &str,
+    last_seq: u64,
+) -> Result<Expected> {
+    let message = jetstream::message::PublishMessage::build()
+        .payload(serde_json::to_vec(value)?.into())
+        .message_id(msg_id)
+        .expected_last_subject_sequence(last_seq)
+        .header(EXPECTED_LAST_SUBJECT, filter);
+    match publish_to_hub(js, &subject, message).await {
+        Ok(_) => Ok(Expected::Stored(Stored::Hub)),
+        Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => Ok(Expected::Moved),
+        Err(e) if out_of_reach(&e) => Ok(Expected::Stored(store(js, subject, value, msg_id).await?)),
+        Err(e) => Err(explain(js, &subject, e).await).context("waiting for JetStream to store the message"),
+    }
+}
+
 /// [`store`], returning the hub stream's ack, or `None` when the message went to the machine's outbox.
 pub async fn store_acked<T: serde::Serialize>(
     js: &jetstream::Context,
