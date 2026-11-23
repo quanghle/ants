@@ -8,11 +8,8 @@ use nkeys::KeyPair;
 use serde_json::json;
 
 use super::*;
+use crate::p;
 use crate::{ADMIN_TAG, AssistantOf};
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 fn m(s: &str) -> Machine {
     s.parse().unwrap()

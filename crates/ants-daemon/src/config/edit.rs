@@ -330,6 +330,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use ants_test_support::user as p;
 
     const FILE: &str = r#"harness = "copilot"
 
@@ -358,10 +359,6 @@ max_harnesses = 2
 
     fn change(field: &str, expected: Option<Value>, value: Option<Value>) -> FieldChange {
         FieldChange { field: f(field), expected, expected_digest: None, value }
-    }
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
     }
 
     #[test]

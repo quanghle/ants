@@ -1,7 +1,7 @@
 //! Tests of sense exports and imports: landing under the same sense id, damaged exports refused, logs already holding
 //! events, renames, moves across buses, anchors, skill files, and thread records.
 
-use ants_proto::{SenseId, UserId};
+use ants_proto::SenseId;
 use serde_json::json;
 
 use super::*;
@@ -10,6 +10,7 @@ use crate::items::Values;
 use crate::log::tests::{KeySigner, Team};
 use crate::log::{AccountVerifier, Break, MemoryLog, RENAMED};
 use crate::store::Store;
+use ants_test_support::user as ant;
 
 /// A bus: its team account and its sense stream.
 struct Bus {
@@ -52,10 +53,6 @@ impl Bus {
 
 type Verify = AccountVerifier<crate::log::NoRevocations>;
 type Log<'a> = AntLog<&'a MemoryLog, KeySigner, Verify>;
-
-fn ant(name: &str) -> UserId {
-    name.parse().unwrap()
-}
 
 fn m1() -> ants_proto::Machine {
     "m1".parse().unwrap()

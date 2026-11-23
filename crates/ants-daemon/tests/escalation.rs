@@ -14,52 +14,18 @@ use ants_daemon::people::humans::Registry;
 use ants_daemon::records::chains;
 use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{ColonyEntry, Envelope, EscalationReason, Role, StatusEvent, StatusUpdate, ThreadId, UserId, subject};
-use ants_test_support::NatsServer as Server;
+use ants_test_support::{NatsServer as Server, colony_entry, user as ant};
 use async_nats::jetstream;
 use futures::StreamExt as _;
 use tokio::time::timeout;
 
 const WAIT: Duration = Duration::from_secs(5);
 
-fn ant(name: &str) -> UserId {
-    name.parse().unwrap()
-}
-
 /// A colony where lead escalates to boss, and boss back to dev-a.
 fn colony() -> Colony {
     Arc::new(|| {
-        let now = chrono::Utc::now();
-        let entry = move |name: &str, chain: &str| ColonyEntry {
-            ant: ant(name),
-            machine: "test".to_owned(),
-            instance: "run-1".to_owned(),
-            harness: "copilot".to_owned(),
-            agent: None,
-            capabilities: Vec::new(),
-            whoami: None,
-            profile: None,
-            sense_unkept: None,
-            workdir: None,
-            started_at: now,
-            heartbeat_at: now,
-            activity: ants_proto::Activity::Idle,
-            handling: 0,
-            harnesses: 0,
-            escalate_to: vec![ant(chain)],
-            sage: None,
-            version: ants_proto::ANTS_VERSION.to_owned(),
-            perms: ants_proto::PERMISSIONS_VERSION,
-            signed_out: None,
-            limited: None,
-            failing: None,
-            unserved: None,
-            fallback: None,
-            memory_low: None,
-            model: None,
-            paused: None,
-            drift: Vec::new(),
-            mcp: false,
-        };
+        let entry =
+            |name: &str, chain: &str| ColonyEntry { escalate_to: vec![ant(chain)], ..colony_entry(name, "test") };
         Box::pin(async move { Ok(vec![entry("lead", "boss"), entry("boss", "dev-a")]) })
     })
 }

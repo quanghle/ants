@@ -8,10 +8,7 @@ use ants_proto::{FindingOutcome, FindingVerdict};
 
 use super::*;
 use crate::proposal::{PROPOSAL, Proposal};
-
-pub(super) fn user(name: &str) -> UserId {
-    name.parse().unwrap()
-}
+pub(super) use ants_test_support::user;
 
 /// A finding of a sage, of `kind`, first offered as `id`.
 pub(super) fn advised(id: &str, kind: &str, text: &str) -> Finding {

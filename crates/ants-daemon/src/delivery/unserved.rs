@@ -442,10 +442,7 @@ mod tests {
     use super::*;
     use crate::bus;
     use crate::sync::MutexExt as _;
-
-    fn p(name: &str) -> UserId {
-        name.parse().unwrap()
-    }
+    use ants_test_support::user as p;
 
     fn entry(ant: &str, capabilities: &[&str], heartbeat_at: DateTime<Utc>) -> ColonyEntry {
         serde_json::from_value(serde_json::json!({

@@ -564,11 +564,8 @@ mod tests {
     use crate::testing::{context, human, sense, tool};
     use crate::thread::record::record_event;
     use crate::tools::{Answer, Handler};
+    use ants_test_support::user as name;
     use serde_json::Value;
-
-    fn name(name: &str) -> UserId {
-        name.parse().unwrap()
-    }
 
     fn on(thread: u8) -> CallContext {
         let thread = format!("019a7d2c-0000-7000-8000-0000000000{thread:02}").parse().unwrap();

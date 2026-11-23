@@ -11,6 +11,7 @@ use ants_test_support::NatsServer;
 use super::*;
 use crate::bus;
 use crate::pool::Stored;
+use ants_test_support::user as p;
 
 /// What a wake sent: the envelopes, as the outbox got them.
 type Sent = Arc<Mutex<Vec<Envelope>>>;
@@ -66,10 +67,6 @@ impl Setup {
     async fn stored(&self) -> u64 {
         bus::ensure_stream(&self.js).await.unwrap().info().await.unwrap().state.messages
     }
-}
-
-fn p(name: &str) -> UserId {
-    name.parse().unwrap()
 }
 
 fn request(ant: &UserId, thread: Option<&ThreadId>, id: &str) -> WakeRequest {

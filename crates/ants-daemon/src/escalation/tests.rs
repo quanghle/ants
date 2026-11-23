@@ -3,10 +3,7 @@
 
 use super::*;
 use crate::records::heed::Heeded;
-
-fn p(name: &str) -> UserId {
-    name.parse().unwrap()
-}
+use ants_test_support::user as p;
 
 fn t() -> ThreadId {
     "t1".parse().unwrap()

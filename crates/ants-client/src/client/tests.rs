@@ -15,6 +15,7 @@ use nkeys::KeyPair;
 use super::*;
 use crate::entry::Kind;
 use crate::error::ErrorKind;
+use crate::p;
 use crate::sealed::State;
 use crate::transport::{Pending, TransportError};
 
@@ -233,10 +234,6 @@ impl Subscription for Queue {
         let closed = if wait.is_some() { TransportError::TimedOut } else { TransportError::Closed };
         Box::pin(std::future::ready(self.0.borrow_mut().pop_front().ok_or(closed)))
     }
-}
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
 }
 
 fn alice_on(server: &Server, account: Option<String>) -> Client {

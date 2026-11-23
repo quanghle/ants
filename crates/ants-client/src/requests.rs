@@ -332,10 +332,7 @@ pub(crate) fn heard(message: &Message) -> Option<Envelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
+    use crate::p;
 
     /// What went wrong with a read that failed.
     fn kind<T: std::fmt::Debug>(read: Result<T, Error>) -> ErrorKind {

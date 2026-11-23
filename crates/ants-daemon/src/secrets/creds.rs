@@ -590,6 +590,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    pub(super) use ants_test_support::user as p;
 
     pub(super) fn claims(name: &str, permissions: &Permissions, tags: &[String], exp: Option<u64>) -> Value {
         let mut claims = json!({
@@ -601,10 +602,6 @@ mod tests {
             claims["exp"] = exp.into();
         }
         claims
-    }
-
-    pub(super) fn p(s: &str) -> UserId {
-        s.parse().unwrap()
     }
 
     #[test]

@@ -30,6 +30,7 @@ use super::routing::{describe, why_unserved};
 use super::*;
 use crate::harness::Launch;
 use crate::pool::{Pool, SessionStore};
+use ants_test_support::user;
 
 mod assistant;
 mod attachments;
@@ -43,10 +44,6 @@ mod saving;
 mod serving;
 
 type Client = RunningService<RoleClient, ClientConfig>;
-
-fn user(name: &str) -> UserId {
-    name.parse().unwrap()
-}
 
 /// A daemon home under the target directory, removed on drop. Unique to this process and call, so concurrent test
 /// processes keep apart, and short enough for a socket path.
@@ -127,37 +124,9 @@ async fn start_with(
 }
 
 fn listed(name: &str, capabilities: &[&str]) -> ColonyEntry {
-    let now = chrono::Utc::now();
     ColonyEntry {
-        ant: user(name),
-        machine: "m1".to_owned(),
-        instance: "run-1".to_owned(),
-        harness: "copilot".to_owned(),
-        agent: None,
         capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
-        whoami: None,
-        profile: None,
-        sense_unkept: None,
-        workdir: None,
-        started_at: now,
-        heartbeat_at: now,
-        activity: ants_proto::Activity::Idle,
-        handling: 0,
-        harnesses: 0,
-        escalate_to: Vec::new(),
-        sage: None,
-        version: ants_proto::ANTS_VERSION.to_owned(),
-        perms: ants_proto::PERMISSIONS_VERSION,
-        signed_out: None,
-        limited: None,
-        failing: None,
-        unserved: None,
-        fallback: None,
-        memory_low: None,
-        model: None,
-        paused: None,
-        drift: Vec::new(),
-        mcp: false,
+        ..ants_test_support::colony_entry(name, "m1")
     }
 }
 

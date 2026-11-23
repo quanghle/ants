@@ -163,10 +163,7 @@ mod tests {
     use futures::channel::mpsc;
 
     use super::*;
-
-    fn p(name: &str) -> UserId {
-        name.parse().unwrap()
-    }
+    use ants_test_support::user as p;
 
     #[test]
     fn a_pause_keeps_its_start_and_its_admin_until_resumed() {

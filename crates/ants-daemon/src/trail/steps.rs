@@ -223,10 +223,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
+    use ants_test_support::user as p;
 
     fn day(n: i64) -> DateTime<Utc> {
         "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap() + TimeDelta::days(n)

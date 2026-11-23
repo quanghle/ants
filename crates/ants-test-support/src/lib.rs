@@ -1,12 +1,13 @@
 //! Test helpers shared by the ants crates (dev-dependency only): external tools, a throwaway nats-server, a scripted
 //! stub CLI ([`StubCli`]), the `ants` command free of the caller's `ANTS_*` variables ([`ants_command`]), waits for a
 //! condition ([`eventually`], and [`wait_until`] without a runtime), a client's transport over async-nats
-//! ([`NatsTransport`]) and sample records ([`trail_run`]).
+//! ([`NatsTransport`]) and sample records ([`user`], [`colony_entry`], [`trail_run`]).
 //!
 //! A test that needs `nats-server` skips when the tool is not on PATH, unless [`REQUIRE_TOOLS`] is set to `1`
 //! (CI sets it), where it fails instead, so a broken install cannot pass as skipped tests. Under [`JS_ACK_FC_V2`]`=1`
 //! every test nats-server uses the JetStream ack and flow control subjects nats-server 2.16 uses by default.
 
+mod colony;
 mod trails;
 mod transport;
 
@@ -17,6 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
+pub use colony::{colony_entry, user};
 pub use trails::{trail_leg, trail_run};
 pub use transport::NatsTransport;
 

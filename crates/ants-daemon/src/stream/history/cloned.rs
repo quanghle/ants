@@ -116,10 +116,7 @@ mod tests {
 
     use super::*;
     use crate::stream::history::format;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
+    use ants_test_support::user as p;
 
     fn entry(from: &str, place: Place, text: &str, at: SystemTime) -> Entry {
         Entry { from: p(from), place, text: text.to_owned(), attachments: Vec::new(), at }
