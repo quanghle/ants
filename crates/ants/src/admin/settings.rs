@@ -267,16 +267,27 @@ fn admin_tagged(creds: &Path) -> bool {
 
 /// Read `ant`'s settings: with an admin's credentials, afresh, waiting up to `wait` for the daemon of its machine;
 /// else, or when that daemon does not answer in time, refuses or is away, as last read. A read still pending is not
-/// sent again.
+/// sent again: while none was ever applied, its outcome is waited for up to `wait`.
 pub async fn read(nats: &Nats<'_>, js: &jetstream::Context, ant: &UserId, wait: Duration) -> Result<Reading> {
     let mut orders = orders::orders_of(js, ant).await?;
     let now: DateTime<Utc> = SystemTime::now().into();
     let waiting = orders.iter().rev().find(|o| o.state == OrderState::Pending && o.op == Some(AdminOp::ReadSettings));
     let stale = if !may_order(nats) {
         Some("as last read: an admin's credentials read them afresh".to_owned())
-    } else if let Some(waiting) = waiting {
+    } else if let Some(waiting) = waiting.filter(|_| Read::last(&orders).is_some()) {
         let ago = waiting.sent_at.map_or_else(String::new, |at| format!(" sent {} ago", short(since(at, now))));
         Some(format!("a read{ago} waits for the daemon of {}", waiting.machine))
+    } else if let Some(waiting) = waiting {
+        let (id, machine) = (waiting.id, waiting.machine.clone());
+        orders = decided(js, ant, id, wait).await?;
+        match orders.iter().find(|o| o.id == id) {
+            Some(o) if o.state == OrderState::Applied => None,
+            Some(o) if o.state != OrderState::Pending => Some(format!(
+                "the daemon of {machine} refused the read: {}",
+                o.reason.as_deref().unwrap_or("no reason given")
+            )),
+            _ => Some(format!("the read waits for the daemon of {machine}")),
+        }
     } else {
         match orders::send(nats, js, None, ant, AdminOp::ReadSettings, wait).await {
             Ok((sent, outcome)) => {
@@ -301,6 +312,19 @@ pub async fn read(nats: &Nats<'_>, js: &jetstream::Context, ant: &UserId, wait: 
         .flatten()
         .map(Box::new);
     Ok(Reading { read: Read::last(&orders), stale, orders, shared })
+}
+
+/// The orders to `ant` once the order `id` is decided, or as they stand after `wait`.
+async fn decided(js: &jetstream::Context, ant: &UserId, id: Uuid, wait: Duration) -> Result<Vec<Listed>> {
+    let started = tokio::time::Instant::now();
+    loop {
+        let orders = orders::orders_of(js, ant).await?;
+        let pending = orders.iter().any(|o| o.id == id && o.state == OrderState::Pending);
+        if !pending || started.elapsed() >= wait {
+            return Ok(orders);
+        }
+        tokio::time::sleep(orders::POLL).await;
+    }
 }
 
 /// `ants ant set ANT KEY=VALUE...`: read `ant`'s settings, send the order of `assignments` expecting the values read,

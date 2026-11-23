@@ -29,7 +29,7 @@ use crate::connection::Nats;
 use crate::{auth, machines};
 
 /// How often [`send`] looks for the outcome of the order it sent.
-const POLL: Duration = Duration::from_millis(250);
+pub(crate) const POLL: Duration = Duration::from_millis(250);
 
 /// The credentials that sign an order: a human's device's, carrying the admin role.
 fn admin_creds<'a>(nats: &Nats<'a>) -> Result<&'a Path> {
