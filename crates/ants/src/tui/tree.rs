@@ -1,27 +1,19 @@
 //! A thread's delegation tree, which `t` opens on a thread: the thread's owner, then each ant messaged on it, on the
 //! threads spun off it ([`ants_proto::Envelope::origin_thread`]) or on the threads the links bucket says the link to it
-//! was passed on ([`links::passed`]), each nested under the ant that messaged it first, with the title or opening line
+//! was passed on ([`ants_daemon::records::links::passed`]), each nested under the ant that messaged it first, with the title or opening line
 //! it was messaged with, its turns left, what it spent and its state; then the totals. Enter opens a node's thread, and
 //! `x` then `y` cancels every prompt running in a node's subtree, as `ants cancel` does for each of its ants.
 //!
 //! The messages come from what the live feed read ([`Delegations`]); the links and the spend are read every while the
 //! tree shows ([`Io`]).
 
-use ants_daemon::bus::relayed;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::time::Duration;
 
-use ants_daemon::limits::caps::Spent;
-use ants_daemon::records::direct_kv::DirectKv;
-use ants_daemon::records::links::{self, Passed};
-use ants_proto::{CancelRequest, JsDomain, SESSIONS_BUCKET, ThreadId, UserId};
+use ants_daemon::records::links::Passed;
+use ants_proto::{ThreadId, UserId};
 use anyhow::Result;
-use async_nats::jetstream;
 use chrono::{DateTime, Utc};
-use futures::future::LocalBoxFuture;
-use futures::stream::FuturesUnordered;
-use futures::{FutureExt as _, StreamExt as _};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -32,111 +24,15 @@ use super::armed::Armed;
 use super::model::{Action, Data, Key, Level, Model, To};
 use super::select::{PAGE, Selection, step};
 use super::style;
-use super::work::ThreadState;
-use crate::cmd::cancel::{CANCEL_GRACE, CANCEL_WAIT, cancel_outcome};
-use crate::live::maybe;
-use crate::spend::{self, ThreadReport};
-use crate::threads::thread::{Entry, Kind};
+use crate::spend::ThreadReport;
 
-/// How often the shown tree's links and spend are read.
-const READ_EVERY: Duration = Duration::from_secs(10);
-/// How many characters of a message's first line are kept.
-const LINE: usize = 120;
+mod io;
+mod shape;
 
-/// A message, post or note on a thread, as the tree takes it.
-#[derive(Debug, Clone)]
-struct Said {
-    at: DateTime<Utc>,
-    kind: Kind,
-    from: Option<UserId>,
-    to: Option<UserId>,
-    turns: Option<u32>,
-    /// Its first line.
-    line: String,
-}
-
-#[derive(Debug, Default)]
-struct OnThread {
-    /// By stream sequence.
-    said: BTreeMap<u64, Said>,
-    /// The thread's owner, as its first message naming one says.
-    owner: Option<UserId>,
-}
-
-/// What the messages read tell of who messaged whom on each thread, and which threads were spun off which.
-#[derive(Debug, Default)]
-pub struct Delegations {
-    threads: HashMap<ThreadId, OnThread>,
-    spun_off: HashMap<ThreadId, BTreeSet<ThreadId>>,
-}
-
-impl Delegations {
-    /// Take `entry` in, once however often it is read.
-    pub fn add(&mut self, entry: &Entry) {
-        if entry.forged
-            || !matches!(
-                entry.kind,
-                Kind::Message | Kind::Escalation | Kind::Mention | Kind::Post | Kind::Note | Kind::Dead
-            )
-        {
-            return;
-        }
-        let thread = self.threads.entry(entry.thread_id.clone()).or_default();
-        if thread.owner.is_none() {
-            thread.owner.clone_from(&entry.owner);
-        }
-        thread.said.entry(entry.seq).or_insert_with(|| Said {
-            at: entry.stored_at,
-            kind: entry.kind,
-            from: entry.from.clone(),
-            to: entry.to.clone(),
-            turns: entry.turns,
-            line: entry.text.lines().next().unwrap_or("").chars().take(LINE).collect(),
-        });
-        if let Some(origin) = entry.origin.as_ref().filter(|o| **o != entry.thread_id) {
-            self.spun_off.entry(origin.clone()).or_default().insert(entry.thread_id.clone());
-        }
-    }
-
-    /// The threads of `root`'s tree: it, then those spun off it.
-    pub fn threads(&self, root: &ThreadId) -> Vec<ThreadId> {
-        let spun_off = self.spun_off.get(root).into_iter().flatten().filter(|t| *t != root);
-        std::iter::once(root.clone()).chain(spun_off.cloned()).collect()
-    }
-}
-
-/// What a node of the tree is doing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NodeState {
-    /// The owner's row: the state of the thread.
-    Thread(ThreadState),
-    /// Busy, as its status updates tell.
-    Working(String),
-    /// A tool request of it waits on a human.
-    WaitingOnMe,
-    /// A message to it was given up on.
-    GaveUp,
-    /// It has a message it did not answer yet.
-    Queued,
-    /// It answered the last message to it.
-    Answered,
-    /// Only the links bucket tells of it: its messages are older than those read.
-    Linked,
-}
+pub use io::{Event, Io};
+pub use shape::{Delegations, NodeState, Tree};
 
 impl NodeState {
-    fn label(&self) -> String {
-        match self {
-            Self::Thread(state) => state.label().to_owned(),
-            Self::Working(stand) => format!("◐ {stand}"),
-            Self::WaitingOnMe => "waiting on me".to_owned(),
-            Self::GaveUp => "gave up".to_owned(),
-            Self::Queued => "queued".to_owned(),
-            Self::Answered => "answered".to_owned(),
-            Self::Linked => "linked".to_owned(),
-        }
-    }
-
     fn style(&self) -> Style {
         match self {
             Self::Thread(state) => Style::new().fg(state.color()),
@@ -145,246 +41,6 @@ impl NodeState {
             Self::Queued => Style::new().fg(Color::Cyan),
             Self::Answered | Self::Linked => style::dim(),
         }
-    }
-}
-
-/// A user on a thread of the tree: the owner at its root, else an ant.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Node {
-    pub user: UserId,
-    pub thread: ThreadId,
-    pub depth: usize,
-    /// What the tree draws before the user.
-    pub glyph: String,
-    /// The thread's title for the first ant messaged on a thread, else the opening line of the first message to it.
-    pub line: String,
-    /// On another thread than the node it nests under.
-    pub spun_off: bool,
-    /// The turns left on the last message to it.
-    pub turns: Option<u32>,
-    /// What it spent on the thread since a human's last message there, once read.
-    pub spend: Option<Spent>,
-    pub state: NodeState,
-    /// How many nodes nest under it, at any depth, which follow it.
-    pub under: usize,
-}
-
-/// A thread's delegation tree: its nodes, the root first, each followed by those nesting under it; and the totals.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Tree {
-    pub nodes: Vec<Node>,
-    /// The channels the root thread was posted in.
-    pub via: Vec<String>,
-    /// The ants in it.
-    pub ants: usize,
-    /// The turns its ants spent: one per message from an ant to another.
-    pub turns: usize,
-    /// What its ants spent, once read.
-    pub spend: Option<Spent>,
-    /// From its first message to its last, or to now while an ant works.
-    pub elapsed: Option<Duration>,
-}
-
-/// A message on a thread of the tree, and its stream sequence.
-type On<'a> = (&'a ThreadId, u64, &'a Said);
-/// A node as first made: its user, its thread and the index of the node it nests under.
-type Made = (UserId, ThreadId, usize);
-
-impl Tree {
-    /// The tree of `root` from what `data` read, `links` passed on to it and the `spend` read of its threads, at
-    /// `now`.
-    pub fn build(
-        root: &ThreadId,
-        data: &Data,
-        links: &[Passed],
-        spend: Option<&[ThreadReport]>,
-        now: DateTime<Utc>,
-    ) -> Self {
-        let human = |user: &UserId| data.is_human(user);
-        let delegations = &data.delegations;
-        let mut threads = delegations.threads(root);
-        for on in links.iter().filter_map(|l| l.on.as_ref()) {
-            if !threads.contains(on) {
-                threads.push(on.clone());
-            }
-        }
-        let mut said: Vec<On> = threads
-            .iter()
-            .filter_map(|t| delegations.threads.get(t).map(|s| (t, s)))
-            .flat_map(|(t, s)| s.said.iter().map(move |(seq, said)| (t, *seq, said)))
-            .collect();
-        said.sort_by_key(|(_, seq, _)| *seq);
-        let owner = delegations
-            .threads
-            .get(root)
-            .and_then(|t| t.owner.clone())
-            .or_else(|| data.live.summary(root).and_then(|s| s.owner.clone()))
-            .or_else(|| said.iter().find(|(t, ..)| *t == root).and_then(|(.., s)| s.from.clone()).filter(human))
-            .unwrap_or_else(|| data.me().clone());
-        let made = shape(root, owner, &said, links, &human);
-
-        // The first node made on each thread, but for the root.
-        let mut first: HashMap<&ThreadId, usize> = HashMap::new();
-        for (at, (_, thread, _)) in made.iter().enumerate().skip(1) {
-            first.entry(thread).or_insert(at);
-        }
-        let mut nodes: Vec<Node> = order(&made)
-            .into_iter()
-            .map(|(at, depth, glyph)| {
-                let (user, thread, parent) = &made[at];
-                if at == 0 {
-                    let state = NodeState::Thread(data.state(thread));
-                    return Node::new(user.clone(), thread.clone(), state);
-                }
-                let on: Vec<(u64, &Said)> =
-                    said.iter().filter(|(t, ..)| *t == thread).map(|(_, seq, s)| (*seq, *s)).collect();
-                let mut node = Node::of(user, thread, &on, data, spend);
-                node.depth = depth;
-                node.glyph = glyph;
-                node.spun_off = made[*parent].1 != *thread;
-                if first.get(thread) == Some(&at) {
-                    let title = data.title(thread);
-                    // A human opens a thread off another only by forwarding to it; an ant, by spinning it off.
-                    let forwarded = on.first().and_then(|(_, s)| s.from.as_ref()).is_some_and(human);
-                    node.line = match (node.spun_off, forwarded) {
-                        (false, _) => title,
-                        (true, false) => format!("spin-off: {title}"),
-                        (true, true) => format!("forwarded: {title}"),
-                    };
-                }
-                node
-            })
-            .collect();
-        for at in (0..nodes.len()).rev() {
-            let depth = nodes[at].depth;
-            nodes[at].under = nodes[at + 1..].iter().take_while(|n| n.depth > depth).count();
-        }
-
-        let ants = nodes.iter().skip(1).map(|n| &n.user).collect::<BTreeSet<_>>().len();
-        let between_ants = |s: &Said| s.from.as_ref().zip(s.to.as_ref()).is_some_and(|(f, t)| !human(f) && !human(t));
-        let turns = said.iter().filter(|(.., s)| s.kind == Kind::Message && between_ants(s)).count();
-        let spend = spend.map(|_| sum(nodes.iter().filter_map(|n| n.spend)));
-        let working = nodes.iter().any(|n| matches!(n.state, NodeState::Working(_)));
-        let first = said.iter().map(|(.., s)| s.at).min();
-        let last = if working { Some(now) } else { said.iter().map(|(.., s)| s.at).max() };
-        let elapsed = first.zip(last).map(|(first, last)| crate::colony::since(first, last));
-        let via = data.live.summary(root).map(|s| s.channels.iter().map(|c| format!("#{c}")).collect());
-        Self { nodes, via: via.unwrap_or_default(), ants, turns, spend, elapsed }
-    }
-}
-
-impl Node {
-    fn new(user: UserId, thread: ThreadId, state: NodeState) -> Self {
-        let (depth, under, glyph, line) = (0, 0, String::new(), String::new());
-        Self { user, thread, depth, glyph, line, spun_off: false, turns: None, spend: None, state, under }
-    }
-
-    /// The node of `ant` on `thread`, whose messages are `on`, from what `data` read and the `spend` read.
-    fn of(ant: &UserId, thread: &ThreadId, on: &[(u64, &Said)], data: &Data, spend: Option<&[ThreadReport]>) -> Self {
-        let to_it =
-            |s: &Said| s.to.as_ref() == Some(ant) && matches!(s.kind, Kind::Message | Kind::Escalation | Kind::Mention);
-        let last = |pick: &dyn Fn(&Said) -> bool| on.iter().filter(|(_, s)| pick(s)).map(|(seq, _)| *seq).max();
-        let last_in = last(&to_it);
-        let last_out = last(&|s| s.from.as_ref() == Some(ant) && s.kind != Kind::Dead);
-        let dead = last(&|s| s.kind == Kind::Dead && s.to.as_ref() == Some(ant));
-        let state = if let Some(stand) = data.live.progress.get(thread).and_then(|p| p.status.of(ant)) {
-            NodeState::Working(stand)
-        } else if data.live.approvals.iter().any(|r| r.ant == *ant && r.thread_id == *thread) {
-            NodeState::WaitingOnMe
-        } else if dead.is_some_and(|d| Some(d) > last_out && Some(d) >= last_in) {
-            NodeState::GaveUp
-        } else if last_in > last_out {
-            NodeState::Queued
-        } else if last_out.is_some() {
-            NodeState::Answered
-        } else {
-            NodeState::Linked
-        };
-        let mut node = Self::new(ant.clone(), thread.clone(), state);
-        node.line = on.iter().find(|(_, s)| to_it(s)).map_or_else(|| data.title(thread), |(_, s)| s.line.clone());
-        node.turns = on.iter().rev().find(|(_, s)| to_it(s)).and_then(|(_, s)| s.turns);
-        node.spend =
-            spend.map(|reports| sum(reports.iter().filter(|r| r.ant == *ant && r.thread == *thread).map(|r| r.spent)));
-        node
-    }
-}
-
-fn sum(spent: impl Iterator<Item = Spent>) -> Spent {
-    spent.fold(Spent::default(), |mut sum, s| {
-        sum += s;
-        sum
-    })
-}
-
-/// The nodes of the tree of `root`, owned by `owner`, in the order first messaged in `said` (by sequence), then as
-/// `links` passed on tell of the others: each ant on a thread nests under the node of the ant that messaged it first
-/// there, that ant's own node on the thread, else its first one; under the root when a human messaged it, or no node
-/// of the sender is known.
-fn shape(root: &ThreadId, owner: UserId, said: &[On], links: &[Passed], human: &dyn Fn(&UserId) -> bool) -> Vec<Made> {
-    let mut made: Vec<Made> = vec![(owner, root.clone(), 0)];
-    let find = |made: &[Made], user: &UserId, on: &ThreadId| {
-        made.iter().skip(1).position(|(u, t, _)| u == user && t == on).map(|at| at + 1)
-    };
-    let under = |made: &[Made], from: &UserId, on: &ThreadId| {
-        if human(from) {
-            return Some(0);
-        }
-        find(made, from, on).or_else(|| made.iter().skip(1).position(|(u, ..)| u == from).map(|at| at + 1))
-    };
-    for (thread, _, s) in said {
-        let (Some(from), Some(to)) = (&s.from, &s.to) else { continue };
-        if matches!(s.kind, Kind::Message | Kind::Escalation | Kind::Mention)
-            && !human(to)
-            && find(&made, to, thread).is_none()
-        {
-            let at = under(&made, from, thread).unwrap_or(0);
-            made.push((to.clone(), (*thread).clone(), at));
-        }
-    }
-    // A link passed on by an ant not in the tree yet waits for one passed on to it, else nests under the root.
-    let on = |link: &Passed| link.on.clone().unwrap_or_else(|| root.clone());
-    let mut waiting: Vec<&Passed> = links.iter().filter(|l| !human(&l.to)).collect();
-    loop {
-        let before = waiting.len();
-        waiting.retain(|link| {
-            let on = on(link);
-            if find(&made, &link.to, &on).is_some() {
-                return false;
-            }
-            let Some(at) = under(&made, &link.from, &on) else { return true };
-            made.push((link.to.clone(), on, at));
-            false
-        });
-        if waiting.len() == before {
-            break;
-        }
-    }
-    for link in waiting {
-        if find(&made, &link.to, &on(link)).is_none() {
-            made.push((link.to.clone(), on(link), 0));
-        }
-    }
-    made
-}
-
-/// The nodes `made` in the order drawn, each followed by those nesting under it, with its depth and the tree drawn
-/// before it.
-fn order(made: &[Made]) -> Vec<(usize, usize, String)> {
-    let mut under: Vec<Vec<usize>> = vec![Vec::new(); made.len()];
-    for (at, (.., parent)) in made.iter().enumerate().skip(1) {
-        under[*parent].push(at);
-    }
-    let mut order = vec![(0, 0, String::new())];
-    walk(&under, 0, 0, "", &mut order);
-    order
-}
-
-fn walk(under: &[Vec<usize>], at: usize, depth: usize, prefix: &str, order: &mut Vec<(usize, usize, String)>) {
-    let children = &under[at];
-    for (n, child) in children.iter().enumerate() {
-        let last = n + 1 == children.len();
-        order.push((*child, depth + 1, format!("{prefix}{}", if last { "└─ " } else { "├─ " })));
-        walk(under, *child, depth + 1, &format!("{prefix}{}", if last { "   " } else { "│  " }), order);
     }
 }
 
@@ -521,14 +177,6 @@ impl Page {
     }
 }
 
-/// What the tree's reads and cancels brought.
-pub enum Event {
-    /// The links to the root and the spend on the tree's threads; None for what could not be read.
-    Read(ThreadId, Option<Vec<Passed>>, Option<Vec<ThreadReport>>),
-    /// How each cancel asked went: whether the ant's daemon cancelled a prompt, None when none answered.
-    Cancelled(Vec<(UserId, ThreadId, Result<Option<bool>>)>),
-}
-
 /// The notice a cancel's `outcomes` show.
 pub fn notice(outcomes: &[(UserId, ThreadId, Result<Option<bool>>)]) -> (String, Level) {
     let names = |pick: &dyn Fn(&Result<Option<bool>>) -> bool| {
@@ -553,117 +201,13 @@ pub fn notice(outcomes: &[(UserId, ThreadId, Result<Option<bool>>)]) -> (String,
     (text, level)
 }
 
-/// The reads of the shown tree, and the cancels asked.
-pub struct Io {
-    js: jetstream::Context,
-    domain: Option<JsDomain>,
-    me: UserId,
-    /// The root of the tree shown, and the threads known of it.
-    watched: Option<(ThreadId, Vec<ThreadId>)>,
-    every: tokio::time::Interval,
-    read: Option<LocalBoxFuture<'static, Event>>,
-    cancels: FuturesUnordered<LocalBoxFuture<'static, Event>>,
-}
-
-impl Io {
-    pub fn new(js: jetstream::Context, domain: Option<JsDomain>, me: UserId) -> Self {
-        let every = tokio::time::interval(READ_EVERY);
-        Self { js, domain, me, watched: None, every, read: None, cancels: FuturesUnordered::new() }
-    }
-
-    /// The next thing read or cancelled. Cancel-safe, so it can race the terminal's keys and the live feed.
-    pub async fn next(&mut self) -> Event {
-        loop {
-            tokio::select! {
-                _ = self.every.tick() => {
-                    if self.read.is_none() {
-                        self.start_read();
-                    }
-                }
-                event = maybe(&mut self.read) => {
-                    self.read = None;
-                    if let Event::Read(root, ..) = &event
-                        && self.watched.as_ref().is_some_and(|(watched, _)| watched == root)
-                    {
-                        return event;
-                    }
-                }
-                Some(event) = self.cancels.next() => return event,
-            }
-        }
-    }
-
-    /// Read the links and spend of the tree of the root of `shown` now and every while, with its threads known; with
-    /// None, of none.
-    pub fn watch(&mut self, shown: Option<(ThreadId, Vec<ThreadId>)>) {
-        let again = self.watched.as_ref().map(|(root, _)| root) != shown.as_ref().map(|(root, _)| root);
-        self.watched = shown;
-        if again {
-            self.start_read();
-        }
-    }
-
-    /// Read everything again now.
-    pub fn refresh(&mut self) {
-        self.start_read();
-    }
-
-    fn start_read(&mut self) {
-        let Some((root, threads)) = self.watched.clone() else {
-            self.read = None;
-            return;
-        };
-        let (js, domain) = (self.js.clone(), self.domain.clone());
-        self.read = Some(
-            async move {
-                let links =
-                    links::passed(&js, &root).await.inspect_err(|e| tracing::debug!("reading the links: {e:#}")).ok();
-                let mut threads = threads;
-                for on in links.iter().flatten().filter_map(|l| l.on.as_ref()) {
-                    if !threads.contains(on) {
-                        threads.push(on.clone());
-                    }
-                }
-                let spend = async {
-                    let kv = DirectKv::new(&js, domain.as_ref(), SESSIONS_BUCKET).await?;
-                    let mut reports = Vec::new();
-                    for thread in &threads {
-                        reports.extend(spend::thread(&js, &kv, None, thread, &BTreeMap::new()).await?);
-                    }
-                    anyhow::Ok(reports)
-                };
-                let spend = spend.await.inspect_err(|e| tracing::debug!("reading the spend: {e:#}")).ok();
-                Event::Read(root, links, spend)
-            }
-            .boxed_local(),
-        );
-    }
-
-    /// Cancel the prompt of each ant on its thread, as `ants cancel` does, all at once.
-    pub fn cancel(&mut self, prompts: Vec<(UserId, ThreadId)>) {
-        let (client, me) = (self.js.client(), self.me.clone());
-        let cancels = prompts.into_iter().map(move |(ant, thread)| {
-            let (client, me) = (client.clone(), me.clone());
-            async move {
-                let outcome = cancel(&client, &me, &ant, &thread).await;
-                (ant, thread, outcome)
-            }
-        });
-        self.cancels.push(async move { Event::Cancelled(futures::future::join_all(cancels).await) }.boxed_local());
-    }
-}
-
-/// Ask the daemons of `ant` to cancel its prompt on `thread`: whether one did, None when none answered.
-async fn cancel(client: &async_nats::Client, me: &UserId, ant: &UserId, thread: &ThreadId) -> Result<Option<bool>> {
-    let request = CancelRequest::new(ant.clone(), thread.clone(), me.clone());
-    let answers = relayed::subscribe(client, request.reply_subject()).await?;
-    client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
-    client.flush().await?;
-    Ok(cancel_outcome(&request, answers, CANCEL_WAIT, CANCEL_GRACE).await)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use ants_daemon::limits::caps::Spent;
+
+    use super::shape::Node;
     use super::*;
     use crate::test_support::live::{at, message, user};
     use crate::tui::model::{Focus, Model, Page as View};
