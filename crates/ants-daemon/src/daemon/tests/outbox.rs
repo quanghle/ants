@@ -24,10 +24,15 @@ struct Uplinked {
 impl Uplinked {
     /// The hub, for [`Bus::connect`] through [`Uplinked::url`], and its leaf node with the uplink up.
     async fn start() -> Option<(Server, Self)> {
+        Self::start_with("").await
+    }
+
+    /// [`Uplinked::start`], the hub's `jetstream` block having `limits` too.
+    async fn start_with(limits: &str) -> Option<(Server, Self)> {
         let (uplink_port, dead_port) = (free_port(), free_port());
         let hub = Server::spawn_with(|dir| {
             format!(
-                "jetstream {{ store_dir: {:?}, domain: hub }}\nleafnodes {{ listen: \"127.0.0.1:{uplink_port}\" }}\n",
+                "jetstream {{ store_dir: {:?}, domain: hub{limits} }}\nleafnodes {{ listen: \"127.0.0.1:{uplink_port}\" }}\n",
                 dir.join("js")
             )
         })?;
@@ -548,4 +553,67 @@ async fn a_message_held_past_the_ack_wait_keeps_its_attempts() {
     assert_eq!(letters[0].1.stream_seq, seq);
     assert!(letters[0].1.deliveries > MAX_ATTEMPTS as u64, "the server counted the delivery in hand");
     assert_eq!(log.locked().doomed_failed, MAX_ATTEMPTS as usize, "every attempt prompted");
+}
+
+/// dev-a's daemon on a leaf node holds a message never to be answered, the hub's store full, when the leaf's uplink is
+/// cut: its dead letter goes to the machine's outbox, and the message stays in hand, counted as buried once. Once the
+/// uplink is back the daemon stores the dead letter in the hub's stream and terminates the message, without a
+/// redelivery of it.
+#[tokio::test]
+async fn junk_whose_dead_letter_is_kept_in_the_outbox_is_terminated_once_the_uplink_is_back() {
+    let limits = format!(", max_file_store: {}, max_memory_store: 8MB", store::STORE);
+    let Some((hub, uplinked)) = Uplinked::start_with(&limits).await else { return };
+    let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let junk = subject::inbox(&bus.dev, &UserId::human());
+    let seq = uplinked.hub_js.publish(junk, "not an envelope".into()).await.unwrap().await.unwrap().sequence;
+    store::fill(&uplinked.hub_js).await;
+    // No redelivery for want of an ack within the test: any spends a delivery.
+    let (progress_every, ack_wait) = (Duration::from_millis(200), WAIT * 3);
+    let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let name = ants_proto::inbox_consumer(&bus.dev);
+        timeout(WAIT, async {
+            loop {
+                if let Ok(mut consumer) = stream.get_consumer::<jetstream::consumer::pull::Config>(&name).await
+                    && consumer.info().await.unwrap().delivered.stream_sequence >= seq
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the junk delivered");
+        // The store refuses its dead letter at least once.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        uplinked.switch(Link::Down).await;
+        timeout(WAIT, async {
+            while uplinked.kept().await == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the dead letter is kept in the outbox");
+        // Several retries of the store, 300 ms apart in the tests, pass.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(bus.metrics.dead_letters(), 1, "counted once while the hub is out of reach");
+        assert_eq!(uplinked.kept().await, 1, "kept in the outbox once");
+        store::free(&uplinked.hub_js).await;
+        uplinked.switch(Link::Up).await;
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
+    let letters = dead::list(&stream).await.unwrap();
+    assert_eq!(letters.len(), 1, "{letters:?}");
+    assert_eq!(letters[0].1.stream_seq, seq);
+    assert!(letters[0].1.error.contains("not an envelope"), "{}", letters[0].1.error);
+    assert_eq!(bus.metrics.dead_letters(), 1, "counted once");
+    assert_eq!(log.locked().prompted, 0);
+    let consumer = bus.consumer().await;
+    assert_eq!((consumer.num_redelivered, consumer.num_ack_pending), (0, 0), "terminated, no delivery spent");
 }

@@ -8,6 +8,7 @@ use async_nats::jetstream;
 use crate::bus;
 use crate::delivery::dead::{self, Burial};
 
+use super::holds::Stalled;
 use super::{Inbox, Incoming, MAX_DELIVER};
 
 /// A dead letter to bury: a new one, or one kept in the machine's outbox on an earlier delivery.
@@ -18,14 +19,35 @@ pub(super) enum Letter {
 }
 
 impl Inbox<'_> {
-    /// Dead-letter a message that is never to be prompted with, keeping only an excerpt of its payload. One whose dead
-    /// letter the hub cannot take, its store full or out of reach, waits in hand until it can ([`Inbox::hold_junk`]).
+    /// Dead-letter a message that is never to be prompted with, keeping only an excerpt of its payload, and terminate
+    /// it. One whose dead letter the hub cannot take, its store full or out of reach, waits in hand until it can
+    /// ([`Inbox::hold_junk`]), as does one whose dead letter went to the machine's outbox: it is counted then, and
+    /// terminated once the hub's stream holds its dead letter.
     pub(super) async fn bury_unanswerable(&self, msg: &jetstream::Message, error: &str) {
         tracing::warn!(error, subject = %msg.subject, "dead-lettering a message without answering it");
-        match dead::bury(self.js, self.ant, msg, None, error).await {
-            Ok(_) => self.metrics.buried(),
+        let kept = self.holds.junk.release(msg);
+        let buried = if kept {
+            self.bury_kept_junk(msg, error).await
+        } else {
+            dead::bury(self.js, self.ant, msg, None, error).await
+        };
+        match buried {
+            Ok(burial) => {
+                if !kept {
+                    self.metrics.buried();
+                }
+                if burial == Burial::Outbox {
+                    self.hold_junk(
+                        msg,
+                        error,
+                        true,
+                        Stalled::OutOfReach,
+                        "the dead letter is in this machine's outbox",
+                    );
+                }
+            }
             Err(e) => match self.stalled_by(&e).await {
-                Some(why) => self.hold_junk(msg, error, why, &e),
+                Some(why) => self.hold_junk(msg, error, kept, why, &format!("{e:#}")),
                 None => {
                     // Never redelivered, dead letter or not.
                     tracing::warn!(error = format!("{e:#}"), "dead-lettering");
@@ -33,6 +55,16 @@ impl Inbox<'_> {
                 }
             },
         }
+    }
+
+    /// [`Inbox::bury_unanswerable`] for `msg` whose dead letter went to the machine's outbox before: once the hub is in
+    /// reach, the letter its stream took from there is the one kept, and no other is stored ([`dead::bury_kept`]).
+    async fn bury_kept_junk(&self, msg: &jetstream::Message, error: &str) -> Result<Burial> {
+        if !bus::in_reach(self.js).await {
+            return Ok(Burial::Outbox);
+        }
+        let dead = dead::letter_for(self.ant, msg, None, error, bus::max_payload(self.client))?;
+        dead::bury_kept(self.js, msg, &dead, None, self.humans, None).await
     }
 
     /// Store `msg` as a dead letter, escalating it up the ant's chain (in the end to the thread's owner, else the

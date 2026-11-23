@@ -67,6 +67,8 @@ struct Bus {
     /// dev-a's escalation chain.
     chain: Chain,
     workload: Arc<colony::Workload>,
+    /// dev-a's counters, this bus's own.
+    metrics: Arc<crate::monitoring::metrics::Ant>,
     pause: crate::pause::Pause,
     mcp: Option<Mcp>,
     /// The ant's identity record; none: it cannot be read.
@@ -133,6 +135,7 @@ impl Bus {
             ledger,
             chain: Chain::default(),
             workload,
+            metrics: Arc::default(),
             pause: crate::pause::Pause::new(false),
             mcp: None,
             identity: None,
@@ -320,7 +323,7 @@ impl Bus {
             workload: &self.workload,
             pause: &self.pause,
             drift: &crate::profile::shared::Drift::default(),
-            metrics: crate::monitoring::metrics::ant(&self.dev),
+            metrics: self.metrics.clone(),
             limits: self.limits,
             ledger: &self.ledger,
             escalator: &escalator,
