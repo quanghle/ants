@@ -77,7 +77,7 @@ pub(crate) static SENT_READS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const
 
 /// The turn at [`SENT_READS`] a read through an ant's sent reader waits for, as `reading` reads: none unless through
 /// the consumer.
-async fn sent_turn(reading: Reading) -> Option<tokio::sync::MutexGuard<'static, ()>> {
+pub(crate) async fn sent_turn(reading: Reading) -> Option<tokio::sync::MutexGuard<'static, ()>> {
     if reading == Reading::Consumer { Some(SENT_READS.lock().await) } else { None }
 }
 

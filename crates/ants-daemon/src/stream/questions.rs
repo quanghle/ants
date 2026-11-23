@@ -61,8 +61,7 @@ pub async fn asked(
 ) -> Result<Option<Envelope>> {
     let Some(answer) = &envelope.answer else { return Ok(None) };
     let question = {
-        let _one =
-            if reading == Reading::Consumer { Some(crate::stream::history::SENT_READS.lock().await) } else { None };
+        let _one = crate::stream::history::sent_turn(reading).await;
         find(js, &sent_reader(ant), reading, &subject::inbox_from(ant), answer.question)
             .await
             .context("reading back the question answered")?
