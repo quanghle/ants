@@ -14,7 +14,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 pub use trails::{trail_leg, trail_run};
@@ -121,14 +121,19 @@ pub fn wait_until<T>(limit: Duration, every: Duration, mut check: impl FnMut() -
 
 /// The command running the `ants` executable `program` with none of the `ANTS_*` variables of this process, so what
 /// the calling shell exports (`ANTS_CREDS`, `ANTS_CONFIG`, `ANTS_JS_DOMAIN`, `ANTS_ANT`, `ANTS_METRICS`, …) changes
-/// nothing of what a test runs: a test sets the ones it means.
+/// nothing of what a test runs: a test sets the ones it means. Its home is an empty scratch directory, one per test
+/// process, unless the test sets another: the credentials, config file and ants' homes of whoever runs the tests are
+/// neither read nor written.
 pub fn ants_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    let home = HOME.get_or_init(|| scratch_dir("home"));
     let mut command = Command::new(program);
     for (name, _) in std::env::vars_os() {
         if name.to_str().is_some_and(|name| name.starts_with("ANTS_")) {
             command.env_remove(name);
         }
     }
+    command.env("HOME", home).env("USERPROFILE", home).env_remove("XDG_CONFIG_HOME").env_remove("XDG_DATA_HOME");
     command
 }
 
