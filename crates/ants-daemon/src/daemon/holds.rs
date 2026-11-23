@@ -35,6 +35,8 @@ pub(super) struct Holds {
     pub(super) stall: Stall,
     /// The messages never to be answered whose dead letter waits in hand for the hub.
     pub(super) junk: Junk,
+    /// The deliveries of messages in hand that were no attempt.
+    pub(super) uncounted: Uncounted,
 }
 
 /// Messages never to be answered ([`Inbox::bury_unanswerable`]) whose dead letter the hub could not take, its store
@@ -63,6 +65,33 @@ impl Junk {
     /// Take the messages held, to bury them again.
     fn take(&self) -> Vec<(jetstream::Message, String)> {
         std::mem::take(&mut *self.0.locked())
+    }
+}
+
+/// The deliveries the server made of messages while a copy was in hand, their progress acks lost, as while the hub was
+/// out of reach for longer than the ack wait: nats-server counts each, but none is an attempt. By stream sequence, the
+/// delivery counts the server gave them, until the message is done with.
+#[derive(Default)]
+pub(super) struct Uncounted(std::sync::Mutex<std::collections::HashMap<u64, Vec<i64>>>);
+
+impl Uncounted {
+    /// Note delivery `delivered` of the message at stream sequence `seq`, which came while a copy of it was in hand.
+    pub(super) fn add(&self, seq: u64, delivered: i64) {
+        self.0.locked().entry(seq).or_default().push(delivered);
+    }
+
+    /// Of delivery `delivered` of the message at stream sequence `seq`: the attempt it is, the deliveries before it
+    /// that were no attempt left out, and the most deliveries the server counted of the message.
+    pub(super) fn standing(&self, seq: u64, delivered: i64) -> (i64, i64) {
+        let uncounted = self.0.locked();
+        let made = uncounted.get(&seq).map_or(&[][..], Vec::as_slice);
+        let before = made.iter().filter(|&&made| made < delivered).count() as i64;
+        (delivered - before, made.iter().copied().fold(delivered, i64::max))
+    }
+
+    /// Forget the message at stream sequence `seq`, done with.
+    pub(super) fn forget(&self, seq: u64) {
+        self.0.locked().remove(&seq);
     }
 }
 

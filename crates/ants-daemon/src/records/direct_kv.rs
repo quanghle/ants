@@ -40,6 +40,8 @@ const BATCH_BYTES: usize = 4 << 20;
 const SEQUENCED_TRIES: usize = 10;
 /// The header making the stream remove a message after the given number of seconds, if it allows per-message TTLs.
 const TTL: &str = "Nats-TTL";
+/// How long [`DirectKv::lookup`] waits for the stream list telling whether a bucket whose direct get timed out exists.
+const LIST_WAIT: Duration = Duration::from_secs(2);
 /// How long a reader consumer left behind by an interrupted read past a relayed message lives on.
 const READER_INACTIVE: Duration = Duration::from_secs(30);
 
@@ -167,6 +169,11 @@ impl DirectKv {
                 }
                 return Ok((Lookup::NoBucket, 0, None, false));
             }
+            // Through a leaf node with its uplink up, the hub drops a direct get no stream answers, so a missing bucket
+            // times out rather than answering no responders: a stream list naming no stream for the key tells.
+            Err(e) if e.kind() == DirectGetErrorKind::TimedOut && self.listed(key).await == Some(false) => {
+                return Ok((Lookup::NoBucket, 0, None, false));
+            }
             Err(e) => return Err(e).with_context(|| format!("reading {key}")),
         };
         let put = if relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::DirectGet) {
@@ -265,6 +272,9 @@ impl DirectKv {
                 let kind = DirectGetErrorKind::ErrorResponse(StatusCode::NO_RESPONDERS, String::new());
                 return Err(DirectGetError::new(kind));
             }
+            Err(e) if e.kind() == RequestErrorKind::TimedOut => {
+                return Err(DirectGetError::with_source(DirectGetErrorKind::TimedOut, e));
+            }
             Err(e) => return Err(DirectGetError::with_source(DirectGetErrorKind::Other, e)),
         };
         match msg.status {
@@ -274,6 +284,23 @@ impl DirectKv {
                 Err(DirectGetError::new(DirectGetErrorKind::ErrorResponse(status, msg.description.unwrap_or_default())))
             }
         }
+    }
+
+    /// Whether the hub's stream list (`STREAM.LIST`, which every user's credentials allow) names the bucket's stream
+    /// among those capturing `key`; None when the list is not had in [`LIST_WAIT`].
+    async fn listed(&self, key: &str) -> Option<bool> {
+        #[derive(serde::Deserialize)]
+        struct Listed {
+            #[serde(default)]
+            streams: Option<Vec<jetstream::stream::Info>>,
+        }
+        let filter = serde_json::json!({ "subject": self.subject(key) });
+        let list = self.js.request::<_, _, jetstream::response::Response<Listed>>("STREAM.LIST", &filter);
+        let Ok(Ok(jetstream::response::Response::Ok(listed))) = tokio::time::timeout(LIST_WAIT, list).await else {
+            return None;
+        };
+        let name = format!("KV_{}", self.bucket);
+        Some(listed.streams.unwrap_or_default().iter().any(|info| info.config.name == name))
     }
 
     /// The JetStream API prefix of requests, `$JS.API.` or that of the hub's domain.

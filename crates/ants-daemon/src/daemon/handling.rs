@@ -64,9 +64,20 @@ impl Inbox<'_> {
     /// Answer one message. A failed attempt is redelivered after a delay, and the last one becomes a dead letter; one
     /// the harness failed for want of signing in, or for a provider limit, is no attempt, and is handed back to wait,
     /// as is one that failed only for the hub, its store full or out of reach ([`Inbox::stalled_by`]). A reply past
-    /// the server's `max_payload` is never worth another prompt: the message becomes a dead letter at once. Returns its
-    /// thread, and how handling ended.
-    pub(super) async fn handle(&self, mut incoming: Incoming, msg: jetstream::Message) -> (ThreadId, Handled) {
+    /// the server's `max_payload` is never worth another prompt: the message becomes a dead letter at once. A delivery
+    /// the server made while a copy of the message was in hand is no attempt either ([`super::holds::Uncounted`]).
+    /// Returns its thread, and how handling ended.
+    pub(super) async fn handle(&self, incoming: Incoming, msg: jetstream::Message) -> (ThreadId, Handled) {
+        let seq = msg.info().map(|info| info.stream_sequence);
+        let handled = Box::pin(self.handle_delivery(incoming, msg)).await;
+        if let (Ok(seq), Handled::Done) = (seq, &handled.1) {
+            self.holds.uncounted.forget(seq);
+        }
+        handled
+    }
+
+    /// [`Inbox::handle`], but for forgetting the deliveries of the message that were no attempt once it is done.
+    async fn handle_delivery(&self, mut incoming: Incoming, msg: jetstream::Message) -> (ThreadId, Handled) {
         let _working = self.workload.working();
         let arrived = incoming.clone();
         let envelope = &incoming.envelope;
@@ -90,7 +101,9 @@ impl Inbox<'_> {
             return (thread, Handled::Done);
         }
         let envelope = &incoming.envelope;
-        let attempt = Attempt::of(delivered, MAX_ATTEMPTS);
+        // Deliveries made while a copy was in hand are no attempt, but the server gives none past MAX_DELIVER.
+        let (counted, delivered) = self.holds.uncounted.standing(seq, delivered);
+        let attempt = Attempt::of(counted.max(delivered - (MAX_DELIVER - MAX_ATTEMPTS)), MAX_ATTEMPTS);
         // Taken up before anything is done for it, unless a human withdrew it first (`ants withdraw`).
         let result = match self.take_up(envelope).await {
             Ok(Some(withdrawal)) => self.withdrawn(Handling { incoming: &incoming, msg: &msg, seq }, &withdrawal).await,

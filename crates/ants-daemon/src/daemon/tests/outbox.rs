@@ -475,8 +475,8 @@ async fn a_message_in_hand_waits_out_the_hub_out_of_reach_spending_no_attempt() 
     assert_eq!(answers, 1, "the next message answered once");
 }
 
-/// A direct get of a missing bucket reads as a missing bucket; through a leaf node whose uplink is down, as the hub
-/// out of reach, never a missing bucket.
+/// A direct get of a missing bucket reads as a missing bucket, through a leaf node with its uplink up too; through one
+/// whose uplink is down, as the hub out of reach, never a missing bucket.
 #[tokio::test]
 async fn a_direct_get_tells_a_missing_bucket_from_the_hub_out_of_reach() {
     use crate::records::direct_kv::{DirectKv, Lookup};
@@ -488,6 +488,11 @@ async fn a_direct_get_tells_a_missing_bucket_from_the_hub_out_of_reach() {
     let there = DirectKv::new(&uplinked.through_leaf, Some(&domain), ants_proto::SESSIONS_BUCKET).await.unwrap();
     assert!(matches!(missing.lookup("human.probe").await.unwrap(), Lookup::NoBucket));
     assert!(matches!(there.lookup("human.probe").await.unwrap(), Lookup::NoValue));
+    // The hub drops a direct get through the leaf that no stream answers: it times out, and still reads as missing.
+    let whole = DirectKv::whole(&uplinked.through_leaf, Some(&domain), "nowhere").await.unwrap();
+    for kv in [&through, &whole] {
+        assert!(matches!(kv.lookup("human.probe").await.unwrap(), Lookup::NoBucket));
+    }
 
     uplinked.switch(Link::Down).await;
     for kv in [&through, &there] {
@@ -496,4 +501,51 @@ async fn a_direct_get_tells_a_missing_bucket_from_the_hub_out_of_reach() {
         assert!(bus::hub_out_of_reach(&e), "{text}");
         assert!(text.contains("out of reach") && !text.contains("no bucket"), "{text}");
     }
+}
+
+/// dev-a's daemon on a leaf node holds a message in hand, the hub out of reach, for longer than the ack wait: the hub
+/// redelivers it once the uplink is back, the new pull request ahead of the next progress ack, which raises the
+/// server's delivered count, as nats-server counts every delivery. That delivery, of a message in hand, is no attempt:
+/// the message, failing every attempt after, still gets all its attempts before it becomes a dead letter.
+#[tokio::test]
+async fn a_message_held_past_the_ack_wait_keeps_its_attempts() {
+    let Some((hub, uplinked)) = Uplinked::start().await else { return };
+    let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
+    let (launch, log, gate) = fake::launch();
+    let t1 = ThreadId::generate();
+    let hold = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
+    let doomed = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "doomed b");
+    bus::publish_json(&uplinked.hub_js, hold.subject(), &hold, None).await.unwrap();
+    let seq = bus::publish_json(&uplinked.hub_js, doomed.subject(), &doomed, None).await.unwrap();
+    let (progress_every, ack_wait) = (Duration::from_secs(1), Duration::from_secs(3));
+    let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
+
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to start", || log.locked().prompted == 1).await;
+        uplinked.switch(Link::Down).await;
+        gate.add_permits(1);
+        until("the answer", || log.locked().answered.len() == 1).await;
+        tokio::time::sleep(ack_wait + Duration::from_secs(2)).await;
+        assert_eq!(log.locked().doomed, 0, "not prompted while the hub is out of reach");
+        uplinked.switch(Link::Up).await;
+        // As the daemon's pull request, through the uplink back, comes before its next progress ack.
+        bus::pull_anew();
+        gate.add_permits(MAX_ATTEMPTS as usize);
+        timeout(WAIT * 2, async {
+            while dead::list(&stream).await.unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("no dead letter");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
+    let letters = dead::list(&stream).await.unwrap();
+    assert_eq!(letters.len(), 1);
+    assert_eq!(letters[0].1.stream_seq, seq);
+    assert!(letters[0].1.deliveries > MAX_ATTEMPTS as u64, "the server counted the delivery in hand");
+    assert_eq!(log.locked().doomed_failed, MAX_ATTEMPTS as usize, "every attempt prompted");
 }
