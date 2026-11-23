@@ -511,7 +511,8 @@ async fn a_direct_get_tells_a_missing_bucket_from_the_hub_out_of_reach() {
 /// dev-a's daemon on a leaf node holds a message in hand, the hub out of reach, for longer than the ack wait: the hub
 /// redelivers it once the uplink is back, the new pull request ahead of the next progress ack, which raises the
 /// server's delivered count, as nats-server counts every delivery. That delivery, of a message in hand, is no attempt:
-/// the message, failing every attempt after, still gets all its attempts before it becomes a dead letter.
+/// the message, failing every attempt after, still gets all its attempts before it becomes a dead letter. The nak of
+/// the copy in hand, an older delivery than the one ignored, has the retry come after the retry delay, not the ack wait.
 #[tokio::test]
 async fn a_message_held_past_the_ack_wait_keeps_its_attempts() {
     let Some((hub, uplinked)) = Uplinked::start().await else { return };
@@ -522,7 +523,7 @@ async fn a_message_held_past_the_ack_wait_keeps_its_attempts() {
     let doomed = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "doomed b");
     bus::publish_json(&uplinked.hub_js, hold.subject(), &hold, None).await.unwrap();
     let seq = bus::publish_json(&uplinked.hub_js, doomed.subject(), &doomed, None).await.unwrap();
-    let (progress_every, ack_wait) = (Duration::from_secs(1), Duration::from_secs(3));
+    let (progress_every, ack_wait) = (Duration::from_secs(2), Duration::from_secs(6));
     let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
 
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -537,7 +538,17 @@ async fn a_message_held_past_the_ack_wait_keeps_its_attempts() {
         uplinked.switch(Link::Up).await;
         // As the daemon's pull request, through the uplink back, comes before its next progress ack.
         bus::pull_anew();
-        gate.add_permits(MAX_ATTEMPTS as usize);
+        until("the first attempt", || log.locked().doomed == 1).await;
+        // The delivery the daemon ignores comes before the copy in hand fails.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        gate.add_permits(1);
+        until("the first attempt to fail", || log.locked().doomed_failed == 1).await;
+        let failed = std::time::Instant::now();
+        until("the retry", || log.locked().doomed == 2).await;
+        let waited = failed.elapsed();
+        println!("retried {waited:?} after the nak of the copy in hand (ack wait {ack_wait:?})");
+        assert!(waited < ack_wait / 2, "retried after the ack wait, not the retry delay: {waited:?}");
+        gate.add_permits(MAX_ATTEMPTS as usize - 1);
         timeout(WAIT * 2, async {
             while dead::list(&stream).await.unwrap().is_empty() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
