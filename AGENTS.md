@@ -24,8 +24,10 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 
 - Rust 2024, one workspace: `ants-proto` (wire contract, no I/O), `ants-sense` (built-in identity, memory and work
   provider, no daemon dependency), `ants-trail` (trails: Monty runs, the one-shot `ants subprocess` worker and its
-  runner, no NATS), `ants-daemon` (NATS + ACP), `ants` (binary), `ants-test-support` (dev-only test helpers: tools on
-  PATH, throwaway nats-server).
+  runner, no NATS), `ants-client` (what a human's client derives from what it reads, its requests and its reads and
+  writes over a transport trait: no I/O, no runtime, built for wasm32 too, used by the daemon, the CLI, `ants chat`
+  and the web client), `ants-daemon` (NATS + ACP), `ants` (binary), `ants-test-support` (dev-only test helpers: tools
+  on PATH, throwaway nats-server).
 - The daemon reaches `ants-sense` only through its `sense` module (`crates/ants-daemon/src/sense.rs`), the `ants`
   crate through that module and, for the files of an ant's home, the few files `sense/tests.rs` lists.
 - Keep the footprint small: tokio current-thread, minimal features, no per-session helper processes; the one
@@ -59,6 +61,8 @@ skipped checks.
 
 - `cargo fmt --all --check`, `cargo clippy --all-targets`, `cargo test`, all with `CARGO_BUILD_WARNINGS=deny` as in
   CI, so any lint warning fails.
+- `cargo check -p ants-client --target wasm32-unknown-unknown` (needs `rustup target add wasm32-unknown-unknown`):
+  the crate names neither async-nats, tokio, ratatui, wasm-bindgen nor js-sys.
 - `cargo doc --workspace --no-deps --document-private-items` with `RUSTDOCFLAGS=-D warnings`, so a broken or
   ambiguous doc link or stray HTML in a doc comment fails. Clap help text is shown as written, not as markdown: its
   `<dir>` placeholders pass (`ants` expects `rustdoc::invalid_html_tags`), and an arg whose help names a config table
