@@ -1,5 +1,6 @@
 //! Holding the messages while the ant's own harness cannot answer, signed out, limited or failing to start: the
-//! humans told, the fallbacks that answer meanwhile, and the checks that let the messages go on.
+//! humans told, the fallbacks that answer meanwhile, and the checks that let the messages go on; and while the hub
+//! cannot take what they need, its JetStream store full or out of reach.
 
 use std::time::Duration;
 
@@ -12,6 +13,7 @@ use crate::limits::fallback::{Failover, OnFallback, OutageNotice};
 use crate::limits::ratelimit::{self, Limited, Throttle};
 use crate::limits::signin::{self, SignIn};
 use crate::monitoring::status;
+use crate::sync::MutexExt as _;
 
 use super::{Inbox, Incoming, mcp_sign_in};
 
@@ -28,9 +30,91 @@ pub(super) struct Holds {
     pub(super) failover: Failover,
     /// The sign-ins to MCP servers the harness's sessions made as they opened, until told.
     pub(super) mcp_sign_ins: mcp_sign_in::Untold,
+    /// Whether messages wait in hand for the hub to store what they need, holding the messages.
+    pub(super) stall: Stall,
+}
+
+/// What of the hub a message waits for in hand, its handling having failed only for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Stalled {
+    /// JetStream refused to store for want of room ([`bus::store_refused`]).
+    StoreFull,
+    /// JetStream did not answer ([`bus::OutOfReach`]).
+    OutOfReach,
+}
+
+impl std::fmt::Display for Stalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::StoreFull => "the hub's JetStream store is full",
+            Self::OutOfReach => "the hub is out of reach",
+        })
+    }
+}
+
+/// Whether messages wait in hand for the hub, and for what; and what of it the log told last.
+#[derive(Default)]
+pub(super) struct Stall(std::sync::Mutex<(Option<Stalled>, Option<Stalled>)>);
+
+impl Stall {
+    pub(super) fn is_on(&self) -> bool {
+        self.0.locked().0.is_some()
+    }
+
+    /// Note that messages wait for `why`: true when the log has not told so since a message was last handled.
+    fn on(&self, why: Stalled) -> bool {
+        let mut stall = self.0.locked();
+        stall.0 = Some(why);
+        stall.1.replace(why) != Some(why)
+    }
+
+    fn off(&self) {
+        self.0.locked().0 = None;
+    }
+
+    /// Note how a message's handling ended: once one is done, the next stall is told again.
+    pub(super) fn settled(&self, handled: &super::handling::Handled) {
+        if matches!(handled, super::handling::Handled::Done) {
+            self.0.locked().1 = None;
+        }
+    }
 }
 
 impl Inbox<'_> {
+    /// What of the hub handling a message failed for with `e`, if only for it: JetStream refusing to store for want of
+    /// room, or not answering, which a request every user's credentials allow confirms ([`bus::in_reach`]); a stream
+    /// missing though JetStream answers is an ordinary failure.
+    pub(super) async fn stalled_by(&self, e: &anyhow::Error) -> Option<Stalled> {
+        if bus::store_refused(e) {
+            Some(Stalled::StoreFull)
+        } else if bus::hub_out_of_reach(e) || bus::unanswered(e) && !bus::in_reach(self.js).await {
+            Some(Stalled::OutOfReach)
+        } else {
+            None
+        }
+    }
+
+    /// Hold the messages, `incoming` having failed only for `why`, with `e`: none is prompted until the hub is tried
+    /// again ([`Self::hub_back`]), and none spends an attempt meanwhile.
+    pub(super) fn wait_for_hub(&self, incoming: &Incoming, why: Stalled, e: &anyhow::Error) {
+        let thread = &incoming.envelope.thread_id;
+        status::state(self.client, self.ant, thread, State::Idle);
+        let error = format!("{e:#}");
+        if self.holds.stall.on(why) {
+            tracing::warn!(%thread, %error, "{why}; messages wait in hand, spending no attempt, until it takes them");
+        } else {
+            tracing::info!(%thread, %error, "{why}; the message waits in hand");
+        }
+    }
+
+    /// Wait `store_every`, then let the messages held for the hub go on: the first to fail for it again holds them
+    /// again.
+    pub(super) async fn hub_back(&self) {
+        tokio::time::sleep(self.pacing.store_every).await;
+        tracing::info!("trying the messages waiting for the hub again");
+        self.holds.stall.off();
+    }
+
     /// Why the ant's own harness cannot answer now, if it cannot: messages go to a fallback meanwhile, if one is up.
     pub(super) fn outage(&self) -> Option<&'static str> {
         if self.holds.sign_in.is_out() {

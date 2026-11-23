@@ -104,6 +104,7 @@ impl Owners {
         let value = match kv.lookup(key.clone()).await {
             Ok(Lookup::Value(value)) => value,
             Ok(Lookup::NoValue) => return Ok(Read::NoOwner),
+            Err(e) if crate::bus::hub_out_of_reach(&e) => return Err(e),
             // A missing bucket, or credentials not reading it, leave a direct get through a leaf node unanswered.
             missing @ (Ok(Lookup::NoBucket) | Err(_)) => {
                 if !self.missing.swap(true, Ordering::Relaxed) {

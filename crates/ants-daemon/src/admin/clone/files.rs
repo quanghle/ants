@@ -10,13 +10,14 @@ use super::undo::Done;
 use super::worktrees::{Tree, worktrees};
 use crate::clone::{Snapshot, ThreadCopy};
 
-/// What of a home a clone does not copy: its worktrees and history are made again, its answered and buried messages,
+/// What of a home a clone does not copy: its worktrees and history are made again, its answered, unsent and buried messages,
 /// its MCP endpoint, its lifecycle events ([`crate::provider::events`]) and its sense identity ([`crate::sense::DIR`])
 /// are its own.
-const NOT_COPIED: [&str; 8] = [
+const NOT_COPIED: [&str; 9] = [
     "worktrees",
     "history",
     "answered",
+    "unsent",
     "buried",
     "mcp.json",
     "mcp.sock",

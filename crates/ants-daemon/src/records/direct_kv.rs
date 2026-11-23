@@ -116,7 +116,8 @@ impl DirectKv {
         Ok(!matches!(self.lookup(format!("{ant}.probe")).await?, Lookup::NoBucket))
     }
 
-    /// The value of `key`; None when it has none or was deleted. Fails when the bucket does not exist.
+    /// The value of `key`; None when it has none or was deleted. Fails when the bucket does not exist, or the hub is
+    /// out of reach ([`crate::bus::OutOfReach`]), as every read does.
     pub async fn get(&self, key: impl AsRef<str>) -> Result<Option<Vec<u8>>> {
         let key = key.as_ref();
         match self.lookup(key).await? {
@@ -158,7 +159,12 @@ impl DirectKv {
         let msg = match self.last(key).await {
             Ok(msg) => msg,
             Err(e) if e.kind() == DirectGetErrorKind::NotFound => return Ok((Lookup::NoValue, 0, None, false)),
+            // No stream answers: a missing bucket, unless no JetStream of the hub answers at all, as behind a leaf
+            // node whose uplink is down.
             Err(e) if matches!(e.kind(), DirectGetErrorKind::ErrorResponse(StatusCode::NO_RESPONDERS, _)) => {
+                if !crate::bus::in_reach(&self.js).await {
+                    return Err(anyhow!(crate::bus::OutOfReach)).with_context(|| format!("reading {key}"));
+                }
                 return Ok((Lookup::NoBucket, 0, None, false));
             }
             Err(e) => return Err(e).with_context(|| format!("reading {key}")),

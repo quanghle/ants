@@ -27,10 +27,14 @@
 //! own dead letters back from the hub ([`stored`]) and keeps a letter of the same message found there instead of
 //! storing another.
 //!
+//! When the hub's store is full, a dead letter it refuses is noted on the machine as in the outbox case, and the
+//! message waits in hand, spending no delivery, until the store takes the letter. Every dead letter is cut to fit the
+//! server's `max_payload` ([`DeadLetter::fit`]), so its size never keeps it out.
+//!
 //! When storing the dead letter fails on that extra delivery too, JetStream delivers the message no more and only
 //! publishes a max-deliveries advisory. As a backstop, the human's side ([`watch`]) turns those advisories into dead
-//! letters. Advisories are core NATS: one published while no watcher runs is lost, and its message stays in the
-//! stream unnoticed until it expires.
+//! letters, trying a burial the full store or the hub out of reach refused again later. Advisories are core NATS: one
+//! published while no watcher runs is lost, and its message stays in the stream unnoticed until it expires.
 
 use crate::bus::relayed::{self, Read};
 use std::path::Path;
@@ -60,6 +64,12 @@ use crate::records::direct_kv::DirectKv;
 const INACTIVE: Duration = Duration::from_secs(30);
 /// Dead letters asked for at once.
 const BATCH: u64 = 256;
+/// Bytes a dead letter leaves under the server's `max_payload`, for its headers.
+const DEAD_HEADROOM: usize = 1024;
+/// How often [`watch`] tries again the burials that failed.
+const BURY_RETRY: Duration = Duration::from_secs(30);
+/// Most failed burials [`watch`] keeps trying; past them, a failure is only logged.
+const BURY_RETRIES_KEPT: usize = 10_000;
 /// One read of dead letters at a time: an ant's reads share its reader.
 static READING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -176,21 +186,22 @@ pub async fn bury_to(
     humans: &Registry,
     escalator: Option<&Escalator>,
 ) -> Result<Burial> {
-    let dead = letter_for(ant, msg, envelope, error)?;
+    let dead = letter_for(ant, msg, envelope, error, bus::max_payload(&js.client()))?;
     bury_letter(js, msg, &dead, None, humans, escalator).await
 }
 
 /// The dead letter of `ant` for `msg`, failed with `error`: of `envelope`, or of the message's payload when there is
-/// none (not an envelope, or a channel post).
+/// none (not an envelope, or a channel post), cut to fit `max_payload` ([`DeadLetter::fit`]).
 pub fn letter_for(
     ant: &UserId,
     msg: &jetstream::Message,
     envelope: Option<&Envelope>,
     error: &str,
+    max_payload: usize,
 ) -> Result<DeadLetter> {
     let info = msg.info().map_err(|e| anyhow!(e))?;
     let (seq, deliveries) = (info.stream_sequence, info.delivered.max(0) as u64);
-    Ok(letter_of(ant, seq, deliveries, error, &msg.payload, envelope))
+    Ok(letter_of(ant, seq, deliveries, error, &msg.payload, envelope, max_payload))
 }
 
 /// Store `dead`, the dead letter of `msg`, in the hub's stream, tell the thread's owner (else the default human of
@@ -349,6 +360,9 @@ async fn read_back(reader: &consumer::PullConsumer, seq: u64) -> Result<Vec<(u64
     Ok(letters)
 }
 
+/// The dead letter of `ant` for the message at stream sequence `seq`, cut to fit `max_payload` with
+/// [`DEAD_HEADROOM`] to spare ([`DeadLetter::fit`]): a message just under the limit yields a letter that would be over
+/// it whole.
 fn letter_of(
     ant: &UserId,
     seq: u64,
@@ -356,11 +370,13 @@ fn letter_of(
     error: &str,
     payload: &[u8],
     envelope: Option<&Envelope>,
+    max_payload: usize,
 ) -> DeadLetter {
-    match envelope {
+    let dead = match envelope {
         Some(e) => DeadLetter::of_envelope(ant.clone(), seq, deliveries, error, e.clone()),
         None => DeadLetter::of_payload(ant.clone(), seq, deliveries, error, payload),
-    }
+    };
+    dead.fit(max_payload.saturating_sub(DEAD_HEADROOM))
 }
 
 /// Tell the thread's owner, else the default human of `humans`, that `dead`, stored at stream sequence `dead_seq`,
@@ -467,21 +483,43 @@ pub async fn watch(
     let sessions = DirectKv::new(js, None, SESSIONS_BUCKET).await?;
     let threads = Threads::new(js.clone(), reader.clone(), sessions).reading(Reading::Gets);
     let claims = Claims { humans: &humans, threads: &threads };
-    while let Some(msg) = advisories.next().await {
-        let advisory = match serde_json::from_slice::<MaxDeliveries>(&msg.payload) {
-            Ok(advisory) => advisory,
-            Err(e) => {
-                tracing::warn!(subject = %msg.subject, error = %e, "skipping an unreadable advisory");
-                continue;
+    // The advisories whose burial failed for a while, the hub's store full or its JetStream not answering, tried again
+    // every `BURY_RETRY`.
+    let mut failed: Vec<MaxDeliveries> = Vec::new();
+    let mut retry = tokio::time::interval_at(tokio::time::Instant::now() + BURY_RETRY, BURY_RETRY);
+    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let advisories = tokio::select! {
+            msg = advisories.next() => {
+                let Some(msg) = msg else { break };
+                match serde_json::from_slice::<MaxDeliveries>(&msg.payload) {
+                    Ok(advisory) => vec![advisory],
+                    Err(e) => {
+                        tracing::warn!(subject = %msg.subject, error = %e, "skipping an unreadable advisory");
+                        continue;
+                    }
+                }
             }
+            _ = retry.tick(), if !failed.is_empty() => std::mem::take(&mut failed),
         };
-        match bury_undelivered(js, &stream, &advisory, &claims).await {
-            Ok(Some((seq, dead))) => {
-                crate::monitoring::metrics::ant(&dead.ant).buried();
-                buried(seq, &dead);
+        for advisory in advisories {
+            match bury_undelivered(js, &stream, &advisory, &claims).await {
+                Ok(Some((seq, dead))) => {
+                    crate::monitoring::metrics::ant(&dead.ant).buried();
+                    buried(seq, &dead);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let seq = advisory.stream_seq;
+                    let passing = crate::bus::store_refused(&e) || crate::bus::unanswered(&e);
+                    if passing && failed.len() < BURY_RETRIES_KEPT && !failed.iter().any(|kept| kept == &advisory) {
+                        tracing::warn!(stream_seq = seq, error = format!("{e:#}"), "dead-lettering; trying again");
+                        failed.push(advisory);
+                    } else {
+                        tracing::warn!(stream_seq = seq, error = format!("{e:#}"), "dead-lettering");
+                    }
+                }
             }
-            Ok(None) => {}
-            Err(e) => tracing::warn!(stream_seq = advisory.stream_seq, error = format!("{e:#}"), "dead-lettering"),
         }
     }
     Ok(())
@@ -534,7 +572,8 @@ pub async fn bury_undelivered(
             if let Some(envelope) = envelope.as_mut() {
                 claims.sender_claims(envelope, seq).await;
             }
-            (letter_of(&ant, seq, advisory.deliveries, &error, &msg.payload, envelope.as_ref()), None)
+            let max_payload = bus::max_payload(&js.client());
+            (letter_of(&ant, seq, advisory.deliveries, &error, &msg.payload, envelope.as_ref(), max_payload), None)
         }
         Consumer::Channels => {
             if subject::parse_chan(&msg.subject).is_none() {

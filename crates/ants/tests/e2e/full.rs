@@ -1,9 +1,10 @@
 //! A hub whose JetStream file store fills up: the daemon warns the human past `[storage] warn_percent`, `ants ask`
-//! is refused while the store is full, replies that cannot be stored leave their messages unacked, and once the store
-//! has room again every message accepted before it filled is answered exactly once, none a dead letter.
+//! is refused while the store is full, replies that cannot be stored wait in hand, spending no delivery attempt and
+//! prompting no harness again, and once the store has room again every message accepted before it filled is
+//! answered exactly once, prompted once, none a dead letter.
 //!
-//! The store stays full for less than a message's five attempts, 30 s apart. The test takes about 45 s: the daemon
-//! retries a failed reply 30 s later, and first reads the usage 30 s after starting.
+//! By default the store stays full for a few seconds; the test takes about 45 s, as the daemon first reads the usage
+//! 30 s after starting. `ANTS_STRESS=N` keeps it full for N times a message's five attempts, 30 s apart, plus 30 s.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -102,15 +103,16 @@ pub fn a_full_hub_answers_once_space_returns() {
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(!refused.status.success() && stderr.contains(full_store), "ants ask --attach on a full hub: {stderr}");
 
-    // Each reply fails to store and leaves its message unacked, with the daemon idle meanwhile.
+    // The replies fail to store and their messages wait in hand, with the daemon idle meanwhile.
     let cpu = cpu_seconds(daemon.0.id());
     let full = Instant::now();
-    let failed = |log: &str| log.matches("handling message").count();
-    while failed(&std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default()) < ACCEPTED {
+    let stalled = |log: &str| log.contains("store is full; messages wait in hand");
+    while !stalled(&std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default()) {
         assert!(full.elapsed() < Duration::from_secs(30), "replies not refused\n{}", logs());
         std::thread::sleep(Duration::from_millis(500));
     }
-    std::thread::sleep(Duration::from_secs(3));
+    let stress: u64 = std::env::var("ANTS_STRESS").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
+    std::thread::sleep(Duration::from_secs(if stress == 0 { 3 } else { stress * 5 * 30 + 30 }));
     if let (Some(before), Some(after)) = (cpu, cpu_seconds(daemon.0.id())) {
         let busy = after - before;
         assert!(busy < full.elapsed().as_secs_f64() / 2.0, "the daemon spun {busy:.1} s on a full store\n{}", logs());
@@ -149,6 +151,8 @@ pub fn a_full_hub_answers_once_space_returns() {
     let answered = answers(&replies(&ants));
     let twice: Vec<_> = answered.iter().filter(|(_, n)| **n > 1).collect();
     assert!(twice.is_empty(), "answered more than once: {twice:?}\n{}", logs());
+    let again = replies(&ants).into_iter().filter(|text| text.contains("may already have taken effect")).count();
+    assert_eq!(again, 0, "prompted again\n{}", logs());
     assert!(!answered.contains_key("tok-f99999"), "answered though refused");
     let dead = run(ants(&["dead", "list"]));
     let dead = String::from_utf8_lossy(&dead.stdout);

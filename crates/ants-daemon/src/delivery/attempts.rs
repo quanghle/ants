@@ -330,32 +330,53 @@ async fn mark(
 }
 
 /// Messages whose reply is stored, in the hub's stream or the machine's outbox, while their ack may not be: one file
-/// per message, named after its envelope id, holding the reply, in `<home>/answered` of the ant.
-pub struct Answered(Notes);
+/// per message, named after its envelope id, holding the reply, in `<home>/answered` of the ant. Beside them, in
+/// `<home>/unsent`, the replies the hub refused to store with their attempt marker, as while its JetStream store is
+/// full: the message's retry sends that reply rather than prompting the harness again.
+pub struct Answered {
+    stored: Notes,
+    unsent: Notes,
+}
 
 impl Answered {
     pub fn new(home: &Path) -> Self {
-        Self(Notes::new(home, "answered"))
+        Self { stored: Notes::new(home, "answered"), unsent: Notes::new(home, "unsent") }
     }
 
     /// Whether the reply to `request` is stored.
     pub async fn has(&self, request: &Envelope) -> bool {
-        self.0.has(request).await
+        self.stored.has(request).await
     }
 
     /// Note that `reply` to `request` is stored, durably, before the request is acked.
     pub async fn add(&self, request: &Envelope, reply: &Reply) -> Result<()> {
-        self.0.add(request, reply).await.context("noting the stored reply")
+        self.stored.add(request, reply).await.context("noting the stored reply")
     }
 
     /// Forget `request` once it is acked. A failure only leaves the note until [`prune`](Self::prune).
     pub async fn forget(&self, request: &Envelope) {
-        self.0.forget(request).await;
+        self.stored.forget(request).await;
+    }
+
+    /// Keep `reply` to `request` on the machine, durably, as its attempt marker could not record it.
+    pub async fn keep_unsent(&self, request: &Envelope, reply: &Reply) -> Result<()> {
+        self.unsent.add(request, reply).await.context("keeping the reply on this machine")
+    }
+
+    /// The reply to `request` kept on the machine ([`Self::keep_unsent`]), if any.
+    pub async fn unsent(&self, request: &Envelope) -> Option<Reply> {
+        self.unsent.get(request).await
+    }
+
+    /// Forget the reply to `request` kept on the machine, once it is stored.
+    pub async fn forget_unsent(&self, request: &Envelope) {
+        self.unsent.forget(request).await;
     }
 
     /// Remove notes older than `max_age`, by when the stream no longer keeps their messages.
     pub async fn prune(&self, max_age: Duration) {
-        self.0.prune(max_age).await;
+        self.stored.prune(max_age).await;
+        self.unsent.prune(max_age).await;
     }
 }
 

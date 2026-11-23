@@ -30,6 +30,8 @@ pub struct DeadLetter {
 impl DeadLetter {
     /// Most bytes of an unparsable payload kept in [`DeadLetter::payload`].
     pub const PAYLOAD_EXCERPT: usize = 4096;
+    /// Most bytes of [`DeadLetter::error`] a letter cut to fit keeps ([`DeadLetter::fit`]).
+    pub const ERROR_MAX: usize = 4096;
 
     /// The dead letter of an envelope that failed `deliveries` times.
     pub fn of_envelope(
@@ -65,6 +67,40 @@ impl DeadLetter {
         }
     }
 
+    /// The dead letter, cut to serialize in at most `max` bytes: its error to [`Self::ERROR_MAX`] bytes, then the text of
+    /// its envelope, ending with an `[ants]` line telling of the cut, so the envelope's other fields, and its replay to
+    /// its thread, stay. One still too large, by the envelope's other fields, keeps an excerpt of the envelope as its
+    /// payload instead ([`Self::of_payload`]).
+    #[must_use]
+    pub fn fit(mut self, max: usize) -> Self {
+        self.error = cut(&self.error, Self::ERROR_MAX).to_owned();
+        let size = |dead: &Self| serde_json::to_vec(dead).map_or(usize::MAX, |json| json.len());
+        let mut over = size(&self).saturating_sub(max);
+        if over == 0 {
+            return self;
+        }
+        if let Some(text) = self.envelope.as_mut().map(|envelope| std::mem::take(&mut envelope.text)) {
+            let mut keep = text.len();
+            // Each byte cut shrinks the JSON by one or more, its escape included: a few rounds at most.
+            for _ in 0..4 {
+                let kept = cut(&text, keep.saturating_sub(over));
+                let note =
+                    format!("\n\n[ants] Cut to fit the dead letter: {} of {} bytes kept.", kept.len(), text.len());
+                if let Some(envelope) = &mut self.envelope {
+                    envelope.text = format!("{kept}{note}");
+                }
+                over = size(&self).saturating_sub(max);
+                if over == 0 {
+                    return self;
+                }
+                keep = kept.len();
+            }
+        }
+        let payload = serde_json::to_vec(&self.envelope).unwrap_or_default();
+        let excerpt = Self::of_payload(self.ant, self.stream_seq, self.deliveries, self.error, &payload);
+        Self { died_at: self.died_at, ..excerpt }
+    }
+
     /// `Nats-Msg-Id` of the dead letter, so a daemon that crashes after storing it does not store it twice.
     pub fn msg_id(&self) -> String {
         format!("dead-{}", self.stream_seq)
@@ -75,10 +111,51 @@ impl DeadLetter {
     }
 }
 
+/// `text` cut to at most `max` bytes, on a character boundary.
+fn cut(text: &str, max: usize) -> &str {
+    &text[..text.floor_char_boundary(max)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::p;
+
+    #[test]
+    fn a_dead_letter_of_a_max_size_envelope_fits_the_limit_its_envelope_cut_and_replayable() {
+        const MAX: usize = 1 << 20;
+        // Quotes and control characters take more bytes as JSON than as text.
+        let text = "\"é\u{1}x".repeat(MAX / 4);
+        let msg = Envelope::new(UserId::human(), p("dev-a"), text);
+        let error = "e".repeat(2 * MAX);
+        let dead = DeadLetter::of_envelope(p("dev-a"), 7, 5, error, msg.clone()).fit(MAX - 1024);
+        let json = serde_json::to_vec(&dead).unwrap();
+        assert!(json.len() <= MAX - 1024, "{} bytes", json.len());
+        assert_eq!(dead.error.len(), DeadLetter::ERROR_MAX);
+        let kept = dead.envelope.expect("still an envelope");
+        assert_eq!((kept.id, &kept.thread_id), (msg.id, &msg.thread_id));
+        assert!(
+            kept.text.ends_with(&format!(" of {} bytes kept.", msg.text.len())),
+            "{}",
+            &kept.text[kept.text.len() - 80..]
+        );
+        assert!(msg.text.starts_with(kept.text.split("\n\n[ants] Cut").next().unwrap()));
+
+        let small = DeadLetter::of_envelope(
+            p("dev-a"),
+            8,
+            5,
+            "harness crashed",
+            Envelope::new(UserId::human(), p("dev-a"), "hi"),
+        );
+        assert_eq!(small.clone().fit(MAX), small, "a letter that fits is kept whole");
+        let excerpt = small.fit(100);
+        assert_eq!(
+            (excerpt.envelope, excerpt.payload.is_some()),
+            (None, true),
+            "an envelope too large without its text"
+        );
+    }
 
     #[test]
     fn dead_letters_keep_the_envelope_or_an_excerpt_of_the_payload() {

@@ -15,6 +15,7 @@ use crate::monitoring::status;
 
 use super::burial::Letter;
 use super::delivery::reply_id;
+use super::holds::Stalled;
 use super::queue::{Place, Retry, queued_message};
 use super::steering::Requeue;
 use super::{Handling, InHand, Inbox, Incoming, MAX_ATTEMPTS, MAX_DELIVER};
@@ -47,6 +48,9 @@ pub(super) enum Handled {
     /// The message steered its thread's prompt, which did not take it or failed: it waits, as it arrived, for a
     /// prompt of its own, ahead of the others.
     Requeued(Box<InHand>),
+    /// Handling failed only for the hub, its store full or out of reach: the message, as it arrived, waits in hand for
+    /// it, spending no attempt.
+    Stalled(Box<InHand>),
 }
 
 enum Arrival {
@@ -57,8 +61,10 @@ enum Arrival {
 
 impl Inbox<'_> {
     /// Answer one message. A failed attempt is redelivered after a delay, and the last one becomes a dead letter; one
-    /// the harness failed for want of signing in, or for a provider limit, is no attempt, and is handed back to wait.
-    /// Returns its thread, and how handling ended.
+    /// the harness failed for want of signing in, or for a provider limit, is no attempt, and is handed back to wait,
+    /// as is one that failed only for the hub, its store full or out of reach ([`Inbox::stalled_by`]). A reply past
+    /// the server's `max_payload` is never worth another prompt: the message becomes a dead letter at once. Returns its
+    /// thread, and how handling ended.
     pub(super) async fn handle(&self, mut incoming: Incoming, msg: jetstream::Message) -> (ThreadId, Handled) {
         let _working = self.workload.working();
         let arrived = incoming.clone();
@@ -74,8 +80,10 @@ impl Inbox<'_> {
         self.thread_origin(&mut incoming, seq).await;
         self.sender_claims(&mut incoming, seq).await;
         self.owner_landed(&incoming, &msg).await;
-        if self.settled_before(Handling { incoming: &incoming, msg: &msg, seq }).await {
-            return (thread, Handled::Done);
+        match self.settled_before(Handling { incoming: &incoming, msg: &msg, seq }).await {
+            Ok(true) => return (thread, Handled::Done),
+            Ok(false) => {}
+            Err(e) => return self.stall(&arrived, msg, &e).await,
         }
         if self.late_taken(Handling { incoming: &incoming, msg: &msg, seq }).await {
             return (thread, Handled::Done);
@@ -120,16 +128,27 @@ impl Inbox<'_> {
             return (thread, Handled::Limited(Box::new((arrived, msg))));
         }
         self.holds.throttle.settled();
+        // On the overdue delivery a message is a dead letter all the same: out of the hub's reach it goes to the
+        // machine's outbox.
+        let stalled = self.stalled_by(&e).await;
+        if let Some(why) = stalled.filter(|why| *why == Stalled::StoreFull || attempt != Attempt::Overdue) {
+            self.wait_for_hub(&arrived, why, &e);
+            return (thread, Handled::Stalled(Box::new((arrived, msg))));
+        }
         tracing::error!(%thread, error = format!("{e:#}"), "handling message");
         status::state(self.client, self.ant, &thread, State::Failed);
-        // A failed last attempt, or an overdue one that failed to send its recorded reply: no delivery follows.
-        if attempt != Attempt::Early {
-            match self.bury(&incoming, &msg, &format!("{e:#}")).await {
-                Ok(_) => {
+        // A failed last attempt, an overdue one that failed to send its recorded reply, or one too large to send: no
+        // delivery follows.
+        if attempt != Attempt::Early || bus::too_large(&e) {
+            let error = if stalled.is_some() { overdue() } else { format!("{e:#}") };
+            match self.bury(&incoming, &msg, &error).await {
+                Ok(()) => {
                     self.attempts.forget(seq).await;
                     self.attempts.finish(&incoming.envelope).await;
                     return (thread, Handled::Done);
                 }
+                // Kept on the machine ([`Inbox::bury_letter`]): buried once the hub takes it.
+                Err(bury) if self.stalled_by(&bury).await.is_some() => return self.stall(&arrived, msg, &bury).await,
                 // The overdue delivery tries again.
                 Err(bury) => tracing::warn!(error = format!("{bury:#}"), "dead-lettering"),
             }
@@ -151,9 +170,17 @@ impl Inbox<'_> {
         (thread, retry.map_or(Handled::Done, Handled::Retry))
     }
 
+    /// Hold `arrived`, whose handling failed with `e` only for the hub ([`Inbox::stalled_by`]), in hand.
+    async fn stall(&self, arrived: &Incoming, msg: jetstream::Message, e: &anyhow::Error) -> (ThreadId, Handled) {
+        let why = self.stalled_by(e).await.unwrap_or(Stalled::OutOfReach);
+        self.wait_for_hub(arrived, why, e);
+        (arrived.envelope.thread_id.clone(), Handled::Stalled(Box::new((arrived.clone(), msg))))
+    }
+
     /// Finish `incoming`, the message at stream sequence `seq`, if an earlier delivery of it settled it already: its
-    /// reply or dead letter is stored. True if so.
-    async fn settled_before(&self, Handling { incoming, msg, seq }: Handling<'_>) -> bool {
+    /// reply or dead letter is stored. True if so; an error when its dead letter, kept on the machine, waits for the hub
+    /// ([`Inbox::stalled_by`]).
+    async fn settled_before(&self, Handling { incoming, msg, seq }: Handling<'_>) -> Result<bool> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
         if self.answered.has(envelope).await {
@@ -167,19 +194,21 @@ impl Inbox<'_> {
                 }
                 Err(e) => tracing::warn!(%thread, error = %e, "acking a message whose reply is stored"),
             }
-            return true;
+            return Ok(true);
         }
-        let Some(kept) = self.buried.get(envelope).await else { return false };
-        // Its dead letter went to the machine's outbox while the hub was out of reach; the redelivery finishes it.
-        tracing::info!(%thread, "burying a message whose dead letter is in the outbox");
+        let Some(kept) = self.buried.get(envelope).await else { return Ok(false) };
+        // Its dead letter went to the machine's outbox while the hub was out of reach, or was kept on the machine while
+        // the hub could not store it; the redelivery, or the retry of the message held in hand, finishes it.
+        tracing::info!(%thread, "burying a message whose dead letter is kept");
         match self.bury_letter(incoming, msg, &kept.dead, Letter::Kept).await {
             Ok(()) => {
                 self.attempts.forget(seq).await;
                 self.attempts.finish(envelope).await;
             }
+            Err(e) if self.stalled_by(&e).await.is_some() => return Err(e),
             Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
         }
-        true
+        Ok(true)
     }
 
     /// Whether `incoming` is a late reply to `ask_ant` that `check_inbox` took while it waited its turn, now acked
@@ -208,14 +237,18 @@ impl Inbox<'_> {
     /// Handle the message at stream sequence `seq`, taken up: answer it, or bury it when overdue. Marks it finished
     /// once it is acked or buried.
     async fn take(&self, incoming: &mut Incoming, msg: &jetstream::Message, seq: u64, attempt: Attempt) -> Result<()> {
-        let marker = self.attempts.get(seq, &incoming.envelope).await?;
+        // A reply the hub refused to record with the attempt marker is kept on the machine.
+        let marker = match self.answered.unsent(&incoming.envelope).await {
+            Some(reply) => Some(Marker::Replied(Box::new(reply))),
+            None => self.attempts.get(seq, &incoming.envelope).await?,
+        };
         if attempt == Attempt::Overdue && !matches!(marker, Some(Marker::Replied(_))) {
-            let error = format!("no outcome after {MAX_ATTEMPTS} attempts: the daemon stopped or the ack wait ran out");
-            match self.bury(incoming, msg, &error).await {
-                Ok(_) => {
+            match self.bury(incoming, msg, &overdue()).await {
+                Ok(()) => {
                     self.attempts.forget(seq).await;
                     self.attempts.finish(&incoming.envelope).await;
                 }
+                Err(e) if self.stalled_by(&e).await.is_some() => return Err(e),
                 Err(e) => {
                     let thread = &incoming.envelope.thread_id;
                     tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering");
@@ -462,4 +495,9 @@ impl Inbox<'_> {
         self.attempts.forget(seq).await;
         Ok(())
     }
+}
+
+/// Why a message is a dead letter on the consumer's extra delivery, with no reply recorded.
+fn overdue() -> String {
+    format!("no outcome after {MAX_ATTEMPTS} attempts: the daemon stopped or the ack wait ran out")
 }

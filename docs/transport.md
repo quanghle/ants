@@ -230,7 +230,7 @@ After the hub's `nats-server` restarts, `ANTS_IN` asks each leaf node to reset i
 
 | Operation | While leaf uplink is down |
 |---|---|
-| Inbox messages and replies (`ants ask`, daemon replies, ant messages) | Buffered in `ANTS_OUT`; daemons record unacked requests in `<home>/answered` and ack redeliveries on reconnect (ignoring `"no responders"`) without re-prompting. |
+| Inbox messages and replies (`ants ask`, daemon replies, ant messages) | Buffered in `ANTS_OUT`; daemons record unacked requests in `<home>/answered` and ack redeliveries on reconnect (ignoring `"no responders"`) without re-prompting. A message in hand whose handling needs the hub (its attempt marker, its thread's session) waits in hand, spending no attempt and starting no new prompt, until the hub answers ([architecture.md](architecture.md#dead-letters)). |
 | Unsequenced notes (`ants notes <thread> TEXT`), channel posts (`ants post`, daemon replies), passed links (`ants_links`) | Buffered in `ANTS_OUT` and sourced into `ANTS` or `ants_links` on reconnect. |
 | Daemon dead letters (`ants.dead.<ant>`) | Buffered in `ANTS_OUT` and noted in `<home>/buried`; notice and `+TERM` run on redelivery (or within 30 s of reconnect on the 6th extra delivery) after checking `deadread-<ant>` against duplicates landing past the 24 h window. |
 | Pull consumers, acks, stream reads (`ants inbox`, `ants channel read`, `ants notes`, `ants dead list`/`replay`) | Fail immediately; require the hub stream. |

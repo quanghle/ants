@@ -78,6 +78,8 @@ const MAX_ATTEMPTS: i64 = 5;
 /// The consumer allows one more delivery, to dead-letter a message whose last attempt never finished.
 const MAX_DELIVER: i64 = MAX_ATTEMPTS + 1;
 const RETRY_DELAY: Duration = Duration::from_secs(30);
+/// How often messages held for the hub, its store full or out of reach, are tried again.
+const STORE_EVERY: Duration = Duration::from_secs(10);
 /// How often a snapshot for a clone checks whether the ant is paused and its last prompt ended.
 const CLONE_WAIT_CHECK: Duration = Duration::from_millis(200);
 /// How long a human's message from a machine's outbox waits for its thread's owner to be recorded.
@@ -468,6 +470,8 @@ struct Pacing {
     backoffs: Backoffs,
     /// How long a fallback that turned a message away is passed over, unless its provider limit says.
     fallback_retry: Duration,
+    /// How often messages held for the hub are tried again.
+    store_every: Duration,
 }
 
 impl Default for Pacing {
@@ -479,6 +483,7 @@ impl Default for Pacing {
             sign_in_every: signin::CHECK_EVERY,
             backoffs: ratelimit::BACKOFFS,
             fallback_retry: crate::limits::fallback::RETRY_AFTER,
+            store_every: STORE_EVERY,
         }
     }
 }

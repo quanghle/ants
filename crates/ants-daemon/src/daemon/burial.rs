@@ -36,7 +36,7 @@ impl Inbox<'_> {
     /// envelope does too. The dead letter of a channel post keeps its payload.
     pub(super) async fn bury(&self, incoming: &Incoming, msg: &jetstream::Message, error: &str) -> Result<()> {
         let envelope = incoming.post.is_none().then_some(&incoming.envelope);
-        let dead = dead::letter_for(self.ant, msg, envelope, error)?;
+        let dead = dead::letter_for(self.ant, msg, envelope, error, bus::max_payload(self.client))?;
         self.bury_letter(incoming, msg, &dead, Letter::New).await
     }
 
@@ -53,30 +53,44 @@ impl Inbox<'_> {
     ) -> Result<()> {
         let post = incoming.post.as_ref().map(|posted| &posted.post);
         let escalator = Some(self.escalator);
-        let burial = match letter {
-            Letter::Kept => dead::bury_kept(self.js, msg, dead, post, self.humans, escalator).await?,
-            Letter::New => {
-                let burial = dead::bury_letter(self.js, msg, dead, post, self.humans, escalator).await?;
-                self.metrics.buried();
-                burial
+        let buried = match letter {
+            Letter::Kept => dead::bury_kept(self.js, msg, dead, post, self.humans, escalator).await,
+            Letter::New => dead::bury_letter(self.js, msg, dead, post, self.humans, escalator).await,
+        };
+        let burial = match buried {
+            Ok(burial) => burial,
+            Err(e) => {
+                // The hub cannot take it now: kept on the machine, it is buried once it can, the message held in hand
+                // meanwhile ([`Inbox::stalled_by`]).
+                if matches!(letter, Letter::New) && self.stalled_by(&e).await.is_some() {
+                    self.keep_letter(incoming, msg, dead).await;
+                }
+                return Err(e);
             }
         };
+        if matches!(letter, Letter::New) {
+            self.metrics.buried();
+        }
         match burial {
             Burial::Hub(_) => self.buried.forget(&incoming.envelope).await,
-            Burial::Outbox => {
-                let last = msg.info().is_ok_and(|info| info.delivered >= MAX_DELIVER);
-                let kept = dead::Kept {
-                    dead: dead.clone(),
-                    post: post.cloned(),
-                    last_delivery: msg.reply.as_ref().filter(|_| last).map(ToString::to_string),
-                };
-                if let Err(e) = self.buried.add(&incoming.envelope, &kept).await {
-                    // The redelivery buries it with an error of its own, under the same message id.
-                    tracing::warn!(error = format!("{e:#}"), "noting the dead letter");
-                }
-            }
+            Burial::Outbox => self.keep_letter(incoming, msg, dead).await,
         }
         Ok(())
+    }
+
+    /// Note `dead`, the dead letter of `msg`, in `buried`, so the message's next handling buries it again; on the last
+    /// delivery with its ack subject, for [`Inbox::finish_buried`].
+    async fn keep_letter(&self, incoming: &Incoming, msg: &jetstream::Message, dead: &DeadLetter) {
+        let last = msg.info().is_ok_and(|info| info.delivered >= MAX_DELIVER);
+        let kept = dead::Kept {
+            dead: dead.clone(),
+            post: incoming.post.as_ref().map(|posted| posted.post.clone()),
+            last_delivery: msg.reply.as_ref().filter(|_| last).map(ToString::to_string),
+        };
+        if let Err(e) = self.buried.add(&incoming.envelope, &kept).await {
+            // The redelivery buries it with an error of its own, under the same message id.
+            tracing::warn!(error = format!("{e:#}"), "noting the dead letter");
+        }
     }
 
     /// Every `retry_delay`, finish the burial of each dead letter kept in the machine's outbox on its message's last
