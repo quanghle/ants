@@ -89,14 +89,13 @@ struct Checkpointed {
 }
 
 impl ItemValues for Checkpointed {
-    const KIND: &str = CHECKPOINT;
+    const KINDS: &[&str] = &[CHECKPOINT];
 }
 
 impl Register {
     /// The register `item` holds; none for an item of another kind.
     pub fn of(item: &Item) -> Option<Self> {
-        (item.kind == CHECKPOINT).then_some(())?;
-        let Checkpointed { thread, goal, step, next, blockers, branch, questions, .. } = Checkpointed::of(item).ok()?;
+        let Checkpointed { thread, goal, step, next, blockers, branch, questions, .. } = Checkpointed::held(item)?;
         Some(Self {
             id: item.id.clone(),
             revision: item.revision,
@@ -206,15 +205,14 @@ struct Handed {
 }
 
 impl ItemValues for Handed {
-    const KIND: &str = HANDOFF;
+    const KINDS: &[&str] = &[HANDOFF];
 }
 
 impl Handoff {
     /// The handoff `item` holds; none for an item of another kind.
     pub fn of(item: &Item) -> Option<Self> {
-        (item.kind == HANDOFF).then_some(())?;
         let Handed { thread, done, in_flight, next, promises, decisions, files, episode, acknowledged, .. } =
-            Handed::of(item).ok()?;
+            Handed::held(item)?;
         Some(Self {
             id: item.id.clone(),
             thread,

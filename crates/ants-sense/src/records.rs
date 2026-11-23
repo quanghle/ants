@@ -51,7 +51,8 @@ pub struct Record {
 }
 
 impl ItemValues for Record {
-    const KIND: &str = "record";
+    const KINDS: &[&str] = &[SELF_MODEL, RELATIONSHIP];
+    const LABEL: &str = "record";
 }
 
 /// A record and the item holding it.
@@ -64,11 +65,7 @@ pub struct RecordItem {
 impl RecordItem {
     /// The record `item` holds; none when it holds none.
     pub fn of(item: Item) -> Option<Self> {
-        if item.kind != SELF_MODEL && item.kind != RELATIONSHIP {
-            return None;
-        }
-        let record = Record::of(&item).ok()?;
-        Some(Self { item, record })
+        Some(Self { record: Record::held(&item)?, item })
     }
 
     pub fn id(&self) -> &ItemId {

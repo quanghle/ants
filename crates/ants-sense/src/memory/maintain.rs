@@ -115,7 +115,8 @@ pub struct Maintenance {
 }
 
 impl ItemValues for Maintenance {
-    const KIND: &str = "maintenance record";
+    const KINDS: &[&str] = &[MAINTENANCE];
+    const LABEL: &str = "maintenance record";
 }
 
 /// Ages up to a time in an ant's active time: the time but its dormancies ([`identity::Card::dormant`]).

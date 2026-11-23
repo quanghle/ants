@@ -310,7 +310,7 @@ impl Access {
 }
 
 impl ItemValues for Memory {
-    const KIND: &str = MEMORY;
+    const KINDS: &[&str] = &[MEMORY];
 }
 
 impl Memory {
@@ -370,8 +370,7 @@ pub struct MemoryItem {
 impl MemoryItem {
     /// The memory `item` holds; none when it holds none.
     pub fn of(item: Item) -> Option<Self> {
-        let memory = (item.kind == MEMORY).then(|| Memory::of(&item).ok()).flatten()?;
-        Some(Self { item, memory })
+        Some(Self { memory: Memory::held(&item)?, item })
     }
 
     pub fn id(&self) -> &ItemId {

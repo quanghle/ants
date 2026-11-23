@@ -103,7 +103,7 @@ pub struct ReviewedFinding {
 }
 
 impl ItemValues for ReviewRecord {
-    const KIND: &str = REVIEW;
+    const KINDS: &[&str] = &[REVIEW];
 }
 
 impl ReviewRecord {

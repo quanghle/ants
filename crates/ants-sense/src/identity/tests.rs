@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use ants_proto::provider::{BoxFuture, Brief, BriefReason, BriefRequest, Origin, Provider, Starter};
+use ants_proto::provider::{Brief, BriefReason, BriefRequest, Provider};
 use uuid::Uuid;
 
 use super::*;
@@ -11,7 +11,8 @@ use crate::Sense;
 use crate::cache::Cache;
 use crate::items::ItemId;
 use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
-use crate::store::{Shared, Store, Stores};
+use crate::store::{Shared, Store};
+use crate::testing::{self, ByAnt};
 
 fn dev_a() -> UserId {
     "dev-a".parse().unwrap()
@@ -23,7 +24,7 @@ fn at(time: &str) -> DateTime<Utc> {
 
 /// The items of `sense` in `log`, its cache in memory.
 async fn items(log: &'static MemoryLog, sense: &SenseId) -> Arc<dyn Items> {
-    Arc::new(crate::testing::store(log, sense.clone(), dev_a()).await)
+    Arc::new(testing::store(log, sense.clone(), dev_a()).await)
 }
 
 /// The items of `sense` in `log` for `ant`, once named `earlier`, cached in `home`, where its chain status is kept.
@@ -53,15 +54,12 @@ fn event(ant: &str, identity: &str, time: &str, kind: EventKind) -> Event {
 
 fn context(identity: &str, harness: &str, model: Option<&str>, machine: &str) -> CallContext {
     CallContext {
-        ant: dev_a(),
         identity: identity.into(),
-        thread: "019a7d2c-0000-7000-8000-000000000001".parse().unwrap(),
-        origin: Origin { by: Starter::Human { user: "alice".parse().unwrap() }, channel: None },
         harness: harness.into(),
         model: model.map(Into::into),
         machine: machine.into(),
-        repo: None,
         at: at("09:00:00"),
+        ..testing::context(testing::human())
     }
 }
 
@@ -350,20 +348,10 @@ async fn a_card_made_anew_starts_with_the_earlier_names_of_the_home() {
     std::fs::remove_dir_all(&home).unwrap();
 }
 
-/// The items of dev-a, the same each time.
-struct DevA(Arc<dyn Items>);
-
-impl Stores for DevA {
-    fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
-        let items = if *ant == dev_a() { Ok(self.0.clone()) } else { Err(StoreError::NotKept(ant.to_string())) };
-        Box::pin(std::future::ready(items))
-    }
-}
-
 #[tokio::test]
 async fn sense_writes_the_card_from_events_and_briefs_and_acks_what_it_does_not_keep() {
     let items = fresh().await;
-    let sense = Sense::with_stores(Arc::new(DevA(items.clone())));
+    let sense = Sense::with_stores(Arc::new(ByAnt([(dev_a(), items.clone())].into())));
     sense.event(event("dev-a", "id1", "10:00:00", EventKind::AntAdded)).await.unwrap();
     let context = context("id1", "copilot", None, "studio");
     let request = BriefRequest { context: context.clone(), budget: 100, reason: BriefReason::Started };

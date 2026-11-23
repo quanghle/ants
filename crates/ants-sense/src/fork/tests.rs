@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ants_proto::provider::{BoxFuture, CallContext, Event, EventKind, Format, Origin, Provider, Starter, ToolCall};
-use ants_proto::{SenseId, UserId};
+use ants_proto::SenseId;
+use ants_proto::provider::{CallContext, Event, EventKind, Format, Provider, ToolCall};
 use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -16,46 +16,26 @@ use crate::items::{ItemId, ItemValues, Values};
 use crate::log::MemoryLog;
 use crate::memory::{Memory, VOTE};
 use crate::records::RELATIONSHIP;
-use crate::store::Stores;
+use crate::testing::{self, ByAnt};
 use crate::thread::{CHECKPOINT, HANDOFF};
 use crate::{promise, remind, task, thread};
 
 const SOURCE: &str = "dev-a";
 const CLONE: &str = "dev-b";
 
-/// The items of the ants sense keeps, each in a log of its own.
-struct Kept(HashMap<UserId, Arc<dyn Items>>);
-
-impl Stores for Kept {
-    fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
-        let items = self.0.get(ant).cloned().ok_or_else(|| StoreError::NotKept(ant.to_string()));
-        Box::pin(std::future::ready(items))
-    }
-}
-
 async fn items(ant: &str) -> Arc<dyn Items> {
-    Arc::new(crate::testing::store(MemoryLog::default(), SenseId::new(), ant.parse().unwrap()).await)
+    Arc::new(testing::store(MemoryLog::default(), SenseId::new(), ant.parse().unwrap()).await)
 }
 
 /// sense keeping the source and the clone, as the daemon serving both does.
 async fn sense() -> (Sense, Arc<dyn Items>, Arc<dyn Items>) {
     let (source, clone) = (items(SOURCE).await, items(CLONE).await);
     let kept = HashMap::from([(SOURCE.parse().unwrap(), source.clone()), (CLONE.parse().unwrap(), clone.clone())]);
-    (Sense::with_stores(Arc::new(Kept(kept))), source, clone)
+    (Sense::with_stores(Arc::new(ByAnt(kept))), source, clone)
 }
 
 fn context(ant: &str) -> CallContext {
-    CallContext {
-        ant: ant.parse().unwrap(),
-        identity: "0f1e".into(),
-        thread: "019a7d2c-0000-7000-8000-000000000001".parse().unwrap(),
-        origin: Origin { by: Starter::Human { user: "alice".parse().unwrap() }, channel: None },
-        harness: "copilot".into(),
-        model: None,
-        machine: "studio".into(),
-        repo: None,
-        at: Utc::now(),
-    }
+    CallContext { ant: ant.parse().unwrap(), model: None, at: Utc::now(), ..testing::context(testing::human()) }
 }
 
 /// The answer of the source's tool `name` to `arguments`, which must not be refused.

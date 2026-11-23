@@ -113,7 +113,7 @@ pub struct Proposal {
 }
 
 impl ItemValues for Proposal {
-    const KIND: &str = PROPOSAL;
+    const KINDS: &[&str] = &[PROPOSAL];
 }
 
 impl Proposal {
@@ -132,11 +132,7 @@ pub struct ProposalItem {
 
 impl ProposalItem {
     pub fn of(item: Item) -> Option<Self> {
-        if item.kind != PROPOSAL {
-            return None;
-        }
-        let proposal = Proposal::of(&item).ok()?;
-        Some(Self { item, proposal })
+        Some(Self { proposal: Proposal::held(&item)?, item })
     }
 
     pub fn id(&self) -> &ItemId {
