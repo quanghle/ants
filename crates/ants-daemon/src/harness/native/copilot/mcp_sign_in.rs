@@ -30,7 +30,8 @@ use serde_json::{Value, json};
 use tokio::sync::{OwnedMutexGuard, mpsc, oneshot};
 use tokio::time::Instant;
 
-use super::{Shared, text};
+use super::Shared;
+use super::turn::text;
 use crate::harness::McpSignIn;
 use crate::harness::mcp_sign_in::Report;
 use crate::harness::native::Cli;

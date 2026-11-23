@@ -2,18 +2,18 @@
 //! a signed-out server shows them (handshake, threads, a turn failing with 401), else as its JSON schema gives them.
 
 use std::assert_matches;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::v1::schema::{EnvVariable, ImageContent, McpServer, McpServerStdio, SessionId, TextContent};
 use ants_proto::{LimitKind, StatusUpdate, ThreadId};
-use ants_test_support::{StubCli, scratch_dir};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use super::*;
 use crate::harness::native::Protocol;
+use crate::harness::native::tests::StubHarness;
 use crate::harness::{
     Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
     parse_definitions,
@@ -118,37 +118,27 @@ fn usage(total: Value, last: Value) -> String {
     turn_note("thread/tokenUsage/updated", json!({ "tokenUsage": usage }))
 }
 
-/// A harness of protocol codex run by a stub CLI in a scratch directory, removed on drop.
-struct Fixture {
-    dir: PathBuf,
-    cli: StubCli,
-    harness: Arc<Harness>,
-}
+/// A harness of protocol codex run by a stub CLI.
+struct Fixture(StubHarness);
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+impl std::ops::Deref for Fixture {
+    type Target = StubHarness;
+
+    fn deref(&self) -> &StubHarness {
+        &self.0
     }
 }
 
 impl Fixture {
     /// `[harnesses.native]` of protocol codex, with `table` added.
     fn new(name: &str, table: &str) -> Self {
-        let dir = scratch_dir(name).canonicalize().unwrap();
-        let cli = StubCli::new(&dir, "codex");
-        let text = format!(
-            "[harnesses.native]\ncommand = {:?}\nprotocol = \"codex\"\nsign_in = \"codex login\"\n{table}",
-            cli.path()
-        );
-        let harness = Harnesses::builtin().define(parse_definitions(&text).unwrap()).unwrap().get("native").unwrap();
-        Self { dir, cli, harness }
+        let table = format!("sign_in = \"codex login\"\n{table}");
+        Self(StubHarness::new(name, "native", Protocol::Codex, "codex", &table))
     }
 
-    /// A launch working in the scratch directory, every tool allowed were the harness to ask, with the ants MCP
-    /// server carrying its token.
+    /// A launch with the ants MCP server carrying its token.
     fn launch(&self, settings: ModelSettings) -> Launch {
-        let allow_all = PermissionPolicy::new(Allowlist::parse(&["*"]).unwrap(), None);
-        let launch = Launch::new(self.harness.clone(), self.dir.clone(), Vec::new(), allow_all, settings);
+        let launch = self.0.launch(&[], settings);
         let stdio = McpServerStdio::new("ants", "/bin/ants")
             .args(vec!["mcp".to_owned()])
             .env(vec![EnvVariable::new("ANTS_MCP_TOKEN", "secret")]);
@@ -164,11 +154,6 @@ impl Fixture {
 
     fn script(&self, run: Option<usize>, blocks: &[Vec<String>]) {
         self.cli.script(run, blocks);
-    }
-
-    /// What run `run` of the CLI read, as JSON.
-    fn received(&self, run: usize) -> Vec<Value> {
-        self.cli.received(run).iter().map(|line| serde_json::from_str(line).unwrap()).collect()
     }
 }
 
