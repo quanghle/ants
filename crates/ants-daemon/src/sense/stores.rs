@@ -502,7 +502,9 @@ async fn open(
     };
     let earlier =
         identity::earlier_names(home).with_context(|| format!("reading {}", Home::new(home).names().display()))?;
-    let cache = Cache::open(home)?;
+    // Opening checks the file whole, and creating it syncs.
+    let opening = home.to_owned();
+    let cache = tokio::task::spawn_blocking(move || Cache::open(&opening)).await??;
     let remote = match link {
         Some(link) if link.js.client().connection_state() == async_nats::connection::State::Connected => {
             match link.log.get_or_try_init(|| JetStreamLog::open(&link.js)).await {
@@ -537,7 +539,7 @@ async fn open(
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .with_earlier_names(earlier);
     let store = Store::open(log, cache).await?.with_machine(context.machine);
-    store.cache().set_context(&saved_context)?;
+    store.cache().set_context(&saved_context).await?;
     Ok(Arc::new(tokio::sync::Mutex::new(store)))
 }
 

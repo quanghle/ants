@@ -7,6 +7,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ants_proto::{Machine, SenseId, UserId};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -81,10 +82,13 @@ pub struct Hit {
     pub score: f64,
 }
 
-/// An ant's items, as built from its log.
+/// An ant's items, as built from its log. Its writes, each synced to disk, run off the caller's thread, one after the
+/// other in the order made (`Cache::write`): a daemon's runtime has one thread.
 pub struct Cache {
-    db: Connection,
+    db: Arc<Mutex<Connection>>,
     pending_file: Option<PathBuf>,
+    /// Held by the write running or waiting to, until it ends, even when its caller has stopped waiting for it.
+    writes: Arc<tokio::sync::Mutex<()>>,
 }
 
 mod outbox;
@@ -100,6 +104,10 @@ impl Cache {
             return Err(CacheError::Unusable("cache missing while pending sense writes may remain".into()));
         }
         std::fs::create_dir_all(home.dir())?;
+        if !file.exists() {
+            // A write-ahead log left by a cache since removed is of no new one.
+            remove(&file, &["-journal", "-wal", "-shm"])?;
+        }
         match Connection::open(&file).map_err(CacheError::from).and_then(Self::ready) {
             Ok(mut cache) => {
                 cache.pending_file = Some(home.pending());
@@ -110,12 +118,7 @@ impl Cache {
                 file.display()
             ))),
             Err(_) => {
-                for suffix in ["", "-journal", "-wal", "-shm"] {
-                    match std::fs::remove_file(format!("{}{suffix}", file.display())) {
-                        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
-                        _ => {}
-                    }
-                }
+                remove(&file, &["", "-journal", "-wal", "-shm"])?;
                 let mut cache = Self::ready(Connection::open(&file)?)?;
                 cache.pending_file = Some(home.pending());
                 Ok(cache)
@@ -130,7 +133,11 @@ impl Cache {
 
     fn ready(db: Connection) -> Result<Self, CacheError> {
         db.pragma_update(None, "cache_size", -PAGE_CACHE_KIB)?;
-        db.pragma_update(None, "synchronous", "FULL")?;
+        // A commit writes the write-ahead log, synced only with the database as SQLite checkpoints it: a power loss may
+        // lose the last commits, never the cache's consistency, and the log holds them. The outbox alone syncs each
+        // commit ([`Cache::enqueue`]).
+        db.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+        db.pragma_update(None, "synchronous", "NORMAL")?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
         match version {
             0 => {
@@ -144,109 +151,114 @@ impl Cache {
             }
             other => return Err(CacheError::Unusable(format!("schema version {other}"))),
         }
-        Ok(Self { db, pending_file: None })
+        Ok(Self { db: Arc::new(Mutex::new(db)), pending_file: None, writes: Arc::default() })
     }
 
     /// What the cache was built from; none when it was never built.
     pub fn built(&self) -> Result<Option<Built>, CacheError> {
-        let (Some(sense), Some(incarnation)) = (meta(&self.db, "sense")?, meta(&self.db, "incarnation")?) else {
+        let db = self.db();
+        let (Some(sense), Some(incarnation)) = (meta(&db, "sense")?, meta(&db, "incarnation")?) else {
             return Ok(None);
         };
         let sense = sense.parse().map_err(|_| CacheError::Unusable(format!("sense identity {sense:?}")))?;
-        let position = meta(&self.db, "position")?.map(|position| serde_json::from_str(&position)).transpose()?;
+        let position = meta(&db, "position")?.map(|position| serde_json::from_str(&position)).transpose()?;
         Ok(Some(Built { sense, incarnation, position }))
     }
 
     /// Opaque connection context retained with the cache, for opening it before the hub is reachable.
     pub fn context(&self) -> Result<Option<Value>, CacheError> {
-        meta(&self.db, "connection")?.map(|value| Ok(serde_json::from_str(&value)?)).transpose()
+        meta(&self.db(), "connection")?.map(|value| Ok(serde_json::from_str(&value)?)).transpose()
     }
 
-    pub fn set_context(&self, value: &Value) -> Result<(), CacheError> {
-        self.db.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('connection', ?1)",
-            [serde_json::to_string(value)?],
-        )?;
-        Ok(())
+    /// Keep `value` as the connection context ([`Cache::context`]), unless kept already.
+    pub async fn set_context(&self, value: &Value) -> Result<(), CacheError> {
+        let value = serde_json::to_string(value)?;
+        if meta(&self.db(), "connection")?.as_ref() == Some(&value) {
+            return Ok(());
+        }
+        self.write(move |db, _| {
+            db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('connection', ?1)", [value])?;
+            Ok(())
+        })
+        .await
     }
 
     /// Empty the cache, to build it again from the start of the log of `sense` in the store's `incarnation`.
-    pub fn reset(&mut self, sense: &SenseId, incarnation: &str) -> Result<(), CacheError> {
-        if !self.pending()?.is_empty() {
-            return Err(CacheError::Unusable("pending sense writes prevent replacing the cache's log".into()));
-        }
-        let tx = self.db.transaction()?;
-        tx.execute_batch(
-            "DELETE FROM meta WHERE key != 'connection'; DELETE FROM items; DELETE FROM changes; DELETE FROM items_text;",
-        )?;
-        set_meta(&tx, "sense", Some(sense.as_str()))?;
-        set_meta(&tx, "incarnation", Some(incarnation))?;
-        tx.commit()?;
-        Ok(())
+    pub async fn reset(&self, sense: &SenseId, incarnation: &str) -> Result<(), CacheError> {
+        let (sense, incarnation) = (sense.clone(), incarnation.to_owned());
+        self.write(move |db, _| {
+            if !outbox::pending(db)?.is_empty() {
+                return Err(CacheError::Unusable("pending sense writes prevent replacing the cache's log".into()));
+            }
+            let tx = db.transaction()?;
+            tx.execute_batch(
+                "DELETE FROM meta WHERE key != 'connection'; DELETE FROM items; DELETE FROM changes;
+                 DELETE FROM items_text;",
+            )?;
+            set_meta(&tx, "sense", Some(sense.as_str()))?;
+            set_meta(&tx, "incarnation", Some(&incarnation))?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
     }
 
     /// Apply `events`, read from the log in order, and record that the log was read up to `position`, at once. An
     /// event that is no item's change, or does not follow on the item's last ([`Change::apply`]), changes nothing; nor
     /// does a batch ([`ITEMS_EVENT`]) of which one change does not, or which changes an item twice.
-    pub fn apply(&mut self, events: &[Checked], position: Option<&Position>) -> Result<(), CacheError> {
-        let position_text = position.map(serde_json::to_string).transpose()?;
+    pub async fn apply(&self, events: &[Checked], position: Option<&Position>) -> Result<(), CacheError> {
+        let position = position.map(serde_json::to_string).transpose()?;
         // Nothing read, as when a call to sense finds the log where the cache left it, writes nothing: each write syncs.
-        if events.is_empty() && meta(&self.db, "position")? == position_text && self.pending_count()? == 0 {
-            return self.clear_pending_marker();
+        if events.is_empty() && self.pending_count()? == 0 && meta(&self.db(), "position")? == position {
+            return outbox::clear_pending_marker(&self.db(), self.pending_file.as_deref());
         }
-        let tx = self.db.transaction()?;
-        let pending = outbox::pending(&tx)?;
-        if !pending.is_empty() {
-            outbox::restore(&tx)?;
-        }
-        for checked in events {
-            let changes = match checked.event.kind.as_str() {
-                ITEM_EVENT => serde_json::from_value::<Change>(checked.event.data.clone()).map(|change| vec![change]),
-                ITEMS_EVENT => serde_json::from_value::<Batch>(checked.event.data.clone()).map(|batch| batch.changes),
-                _ => continue,
-            };
-            let Ok(changes) = changes else { continue };
-            let at = checked
-                .event
-                .data
-                .get(outbox::AT)
-                .and_then(Value::as_str)
-                .and_then(|at| at.parse::<DateTime<Utc>>().ok())
-                .unwrap_or(checked.event.at);
-            let revisions = changes.into_iter().map(|change| Revision {
-                sequence: checked.stored.sequence,
-                at,
-                machine: checked.event.machine.clone(),
-                change,
-            });
-            apply(&tx, revisions.collect())?;
-            if let Some(operation) = checked.event.data.get(outbox::OPERATION).and_then(Value::as_str)
-                && let Some(entry) = pending.iter().find(|entry| entry.operation == operation)
-            {
-                if entry.kind != checked.event.kind || entry.data != checked.event.data {
-                    return Err(CacheError::Unusable(format!(
-                        "remote event differs from pending sense write {operation}; local write retained"
-                    )));
-                }
-                tx.execute("DELETE FROM outbox WHERE operation = ?1", [operation])?;
-            }
-        }
-        if !pending.is_empty() {
-            outbox::overlay(&tx)?;
-        }
-        set_meta(&tx, "position", position_text.as_deref())?;
-        tx.commit()?;
-        self.clear_pending_marker()?;
-        Ok(())
+        let events = events.to_vec();
+        self.write(move |db, pending_file| {
+            apply_events(db, &events, position.as_deref())?;
+            outbox::clear_pending_marker(db, pending_file)
+        })
+        .await
+    }
+
+    /// The connection, for a read: reads run on the caller's thread, as only writes sync.
+    fn db(&self) -> MutexGuard<'_, Connection> {
+        self.db.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Run `write` on the connection, given the pending marker's path, on a thread of the runtime's blocking pool once
+    /// the writes made before it have ended. It runs to its end even when the caller stops waiting for it.
+    async fn write<T: Send + 'static>(
+        &self,
+        write: impl FnOnce(&mut Connection, Option<&Path>) -> Result<T, CacheError> + Send + 'static,
+    ) -> Result<T, CacheError> {
+        let turn = self.writes.clone().lock_owned().await;
+        let (db, pending_file) = (self.db.clone(), self.pending_file.clone());
+        let written = tokio::task::spawn_blocking(move || {
+            let _turn = turn;
+            write(&mut db.lock().unwrap_or_else(PoisonError::into_inner), pending_file.as_deref())
+        });
+        written.await.map_err(|e| CacheError::Io(io::Error::other(format!("writing the cache: {e}"))))?
+    }
+
+    /// Hold off the writes after it until dropped, as one running would.
+    #[cfg(test)]
+    pub(crate) async fn hold_writes(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.writes.clone().lock_owned().await
+    }
+
+    /// Wait for the writes made so far to end, those whose callers stopped waiting for them too.
+    pub async fn settled(&self) {
+        drop(self.writes.lock().await);
     }
 
     pub fn get(&self, id: &ItemId) -> Result<Option<Item>, CacheError> {
-        get(&self.db, id)
+        get(&self.db(), id)
     }
 
     /// The items of `kind`, the last changed first, up to `limit`.
     pub fn list(&self, kind: &str, limit: usize) -> Result<Vec<Item>, CacheError> {
-        let mut query = self.db.prepare("SELECT item FROM items WHERE kind = ?1 ORDER BY updated_at DESC LIMIT ?2")?;
+        let db = self.db();
+        let mut query = db.prepare("SELECT item FROM items WHERE kind = ?1 ORDER BY updated_at DESC LIMIT ?2")?;
         let rows = query.query_map(params![kind, limit_of(limit)], |row| row.get::<_, String>(0))?;
         rows.map(|item| Ok(serde_json::from_str(&item?)?)).collect()
     }
@@ -261,7 +273,8 @@ impl Cache {
         limit: usize,
     ) -> Result<Vec<Item>, CacheError> {
         let path = format!("$.values.\"{}\"", name.replace('"', ""));
-        let mut query = self.db.prepare(
+        let db = self.db();
+        let mut query = db.prepare(
             "SELECT item FROM items WHERE kind = ?1 AND json_extract(item, ?2) IS json_extract(?3, '$')
              ORDER BY updated_at DESC LIMIT ?4",
         )?;
@@ -277,26 +290,27 @@ impl Cache {
         since: Option<DateTime<Utc>>,
         top: usize,
     ) -> Result<Option<Experience>, CacheError> {
-        experience::count(&self.db, own, since, top)
+        experience::count(&self.db(), own, since, top)
     }
 
     /// The tally of the reviews the items record, with the `top` kinds and ants (`crate::dream::review_tally`).
     pub fn review_tally(&self, top: usize) -> Result<Option<ReviewTally>, CacheError> {
-        crate::dream::reviews::count(&self.db, top)
+        crate::dream::reviews::count(&self.db(), top)
     }
 
     /// The calls of sense's tools the ant's threads made since `since`, pending writes too ([`crate::thread::calls`]).
     pub fn calls(&self, since: DateTime<Utc>) -> Result<Vec<Calls>, CacheError> {
         let pending = self.pending()?.into_iter().take(self.pending_ready()?);
         let pending = pending.map(|pending| pending.revisions()).collect::<Result<Vec<_>, _>>()?;
-        calls::count(&self.db, &pending, since)
+        calls::count(&self.db(), &pending, since)
     }
 
     /// The items, of `kind` if given, whose title or body holds any word of `text`, the best matches first (BM25, a
     /// title's words weighing more), up to `limit`. `text` is taken as words only, never as an FTS5 query.
     pub fn search(&self, text: &str, kind: Option<&str>, limit: usize) -> Result<Vec<Hit>, CacheError> {
         let Some(query) = match_query(text) else { return Ok(Vec::new()) };
-        let mut found = self.db.prepare(
+        let db = self.db();
+        let mut found = db.prepare(
             "SELECT items.item, bm25(items_text, 2.0, 1.0) AS rank
              FROM items_text JOIN items ON items.rowid = items_text.rowid
              WHERE items_text MATCH ?1 AND (?2 IS NULL OR items.kind = ?2)
@@ -314,11 +328,14 @@ impl Cache {
 
     /// The changes of item `id`, confirmed first and pending after them with sequence 0.
     pub fn history(&self, id: &ItemId) -> Result<Vec<Revision>, CacheError> {
-        let mut query = self.db.prepare("SELECT entry FROM changes WHERE item = ?1 ORDER BY sequence")?;
-        let rows = query.query_map([id.as_str()], |row| row.get::<_, String>(0))?;
-        let mut revisions: Vec<Revision> =
-            rows.map(|revision| Ok(serde_json::from_str(&revision?)?)).collect::<Result<_, CacheError>>()?;
-        let applied = meta(&self.db, "pending_applied")?.and_then(|value| value.parse::<usize>().ok());
+        let (mut revisions, applied) = {
+            let db = self.db();
+            let mut query = db.prepare("SELECT entry FROM changes WHERE item = ?1 ORDER BY sequence")?;
+            let rows = query.query_map([id.as_str()], |row| row.get::<_, String>(0))?;
+            let revisions: Vec<Revision> =
+                rows.map(|revision| Ok(serde_json::from_str(&revision?)?)).collect::<Result<_, CacheError>>()?;
+            (revisions, meta(&db, "pending_applied")?.and_then(|value| value.parse::<usize>().ok()))
+        };
         for pending in self.pending()?.into_iter().take(applied.unwrap_or(usize::MAX)) {
             revisions.extend(pending.revisions()?.into_iter().filter(|revision| &revision.change.id == id));
         }
@@ -329,6 +346,17 @@ impl Cache {
     pub fn at(&self, id: &ItemId, at: DateTime<Utc>) -> Result<Option<Item>, CacheError> {
         Ok(state_at(&self.history(id)?, at))
     }
+}
+
+/// Remove `file` with each of `suffixes` appended, where they exist.
+fn remove(file: &Path, suffixes: &[&str]) -> io::Result<()> {
+    for suffix in suffixes {
+        match std::fs::remove_file(format!("{}{suffix}", file.display())) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn limit_of(limit: usize) -> i64 {
@@ -348,6 +376,53 @@ fn set_meta(tx: &Transaction<'_>, key: &str, value: Option<&str>) -> Result<(), 
         Some(value) => tx.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)", [key, value])?,
         None => tx.execute("DELETE FROM meta WHERE key = ?1", [key])?,
     };
+    Ok(())
+}
+
+/// Apply `events` to the cache in `db` and record the log read up to `position`, in one transaction ([`Cache::apply`]).
+fn apply_events(db: &mut Connection, events: &[Checked], position: Option<&str>) -> Result<(), CacheError> {
+    let tx = db.transaction()?;
+    let pending = outbox::pending(&tx)?;
+    if !pending.is_empty() {
+        outbox::restore(&tx)?;
+    }
+    for checked in events {
+        let changes = match checked.event.kind.as_str() {
+            ITEM_EVENT => serde_json::from_value::<Change>(checked.event.data.clone()).map(|change| vec![change]),
+            ITEMS_EVENT => serde_json::from_value::<Batch>(checked.event.data.clone()).map(|batch| batch.changes),
+            _ => continue,
+        };
+        let Ok(changes) = changes else { continue };
+        let at = checked
+            .event
+            .data
+            .get(outbox::AT)
+            .and_then(Value::as_str)
+            .and_then(|at| at.parse::<DateTime<Utc>>().ok())
+            .unwrap_or(checked.event.at);
+        let revisions = changes.into_iter().map(|change| Revision {
+            sequence: checked.stored.sequence,
+            at,
+            machine: checked.event.machine.clone(),
+            change,
+        });
+        apply(&tx, revisions.collect())?;
+        if let Some(operation) = checked.event.data.get(outbox::OPERATION).and_then(Value::as_str)
+            && let Some(entry) = pending.iter().find(|entry| entry.operation == operation)
+        {
+            if entry.kind != checked.event.kind || entry.data != checked.event.data {
+                return Err(CacheError::Unusable(format!(
+                    "remote event differs from pending sense write {operation}; local write retained"
+                )));
+            }
+            tx.execute("DELETE FROM outbox WHERE operation = ?1", [operation])?;
+        }
+    }
+    if !pending.is_empty() {
+        outbox::overlay(&tx)?;
+    }
+    set_meta(&tx, "position", position)?;
+    tx.commit()?;
     Ok(())
 }
 

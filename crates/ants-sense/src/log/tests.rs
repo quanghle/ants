@@ -286,6 +286,20 @@ async fn the_status_is_written_again_only_once_changed_or_stale() {
 }
 
 #[tokio::test]
+async fn an_unreadable_status_kept_is_taken_as_none_and_kept_anew() {
+    let (team, log, sense) = (Team::new(), MemoryLog::default(), SenseId::new());
+    let home = ants_test_support::scratch_dir("sense-status-unreadable");
+    ant_log(&log, team.signer("dev-a"), team.verifier(), &sense, Some(&home)).append("note", json!(1)).await.unwrap();
+    for unreadable in [&b""[..], b"{\"events\":"] {
+        std::fs::write(crate::home::Home::new(&home).status(), unreadable).unwrap();
+        let mut reader = ant_log(&log, Unsigned, team.verifier(), &sense, Some(&home));
+        reader.catch_up().await.unwrap();
+        assert_eq!(read_status(&home).unwrap().unwrap().events, 1);
+    }
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[tokio::test]
 async fn the_log_s_size_counts_each_message_of_the_identity_read_or_appended() {
     let (team, log, sense, other) = (Team::new(), MemoryLog::default(), SenseId::new(), SenseId::new());
     let home = ants_test_support::scratch_dir("sense-size");

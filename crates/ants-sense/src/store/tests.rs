@@ -1,5 +1,5 @@
 //! Tests of the store: revisions and expected ones, past values, raced writes, items of known ids, listing and search,
-//! cache rebuilds, atomic writes, and how sense reaches an ant's items.
+//! cache rebuilds, atomic writes, writes whose callers stopped waiting, and how sense reaches an ant's items.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -334,4 +334,31 @@ async fn a_write_changes_several_items_in_one_event_all_or_none() {
     other.append(ITEMS_EVENT, json!({ "changes": [three, skipping] })).await.unwrap();
     store.sync().await.unwrap();
     assert_eq!(titles(&store), ["one", "two"]);
+}
+
+#[tokio::test]
+async fn a_write_whose_caller_stopped_waiting_once_appended_is_cached_by_the_next_call() {
+    let (log, sense) = (MemoryLog::default(), SenseId::new());
+    let home = ants_test_support::scratch_dir("sense-stopped");
+    let verifier = AccountVerifier::new(vec![], NoRevocations);
+    let ant_log =
+        AntLog::new(&log, Unsigned, verifier, sense.clone(), dev_a(), "m1".parse().unwrap(), Some(home.clone()));
+    let mut store = Store::open(ant_log.unwrap(), Cache::open(&home).unwrap()).await.unwrap();
+    let earlier_write = store.cache().hold_writes().await;
+    {
+        // Polled once: appended, then waiting for the cache's earlier write to end.
+        let write = store.create("note", note("one"), "t");
+        tokio::select! {
+            biased;
+            _ = write => panic!("the write did not wait for the cache"),
+            () = std::future::ready(()) => {}
+        }
+    }
+    drop(earlier_write);
+    assert_eq!(log.last_sequence(&sense).await.unwrap(), 1, "appended");
+    store.sync().await.unwrap();
+    assert_eq!(titles(&store), ["one"]);
+    store.create("note", note("two"), "t").await.unwrap();
+    assert_eq!(titles(&store), ["one", "two"]);
+    std::fs::remove_dir_all(&home).unwrap();
 }

@@ -59,17 +59,20 @@ impl ChainStatus {
     }
 }
 
-/// The [`ChainStatus`] kept in `home`; none when there is none.
+/// The [`ChainStatus`] kept in `home`; none when there is none. What is there but no status, as a power loss may leave
+/// it ([`write_status`]), fails as [`io::ErrorKind::InvalidData`].
 pub fn read_status(home: &Path) -> io::Result<Option<ChainStatus>> {
     let text = match std::fs::read(Home::new(home).status()) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    serde_json::from_slice(&text).map(Some).map_err(io::Error::other)
+    serde_json::from_slice(&text).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-/// Keep `status` in `home`, replacing the file whole.
+/// Keep `status` in `home`, replacing the file whole, synced to disk neither: it is written again as often as an event
+/// is appended, and a status a power loss leaves out of date or empty is written anew at the next read of the log.
 pub fn write_status(home: &Path, status: &ChainStatus) -> io::Result<()> {
-    crate::home::write(&Home::new(home).status(), &serde_json::to_vec_pretty(status).map_err(io::Error::other)?)
+    let bytes = serde_json::to_vec_pretty(status).map_err(io::Error::other)?;
+    crate::home::write_unsynced(&Home::new(home).status(), &bytes)
 }

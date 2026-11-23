@@ -53,12 +53,15 @@ pub struct Store<L, S, V> {
     machine: Machine,
     /// Why the latest [`Store::sync`] failed; none when it succeeded.
     unsynced: Option<String>,
+    /// The log may hold events read or appended that the cache has yet to apply: still so as a call starts when the
+    /// last stopped waiting for its log or cache ([`Store::settle`]).
+    unsettled: bool,
 }
 
 impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     /// The items of `log`, cached in `cache`: kept when built from this log up to where it still matches, else
     /// emptied and built again from the log's start; then caught up with the log ([`Store::sync`]).
-    pub async fn open(mut log: AntLog<L, S, V>, mut cache: Cache) -> Result<Self, StoreError> {
+    pub async fn open(mut log: AntLog<L, S, V>, cache: Cache) -> Result<Self, StoreError> {
         let sense = log.chain().sense().clone();
         let incarnation = log.log().incarnation().to_owned();
         let built =
@@ -69,17 +72,18 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
                 Err(error) if is_offline(&error) => built.position,
                 Err(error) => return Err(error.into()),
                 Ok(false) => {
-                    cache.reset(&sense, &incarnation)?;
+                    cache.reset(&sense, &incarnation).await?;
                     None
                 }
             },
             _ => {
-                cache.reset(&sense, &incarnation)?;
+                cache.reset(&sense, &incarnation).await?;
                 None
             }
         };
         log.resume(position);
-        let mut store = Self { log, cache, machine: "offline".parse().expect("a machine name"), unsynced: None };
+        let machine = "offline".parse().expect("a machine name");
+        let mut store = Self { log, cache, machine, unsynced: None, unsettled: false };
         match store.sync().await {
             Err(StoreError::Log(error)) if is_offline(&error) => {}
             Err(StoreError::Unavailable(_)) if store.cache.pending_conflict()?.is_some() => {}
@@ -106,6 +110,7 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     /// Catch up with the verified log, then append queued local changes in order. A conflict retains the affected
     /// write and those after it, returning an error rather than overwriting either side.
     pub async fn sync(&mut self) -> Result<(), StoreError> {
+        self.settle().await;
         let synced = match self.catch_up().await {
             Ok(()) => self.flush().await,
             failed => failed,
@@ -128,6 +133,7 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
 
     async fn catch_up(&mut self) -> Result<(), StoreError> {
         loop {
+            self.unsettled = true;
             let read = match self.log.read_next().await {
                 Ok(read) => read,
                 Err(e) => {
@@ -135,8 +141,8 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
                     return Err(e.into());
                 }
             };
-            let Some(events) = read else { return self.apply(&[]) };
-            self.apply(&events)?;
+            let Some(events) = read else { return self.apply(&[]).await };
+            self.apply(&events).await?;
         }
     }
 
@@ -298,6 +304,7 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         mut next: impl FnMut(&Cache) -> Result<Vec<Result<Change, Item>>, StoreError>,
         queue: bool,
     ) -> Result<Vec<Item>, StoreError> {
+        self.settle().await;
         if self.pending()? > 0 {
             match self.sync().await {
                 Err(StoreError::Log(error)) if queue && is_offline(&error) => {
@@ -326,22 +333,23 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
                 .collect();
             if self.pending()? > 0 {
                 self.check_integrity()?;
-                self.cache.enqueue(&pending)?;
+                self.cache.enqueue(&pending).await?;
                 return decided.into_iter().map(|decided| self.applied(decided)).collect();
             }
+            self.unsettled = true;
             match self.log.try_append(kind, pending.data.clone()).await {
                 Ok(Ok(appended)) => {
-                    self.apply(std::slice::from_ref(&appended))?;
+                    self.apply(std::slice::from_ref(&appended)).await?;
                     return decided.into_iter().map(|decided| self.applied(decided)).collect();
                 }
                 Ok(Err(missed)) => {
-                    self.apply(&missed)?;
+                    self.apply(&missed).await?;
                 }
                 Err(e) => {
                     self.realign();
                     if queue && is_offline(&e) {
                         self.check_integrity()?;
-                        self.cache.enqueue(&pending)?;
+                        self.cache.enqueue(&pending).await?;
                         return decided.into_iter().map(|decided| self.applied(decided)).collect();
                     }
                     return Err(e.into());
@@ -363,10 +371,11 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
             {
                 return Err(StoreError::Unavailable(reason));
             }
+            self.unsettled = true;
             match self.log.try_append(&pending.kind, pending.data.clone()).await {
-                Ok(Ok(appended)) => self.apply(std::slice::from_ref(&appended))?,
+                Ok(Ok(appended)) => self.apply(std::slice::from_ref(&appended)).await?,
                 Ok(Err(missed)) => {
-                    self.apply(&missed)?;
+                    self.apply(&missed).await?;
                     self.check_chain()?;
                     conflicts += 1;
                     if conflicts >= APPEND_TRIES {
@@ -429,18 +438,34 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     }
 
     /// Apply `events`, just read, to the cache, with how far the log was read.
-    fn apply(&mut self, events: &[Checked]) -> Result<(), StoreError> {
+    async fn apply(&mut self, events: &[Checked]) -> Result<(), StoreError> {
         let position = self.log.chain().position();
-        self.cache.apply(events, position.as_ref()).map_err(|e| {
+        match self.cache.apply(events, position.as_ref()).await {
+            Ok(()) => {
+                self.unsettled = false;
+                Ok(())
+            }
+            Err(e) => {
+                self.realign();
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Read the log again from where the cache was built to, once its writes have ended, when the last call stopped
+    /// waiting before the cache applied what its log read or appended ([`Store::unsettled`]).
+    async fn settle(&mut self) {
+        if self.unsettled {
+            self.cache.settled().await;
             self.realign();
-            e.into()
-        })
+        }
     }
 
     /// Read the log again from where the cache was built to, after what was read past it failed to apply or was lost.
     fn realign(&mut self) {
         let position = self.cache.built().ok().flatten().and_then(|built| built.position);
         self.log.resume(position);
+        self.unsettled = false;
     }
 }
 

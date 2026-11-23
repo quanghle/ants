@@ -49,53 +49,67 @@ impl Pending {
 
 impl Cache {
     pub(crate) fn pending(&self) -> Result<Vec<Pending>, CacheError> {
-        pending(&self.db)
+        pending(&self.db())
     }
 
     pub(crate) fn pending_count(&self) -> Result<usize, CacheError> {
-        count(&self.db)
+        count(&self.db())
     }
 
     pub(crate) fn pending_conflict(&self) -> Result<Option<String>, CacheError> {
-        meta(&self.db, "pending_conflict")
+        meta(&self.db(), "pending_conflict")
     }
 
     pub(crate) fn pending_ready(&self) -> Result<usize, CacheError> {
-        Ok(meta(&self.db, "pending_applied")?.and_then(|value| value.parse().ok()).unwrap_or(self.pending_count()?))
+        let db = self.db();
+        Ok(meta(&db, "pending_applied")?.and_then(|value| value.parse().ok()).unwrap_or(count(&db)?))
     }
 
-    pub(crate) fn enqueue(&mut self, entry: &Pending) -> Result<(), CacheError> {
-        // The marker prevents a corrupt cache from being discarded with acknowledged local writes inside.
-        if let Some(path) = &self.pending_file {
-            let file = std::fs::File::create(path)?;
-            file.sync_all()?;
-            std::fs::File::open(path.parent().expect("cache directory"))?.sync_all()?;
-        }
-        let tx = self.db.transaction()?;
-        if count(&tx)? == 0 {
-            snapshot(&tx)?;
-        }
-        tx.execute(
-            "INSERT INTO outbox (operation, entry) VALUES (?1, ?2)",
-            params![entry.operation, serde_json::to_string(entry)?],
-        )?;
-        apply_pending(&tx, entry)?;
-        set_meta(&tx, "pending_applied", Some(&count(&tx)?.to_string()))?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub(super) fn clear_pending_marker(&self) -> Result<(), CacheError> {
-        if let Some(path) = &self.pending_file
-            && self.pending_count()? == 0
-        {
-            match std::fs::remove_file(path) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
-                _ => {}
+    pub(crate) async fn enqueue(&self, entry: &Pending) -> Result<(), CacheError> {
+        let entry = entry.clone();
+        self.write(move |db, pending_file| {
+            // The marker prevents a corrupt cache from being discarded with acknowledged local writes inside.
+            if let Some(path) = pending_file {
+                let file = std::fs::File::create(path)?;
+                file.sync_all()?;
+                std::fs::File::open(path.parent().expect("cache directory"))?.sync_all()?;
             }
-        }
-        Ok(())
+            // Accepted, the write is the outbox's alone until the log holds it: its commit syncs.
+            db.pragma_update(None, "synchronous", "FULL")?;
+            let queued = queue(db, &entry);
+            db.pragma_update(None, "synchronous", "NORMAL")?;
+            queued
+        })
+        .await
     }
+}
+
+fn queue(db: &mut Connection, entry: &Pending) -> Result<(), CacheError> {
+    let tx = db.transaction()?;
+    if count(&tx)? == 0 {
+        snapshot(&tx)?;
+    }
+    tx.execute(
+        "INSERT INTO outbox (operation, entry) VALUES (?1, ?2)",
+        params![entry.operation, serde_json::to_string(entry)?],
+    )?;
+    apply_pending(&tx, entry)?;
+    set_meta(&tx, "pending_applied", Some(&count(&tx)?.to_string()))?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Remove the pending marker at `path`, if any, once the outbox in `db` is empty.
+pub(super) fn clear_pending_marker(db: &Connection, path: Option<&Path>) -> Result<(), CacheError> {
+    if let Some(path) = path
+        && count(db)? == 0
+    {
+        match std::fs::remove_file(path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn count(db: &Connection) -> Result<usize, CacheError> {
