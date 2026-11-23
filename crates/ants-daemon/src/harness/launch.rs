@@ -294,17 +294,22 @@ fn connector(
 #[cfg(test)]
 pub(crate) mod fakes {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{LazyLock, Mutex};
 
     use super::Connector;
     use crate::sync::MutexExt as _;
 
     static FAKES: LazyLock<Mutex<HashMap<String, Connector>>> = LazyLock::new(Mutex::default);
+    static INSTALLS: AtomicUsize = AtomicUsize::new(0);
 
-    /// Start `connect` for the harness named `name` until the guard drops.
-    pub(crate) fn install(name: &str, connect: Connector) -> Installed {
-        FAKES.locked().insert(name.to_owned(), connect);
-        Installed(name.to_owned())
+    /// Start `connect` for a harness with a name of its own, `base` and a number no other install has, until the
+    /// guard drops: tests running in parallel never share a fake, whatever they call theirs.
+    pub(crate) fn install(base: &str, connect: Connector) -> Installed {
+        let name = format!("{base}-{}", INSTALLS.fetch_add(1, Ordering::Relaxed));
+        let other = FAKES.locked().insert(name.clone(), connect);
+        assert!(other.is_none(), "a fake harness {name} is installed already");
+        Installed(name)
     }
 
     pub(super) fn of(name: &str) -> Option<Connector> {
@@ -313,9 +318,43 @@ pub(crate) mod fakes {
 
     pub(crate) struct Installed(String);
 
+    impl Installed {
+        /// The harness name to configure, which starts the fake.
+        pub(crate) fn name(&self) -> &str {
+            &self.0
+        }
+    }
+
     impl Drop for Installed {
         fn drop(&mut self) {
             FAKES.locked().remove(&self.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Fake harnesses installed under one name by tests running in parallel.
+
+    use std::sync::Arc;
+
+    use super::{Connector, fakes};
+
+    #[test]
+    fn fakes_installed_under_one_name_coexist_and_each_guard_removes_only_its_own() {
+        let connector = || -> Connector { Arc::new(|| unreachable!("never started")) };
+        let (first, second) = (connector(), connector());
+        let one = fakes::install("same", first.clone());
+        let two = fakes::install("same", second.clone());
+        assert_ne!(one.name(), two.name());
+        assert!(one.name().starts_with("same-") && two.name().starts_with("same-"));
+        assert!(fakes::of("same").is_none(), "only the names of the guards start a fake");
+        assert!(Arc::ptr_eq(&fakes::of(one.name()).unwrap(), &first));
+        assert!(Arc::ptr_eq(&fakes::of(two.name()).unwrap(), &second));
+
+        let dropped = one.name().to_owned();
+        drop(one);
+        assert!(fakes::of(&dropped).is_none());
+        assert!(Arc::ptr_eq(&fakes::of(two.name()).unwrap(), &second), "the other fake stays");
     }
 }
