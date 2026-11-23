@@ -177,7 +177,7 @@ fn answers(ants: &impl Fn(&[&str]) -> Command) -> HashMap<String, usize> {
     counts
 }
 
-fn tail(text: &str, lines: usize) -> String {
+pub fn tail(text: &str, lines: usize) -> String {
     let all: Vec<_> = text.lines().collect();
     all[all.len().saturating_sub(lines)..].join("\n") + "\n"
 }
