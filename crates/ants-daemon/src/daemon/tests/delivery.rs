@@ -448,6 +448,48 @@ async fn members_woken_by_one_post_spend_the_thread_s_turns_together() {
 }
 
 #[tokio::test]
+async fn a_reply_spending_a_turn_is_stored_only_while_no_other_post_reached_the_channel() {
+    use crate::channel::Earlier;
+
+    let Some((bus, _)) = Bus::start().await else { return };
+    let (ops, _posts) = bus.channel("ops", &["dev-a", "dev-b"]).await;
+    let humans = Humans::default();
+    let mut review = ChannelPost::new(ops.clone(), UserId::human(), "@dev-a @dev-b review");
+    review.turn_budget = 3;
+    let at = bus.post(&review).await;
+    let filter = subject::chan_room(&ops);
+    let read = bus.threads.context(&review, at, Earlier::Omitted, &humans).await.unwrap();
+    assert_eq!((read.later.len(), read.last_seq), (0, at), "nothing after the post yet");
+
+    // dev-b's answer lands between dev-a's read and its store: dev-a's, from the same turns, is turned away.
+    let b = review.reply("dev-b".parse().unwrap(), "fine", &[], &humans).unwrap();
+    assert_eq!(b.turn_budget, 2);
+    bus.post(&b).await;
+    let a = review.reply(bus.dev.clone(), "fine too", &read.later, &humans).unwrap();
+    let store = async |post: &ChannelPost, last_seq: u64| {
+        bus::store_expecting(&bus.js, post.subject(), post, "reply-a", &filter, last_seq).await.unwrap()
+    };
+    assert_eq!(store(&a, read.last_seq).await, bus::Expected::Moved);
+
+    // Read again, it spends the next turn.
+    let read = bus.threads.context(&review, at, Earlier::Omitted, &humans).await.unwrap();
+    assert_eq!(read.later, std::slice::from_ref(&b));
+    let a = review.reply(bus.dev.clone(), "fine too", &read.later, &humans).unwrap();
+    assert_eq!(a.turn_budget, 1, "a turn of its own");
+    assert_eq!(store(&a, read.last_seq).await, bus::Expected::Stored(bus::Stored::Hub));
+    // Stored again from the same read, as by a retry, it finds itself the post that came after, and is stored once.
+    assert_eq!(store(&a, read.last_seq).await, bus::Expected::Moved);
+    let read = bus.threads.context(&review, at, Earlier::Omitted, &humans).await.unwrap();
+    assert_eq!(read.later, [b.clone(), a.clone()]);
+    assert_eq!(bus.stored(&subject::chan(&ops, &bus.dev)).await, 1);
+    // A post on another thread of the channel moves it on too.
+    let other = ChannelPost::new(ops.clone(), UserId::human(), "unrelated");
+    let last = bus.post(&other).await;
+    let read = bus.threads.context(&review, at, Earlier::Omitted, &humans).await.unwrap();
+    assert_eq!((read.later.len(), read.last_seq), (2, last));
+}
+
+#[tokio::test]
 async fn an_ant_s_reply_to_the_ant_s_own_message_is_prompted_but_not_answered_back_even_out_of_turns() {
     use super::super::prompt::text::own_reply_note;
     use ants_proto::{NoReplyWhy, TimelineEntry};

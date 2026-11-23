@@ -21,8 +21,11 @@ pub use connect::{
     jetstream, reach_jetstream, unanswered, worth_retrying,
 };
 pub use live::{CATCH_UP, LiveInbox, caught_up_inbox, live_inbox};
-pub use publish::{Stored, explain, explained, publish, publish_json, store, store_acked, store_in_hub, uncaptured};
-pub(crate) use publish::{out_of_reach, warn_uncaptured};
+pub(crate) use publish::{EXPECTED_LAST_SUBJECT, out_of_reach, warn_uncaptured};
+pub use publish::{
+    Expected, Stored, explain, explained, publish, publish_json, store, store_acked, store_expecting, store_in_hub,
+    uncaptured,
+};
 pub use pull::{IDLE_HEARTBEAT, Pull, pull, pull_anew};
 
 /// How long the stream keeps messages, the sessions bucket a thread's session, and the attempts bucket a marker: a
