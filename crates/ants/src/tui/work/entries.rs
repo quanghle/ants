@@ -62,3 +62,50 @@ pub fn latest(entries: &[Entry], me: &UserId) -> Option<Uuid> {
         .filter(|e| matches!(e.kind, Kind::Message | Kind::Escalation | Kind::Post) && e.from.as_ref() != Some(me))
         .find_map(|e| e.id)
 }
+
+#[cfg(test)]
+mod tests {
+    use ants_proto::{EscalationReason, Question};
+
+    use super::*;
+    use crate::test_support::live::{message, user};
+
+    #[test]
+    fn a_reply_goes_to_the_ant_that_last_wrote_else_the_one_last_written_to() {
+        let (thread, me) = (ThreadId::generate(), user("alice"));
+        let human = |u: &UserId| u.as_str() == "bob";
+        let mut entries = vec![message(1, &thread, "alice", "dev-a", "deploy")];
+        assert_eq!(reply_to(&entries, &me, human), Some(user("dev-a")));
+        entries.push(message(2, &thread, "dev-b", "alice", "done"));
+        entries.push(message(3, &thread, "bob", "alice", "thanks"));
+        assert_eq!(reply_to(&entries, &me, human), Some(user("dev-b")), "a human is no ant to reply to");
+        assert_eq!(reply_to(&entries[2..], &me, human), None);
+        assert_eq!(dm_with(&entries, &me, human), Some(user("bob")), "on a thread with no ant, the other human");
+        assert_eq!(dm_with(&entries[..2], &me, human), None);
+    }
+
+    #[test]
+    fn the_stuck_ant_is_that_of_the_latest_escalation_or_dead_letter() {
+        let thread = ThreadId::generate();
+        let mut escalated = message(1, &thread, "dev-a", "alice", "out of turns");
+        (escalated.kind, escalated.reason, escalated.stuck) =
+            (Kind::Escalation, Some(EscalationReason::TurnBudget), Some(user("dev-a")));
+        let mut approval = escalated.clone();
+        approval.reason = Some(EscalationReason::Approval);
+        assert_eq!(stuck(&[escalated.clone(), approval.clone()]), Some(user("dev-a")));
+        assert_eq!(stuck(&[approval]), None);
+        let mut dead = message(2, &thread, "alice", "dev-b", "hi");
+        dead.kind = Kind::Dead;
+        assert_eq!(stuck(&[escalated, dead]), Some(user("dev-b")));
+    }
+
+    #[test]
+    fn the_message_to_react_to_is_the_latest_of_another() {
+        let (thread, me) = (ThreadId::generate(), user("alice"));
+        let question = Question::new("which?", &["a".into(), "b".into()], true).unwrap();
+        let mut asked = message(1, &thread, "dev-a", "alice", "which?");
+        asked.question = Some(question.into());
+        let answered = message(2, &thread, "alice", "dev-a", "a");
+        assert_eq!(latest(&[asked.clone(), answered], &me), asked.id);
+    }
+}

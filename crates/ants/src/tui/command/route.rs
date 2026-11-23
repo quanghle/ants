@@ -5,9 +5,10 @@ use ants_proto::{ChannelId, ThreadId, UserId};
 
 use super::Note;
 use crate::text::excerpt;
-use crate::tui::exec::{Job, dm_with, reply_to};
+use crate::tui::exec::Job;
 use crate::tui::model::{Data, Model, Page};
 use crate::tui::thread;
+use crate::tui::work::entries::{dm_with, reply_to};
 
 /// How much of a thread's title the bar's title shows.
 const TITLE_CHARS: usize = 40;

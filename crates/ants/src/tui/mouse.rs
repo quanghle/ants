@@ -573,7 +573,9 @@ mod tests {
             "the wheel scrolls the help over the box"
         );
         m.key(Key::Esc, at(1));
-        let Some(Action::Run(super::super::exec::Job::TrailStart(asked), _)) = m.key(Key::Char('y'), at(1)) else {
+        let Some(Action::Run(super::super::exec::Job::Trail(crate::tui::trail::Job::Start(asked)), _)) =
+            m.key(Key::Char('y'), at(1))
+        else {
             panic!("y starts the run")
         };
         assert_eq!(*asked, start);

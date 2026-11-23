@@ -46,7 +46,7 @@ fn run(m: &mut Model, text: &str) -> Option<Action> {
 #[test]
 fn trail_run_shows_what_the_run_may_spend_until_y_starts_it_and_another_key_leaves_it() {
     let mut m = model();
-    let Some(Action::Run(Job::TrailPlan { trail, conductor, args, limits, thread }, _)) =
+    let Some(Action::Run(exec::Job::Trail(Job::Plan { trail, conductor, args, limits, thread }), _)) =
         run(&mut m, r#"/trail run review @lead {"files": ["a.rs"]}"#)
     else {
         panic!("no plan")
@@ -92,21 +92,28 @@ fn trail_run_shows_what_the_run_may_spend_until_y_starts_it_and_another_key_leav
         m.help().is_none() && matches!(m.prompt, Some(crate::tui::model::Prompt::Start(_))),
         "the run waits on after the help"
     );
-    let Some(Action::Run(Job::TrailStart(asked), _)) = m.key(Key::Char('y'), at(2)) else { panic!("no start") };
+    let Some(Action::Run(exec::Job::Trail(Job::Start(asked)), _)) = m.key(Key::Char('y'), at(2)) else {
+        panic!("no start")
+    };
     assert_eq!(*asked, start);
     let started = Done { line: "started run".to_owned(), open: Some(start.thread.clone()), ..Done::default() };
     assert_eq!(m.outcome(done(started)), Some(Action::Open(start.thread.clone())), "its thread shows");
     assert!(matches!(m.page(), Page::Thread(page) if page.history.thread == start.thread));
 
     m.focus = Focus::View;
-    assert_eq!(run(&mut m, "/trail runs"), Some(Action::Run(Job::TrailRuns, "/trail runs".to_owned())));
-    let Some(Action::Run(Job::TrailTips(args), _)) = run(&mut m, "/trail tips review --all") else { panic!("no tips") };
+    assert_eq!(run(&mut m, "/trail runs"), Some(Action::Run(exec::Job::Trail(Job::Runs), "/trail runs".to_owned())));
+    let Some(Action::Run(exec::Job::Trail(Job::Tips(args)), _)) = run(&mut m, "/trail tips review --all") else {
+        panic!("no tips")
+    };
     assert_eq!((args.name.as_str(), args.all), ("review", true));
     let listed = Done { line: "1 run".to_owned(), page: Some("RUN  TRAIL".to_owned()), ..Done::default() };
     assert_eq!(m.outcome(done(listed)), Some(Action::Page("RUN  TRAIL".to_owned())));
-    let Some(Action::Run(Job::TrailStop(pick), _)) = run(&mut m, "/trail stop 0190ab") else { panic!("no stop") };
+    let Some(Action::Run(exec::Job::Trail(Job::Stop(pick)), _)) = run(&mut m, "/trail stop 0190ab") else {
+        panic!("no stop")
+    };
     assert_eq!(pick.to_string(), "0190ab");
-    let Some(Action::Run(Job::TrailResume { run: pick, limits }, _)) = run(&mut m, "/trail resume 0190ab --steps 80")
+    let Some(Action::Run(exec::Job::Trail(Job::Resume { run: pick, limits }), _)) =
+        run(&mut m, "/trail resume 0190ab --steps 80")
     else {
         panic!("no resume")
     };
@@ -168,7 +175,7 @@ fn trail_run_reports_on_a_thread_read_the_latest_or_the_one_open() {
     let mut m = model();
     m.stored(vec![message(1, &older, "alice", "dev-a", "a"), message(2, &newer, "alice", "dev-a", "b")], at(1));
     let thread = |m: &mut Model, text: &str| match run(m, text) {
-        Some(Action::Run(Job::TrailPlan { thread, limits, .. }, _)) => Ok((thread, limits.steps)),
+        Some(Action::Run(exec::Job::Trail(Job::Plan { thread, limits, .. }), _)) => Ok((thread, limits.steps)),
         _ => Err(m.ui.bar.status.as_ref().unwrap().text.clone()),
     };
     assert_eq!(thread(&mut m, "/trail run review --thread 0190a --steps 10"), Ok((Some(older.clone()), 10)));

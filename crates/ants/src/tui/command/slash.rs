@@ -10,7 +10,7 @@ use crate::messages::{attachments, forward};
 use crate::people::quiet;
 use crate::tui::exec::Job;
 use crate::tui::model::{Action, Focus, Model, Page};
-use crate::tui::{attach, nav, thread};
+use crate::tui::{attach, nav, thread, trail};
 use crate::{live, tools};
 
 /// What `/grant` without a text sends the stuck ant.
@@ -71,9 +71,7 @@ impl Model {
                     self.channel_on_view().ok_or("/notify sets a channel's notify level: show the channel first")?;
                 Ok(Some(self.set_level(channel, level)))
             }
-            Slash::Notify(Notify::Snooze(hold)) => run(Job::NotifySnooze(hold)),
-            Slash::Notify(Notify::Resume) => run(Job::NotifyResume),
-            Slash::Notify(Notify::Status) => run(Job::NotifyStatus),
+            Slash::Notify(Notify::Push(job)) => run(Job::Notify(job)),
             Slash::Snooze(duration) => Ok(Some(self.set_snooze(self.target(now)?, Some(now + duration), now))),
             Slash::Unsnooze => Ok(Some(self.set_snooze(self.target(now)?, None, now))),
             Slash::Remind(text) => {
@@ -122,30 +120,18 @@ impl Model {
                 run(Job::Forward { to, source, note })
             }
             Slash::Save(to) => run(Job::Save(Box::new(self.marked()?), to.map(|to| attach::expand(&to)))),
-            Slash::Add { name, machine, settings, wait } => run(Job::Add { name, machine, settings, wait }),
-            Slash::Clone { src, new, machine, settings, wait } => run(Job::Clone { src, new, machine, settings, wait }),
+            Slash::Add(add) => run(Job::Add(add)),
+            Slash::Clone(clone) => run(Job::Clone(clone)),
             Slash::Retire(ant) => run(Job::Retire { ant }),
             Slash::Dead(dead) => self.dead(dead, now),
-            Slash::Trail(trail) => run(self.trail(trail, now)?),
+            Slash::Trail(Trail::Run { trail, conductor, args, limits, thread }) => {
+                let thread = thread.map(|on| self.on_thread(on, now)).transpose()?;
+                run(Job::Trail(trail::Job::Plan { trail, conductor, args, limits, thread }))
+            }
+            Slash::Trail(Trail::Job(job)) => run(Job::Trail(job)),
             Slash::Attach(_) | Slash::Detach => Ok(None),
             Slash::Quit => Ok(Some(Action::Quit)),
         }
-    }
-
-    /// The job the `/trail` subcommand `trail` runs.
-    fn trail(&self, trail: Trail, now: DateTime<Utc>) -> Result<Job, String> {
-        Ok(match trail {
-            Trail::List => Job::TrailList,
-            Trail::Show(what) => Job::TrailShow(what),
-            Trail::Tips(args) => Job::TrailTips(args),
-            Trail::Runs => Job::TrailRuns,
-            Trail::Run { trail, conductor, args, limits, thread } => {
-                let thread = thread.map(|on| self.on_thread(on, now)).transpose()?;
-                Job::TrailPlan { trail, conductor, args, limits, thread }
-            }
-            Trail::Stop(run) => Job::TrailStop(run),
-            Trail::Resume { run, limits } => Job::TrailResume { run, limits },
-        })
     }
 
     /// The answer `/answer TEXT` gives the card the keys answer: its question alone takes all of `text`, several a

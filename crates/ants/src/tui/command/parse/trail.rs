@@ -5,18 +5,12 @@ use ants_proto::{ThreadId, TrailLimits, TrailName, UserId};
 use serde_json::Value;
 
 use super::{first_word, flags};
-use crate::cmd::trail::runs::Pick;
-use crate::cmd::trail::{LimitArgs, Shown, TipsArgs};
+use crate::cmd::trail::LimitArgs;
+use crate::tui::trail::Job;
 
 /// What `/trail` asks of the saved trails and the runs of trails, as `ants trail` does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trail {
-    List,
-    /// Show the saved trail, else the run, named.
-    Show(Shown),
-    /// List a trail's tips, or retire one.
-    Tips(TipsArgs),
-    Runs,
     /// Start a run of the saved trail `trail` with `args`, a JSON value, on `conductor`, else whom a message naming no
     /// one goes to, under `limits`, reporting on `thread`, else a new one, once confirmed.
     Run {
@@ -26,12 +20,8 @@ pub enum Trail {
         limits: TrailLimits,
         thread: Option<OnThread>,
     },
-    Stop(Pick),
-    /// Resume the run `run`, under its own limits with those `limits` gives instead.
-    Resume {
-        run: Pick,
-        limits: LimitArgs,
-    },
+    /// What asks nothing of the view shown.
+    Job(Job),
 }
 
 /// The thread `/trail run --thread` names.
@@ -62,15 +52,15 @@ impl std::str::FromStr for OnThread {
 pub(super) fn read(args: &str) -> Result<Trail, Option<String>> {
     let error = |e: &dyn std::fmt::Display| Some(e.to_string());
     match first_word(args) {
-        ("list", "") => Ok(Trail::List),
+        ("list", "") => Ok(Trail::Job(Job::List)),
         ("show", what) if !what.is_empty() && !what.contains(char::is_whitespace) => {
-            what.to_ascii_lowercase().parse().map(Trail::Show).map_err(|e| error(&e))
+            what.to_ascii_lowercase().parse().map(|what| Trail::Job(Job::Show(what))).map_err(|e| error(&e))
         }
-        ("tips", rest) => flags("/trail tips", rest).map(Trail::Tips),
-        ("runs", "") => Ok(Trail::Runs),
+        ("tips", rest) => flags("/trail tips", rest).map(|args| Trail::Job(Job::Tips(args))),
+        ("runs", "") => Ok(Trail::Job(Job::Runs)),
         ("run", rest) if !rest.is_empty() => trail_run(rest),
         ("stop", run) if !run.is_empty() && !run.contains(char::is_whitespace) => {
-            run.parse().map(Trail::Stop).map_err(|e: String| Some(e))
+            run.parse().map(|run| Trail::Job(Job::Stop(run))).map_err(|e: String| Some(e))
         }
         ("resume", rest) if !rest.is_empty() => trail_resume(rest),
         _ => Err(None),
@@ -102,7 +92,7 @@ fn trail_resume(args: &str) -> Result<Trail, Option<String>> {
         return Err(None);
     }
     limits.over(TrailLimits::DEFAULT).map_err(|e| Some(e.to_string()))?;
-    Ok(Trail::Resume { run, limits })
+    Ok(Trail::Job(Job::Resume { run, limits }))
 }
 
 /// The options of `/trail run`, else of `/trail resume`.
@@ -180,6 +170,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::cmd::trail::{Shown, TipsArgs};
     use crate::test_support::live::user;
     use crate::tui::command::parse::{Command, Slash, parse};
 
@@ -189,12 +180,12 @@ mod tests {
             Ok(Command::Slash(Slash::Trail(trail))) => trail,
             other => panic!("{text}: {other:?}"),
         };
-        assert_eq!(trail("/trail list"), Trail::List);
-        assert_eq!(trail("/trail show review"), Trail::Show(Shown::Trail("review".parse().unwrap())));
-        assert_eq!(trail("/trail show 0190AB"), Trail::Show(Shown::Trail("0190ab".parse().unwrap())));
+        assert_eq!(trail("/trail list"), Trail::Job(Job::List));
+        assert_eq!(trail("/trail show review"), Trail::Job(Job::Show(Shown::Trail("review".parse().unwrap()))));
+        assert_eq!(trail("/trail show 0190AB"), Trail::Job(Job::Show(Shown::Trail("0190ab".parse().unwrap()))));
         let run = "0190aaaa-0000-7000-8000-000000000001";
-        assert_eq!(trail(&format!("/trail show {run}")), Trail::Show(Shown::Run(run.parse().unwrap())));
-        assert_eq!(trail("/trail runs"), Trail::Runs);
+        assert_eq!(trail(&format!("/trail show {run}")), Trail::Job(Job::Show(Shown::Run(run.parse().unwrap()))));
+        assert_eq!(trail("/trail runs"), Trail::Job(Job::Runs));
         let run = |conductor: Option<&str>, args| Trail::Run {
             trail: "review".parse().unwrap(),
             conductor: conductor.map(user),
@@ -207,8 +198,8 @@ mod tests {
         let args = Some(serde_json::json!({"files": ["a.rs", "b.rs"]}));
         assert_eq!(trail(r#"/trail run review @lead {"files": ["a.rs", "b.rs"]}"#), run(Some("lead"), args.clone()));
         assert_eq!(trail(r#"/trail run review {"files": ["a.rs", "b.rs"]}"#), run(None, args));
-        assert_eq!(trail("/trail stop 0190AB"), Trail::Stop("0190ab".parse().unwrap()));
-        let resume = Trail::Resume { run: "0190ab".parse().unwrap(), limits: LimitArgs::default() };
+        assert_eq!(trail("/trail stop 0190AB"), Trail::Job(Job::Stop("0190ab".parse().unwrap())));
+        let resume = Trail::Job(Job::Resume { run: "0190ab".parse().unwrap(), limits: LimitArgs::default() });
         assert_eq!(trail("/trail resume 0190ab"), resume);
         let usage = "usage: /trail list | show NAME|RUN | tips NAME [--key KEY] [--all] | tips NAME --retire ID \
                      [--writer ANT] | runs | run NAME [@ANT] [--steps N] [--at-once N] [--turns N] [--wall DUR] \
@@ -238,11 +229,11 @@ mod tests {
 
         let tips =
             |name: &str| TipsArgs { name: name.parse().unwrap(), key: None, all: false, retire: None, writer: None };
-        assert_eq!(trail("/trail tips deploy"), Trail::Tips(tips("deploy")));
+        assert_eq!(trail("/trail tips deploy"), Trail::Job(Job::Tips(tips("deploy"))));
         let keyed = TipsArgs { key: Some("build image".to_owned()), all: true, ..tips("deploy") };
-        assert_eq!(trail(r#"/trail tips deploy --key "build image" --all"#), Trail::Tips(keyed));
+        assert_eq!(trail(r#"/trail tips deploy --key "build image" --all"#), Trail::Job(Job::Tips(keyed)));
         let retire = TipsArgs { retire: Some("abcdefgh".parse().unwrap()), ..tips("deploy") };
-        assert_eq!(trail("/trail tips deploy --retire abcdefgh"), Trail::Tips(retire));
+        assert_eq!(trail("/trail tips deploy --retire abcdefgh"), Trail::Job(Job::Tips(retire)));
         assert!(parse("/trail tips deploy --retire abcdefgh --all").unwrap_err().contains("cannot be used with"));
         assert!(parse("/trail tips deploy --json").unwrap_err().contains("--json"));
         assert!(parse("/trail tips Not_A_Name").unwrap_err().contains("trail name"));
@@ -297,7 +288,7 @@ mod tests {
     #[test]
     fn trail_resume_takes_the_limits_of_ants_trail_resume_after_its_run() {
         let resume = |text: &str| match parse(text) {
-            Ok(Command::Slash(Slash::Trail(Trail::Resume { run, limits }))) => (run.to_string(), limits),
+            Ok(Command::Slash(Slash::Trail(Trail::Job(Job::Resume { run, limits })))) => (run.to_string(), limits),
             other => panic!("{text}: {other:?}"),
         };
         let limits =

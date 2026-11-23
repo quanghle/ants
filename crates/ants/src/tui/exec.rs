@@ -2,36 +2,35 @@
 //! on: the same library code as `ants ask`, `ants post`, `ants notes`, `ants answer`, `ants react`, `ants cancel`,
 //! `ants thread done|title|pin|mute...`, `ants dead replay|drop`, `ants notify` ([`super::notify`]), `ants remind list`
 //! ([`super::remind`]) and `ants trail` ([`super::trail`]) run, each returning the line those print and the warnings
-//! they log.
+//! they log. The sends are in [`send`].
 
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ants_daemon::bus;
 use ants_daemon::records::reactions;
-use ants_proto::{
-    ChannelId, ChannelNotify, JsDomain, Machine, Pick, Quote, Reaction, ThreadId, TrailName, UserId, Uuid,
-};
+use ants_proto::{ChannelId, ChannelNotify, JsDomain, Machine, Pick, Quote, Reaction, ThreadId, UserId, Uuid};
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream;
 use futures::future::LocalBoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 
-pub use super::work::entries::{dm_with, reply_to};
-use super::work::entries::{latest, stuck, waiting};
+use super::work::entries::{latest, waiting};
 use super::{attach, notify, remind, trail};
 use crate::admin::orders;
 use crate::admin::pause;
-use crate::cmd::{cancel, dead, send};
-use crate::messages::attachments::{self, File, Listed};
+use crate::cmd::send as cli;
+use crate::cmd::{cancel, dead};
+use crate::messages::attachments::{File, Listed};
 use crate::messages::forward;
 use crate::people::sealed::{Keyring, Sealing};
 use crate::people::{humans, quiet};
 use crate::threads::thread::{self};
 use crate::threads::thread_meta::{self, Marking, Meta};
+
+mod send;
 
 /// What a job needs: the UI's connection and its human.
 pub struct Ctx {
@@ -86,7 +85,7 @@ pub enum Job {
         quote: Option<Quoted>,
     },
     /// Send `text`, which names no one, on a new thread as `ants ask` does: to the human's assistant, else the
-    /// messenger ([`send::unaddressed`]).
+    /// messenger ([`cli::unaddressed`]).
     Unaddressed {
         text: String,
     },
@@ -100,6 +99,9 @@ pub enum Job {
     },
     /// Reply `text` on `thread` to `to`, else to the ant that last messaged the human there ([`reply_to`]), else to the
     /// other human ([`dm_with`]), else as [`Job::Unaddressed`] does; quoting the message it replies to if any.
+    ///
+    /// [`reply_to`]: super::work::entries::reply_to
+    /// [`dm_with`]: super::work::entries::dm_with
     Reply {
         thread: ThreadId,
         to: Option<UserId>,
@@ -107,6 +109,8 @@ pub enum Job {
         quote: Option<Quoted>,
     },
     /// Send `text` to the ant stuck on `thread` ([`stuck`]), which the human's message gives fresh turns.
+    ///
+    /// [`stuck`]: super::work::entries::stuck
     Grant {
         thread: ThreadId,
         text: String,
@@ -148,12 +152,8 @@ pub enum Job {
         channel: ChannelId,
         level: ChannelNotify,
     },
-    /// Hold back the human's push notifications on every device this long, as `ants notify snooze` does.
-    NotifySnooze(Duration),
-    /// End the snooze, as `ants notify resume` does.
-    NotifyResume,
-    /// Show what holds the human's push notifications back, as `ants notify status` does.
-    NotifyStatus,
+    /// Change or show what holds the human's push notifications back, as `ants notify` does.
+    Notify(notify::Job),
     /// List the human's reminders, as `ants remind list` does.
     Reminders,
     Title {
@@ -192,23 +192,8 @@ pub enum Job {
         job: Box<Job>,
         files: Rc<[File]>,
     },
-    /// Add the ant `name` on `machine` with `settings` by admin order, waiting up to `wait` for its outcome, as `ants
-    /// ant add` does.
-    Add {
-        name: UserId,
-        machine: Machine,
-        settings: serde_json::Map<String, serde_json::Value>,
-        wait: Duration,
-    },
-    /// Clone `src` as `new` with `settings` over its own by admin order to `machine`, else to the machine serving it,
-    /// waiting up to `wait` for its outcome, as `ants ant clone` does.
-    Clone {
-        src: UserId,
-        new: UserId,
-        machine: Option<Machine>,
-        settings: serde_json::Map<String, serde_json::Value>,
-        wait: Duration,
-    },
+    Add(AddAnt),
+    Clone(CloneAnt),
     /// Retire `ant` by admin order, as `ants ant retire` does.
     Retire {
         ant: UserId,
@@ -234,32 +219,45 @@ pub enum Job {
         source: forward::Source,
         note: String,
     },
-    /// List the saved trails, as `ants trail list` does.
-    TrailList,
-    /// Show the saved trail, else the run, named, as `ants trail show` does.
-    TrailShow(crate::cmd::trail::Shown),
-    /// List a trail's tips, or retire one, as `ants trail tips` does.
-    TrailTips(crate::cmd::trail::TipsArgs),
-    /// List the runs of trails, as `ants trail runs` does.
-    TrailRuns,
-    /// Plan a run of the saved trail `trail` with `args` on `conductor` under `limits`, reporting on `thread`, else a
-    /// new one, as `ants trail run` sums it up before asking to start it ([`Done::planned`]).
-    TrailPlan {
-        trail: TrailName,
-        conductor: Option<UserId>,
-        args: Option<serde_json::Value>,
-        limits: ants_proto::TrailLimits,
-        thread: Option<ThreadId>,
-    },
-    /// Ask the conductor to start the run planned, as `ants trail run` does once confirmed.
-    TrailStart(Box<crate::cmd::trail::start::Start>),
-    /// Stop the run picked, as `ants trail stop` does.
-    TrailStop(crate::cmd::trail::runs::Pick),
-    /// Resume the run picked, with the limits given instead of its own, as `ants trail resume` does.
-    TrailResume {
-        run: crate::cmd::trail::runs::Pick,
-        limits: crate::cmd::trail::LimitArgs,
-    },
+    /// Ask of the saved trails and the runs of trails what `ants trail` does.
+    Trail(trail::Job),
+}
+
+/// The ant `name` to add on `machine` with `settings` by admin order, waiting up to `wait` for its outcome, as `ants
+/// ant add` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddAnt {
+    pub name: UserId,
+    pub machine: Machine,
+    pub settings: serde_json::Map<String, serde_json::Value>,
+    pub wait: Duration,
+}
+
+impl AddAnt {
+    async fn run(self, ctx: &Ctx) -> Result<Done> {
+        let Self { name, machine, settings, wait } = self;
+        let said = orders::add::add(admin(ctx)?, &ctx.js, &name, machine, settings, wait).await?;
+        Ok(Done::line(said.replace('\n', " ")))
+    }
+}
+
+/// The ant `src` to clone as `new` with `settings` over its own by admin order to `machine`, else to the machine
+/// serving it, waiting up to `wait` for its outcome, as `ants ant clone` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloneAnt {
+    pub src: UserId,
+    pub new: UserId,
+    pub machine: Option<Machine>,
+    pub settings: serde_json::Map<String, serde_json::Value>,
+    pub wait: Duration,
+}
+
+impl CloneAnt {
+    async fn run(self, ctx: &Ctx) -> Result<Done> {
+        let Self { src, new, machine, settings, wait } = self;
+        let said = orders::clone::clone(admin(ctx)?, &ctx.js, &src, &new, machine, settings, wait).await?;
+        Ok(Done::line(said.replace('\n', " ")))
+    }
 }
 
 /// A message withdrawn to send again: its text and attachments.
@@ -293,7 +291,7 @@ pub struct Done {
 }
 
 impl Done {
-    fn line(line: String) -> Self {
+    pub(super) fn line(line: String) -> Self {
         Self { line, ..Self::default() }
     }
 }
@@ -371,14 +369,18 @@ impl Job {
             job => (job, false),
         };
         match job {
-            Self::Ask { to, thread, text, quote } => ask(ctx, to.into(), thread, text, quote, false, &files).await,
-            Self::Unaddressed { text } => {
-                let to = send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await;
-                ask(ctx, to, None, text, None, false, &files).await
+            Self::Ask { to, thread, text, quote } => {
+                send::ask(ctx, to.into(), thread, text, quote, false, &files).await
             }
-            Self::Post { channel, thread, text, quote } => post(ctx, channel, thread, text, quote, queue, &files).await,
-            Self::Reply { thread, to, text, quote } => reply(ctx, thread, to, text, quote, queue, &files).await,
-            Self::Grant { thread, text } => grant(ctx, thread, text, &files).await,
+            Self::Unaddressed { text } => {
+                let to = cli::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await;
+                send::ask(ctx, to, None, text, None, false, &files).await
+            }
+            Self::Post { channel, thread, text, quote } => {
+                send::post(ctx, channel, thread, text, quote, queue, &files).await
+            }
+            Self::Reply { thread, to, text, quote } => send::reply(ctx, thread, to, text, quote, queue, &files).await,
+            Self::Grant { thread, text } => send::grant(ctx, thread, text, &files).await,
             Self::Restart { ant, now } => restart(ctx, &ant, now).await,
             Self::Cancel { thread, ants } => cancel_all(ctx, &thread, ants).await,
             Self::Answer { thread, question, picks } => answer(ctx, &thread, question, picks).await,
@@ -394,30 +396,19 @@ impl Job {
             Self::ChannelNotify { channel, level } => {
                 Ok(Done::line(quiet::channel_notify(&ctx.js, me, &channel, level).await?))
             }
-            Self::NotifySnooze(hold) => Ok(Done::line(quiet::snoozed(&ctx.js, me, hold).await?)),
-            Self::NotifyResume => Ok(Done::line(quiet::resumed(&ctx.js, me).await?)),
-            Self::NotifyStatus => notify::status(ctx).await,
+            Self::Notify(job) => job.run(ctx).await,
             Self::Reminders => remind::listed(ctx).await,
             Self::Title { thread, text } => {
                 Ok(Done::line(thread_meta::retitle(&ctx.js, ctx.meta()?, &ctx.sealing, &thread, &text, false).await?))
             }
-            Self::Notes { thread, text } => {
-                let post = send::post_notes(&ctx.js, me, thread, text, &files, ATTACH).await?;
-                Ok(Done::line(format!("{}{}", send::notes_posted(&post), with(&files))))
-            }
+            Self::Notes { thread, text } => send::notes(ctx, thread, text, &files).await,
             Self::React { thread, message, reaction } => react(ctx, &thread, message, reaction).await,
             Self::Open(listed) => Ok(Done::line(attach::open(&ctx.js, ctx.keyring.as_deref(), &listed).await?)),
             Self::Save(listed, to) => {
                 Ok(Done::line(attach::save(&ctx.js, ctx.keyring.as_deref(), &listed, to.as_deref()).await?))
             }
-            Self::Add { name, machine, settings, wait } => {
-                let said = orders::add::add(admin(ctx)?, &ctx.js, &name, machine, settings, wait).await?;
-                Ok(Done::line(said.replace('\n', " ")))
-            }
-            Self::Clone { src, new, machine, settings, wait } => {
-                let said = orders::clone::clone(admin(ctx)?, &ctx.js, &src, &new, machine, settings, wait).await?;
-                Ok(Done::line(said.replace('\n', " ")))
-            }
+            Self::Add(add) => add.run(ctx).await,
+            Self::Clone(clone) => clone.run(ctx).await,
             Self::Retire { ant } => retire(ctx, &ant).await,
             Self::DeadReplay(seq) => {
                 Ok(Done { line: dead::replayed(&ctx.js, seq).await?, dead: Some(seq), ..Done::default() })
@@ -425,30 +416,14 @@ impl Job {
             Self::DeadDrop(seq) => {
                 Ok(Done { line: dead::dropped(&ctx.js, seq).await?, dead: Some(seq), ..Done::default() })
             }
-            Self::Forward { to, source, note } => forward(ctx, to, &source, &note, &files).await,
+            Self::Forward { to, source, note } => send::forward(ctx, to, &source, &note, &files).await,
             Self::Pause { ant, paused } => pause(ctx, &ant, paused).await,
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
             Self::Later(_) => Err(anyhow!("a message waits its turn once")),
             Self::Withdraw { ants, message, edit } => withdraw(ctx, &ants, message, edit.map(|e| *e)).await,
-            Self::TrailList => trail::trails(ctx).await,
-            Self::TrailShow(what) => trail::shown(ctx, what).await,
-            Self::TrailTips(args) => trail::tips(ctx, &args).await,
-            Self::TrailRuns => trail::listed(ctx).await,
-            Self::TrailPlan { trail, conductor, args, limits, thread } => {
-                trail::planned(ctx, &trail, conductor, args, limits, thread).await
-            }
-            Self::TrailStart(start) => trail::started(ctx, &start).await,
-            Self::TrailStop(run) => trail::stopped(ctx, &run).await,
-            Self::TrailResume { run, limits } => trail::resumed(ctx, &run, limits).await,
+            Self::Trail(job) => job.run(ctx).await,
         }
     }
-}
-
-/// Ask the ant stuck on `thread` again with `text`, granting what it waits for.
-async fn grant(ctx: &Ctx, thread: ThreadId, text: String, files: &[File]) -> Result<Done> {
-    let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
-    let ant = stuck(&entries).ok_or_else(|| anyhow!("no ant is stuck on thread {thread}"))?;
-    ask(ctx, ant.into(), Some(thread), text, None, false, files).await
 }
 
 /// Send `ant` a restart order, at once when `now`.
@@ -462,11 +437,11 @@ async fn answer(ctx: &Ctx, thread: &ThreadId, question: Uuid, picks: Vec<Pick>) 
     let me = &ctx.me.id;
     let entries = thread::history(&ctx.js, thread, None, thread::Activity::None, None).await?;
     waiting(&entries, me, thread, question)?;
-    let envelope = send::answering(&ctx.js, me, question, send::Picks::Made(picks)).await?;
-    let stored = send::deliver(&ctx.js, ctx.domain.as_ref(), &envelope).await?;
+    let envelope = cli::answering(&ctx.js, me, question, cli::Picks::Made(picks)).await?;
+    let stored = cli::deliver(&ctx.js, ctx.domain.as_ref(), &envelope).await?;
     Ok(Done {
         line: format!("answered {} on thread {thread}", envelope.to),
-        warnings: outbox(stored),
+        warnings: send::outbox(stored),
         ..Done::default()
     })
 }
@@ -482,7 +457,7 @@ async fn react(ctx: &Ctx, thread: &ThreadId, message: Option<Uuid>, reaction: Re
         }
     };
     let changed = reactions::add(&ctx.js, ctx.domain.as_ref(), me, &message, &reaction).await?;
-    Ok(Done::line(send::reacted_line(&reaction, message, false, changed)))
+    Ok(Done::line(cli::reacted_line(&reaction, message, false, changed)))
 }
 
 /// Send `ant` an order pausing it, or resuming it unless `paused`.
@@ -532,30 +507,6 @@ fn changed_line(channel: &ChannelId, change: &crate::channel::Change, changed: &
     } else {
         format!("#{channel}: {}", parts.join(", "))
     }
-}
-
-/// Reply on `thread` to `to`, else to whoever the human talks with there, else as an unaddressed message.
-async fn reply(
-    ctx: &Ctx,
-    thread: ThreadId,
-    to: Option<UserId>,
-    text: String,
-    quote: Option<Quoted>,
-    queue: bool,
-    files: &[File],
-) -> Result<Done> {
-    if let Some(to) = to {
-        return ask(ctx, to.into(), Some(thread), text, quote, queue, files).await;
-    }
-    let me = &ctx.me.id;
-    let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
-    let humans = humans::load(&ctx.js, &ctx.me).await;
-    let human = |u: &UserId| humans.contains(u);
-    let to = match reply_to(&entries, me, human).or_else(|| dm_with(&entries, me, human)) {
-        Some(to) => to.into(),
-        None => send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await,
-    };
-    ask(ctx, to, Some(thread), text, quote, queue, files).await
 }
 
 /// Cancel the prompts of `ants` on `thread`, failing only when none is cancelled.
@@ -611,13 +562,6 @@ async fn withdraw(ctx: &Ctx, ants: &[UserId], message: Uuid, edit: Option<Edit>)
     Ok(Done { line, warnings, withdrew: Some(message), edit, ..Done::default() })
 }
 
-/// Hand `source` to `to` on a new thread, as `ants ask --forward` does.
-async fn forward(ctx: &Ctx, to: UserId, source: &forward::Source, note: &str, files: &[File]) -> Result<Done> {
-    let files = source.files(&ctx.js, ctx.keyring.as_deref(), files.to_vec()).await?;
-    let envelope = source.envelope(&ctx.me, to.clone(), note);
-    deliver(ctx, to.into(), envelope, None, &files, true).await
-}
-
 /// The human's admin credentials, which sign admin orders, or why there are none.
 fn admin(ctx: &Ctx) -> Result<&orders::Admin> {
     ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))
@@ -629,140 +573,16 @@ async fn retire(ctx: &Ctx, ant: &UserId) -> Result<Done> {
     Ok(Done::line(said.replace('\n', " ")))
 }
 
-/// How the chat attaches a file, as [`send::check_fits`] suggests it.
-const ATTACH: &str = "attach it with /attach";
-
-/// The warning for a message kept in the leaf node's outbox.
-fn outbox(stored: bus::Stored) -> Vec<String> {
-    match stored {
-        bus::Stored::Outbox => vec![send::OUTBOX.to_owned()],
-        bus::Stored::Hub => Vec::new(),
-    }
-}
-
-/// Send `text` to `to` on `thread`, or a new one, as `ants ask` does, with the warnings it prints for an ant no daemon
-/// serves now; quoting the message it replies to if any, and with `queue` waiting behind the prompt running on the
-/// thread; `files` go with it, stored before it as `ants ask --attach` stores them.
-async fn ask(
-    ctx: &Ctx,
-    to: send::Recipient,
-    thread: Option<ThreadId>,
-    text: String,
-    quote: Option<Quoted>,
-    queue: bool,
-    files: &[File],
-) -> Result<Done> {
-    let new = thread.is_none();
-    let mut envelope = send::ask_envelope(&ctx.me, thread, to.to.clone(), text);
-    envelope.queue = queue;
-    deliver(ctx, to, envelope, quote, files, new).await
-}
-
-/// Send `envelope` from [`send::ask_envelope`] to `to` as [`ask`] does, opening its thread when `new`.
-async fn deliver(
-    ctx: &Ctx,
-    to: send::Recipient,
-    mut envelope: ants_proto::Envelope,
-    quote: Option<Quoted>,
-    files: &[File],
-    new: bool,
-) -> Result<Done> {
-    if let Some(q) = &quote {
-        envelope = envelope.quoting(q.id, q.quote.clone());
-    }
-    envelope.attachments = attachments::references(files);
-    // Sealed to a human, what is stored is each file's ciphertext.
-    let mut stored = files.to_vec();
-    send::seal_to_human(&ctx.js, &ctx.me, &ctx.sealing, &mut envelope, &mut stored).await?;
-    // Sealing took the quote into the sealed body; one left is in the clear.
-    if let Some(q) = quote.filter(|_| envelope.quote.is_some()) {
-        envelope.quote = Some(q.quote(false));
-    }
-    send::check_fits(&ctx.js, &envelope, ATTACH)?;
-    let (mut warnings, _) = send::unserved(&ctx.js, &ctx.me, &envelope.to).await;
-    attachments::store(&ctx.js, &stored, |id| envelope.attachment_handle(id)).await?;
-    let stored = send::deliver(&ctx.js, ctx.domain.as_ref(), &envelope).await?;
-    warnings.extend(outbox(stored));
-    Ok(Done {
-        line: format!("{} {to} on thread {}{}", sent(envelope.queue), envelope.thread_id, with(files)),
-        warnings,
-        open: new.then_some(envelope.thread_id),
-        ..Done::default()
-    })
-}
-
-/// Post `text` to `channel` on `thread`, or a new one, as `ants post` does, with the warnings it prints; quoting the
-/// post or message it replies to if any, and with `queue` waiting behind the prompt running on the thread; `files` go
-/// with it, stored before it as `ants post --attach` stores them.
-async fn post(
-    ctx: &Ctx,
-    channel: ChannelId,
-    thread: Option<ThreadId>,
-    text: String,
-    quote: Option<Quoted>,
-    queue: bool,
-    files: &[File],
-) -> Result<Done> {
-    let new = thread.is_none();
-    let mut posting = send::Posting::compose(&ctx.js, &ctx.me, channel, thread, text).await?;
-    if let Some(q) = quote {
-        posting.post = posting.post.quoting(q.id, q.quote(false));
-    }
-    posting.post.attachments = attachments::references(files);
-    posting.post.queue = queue;
-    send::check_fits(&ctx.js, &posting.post, ATTACH)?;
-    attachments::store(&ctx.js, files, |id| posting.post.attachment_handle(id)).await?;
-    let (stored, notified) = posting.deliver(&ctx.js, &ctx.me).await?;
-    let post = &posting.post;
-    let posted = if queue { "queued a post to" } else { "posted to" };
-    let mut line = format!("{posted} #{} on thread {}{}", post.channel, post.thread_id, with(files));
-    if !notified.is_empty() {
-        let names: Vec<&str> = notified.iter().map(UserId::as_str).collect();
-        line = format!("{line}; notified {}", names.join(", "));
-    }
-    let mut warnings = posting.warnings.clone();
-    if stored.is_none() {
-        warnings.push(send::OUTBOX.to_owned());
-    }
-    Ok(Done { line, warnings, open: new.then(|| post.thread_id.clone()), ..Done::default() })
-}
-
-/// How a sent line begins: a message sent, or with `queue` one waiting its turn.
-fn sent(queue: bool) -> &'static str {
-    if queue { "queued for" } else { "sent to" }
-}
-
-/// How a sent line tells of the `files` attached.
-fn with(files: &[File]) -> String {
-    match files.len() {
-        0 => String::new(),
-        1 => " with 1 file".to_owned(),
-        n => format!(" with {n} files"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use ants_proto::{EscalationReason, Question};
+    use ants_daemon::bus;
+    use ants_proto::Question;
 
     use super::*;
     use crate::connection::Nats;
-    use crate::test_support::live::{message, user};
+    use crate::messages::attachments;
+    use crate::test_support::live::user;
     use crate::threads::thread::Kind;
-
-    #[test]
-    fn a_reply_goes_to_the_ant_that_last_wrote_else_the_one_last_written_to() {
-        let (thread, me) = (ThreadId::generate(), user("alice"));
-        let human = |u: &UserId| u.as_str() == "bob";
-        let mut entries = vec![message(1, &thread, "alice", "dev-a", "deploy")];
-        assert_eq!(reply_to(&entries, &me, human), Some(user("dev-a")));
-        entries.push(message(2, &thread, "dev-b", "alice", "done"));
-        entries.push(message(3, &thread, "bob", "alice", "thanks"));
-        assert_eq!(reply_to(&entries, &me, human), Some(user("dev-b")), "a human is no ant to reply to");
-        assert_eq!(reply_to(&entries[2..], &me, human), None);
-        assert_eq!(dm_with(&entries, &me, human), Some(user("bob")), "on a thread with no ant, the other human");
-        assert_eq!(dm_with(&entries[..2], &me, human), None);
-    }
 
     /// What the bar sends to another human, a reply on their thread with a file attached and its title are sealed for
     /// both; a reply to an ant quoting a sealed message carries no excerpt of it, and notes posted there go in the
@@ -844,31 +664,6 @@ mod tests {
         assert_eq!((title.title.as_str(), title.sealed), ("Team lunch", None), "opened on bob's device");
         let unopened = Meta::open(&bob_js, None, &bob).await.unwrap().title(&thread).await.unwrap().unwrap();
         assert_eq!(unopened.title, "[sealed]", "stored sealed");
-    }
-
-    #[test]
-    fn the_stuck_ant_is_that_of_the_latest_escalation_or_dead_letter() {
-        let thread = ThreadId::generate();
-        let mut escalated = message(1, &thread, "dev-a", "alice", "out of turns");
-        (escalated.kind, escalated.reason, escalated.stuck) =
-            (Kind::Escalation, Some(EscalationReason::TurnBudget), Some(user("dev-a")));
-        let mut approval = escalated.clone();
-        approval.reason = Some(EscalationReason::Approval);
-        assert_eq!(stuck(&[escalated.clone(), approval.clone()]), Some(user("dev-a")));
-        assert_eq!(stuck(&[approval]), None);
-        let mut dead = message(2, &thread, "alice", "dev-b", "hi");
-        dead.kind = Kind::Dead;
-        assert_eq!(stuck(&[escalated, dead]), Some(user("dev-b")));
-    }
-
-    #[test]
-    fn the_message_to_react_to_is_the_latest_of_another() {
-        let (thread, me) = (ThreadId::generate(), user("alice"));
-        let question = Question::new("which?", &["a".into(), "b".into()], true).unwrap();
-        let mut asked = message(1, &thread, "dev-a", "alice", "which?");
-        asked.question = Some(question.into());
-        let answered = message(2, &thread, "alice", "dev-a", "a");
-        assert_eq!(latest(&[asked.clone(), answered], &me), asked.id);
     }
 
     /// A digit on a question card answers that question, though a later one was stored before the answer went out;
