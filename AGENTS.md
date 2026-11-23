@@ -69,10 +69,11 @@ skipped checks.
   sets it when `nats-server` is on PATH.
 - `ANTS_TEST_JS_ACK_FC_V2=1` runs the test servers with nats-server 2.16's v2 ack and flow control subjects; CI and
   the script run `cargo test` both ways.
-- `ANTS_STRESS=N cargo test -p ants --test e2e -- flood reloads_under flapping` runs the stress tests at N times their
-  size (minutes, not run by CI or the script): a flood with the daemon killed twice during the backlog, reloads listing
-  and unlisting ants and reading half-written files under traffic, and a leaf node's uplink flapping with one outage
-  past the ack wait; every message answered once, a withdrawn one never, none a dead letter for an outage.
+- `ANTS_STRESS=N cargo test -p ants --test e2e -- flood reloads_under flapping many_ants` runs the stress tests at N
+  times their size (minutes, not run by CI or the script): a flood with the daemon killed twice during the backlog,
+  reloads listing and unlisting ants and reading half-written files under traffic, a leaf node's uplink flapping with
+  one outage past the ack wait, and 12×N ants in git worktrees on one daemon; every message answered once, a withdrawn
+  one never, none a dead letter for an outage, every thread in a worktree of its own, each removed with its branch.
 - `cargo build --release` and `scripts/footprint.sh --ants target/release/ants --port 14722 --max-mb 10` with
   `--footprint`; the footprint check skips where `scripts/footprint.sh` cannot measure (Linux and macOS only, needs
   `nats-server`, and `footprint` on macOS).
