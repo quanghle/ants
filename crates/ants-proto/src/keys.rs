@@ -19,10 +19,7 @@ use crate::{
     JournalEntry, TRAIL_RATINGS_BUCKET, TRAIL_TIPS_BUCKET, TipRetired, TipVote, TrailRating, TrailRun, TrailRunIndex,
     TrailSession, TrailStepThread, TrailTip,
 };
-use crate::{
-    PERMISSIONS_VERSION, PermissionsVersion, Reaction, RunId, TRAIL_RUNS_BUCKET, ThreadId, TipId, TrailName, UserId,
-    WEBHOOKS_BUCKET, subject,
-};
+use crate::{PERMISSIONS_VERSION, PermissionsVersion, Reaction, RunId, ThreadId, TipId, TrailName, UserId, subject};
 
 /// Durable JetStream consumer name of a user's inbox. The CLI with an ant's credentials reads the ant's inbox back
 /// through one of its [`spare_readers`], with no ack, while the ant's daemon takes the inbox from it.
@@ -81,6 +78,20 @@ pub fn escalation_deadlines_key(ant: &UserId) -> String {
 /// Key of what an ant has spent on `day` (`YYYY-MM-DD`, UTC), in [`SESSIONS_BUCKET`].
 pub fn daily_spend_key(ant: &UserId, day: &str) -> String {
     format!("{ant}.day.{day}")
+}
+
+/// The ant and day of a [`daily_spend_key`], or `None` when `key` is none.
+pub fn parse_daily_spend_key(key: &str) -> Option<(UserId, String)> {
+    let (ant, day) = key.split_once(".day.")?;
+    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+    Some((ant.parse().ok()?, day.to_owned()))
+}
+
+/// The ant and thread of a [`thread_spend_key`], or `None` when `key` is none.
+pub fn parse_thread_spend_key(key: &str) -> Option<(UserId, ThreadId)> {
+    let (ant, rest) = key.split_once('.')?;
+    let thread = rest.strip_suffix(".spend")?;
+    Some((ant.parse().ok()?, thread.parse().ok()?))
 }
 
 /// Key in [`SESSIONS_BUCKET`] noting that the humans were warned of JetStream `store` (`file` or `memory`) of `domain`
@@ -341,13 +352,13 @@ impl Feed {
     }
 }
 
-/// Key of the event of `webhook` whose id hashes to `hash` in [`WEBHOOKS_BUCKET`]. Keys start with the webhook, so its
+/// Key of the event of `webhook` whose id hashes to `hash` in [`crate::WEBHOOKS_BUCKET`]. Keys start with the webhook, so its
 /// credentials can be confined to its own.
 pub fn webhook_seen_key(webhook: &UserId, hash: &str) -> String {
     format!("{webhook}.{hash}")
 }
 
-/// Key of the marker of `webhook` in [`WEBHOOKS_BUCKET`], which `ants webhook serve` (or the daemon running the
+/// Key of the marker of `webhook` in [`crate::WEBHOOKS_BUCKET`], which `ants webhook serve` (or the daemon running the
 /// schedule of that name) puts on connecting and every [`SERVING_EVERY`] while it runs, for `ants doctor` and the
 /// release checks. Its value is the [`Serving`] of the process that put it. It says nothing of what its sender is: the
 /// subject of a message does ([`subject::webhook_inbox`]).
@@ -355,15 +366,15 @@ pub fn webhook_marker_key(webhook: &UserId) -> String {
     format!("{webhook}.webhook")
 }
 
-/// Key of the [`Serving`] of `ants channel serve` in [`WEBHOOKS_BUCKET`], put on connecting and every
+/// The name of the webhook whose [`webhook_marker_key`] `key` is, unchecked, or `None` when `key` is no marker's.
+pub fn parse_webhook_marker_key(key: &str) -> Option<&str> {
+    key.strip_suffix(".webhook")
+}
+
+/// Key of the [`Serving`] of `ants channel serve` in [`crate::WEBHOOKS_BUCKET`], put on connecting and every
 /// [`SERVING_EVERY`] while it runs. `channel-manager` is a reserved name, so no webhook writes it.
 pub fn channel_manager_serving_key() -> String {
     format!("{}.serve", UserId::channel_manager())
-}
-
-/// The subject of [`channel_manager_serving_key`] in the stream of [`WEBHOOKS_BUCKET`].
-pub fn channel_manager_serving_subject() -> String {
-    format!("$KV.{WEBHOOKS_BUCKET}.{}", channel_manager_serving_key())
 }
 
 /// The version of ants, the same for every crate of the workspace.
@@ -393,38 +404,33 @@ impl Serving {
     }
 }
 
-/// The subject of the marker of `webhook` ([`webhook_marker_key`]) in the stream of [`WEBHOOKS_BUCKET`].
-pub fn webhook_marker_subject(webhook: &UserId) -> String {
-    format!("$KV.{WEBHOOKS_BUCKET}.{}", webhook_marker_key(webhook))
-}
-
 /// The key token of a conductor's [`TrailRunIndex`] ([`trail_runs_index_key`]), which no [`RunId`] is.
 pub const TRAIL_RUNS_INDEX: &str = "runs";
 /// The key token under which a conductor keeps its [`TrailStepThread`]s ([`trail_step_key`]), which no [`RunId`] is.
 pub const TRAIL_STEPS: &str = "steps";
 
-/// Key of a trail run's [`TrailRun`] in [`TRAIL_RUNS_BUCKET`]. Every key of a run starts with its conductor, so its
+/// Key of a trail run's [`TrailRun`] in [`crate::TRAIL_RUNS_BUCKET`]. Every key of a run starts with its conductor, so its
 /// credentials can be confined to its own runs.
 pub fn trail_run_key(conductor: &UserId, run: &RunId) -> String {
     format!("{conductor}.{run}")
 }
 
-/// Key of a trail run's [`TrailSession`] in [`TRAIL_RUNS_BUCKET`].
+/// Key of a trail run's [`TrailSession`] in [`crate::TRAIL_RUNS_BUCKET`].
 pub fn trail_session_key(conductor: &UserId, run: &RunId) -> String {
     format!("{conductor}.{run}.session")
 }
 
-/// Key of the [`JournalEntry`] of a trail run's answered call `call` in [`TRAIL_RUNS_BUCKET`].
+/// Key of the [`JournalEntry`] of a trail run's answered call `call` in [`crate::TRAIL_RUNS_BUCKET`].
 pub fn trail_call_key(conductor: &UserId, run: &RunId, call: u32) -> String {
     format!("{conductor}.{run}.call.{call}")
 }
 
-/// Key of a conductor's [`TrailRunIndex`] in [`TRAIL_RUNS_BUCKET`].
+/// Key of a conductor's [`TrailRunIndex`] in [`crate::TRAIL_RUNS_BUCKET`].
 pub fn trail_runs_index_key(conductor: &UserId) -> String {
     format!("{conductor}.{TRAIL_RUNS_INDEX}")
 }
 
-/// Key of the [`TrailStepThread`] of the step thread `thread` of one of a conductor's runs in [`TRAIL_RUNS_BUCKET`].
+/// Key of the [`TrailStepThread`] of the step thread `thread` of one of a conductor's runs in [`crate::TRAIL_RUNS_BUCKET`].
 pub fn trail_step_key(conductor: &UserId, thread: &ThreadId) -> String {
     format!("{conductor}.{TRAIL_STEPS}.{thread}")
 }
@@ -434,7 +440,7 @@ pub fn trail_step_key(conductor: &UserId, thread: &ThreadId) -> String {
 pub const TRAIL_ANSWERING: &str = "answering";
 
 /// Key of the [`TrailAnswering`](crate::TrailAnswering) of the runs `ant` started with `run_trail` while answering the
-/// step on `thread`, in [`TRAIL_RUNS_BUCKET`].
+/// step on `thread`, in [`crate::TRAIL_RUNS_BUCKET`].
 pub fn trail_answering_key(ant: &UserId, thread: &ThreadId) -> String {
     format!("{ant}.{TRAIL_ANSWERING}.{thread}")
 }
@@ -444,7 +450,7 @@ pub fn trail_answering_key(ant: &UserId, thread: &ThreadId) -> String {
 pub const TRAIL_STEPS_ON: &str = "on";
 
 /// Key of the [`TrailStepThread`] of the step thread `step` of one of a conductor's runs reporting on `thread`, in
-/// [`TRAIL_RUNS_BUCKET`]: the index by which a reader takes the steps on one thread alone, the keys starting with
+/// [`crate::TRAIL_RUNS_BUCKET`]: the index by which a reader takes the steps on one thread alone, the keys starting with
 /// [`trail_thread_steps_prefix`].
 pub fn trail_thread_step_key(conductor: &UserId, thread: &ThreadId, step: &ThreadId) -> String {
     format!("{}{step}", trail_thread_steps_prefix(conductor, thread))
@@ -455,14 +461,9 @@ pub fn trail_thread_steps_prefix(conductor: &UserId, thread: &ThreadId) -> Strin
     format!("{conductor}.{TRAIL_STEPS_ON}.{thread}.")
 }
 
-/// The subject of every key of a conductor's runs in the stream of [`TRAIL_RUNS_BUCKET`]: those its credentials write.
-pub fn trail_runs_subject(conductor: &UserId) -> String {
-    format!("$KV.{TRAIL_RUNS_BUCKET}.{conductor}.>")
-}
-
-/// JetStream consumer on the stream of [`TRAIL_RUNS_BUCKET`] a conductor's daemon reads one of its keys back through,
+/// JetStream consumer on the stream of [`crate::TRAIL_RUNS_BUCKET`] a conductor's daemon reads one of its keys back through,
 /// one read at a time, when the key's last message is one a stream relayed: its filter is pinned to
-/// [`trail_runs_subject`] of the conductor.
+/// [`subject::trail_runs`] of the conductor.
 pub fn trail_runs_reader(conductor: &UserId) -> String {
     format!("runsread-{conductor}")
 }
@@ -496,7 +497,7 @@ pub fn trail_rating_key(trail: &TrailName, conductor: &UserId, run: &RunId) -> S
     format!("{trail}.{conductor}.{run}")
 }
 
-/// The conductor and run a key of [`trail_run_key`] names, or `None` for any other key of [`TRAIL_RUNS_BUCKET`], as
+/// The conductor and run a key of [`trail_run_key`] names, or `None` for any other key of [`crate::TRAIL_RUNS_BUCKET`], as
 /// a reader listing the headers of every run takes them from the keys `*.*`.
 pub fn parse_trail_run_key(key: &str) -> Option<(UserId, RunId)> {
     let (conductor, run) = key.split_once('.')?;
@@ -519,10 +520,10 @@ mod tests {
             trail_step_key(&dev_a, &ThreadId::generate()),
             trail_thread_step_key(&dev_a, &ThreadId::generate(), &ThreadId::generate()),
         ];
-        let own = trail_runs_subject(&dev_a);
+        let own = subject::trail_runs(&dev_a);
         let own = own.strip_suffix('>').unwrap();
         for key in &keys {
-            assert!(format!("$KV.{TRAIL_RUNS_BUCKET}.{key}").starts_with(own), "{key}");
+            assert!(format!("$KV.{}.{key}", crate::TRAIL_RUNS_BUCKET).starts_with(own), "{key}");
         }
         assert_eq!(keys[2], format!("dev-a.{run}.call.7"));
         assert_eq!(parse_trail_run_key(&keys[0]), Some((dev_a, run)));

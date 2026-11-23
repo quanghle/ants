@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use ants_proto::{
     MAX_RATING_TASK, MAX_RATING_WHY, RatingOutcome, RatingSummary, RunId, TRAIL_RATINGS_BUCKET, TrailName, TrailRating,
-    UserId,
+    UserId, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
@@ -20,8 +20,8 @@ use crate::text::one_line;
 /// The ratings of every trail, those `conductor` gave for one.
 pub(crate) async fn read(js: &jetstream::Context, conductor: Option<&UserId>) -> Result<Vec<TrailRating>> {
     let filter = match conductor {
-        Some(conductor) => format!("$KV.{TRAIL_RATINGS_BUCKET}.*.{conductor}.*"),
-        None => format!("$KV.{TRAIL_RATINGS_BUCKET}.>"),
+        Some(conductor) => subject::kv(TRAIL_RATINGS_BUCKET, format_args!("*.{conductor}.*")),
+        None => subject::kv_all(TRAIL_RATINGS_BUCKET),
     };
     let found = latest_in(js, TRAIL_RATINGS_BUCKET, &filter).await?;
     Ok(found.iter().filter_map(|(key, payload)| parse(key, payload)).collect())
@@ -29,14 +29,15 @@ pub(crate) async fn read(js: &jetstream::Context, conductor: Option<&UserId>) ->
 
 /// The ratings of trail `name`, the latest first.
 pub(super) async fn of_trail(js: &jetstream::Context, name: &TrailName) -> Result<Option<RatingSummary>> {
-    let found = latest_in(js, TRAIL_RATINGS_BUCKET, &format!("$KV.{TRAIL_RATINGS_BUCKET}.{name}.>")).await?;
+    let found =
+        latest_in(js, TRAIL_RATINGS_BUCKET, &subject::kv(TRAIL_RATINGS_BUCKET, format_args!("{name}.>"))).await?;
     let ratings = found.iter().filter_map(|(key, payload)| parse(key, payload)).collect();
     Ok(summaries(ratings).remove(name))
 }
 
 /// The ratings of run `run`, `conductor`'s.
 pub(super) async fn of_run(js: &jetstream::Context, conductor: &UserId, run: &RunId) -> Result<Vec<TrailRating>> {
-    let filter = format!("$KV.{TRAIL_RATINGS_BUCKET}.*.{conductor}.{run}");
+    let filter = subject::kv(TRAIL_RATINGS_BUCKET, format_args!("*.{conductor}.{run}"));
     let found = latest_in(js, TRAIL_RATINGS_BUCKET, &filter).await?;
     let mut ratings: Vec<TrailRating> = found.iter().filter_map(|(key, payload)| parse(key, payload)).collect();
     ratings.sort_by(|a, b| a.trail.cmp(&b.trail));
@@ -141,10 +142,10 @@ pub(super) fn of_run_section(ratings: &[TrailRating], now: DateTime<Utc>) -> Str
 /// Purge the ratings of trail `name`; returns how many went.
 pub(super) async fn purge(js: &jetstream::Context, name: &TrailName) -> Result<u64> {
     let stream = js
-        .get_stream(format!("KV_{TRAIL_RATINGS_BUCKET}"))
+        .get_stream(subject::kv_stream(TRAIL_RATINGS_BUCKET))
         .await
         .context("opening ants_trail_ratings (`ants init` creates it)")?;
-    super::saved::purge_keys(&stream, &format!("$KV.{TRAIL_RATINGS_BUCKET}.{name}.>")).await
+    super::saved::purge_keys(&stream, &subject::kv(TRAIL_RATINGS_BUCKET, format_args!("{name}.>"))).await
 }
 
 /// What `ants trail rm` adds to its line for the `purged` ratings it removed with the trail, before what it says of the

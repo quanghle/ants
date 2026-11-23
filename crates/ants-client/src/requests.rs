@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use ants_proto::{
     Envelope, HUMANS_BUCKET, JsDomain, OWNERS_BUCKET, READ_BUCKET, ReadMarker, STREAM, StatusEvent, ThreadId, UserId,
-    assistant_grant_key, owner_key, owner_record_id,
+    assistant_grant_key, owner_key, owner_record_id, subject,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -53,7 +53,7 @@ pub(crate) fn api(domain: Option<&JsDomain>) -> String {
 /// The subject a put under `key` of `bucket` goes to: through the JetStream API of the hub's domain, if it has one.
 fn put_subject(domain: Option<&JsDomain>, bucket: &str, key: &str) -> String {
     let api = domain.map_or_default(|domain| api(Some(domain)));
-    format!("{api}$KV.{bucket}.{key}")
+    format!("{api}{}", subject::kv(bucket, key))
 }
 
 /// A batched direct get: up to `batch` messages on `next_by_subj`, the first at or after `seq`, or stored at or after
@@ -242,7 +242,10 @@ pub(crate) fn owner_recorded(answer: &Message) -> Result<(), Error> {
 
 /// The direct get of the last message under `key` of `bucket`.
 pub(crate) fn kv_get(domain: Option<&JsDomain>, bucket: &str, key: &str) -> Message {
-    Message::new(format!("{}DIRECT.GET.KV_{bucket}.$KV.{bucket}.{key}", api(domain)), Vec::new())
+    Message::new(
+        format!("{}DIRECT.GET.{}.{}", api(domain), subject::kv_stream(bucket), subject::kv(bucket, key)),
+        Vec::new(),
+    )
 }
 
 /// A bucket's entry: its value, none for a key with none or deleted, and its revision, 0 for a key never written.
@@ -264,7 +267,8 @@ pub(crate) fn kv_entry(what: &str, answer: Message) -> Result<KvEntry, Error> {
     }
     let revision = answer.header_value(SEQUENCE).and_then(|seq| seq.parse().ok());
     let revision = revision.ok_or_else(|| Error::malformed(what, "no sequence"))?;
-    let deleted = answer.header_value(KV_OPERATION).is_some_and(|op| DELETED.contains(&op));
+    // The server adds no such header: it is the writer's, read first as the daemons and async-nats read it.
+    let deleted = answer.stored_header_value(KV_OPERATION).is_some_and(|op| DELETED.contains(&op));
     Ok(KvEntry { value: (!deleted).then_some(answer.payload), revision })
 }
 
@@ -480,6 +484,11 @@ mod tests {
         assert_eq!(entry, KvEntry { value: Some(br#"{"below":7}"#.to_vec()), revision: 41 });
         let deleted = kv_entry("reading", got("42", "").header("KV-Operation", "DEL")).unwrap();
         assert_eq!(deleted, KvEntry { value: None, revision: 42 });
+        let twice = got("42", "").header("KV-Operation", "PUT").header("KV-Operation", "DEL");
+        assert!(
+            kv_entry("reading", twice).unwrap().value.is_some(),
+            "its writer's first value, as the daemons read it"
+        );
         let relayed = got("43", r#"{"below":9}"#).header("Nats-Sequence", "5");
         assert!(matches!(kind(kv_entry("reading", relayed)), ErrorKind::Relayed));
 

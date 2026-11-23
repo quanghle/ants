@@ -8,7 +8,7 @@ use crate::{AntRequest, MACHINES_BUCKET, ReactionsRequest, SaveTrailRequest, cha
 use crate::{
     CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, ENROLL_INBOX, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET,
     INTAKE_STREAM, LINKS_BUCKET, REACTIONS_BUCKET, STREAM, THREADS_BUCKET, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, UserId,
-    chan_consumer, channel_manager_serving_subject, done_reader, inbox_consumer, inbox_prefix, subject,
+    chan_consumer, done_reader, inbox_consumer, inbox_prefix, subject,
 };
 
 impl Permissions {
@@ -24,8 +24,8 @@ impl Permissions {
             (kv_stream(COLONY_BUCKET), kv_stream(CHANNELS_BUCKET), kv_stream(HUMANS_BUCKET));
         let mut publish = vec![
             subject::chan_from(&user),
-            format!("$KV.{CHANNELS_BUCKET}.>"),
-            channel_manager_serving_subject(),
+            subject::kv_all(CHANNELS_BUCKET),
+            subject::channel_manager_serving(),
             // Finding JetStream on connecting, as an ant does, without the stream's info.
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{}", inbox_consumer(&user)),
         ];
@@ -95,7 +95,7 @@ impl Permissions {
             format!("$JS.API.STREAM.INFO.{STREAM}"),
             format!("$JS.API.DIRECT.GET.{STREAM}"),
             format!("$JS.API.DIRECT.GET.{reactions}.>"),
-            format!("$KV.{REACTIONS_BUCKET}.>"),
+            subject::kv_all(REACTIONS_BUCKET),
             subject::ALL_REACTIONS_REPLIES.to_owned(),
         ];
         publish.extend(ordered_consumer_subjects(&reactions));
@@ -121,7 +121,7 @@ impl Permissions {
             publish: vec![
                 format!("$JS.API.DIRECT.GET.{}", kv_stream(TRAILS_BUCKET)),
                 format!("$JS.API.DIRECT.GET.{}", kv_stream(TRAIL_RUNS_BUCKET)),
-                format!("$KV.{TRAILS_BUCKET}.*"),
+                subject::kv(TRAILS_BUCKET, "*"),
                 subject::ALL_SAVE_TRAIL_REPLIES.to_owned(),
             ],
             subscribe: vec![subject::ALL_SAVE_TRAIL_REQUESTS.to_owned(), format!("{ENROLL_INBOX}.>")],
@@ -138,7 +138,7 @@ impl Permissions {
         let devices = kv_stream(DEVICES_BUCKET);
         let revoked = subject::revoked_devices();
         let identities = kv_stream(IDENTITIES_BUCKET);
-        let records = format!("$KV.{IDENTITIES_BUCKET}.*");
+        let records = subject::kv(IDENTITIES_BUCKET, "*");
         let growth = subject::all_revoked_growth();
         Self {
             publish: vec![
@@ -159,11 +159,10 @@ impl Permissions {
     /// What retirement cleanup allows on the hub: checking one ant's colony entry and deleting only its channel
     /// and done consumers, never its inbox consumer.
     pub fn for_retired_consumers(ant: &UserId) -> Self {
-        let colony = kv_stream(COLONY_BUCKET);
         let threads = kv_stream(THREADS_BUCKET);
         Self {
             publish: vec![
-                format!("$JS.API.DIRECT.GET.{colony}.$KV.{COLONY_BUCKET}.{ant}"),
+                subject::kv_get(COLONY_BUCKET, ant),
                 format!("$JS.API.CONSUMER.DELETE.{STREAM}.{}", chan_consumer(ant)),
                 format!("$JS.API.CONSUMER.DELETE.{threads}.{}", done_reader(ant)),
             ],

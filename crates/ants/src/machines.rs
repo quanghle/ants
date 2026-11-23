@@ -83,8 +83,7 @@ async fn timed_after(
     filter: &str,
     from: u64,
 ) -> Result<(Vec<(String, Vec<u8>, DateTime<Utc>)>, u64)> {
-    let mut gets = Gets::open(js, &format!("KV_{bucket}"), filter, Position::from_seq(from)).await?;
-    let prefix = format!("$KV.{bucket}.");
+    let mut gets = Gets::open(js, &subject::kv_stream(bucket), filter, Position::from_seq(from)).await?;
     let mut last = Entries::new();
     loop {
         let stored = match gets.next().await {
@@ -106,7 +105,7 @@ async fn timed_after(
             Err(GetsError::Malformed(why)) => bail!(why),
         };
         let deleted = stored.headers.iter().any(|(name, _)| name == "KV-Operation");
-        if let Some(key) = stored.subject.strip_prefix(prefix.as_str()) {
+        if let Some(key) = subject::kv_key(bucket, &stored.subject) {
             let value = (!deleted).then_some((stored.payload, stored.stored_at));
             last.insert(key.to_owned(), (stored.seq, value));
         }

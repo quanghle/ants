@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use ants_proto::{
     ColonyEntry, PendingCall, RunId, RunLimit, RunState, TRAIL_RUNS_BUCKET, TrailFunction, TrailLimits, TrailRun,
+    subject,
 };
 use ants_trail::{Limits, Request, Response, Worker};
 use chrono::{DateTime, Utc};
@@ -70,7 +71,7 @@ pub(super) async fn check_worker(program: &Path, deadline: Duration) -> Check {
 pub(super) async fn check_runs(connected: Option<&Connected>, now: DateTime<Utc>) -> Vec<Check> {
     let check = "trail runs";
     let Some(connected) = connected else { return vec![Check::skip(check, "the hub is not reached")] };
-    if !connected.rights.may_publish(&format!("$JS.API.DIRECT.GET.KV_{TRAIL_RUNS_BUCKET}")) {
+    if !connected.rights.may_publish(&format!("$JS.API.DIRECT.GET.{}", subject::kv_stream(TRAIL_RUNS_BUCKET))) {
         return vec![Check::skip(check, "checked with a human's credentials, which read every conductor's runs")];
     }
     let colony = match &connected.colony {

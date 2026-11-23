@@ -24,12 +24,12 @@ pub fn asked(request: &ApprovalRequest) -> Vec<Line<'static>> {
     };
     let object = input.as_ref().and_then(Value::as_object);
     let mut lines = match (tool.kind.as_str(), object) {
-        ("execute", Some(object)) if let Some(command) = command(object) => {
+        (ants_proto::tool_kind::EXECUTE, Some(object)) if let Some(command) = command(object) => {
             let mut lines = text(&command, "");
             lines.extend(object.iter().filter(|(k, _)| k.as_str() != "command").flat_map(|(k, v)| field(k, v)));
             lines
         }
-        ("edit" | "write", Some(object)) => {
+        (ants_proto::tool_kind::EDIT | "write", Some(object)) => {
             let path = PATHS.iter().find_map(|k| object.get(*k)?.as_str().map(str::to_owned));
             let path = path.or_else(|| tool.locations.first().cloned()).unwrap_or_else(|| tool.title.clone());
             let mut lines = vec![Line::styled(clean(&path), Style::new().bold())];

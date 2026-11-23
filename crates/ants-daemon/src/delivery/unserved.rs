@@ -42,7 +42,7 @@ const MAX_PEERS: usize = 5;
 
 /// The subject a human's credentials list to tell of its waiting messages, as they list it: the put of its markers.
 pub fn marker_subject(sender: &UserId) -> String {
-    format!("$KV.{ATTEMPTS_BUCKET}.{sender}.unserved.*")
+    subject::kv(ATTEMPTS_BUCKET, format_args!("{sender}.unserved.*"))
 }
 
 /// A message the watched user sent, still to be accounted for.

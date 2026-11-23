@@ -75,7 +75,7 @@ pub struct Call {
 impl Call {
     /// Whether it ended: completed or failed.
     pub fn ended(&self) -> bool {
-        matches!(self.status.as_deref(), Some("completed" | "failed"))
+        ants_proto::call_ended(self.status.as_deref())
     }
 }
 
@@ -113,7 +113,7 @@ impl Calls {
     pub fn status(&mut self, event: &StatusEvent) {
         let StatusUpdate::Tool { id, title, tool_kind, status, paths } = &event.update else { return };
         self.touched = Some(event.at);
-        let ended = matches!(status.as_deref(), Some("completed" | "failed"));
+        let ended = ants_proto::call_ended(status.as_deref());
         let same = |c: &Call| c.ant == event.ant && c.id == *id;
         let at = self.calls.iter().rposition(|c| same(c) && !c.ended());
         let at = at.or_else(|| self.calls.iter().rposition(|c| same(c) && ended && c.live));

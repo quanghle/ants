@@ -6,8 +6,7 @@ use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, HUMANS_BUCKET, IDENTITIES_BUCKET,
     INTAKE_STREAM, LINKS_BUCKET, MACHINES_BUCKET, NOTIFY_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET,
     PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET, SESSIONS_BUCKET, STREAM, THREADS_BUCKET, TRAIL_RATINGS_BUCKET,
-    TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, UserId, WEBHOOKS_BUCKET, channel_manager_serving_subject,
-    notify_consumer, subject,
+    TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, UserId, WEBHOOKS_BUCKET, notify_consumer, subject,
 };
 #[cfg(doc)]
 use {
@@ -38,7 +37,7 @@ pub(super) fn identity_rights() -> [String; 3] {
     [
         format!("$JS.API.STREAM.CREATE.{identities}"),
         format!("$JS.API.DIRECT.GET.{identities}"),
-        format!("$KV.{IDENTITIES_BUCKET}.*"),
+        subject::kv(IDENTITIES_BUCKET, "*"),
     ]
 }
 
@@ -56,13 +55,13 @@ pub(super) fn trail_rights() -> [String; 13] {
     [
         format!("$JS.API.STREAM.CREATE.{trails}"),
         format!("$JS.API.STREAM.INFO.{trails}"),
-        format!("$KV.{TRAILS_BUCKET}.*"),
+        subject::kv(TRAILS_BUCKET, "*"),
         format!("$JS.API.STREAM.CREATE.{runs}"),
         format!("$JS.API.STREAM.INFO.{runs}"),
         format!("$JS.API.DIRECT.GET.{runs}"),
         format!("$JS.API.STREAM.CREATE.{tips}"),
         format!("$JS.API.STREAM.INFO.{tips}"),
-        format!("$KV.{TRAIL_TIPS_BUCKET}.>"),
+        subject::kv_all(TRAIL_TIPS_BUCKET),
         format!("$JS.API.STREAM.PURGE.{tips}"),
         format!("$JS.API.STREAM.CREATE.{ratings}"),
         format!("$JS.API.STREAM.INFO.{ratings}"),
@@ -144,7 +143,7 @@ pub(super) fn notify_prefs_rights(human: &UserId) -> [String; 6] {
 /// once it found the ant reads the message.
 pub(super) fn human_reaction_rights(human: &UserId) -> Vec<String> {
     let reactions = kv_stream(REACTIONS_BUCKET);
-    let own = format!("$KV.{REACTIONS_BUCKET}.{human}.>");
+    let own = subject::kv(REACTIONS_BUCKET, format_args!("{human}.>"));
     let mut rights = vec![
         own,
         format!("$JS.API.STREAM.INFO.{reactions}"),
@@ -165,10 +164,10 @@ pub(super) fn human_reaction_rights(human: &UserId) -> Vec<String> {
 /// bucket has a user id there.
 pub(super) fn thread_rights(human: &UserId) -> [String; 12] {
     let threads = kv_stream(THREADS_BUCKET);
-    let titles = format!("$KV.{THREADS_BUCKET}.title.*");
-    let summaries = format!("$KV.{THREADS_BUCKET}.summary.*");
-    let done = format!("$KV.{THREADS_BUCKET}.done");
-    let own = format!("$KV.{THREADS_BUCKET}.*.{human}");
+    let titles = subject::kv(THREADS_BUCKET, "title.*");
+    let summaries = subject::kv(THREADS_BUCKET, "summary.*");
+    let done = subject::kv(THREADS_BUCKET, "done");
+    let own = subject::kv(THREADS_BUCKET, format_args!("*.{human}"));
     let assisted = format!("{own}.*");
     [
         format!("$JS.API.STREAM.INFO.{threads}"),
@@ -233,8 +232,8 @@ pub(super) fn human_store_rights(human: &UserId) -> [String; 48] {
         format!("$JS.API.STREAM.INFO.{attempts}"),
         format!("$JS.API.STREAM.INFO.{owners}"),
         // Reading what each ant spent, for `ants spend`: its thread and daily spend keys, not its sessions.
-        format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.*.spend"),
-        format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.day.*"),
+        subject::kv_get(SESSIONS_BUCKET, "*.*.spend"),
+        subject::kv_get(SESSIONS_BUCKET, "*.day.*"),
         format!("$JS.API.STREAM.CREATE.{sessions}"),
         format!("$JS.API.STREAM.CREATE.{attempts}"),
         format!("$JS.API.STREAM.CREATE.{channels}"),
@@ -245,16 +244,16 @@ pub(super) fn human_store_rights(human: &UserId) -> [String; 48] {
         format!("$JS.API.STREAM.INFO.{webhooks}"),
         format!("$JS.API.STREAM.CREATE.{webhooks}"),
         // The version the channel manager runs, for `ants doctor`.
-        format!("$JS.API.DIRECT.GET.{webhooks}.{}", channel_manager_serving_subject()),
+        format!("$JS.API.DIRECT.GET.{webhooks}.{}", subject::channel_manager_serving()),
         // And the version each webhook runs, its marker, for the same.
-        format!("$JS.API.DIRECT.GET.{webhooks}.$KV.{WEBHOOKS_BUCKET}.*.webhook"),
+        subject::kv_get(WEBHOOKS_BUCKET, "*.webhook"),
         // Put and delete of every channel's and every human's entry, and of the keys under its own name, such
         // as its assistant grant, which no one else writes.
-        format!("$KV.{CHANNELS_BUCKET}.>"),
-        format!("$KV.{HUMANS_BUCKET}.*"),
-        format!("$KV.{HUMANS_BUCKET}.{human}.>"),
+        subject::kv_all(CHANNELS_BUCKET),
+        subject::kv(HUMANS_BUCKET, "*"),
+        subject::kv(HUMANS_BUCKET, format_args!("{human}.>")),
         // Recording the owner of each thread it messages an ant on, and the same in the leaf's outbox.
-        format!("$KV.{OWNERS_BUCKET}.*.*"),
+        subject::kv(OWNERS_BUCKET, "*.*"),
         "ants.out.owners.*.*".to_owned(),
         // Sourcing leaf outboxes into the stream (`ants leaf outbox`).
         format!("$JS.API.STREAM.UPDATE.{STREAM}"),
@@ -273,11 +272,11 @@ pub(super) fn human_store_rights(human: &UserId) -> [String; 48] {
         // Answering an ant's request for the reactions to a message it reads.
         subject::ALL_REACTIONS_REPLIES.to_owned(),
         // Withdrawing a message from an ant's queue: creating its mark, and reading the mark that won.
-        format!("$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
-        format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
+        subject::kv(ATTEMPTS_BUCKET, "*.msg.*"),
+        subject::kv_get(ATTEMPTS_BUCKET, "*.msg.*"),
         // Its own markers of the messages it was told keep waiting for an ant no daemon serves.
-        format!("$KV.{ATTEMPTS_BUCKET}.{human}.unserved.*"),
-        format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.{human}.unserved.*"),
+        subject::kv(ATTEMPTS_BUCKET, format_args!("{human}.unserved.*")),
+        subject::kv_get(ATTEMPTS_BUCKET, format_args!("{human}.unserved.*")),
         subject::DEAD_ALL.to_owned(),
         // Setting up the store and forward of leaf nodes: the hub's intake, and each leaf's outbox through the
         // leaf's own domain (the plain form is what a leaf maps its own domain to).

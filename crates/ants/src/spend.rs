@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use crate::connection::Nats;
 use ants_daemon::limits::caps::{self, Caps, Spent};
 use ants_daemon::records::direct_kv::DirectKv;
-use ants_proto::{SESSIONS_BUCKET, ThreadId, UserId};
+use ants_proto::{SESSIONS_BUCKET, ThreadId, UserId, parse_daily_spend_key, parse_thread_spend_key, subject};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use chrono::{Days, NaiveDate, Utc};
@@ -79,20 +79,6 @@ pub fn window(today: NaiveDate, days: u32) -> Vec<String> {
         .collect()
 }
 
-/// The ant and day of a daily spend key, `<ant>.day.<YYYY-MM-DD>`.
-fn parse_day_key(key: &str) -> Option<(UserId, String)> {
-    let (ant, day) = key.split_once(".day.")?;
-    NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
-    Some((ant.parse().ok()?, day.to_owned()))
-}
-
-/// The ant and thread of a thread spend key, `<ant>.<thread>.spend`.
-fn parse_thread_key(key: &str) -> Option<(UserId, ThreadId)> {
-    let (ant, rest) = key.split_once('.')?;
-    let thread = rest.strip_suffix(".spend")?;
-    Some((ant.parse().ok()?, thread.parse().ok()?))
-}
-
 /// `ant`'s report over `days` (newest first) from what it spent on the days found, the others counting as nothing.
 fn report(
     ant: UserId,
@@ -113,21 +99,22 @@ fn report(
 /// The keys of [`SESSIONS_BUCKET`] matching the key pattern `filter`, by stream info, which only human credentials
 /// allow; none when the bucket does not exist.
 async fn keys(js: &jetstream::Context, filter: &str) -> Result<Vec<String>> {
-    let prefix = format!("$KV.{SESSIONS_BUCKET}.");
-    let stream = match js.get_stream(format!("KV_{SESSIONS_BUCKET}")).await {
+    let stream = match js.get_stream(subject::kv_stream(SESSIONS_BUCKET)).await {
         Ok(stream) => stream,
         Err(e) if crate::node::outbox::not_found(&e) => return Ok(Vec::new()),
         Err(e) => return Err(e).context(format!("looking up {SESSIONS_BUCKET}, which needs human credentials")),
     };
     let subjects: Vec<(String, usize)> = stream
-        .info_with_subjects(format!("{prefix}{filter}"))
+        .info_with_subjects(subject::kv(SESSIONS_BUCKET, filter))
         .await
         .with_context(|| format!("listing {filter} in {SESSIONS_BUCKET}"))?
         .try_collect()
         .await
         .with_context(|| format!("listing {filter} in {SESSIONS_BUCKET}"))?;
-    let mut keys: Vec<String> =
-        subjects.into_iter().filter_map(|(subject, _)| subject.strip_prefix(&prefix).map(str::to_owned)).collect();
+    let mut keys: Vec<String> = subjects
+        .into_iter()
+        .filter_map(|(subject, _)| subject::kv_key(SESSIONS_BUCKET, &subject).map(str::to_owned))
+        .collect();
     keys.sort();
     Ok(keys)
 }
@@ -146,7 +133,9 @@ pub async fn ants(
         found.insert(ant.clone(), BTreeMap::new());
     }
     for key in keys(js, &format!("{}.day.*", ant.map_or("*", UserId::as_str))).await? {
-        let Some((ant, day)) = parse_day_key(&key).filter(|(_, day)| wanted.contains(day.as_str())) else { continue };
+        let Some((ant, day)) = parse_daily_spend_key(&key).filter(|(_, day)| wanted.contains(day.as_str())) else {
+            continue;
+        };
         if let Some(spent) = caps::day_spent(kv, &ant, &day).await? {
             found.entry(ant).or_default().insert(day, spent);
         }
@@ -167,7 +156,7 @@ pub async fn ants(
 async fn threads_of(js: &jetstream::Context, kv: &DirectKv, ant: &UserId) -> Result<Vec<ThreadSpent>> {
     let mut threads = Vec::new();
     for key in keys(js, &format!("{ant}.*.spend")).await? {
-        let Some((ant, thread)) = parse_thread_key(&key) else { continue };
+        let Some((ant, thread)) = parse_thread_spend_key(&key) else { continue };
         if let Some(spent) = caps::thread_spent(kv, &ant, &thread).await?
             && (spent.tokens > 0 || spent.cost > 0.0)
         {
@@ -188,7 +177,7 @@ pub async fn thread(
 ) -> Result<Vec<ThreadReport>> {
     let mut reports = Vec::new();
     for key in keys(js, &format!("{}.{thread}.spend", ant.map_or("*", UserId::as_str))).await? {
-        let Some((ant, thread)) = parse_thread_key(&key) else { continue };
+        let Some((ant, thread)) = parse_thread_spend_key(&key) else { continue };
         if let Some((spent, total)) = caps::thread_spent_and_total(kv, &ant, &thread).await? {
             let caps = caps.get(&ant).copied();
             reports.push(ThreadReport { ant, thread, spent, total, caps });
@@ -217,7 +206,7 @@ pub async fn on_threads(
     kv: &DirectKv,
     threads: &HashSet<ThreadId>,
 ) -> Result<HashMap<ThreadId, Vec<(UserId, Spent)>>> {
-    let found = keys(js, "*.*.spend").await?.into_iter().filter_map(|key| parse_thread_key(&key));
+    let found = keys(js, "*.*.spend").await?.into_iter().filter_map(|key| parse_thread_spend_key(&key));
     let reads = futures::stream::iter(found.filter(|(_, thread)| threads.contains(thread)))
         .map(async |(ant, thread)| Ok::<_, anyhow::Error>((caps::thread_spent(kv, &ant, &thread).await?, ant, thread)))
         .buffer_unordered(CONCURRENT);
@@ -406,15 +395,15 @@ mod tests {
 
     #[test]
     fn keys_parse_into_ant_and_day_or_thread() {
-        assert_eq!(parse_day_key("dev-a.day.2026-11-14"), Some((p("dev-a"), "2026-11-14".to_owned())));
-        assert_eq!(parse_day_key("dev-a.day.spend"), None, "the spend of a thread named day");
-        assert_eq!(parse_day_key("dev-a.t1.spend"), None);
+        assert_eq!(parse_daily_spend_key("dev-a.day.2026-11-14"), Some((p("dev-a"), "2026-11-14".to_owned())));
+        assert_eq!(parse_daily_spend_key("dev-a.day.spend"), None, "the spend of a thread named day");
+        assert_eq!(parse_daily_spend_key("dev-a.t1.spend"), None);
         let t1: ThreadId = "t1".parse().unwrap();
-        assert_eq!(parse_thread_key("dev-a.t1.spend"), Some((p("dev-a"), t1)));
-        assert_eq!(parse_thread_key("dev-a.day.spend").map(|(_, t)| t.to_string()), Some("day".to_owned()));
-        assert_eq!(parse_thread_key("dev-a.t1"), None, "a session");
-        assert_eq!(parse_thread_key("dev-a.t1.seen"), None);
-        assert_eq!(parse_thread_key("dev-a.mention.7.alice"), None);
+        assert_eq!(parse_thread_spend_key("dev-a.t1.spend"), Some((p("dev-a"), t1)));
+        assert_eq!(parse_thread_spend_key("dev-a.day.spend").map(|(_, t)| t.to_string()), Some("day".to_owned()));
+        assert_eq!(parse_thread_spend_key("dev-a.t1"), None, "a session");
+        assert_eq!(parse_thread_spend_key("dev-a.t1.seen"), None);
+        assert_eq!(parse_thread_spend_key("dev-a.mention.7.alice"), None);
     }
 
     #[test]

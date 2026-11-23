@@ -166,7 +166,7 @@ pub struct CallCount {
 pub struct TimelineRejection {
     /// The approval request's id.
     pub request: Uuid,
-    /// ACP tool kind of the call asked for.
+    /// ACP tool kind of the call asked for ([`tool_kind`](crate::tool_kind)).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
     /// The call's title as the request showed it: redacted, at most [`MAX_TIMELINE_TITLE`] characters.
@@ -196,13 +196,13 @@ impl TimelineRejection {
 pub struct TimelineCall {
     /// The ACP tool call id, unique within the prompt.
     pub id: String,
-    /// ACP tool kind: read, edit, execute and so on.
+    /// ACP tool kind ([`tool_kind`](crate::tool_kind)): read, edit, execute and so on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_kind: Option<String>,
     /// At most [`MAX_TIMELINE_TITLE`] characters, redacted.
     #[serde(default)]
     pub title: String,
-    /// ACP tool call status: pending, in_progress, completed or failed.
+    /// ACP tool call status ([`call_status`](crate::call_status)): pending, in_progress, completed or failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     /// When the daemon first heard of the call.
@@ -219,7 +219,7 @@ pub struct TimelineCall {
 impl TimelineCall {
     /// Whether the call ended: completed or failed.
     pub fn ended(&self) -> bool {
-        matches!(self.status.as_deref(), Some("completed" | "failed"))
+        crate::call_ended(self.status.as_deref())
     }
 
     /// The call with its title and paths cut to what a record keeps.

@@ -29,7 +29,7 @@ use agent_client_protocol::v1::schema::{
     PermissionOption, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, ToolCallUpdateFields,
 };
-use ants_proto::{ThreadId, ToolCall, Verdict};
+use ants_proto::{ThreadId, ToolCall, Verdict, tool_kind};
 use anyhow::{Result, bail};
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -37,8 +37,6 @@ use serde_json::Value;
 use crate::secrets::redact::Redactor;
 use crate::sync::MutexExt as _;
 
-const KINDS: [&str; 10] =
-    ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"];
 /// Longest raw tool input shown to the human.
 const MAX_INPUT: usize = 2000;
 
@@ -62,11 +60,39 @@ impl FromStr for Rule {
             Some(_) => bail!("allow rule {s:?} has an empty pattern"),
             None => (s, None),
         };
-        if !KINDS.contains(&kind) {
-            bail!("allow rule {s:?}: unknown tool kind {kind:?}, expected * or one of {}", KINDS.join(", "));
+        if !tool_kind::ALL.contains(&kind) {
+            bail!("allow rule {s:?}: unknown tool kind {kind:?}, expected * or one of {}", tool_kind::ALL.join(", "));
         }
         Ok(Self { kind: Some(kind.to_owned()), pattern })
     }
+}
+
+/// What a rule's pattern is matched against, by the kind of the tool; see the [module docs](self).
+enum Subject {
+    /// The whole command line.
+    Command,
+    /// Every file the call touches.
+    Paths,
+    /// The URL, else the title.
+    Url,
+    /// The title the harness shows, or the MCP tool it names.
+    Title,
+}
+
+impl Subject {
+    fn of(kind: &str) -> Self {
+        match kind {
+            tool_kind::EXECUTE => Self::Command,
+            tool_kind::READ | tool_kind::EDIT | tool_kind::DELETE | tool_kind::MOVE => Self::Paths,
+            tool_kind::FETCH => Self::Url,
+            _ => Self::Title,
+        }
+    }
+}
+
+/// The server and the tool of Claude Code's title of an MCP tool call, `mcp__<server>__<tool>`, either empty or not.
+fn mcp_title(title: &str) -> Option<(&str, &str)> {
+    title.strip_prefix("mcp__")?.split_once("__")
 }
 
 impl Rule {
@@ -75,17 +101,17 @@ impl Rule {
             return false;
         }
         let Some(pattern) = &self.pattern else { return true };
-        match tool.kind.as_str() {
-            "execute" => command(tool.fields).is_some_and(|c| !has_shell_control(&c) && glob(pattern, &c)),
-            "read" | "edit" | "delete" | "move" => {
+        match Subject::of(&tool.kind) {
+            Subject::Command => command(tool.fields).is_some_and(|c| !has_shell_control(&c) && glob(pattern, &c)),
+            Subject::Paths => {
                 let paths = paths(tool.fields, workdir);
                 !paths.is_empty() && paths.iter().all(|p| path_matches(pattern, p, workdir))
             }
-            "fetch" => {
+            Subject::Url => {
                 let url = tool.fields.raw_input.as_ref().and_then(|i| i.get("url")).and_then(Value::as_str);
                 url.or(tool.fields.title.as_deref()).is_some_and(|t| glob(pattern, t))
             }
-            _ => {
+            Subject::Title => {
                 tool.fields.title.as_deref().is_some_and(|t| glob(pattern, t))
                     || mcp_tool(tool.fields).is_some_and(|t| glob(pattern, t))
             }
@@ -96,7 +122,7 @@ impl Rule {
 /// The tool an MCP tool call runs, from Claude Code's title `mcp__<server>__<tool>` or Codex's call.
 fn mcp_tool(fields: &ToolCallUpdateFields) -> Option<&str> {
     let title = fields.title.as_deref()?;
-    if let Some((server, tool)) = title.strip_prefix("mcp__").and_then(|t| t.split_once("__")) {
+    if let Some((server, tool)) = mcp_title(title) {
         return (!server.is_empty() && !tool.is_empty()).then_some(tool);
     }
     codex_mcp_tool(fields)
@@ -139,21 +165,21 @@ impl Allowlist {
 /// leading or trailing blanks, which a rule loses.
 pub fn rule_for(tool: &ToolCall) -> Option<String> {
     let input = tool.input.as_deref().and_then(|i| serde_json::from_str::<Value>(i).ok());
-    let pattern = match tool.kind.as_str() {
-        "execute" => input.as_ref().and_then(command_in).filter(|c| !has_shell_control(c))?,
-        "read" | "edit" | "delete" | "move" => match tool.locations.as_slice() {
+    let pattern = match Subject::of(&tool.kind) {
+        Subject::Command => input.as_ref().and_then(command_in).filter(|c| !has_shell_control(c))?,
+        Subject::Paths => match tool.locations.as_slice() {
             [path] if Path::new(path).is_absolute() && normalize(Path::new(path)) == Path::new(path) => path.clone(),
             _ => return None,
         },
-        "fetch" => input
+        Subject::Url => input
             .as_ref()
             .and_then(|i| i.get("url"))
             .and_then(Value::as_str)
             .map_or_else(|| tool.title.clone(), str::to_owned),
-        _ => tool.title.clone(),
+        Subject::Title => tool.title.clone(),
     };
     let fits = !pattern.is_empty() && pattern.trim() == pattern && !pattern.contains('*');
-    (fits && KINDS.contains(&tool.kind.as_str())).then(|| format!("{}:{pattern}", tool.kind))
+    (fits && tool_kind::ALL.contains(&tool.kind.as_str())).then(|| format!("{}:{pattern}", tool.kind))
 }
 
 /// Whether the allowlist rule `rule` covers `tool`, a call as an approver is shown it ([`Approver::decide`]): how a
@@ -169,9 +195,11 @@ pub fn covers(rule: &str, tool: &ToolCall) -> bool {
     }
     let Some(pattern) = &rule.pattern else { return true };
     let input = tool.input.as_deref().and_then(|i| serde_json::from_str::<Value>(i).ok());
-    match tool.kind.as_str() {
-        "execute" => input.as_ref().and_then(command_in).is_some_and(|c| !has_shell_control(&c) && glob(pattern, &c)),
-        "read" | "edit" | "delete" | "move" => {
+    match Subject::of(&tool.kind) {
+        Subject::Command => {
+            input.as_ref().and_then(command_in).is_some_and(|c| !has_shell_control(&c) && glob(pattern, &c))
+        }
+        Subject::Paths => {
             pattern.starts_with('/')
                 && !tool.locations.is_empty()
                 && tool.locations.iter().all(|l| {
@@ -179,12 +207,12 @@ pub fn covers(rule: &str, tool: &ToolCall) -> bool {
                     path.is_absolute() && normalize(path) == path && glob(pattern, l)
                 })
         }
-        "fetch" => {
+        Subject::Url => {
             let url = input.as_ref().and_then(|i| i.get("url")).and_then(Value::as_str);
             glob(pattern, url.unwrap_or(&tool.title))
         }
-        _ => {
-            let mcp = tool.title.strip_prefix("mcp__").and_then(|t| t.split_once("__")).map(|(_, tool)| tool);
+        Subject::Title => {
+            let mcp = mcp_title(&tool.title).map(|(_, tool)| tool);
             glob(pattern, &tool.title) || mcp.is_some_and(|t| !t.is_empty() && glob(pattern, t))
         }
     }
@@ -201,9 +229,17 @@ pub trait Approver: Send + Sync {
 /// The verdicts a harness offers, with its names of those it names.
 pub type Offer = (Vec<Verdict>, BTreeMap<Verdict, String>);
 
-/// Threads being answered under narrowed tool rules ([`PermissionPolicy::narrow`]), whether the rules are a review's,
-/// and how many answers narrow each.
-type Narrowed = Arc<Mutex<HashMap<ThreadId, (Allowlist, bool, usize)>>>;
+/// Threads being answered under narrowed tool rules ([`PermissionPolicy::narrow`]).
+type Narrowed = Arc<Mutex<HashMap<ThreadId, Narrow>>>;
+
+/// The tool rules a thread is narrowed to.
+struct Narrow {
+    rules: Allowlist,
+    /// Whether the rules are a review's.
+    review: bool,
+    /// How many answers narrow the thread.
+    held: usize,
+}
 
 /// What to answer when a harness asks permission to use a tool. The default rejects every request.
 #[derive(Clone, Default)]
@@ -230,9 +266,9 @@ impl Drop for Narrowing {
     fn drop(&mut self) {
         let Some(thread) = self.thread.take() else { return };
         let mut narrowed = self.narrowed.locked();
-        if let Some((_, _, held)) = narrowed.get_mut(&thread) {
-            *held -= 1;
-            if *held == 0 {
+        if let Some(narrow) = narrowed.get_mut(&thread) {
+            narrow.held -= 1;
+            if narrow.held == 0 {
                 narrowed.remove(&thread);
             }
         }
@@ -263,8 +299,8 @@ impl PermissionPolicy {
             Allowlist::default()
         });
         let mut narrowed = self.narrowed.locked();
-        let held = narrowed.get(thread).map_or(0, |(_, _, held)| *held);
-        narrowed.insert(thread.clone(), (rules, review, held + 1));
+        let held = narrowed.get(thread).map_or(0, |narrow| narrow.held);
+        narrowed.insert(thread.clone(), Narrow { rules, review, held: held + 1 });
         Narrowing { narrowed: self.narrowed.clone(), thread: Some(thread.clone()) }
     }
 
@@ -272,14 +308,14 @@ impl PermissionPolicy {
     /// they are a review's.
     fn narrowed_out(&self, tool: &Tool<'_>, thread: Option<&ThreadId>, workdir: &Path) -> Option<bool> {
         let narrowed = self.narrowed.locked();
-        let (rules, review, _) = thread.and_then(|t| narrowed.get(t))?;
-        (!rules.allows(tool, workdir)).then_some(*review)
+        let narrow = thread.and_then(|t| narrowed.get(t))?;
+        (!narrow.rules.allows(tool, workdir)).then_some(narrow.review)
     }
 
     /// Whether `thread` is narrowed to a review ([`ants_proto::REVIEW_ALLOW`]), so its sessions are a review's
     /// ([`crate::harness::Launch::for_review`]).
     pub(crate) fn reviewing(&self, thread: &ThreadId) -> bool {
-        self.narrowed.locked().get(thread).is_some_and(|(_, review, _)| *review)
+        self.narrowed.locked().get(thread).is_some_and(|narrow| narrow.review)
     }
 
     /// Let `rule` through the tool rules `thread` is narrowed to, unless to a review's, for as long as the narrowing
@@ -292,7 +328,7 @@ impl PermissionPolicy {
                 return;
             }
         };
-        if let Some((rules, false, _)) = self.narrowed.locked().get_mut(thread) {
+        if let Some(Narrow { rules, review: false, .. }) = self.narrowed.locked().get_mut(thread) {
             rules.0.push(rule);
         }
     }
@@ -393,13 +429,13 @@ struct Tool<'a> {
 
 fn kind_name(fields: &ToolCallUpdateFields) -> String {
     if codex_mcp_tool(fields).is_some() {
-        return "other".to_owned();
+        return tool_kind::OTHER.to_owned();
     }
     fields
         .kind
         .and_then(|k| serde_json::to_value(k).ok())
         .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "other".to_owned())
+        .unwrap_or_else(|| tool_kind::OTHER.to_owned())
 }
 
 /// The ACP option `verdict` picks, by option kind, never by position or label.

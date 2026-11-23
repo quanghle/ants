@@ -260,7 +260,7 @@ impl Machine {
     /// keys.
     pub fn admitted_links(&self, user: &UserId) -> (String, String) {
         let filter = format!("ants.in.{self}.ants.out.links.{user}.*.*");
-        (filter, format!("$KV.{LINKS_BUCKET}.{user}.{{{{wildcard(1)}}}}.{{{{wildcard(2)}}}}"))
+        (filter, subject::kv(LINKS_BUCKET, format_args!("{user}.{{{{wildcard(1)}}}}.{{{{wildcard(2)}}}}")))
     }
 
     /// What the hub's [`OWNERS_BUCKET`] admits from the machine's outbox when a human runs on it, as an
@@ -268,7 +268,7 @@ impl Machine {
     /// ([`owner_outbox`]), under their keys.
     pub fn admitted_owners(&self) -> (String, String) {
         let filter = format!("ants.in.{self}.ants.out.owners.*.*");
-        (filter, format!("$KV.{OWNERS_BUCKET}.{{{{wildcard(1)}}}}.{{{{wildcard(2)}}}}"))
+        (filter, subject::kv(OWNERS_BUCKET, "{{wildcard(1)}}.{{wildcard(2)}}"))
     }
 
     /// What the hub's attachments' store ([`FILES_BUCKET`]) admits from the machine's outbox for `user` in `role`, as

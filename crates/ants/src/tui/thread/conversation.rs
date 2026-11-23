@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use ants_client::entry::{Entry, Kind};
-use ants_proto::{NoticeKind, StepStage, UserId, Uuid};
+use ants_proto::{NoticeKind, StepStage, UserId, Uuid, call_status, tool_kind};
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -438,7 +438,7 @@ impl Shown<'_> {
     /// A turn collapsed: its ant, what its calls did and how long they took, how many failed and why it ended with no
     /// reply if it did; a running one after a spinner, its latest calls under it at `rest`.
     fn turn(&self, lines: &mut Vec<Line<'static>>, turn: &Turn, first: &str, rest: &str) {
-        let failed = turn.calls.iter().filter(|c| c.status.as_deref() == Some("failed")).count();
+        let failed = turn.calls.iter().filter(|c| c.status.as_deref() == Some(call_status::FAILED)).count();
         let (bullet, tone) = if turn.running {
             (self.spinner(), busy())
         } else if failed > 0 {
@@ -496,9 +496,13 @@ impl Shown<'_> {
     fn call(&self, call: &Call, bold: bool) -> Vec<Span<'static>> {
         let took = took(call);
         let (glyph, tone, status) = match call.status.as_deref() {
-            Some("completed") => (BULLET, Style::new().fg(style::CONNECTED), (!took.is_empty()).then_some(took)),
-            Some("failed") if took.is_empty() => (BULLET, Style::new().fg(style::ERROR), Some("failed".to_owned())),
-            Some("failed") => (BULLET, Style::new().fg(style::ERROR), Some(format!("failed after {took}"))),
+            Some(call_status::COMPLETED) => {
+                (BULLET, Style::new().fg(style::CONNECTED), (!took.is_empty()).then_some(took))
+            }
+            Some(call_status::FAILED) if took.is_empty() => {
+                (BULLET, Style::new().fg(style::ERROR), Some("failed".to_owned()))
+            }
+            Some(call_status::FAILED) => (BULLET, Style::new().fg(style::ERROR), Some(format!("failed after {took}"))),
             _ if self.busy => {
                 let elapsed = crate::colony::short(crate::colony::since(call.started, self.now));
                 (self.spinner(), busy(), Some(format!("running {elapsed}")))
@@ -512,7 +516,7 @@ impl Shown<'_> {
         spans.extend(args.map(|args| Span::raw(format!("({args})"))));
         if let Some(status) = status {
             // A call that ended well shows how long it took dim; one that failed or runs, in its colour.
-            let style = if call.status.as_deref() == Some("completed") { style::dim() } else { tone };
+            let style = if call.status.as_deref() == Some(call_status::COMPLETED) { style::dim() } else { tone };
             spans.push(Span::styled(format!(" · {status}"), style));
         }
         spans
@@ -563,13 +567,13 @@ impl Shown<'_> {
 /// What `calls` did, by kind in the order each first came, other tools last: `Read 2 files, ran 1 command`.
 pub(super) fn summary(calls: &[&Call]) -> String {
     const DID: [(&str, &str, &str); 7] = [
-        ("read", "read", "file"),
-        ("edit", "edited", "file"),
-        ("delete", "deleted", "file"),
-        ("move", "moved", "file"),
-        ("search", "searched for", "pattern"),
-        ("execute", "ran", "command"),
-        ("fetch", "fetched", "page"),
+        (tool_kind::READ, "read", "file"),
+        (tool_kind::EDIT, "edited", "file"),
+        (tool_kind::DELETE, "deleted", "file"),
+        (tool_kind::MOVE, "moved", "file"),
+        (tool_kind::SEARCH, "searched for", "pattern"),
+        (tool_kind::EXECUTE, "ran", "command"),
+        (tool_kind::FETCH, "fetched", "page"),
     ];
     let mut counts: Vec<(Option<usize>, usize)> = Vec::new();
     for call in calls {

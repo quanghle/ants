@@ -131,7 +131,7 @@ pub async fn register(js: &jetstream::Context, me: &Me) -> Result<bool> {
     let registered = |payload: &[u8]| {
         serde_json::from_slice::<HumanEntry>(payload).is_ok_and(|e| e.check_key(me.id.as_str()).is_ok())
     };
-    let bucket = js.get_stream_no_info(format!("KV_{HUMANS_BUCKET}")).await?;
+    let bucket = js.get_stream_no_info(subject::kv_stream(HUMANS_BUCKET)).await?;
     let found = match bucket.direct_get_last_for_subject(subject::human_entry(&me.id)).await {
         Ok(msg) => Some(registered(&msg.payload)),
         Err(e) if e.kind() == DirectGetErrorKind::NotFound => Some(false),

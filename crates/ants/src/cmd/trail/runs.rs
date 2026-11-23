@@ -9,7 +9,8 @@ use ants_proto::provider::Starter;
 use ants_proto::{
     CallAnswer, GotoArgs, JournalEntry, PendingCall, QueuedCall, RatingOutcome, RunId, RunState, StepStage,
     TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLeg, TrailName, TrailRating, TrailRun, TrailSession,
-    TrailStepThread, UserId, Uuid, parse_trail_run_key, trail_run_key, trail_session_key, trail_thread_steps_prefix,
+    TrailStepThread, UserId, Uuid, parse_trail_run_key, subject, trail_run_key, trail_session_key,
+    trail_thread_steps_prefix,
 };
 use anyhow::{Result, bail};
 use async_nats::jetstream;
@@ -24,8 +25,8 @@ use crate::text::{after_colon, one_line};
 /// The runs `conductor` keeps, else those of every conductor, oldest first.
 pub(crate) async fn list(js: &jetstream::Context, conductor: Option<&UserId>) -> Result<Vec<TrailRun>> {
     let filter = match conductor {
-        Some(conductor) => format!("$KV.{TRAIL_RUNS_BUCKET}.{conductor}.*"),
-        None => format!("$KV.{TRAIL_RUNS_BUCKET}.*.*"),
+        Some(conductor) => subject::kv(TRAIL_RUNS_BUCKET, format_args!("{conductor}.*")),
+        None => subject::kv(TRAIL_RUNS_BUCKET, "*.*"),
     };
     let mut runs = headers(js, &filter).await?;
     runs.sort_by(|a, b| (a.started_at, a.run.as_str()).cmp(&(b.started_at, b.run.as_str())));
@@ -79,7 +80,7 @@ pub(super) struct Detail {
 
 /// The run `run`, of whichever conductor keeps it.
 pub(super) async fn find(js: &jetstream::Context, run: &RunId) -> Result<TrailRun> {
-    let mut found = headers(js, &format!("$KV.{TRAIL_RUNS_BUCKET}.*.{run}")).await?;
+    let mut found = headers(js, &subject::kv(TRAIL_RUNS_BUCKET, format_args!("*.{run}"))).await?;
     match found.len() {
         0 => bail!("no run {run}: `ants trail runs` lists the runs kept"),
         1 => Ok(found.remove(0)),
@@ -152,7 +153,7 @@ pub(super) fn picked(runs: Vec<TrailRun>, pick: &Pick, listed: &str) -> Result<T
 pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detail> {
     let header = find(js, run).await?;
     let session = session(js, &header).await?;
-    let calls = format!("$KV.{TRAIL_RUNS_BUCKET}.{}.call.*", trail_run_key(&header.conductor, run));
+    let calls = subject::kv(TRAIL_RUNS_BUCKET, format_args!("{}.call.*", trail_run_key(&header.conductor, run)));
     let mut journal: Vec<JournalEntry> =
         latest_in(js, TRAIL_RUNS_BUCKET, &calls).await?.iter().filter_map(|(k, v)| parse(k, v)).collect();
     journal.sort_by_key(|entry| entry.call);
@@ -168,7 +169,7 @@ pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detai
 
 /// The session the conductor of `run` keeps: the calls the run waits on and those queued. None before its first.
 pub(crate) async fn session(js: &jetstream::Context, run: &TrailRun) -> Result<Option<TrailSession>> {
-    let session = format!("$KV.{TRAIL_RUNS_BUCKET}.{}", trail_session_key(&run.conductor, &run.run));
+    let session = subject::kv(TRAIL_RUNS_BUCKET, trail_session_key(&run.conductor, &run.run));
     Ok(latest_in(js, TRAIL_RUNS_BUCKET, &session).await?.iter().find_map(|(k, v)| parse(k, v)))
 }
 
@@ -445,7 +446,7 @@ pub(super) type Marked = (ThreadId, TrailStepThread, DateTime<Utc>);
 /// run goes on, the calls its session waits on.
 pub(crate) async fn steps_on(js: &jetstream::Context, conductor: &UserId, thread: &ThreadId) -> Result<Vec<Step>> {
     let prefix = trail_thread_steps_prefix(conductor, thread);
-    let filter = format!("$KV.{TRAIL_RUNS_BUCKET}.{prefix}*");
+    let filter = subject::kv(TRAIL_RUNS_BUCKET, format_args!("{prefix}*"));
     let mut marked: Vec<Marked> = Vec::new();
     for (key, value, at) in latest_timed_in(js, TRAIL_RUNS_BUCKET, &filter).await? {
         let Some(step) = key.strip_prefix(&prefix).and_then(|step| step.parse::<ThreadId>().ok()) else { continue };
@@ -457,15 +458,15 @@ pub(crate) async fn steps_on(js: &jetstream::Context, conductor: &UserId, thread
     let mut steps = Vec::new();
     for run in runs {
         let key = trail_run_key(conductor, &run);
-        let header = format!("$KV.{TRAIL_RUNS_BUCKET}.{key}");
+        let header = subject::kv(TRAIL_RUNS_BUCKET, &key);
         let header: Option<TrailRun> =
             latest_in(js, TRAIL_RUNS_BUCKET, &header).await?.iter().find_map(|(k, v)| parse(k, v));
-        let calls = format!("$KV.{TRAIL_RUNS_BUCKET}.{key}.call.*");
+        let calls = subject::kv(TRAIL_RUNS_BUCKET, format_args!("{key}.call.*"));
         let journal: Vec<JournalEntry> =
             latest_in(js, TRAIL_RUNS_BUCKET, &calls).await?.iter().filter_map(|(k, v)| parse(k, v)).collect();
         let going = header.as_ref().is_some_and(|h| matches!(h.state, RunState::Running | RunState::Waiting));
         let pending = if going {
-            let session = format!("$KV.{TRAIL_RUNS_BUCKET}.{}", trail_session_key(conductor, &run));
+            let session = subject::kv(TRAIL_RUNS_BUCKET, trail_session_key(conductor, &run));
             let session: Option<TrailSession> =
                 latest_in(js, TRAIL_RUNS_BUCKET, &session).await?.iter().find_map(|(k, v)| parse(k, v));
             session.map(|s| s.pending)

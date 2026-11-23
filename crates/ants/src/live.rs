@@ -399,7 +399,7 @@ impl Feed {
 
     /// Take in `msg`, heard on the ants traffic: a status event, or else a hint that the stream has more to read.
     fn heard(&mut self, msg: &async_nats::Message) -> Option<StatusEvent> {
-        if msg.subject.starts_with("ants.status.") {
+        if ants_proto::subject::is_status(&msg.subject) {
             ants_client::requests::status_on(&msg.subject, &msg.payload)
         } else {
             self.tail_wanted = true;

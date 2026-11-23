@@ -5,7 +5,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, HUMANS_BUCKET, Role, UserId};
+use crate::{Error, HUMANS_BUCKET, Role, UserId, subject};
 
 /// A human's entry in the [`HUMANS_BUCKET`], under the key of its user id. Only humans write it.
 ///
@@ -91,7 +91,7 @@ impl Humans {
 /// Whether the publish allowances `publish` of a user JWT are a human's: they write every human's entry in
 /// [`HUMANS_BUCKET`] (`$KV.ants_humans.*`), as no other credentials do.
 pub fn writes_human_entries<'a>(publish: impl IntoIterator<Item = &'a str>) -> bool {
-    let entries = format!("$KV.{HUMANS_BUCKET}.*");
+    let entries = subject::kv(HUMANS_BUCKET, "*");
     publish.into_iter().any(|s| s == entries)
 }
 

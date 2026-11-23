@@ -171,7 +171,7 @@ impl Bus {
 
 /// The members of `channel` now; none when it does not exist.
 pub(super) async fn members(js: &jetstream::Context, channel: &ChannelId) -> Result<Vec<UserId>> {
-    let bucket = js.get_stream_no_info(format!("KV_{CHANNELS_BUCKET}")).await?;
+    let bucket = js.get_stream_no_info(subject::kv_stream(CHANNELS_BUCKET)).await?;
     match bucket.direct_get_last_for_subject(subject::channel_entry(channel)).await {
         Ok(entry) if entry.payload.is_empty() => Ok(Vec::new()),
         Ok(entry) => {

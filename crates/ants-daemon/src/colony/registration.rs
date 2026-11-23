@@ -414,7 +414,7 @@ fn ticker(every: Duration) -> tokio::time::Interval {
 
 /// Warn that the heartbeat putting `entry` failed with `e`, naming a full store as such ([`bus::explain_full`]).
 fn beat_failed(entry: &ColonyEntry, e: anyhow::Error) {
-    let e = bus::explain_full(e, &format!("$KV.{}.{}", ants_proto::COLONY_BUCKET, entry.key()));
+    let e = bus::explain_full(e, &ants_proto::subject::kv(ants_proto::COLONY_BUCKET, entry.key()));
     tracing::warn!(ant = %entry.ant, error = format!("{e:#}"), "colony heartbeat");
 }
 

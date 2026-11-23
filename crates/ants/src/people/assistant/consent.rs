@@ -10,6 +10,7 @@ use ants_daemon::bus::relayed::GuardedKv as _;
 use ants_proto::{
     ASSISTANT_ORDER_KINDS, Act, ActAnswer, AdminOrder, ApprovalRequest, Confirmations, HUMANS_BUCKET, MACHINES_BUCKET,
     MAX_PRE_ALLOW, ORDER_HOLD, ORDER_RULE, PreAllow, STREAM, UserId, confirmations_key, pre_allow_key, pre_allow_rule,
+    subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -172,7 +173,7 @@ pub(crate) async fn answer_order(
 
 /// The admin orders the machines' daemons hold for `human` to confirm, oldest first.
 pub(crate) async fn orders_held_for(js: &jetstream::Context, human: &UserId) -> Result<Vec<AdminOrder>> {
-    let mut orders: Vec<AdminOrder> = crate::machines::latest(js, &format!("$KV.{MACHINES_BUCKET}.*.held"))
+    let mut orders: Vec<AdminOrder> = crate::machines::latest(js, &subject::kv(MACHINES_BUCKET, "*.held"))
         .await?
         .into_iter()
         .flat_map(|(_, value)| held_orders(&value))

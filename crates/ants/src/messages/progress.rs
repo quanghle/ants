@@ -221,7 +221,7 @@ impl Status {
             StatusUpdate::Message { .. } => Stand::Writing,
             StatusUpdate::Thought { .. } => Stand::Thinking,
             StatusUpdate::Tool { id, title, tool_kind, status, .. } => {
-                let done = matches!(status.as_deref(), Some("completed" | "failed"));
+                let done = ants_proto::call_ended(status.as_deref());
                 match &view.stand {
                     Stand::Tool { id: current, .. } if current == id && done => Stand::Working,
                     _ if done => return,

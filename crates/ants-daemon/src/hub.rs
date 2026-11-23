@@ -22,7 +22,7 @@ use ants_proto::{
     LINKS_BUCKET, MACHINES_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET,
     READ_BUCKET, SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS,
     THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUN_RETENTION, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET,
-    TrailLimits, WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
+    TrailLimits, WEBHOOK_RETENTION, WEBHOOKS_BUCKET, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{
@@ -124,7 +124,7 @@ impl Object {
     pub fn stream_name(self) -> String {
         match (self, self.bucket()) {
             (Self::Files, _) => FILES_STREAM.to_owned(),
-            (_, Some(bucket)) => format!("KV_{bucket}"),
+            (_, Some(bucket)) => subject::kv_stream(bucket),
             (_, None) => STREAM.to_owned(),
         }
     }
@@ -511,7 +511,7 @@ pub async fn ensure_bucket(js: &jetstream::Context, object: Object) -> Result<kv
 /// Read by a direct get naming no subject, which a human's credentials allow.
 async fn mark_incarnation(identities: &kv::Store) -> Result<()> {
     let value = chrono::Utc::now().to_rfc3339().into();
-    let subject = format!("$KV.{IDENTITIES_BUCKET}.{INCARNATION_KEY}");
+    let subject = subject::identities_incarnation();
     let last = match identities.stream.direct_get_next_for_subject(subject, None).await {
         Ok(msg) if !msg.headers.get("KV-Operation").is_some_and(|op| ["DEL", "PURGE"].contains(&op.as_str())) => {
             return Ok(());
@@ -533,9 +533,9 @@ async fn mark_incarnation(identities: &kv::Store) -> Result<()> {
 /// ([`crate::records::direct_kv::DirectKv::past_relays`]), however many are relayed onto the key.
 fn trails_bucket_config(bucket: &str, description: &str, max_age: Duration) -> stream::Config {
     stream::Config {
-        name: format!("KV_{bucket}"),
+        name: subject::kv_stream(bucket),
         description: Some(description.to_owned()),
-        subjects: vec![format!("$KV.{bucket}.>")],
+        subjects: vec![subject::kv_all(bucket)],
         // Unlimited, as a count: KV clients refuse to open a bucket of history below 1.
         max_messages_per_subject: i64::MAX,
         max_age,
@@ -587,9 +587,9 @@ pub fn read_config() -> kv::Config {
 /// ([`ants_proto::done_reader`]).
 pub fn threads_config() -> stream::Config {
     stream::Config {
-        name: format!("KV_{THREADS_BUCKET}"),
+        name: subject::kv_stream(THREADS_BUCKET),
         description: Some("Thread titles, and the threads each human pinned or archived".into()),
-        subjects: vec![format!("$KV.{THREADS_BUCKET}.>")],
+        subjects: vec![subject::kv_all(THREADS_BUCKET)],
         max_messages_per_subject: 1,
         discard: stream::DiscardPolicy::New,
         storage: stream::StorageType::File,
@@ -642,7 +642,7 @@ pub fn owners_config() -> stream::Config {
     stream::Config {
         name: crate::records::owners::owners_stream(),
         description: Some("The owner of each thread humans and webhooks message ants on, first record kept".into()),
-        subjects: vec![format!("$KV.{OWNERS_BUCKET}.>")],
+        subjects: vec![subject::kv_all(OWNERS_BUCKET)],
         max_age: RETENTION,
         duplicate_window: RETENTION,
         max_messages_per_subject: 1,
@@ -661,9 +661,9 @@ pub fn owners_config() -> stream::Config {
 /// purges and rollups, which would remove others' reactions as well, and drops reactions with the stream's messages.
 pub fn reactions_config() -> stream::Config {
     stream::Config {
-        name: format!("KV_{REACTIONS_BUCKET}"),
+        name: subject::kv_stream(REACTIONS_BUCKET),
         description: Some("Reactions to messages, each under its reactor's key".into()),
-        subjects: vec![format!("$KV.{REACTIONS_BUCKET}.>")],
+        subjects: vec![subject::kv_all(REACTIONS_BUCKET)],
         max_age: RETENTION,
         max_messages_per_subject: 1,
         discard: stream::DiscardPolicy::New,

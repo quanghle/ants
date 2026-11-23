@@ -11,7 +11,7 @@ use ants_daemon::colony;
 use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{
     COLONY_BUCKET, ColonyEntry, PERMISSIONS_VERSION, PermissionsVersion, SERVING_EVERY, Serving, WEBHOOKS_BUCKET,
-    channel_manager_serving_subject,
+    parse_webhook_marker_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, stream::DirectGetErrorKind};
@@ -167,7 +167,7 @@ pub async fn running(js: &jetstream::Context, may: impl Fn(&str) -> bool, now: D
         Err(e) => running.unseen.push(format!("no colony read ({e}): daemons not looked at")),
     }
 
-    let stream_name = format!("KV_{WEBHOOKS_BUCKET}");
+    let stream_name = subject::kv_stream(WEBHOOKS_BUCKET);
     if !may(&format!("$JS.API.STREAM.INFO.{stream_name}")) {
         running.unseen.push(format!("the credentials get no stream info of {WEBHOOKS_BUCKET}: webhooks not looked at"));
         return Ok(running);
@@ -178,9 +178,8 @@ pub async fn running(js: &jetstream::Context, may: impl Fn(&str) -> bool, now: D
         Err(e) => return Err(e).context(format!("looking up {WEBHOOKS_BUCKET}")),
     };
     let Some(stream) = stream else { return Ok(running) };
-    let prefix = format!("$KV.{WEBHOOKS_BUCKET}.");
     let markers: Vec<(String, usize)> = stream
-        .info_with_subjects(format!("{prefix}*.webhook"))
+        .info_with_subjects(subject::kv(WEBHOOKS_BUCKET, "*.webhook"))
         .await
         .context("listing the webhooks' markers")?
         .try_collect()
@@ -193,7 +192,7 @@ pub async fn running(js: &jetstream::Context, may: impl Fn(&str) -> bool, now: D
         if !fresh(at, now) {
             continue;
         }
-        let webhook = subject.strip_prefix(&prefix).and_then(|k| k.strip_suffix(".webhook")).unwrap_or(&subject);
+        let webhook = subject::kv_key(WEBHOOKS_BUCKET, &subject).and_then(parse_webhook_marker_key).unwrap_or(&subject);
         let what = format!("webhook {webhook}");
         match serde_json::from_slice::<Serving>(&value) {
             Ok(serving) => running.components.push(Component::of_serving(&what, serving)),
@@ -201,7 +200,7 @@ pub async fn running(js: &jetstream::Context, may: impl Fn(&str) -> bool, now: D
         }
     }
 
-    let manager = channel_manager_serving_subject();
+    let manager = subject::channel_manager_serving();
     match last(&stream, &manager).await? {
         Some((value, at)) if fresh(at, now) => match serde_json::from_slice::<Serving>(&value) {
             Ok(serving) => running.components.push(Component::of_serving("the channel manager", serving)),

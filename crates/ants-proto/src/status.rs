@@ -95,7 +95,7 @@ impl StepStage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanStep {
     pub content: String,
-    /// ACP plan entry status: pending, in_progress or completed.
+    /// ACP plan entry status ([`call_status`](crate::call_status)): pending, in_progress or completed.
     pub status: String,
 }
 

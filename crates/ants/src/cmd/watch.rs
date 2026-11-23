@@ -213,8 +213,8 @@ impl Printer {
                     .iter()
                     .map(|s| {
                         let mark = match s.status.as_str() {
-                            "completed" => "x",
-                            "in_progress" => ">",
+                            ants_proto::call_status::COMPLETED => "x",
+                            ants_proto::call_status::IN_PROGRESS => ">",
                             _ => " ",
                         };
                         format!("[{mark}] {}", s.content)

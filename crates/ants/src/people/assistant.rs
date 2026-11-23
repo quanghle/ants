@@ -148,7 +148,7 @@ fn check(ant: &UserId, local: &Local, colony: &[ColonyEntry]) -> Result<Vec<Stri
 /// `fetch` or `execute` requests.
 fn risky(rule: &str) -> bool {
     let kind = rule.trim().split(':').next().unwrap_or_default();
-    ["*", "fetch", "execute"].contains(&kind)
+    ["*", ants_proto::tool_kind::FETCH, ants_proto::tool_kind::EXECUTE].contains(&kind)
 }
 
 /// Whether `workdir` is the home of `ant`, `home` as its entry sets one, or as `~/.ants/agents/<ant>` by default on any

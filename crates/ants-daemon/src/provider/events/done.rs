@@ -10,7 +10,7 @@
 use crate::bus::relayed::{self, Read};
 use std::time::Duration;
 
-use ants_proto::{THREADS_BUCKET, ThreadDone, ThreadId, UserId, done_key, done_mark_key, done_reader};
+use ants_proto::{THREADS_BUCKET, ThreadDone, ThreadId, UserId, done_key, done_mark_key, done_reader, subject};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
 use futures::StreamExt as _;
@@ -74,12 +74,12 @@ pub async fn hear(
 /// The markings put from now on, from the durable consumer of `ant`, created if missing: one in hand at a time, so
 /// they are told in the order they were put.
 pub async fn consumer(js: &jetstream::Context, ant: &UserId) -> Result<crate::bus::Pull> {
-    let stream = js.get_stream_no_info(format!("KV_{THREADS_BUCKET}")).await?;
+    let stream = js.get_stream_no_info(subject::kv_stream(THREADS_BUCKET)).await?;
     let name = done_reader(ant);
     let consumer: consumer::PullConsumer = stream
         .create_consumer(consumer::pull::Config {
             durable_name: Some(name.clone()),
-            filter_subject: format!("$KV.{THREADS_BUCKET}.done.*.*"),
+            filter_subject: subject::kv(THREADS_BUCKET, "done.*.*"),
             deliver_policy: consumer::DeliverPolicy::New,
             ack_policy: consumer::AckPolicy::Explicit,
             ack_wait: ACK_WAIT,
@@ -123,7 +123,7 @@ fn marked(message: &jetstream::Message) -> Option<(ThreadId, ThreadDone)> {
     if removed {
         return None;
     }
-    let marking = message.subject.as_str().strip_prefix(&format!("$KV.{THREADS_BUCKET}.done."))?;
+    let marking = subject::kv_key(THREADS_BUCKET, message.subject.as_str())?.strip_prefix("done.")?;
     let thread: ThreadId = marking.split_once('.')?.0.parse().ok()?;
     let done: ThreadDone = serde_json::from_slice(&message.payload).ok()?;
     (done.thread_id == thread).then_some((thread, done))

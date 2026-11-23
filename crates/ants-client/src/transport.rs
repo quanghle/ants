@@ -57,6 +57,12 @@ impl Message {
         self.headers.iter().rfind(|(header, _)| header == name).map(|(_, value)| value.as_str())
     }
 
+    /// The first value of the header named exactly `name`: the one its writer stored, for a header the server adds
+    /// none of.
+    pub fn stored_header_value(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(header, _)| header == name).map(|(_, value)| value.as_str())
+    }
+
     /// The names of its headers, one per value.
     pub fn header_names(&self) -> impl Iterator<Item = &str> + Clone {
         self.headers.iter().map(|(name, _)| name.as_str())

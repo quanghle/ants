@@ -241,7 +241,7 @@ async fn publish(js: &jetstream::Context, order: &AdminOrder) -> Result<()> {
 
 /// The outcome the daemon of `order`'s machine recorded, if any yet.
 pub async fn outcome(js: &jetstream::Context, order: &AdminOrder) -> Result<Option<AdminOutcome>> {
-    let filter = format!("$KV.{MACHINES_BUCKET}.{}", order.outcome_key());
+    let filter = subject::kv(MACHINES_BUCKET, order.outcome_key());
     let found = machines::latest(js, &filter).await?.into_iter().next();
     found.map(|(_, payload)| serde_json::from_slice(&payload).context("reading the order's outcome")).transpose()
 }
