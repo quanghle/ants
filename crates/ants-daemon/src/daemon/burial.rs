@@ -6,7 +6,7 @@ use anyhow::Result;
 use async_nats::jetstream;
 
 use crate::bus;
-use crate::delivery::dead::{self, Burial};
+use crate::delivery::dead::{self, Burial, Burying};
 
 use super::holds::Stalled;
 use super::{Inbox, Incoming, MAX_DELIVER};
@@ -58,13 +58,13 @@ impl Inbox<'_> {
     }
 
     /// [`Inbox::bury_unanswerable`] for `msg` whose dead letter went to the machine's outbox before: once the hub is in
-    /// reach, the letter its stream took from there is the one kept, and no other is stored ([`dead::bury_kept`]).
+    /// reach, the letter its stream took from there is the one kept, and no other is stored ([`Burying::bury_kept`]).
     async fn bury_kept_junk(&self, msg: &jetstream::Message, error: &str) -> Result<Burial> {
         if !bus::in_reach(self.js).await {
             return Ok(Burial::Outbox);
         }
         let dead = dead::letter_for(self.ant, msg, None, error, bus::max_payload(self.client))?;
-        dead::bury_kept(self.js, msg, &dead, None, self.humans, None).await
+        Burying { js: self.js, humans: self.humans, escalator: None }.bury_kept(msg, &dead, None).await
     }
 
     /// Store `msg` as a dead letter, escalating it up the ant's chain (in the end to the thread's owner, else the
@@ -76,9 +76,9 @@ impl Inbox<'_> {
         self.bury_letter(incoming, msg, &dead, Letter::New).await
     }
 
-    /// Bury `msg` as `dead` ([`dead::bury_letter`]), or, [`Letter::Kept`] in the machine's outbox on an earlier delivery,
-    /// as the letter the hub's stream may hold already ([`dead::bury_kept`]). A dead letter kept in the machine's outbox is
-    /// noted in `buried`, so the redelivery buries it again, even in a restarted daemon; on the last delivery, with its
+    /// Bury `msg` as `dead` ([`Burying::bury_letter`]), or, [`Letter::Kept`] in the machine's outbox on an earlier
+    /// delivery, as the letter the hub's stream may hold already ([`Burying::bury_kept`]). A dead letter kept in the
+    /// machine's outbox is noted in `buried`, so the redelivery buries it again, even in a restarted daemon; on the last delivery, with its
     /// ack subject, for [`Inbox::finish_buried`]. The answer or reply kept on the machine for the message's retry is
     /// forgotten: none follows.
     pub(super) async fn bury_letter(
@@ -89,10 +89,10 @@ impl Inbox<'_> {
         letter: Letter,
     ) -> Result<()> {
         let post = incoming.post.as_ref().map(|posted| &posted.post);
-        let escalator = Some(self.escalator);
+        let burying = Burying { js: self.js, humans: self.humans, escalator: Some(self.escalator) };
         let buried = match letter {
-            Letter::Kept => dead::bury_kept(self.js, msg, dead, post, self.humans, escalator).await,
-            Letter::New => dead::bury_letter(self.js, msg, dead, post, self.humans, escalator).await,
+            Letter::Kept => burying.bury_kept(msg, dead, post).await,
+            Letter::New => burying.bury_letter(msg, dead, post).await,
         };
         let burial = match buried {
             Ok(burial) => burial,
