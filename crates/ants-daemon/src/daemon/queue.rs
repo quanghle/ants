@@ -209,6 +209,9 @@ impl Inbox<'_> {
                     running.push(self.handle(incoming, msg).map(move |(thread, handled)| (thread, handled, joiner)));
                 }
             }
+            // Not those awaiting a redelivery, which may take a while.
+            let in_hand = threads.iter().filter(|(_, t)| t.retry.is_none()).map(|(thread, _)| thread.clone());
+            self.pool.set_in_hand(in_hand.collect());
             self.workload.set_harnesses(self.pool.live());
         }
 

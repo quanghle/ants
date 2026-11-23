@@ -1,6 +1,6 @@
-//! Many ants on one daemon, each in a git workdir of its own with worktrees on: every thread started at once gets its
-//! own worktree, every message is answered exactly once, and once the threads' sessions are gone a restarted daemon
-//! removes every worktree and branch.
+//! Many ants on one daemon in git workdirs with worktrees on, half of them each in a repository of its own, the other
+//! half sharing one: every thread started at once gets its own worktree, every message is answered exactly once, and
+//! once the threads' sessions are gone a restarted daemon removes every worktree and branch.
 //!
 //! By default 12 ants with 3 threads each. `ANTS_STRESS=N` serves 12×N ants with 3+N threads each.
 
@@ -44,9 +44,19 @@ pub fn many_ants_in_worktrees_answer_once_and_clean_up() {
 
     let names: Vec<String> = (0..count).map(|i| format!("m-{i:03}")).collect();
     let mut config = "messenger = false\nsage = \"none\"\nharness = \"copilot\"\n".to_owned();
-    for name in &names {
-        let (repo, home) = (dir.join("repos").join(name), dir.join("homes").join(name));
-        make_repo(&repo);
+    let shared = dir.join("repos").join("shared");
+    make_repo(&shared);
+    let mut repos = vec![shared.clone()];
+    for (i, name) in names.iter().enumerate() {
+        let home = dir.join("homes").join(name);
+        let repo = if i % 2 == 0 {
+            let own = dir.join("repos").join(name);
+            make_repo(&own);
+            repos.push(own.clone());
+            own
+        } else {
+            shared.clone()
+        };
         std::fs::create_dir_all(&home).unwrap();
         let _ = write!(
             config,
@@ -134,7 +144,7 @@ pub fn many_ants_in_worktrees_answer_once_and_clean_up() {
     let start = Instant::now();
     loop {
         let left: Vec<_> = sent.iter().filter(|(name, _, thread)| worktree(name, thread).exists()).collect();
-        let branches: HashSet<String> = names.iter().flat_map(|name| branches(&dir.join("repos").join(name))).collect();
+        let branches: HashSet<String> = repos.iter().flat_map(|repo| branches(repo)).collect();
         if left.is_empty() && branches.is_empty() {
             break;
         }
