@@ -53,3 +53,32 @@ impl Permissions {
         self
     }
 }
+
+/// The JetStream domain the publish allowances `publish` of a user JWT name, as [`Permissions::with_js_domain`] adds
+/// them; none for credentials of a hub without one.
+pub fn js_domain_of<'a>(publish: impl IntoIterator<Item = &'a str>) -> Option<JsDomain> {
+    publish.into_iter().find_map(|s| {
+        let (domain, rest) = s.strip_prefix("$JS.")?.split_once('.')?;
+        if domain == "API" || domain == "*" || !rest.starts_with("API.") {
+            return None;
+        }
+        domain.parse().ok()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Role, p};
+
+    #[test]
+    fn the_domain_of_credentials_is_the_one_their_rights_name() {
+        let hub: JsDomain = "hub".parse().unwrap();
+        for plain in [Permissions::for_user(&p("alice"), Role::Human), Permissions::for_web(&p("alice"))] {
+            assert_eq!(js_domain_of(plain.publish.iter().map(String::as_str)), None);
+            let in_domain = plain.with_js_domain(Some(&hub));
+            assert_eq!(js_domain_of(in_domain.publish.iter().map(String::as_str)), Some(hub.clone()));
+        }
+        assert_eq!(js_domain_of(["$JS.*.API.>", "$JS.ACK.>"]), None);
+    }
+}

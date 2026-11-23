@@ -94,7 +94,7 @@ static PAGE: Page = Page {
 };
 
 fn served() -> Served {
-    let site = Site { server: "ws://127.0.0.1:4281".to_owned(), bootstrap: None };
+    let site = Site { server: "ws://127.0.0.1:4281".to_owned(), bootstrap: None, github_url: None };
     Served::new(PAGE, node_web::page_listen(), site)
 }
 
@@ -152,7 +152,7 @@ async fn ants_web_answers_with_the_page_and_its_site_under_its_content_security_
 async fn ants_web_serves_over_http_until_stopped() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listen = listener.local_addr().unwrap();
-    let site = Site { server: "ws://127.0.0.1:4281".to_owned(), bootstrap: None };
+    let site = Site { server: "ws://127.0.0.1:4281".to_owned(), bootstrap: None, github_url: None };
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let serving = tokio::spawn(serve(listener, Arc::new(Served::new(PAGE, listen, site)), async {
         let _ = stopped.await;
@@ -170,7 +170,11 @@ fn ants_web_export_writes_the_page_and_its_site_and_prints_the_headers_to_serve_
     std::fs::create_dir_all(dir.join("assets")).unwrap();
     std::fs::write(dir.join("assets/index-0.js"), "an older page's").unwrap();
     std::fs::write(dir.join("index.html"), "an older page").unwrap();
-    let site = Site { server: "wss://hub.example/nats".to_owned(), bootstrap: Some("creds".to_owned()) };
+    let site = Site {
+        server: "wss://hub.example/nats".to_owned(),
+        bootstrap: Some("creds".to_owned()),
+        github_url: Some("https://github.com".to_owned()),
+    };
     let told = export(PAGE, &dir, site.clone()).unwrap();
 
     assert_eq!(std::fs::read(dir.join("index.html")).unwrap(), b"<p>page</p>");

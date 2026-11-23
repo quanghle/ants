@@ -5,12 +5,14 @@
 use std::rc::Rc;
 
 use ants_client::client::{MarkRead, Session, Window};
+use ants_client::device::Credentials;
 use ants_client::transport::{Message, Transport as _};
 use ants_proto::{StatusEvent, StatusUpdate};
 use ants_test_support::NatsTransport;
 use async_nats::HeaderMap;
 
 use super::*;
+use crate::test_support::colony::entry as colony_entry;
 
 /// Web credentials of `human` issued to `out`: the device.
 fn issue_web(team: &Path, human: &UserId, out: &Path) -> ants_proto::DeviceId {
@@ -232,9 +234,12 @@ async fn a_web_device_does_what_the_page_s_views_do_and_nothing_else() {
     assert_eq!(serde_json::from_slice::<Envelope>(&kept.payload).unwrap(), ask);
 }
 
-/// The client of the web device of `alice` on `server`, connected, with its transport: the hub set up by another
-/// device of hers.
-async fn page(server: &Server, domain: Option<&JsDomain>) -> (ants_client::client::Client, Rc<NatsTransport>) {
+/// The client of the web device of `alice` on `server`, connected as its credentials tell, with its transport and
+/// device: the hub set up by another device of hers, whose JetStream context comes last.
+async fn page(
+    server: &Server,
+    domain: Option<&JsDomain>,
+) -> (ants_client::client::Client, Rc<NatsTransport>, ants_proto::DeviceId, async_nats::jetstream::Context) {
     let (team, alice) = (server.dir().join("auth"), p("alice"));
     let laptop = server.dir().join("alice.creds");
     let full = Permissions::for_user(&alice, Role::Human).with_js_domain(domain);
@@ -246,13 +251,20 @@ async fn page(server: &Server, domain: Option<&JsDomain>) -> (ants_client::clien
     let out = server.dir().join("alice-web.creds");
     let new = NewDevice { web: true, ..NewDevice::default() };
     let web = Permissions::for_web(&alice).with_js_domain(domain);
-    issue_device_with(&team, &alice, Kind::Human, web, &new, &out).unwrap();
+    let device = issue_device_with(&team, &alice, Kind::Human, web, &new, &out).unwrap().unwrap();
+    let (jwt, key) = read_creds(&out).unwrap();
+    let account = account_key(&team).unwrap();
+    let credentials = Credentials::read(&jwt, &key.public_key(), Some(&account)).unwrap();
+    assert_eq!((&credentials.human, credentials.device, credentials.domain.as_ref()), (&alice, Some(device), domain));
+    let session = credentials.session();
+    assert_eq!(
+        session,
+        Session { human: alice, domain: domain.cloned(), account: Some(account), name: "ants-web".into() }
+    );
     let transport = Rc::new(NatsTransport::new(&server.url, Some(&out)));
-    let account = Some(account_key(&team).unwrap());
-    let session = Session { human: alice, domain: domain.cloned(), account, name: "ants-web".into() };
     let client = ants_client::client::Client::new(transport.clone(), session);
     client.connect().await.unwrap();
-    (client, transport)
+    (client, transport, device, h_js)
 }
 
 /// Every page of `window`, read to its end: the sequence, sender and text of each entry.
@@ -269,13 +281,34 @@ async fn read(client: &ants_client::client::Client, window: Window) -> Vec<(u64,
     }
 }
 
-/// The client sends, hears, reads a window and marks read on `server`, whose JetStream is in `domain`, and the
+/// The client lists the colony, keeps its presence, sends, hears, reads a window and marks read on `server`, whose JetStream is in `domain`, and the
 /// server refuses none of it.
 async fn the_client_s_reads_and_writes_pass(server: &Server, domain: Option<&JsDomain>) {
     let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
-    let (client, transport) = page(server, domain).await;
+    let (client, transport, device, h_js) = page(server, domain).await;
     let ant = server.creds_in(&dev_a, domain);
     let (d_client, d_js) = bus::connect(&server.url, Some(&ant), domain, &dev_a, "test").await.unwrap();
+
+    // The colony, listed by batched direct gets: nothing, then the entries of the ants serving, the last of each.
+    assert_eq!(client.colony().await.unwrap(), []);
+    bus::ensure_colony(&h_js, ants_proto::COLONY_TTL).await.unwrap();
+    assert_eq!(client.colony().await.unwrap(), []);
+    let colony = d_js.get_key_value(ants_proto::COLONY_BUCKET).await.unwrap();
+    let now = chrono::Utc::now();
+    let entries = [colony_entry("dev-a", 60, 5, now), colony_entry("dev-a", 60, 0, now)];
+    for entry in &entries {
+        colony.put("dev-a", serde_json::to_vec(entry).unwrap().into()).await.unwrap();
+    }
+    assert_eq!(client.colony().await.unwrap(), entries[1..]);
+
+    // Its presence while open, read by the human's other devices, and gone when it closes.
+    let present = crate::people::presence::Present::new(&h_js, domain).await.unwrap();
+    let following = async || present.following(&alice, [device], ants_proto::Following::Inbox).await;
+    let presence = client.presence(device);
+    client.present(&presence).await.unwrap();
+    assert_eq!(following().await, [device].into());
+    client.absent(&presence).await.unwrap();
+    assert_eq!(following().await, [].into());
 
     // A send to an ant: the thread's owner recorded, which the ant's daemon reads, and the stream's ack.
     let ask = |text: &str, to: Option<&UserId>| ants_client::sending::Send {
@@ -363,13 +396,13 @@ async fn the_client_s_reads_and_writes_pass(server: &Server, domain: Option<&JsD
 #[tokio::test]
 async fn the_client_sends_reads_marks_read_and_hears_with_web_credentials() {
     let Some(server) = Server::start() else { return };
-    the_client_s_reads_and_writes_pass(&server, None).await;
+    Box::pin(the_client_s_reads_and_writes_pass(&server, None)).await;
 }
 
 #[tokio::test]
 async fn the_client_does_the_same_in_a_hub_s_domain() {
     let Some(server) = Server::start_with("domain: hub", "") else { return };
-    the_client_s_reads_and_writes_pass(&server, Some(&"hub".parse().unwrap())).await;
+    Box::pin(the_client_s_reads_and_writes_pass(&server, Some(&"hub".parse().unwrap()))).await;
 }
 
 #[tokio::test]

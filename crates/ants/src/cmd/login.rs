@@ -9,6 +9,7 @@
 //! of the GitHub named by `--github-url`, and a JWT is taken only when the account of the bootstrap credentials issued
 //! it to the device's key, for a human of the name asked for.
 
+use ants_client::device::registration;
 use ants_daemon::bus::relayed;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -28,7 +29,7 @@ use crate::credentials::revoke;
 use crate::{auth, defaults};
 
 /// The GitHub whose device login page `ants login` shows by default.
-pub const GITHUB_URL: &str = "https://github.com";
+pub use registration::GITHUB_URL;
 
 #[derive(clap::Args, Debug)]
 pub struct LoginArgs {
@@ -137,24 +138,9 @@ pub async fn register(login: &Login<'_>, store: &dyn Store, stop: impl Future<Ou
     use_in_config(login)
 }
 
-/// The device login page of the GitHub at `github_url`, `https://HOST` with an optional port and trailing slash:
-/// `https://HOST/login/device`, the host in lower case.
+/// The device login page of the GitHub at `github_url` ([`registration::device_page`]).
 pub fn device_page(github_url: &str) -> Result<String> {
-    let host = github_url
-        .get(.."https://".len())
-        .filter(|scheme| scheme.eq_ignore_ascii_case("https://"))
-        .map(|_| &github_url["https://".len()..])
-        .map(|rest| rest.strip_suffix('/').unwrap_or(rest))
-        .filter(|host| plain_host(host));
-    match host {
-        Some(host) => Ok(format!("https://{}/login/device", host.to_ascii_lowercase())),
-        None => bail!("--github-url {github_url}: give a GitHub's https://HOST, without a path, such as {GITHUB_URL}"),
-    }
-}
-
-/// Whether `host` is a host name or address, with an optional port, and nothing else.
-fn plain_host(host: &str) -> bool {
-    !host.is_empty() && host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+    registration::device_page(github_url).map_err(|e| anyhow!("--github-url {e}"))
 }
 
 /// Why a sign-in page other than `page` is not shown. The error never repeats the page sent, nor builds a

@@ -11,13 +11,16 @@ description = "What a human's client derives from what it reads and sends, with 
 [dependencies]
 ants-proto.workspace = true
 chrono = { workspace = true, features = ["std", "serde"] }
+data-encoding.workspace = true
+# The one-off X25519 key a registration's answers are sealed to: nkeys makes none itself on wasm32, so its bytes come
+# from getrandom, which takes them from the browser there (ants-proto turns that on).
+getrandom = "0.2.17"
+nkeys = { workspace = true, features = ["xkeys"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-data-encoding.workspace = true
-nkeys.workspace = true
 futures = { workspace = true, features = ["executor"] }
 
 [lints]

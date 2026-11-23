@@ -183,8 +183,10 @@ impl Permissions {
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{chan_read}.{}", subject::ALL_CHANNELS),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{chan_read}"),
             format!("$JS.API.CONSUMER.DELETE.{STREAM}.{chan_read}"),
-            // Reading the colony: single entries, and the ordered consumers behind listing and watching it.
+            // Reading the colony: single entries, the last of each by batched direct gets (as the page lists it), and
+            // the ordered consumers behind listing and watching it.
             format!("$JS.API.DIRECT.GET.{colony_stream}.>"),
+            format!("$JS.API.DIRECT.GET.{colony_stream}"),
         ]);
         publish.extend(ordered_consumer_subjects(&colony_stream));
         publish.extend([
