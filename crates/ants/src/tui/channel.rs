@@ -17,7 +17,7 @@ use super::attach;
 use super::command::Conversation;
 use super::exec::Job;
 use super::model::{Action, Data, Key, Model, To, Ui};
-use super::select::{PAGE, Selection, step};
+use super::select::{PAGE, Selection};
 use super::style::{self, ago};
 use crate::channel::reads::Unread;
 use crate::messages::attachments::Listed;
@@ -230,8 +230,7 @@ impl Page {
     }
 
     pub fn key(&mut self, key: Key, data: &Data, ui: &Ui, _: DateTime<Utc>) -> Option<To> {
-        let at = self.at(data, ui);
-        let to = match key {
+        match key {
             Key::Char('o') => {
                 let listed = self.attachment(data, ui)?.clone();
                 return Some(To::Do(Action::Run(Job::Open(Box::new(listed)), String::new())));
@@ -261,9 +260,8 @@ impl Page {
                     String::new(),
                 )));
             }
-            _ => step(key, at, Some(PAGE))?,
-        };
-        self.selected.select(&self.ids(data, ui), to);
+            _ => _ = self.selected.step(key, &self.ids(data, ui), Some(PAGE)),
+        }
         None
     }
 
@@ -295,7 +293,7 @@ impl Page {
         let block = style::block(format!(" #{} · {} ", self.channel, tab.label()), focused);
         if posts.is_empty() {
             let text = match (data.live.stored_at, tab) {
-                (None, _) => "reading the stream…".to_owned(),
+                (None, _) => style::READING.to_owned(),
                 (Some(_), Tab::All) if counts.contains_key(&Tab::Archived) => {
                     "only posts on archived threads".to_owned()
                 }

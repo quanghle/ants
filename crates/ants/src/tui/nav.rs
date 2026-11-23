@@ -179,14 +179,9 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data, ui: &Ui, selected: &Item
         hits.push((lines.len(), item));
         lines.push(line);
     }
-    let height = usize::from(area.height.saturating_sub(2));
     let inner = style::block(String::new(), focused).inner(area);
     let top = ui.mouse.top(super::mouse::Viewport::Nav, inner, at, at, at + 1, lines.len());
-    for (row, item) in hits {
-        if row >= top && row < top + height {
-            ui.mouse.add(Rect { y: inner.y + (row - top) as u16, height: 1, ..inner }, super::mouse::Target::Nav(item));
-        }
-    }
+    ui.mouse.rows(inner, top, hits.into_iter().map(|(row, item)| (row, super::mouse::Target::Nav(item))));
     let paragraph = Paragraph::new(lines)
         .block(style::block(String::new(), focused))
         .scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));

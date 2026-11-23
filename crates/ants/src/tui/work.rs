@@ -12,7 +12,7 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use super::command::Conversation;
 use super::model::{Data, Key, Model, To, Ui};
-use super::select::{PAGE, Selection, step};
+use super::select::{PAGE, Selection};
 use super::style::{self, ago};
 
 pub mod entries;
@@ -95,7 +95,7 @@ impl Page {
     pub fn key(&mut self, key: Key, data: &Data, _: DateTime<Utc>) -> Option<To> {
         let rows = self.rows(data);
         let at = self.at(&rows);
-        let to = match key {
+        match key {
             Key::Enter => return rows.get(at).map(|(t, _)| To::Thread(t.clone())),
             Key::Char('S') => return rows.get(at).map(|(t, _)| To::Tldr(t.clone())),
             Key::Char('f') => return rows.get(at).map(|_| To::Forward),
@@ -105,9 +105,8 @@ impl Page {
             Key::Char('x') | Key::Ctrl('x') => {
                 return rows.get(at).map(|(t, _)| To::Interrupt(t.clone()));
             }
-            _ => step(key, at, Some(PAGE))?,
-        };
-        self.selected.select(&threads(&rows), to);
+            _ => _ = self.selected.step(key, &threads(&rows), Some(PAGE)),
+        }
         None
     }
 
@@ -116,7 +115,7 @@ impl Page {
         let rows = self.rows(data);
         let block = style::block(format!(" {} ({}) ", self.filter.title(), rows.len()), focused);
         if rows.is_empty() {
-            let text = if data.live.stored_at.is_some() { "no threads" } else { "reading the stream…" };
+            let text = if data.live.stored_at.is_some() { "no threads" } else { style::READING };
             frame.render_widget(Paragraph::new(text).block(block), area);
             return;
         }
@@ -141,16 +140,7 @@ impl Page {
         let header = Row::new(columns.iter().map(|(column, _)| column.name())).style(style::dim());
         let table =
             Table::new(table, widths).header(header).block(block).row_highlight_style(style::highlight(focused));
-        let inner = ratatui::layout::Rect {
-            x: list.x + 1,
-            y: list.y + 2,
-            width: list.width.saturating_sub(2),
-            height: list.height.saturating_sub(3),
-        };
-        let top = ui.mouse.top(super::mouse::Viewport::Work, inner, at, at, at + 1, rows.len());
-        for n in top..rows.len().min(top + usize::from(inner.height)) {
-            ui.mouse.add(Rect { y: inner.y + (n - top) as u16, height: 1, ..inner }, super::mouse::Target::Row(n));
-        }
+        let top = super::mouse::table(&ui.mouse, super::mouse::Viewport::Work, list, at, rows.len());
         let mut state = TableState::default().with_offset(top);
         frame.render_stateful_widget(table, list, &mut state);
         if let (Some(detail), Some((thread, _))) = (detail, rows.get(at)) {

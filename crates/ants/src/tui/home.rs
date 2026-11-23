@@ -7,7 +7,7 @@
 use std::cell::Cell;
 use std::collections::HashSet;
 
-use ants_proto::{ApprovalRequest, ThreadId, UserId, Uuid, Verdict};
+use ants_proto::{ApprovalRequest, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -21,7 +21,7 @@ use super::armed::Armed;
 use super::command::{Conversation, GRANT};
 use super::exec::Job;
 use super::model::{Action, Data, Key, Model, To, Ui};
-use super::select::{Selection, step};
+use super::select::Selection;
 use super::style::{self, ago};
 use super::{catchup, question};
 use crate::text::excerpt;
@@ -192,16 +192,10 @@ impl Page {
         let at = self.at(&items);
         let selected = items.get(at);
         let pending = selected.and_then(Item::pending).cloned();
-        let verdict = match key {
-            Key::Char('a') => Some(Verdict::AllowOnce),
-            Key::Char('A') => Some(Verdict::AllowAlways),
-            Key::Char('r') => Some(Verdict::Reject),
-            _ => None,
-        };
         let thread = || selected.map(|i| i.thread.clone());
         let reminded = selected.and_then(|i| data.cards.reminders.remind.get(&i.thread)).and_then(|r| r.message);
         let reminder = selected.filter(|i| i.why == Why::Reminder).map(|i| i.thread.clone());
-        let to = match key {
+        match key {
             Key::Enter if selected.is_some_and(|i| i.requests.len() > 1) => {
                 let group = selected?;
                 let key = (group.requests[0].ant.clone(), group.thread.clone());
@@ -225,11 +219,9 @@ impl Page {
             Key::Char('d') if reminder.is_some() => return reminder.map(To::Unremind),
             Key::Char('b') => return thread().map(|t| To::Remind(t, reminded)),
             Key::Char('a' | 'A' | 'r') if let Some(request) = pending => {
-                // A request its card does not show whole opens in full, where the keys answer it.
                 let drawn = self.carded.get() == Some(request.id);
                 let room = self.room.get().map(|(width, rows)| (width, if drawn { rows } else { 0 }));
-                let verdict = verdict.filter(|_| approvals::fits(&request, room));
-                return Some(To::Ask(request, verdict));
+                return Some(approvals::keyed(request, key, room));
             }
             Key::Char('a' | 'A') => return None,
             Key::Char('l') => {
@@ -264,9 +256,8 @@ impl Page {
             Key::Char('s') => return Some(To::Digest),
             Key::Char('c') => return Some(To::Credentials),
             Key::Char('o') => return Some(To::Held),
-            _ => step(key, at, None)?,
-        };
-        self.selected.select(&items.iter().map(Item::id).collect::<Vec<_>>(), to);
+            _ => _ = self.selected.step(key, &items.iter().map(Item::id).collect::<Vec<_>>(), None),
+        }
         None
     }
 
@@ -286,7 +277,7 @@ impl Page {
         frame.render_widget(Paragraph::new(first), top);
         if items.is_empty() {
             let text = match data.live.stored_at {
-                None => vec![Line::raw("reading the stream…")],
+                None => vec![Line::raw(style::READING)],
                 Some(_) if data.live.order.is_empty() => what_to_type(),
                 Some(_) => vec![Line::raw("nothing waits on a human")],
             };

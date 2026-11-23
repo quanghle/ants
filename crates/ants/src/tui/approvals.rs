@@ -14,7 +14,7 @@ use ratatui::Frame;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::model::{Data, Key};
+use super::model::{Data, Key, To};
 use super::style;
 use crate::live;
 use crate::tools::{self, State};
@@ -131,6 +131,23 @@ fn card_text(request: &ApprovalRequest, width: usize) -> Vec<Line<'static>> {
         first.spans.insert(0, Span::raw(format!("{}: ", request.tool.kind)));
     }
     style::wrapped(asked, width)
+}
+
+/// The verdict `key` gives a request: `a` allows it once, `A` always, `r` rejects it.
+pub fn verdict(key: Key) -> Option<Verdict> {
+    match key {
+        Key::Char('a') => Some(Verdict::AllowOnce),
+        Key::Char('A') => Some(Verdict::AllowAlways),
+        Key::Char('r') => Some(Verdict::Reject),
+        _ => None,
+    }
+}
+
+/// What `key` does to `request` on its card, drawn in `room` ([`fits`]): answer it at once with the verdict it gives
+/// when the card shows whole what the request asks, else show it in full, where the keys answer it.
+pub fn keyed(request: ApprovalRequest, key: Key, room: Option<(usize, usize)>) -> To {
+    let verdict = verdict(key).filter(|_| fits(&request, room));
+    To::Ask(request, verdict)
 }
 
 /// Whether what `request` asks shows whole on the card the keys answer, as last drawn: `width` wide over `rows` lines;
@@ -324,10 +341,10 @@ impl Asking {
                 return live::refusal(&self.request, &self.state, Verdict::Reject)
                     .map_or(Answer::Note, Answer::Refused);
             }
-            Key::Char('a') => Verdict::AllowOnce,
-            Key::Char('A') => Verdict::AllowAlways,
-            Key::Char('r') => Verdict::Reject,
-            _ => return Answer::Keep,
+            _ => match verdict(key) {
+                Some(verdict) => verdict,
+                None => return Answer::Keep,
+            },
         };
         match live::refusal(&self.request, &self.state, verdict) {
             Some(refusal) => Answer::Refused(refusal),

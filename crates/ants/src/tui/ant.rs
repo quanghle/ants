@@ -25,7 +25,7 @@ use super::markdown;
 use super::mcp;
 use super::memories;
 use super::model::{Action, Data, Key, Model, To};
-use super::select::{PAGE, Selection, step};
+use super::select::{PAGE, Selection};
 use super::settings;
 use super::style::{self, ago};
 use super::work::{self, Filter};
@@ -281,11 +281,10 @@ impl Page {
         }
         let messages = self.messages();
         let at = self.message.at(&messages);
-        let to = match key {
+        match key {
             Key::Enter => return self.waiting().get(at).map(|m| To::Thread(m.thread_id.clone())),
-            _ => step(key, at, Some(PAGE))?,
-        };
-        self.message.select(&messages, to);
+            _ => _ = self.message.step(key, &messages, Some(PAGE)),
+        }
         None
     }
 

@@ -129,8 +129,8 @@ impl Model {
         }
         let selected = self.ui.bar.pick.selected.min(entries.len() - 1);
         match key {
-            Key::Up => self.ui.bar.pick.selected = selected.checked_sub(1).unwrap_or(entries.len() - 1),
-            Key::Down => self.ui.bar.pick.selected = (selected + 1) % entries.len(),
+            Key::Up => self.ui.bar.pick.up(entries.len()),
+            Key::Down => self.ui.bar.pick.down(entries.len()),
             Key::Esc => self.close_palette(),
             Key::Tab | Key::Enter => return Some(self.pick(entries.swap_remove(selected), key == Key::Tab, now)),
             _ => return None,
