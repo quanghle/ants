@@ -560,7 +560,9 @@ the ant's items: a call only reading them, or changing another ant's, leaves it 
 dormant, or the ant is paused ([config.md](config.md#pausing-an-ant)), nothing fires: no reminder, watcher check or
 dream, nor a firing left pending; each one due meanwhile fires once on its revival or resuming, its refires counting
 from then. A firing wakes the ant ([Wake requests](architecture.md#wake-requests)) with the reminder's text
-and why it fired, on its source thread, or a new thread when no source thread remains. A firing whose wake fails stays
+and why it fired, on its source thread, or a new thread when no source thread remains. The answer to a wake goes to the
+thread's human owner; on a thread no human owns, a dream's or a reminder's new thread among them, it stays on the
+thread's timeline, as `ants thread show` and `ants chat` show it, and goes to nobody. A firing whose wake fails stays
 pending and is tried again a minute later, the firings after it with it, while memory maintenance and dreams go on.
 
 Condition triggers use the following objects:

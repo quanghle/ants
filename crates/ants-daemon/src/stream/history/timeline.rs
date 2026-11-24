@@ -115,6 +115,7 @@ impl Thread {
                     NoReplyWhy::ReplyToOwn => "the message answered the ant's own",
                     NoReplyWhy::Completed => "the ant called complete",
                     NoReplyWhy::Steered => "a later message took its answer",
+                    NoReplyWhy::Unowned => "a wake on a thread no human owns, its answer kept here",
                 };
                 let _ = write!(text, "- {} ended with no reply: {why}", end.at.format("%H:%M"));
                 if let Some(reason) = &end.reason {

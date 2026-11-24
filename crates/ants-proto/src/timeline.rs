@@ -91,6 +91,9 @@ pub enum NoReplyWhy {
     Completed,
     /// A later message steered the prompt, whose answer went to that one; `reason` names it.
     Steered,
+    /// The message was a provider's wake ([`crate::Envelope::wake_provider`]) on a thread no human owns, such as a
+    /// dream's or a reminder's on a new thread: its answer stays on the thread, sent to nobody.
+    Unowned,
 }
 
 /// How a prompt ended ([`TimelineEntry::Ended`]).

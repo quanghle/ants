@@ -93,12 +93,23 @@ impl Inbox<'_> {
         Ok(())
     }
 
+    /// Whether `incoming` is a provider's wake on a thread no human owns, outside a channel: its answer stays on the
+    /// thread, sent to nobody ([`NoReplyWhy::Unowned`]).
+    pub(super) fn unowned_wake(&self, incoming: &Incoming) -> bool {
+        let envelope = &incoming.envelope;
+        incoming.post.is_none()
+            && incoming.resume.is_none()
+            && envelope.trail_step.is_none()
+            && envelope.wake_provider().is_some()
+            && self.humans.human_owner(envelope.owner.as_ref()).is_none()
+    }
+
     /// Who the answer to `incoming` goes to when it goes as a message, outside a channel, as [`Inbox::reply_for`]
     /// addresses it: none for a channel post's or a resumed channel thread's, a trail step's the ant sent itself, a
-    /// webhook's with no owner, and one going to an escalation's notes.
+    /// webhook's with no owner, a provider's wake on a thread no human owns, and one going to an escalation's notes.
     pub(super) fn answered_to(&self, incoming: &Incoming) -> Option<UserId> {
         let envelope = &incoming.envelope;
-        if incoming.post.is_some() || incoming.resume.is_some() {
+        if incoming.post.is_some() || incoming.resume.is_some() || self.unowned_wake(incoming) {
             return None;
         }
         if envelope.trail_step.is_some() && envelope.from == *self.ant {
@@ -147,7 +158,8 @@ impl Inbox<'_> {
             }
             _ if envelope.webhook || envelope.from == *self.ant => {
                 // Nobody reads a webhook's inbox, nor the ant's own for work it handed itself: the answer goes to the
-                // thread's owner, else only to the log for a webhook and to the default human for a handoff.
+                // thread's owner, else only to the log for a webhook and to the default human for a handoff (a
+                // provider's wake with no owner ends unanswered before, [`Inbox::unowned_wake`]).
                 let owner = self.humans.human_owner(envelope.owner.as_ref());
                 let owner = owner.or_else(|| (!envelope.webhook).then(|| self.humans.default_human().clone()));
                 let Some(owner) = owner else {

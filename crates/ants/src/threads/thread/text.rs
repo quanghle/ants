@@ -412,6 +412,7 @@ fn no_reply(end: &NoReply, text: &str) -> String {
         (NoReplyWhy::Completed, None) => "completed".to_owned(),
         (NoReplyWhy::Steered, Some(reason)) => format!("steered ({reason})"),
         (NoReplyWhy::Steered, None) => "steered".to_owned(),
+        (NoReplyWhy::Unowned, _) => "wake on a thread no human owns, answer kept on the thread".to_owned(),
     };
     if text.is_empty() { why } else { format!("{why}: {text}") }
 }
