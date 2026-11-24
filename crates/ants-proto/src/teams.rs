@@ -127,6 +127,10 @@ pub enum TeamRefusal {
     NotLeadable { ant: UserId, team: UserId },
     #[error("{lead} leads team {team}; name another lead first (`ants team set {team} --lead ANT`)")]
     RemovesLead { lead: UserId, team: UserId },
+    #[error(
+        "team {team} has no lead since its lead was revoked; a human names one (`ants team set {team} --lead ANT`)"
+    )]
+    Leaderless { team: UserId },
     #[error("{ant} manages neither team {team} nor a team above it")]
     NotManager { ant: UserId, team: UserId },
     #[error("team {team} is not a member of team {parent}")]
@@ -222,6 +226,11 @@ impl TeamDirectory {
 
     fn known(&self, id: &UserId) -> Result<&Team, TeamRefusal> {
         self.team(id).ok_or_else(|| TeamRefusal::NoSuchTeam { team: id.clone() })
+    }
+
+    /// The lead a message to the team `team` goes to: refused for no such team and for a leaderless one.
+    pub fn lead_of(&self, team: &UserId) -> Result<&UserId, TeamRefusal> {
+        self.known(team)?.lead.as_ref().ok_or_else(|| TeamRefusal::Leaderless { team: team.clone() })
     }
 
     pub fn is_team(&self, id: &UserId) -> bool {

@@ -104,6 +104,8 @@ fn every_team_is_created_with_a_lead_that_is_never_removed_only_replaced() {
 #[test]
 fn renaming_retiring_revoking_and_deleting_keep_the_forest() {
     let mut directory = forest();
+    assert_eq!(directory.lead_of(&p("backend")), Ok(&p("dev-a")));
+    assert_eq!(directory.lead_of(&p("nobody")), Err(TeamRefusal::NoSuchTeam { team: p("nobody") }));
     assert!(directory.rename_ant(&p("dev-a"), &p("dev-x")));
     assert_eq!(directory.team(&p("backend")).unwrap().lead, Some(p("dev-x")));
     assert_eq!(directory.drop_ant(&p("dev-b")), Some(p("backend")));
@@ -112,6 +114,7 @@ fn renaming_retiring_revoking_and_deleting_keep_the_forest() {
     let backend = directory.team(&p("backend")).unwrap();
     assert!(backend.leaderless() && backend.members.is_empty());
     assert_eq!(directory.check(), Ok(()), "a leaderless team breaks only itself");
+    assert_eq!(directory.lead_of(&p("backend")), Err(TeamRefusal::Leaderless { team: p("backend") }));
     let changed = directory.delete(&p("eng")).unwrap();
     assert_eq!(changed, ["deleted team eng"]);
     assert_eq!(directory.roots().len(), 2, "its member teams are on no team");
