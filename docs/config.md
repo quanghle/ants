@@ -542,7 +542,10 @@ version.
   model call. A session that never ran a prompt has no transcript; resuming it starts a new session.
 - **Settings:** `model` (with its `context`'s `model_suffix`, as `opus[1m]`) is passed as `--model`; `reasoning_effort`
   as `--effort` and must be `low`, `medium`, `high`, `xhigh` or `max`, else the session fails. An unknown model fails the
-  first prompt with Claude Code's message.
+  first prompt with Claude Code's message. Another model or effort selected on an open session (ACP
+  `session/set_config_option`) goes to the running process as Claude Code's `set_model` or `apply_flag_settings`
+  (`effortLevel`), taking effect from its next model call; an unknown model fails the change with Claude Code's
+  message, and an effort outside that list fails it unsent.
 - **Permissions:** `mode` is `--permission-mode`: `default` (or `manual`), `acceptEdits`, `plan`, `auto`, `dontAsk` or
   `bypassPermissions`. With `--permission-prompts none`, a tool call Claude Code would ask a human about is denied at
   once (logged as a warning) and the turn goes on; under `tools = "ask"`, `--permission-prompts host
@@ -565,7 +568,10 @@ version.
   overriding an earlier one of the same name and the ants servers overriding both; `ants ant mcp ANT` lists them.
   Invalid JSON, or a file that does not read, fails the start.
 - **Cancel:** Claude Code's `interrupt` ends the turn, the session going on; a turn not over 10 s later has its process
-  killed, and the session resumes on the next message.
+  killed, and the session resumes on the next message. Where Claude Code advertises `interrupt_cancel_queued_v1` in its
+  `system/init` (as 2.1.331 does), the interrupt carries `cancel_queued`, dropping the steering messages written
+  but not yet taken in, which would otherwise each run as a turn of their own after the cancelled one, and a prompt
+  interrupted before its turn started ends at once.
 - **Steering:** a steering message goes to stdin as a user message while the turn runs; Claude Code takes it between
   model calls, or after the turn's `result` as a turn of its own. The CLI runs with `--replay-user-messages` and
   `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`, and the prompt ends once Claude Code reports itself idle with each steer
