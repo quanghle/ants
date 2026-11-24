@@ -2,8 +2,12 @@
 
 ## Work tracking: bd
 
-All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
+All work and specs live in bd, in the workspace `ants` of the bd server at `https://bd.quangle.net/w/ants`. Do not
+keep TODO lists in markdown.
 
+- Connect a checkout once with `bd remote set https://bd.quangle.net/w/ants` (`--force` over a local `.bd/bd.db` left
+  from before), then sign in with `bd remote login --provider github --human`. Ants take `BD_REMOTE` and `BD_TOKEN`
+  from their `env` instead. `bd remote show` checks the connection, the token and the actor.
 - `bd ready` lists unblocked work; `bd claim <id>` takes one under a lease.
 - `bd show <id>` shows details; `bd close <id> -r "<what was done>"` closes it.
 - Record discovered work with `bd create ... --dep discovered-from:<id>`.
@@ -16,7 +20,7 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - A spec for a new feature says, for each surface (CLI, `ants chat`, the web client, MCP tools, admin orders,
   `ants doctor`, docs, `contrib/skills/`), what the feature offers there or why nothing: a feature lands with its
   surfaces, or with issues for the ones still missing.
-- The database is local; refresh the committed snapshot with `bd export -o .bd/issues.jsonl` in each commit that
+- The database is the server's; refresh the committed snapshot with `bd export -o .bd/issues.jsonl` in each commit that
   changes issues or specs. Release notes (`scripts/release-notes.sh`) are built from that snapshot, so the commit a
   release tag points at must carry an up-to-date export.
 
@@ -39,7 +43,8 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - `crates/ants/nats-server.sha256` pins the nats-server release bundled with ants: release archives, `ants setup`
   downloads and CI's tests all take it from there.
 - The web client's front end and its browser bindings (the crate `ants-web`) live in the repo `ants-web`, beside this
-  one and local for now; its work and its spec (area web) are tracked in this repo's bd.
+  one and local for now; its work and specs are tracked in the bd workspace `antsw`
+  (`https://bd.quangle.net/w/antsw`), apart from the earlier ones (epic `ants-yoh65`, spec area web) kept here.
 - `crates/ants/web.sha256` pins the page of the web client, by its bundle's SHA-256, the ants-web commit built and the
   ants version it is built for. `scripts/web.sh` builds the pinned page from the ants-web checkout beside this one
   into `target/web`, which `cargo build --release --features web` embeds (`crates/ants/build.rs` checks the digest and
