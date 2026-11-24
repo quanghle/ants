@@ -259,7 +259,8 @@ impl Status {
     /// Whether `update` tells where an ant stands, so that an ant not held yet is to show.
     fn sets_stand(&self, update: &StatusUpdate) -> bool {
         match update {
-            StatusUpdate::State { state } => !matches!(state, State::Idle | State::SignedOut),
+            // A signed-out harness is told for a message held until it is signed in again.
+            StatusUpdate::State { state } => *state != State::Idle,
             StatusUpdate::Queued { message, .. } => self.mine.contains(message),
             StatusUpdate::Approval { .. }
             | StatusUpdate::Message { .. }
@@ -465,7 +466,6 @@ mod tests {
                 decider: None,
                 via: None,
             },
-            state(State::SignedOut),
         ];
         let mut status = Status::new(vec![]);
         assert_eq!(line(&mut status, [state(State::Working), state(State::Idle)]), "");
