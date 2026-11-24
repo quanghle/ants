@@ -191,6 +191,9 @@ impl Status {
         }
         let at = match self.ants.iter().position(|v| v.ant == event.ant) {
             Some(at) => at,
+            // An update that tells no stand leaves an ant not held so: a message's turn, a plan or an escalation
+            // after its prompt ended would keep it on the line until another prompt.
+            None if !self.sets_stand(&event.update) => return,
             None => {
                 self.ants.push(View { ant: event.ant.clone(), stand: Stand::Waiting, signed_out: false });
                 self.ants.len() - 1
@@ -253,12 +256,30 @@ impl Status {
         view.stand = stand;
     }
 
-    /// Where `ant` stands, as the line tells it after the ant's name; None when it is not shown.
+    /// Whether `update` tells where an ant stands, so that an ant not held yet is to show.
+    fn sets_stand(&self, update: &StatusUpdate) -> bool {
+        match update {
+            StatusUpdate::State { state } => !matches!(state, State::Idle | State::SignedOut),
+            StatusUpdate::Queued { message, .. } => self.mine.contains(message),
+            StatusUpdate::Approval { .. }
+            | StatusUpdate::Message { .. }
+            | StatusUpdate::Thought { .. }
+            | StatusUpdate::Tool { .. } => true,
+            StatusUpdate::Plan { .. }
+            | StatusUpdate::Escalated { .. }
+            | StatusUpdate::Asked { .. }
+            | StatusUpdate::Decided { .. }
+            | StatusUpdate::Step { .. }
+            | StatusUpdate::Leg { .. } => false,
+        }
+    }
+
     /// Where `ant` stands on the thread, and whether its harness is signed out, if it was heard from.
     pub fn stand(&self, ant: &UserId) -> Option<(&Stand, bool)> {
         self.ants.iter().find(|v| v.ant == *ant).map(|v| (&v.stand, v.signed_out))
     }
 
+    /// Where `ant` stands, as the line tells it after the ant's name; None when it is not shown.
     pub fn of(&self, ant: &UserId) -> Option<String> {
         let view = self.ants.iter().find(|v| v.ant == *ant)?;
         let line = describe(view);
@@ -423,5 +444,36 @@ mod tests {
         assert_eq!(line(&mut status, [state(State::Working)]), "dev-b: queued behind 1");
         assert_eq!(line(&mut status, [queued(mine, 0)]), "dev-b: working");
         assert_eq!(line(&mut status, [state(State::Failed)]), "dev-b: attempt failed, may be retried");
+    }
+
+    #[test]
+    fn updates_after_an_idle_that_tell_no_stand_leave_the_line_empty() {
+        let (dev_b, thread): (UserId, ants_proto::ThreadId) = ("dev-b".parse().unwrap(), "t1".parse().unwrap());
+        let escalation = ants_proto::Escalation::new(dev_b, thread, ants_proto::EscalationReason::Asked);
+        let after = [
+            StatusUpdate::Queued { message: Uuid::now_v7(), ahead: 0 },
+            StatusUpdate::Queued { message: Uuid::now_v7(), ahead: 2 },
+            StatusUpdate::Plan { steps: vec![] },
+            StatusUpdate::Escalated { to: "alice".parse().unwrap(), escalation },
+            StatusUpdate::Decided {
+                request_id: Uuid::now_v7(),
+                verdict: ants_proto::Verdict::Reject,
+                by: ants_proto::DecidedBy::Expiry,
+                decider: None,
+                via: None,
+            },
+            state(State::SignedOut),
+        ];
+        let mut status = Status::new(vec![]);
+        assert_eq!(line(&mut status, [state(State::Working), state(State::Idle)]), "");
+        for update in after {
+            assert_eq!(line(&mut status, [update.clone()]), "", "{update:?} after the idle");
+        }
+        assert_eq!(status.busy().count(), 0);
+
+        let mine = Uuid::now_v7();
+        let mut status = Status::new(vec![mine]);
+        let queued = StatusUpdate::Queued { message: mine, ahead: 1 };
+        assert_eq!(line(&mut status, [state(State::Idle), queued]), "dev-b: queued behind 1", "the message sent shows");
     }
 }
