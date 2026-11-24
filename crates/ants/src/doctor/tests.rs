@@ -1,7 +1,8 @@
 //! Tests of `ants doctor`: the hub, versions, harnesses, shared settings, sense, leaf, keys, tunnels, bridges, webhook,
-//! services and config checks, and how a check renders.
+//! services, channels and config checks, and how a check renders.
 
 mod ants;
+mod channels;
 mod config_file;
 mod credentials;
 mod leaf_node;

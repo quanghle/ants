@@ -844,7 +844,9 @@ pub(crate) async fn revoke_credentials(
     }
     push_and_report(url, domain, &dir).await?;
     for ant in &retired {
-        crate::signing::retire::clean_consumers(url, domain, &dir, ant).await;
+        for line in crate::signing::retire::clean_consumers(url, domain, &dir, ant).await {
+            println!("{line}");
+        }
     }
     if !retired.is_empty() {
         leave_teams(url, domain, &dir, &retired).await;

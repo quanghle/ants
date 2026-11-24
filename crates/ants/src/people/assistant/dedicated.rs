@@ -579,7 +579,9 @@ impl Dedicated {
         match (revoked, no_push) {
             (true, false) => {
                 crate::credentials::push::push_and_report(nats.url, nats.domain, &dir).await?;
-                retire::clean_consumers(nats.url, nats.domain, &dir, name).await;
+                for line in retire::clean_consumers(nats.url, nats.domain, &dir, name).await {
+                    println!("{line}");
+                }
                 Ok(())
             }
             (true, true) => {

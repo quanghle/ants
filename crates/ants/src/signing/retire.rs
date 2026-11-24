@@ -31,10 +31,16 @@ pub const STOP_WAIT: Duration = Duration::from_mins(5);
 const STOP_POLL: Duration = Duration::from_secs(1);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Delete consumers the ant's daemon could not clean up at shutdown. Call after applying the revocation, with the
-/// team key, and leave the consumers alone if the ant is still served or holds another live key.
-pub(crate) async fn clean_consumers(url: &str, domain: Option<&JsDomain>, dir: &Path, ant: &UserId) {
+/// Clean up after an ant left with no live key, retired or revoked whole: take it out of its channels, each change
+/// announced in the channel; and once the colony shows no daemon serving it, delete the consumers its daemon could
+/// not clean up at shutdown and end the trail runs it left unfinished. Call after applying the revocation, with the
+/// team key; an ant holding another live key is left alone. Returns a line per channel it was taken out of.
+pub(crate) async fn clean_consumers(url: &str, domain: Option<&JsDomain>, dir: &Path, ant: &UserId) -> Vec<String> {
+    let mut lines = Vec::new();
     let cleanup = async {
+        if crate::signing::signer::live(dir)?.iter().any(|key| key.name == ant.as_str()) {
+            return Ok(());
+        }
         bus::check_url(url)?;
         let creds = auth::retired_consumer_creds(dir, domain, ant)?;
         let connect = async_nats::ConnectOptions::with_credentials(&creds)?
@@ -45,6 +51,18 @@ pub(crate) async fn clean_consumers(url: &str, domain: Option<&JsDomain>, dir: &
         let client = tokio::time::timeout(CLEANUP_TIMEOUT, connect).await.context("no answer from the hub")??;
         let mut js = bus::jetstream(client, domain);
         js.set_timeout(CLEANUP_TIMEOUT);
+        match crate::channel::drop_retired(&js, domain, ant).await {
+            Ok(dropped) => {
+                for line in &dropped {
+                    tracing::info!(%ant, "{line}");
+                }
+                lines = dropped;
+            }
+            Err(e) => tracing::warn!(
+                %ant, error = format!("{e:#}"),
+                "taking the retired ant out of its channels; retry the same key revocation on the hub"
+            ),
+        }
         let colony = DirectKv::new(&js, domain, COLONY_BUCKET).await?;
         if let Some(value) = colony.get(ant.as_str()).await? {
             let entry: ColonyEntry = serde_json::from_slice(&value).context("reading the colony entry")?;
@@ -53,14 +71,12 @@ pub(crate) async fn clean_consumers(url: &str, domain: Option<&JsDomain>, dir: &
                 return Ok(());
             }
         }
-        if !crate::signing::signer::live(dir)?.iter().any(|key| key.name == ant.as_str()) {
-            bus::forget_retired(&js, ant).await?;
-            if let Err(e) = end_runs(&js, domain, ant).await {
-                tracing::warn!(
-                    %ant, error = format!("{e:#}"),
-                    "ending the trail runs of the retired ant; retry the same key revocation on the hub"
-                );
-            }
+        bus::forget_retired(&js, ant).await?;
+        if let Err(e) = end_runs(&js, domain, ant).await {
+            tracing::warn!(
+                %ant, error = format!("{e:#}"),
+                "ending the trail runs of the retired ant; retry the same key revocation on the hub"
+            );
         }
         Ok::<(), anyhow::Error>(())
     };
@@ -70,6 +86,7 @@ pub(crate) async fn clean_consumers(url: &str, domain: Option<&JsDomain>, dir: &
             "deleting consumers of the retired ant; retry the same key revocation on the hub once no daemon serves it"
         );
     }
+    lines
 }
 
 /// End the trail runs `ant` conducted that are left unfinished, no daemon conducting them any more: each fails, its
@@ -455,7 +472,9 @@ pub async fn retire(
             if !revoked.is_empty() {
                 crate::credentials::push::push_and_report(url, js_domain, &dir).await?;
             }
-            clean_consumers(url, js_domain, &dir, name).await;
+            for line in clean_consumers(url, js_domain, &dir, name).await {
+                println!("{line}");
+            }
         }
     }
     Ok(())

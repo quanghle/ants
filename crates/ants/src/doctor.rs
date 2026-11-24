@@ -21,6 +21,7 @@ use self::ants::{
     check_ants, check_bypassed, check_host, check_machine_name, check_mcp_sockets, check_open_files, check_reactions,
     check_sense_kept, check_sense_logs, check_shared_workdirs, check_trail_saves, check_watchers,
 };
+use self::channels::check_channels;
 use self::credentials::{check_backup, check_cli_creds};
 use self::leaf_node::{Leaf, check_leaf};
 use self::server::{check_resolver, check_storage, check_store_account, reach};
@@ -37,6 +38,7 @@ use crate::service::Services;
 use crate::webhook;
 
 mod ants;
+mod channels;
 mod colony;
 mod credentials;
 mod leaf_node;
@@ -212,6 +214,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.push(worker);
     checks.extend(check_runs(connected.as_ref(), chrono::Utc::now()).await);
     checks.extend(check_teams(connected.as_ref(), setup, chrono::Utc::now()).await);
+    checks.extend(check_channels(connected.as_ref(), setup).await);
     checks.push(resolver);
     // After the CLI's connection, which has the hub load the bus's account if no member connected yet.
     checks.push(check_store_account(setup, through_leaf).await);

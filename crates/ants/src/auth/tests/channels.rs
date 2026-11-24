@@ -230,3 +230,69 @@ async fn an_ant_reads_where_its_own_inbox_and_channel_consumers_stand_and_no_oth
         assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");
     }
 }
+
+/// Revoking the last key of an ant takes it out of every channel it is a member, the messenger or the owner of, each
+/// change announced in the channel by the channel manager, even while the colony still shows it live; channels without
+/// it stay as they are.
+#[tokio::test]
+async fn revoking_an_ant_whole_takes_it_out_of_its_channels_each_change_announced() {
+    let Some(server) = Server::start() else { return };
+    let team = server.dir().join("auth");
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
+    let mut inspect = Permissions::for_user(&human, Role::Human);
+    inspect.publish.extend([
+        format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
+        format!("$JS.API.STREAM.INFO.{STREAM}"),
+        format!("$KV.{}.{dev_a}", ants_proto::COLONY_BUCKET),
+    ]);
+    let human_creds = server.dir().join("human.creds");
+    issue_with(&team, &human, Role::Human.into(), inspect, &human_creds).unwrap();
+    let h_js = connect_to(&server.url, &human_creds, None, &human).await;
+    let stream = bus::ensure_stream(&h_js).await.unwrap();
+    ants_daemon::hub::ensure_bucket(&h_js, ants_daemon::hub::Object::Devices).await.unwrap();
+    let colony = bus::ensure_colony(&h_js, ants_proto::COLONY_TTL).await.unwrap();
+    let kv = bus::ensure_channels(&h_js).await.unwrap();
+    let ant_creds = server.creds(&dev_a);
+    let key = read_creds(&ant_creds).unwrap().1.public_key();
+    let entry = crate::test_support::colony::entry(dev_a.as_str(), 60, 0, chrono::Utc::now());
+    colony.put(dev_a.as_str(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+
+    let mut ops = ChannelEntry::new("ops".parse().unwrap());
+    ops.add_member(dev_a.clone());
+    ops.add_member(human.clone());
+    (ops.messenger, ops.owner) = (Some(dev_a.clone()), Some(dev_a.clone()));
+    let mut web = ChannelEntry::new("web".parse().unwrap());
+    web.add_member(dev_b.clone());
+    web.owner = Some(dev_b.clone());
+    for entry in [&ops, &web] {
+        kv.put(entry.key(), serde_json::to_vec(entry).unwrap().into()).await.unwrap();
+    }
+
+    let conn = crate::connection::Connection { nats: &server.url, creds: None, js_domain: None, human: None };
+    crate::cmd::auth::revoke_credentials(None, vec![key], Vec::new(), false, Some(team.clone()), &conn).await.unwrap();
+
+    let read = async |channel: &str| -> ChannelEntry {
+        serde_json::from_slice(&kv.get(channel).await.unwrap().unwrap()).unwrap()
+    };
+    let left = read("ops").await;
+    assert_eq!((&left.members, &left.messenger, &left.owner), (&vec![human.clone()], &None, &None));
+    assert_eq!(read("web").await, web, "a channel without the ant stays as it was");
+    let mut posts = Vec::new();
+    for seq in 1..=stream.get_info().await.unwrap().state.last_sequence {
+        let message = stream.get_raw_message(seq).await.unwrap();
+        if message.subject.as_str().starts_with("ants.chan.") {
+            posts.push(serde_json::from_slice::<ChannelPost>(&message.payload).unwrap());
+        }
+    }
+    let [post] = &posts[..] else { panic!("one announcement: {posts:?}") };
+    assert_eq!((post.channel.as_str(), &post.from), ("ops", &UserId::channel_manager()));
+    assert!(post.mentions.is_empty() && post.in_reply_to.is_none(), "a top-level post mentioning nobody: {post:?}");
+    assert_eq!(
+        post.text,
+        format!(
+            "the retirement of dev-a changed #ops: removed dev-a; messenger back to the default {}; owner dev-a \
+             cleared.",
+            UserId::messenger()
+        )
+    );
+}

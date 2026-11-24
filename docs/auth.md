@@ -57,8 +57,11 @@ After applying a revocation that leaves an ant or assistant no live key, `ants a
 `ants assistant disable --retire`, and `ants signer` also remove the ant's durable `chan-<ant>` and `done-<ant>`
 consumers if the colony shows no live daemon serving it. The inbox consumer stays. They also end the trail runs it
 conducted and left unfinished, each failed and its owner told on the run's thread as the ant
-([trails.md](trails.md#restarts-stops-and-resumes)). Cleanup uses temporary credentials scoped to that ant: its
-colony entry, those two consumers, its own keys of `ants_trail_runs` and messages from it. If cleanup was skipped with `--no-push`, or the hub could
+([trails.md](trails.md#restarts-stops-and-resumes)). Whether or not the colony still shows it live, they take it out
+of every channel it is a member, messenger or owner of, each change announced in the channel by the channel manager
+([architecture.md](architecture.md#channels)). Cleanup uses temporary credentials scoped to that ant: its colony
+entry, those two consumers, its own keys of `ants_trail_runs` and messages from it, and the channels' entries and the
+channel manager's posts. If cleanup was skipped with `--no-push`, or the hub could
 not be reached for cleanup, repeat `ants auth revoke --key K` directly against the hub, without `--no-push`, once
 the ant is no longer served.
 

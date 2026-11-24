@@ -178,8 +178,10 @@ impl Permissions {
     }
 
     /// What retirement cleanup allows on the hub: checking one ant's colony entry and deleting only its channel
-    /// and done consumers, never its inbox consumer; and, for the trail runs it conducted that no daemon ends any
-    /// more, reading the runs, writing its own keys of them and telling each run's owner on its thread, as the ant.
+    /// and done consumers, never its inbox consumer; for the trail runs it conducted that no daemon ends any more,
+    /// reading the runs, writing its own keys of them and telling each run's owner on its thread, as the ant; and
+    /// taking it out of the channels, reading and writing their entries and announcing each change in the channel as
+    /// the channel manager.
     pub fn for_retired_consumers(ant: &UserId) -> Self {
         let threads = kv_stream(THREADS_BUCKET);
         Self {
@@ -190,6 +192,9 @@ impl Permissions {
                 subject::kv_get(TRAIL_RUNS_BUCKET, format_args!("{ant}.*")),
                 subject::trail_runs(ant),
                 subject::inbox_from(ant),
+                format!("$JS.API.DIRECT.GET.{}", kv_stream(CHANNELS_BUCKET)),
+                subject::kv_all(CHANNELS_BUCKET),
+                subject::chan_from(&UserId::channel_manager()),
             ],
             subscribe: vec![format!("{ENROLL_INBOX}.>")],
         }
