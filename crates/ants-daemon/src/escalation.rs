@@ -13,6 +13,10 @@
 //! that loops back or past `max_escalation_hops`, it goes to the thread's owner, else the default human, as it did
 //! before chains. Only a human's message ends an escalation.
 //!
+//! A chain goes through the forest of teams as the escalation is sent ([`forest`]): a team in `escalate_to` stands for
+//! its lead, and an ant on a team with no `escalate_to` escalates to its team's lead, which climbs to the lead above
+//! it, and so on to the top lead, whose chain goes to the thread's owner.
+//!
 //! Each level that goes up a chain posts to the thread's notes with a fresh turn budget, so the members have turns
 //! to coordinate there even when the notes ran out. A member's prompt says who leads ([`group_note`]); the leader's
 //! reply goes to the stuck ant, a non-leader's to the thread notes. A member that sends the escalation one level
@@ -43,8 +47,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_proto::{
-    ChannelId, DEFAULT_MAX_ESCALATION_HOPS, DEFAULT_TURN_BUDGET, Envelope, Escalation, EscalationReason, Hop,
-    NotesPost, OwnerBecause, Role, ThreadId, UserId,
+    ChannelId, DEFAULT_MAX_ESCALATION_HOPS, DEFAULT_TURN_BUDGET, Envelope, Escalation, EscalationReason, Hop, JsDomain,
+    NotesPost, OwnerBecause, Role, TeamDirectory, ThreadId, UserId,
 };
 use anyhow::Result;
 use futures::future::BoxFuture;
@@ -62,6 +66,7 @@ use crate::records::heed::Heed;
 use crate::records::links;
 
 mod deadlines;
+pub mod forest;
 mod route;
 mod step;
 mod text;
@@ -97,6 +102,26 @@ pub fn jetstream_sender(js: async_nats::jetstream::Context) -> Sender {
             let ack = bus::store_acked(&js, envelope.subject(), &envelope, &id).await?;
             status::escalated(&js.client(), &envelope);
             Ok(ack.map(|ack| ack.sequence))
+        })
+    })
+}
+
+/// Reads the team directory a chain goes through ([`forest`]): None when the bus keeps none, or it breaks the rules or
+/// cannot be read in time, the chain then going as `escalate_to` names it.
+pub type Teams = Arc<dyn Fn() -> BoxFuture<'static, Option<TeamDirectory>> + Send + Sync>;
+
+/// Reads the team directory of `js` ([`crate::teams::read_quickly`]).
+pub fn jetstream_teams(js: async_nats::jetstream::Context, js_domain: Option<JsDomain>) -> Teams {
+    Arc::new(move || {
+        let (js, js_domain) = (js.clone(), js_domain.clone());
+        Box::pin(async move {
+            match crate::teams::open(&js, js_domain.as_ref()).await {
+                Ok(kv) => crate::teams::read_quickly(&kv).await,
+                Err(e) => {
+                    tracing::warn!(error = format!("{e:#}"), "opening the team directory");
+                    None
+                }
+            }
         })
     })
 }
@@ -207,6 +232,8 @@ pub struct Escalator {
     colony: Colony,
     /// The chains kept past the colony, for a leader that is offline.
     chains: Option<Chains>,
+    /// The team directory chains go through; None takes them as `escalate_to` names them.
+    teams: Option<Teams>,
     humans: Registry,
     ledger: Arc<Ledger>,
     send: Sender,
@@ -231,6 +258,7 @@ impl Escalator {
             chain,
             colony,
             chains: None,
+            teams: None,
             humans,
             ledger,
             send,
@@ -265,6 +293,12 @@ impl Escalator {
     pub fn with_chains(mut self, chains: Chains) -> Self {
         self.chains = Some(chains);
         self
+    }
+
+    /// Take each chain through the forest of teams `teams` reads ([`forest::chain`]).
+    #[must_use]
+    pub fn with_teams(self, teams: Teams) -> Self {
+        Self { teams: Some(teams), ..self }
     }
 
     /// Post to the thread's notes through `notes` as each escalation goes up a level, with a fresh budget.
@@ -671,9 +705,20 @@ impl Escalator {
         Ok((Escalated::Owner(human), why))
     }
 
+    /// The chain of `leader`: its escalate_to ([`Escalator::escalate_to_of`]) through the forest of teams
+    /// ([`forest::chain`]).
+    async fn chain_of(&self, leader: &UserId) -> Vec<UserId> {
+        let escalate_to = self.escalate_to_of(leader).await;
+        let teams = match &self.teams {
+            Some(teams) => teams().await,
+            None => None,
+        };
+        forest::chain(leader, &escalate_to, teams.as_ref())
+    }
+
     /// The escalate_to of `leader`: the ant's own, else what the colony lists, else the chain kept for it once its
     /// colony entry expired, else none.
-    async fn chain_of(&self, leader: &UserId) -> Vec<UserId> {
+    async fn escalate_to_of(&self, leader: &UserId) -> Vec<UserId> {
         if *leader == self.ant {
             return self.chain.escalate_to.clone();
         }

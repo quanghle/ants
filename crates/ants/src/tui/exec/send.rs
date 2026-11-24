@@ -111,7 +111,7 @@ pub(super) async fn post(
     files: &[File],
 ) -> Result<Done> {
     let new = thread.is_none();
-    let mut posting = send::Posting::compose(&ctx.js, &ctx.me, channel, thread, text).await?;
+    let mut posting = send::Posting::compose(&ctx.js, ctx.domain.as_ref(), &ctx.me, channel, thread, text).await?;
     if let Some(q) = quote {
         posting.post = posting.post.quoting(q.id, q.quote(false));
     }
@@ -179,17 +179,23 @@ pub(super) async fn grant(ctx: &Ctx, thread: ThreadId, text: String, files: &[Fi
     ask(ctx, ant.into(), Some(thread), text, None, false, files).await
 }
 
-/// Hand `source` to `to` on a new thread, as `ants ask --forward` does.
+/// Hand `source` to `to` on a new thread, as `ants ask --forward` does: to a team's lead carrying the team when `to`
+/// says so.
 pub(super) async fn forward(
     ctx: &Ctx,
-    to: UserId,
+    to: Addressed,
     source: &forward::Source,
     note: &str,
     files: &[File],
 ) -> Result<Done> {
     let files = source.files(&ctx.js, ctx.keyring.as_deref(), files.to_vec()).await?;
-    let envelope = source.envelope(&ctx.me, to.clone(), note);
-    deliver(ctx, to, envelope, None, &files, true).await
+    let told = match &to.team {
+        Some(team) => format!("team {team} (lead {})", to.to),
+        None => to.to.to_string(),
+    };
+    let mut envelope = source.envelope(&ctx.me, to.to.clone(), note);
+    to.apply(&mut envelope);
+    deliver(ctx, told, envelope, None, &files, true).await
 }
 
 /// Post `text` to the notes of `thread` as `ants notes` does, `files` going with it.

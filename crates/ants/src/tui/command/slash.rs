@@ -104,7 +104,8 @@ impl Model {
             Slash::Forward { to, note } => {
                 let source = self.forwardable(now)?;
                 source.check().map_err(|e| format!("{e:#}"))?;
-                run(Job::Forward { to, source, note })
+                let ants_client::sending::Addressed { to, team } = self.addressed(to)?;
+                run(Job::Forward { to, source, note, team })
             }
             Slash::Save(to) => run(Job::Save(Box::new(self.marked()?), to.map(|to| attach::expand(&to)))),
             Slash::Add(add) => run(Job::Add(add)),

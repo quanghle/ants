@@ -154,6 +154,10 @@ async fn manage(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
     let (_, js) = nats.connect("ants-cli").await?;
     let kv = channel::open(&js).await?;
     let humans = humans::load(&js, &nats.me).await;
+    let named =
+        matches!(command, ChannelCommand::Create { .. } | ChannelCommand::Set { .. } | ChannelCommand::Add { .. });
+    let teams = if named { channel::teams(&js, nats.domain).await } else { None };
+    let teams = teams.as_ref();
     match command {
         ChannelCommand::Create { channel, members, messenger, owner, description } => {
             let change = channel::Change {
@@ -163,20 +167,21 @@ async fn manage(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
                 description: Some(description),
                 ..channel::Change::default()
             };
-            change.check(&channel, &humans)?;
+            change.check(&channel, &humans, teams)?;
             let mut entry = ants_proto::ChannelEntry::new(channel);
             change.apply(&mut entry);
             channel::create(&kv, &entry).await?;
             warn_unserved(&js, entry.members.iter().chain(&entry.messenger).chain(&entry.owner), &humans).await;
             println!("created {}", channel::describe(&entry));
         }
-        command @ ChannelCommand::Set { .. } => set(&js, &kv, &humans, command).await?,
+        command @ ChannelCommand::Set { .. } => set(&js, &kv, &humans, teams, command).await?,
         ChannelCommand::Add { channel, users } => {
-            write(&js, &kv, &humans, &channel, &channel::Change { add: users, ..channel::Change::default() }).await?;
+            let change = channel::Change { add: users, ..channel::Change::default() };
+            write(&js, &kv, &humans, teams, &channel, &change).await?;
         }
         ChannelCommand::Remove { channel, users } => {
-            write(&js, &kv, &humans, &channel, &channel::Change { remove: users, ..channel::Change::default() })
-                .await?;
+            let change = channel::Change { remove: users, ..channel::Change::default() };
+            write(&js, &kv, &humans, teams, &channel, &change).await?;
         }
         ChannelCommand::List => {
             let entries = channel::list(&kv).await?;
@@ -217,6 +222,7 @@ async fn set(
     js: &async_nats::jetstream::Context,
     kv: &async_nats::jetstream::kv::Store,
     humans: &ants_proto::Humans,
+    teams: Option<&ants_proto::TeamDirectory>,
     command: ChannelCommand,
 ) -> Result<()> {
     let ChannelCommand::Set {
@@ -245,7 +251,7 @@ async fn set(
              --description or --no-description"
         );
     }
-    write(js, kv, humans, &channel, &change).await
+    write(js, kv, humans, teams, &channel, &change).await
 }
 
 /// Write `change` to `channel`, warning of what it warns of, and print the channel as it stored it.
@@ -253,10 +259,11 @@ async fn write(
     js: &async_nats::jetstream::Context,
     kv: &async_nats::jetstream::kv::Store,
     humans: &ants_proto::Humans,
+    teams: Option<&ants_proto::TeamDirectory>,
     channel: &ChannelId,
     change: &channel::Change,
 ) -> Result<()> {
-    let changed = change.write(js, kv, channel, humans).await?;
+    let changed = change.write(js, kv, channel, humans, teams).await?;
     for warning in &changed.warnings {
         tracing::warn!("{warning}");
     }

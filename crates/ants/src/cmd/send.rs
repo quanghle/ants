@@ -463,7 +463,7 @@ pub(crate) async fn post(nats: &Nats<'_>, args: PostArgs) -> Result<()> {
     if let Some(other) = replied.as_ref().and_then(|r| r.channel.as_ref()).filter(|c| **c != channel) {
         bail!("the message replied to is a post to #{other}, not #{channel}");
     }
-    let mut posting = Posting::compose(&js, &nats.me, channel, thread, text).await?;
+    let mut posting = Posting::compose(&js, nats.domain, &nats.me, channel, thread, text).await?;
     if let Some(r) = replied {
         posting.post = posting.post.quoting(r.quoted.id, r.quoted.quote(false));
     }

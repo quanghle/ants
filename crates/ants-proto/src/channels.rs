@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     Attachment, ChannelId, ChannelOp, DEFAULT_TURN_BUDGET, Envelope, Error, Humans, MAX_CHANNEL_DESCRIPTION, Mention,
-    Quote, Refusal, ThreadId, UserId, parse_mentions, subject,
+    Quote, Refusal, TeamDirectory, TeamRefusal, ThreadId, UserId, parse_mentions, subject,
 };
 #[cfg(doc)]
 use crate::{CHANNELS_BUCKET, HUMANS_BUCKET, WEBHOOK_ALLOW};
@@ -207,6 +207,25 @@ impl ChannelEntry {
     }
 }
 
+/// A team a [`ChannelPost`] @mentions, which mentions the team's `lead` in its stead ([`ChannelPost::through_teams`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamMention {
+    pub team: UserId,
+    pub lead: UserId,
+}
+
+/// Why a post @mentioning a team is not posted ([`ChannelPost::through_teams`]).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TeamPostRefusal {
+    #[error("nothing posted: {0}")]
+    Team(#[from] TeamRefusal),
+    #[error(
+        "nothing posted: @{team} mentions the lead of team {team}, {lead}, who is no member of #{channel}; a team is no \
+         channel member: mention a member, or have {lead} added to #{channel}"
+    )]
+    NotMember { team: UserId, lead: UserId, channel: ChannelId },
+}
+
 /// A post to a channel, on [`subject::chan`]: like a Slack message, either a top-level post that starts a thread or a
 /// post on an existing thread.
 ///
@@ -224,9 +243,15 @@ pub struct ChannelPost {
     pub thread_id: ThreadId,
     pub from: UserId,
     pub text: String,
-    /// The users the post @mentions, in order ([`parse_mentions`] of the text, when built here).
+    /// The users the post @mentions, in order ([`parse_mentions`] of the text, when built here); a team's lead in the
+    /// team's stead ([`ChannelPost::through_teams`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<UserId>,
+    /// The teams the post @mentions, each with the lead mentioned for it ([`ChannelPost::through_teams`]): the lead's
+    /// prompt names the team. The poster sets it; a reader takes it as a claim of the poster's, as
+    /// [`Envelope::team`]. Never copied by [`ChannelPost::reply`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teams: Vec<TeamMention>,
     /// Ant-to-ant turns left on the thread after this post.
     pub turn_budget: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -291,6 +316,7 @@ impl ChannelPost {
             channel,
             thread_id,
             mentions: parse_mentions(&text),
+            teams: Vec::new(),
             from,
             text,
             turn_budget: DEFAULT_TURN_BUDGET,
@@ -421,6 +447,40 @@ impl ChannelPost {
     /// Whether the post @mentions `user`.
     pub fn mentions(&self, user: &UserId) -> bool {
         self.mentions.contains(user)
+    }
+
+    /// The post with each team of `teams` it @mentions standing for the team's lead, its own or the nearest one above
+    /// it ([`TeamDirectory::lead_of`]), as a message to a team goes to it: the lead is mentioned in the team's stead,
+    /// once, and the team kept in [`ChannelPost::teams`]. Refused for a team with no lead in it nor above it and,
+    /// given the channel's `entry`, for one whose lead is no member of the channel, as a team itself never is one.
+    pub fn through_teams(
+        mut self,
+        teams: &TeamDirectory,
+        entry: Option<&ChannelEntry>,
+    ) -> Result<Self, TeamPostRefusal> {
+        let mut mentions: Vec<UserId> = Vec::with_capacity(self.mentions.len());
+        for mention in std::mem::take(&mut self.mentions) {
+            let user = if teams.is_team(&mention) {
+                let lead = teams.lead_of(&mention)?.clone();
+                if let Some(entry) = entry.filter(|e| !e.is_member(&lead)) {
+                    return Err(TeamPostRefusal::NotMember { team: mention, lead, channel: entry.channel.clone() });
+                }
+                self.teams.push(TeamMention { team: mention, lead: lead.clone() });
+                lead
+            } else {
+                mention
+            };
+            if !mentions.contains(&user) {
+                mentions.push(user);
+            }
+        }
+        self.mentions = mentions;
+        Ok(self)
+    }
+
+    /// The teams the post @mentions for `lead`, which it mentions as their lead ([`ChannelPost::teams`]).
+    pub fn teams_led_by<'a>(&'a self, lead: &'a UserId) -> impl Iterator<Item = &'a UserId> + 'a {
+        self.teams.iter().filter(move |t| t.lead == *lead).map(|t| &t.team)
     }
 
     /// The message telling `human`, a human member of the channel it @mentions ([`ChannelEntry::notified`]), of the

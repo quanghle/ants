@@ -93,13 +93,38 @@ fn f_forwards_the_selected_message_else_the_thread_s_tldr() {
     m.data.cards.tldr.insert(thread, tldr.clone());
     assert_eq!(m.unfit("forward", at(2)), None);
     let source = forward::Source::Thread(Box::new(tldr));
-    let job = Job::Forward { to: user("dev-b"), source, note: String::new() };
+    let job = Job::Forward { to: user("dev-b"), source, note: String::new(), team: None };
     assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, "/forward @dev-b".into())));
 
     m.key(Key::Up, at(2));
     m.key(Key::Char('f'), at(2));
     typed(&mut m, "dev-b over to you");
     let source = forward::Source::Message(Box::new(entries[1].clone()));
-    let job = Job::Forward { to: user("dev-b"), source, note: "over to you".into() };
+    let job = Job::Forward { to: user("dev-b"), source, note: "over to you".into(), team: None };
     assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, "/forward @dev-b over to you".into())));
+}
+
+#[test]
+fn forward_to_a_team_hands_it_to_the_team_s_lead_carrying_the_team() {
+    let thread = ThreadId::generate();
+    let mut m = model();
+    let mut directory = ants_proto::TeamDirectory::default();
+    directory.create(ants_proto::Team::new(user("backend"), user("dev-a"), user("alice")), None).unwrap();
+    directory.create(ants_proto::Team::unled(user("web"), user("alice")), None).unwrap();
+    m.read(Read::Teams(Ok(Some(directory))), at(0));
+    m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+    let entries = vec![message(1, &thread, "alice", "dev-b", "deploy"), message(2, &thread, "dev-b", "alice", "done")];
+    m.stored(entries.clone(), at(2));
+    m.focus = Focus::View;
+    m.key(Key::Up, at(2));
+    m.key(Key::Char('f'), at(2));
+    typed(&mut m, "web take it");
+    assert_eq!(m.key(Key::Enter, at(2)), None, "nobody to hand it to");
+    let status = m.ui.bar.status.as_ref().unwrap();
+    assert!(status.text.starts_with("team web has no lead, nor has any team above it"), "{}", status.text);
+
+    m.ui.bar.set_text("/forward @backend take it");
+    let source = forward::Source::Message(Box::new(entries[1].clone()));
+    let job = Job::Forward { to: user("dev-a"), source, note: "take it".into(), team: Some(user("backend")) };
+    assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, "/forward @backend take it".into())));
 }

@@ -22,10 +22,12 @@
 //! # The ant's chain
 //!
 //! With an `escalate_to`, the request also goes to every ant of it, on `ants.inbox.<member>.<ant>`, as an
-//! approval escalation at level 1 whose text shows the tool call ([`NatsApprover::with_chain`]). Any member decides
+//! approval escalation at level 1 whose text shows the tool call ([`NatsApprover::with_chain`]); a team in it stands
+//! for its lead as the request is sent ([`NatsApprover::with_teams`]). Any member decides
 //! with the MCP tool `decide_approval`, which sends an envelope carrying the decision to
 //! `ants.inbox.<ant>.<member>`: the subject pins the member, so ant credentials need no rights on another
-//! ant's approvals. The ant takes such a decision only from its own `escalate_to` and for a request still
+//! ant's approvals. The ant takes such a decision only from an ant of its own `escalate_to` the request went to and for
+//! a request still
 //! waiting ([`Envelope::chain_decision`]); it hears it on a core subscription to its inbox while waiting, and the inbox
 //! consumer, which delivers it again later, acks it without prompting ([`NatsApprover::offer`]). The first decision
 //! wins: a member's, unless a human's is stored by the time the member's arrives. The escalation does not climb further
@@ -66,7 +68,7 @@ use futures::future::BoxFuture;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::bus;
-use crate::escalation::Chain;
+use crate::escalation::{Chain, Teams, forest};
 use crate::people::assistant_first::AssistantFirst;
 use crate::people::humans::{Registry, Withdrawal};
 use crate::permission::{Approver, Offer};
@@ -106,14 +108,17 @@ struct Listening {
     decisions: bus::relayed::Heard,
     /// The ant's live inbox, where the ants of its chain decide: none without a chain, or once it closed.
     inbox: Option<bus::LiveInbox>,
+    /// The ants of the chain that may decide the request ([`NatsApprover::chain`]).
+    chain: Vec<UserId>,
     consents: broadcast::Receiver<UserId>,
     withdrawals: broadcast::Receiver<Withdrawal>,
     /// The decisions the inbox consumer offers ([`NatsApprover::offer`]).
     from_chain: mpsc::UnboundedReceiver<Offered>,
 }
 
-/// The requests waiting for a decision, by id, with where a decision offered on each goes.
-type Waiting = Arc<Mutex<HashMap<Uuid, (ApprovalRequest, mpsc::UnboundedSender<Offered>)>>>;
+/// The requests waiting for a decision, by id, with the ants of the chain that may decide each and where a decision
+/// offered on it goes.
+type Waiting = Arc<Mutex<HashMap<Uuid, (ApprovalRequest, Vec<UserId>, mpsc::UnboundedSender<Offered>)>>>;
 
 /// What settled a request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +164,8 @@ pub struct NatsApprover {
     timeout: Duration,
     /// The ant's escalate_to and its hop limit; an empty chain asks only the humans.
     chain: Chain,
+    /// The team directory a team in escalate_to is looked up in; None takes escalate_to as it is.
+    teams: Option<Teams>,
     waiting: Waiting,
     /// Who is a human, and who is told of an expired request on a thread with no owner.
     humans: Registry,
@@ -204,7 +211,7 @@ impl NatsApprover {
         humans: Registry,
     ) -> Self {
         let (chain, waiting, answering) = Default::default();
-        Self { client, js, ant, timeout, chain, waiting, humans, answering, assistants: None }
+        Self { client, js, ant, timeout, chain, teams: None, waiting, humans, answering, assistants: None }
     }
 
     /// The same, also sending each request to the assistant of the human it waits for, which `assistants` finds.
@@ -217,6 +224,23 @@ impl NatsApprover {
     #[must_use]
     pub fn with_chain(self, chain: Chain) -> Self {
         Self { chain, ..self }
+    }
+
+    /// The same, a team in escalate_to standing for its lead in the directory `teams` reads as each request is sent.
+    #[must_use]
+    pub fn with_teams(self, teams: Teams) -> Self {
+        Self { teams: Some(teams), ..self }
+    }
+
+    /// The ants of the chain a request goes to now, which may decide it: those escalate_to names, a team standing for
+    /// its lead ([`forest::named`]).
+    async fn chain(&self) -> Vec<UserId> {
+        let escalate_to = &self.chain.escalate_to;
+        let teams = match &self.teams {
+            Some(teams) if !escalate_to.is_empty() => teams().await,
+            _ => None,
+        };
+        forest::named(&self.ant, escalate_to, teams.as_ref())
     }
 
     /// Note that the ant answers `envelope` on its thread until the returned guard drops: a tool request of the turn
@@ -290,7 +314,7 @@ impl NatsApprover {
     pub fn offer(&self, envelope: &Envelope) {
         let Some(decision) = envelope.approval.as_deref() else { return };
         let waiting = self.waiting.locked();
-        let Some((request, chain_decided)) = waiting.get(&decision.request_id) else {
+        let Some((request, chain, chain_decided)) = waiting.get(&decision.request_id) else {
             let (from, request) = (&envelope.from, decision.request_id);
             tracing::debug!(%from, %request, "ignoring a decision on a request no longer waiting");
             return;
@@ -305,7 +329,7 @@ impl NatsApprover {
             let _ = chain_decided.send(Offered::Held(held));
             return;
         }
-        match envelope.chain_decision(request, &self.chain.escalate_to) {
+        match envelope.chain_decision(request, chain) {
             Some(decided) => {
                 let _ = chain_decided.send(Offered::Chain((envelope.from.clone(), decided)));
             }
@@ -317,13 +341,11 @@ impl NatsApprover {
         }
     }
 
-    /// Send `request` to every ant of the chain, as an approval escalation showing the tool call, with the tool rules
+    /// Send `request` to every ant of `chain`, as an approval escalation showing the tool call, with the tool rules
     /// of the message the ant answers on the thread. Returns whom it went to: none when the chain is empty or allows
     /// no hop.
-    async fn ask_chain(&self, request: &ApprovalRequest) -> Result<Vec<UserId>> {
-        let Hop::Chain { escalation, to } =
-            Escalation::of_request(request).up(&self.chain.escalate_to, self.chain.max_hops)
-        else {
+    async fn ask_chain(&self, request: &ApprovalRequest, chain: &[UserId]) -> Result<Vec<UserId>> {
+        let Hop::Chain { escalation, to } = Escalation::of_request(request).up(chain, self.chain.max_hops) else {
             return Ok(Vec::new());
         };
         let text = chain_text(request, &to);
@@ -341,12 +363,12 @@ impl NatsApprover {
     }
 
     /// Send `request` to the assistant of `human`, the human it waits for, when one stands for it and can act, and is
-    /// not of the chain, which asked it already: as an approval escalation the assistant decides for the human, held
+    /// not of `chain`, which asked it already: as an approval escalation the assistant decides for the human, held
     /// until the human confirms or a pre-allow rule covers it. Returns the assistant it went to; failing to, it only
     /// warns.
-    async fn ask_assistant(&self, request: &ApprovalRequest, human: &UserId) -> Option<UserId> {
+    async fn ask_assistant(&self, request: &ApprovalRequest, human: &UserId, chain: &[UserId]) -> Option<UserId> {
         let assistant = self.assistants.as_ref()?.of(human, &self.ant).await?;
-        if self.chain.escalate_to.contains(&assistant) {
+        if chain.contains(&assistant) {
             return None;
         }
         let escalation = Escalation::of_request(request).to_assistant(assistant.clone(), human.clone());
@@ -370,8 +392,8 @@ impl NatsApprover {
     }
 
     /// [`Self::ask_chain`], logging whom it asked or why it could not: those it asked.
-    async fn ask_chain_logged(&self, request: &ApprovalRequest) -> Vec<UserId> {
-        match self.ask_chain(request).await {
+    async fn ask_chain_logged(&self, request: &ApprovalRequest, chain: &[UserId]) -> Vec<UserId> {
+        match self.ask_chain(request, chain).await {
             Ok(to) => {
                 if !to.is_empty() {
                     tracing::info!(request = %request.id, ?to, "asked the ant's chain too");
@@ -404,15 +426,11 @@ impl NatsApprover {
             .for_human(Some(human.clone()), self.chain.stand_in.clone());
         // Subscribe first, so a quick answer is not missed.
         let decisions = relayed::subscribe(&self.client, request.decision_subject()).await?;
-        let inbox = if self.chain.escalate_to.is_empty() {
-            None
-        } else {
-            Some(bus::live_inbox(&self.client, &self.ant).await?)
-        };
+        let chain = self.chain().await;
+        let inbox = if chain.is_empty() { None } else { Some(bus::live_inbox(&self.client, &self.ant).await?) };
         let (consents, withdrawals) = (self.humans.consents(), self.humans.withdrawals());
         let (chain_decided, from_chain) = mpsc::unbounded_channel();
-        let mut listening = Listening { decisions, inbox, consents, withdrawals, from_chain };
-        self.waiting.locked().insert(request.id, (request.clone(), chain_decided));
+        self.waiting.locked().insert(request.id, (request.clone(), chain.clone(), chain_decided));
         // Leaves the waiting map once decided, expired or given up.
         let _pending = DropGuard::new(request.id, |id| {
             self.waiting.locked().remove(&id);
@@ -421,8 +439,9 @@ impl NatsApprover {
         if let Some((_, asked)) = self.answering.locked().get_mut(&request.thread_id) {
             *asked += 1;
         }
-        let mut asked = self.ask_chain_logged(&request).await;
-        asked.extend(self.ask_assistant(&request, &human).await);
+        let mut asked = self.ask_chain_logged(&request, &chain).await;
+        asked.extend(self.ask_assistant(&request, &human, &chain).await);
+        let mut listening = Listening { decisions, inbox, chain, consents, withdrawals, from_chain };
         let waits = StatusUpdate::Approval { request_id: request.id };
         crate::monitoring::status::publish(&self.client, &self.ant, &request.thread_id, waits);
         crate::monitoring::status::state(&self.client, &self.ant, &request.thread_id, State::WaitingApproval);
@@ -450,7 +469,7 @@ impl NatsApprover {
 
     /// How `request` was settled, as heard on `listening`; None once nothing more can be heard.
     async fn wait(&self, request: &ApprovalRequest, listening: &mut Listening) -> Option<Settled> {
-        let Listening { decisions, inbox, consents, withdrawals, from_chain } = listening;
+        let Listening { decisions, inbox, chain, consents, withdrawals, from_chain } = listening;
         // Whether a decision was heard for the request, and a failure to read the stored one was warned of.
         let (mut heard, mut warned) = (false, false);
         // The decisions assistants made for their humans, the latest of each, waiting for the humans' consent.
@@ -462,7 +481,7 @@ impl NatsApprover {
             let next = tokio::select! {
                 msg = decisions.next() => msg.map_or(Heard::Closed, Heard::Human),
                 msg = next_message(inbox) => match msg {
-                    Some(msg) => self.chain_decision(request, &msg).map_or(Heard::Nothing, Heard::Chain),
+                    Some(msg) => self.chain_decision(request, chain, &msg).map_or(Heard::Nothing, Heard::Chain),
                     None => {
                         *inbox = None;
                         Heard::Nothing
@@ -623,8 +642,13 @@ impl NatsApprover {
         }
     }
 
-    /// The decision on `request` that `msg`, heard on the ant's inbox, carries from an ant of its chain, if any.
-    fn chain_decision(&self, request: &ApprovalRequest, msg: &async_nats::Message) -> Option<FromChain> {
+    /// The decision on `request` that `msg`, heard on the ant's inbox, carries from an ant of `chain`, if any.
+    fn chain_decision(
+        &self,
+        request: &ApprovalRequest,
+        chain: &[UserId],
+        msg: &async_nats::Message,
+    ) -> Option<FromChain> {
         let envelope = serde_json::from_slice::<Envelope>(&msg.payload).ok().filter(|e| e.approval.is_some())?;
         if let Err(e) = envelope.check_subject(&msg.subject) {
             tracing::warn!(error = %e, "ignoring an approval decision with a forged sender");
@@ -634,7 +658,7 @@ impl NatsApprover {
         if envelope.on_behalf_of.is_some() {
             return None;
         }
-        let decided = envelope.chain_decision(request, &self.chain.escalate_to);
+        let decided = envelope.chain_decision(request, chain);
         if decided.is_none() && envelope.approval.as_ref().is_some_and(|d| d.request_id == request.id) {
             let (from, request) = (&envelope.from, request.id);
             tracing::warn!(%from, %request, "ignoring an approval decision from outside the ant's escalate_to");

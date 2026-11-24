@@ -114,7 +114,8 @@ pub struct Ant {
     /// The share of a spend cap, in percent, past which a human is warned once; 0 for never.
     #[serde(default = "default_spend_warn_percent")]
     pub spend_warn_percent: u8,
-    /// Ants the ant's escalations go to before any human, the first one leading; published in the colony.
+    /// Ants the ant's escalations go to before any human, the first one leading, a team standing for its lead;
+    /// published in the colony.
     #[serde(default)]
     pub escalate_to: Vec<UserId>,
     /// Turns a thread gets from a human's message, a webhook's or schedule's, and a leader's answer to an

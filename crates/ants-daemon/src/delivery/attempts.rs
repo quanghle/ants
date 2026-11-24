@@ -39,7 +39,7 @@ pub enum Marker {
 #[serde(untagged)]
 pub enum Reply {
     Message(Box<Envelope>),
-    Post(ChannelPost),
+    Post(Box<ChannelPost>),
     Notes(NotesPost),
 }
 

@@ -70,7 +70,7 @@ pub use attachments::{
 };
 pub use behalf::{ASSISTANT_RECORD, Acting, AssistantRecord, RecordError, assistant_record_key};
 pub use chanadm::{ChannelAdminOutcome, ChannelAdminReply, ChannelAdminRequest, ChannelOp, Refusal};
-pub use channels::{ChannelEntry, ChannelPost, ThreadOrigin};
+pub use channels::{ChannelEntry, ChannelPost, TeamMention, TeamPostRefusal, ThreadOrigin};
 pub use colony::{
     Activity, AntModel, ColonyEntry, HarnessAgent, HarnessFailing, HarnessLimit, LimitKind, MemoryLow, Paused,
     ServingFallback, SignInNeeded, Unserved,

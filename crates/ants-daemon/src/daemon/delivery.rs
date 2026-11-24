@@ -149,7 +149,7 @@ impl Inbox<'_> {
                 let Some(post) = self.post_reply(h, &posted.post, read, &text).await? else {
                     return Ok(None);
                 };
-                Reply::Post(post)
+                Reply::Post(Box::new(post))
             }
             // The answer once a human answered what the turn on a trail step asked: the step's reply, to its conductor.
             _ if let Some(asked) = asked => {
@@ -161,7 +161,7 @@ impl Inbox<'_> {
             _ if let Some(channel) = &incoming.resume => {
                 let post = ChannelPost::on_thread(channel.clone(), thread.clone(), self.ant.clone(), text);
                 let post = post.with_owner(envelope.owner.clone()).with_creator(envelope.creator.clone());
-                Reply::Post(post.spend(envelope.turn_budget)?)
+                Reply::Post(Box::new(post.spend(envelope.turn_budget)?))
             }
             // A step of a trail the ant conducts, sent itself: the answer returns to the run in the ant's inbox.
             _ if envelope.trail_step.is_some() && envelope.from == *self.ant => {
@@ -217,7 +217,7 @@ impl Inbox<'_> {
             Reply::Post(post) => {
                 let (attachments, left_out) = self.reply_files(thread, files, |id| post.attachment_handle(id)).await;
                 let text = with_left_out(post.text, left_out);
-                Reply::Post(ChannelPost { title, text, attachments, ..post })
+                Reply::Post(Box::new(ChannelPost { title, text, attachments, ..*post }))
             }
             // Posted with the title and files already.
             Reply::Notes(post) => Reply::Notes(post),
@@ -373,9 +373,9 @@ impl Inbox<'_> {
             (Reply::Notes(_), _) => reply,
             (Reply::Post(post), Some(posted)) => {
                 // Boxed: rereading the thread would grow the future of every turn delivering a reply.
-                let spending = Box::pin(self.post_spending(h, &posted.post, post.clone()));
+                let spending = Box::pin(self.post_spending(h, &posted.post, (**post).clone()));
                 let Some(post) = spending.await? else { return Ok(()) };
-                spent = Reply::Post(post);
+                spent = Reply::Post(Box::new(post));
                 &spent
             }
             _ => {

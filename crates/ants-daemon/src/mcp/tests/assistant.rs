@@ -514,6 +514,36 @@ async fn what_the_assistant_does_for_its_human_carries_on_behalf_of() {
     assert!(!ok && refused.contains("unknown op retire"), "{refused}");
 }
 
+/// A message for the human to a team goes to the team's lead carrying the team, as send_message's does.
+#[tokio::test]
+async fn the_assistant_sends_for_its_human_to_a_team_s_lead() {
+    let home = home("assist-team");
+    let (mcp, mut sent, humans, device, store) = assistant(&home).await;
+    grant(&humans, &device, Some("dev-a"), false);
+    mcp.with_teams(super::teams::memory_teams(super::teams::forest(), false).0);
+    let (url, token) = http_server(&mcp, &ThreadId::generate());
+    let client = http_client(&url, &token).await;
+
+    let (ok, text) = call(&client, "send_for_human", serde_json::json!({"to": "@infra", "text": "disk"})).await;
+    assert!(ok && text.starts_with("Sent boss, the lead of team infra, message"), "{text}");
+    let out = sent.try_recv().unwrap();
+    assert_eq!(
+        (&out.to, &out.team, out.on_behalf_of.as_ref()),
+        (&user("boss"), &Some(user("infra")), Some(&user("alice")))
+    );
+    let recorded = store.owners.locked().clone();
+    assert_eq!(recorded, [(out.thread_id.clone(), user("boss"), user("alice"), user("dev-a"))], "the lead's thread");
+
+    let (ok, text) = call(&client, "send_for_human", serde_json::json!({"to": "orphans", "text": "?"})).await;
+    assert!(!ok && text.starts_with("nothing sent: team orphans has no lead, nor has any team above it"), "{text}");
+    let (ok, text) = call(&client, "send_for_human", serde_json::json!({"to": "backend", "text": "?"})).await;
+    assert!(!ok && text.starts_with("team backend sends to its lead, this ant;"), "{text}");
+    let (ok, text) = call(&client, "send_for_human", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
+    assert!(ok, "{text}");
+    assert_eq!(sent.try_recv().unwrap().team, None, "an ant is no team");
+    assert!(sent.try_recv().is_err());
+}
+
 /// A read of an ant's memories carries the id of its identity record, which its provider knows it by.
 #[tokio::test]
 async fn the_assistant_reads_memories_naming_the_ant_s_identity() {

@@ -149,7 +149,8 @@ impl Tools {
     #[tool(description = "Escalate the current thread when stuck on it: `issue` says what blocks it and what is \
         needed. It goes up the thread's origin chain one level at a time: the escalation chain of the ant that \
         created the thread with a channel post, else this ant's, to the escalate_to ants (the first leads and \
-        answers on the thread), and to the thread's owner when no chain is left. On an escalation \
+        answers on the thread; a team stands for its lead; an ant on a team with no escalate_to goes to the lead \
+        above it), and to the thread's owner when no chain is left. On an escalation \
         group's message only its leader escalates, one level higher; the other members post to the thread notes. \
         What would reach a human goes to the human's assistant first, when one can act; the assistant handling such \
         an escalation or question passes it on to its human with this tool. Returns where it went.")]

@@ -9,7 +9,7 @@ use crate::teams::Read;
 
 /// eng (lead boss) holding backend (lead dev-a, with dev-b) and infra (no lead of its own, with dev-i), and orphans,
 /// whose lead was revoked, with no team above it.
-fn forest() -> TeamDirectory {
+pub(super) fn forest() -> TeamDirectory {
     let mut directory = TeamDirectory::default();
     let mut eng = Team::new(user("eng"), user("boss"), ants_test_support::human());
     eng.set_description(Some("Builds the shop.")).unwrap();
@@ -27,7 +27,7 @@ fn forest() -> TeamDirectory {
 
 /// The teams in memory, changed for dev-a as `ants signer` would, any name an ant of the bus; with `silent` no signer
 /// answers.
-fn memory_teams(directory: TeamDirectory, silent: bool) -> (TeamAccess, Arc<StdMutex<TeamDirectory>>) {
+pub(super) fn memory_teams(directory: TeamDirectory, silent: bool) -> (TeamAccess, Arc<StdMutex<TeamDirectory>>) {
     let shared = Arc::new(StdMutex::new(directory));
     let read = shared.clone();
     let changed = shared.clone();

@@ -1,5 +1,6 @@
-//! Tests of the doctor's team checks: a team with no lead, nor any above it, a lead not live, an unknown member and a team taking the name
-//! of an ant or a human; and whether `ants signer` answers each ant's team changes.
+//! Tests of the doctor's team checks: a team with no lead, nor any above it, a lead not live, an owner no human, an
+//! unknown member and a team taking the name of an ant or a human; and whether `ants signer` answers each ant's team
+//! changes.
 
 use std::collections::BTreeSet;
 
@@ -56,6 +57,26 @@ fn an_unknown_member_and_a_taken_name_fail_and_a_team_with_no_lead_and_a_lead_no
     );
     assert_eq!(checks[0].fix, ["ants team set backend --lead ANT"]);
     assert_eq!(checks[1].fix, ["ants team remove backend dev-b"]);
+}
+
+#[test]
+fn an_owner_no_human_warns_unless_the_humans_are_unread() {
+    let now = chrono::Utc::now();
+    let mut directory = backend();
+    directory.teams[0].owner = Some(p("dev-b"));
+    let known = BTreeSet::from([p("dev-a"), p("dev-b")]);
+    let checks = findings(&directory, &known, Some(&Humans::of([p("alice")])), None, now);
+    let details: Vec<(Status, &str)> = checks.iter().map(|c| (c.status, c.detail.as_str())).collect();
+    assert_eq!(
+        details,
+        [(Status::Warn, "dev-b, the owner of team backend, is no human of the bus: no human answers for the team")]
+    );
+    assert_eq!(checks[0].fix, ["ants team set backend --owner HUMAN, or ants team set backend --no-owner"]);
+    directory.teams[0].owner = Some(p("alice"));
+    let checks = findings(&directory, &known, Some(&Humans::of([p("alice")])), None, now);
+    assert_eq!(checks[0].status, Status::Ok, "{}", checks[0]);
+    directory.teams[0].owner = Some(p("dev-b"));
+    assert_eq!(findings(&directory, &known, None, None, now)[0].status, Status::Ok, "the humans unread");
 }
 
 #[test]

@@ -29,15 +29,24 @@ pub fn description_note(channel: &ChannelId, description: &str) -> String {
     format!("[ants] #{channel}, the channel of this thread, is described by a human as:\n{description}")
 }
 
-/// The prompt for `post`, which @mentions `ant`, after the `context` of its thread. `left` is the turns the thread
-/// keeps after the reply; none when the final answer is not posted, as for a post answering one of the ant's own.
+/// The prompt for `post`, which @mentions `ant`, after the `context` of its thread, naming the teams the post
+/// mentions `ant` for, their lead ([`ChannelPost::teams`]). `left` is the turns the thread keeps after the reply;
+/// none when the final answer is not posted, as for a post answering one of the ant's own.
 pub fn prompt(ant: &UserId, post: &ChannelPost, context: &Context, left: Option<u32>) -> String {
     let channel = &post.channel;
     let mut text = format!("[ants] Channel #{channel}, thread {}.\n\n", post.thread_id);
     text.push_str(&context_text(context));
+    let teams: Vec<String> = post.teams_led_by(ant).map(|team| format!("team {team}")).collect();
+    let mentioned = match teams.as_slice() {
+        [] => ant.to_string(),
+        teams => format!(
+            "{}, which {ant} leads (hand the work on to the members, as list_teams shows them, or answer it)",
+            teams.join(" and ")
+        ),
+    };
     let _ = write!(
         text,
-        "[ants] Post from {} mentioning {ant}:\n{}",
+        "[ants] Post from {} mentioning {mentioned}:\n{}",
         poster(post),
         quoted(post.quote.as_ref(), &post.text)
     );
@@ -230,5 +239,18 @@ mod tests {
         assert_eq!(as_envelope(&quoting, &p("dev-a")).quote, quoting.quote);
         let withheld = Quote::new(p("bob"), "the code is 1234").withheld();
         assert_eq!(quoted(Some(&withheld), "done"), "[ants] In reply to a sealed message from bob.\ndone");
+    }
+
+    #[test]
+    fn a_post_mentioning_a_team_names_it_in_its_lead_s_prompt() {
+        let mut ask = post("human", "@backend @dev-b deploy?");
+        ask.mentions = vec![p("dev-a"), p("dev-b")];
+        ask.teams = vec![ants_proto::TeamMention { team: p("backend"), lead: p("dev-a") }];
+        let lead = prompt(&p("dev-a"), &ask, &Context::default(), None);
+        let named = "[ants] Post from human mentioning team backend, which dev-a leads (hand the work on to the \
+                     members, as list_teams shows them, or answer it):\n@backend @dev-b deploy?";
+        assert!(lead.ends_with(named), "{lead}");
+        let member = prompt(&p("dev-b"), &ask, &Context::default(), None);
+        assert!(member.ends_with("[ants] Post from human mentioning dev-b:\n@backend @dev-b deploy?"), "{member}");
     }
 }

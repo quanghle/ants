@@ -344,6 +344,45 @@ async fn the_chain_hears_the_request_and_only_its_decision_counts() {
     approver.offer(&lead_says);
 }
 
+/// A team in escalate_to stands for its lead as the request is sent, and the lead's decision counts.
+#[tokio::test]
+async fn a_team_in_the_chain_is_asked_through_its_lead_whose_decision_counts() {
+    let Some(server) = Server::start() else { return };
+    let [ant, lead, backend]: [UserId; 3] = ["dev-a", "lead", "backend"].map(|u| u.parse().unwrap());
+    let thread: ThreadId = "t1".parse().unwrap();
+    let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
+    bus::ensure_stream(&js).await.unwrap();
+    let (human, human_js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "human").await.unwrap();
+    let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
+    let mut asked = human.subscribe(subject::inbox_of(&lead)).await.unwrap();
+    subscribed(&human_js).await;
+
+    let mut directory = ants_proto::TeamDirectory::default();
+    directory.create(ants_proto::Team::new(backend.clone(), lead.clone(), ants_test_support::human()), None).unwrap();
+    let teams: Teams = Arc::new(move || {
+        let directory = directory.clone();
+        Box::pin(async move { Some(directory) })
+    });
+    let approver = NatsApprover::new(client, js, ant.clone(), WAIT, Registry::new(ants_test_support::human()))
+        .with_chain(chain(&[&backend]))
+        .with_teams(teams);
+    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())));
+    let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
+    let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
+    let msg = timeout(WAIT, asked.next()).await.unwrap().unwrap();
+    let notice: Envelope = serde_json::from_slice(&msg.payload).unwrap();
+    assert_eq!(notice.escalation.as_deref().unwrap().request_id, Some(request.id), "the lead is asked");
+
+    let decide = |from: &UserId| Envelope::decision(thread.clone(), from.clone(), request.decide(Verdict::AllowOnce));
+    let team_says = decide(&backend);
+    send(&human_js, team_says.subject(), &team_says).await;
+    tokio::time::sleep(RECHECK * 2).await;
+    assert!(!decided.is_finished(), "the team's name decides nothing");
+    let lead_says = decide(&lead);
+    send(&human_js, lead_says.subject(), &lead_says).await;
+    assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowOnce);
+}
+
 #[tokio::test]
 async fn an_expired_request_is_told_to_the_chain_asked_and_pushed_to_the_human_once() {
     let Some(server) = Server::start() else { return };
@@ -545,7 +584,7 @@ async fn an_assistant_s_decision_takes_effect_only_with_its_human_s_consent() {
         description: None,
         length: 0,
     };
-    assert!(approver.chain_decision(&request, &msg).is_none());
+    assert!(approver.chain_decision(&request, &approver.chain.escalate_to, &msg).is_none());
 }
 
 #[tokio::test]

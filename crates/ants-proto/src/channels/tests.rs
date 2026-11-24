@@ -337,3 +337,36 @@ fn threads_keep_the_ant_that_created_them_and_only_its_own_post_makes_it_so() {
     assert!(!json.contains("creator"), "{json}");
     assert!(serde_json::to_string(&top).unwrap().contains(r#""creator":"boss""#));
 }
+
+#[test]
+fn a_team_mentioned_in_a_post_stands_for_its_lead_who_has_to_be_a_member() {
+    let mut teams = TeamDirectory::default();
+    teams.create(crate::Team::new(p("eng"), p("boss"), crate::human()), None).unwrap();
+    teams.create(crate::Team::unled(p("infra"), crate::human()), Some(&p("eng"))).unwrap();
+    teams.create(crate::Team::unled(p("web"), crate::human()), None).unwrap();
+    let mut ops = ChannelEntry::new("ops".parse().unwrap());
+    ops.add_member(p("boss"));
+    ops.add_member(p("dev-a"));
+    let channel = ops.channel.clone();
+    let post = |text: &str| ChannelPost::new(channel.clone(), crate::human(), text);
+
+    let through = post("@infra @dev-a @eng disk full").through_teams(&teams, Some(&ops)).unwrap();
+    assert_eq!(through.mentions, [p("boss"), p("dev-a")], "the lead once, in the teams' stead");
+    let shown: Vec<_> = through.teams.iter().map(|t| (t.team.as_str(), t.lead.as_str())).collect();
+    assert_eq!(shown, [("infra", "boss"), ("eng", "boss")], "a lead taken from the team above");
+    assert_eq!(through.teams_led_by(&p("boss")).collect::<Vec<_>>(), [&p("infra"), &p("eng")]);
+    assert_eq!(ops.woken(&through, &crate::humans()), [p("boss"), p("dev-a")]);
+    let json = serde_json::to_string(&through).unwrap();
+    assert_eq!(serde_json::from_str::<ChannelPost>(&json).unwrap(), through);
+
+    let plain = post("@dev-a hi").through_teams(&teams, Some(&ops)).unwrap();
+    assert_eq!((plain.mentions.as_slice(), plain.teams.is_empty()), ([p("dev-a")].as_slice(), true));
+    let err = post("@web deploy").through_teams(&teams, Some(&ops)).unwrap_err();
+    assert!(err.to_string().starts_with("nothing posted: team web has no lead, nor has any team above it"), "{err}");
+    ops.remove_member(&p("boss"));
+    let err = post("@infra deploy").through_teams(&teams, Some(&ops)).unwrap_err();
+    let refused = "nothing posted: @infra mentions the lead of team infra, boss, who is no member of #ops";
+    assert!(err.to_string().starts_with(refused), "{err}");
+    let unchecked = post("@infra deploy").through_teams(&teams, None).unwrap();
+    assert_eq!(unchecked.mentions, [p("boss")], "no channel to check against");
+}
