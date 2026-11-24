@@ -1,5 +1,5 @@
 //! Tests of schedules: their own credentials, catch-up of missed firings, firings sent once across daemons and
-//! restarts, trail schedules, and channel schedules' mentions.
+//! restarts, firings for a paused ant, trail schedules, and channel schedules' mentions.
 
 use ants_daemon::bus;
 use ants_daemon::records::owners::Owners;
@@ -136,6 +136,36 @@ async fn a_firing_goes_out_once_across_daemons_and_restarts() {
     let marker = seen.get(webhook_marker_key(&nightly)).await.unwrap().expect("it publishes its version");
     let marker: ants_proto::Serving = serde_json::from_slice(&marker).unwrap();
     assert_eq!(marker.version, ants_proto::ANTS_VERSION, "it publishes its version");
+}
+
+#[tokio::test]
+async fn a_firing_for_a_paused_ant_is_skipped_or_with_catch_up_held() {
+    let Some((server, js, _)) = hub().await else { return };
+    bus::ensure_colony(&js, ants_proto::COLONY_TTL).await.unwrap();
+    let (_ant, ant_js) = server.connect(&p("dev-a")).await;
+    let colony = ant_js.get_key_value(ants_proto::COLONY_BUCKET).await.unwrap();
+    let nightly = p("nightly");
+    let to = Destination::Ant(p("dev-a"));
+    let creds = creds(&server, &nightly, to.clone());
+    let mut schedule = schedule("nightly", Some(creds.clone()), to);
+    let bus = Bus::connect(&nightly, Some(&creds), &server.url, None, "test").await.unwrap();
+    assert!(!bus.paused(&p("dev-a")).await.unwrap(), "an ant with no entry is not paused");
+    let mut entry = ants_test_support::colony_entry("dev-a", "m1");
+    entry.paused = Some(ants_proto::Paused { since: Utc::now(), by: None });
+    colony.put("dev-a", serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+    assert!(bus.paused(&p("dev-a")).await.unwrap(), "its credentials read the ant's colony entry");
+
+    let due = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+    assert_eq!(send_unless_paused(&bus, &schedule, due).await, None, "skipped");
+    schedule.catch_up = true;
+    assert_eq!(send_unless_paused(&bus, &schedule, due).await, Some(due), "held");
+    let inbox = subject::webhook_inbox(&p("dev-a"), &nightly);
+    assert!(stored::<Envelope>(&js, &inbox).await.is_empty(), "nothing sent while the ant is paused");
+
+    entry.paused = None;
+    colony.put("dev-a", serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+    assert_eq!(send_unless_paused(&bus, &schedule, due).await, None, "sent");
+    assert_eq!(stored::<Envelope>(&js, &inbox).await.len(), 1);
 }
 
 #[tokio::test]

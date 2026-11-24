@@ -535,24 +535,34 @@ conflict returns the current item.
 
 `sense_remind` records a time, condition or watch trigger and supports acknowledgment, postponement, renewal and
 dropping.
-Time triggers accept an absolute time, a relative delay, or a recurring daily or weekly UTC time. An unacknowledged
-firing fires again at most three times, an hour apart; a retried delivery or a daemon taking over never fires it twice.
+Time triggers accept an absolute time, a relative delay, or a recurring daily or weekly time. An `at` reads as
+`[[schedule]]` and `ants remind` read times ([config.md](config.md#schedules)): a duration such as `90m` or `1d2h`, the
+next `HH:MM`, `YYYY-MM-DDTHH:MM`, or an RFC 3339 time; clock times without an offset, and a daily or weekly trigger
+without `timezone`, are local to the config file's top-level `timezone` (default UTC), resolved when the reminder is
+made. `timezone` takes any IANA zone. A firing over a minute late, but for a refire, says so with
+`(Sent late: due YYYY-MM-DD HH:MM UTC.)` after its reason. An unacknowledged firing fires again at most three times, an hour apart, each refire replacing the one before it: one still waiting in the
+ant's queue is withdrawn, so a busy ant is prompted once. A retried delivery or a daemon taking over never fires it twice.
 
 For example, `{"action":"create","title":"Check CI","trigger":{"kind":"after","seconds":600}}` creates a relative
 reminder. Other triggers are `{"kind":"at","at":"2026-12-01T12:00:00Z"}`,
-`{"kind":"daily","time":"09:30","timezone":"UTC"}`, `{"kind":"weekly","weekday":"mon","time":"09:30","timezone":"UTC"}`,
+`{"kind":"at","at":"09:30"}` (the next 09:30), `{"kind":"at","at":"90m"}`,
+`{"kind":"daily","time":"09:30"}`, `{"kind":"weekly","weekday":"mon","time":"09:30","timezone":"Europe/London"}`,
 or `{"kind":"condition","condition":{...}}` using a condition below. Empty arguments or `action=list` list reminders;
-`show`, `ack`, `drop` and `renew` take `id`. `postpone` takes `id` and exactly one of `after_seconds` or a future RFC
-3339 `at`. Optional positive `revision` guards mutations. Acknowledging a recurring reminder advances to the next
-occurrence. Weekdays are `mon` through `sun`; delays are 1 through 31,536,000 seconds. A trigger giving no time to
-fire at, or a reminder time out of the range of times, as a commitment due within thirty days of the last time
+`show`, `ack`, `drop` and `renew` take `id`. `postpone` takes `id` and exactly one of `after_seconds` or a future
+`at`, read as above. Optional positive `revision` guards mutations. Acknowledging a recurring reminder advances to
+the next occurrence. Weekdays are `mon` through `sun`; delays are 1 through 31,536,000 seconds. A trigger giving no
+time to fire at, or a reminder time out of the range of times, as a commitment due within thirty days of the last time
 representable, is refused with `invalid_trigger`.
 
 The active daemon fires reminders; a standby fires none until it takes the ant over, then goes on with the stored
 schedule and any firing pending. Between firings the schedule sleeps until the next is due or a call to sense changes
 the ant's items: a call only reading them, or changing another ant's, leaves it asleep. While the ant's identity is
-dormant nothing fires. A firing wakes the ant ([Wake requests](architecture.md#wake-requests)) with the reminder's text
-and why it fired, on its source thread, or a new thread when no source thread remains. A firing whose wake fails stays
+dormant, or the ant is paused ([config.md](config.md#pausing-an-ant)), nothing fires: no reminder, watcher check or
+dream, nor a firing left pending; each one due meanwhile fires once on its revival or resuming, its refires counting
+from then. A firing wakes the ant ([Wake requests](architecture.md#wake-requests)) with the reminder's text
+and why it fired, on its source thread, or a new thread when no source thread remains. The answer to a wake goes to the
+thread's human owner; on a thread no human owns, a dream's or a reminder's new thread among them, it stays on the
+thread's timeline, as `ants thread show` and `ants chat` show it, and goes to nobody. A firing whose wake fails stays
 pending and is tried again a minute later, the firings after it with it, while memory maintenance and dreams go on.
 
 Condition triggers use the following objects:
@@ -572,8 +582,12 @@ interval to thirty minutes. An ant holds at most fifty active triggers, includin
 `sense_remind` or `sense_promise` call that would make more active is refused with `too_many`.
 Ordinary reminders expire after thirty days unless renewed; automatic commitment reminders remain valid until thirty
 days after the later of creation or renewal and the commitment's due time, so a distant due date cannot expire before
-firing. Command conditions run only under the ant's tool allow rules, in its workdir and environment, with a
-thirty-second timeout; stdout and stderr are discarded, and no approval request is raised for a disallowed one.
+firing. A command condition runs as the ant's harness would run it, in its workdir and environment, with a
+thirty-second timeout; stdout and stderr are discarded. On a harness that runs its tools unasked (a built-in harness or
+one of a native protocol, unless `tools = "ask"`, see [config.md](config.md#harnesses)) it runs unasked too, but for a trigger made on a thread narrowed
+to other tool rules or otherwise untrusted, where the ant's tool allow rules decide as under `tools = "ask"`: a command
+outside them is refused, with no approval request raised. A `sense_remind` call creating a command trigger or watcher
+whose command would be refused so is refused itself, naming the `execute:` rule in the ant's `allow` that lets it run.
 Untrusted threads (webhooks, sage reviews and unknown origins) cannot create or change command triggers. Outside checks
 use only `gh`, `bd` and `git`.
 

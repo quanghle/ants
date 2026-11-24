@@ -187,6 +187,7 @@ impl Mcp {
             trails: OnceLock::new(),
             dreams: OnceLock::new(),
             worktrees: OnceLock::new(),
+            trigger_commands: OnceLock::new(),
             served: Mutex::default(),
             settling: tokio::sync::Mutex::default(),
             state_path,
@@ -317,6 +318,12 @@ impl Mcp {
     /// or in answer to a dream finding ([`crate::sense::Dreams::ground`]).
     pub fn with_dreams(&self, dreams: crate::sense::Dreams) {
         let _ = self.hub.dreams.set(dreams);
+    }
+
+    /// Refuse through `commands` a sense_remind call creating a trigger whose command its checks could not run
+    /// ([`crate::sense::TriggerCommands::refusal`]).
+    pub(crate) fn with_triggers(&self, commands: crate::sense::TriggerCommands) {
+        let _ = self.hub.trigger_commands.set(commands);
     }
 
     /// The ant's provider, connected: none when the ant has none.
@@ -497,6 +504,8 @@ struct Hub {
     dreams: OnceLock<crate::sense::Dreams>,
     /// The worktrees the ant's threads work in, each in its own ([`Mcp::with_worktrees`]).
     worktrees: OnceLock<Arc<crate::worktrees::Worktrees>>,
+    /// What decides the commands of the ant's sense triggers, when its provider is sense ([`Mcp::with_triggers`]).
+    trigger_commands: OnceLock<crate::sense::TriggerCommands>,
     /// The provider's tools as listed last.
     served: Mutex<provider::Served>,
     /// Held while a thread's origin is settled or read back, so none is lost to another.

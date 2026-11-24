@@ -83,6 +83,7 @@ impl Model {
             }
             Slash::Unremind => Ok(Some(self.set_reminder(self.target(now)?, None))),
             Slash::Reminders => run(Job::Reminders),
+            Slash::Schedules => run(Job::Schedules),
             Slash::Title(text) => run(Job::Title { thread: self.target(now)?, text }),
             Slash::Notes(text) => run(Job::Notes { thread: self.target(now)?, text }),
             Slash::React(reaction) => {

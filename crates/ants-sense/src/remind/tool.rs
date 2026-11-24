@@ -18,7 +18,7 @@ pub(super) fn schema() -> Value {
             "id":{"type":"string"},
             "title":{"type":"string","minLength":1,"maxLength":MAX_TITLE_CHARS},
             "trigger":trigger::schema(),
-            "at":{"type":"string","format":"date-time","description":"Postpone until this RFC 3339 time."},
+            "at":{"type":"string","description":format!("Postpone until: {}.", crate::when::FORMS)},
             "after_seconds":{
                 "type":"integer","minimum":1,"maximum":MAX_POSTPONE_SECONDS,"description":"Postpone by this duration."
             },
@@ -46,8 +46,9 @@ struct Request {
     action: Option<Action>,
     id: Option<ItemId>,
     title: Option<String>,
-    trigger: Option<Trigger>,
-    at: Option<DateTime<Utc>>,
+    /// Read by [`trigger::read`].
+    trigger: Option<Value>,
+    at: Option<String>,
     after_seconds: Option<u64>,
     revision: Option<u64>,
 }
@@ -93,7 +94,8 @@ pub(super) async fn handle(sense: &Sense, call: &ToolCall) -> Result<Answer, Ans
     if action == Action::Ack && reminder.status == Status::Acknowledged {
         return answer(item);
     }
-    let changed = mutation(reminder, call, &request, action)?;
+    let zone = sense.timezone(&call.context.ant);
+    let changed = mutation(reminder, call, &request, action, &zone)?;
     let writes = [change_to(&item, &changed).map_err(refused)?];
     answer(write_creations(&*items, &writes, by, now).await.map_err(refused)?.remove(0))
 }
@@ -108,6 +110,8 @@ async fn create(sense: &Sense, items: &dyn Items, call: &ToolCall, request: Requ
         return Err(Answer::invalid("title must be nonempty."));
     }
     let trigger = request.trigger.ok_or_else(|| Answer::invalid("trigger is required."))?;
+    let trigger = trigger::read(trigger, now, &sense.timezone(&call.context.ant))
+        .map_err(|error| Answer::invalid(format!("trigger: {}.", error.trim_end_matches('.'))))?;
     trigger.validate().map_err(|error| Answer::invalid(format!("trigger: {}.", error.trim_end_matches('.'))))?;
     deny_untrusted_command(call, &trigger)?;
     let at = trigger.first(now).map_err(refused)?;
@@ -119,7 +123,13 @@ async fn create(sense: &Sense, items: &dyn Items, call: &ToolCall, request: Requ
     answer(write_creations(items, &writes, by, now).await.map_err(refused)?.remove(0))
 }
 
-fn mutation(mut reminder: Reminder, call: &ToolCall, request: &Request, action: Action) -> Result<Reminder, Answer> {
+fn mutation(
+    mut reminder: Reminder,
+    call: &ToolCall,
+    request: &Request,
+    action: Action,
+    zone: &crate::when::TimeZone,
+) -> Result<Reminder, Answer> {
     let now = call.context.at;
     let expired = reminder.expired(now);
     reminder.writer = call.context.clone();
@@ -143,8 +153,9 @@ fn mutation(mut reminder: Reminder, call: &ToolCall, request: &Request, action: 
             if !matches!(reminder.status, Status::Active | Status::Exhausted) || expired {
                 return Err(Answer::invalid("Only an active, unexpired reminder can be postponed."));
             }
-            let at = match (request.at, request.after_seconds) {
-                (Some(at), None) => at,
+            let at = match (&request.at, request.after_seconds) {
+                (Some(at), None) => crate::when::parse(at, now, &crate::when::Zone::Named(zone.clone()))
+                    .map_err(|error| Answer::invalid(format!("at: {error}.")))?,
                 (None, Some(seconds)) => {
                     if !(1..=MAX_POSTPONE_SECONDS).contains(&seconds) {
                         let message = format!("after_seconds must be between 1 and {MAX_POSTPONE_SECONDS}.");

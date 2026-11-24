@@ -129,3 +129,31 @@ fn a_sage_setting_names_an_ant_or_none() {
     assert_eq!("none".parse::<Sage>().unwrap().to_string(), "none");
     assert_eq!("lead".parse::<Sage>().unwrap().to_string(), "lead");
 }
+
+#[test]
+fn only_ants_served_with_sense_name_a_sage_and_another_naming_one_warns() {
+    let mixed =
+        format!("{}{}{}", ant("dev-a", "provider = \"none\"\nsage = \"lead\""), ant("dev-b", ""), ant("lead", ""));
+    assert_eq!(
+        reviewers(&mixed),
+        pairs(&[
+            ("dev-a", None),
+            ("dev-b", Some("system-sage")),
+            ("lead", Some("system-sage")),
+            ("system-messenger", None),
+            ("system-sage", None)
+        ]),
+        "dev-a never dreams, so lead is no sage and has the file's"
+    );
+    let warnings = load(&mixed).unwrap().warnings;
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].starts_with("ant dev-a: sage names lead, but the ant's provider is none"), "{}", warnings[0]);
+
+    let none = format!("provider = \"none\"\n{}{}", ant("dev-a", ""), ant("dev-b", ""));
+    assert_eq!(
+        reviewers(&none),
+        pairs(&[("dev-a", None), ("dev-b", None), ("system-messenger", None)]),
+        "no ant dreams: the file serves no sage"
+    );
+    assert_eq!(load(&none).unwrap().warnings, Vec::<String>::new(), "the file's default sage warns of nothing");
+}

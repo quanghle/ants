@@ -94,6 +94,9 @@ pub enum NoReplyWhy {
     /// The ant asked a human with ask_human while answering a trail step: its answer once the human answered is the
     /// step's reply.
     Asked,
+    /// The message was a provider's wake ([`crate::Envelope::wake_provider`]) on a thread no human owns, such as a
+    /// dream's or a reminder's on a new thread: its answer stays on the thread, sent to nobody.
+    Unowned,
 }
 
 /// How a prompt ended ([`TimelineEntry::Ended`]).

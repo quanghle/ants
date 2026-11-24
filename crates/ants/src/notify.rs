@@ -576,7 +576,7 @@ async fn remind(human: &Human, bus: &HumanBus, js_domain: Option<&JsDomain>) -> 
             }
             for (thread, reminder) in due.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner) {
                 tracing::info!(human = %human.name, %thread, "pushing a reminder");
-                send(human, &reminder_notice(&human.name, &thread, &reminder), |_| true).await;
+                send(human, &reminder_notice(&human.name, &thread, &reminder, now), |_| true).await;
             }
         }
     }

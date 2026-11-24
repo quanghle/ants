@@ -270,7 +270,7 @@ impl Inbox<'_> {
         // A human's cancel is no limit: the reply tells of it, and nothing is escalated for it.
         let cut = reply.cut.is_some() && !cut_by_cancel;
         let limit = reply.cut.filter(|_| !cut_by_cancel).or(reached);
-        let unanswered = unanswered(completed, asked, own);
+        let unanswered = unanswered(completed, asked, own, self.unowned_wake(incoming));
         self.note_end(thread, &measured, end_of(cancelled_by.as_ref(), &limit, &unanswered), reply.rebuilt).await;
         let limit_notice =
             limit.as_ref().map(|l| format!("[ants] {l}{}", if cut { "; the prompt was cancelled." } else { "." }));
@@ -745,17 +745,20 @@ impl Inbox<'_> {
     }
 }
 
-/// Why a turn that ended sends no reply, if it sends none: the session called `complete`, or the message was another
-/// ant's reply to the ant's `own`.
+/// Why a turn that ended sends no reply, if it sends none: the session asked a human answering a trail step, called
+/// `complete`, the message was another ant's reply to the ant's `own`, or a provider's wake on a thread no human owns
+/// (`unowned`).
 fn unanswered(
     completed: Option<crate::mcp::Completed>,
     asked: Option<UserId>,
     own: bool,
+    unowned: bool,
 ) -> Option<(NoReplyWhy, Option<String>)> {
     match (completed, asked) {
         (_, Some(whom)) => Some((NoReplyWhy::Asked, Some(format!("asked {whom}")))),
         (Some(completed), None) => Some((NoReplyWhy::Completed, completed.reason)),
-        (None, None) => own.then_some((NoReplyWhy::ReplyToOwn, None)),
+        (None, None) if own => Some((NoReplyWhy::ReplyToOwn, None)),
+        (None, None) => unowned.then_some((NoReplyWhy::Unowned, None)),
     }
 }
 

@@ -31,11 +31,14 @@ const MAX_ERROR: usize = 8000;
 const MAX_CRASHES: u32 = 3;
 
 impl Trails {
-    /// Drive each run woken, one pass at a time per run, and wake those whose wall time passed.
+    /// Drive each run woken, one pass at a time per run, and wake those whose wall time passed. While the conductor
+    /// is paused the runs woken wait, sending no step, and are driven on resuming.
     pub(super) async fn drive_all(&self) {
         let mut woken = self.inner.woken.lock().await;
         let mut driving: HashSet<RunId> = HashSet::new();
         let mut again: HashSet<RunId> = HashSet::new();
+        let mut held: HashSet<RunId> = HashSet::new();
+        let mut paused = self.inner.pause.subscribe();
         let mut drivers = FuturesUnordered::new();
         loop {
             let overdue = self.next_deadline();
@@ -47,7 +50,12 @@ impl Trails {
             };
             tokio::select! {
                 Some(run) = woken.recv() => {
-                    if driving.insert(run.clone()) {
+                    if paused.borrow().is_some() {
+                        if held.is_empty() {
+                            tracing::info!("paused: holding the passes and steps of its trail runs");
+                        }
+                        held.insert(run);
+                    } else if driving.insert(run.clone()) {
                         drivers.push(self.drive(run));
                     } else {
                         again.insert(run);
@@ -56,8 +64,12 @@ impl Trails {
                 Some(run) = drivers.next() => {
                     driving.remove(&run);
                     if again.remove(&run) {
-                        driving.insert(run.clone());
-                        drivers.push(self.drive(run));
+                        self.wake(&run);
+                    }
+                }
+                Ok(()) = paused.changed() => {
+                    if paused.borrow_and_update().is_none() {
+                        held.drain().for_each(|run| self.wake(&run));
                     }
                 }
                 () = sleep => self.wake_overdue(),

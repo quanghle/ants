@@ -99,6 +99,8 @@ pub struct Conducting {
     /// The thread notes, where a run reports on its thread.
     pub notes: Arc<dyn NotesStore>,
     pub saves: SaveThrough,
+    /// Whether the conductor is paused: then it starts no run and its runs' passes wait, sending no step.
+    pub pause: crate::pause::Pause,
 }
 
 /// How a daemon saves and removes its ant's trails in [`ants_proto::TRAILS_BUCKET`], which ant credentials write
@@ -179,6 +181,7 @@ struct Inner {
     outbox: Outbox,
     attempts: DirectKv,
     notes: Arc<dyn NotesStore>,
+    pause: crate::pause::Pause,
     /// The team directory, naming the leads agent(team=) steps go to; None when it cannot be named.
     teams: Option<DirectKv>,
     /// The conductor's escalator, asking a human() step's question of the owner's assistant first; unset asks the
@@ -296,6 +299,7 @@ impl Trails {
             workers,
             notes,
             saves,
+            pause,
         } = conducting;
         COMPUTING.get_or_init(|| Semaphore::new(workers.clamp(1, MAX_WORKERS)));
         let store = Store::new(&js, js_domain.as_ref(), ant.clone()).await?;
@@ -317,6 +321,7 @@ impl Trails {
             outbox,
             attempts,
             notes,
+            pause,
             teams,
             escalator: OnceLock::new(),
             runs: Mutex::default(),

@@ -34,7 +34,9 @@ impl Permissions {
     /// one; remembering the events it delivered, under its own keys of [`WEBHOOKS_BUCKET`]
     /// only, and recording the owner its config names for each thread it starts in an ant's inbox ([`OWNERS_BUCKET`],
     /// under that ant's keys only). It reads the entry of each channel among `destinations`, for the members a
-    /// broadcast mentions, and hears its own reply inboxes, for the stream's acks. It asks for its own renewal
+    /// broadcast mentions, and the colony entry of each ant among them ([`COLONY_BUCKET`]), for whether the ant is
+    /// paused, as a schedule's firing for a paused ant waits or is skipped; and hears its own reply inboxes, for the
+    /// stream's acks. It asks for its own renewal
     /// ([`subject::renew`]) and hears the answer. Nothing else: it neither writes
     /// `ants_channels` nor `ants_humans`, so it can neither change a channel nor become a human, nor reads any message.
     /// It gets no stream info, which lists every subject stored: it reads and records its events by key alone.
@@ -48,8 +50,11 @@ impl Permissions {
             if !publish.contains(&subject) {
                 publish.push(subject);
             }
-            if let Destination::Channel(channel) = destination {
-                publish.push(format!("$JS.API.DIRECT.GET.{channels}.{}", subject::channel_entry(channel)));
+            match destination {
+                Destination::Channel(channel) => {
+                    publish.push(format!("$JS.API.DIRECT.GET.{channels}.{}", subject::channel_entry(channel)));
+                }
+                Destination::Ant(ant) => publish.push(subject::kv_get(COLONY_BUCKET, ant)),
             }
         }
         publish.extend([

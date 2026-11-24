@@ -24,9 +24,10 @@ mod stores;
 mod workdirs;
 
 pub use ants_sense::home::DIR;
-pub use ants_sense::{CAPABILITIES, NAME};
+pub use ants_sense::when;
+pub use ants_sense::{CAPABILITIES, NAME, REMINDERS};
 pub use dreams::{Dreams, Grounded, Refusal};
-pub(crate) use scheduler::{Daemon, Dreaming, Serving, TrailChecks, Watching};
+pub(crate) use scheduler::{Daemon, Dreaming, Serving, TrailChecks, TriggerCommands, Watching};
 pub use stores::{Hosting, Link, Retrying};
 
 use crate::daemon::Config;
@@ -56,6 +57,11 @@ impl Sense {
     /// (`SenseStores::serve`).
     pub fn serve(&self, ant: &UserId, home: &Path, creds: Option<PathBuf>) {
         self.stores.serve(ant, home, creds);
+    }
+
+    /// Read the times of day of the reminders `ant` makes in `zone`, UTC for None ([`ants_sense::Sense::read_times_in`]).
+    pub(crate) fn read_times_in(&self, ant: &UserId, zone: Option<&when::TimeZone>) {
+        self.provider.read_times_in(ant, zone.cloned().unwrap_or(when::TimeZone::UTC));
     }
 
     /// The daemon of `ant`, served, read its identity `record`, which names its sense id: None when it has none

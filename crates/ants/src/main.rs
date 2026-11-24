@@ -33,6 +33,7 @@ mod tui;
 mod notify;
 mod reload;
 mod scheduler;
+mod schedules;
 mod serve;
 mod service;
 mod webhook;

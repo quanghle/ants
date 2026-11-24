@@ -327,7 +327,8 @@ pub struct Firing {
     pub thread: Option<ThreadId>,
     pub reason: String,
     pub at: DateTime<Utc>,
-    /// The firing it replaces: the same watcher's last, whose wake is withdrawn while it still waits in the queue.
+    /// The firing it replaces: the same watcher's last, or the firing a refire follows, whose wake is withdrawn while
+    /// it still waits in the queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<String>,
     /// Whether it is a watcher's last, its check having reported it done: its delivery retires the watcher.
@@ -338,7 +339,7 @@ pub struct Firing {
 impl Firing {
     /// Whether it is a watcher's.
     pub fn watched(&self) -> bool {
-        self.replaces.is_some() || self.last || self.reason.starts_with(WATCH_REASON)
+        self.last || self.reason.starts_with(WATCH_REASON)
     }
 }
 
@@ -474,8 +475,9 @@ async fn schedule(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<Due>, Sto
     Ok(due)
 }
 
-/// Persist a due time firing before waking the ant. Returning a pending firing never allocates another number.
-/// A condition's first firing must instead pass through [`condition_checked`] or [`condition_observed`].
+/// Persist a due time firing before waking the ant, its `reason` noting when the occurrence was due if it fires
+/// later than [`crate::when::LATE`]. Returning a pending firing never allocates another number. A condition's first
+/// firing must instead pass through [`condition_checked`] or [`condition_observed`].
 pub async fn prepare_firing(
     items: &dyn Items,
     id: &ItemId,
@@ -498,13 +500,20 @@ pub async fn prepare_firing(
         if reminder.next_due.is_none_or(|at| at > now) || reminder.condition().is_some() || reminder.watch().is_some() {
             return Ok(None);
         }
-        prepare(items, &item, reminder, now, reason).await.map(Some)
+        // An occurrence's first firing past its time says so, as a schedule's does; its refires come late by design.
+        let late = reminder.next_due.filter(|_| reminder.occurrence_firings == 0);
+        let reason = match late.and_then(|due| crate::when::late_note(due, now)) {
+            Some(note) => format!("{reason} {note}"),
+            None => reason.to_owned(),
+        };
+        prepare(items, &item, reminder, now, &reason).await.map(Some)
     })
     .await
 }
 
 /// Confirm an actual successful wake. A retry of the same confirmation is a no-op; an older id cannot confirm a
-/// newer firing. Initial delivery is followed by at most three refires, each an hour after successful delivery.
+/// newer firing. Initial delivery is followed by at most three refires, each an hour after successful delivery and
+/// replacing the firing before it ([`Firing::replaces`]).
 pub async fn confirm_delivered(
     items: &dyn Items,
     id: &ItemId,
@@ -767,7 +776,9 @@ async fn prepare(
     now: DateTime<Utc>,
     reason: &str,
 ) -> Result<Firing, StoreError> {
-    prepare_as(items, item, reminder, now, reason, None, false).await
+    // A refire replaces the occurrence's firing before it, withdrawn if it still waits in the ant's queue.
+    let replaces = reminder.delivered.as_ref().filter(|_| reminder.occurrence_firings > 0).map(|d| d.id.clone());
+    prepare_as(items, item, reminder, now, reason, replaces, false).await
 }
 
 /// [`prepare`] a firing replacing the firing `replaces`, the last of its watcher with `last`.

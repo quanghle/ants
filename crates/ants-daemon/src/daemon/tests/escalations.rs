@@ -638,7 +638,7 @@ async fn a_chain_member_s_decision_ends_without_a_turn_budget_escalation_to_the_
     assert!(timeout(quiet, to_human.next()).await.is_err(), "nothing went to the human");
 }
 
-/// A provider's wake brings turns of its own: prompted on a thread out of turns, and answered to the human.
+/// A provider's wake brings turns of its own: prompted on a thread out of turns, and answered to the human owning it.
 #[tokio::test]
 async fn a_provider_s_wake_is_prompted_on_a_thread_out_of_turns_and_answered_to_the_human() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
@@ -646,8 +646,13 @@ async fn a_provider_s_wake_is_prompted_on_a_thread_out_of_turns_and_answered_to_
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let [dev_b] = ants(["dev-b"]);
     let t1 = ThreadId::generate();
+    let human = ants_test_support::human();
+    bus::ensure_owners(&bus.js).await.unwrap();
+    crate::records::owners::record(&bus.js, None, &t1, &bus.dev, &human).await.unwrap();
     bus.send_spent(&dev_b, &t1, "no turns", None).await;
-    let wake = Envelope::on_thread(t1.clone(), bus.dev.clone(), bus.dev.clone(), "standup").woken_by("sense");
+    let wake = Envelope::on_thread(t1.clone(), bus.dev.clone(), bus.dev.clone(), "standup")
+        .with_owner(Some(human))
+        .woken_by("sense");
     bus::publish_json(&bus.js, wake.subject(), &wake, None).await.unwrap();
 
     let ctrl_c = Arc::new(Semaphore::new(0));
@@ -810,4 +815,34 @@ async fn a_steer_cancelling_a_prompt_settles_its_waiting_tool_request() {
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(log.locked().prompted, 2);
+}
+
+/// The answer to a provider's wake on a thread no human owns, a dream's or a reminder's on a new thread, stays on the
+/// thread's timeline and goes to nobody, while the ant's own message on a thread nobody owns still reaches the human.
+#[tokio::test]
+async fn a_provider_s_wake_on_a_thread_no_human_owns_is_answered_to_nobody() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    let wake = Envelope::on_thread(t1.clone(), bus.dev.clone(), bus.dev.clone(), "dream").woken_by("sense");
+    bus::publish_json(&bus.js, wake.subject(), &wake, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let (message, entry) = no_reply_on(&bus, &t1).await;
+        assert_eq!(message, wake.id);
+        let ants_proto::TimelineEntry::NoReply { why: ants_proto::NoReplyWhy::Unowned, text, .. } = &entry else {
+            panic!("{entry:?}")
+        };
+        assert!(text.ends_with(": dream"), "{text}");
+        let handoff = Envelope::on_thread(t2.clone(), bus.dev.clone(), bus.dev.clone(), "handed off");
+        bus::publish_json(&bus.js, handoff.subject(), &handoff, None).await.unwrap();
+        let answer = next_envelope(&mut to_human).await;
+        assert_eq!((&answer.thread_id, answer.in_reply_to), (&t2, Some(handoff.id)), "nothing came of the wake");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+    assert_eq!(log.locked().answered, ["dream", "handed off"]);
 }

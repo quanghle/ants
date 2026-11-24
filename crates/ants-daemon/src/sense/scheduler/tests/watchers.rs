@@ -112,6 +112,62 @@ async fn a_watcher_outside_the_allow_rules_fails_its_checks_without_waking() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// On a harness running its tools unasked, a watcher's command runs unasked too, no allow rule needed; one whose
+/// source thread is untrusted is held to the rules.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_watcher_on_a_harness_running_its_tools_unasked_runs_its_command_unasked() {
+    let root = ants_test_support::scratch_dir("scheduler-watchers-unasked");
+    std::fs::write(root.join("result"), "pending").unwrap();
+    let check = root.join("check");
+    std::fs::write(&check, "#!/bin/sh\ncat result\n").unwrap();
+    std::fs::set_permissions(&check, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let (sense, stores) = setup().await;
+    let items = &*stores.items;
+    let host = Wakes::default();
+    let config = Settings { workdir: root.clone(), unasked: true, ..settings() };
+    let id = create(&sense, command_watcher()).await;
+    cycle(&sense, items, &host, &config, Utc::now()).await.unwrap();
+    let checked = reminder(items, &id).await;
+    assert_eq!((checked.failed_checks, checked.check_error.as_deref()), (None, None), "checked unasked");
+    assert!(checked.digest().is_some());
+
+    let source = checked.source_context.clone().unwrap();
+    let untrusted = ants_proto::provider::Origin {
+        by: ants_proto::provider::Starter::Webhook { user: "github".parse().unwrap() },
+        channel: None,
+    };
+    let mut values = ants_sense::items::Values::new();
+    values.insert("source_context".into(), json!(CallContext { origin: untrusted, ..source }));
+    values.insert("next_due".into(), json!(Utc::now()));
+    let item = items.get(&id).await.unwrap().unwrap();
+    let change = Write::Change { id: id.clone(), values, expected: Some(item.revision) };
+    items.write(&[change], "test").await.unwrap();
+    cycle(&sense, items, &host, &config, Utc::now() + chrono::Duration::seconds(61)).await.unwrap();
+    let refused = reminder(items, &id).await;
+    assert!(refused.check_error.unwrap().contains("outside the ant's tool allow rules"), "an untrusted source");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sense_remind_is_refused_a_command_its_checks_could_not_run_naming_the_rule() {
+    let asked = TriggerCommands { allow: vec!["execute:./probe".into()], unasked: false };
+    let create = |trigger: Value| json!({"title": "t", "trigger": trigger}).as_object().unwrap().clone();
+    let why = asked.refusal("remind", &create(command_watcher())).unwrap();
+    assert!(why.contains("\"execute:./check\""), "{why}");
+    let condition = json!({"kind":"condition","condition":{"kind":"command","command":"./check"}});
+    assert!(asked.refusal("remind", &create(condition)).is_some());
+    let probe = json!({"kind":"watch","run":{"kind":"command","command":"./probe"}});
+    assert_eq!(asked.refusal("remind", &create(probe)), None, "inside the rules");
+    assert_eq!(asked.refusal("remind", &create(json!({"kind":"after","seconds":300}))), None, "no command");
+    let mut snooze = create(command_watcher());
+    snooze.insert("action".into(), json!("snooze"));
+    assert_eq!(asked.refusal("remind", &snooze), None, "not a creation");
+    assert_eq!(asked.refusal("recall", &create(command_watcher())), None);
+    let unasked = TriggerCommands { allow: Vec::new(), unasked: true };
+    assert_eq!(unasked.refusal("remind", &create(command_watcher())), None);
+}
+
 #[tokio::test]
 async fn a_trail_watcher_reads_through_its_check_and_a_daemon_without_trails_fails_it() {
     let root = ants_test_support::scratch_dir("scheduler-trail-watchers");

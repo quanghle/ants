@@ -5,43 +5,29 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use ants_daemon::sense::when::{self, Zone};
 use ants_proto::{Reminder, Reminders, ThreadId, ThreadTitle, Uuid};
 use anyhow::{Result, bail};
 use async_nats::jetstream;
-use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Utc};
+use chrono::{DateTime, Local, Utc};
 
 use crate::connection::Nats;
 use crate::threads::{thread, thread_meta};
 
-/// When `text`, `DURATION|TIME [NOTE]`, says to be reminded from `now`, and the note: a duration such as `1h30m`
-/// from now, a time of day `HH:MM` (the next one) or a date and time `YYYY-MM-DDTHH:MM`, both in `zone`.
-pub fn parse<Z: TimeZone>(text: &str, now: DateTime<Utc>, zone: &Z) -> Result<(DateTime<Utc>, String), String> {
+/// When `text`, `TIME [NOTE]`, says to be reminded from `now`, and the note: its first word read as every time is
+/// ([`when::parse`]), local times in `zone`, such as a duration `1h30m` from now, the next `HH:MM` or
+/// `YYYY-MM-DDTHH:MM`.
+pub fn parse(text: &str, now: DateTime<Utc>, zone: &Zone) -> Result<(DateTime<Utc>, String), String> {
     let text = text.trim();
-    let (when, note) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
-    if when.is_empty() {
-        return Err("when to remind: a duration such as 1h, a time HH:MM or YYYY-MM-DDTHH:MM".to_owned());
+    let (time, note) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    if time.is_empty() {
+        return Err(format!("when to remind: {}", when::FORMS));
     }
-    let local = now.with_timezone(zone).naive_local();
-    let at = if let Ok(time) = NaiveTime::parse_from_str(when, "%H:%M") {
-        let today = local.date().and_time(time);
-        let day = if today > local { today } else { today + TimeDelta::days(1) };
-        utc(zone, day, when)?
-    } else if let Ok(at) = NaiveDateTime::parse_from_str(when, "%Y-%m-%dT%H:%M") {
-        utc(zone, at, when)?
-    } else {
-        let duration = ants_proto::duration::parse(when).map_err(|e| e.to_string())?;
-        now + TimeDelta::from_std(duration).map_err(|_| format!("too long: {when}"))?
-    };
+    let at = when::parse(time, now, zone)?;
     if at <= now {
-        return Err(format!("{when} is past: a reminder is due later"));
+        return Err(format!("{time} is past: a reminder is due later"));
     }
     Ok((at, note.trim().to_owned()))
-}
-
-/// `at` in `zone`, in UTC; the earlier of two in a repeated hour.
-fn utc<Z: TimeZone>(zone: &Z, at: NaiveDateTime, when: &str) -> Result<DateTime<Utc>, String> {
-    let at = zone.from_local_datetime(&at).earliest().ok_or_else(|| format!("no such local time: {when}"))?;
-    Ok(at.with_timezone(&Utc))
 }
 
 /// `at` on the local clock, as `ants remind` prints it.
@@ -82,7 +68,7 @@ async fn connect(nats: &Nats<'_>) -> Result<(jetstream::Context, thread_meta::Me
 /// (`DURATION|TIME [NOTE]`) says, in place of any reminder of the thread.
 pub async fn set(nats: &Nats<'_>, target_text: &str, when: &str) -> Result<()> {
     let now = Utc::now();
-    let (due, note) = parse(when, now, &Local).map_err(anyhow::Error::msg)?;
+    let (due, note) = parse(when, now, &Zone::Local).map_err(anyhow::Error::msg)?;
     let (js, meta) = connect(nats).await?;
     let (thread, message) = target(nats, &js, target_text).await?;
     let reminder = Reminder { at: now, due, message, note, pushed: false };
@@ -204,24 +190,27 @@ pub async fn clear(nats: &Nats<'_>, target_text: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeDelta;
+
     use super::*;
     use crate::test_support::live::at;
 
     #[test]
     fn a_reminder_is_due_after_a_duration_at_the_next_time_of_day_or_at_a_date() {
         let now = at(0);
-        assert_eq!(parse("90m check CI", now, &Utc), Ok((now + TimeDelta::minutes(90), "check CI".to_owned())));
+        let zone = &Zone::Named(when::TimeZone::UTC);
+        assert_eq!(parse("90m check CI", now, zone), Ok((now + TimeDelta::minutes(90), "check CI".to_owned())));
         let utc = |text: &str| text.parse::<DateTime<Utc>>().unwrap();
         assert_eq!(now, utc("2027-01-15T08:00:00Z"));
-        assert_eq!(parse("09:30", now, &Utc).unwrap().0, utc("2027-01-15T09:30:00Z"), "later today");
-        assert_eq!(parse("07:00", now, &Utc).unwrap().0, utc("2027-01-16T07:00:00Z"), "tomorrow");
-        let east = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
-        assert_eq!(parse("09:30", now, &east).unwrap().0, utc("2027-01-16T07:30:00Z"), "in the zone");
+        assert_eq!(parse("09:30", now, zone).unwrap().0, utc("2027-01-15T09:30:00Z"), "later today");
+        assert_eq!(parse("07:00", now, zone).unwrap().0, utc("2027-01-16T07:00:00Z"), "tomorrow");
+        let east = &Zone::Named(when::TimeZone::fixed(jiff::tz::offset(2)));
+        assert_eq!(parse("09:30", now, east).unwrap().0, utc("2027-01-16T07:30:00Z"), "in the zone");
         let date = (now + TimeDelta::days(3)).format("%Y-%m-%dT%H:%M").to_string();
-        assert_eq!(parse(&date, now, &Utc).unwrap().0, now + TimeDelta::days(3));
-        assert!(parse("2000-01-01T00:00", now, &Utc).unwrap_err().contains("past"));
-        assert!(parse("", now, &Utc).is_err());
-        assert!(parse("soon", now, &Utc).is_err());
+        assert_eq!(parse(&date, now, zone).unwrap().0, now + TimeDelta::days(3));
+        assert!(parse("2000-01-01T00:00", now, zone).unwrap_err().contains("past"));
+        assert!(parse("", now, zone).is_err());
+        assert!(parse("soon", now, zone).is_err());
     }
 
     #[test]

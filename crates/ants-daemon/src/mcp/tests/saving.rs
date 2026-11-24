@@ -42,6 +42,7 @@ async fn conducting(server: &NatsServer) -> (Trails, async_nats::jetstream::Cont
         workers: DEFAULT_WORKERS,
         notes: Arc::new(MemoryNotes::default()),
         saves: crate::trail::SaveThrough::Bucket,
+        pause: crate::pause::Pause::new(false),
     };
     (Trails::new(conducting).await.unwrap(), js)
 }

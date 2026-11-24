@@ -12,6 +12,7 @@ fn a_webhook_may_post_only_to_its_destinations_and_keep_only_its_own_events() {
         perms.publish,
         [
             "ants.inbox.dev-a.github.webhook",
+            "$JS.API.DIRECT.GET.KV_ants_colony.$KV.ants_colony.dev-a",
             "ants.chan.ops.github.webhook",
             "$JS.API.DIRECT.GET.KV_ants_channels.$KV.ants_channels.ops",
             "$JS.API.CONSUMER.INFO.ANTS.inbox-github",

@@ -110,9 +110,10 @@ impl Reads<'_> {
     }
 }
 
-/// The exit status and stdout of `command` run as a watcher's, refused outside the ant's tool allow rules.
+/// The exit status and stdout of `command` run as a watcher's, refused outside the ant's tool allow rules unless it
+/// runs unasked.
 async fn command_check(command: &str, context: &Context<'_>) -> Result<(Option<i32>, Vec<u8>)> {
-    if !conditions::allowed(command, context.allow) {
+    if !context.runs(command) {
         bail!("the command is outside the ant's tool allow rules");
     }
     let (program, args) = conditions::shell(command);

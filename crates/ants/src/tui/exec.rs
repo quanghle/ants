@@ -148,6 +148,8 @@ pub enum Job {
     Notify(notify::Job),
     /// List the human's reminders, as `ants remind list` does.
     Reminders,
+    /// List the schedules of the machine's config file, as `ants schedule list` does.
+    Schedules,
     Title {
         thread: ThreadId,
         text: String,
@@ -396,6 +398,7 @@ impl Job {
             }
             Self::Notify(job) => job.run(ctx).await,
             Self::Reminders => remind::listed(ctx).await,
+            Self::Schedules => schedules(ctx).await,
             Self::Title { thread, text } => {
                 Ok(Done::line(thread_meta::retitle(&ctx.js, ctx.meta()?, &ctx.sealing, &thread, &text, false).await?))
             }
@@ -582,6 +585,26 @@ async fn retire(ctx: &Ctx, ant: &UserId) -> Result<Done> {
     let said =
         orders::retire::retire(admin(ctx)?, &ctx.js, ctx.domain.as_ref(), ant, None, orders::retire::WAIT).await?;
     Ok(Done::line(said.replace('\n', " ")))
+}
+
+/// The schedules of the machine's config file (`ANTS_CONFIG`, else the default) as `ants schedule list` prints them,
+/// for the pager.
+async fn schedules(ctx: &Ctx) -> Result<Done> {
+    let path = match std::env::var_os("ANTS_CONFIG") {
+        Some(path) => std::path::PathBuf::from(path),
+        None => ants_daemon::config::default_path()?,
+    };
+    let (listed, unread) = crate::schedules::read(&ctx.js, &path, None).await?;
+    let mut page = crate::schedules::table(&listed);
+    if let Some(unread) = unread {
+        page = format!("{page}last firings not read: {unread}\n");
+    }
+    let line = match listed.len() {
+        0 => return Ok(Done { line: format!("no schedules in {}", path.display()), ..Done::default() }),
+        1 => "1 schedule: the pager lists it".to_owned(),
+        n => format!("{n} schedules: the pager lists them"),
+    };
+    Ok(Done { line, page: Some(page), ..Done::default() })
 }
 
 #[cfg(test)]

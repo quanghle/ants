@@ -12,6 +12,8 @@ description = "sense, ants' built-in identity, memory and work provider, run ins
 ants-proto.workspace = true
 chrono = { workspace = true, features = ["clock", "serde"] }
 data-encoding.workspace = true
+# Already in the binary through the daemon's schedules: the time zones of the times ants read (crate::when).
+jiff.workspace = true
 # Already in the binary through async-nats: the sanitizer's secret shapes (crate::sanitize).
 regex = "1.13.1"
 rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"] }

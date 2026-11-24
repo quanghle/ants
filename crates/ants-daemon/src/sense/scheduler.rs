@@ -1,7 +1,8 @@
 //! The active daemon owns sense's durable schedule. A firing is stored before its wake, and confirmed only after
 //! delivery; a replacement daemon therefore resumes pending work with the same wake id. Nothing fires while the ant's
-//! sense identity is dormant ([`ants_sense::identity::Card::active`]); its revival changes the card, which wakes the
-//! scheduler. It also runs sense's daily memory maintenance and begins the ant's dreams ([`dreams`]), whose last ones
+//! sense identity is dormant ([`ants_sense::identity::Card::active`]) or the ant is paused ([`crate::pause`]); its
+//! revival changes the card and its resuming the pause, either waking the scheduler, so each trigger due meanwhile
+//! fires once. It also runs sense's daily memory maintenance and begins the ant's dreams ([`dreams`]), whose last ones
 //! are kept in sense data, so a replacement daemon runs them no sooner either. Each read of the ant's items also
 //! publishes the profile of its confirmed persona ([`super::published::profile`]), dormant or not.
 
@@ -36,6 +37,9 @@ struct Settings {
     machine: String,
     env: BTreeMap<String, String>,
     allow: Vec<String>,
+    /// Whether the ant's harness runs its tools unasked: then so do its triggers' commands, but for a trigger made on
+    /// an untrusted thread, its allow rules deciding otherwise.
+    unasked: bool,
     /// None in tests that leave dreams out.
     dreams: Option<dreams::Dreams>,
     /// What the ant's colony entry shows, its profile among it.
@@ -48,6 +52,46 @@ struct Settings {
     home: Option<PathBuf>,
     /// The output of each watcher firing prepared and not delivered yet, by firing id, redacted and cut.
     outputs: std::sync::Mutex<HashMap<String, String>>,
+    /// Whether the ant is paused: then nothing fires, as for a dormant ant.
+    pause: crate::pause::Pause,
+}
+
+/// Whether the commands of an ant's triggers run, as its scheduler decides it: unasked on a harness running its tools
+/// so, else as the ant's tool allow rules permit.
+#[derive(Debug, Clone)]
+pub(crate) struct TriggerCommands {
+    allow: Vec<String>,
+    unasked: bool,
+}
+
+impl TriggerCommands {
+    /// As the ant `config` serves runs them.
+    pub(crate) fn of(config: &crate::daemon::Config) -> Self {
+        Self { allow: config.policy.allow.clone(), unasked: config.harness.harness.bypasses_permissions() }
+    }
+
+    /// Why a call of sense's tool `tool` with `arguments` is refused: one creating a command trigger or watcher whose
+    /// command the scheduler would refuse to run, naming the rule that lets it. A trigger from an untrusted thread
+    /// sense refuses itself.
+    pub(crate) fn refusal(&self, tool: &str, arguments: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+        let action = arguments.get("action").and_then(serde_json::Value::as_str);
+        if self.unasked || tool != "remind" || action.is_some_and(|action| action != "create") {
+            return None;
+        }
+        let trigger: remind::Trigger = serde_json::from_value(arguments.get("trigger")?.clone()).ok()?;
+        let command = match (trigger.condition(), trigger.watch()) {
+            (Some(remind::Condition::Command { command }), _) => command,
+            (_, Some(remind::Watch { run: remind::Watched::Command { command }, .. })) => command,
+            _ => return None,
+        };
+        (!conditions::allowed(command, &self.allow)).then(|| {
+            format!(
+                "the command {command:?} is outside the ant's tool allow rules, which decide what its triggers run as \
+                 its harness asks about its tools, so each check would be refused: a rule such as \
+                 \"execute:{command}\" in the ant's allow lets it run"
+            )
+        })
+    }
 }
 
 /// What a watcher's check takes beside the ant's config.
@@ -96,12 +140,14 @@ pub(super) fn serve(
         machine: machine.to_owned(),
         env: config.harness.env.clone(),
         allow: config.policy.allow.clone(),
+        unasked: config.harness.harness.bypasses_permissions(),
         dreams: Some(dreams::Dreams::new(dreaming)),
         workload,
         trails: watching.trails,
         redactor: watching.redactor,
         home: Some(config.storage.home.clone()),
         outputs: std::sync::Mutex::default(),
+        pause: config.pause.clone(),
     };
     start(sense, Arc::new(host), settings)
 }
@@ -110,7 +156,9 @@ fn start(sense: Arc<Sense>, host: Arc<dyn Host>, settings: Settings) -> Serving 
     Serving(Mutex::new(Some(tokio::spawn(async move {
         // Subscribe first: a call changing the ant's items during a schedule read must wake the following sleep.
         let mut changes = sense.changes(&settings.ant);
+        let mut paused = settings.pause.subscribe();
         loop {
+            paused.mark_unchanged();
             let result = async {
                 let items = sense.synced(&settings.ant).await?;
                 super::published::profile(&*items, &settings.ant, &settings.workload).await;
@@ -119,7 +167,7 @@ fn start(sense: Arc<Sense>, host: Arc<dyn Host>, settings: Settings) -> Serving 
             .await;
             match result {
                 Ok(next) => {
-                    if !wait(&mut changes, next).await {
+                    if !wait(&mut changes, &mut paused, next).await {
                         return;
                     }
                 }
@@ -127,7 +175,7 @@ fn start(sense: Arc<Sense>, host: Arc<dyn Host>, settings: Settings) -> Serving 
                     if error.downcast_ref::<StoreError>().is_some_and(|e| matches!(e, StoreError::NotKept(_))) =>
                 {
                     // A fixture without a host keeps no data. It needs no retries or warnings.
-                    if !wait(&mut changes, None).await {
+                    if !wait(&mut changes, &mut paused, None).await {
                         return;
                     }
                 }
@@ -150,6 +198,10 @@ async fn cycle(
 ) -> Result<Option<DateTime<Utc>>> {
     if ants_sense::identity::card(items).await?.is_some_and(|card| !card.active) {
         // A dormant ant's reminders wait for its revival, which changes the card.
+        return Ok(None);
+    }
+    if settings.pause.get().is_some() {
+        // A paused ant's triggers wait for its resuming, which changes the pause.
         return Ok(None);
     }
     let started = tokio::time::Instant::now();
@@ -225,8 +277,14 @@ async fn probe(
     }
     let workdir =
         workdir(sense, settings, check.source.clone(), check.workdir.as_ref(), check.workdir_machine.as_ref());
-    let context =
-        conditions::Context { workdir: &workdir, env: &settings.env, allow: &settings.allow, items, now: check.at };
+    let context = conditions::Context {
+        workdir: &workdir,
+        env: &settings.env,
+        allow: &settings.allow,
+        unasked: unasked(settings, check.source.as_ref()),
+        items,
+        now: check.at,
+    };
     let started = tokio::time::Instant::now();
     let result = conditions::evaluate(&check.condition, check.observation.as_ref(), &context).await;
     let now = since(check.at, started);
@@ -247,8 +305,14 @@ async fn watch(sense: &Sense, items: &dyn Items, settings: &Settings, check: &Wa
     }
     let workdir =
         workdir(sense, settings, check.source.clone(), check.workdir.as_ref(), check.workdir_machine.as_ref());
-    let context =
-        conditions::Context { workdir: &workdir, env: &settings.env, allow: &settings.allow, items, now: check.at };
+    let context = conditions::Context {
+        workdir: &workdir,
+        env: &settings.env,
+        allow: &settings.allow,
+        unasked: unasked(settings, check.source.as_ref()),
+        items,
+        now: check.at,
+    };
     let reads = watchers::Reads { context, thread: check.source.as_ref().map(|source| source.thread.clone()) };
     let started = tokio::time::Instant::now();
     let seen = watchers::run(check, &reads, settings.trails.as_deref()).await;
@@ -291,6 +355,12 @@ fn workdir(
         .unwrap_or_else(|| settings.workdir.clone())
 }
 
+/// Whether the commands of a trigger made in `source` run unasked: when the ant's harness runs its tools so and the
+/// trigger comes from a trusted thread, none narrowed to tool rules.
+fn unasked(settings: &Settings, source: Option<&ants_proto::provider::CallContext>) -> bool {
+    settings.unasked && source.is_some_and(ants_proto::provider::CallContext::trusted)
+}
+
 /// `at`, moved on by the time elapsed since `started`.
 fn since(at: DateTime<Utc>, started: tokio::time::Instant) -> DateTime<Utc> {
     at + chrono::Duration::from_std(started.elapsed()).expect("a bounded check")
@@ -324,16 +394,17 @@ async fn deliver(items: &dyn Items, host: &dyn Host, settings: &Settings, firing
     Ok(())
 }
 
-async fn wait(changes: &mut watch::Receiver<()>, next: Option<DateTime<Utc>>) -> bool {
-    match next {
-        Some(next) => {
-            let delay = (next - Utc::now()).to_std().unwrap_or_default();
-            tokio::select! {
-                _ = tokio::time::sleep(delay) => true,
-                changed = changes.changed() => changed.is_ok(),
-            }
-        }
-        None => changes.changed().await.is_ok(),
+/// Until `next`, a change of the ant's items or a pause or resume; false once the items' changes end.
+async fn wait(
+    changes: &mut watch::Receiver<()>,
+    paused: &mut watch::Receiver<Option<ants_proto::Paused>>,
+    next: Option<DateTime<Utc>>,
+) -> bool {
+    let delay = next.map(|next| (next - Utc::now()).to_std().unwrap_or_default());
+    tokio::select! {
+        () = async { tokio::time::sleep(delay.unwrap_or_default()).await }, if delay.is_some() => true,
+        changed = changes.changed() => changed.is_ok(),
+        Ok(()) = paused.changed() => true,
     }
 }
 

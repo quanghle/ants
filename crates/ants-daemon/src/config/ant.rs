@@ -176,6 +176,9 @@ pub struct Ant {
     /// What `provider` names among the file's providers; sense while it names none.
     #[serde(skip)]
     pub provider_setting: Setting,
+    /// The file's top-level `timezone`.
+    #[serde(skip)]
+    pub timezone: Option<jiff::tz::TimeZone>,
 }
 
 fn default_max_harnesses() -> usize {
@@ -274,6 +277,7 @@ impl Ant {
             memory_pressure: pressure::Settings::default(),
             trail_workers: crate::trail::DEFAULT_WORKERS,
             provider_setting: Setting::Sense,
+            timezone: None,
         }
     }
 
@@ -362,6 +366,7 @@ impl Ant {
             requester: crate::mcp::Requester::default(),
             pause: crate::pause::Pause::new(self.paused),
             drift: crate::profile::shared::Drift::default(),
+            timezone: self.timezone,
         })
     }
 
@@ -415,10 +420,10 @@ impl Ant {
     }
 
     /// The ant reviewing this one: its `sage` setting, else the file's top-level one; none where that is none or
-    /// names the ant itself, and for a sage, which has none of its own: a built-in ant, or one another ant of the file
-    /// names as its sage.
+    /// names the ant itself, for a sage, which has none of its own: a built-in ant, or one another ant of the file
+    /// names as its sage, and for an ant whose provider is not sense, which never dreams.
     pub fn reviewed_by(&self) -> Option<UserId> {
-        if self.builtin.is_some() || self.is_sage {
+        if self.builtin.is_some() || self.is_sage || !super::sage::dreams(self) {
             return None;
         }
         match self.sage.as_ref().unwrap_or(&self.file_sage) {

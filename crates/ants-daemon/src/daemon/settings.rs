@@ -42,6 +42,9 @@ pub struct Config {
     /// ([`crate::profile::shared`]), as its colony entry reports them; equal to any other, so that a change of drift alone
     /// restarts no harness ([`crate::profile::shared::Drift::replace`]).
     pub drift: crate::profile::shared::Drift,
+    /// The zone the times of day of the ant's sense reminders are read in: the config file's `timezone`; UTC when
+    /// None.
+    pub timezone: Option<jiff::tz::TimeZone>,
 }
 
 /// How the daemon reaches the bus.

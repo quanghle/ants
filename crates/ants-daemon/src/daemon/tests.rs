@@ -192,6 +192,7 @@ impl Bus {
             attempts: self.markers.clone(),
             workers: crate::trail::DEFAULT_WORKERS,
             notes: Arc::new(crate::stream::notes::JetStreamNotes::new(self.js.clone(), self.dev.clone())),
+            pause: self.pause.clone(),
         };
         let trails = crate::trail::Trails::new(conducting).await.unwrap();
         self.trails = Some(trails.clone());

@@ -9,8 +9,8 @@ use ants_daemon::records::direct_kv::DirectKv;
 use ants_daemon::records::owners;
 use ants_daemon::schedule::Mentions;
 use ants_proto::{
-    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, ThreadId, TrailStart,
-    UserId, WEBHOOKS_BUCKET, subject, webhook_marker_key,
+    CHANNELS_BUCKET, COLONY_BUCKET, ChannelEntry, ChannelId, ChannelPost, ColonyEntry, Destination, Envelope, JsDomain,
+    ThreadId, TrailStart, UserId, WEBHOOKS_BUCKET, subject, webhook_marker_key,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
@@ -152,6 +152,20 @@ impl Bus {
             }
         }
         Ok(Delivered { thread: Some(thread), duplicate: false })
+    }
+
+    /// Whether `ant` is paused, as its colony entry says: not when it has none, its daemon stopped.
+    pub(crate) async fn paused(&self, ant: &UserId) -> Result<bool> {
+        let bucket = self.js.get_stream_no_info(subject::kv_stream(COLONY_BUCKET)).await?;
+        match bucket.direct_get_last_for_subject(subject::colony(ant)).await {
+            Ok(entry) if entry.payload.is_empty() => Ok(false),
+            Ok(entry) => {
+                let entry: ColonyEntry = serde_json::from_slice(&entry.payload).context("reading the colony entry")?;
+                Ok(entry.paused.is_some())
+            }
+            Err(e) if e.kind() == DirectGetErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e).context("reading the colony entry"),
+        }
     }
 
     async fn seen(&self, key: &str) -> Result<Option<Seen>> {

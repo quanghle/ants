@@ -276,6 +276,7 @@ dependencies = [
  "ants-test-support",
  "chrono",
  "data-encoding",
+ "jiff",
  "nkeys",
  "regex",
  "rusqlite",

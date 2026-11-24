@@ -137,6 +137,7 @@ pub(super) async fn trails(bus: Bus<'_>, services: &Services) -> Option<Trails> 
             Some(_) => crate::trail::SaveThrough::Signer,
             None => crate::trail::SaveThrough::Bucket,
         },
+        pause: config.pause.clone(),
     };
     match Trails::new(conducting).await {
         Ok(trails) => {
@@ -285,6 +286,7 @@ pub(super) async fn services(bus: Bus<'_>, allow: Allowlist, machine: &str) -> R
     let sense = providers.sense_of(&config.provider);
     if let Some(sense) = sense {
         sense.serve(&config.ant, &config.storage.home, config.connection.creds.clone());
+        sense.read_times_in(&config.ant, config.timezone.as_ref());
         sense.identify(&config.ant, identity.clone());
     }
     let lifecycle = match &identity_id {
@@ -306,6 +308,7 @@ pub(super) async fn services(bus: Bus<'_>, allow: Allowlist, machine: &str) -> R
     connect_mcp(&mut mcp, bus, &redactor).await?;
     if let Some(sense) = sense {
         mcp.with_dreams(sense.dreams());
+        mcp.with_triggers(crate::sense::TriggerCommands::of(config));
     }
     mcp.with_origins(crate::provider::origins::OriginStore::kv(sessions_kv.clone(), config.ant.clone()));
     if let Some(identity) = &identity {

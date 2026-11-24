@@ -1,8 +1,9 @@
 //! Who reviews each ant: the `sage` setting of its `[[ant]]` table, one of its shared settings, else the file's
 //! top-level `sage`, which names the built-in sage ([`super::builtin_sage`]) unless set ([`Sage`]). A sage has no sage
 //! of its own: the built-in ants, and every ant the file names as another's sage, are reviewed by no one ([`settle`],
-//! [`Ant::reviewed_by`]). On a server taking credentials, a machine without the built-in sage's leaves it to another
-//! ([`super::builtins`]).
+//! [`Ant::reviewed_by`]). Only an ant served with sense dreams, so only one names a sage: an ant with another provider
+//! has none, and its `sage` setting warns. On a server taking credentials, a machine without the built-in sage's leaves
+//! it to another ([`super::builtins`]).
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -13,6 +14,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 
 use super::Ant;
+use crate::provider::Setting;
 
 /// What a `sage` setting names: the ant that reviews, or none (`"none"`), which turns reviews off.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -57,18 +59,38 @@ impl fmt::Display for Sage {
     }
 }
 
+/// Who reviews the ants of a file, as [`settle`] settles it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct Settled {
+    /// Whether an ant names the built-in sage, so that the file serves it.
+    pub serves_sage: bool,
+    /// One line for each ant whose `sage` setting names an ant while its provider is not sense, which never dreams.
+    pub warnings: Vec<String>,
+}
+
 /// Settle who reviews each of `ants`, the file's top-level `sage` being `default`: mark the sages, the ants the
-/// others name, and return whether one of the others names the built-in sage, so that the file serves it. Fails where
-/// an ant's own setting names the ant itself, or names another while the ant is
-/// a sage, which has no sage of its own.
-pub(super) fn settle(ants: &mut [Ant], default: &Sage) -> Result<bool> {
+/// others served with sense name, and say whether one of them names the built-in sage, so that the file serves it,
+/// warning of each ant with another provider naming a sage. Fails where an ant's own setting names the ant itself, or
+/// names another while the ant is a sage, which has no sage of its own.
+pub(super) fn settle(ants: &mut [Ant], default: &Sage) -> Result<Settled> {
+    let mut warnings = Vec::new();
     for ant in ants.iter_mut() {
         ant.file_sage = default.clone();
         if ant.sage.as_ref() == Some(&Sage::Ant(ant.name.clone())) {
             bail!("ant {}: sage names the ant itself", ant.name);
         }
+        if let Some(Sage::Ant(sage)) = &ant.sage
+            && ant.builtin.is_none()
+            && !dreams(ant)
+        {
+            warnings.push(format!(
+                "ant {}: sage names {sage}, but the ant's provider is {}, which never dreams: no sage reviews it;                  remove its sage or serve it with provider = \"sense\"",
+                ant.name,
+                ant.provider_setting.name()
+            ));
+        }
     }
-    let reviewed = || ants.iter().filter(|ant| ant.builtin.is_none());
+    let reviewed = || ants.iter().filter(|ant| ant.builtin.is_none() && dreams(ant));
     let mut sages: BTreeSet<UserId> = reviewed()
         .filter_map(|ant| match &ant.sage {
             Some(Sage::Ant(sage)) => Some(sage.clone()),
@@ -93,7 +115,12 @@ pub(super) fn settle(ants: &mut [Ant], default: &Sage) -> Result<bool> {
             );
         }
     }
-    Ok(sages.contains(&UserId::sage()))
+    Ok(Settled { serves_sage: sages.contains(&UserId::sage()), warnings })
+}
+
+/// Whether `ant` dreams, so that a sage reviews it: only sense keeps dreams.
+pub(super) fn dreams(ant: &Ant) -> bool {
+    matches!(ant.provider_setting, Setting::Sense)
 }
 
 #[cfg(test)]

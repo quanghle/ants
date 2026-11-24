@@ -1,5 +1,5 @@
-//! Tests of sense's durable schedule in the daemon: sleeping and waking, dormant ants, retried deliveries, takeovers,
-//! source threads, maintenance runs, the published profile and watchers.
+//! Tests of sense's durable schedule in the daemon: sleeping and waking, dormant and paused ants, refires, retried
+//! deliveries, takeovers, source threads, maintenance runs, the published profile and watchers.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -44,12 +44,14 @@ fn settings() -> Settings {
         machine: "m1".into(),
         env: BTreeMap::new(),
         allow: Vec::new(),
+        unasked: false,
         dreams: None,
         workload: Arc::new(crate::colony::Workload::default()),
         trails: None,
         redactor: crate::secrets::redact::Redactor::off(),
         home: None,
         outputs: Mutex::default(),
+        pause: crate::pause::Pause::new(false),
     }
 }
 
@@ -374,9 +376,50 @@ async fn a_takeover_keeps_the_last_maintenance_run() {
 #[tokio::test(start_paused = true)]
 async fn waiting_subscribes_before_read_and_honors_deadlines() {
     let (sender, mut changes) = watch::channel(());
+    let pause = crate::pause::Pause::new(false);
+    let mut paused = pause.subscribe();
     sender.send_replace(());
-    assert!(wait(&mut changes, None).await, "change during read is retained");
+    assert!(wait(&mut changes, &mut paused, None).await, "change during read is retained");
     let before = tokio::time::Instant::now();
-    assert!(wait(&mut changes, Some(Utc::now() + chrono::Duration::hours(1))).await);
+    assert!(wait(&mut changes, &mut paused, Some(Utc::now() + chrono::Duration::hours(1))).await);
     assert!(before.elapsed() >= Duration::from_secs(3599));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_paused_ant_s_reminders_wait_and_fire_once_on_resuming() {
+    let (sense, stores) = setup().await;
+    let id = create(&sense, json!({"kind":"at","at":Utc::now()})).await;
+    let host = Arc::new(Wakes::default());
+    let pause = crate::pause::Pause::new(true);
+    let scheduler = start(sense.clone(), host.clone(), Settings { pause: pause.clone(), ..settings() });
+    settle().await;
+    tokio::time::advance(DAY).await;
+    settle().await;
+    assert!(host.requests.locked().is_empty(), "nothing fires while paused");
+    assert!(remind::pending_work(&*stores.items).await.unwrap().is_empty(), "nor is a firing prepared");
+    pause.replace(&crate::pause::Pause::new(false));
+    settle().await;
+    let requests = host.requests.locked().clone();
+    assert_eq!(requests.iter().map(|request| request.id.clone()).collect::<Vec<_>>(), [format!("{id}:1")]);
+    assert!(requests[0].replaces.is_none());
+    scheduler.stop().await;
+}
+
+#[tokio::test]
+async fn an_hourly_refire_replaces_the_firing_before_it() {
+    let (sense, stores) = setup().await;
+    let items = &*stores.items;
+    let id = create(&sense, json!({"kind":"at","at":Utc::now()})).await;
+    let host = Wakes::default();
+    let config = settings();
+    cycle(&sense, items, &host, &config, Utc::now()).await.unwrap();
+    for hours in 1..=3 {
+        cycle(&sense, items, &host, &config, Utc::now() + chrono::Duration::minutes(61 * hours)).await.unwrap();
+    }
+    let requests = host.requests.locked().clone();
+    let ids: Vec<_> = requests.iter().map(|request| request.id.clone()).collect();
+    assert_eq!(ids, (1..=4).map(|n| format!("{id}:{n}")).collect::<Vec<_>>());
+    let replaced: Vec<_> = requests.iter().map(|request| request.replaces.clone()).collect();
+    assert_eq!(replaced, [None, Some(format!("{id}:1")), Some(format!("{id}:2")), Some(format!("{id}:3"))]);
+    assert!(requests.iter().all(|request| !request.text.contains(super::watchers::OUTPUT_LOST)), "no watcher's output");
 }

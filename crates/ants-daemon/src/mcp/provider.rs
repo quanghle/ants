@@ -214,6 +214,9 @@ impl Tools {
         thread: &ThreadId,
     ) -> CallToolResult {
         let format = take_format(&mut arguments);
+        if let Some(why) = self.hub.trigger_commands.get().and_then(|commands| commands.refusal(tool, &arguments)) {
+            return text(Err(format!("[ants] {name} was not called: {why}.")));
+        }
         let context = match self.hub.call_context(thread).await {
             Ok(context) => context,
             Err(why) => return text(Err(format!("[ants] {name} was not called: {why}."))),

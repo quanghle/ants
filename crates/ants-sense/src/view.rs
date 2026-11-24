@@ -41,6 +41,7 @@ mod report;
 mod work;
 
 pub use report::{KEY as REPORT, NO_DATA};
+pub use work::REMINDERS;
 
 /// The key of the entry counting the entries left out.
 pub const LEFT_OUT: &str = "left out";
