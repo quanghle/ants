@@ -16,7 +16,8 @@
 //!   path relative to the workdir, and never a file outside it. `edit:*` allows edits anywhere in the workdir.
 //! - `fetch`: the URL (`raw_input.url`), else the title.
 //! - anything else: the title the harness shows, such as an MCP tool's name. Claude Code titles MCP tools
-//!   `mcp__<server>__<tool>` and Codex `mcp.<server>.<tool>`; the pattern may match that or just the tool. Codex
+//!   `mcp__<server>__<tool>`, Codex `mcp.<server>.<tool>` and Copilot CLI `<server>/<tool>`; the pattern may match
+//!   that or just the tool. Codex
 //!   reports MCP tool calls as `execute`; they count as `other`.
 
 use std::collections::{BTreeMap, HashMap};
@@ -119,13 +120,22 @@ impl Rule {
     }
 }
 
-/// The tool an MCP tool call runs, from Claude Code's title `mcp__<server>__<tool>` or Codex's call.
+/// The tool an MCP tool call runs, from Claude Code's title `mcp__<server>__<tool>`, Codex's call or Copilot's.
 fn mcp_tool(fields: &ToolCallUpdateFields) -> Option<&str> {
     let title = fields.title.as_deref()?;
     if let Some((server, tool)) = mcp_title(title) {
         return (!server.is_empty() && !tool.is_empty()).then_some(tool);
     }
-    codex_mcp_tool(fields)
+    codex_mcp_tool(fields).or_else(|| copilot_mcp_tool(fields))
+}
+
+/// The tool of a Copilot CLI MCP permission request: titled `<server>/<tool>`, with the server and tool as
+/// `serverName` and `toolName` in its raw input.
+fn copilot_mcp_tool(fields: &ToolCallUpdateFields) -> Option<&str> {
+    let input = fields.raw_input.as_ref()?;
+    let (server, tool) = (input.get("serverName")?.as_str()?, input.get("toolName")?.as_str()?);
+    let title = fields.title.as_deref()?.strip_prefix(server)?.strip_prefix('/')?;
+    (!server.is_empty() && !tool.is_empty() && title == tool).then_some(tool)
 }
 
 /// The tool of a Codex MCP tool call: titled `mcp.<server>.<tool>`, with the server and tool, but no command, in its
@@ -687,6 +697,12 @@ mod tests {
         let claude = request(ToolKind::Other, "mcp__ants__send_message", json!({}), &[]);
         assert!(allows(&["other:send_message"], &claude) && allows(&["other:mcp__ants__*"], &claude));
         assert!(!allows(&["other:ants"], &claude));
+        let input = json!({ "kind": "mcp", "serverName": "ants", "toolName": "send_message", "args": {} });
+        let copilot = request(ToolKind::Other, "ants/send_message", input, &[]);
+        assert!(allows(&["other:send_message"], &copilot) && allows(&["other:ants/*"], &copilot));
+        assert!(!allows(&["other:ants"], &copilot) && !allows(&["other:send"], &copilot));
+        let lookalike = request(ToolKind::Other, "ants/send_message", json!({ "toolName": "send_message" }), &[]);
+        assert!(!allows(&["other:send_message"], &lookalike), "no server in its input");
         let input = json!({ "server": "ants", "tool": "send_message", "arguments": { "to": "dev-b" } });
         let codex = request(ToolKind::Execute, "mcp.ants.send_message", input.clone(), &[]);
         assert!(allows(&["other:send_message"], &codex) && allows(&["other:mcp.ants.*"], &codex));

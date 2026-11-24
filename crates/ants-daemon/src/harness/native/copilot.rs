@@ -129,9 +129,9 @@ impl Shared {
     }
 
     /// The handler answering the CLI's permission requests of a session whose prompt running sends them to `asking`
-    /// ([`Permissions`]).
-    fn permissions(&self, asking: Asking) -> Arc<dyn sdk::handler::PermissionHandler> {
-        Arc::new(Permissions { cli: self.cli.clone(), asking })
+    /// and whose ants MCP servers are `ants` ([`Permissions`]).
+    fn permissions(&self, asking: Asking, ants: &Map<String, Value>) -> Arc<dyn sdk::handler::PermissionHandler> {
+        Arc::new(Permissions { cli: self.cli.clone(), asking, ants: ants.keys().cloned().collect() })
     }
 }
 
@@ -142,11 +142,15 @@ macro_rules! settings {
     ($config:expr, $shared:expr, $open:expr, $asking:expr) => {{
         let shared: &Shared = $shared;
         let open: Open = $open;
+        let ants = match mcp_servers_json(&open.mcp_servers) {
+            Value::Object(ants) => ants,
+            _ => Map::new(),
+        };
         let mut config = $config
             .with_streaming(true)
             .with_working_directory(open.cwd)
             .with_enable_session_telemetry(false)
-            .with_permission_handler(shared.permissions($asking));
+            .with_permission_handler(shared.permissions($asking, &ants));
         if let Some(model) = shared.cli.model() {
             config = config.with_model(model);
         }
@@ -166,9 +170,7 @@ macro_rules! settings {
             config = config.with_skill_directories([skills.dir]);
         }
         let mut servers = shared.mcp.clone();
-        if let Value::Object(own) = mcp_servers_json(&open.mcp_servers) {
-            servers.extend(own);
-        }
+        servers.extend(ants);
         if !servers.is_empty() {
             let servers = serde_json::from_value(Value::Object(servers))
                 .map_err(|e| failed(format!("the session's MCP servers: {e}")))?;

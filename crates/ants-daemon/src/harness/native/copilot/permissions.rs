@@ -18,10 +18,13 @@ pub(super) type Asking = Arc<Mutex<Option<Updates>>>;
 
 /// The handler answering a session's permission requests: one that managed policy says a human must decide is
 /// denied; else every one is approved, as the tools left to the model are the ones the definition enables, unless the
-/// ant asks ants about its tools, when ants decide ([`approve`]).
+/// ant asks ants about its tools, when ants decide ([`approve`]) all but those of the ants MCP servers, which run
+/// unasked as on the other native protocols.
 pub(super) struct Permissions {
     pub(super) cli: Cli,
     pub(super) asking: Asking,
+    /// The names of the session's ants MCP servers.
+    pub(super) ants: Vec<String>,
 }
 
 impl sdk::handler::PermissionHandler for Permissions {
@@ -41,7 +44,7 @@ impl sdk::handler::PermissionHandler for Permissions {
                 deny_approval(&self.cli, &described);
                 return PermissionResult::reject(None);
             }
-            if !self.cli.asks() {
+            if !self.cli.asks() || self.ants_tool(&data) {
                 tracing::debug!(
                     harness = self.cli.name(),
                     request = described,
@@ -56,6 +59,15 @@ impl sdk::handler::PermissionHandler for Permissions {
                 PermissionResult::reject(Some("The ant's tool permissions did not allow it.".to_owned()))
             }
         })
+    }
+}
+
+impl Permissions {
+    /// Whether `data` asks to run a tool of one of the session's ants MCP servers.
+    fn ants_tool(&self, data: &PermissionRequestData) -> bool {
+        let request = data.extra.get("permissionRequest").unwrap_or(&data.extra);
+        data.kind == Some(PermissionRequestKind::Mcp)
+            && request["serverName"].as_str().is_some_and(|server| self.ants.iter().any(|ants| ants == server))
     }
 }
 
