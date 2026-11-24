@@ -83,7 +83,14 @@ Review changes for correctness."""
     assert_eq!(config.spending.caps, caps);
     assert_eq!(config.spending.warn_percent, 90);
     let escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
-    let chain = Chain { escalate_to, max_hops: 2, after: None, remind: None, stand_in: Some("carol".parse().unwrap()) };
+    let chain = Chain {
+        escalate_to,
+        max_hops: 2,
+        turn_budget: ants_proto::DEFAULT_TURN_BUDGET,
+        after: None,
+        remind: None,
+        stand_in: Some("carol".parse().unwrap()),
+    };
     assert_eq!(config.policy.escalation, chain, "0 waits for the leader for good and never reminds");
     assert_eq!(config.worktrees.per_thread, Some(true));
     check_dev_b(ants[1].clone());

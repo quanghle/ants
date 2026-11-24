@@ -20,7 +20,7 @@ pub(crate) struct Cli {
     /// The executable: the command, else on Windows the file found on `PATH`.
     program: PathBuf,
     /// The definition's arguments and those of the ant's `context`.
-    args: Vec<String>,
+    pub(super) args: Vec<String>,
     /// The definition's environment with the ant's over it, added to the daemon's.
     env: BTreeMap<String, String>,
     /// The ant's model, with the suffix its `context` selects.

@@ -1,6 +1,8 @@
 //! Delivering answers: the title and files a turn attached, what the runs started answering a step spent, a webhook's
 //! answer, replies on channel threads, and what a review's thread spent noted with the answer in the sage's sense.
 
+use std::collections::BTreeMap;
+
 use super::*;
 
 #[tokio::test]
@@ -726,4 +728,105 @@ async fn a_human_joining_a_running_review_gets_the_answer_and_the_sage_records_i
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     let log = log.locked();
     assert_eq!((log.prompted, log.cancelled), (3, 0), "the steer joined rather than starting a new prompt");
+}
+
+#[tokio::test]
+async fn a_human_s_or_webhook_s_message_or_post_gives_the_thread_the_configured_turn_budget() {
+    for turn_budget in [3, 20] {
+        Box::pin(fresh_budget_of(turn_budget)).await;
+    }
+}
+
+/// A human's and a webhook's message and channel post, each stamped with the default budget by its client, give their
+/// threads dev-a's `turn_budget`.
+async fn fresh_budget_of(turn_budget: u32) {
+    let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+    bus.chain.turn_budget = turn_budget;
+    let (launch, _log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (ops, mut replies) = bus.channel("ops", &["dev-a"]).await;
+    let (human, hook) = (UserId::human(), "github".parse::<UserId>().unwrap());
+    let ask = Envelope::new(human.clone(), bus.dev.clone(), "hello");
+    assert_eq!(ask.turn_budget, DEFAULT_TURN_BUDGET, "stamped by the client");
+    bus::publish_json(&bus.js, ask.subject(), &ask, None).await.unwrap();
+    let hooked = Envelope::new(hook.clone(), bus.dev.clone(), "build red").with_owner(Some(human.clone()));
+    let hooked = hooked.from_webhook();
+    bus::publish_json(&bus.js, hooked.subject(), &hooked, None).await.unwrap();
+    let mut root = ChannelPost::new(ops.clone(), human.clone(), "@dev-a deploy friday?");
+    root.mentions = vec![bus.dev.clone()];
+    bus.post(&root).await;
+    let alert = ChannelPost::new(ops.clone(), hook, "@dev-a deploy failed").from_webhook(vec![bus.dev.clone()]);
+    let seq = bus.post(&alert).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let mut answers = BTreeMap::new();
+        for _ in 0..2 {
+            let reply = next_envelope(&mut to_human).await;
+            answers.insert(reply.in_reply_to.unwrap(), reply.turn_budget);
+        }
+        let want = BTreeMap::from([(ask.id, turn_budget), (hooked.id, turn_budget)]);
+        assert_eq!(answers, want, "an answer to a human spends none of the receiving ant's budget");
+        let mut posts = BTreeMap::new();
+        for _ in 0..2 {
+            let reply = next_post(&mut replies).await;
+            posts.insert(reply.in_reply_to.unwrap(), reply.turn_budget);
+        }
+        let want = BTreeMap::from([(root.id, turn_budget - 1), (alert.id, turn_budget - 1)]);
+        assert_eq!(posts, want, "a post's reply spends one of the receiving ant's budget");
+        bus.until_posts_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+}
+
+#[tokio::test]
+async fn an_ant_s_message_or_post_keeps_its_budget_whatever_the_receiver_s_turn_budget() {
+    let Some((mut bus, _)) = Bus::start().await else { return };
+    bus.chain.turn_budget = 3;
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let [mut to_dev_b] = inboxes(&bus, std::slice::from_ref(&dev_b).try_into().unwrap()).await;
+    let (launch, _log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b"]).await;
+    let (ask, _) = bus.send_ant(&ThreadId::generate(), "review?").await;
+    let mut post = ChannelPost::new(ops.clone(), dev_b.clone(), "@dev-a agree?");
+    post.mentions = vec![bus.dev.clone()];
+    let seq = bus.post(&post).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let reply = next_envelope(&mut to_dev_b).await;
+        assert_eq!((reply.in_reply_to, reply.turn_budget), (Some(ask.id), DEFAULT_TURN_BUDGET - 1));
+        let reply = next_post(&mut replies).await;
+        assert_eq!((reply.in_reply_to, reply.turn_budget), (Some(post.id), DEFAULT_TURN_BUDGET - 1));
+        bus.until_posts_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+}
+
+#[tokio::test]
+async fn a_later_human_post_on_a_channel_thread_gives_it_the_configured_turn_budget() {
+    let Some((mut bus, _)) = Bus::start().await else { return };
+    bus.chain.turn_budget = 20;
+    let (launch, _log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (ops, mut replies) = bus.channel("ops", &["dev-a"]).await;
+    let mut root = ChannelPost::new(ops.clone(), UserId::human(), "@dev-a deploy friday?");
+    root.mentions = vec![bus.dev.clone()];
+    bus.post(&root).await;
+    // Mentioning nobody, it wakes the channel's messenger only; dev-a reads it among the thread's later posts.
+    let more = root.reply(UserId::human(), "or monday", &[], &bus.humans.humans()).unwrap();
+    assert_eq!(more.turn_budget, DEFAULT_TURN_BUDGET, "stamped by the client");
+    let seq = bus.post(&more).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let reply = next_post(&mut replies).await;
+        assert_eq!((reply.in_reply_to, reply.turn_budget), (Some(root.id), 19), "not the 8 the later post carries");
+        bus.until_posts_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
 }

@@ -95,6 +95,9 @@ fn entry_limits(ant: &Ant, out: &mut String) {
     let mut set = |key: &str, value: String| {
         let _ = writeln!(out, "{key} = {value}");
     };
+    if let Some(turns) = ant.turn_budget {
+        set("turn_budget", turns.to_string());
+    }
     let numbers = [
         ("max_harnesses", ant.max_harnesses as u64, default.max_harnesses as u64),
         ("max_tool_calls", ant.max_tool_calls as u64, default.max_tool_calls as u64),
