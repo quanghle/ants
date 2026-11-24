@@ -74,7 +74,9 @@ pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Resul
         }
     };
     let reload = || serve::ants_on_reload(args, &default_path, &hostname, conn.creds).and_then(&served);
-    let serving = async { serve::run(served(startup()?)?, reload, triggers, replaced, stop).await };
+    // A daemon managing the nats-server goes on serving it, and the machine's admin orders, with no ants left.
+    let idle = if managed.is_some() { serve::Idle::Wait } else { serve::Idle::Exit };
+    let serving = async { serve::run(served(startup()?)?, reload, triggers, replaced, stop, idle).await };
     let ended = match managed {
         Some(managed) => natsd::run_serving(managed, serving).await?,
         None => serving.await?,

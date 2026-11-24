@@ -439,7 +439,8 @@ async fn add_orders_sent_at_once_leave_the_daemon_serving_every_ant() {
                 let stopping = async {
                     let _ = stopped.await;
                 };
-                serve::run(served().unwrap(), served, triggers, stopping, std::future::pending()).await
+                serve::run(served().unwrap(), served, triggers, stopping, std::future::pending(), serve::Idle::Exit)
+                    .await
             })
         })
     };

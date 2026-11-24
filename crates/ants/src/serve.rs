@@ -156,20 +156,31 @@ pub enum Ended {
     Replaced,
 }
 
+/// What [`run`] does while no ant is left to serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Idle {
+    /// End.
+    Exit,
+    /// Go on, its host connection taking the machine's admin orders, until `shutdown` or `replaced`: a daemon
+    /// managing the machine's nats-server keeps serving it.
+    Wait,
+}
+
 /// Serve every ant until `shutdown` (Ctrl-C or SIGTERM: [`stop_signal`]), each over its own NATS connection, and run
 /// the schedules alongside, each over its own as well. An ant that fails is reported and the others keep running; it is
 /// an error only when none is left. On SIGHUP, once the config file changed and settled, or at once after an admin
 /// order edited it (`triggers`), `reload` lists the ants and schedules again and the daemon serves those
-/// ([`reconcile`], [`Schedules::reconcile`]); an empty list leaves no ants running once they drain, and a list it
-/// cannot read is reported and what runs stays as it is. Health and metrics are served on `served.metrics`, if given,
-/// until the daemon stops; a reload does not move them. Once `replaced` the ants stop as on SIGTERM, finishing their
-/// prompts in flight, and the schedules at once.
+/// ([`reconcile`], [`Schedules::reconcile`]); an empty list leaves no ants running once they drain, which ends serving
+/// unless `idle` is [`Idle::Wait`], and a list it cannot read is reported and what runs stays as it is. Health and
+/// metrics are served on `served.metrics`, if given, until the daemon stops; a reload does not move them. Once
+/// `replaced` the ants stop as on SIGTERM, finishing their prompts in flight, and the schedules at once.
 pub async fn run(
     served: Served,
     reload: impl Fn() -> Result<Served>,
     mut triggers: Triggers,
     replaced: impl Future<Output = ()>,
     shutdown: impl Future<Output = ()>,
+    idle: Idle,
 ) -> Result<Ended> {
     let metrics = served.metrics;
     let _metrics = serve_metrics(metrics, Arc::new(ants_daemon::monitoring::metrics::Daemon)).await?;
@@ -187,7 +198,12 @@ pub async fn run(
     schedules.reconcile(served.schedules, run_schedule);
     tokio::pin!(shutdown, replaced);
     let (mut stopping, mut served, mut errors, mut ended) = (false, 0, Vec::new(), Ended::Stopped);
-    while !tasks.is_empty() {
+    let mut idle_told = false;
+    while !tasks.is_empty() || (idle == Idle::Wait && !stopping) {
+        if tasks.is_empty() && !std::mem::replace(&mut idle_told, true) {
+            tracing::info!("no ants left to serve; serving the machine's nats-server and admin orders until stopped");
+        }
+        idle_told &= tasks.is_empty();
         tokio::select! {
             Some((ant, result)) = tasks.next() => {
                 match result {

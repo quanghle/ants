@@ -470,6 +470,39 @@ async fn a_reload_starts_stops_or_restarts_schedules() {
     assert_eq!(schedules.0.len(), 2);
 }
 
+/// A file having the daemon manage the machine's nats-server is served with no ants, at start as after a reload: the
+/// daemon goes on serving the server and the machine's admin orders until stopped. Without it, serving ends once no
+/// ant is left.
+#[tokio::test]
+async fn a_daemon_managing_the_nats_server_goes_on_with_no_ants() {
+    let dir = ants_test_support::scratch_dir("serve-idle").canonicalize().unwrap();
+    let config = dir.join("config.toml");
+    let conf = dir.join("nats.conf");
+    std::fs::write(&conf, "listen: 127.0.0.1:4222\n").unwrap();
+    std::fs::write(&config, format!("messenger = false\n[nats_server]\nconfig = {conf:?}\n")).unwrap();
+    let listed = ants(&args(&format!("--config {}", config.display())), &config, "gen-4f2a.internal", None).unwrap();
+    assert!(listed.ants.is_empty() && listed.nats_server.is_some(), "{listed:?}");
+
+    let empty = || {
+        let (host, sense, shared, machine) = (None, None, None, None);
+        anyhow::Ok(Served { configs: Vec::new(), schedules: Vec::new(), metrics: None, host, sense, shared, machine })
+    };
+    let triggers = || crate::reload::Triggers::new(config.clone(), None, Duration::from_mins(1)).unwrap();
+    let ended = run(empty().unwrap(), empty, triggers(), std::future::pending(), std::future::ready(()), Idle::Exit);
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), ended).await.unwrap().unwrap(), Ended::Stopped);
+
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let shutdown = async move {
+        let _ = stopped.await;
+    };
+    let serving = run(empty().unwrap(), empty, triggers(), std::future::pending(), shutdown, Idle::Wait);
+    tokio::pin!(serving);
+    assert!(tokio::time::timeout(Duration::from_millis(300), serving.as_mut()).await.is_err(), "goes on with no ants");
+    stop.send(()).unwrap();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), serving).await.unwrap().unwrap(), Ended::Stopped);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn duration_flags_need_a_unit() {
     let p = args("--idle-timeout 90s --prompt-timeout 0 --approval-timeout 1h30m").options.apply(ant("dev-a"));
