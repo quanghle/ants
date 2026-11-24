@@ -29,7 +29,7 @@ use std::time::{Duration, SystemTime};
 
 use ants_proto::{
     AdminOrder, ApprovalRequest, CancelReply, CancelRequest, Envelope, Humans, QueueRequest, Reaction, ReadMarker,
-    ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes, ThreadTitle, UserId, Uuid,
+    Reminders, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes, ThreadTitle, UserId, Uuid,
 };
 use anyhow::Result;
 use futures::future::BoxFuture;
@@ -88,6 +88,8 @@ pub trait HumanStore: Send + Sync {
     fn marks(&self, human: UserId) -> BoxFuture<'_, Result<ThreadMarks>>;
     /// `human`'s own snoozes.
     fn snoozes(&self, human: UserId) -> BoxFuture<'_, Result<ThreadSnoozes>>;
+    /// `human`'s own reminders and snoozes, and the snoozes `assistant` set for it.
+    fn reminders(&self, human: UserId, assistant: UserId) -> BoxFuture<'_, Result<(Reminders, ThreadSnoozes)>>;
     /// Change the pins and archives `assistant` set for `human` with `change`, on top of whatever changed meanwhile.
     /// Whether that changed anything.
     fn change_marks(

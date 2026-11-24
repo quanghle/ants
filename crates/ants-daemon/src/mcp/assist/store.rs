@@ -202,6 +202,15 @@ impl HumanStore for JetStreamStore {
         })
     }
 
+    fn reminders(&self, human: UserId, assistant: UserId) -> BoxFuture<'_, Result<(Reminders, ThreadSnoozes)>> {
+        Box::pin(async move {
+            let threads = self.threads().await?;
+            let own: Reminders = self.entry(&threads, &reminders_key(&human)).await?.0;
+            let assisted: Reminders = self.entry(&threads, &assisted_reminders_key(&human, &assistant)).await?.0;
+            Ok((own, assisted.snoozed))
+        })
+    }
+
     fn change_marks(
         &self,
         human: UserId,

@@ -32,6 +32,8 @@ struct MemoryHuman {
     own_snoozes: StdMutex<ants_proto::ThreadSnoozes>,
     marks: StdMutex<ants_proto::ThreadMarks>,
     snoozes: StdMutex<ants_proto::ThreadSnoozes>,
+    /// The human's own reminders.
+    reminders: StdMutex<ants_proto::Reminders>,
 }
 
 impl MemoryHuman {
@@ -96,6 +98,17 @@ impl HumanStore for MemoryHuman {
     fn snoozes(&self, _: UserId) -> BoxFuture<'_, Result<ants_proto::ThreadSnoozes>> {
         let snoozes = self.own_snoozes.locked().clone();
         Box::pin(async move { Ok(snoozes) })
+    }
+
+    fn reminders(
+        &self,
+        _: UserId,
+        _: UserId,
+    ) -> BoxFuture<'_, Result<(ants_proto::Reminders, ants_proto::ThreadSnoozes)>> {
+        let own =
+            ants_proto::Reminders { snoozed: self.own_snoozes.locked().clone(), ..self.reminders.locked().clone() };
+        let assisted = self.snoozes.locked().clone();
+        Box::pin(async move { Ok((own, assisted)) })
     }
 
     fn change_marks(
@@ -783,4 +796,55 @@ async fn the_assistant_reads_and_sends_its_human_s_sealed_messages_only_when_enr
     assert!(ok, "{plain}");
     let reply = sent.try_recv().unwrap();
     assert!(reply.sealed.is_none() && reply.text == "yes");
+}
+
+/// human_queue lists what alice's home lists: a thread stuck on her, an unread message, an unread mention and a due
+/// reminder, each under its own heading, and leaves out the threads she snoozed or the assistant snoozed for her
+/// until something new arrives on them; a human's word on a stuck thread takes it off.
+#[tokio::test]
+async fn the_queue_lists_what_home_lists_less_the_snoozed_threads() {
+    use ants_proto::{Escalation, EscalationReason, Mention, Reminder};
+
+    let home = home("assist-queue");
+    let (mcp, _sent, humans, device, store) = assistant(&home).await;
+    grant(&humans, &device, Some("dev-a"), false);
+    let (alice, bob, dev_b) = (user("alice"), user("bob"), user("dev-b"));
+    let [stuck, chat, mentioned, reminded, snoozed, own] = [(); 6].map(|()| ThreadId::generate());
+    let mut escalation = Envelope::on_thread(stuck.clone(), dev_b.clone(), alice.clone(), "Out of turns");
+    escalation.escalation = Some(Box::new(Escalation::new(dev_b.clone(), stuck.clone(), EscalationReason::TurnBudget)));
+    store.store(escalation);
+    store.store(Envelope::on_thread(chat.clone(), bob.clone(), alice.clone(), "Lunch?"));
+    let mut mention = Envelope::on_thread(mentioned.clone(), bob.clone(), alice.clone(), "@alice look");
+    mention.mention = Some(Mention { channel: "ops".parse().unwrap(), post: Uuid::new_v4(), author: None });
+    store.store(mention);
+    for thread in [&snoozed, &own] {
+        store.store(Envelope::on_thread(thread.clone(), bob.clone(), alice.clone(), "Later"));
+    }
+    let now = chrono::Utc::now();
+    let hour = chrono::TimeDelta::hours(1);
+    let reminder = Reminder { at: now - hour, due: now, message: None, note: "call bob".into(), pushed: false };
+    store.reminders.locked().remind(&reminded, reminder);
+    store.snoozes.locked().snooze(&snoozed, now, now + hour);
+    store.own_snoozes.locked().snooze(&own, now, now + hour);
+    let (url, token) = http_server(&mcp, &ThreadId::generate());
+    let client = http_client(&url, &token).await;
+
+    let (ok, queue) = call(&client, "human_queue", serde_json::json!({})).await;
+    assert!(ok, "{queue}");
+    assert!(queue.contains("Stuck threads (1), escalated to alice"), "{queue}");
+    assert!(queue.contains(&format!("on thread {stuck}, dev-b to alice: Out of turns")), "{queue}");
+    assert!(queue.contains("Unread messages to alice (1):") && queue.contains("bob to alice: Lunch?"), "{queue}");
+    assert!(queue.contains("Unread mentions of alice (1):") && queue.contains("@alice look"), "{queue}");
+    assert!(queue.contains(&format!("Due reminders (1):\n- thread {reminded}, due ")), "{queue}");
+    assert!(queue.contains(": call bob"), "{queue}");
+    for thread in [&snoozed, &own] {
+        assert!(!queue.contains(&thread.to_string()), "{thread} is snoozed: {queue}");
+    }
+
+    store.store(Envelope::on_thread(snoozed.clone(), bob.clone(), alice.clone(), "Now?"));
+    store.store(Envelope::on_thread(stuck.clone(), alice.clone(), dev_b.clone(), "Go on"));
+    let (_, queue) = call(&client, "human_queue", serde_json::json!({})).await;
+    assert!(queue.contains(&format!("on thread {snoozed}, bob to alice: Now?")), "the snooze ended: {queue}");
+    assert!(!queue.contains(&own.to_string()), "{queue}");
+    assert!(queue.contains("Stuck threads (0)"), "alice answered: {queue}");
 }
