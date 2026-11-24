@@ -93,6 +93,28 @@ impl Inbox<'_> {
         Ok(())
     }
 
+    /// Who the answer to `incoming` goes to when it goes as a message, outside a channel, as [`Inbox::reply_for`]
+    /// addresses it: none for a channel post's or a resumed channel thread's, a trail step's the ant sent itself, a
+    /// webhook's with no owner, and one going to an escalation's notes.
+    pub(super) fn answered_to(&self, incoming: &Incoming) -> Option<UserId> {
+        let envelope = &incoming.envelope;
+        if incoming.post.is_some() || incoming.resume.is_some() {
+            return None;
+        }
+        if envelope.trail_step.is_some() && envelope.from == *self.ant {
+            return None;
+        }
+        if envelope.webhook || envelope.from == *self.ant {
+            let owner = self.humans.human_owner(envelope.owner.as_ref());
+            return owner.or_else(|| (!envelope.webhook).then(|| self.humans.default_human().clone()));
+        }
+        match escalation::route(self.ant, envelope).map(|(_, route)| route) {
+            Some(Route::Notes) => None,
+            Some(Route::Stuck(stuck)) => Some(stuck),
+            _ => Some(envelope.from.clone()),
+        }
+    }
+
     /// The reply carrying `text`, the answer to `incoming`, `title`, the one the turn suggested for the thread, and
     /// `files`, those it attached, whatever kind of reply it is: `None` when the answer went up the chain or nowhere
     /// instead, and the message is done with. `files` are stored under the reply's handles, and left as stored, so

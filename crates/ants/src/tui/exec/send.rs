@@ -37,6 +37,7 @@ pub(super) async fn ask(
     queue: bool,
     files: &[File],
 ) -> Result<Done> {
+    ants_client::sending::one_recipient(&ctx.me.id, &to.to, &text)?;
     let new = thread.is_none();
     let mut envelope = send::ask_envelope(&ctx.me, thread, to.to.clone(), text);
     envelope.queue = queue;
@@ -55,6 +56,7 @@ pub(super) async fn ask_addressed(
 ) -> Result<Done> {
     let Some(team) = to.team.clone() else { return ask(ctx, to.to.into(), thread, text, quote, queue, files).await };
     let new = thread.is_none();
+    ants_client::sending::one_recipient(&ctx.me.id, &to.to, &text)?;
     let told = format!("team {team} (lead {})", to.to);
     let mut envelope = send::ask_envelope(&ctx.me, thread, to.to.clone(), text);
     envelope.queue = queue;

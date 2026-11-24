@@ -19,6 +19,9 @@ use crate::sync::MutexExt as _;
 const DEFAULT_ASK_WAIT: Duration = Duration::from_secs(300);
 const MAX_ASK_WAIT: Duration = Duration::from_mins(30);
 
+/// How an ant posts to a channel, for a message @mentioning several users ([`ants_proto::one_recipient`]).
+pub(crate) const POST_WITH: &str = "post_channel, with `on_thread` on the thread of the channel post being handled";
+
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SendMessage {
     /// Recipient: an ant, such as `dev-b`, a team, such as `backend`, which reaches its lead, or a human by name.
@@ -254,6 +257,7 @@ impl Tools {
     ) -> Result<String, String> {
         let mut envelope = self.hub.outgoing(thread, to.as_str(), text, on)?;
         envelope.team = team;
+        ants_proto::one_recipient(&self.hub.ant, &envelope.to, &envelope.text, POST_WITH)?;
         let loaded = self.hub.load(thread, attach).await?;
         envelope.attachments = loaded.iter().map(|l| l.attachment.clone()).collect();
         self.hub.check_fits(&envelope)?;
@@ -300,6 +304,7 @@ impl Tools {
     ) -> Result<Envelope, String> {
         let mut envelope = self.hub.outgoing(thread, to.as_str(), text, None)?;
         envelope.team = team;
+        ants_proto::one_recipient(&self.hub.ant, &envelope.to, &envelope.text, POST_WITH)?;
         if self.hub.humans.is_human(&envelope.to) {
             return Err(format!("ask_ant is for ants; send_message reaches {}", envelope.to));
         }
@@ -330,7 +335,9 @@ impl Tools {
         message. When no daemon serves the ant now (no colony entry, a stale one, or a harness signed out) the \
         message still goes and waits, and the result warns so, naming ants from the colony to message instead. \
         `attach` lists files in the working directory to attach (at most 8 of up to 8 MiB each), secrets in text \
-        files replaced with [redacted]; one that cannot be attached fails the call with nothing sent.")]
+        files replaced with [redacted]; one that cannot be attached fails the call with nothing sent. A message has one \
+        recipient: text @mentioning two or more ants or humans is refused with nothing sent, as addressing several \
+        takes post_channel, else one message to each.")]
     async fn send_message(
         &self,
         Parameters(args): Parameters<SendMessage>,
@@ -377,7 +384,8 @@ impl Tools {
         current thread and spends one turn of its budget. A reply that arrives after the wait gives up is kept for \
         check_inbox, and once the turn ends is prompted on this thread. When no daemon serves the ant now (no colony entry, a stale one, or a harness signed out) the \
         call is refused at once with nothing sent, saying why and naming ants from the colony to ask instead. \
-        `attach` lists files in the working directory to attach, as for send_message.")]
+        `attach` lists files in the working directory to attach, as for send_message. Text @mentioning two or more \
+        ants or humans is refused, as by send_message.")]
     async fn ask_ant(
         &self,
         Parameters(args): Parameters<AskAnt>,

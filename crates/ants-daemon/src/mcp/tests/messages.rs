@@ -34,6 +34,29 @@ async fn send_message_follows_on_from_the_current_message() {
 }
 
 #[tokio::test]
+async fn a_message_mentioning_several_users_is_refused_with_nothing_sent() {
+    let home = home("mentions");
+    let (mcp, mut sent) = start(&home).await;
+    let current = from_human();
+    let (url, token) = http_server(&mcp, &current.thread_id);
+    let client = http_client(&url, &token).await;
+    let _turn = mcp.begin(&current);
+
+    let several = "@dev-b @dev-c the specs are up as PR #51";
+    for tool in ["send_message", "ask_ant"] {
+        let (ok, text) = call(&client, tool, serde_json::json!({"to": "dev-b", "text": several})).await;
+        assert!(!ok && text.contains("mentions @dev-b and @dev-c"), "{tool}: {text}");
+        assert!(text.contains("one recipient, dev-b,") && text.contains("post_channel"), "{tool}: {text}");
+    }
+    assert!(sent.try_recv().is_err(), "nothing was sent");
+
+    let (ok, text) =
+        call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "@dev-c reviews it"})).await;
+    assert!(ok, "one mention goes: {text}");
+    assert_eq!(sent.recv().await.unwrap().turn_budget, current.turn_budget);
+}
+
+#[tokio::test]
 async fn handoff_sends_to_the_ant_itself_on_another_thread() {
     let home = home("handoff");
     let (mcp, mut sent) = start(&home).await;

@@ -283,6 +283,7 @@ pub(crate) async fn ask(nats: &Nats<'_>, args: AskArgs) -> Result<()> {
         Some(_) => Addressed { to, team: None },
         None => to_team(&js, nats.domain, to).await?,
     };
+    ants_client::sending::one_recipient(&nats.me.id, &addressed.to, &text)?;
     let mut envelope = match &forwarded {
         Some(source) => source.envelope(&nats.me, addressed.to.clone(), &text),
         None => ask_envelope(&nats.me, thread, addressed.to.clone(), text),

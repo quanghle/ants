@@ -219,6 +219,9 @@ pub(crate) async fn answering(js: &jetstream::Context, human: &UserId, id: Uuid,
         (Picks::Words(words), Some(asked)) => asked.picks(&words)?,
         (Picks::Words(_), None) => Vec::new(),
     };
+    let typed: Vec<&str> =
+        picks.iter().filter_map(|p| if let Pick::Typed(t) = p { Some(t.as_str()) } else { None }).collect();
+    ants_client::sending::one_recipient(human, asker, &typed.join("\n"))?;
     Ok(Envelope::answering(&question, human.clone(), picks)?.with_owner(Some(human.clone())))
 }
 
@@ -313,6 +316,8 @@ mod tests {
         let picks = &answer.answer.as_ref().unwrap().picks;
         assert_eq!(picks, &[Pick::Options(vec![1, 3]), Pick::Typed("after lunch".to_owned())]);
         assert_eq!(answer.text, "Regions: eu, ap\nQ2: after lunch");
+        let several = answering(&js, &alice, asked.id, picked(&["1", "ask @dev-b and @dev-c"])).await.unwrap_err();
+        assert!(several.to_string().starts_with("Not sent: the text mentions @dev-b and @dev-c"), "{several}");
         let refused = |words| answering(&js, &alice, asked.id, picked(words));
         let short = refused(&["1"]).await.unwrap_err().to_string();
         assert!(short.contains("1 answers to 2 questions"), "{short}");

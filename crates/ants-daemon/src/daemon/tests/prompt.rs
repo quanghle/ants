@@ -788,3 +788,36 @@ async fn a_member_s_session_starts_with_its_team_note_and_a_message_to_its_team_
     let later = &answered[1];
     assert!(!later.contains("member of team") && !later.contains("sent this message to team"), "{later}");
 }
+
+#[tokio::test]
+async fn an_answer_mentioning_several_users_is_prompted_again_and_sent_once() {
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (several, one) = (ThreadId::generate(), ThreadId::generate());
+    bus.send(&several, "@zelda @impa PR #51 is up").await;
+    bus.send(&one, "@zelda PR #52 is up").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let mut got = std::collections::HashMap::new();
+        for _ in 0..2 {
+            let (thread, text) = next_reply(&mut replies).await;
+            assert!(got.insert(thread, text).is_none(), "one reply a thread");
+        }
+        let again = &got[&several];
+        assert!(
+            again.contains("[ants] The answer of this turn was not sent. Not sent: the text mentions @zelda and @impa"),
+            "{again}"
+        );
+        assert!(
+            again.ends_with("[ants] Only human receives this message, not @zelda and @impa, though mentioned."),
+            "{again}"
+        );
+        assert!(got[&one].ends_with("@zelda PR #52 is up"), "{}", got[&one]);
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let prompts = log.locked().prompts.clone();
+    assert_eq!(prompts.len(), 3, "the answer mentioning several prompted again, once: {prompts:?}");
+}

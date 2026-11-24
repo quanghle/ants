@@ -22,7 +22,7 @@ mod notes;
 mod notice;
 mod review;
 
-pub use mention::{Mention, Quote, parse_mentions};
+pub use mention::{Mention, Quote, one_recipient, parse_mentions, several_mentions};
 pub use notes::NotesPost;
 pub use notice::NoticeKind;
 pub use review::{
@@ -580,6 +580,23 @@ mod tests {
         assert!(ids("@host.example @Dev @dev_a @a@b @ @@dev-a @-x").is_empty());
         assert_eq!(ids(&format!("@{} @ok", "x".repeat(65))), ["ok"]);
         assert_eq!(ids("end @dev-a."), ["dev-a"]);
+    }
+
+    #[test]
+    fn a_message_outside_a_channel_mentioning_several_users_is_refused() {
+        let (navi, zelda) = (p("navi"), p("zelda"));
+        let check = |text: &str| one_recipient(&navi, &zelda, text, "post_channel");
+        assert_eq!(check("no mention"), Ok(()));
+        assert_eq!(check("@zelda please review"), Ok(()));
+        assert_eq!(check("@impa please review"), Ok(()), "one mention, even of another than the recipient");
+        assert_eq!(check("@navi here, @zelda: done"), Ok(()), "the sender's own name is no recipient");
+        assert_eq!(check("mail a@b.com and c@d.com"), Ok(()));
+        let refused = check("@zelda @impa @link PR #51 is up").unwrap_err();
+        assert!(refused.starts_with("Not sent: the text mentions @zelda, @impa and @link"), "{refused}");
+        assert!(refused.contains("one recipient, zelda,") && refused.contains("(post_channel)"), "{refused}");
+        assert!(refused.contains("one message to each"), "{refused}");
+        assert_eq!(several_mentions(&navi, "@zelda @impa"), Some(vec![zelda.clone(), p("impa")]));
+        assert_eq!(several_mentions(&navi, &refused), Some(vec![zelda, p("impa"), p("link")]), "names no other user");
     }
 
     #[test]

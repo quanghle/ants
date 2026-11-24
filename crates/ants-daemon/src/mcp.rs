@@ -94,7 +94,7 @@ pub use assist::{HumanMessage, HumanSealing, HumanStore, jetstream_store};
 pub use attach::{FileAccess, jetstream_files};
 pub use channels::{ChannelAccess, ThreadPoster, jetstream_channels};
 pub use managers::{AntAsk, AntRequester, ManagerAsk, Requester, RetireAsk};
-pub(crate) use messages::asked_questions;
+pub(crate) use messages::{POST_WITH, asked_questions};
 pub(crate) use provider::Directories;
 pub use ratings::RATE_TRAIL;
 pub use reactions::{ReactionAsker, local_reaction_asker, nats_reaction_asker};

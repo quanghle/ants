@@ -1,5 +1,5 @@
-//! What a message quotes ([`Quote`]), the channel post a mention notice tells of ([`Mention`]) and the @mentions of a
-//! text ([`parse_mentions`]).
+//! What a message quotes ([`Quote`]), the channel post a mention notice tells of ([`Mention`]), the @mentions of a
+//! text ([`parse_mentions`]) and those a message outside a channel cannot carry ([`several_mentions`]).
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -93,4 +93,26 @@ pub fn parse_mentions(text: &str) -> Vec<UserId> {
         prev = Some(c);
     }
     found
+}
+
+/// The users other than `from` that `text` @mentions ([`parse_mentions`]), when they are more than one: a message
+/// outside a channel has one recipient, so several mentions in it would read as addressing users it never reaches.
+pub fn several_mentions(from: &UserId, text: &str) -> Option<Vec<UserId>> {
+    let mentioned: Vec<UserId> = parse_mentions(text).into_iter().filter(|m| m != from).collect();
+    (mentioned.len() > 1).then_some(mentioned)
+}
+
+/// Refuse a message from `from` to `to` outside a channel whose `text` @mentions several users
+/// ([`several_mentions`]), saying why: it reaches `to` alone, so addressing several takes a channel post, as
+/// `post_with` makes one, whose mentions wake or notify them, else one message to each.
+pub fn one_recipient(from: &UserId, to: &UserId, text: &str, post_with: &str) -> Result<(), String> {
+    let Some(mentioned) = several_mentions(from, text) else { return Ok(()) };
+    let names: Vec<String> = mentioned.iter().map(|u| format!("@{u}")).collect();
+    let (last, rest) = names.split_last().unwrap_or((&names[0], &[]));
+    Err(format!(
+        "Not sent: the text mentions {} and {last}, but a message has one recipient, {to}, and the others would \
+         receive nothing. To address several, post to a channel ({post_with}), whose mentions reach them; else send \
+         one message to each.",
+        rest.join(", ")
+    ))
 }

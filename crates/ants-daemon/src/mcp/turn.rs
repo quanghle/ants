@@ -40,6 +40,11 @@ impl Mcp {
         self.hub.sessions.locked().turns.get_mut(thread)?.completed.take()
     }
 
+    /// Whether the session of `thread` called `complete` during the turn so far, left for [`Mcp::take_completed`].
+    pub fn completing(&self, thread: &ThreadId) -> bool {
+        self.hub.sessions.locked().turns.get(thread).is_some_and(|turn| turn.completed.is_some())
+    }
+
     /// Take the files the session of `thread` attached to the final answer of its turn (`attach_to_reply`), while the
     /// turn lasts: the directory the thread works in and their paths in it, for [`Mcp::store_reply_files`]. None when
     /// it attached none.

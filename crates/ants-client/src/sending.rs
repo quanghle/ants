@@ -1,6 +1,7 @@
 //! What a human sends: who gets a message naming no one ([`unaddressed`]), the human's assistant while its grant
 //! stands ([`designated`]), else the messenger, where a message to a team goes ([`addressed`]), and the [`Envelope`]
-//! of a message as `ants ask` sends it ([`ask_envelope`], `compose`).
+//! of a message as `ants ask` sends it ([`ask_envelope`], `compose`), refused when its text @mentions several users
+//! ([`one_recipient`]).
 
 use ants_proto::{
     AssistantGrant, Envelope, GrantError, Quote, TeamDirectory, TeamRefusal, ThreadId, UserId, Uuid,
@@ -119,8 +120,18 @@ pub struct Send {
     pub queue: bool,
 }
 
-/// The envelope of `send` from the human `me` to `to`, as `ants ask` makes it; refused with no text, or to wait on
-/// no thread.
+/// How a human posts to a channel, for a message @mentioning several users ([`one_recipient`]).
+pub const POST_WITH: &str = "`ants post`, or a channel in ants chat or the web client";
+
+/// Refuse a message from `me` to `to` whose `text` @mentions several users, before anything is sent: a message has
+/// one recipient, so addressing several takes a channel post, else one message to each
+/// ([`ants_proto::one_recipient`]).
+pub fn one_recipient(me: &UserId, to: &UserId, text: &str) -> Result<(), Error> {
+    ants_proto::one_recipient(me, to, text, POST_WITH).map_err(|why| Error::invalid("sending the message", why))
+}
+
+/// The envelope of `send` from the human `me` to `to`, as `ants ask` makes it; refused with no text, to wait on no
+/// thread, or when its text @mentions several users ([`one_recipient`]).
 pub(crate) fn compose(me: &UserId, to: UserId, send: Send) -> Result<Envelope, Error> {
     const WHAT: &str = "sending the message";
     let Send { thread, text, reply_to, queue, .. } = send;
@@ -130,6 +141,7 @@ pub(crate) fn compose(me: &UserId, to: UserId, send: Send) -> Result<Envelope, E
     if queue && thread.is_none() {
         return Err(Error::invalid(WHAT, "a message waits behind a prompt on an existing thread only"));
     }
+    one_recipient(me, &to, &text)?;
     let mut envelope = ask_envelope(me, true, thread, to, text);
     if let Some(ReplyTo { id, quote }) = reply_to {
         envelope = envelope.quoting(id, quote);
@@ -178,6 +190,20 @@ mod tests {
         assert!(matches!(compose(&alice, dev_a.clone(), nowhere).unwrap_err().kind, ErrorKind::Invalid(_)));
         assert!(matches!(compose(&alice, dev_a.clone(), Send::default()).unwrap_err().kind, ErrorKind::Invalid(_)));
         assert_eq!(ask_envelope(&dev_a, false, None, alice, "hi".into()).owner, None, "an ant's thread has no owner");
+    }
+
+    #[test]
+    fn a_message_mentioning_several_users_is_refused_and_one_mentioning_one_goes() {
+        let (alice, dev_a) = (p("alice"), p("dev-a"));
+        let send = |text: &str| compose(&alice, dev_a.clone(), Send { text: text.into(), ..Send::default() });
+        let refused = send("@dev-a @dev-b review PR #51").unwrap_err();
+        assert!(matches!(refused.kind, ErrorKind::Invalid(_)), "{refused:?}");
+        let why = refused.to_string();
+        assert!(why.starts_with("Not sent: the text mentions @dev-a and @dev-b"), "{why}");
+        assert!(why.contains("one recipient, dev-a,") && why.contains("`ants post`"), "{why}");
+        assert!(send("@dev-b review PR #51").is_ok());
+        assert!(send("@alice @dev-a review it").is_ok(), "the sender's own name is no recipient");
+        assert!(send("review PR #51").is_ok());
     }
 
     #[test]

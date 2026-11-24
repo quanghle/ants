@@ -32,6 +32,7 @@ use super::steering::{Join, next_join, steer};
 use super::{Handling, Inbox, Incoming, Steered};
 
 mod measured;
+mod mentions;
 pub(super) mod text;
 
 use measured::{Measured, stored_every};
@@ -231,20 +232,21 @@ impl Inbox<'_> {
         let (text, _checkouts) = self.review_checkouts(incoming, msg, joining, text).await;
         // The answer of a prompt a message joined is sent while the turn of the one it started with lasts.
         let mut _answering = None;
-        let ran = if joining {
+        let (ran, mentions_notice) = if joining {
             let Some((ran, answering)) = self.joined(h, own, cut_off, text).await? else {
                 return Ok(());
             };
             _answering = Some(answering);
-            ran
+            (ran, None)
         } else {
             let flush =
                 tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
             let ran = Box::pin(self.run_prompt(h, text, flush)).await;
+            let (ran, notice) = Box::pin(self.one_recipient(h, own, ran)).await;
             if !ran.joined.is_empty() {
                 return Box::pin(self.hand_on(h, own, ran, cut_off)).await;
             }
-            ran
+            (ran, notice)
         };
         let Ran { reply, cancelled_by, cut_by_cancel, worked, mut reached, spend, fallback, mut measured, .. } = ran;
         // While the turn lasts: it ends with `_turn`.
@@ -274,7 +276,7 @@ impl Inbox<'_> {
             limit.as_ref().map(|l| format!("[ants] {l}{}", if cut { "; the prompt was cancelled." } else { "." }));
         let [branch_notice, publish_notice] = self.branch_notices(envelope, msg, cancelled_by.is_some()).await;
         let cancel_notice = cancelled_by.map(|cancel| cancel.notice(self.ant));
-        let notice = [fallback_notice, limit_notice, cancel_notice, branch_notice, publish_notice];
+        let notice = [fallback_notice, limit_notice, cancel_notice, branch_notice, publish_notice, mentions_notice];
         let notice = notice.into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = fit_to(self.redactor.redact(&text).into_owned(), reply_room(self.client));
