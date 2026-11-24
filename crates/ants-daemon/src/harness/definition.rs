@@ -77,8 +77,8 @@ pub struct Harness {
     /// Bytes of the thread's history a rebuilt session is seeded with ([`crate::stream::history::budget`]).
     pub(crate) history_budget: Option<usize>,
     /// Globs of the files it keeps memories in, which an admin's read of the ant's memories shows
-    /// ([`crate::admin`]): relative to the ant's workdir, or under `~`. Unset, a table replacing a built-in harness
-    /// keeps the built-in's.
+    /// ([`crate::admin`]): relative to the ant's workdir, or under `~`. Unset, a table of a native protocol takes its
+    /// protocol's, and one replacing a built-in harness keeps the built-in's.
     pub(crate) memory_files: Option<Vec<String>>,
 }
 

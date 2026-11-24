@@ -461,7 +461,7 @@ sign_in = "agy"
 
 Even gated, Claude Code runs its built-in read-only tools (`Read`, `Grep`, `ls`, `echo`) and rules from `.claude/settings*.json` unasked, and Antigravity applies workspace reads/edits and its `settings.json` first.
 
-**Reviews run gated.** A sage's review ([The sage](#the-sage)) runs in a session of its own started with the harness's `review` table in place of its `args` and `mode`: `copilot` drops `--allow-all` (`review = { args = ["--acp"] }`), `claude` takes mode `default` and `codex` mode `read-only`. The daemon rejects each tool request of that session outside the review's read-only rules, asking no one. `antigravity` sets no `review`, as it applies edits unasked even gated, so a sage on it declines reviews and the ant reviews the packet alone. A harness that asks before running tools reviews on its own `args` and `mode`; one running its tools unasked (`bypass_permissions`, or a native protocol) needs a `review` naming the arguments or mode that keep its tools read only or make it ask, else its sage declines reviews and `ants doctor` warns (`ant NAME reviews`). A redefinition of a built-in sets its own `review`; for a native protocol, `review` takes the CLI's own read-only setting, such as Claude Code's `plan` or codex's `read-only`. A redefinition replaces the built-in's quota and context-overflow phrases, `window` and `context` table too: copy those from `harnesses.toml` to keep them.
+**Reviews run gated.** A sage's review ([The sage](#the-sage)) runs in a session of its own started with the harness's `review` table in place of its `args` and `mode`: `copilot` drops `--allow-all` (`review = { args = ["--acp"] }`), `claude` takes mode `default` and `codex` mode `read-only`. The daemon rejects each tool request of that session outside the review's read-only rules, asking no one. `antigravity` sets no `review`, as it applies edits unasked even gated, so a sage on it declines reviews and the ant reviews the packet alone. A harness that asks before running tools reviews on its own `args` and `mode`; one running its tools unasked (`bypass_permissions`, or a native protocol) needs a `review` naming the arguments or mode that keep its tools read only or make it ask, else its sage declines reviews and `ants doctor` warns (`ant NAME reviews`). A redefinition of a built-in sets its own `review`; for a native protocol, `review` takes the CLI's own read-only setting, and a definition setting none takes its [protocol's](#harness-protocols) (Claude Code's `plan`, codex's `read-only`; `copilot-sdk` and `antigravity` have none). A redefinition replaces the built-in's quota and context-overflow phrases, `window` and `context` table too: copy those from `harnesses.toml` to keep them.
 
 ### Custom harnesses
 
@@ -505,6 +505,15 @@ huge = { model_suffix = "-1m", history_budget = 262144 }
 | `copilot-sdk` | Copilot CLI's JSON-RPC server (`copilot --server --stdio`) through the GitHub Copilot SDK ([below](#copilot-sdk-protocol--copilot-sdk)) |
 
 Any other value fails loading the file defining the harness, naming that file.
+
+**Protocol defaults.** A definition of a native protocol, under any name, takes that protocol's defaults for each of `memory_files`, `review` and `window` it does not set (`crates/ants-daemon/src/protocols.toml`), rather than those of a built-in it may replace:
+
+| `protocol` | `memory_files` | `review` | `window` |
+|---|---|---|---|
+| `claude` | as built-in `claude` | `{ mode = "plan" }` | `200000` |
+| `codex` | as built-in `codex` | `{ mode = "read-only" }` | none |
+| `copilot-sdk` | as built-in `copilot` | none: a sage on it declines reviews | none |
+| `antigravity` | as built-in `antigravity` | none: a sage on it declines reviews | none |
 
 Every protocol other than `acp` is native: the daemon runs a translator in its own process that starts the definition's command and speaks the CLI's protocol to it, and ACP to the rest of the daemon. The command is found and started as for ACP (a path, else looked up on `PATH`, as `.exe`, `.cmd` or `.bat` on Windows, without a shell), with the protocol's own arguments before the definition's `args` and those of the ant's `context`, and the same environment layering. The rest works as for ACP:
 
@@ -688,7 +697,7 @@ long_context = { args = ["--context", "long_context"] }
 | `codex` | `AGENTS.md`, `AGENTS.override.md`, `~/.codex/AGENTS.md`, `~/.codex/AGENTS.override.md` |
 | `antigravity` | `GEMINI.md`, `AGENTS.md`, `.agent/rules/*.md`, `~/.gemini/GEMINI.md` |
 
-A `[harnesses.NAME]` redefining a harness without `memory_files` keeps the globs of the one it replaces; `memory_files = []` shows none. A read follows a symbolic link only when its target, resolved, still matches one of the globs and lies under the ant's workdir, the ant's home (`home`, default `~/.ants/agents/<name>`) or the home directory of the daemon's user; `**` follows no linked directory. Anything else is left out, named with the reason. With `BD_DB` in the ant's environment (the ant's `env`, else its harness's, else the daemon's), the read also lists the bd memories of that database (`bd memories --json`, run in the workdir, at most 10 s).
+A `[harnesses.NAME]` of protocol `acp` redefining a harness without `memory_files` keeps the globs of the one it replaces; one of a native protocol, under any name, takes those of its [protocol](#harness-protocols) (Claude Code's for `claude`, as the built-in of the same CLI for the others); `memory_files = []` shows none. A read follows a symbolic link only when its target, resolved, still matches one of the globs and lies under the ant's workdir, the ant's home (`home`, default `~/.ants/agents/<name>`) or the home directory of the daemon's user; `**` follows no linked directory. Anything else is left out, named with the reason. With `BD_DB` in the ant's environment (the ant's `env`, else its harness's, else the daemon's), the read also lists the bd memories of that database (`bd memories --json`, run in the workdir, at most 10 s).
 
 A read is capped so its outcome fits the `ants_machines` bucket: 32 KiB per file or memory (cut short beyond), 192 KiB of JSON for all of them, and 64 files; what is left out is listed with why. The ant's core memories (`whoami`, `memory`, `tasks` of its `[[ant]]`) come from the config file and are edited with a `set` order.
 
@@ -744,7 +753,7 @@ When ACP `session/load` fails, or the stored session was created in a directory 
 
 When a prompt overflows the model's context window (`context_length_exceeded`, `maximum context length`, `prompt is too long`, `exceeds the context window`, or `context_overflow`), the daemon immediately rebuilds the session with **half** the history budget and retries without spending an attempt, closing the overflowed session first (ACP `session/close`) when the harness offers it. If the fresh session also overflows, the daemon escalates `context_window` on the thread and acks the message without dead-lettering.
 
-History budget precedence: ant `history_budget` -> selected `context`'s `history_budget` or `window / 12 × 4` -> harness `history_budget` or `window / 12 × 4` -> `64 KiB`, capped at `window` bytes (1/4 of window at 4 bytes/token). Built-in `claude` sets `window = 200000` (`1000000` for `context = "1m"`); `copilot` and `antigravity` default to `64 KiB`. `history_budget = 0` includes only the omitted-entries summary line.
+History budget precedence: ant `history_budget` -> selected `context`'s `history_budget` or `window / 12 × 4` -> harness `history_budget` or `window / 12 × 4` -> `64 KiB`, capped at `window` bytes (1/4 of window at 4 bytes/token). Built-in `claude` sets `window = 200000` (`1000000` for `context = "1m"`), as does a definition of protocol `claude` that sets none; `copilot` and `antigravity` default to `64 KiB`. `history_budget = 0` includes only the omitted-entries summary line.
 
 ### Model, reasoning effort and context
 

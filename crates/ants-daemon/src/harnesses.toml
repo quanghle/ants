@@ -11,7 +11,8 @@
 # `memory_files` lists globs of the files the harness keeps memories and instructions in, which an admin's read of an
 # ant's memories shows (`ants ant memories`): relative to the ant's workdir, or under `~`; `*` and `?` match within a
 # path component and `**` any directories. A [harnesses.<name>] table replacing a built-in keeps its memory_files
-# unless it sets them.
+# unless it sets them. A table of a native protocol takes that protocol's memory_files, review and window instead
+# (protocols.toml).
 #
 # Every built-in runs in its most permissive native setting, through `args` or `mode`, and so runs its own tools
 # without asking ants: `bypass_permissions` says so, and makes the daemon and `ants doctor` warn of allow rules and

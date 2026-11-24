@@ -1,0 +1,26 @@
+# What a [harnesses.<name>] table of a native protocol takes, under any name, for each of these it does not set: the
+# memory files of its CLI, a `review` keeping a sage's review read only through the CLI's own settings, and the
+# model's context window, when known. The keys mean what they do in harnesses.toml. A key a protocol leaves out has no
+# default: Copilot SDK and Antigravity set no review, so a sage on them declines reviews unless its definition sets one.
+
+[protocols.claude]
+memory_files = ["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md", "~/.claude/CLAUDE.md"]
+review = { mode = "plan" }
+window = 200000
+
+[protocols.codex]
+memory_files = ["AGENTS.md", "AGENTS.override.md", "~/.codex/AGENTS.md", "~/.codex/AGENTS.override.md"]
+review = { mode = "read-only" }
+
+[protocols.copilot-sdk]
+memory_files = [
+    "AGENTS.md",
+    ".github/copilot-instructions.md",
+    ".github/instructions/**/*.instructions.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "~/.copilot/copilot-instructions.md",
+]
+
+[protocols.antigravity]
+memory_files = ["GEMINI.md", "AGENTS.md", ".agent/rules/*.md", "~/.gemini/GEMINI.md"]
