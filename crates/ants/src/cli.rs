@@ -13,8 +13,9 @@ use crate::cmd::{
     ant::AntCommand, assistant::AssistantCommand, attachment::AttachmentCommand, auth::AuthCommand,
     bridge::BridgeCommand, channel::ChannelCommand, dead::DeadCommand, doctor, enroll::EnrollCommand,
     harness::HarnessCommand, hook::HookCommand, inbox, keys::KeysCommand, leaf::LeafCommand, login,
-    notify::NotifyCommand, remind::RemindCommand, renew, send, setup, signer, spend::SpendArgs, team::TeamCommand,
-    thread::ThreadCommand, tools::ToolsCommand, trail::TrailCommand, web, webhook::WebhookCommand,
+    notify::NotifyCommand, remind::RemindCommand, renew, schedule::ScheduleCommand, send, setup, signer,
+    spend::SpendArgs, team::TeamCommand, thread::ThreadCommand, tools::ToolsCommand, trail::TrailCommand, web,
+    webhook::WebhookCommand,
 };
 use crate::messages::{attachments, progress};
 use crate::release::update;
@@ -196,6 +197,11 @@ pub(crate) enum Command {
     /// does: set a reminder, list them, or clear one. Needs a human's credentials.
     #[command(subcommand)]
     Remind(RemindCommand),
+    /// The schedules of the machine's config file (`[[schedule]]`), with their next firing and how the last went, as
+    /// `/schedules` in `ants chat` shows them; with --ant, those sending to the ant and the reminders and watchers
+    /// sense keeps for it. Needs a human's credentials, and admin ones for an ant's reminders.
+    #[command(subcommand)]
+    Schedule(ScheduleCommand),
     /// Create the CLI's human's dedicated assistant ant, designate an existing ant as its assistant, withdraw or
     /// retire it, show a human's, or enroll it as a device of the human for sealed messages. The human's device signs
     /// the designation. Needs a human device's credentials, but for `show` and `key`.

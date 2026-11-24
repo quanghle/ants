@@ -47,6 +47,7 @@ pub(crate) mod notify;
 pub(crate) mod remind;
 pub(crate) mod renew;
 pub(crate) mod retire;
+pub(crate) mod schedule;
 pub(crate) mod send;
 pub(crate) mod setup;
 pub(crate) mod signer;
@@ -102,6 +103,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::Attachment(command) => attachment::run(&nats()?, command).await,
         Command::Notify(command) => notify::run(&nats()?, command).await,
         Command::Remind(command) => remind::run(&nats()?, command).await,
+        Command::Schedule(command) => schedule::run(&nats()?, command).await,
         Command::Assistant(command) => assistant::run(&conn, command).await,
         Command::Watch { subject, thread } => watch::run(&nats()?, subject, thread).await,
         Command::Chat { since, compact } => Box::pin(tui::run(&nats()?, since, compact)).await,

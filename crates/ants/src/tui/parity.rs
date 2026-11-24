@@ -116,6 +116,7 @@ const CLI: &[(&str, Chat)] = &[
     ("remind set", Slash("remind")),
     ("remind list", Slash("reminders")),
     ("remind clear", Slash("unremind")),
+    ("schedule list", Slash("schedules")),
     ("assistant enable", Missing("ants-waemb")),
     ("assistant disable", Missing("ants-waemb")),
     ("assistant show", Missing("ants-waemb")),

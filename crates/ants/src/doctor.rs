@@ -23,6 +23,7 @@ use self::ants::{
 };
 use self::credentials::{check_backup, check_cli_creds};
 use self::leaf_node::{Leaf, check_leaf};
+use self::schedules::check_schedules;
 use self::server::{check_resolver, check_storage, check_store_account, reach};
 use self::services::{check_services, check_webhooks};
 use self::teams::{check_team_changes, check_teams};
@@ -40,6 +41,7 @@ mod ants;
 mod colony;
 mod credentials;
 mod leaf_node;
+mod schedules;
 mod server;
 mod services;
 mod teams;
@@ -140,7 +142,8 @@ pub struct Setup {
 /// buckets, the versions of ants running across the colony, the JetStream storage, each ant's credentials, harness,
 /// workdir, reactions responder, trail saves and team changes, the trail worker and the runs of trails stuck, the team
 /// directory, the hub's account resolver and store account, the account keys' backup, the leaf node and outbox, the
-/// installed services, the WebSocket listeners' origins, the webhooks' config file and notification sinks, and the Dev
+/// installed services, the WebSocket listeners' origins, the webhooks' config file and notification sinks, the config
+/// file's schedules (one firing no more or sending to an ant no daemon serves), and the Dev
 /// Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
@@ -185,7 +188,8 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let hostname = ants_daemon::colony::machine().await;
     let host = loaded.as_ref().map(|l| &l.host);
     checks.extend(host.map(|host| check_host(host, ants, &hostname, now)));
-    let colony = connected.as_ref().and_then(|c| c.colony.as_ref().ok()).map_or_default(Vec::as_slice);
+    let read_colony = connected.as_ref().and_then(|c| c.colony.as_ref().ok()).map(Vec::as_slice);
+    let colony = read_colony.unwrap_or_default();
     // Without a config file read, the host settings an ant described by flags goes by.
     let unread;
     let kept_host = match host {
@@ -208,6 +212,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     if let Some(loaded) = &loaded {
         let webhooks = setup.webhooks.exists().then(|| webhook::Config::read(&setup.webhooks).ok()).flatten();
         checks.extend(check_bypassed(loaded, webhooks.as_ref().map_or_default(|c| c.webhooks.as_slice())));
+        checks.extend(check_schedules(&loaded.schedules, read_colony, chrono::Utc::now()));
     }
     checks.push(worker);
     checks.extend(check_runs(connected.as_ref(), chrono::Utc::now()).await);

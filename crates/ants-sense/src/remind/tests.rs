@@ -79,7 +79,7 @@ async fn a_malformed_reminder_hides_itself_alone_from_listings() {
 }
 
 #[tokio::test]
-async fn refires_are_hour_apart_capped_at_three_replace_the_one_before_and_snooze_uses_a_new_id() {
+async fn refires_are_hour_apart_capped_at_three_replace_the_one_before_and_a_late_snooze_says_so_with_a_new_id() {
     let (sense, items) = fixture(SharedLog::default()).await;
     let id = create(&sense, json!({"kind":"after","seconds":60})).await;
     let first_due = now() + Duration::minutes(1);
@@ -91,6 +91,7 @@ async fn refires_are_hour_apart_capped_at_three_replace_the_one_before_and_snooz
         let replaced = (firing > 1).then(|| format!("{id}:{}", firing - 1));
         assert_eq!(prepared.replaces, replaced, "a refire replaces the firing before it");
         assert!(!prepared.watched());
+        assert_eq!(prepared.reason, "time", "on time, and a refire is late by design");
         confirm_delivered(&*items, &id, &prepared.id, at).await.unwrap();
         assert!(prepare_firing(&*items, &id, at, "early").await.unwrap().is_none());
     }
@@ -101,6 +102,8 @@ async fn refires_are_hour_apart_capped_at_three_replace_the_one_before_and_snooz
     assert!(!postponed.is_error, "{postponed:?}");
     let firing = prepare_firing(&*items, &id, first_due + Duration::hours(5), "snoozed").await.unwrap().unwrap();
     assert_eq!(firing.id, format!("{id}:5"));
+    let due = (first_due + Duration::hours(4) + Duration::seconds(60)).format("%Y-%m-%d %H:%M UTC");
+    assert_eq!(firing.reason, format!("snoozed (Sent late: due {due}.)"), "fired past its time");
     let acknowledged = remind(&sense, &call(first_due + Duration::hours(5), json!({"action":"ack","id":id}))).await;
     assert!(!acknowledged.is_error, "{acknowledged:?}");
     assert!(prepare_firing(&*items, &id, first_due + Duration::hours(6), "after ack").await.unwrap().is_none());
@@ -311,7 +314,8 @@ async fn bad_triggers_are_refused_with_one_terminal_period() {
     for trigger in [
         json!({"kind":"daily","time":"25:00","timezone":"UTC"}),
         json!({"kind":"weekly","time":"12:00","weekday":"monday","timezone":"UTC"}),
-        json!({"kind":"daily","time":"12:00","timezone":"Europe/Paris"}),
+        json!({"kind":"daily","time":"12:00","timezone":"Nowhere/City"}),
+        json!({"kind":"at","at":"soon"}),
         json!({"kind":"after","seconds":0}),
         json!({"kind":"condition","condition":{"kind":"gh_pr","repo":"owner/repo","number":0,"state":"merged"}}),
         json!({"kind":"condition","condition":{"kind":"command","command":"true","extra":true}}),
@@ -321,6 +325,34 @@ async fn bad_triggers_are_refused_with_one_terminal_period() {
         assert_eq!(answer.json["error"], "invalid_arguments", "{answer:?}");
         assert!(answer.text.ends_with('.') && !answer.text.ends_with(".."), "{answer:?}");
     }
+}
+
+/// Times of day read in the config file's zone, as `[[schedule]]` and `ants remind` read them, each daily or weekly
+/// trigger keeping the zone it was made in.
+#[tokio::test]
+async fn times_are_read_as_ants_reads_them_in_the_config_file_s_time_zone() {
+    let (sense, items) = fixture(SharedLog::default()).await;
+    sense.read_times_in(&"dev-a".parse().unwrap(), crate::when::zone("Europe/Paris").unwrap());
+    let utc = |text: &str| text.parse::<DateTime<Utc>>().unwrap();
+    let due = |reminder: Item| Reminder::of(&reminder).unwrap().next_due;
+    let daily = create(&sense, json!({"kind":"daily","time":"09:00"})).await;
+    assert_eq!(get(&*items, &daily).await.unwrap().values["trigger"]["timezone"], "Europe/Paris");
+    assert_eq!(due(get(&*items, &daily).await.unwrap()), Some(utc("2025-01-02T08:00:00Z")));
+    let weekly = create(&sense, json!({"kind":"weekly","weekday":"fri","time":"09:00","timezone":"UTC"})).await;
+    assert_eq!(due(get(&*items, &weekly).await.unwrap()), Some(utc("2025-01-03T09:00:00Z")));
+    let times = [
+        ("13:30", "2025-01-01T12:30:00Z"),
+        ("2h", "2025-01-01T14:00:00Z"),
+        ("2025-01-05T10:00", "2025-01-05T09:00:00Z"),
+    ];
+    for (text, at) in times {
+        let id = create(&sense, json!({"kind":"at","at":text})).await;
+        assert_eq!(due(get(&*items, &id).await.unwrap()), Some(utc(at)), "{text}");
+    }
+    let postpone = json!({"action":"postpone","id":daily,"at":"2025-01-03T10:00"});
+    let postponed = remind(&sense, &call(now(), postpone)).await;
+    assert!(!postponed.is_error, "{postponed:?}");
+    assert_eq!(due(get(&*items, &daily).await.unwrap()), Some(utc("2025-01-03T09:00:00Z")));
 }
 
 #[tokio::test]

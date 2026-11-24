@@ -42,9 +42,11 @@ use std::time::Duration;
 use ants_proto::{ChannelId, Destination, JsDomain, TrailName, TrailStart, UserId};
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Datelike as _, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Timelike as _, Utc};
-use jiff::tz::{AmbiguousOffset, TimeZone};
+use jiff::tz::TimeZone;
 use serde::Deserialize;
 use serde_json::Value;
+
+use crate::sense::when;
 
 /// Shortest `every`.
 pub const MIN_EVERY: Duration = Duration::from_secs(60);
@@ -190,9 +192,9 @@ impl Schedule {
     }
 }
 
-/// The time zone named `name` in the IANA time zone database.
+/// The time zone named `name` in the IANA time zone database, as every time is read ([`when::zone`]).
 pub fn time_zone(name: &str) -> Result<TimeZone> {
-    TimeZone::get(name).map_err(|e| anyhow::anyhow!("timezone {name:?}: unknown time zone ({e})"))
+    when::zone(name).map_err(anyhow::Error::msg)
 }
 
 /// When a schedule fires.
@@ -367,41 +369,14 @@ impl Cron {
         Self { zone, ..self }
     }
 
-    /// The instant local time `at` fires at in the timetable's zone: in a gap, when the clocks go forward, the end of
-    /// the gap; in a fold, when they go back, the first occurrence.
+    /// The instant local time `at` fires at in the timetable's zone, as every time is read ([`when::instant`]).
     fn instant(&self, at: NaiveDateTime) -> Option<DateTime<Utc>> {
-        if self.zone == TimeZone::UTC {
-            return Some(at.and_utc());
-        }
-        let civil = jiff::civil::DateTime::new(
-            i16::try_from(at.year()).ok()?,
-            i8::try_from(at.month()).ok()?,
-            i8::try_from(at.day()).ok()?,
-            i8::try_from(at.hour()).ok()?,
-            i8::try_from(at.minute()).ok()?,
-            0,
-            0,
-        )
-        .ok()?;
-        let instant = match self.zone.to_ambiguous_timestamp(civil).offset() {
-            AmbiguousOffset::Unambiguous { offset } | AmbiguousOffset::Fold { before: offset, .. } => {
-                offset.to_timestamp(civil).ok()?
-            }
-            // Read with the offset after the gap, `at` falls just before the transition that opens it.
-            AmbiguousOffset::Gap { after, .. } => {
-                self.zone.following(after.to_timestamp(civil).ok()?).next()?.timestamp()
-            }
-        };
-        DateTime::from_timestamp(instant.as_second(), instant.subsec_nanosecond().try_into().ok()?)
+        when::instant(&self.zone, at)
     }
 
     /// The local time of instant `t` in the timetable's zone.
     fn local(&self, t: DateTime<Utc>) -> Option<NaiveDateTime> {
-        if self.zone == TimeZone::UTC {
-            return Some(t.naive_utc());
-        }
-        let offset = self.zone.to_offset(jiff::Timestamp::from_second(t.timestamp()).ok()?);
-        Some(t.naive_utc() + TimeDelta::seconds(offset.seconds().into()))
+        when::local(&self.zone, t)
     }
 
     /// The first instant strictly after `t` the timetable fires at; None when there is none within years.

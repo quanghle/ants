@@ -175,6 +175,9 @@ pub struct Ant {
     /// What `provider` names among the file's providers; sense while it names none.
     #[serde(skip)]
     pub provider_setting: Setting,
+    /// The file's top-level `timezone`.
+    #[serde(skip)]
+    pub timezone: Option<jiff::tz::TimeZone>,
 }
 
 fn default_max_harnesses() -> usize {
@@ -273,6 +276,7 @@ impl Ant {
             memory_pressure: pressure::Settings::default(),
             trail_workers: crate::trail::DEFAULT_WORKERS,
             provider_setting: Setting::Sense,
+            timezone: None,
         }
     }
 
@@ -361,6 +365,7 @@ impl Ant {
             requester: crate::mcp::Requester::default(),
             pause: crate::pause::Pause::new(self.paused),
             drift: crate::profile::shared::Drift::default(),
+            timezone: self.timezone,
         })
     }
 

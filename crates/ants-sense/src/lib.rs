@@ -41,8 +41,10 @@ pub mod testing;
 pub(crate) mod thread;
 mod tools;
 pub(crate) mod view;
+pub mod when;
 
 pub use tools::{Answer, DreamWrite, MAX_TOOLS, TOOLS, ToolSpec};
+pub use view::REMINDERS;
 
 use store::{Items, StoreError, Stores};
 
@@ -74,6 +76,8 @@ struct Ant {
     /// Taken by each write on a dream thread, counted toward [`dream::MAX_DREAM_WRITES`], from the check of the cap
     /// until counted, so concurrent writes cannot pass the cap together.
     dream_writes: Arc<tokio::sync::Mutex<()>>,
+    /// The zone its reminders' times of day are read in ([`Sense::read_times_in`]); UTC when None.
+    timezone: Mutex<Option<when::TimeZone>>,
 }
 
 /// Directories supplied by the daemon, never taken from a tool's arguments.
@@ -109,6 +113,18 @@ impl Sense {
 
     fn ant(&self, ant: &UserId) -> Arc<Ant> {
         self.ants.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(ant.clone()).or_default().clone()
+    }
+
+    /// Read the times of day of the reminders `ant` makes in `zone`, as the config file serving it says: its
+    /// top-level `timezone`, else UTC.
+    pub fn read_times_in(&self, ant: &UserId, zone: when::TimeZone) {
+        *self.ant(ant).timezone.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(zone);
+    }
+
+    /// The zone the times of day of the reminders `ant` makes are read in ([`Sense::read_times_in`]).
+    pub fn timezone(&self, ant: &UserId) -> when::TimeZone {
+        let zone = self.ant(ant).timezone.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        zone.unwrap_or(when::TimeZone::UTC)
     }
 
     /// The changes of the items of `ant`. Subscribe before reading triggers, so a change during the

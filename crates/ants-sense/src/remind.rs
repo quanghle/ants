@@ -475,8 +475,9 @@ async fn schedule(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<Due>, Sto
     Ok(due)
 }
 
-/// Persist a due time firing before waking the ant. Returning a pending firing never allocates another number.
-/// A condition's first firing must instead pass through [`condition_checked`] or [`condition_observed`].
+/// Persist a due time firing before waking the ant, its `reason` noting when the occurrence was due if it fires
+/// later than [`crate::when::LATE`]. Returning a pending firing never allocates another number. A condition's first
+/// firing must instead pass through [`condition_checked`] or [`condition_observed`].
 pub async fn prepare_firing(
     items: &dyn Items,
     id: &ItemId,
@@ -499,7 +500,13 @@ pub async fn prepare_firing(
         if reminder.next_due.is_none_or(|at| at > now) || reminder.condition().is_some() || reminder.watch().is_some() {
             return Ok(None);
         }
-        prepare(items, &item, reminder, now, reason).await.map(Some)
+        // An occurrence's first firing past its time says so, as a schedule's does; its refires come late by design.
+        let late = reminder.next_due.filter(|_| reminder.occurrence_firings == 0);
+        let reason = match late.and_then(|due| crate::when::late_note(due, now)) {
+            Some(note) => format!("{reason} {note}"),
+            None => reason.to_owned(),
+        };
+        prepare(items, &item, reminder, now, &reason).await.map(Some)
     })
     .await
 }

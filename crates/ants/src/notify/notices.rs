@@ -611,14 +611,19 @@ pub(super) fn digest_notice(
     }
 }
 
-/// The notice to `human` of its `reminder` of `thread`, now due.
-pub(super) fn reminder_notice(human: &UserId, thread: &ThreadId, reminder: &Reminder) -> Notice {
+/// The notice to `human` of its `reminder` of `thread`, due and pushed at `now`: one pushed late says when it was due.
+pub(super) fn reminder_notice(human: &UserId, thread: &ThreadId, reminder: &Reminder, now: DateTime<Utc>) -> Notice {
     let note = cut(&redactor().redact(&reminder.note), MAX_TEXT);
     let title = if note.is_empty() { format!("reminder of thread {thread}") } else { format!("reminder: {note}") };
     let about = match reminder.message {
         Some(message) => format!("message {message} on thread {thread}"),
         None => format!("thread {thread}"),
     };
+    let mut text =
+        format!("Reminder of {about}: `ants thread show {thread}` shows it; ants chat lists it on home until done.");
+    if let Some(note) = ants_daemon::sense::when::late_note(reminder.due, now) {
+        text = format!("{text} {note}");
+    }
     Notice {
         about: About::Reminder {
             id: Uuid::now_v7(),
@@ -628,9 +633,7 @@ pub(super) fn reminder_notice(human: &UserId, thread: &ThreadId, reminder: &Remi
         },
         human: human.clone(),
         title,
-        text: format!(
-            "Reminder of {about}: `ants thread show {thread}` shows it; ants chat lists it on home until done."
-        ),
+        text,
         buttons: Vec::new(),
         urgent: false,
     }

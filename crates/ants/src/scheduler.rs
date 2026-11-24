@@ -182,7 +182,8 @@ async fn fire(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>, late: bool) ->
     let at = due.timestamp().to_string();
     let mut text = schedule.text.clone();
     if late {
-        let _ = write!(text, "\n\n(Sent late: due {}.)", due.format("%Y-%m-%d %H:%M UTC"));
+        let note = ants_daemon::sense::when::late_note(due, Utc::now()).unwrap_or_default();
+        let _ = write!(text, "\n\n{note}");
     }
     bus.deliver(Delivery {
         from: &schedule.name,

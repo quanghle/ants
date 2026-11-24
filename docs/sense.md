@@ -535,18 +535,23 @@ conflict returns the current item.
 
 `sense_remind` records a time, condition or watch trigger and supports acknowledgment, postponement, renewal and
 dropping.
-Time triggers accept an absolute time, a relative delay, or a recurring daily or weekly UTC time. An unacknowledged
-firing fires again at most three times, an hour apart, each refire replacing the one before it: one still waiting in the
+Time triggers accept an absolute time, a relative delay, or a recurring daily or weekly time. An `at` reads as
+`[[schedule]]` and `ants remind` read times ([config.md](config.md#schedules)): a duration such as `90m` or `1d2h`, the
+next `HH:MM`, `YYYY-MM-DDTHH:MM`, or an RFC 3339 time; clock times without an offset, and a daily or weekly trigger
+without `timezone`, are local to the config file's top-level `timezone` (default UTC), resolved when the reminder is
+made. `timezone` takes any IANA zone. A firing over a minute late, but for a refire, says so with
+`(Sent late: due YYYY-MM-DD HH:MM UTC.)` after its reason. An unacknowledged firing fires again at most three times, an hour apart, each refire replacing the one before it: one still waiting in the
 ant's queue is withdrawn, so a busy ant is prompted once. A retried delivery or a daemon taking over never fires it twice.
 
 For example, `{"action":"create","title":"Check CI","trigger":{"kind":"after","seconds":600}}` creates a relative
 reminder. Other triggers are `{"kind":"at","at":"2026-12-01T12:00:00Z"}`,
-`{"kind":"daily","time":"09:30","timezone":"UTC"}`, `{"kind":"weekly","weekday":"mon","time":"09:30","timezone":"UTC"}`,
+`{"kind":"at","at":"09:30"}` (the next 09:30), `{"kind":"at","at":"90m"}`,
+`{"kind":"daily","time":"09:30"}`, `{"kind":"weekly","weekday":"mon","time":"09:30","timezone":"Europe/London"}`,
 or `{"kind":"condition","condition":{...}}` using a condition below. Empty arguments or `action=list` list reminders;
-`show`, `ack`, `drop` and `renew` take `id`. `postpone` takes `id` and exactly one of `after_seconds` or a future RFC
-3339 `at`. Optional positive `revision` guards mutations. Acknowledging a recurring reminder advances to the next
-occurrence. Weekdays are `mon` through `sun`; delays are 1 through 31,536,000 seconds. A trigger giving no time to
-fire at, or a reminder time out of the range of times, as a commitment due within thirty days of the last time
+`show`, `ack`, `drop` and `renew` take `id`. `postpone` takes `id` and exactly one of `after_seconds` or a future
+`at`, read as above. Optional positive `revision` guards mutations. Acknowledging a recurring reminder advances to
+the next occurrence. Weekdays are `mon` through `sun`; delays are 1 through 31,536,000 seconds. A trigger giving no
+time to fire at, or a reminder time out of the range of times, as a commitment due within thirty days of the last time
 representable, is refused with `invalid_trigger`.
 
 The active daemon fires reminders; a standby fires none until it takes the ant over, then goes on with the stored

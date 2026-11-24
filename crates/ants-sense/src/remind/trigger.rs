@@ -1,16 +1,19 @@
-//! When a reminder fires ([`Trigger`]): at a time, after a delay, daily or weekly at a UTC clock time, on a
-//! condition, or, a watcher, on each change of what it watches; its validation, its schema in the `sense_remind` tool, and its first and next firing times.
+//! When a reminder fires ([`Trigger`]): at a time, after a delay, daily or weekly at a time of day in a time zone, on
+//! a condition, or, a watcher, on each change of what it watches; its reading from a `sense_remind` call ([`read`]),
+//! its validation, its schema in the tool, and its first and next firing times.
 
-use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{Condition, RemindError, Watch};
+use crate::when::{self, Zone};
 
 /// The most seconds of an `after` trigger: a year.
 pub const MAX_AFTER_SECONDS: u64 = 365 * 24 * 60 * 60;
 
-/// Reminder time zones are deliberately UTC, so a restart or host timezone change cannot move a firing.
+/// A daily or weekly trigger keeps the zone it was made in, so neither a restart, a host's time zone nor a change of
+/// the config file's `timezone` moves its firings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Trigger {
@@ -61,10 +64,8 @@ impl Trigger {
                 Ok(())
             }
             Self::Daily { time, timezone } | Self::Weekly { time, timezone, .. } => {
-                clock(time)?;
-                if timezone != "UTC" {
-                    return Err("Recurring reminders require timezone UTC.".into());
-                }
+                when::clock(time)?;
+                when::zone(timezone)?;
                 if let Self::Weekly { weekday, .. } = self {
                     weekday_number(weekday)?;
                 }
@@ -85,59 +86,69 @@ impl Trigger {
     }
 
     pub(crate) fn next(&self, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, RemindError> {
-        let (time, weekday) = match self {
-            Self::Daily { time, .. } => (time, None),
-            Self::Weekly { time, weekday, .. } => (time, Some(weekday_number(weekday).map_err(RemindError::Trigger)?)),
+        let (time, weekday, timezone) = match self {
+            Self::Daily { time, timezone } => (time, None, timezone),
+            Self::Weekly { time, weekday, timezone } => {
+                (time, Some(weekday_number(weekday).map_err(RemindError::Trigger)?), timezone)
+            }
             _ => return Ok(None),
         };
-        let time = clock(time).map_err(RemindError::Trigger)?;
-        for days in 0..=7 {
-            let date = super::add(now, Duration::days(days))?.date_naive();
-            if weekday.is_some_and(|wanted| date.weekday().num_days_from_monday() != wanted) {
-                continue;
-            }
-            let candidate = date.and_time(time).and_utc();
-            if candidate > now {
-                return Ok(Some(candidate));
-            }
-        }
-        Err(no_time())
+        let time = when::clock(time).map_err(RemindError::Trigger)?;
+        let zone = Zone::Named(when::zone(timezone).map_err(RemindError::Trigger)?);
+        zone.next(time, weekday, now).map(Some).ok_or_else(no_time)
     }
+}
+
+/// The trigger `value` of a `sense_remind` call made at `now`, its times read as [`when::parse`] reads them in `zone`,
+/// the config file's: an `at` given as text, and the zone of a daily or weekly one naming none.
+pub(crate) fn read(mut value: Value, now: DateTime<Utc>, zone: &when::TimeZone) -> Result<Trigger, String> {
+    if let Value::Object(fields) = &mut value {
+        match fields.get("kind").and_then(Value::as_str) {
+            Some("at") => {
+                if let Some(Value::String(text)) = fields.get("at") {
+                    let at = when::parse(text, now, &Zone::Named(zone.clone())).map_err(|e| format!("at: {e}"))?;
+                    fields.insert("at".into(), json!(at));
+                }
+            }
+            Some("daily" | "weekly") if !fields.contains_key("timezone") => {
+                fields.insert("timezone".into(), json!(when::name(zone)));
+            }
+            _ => {}
+        }
+    }
+    serde_json::from_value(value).map_err(|e| e.to_string())
 }
 
 fn no_time() -> RemindError {
     RemindError::Trigger("The trigger has no time to come.".into())
 }
 
-fn clock(time: &str) -> Result<NaiveTime, String> {
-    if time.len() != 5 || time.as_bytes()[2] != b':' {
-        return Err("Recurring time must be HH:MM in UTC.".into());
-    }
-    NaiveTime::parse_from_str(time, "%H:%M").map_err(|_| "Recurring time must be HH:MM in UTC.".into())
-}
-
-fn weekday_number(day: &str) -> Result<u32, String> {
-    ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-        .iter()
-        .position(|candidate| *candidate == day)
-        .map(|day| day as u32)
+fn weekday_number(day: &str) -> Result<chrono::Weekday, String> {
+    use chrono::Weekday::{Fri, Mon, Sat, Sun, Thu, Tue, Wed};
+    let days = [("mon", Mon), ("tue", Tue), ("wed", Wed), ("thu", Thu), ("fri", Fri), ("sat", Sat), ("sun", Sun)];
+    days.iter()
+        .find(|(name, _)| *name == day)
+        .map(|(_, weekday)| *weekday)
         .ok_or_else(|| "weekday must be mon, tue, wed, thu, fri, sat or sun.".into())
 }
 
 pub(super) fn schema() -> Value {
     let condition = super::condition::schema();
     let watch = super::watch::schema();
+    let at = format!("When: {}; local times in the config file's time zone.", when::FORMS);
+    let timezone = "An IANA time zone such as Europe/London; default the config file's time zone, else UTC.";
     json!({"oneOf":[
         {"type":"object","additionalProperties":false,"required":["kind","at"],
-         "properties":{"kind":{"const":"at"},"at":{"type":"string","format":"date-time"}}},
+         "properties":{"kind":{"const":"at"},"at":{"type":"string","description":at}}},
         {"type":"object","additionalProperties":false,"required":["kind","seconds"],
          "properties":{"kind":{"const":"after"},"seconds":{"type":"integer","minimum":1,"maximum":MAX_AFTER_SECONDS}}},
-        {"type":"object","additionalProperties":false,"required":["kind","time","timezone"],
+        {"type":"object","additionalProperties":false,"required":["kind","time"],
          "properties":{"kind":{"const":"daily"},"time":{"type":"string","pattern":"^([01][0-9]|2[0-3]):[0-5][0-9]$"},
-                       "timezone":{"const":"UTC"}}},
-        {"type":"object","additionalProperties":false,"required":["kind","weekday","time","timezone"],
+                       "timezone":{"type":"string","description":timezone}}},
+        {"type":"object","additionalProperties":false,"required":["kind","weekday","time"],
          "properties":{"kind":{"const":"weekly"},"weekday":{"enum":["mon","tue","wed","thu","fri","sat","sun"]},
-                       "time":{"type":"string","pattern":"^([01][0-9]|2[0-3]):[0-5][0-9]$"},"timezone":{"const":"UTC"}}},
+                       "time":{"type":"string","pattern":"^([01][0-9]|2[0-3]):[0-5][0-9]$"},
+                       "timezone":{"type":"string","description":timezone}}},
         {"type":"object","additionalProperties":false,"required":["kind","condition"],
          "properties":{"kind":{"const":"condition"},"condition":condition}},
         watch

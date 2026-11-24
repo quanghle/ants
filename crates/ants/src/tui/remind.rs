@@ -8,7 +8,7 @@
 use ants_proto::Reminders;
 use ants_proto::{Reminder, ThreadId, Uuid};
 use anyhow::Result;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
 
 use super::acts::Change;
 use super::exec::{Ctx, Done};
@@ -31,7 +31,7 @@ impl Model {
         text: &str,
         now: DateTime<Utc>,
     ) -> Result<Action, String> {
-        let (due, note) = crate::threads::remind::parse(text, now, &Local)?;
+        let (due, note) = crate::threads::remind::parse(text, now, &ants_daemon::sense::when::Zone::Local)?;
         let reminder = Reminder { at: now, due, message, note, pushed: false };
         Ok(self.set_reminder(thread, Some(reminder)))
     }

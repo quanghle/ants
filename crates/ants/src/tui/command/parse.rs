@@ -83,6 +83,7 @@ pub const COMMANDS: &[Row] = &[
     ),
     row("unremind", "", "clear the thread's reminder", Needs::Thread),
     row("reminders", "", "every reminder, the soonest due first, in the pager", Needs::Nothing),
+    row("schedules", "", "the machine's schedules, their next and last firings, in the pager", Needs::Nothing),
     row("archive", "", "archive the thread", Needs::Thread),
     row("unarchive", "", "unarchive the thread", Needs::Thread),
     row("title", "TEXT", "title the thread", Needs::Thread),
@@ -180,6 +181,8 @@ pub enum Slash {
     Unremind,
     /// List every reminder, as `ants remind list` does.
     Reminders,
+    /// List the machine's schedules, as `ants schedule list` does.
+    Schedules,
     Title(String),
     /// Post the text to the thread's notes.
     Notes(String),
@@ -339,6 +342,7 @@ fn slash(text: &str) -> Result<Slash, String> {
         "remind" => text().map(Slash::Remind),
         "unremind" => bare(Slash::Unremind),
         "reminders" => bare(Slash::Reminders),
+        "schedules" => bare(Slash::Schedules),
         "title" => text().map(Slash::Title),
         "notes" => text().map(Slash::Notes),
         "react" => text()?.parse().map(Slash::React).map_err(|e| e.to_string()),
@@ -516,6 +520,7 @@ pub(super) mod tests {
         assert_eq!(ok("/unremind"), Slash::Unremind);
         assert_eq!(ok("/reminders"), Slash::Reminders);
         assert_eq!(parse("/reminders soon").unwrap_err(), "usage: /reminders");
+        assert_eq!(ok("/schedules"), Slash::Schedules);
         assert_eq!(parse("/remind").unwrap_err(), "usage: /remind DURATION|TIME [NOTE]");
         assert_eq!(ok("/forward @dev-b"), Slash::Forward { to: user("dev-b"), note: String::new() });
         assert_eq!(ok("/forward @dev-b take it"), Slash::Forward { to: user("dev-b"), note: "take it".into() });

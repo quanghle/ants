@@ -11,7 +11,7 @@
 //! turn_budget = 8                   # turns a thread gets from a human's message, for ant-to-ant replies (the
 //!                                   # default); also per ant and per template
 //! metrics = "127.0.0.1:9464"        # serve /healthz and /metrics there (crate::monitoring::metrics); off without it
-//! timezone = "America/New_York"     # default zone of the schedules' cron, else UTC
+//! timezone = "America/New_York"     # zone of the schedules' cron and of the ants' sense times of day, else UTC
 //! redact = true                     # redact secrets from what the ants publish (the default; crate::secrets::redact)
 //! machine = "dev-vm1"               # the machine the colony names for the ants, and the host's where [host] and
 //!                                   # its credentials name none (default: the host name)
@@ -221,7 +221,8 @@ struct File {
     turn_budget: Option<u32>,
     /// Where to serve health and metrics ([`crate::monitoring::metrics`]).
     metrics: Option<SocketAddr>,
-    /// Default time zone of the schedules' cron timetables.
+    /// Default time zone of the schedules' cron timetables, and the zone the times of day of the ants' sense reminders
+    /// are read in.
     timezone: Option<String>,
     /// Redact secrets from what the file's ants publish ([`crate::secrets::redact`]).
     #[serde(default = "yes")]
@@ -401,6 +402,9 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     let elsewhere = builtins::leave(&mut ants, takes, home);
     for ant in &ants {
         builtins::harness_set(ant).with_context(|| format!("config {}", path.display()))?;
+    }
+    for ant in &mut ants {
+        ant.timezone.clone_from(&timezone);
     }
     let entries = std::mem::take(&mut file.schedules);
     let schedules = schedules(entries, &file, timezone.as_ref(), &names, base, home, path)?;

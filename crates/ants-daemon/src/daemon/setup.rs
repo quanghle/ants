@@ -285,6 +285,7 @@ pub(super) async fn services(bus: Bus<'_>, allow: Allowlist, machine: &str) -> R
     let sense = providers.sense_of(&config.provider);
     if let Some(sense) = sense {
         sense.serve(&config.ant, &config.storage.home, config.connection.creds.clone());
+        sense.read_times_in(&config.ant, config.timezone.as_ref());
         sense.identify(&config.ant, identity.clone());
     }
     let lifecycle = match &identity_id {

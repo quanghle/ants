@@ -194,8 +194,11 @@ fn exec_and_http_sinks_get_the_notice_as_versioned_json() {
     let (thread, message) = (ThreadId::generate(), Uuid::now_v7());
     let due = at("2025-01-06T09:00:00Z");
     let reminder = ants_proto::Reminder { at: due, due, message: Some(message), note: "ship it".into(), pushed: false };
-    let reminded = reminder_notice(&p("alice"), &thread, &reminder);
+    let reminded = reminder_notice(&p("alice"), &thread, &reminder, due);
     assert_eq!(reminded.title, "reminder: ship it");
+    assert!(!reminded.text.contains("late"), "{}", reminded.text);
+    let late = reminder_notice(&p("alice"), &thread, &reminder, due + chrono::TimeDelta::hours(3));
+    assert!(late.text.ends_with("(Sent late: due 2025-01-06 09:00 UTC.)"), "{}", late.text);
     let json = notice_json(&reminded, now);
     assert_eq!(
         (&json["kind"], &json["thread"], &json["message"], &json["due"]),
