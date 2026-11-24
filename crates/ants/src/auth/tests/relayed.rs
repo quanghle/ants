@@ -290,7 +290,7 @@ async fn an_answer_the_server_sent_onto_a_subject_an_ant_or_a_webhook_may_not_pu
     let (_, b_js) = server.connect(&dev_b).await;
     h_js.create_stream(ants_daemon::hub::trails_config()).await.unwrap();
     h_js.create_stream(ants_daemon::hub::trail_runs_config()).await.unwrap();
-    crate::webhook::ensure_bucket(&h_js).await.unwrap();
+    crate::test_support::webhook::ensure_bucket(&h_js).await.unwrap();
     bus::ensure_stream(&h_js).await.unwrap();
     bus::open_stream(&b_js, &dev_b).await.unwrap();
     let creds = server.dir().join("github.creds");

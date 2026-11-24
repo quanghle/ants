@@ -13,8 +13,7 @@ use super::model::Key;
 use super::style;
 
 /// The names the picker offers, in order.
-pub const COMMON: [&str; 10] =
-    ["thumbsup", "heart", "eyes", "check", "x", "rocket", "tada", "thinking", "fire", "pray"];
+const COMMON: [&str; 10] = ["thumbsup", "heart", "eyes", "check", "x", "rocket", "tada", "thinking", "fire", "pray"];
 
 /// The emoji of the common names; any other name shows as `:name:`.
 const GLYPHS: &[(&str, &str)] = &[

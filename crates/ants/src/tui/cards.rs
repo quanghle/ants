@@ -177,11 +177,11 @@ impl Source {
         };
         let spend = async {
             let kv = self.sessions.as_ref().map_err(|e| anyhow!("{e}"))?;
-            crate::spend::on_threads(&self.js, kv, &threads).await.context("per thread")
+            crate::ants::spend::on_threads(&self.js, kv, &threads).await.context("per thread")
         };
         let today = async {
             let kv = self.sessions.as_ref().map_err(|e| anyhow!("{e}"))?;
-            crate::spend::today(&self.js, kv).await.context("of the day")
+            crate::ants::spend::today(&self.js, kv).await.context("of the day")
         };
         let reminders = async { self.meta.as_ref().map_err(|e| anyhow!("{e}"))?.reminders().await };
         let (titles, meta, spend, today, reminders) = futures::join!(titles, meta, spend, today, reminders);

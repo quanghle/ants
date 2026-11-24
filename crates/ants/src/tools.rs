@@ -47,8 +47,6 @@ mod following;
 mod requests;
 mod text;
 
-#[cfg(test)]
-pub use answer::answer;
 pub use answer::{Answer, Suggestion, answer_request, suggestion};
 pub use assisted::HeldAct;
 pub(crate) use assisted::{deciders, record};

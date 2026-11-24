@@ -95,7 +95,7 @@ pub(crate) fn retired_consumer_creds(dir: &Path, js_domain: Option<&JsDomain>, a
     short_lived_creds(dir, js_domain, Permissions::for_retired_consumers(ant))
 }
 
-pub(super) fn short_lived_creds(dir: &Path, js_domain: Option<&JsDomain>, permissions: Permissions) -> Result<String> {
+fn short_lived_creds(dir: &Path, js_domain: Option<&JsDomain>, permissions: Permissions) -> Result<String> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
     let exp = now()? + APPROVER_TTL.as_secs();

@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::admin::orders::outcome;
 use crate::admin::orders::tests::send;
-use crate::auth::{Issue, NewDevice};
+use crate::auth::{Issue, Registered};
 use crate::credentials::issued::{self, Kind};
 use crate::credentials::revoke;
 use crate::test_support::Server;
@@ -49,7 +49,7 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
     h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
     let admin_creds = server.dir().join("alice-admin.creds");
-    let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let threads = format!("KV_{THREADS_BUCKET}");
     let mut rights = Permissions::for_user(&alice, Role::Human);
     rights.publish.extend([
@@ -138,7 +138,7 @@ async fn an_order_to_another_ant_is_decided_while_an_add_waits_for_the_signer() 
     h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
     let admin_creds = server.dir().join("alice-admin.creds");
-    let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
     let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
@@ -237,13 +237,13 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     let m1: Machine = "m1".parse().unwrap();
     let (alice, bob, dev_a, dev_b) = (p("alice"), p("bob"), p("dev-a"), p("dev-b"));
     let bob_creds = hub.dir().join("bob.creds");
-    auth::issue(&team, &bob, Role::Human, Some(&domain), &bob_creds).unwrap();
+    crate::test_support::issue(&team, &bob, Role::Human, Some(&domain), &bob_creds).unwrap();
     let (_h, h_js) = bus::connect(&hub.url, Some(&bob_creds), Some(&domain), &bob, "test").await.unwrap();
     bus::ensure_stream(&h_js).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
     let admin_creds = hub.dir().join("alice-admin.creds");
-    let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human).with_js_domain(Some(&domain));
     Issue::new(&team, &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
 
@@ -300,7 +300,7 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     let (ants, watched) = tokio::sync::watch::channel(vec![dev_a.clone()]);
     let task = tokio::spawn(host::run(host, watched));
     eventually("m1's daemon records its ants in the hub", async || {
-        !crate::machines::machines_of(&h_js, &dev_a).await.unwrap_or_default().is_empty()
+        !crate::ants::machines::machines_of(&h_js, &dev_a).await.unwrap_or_default().is_empty()
     })
     .await;
 
@@ -365,7 +365,7 @@ async fn add_orders_sent_at_once_leave_the_daemon_serving_every_ant() {
     ants_daemon::hub::init(&js, |s| rights.may_publish(s)).await.unwrap();
     let team = dir.join("auth");
     let admin_creds = dir.join("alice-admin.creds");
-    let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&team, &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
     let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();

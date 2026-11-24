@@ -46,7 +46,7 @@ mod transports;
 mod web;
 
 /// How long a network check may take.
-pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]

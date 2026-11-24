@@ -3,7 +3,7 @@
 //! attachment get`), opening one sealed on a message between two humans ([`crate::people::sealed`]). The ants TUI attaches,
 //! lists and saves through the same functions.
 
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
@@ -139,23 +139,6 @@ pub fn target(out: Option<&Path>, name: &str) -> PathBuf {
     }
 }
 
-/// Write `bytes` to a new file at `path`, refusing to overwrite one; on a failure, nothing is left there.
-pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            anyhow::anyhow!("{} exists: not overwriting it (-o names another path)", path.display())
-        } else {
-            anyhow::Error::new(e).context(format!("creating {}", path.display()))
-        }
-    })?;
-    if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-        drop(file);
-        let _ = std::fs::remove_file(path);
-        return Err(e).with_context(|| format!("writing {}", path.display()));
-    }
-    Ok(())
-}
-
 /// Read the attachment under `handle` and check its bytes ([`fetch`]) against `expected`, the reference of the message
 /// carrying it, if given, which the hub stored at `stored`. When the store holds it as an attachment of a sealed message
 /// ([`SealedAttachment::STORED_NAME`]), or `expected` is sealed, its reference and content key are those of the sealed
@@ -220,7 +203,7 @@ pub async fn save(
     }
     let (attachment, bytes) = open(js, keyring, handle, expected, stored).await?;
     let path = target(out, &attachment.name);
-    write_new(&path, &bytes)?;
+    crate::files::write_new(&path, &bytes)?;
     Ok((attachment, bytes.len() as u64, path))
 }
 

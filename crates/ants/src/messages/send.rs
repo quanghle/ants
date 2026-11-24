@@ -15,7 +15,7 @@ use async_nats::jetstream;
 
 use crate::messages::attachments;
 use crate::people::{assistant, humans, sealed};
-use crate::{channel, colony};
+use crate::{ants::colony, channel};
 
 /// The message or post a send replies to, quoting it ([`Envelope::quoting`]).
 #[derive(Debug, Clone, PartialEq, Eq)]

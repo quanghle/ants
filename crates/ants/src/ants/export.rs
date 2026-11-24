@@ -40,8 +40,8 @@ use chrono::{DateTime, Utc};
 use data_encoding::BASE64;
 use serde::{Deserialize, Serialize};
 
-use crate::add::{self, AddArgs};
 use crate::admin::settings::SharedRecord;
+use crate::ants::add::{self, AddArgs};
 use crate::serve::AntOptions;
 
 mod provider;
@@ -127,7 +127,7 @@ pub enum Kind {
 
 /// The settings of `ant` an export carries: those of its shared settings `shared` where the bus holds them, as its
 /// daemon serves them, else of its `[[ant]]` table.
-pub fn settings_of(ant: &Ant, shared: Option<&SharedSettings>) -> Result<Settings> {
+fn settings_of(ant: &Ant, shared: Option<&SharedSettings>) -> Result<Settings> {
     let overlaid;
     let ant = match shared {
         Some(record) => {
@@ -150,7 +150,7 @@ pub fn settings_of(ant: &Ant, shared: Option<&SharedSettings>) -> Result<Setting
 
 /// `ant` with the exported `settings` in place of its own. Listed in a config, they become the ant's shared settings on
 /// the bus when the first daemon serving it creates them; shared settings the bus holds already serve instead.
-pub fn with_settings(settings: &Settings, ant: Ant) -> Ant {
+fn with_settings(settings: &Settings, ant: Ant) -> Ant {
     Ant {
         whoami: settings.whoami.clone(),
         harness: settings.harness.clone(),
@@ -163,14 +163,14 @@ pub fn with_settings(settings: &Settings, ant: Ant) -> Ant {
 }
 
 /// The files of the home `home` that the `memory_files` globs of `harness` match, relative to it.
-pub fn harness_files_of(harness: Option<&Harness>, home: &Path) -> Vec<PathBuf> {
+fn harness_files_of(harness: Option<&Harness>, home: &Path) -> Vec<PathBuf> {
     let globs = harness.map_or(&[][..], Harness::memory_files);
     ants_daemon::admin::files_under(globs, home, &LEFT_OUT)
 }
 
 /// The core memory files of `ant` in its home `home`, relative to it: the regular files there that are not `harness`
 /// files, not [`LEFT_OUT`] and not the task database its `BD_DB` names; links are not followed.
-pub fn core_files_of(ant: &Ant, home: &Path, harness: &[PathBuf]) -> Result<Vec<PathBuf>> {
+fn core_files_of(ant: &Ant, home: &Path, harness: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let task_db: Vec<PathBuf> = ant
         .env
         .get("BD_DB")
@@ -295,7 +295,7 @@ pub async fn export(
 
     let mut export = pack_ant(listed, harness.as_deref(), shared.as_ref(), identity, nats.account.clone())?;
     export.provider = part;
-    write_new(&out, &serde_json::to_vec_pretty(&export)?)?;
+    crate::files::write_new_private(&out, &serde_json::to_vec_pretty(&export)?)?;
     let count = |kind| export.files.iter().filter(|f| f.kind == kind).count();
     let part = export.provider.as_ref().map_or_else(String::new, |p| format!(", the part of provider {}", p.provider));
     println!(
@@ -393,28 +393,6 @@ async fn wait_between_prompts(js: &async_nats::jetstream::Context, ant: &UserId)
     }
 }
 
-/// Write `bytes` to a new file at `path` only its owner can read, refusing to overwrite one.
-fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write as _;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            anyhow::anyhow!("{} exists: not overwriting it (-o names another path)", path.display())
-        } else {
-            anyhow::Error::new(e).context(format!("creating {}", path.display()))
-        }
-    })?;
-    if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-        drop(file);
-        let _ = std::fs::remove_file(path);
-        return Err(e).with_context(|| format!("writing {}", path.display()));
-    }
-    Ok(())
-}
-
 /// The identity record of `ant` and its sequence: None when absent.
 pub(crate) async fn read(kv: &DirectKv, ant: &UserId) -> Result<(Option<AntIdentity>, u64)> {
     let (found, last) = kv.lookup_last(ant.as_str()).await?;
@@ -433,7 +411,7 @@ pub(crate) async fn read(kv: &DirectKv, ant: &UserId) -> Result<(Option<AntIdent
 /// Set or clear the moved mark of `ant`'s identity record by compare-and-set: whether it changed.
 async fn mark_moved(kv: &DirectKv, ant: &UserId, mark: Option<MovedMark>) -> Result<bool> {
     let absent = format!("{ant} has no identity record");
-    let marked = crate::avatars::change_in(kv, ant, &absent, |record| {
+    let marked = crate::ants::avatars::change_in(kv, ant, &absent, |record| {
         if record.moved.is_some() == mark.is_some() {
             return Ok(false);
         }
@@ -678,7 +656,7 @@ async fn create(js: &async_nats::jetstream::Context, kv: &DirectKv, identity: &A
     if let (Some(_), _) = read(kv, name).await? {
         bail!("the bus holds an ant named {name} already: --as NEW imports it under another name");
     }
-    let held = crate::avatars::read(js).await?;
+    let held = crate::ants::avatars::read(js).await?;
     if let Some(same) = held.values().find(|record| record.id == identity.id) {
         bail!(
             "the bus holds this ant already, as {}: one bus never holds two copies of an ant; after a move, \

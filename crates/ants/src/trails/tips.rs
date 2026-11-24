@@ -17,7 +17,7 @@ use serde::Serialize;
 use super::TipsArgs;
 use crate::buckets::latest_in;
 use crate::text::one_line;
-use crate::text::{short, since};
+use crate::text::{ago, short, since};
 
 /// How many characters of a tip key a listing shows.
 const KEY_WIDTH: usize = 40;
@@ -133,7 +133,7 @@ pub(crate) fn row(ranked: &Ranked<'_>, now: DateTime<Utc>) -> [String; 6] {
     if ranked.older_script {
         status.push_str(", older script");
     }
-    let written = format!("{} ago", short(since(tip.written_at, now)));
+    let written = ago(tip.written_at, now);
     [tip.id.to_string(), key(tip), tip.writer.to_string(), votes(ranked), status, written]
 }
 

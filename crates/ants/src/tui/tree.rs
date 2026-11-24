@@ -24,7 +24,7 @@ use super::armed::Armed;
 use super::model::{Action, Data, Key, Level, Model, To};
 use super::select::{PAGE, Selection};
 use super::style;
-use crate::spend::ThreadReport;
+use crate::ants::spend::ThreadReport;
 
 mod io;
 mod shape;

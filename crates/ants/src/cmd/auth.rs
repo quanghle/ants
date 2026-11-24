@@ -11,7 +11,7 @@ use clap::Subcommand;
 use crate::auth::team_dir;
 use crate::connection::Connection;
 use crate::credentials::push::push_and_report;
-use crate::credentials::{backup, issued, keys, listing, revoke};
+use crate::credentials::{self, backup, issued, keys, listing, revoke};
 use crate::node::members;
 use crate::node::members::EnrollApprover;
 use crate::people::devices;
@@ -420,7 +420,7 @@ pub(crate) async fn run(conn: &Connection<'_>, command: AuthCommand) -> Result<(
         AuthCommand::Issued { json, dir } => listing::list_issued(&team_dir(dir)?, json),
         AuthCommand::Devices { human, json, dir } => listing::list_devices(&team_dir(dir)?, human.as_str(), json),
         AuthCommand::Rename { human, device, label, dir } => {
-            let renamed = issued::rename(&team_dir(dir)?, human.as_str(), &device, &label)?;
+            let renamed = credentials::devices::rename(&team_dir(dir)?, human.as_str(), &device, &label)?;
             println!("{} of {human} is now labelled {label:?}", renamed.device);
             Ok(())
         }
@@ -441,7 +441,7 @@ pub(crate) async fn run(conn: &Connection<'_>, command: AuthCommand) -> Result<(
         AuthCommand::Admin(AdminCommand::List { json, dir }) => listing::list_admins(&team_dir(dir)?, json),
         AuthCommand::Admin(AdminCommand::Drop { human, no_push, dir }) => {
             let dir = team_dir(dir)?;
-            let keys: Vec<String> = issued::admins(&dir, auth::now()?)?
+            let keys: Vec<String> = credentials::devices::admins(&dir, auth::now()?)?
                 .into_iter()
                 .filter(|a| a.name == human.as_str())
                 .map(|a| a.key)
@@ -529,7 +529,7 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
         None => None,
     };
     let new =
-        auth::NewDevice { label: label.as_deref(), github, admin, web, assistant_of, ..auth::NewDevice::default() };
+        auth::Registered { label: label.as_deref(), github, admin, web, assistant_of, ..auth::Registered::default() };
     if store_key {
         let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
         let key = nkeys::KeyPair::new_user();
@@ -778,7 +778,7 @@ pub(crate) async fn revoke_credentials(
     let now = auth::now()?;
     let mut name = name;
     if let (Some(human), false) = (&name, devices.is_empty()) {
-        keys.extend(issued::device_keys(&dir, human, &devices)?);
+        keys.extend(credentials::devices::device_keys(&dir, human, &devices)?);
         name = None;
     }
     let ant = name.clone().filter(|name| {
@@ -930,7 +930,7 @@ mod tests {
         let text = std::fs::read_to_string(team.join("human.creds")).unwrap();
         assert!(ants_daemon::secrets::creds::Finding::from_creds(&text).unwrap().web);
         assert!(ants_daemon::secrets::creds::xkey_of(&text).is_none());
-        let devices = issued::devices(&team, "alice").unwrap();
+        let devices = credentials::devices::devices(&team, "alice").unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!((devices[0].web, devices[0].label.as_deref()), (true, Some("browser")));
         std::fs::remove_dir_all(dir).unwrap();

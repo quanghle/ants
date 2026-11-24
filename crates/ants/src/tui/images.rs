@@ -25,9 +25,9 @@ use crate::messages::attachments;
 use crate::people::sealed::Keyring;
 
 /// Widest an image is drawn, in cells.
-pub const MAX_COLS: u16 = 48;
+const MAX_COLS: u16 = 48;
 /// Tallest an image is drawn, in cells.
-pub const MAX_ROWS: u16 = 12;
+const MAX_ROWS: u16 = 12;
 /// Most images of a thread drawn: its latest.
 const MAX_IMAGES: usize = 12;
 /// Most memory decoding an image takes.

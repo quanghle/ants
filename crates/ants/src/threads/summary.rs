@@ -19,16 +19,16 @@ use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 
-use crate::colony;
+use crate::ants::colony;
 use crate::connection::Nats;
 use crate::messages::{inbox, progress};
 use crate::threads::thread::{self, Pick};
 use crate::threads::thread_meta;
 
 /// Most bytes of entries a request carries: the newest that fit.
-pub const ENTRIES_MAX: usize = 16 * 1024;
+const ENTRIES_MAX: usize = 16 * 1024;
 /// Most bytes of one entry's text a request carries.
-pub const ENTRY_MAX: usize = 1024;
+const ENTRY_MAX: usize = 1024;
 
 /// `text` cut to at most `max` bytes, on a character boundary, with an ellipsis when cut.
 fn cut(text: &str, max: usize) -> String {
@@ -44,7 +44,7 @@ fn cut(text: &str, max: usize) -> String {
 
 /// The entries as a request's text carries them, oldest first, one line each (its text's line breaks kept): time,
 /// kind, route, with `threads` the thread, and the text cut to [`ENTRY_MAX`]; only the newest within [`ENTRIES_MAX`].
-pub fn entries_text(entries: &[Entry], threads: bool) -> String {
+fn entries_text(entries: &[Entry], threads: bool) -> String {
     let mut lines = Vec::new();
     let mut size = 0;
     for e in entries.iter().rev() {

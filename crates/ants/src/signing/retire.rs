@@ -178,7 +178,7 @@ pub async fn leave_leaves(dir: &Path, ant: &UserId, hub: Option<&Context>) -> Ve
 }
 
 /// [`leave_leaves`], `local` reading this machine's leaf node configuration, and `apply` reloading the node.
-pub(crate) async fn leave_leaves_with(
+async fn leave_leaves_with(
     dir: &Path,
     ant: &UserId,
     hub: Option<&Context>,
@@ -410,13 +410,10 @@ pub async fn retire(
 #[cfg(test)]
 mod tests {
     use ants_proto::{Permissions, Role};
+    use ants_test_support::user as p;
 
     use super::*;
     use crate::node::members::EnrollApprover;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     fn leaf_conf(path: &Path, machine: &Machine, creds: &Path) {
         std::fs::write(path, format!("server_name: \"{machine}\"\ncredentials: {creds:?}\n")).unwrap();

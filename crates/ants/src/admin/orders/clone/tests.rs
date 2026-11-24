@@ -18,7 +18,7 @@ use ants_proto::{
 use serde_json::{Value, json};
 
 use crate::admin::orders::tests::send;
-use crate::auth::{Issue, NewDevice};
+use crate::auth::{Issue, Registered};
 use crate::credentials::issued::Kind;
 use crate::test_support::Server;
 use crate::test_support::orders::{SIGNED, with_signer};
@@ -53,7 +53,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
     h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
     ants_daemon::hub::create_identities(&h_js).await.unwrap();
     let admin_creds = server.dir().join("alice-admin.creds");
-    let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&team, &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
     let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();

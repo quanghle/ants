@@ -112,13 +112,7 @@ pub fn leaf_system_creds(uplink: &Path) -> PathBuf {
 /// the hub's for the accounts it holds ([`PACK_REQUEST`]) and hear the answers on the leaf's own system inbox only
 /// ([`system_inbox`]), which catches a leaf up on the pushes it missed while offline. They expire at `exp`, if ever.
 /// Recorded as [`Kind::LeafSystem`], so revoking the uplink by name revokes them too, in the system account.
-pub(super) fn issue_leaf_system(
-    dir: &Path,
-    machine: &Machine,
-    account: &str,
-    exp: Option<u64>,
-    out: &Path,
-) -> Result<()> {
+fn issue_leaf_system(dir: &Path, machine: &Machine, account: &str, exp: Option<u64>, out: &Path) -> Result<()> {
     let system = load(&dir.join(SYSTEM_SEED))?;
     let user = KeyPair::new_user();
     let permissions = Permissions {
@@ -134,11 +128,11 @@ pub(super) fn issue_leaf_system(
 
 /// What a `full` resolver periodically sends the other servers of its system account, with the hash of the accounts
 /// it holds; those with a `full` resolver too answer with theirs when they differ, and it keeps the newer ones.
-pub(super) const PACK_REQUEST: &str = "$SYS.REQ.CLAIMS.PACK";
+const PACK_REQUEST: &str = "$SYS.REQ.CLAIMS.PACK";
 
 /// The inbox prefix of the system requests of `machine`'s leaf node, named after the machine (`ants leaf config`):
 /// nats-server takes `$SYS._INBOX.` and 8 base-62 digits of the SHA-256 of its server name.
-pub(super) fn system_inbox(machine: &Machine) -> String {
+fn system_inbox(machine: &Machine) -> String {
     const DIGITS: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     let sha = ring::digest::digest(&ring::digest::SHA256, machine.as_str().as_bytes());
     let hash: String = sha.as_ref()[..8].iter().map(|b| char::from(DIGITS[usize::from(b % 62)])).collect();
@@ -196,7 +190,7 @@ pub fn check_leaf(account: &str, jwt: &str, machine: &Machine) -> Result<Claims>
     leaf_claims(account, jwt, machine).map(|(claims, _)| claims)
 }
 
-pub(super) fn leaf_claims(account: &str, jwt: &str, machine: &Machine) -> Result<(Claims, Value)> {
+fn leaf_claims(account: &str, jwt: &str, machine: &Machine) -> Result<(Claims, Value)> {
     let (claims, body) = verified_body(jwt)?;
     if claims.iss != account {
         bail!("issued by {}, not by the team's account {account}", claims.iss);

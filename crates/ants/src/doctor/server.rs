@@ -71,7 +71,7 @@ pub(super) async fn reach(
 }
 
 /// The oldest nats-server, major and minor version, ants runs on.
-pub(super) const MIN_NATS_SERVER: (u32, u32) = (2, 15);
+const MIN_NATS_SERVER: (u32, u32) = (2, 15);
 
 /// Whether nats-server `version` is [`MIN_NATS_SERVER`] or later; a version that does not parse passes.
 pub(super) fn supported_server(version: &str) -> bool {
@@ -154,7 +154,7 @@ pub(super) fn unreached(
 
 /// Whether JetStream answers in the domain the CLI uses, the hub's: not the leaf node's own, and one the credentials
 /// were issued for.
-pub(super) async fn check_jetstream(
+async fn check_jetstream(
     setup: &Setup,
     identity: &Identity,
     js: &jetstream::Context,
@@ -229,7 +229,7 @@ pub(super) async fn check_jetstream(
 }
 
 /// The hub's stream and buckets, as [`hub::check`] finds them with the credentials' rights.
-pub(super) async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
+async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
     let check = "hub";
     if !identity.me.role.is_human() {
         return vec![Check::skip(check, "an ant's credentials get no stream info: run `ants doctor` as a human")];
@@ -271,7 +271,7 @@ pub(super) async fn check_hub(js: &jetstream::Context, identity: &Identity) -> V
 /// most each takes ([`consumer_limit`]): past that, creating one fails, so an ant cannot read its inbox, or a daemon
 /// cannot watch the bucket. Warns from four fifths of it. Those whose stream info the credentials do not get are left
 /// out, the stream with a skip.
-pub(super) async fn check_consumers(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
+async fn check_consumers(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
     let check = "consumers";
     let objects = std::iter::once(hub::Object::Stream).chain(hub::Object::ALL.into_iter().filter(|o| o.watched()));
     let (seen, unseen): (Vec<_>, Vec<_>) =
@@ -520,6 +520,6 @@ async fn account_jetstream(client: &async_nats::Client, key: String) -> Result<O
     }
 }
 
-pub(super) fn copy_server_conf(conf: &Path, then: &str) -> String {
+fn copy_server_conf(conf: &Path, then: &str) -> String {
     format!("copy {} next to the hub's nats-server configuration and {then}", conf.display())
 }

@@ -14,7 +14,7 @@ use super::answer::{check, decide};
 use super::*;
 use crate::cmd::tools::decide_request;
 use crate::connection::Nats;
-use crate::test_support::Server;
+use crate::test_support::{Server, answer};
 
 fn request(ant: &UserId, title: &str, offered: Vec<Verdict>, timeout: Duration) -> ApprovalRequest {
     let tool = ToolCall { kind: "execute".into(), title: title.into(), ..Default::default() };

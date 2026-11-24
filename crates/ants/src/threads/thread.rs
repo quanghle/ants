@@ -118,7 +118,7 @@ pub async fn scan(js: &jetstream::Context, start: consumer::DeliverPolicy, take:
 }
 
 /// [`scan`], opening sealed messages with `keyring`, which looks up a sending device added since it was loaded.
-pub async fn scan_opening(
+async fn scan_opening(
     js: &jetstream::Context,
     start: consumer::DeliverPolicy,
     keyring: Option<Arc<sealed::Keyring>>,

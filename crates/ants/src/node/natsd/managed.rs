@@ -57,7 +57,7 @@ pub(super) fn address(url: &str) -> Result<(String, u16)> {
 }
 
 /// `host:port`, with brackets around an IPv6 host.
-pub(super) fn host_port(host: &str, port: u16) -> String {
+fn host_port(host: &str, port: u16) -> String {
     if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") }
 }
 

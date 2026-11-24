@@ -104,7 +104,7 @@ pub fn error(text: &str, width: u16) -> Vec<Line<'static>> {
 }
 
 /// How many lines an error takes in a footer at most.
-pub const ERROR_LINES: usize = 3;
+const ERROR_LINES: usize = 3;
 
 /// `text` in at most `width` columns, an ellipsis ending it when cut.
 pub fn fit(text: &str, width: usize) -> String {

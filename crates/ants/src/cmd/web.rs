@@ -27,7 +27,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
 
 use crate::auth;
-use crate::node::web as node_web;
+use crate::node::{leaf, web as node_web};
 
 /// The page embedded in the binary, as `build.rs` writes it.
 #[cfg(feature = "web")]
@@ -151,8 +151,7 @@ async fn serve_args(page: Page, args: ServeArgs) -> Result<()> {
     let server = match server {
         Some(server) => websocket(&server)?,
         None => {
-            let dir = auth::default_dir()?;
-            let (leaf, hub) = (dir.with_file_name("leaf.conf"), dir.with_file_name("nats.conf"));
+            let (leaf, hub) = (leaf::default_path()?, auth::default_dir()?.with_file_name("nats.conf"));
             let conf = if leaf.exists() { leaf } else { hub };
             let (server, warning) = local_server(&conf, &origin)?;
             if let Some(warning) = warning {

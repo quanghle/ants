@@ -72,7 +72,7 @@ fn check_leaf_store(leaf: &Leaf, generic: String, now: u64) -> Check {
 }
 
 /// The leaf node's system account credentials, which carry the revocations pushed to the hub.
-pub(super) fn check_leaf_system(
+fn check_leaf_system(
     setup: &Setup,
     leaf: &Leaf,
     uplink: &anyhow::Result<creds::Finding>,
@@ -232,7 +232,7 @@ async fn check_listening(setup: &Setup, leaf: &Leaf, managed: Option<&Path>) -> 
 }
 
 /// Whether the hub sources the outbox of `machine` and takes from it what `members` send ([`outbox::sourcing`]).
-pub(super) async fn check_outbox(
+async fn check_outbox(
     machine: &Machine,
     members: Option<&[(UserId, Role)]>,
     uplink: Option<&creds::Finding>,

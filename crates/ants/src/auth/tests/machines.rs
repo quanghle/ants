@@ -81,7 +81,7 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
     let recorded = async |want: &[UserId]| {
         timeout(WAIT, async {
             loop {
-                let records = crate::machines::list(&h_js).await.unwrap();
+                let records = crate::ants::machines::list(&h_js).await.unwrap();
                 if records.iter().any(|r| r.machine == m1 && r.ants == want) {
                     return records;
                 }
@@ -94,7 +94,7 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
     recorded(std::slice::from_ref(&dev_a)).await;
     ants.send_replace(vec![dev_b.clone(), dev_a.clone()]);
     assert_eq!(recorded(&[dev_a.clone(), dev_b.clone()]).await.len(), 1);
-    assert_eq!(crate::machines::machines_of(&h_js, &dev_b).await.unwrap(), std::slice::from_ref(&m1));
+    assert_eq!(crate::ants::machines::machines_of(&h_js, &dev_b).await.unwrap(), std::slice::from_ref(&m1));
 
     let client = async_nats::ConnectOptions::with_credentials_file(&creds)
         .await

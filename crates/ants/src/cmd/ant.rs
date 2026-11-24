@@ -12,7 +12,10 @@ use crate::admin::settings::{self, Assignment};
 use crate::admin::{mcp, memories, orders, pause, restart, trail};
 use crate::trails::ResumeLimitArgs;
 use crate::trails::runs::Pick;
-use crate::{ant, avatars, completions, export, sense_id};
+use crate::{
+    ants::{ant, avatars, export, sense_id},
+    completions,
+};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -242,7 +245,7 @@ pub(crate) enum AntCommand {
     /// export carries goes to the ant's provider here by an admin order to the daemon of this machine, of a provider
     /// of the same name only; when it cannot, a warning says why and --provider-only tries again. Needs a human's
     /// credentials, admin ones for the provider's part.
-    Import(Box<crate::export::ImportArgs>),
+    Import(Box<crate::ants::export::ImportArgs>),
     /// Clear the moved mark `ants ant export --move` set on ANT, so a daemon listing it serves it again.
     Unseal {
         #[arg(add = ArgValueCandidates::new(completions::ants))]

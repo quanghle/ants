@@ -18,7 +18,7 @@ pub fn creds_jwt(creds: &str) -> Option<&str> {
     creds_block(creds, "BEGIN NATS USER JWT")
 }
 
-pub(super) fn creds_block<'a>(creds: &'a str, marker: &str) -> Option<&'a str> {
+fn creds_block<'a>(creds: &'a str, marker: &str) -> Option<&'a str> {
     let mut lines = creds.lines().map(str::trim);
     lines.find(|line| line.starts_with("---") && line.contains(marker))?;
     lines.find(|line| !line.is_empty()).filter(|line| !line.starts_with("---"))

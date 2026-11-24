@@ -20,7 +20,7 @@ use crate::messages::{attachments, progress};
 use crate::release::update;
 use crate::signing::retire;
 use crate::threads::thread;
-use crate::{add, completions, serve};
+use crate::{ants::add, completions, serve};
 
 /// The server `--nats` defaults to.
 pub(crate) const DEFAULT_NATS: &str = "nats://127.0.0.1:4222";

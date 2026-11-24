@@ -30,11 +30,11 @@ pub(super) fn installed_transports(services: &mut Services) -> Vec<Transport> {
 }
 
 /// When a Dev Tunnel login has this little left, warn.
-pub(super) const LOGIN_WARN: Duration = Duration::from_hours(24);
+const LOGIN_WARN: Duration = Duration::from_hours(24);
 /// When a Dev Tunnel connect token has this little left, warn.
-pub(super) const TOKEN_WARN: Duration = Duration::from_hours(6);
+const TOKEN_WARN: Duration = Duration::from_hours(6);
 /// How long a Dev Tunnel connect token lasts, for a token file whose expiry cannot be read.
-pub(super) const TOKEN_LIFE: Duration = Duration::from_hours(24);
+const TOKEN_LIFE: Duration = Duration::from_hours(24);
 
 /// The Dev Tunnel and HTTPS bridge services `transports`: whether each runs, the Dev Tunnel login or connect token,
 /// and whether each bridge answers, takes its token and carries a connection to the hub's leafnode port. Nothing
@@ -87,7 +87,7 @@ pub(super) async fn check_transports(transports: Vec<Transport>, now: u64) -> Ve
 
 /// The Dev Tunnel login of `devtunnel user show`, run with `program`: there, and not expiring within
 /// [`LOGIN_WARN`].
-pub(super) async fn check_devtunnel_login(program: &Path, restart: &str, now: u64) -> Check {
+async fn check_devtunnel_login(program: &Path, restart: &str, now: u64) -> Check {
     let check = "devtunnel login";
     let fix =
         || vec![format!("devtunnel user login -g -d (GitHub, device code; -e for Microsoft Entra), then {restart}")];
@@ -131,7 +131,7 @@ pub(super) async fn check_devtunnel_login(program: &Path, restart: &str, now: u6
 
 /// The connect token of `tunnel` in `file`, read by the devtunnel service at each start: there, private to its owner
 /// and not expiring within [`TOKEN_WARN`] (its `exp`, or [`TOKEN_LIFE`] after it was written).
-pub(super) fn check_devtunnel_token(file: &Path, tunnel: &str, restart: &str, now: u64) -> Check {
+fn check_devtunnel_token(file: &Path, tunnel: &str, restart: &str, now: u64) -> Check {
     let check = "devtunnel token";
     let shown = file.display();
     let renew =
@@ -158,7 +158,7 @@ pub(super) fn check_devtunnel_token(file: &Path, tunnel: &str, restart: &str, no
 }
 
 /// The `exp` of a JSON Web Token.
-pub(super) fn jwt_expiry(token: &str) -> Option<u64> {
+fn jwt_expiry(token: &str) -> Option<u64> {
     let mut parts = token.split('.');
     let (_, payload, _) = (parts.next()?, parts.next()?, parts.next()?);
     let payload = data_encoding::BASE64URL_NOPAD.decode(payload.trim_end_matches('=').as_bytes()).ok()?;
@@ -190,7 +190,7 @@ pub(super) fn left(seconds: u64) -> String {
 
 /// The bridge of `service`, `ants bridge connect` or `ants bridge serve` run as `unit`: its token file, whether the
 /// bridge answers as one taking it, and whether it carries a connection to the hub's leafnode port ([`check_pipe`]).
-pub(super) async fn check_bridge(service: Service, unit: &Unit, restart: &str) -> Vec<Check> {
+async fn check_bridge(service: Service, unit: &Unit, restart: &str) -> Vec<Check> {
     let serving = service == Service::BridgeServe;
     let (token_check, url_check, pipe_check) = if serving {
         ("bridge serve token", "bridge serve url", "bridge serve pipe")
@@ -299,7 +299,7 @@ pub(super) enum End<'a> {
 /// down a connection to its listen address, as the leaf node's own uplink does. Neither sends anything up, so the hub
 /// sees each connection come and go unauthenticated, and the leaf node's uplink is left alone: `ants bridge connect`
 /// carries each local connection in a session of its own.
-pub(super) async fn check_pipe(check: &str, remote: &bridge::Remote, url: &str, end: End<'_>, restart: &str) -> Check {
+async fn check_pipe(check: &str, remote: &bridge::Remote, url: &str, end: End<'_>, restart: &str) -> Check {
     let carried = match remote.first_line(NETWORK_TIMEOUT).await {
         Ok(carried) => carried,
         Err(e) => return Check::fail(check, format!("{url}: {e:#}"), vec![restart.to_owned()]),
@@ -406,7 +406,7 @@ async fn first_line_at(addr: &str, wait: Duration) -> std::io::Result<String> {
 }
 
 /// The URL `ants bridge connect` runs with, among its arguments `args`.
-pub(super) fn bridge_url(args: &[String]) -> Option<&str> {
+fn bridge_url(args: &[String]) -> Option<&str> {
     let start = args.iter().position(|a| a == "connect")? + 1;
     let mut rest = args[start..].iter();
     while let Some(arg) = rest.next() {

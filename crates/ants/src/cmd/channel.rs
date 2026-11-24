@@ -12,7 +12,7 @@ use crate::connection::{Connection, Nats};
 use crate::people::{humans, quiet};
 use crate::release::upgrade;
 use crate::threads::{thread, thread_meta};
-use crate::{channel, colony, completions};
+use crate::{ants::colony, channel, completions};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ChannelCommand {
@@ -188,9 +188,7 @@ async fn manage(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
             }
         }
         ChannelCommand::Notify { channel, level } => {
-            if !nats.me.role.is_human() {
-                bail!("a channel's notify level needs a human's credentials; those of {} are an ant's", nats.me.id);
-            }
+            nats.me.must_be_human("a channel's notify level")?;
             if channel::get(&kv, &channel).await?.is_none() {
                 tracing::warn!("no channel #{channel}");
             }

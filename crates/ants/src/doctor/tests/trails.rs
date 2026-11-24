@@ -4,8 +4,9 @@
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     ColonyEntry, PendingCall, Role, RunLimit, RunState, TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLeg,
-    TrailLimits, TrailParent, TrailRun, TrailSession, UserId, Uuid, trail_session_key,
+    TrailLimits, TrailParent, TrailRun, TrailSession, Uuid, trail_session_key,
 };
+use ants_test_support::user as p;
 use ants_test_support::{trail_leg, trail_run};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
@@ -15,10 +16,6 @@ use super::super::trails::check_worker;
 use super::super::trails::{MAX_LISTED, check_runs, stuck};
 use super::*;
 use crate::test_support::colony::entry;
-
-fn p(id: &str) -> UserId {
-    id.parse().unwrap()
-}
 
 /// A run of trail deploy that `conductor` conducts, in `state`, started `hours` before `now` and updated 30 minutes
 /// before it.
@@ -322,7 +319,13 @@ async fn the_worker_check_starts_the_worker_as_a_daemon_does() {
     // The ants binary cargo builds beside the test's, for the integration tests.
     let exe = std::env::current_exe().unwrap();
     let ants = exe.ancestors().skip(1).map(|dir| dir.join("ants")).find(|ants| ants.is_file());
-    let ants = ants.expect("the ants binary is built beside the test binary, as `cargo test` builds it");
+    // Cargo builds it for the integration tests alone: `cargo test --bins` has none to start.
+    let Some(ants) = ants else {
+        let required = std::env::var(ants_test_support::REQUIRE_TOOLS).as_deref() == Ok("1");
+        assert!(!required, "no ants binary beside the test binary, which `cargo test` builds, and tools are required");
+        eprintln!("no ants binary beside the test binary (`cargo test` builds it); skipping");
+        return;
+    };
     // A daemon allows GRACE; a debug build started on a loaded machine may take longer.
     let deadline = Duration::from_mins(1);
     let check = check_worker(&ants, deadline).await;

@@ -4,13 +4,10 @@
 use std::time::Duration;
 
 use ants_proto::{ChannelNotify, ChannelReadMarkers, STREAM, chan_reader};
+use ants_test_support::user as p;
 
 use super::*;
 use crate::test_support::Server;
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 fn ops() -> ChannelId {
     "ops".parse().unwrap()
@@ -326,7 +323,7 @@ async fn a_post_on_a_webhook_s_thread_keeps_its_owner_and_no_ant_posts_as_a_webh
     let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
     bus::ensure_stream(&a_js).await.unwrap();
     crate::people::humans::ensure(&a_js).await.unwrap();
-    crate::webhook::ensure_bucket(&a_js).await.unwrap();
+    crate::test_support::webhook::ensure_bucket(&a_js).await.unwrap();
     for (js, human) in [(&a_js, &alice), (&b_js, &bob)] {
         crate::people::humans::register(js, &me(human)).await.unwrap();
     }
@@ -334,7 +331,7 @@ async fn a_post_on_a_webhook_s_thread_keeps_its_owner_and_no_ant_posts_as_a_webh
 
     let creds = server.dir().join("github.creds");
     let permissions = ants_proto::Permissions::for_webhook(&hook, &[ants_proto::Destination::Channel(ops())]);
-    crate::auth::issue_with(
+    crate::test_support::issue_with(
         &server.dir().join("auth"),
         &hook,
         crate::credentials::issued::Kind::Webhook,

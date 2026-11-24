@@ -6,7 +6,7 @@ use std::path::Path;
 
 use ants_daemon::stream::reading::Reading;
 use ants_proto::{DeviceId, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId, subject};
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::stream::DirectGetErrorKind;
 use async_nats::jetstream::{self, kv};
 use data_encoding::BASE64URL_NOPAD;
@@ -39,6 +39,14 @@ impl Me {
         };
         let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
         Self::from_creds_text(&text).with_context(|| format!("credentials {}", path.display()))
+    }
+
+    /// Refuse the credentials of an ant for `what`, which the server allows only a human.
+    pub fn must_be_human(&self, what: &str) -> Result<()> {
+        if !self.role.is_human() {
+            bail!("{what} needs a human's credentials; those of {} are an ant's", self.id);
+        }
+        Ok(())
     }
 
     fn from_creds_text(text: &str) -> Result<Self> {
@@ -205,6 +213,7 @@ pub async fn register_or_warn(js: &jetstream::Context, me: &Me) {
 #[cfg(test)]
 mod tests {
     use ants_daemon::bus;
+    use ants_test_support::user as p;
     use serde_json::json;
 
     use super::*;
@@ -215,10 +224,6 @@ mod tests {
         let part = |v: &Value| BASE64URL_NOPAD.encode(&serde_json::to_vec(v).unwrap());
         let jwt = format!("{}.{}.c2ln", part(&json!({ "typ": "JWT" })), part(&claims));
         format!("-----BEGIN NATS USER JWT-----\n{jwt}\n------END NATS USER JWT------\n\nseed follows\n")
-    }
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
     }
 
     #[test]

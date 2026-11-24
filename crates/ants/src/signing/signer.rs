@@ -57,7 +57,7 @@ mod ordered;
 pub use asking::{Requester, Retired, ask, retire};
 
 /// Most requests of one manager waiting for a human at once; more are refused.
-pub const MAX_WAITING: usize = 3;
+const MAX_WAITING: usize = 3;
 /// How often the signer looks for the humans' decisions on the requests it asked them about.
 pub const TICK: Duration = Duration::from_secs(1);
 /// Least time a request must have left for a human to be asked about it.
@@ -680,6 +680,7 @@ mod tests {
 
     use ants_daemon::bus;
     use ants_proto::Role;
+    use ants_test_support::user as p;
     use nkeys::KeyPair;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
@@ -692,10 +693,6 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(20);
     const REPEAT: Duration = Duration::from_millis(200);
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     fn asked(name: &str, template: &str, request: &str, reason: &str) -> ants_proto::AskedAnt {
         let (template, request, reason) = (template.to_owned(), request.to_owned(), reason.to_owned());
@@ -807,7 +804,7 @@ mod tests {
         h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
         let (recorded, _) = signing(&server, &config, async {
             loop {
-                if let Some(holder) = crate::machines::holder(&h_js).await.unwrap() {
+                if let Some(holder) = crate::ants::machines::holder(&h_js).await.unwrap() {
                     break holder;
                 }
                 tokio::time::sleep(REPEAT).await;
@@ -816,7 +813,7 @@ mod tests {
         .await;
         assert_eq!(recorded.machine, "keybox".parse::<ants_proto::Machine>().unwrap());
         assert_eq!((recorded.hostname, recorded.version), (colony::machine().await, ANTS_VERSION.to_owned()));
-        assert_eq!(crate::machines::list(&h_js).await.unwrap(), [], "the record is no machine's");
+        assert_eq!(crate::ants::machines::list(&h_js).await.unwrap(), [], "the record is no machine's");
         let as_human = DirectKv::new(&h_js, None, MACHINES_BUCKET).await.unwrap();
         assert!(as_human.put(ACCOUNT_HOLDER_KEY, b"{}".to_vec()).await.is_err(), "a human only reads it");
     }
@@ -873,7 +870,7 @@ mod tests {
             };
             assert_eq!(asked.ant, p("lead"));
             assert!(asked.tool.title.contains("max_ants"), "{}", asked.tool.title);
-            tools::answer(&js, &stream, &asked.id.to_string(), verdict, Utc::now()).await.unwrap();
+            crate::test_support::answer(&js, &stream, &asked.id.to_string(), verdict, Utc::now()).await.unwrap();
         };
 
         let user = KeyPair::new_user();

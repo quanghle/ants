@@ -111,7 +111,7 @@ fn rejects_what_would_not_make_a_working_local_leaf() {
     assert!(wrong(&creds).contains("not for the system account"));
 
     let ant = dir.join("dev-a.creds");
-    auth::issue(&dir, &"dev-a".parse().unwrap(), Role::Ant, None, &ant).unwrap();
+    crate::test_support::issue(&dir, &"dev-a".parse().unwrap(), Role::Ant, None, &ant).unwrap();
     assert!(err(leaf(&tcp, &ant, &server_conf)).contains("not leaf uplink credentials"));
     assert!(wrong(&ant).contains("not leaf uplink credentials"));
     let other = scratch_dir("leaf-other-team");
@@ -222,7 +222,7 @@ async fn a_generated_leaf_reaches_the_hub_and_switches_its_uplink_on_reload() {
     let (human, dev_a) = (UserId::human(), "dev-a".parse::<UserId>().unwrap());
     let creds = |p: &UserId| {
         let out = hub.dir().join(format!("{p}.creds"));
-        auth::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
+        crate::test_support::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
         out
     };
     let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
@@ -317,7 +317,7 @@ async fn renewed_uplink_credentials_reconnect_the_uplink_alone_on_reload() {
     let (human, dev_a, dev_b) = (UserId::human(), "dev-a".parse::<UserId>().unwrap(), "dev-b".parse().unwrap());
     let creds = |p: &UserId| {
         let out = hub.dir().join(format!("{p}.creds"));
-        auth::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
+        crate::test_support::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
         out
     };
     let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
@@ -486,7 +486,7 @@ impl Revocable {
         let (dev_a, dev_b) = ("dev-a".parse::<UserId>().unwrap(), "dev-b".parse::<UserId>().unwrap());
         let creds = |user: &UserId| {
             let out = hub.dir().join(format!("{user}.creds"));
-            auth::issue(&team, user, Role::Ant, None, &out).unwrap();
+            crate::test_support::issue(&team, user, Role::Ant, None, &out).unwrap();
             out
         };
         let (a, b) = (creds(&dev_a), creds(&dev_b));

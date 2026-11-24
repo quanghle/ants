@@ -11,7 +11,7 @@ pub const PASTED: u32 = 0xF_0000;
 /// How many pastes there may be placeholders for: the characters of the Supplementary Private Use Area-A.
 const PASTES: usize = 0xFFFE;
 /// What shows where the cursor is, in an input drawn as text.
-pub const CARET: char = '▏';
+const CARET: char = '▏';
 
 /// A character deleted, or a paste whose placeholder was.
 #[derive(Debug, Clone, PartialEq, Eq)]

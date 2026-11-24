@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 /// How often a following checker reads every claim it checked again when it cannot watch the grants or the
 /// revocations, as an ant's credentials cannot watch the revocations; and how soon it watches again after a watch
 /// ended.
-pub const REFRESH: Duration = Duration::from_secs(60);
+const REFRESH: Duration = Duration::from_secs(60);
 
 /// Checks the claims of the acts the CLI shows, caching what it read.
 pub struct Checker {

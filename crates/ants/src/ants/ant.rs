@@ -13,11 +13,11 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::admin::{orders, settings};
-use crate::colony::{self, State};
+use crate::ants::colony::{self, State};
+use crate::ants::{queue, spend};
 use crate::connection::Nats;
 use crate::text::{short, since};
 use crate::threads::thread;
-use crate::{queue, spend};
 
 /// How many of its most recently active threads `ants ant show` lists.
 const THREADS_SHOWN: usize = 10;
@@ -57,7 +57,7 @@ pub fn about(e: &ColonyEntry, now: DateTime<Utc>) -> Vec<(&'static str, String)>
 /// machine, sense keeping none of its data. Empty when nothing does.
 pub fn holds(ant: &UserId, entry: Option<&ColonyEntry>, moved: Option<&MovedMark>, now: DateTime<Utc>) -> Vec<String> {
     if let Some(mark) = moved {
-        return vec![crate::export::moved_line(ant, mark, now)];
+        return vec![crate::ants::export::moved_line(ant, mark, now)];
     }
     let Some(e) = entry else { return colony::unserved(ant, None, colony::Absent::Known, now).into_iter().collect() };
     if State::of(e, now) == State::Stale {
@@ -150,7 +150,7 @@ pub async fn show(nats: &Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, Caps>, j
     };
     let (threads, omitted) = thread::listed(nats, None, &select).await?;
     let reading = settings::read(nats, &js, &ant, settings::READ_WAIT).await?;
-    let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(&js).await);
+    let faces = crate::ants::avatars::Faces::stdout(crate::ants::avatars::read_or_none(&js).await);
     let now = Utc::now();
     let moved = faces.identity(&ant).and_then(|i| i.moved.as_ref());
     let holds = holds(&ant, entry.as_ref(), moved, now);

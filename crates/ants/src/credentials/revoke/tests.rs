@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::*;
-use crate::credentials::issued::{device_keys, devices, rename, standing_approval};
+use crate::credentials::devices::{device_keys, devices, rename};
+use crate::credentials::issued::standing_approval;
 use crate::credentials::listing::listing;
 use crate::credentials::push::{connect_system, push};
 use crate::test_support::Server;
@@ -24,7 +25,7 @@ fn revoking_a_name_takes_all_its_keys_and_drops_revocations_once_expired() {
     let alice: ants_proto::UserId = "alice".parse().unwrap();
     let human = |n: &str| {
         let out = team.join(format!("alice-{n}.creds"));
-        auth::issue(&team, &alice, ants_proto::Role::Human, None, &out).unwrap();
+        crate::test_support::issue(&team, &alice, ants_proto::Role::Human, None, &out).unwrap();
         auth::verified(auth::creds_jwt(&fs::read_to_string(out).unwrap()).unwrap()).unwrap().sub
     };
     let (laptop, phone) = (human("laptop"), human("phone"));
@@ -80,7 +81,7 @@ async fn revoked_credentials_lose_their_connection_and_are_refused_after_a_push_
     let team = server.dir().join("auth");
     let issue = |user: &str, file: &str| {
         let out = team.join(file);
-        auth::issue(&team, &user.parse().unwrap(), ants_proto::Role::Ant, None, &out).unwrap();
+        crate::test_support::issue(&team, &user.parse().unwrap(), ants_proto::Role::Ant, None, &out).unwrap();
         out
     };
     let (a, b) = (issue("dev-a", "dev-a.creds"), issue("dev-b", "dev-b.creds"));
@@ -165,7 +166,7 @@ async fn only_a_hub_with_a_full_resolver_keeps_a_pushed_revocation_across_restar
         let team = hub.team();
         let issue = |user: &str| {
             let out = team.join(format!("{user}.creds"));
-            auth::issue(&team, &user.parse().unwrap(), ants_proto::Role::Ant, None, &out).unwrap();
+            crate::test_support::issue(&team, &user.parse().unwrap(), ants_proto::Role::Ant, None, &out).unwrap();
             out
         };
         let (a, b) = (issue("dev-a"), issue("dev-b"));
@@ -260,11 +261,11 @@ fn revoking_a_name_withdraws_its_approval_grants_but_revoking_a_device_does_not(
     auth::init(&team).unwrap();
     let carol: ants_proto::UserId = "carol".parse().unwrap();
     let sign = |label| {
-        let new = auth::NewDevice {
+        let new = auth::Registered {
             label: Some(label),
             github: Some(GithubAccount { id: 7, login: "mallory".into() }),
             grant: Some(Grant::Approval("alice".into())),
-            ..auth::NewDevice::default()
+            ..auth::Registered::default()
         };
         let key = nkeys::KeyPair::new_user().public_key();
         let permissions = ants_proto::Permissions::for_user(&carol, ants_proto::Role::Human);

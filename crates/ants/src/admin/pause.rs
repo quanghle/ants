@@ -64,12 +64,9 @@ fn said(sent: &Sent, paused: bool) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use ants_proto::{AdminOrder, AdminOutcome, OrderState};
+    use ants_test_support::user as p;
 
     use super::*;
-
-    fn p(name: &str) -> UserId {
-        name.parse().unwrap()
-    }
 
     #[test]
     fn tells_how_the_order_went() {

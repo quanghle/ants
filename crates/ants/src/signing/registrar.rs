@@ -54,7 +54,7 @@ mod offboard;
 mod renewal;
 
 /// Most registrations waiting for a human at once; more GitHub users outside the policy are refused.
-pub const MAX_WAITING_REGISTRATIONS: usize = 3;
+const MAX_WAITING_REGISTRATIONS: usize = 3;
 /// Least time a request must have left for a human to be asked about it.
 const LEAST_ASKING: Duration = Duration::from_secs(10);
 /// How long a renewal's answer is kept for the repeats of its request, and its membership check at most runs.
@@ -69,7 +69,7 @@ const SWEEP_RESERVE: u64 = 100;
 /// registration policy: one [`Offboarded`] per line.
 ///
 /// [`Offboarded`]: offboard::Offboarded
-pub const OFFBOARDED: &str = "offboarded.jsonl";
+const OFFBOARDED: &str = "offboarded.jsonl";
 
 /// What a registration's task found out.
 enum Progress {

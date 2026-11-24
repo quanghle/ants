@@ -29,7 +29,6 @@ use chrono::Utc;
 use clap_complete::engine::ArgValueCandidates;
 
 use crate::completions;
-use crate::connection::Nats;
 use crate::threads::thread;
 
 /// `ants trail run`.
@@ -216,12 +215,4 @@ pub(crate) async fn find(js: &jetstream::Context, what: Shown, human: bool) -> R
 /// The run `run` as `ants trail show RUN` prints it at `now`.
 pub(crate) async fn run_shown(js: &jetstream::Context, run: &RunId, now: chrono::DateTime<Utc>) -> Result<String> {
     Ok(runs::render(&runs::detail(js, run).await?, now))
-}
-
-/// Refuse the credentials of an ant for `what`, which the server allows only a human.
-pub(crate) fn human(nats: &Nats<'_>, what: &str) -> Result<()> {
-    if !nats.me.role.is_human() {
-        bail!("{what} needs a human's credentials; those of {} are an ant's", nats.me.id);
-    }
-    Ok(())
 }

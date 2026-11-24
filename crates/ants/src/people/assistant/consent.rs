@@ -173,7 +173,7 @@ pub(crate) async fn answer_order(
 
 /// The admin orders the machines' daemons hold for `human` to confirm, oldest first.
 pub(crate) async fn orders_held_for(js: &jetstream::Context, human: &UserId) -> Result<Vec<AdminOrder>> {
-    let mut orders: Vec<AdminOrder> = crate::machines::latest(js, &subject::kv(MACHINES_BUCKET, "*.held"))
+    let mut orders: Vec<AdminOrder> = crate::ants::machines::latest(js, &subject::kv(MACHINES_BUCKET, "*.held"))
         .await?
         .into_iter()
         .flat_map(|(_, value)| held_orders(&value))

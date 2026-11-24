@@ -10,7 +10,7 @@ use ants_daemon::sense::{self, HomeSense};
 use ants_proto::{AntIdentity, IDENTITIES_BUCKET, SeedSource, SenseId, UserId};
 use anyhow::{Context as _, Result, bail};
 
-use crate::{avatars, export};
+use crate::ants::{avatars, export};
 
 /// Which side `ants ant sense-id --take` keeps.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

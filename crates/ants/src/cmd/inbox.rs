@@ -11,7 +11,7 @@ use futures::StreamExt as _;
 
 use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 
-use crate::avatars::Faces;
+use crate::ants::avatars::Faces;
 use crate::connection::{Listing, Nats};
 use crate::messages::{inbox, reacted};
 use crate::people::behalf::Checker;
@@ -101,7 +101,7 @@ async fn show(
     let behalf = std::sync::Arc::new(Checker::new(nats, &js));
     let _following = follow.then(|| behalf.follow());
     let shown = reacted::Shown::default();
-    let faces = Faces::stdout(crate::avatars::read_or_none(&js).await);
+    let faces = Faces::stdout(crate::ants::avatars::read_or_none(&js).await);
     let show_with = |e: &Envelope, reactions: &[reactions::Reacted]| -> Result<()> {
         let (e, state) = sealed::read(e.clone(), keyring.as_ref());
         shown.add(e.id, &e.from, &e.text);

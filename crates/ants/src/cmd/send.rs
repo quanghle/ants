@@ -26,7 +26,7 @@ use crate::messages::send::{
 use crate::messages::{attachments, compose, forward, inbox, progress, reacted};
 use crate::people::{humans, sealed};
 use crate::threads::thread;
-use crate::{channel, colony, completions};
+use crate::{ants::colony, channel, completions};
 
 /// `ants ask`.
 #[derive(clap::Args, Debug, Default)]

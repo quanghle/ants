@@ -174,7 +174,7 @@ pub(super) async fn check_webhooks(path: &Path) -> Vec<Check> {
 }
 
 /// Whether the program of an exec sink is there to run: an executable file at its path, or one on `PATH` here.
-pub(super) fn check_command(what: &str, program: &str) -> Check {
+fn check_command(what: &str, program: &str) -> Check {
     let check = "notify commands";
     let executable = |path: &Path| {
         let Ok(metadata) = std::fs::metadata(path) else { return false };
@@ -210,7 +210,7 @@ pub(super) fn check_command(what: &str, program: &str) -> Check {
 
 /// Whether `public_url`, the approval links' address, reaches `ants webhook serve`: its page for a link without a
 /// query.
-pub(super) async fn check_public_url(public_url: &str) -> Check {
+async fn check_public_url(public_url: &str) -> Check {
     let check = "public_url";
     let url = format!("{}{}", public_url.trim_end_matches('/'), notify::APPROVAL_PATH);
     let fix = || {

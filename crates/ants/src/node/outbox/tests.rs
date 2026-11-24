@@ -49,7 +49,7 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
         (UserId::human(), "dev-a".parse().unwrap(), "dev-b".parse().unwrap());
     let creds = |p: &UserId| {
         let out = hub.dir().join(format!("{p}.creds"));
-        auth::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
+        crate::test_support::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
         out
     };
     let connect = async |url: &str, p: &UserId| {
@@ -123,7 +123,7 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     assert_eq!(sourcing(&h_js, &m1, &more).await.unwrap().unadmitted, std::slice::from_ref(&dev_b));
     // Any human on the machine may set it up again, on the machine, through its leaf node.
     let alice_creds = hub.dir().join("alice.creds");
-    auth::issue(&team, &alice, Role::Human, Some(&domain), &alice_creds).unwrap();
+    crate::test_support::issue(&team, &alice, Role::Human, Some(&domain), &alice_creds).unwrap();
     let (_alice, alice_js) = bus::connect(&hub.url, Some(&alice_creds), Some(&domain), &alice, "test").await.unwrap();
     let setup = super::connect(&leaf_node.url, Some(&alice_creds), &alice).await.unwrap();
     admit(&setup, &alice_js, &m1, &on_m1).await.unwrap();
@@ -299,7 +299,7 @@ async fn a_post_waiter_reads_back_what_never_comes_live() {
         (UserId::human(), "dev-a".parse().unwrap(), "dev-b".parse().unwrap());
     let connect = async |url: &str, p: &UserId| {
         let creds = hub.dir().join(format!("{p}.creds"));
-        auth::issue(&team, p, Role::by_default(p), Some(&domain), &creds).unwrap();
+        crate::test_support::issue(&team, p, Role::by_default(p), Some(&domain), &creds).unwrap();
         let (client, mut js) = bus::connect(url, Some(&creds), Some(&domain), p, "test").await.unwrap();
         js.set_timeout(Duration::from_secs(2));
         (client, js)
@@ -424,7 +424,7 @@ async fn a_hub_without_js_api_reply_v2_is_reported() {
     let m1: Machine = "m1".parse().unwrap();
     let human = UserId::human();
     let human_creds = hub.dir().join("human.creds");
-    auth::issue(&team, &human, Role::Human, Some(&domain), &human_creds).unwrap();
+    crate::test_support::issue(&team, &human, Role::Human, Some(&domain), &human_creds).unwrap();
     let (_h, h_js) = bus::connect(&hub.url, Some(&human_creds), Some(&domain), &human, "test").await.unwrap();
     bus::ensure_stream(&h_js).await.unwrap();
     let on_m1 = auth::members(std::slice::from_ref(&human), &[]);
@@ -616,7 +616,7 @@ async fn an_outbox_goes_on_after_a_restart_at_once_through_its_durable_consumer(
     let (human, dev_a): (UserId, UserId) = (UserId::human(), "dev-a".parse().unwrap());
     let creds = |p: &UserId| {
         let out = hub.dir().join(format!("{p}.creds"));
-        auth::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
+        crate::test_support::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
         out
     };
     let (human_creds, a_creds) = (creds(&human), creds(&dev_a));

@@ -20,6 +20,7 @@ use ants_proto::{
     PERMISSIONS_VERSION, STREAM, ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, link_key,
     notes_consumer, session_key, subject,
 };
+use ants_test_support::user as p;
 use async_nats::jetstream::AckKind;
 use async_nats::{Client, jetstream};
 use data_encoding::BASE64URL_NOPAD;
@@ -30,8 +31,9 @@ use tokio::time::timeout;
 
 use super::uplink::allowed;
 use super::*;
+use crate::credentials::devices;
 use crate::node::members::EnrollApprover;
-use crate::test_support::Server;
+use crate::test_support::{Server, issue, issue_with};
 
 mod channels;
 mod credentials;
@@ -48,10 +50,6 @@ mod uplink;
 mod web;
 
 const WAIT: Duration = Duration::from_secs(5);
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 /// The server handles operations in order, so the next violation names the first denied one.
 /// Returns once the server has registered the subscriptions of `js`'s client: async-nats' flush only writes them

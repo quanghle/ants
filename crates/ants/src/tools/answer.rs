@@ -13,25 +13,8 @@ use chrono::{DateTime, Utc};
 
 use super::State;
 use super::assisted::deciders;
-#[cfg(test)]
-use super::requests::find;
 use super::requests::{decision, qualified, state_at};
 use super::text::commands;
-
-/// Answer the pending request `id` picks (see [`find`]), and wait until JetStream has stored the decision. The
-/// decision is stored only while the request has none, so another human's that came first wins over it.
-#[cfg(test)]
-pub async fn answer(
-    js: &jetstream::Context,
-    stream: &Stream,
-    id: &str,
-    verdict: Verdict,
-    now: DateTime<Utc>,
-) -> Result<ApprovalDecision> {
-    let (seq, request) = find(stream, id).await?;
-    let answer = Answer { seq, request: &request, verdict, by: &UserId::human(), now };
-    answer_request(js, stream, &answer).await
-}
 
 /// A human's answer to a tool request.
 pub struct Answer<'a> {
@@ -45,7 +28,8 @@ pub struct Answer<'a> {
     pub now: DateTime<Utc>,
 }
 
-/// Give `answer`, as `answer()` does.
+/// Give `answer`, and wait until JetStream has stored the decision. The decision is stored only while the request has
+/// none, so another human's that came first wins over it.
 pub async fn answer_request(js: &jetstream::Context, stream: &Stream, answer: &Answer<'_>) -> Result<ApprovalDecision> {
     let Answer { request, verdict, by, .. } = *answer;
     let last = check(js, stream, answer).await?;

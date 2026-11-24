@@ -351,11 +351,9 @@ pub fn uplink(leaf_conf: &Path, machine: &Machine) -> Result<Members> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use ants_test_support::user as p;
 
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
+    use super::*;
 
     fn users(names: &[&str]) -> Vec<UserId> {
         names.iter().map(|n| p(n)).collect()

@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 
-use crate::avatars::{self, Faces};
+use crate::ants::avatars::{self, Faces};
 use crate::text::{ago, short, since};
 
 /// How fresh an entry is, judged by its last heartbeat ([`colony::is_live`]).
@@ -217,7 +217,7 @@ pub fn sense_unkept(entries: &[ColonyEntry]) -> Vec<String> {
 
 /// One line per ant whose machine's config sets some of its shared settings otherwise ([`ColonyEntry::drift`]), which
 /// the daemon ignores for the shared ones.
-pub fn drifted(entries: &[ColonyEntry]) -> Vec<String> {
+fn drifted(entries: &[ColonyEntry]) -> Vec<String> {
     entries
         .iter()
         .filter(|e| !e.drift.is_empty())
@@ -245,7 +245,7 @@ pub enum Absent {
 }
 
 /// A note for a colony listing no ant at all ([`Absent::Empty`]).
-pub const EMPTY_COLONY: &str = "no daemon beats, or the hub's JetStream memory store is full and refuses their \
+const EMPTY_COLONY: &str = "no daemon beats, or the hub's JetStream memory store is full and refuses their \
                                 heartbeats (`ants doctor` shows its usage)";
 
 /// Why no daemon serves `ant` now, given its colony entry, or None when one does: no entry (with no escalation chain
@@ -406,7 +406,7 @@ pub fn json(entry: &ColonyEntry, now: DateTime<Utc>, faces: &Faces) -> Result<St
 }
 
 /// `table` with each ant's face before its row, in its colour, the header indented to line up.
-pub fn faced(table: &str, entries: &[ColonyEntry], faces: &Faces) -> String {
+fn faced(table: &str, entries: &[ColonyEntry], faces: &Faces) -> String {
     let mut lines = table.lines();
     let header = lines.next().map(|h| format!("{:width$} {h}", "", width = ants_proto::FACE_WIDTH));
     let rows = lines.zip(entries).map(|(line, e)| format!("{} {line}", faces.face(&e.ant)));
@@ -427,7 +427,7 @@ pub async fn show(nats: &crate::connection::Nats<'_>, json: bool) -> Result<()> 
     let now = Utc::now();
     let moved: Vec<String> = identities
         .values()
-        .filter_map(|i| i.moved.as_ref().map(|mark| crate::export::moved_line(&i.ant, mark, now)))
+        .filter_map(|i| i.moved.as_ref().map(|mark| crate::ants::export::moved_line(&i.ant, mark, now)))
         .collect();
     let faces = Faces::stdout(identities);
     if json {
@@ -497,31 +497,50 @@ mod tests {
         assert!(notes[0].starts_with("dev-a: drifted on m1: its config sets model, whoami otherwise"), "{notes:?}");
     }
 
-    #[test]
-    #[expect(clippy::too_many_lines, reason = "one table, each of its columns checked row by row")]
-    fn rows_show_state_and_ages() {
-        let now = Utc::now();
-        let mut quiet = entry("dev-b", 7300, 25, now);
-        quiet.capabilities.clear();
-        quiet.workdir = None;
+    /// A live ant at work, with all that an entry can tell of one.
+    fn busy(now: DateTime<Utc>) -> ColonyEntry {
         let mut busy = entry("dev-a", 190, 4, now);
         (busy.activity, busy.handling, busy.harnesses) = (Activity::Working, 1, 2);
         busy.escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
         (busy.version, busy.perms) = ("0.2.0".to_owned(), PermissionsVersion(2));
         busy.agent = Some(ants_proto::HarnessAgent { name: "copilot".to_owned(), version: "1.0.3".to_owned() });
         busy.profile = Some("Good for NATS\nreconnects\tand \u{1b}[31mflaky tests, much more than that.".to_owned());
+        busy
+    }
+
+    /// A stale ant, with as little as an entry can tell of one.
+    fn quiet(now: DateTime<Utc>) -> ColonyEntry {
+        let mut quiet = entry("dev-b", 7300, 25, now);
+        quiet.capabilities.clear();
+        quiet.workdir = None;
         quiet.profile = Some("\u{7}\n".to_owned());
+        quiet
+    }
+
+    /// dev-c, whose harness has been signed out for five minutes and names how to sign in.
+    fn signed_out(now: DateTime<Utc>) -> ColonyEntry {
+        let since = now - chrono::Duration::seconds(300);
+        let mut out = entry("dev-c", 600, 2, now);
+        out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: Some("copilot login".to_owned()) });
+        out
+    }
+
+    #[test]
+    fn mixed_versions_of_live_ants_are_noted() {
+        let now = Utc::now();
+        let (busy, quiet) = (busy(now), quiet(now));
         let older = ColonyEntry { version: "0.1.0".to_owned(), ..entry("dev-c", 60, 4, now) };
         assert_eq!(
             crate::release::versions::colony_note(&[busy.clone(), older, quiet.clone()], now).as_deref(),
             Some("mixed ants versions: 0.2.0 (1), 0.1.0 (1); `ants doctor` tells whether credentials may be renewed")
         );
-        assert_eq!(
-            crate::release::versions::colony_note(&[busy.clone(), quiet.clone()], now),
-            None,
-            "a stale one runs nothing"
-        );
-        let table = table(&[busy, quiet], now);
+        assert_eq!(crate::release::versions::colony_note(&[busy, quiet], now), None, "a stale one runs nothing");
+    }
+
+    #[test]
+    fn rows_show_state_and_ages() {
+        let now = Utc::now();
+        let table = table(&[busy(now), quiet(now)], now);
         let rows: Vec<Vec<&str>> = table.lines().map(|l| l.split_whitespace().collect()).collect();
         assert_eq!(
             rows[0],
@@ -594,10 +613,12 @@ mod tests {
         );
         let columns: Vec<Option<usize>> = table.lines().map(|l| l.find("copilot").or(l.find("HARNESS "))).collect();
         assert!(columns.iter().all(|c| c.is_some() && *c == columns[0]), "{table}");
+    }
 
-        let mut out = entry("dev-c", 600, 2, now);
+    #[test]
+    fn an_ant_whose_harness_cannot_answer_shows_why_and_its_messages_are_told_to_wait() {
+        let now = Utc::now();
         let since = now - chrono::Duration::seconds(300);
-        out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: Some("copilot login".to_owned()) });
         let mut unnamed = entry("dev-d", 600, 2, now);
         unnamed.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: None });
         let mut limited = entry("dev-f", 600, 2, now);
@@ -607,8 +628,8 @@ mod tests {
         quota.limited = Some(HarnessLimit { kind: LimitKind::Quota, since, until });
         let mut failing = entry("dev-h", 600, 2, now);
         failing.failing = Some(ants_proto::HarnessFailing { since, error: "copilot: not found".to_owned() });
-        let entries = [out.clone(), unnamed, entry("dev-e", 600, 2, now), limited, quota, failing];
-        let table = super::table(&entries, now);
+        let entries = [signed_out(now), unnamed, entry("dev-e", 600, 2, now), limited, quota, failing];
+        let table = table(&entries, now);
         let activities: Vec<&str> = table.lines().map(|l| l.split_whitespace().nth(2).unwrap()).collect();
         assert_eq!(
             activities,
@@ -637,20 +658,29 @@ mod tests {
                     .to_owned(),
             ]
         );
-        let json: serde_json::Value = serde_json::from_str(&super::json(&out, now, &Faces::plain()).unwrap()).unwrap();
-        assert_eq!(json["signed_out"]["sign_in"].as_str(), Some("copilot login"));
+    }
+
+    #[test]
+    fn an_ant_low_on_memory_is_noted_and_its_messages_do_not_wait() {
+        let now = Utc::now();
+        let since = now - chrono::Duration::seconds(300);
         let mut low = entry("dev-i", 600, 2, now);
         low.memory_low = Some(ants_proto::MemoryLow { since, available: 768 << 20, max_harnesses: 1 });
         assert_eq!(held(std::slice::from_ref(&low), now), Vec::<String>::new(), "messages do not wait");
         assert_eq!(
-            memory_low(&[low, out.clone()], now),
+            memory_low(&[low, signed_out(now)], now),
             ["dev-i: memory low on m1 for 5m (768.0 MB available); idle harnesses stop at once and at most 1 harness \
               runs until it recovers."]
         );
+    }
 
+    #[test]
+    fn a_fallback_answering_shows_as_the_activity_and_among_what_is_held() {
+        let now = Utc::now();
+        let since = now - chrono::Duration::seconds(300);
         let fallback = Some(ants_proto::ServingFallback { name: "claude:opus".to_owned(), since });
         let mut covered = entry("dev-i", 600, 2, now);
-        (covered.signed_out, covered.fallback) = (out.signed_out, fallback.clone());
+        (covered.signed_out, covered.fallback) = (signed_out(now).signed_out, fallback.clone());
         let mut back = entry("dev-j", 600, 2, now);
         back.fallback = fallback;
         let entries = [covered, back];
@@ -663,6 +693,14 @@ mod tests {
                 "dev-j: fallback claude:opus answers messages to dev-j (for 5m) until harness copilot answers again.",
             ]
         );
+    }
+
+    #[test]
+    fn json_tells_an_entry_s_state_and_what_it_carries() {
+        let now = Utc::now();
+        let out = signed_out(now);
+        let json: serde_json::Value = serde_json::from_str(&super::json(&out, now, &Faces::plain()).unwrap()).unwrap();
+        assert_eq!(json["signed_out"]["sign_in"].as_str(), Some("copilot login"));
 
         let mut led = entry("dev-a", 0, 30, now);
         led.escalate_to = vec!["lead".parse().unwrap()];

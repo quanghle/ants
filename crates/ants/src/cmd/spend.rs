@@ -8,7 +8,7 @@ use clap_complete::engine::ArgValueCandidates;
 
 use crate::connection::Connection;
 use crate::threads::thread;
-use crate::{completions, spend};
+use crate::{ants::spend, completions};
 
 /// `ants spend`.
 #[derive(clap::Args, Debug)]

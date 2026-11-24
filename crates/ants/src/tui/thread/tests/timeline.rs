@@ -157,7 +157,7 @@ fn a_spinner_turns_eight_times_a_second_unless_animate_is_off() {
     let later = at(10) + chrono::TimeDelta::milliseconds(125);
     assert_ne!(spinner(&m, at(10)), spinner(&m, later));
     assert!(page.spinning.get());
-    m.data.looks = crate::tui::faces::Looks::new(crate::avatars::Depth::Plain, ants_proto::Theme::Dark, false);
+    m.data.looks = crate::tui::faces::Looks::new(crate::ants::avatars::Depth::Plain, ants_proto::Theme::Dark, false);
     assert_eq!(spinner(&m, at(10)), spinner(&m, later), "a frame a second");
 }
 

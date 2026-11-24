@@ -18,7 +18,7 @@ use crate::service::{Action, Service, Services};
 const REPO: &str = "quanghle/ants";
 const API_URL: &str = "https://api.github.com";
 /// Exit status of `ants update --check` when a newer release is out.
-pub const AVAILABLE_EXIT_CODE: i32 = 10;
+const AVAILABLE_EXIT_CODE: i32 = 10;
 /// Longest answer of the GitHub API read.
 const MAX_ANSWER: usize = 1024 * 1024;
 /// Largest archive downloaded.
