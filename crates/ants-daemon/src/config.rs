@@ -332,6 +332,8 @@ pub struct Loaded {
     /// The built-in ants the file serves but the machine leaves to another, the server taking credentials and they
     /// having none on the machine ([`builtins`]): not among [`Self::ants`], which may name the sage all the same.
     pub elsewhere: Vec<builtins::Elsewhere>,
+    /// What loading the file warned of, each also logged: an ant naming a sage while its provider is not sense.
+    pub warnings: Vec<String>,
     /// The file's directory, which relative paths are relative to, and the home directory `~` stands for.
     base: PathBuf,
     home: PathBuf,
@@ -392,7 +394,11 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         .with_context(|| format!("config {}", path.display()))?;
     check_added(&mut ants, &templates).with_context(|| format!("config {}", path.display()))?;
     let file_sage = file.sage.clone().unwrap_or_default();
-    if sage::settle(&mut ants, &file_sage).with_context(|| format!("config {}", path.display()))? {
+    let settled = sage::settle(&mut ants, &file_sage).with_context(|| format!("config {}", path.display()))?;
+    for warning in &settled.warnings {
+        tracing::warn!(config = %path.display(), "{warning}");
+    }
+    if settled.serves_sage {
         let sage = builtin_sage(file.harness.as_deref(), home);
         names.insert(sage.name.clone());
         let sage = settle_ant(sage, &file, (&harnesses, &providers), base, home, path)?;
@@ -420,6 +426,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         nats_server,
         auto_update: file.auto_update,
         elsewhere,
+        warnings: settled.warnings,
         base,
         home,
     })

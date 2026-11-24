@@ -407,10 +407,10 @@ impl Ant {
     }
 
     /// The ant reviewing this one: its `sage` setting, else the file's top-level one; none where that is none or
-    /// names the ant itself, and for a sage, which has none of its own: a built-in ant, or one another ant of the file
-    /// names as its sage.
+    /// names the ant itself, for a sage, which has none of its own: a built-in ant, or one another ant of the file
+    /// names as its sage, and for an ant whose provider is not sense, which never dreams.
     pub fn reviewed_by(&self) -> Option<UserId> {
-        if self.builtin.is_some() || self.is_sage {
+        if self.builtin.is_some() || self.is_sage || !super::sage::dreams(self) {
             return None;
         }
         match self.sage.as_ref().unwrap_or(&self.file_sage) {

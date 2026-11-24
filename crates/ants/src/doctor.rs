@@ -293,6 +293,10 @@ fn check_config(path: &Path, checks: &mut Vec<Check>) -> Option<config::Loaded> 
                 let detail = format!("{} lists {}{elsewhere}", path.display(), names.join(", "));
                 checks.push(Check::ok("config", detail));
             }
+            for warning in &loaded.warnings {
+                let fix = vec![format!("correct {}", path.display())];
+                checks.push(Check::warn("config", warning.clone(), fix));
+            }
             Some(loaded)
         }
         Err(e) => {
