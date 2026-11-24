@@ -42,6 +42,8 @@ const OWN_FLAGS: &[&str] = &[
     "input-format",
     "output-format",
     "conversation",
+    "resume",
+    "r",
     "continue",
     "c",
     "print",

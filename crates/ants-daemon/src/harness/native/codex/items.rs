@@ -45,7 +45,7 @@ impl Tokens {
             input: count("inputTokens"),
             output: count("outputTokens"),
             cache_read: count("cachedInputTokens"),
-            cache_write: 0,
+            cache_write: count("cacheWriteInputTokens"),
             thought: count("reasoningOutputTokens"),
         };
         Self { total: count("totalTokens"), counts }

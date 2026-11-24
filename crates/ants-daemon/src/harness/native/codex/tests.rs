@@ -412,7 +412,10 @@ async fn codex_limits_are_classified_with_their_reset() {
     let too_many = turn_error("exceeded retry limit, last status: 429 Too Many Requests", json!("rateLimitExceeded"));
     let limited = [turn_started(4, TURN), vec![turn_completed(TURN, "failed", too_many)]].concat();
     codex.script(Some(2), &[signed_in(), vec![vec![opened(3, THREAD)], limited]].concat());
-    codex.script(Some(3), &handshake_of("0.168.2", json!({ "type": "apiKey" })));
+    let spent = turn_error("Your API project has reached its spend limit.", json!("projectSpendLimitExceeded"));
+    let capped = [turn_started(4, TURN), vec![turn_completed(TURN, "failed", spent)]].concat();
+    codex.script(Some(3), &[signed_in(), vec![vec![opened(3, THREAD)], capped]].concat());
+    codex.script(Some(4), &handshake_of("0.168.2", json!({ "type": "apiKey" })));
     let launch = codex.launch(ModelSettings::default());
 
     let session = Session::start(&launch, None).await.unwrap();
@@ -427,6 +430,12 @@ async fn codex_limits_are_classified_with_their_reset() {
     let err = session.prompt("go").await.unwrap_err();
     let limited = err.downcast_ref::<Limited>().expect("a provider limit");
     assert_eq!((limited.kind, limited.retry_after), (LimitKind::RateLimit, None), "{err:#}");
+    session.close().await;
+
+    let session = Session::start(&launch, None).await.unwrap();
+    let err = session.prompt("go").await.unwrap_err();
+    let limited = err.downcast_ref::<Limited>().expect("a spend limit");
+    assert_eq!((limited.kind, limited.retry_after), (LimitKind::Quota, None), "{err:#}");
     session.close().await;
 
     let err = format!("{:#}", Session::start(&launch, None).await.err().expect("an old codex"));

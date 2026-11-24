@@ -547,7 +547,8 @@ version.
   `bypassPermissions`. With `--permission-prompts none`, a tool call Claude Code would ask a human about is denied at
   once (logged as a warning) and the turn goes on; under `tools = "ask"`, `--permission-prompts host
   --permission-prompt-tool stdio` has Claude Code ask the translator, which asks ants (set `ask = { mode = "auto" }` or
-  another gated mode: in `bypassPermissions` nothing is asked). What runs unasked is decided by the mode, by permission flags in
+  another gated mode: in `bypassPermissions` nothing is asked, and since Claude Code 2.1.326 the calls it holds back even
+  there, such as some `rm`, `cp` or `mv` commands aimed at the root or home directory, are denied). What runs unasked is decided by the mode, by permission flags in
   `args` (`--allowedTools`, `--disallowedTools`, `--tools`, `--settings` with `permissions` rules) and by Claude Code's
   own settings files (`~/.claude/settings.json`, the project's `.claude/settings*.json`; `--setting-sources` in `args`
   limits which load). The ants MCP server's tools are always allowed (`--allowedTools=mcp__ants`). Put a list-taking
@@ -577,7 +578,8 @@ version.
   plan, spend and credit limits ("You've hit your session limit", `billing_error`, a rejected `rate_limit_event`) are an
   exhausted quota, retried after its reset time when Claude Code gives one; other 429 and 529 answers are rate limits;
   "Prompt is too long" and the like are a context overflow.
-- **Spend:** the cost is Claude Code's `total_cost_usd`, which it restores when a session resumes; a fork's starts at its
+- **Spend:** the cost is Claude Code's `total_cost_usd`, which it restores when a session resumes and which, since
+  Claude Code 2.1.326, also counts its billed permission-classifier calls and model calls stopped or cut short; a fork's starts at its
   parent's, which the fork's stored id carries (`<id>~<base>`), so it reports only what it spent itself, after a
   restart too. The context window's use is that of the last model call. Prompts take text and images (base64 image
   blocks).
@@ -623,7 +625,7 @@ env = { CODEX_HOME = "/srv/ants/codex" }        # optional: config, credentials 
 
 Runs Antigravity CLI 1.5.9 or later headless, one `agy` process per session, as `agy --input-format stream-json --output-format stream-json --disable-slash-commands --settings FILE [--add-dir DIR] [--model MODEL] [--effort EFFORT] [--conversation ID]` followed by the definition's `args`. The environment gets `AGY_CLI_DISABLE_AUTO_UPDATE=true` unless the definition or the ant sets it (agy otherwise replaces its own binary in the background). `ants harness check` names it `agy` with the version `agy --version` prints; an older agy fails the check.
 
-- **Arguments:** flags the protocol sets or that change how agy speaks (`--input-format`, `--output-format`, `--conversation`, `--continue`/`-c`, `--print`/`-p`/`--prompt`, `--prompt-interactive`/`-i`, `--print-timeout`) fail loading the definition. A prompt starting with `/` reaches the model as typed.
+- **Arguments:** flags the protocol sets or that change how agy speaks (`--input-format`, `--output-format`, `--conversation` and its aliases `--resume`/`-r` (agy 1.5.16), `--continue`/`-c`, `--print`/`-p`/`--prompt`, `--prompt-interactive`/`-i`, `--print-timeout`) fail loading the definition. A prompt starting with `/` reaches the model as typed.
 - **Settings:** agy reads only the last `--settings` given, so the definition's own `--settings` (inline JSON, else a file relative to the session's directory) is taken out of its arguments and merged into the session's settings file, with `mode` as `toolPermission` and an allow rule `mcp(NAME/*)` for each ants MCP server.
 - **`mode`:** agy's tool permission mode (`toolPermission`): `request-review` (agy's default when unset), `proceed-in-sandbox`, `always-proceed` or `strict`; anything else fails loading. Headless agy asks no one: a tool its settings would ask about is denied at once and ends the turn, the reply being what agy said until then, and each denial is logged as a warning. Antigravity refuses `tools = "ask"`. `--dangerously-skip-permissions` in `args` approves every tool, allow, ask and deny rules (`permissions` in `--settings`, such as `command(git)` or `write_file(src/)`) restrict them, and `--mode accept-edits` or `--mode plan` sets agy's agent mode.
 - **Sign-in:** `agy` run once on a terminal (a Google account), or a Gemini API key: `GEMINI_API_KEY` in `env` with `--settings '{"modelProvider": "gemini"}'`. Signed out, agy fails the session at once (`authentication failed or timed out`). agy opens a session with any API key, rejecting a wrong or revoked one only at a prompt (`API key not valid`), which counts as signed out; where agy's settings choose `"modelProvider": "gemini"` (the definition's `--settings`, else `~/.gemini/antigravity-cli/settings.json`; a settings file relative to the session's directory counts as choosing it), sessions then fail `auth_required` until `GEMINI_API_KEY` changes.

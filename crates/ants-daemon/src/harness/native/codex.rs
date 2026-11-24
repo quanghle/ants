@@ -211,6 +211,10 @@ impl Shared {
         match (kind, status) {
             ("contextWindowExceeded", _) => context_overflow(detail),
             ("usageLimitExceeded", _) => quota_exhausted(self.retry_after(), detail),
+            // Raised by a human, so with no time to retry at.
+            ("apiKeySpendLimitExceeded" | "projectSpendLimitExceeded" | "organizationSpendLimitExceeded", _) => {
+                quota_exhausted(None, detail)
+            }
             ("rateLimitExceeded", _) | (_, Some(429)) => rate_limited(Some(429), self.retry_after(), detail),
             ("serverOverloaded" | "flexUnavailable" | "policyCapacityUnavailable", _) => {
                 rate_limited(status, None, detail)

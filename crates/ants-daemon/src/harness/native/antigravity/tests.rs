@@ -488,6 +488,10 @@ fn agy_definitions_are_checked_as_they_load() {
     assert!(err.contains("protocol antigravity sets agy's --p itself"), "{err}");
     let err = refused("[harnesses.agy.context]\nbig = { args = [\"--conversation=x\"] }");
     assert!(err.contains("sets agy's --conversation itself"), "{err}");
+    for resume in ["-r", "--resume"] {
+        let err = refused(&format!("args = [{resume:?}, \"x\"]"));
+        assert!(err.contains("sets agy's -") && err.contains(" itself"), "{resume}: {err}");
+    }
     let err = refused("args = [\"--settings={oops\"]");
     assert!(err.contains("--settings {oops: "), "{err}");
     assert!(refused("args = [\"--settings\"]").contains("--settings takes a value"));

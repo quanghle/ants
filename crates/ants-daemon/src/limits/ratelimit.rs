@@ -46,6 +46,7 @@ const QUOTA_TEXTS: &[&str] = &[
     "usage limit",
     "hit your limit",
     "spending limit",
+    "spend limit",
     "credit balance is too low",
     "out of credits",
 ];
@@ -529,6 +530,17 @@ mod tests {
             ("copilot", "Error: insufficient_quota; retry-after: 30".to_owned(), Some((RateLimit, secs(30)))),
             ("copilot", "Internal error: connection reset by peer".to_owned(), None),
             ("copilot", "Process exited: 2026-11-15T03:51:14.529 read line 429 of /src/429/main.rs".to_owned(), None),
+        ]);
+    }
+
+    /// What codex 0.172.0 says, as codex-acp passes it on, when an API key, project or organization reached its spend
+    /// limit.
+    #[test]
+    fn codex_spend_limits_are_quotas() {
+        use LimitKind::Quota;
+        assert_classified([
+            ("codex", "Your API organization has reached its spend limit.".to_owned(), Some((Quota, None))),
+            ("codex", "Your API key has reached its spend limit.".to_owned(), Some((Quota, None))),
         ]);
     }
 
