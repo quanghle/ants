@@ -92,6 +92,12 @@ pub fn revoker_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String>
     short_lived_creds(dir, js_domain, Permissions::for_device_revoker())
 }
 
+/// Short-lived credentials that read and write the team directory ([`Permissions::for_team_keeper`]): `ants auth
+/// revoke` takes a revoked ant off its team with them, and `ants auth user` reads which names teams hold.
+pub(crate) fn team_keeper_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
+    short_lived_creds(dir, js_domain, Permissions::for_team_keeper())
+}
+
 /// Short-lived credentials for checking and cleaning up one retired ant ([`Permissions::for_retired_consumers`]).
 pub(crate) fn retired_consumer_creds(dir: &Path, js_domain: Option<&JsDomain>, ant: &UserId) -> Result<String> {
     short_lived_creds(dir, js_domain, Permissions::for_retired_consumers(ant))

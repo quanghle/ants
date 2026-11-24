@@ -51,6 +51,7 @@ pub(crate) mod send;
 pub(crate) mod setup;
 pub(crate) mod signer;
 pub(crate) mod spend;
+pub(crate) mod team;
 pub(crate) mod thread;
 pub(crate) mod tools;
 pub(crate) mod trail;
@@ -77,12 +78,13 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     match command {
         Command::Ask(args) => Box::pin(send::ask(&nats()?, args)).await,
         Command::Inbox(args) => Box::pin(inbox::run(&nats()?, args)).await,
-        Command::Colony { json } => colony::show(&nats()?, json).await,
+        Command::Colony { json, team } => colony::show(&nats()?, json, team).await,
         Command::Ant(command) => ant::run(&nats()?, command).await,
         Command::Machines { ant, json } => machines::show(&nats()?, ant, json).await,
         Command::Spend(args) => spend::run(&conn, args).await,
         Command::Post(args) => send::post(&nats()?, args).await,
         Command::Channel(command) => channel::run(&conn, command).await,
+        Command::Team(command) => team::run(&nats()?, command).await,
         Command::Notes { thread, attach, text } => send::notes(&nats()?, thread, attach, text).await,
         Command::React { message, reaction, remove } => send::react(&nats()?, message, reaction, remove).await,
         Command::Answer { message, answer } => send::answer(&nats()?, message, answer).await,

@@ -554,7 +554,8 @@ fn admin(ctx: &Ctx) -> Result<&orders::Admin> {
 
 /// Retire `ant` by admin order, as `ants ant retire` does.
 async fn retire(ctx: &Ctx, ant: &UserId) -> Result<Done> {
-    let said = orders::retire::retire(admin(ctx)?, &ctx.js, ant, None, orders::retire::WAIT).await?;
+    let said =
+        orders::retire::retire(admin(ctx)?, &ctx.js, ctx.domain.as_ref(), ant, None, orders::retire::WAIT).await?;
     Ok(Done::line(said.replace('\n', " ")))
 }
 

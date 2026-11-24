@@ -28,6 +28,7 @@ mod machines;
 mod queue;
 mod sense_id;
 mod spend;
+mod teams;
 mod tools;
 
 // The full-screen views.

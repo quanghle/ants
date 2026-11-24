@@ -1,8 +1,11 @@
 //! What a human sends: who gets a message naming no one ([`unaddressed`]), the human's assistant while its grant
-//! stands ([`designated`]), else the messenger, and the [`Envelope`] of a message as `ants ask` sends it
-//! ([`ask_envelope`], `compose`).
+//! stands ([`designated`]), else the messenger, where a message to a team goes ([`addressed`]), and the [`Envelope`]
+//! of a message as `ants ask` sends it ([`ask_envelope`], `compose`).
 
-use ants_proto::{AssistantGrant, Envelope, GrantError, Quote, ThreadId, UserId, Uuid, assistant_grant_key};
+use ants_proto::{
+    AssistantGrant, Envelope, GrantError, Quote, TeamDirectory, TeamRefusal, ThreadId, UserId, Uuid,
+    assistant_grant_key,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +54,31 @@ pub fn unaddressed(me: &UserId, assistant: Option<UserId>) -> Recipient {
         Some(assistant) => Recipient { to: assistant, assistant_of: Some(me.clone()) },
         None => UserId::messenger().into(),
     }
+}
+
+/// Where a message to `to` goes: who gets it, and the team it was addressed to when `to` names one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Addressed {
+    pub to: UserId,
+    pub team: Option<UserId>,
+}
+
+impl Addressed {
+    /// Address `envelope` as this says: to its recipient, carrying the team addressed, if any.
+    pub fn apply(self, envelope: &mut Envelope) {
+        envelope.to = self.to;
+        envelope.team = self.team;
+    }
+}
+
+/// Where a message to `to` goes, given the team directory `teams`: to the lead of the team `to` names, carrying the
+/// team, else to `to` itself. A leaderless team is refused ([`TeamDirectory::lead_of`]).
+pub fn addressed(teams: &TeamDirectory, to: UserId) -> Result<Addressed, TeamRefusal> {
+    if !teams.is_team(&to) {
+        return Ok(Addressed { to, team: None });
+    }
+    let lead = teams.lead_of(&to)?.clone();
+    Ok(Addressed { to: lead, team: Some(to) })
 }
 
 /// What `ants ask` sends as `from`: a thread `from` owns, as it starts it or continues it, when `human`. A thread an
@@ -149,5 +177,20 @@ mod tests {
         assert!(matches!(compose(&alice, dev_a.clone(), nowhere).unwrap_err().kind, ErrorKind::Invalid(_)));
         assert!(matches!(compose(&alice, dev_a.clone(), Send::default()).unwrap_err().kind, ErrorKind::Invalid(_)));
         assert_eq!(ask_envelope(&dev_a, false, None, alice, "hi".into()).owner, None, "an ant's thread has no owner");
+    }
+
+    #[test]
+    fn a_message_to_a_team_goes_to_its_lead_carrying_the_team_and_a_leaderless_one_is_refused() {
+        let mut teams = TeamDirectory::default();
+        teams.create(ants_proto::Team::new(p("backend"), p("dev-a"), p("alice")), None).unwrap();
+        let to = addressed(&teams, p("backend")).unwrap();
+        assert_eq!(to, Addressed { to: p("dev-a"), team: Some(p("backend")) });
+        let mut envelope = ask_envelope(&p("alice"), true, None, p("backend"), "fix it".into());
+        to.apply(&mut envelope);
+        assert_eq!((envelope.subject(), envelope.team), ("ants.inbox.dev-a.alice".to_owned(), Some(p("backend"))));
+        assert_eq!(addressed(&teams, p("dev-b")).unwrap(), Addressed { to: p("dev-b"), team: None });
+
+        assert_eq!(teams.drop_ant(&p("dev-a")), Some(p("backend")));
+        assert_eq!(addressed(&teams, p("backend")).unwrap_err(), TeamRefusal::Leaderless { team: p("backend") });
     }
 }

@@ -14,7 +14,7 @@ pub mod keeper;
 const TRIES: usize = 10;
 
 /// The directory as read: what it holds, a directory breaking the rules read as [`TeamRefusal::Unreadable`], and the
-/// stream sequence of its key's last message, which [`write`] expects (0 for none).
+/// stream sequence of its key's last message, which [`write()`] expects (0 for none).
 #[derive(Debug, Clone)]
 pub struct Read {
     pub directory: Result<TeamDirectory, TeamRefusal>,

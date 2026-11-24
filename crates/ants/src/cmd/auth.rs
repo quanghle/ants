@@ -1,6 +1,7 @@
 //! `ants auth`: the team's keys, and the credentials they sign.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ants_proto::{
     BuiltinAnt, ChannelId, Destination, DeviceKey, IDENTITIES_BUCKET, JsDomain, Machine, Permissions, UserId,
@@ -524,6 +525,7 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
     }
     let kind = Kind { human, web, observer, webhook, assistant_of: assistant_of.as_ref() };
     let (kind, permissions) = user_rights(&user, kind, to, channels, domain)?;
+    check_name_free(&dir, &user, kind, conn).await?;
     let github = match github {
         Some(login) => Some(github_binding(&dir, &user, &login, config).await?),
         None => None,
@@ -565,6 +567,35 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
         None => println!("{jwt}"),
     }
     Ok(())
+}
+
+/// Refuse issuing `user` credentials of `kind`, an ant's or a human's, when another kind holds the name, as ants,
+/// humans and teams share names: a live key of `dir` issued to an ant of the name for a human, or to a human for an
+/// ant, or a team of the name, should the team directory of the server of `conn` be read within a few seconds.
+async fn check_name_free(dir: &Path, user: &UserId, kind: issued::Kind, conn: &Connection<'_>) -> Result<()> {
+    use issued::Kind::{Ant, Assistant, Human};
+    let other = match kind {
+        Human => [Ant, Assistant].as_slice(),
+        Ant | Assistant => [Human].as_slice(),
+        _ => return Ok(()),
+    };
+    let live = crate::signing::signer::live(dir)?;
+    if let Some(held) = live.iter().find(|i| i.name == user.as_str() && other.contains(&i.kind)) {
+        let (holder, wanted) = if held.kind == Human { ("a human", "an ant's") } else { ("an ant", "a human's") };
+        bail!(
+            "{user} is {holder} of the bus (key {}): no {wanted} credentials take its name; `ants auth revoke {user}` \
+             frees it",
+            held.key
+        );
+    }
+    let reached = async { crate::teams::keeper(conn.nats, conn.js_domain, dir, Duration::from_secs(3)).await };
+    match reached.await {
+        Ok(js) => crate::teams::check_no_team(&js, conn.js_domain, user).await,
+        Err(e) => {
+            tracing::debug!("not checking the team names: {e:#}");
+            Ok(())
+        }
+    }
 }
 
 /// `ants auth init`.
@@ -826,11 +857,34 @@ pub(crate) async fn revoke_credentials(
     for ant in &retired {
         crate::signing::retire::clean_consumers(url, domain, &dir, ant).await;
     }
+    if !retired.is_empty() {
+        leave_teams(url, domain, &dir, &retired).await;
+    }
     if let Some(ant) = ant {
         devices::forget_identity(url, domain, &dir, &ant.parse()?).await?;
         println!("{ant}'s identity deleted from {IDENTITIES_BUCKET}");
     }
     Ok(())
+}
+
+/// Take the ants of `revoked`, revoked whole, off their teams, with short-lived credentials signed with the account
+/// key in `dir`: a revoked lead leaves its team leaderless until a human names another.
+async fn leave_teams(url: &str, domain: Option<&JsDomain>, dir: &Path, revoked: &[UserId]) {
+    let js = match crate::teams::keeper(url, domain, dir, Duration::from_secs(10)).await {
+        Ok(js) => js,
+        Err(e) => {
+            println!(
+                "cannot reach the team directory ({e:#}): `ants team remove TEAM NAME` takes {} off their teams",
+                revoked.iter().map(UserId::as_str).collect::<Vec<_>>().join(", ")
+            );
+            return;
+        }
+    };
+    for ant in revoked {
+        if let Some(line) = crate::teams::drop_ant_or_say(&js, domain, ant).await {
+            println!("{line}");
+        }
+    }
 }
 
 /// The ants among the names of `revoked` that hold no live key in the team directory `dir` any more: retired.

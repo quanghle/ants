@@ -37,6 +37,7 @@ const MACHINE: &str = "sets up or checks the machine running it";
 const MOVING: &str = "moves an ant between machines: files, config file and provider data of the machine running it";
 const ASSISTANT: &str = "ants-waemb";
 const SEND: &str = "the command bar: `@user TEXT` starts a thread, a text alone replies on the open one";
+const TEAMS: &str = "ants-n0szm.5";
 const POST: &str = "the command bar: `#channel TEXT` posts to a channel";
 
 /// Each command of `ants` by its words (`trail run`), or the commands starting with the same words (`auth`), and where
@@ -78,6 +79,13 @@ const CLI: &[(&str, Chat)] = &[
     ("channel read", Shown("a channel's view, which a channel of the nav opens, marking its posts read")),
     ("channel delete", Missing("ants-njfyx")),
     ("channel serve", Exempt(SERVICE)),
+    ("team create", Missing(TEAMS)),
+    ("team set", Missing(TEAMS)),
+    ("team add", Missing(TEAMS)),
+    ("team remove", Missing(TEAMS)),
+    ("team delete", Missing(TEAMS)),
+    ("team list", Missing(TEAMS)),
+    ("team show", Missing(TEAMS)),
     ("notes", Slash("notes")),
     ("react", Slash("react")),
     ("answer", Slash("answer")),

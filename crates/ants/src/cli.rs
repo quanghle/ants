@@ -13,8 +13,8 @@ use crate::cmd::{
     ant::AntCommand, assistant::AssistantCommand, attachment::AttachmentCommand, auth::AuthCommand,
     bridge::BridgeCommand, channel::ChannelCommand, dead::DeadCommand, doctor, enroll::EnrollCommand,
     harness::HarnessCommand, hook::HookCommand, inbox, keys::KeysCommand, leaf::LeafCommand, login,
-    notify::NotifyCommand, remind::RemindCommand, renew, send, setup, signer, spend::SpendArgs, thread::ThreadCommand,
-    tools::ToolsCommand, trail::TrailCommand, web, webhook::WebhookCommand,
+    notify::NotifyCommand, remind::RemindCommand, renew, send, setup, signer, spend::SpendArgs, team::TeamCommand,
+    thread::ThreadCommand, tools::ToolsCommand, trail::TrailCommand, web, webhook::WebhookCommand,
 };
 use crate::messages::{attachments, progress};
 use crate::release::update;
@@ -64,8 +64,8 @@ pub(crate) struct Ants<C: Subcommand> {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
-    /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient; otherwise the
-    /// human's assistant gets it while its grant stands, else system-messenger. With --wait or --follow, print the
+    /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient, or @TEAM to send
+    /// to the team's lead; otherwise the human's assistant gets it while its grant stands, else system-messenger. With --wait or --follow, print the
     /// replies to the CLI's human on the thread and mark them read.
     Ask(send::AskArgs),
     /// Print the replies to the CLI's human not read yet, including those that arrived while no CLI was running, and
@@ -77,6 +77,9 @@ pub(crate) enum Command {
         /// One JSON entry per line, with its state.
         #[arg(long)]
         json: bool,
+        /// Only the ants of this team and of the teams beneath it.
+        #[arg(long, value_name = "TEAM", value_parser = crate::teams::parse_name, add = ArgValueCandidates::new(completions::teams))]
+        team: Option<UserId>,
     },
     /// One ant at a glance, as the ant view of `ants chat` shows it.
     #[command(subcommand)]
@@ -104,6 +107,10 @@ pub(crate) enum Command {
     /// Channels: named groups of ants that humans post to with `ants post`.
     #[command(subcommand)]
     Channel(ChannelCommand),
+    /// Teams: named groups of ants and teams, each with an ant lead that messages to the team go to (`ants ask
+    /// @TEAM`). Each ant and each team is on one team at most, so teams form a forest.
+    #[command(subcommand)]
+    Team(TeamCommand),
     /// Show the notes of a thread, or post TEXT to them as the CLI's human, which gives them a fresh turn budget.
     /// Thread notes are a passive board, one per thread: a post wakes nobody, and ants read the notes with
     /// read_notes. They are distinct from the execution plan an ant reports, which `ants watch <ant>` shows.

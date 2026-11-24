@@ -420,9 +420,22 @@ pub async fn list(js: &jetstream::Context) -> Result<Vec<ColonyEntry>> {
 }
 
 /// Print the colony: a table, or with `json` one entry per line.
-pub async fn show(nats: &crate::connection::Nats<'_>, json: bool) -> Result<()> {
+/// `ants colony`: the ants being served, with `team` only those of the team and of the teams beneath it.
+pub async fn show(nats: &crate::connection::Nats<'_>, json: bool, team: Option<UserId>) -> Result<()> {
     let (_, js) = nats.connect("ants-colony").await?;
-    let entries = list(&js).await?;
+    let mut entries = list(&js).await?;
+    if let Some(team) = &team {
+        let directory = crate::teams::read_of(&js, nats.domain).await?.ok_or(ants_proto::TeamRefusal::NoDirectory)?;
+        if !directory.is_team(team) {
+            return Err(ants_proto::TeamRefusal::NoSuchTeam { team: team.clone() }.into());
+        }
+        let ants = directory.ants_under(team);
+        entries.retain(|e| ants.contains(&e.ant));
+        if entries.is_empty() && !json {
+            println!("no ant of team {team} is in the colony ({} on it: `ants team show {team}`)", ants.len());
+            return Ok(());
+        }
+    }
     let identities = avatars::read_or_none(&js).await;
     let now = Utc::now();
     let moved: Vec<String> = identities

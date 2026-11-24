@@ -251,7 +251,7 @@ async fn add(
 /// account to the hub when any was live: only an ant's or an assistant's key, whose first key (before renewals) was
 /// issued no later than the admin sent the order, so that the order retires no ant added again since. Then, behind a
 /// leaf node, drop the ant from it ([`drop_from_leaf`]) with the uplink credentials the request carries, answering
-/// with them renewed, or why they were not.
+/// with them renewed, or why they were not. The ant leaves its team ([`crate::teams::drop_ant`]).
 async fn retire(
     approver: &Approver,
     url: &str,
@@ -306,6 +306,9 @@ async fn retire(
         Ok(jwt) => (jwt, None),
         Err(e) => (None, Some(format!("{e:#}"))),
     };
+    if let Some(line) = crate::teams::drop_ant_or_say(approver.hub(), approver.js_domain(), ant).await {
+        tracing::info!(%ant, "{line}");
+    }
     let revoked = newly.into_iter().map(|r| r.key).collect();
     Ok(EnrollReply::Retired { ant: ant.clone(), public_key: key.to_owned(), revoked, push_error, leaf_jwt, leaf_error })
 }

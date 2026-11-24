@@ -425,8 +425,9 @@ impl Signer<'_> {
         Ok((jwt, Some(renewed)))
     }
 
-    /// Retire the ant `request` names, if its manager added it: revoke its live keys, push the account to the hub
-    /// when any were, drop it from the leaf node the request came through ([`ordered::drop_from_leaf`]), and answer.
+    /// Retire the ant `request` names, if its manager added it and it leads no team: revoke its live keys, push the
+    /// account to the hub when any were, take it off its team, drop it from the leaf node the request came through
+    /// ([`ordered::drop_from_leaf`]), and answer.
     async fn retire(
         &mut self,
         approver: &Approver,
@@ -434,6 +435,9 @@ impl Signer<'_> {
         report: &mut impl FnMut(&AntRequest, &Event),
     ) -> Result<()> {
         let (name, public_key) = (&request.name, Some(request.public_key.as_str()));
+        if let Err(e) = crate::teams::check_retirable_on(approver.hub(), approver.js_domain(), name).await {
+            return self.refuse(approver, request, format!("{e:#}"), report).await;
+        }
         let revoked = match revoke_added(self.dir, name, Some(&request.manager), public_key) {
             Ok(revoked) => revoked,
             Err(e) => return self.refuse(approver, request, format!("{e:#}"), report).await,
@@ -447,6 +451,9 @@ impl Signer<'_> {
             super::retire::clean_consumers(self.url, approver.js_domain(), self.dir, name).await;
         }
         report(request, &Event::Retired { revoked: revoked.len(), push_error: push_error.clone() });
+        if let Some(line) = crate::teams::drop_ant_or_say(approver.hub(), approver.js_domain(), name).await {
+            tracing::info!(ant = %name, "{line}");
+        }
         let (leaf_jwt, leaf_error) = match &request.leaf {
             Some(leaf) => {
                 match ordered::drop_from_leaf(approver, &leaf.jwt, &leaf.machine, name, ants_proto::LeafRole::Ant).await

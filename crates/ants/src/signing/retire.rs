@@ -314,8 +314,9 @@ pub struct RetireArgs {
     pub no_push: bool,
 }
 
-/// Retire the ant `args` names, as a human: any ant added from a template, whichever manager added it. `colony`, the
-/// connection to read the colony through, if any, waits up to `wait` for the daemon to stop the ant; `url` is where to
+/// Retire the ant `args` names, as a human: any ant added from a template, whichever manager added it, unless it leads
+/// a team. `colony`, the connection to read the colony and the teams through, if any, waits up to `wait` for the
+/// daemon to stop the ant, and takes the ant off its team; `url` is where to
 /// push the revocation, and `js_domain` the hub's JetStream domain, if it has one.
 pub async fn retire(
     args: &RetireArgs,
@@ -331,6 +332,9 @@ pub async fn retire(
     };
     let left = crate::auth::default_dir()?.join(format!("{name}.creds"));
     let listed = config::load(&path)?.ants.iter().any(|a| a.name == *name);
+    if let Some(js) = colony {
+        crate::teams::check_retirable_on(js, js_domain, name).await?;
+    }
     let (unlisted, creds) = match listed {
         true => {
             let unlisted = unlist(&path, name, None)?;
@@ -389,6 +393,12 @@ pub async fn retire(
     };
     forget(&creds)?;
     println!("{} removed", creds.display());
+    if let Some(line) = match colony {
+        Some(js) => crate::teams::drop_ant_or_say(js, js_domain, name).await,
+        None => Some(format!("`ants team remove TEAM {name}` takes {name} off its team, if any")),
+    } {
+        println!("{line}");
+    }
     if let Some(u) = &unlisted {
         println!("{}", home_note(name, &u.template, &u.home));
     }

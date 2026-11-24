@@ -228,6 +228,15 @@ pub fn channels() -> Vec<CompletionCandidate> {
     })
 }
 
+/// The teams.
+pub fn teams() -> Vec<CompletionCandidate> {
+    let domain = Connection::of(&words()).js_domain;
+    lookup(async |js, _| {
+        let Some(directory) = crate::teams::read_of(js, domain.as_ref()).await? else { return Ok(Vec::new()) };
+        Ok(directory.teams.iter().map(|t| CompletionCandidate::new(t.team.as_str())).collect())
+    })
+}
+
 /// `last` and the threads the CLI's human took part in recently, most recent first, each with its title, else its
 /// latest text.
 pub fn threads() -> Vec<CompletionCandidate> {

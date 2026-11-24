@@ -2,6 +2,7 @@
 
 use ants_client::attachments::listed_on;
 use ants_client::inbox::ParseError;
+use ants_client::sending::Addressed;
 use ants_daemon::bus;
 use ants_daemon::bus::relayed;
 use ants_daemon::records::reactions;
@@ -140,6 +141,20 @@ async fn addressee(js: &jetstream::Context, nats: &Nats<'_>, to: Option<UserId>)
     }
 }
 
+/// Where a message to `to` goes: to the lead of the team `to` names, carrying the team
+/// ([`ants_client::sending::addressed`]), refused for a leaderless team; to `to` itself on a bus without teams, or,
+/// with a warning, when the team directory cannot be read.
+async fn to_team(js: &jetstream::Context, js_domain: Option<&ants_proto::JsDomain>, to: UserId) -> Result<Addressed> {
+    match crate::teams::read_of(js, js_domain).await {
+        Ok(Some(directory)) => Ok(ants_client::sending::addressed(&directory, to)?),
+        Ok(None) => Ok(Addressed { to, team: None }),
+        Err(e) => {
+            tracing::warn!("not checking whether {to} names a team: {e:#}");
+            Ok(Addressed { to, team: None })
+        }
+    }
+}
+
 /// Where `ants ask` or `ants post` sends: on the thread `thread` picks, else a new one, or replying to the message
 /// `reply_to` picks; for `ants ask`, on a new thread forwarding what `forward` picks ([`forward`]).
 #[derive(Default)]
@@ -264,10 +279,15 @@ pub(crate) async fn ask(nats: &Nats<'_>, args: AskArgs) -> Result<()> {
     let (thread, replied) = target.resolve(nats, &js).await?;
     let author = replied.as_ref().map(|r| &r.quoted.quote.from).filter(|from| **from != nats.me.id);
     let (to, unaddressed) = addressee(&js, nats, to.or_else(|| author.cloned())).await;
-    let mut envelope = match &forwarded {
-        Some(source) => source.envelope(&nats.me, to, &text),
-        None => ask_envelope(&nats.me, thread, to, text),
+    let addressed = match unaddressed {
+        Some(_) => Addressed { to, team: None },
+        None => to_team(&js, nats.domain, to).await?,
     };
+    let mut envelope = match &forwarded {
+        Some(source) => source.envelope(&nats.me, addressed.to.clone(), &text),
+        None => ask_envelope(&nats.me, thread, addressed.to.clone(), text),
+    };
+    addressed.apply(&mut envelope);
     if let Some(r) = &replied {
         envelope = envelope.quoting(r.quoted.id, r.quoted.quote.clone());
     }
@@ -359,6 +379,9 @@ fn print_sent(stored: bus::Stored, envelope: &Envelope, unaddressed: Option<&Rec
     println!("message {}", envelope.id);
     if let Some(recipient) = unaddressed {
         println!("to {recipient}");
+    }
+    if let Some(team) = &envelope.team {
+        println!("to {} (lead of team {team})", envelope.to);
     }
     print_attached(files, |id| envelope.attachment_handle(id));
 }
