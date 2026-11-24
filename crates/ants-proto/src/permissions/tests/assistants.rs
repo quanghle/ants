@@ -192,6 +192,7 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
         "ants.out.owners.*.*",
         "$KV.ants_humans.*",
         "$KV.ants_channels.>",
+        "$KV.ants_teams.directory",
         "$JS.API.STREAM.UPDATE.ANTS",
         "$JS.API.STREAM.MSG.DELETE.ANTS",
         "$JS.API.STREAM.CREATE.KV_ants_read",

@@ -235,3 +235,54 @@ fn kv_entries() {
     snap("following_variants", &[Following::Inbox, Following::Approvals]);
     snap("presence", &Presence { human: user("alice"), device: device(), following: Following::Inbox, since: at(0) });
 }
+
+#[test]
+fn teams() {
+    let team = |id: &str, lead: &str, members: &[&str]| Team {
+        team: user(id),
+        description: Some(format!("The {id} team.")),
+        members: members.iter().map(|m| user(m)).collect(),
+        lead: Some(user(lead)),
+        owner: Some(user("alice")),
+        avatar: Some("seed".to_owned()),
+        color: Some("teal".to_owned()),
+        created_by: user("alice"),
+        created_at: at(0),
+    };
+    snap(
+        "team_directory",
+        &TeamDirectory { teams: vec![team("eng", "lead", &["lead", "backend"]), team("backend", "dev-a", &["dev-a"])] },
+    );
+    let ops = vec![
+        TeamOp::AddMember { member: user("dev-b") },
+        TeamOp::RemoveMember { member: user("dev-c") },
+        TeamOp::SetLead { ant: user("dev-b") },
+        TeamOp::SetDescription { description: "Services.".to_owned() },
+        TeamOp::ClearDescription,
+        TeamOp::CreateTeam { team: user("infra"), lead: user("dev-d"), description: Some("Machines.".to_owned()) },
+        TeamOp::DeleteTeam { team: user("infra") },
+    ];
+    snap(
+        "team_admin_request",
+        &TeamAdminRequest {
+            id: id(1),
+            ant: user("lead"),
+            team: user("backend"),
+            ops,
+            last: 42,
+            thread_id: Some(thread()),
+            requested_at: at(0),
+            expires_at: at(1),
+        },
+    );
+    for (name, outcome) in [
+        ("team_admin_reply_applied", TeamAdminOutcome::Applied { last: 43, changed: vec!["added dev-b".to_owned()] }),
+        ("team_admin_reply_changed", TeamAdminOutcome::Changed),
+        (
+            "team_admin_reply_refused",
+            TeamAdminOutcome::Refused { refusal: TeamRefusal::OnTeam { member: user("dev-b"), team: user("eng") } },
+        ),
+    ] {
+        snap(name, &TeamAdminReply { request_id: id(1), ant: user("lead"), outcome });
+    }
+}

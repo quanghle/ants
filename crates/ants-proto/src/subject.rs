@@ -515,6 +515,24 @@ pub const ALL_SAVE_TRAIL_REQUESTS: &str = "ants.savetrail.*";
 /// Every answer to a trail save request.
 pub const ALL_SAVE_TRAIL_REPLIES: &str = "_INBOX.*.savetrail";
 
+/// Where `ant` asks `ants signer` to change a team it manages ([`TeamAdminRequest`](super::TeamAdminRequest); core
+/// NATS, not stored). Only the ant publishes here, and only `ants signer` answers: no ant writes the teams itself.
+pub fn teamadm(ant: &UserId) -> String {
+    format!("ants.teamadm.{ant}")
+}
+
+/// Where the answer to a team change request of `ant` goes ([`TeamAdminReply`](super::TeamAdminReply); core NATS):
+/// under the ant's reply inboxes ([`inbox_prefix`](super::inbox_prefix)), which only it reads. Only `ants signer`
+/// answers.
+pub fn teamadm_reply(ant: &UserId) -> String {
+    format!("{}.teamadm", super::inbox_prefix(ant))
+}
+
+/// Every team change request, of all ants.
+pub const ALL_TEAMADM_REQUESTS: &str = "ants.teamadm.*";
+/// Every answer to a team change request.
+pub const ALL_TEAMADM_REPLIES: &str = "_INBOX.*.teamadm";
+
 /// Where the daemon of `ant` answers a trail request ([`TrailReply`](super::TrailReply); core NATS).
 pub fn trailed(ant: &UserId) -> String {
     format!("ants.trailed.{ant}")

@@ -22,8 +22,8 @@ use ants_proto::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, COLONY_TTL, DEVICES_BUCKET, FILES_BUCKET,
     FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, INCARNATION_KEY, JsDomain, LINKS_BUCKET, MACHINES_BUCKET,
     NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET, SESSIONS_BUCKET, STREAM,
-    THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, WEBHOOKS_BUCKET,
-    subject,
+    TEAMS_BUCKET, THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET,
+    WEBHOOKS_BUCKET, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{
@@ -37,7 +37,7 @@ use crate::records::direct_kv::DirectKv;
 pub use configs::{
     MAX_CONSUMERS, chains_config, channels_config, colony_config, devices_config, files_config, humans_config,
     identities_config, kept_config, machines_config, notify_config, owners_config, presence_config, reactions_config,
-    read_config, stored_inbox, stream_config, threads_config, trail_ratings_config, trail_runs_config,
+    read_config, stored_inbox, stream_config, teams_config, threads_config, trail_ratings_config, trail_runs_config,
     trail_tips_config, trails_config, webhooks_config,
 };
 
@@ -67,13 +67,14 @@ pub enum Object {
     TrailRuns,
     TrailTips,
     TrailRatings,
+    Teams,
     /// The attachments' store ([`FILES_BUCKET`]).
     Files,
 }
 
 impl Object {
     /// Every object, the stream first.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Stream,
         Self::Colony,
         Self::Sessions,
@@ -96,6 +97,7 @@ impl Object {
         Self::TrailRuns,
         Self::TrailTips,
         Self::TrailRatings,
+        Self::Teams,
         Self::Files,
     ];
 
@@ -124,6 +126,7 @@ impl Object {
             Self::TrailRuns => TRAIL_RUNS_BUCKET,
             Self::TrailTips => TRAIL_TIPS_BUCKET,
             Self::TrailRatings => TRAIL_RATINGS_BUCKET,
+            Self::Teams => TEAMS_BUCKET,
         })
     }
 
@@ -166,6 +169,7 @@ impl Object {
             Self::TrailRuns => Spec::Stream(Box::new(trail_runs_config())),
             Self::TrailTips => Spec::Stream(Box::new(trail_tips_config())),
             Self::TrailRatings => Spec::Stream(Box::new(trail_ratings_config())),
+            Self::Teams => Spec::Stream(Box::new(teams_config())),
         }
     }
 
@@ -479,6 +483,7 @@ mod tests {
             Object::TrailRuns,
             Object::TrailTips,
             Object::TrailRatings,
+            Object::Teams,
             Object::Files,
         ];
         assert_eq!(problems(&check(&js, |_| true).await), left, "the rest is created");
@@ -495,6 +500,7 @@ mod tests {
                 Object::TrailRuns,
                 Object::TrailTips,
                 Object::TrailRatings,
+                Object::Teams,
                 Object::Files
             ]
         );

@@ -13,7 +13,8 @@
 //! write the reactions bucket, so the signer lists the reactions to a message for the ant, and adds or removes the
 //! ant's own, once it found the ant reads the message, and ants' trail saves ([`keeper::serve`]): an ant's credentials
 //! write no saved trail, whose key names no saver, so the signer saves a trail for the ant as its own, and replaces or
-//! removes only one the ant saved. It also registers humans' devices after a GitHub sign-in, and
+//! removes only one the ant saved, and ants' team changes ([`teams::keeper::serve`]): no ant writes the team
+//! directory, one entry for every team, so the signer changes for a lead only the teams it manages. It also registers humans' devices after a GitHub sign-in, and
 //! renews the credentials such registrations granted ([`crate::signing::registrar`]), and answers the enrollment requests a
 //! machine's daemon sends carrying an admin's order to add or retire an ant there ([`ordered`]). Each time it connects,
 //! it records its machine as the one holding the account key ([`AccountHolder`]), for `ants chat` and `ants machines`
@@ -34,6 +35,7 @@ use ants_daemon::config;
 use ants_daemon::profile::template::{AntTemplate, Request};
 use ants_daemon::records::direct_kv::DirectKv;
 use ants_daemon::records::reactions;
+use ants_daemon::teams;
 use ants_daemon::trail::keeper;
 use ants_proto::{
     ACCOUNT_HOLDER_KEY, ANTS_VERSION, AccountHolder, AntReply, AntRequest, ApprovalDecision, ApprovalRequest,
@@ -142,8 +144,8 @@ struct Waiting {
 }
 
 /// `ants signer`: answer the ant requests of manager ants ([`AntRequest`]) over the server at `url`, signing with the
-/// account key in the team directory `dir`, ants' reactions requests ([`reactions::serve`]) and trail saves
-/// ([`keeper::serve`]), until `stop`
+/// account key in the team directory `dir`, ants' reactions requests ([`reactions::serve`]), trail saves
+/// ([`keeper::serve`]) and team changes ([`teams::keeper::serve`]), until `stop`
 /// completes. Each run connects afresh every
 /// [`Options::reconnect`], with credentials it issues itself, and reads the revocations again; the templates are read
 /// for each request. Calls `report` with what it did with each request.
@@ -182,6 +184,12 @@ pub async fn serve(
         let _keeping = AbortOnDrop(tokio::spawn(async move {
             if let Err(e) = keeping.await {
                 tracing::warn!("answering trail saves until the next reconnect: {e:#}");
+            }
+        }));
+        let teams = teams::keeper::serve(approver.client.clone(), approver.hub().clone(), js_domain.cloned());
+        let _teams = AbortOnDrop(tokio::spawn(async move {
+            if let Err(e) = teams.await {
+                tracing::warn!("answering team changes until the next reconnect: {e:#}");
             }
         }));
         approver.client.flush().await?;

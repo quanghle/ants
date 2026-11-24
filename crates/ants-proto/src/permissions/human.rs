@@ -5,8 +5,9 @@ use super::{ack_subjects, kv_stream, ordered_consumer_subjects};
 use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, HUMANS_BUCKET, IDENTITIES_BUCKET,
     INTAKE_STREAM, LINKS_BUCKET, MACHINES_BUCKET, NOTIFY_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET,
-    PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET, SESSIONS_BUCKET, STREAM, THREADS_BUCKET, TRAIL_RATINGS_BUCKET,
-    TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, UserId, WEBHOOKS_BUCKET, notify_consumer, subject,
+    PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET, SESSIONS_BUCKET, STREAM, TEAM_DIRECTORY_KEY, TEAMS_BUCKET,
+    THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET, TRAILS_BUCKET, UserId, WEBHOOKS_BUCKET,
+    notify_consumer, subject,
 };
 #[cfg(doc)]
 use {
@@ -66,6 +67,17 @@ pub(super) fn trail_rights() -> [String; 13] {
         format!("$JS.API.STREAM.CREATE.{ratings}"),
         format!("$JS.API.STREAM.INFO.{ratings}"),
         format!("$JS.API.STREAM.PURGE.{ratings}"),
+    ]
+}
+
+/// What a human's credentials need of [`TEAMS_BUCKET`]: creating it and looking it up, and putting the team
+/// directory, by compare-and-set on its one key; every user reads it by direct gets naming no subject.
+pub(super) fn team_rights() -> [String; 3] {
+    let teams = kv_stream(TEAMS_BUCKET);
+    [
+        format!("$JS.API.STREAM.CREATE.{teams}"),
+        format!("$JS.API.STREAM.INFO.{teams}"),
+        subject::kv(TEAMS_BUCKET, TEAM_DIRECTORY_KEY),
     ]
 }
 

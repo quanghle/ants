@@ -20,5 +20,6 @@ mod humans;
 mod leaves;
 mod stores;
 mod streams;
+mod teams;
 mod trails;
 mod webhooks;

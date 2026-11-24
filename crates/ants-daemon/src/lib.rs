@@ -52,6 +52,7 @@ pub mod stream;
 pub mod trail;
 
 pub mod sync;
+pub mod teams;
 #[cfg(test)]
 mod test_support;
 

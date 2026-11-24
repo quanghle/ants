@@ -46,6 +46,7 @@ mod sense;
 mod shared;
 mod status;
 pub mod subject;
+mod teams;
 #[cfg(test)]
 mod test_support;
 mod text;
@@ -160,6 +161,9 @@ pub use shared::{
     is_shared_field,
 };
 pub use status::{DecidedBy, MAX_TOOL_PATHS, PlanStep, State, StatusEvent, StatusUpdate, StepStage};
+pub use teams::{
+    TEAM_DIRECTORY_KEY, Team, TeamAdminOutcome, TeamAdminReply, TeamAdminRequest, TeamDirectory, TeamOp, TeamRefusal,
+};
 pub use text::{lines, one_line, shown};
 pub use threads::{
     Archived, Mark, Reminder, Reminders, SNOOZE_MAX, SealedTitle, Snooze, THREAD_UNDONE, ThreadDone, ThreadMarks,
@@ -255,6 +259,23 @@ pub const CHANADM_WAIT: Duration = Duration::from_secs(10);
 pub const MAX_CHANNEL_OPS: usize = 32;
 /// Most characters a channel's description ([`ChannelEntry::description`]) has.
 pub const MAX_CHANNEL_DESCRIPTION: usize = 1000;
+/// KV bucket of the teams: one entry, [`TEAM_DIRECTORY_KEY`], holding the [`TeamDirectory`] of every team, so each
+/// write checks the whole forest. Humans write it by compare-and-set; an ant changes the teams it manages only by asking
+/// `ants signer` ([`TeamAdminRequest`]), whose credentials alone write it for ants ([`Permissions::for_team_keeper`]):
+/// one entry gives NATS permissions no hold on a single team. Every ant, assistant and human reads it, by direct gets
+/// naming no subject ([`Permissions::for_user`]). It keeps each earlier message, as the trails' buckets do, so a reader
+/// reads past a message a stream relayed onto the key. The entry never expires.
+pub const TEAMS_BUCKET: &str = "ants_teams";
+/// How long a [`TeamAdminRequest`] stays valid after it is made.
+pub const TEAMADM_TTL: Duration = Duration::from_secs(60);
+/// How often an ant repeats a [`TeamAdminRequest`] while no answer arrives, and for how long in all. Requests are
+/// core NATS, so one sent while no signer listens is lost.
+pub const TEAMADM_REPEAT: Duration = Duration::from_secs(2);
+pub const TEAMADM_WAIT: Duration = Duration::from_secs(10);
+/// Most operations one [`TeamAdminRequest`] may carry.
+pub const MAX_TEAM_OPS: usize = 32;
+/// Most characters a team's description ([`Team::description`]) has.
+pub const MAX_TEAM_DESCRIPTION: usize = 1000;
 /// KV bucket of the humans: one [`HumanEntry`] per human, keyed by its user id. Only humans write it; ants read
 /// it. [`UserId::human`] is a human without an entry.
 pub const HUMANS_BUCKET: &str = "ants_humans";

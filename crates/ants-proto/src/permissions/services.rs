@@ -4,11 +4,13 @@
 
 use super::{Permissions, kv_stream, ordered_consumer_subjects};
 #[cfg(doc)]
-use crate::{AntRequest, MACHINES_BUCKET, ReactionsRequest, SaveTrailRequest, channel_manager_serving_key};
+use crate::{
+    AntRequest, MACHINES_BUCKET, ReactionsRequest, SaveTrailRequest, TeamAdminRequest, channel_manager_serving_key,
+};
 use crate::{
     CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, ENROLL_INBOX, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET,
-    INTAKE_STREAM, LINKS_BUCKET, REACTIONS_BUCKET, STREAM, THREADS_BUCKET, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, UserId,
-    chan_consumer, done_reader, inbox_consumer, inbox_prefix, subject,
+    INTAKE_STREAM, LINKS_BUCKET, REACTIONS_BUCKET, STREAM, TEAM_DIRECTORY_KEY, TEAMS_BUCKET, THREADS_BUCKET,
+    TRAIL_RUNS_BUCKET, TRAILS_BUCKET, UserId, chan_consumer, done_reader, inbox_consumer, inbox_prefix, subject,
 };
 
 impl Permissions {
@@ -125,6 +127,24 @@ impl Permissions {
                 subject::ALL_SAVE_TRAIL_REPLIES.to_owned(),
             ],
             subscribe: vec![subject::ALL_SAVE_TRAIL_REQUESTS.to_owned(), format!("{ENROLL_INBOX}.>")],
+        }
+    }
+
+    /// What `ants signer` also allows itself, on the machine holding the account key, to change teams for the ants that
+    /// manage them ([`TeamAdminRequest`]): hearing every such request ([`subject::ALL_TEAMADM_REQUESTS`]); reading the
+    /// team directory and the ants' identity records by direct gets naming no subject, as every ant does, to check
+    /// that an ant added is one; putting the directory, which only it does for an ant, once it found the ant manages the team and the
+    /// change keeps the forest; and answering on the ant's own [`subject::teamadm_reply`]. The replies of its JetStream
+    /// requests come under [`ENROLL_INBOX`], as those of [`Permissions::for_enroll_approver`], with which it is issued.
+    pub fn for_team_keeper() -> Self {
+        Self {
+            publish: vec![
+                format!("$JS.API.DIRECT.GET.{}", kv_stream(TEAMS_BUCKET)),
+                format!("$JS.API.DIRECT.GET.{}", kv_stream(IDENTITIES_BUCKET)),
+                subject::kv(TEAMS_BUCKET, TEAM_DIRECTORY_KEY),
+                subject::ALL_TEAMADM_REPLIES.to_owned(),
+            ],
+            subscribe: vec![subject::ALL_TEAMADM_REQUESTS.to_owned(), format!("{ENROLL_INBOX}.>")],
         }
     }
 

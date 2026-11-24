@@ -30,7 +30,7 @@ credentials file lets no one act for an ant or a human. They read no inbox, note
 or `STREAM.MSG.GET` on `ANTS`. Every KV bucket other than `ants_colony` is denied too: `ants_sessions`, `ants_attempts`,
 `ants_owners`, `ants_links`, `ants_chains`, `ants_humans`, `ants_channels`, `ants_webhooks`, `ants_read`,
 `ants_presence`, `ants_notify`, `ants_reactions`, `ants_threads`, `ants_devices`, `ants_machines`, `ants_identities`,
-`ants_trails`, `ants_trail_runs`, `ants_trail_tips` and `ants_trail_ratings`, and the attachment store `ants_files`.
+`ants_trails`, `ants_trail_runs`, `ants_trail_tips`, `ants_trail_ratings` and `ants_teams`, and the attachment store `ants_files`.
 
 Event payloads can still contain prompt or tool text:
 

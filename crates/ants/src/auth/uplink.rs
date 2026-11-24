@@ -29,7 +29,7 @@ use crate::node::members::EnrollApprover;
 /// ([`Permissions::for_leaf`]), plus what the credentials of `webhooks` allow, for an `ants webhook serve` on the
 /// machine ([`webhook_permissions`]), plus [`EnrollApprover::With`] what `ants enroll` and `ants signer` on the machine
 /// need ([`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`],
-/// [`Permissions::for_trail_keeper`]), and connect only as a leaf
+/// [`Permissions::for_trail_keeper`], [`Permissions::for_team_keeper`]), and connect only as a leaf
 /// node, not as a client. Also writes the store account credentials of the leaf's second uplink beside them
 /// ([`leaf_store_creds`]), and the system account credentials of its third ([`leaf_system_creds`]), both recorded and
 /// revoked with them under the same name and with the same lifetime.

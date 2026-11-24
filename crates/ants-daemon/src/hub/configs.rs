@@ -7,8 +7,8 @@ use ants_proto::{
     ATTACHMENT_CHUNK, ATTACHMENT_HEADROOM, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, FILES_BUCKET,
     FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, MACHINES_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET,
     PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM,
-    STREAM_SUBJECTS, THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUN_RETENTION, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET,
-    TRAILS_BUCKET, TrailLimits, WEBHOOK_RETENTION, WEBHOOKS_BUCKET, subject,
+    STREAM_SUBJECTS, TEAMS_BUCKET, THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUN_RETENTION, TRAIL_RUNS_BUCKET,
+    TRAIL_TIPS_BUCKET, TRAILS_BUCKET, TrailLimits, WEBHOOK_RETENTION, WEBHOOKS_BUCKET, subject,
 };
 use async_nats::jetstream::{kv, stream};
 
@@ -161,6 +161,11 @@ pub fn trail_tips_config() -> stream::Config {
 /// The trails' ratings ([`TRAIL_RATINGS_BUCKET`]): a rating lasts until a human purges its trail's.
 pub fn trail_ratings_config() -> stream::Config {
     trails_bucket_config(TRAIL_RATINGS_BUCKET, "Trail ratings, each written by its run's conductor", Duration::ZERO)
+}
+
+/// The team directory ([`TEAMS_BUCKET`]): one key, every team, lasting until a human changes it.
+pub fn teams_config() -> stream::Config {
+    trails_bucket_config(TEAMS_BUCKET, "The team directory, written by humans and ants signer", Duration::ZERO)
 }
 
 /// The read markers of the humans ([`READ_BUCKET`]).

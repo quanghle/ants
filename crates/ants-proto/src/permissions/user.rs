@@ -4,15 +4,15 @@
 use super::human::{
     device_directory_rights, human_notify_rights, human_reaction_rights, human_store_rights, identity_rights,
     machine_record_rights, notify_prefs_rights, outbox_setup_rights, presence_rights, read_marker_rights,
-    rollup_denial_rights, thread_rights, trail_rights,
+    rollup_denial_rights, team_rights, thread_rights, trail_rights,
 };
 use super::{Permissions, ack_subjects, kv_stream, ordered_consumer_subjects};
 use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM,
     HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, READ_BUCKET, Role, SESSIONS_BUCKET,
-    STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET, TRAIL_TIPS_BUCKET,
-    TRAILS_BUCKET, UserId, chan_consumer, chan_reader, dead_reader, done_reader, inbox_consumer, inbox_prefix,
-    notes_consumer, sent_reader, spare_readers, subject, trail_runs_reader,
+    STORAGE_WARNING_PREFIX, STREAM, TEAMS_BUCKET, THREADS_BUCKET, TRAIL_RATINGS_BUCKET, TRAIL_RUNS_BUCKET,
+    TRAIL_TIPS_BUCKET, TRAILS_BUCKET, UserId, chan_consumer, chan_reader, dead_reader, done_reader, inbox_consumer,
+    inbox_prefix, notes_consumer, sent_reader, spare_readers, subject, trail_runs_reader,
 };
 #[cfg(doc)]
 use crate::{
@@ -49,6 +49,19 @@ fn attachment_rights(user: &UserId, role: Role) -> Vec<String> {
         format!("{get}.{chunks}.{user}.inbox.>"),
         format!("{get}.{chunks}.*.notes.>"),
         format!("{get}.{chunks}.*.chan.>"),
+    ]
+}
+
+/// What an ant asks `ants signer` for, each on a subject naming it: an ant added from a template, should it manage one;
+/// the reactions to a message it reads, and adding or removing its own; saving a trail as its own or removing one it
+/// saved; and changing a team it manages.
+fn signer_requests(user: &UserId) -> [String; 5] {
+    [
+        subject::antreq(user),
+        subject::reactions(user),
+        subject::react(user),
+        subject::save_trail(user),
+        subject::teamadm(user),
     ]
 }
 
@@ -126,6 +139,12 @@ impl Permissions {
     /// retires any tip, under a key no ant writes ([`crate::trail_tip_retired_key`]), and purges a trail's. Every ant and human reads the trails' ratings
     /// ([`TRAIL_RATINGS_BUCKET`]) the same way; an ant puts only its own, under keys naming it, and a human writes none
     /// but purges a removed trail's.
+    ///
+    /// Every ant and human reads the team directory ([`TEAMS_BUCKET`]) by direct gets naming no subject; a human
+    /// creates the bucket and puts the directory by compare-and-set (`team_rights`). The directory is one entry for
+    /// every team, so no subject can hold an ant to the teams it manages: an ant writes none of it, but asks
+    /// `ants signer` to change a team it manages ([`crate::TeamAdminRequest`], on [`subject::teamadm`],
+    /// [`Permissions::for_team_keeper`]).
     ///
     /// Each inbox, notes and channel subject an ant may publish, and its own dead letter and timeline subjects, it may
     /// also publish in its outbox form ([`subject::outbox`]), which only a leaf node's outbox keeps, and so the links it passes on
@@ -218,6 +237,8 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{}", kv_stream(TRAIL_TIPS_BUCKET)),
             // And the trails' ratings, the same way.
             format!("$JS.API.DIRECT.GET.{}", kv_stream(TRAIL_RATINGS_BUCKET)),
+            // And the team directory, the same way, past a message a stream relayed onto its key.
+            format!("$JS.API.DIRECT.GET.{}", kv_stream(TEAMS_BUCKET)),
         ]);
         publish.extend(attachment_rights(user, role));
         publish
@@ -237,6 +258,7 @@ impl Permissions {
         publish.extend(human_reaction_rights(user));
         publish.extend(device_directory_rights(user));
         publish.extend(trail_rights());
+        publish.extend(team_rights());
         publish.extend(rollup_denial_rights());
         subscribe.extend([subject::ALL.to_owned(), subject::max_deliveries_advisories()]);
     }
@@ -318,13 +340,6 @@ impl Permissions {
             subject::kv(LINKS_BUCKET, format_args!("{user}.>")),
             format!("ants.out.links.{user}.>"),
             subject::renew(user.as_str()),
-            // Asking the signer for an ant added from a template, should it manage one.
-            subject::antreq(user),
-            // Asking for the reactions to a message it reads, and to add or remove its own.
-            subject::reactions(user),
-            subject::react(user),
-            // Asking to save a trail as its own, or to remove one it saved.
-            subject::save_trail(user),
             // Get of the assistants' records and of the revocations, to check what an assistant does for its human.
             format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(DEVICES_BUCKET), subject::assistant_records()),
             format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(DEVICES_BUCKET), subject::revoked_devices()),
@@ -349,6 +364,7 @@ impl Permissions {
             format!("$JS.API.CONSUMER.MSG.NEXT.{threads}.{done}"),
         ]);
         publish.extend(ack_subjects(&threads, &done));
+        publish.extend(signer_requests(user));
         // Deleting that consumer and its channel consumer as its retirement stops it, so neither keeps piling up; and
         // where the channel consumer stands, as `ants queue` lists it.
         publish.extend([
