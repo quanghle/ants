@@ -36,7 +36,9 @@ async fn calls_of_an_ant_that_come_together_share_a_catch_up() {
     {
         asked += 1;
     }
-    assert_eq!(asked, 2, "one read of the log for the first call, one shared by the seven that came during it");
+    // One read for the first call and one shared by those that came during it, or, on a loaded machine where all
+    // eight came before the first read went out, the one read shared by all: never a read each.
+    assert!((1..=2).contains(&asked), "{asked} reads of the log for eight calls coming together");
     drop((items, hosting));
     std::fs::remove_dir_all(home).unwrap();
 }
