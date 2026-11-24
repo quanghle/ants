@@ -135,12 +135,18 @@ fn stuck_runs_name_the_command_resuming_or_stopping_each() {
                 ),
                 format!("ants trail stop {}", orphaned.run)
             ),
-            warn(
+            (
+                Status::Warn,
                 format!(
                     "{} waits on its conductor dev-gone, which is not in the colony: no daemon conducts it",
                     name(&unconducted)
                 ),
-                format!("start the daemon serving dev-gone; `ants trail stop {}` needs it too", unconducted.run)
+                vec![
+                    format!("start the daemon serving dev-gone; `ants trail stop {}` needs it too", unconducted.run),
+                    "for a retired or revoked dev-gone: `ants auth revoke dev-gone` where the account key is ends its \
+                     runs"
+                        .to_owned()
+                ]
             ),
             warn(
                 format!("{}, conducted by dev-gone, was stopped by bob 30m ago", name(&stopped_unconducted)),

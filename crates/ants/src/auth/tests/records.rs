@@ -285,6 +285,78 @@ async fn ants_signer_reads_the_runs_ants_save_trails_from() {
     assert!(keeper.put(&key, b"{}".to_vec()).await.is_err(), "the signer writes no run");
 }
 
+/// Revoking the last key of a conductor no daemon serves ends its unfinished runs, each owner told why on the run's
+/// thread as the conductor, and leaves its finished runs and the runs of others as they are.
+#[tokio::test]
+async fn revoking_a_conductor_ends_its_unfinished_runs_on_their_threads() {
+    use ants_proto::{RunState, TRAIL_RUNS_BUCKET, TrailRun, TrailRunIndex, trail_run_key, trail_runs_index_key};
+    use ants_test_support::trail_run;
+
+    let Some(server) = Server::start() else { return };
+    let team = server.dir().join("auth");
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
+    let mut inspect = Permissions::for_user(&human, Role::Human);
+    inspect.publish.extend([format!("$JS.API.STREAM.MSG.GET.{STREAM}"), format!("$JS.API.STREAM.INFO.{STREAM}")]);
+    let human_creds = server.dir().join("human.creds");
+    issue_with(&team, &human, Role::Human.into(), inspect, &human_creds).unwrap();
+    let h_js = connect_to(&server.url, &human_creds, None, &human).await;
+    h_js.create_stream(ants_daemon::hub::trail_runs_config()).await.unwrap();
+    let stream = bus::ensure_stream(&h_js).await.unwrap();
+    ants_daemon::hub::ensure_bucket(&h_js, ants_daemon::hub::Object::Devices).await.unwrap();
+    bus::ensure_colony(&h_js, ants_proto::COLONY_TTL).await.unwrap();
+    let conductor = server.creds(&dev_a);
+    let key = read_creds(&conductor).unwrap().1.public_key();
+    let a_js = connect_to(&server.url, &conductor, None, &dev_a).await;
+    let (_b, b_js) = server.connect(&dev_b).await;
+
+    let now = chrono::Utc::now();
+    let (running, stopped) =
+        (trail_run(&dev_a, Some("deploy"), RunState::Running, now), trail_run(&dev_a, None, RunState::Waiting, now));
+    let done = trail_run(&dev_a, Some("deploy"), RunState::Done { result: serde_json::Value::Null }, now);
+    let others = trail_run(&dev_b, Some("deploy"), RunState::Running, now);
+    let put = async |js: &jetstream::Context, run: &TrailRun| {
+        let runs = DirectKv::new(js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+        runs.put(trail_run_key(&run.conductor, &run.run), serde_json::to_vec(run).unwrap()).await.unwrap();
+    };
+    for run in [&running, &stopped, &done] {
+        put(&a_js, run).await;
+    }
+    put(&b_js, &others).await;
+    let index = TrailRunIndex { runs: vec![running.run.clone(), stopped.run.clone(), done.run.clone()] };
+    let a_runs = DirectKv::new(&a_js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    a_runs.put(trail_runs_index_key(&dev_a), serde_json::to_vec(&index).unwrap()).await.unwrap();
+
+    let conn = crate::connection::Connection { nats: &server.url, creds: None, js_domain: None, human: None };
+    crate::cmd::auth::revoke_credentials(None, vec![key], Vec::new(), false, Some(team.clone()), &conn).await.unwrap();
+
+    let runs = DirectKv::whole(&h_js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    let header = async |run: &TrailRun| -> TrailRun {
+        let stored = runs.get(trail_run_key(&run.conductor, &run.run)).await.unwrap().unwrap();
+        serde_json::from_slice(&stored).unwrap()
+    };
+    let why = "its conductor dev-a was retired or revoked, so no daemon conducts it any more";
+    let mut told = Vec::new();
+    for seq in 1..=stream.get_info().await.unwrap().state.last_sequence {
+        let message = stream.get_raw_message(seq).await.unwrap();
+        if message.subject.as_str() == subject::inbox(&human, &dev_a) {
+            told.push(serde_json::from_slice::<Envelope>(&message.payload).unwrap());
+        }
+    }
+    assert_eq!(told.len(), 2, "{told:?}");
+    for run in [&running, &stopped] {
+        let ended = header(run).await;
+        assert_eq!(ended.state, RunState::Failed { error: why.to_owned(), limit: None });
+        assert!(ended.ended_at.is_some());
+        let told = told.iter().find(|told| told.thread_id == run.thread).expect("the owner is told on the thread");
+        assert!(told.text.contains(run.run.as_str()) && told.text.contains(why), "{}", told.text);
+    }
+    assert_eq!(header(&done).await, done, "a finished run stays as it was");
+    assert_eq!(header(&others).await, others, "another conductor's run stays as it was");
+    let index: TrailRunIndex =
+        serde_json::from_slice(&runs.get(trail_runs_index_key(&dev_a)).await.unwrap().unwrap()).unwrap();
+    assert!(index.runs.is_empty(), "no run is left in the conductor's index");
+}
+
 #[tokio::test]
 async fn humans_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
     use ants_proto::{

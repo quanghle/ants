@@ -8,11 +8,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_daemon::records::direct_kv::DirectKv;
+use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_daemon::secrets::creds::Finding;
 use ants_daemon::secrets::keystore;
 use ants_daemon::{bus, colony, config};
-use ants_proto::{COLONY_BUCKET, ColonyEntry, ENROLL_INBOX, JsDomain, LeafRole, Machine, UserId};
+use ants_proto::{
+    COLONY_BUCKET, ColonyEntry, ENROLL_INBOX, Envelope, JsDomain, LeafRole, Machine, RunState, TRAIL_RUNS_BUCKET,
+    TrailRun, TrailRunIndex, UserId, trail_run_key, trail_runs_index_key,
+};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::Context;
 
@@ -52,6 +55,12 @@ pub(crate) async fn clean_consumers(url: &str, domain: Option<&JsDomain>, dir: &
         }
         if !crate::signing::signer::live(dir)?.iter().any(|key| key.name == ant.as_str()) {
             bus::forget_retired(&js, ant).await?;
+            if let Err(e) = end_runs(&js, domain, ant).await {
+                tracing::warn!(
+                    %ant, error = format!("{e:#}"),
+                    "ending the trail runs of the retired ant; retry the same key revocation on the hub"
+                );
+            }
         }
         Ok::<(), anyhow::Error>(())
     };
@@ -61,6 +70,44 @@ pub(crate) async fn clean_consumers(url: &str, domain: Option<&JsDomain>, dir: &
             "deleting consumers of the retired ant; retry the same key revocation on the hub once no daemon serves it"
         );
     }
+}
+
+/// End the trail runs `ant` conducted that are left unfinished, no daemon conducting them any more: each fails, its
+/// owner told why on its thread as its daemon would have, and the conductor's index of unfinished runs empties.
+async fn end_runs(js: &Context, domain: Option<&JsDomain>, ant: &UserId) -> Result<()> {
+    let kv = DirectKv::new(js, domain, TRAIL_RUNS_BUCKET).await?;
+    let index: TrailRunIndex = match kv.lookup(trail_runs_index_key(ant)).await? {
+        Lookup::Value(index) => serde_json::from_slice(&index).context("reading the index of the runs")?,
+        Lookup::NoValue | Lookup::NoBucket => return Ok(()),
+    };
+    if index.runs.is_empty() {
+        return Ok(());
+    }
+    let why = format!("its conductor {ant} was retired or revoked, so no daemon conducts it any more");
+    for id in &index.runs {
+        let Some(run) = kv.get(trail_run_key(ant, id)).await? else { continue };
+        let mut run: TrailRun = serde_json::from_slice(&run).with_context(|| format!("reading run {id}"))?;
+        if run.finished() {
+            continue;
+        }
+        let now = chrono::Utc::now();
+        run.state = RunState::Failed { error: why.clone(), limit: None };
+        (run.ended_at, run.updated_at) = (Some(now), now);
+        kv.put(trail_run_key(ant, &run.run), serde_json::to_vec(&run)?).await?;
+        tracing::info!(%ant, run = %run.run, "ended a trail run of the retired conductor");
+        if let (None, Some(owner)) = (&run.parent, &run.owner) {
+            let name = match run.first_trail() {
+                Some(trail) => format!("Run {} of trail {trail}", run.run),
+                None => format!("Run {} of an inline script", run.run),
+            };
+            let text = format!("{name} failed ({} steps, {} turns): {why}", run.steps, run.turns);
+            let told =
+                Envelope::on_thread(run.thread.clone(), ant.clone(), owner.clone(), text).with_owner(run.owner.clone());
+            bus::publish(js, &told).await?;
+        }
+    }
+    kv.put(trail_runs_index_key(ant), serde_json::to_vec(&TrailRunIndex::default())?).await?;
+    Ok(())
 }
 
 /// An ant whose entry left the config file.

@@ -55,8 +55,10 @@ Renewing credentials (`ants renew`) leaves the key renewed valid until it expire
 
 After applying a revocation that leaves an ant or assistant no live key, `ants auth revoke`, `ants retire`,
 `ants assistant disable --retire`, and `ants signer` also remove the ant's durable `chan-<ant>` and `done-<ant>`
-consumers if the colony shows no live daemon serving it. The inbox consumer stays. Cleanup uses temporary
-credentials scoped to that ant and those two consumers. If cleanup was skipped with `--no-push`, or the hub could
+consumers if the colony shows no live daemon serving it. The inbox consumer stays. They also end the trail runs it
+conducted and left unfinished, each failed and its owner told on the run's thread as the ant
+([trails.md](trails.md#restarts-stops-and-resumes)). Cleanup uses temporary credentials scoped to that ant: its
+colony entry, those two consumers, its own keys of `ants_trail_runs` and messages from it. If cleanup was skipped with `--no-push`, or the hub could
 not be reached for cleanup, repeat `ants auth revoke --key K` directly against the hub, without `--no-push`, once
 the ant is no longer served.
 

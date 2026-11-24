@@ -64,8 +64,9 @@ pub use settings::{
     Config, Connection, HarnessSettings, Policy, Pooling, Presence, Spending, Storage, WorktreeSettings,
 };
 use setup::{
-    Bus, Services, connect, delivery_marks, enter_colony, forget_if_retired, growth, harness_pool, inbox_messages,
-    publisher, services, settle_worktrees, storage_watcher, take_turn, trails, unsealed, wind_down, workload,
+    Bus, Services, connect, delivery_marks, end_runs_if_retired, enter_colony, forget_if_retired, growth, harness_pool,
+    inbox_messages, publisher, services, settle_worktrees, storage_watcher, take_turn, trails, unsealed, wind_down,
+    workload,
 };
 
 /// Period of the progress acks sent for every message in hand, from its arrival to its ack: waiting for its thread,
@@ -315,6 +316,7 @@ async fn serve(
     };
     let beside = Beside { config, stop, registration: &registration, storage: &storage };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, beside)).await?;
+    end_runs_if_retired(&served, config, inbox.trails.as_ref(), retired_before).await;
     forget_if_retired(&served, config, &js, retired_before).await;
     wind_down(&served, registration, pool, lifecycle.as_ref(), growth(config, provider.identity, providers)).await;
     Ok(served)
