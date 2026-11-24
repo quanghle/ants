@@ -205,9 +205,9 @@ fn summary_note(summary: &SummaryRequest) -> String {
 /// sent back.
 pub(in crate::daemon) fn own_reply_note(from: &UserId, post: bool, spent: bool) -> String {
     let (what, going_on) = if post {
-        ("a post this ant made", "post_channel on this thread (or send_message)")
+        ("a post this ant made", "post_channel with on_thread on this thread (or send_message)")
     } else {
-        ("a message this ant sent", "send_message (or post_channel on a channel)")
+        ("a message this ant sent", "send_message (or post_channel to start a thread on a channel)")
     };
     if spent {
         return format!(
@@ -227,7 +227,7 @@ pub(in crate::daemon) fn late_reply_note(from: &UserId, spent: bool) -> String {
     let going_on = if spent {
         "send_message to a human who asked, or escalate, as the thread has no turns left for ants"
     } else {
-        "send_message (or post_channel on a channel's thread)"
+        "send_message (post_channel with on_thread answers only a channel post being handled)"
     };
     format!(
         "[ants] {from} replied to an ask_ant or route call on this thread after the call gave up; the answer to this \

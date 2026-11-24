@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ants_proto::{Attachment, AttachmentHandle, Envelope, ThreadId, ThreadTitle, Uuid};
+use ants_proto::{Attachment, AttachmentHandle, ChannelPost, Envelope, ThreadId, ThreadTitle, Uuid};
 use chrono::{DateTime, Utc};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -69,19 +69,30 @@ impl Mcp {
     pub fn begin(&self, envelope: &Envelope) -> Turn {
         let mut sessions = self.hub.sessions.locked();
         let turn = sessions.turns.entry(envelope.thread_id.clone());
-        turn.and_modify(|turn| turn.current = envelope.clone()).or_insert_with(|| TurnState::of(envelope.clone()));
+        turn.and_modify(|turn| {
+            turn.current = envelope.clone();
+            turn.post = None;
+        })
+        .or_insert_with(|| TurnState::of(envelope.clone()));
         drop(sessions);
         Turn { hub: self.hub.clone(), thread: envelope.thread_id.clone() }
     }
 
     /// Make `envelope`, a message that joined the prompt running on its thread, the message the thread handles, as
-    /// [`Mcp::begin`] does, while the turn of the message the prompt started with lasts; the session may read the
-    /// files attached to either, which the hub stored at `stored`.
-    pub fn steer_to(&self, envelope: &Envelope, handles: Vec<AttachmentHandle>, stored: Option<DateTime<Utc>>) {
+    /// [`Mcp::begin`] does, while the turn of the message the prompt started with lasts, made of `post` when a channel
+    /// post ([`Turn::answering`]); the session may read the files attached to either, which the hub stored at `stored`.
+    pub fn steer_to(
+        &self,
+        envelope: &Envelope,
+        post: Option<(ChannelPost, u64)>,
+        handles: Vec<AttachmentHandle>,
+        stored: Option<DateTime<Utc>>,
+    ) {
         let thread = &envelope.thread_id;
         let mut sessions = self.hub.sessions.locked();
         let Some(turn) = sessions.turns.get_mut(thread) else { return };
         turn.current = envelope.clone();
+        turn.post = post;
         let Some(stored) = stored.filter(|_| !handles.is_empty()) else { return };
         let carried = turn.carried.get_or_insert_with(|| (Vec::new(), stored));
         carried.0.extend(handles);
@@ -104,6 +115,16 @@ impl Turn {
             && let Some(turn) = self.hub.sessions.locked().turns.get_mut(&self.thread)
         {
             turn.carried = Some((handles, stored));
+        }
+        self
+    }
+
+    /// Made of `post`, a channel post with its stream sequence in the ant's inbox stream, which `post_channel` with
+    /// `on_thread` answers on its thread.
+    #[must_use]
+    pub fn answering(self, post: Option<(ChannelPost, u64)>) -> Self {
+        if let Some(turn) = self.hub.sessions.locked().turns.get_mut(&self.thread) {
+            turn.post = post;
         }
         self
     }

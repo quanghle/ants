@@ -156,9 +156,7 @@ impl Inbox<'_> {
     /// Give the posts of `humans` among the `later` ones of a channel thread the ant's fresh budget, as admitting them
     /// would ([`ChannelPost::turns_left`] resets to it), whatever their client stamped.
     pub(super) fn fresh_budgets(&self, later: &mut [ChannelPost], humans: &Humans) {
-        for post in later.iter_mut().filter(|post| post.by_human(humans)) {
-            post.turn_budget = self.escalator.turn_budget();
-        }
+        fresh_budgets(later, humans, self.escalator.turn_budget());
     }
 
     /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, a reply to an `ask_ant`
@@ -401,5 +399,13 @@ impl Inbox<'_> {
                 None
             }
         }
+    }
+}
+
+/// Give the posts of `humans` among the `later` ones of a channel thread `budget`, the ant's fresh one
+/// ([`Inbox::fresh_budgets`]).
+pub(super) fn fresh_budgets(later: &mut [ChannelPost], humans: &Humans, budget: u32) {
+    for post in later.iter_mut().filter(|post| post.by_human(humans)) {
+        post.turn_budget = budget;
     }
 }

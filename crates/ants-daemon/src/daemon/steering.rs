@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use ants_proto::{AttachmentHandle, NoReplyWhy, NoticeKind};
+use ants_proto::{AttachmentHandle, ChannelPost, NoReplyWhy, NoticeKind};
 use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, oneshot};
 
@@ -32,6 +32,8 @@ pub(super) struct Join {
     /// The handles of the files attached to it, which the hub stored at `stored`.
     pub(super) carried: Vec<AttachmentHandle>,
     pub(super) stored: Option<DateTime<Utc>>,
+    /// The channel post it was made of, with its stream sequence.
+    pub(super) post: Option<(ChannelPost, u64)>,
     /// What the prompt is steered with.
     pub(super) text: String,
     /// What came of it; dropped when the prompt failed, the message then waiting its turn again.
@@ -104,7 +106,7 @@ impl Inbox<'_> {
         text: String,
     ) -> Result<Option<(Ran, tokio::sync::oneshot::Sender<()>)>> {
         let envelope = &incoming.envelope;
-        match self.join(incoming, msg, text).await {
+        match self.join(incoming, msg, seq, text).await {
             Some(Joined::Answer(ran, answering)) => Ok(Some((*ran, answering))),
             Some(Joined::Superseded(by, id)) => self.superseded(h, own, (&by, id)).await.map(|()| None),
             Some(Joined::Refused) => {
@@ -123,7 +125,13 @@ impl Inbox<'_> {
     }
 
     /// Join the prompt running on the thread of `incoming` with `text`: what came of it, None when the prompt failed.
-    pub(super) async fn join(&self, incoming: &Incoming, msg: &jetstream::Message, text: String) -> Option<Joined> {
+    pub(super) async fn join(
+        &self,
+        incoming: &Incoming,
+        msg: &jetstream::Message,
+        seq: u64,
+        text: String,
+    ) -> Option<Joined> {
         let envelope = &incoming.envelope;
         let stored = crate::files::stored(msg);
         let text = match Attached::new(self.js.clone(), incoming.attached(), stored) {
@@ -132,7 +140,8 @@ impl Inbox<'_> {
         };
         let carried = incoming.attached().into_iter().map(|(handle, _)| handle).collect();
         let (joined, outcome) = tokio::sync::oneshot::channel();
-        let join = Join { envelope: envelope.clone(), carried, stored, text, joined };
+        let post = incoming.post.as_ref().map(|posted| (posted.post.clone(), seq));
+        let join = Join { envelope: envelope.clone(), carried, stored, post, text, joined };
         if !self.running.steers.join(join) {
             return Some(Joined::Refused);
         }
@@ -242,7 +251,7 @@ impl Inbox<'_> {
             return;
         }
         if let Some(mcp) = self.mcp {
-            mcp.steer_to(envelope, join.carried.clone(), join.stored);
+            mcp.steer_to(envelope, join.post.clone(), join.carried.clone(), join.stored);
         }
         joined.push(join);
     }

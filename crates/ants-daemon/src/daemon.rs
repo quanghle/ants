@@ -259,7 +259,11 @@ async fn serve(
     let (services, launch) = services(shared, allow, &entry.machine).await?;
     let Services { redactor, reading, sessions_kv, lifecycle, .. } = &services;
     let stream = bus::open_stream(&js, &config.ant).await?;
-    let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(*reading);
+    let threads =
+        std::sync::Arc::new(Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(*reading));
+    let turn_budget = services.escalator.turn_budget();
+    let poster = delivery::thread_poster(js.clone(), threads.clone(), humans.clone(), turn_budget, redactor.clone());
+    services.mcp.with_thread_posts(poster);
     let storage = storage_watcher(config, &js, sessions_kv);
     let sessions = SessionStore::kv(sessions_kv.clone(), config.ant.clone());
     let (outbox, attempts_kv) = (services.outbox.clone(), services.attempts_kv.clone());

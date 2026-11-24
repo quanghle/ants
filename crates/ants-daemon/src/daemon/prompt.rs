@@ -110,9 +110,10 @@ impl Unnarrowed {
 }
 
 /// The turn of `incoming`, the message its thread handles now, on the ant's MCP server ([`crate::mcp::Mcp::begin`]).
-fn begin_turn(mcp: &crate::mcp::Mcp, incoming: &Incoming, msg: &jetstream::Message) -> crate::mcp::Turn {
+fn begin_turn(mcp: &crate::mcp::Mcp, incoming: &Incoming, msg: &jetstream::Message, seq: u64) -> crate::mcp::Turn {
     let carried = incoming.attached().into_iter().map(|(handle, _)| handle).collect();
-    mcp.begin(&incoming.envelope).carrying(carried, crate::files::stored(msg))
+    let post = incoming.post.as_ref().map(|posted| (posted.post.clone(), seq));
+    mcp.begin(&incoming.envelope).carrying(carried, crate::files::stored(msg)).answering(post)
 }
 
 impl Inbox<'_> {
@@ -224,7 +225,7 @@ impl Inbox<'_> {
         let joining = incoming.steered == Steered::Joining;
         self.warn_unnarrowed(incoming);
         let _narrowed = self.narrow_turn(envelope, joining);
-        let _turn = self.mcp.filter(|_| !joining).map(|mcp| begin_turn(mcp, incoming, msg));
+        let _turn = self.mcp.filter(|_| !joining).map(|mcp| begin_turn(mcp, incoming, msg, seq));
         let _asking = self.approvals.filter(|_| !joining).map(|approvals| approvals.begin(envelope));
         let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off, own.then_some(spent)).await;
         let (text, _checkouts) = self.review_checkouts(incoming, msg, joining, text).await;
