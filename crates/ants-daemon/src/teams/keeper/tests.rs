@@ -69,9 +69,27 @@ async fn the_keeper_changes_only_the_teams_an_ant_manages() {
     let humans = DirectKv::new(&js, None, HUMANS_BUCKET).await.unwrap();
     let (identities, humans) = (Some(identities), Some(humans));
     let changer = Changer { client: a.clone(), kv: kv.clone(), identities, humans, signer: false };
+    let mut status = a.subscribe(subject::status_of(&p("boss"))).await.unwrap();
+    a.flush().await.unwrap();
     let create = vec![TeamOp::CreateTeam { team: p("db"), lead: Some(p("dev-b")), description: None }];
     let outcome = changer.change(&p("boss"), &p("backend"), create, None).await.unwrap();
     assert!(matches!(outcome, Some(TeamAdminOutcome::Applied { .. })), "{outcome:?}");
+    let mut told = Vec::new();
+    for _ in 0..2 {
+        let msg = tokio::time::timeout(Duration::from_secs(5), futures::StreamExt::next(&mut status)).await;
+        let event: ants_proto::StatusEvent = serde_json::from_slice(&msg.unwrap().unwrap().payload).unwrap();
+        let ants_proto::StatusUpdate::TeamChanged { team, change, entry, parent } = event.update else { panic!() };
+        assert_eq!(event.thread_id.as_str(), team.as_str(), "on the thread the team names");
+        told.push((team, change, entry.and_then(|e| e.lead), parent));
+    }
+    assert_eq!(
+        told,
+        [
+            (p("backend"), ants_proto::TeamChange::Changed, Some(p("dev-a")), Some(p("eng"))),
+            (p("db"), ants_proto::TeamChange::Created, Some(p("dev-b")), Some(p("backend"))),
+        ],
+        "the team changed and the team created, on the status of the ant changing them"
+    );
     let (directory, _) = super::super::read_checked(&kv).await.unwrap();
     assert_eq!(directory.holder(&p("db")).unwrap().team, p("backend"));
     assert_eq!(directory.team(&p("db")).unwrap().created_by, p("boss"));

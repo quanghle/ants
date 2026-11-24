@@ -36,6 +36,15 @@ pub struct HumanEntry {
     completion_window: Option<String>,
     /// Whether a question an ant asks the human (ask_human) is notified: as escalations are, unless set.
     questions: Option<bool>,
+    /// Whether a message another human sends the human is notified.
+    #[serde(default = "yes")]
+    messages: bool,
+    /// Whether a channel post that @mentions the human is notified.
+    #[serde(default = "yes")]
+    mentions: bool,
+    /// Whether the end of a trail run whose end is told to the human is notified.
+    #[serde(default = "yes")]
+    runs: bool,
     /// The daily window notices are held back in, such as `22:00-07:00`.
     quiet: Option<String>,
     /// The time zone `quiet` reads in, instead of the file's.
@@ -119,6 +128,9 @@ pub struct Human {
     /// How long a thread is quiet before its replies are notified, folded into one: zero for each as it comes.
     pub(super) completion_window: Duration,
     pub(super) questions: bool,
+    pub(super) messages: bool,
+    pub(super) mentions: bool,
+    pub(super) runs: bool,
     pub(super) quiet: Option<QuietHours>,
     pub(super) bypass: Vec<Bypass>,
     /// Who gets what waits for the human while it is away, unless an ant names its own stand-in ([`relayed`]).
@@ -331,8 +343,12 @@ impl Human {
             (true, Some(ants)) => Some(ants),
         };
         let questions = entry.questions.unwrap_or(entry.escalations);
-        if approvals.is_none() && !entry.escalations && !entry.completions && !questions {
-            bail!("approvals, escalations, completions and questions are all off: nothing to notify");
+        let inbox = [entry.escalations, entry.completions, questions, entry.messages, entry.mentions, entry.runs];
+        if approvals.is_none() && !inbox.contains(&true) {
+            bail!(
+                "approvals, escalations, completions, questions, messages, mentions and runs are all off: nothing to \
+                 notify"
+            );
         }
         let completion_window = match entry.completion_window {
             Some(_) if !entry.completions => bail!("completion_window goes with completions = true only"),
@@ -372,6 +388,9 @@ impl Human {
             completions: entry.completions,
             completion_window,
             questions,
+            messages: entry.messages,
+            mentions: entry.mentions,
+            runs: entry.runs,
             quiet,
             bypass: entry.bypass,
             stand_in: entry.stand_in,
@@ -423,8 +442,8 @@ impl Human {
     /// The consumer's subjects: tool requests and the human's inbox, as configured.
     pub(super) fn subjects(&self) -> Vec<String> {
         let approvals = self.approvals.is_some().then(|| subject::ALL_APPROVAL_REQUESTS.to_owned());
-        let escalations =
-            (self.escalations || self.completions || self.questions).then(|| subject::inbox_of(&self.name));
+        let inbox = [self.escalations, self.completions, self.questions, self.messages, self.mentions, self.runs];
+        let escalations = inbox.contains(&true).then(|| subject::inbox_of(&self.name));
         approvals.into_iter().chain(escalations).collect()
     }
 

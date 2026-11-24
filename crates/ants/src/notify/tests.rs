@@ -30,7 +30,10 @@ use serde_json::{Value, json};
 
 use super::config::{NTFY, QuietHours, Sink, TELEGRAM};
 use super::links::{Action, LinkError, details, html};
-use super::notices::{Button, counted, notice_json};
+use super::notices::{
+    Button, action_notice, completion_notice, counted, escalation_notice, mention_notice, message_notice, notice_json,
+    question_notice, run_notice,
+};
 use super::sinks::{Delivery, cut};
 use super::*;
 

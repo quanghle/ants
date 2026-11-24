@@ -132,6 +132,10 @@ pub(crate) enum Command {
         /// The post. Without it, show the notes.
         #[arg(value_name = "TEXT")]
         text: Vec<String>,
+        /// One JSON object per post, the `NotesPost` with `by` naming its author as the text does; with TEXT, the
+        /// post made.
+        #[arg(long)]
+        json: bool,
     },
     /// React to a message as the CLI's user, such as `eyes` for seen or `check` for done, or remove the reaction with
     /// --remove. A reaction is no message: it wakes nobody, marks nothing read and ends no wait for a reply. Humans see

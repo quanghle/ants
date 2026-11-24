@@ -30,15 +30,16 @@ fn a_human_has_sinks_and_what_to_be_notified_of() {
     assert_eq!(quiet.subjects(), ["ants.inbox.bob.>"]);
     assert!(!quiet.wants_request_of(&p("dev-a")));
     assert_matches!(&quiet.sinks[0].sink, Sink::Ntfy { url, .. } if url == "http://ntfy.lan");
-    let every = human(&format!("name = \"bob\"\nescalations = false\n{NTFY_SINK}")).unwrap();
+    let off = "escalations = false\nmessages = false\nmentions = false\nruns = false\n";
+    let every = human(&format!("name = \"bob\"\n{off}{NTFY_SINK}")).unwrap();
     assert_eq!(every.subjects(), ["ants.approvals.*"]);
-    let asked = human(&format!("name = \"bob\"\nescalations = false\nquestions = true\n{NTFY_SINK}")).unwrap();
+    let asked = human(&format!("name = \"bob\"\n{off}questions = true\n{NTFY_SINK}")).unwrap();
     assert_eq!(asked.subjects(), ["ants.approvals.*", "ants.inbox.bob.>"], "questions follow escalations unless set");
     assert!(every.wants_request_of(&p("dev-b")));
 
     for (text, why) in [
         ("name = \"bob\"\n".to_owned(), "nowhere to send"),
-        (format!("name = \"bob\"\napprovals = false\nescalations = false\n{NTFY_SINK}"), "nothing to notify"),
+        (format!("name = \"bob\"\napprovals = false\n{off}{NTFY_SINK}"), "nothing to notify"),
         (format!("name = \"bob\"\napprovals = false\nants = [\"dev-a\"]\n{NTFY_SINK}"), "approvals = true only"),
         (format!("name = \"bob\"\nants = []\n{NTFY_SINK}"), "give the ants"),
         ("name = \"bob\"\n[[notify]]\nkind = \"ntfy\"\n".to_owned(), "ntfy needs topic"),

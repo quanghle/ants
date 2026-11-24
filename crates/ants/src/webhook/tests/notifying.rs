@@ -1,5 +1,6 @@
 //! Tests of the service notifying humans: test notices, tool requests and escalations decided on a link, pushes
-//! to the devices not following, held notices, folded replies and digests.
+//! to the devices not following, held notices, folded replies and digests, messages from humans, mentions and run
+//! ends.
 
 use super::*;
 
@@ -533,4 +534,107 @@ async fn one_digest_of_what_a_snooze_held_back_follows_its_end_across_services()
     let seq = stream.get_last_raw_message_by_subject(&asked.subject()).await.unwrap().sequence;
     let state = crate::tools::state(&own, &stream, seq, &asked, chrono::Utc::now()).await.unwrap();
     assert_matches!(state, crate::tools::State::Pending, "still pending");
+}
+
+#[tokio::test]
+async fn messages_from_humans_mentions_and_run_ends_reach_the_sinks_held_like_the_others_and_in_the_digest() {
+    let Some((server, _, _)) = hub().await else { return };
+    let (alice, bob, dev_a, lead) = (p("alice"), p("bob"), p("dev-a"), p("lead"));
+    let creds = server.creds_as(&alice, ants_proto::Role::Human);
+    let (_, own) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+    let humans = crate::people::humans::ensure(&own).await.unwrap();
+    for human in [&alice, &bob] {
+        let entry = ants_proto::HumanEntry::new(human.clone());
+        humans.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+    }
+    let secret = server.dir().join("notices.secret");
+    private(&secret, "0123456789abcdef-notices");
+    let (sink, mut posts) = sink().await;
+    let config = server.dir().join("webhooks.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[[human]]\nname = \"alice\"\ncreds = {creds:?}\ndigest = true\n\
+                 [[human.notify]]\nkind = \"http\"\nurl = \"http://{sink}/notices\"\nsecret_file = {secret:?}\n"
+        ),
+    )
+    .unwrap();
+    let (_service, _) = start(&config, &server.url).await;
+    let stream = own.get_stream(STREAM).await.unwrap();
+    for _ in 0..100 {
+        if stream.consumer_info(&ants_proto::notify_consumer(&alice)).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, from_bob) = server.connect_as(&bob, ants_proto::Role::Human).await;
+    let (_, from_dev_a) = server.connect(&dev_a).await;
+    let (_, from_lead) = server.connect(&lead).await;
+    let send = async |js: &jetstream::Context, envelope: &Envelope| {
+        js.publish(envelope.subject(), serde_json::to_vec(envelope).unwrap().into()).await.unwrap().await.unwrap();
+    };
+    let three = async |thread: &ThreadId| {
+        send(&from_bob, &Envelope::on_thread(thread.clone(), bob.clone(), alice.clone(), "lunch?")).await;
+        let mention =
+            ants_proto::Mention { channel: "ops".parse().unwrap(), post: ants_proto::Uuid::now_v7(), author: None };
+        let post = Envelope::on_thread(thread.clone(), dev_a.clone(), alice.clone(), "@alice the build is red");
+        send(&from_dev_a, &Envelope { mention: Some(mention), ..post }).await;
+        let end = ants_proto::TrailEnd { run: "r1".parse().unwrap(), trail: None, state: ants_proto::RunEnd::Done };
+        let ended = Envelope::on_thread(thread.clone(), lead.clone(), alice.clone(), "Run r1 done").ending(Some(end));
+        send(&from_lead, &ended).await;
+    };
+    let kinds = async |posts: &mut mpsc::UnboundedReceiver<(String, Value)>, n: usize| {
+        let mut got = Vec::new();
+        for _ in 0..n {
+            let (path, body) = next(posts).await;
+            assert_eq!(path, "/notices");
+            got.push((body["kind"].as_str().unwrap().to_owned(), body["title"].as_str().unwrap().to_owned()));
+        }
+        got.sort();
+        got
+    };
+    let pair = |kind: &str, title: &str| (kind.to_owned(), title.to_owned());
+    let pushed = [
+        pair("mention", "dev-a mentions alice in #ops"),
+        pair("message", "bob wrote"),
+        pair("run", "lead: run of an inline script done"),
+    ];
+    let thread = ThreadId::generate();
+    three(&thread).await;
+    assert_eq!(kinds(&mut posts, 3).await, pushed);
+
+    let hold = async |change: &(dyn Fn(&mut ants_proto::NotifyPrefs, chrono::DateTime<chrono::Utc>) + Sync)| {
+        crate::people::quiet::update(&own, &alice, change).await.unwrap();
+    };
+    hold(&|prefs, now| prefs.snoozed_until = Some(now + chrono::TimeDelta::hours(1))).await;
+    three(&thread).await;
+    let notify = own.get_key_value(ants_proto::NOTIFY_BUCKET).await.unwrap();
+    let key = ants_proto::held_key(&alice);
+    let mut counts = std::collections::BTreeMap::new();
+    for _ in 0..100 {
+        if let Some(value) = notify.get(&key).await.unwrap() {
+            counts = serde_json::from_slice::<ants_proto::HeldNotices>(&value).unwrap().counts;
+            if counts.values().sum::<u32>() == 3 {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let one = |kind: &str| (kind.to_owned(), 1);
+    assert_eq!(counts, std::collections::BTreeMap::from([one("mention"), one("message"), one("run")]));
+    assert!(timeout(Duration::from_millis(500), posts.recv()).await.is_err(), "held back while snoozed");
+
+    let muted = ThreadId::generate();
+    hold(&|prefs, now| {
+        prefs.snoozed_until = None;
+        prefs.muted.insert(muted.clone(), now + chrono::TimeDelta::hours(1));
+    })
+    .await;
+    let (_, digest) = next(&mut posts).await;
+    assert_eq!(digest["kind"], "digest");
+    assert_eq!(digest["counts"], serde_json::json!({ "mention": 1, "message": 1, "run": 1 }));
+    three(&muted).await;
+    send(&from_bob, &Envelope::on_thread(thread.clone(), bob.clone(), alice.clone(), "still on?")).await;
+    assert_eq!(kinds(&mut posts, 1).await, [pair("message", "bob wrote")], "a mute holds back the others");
+    assert!(timeout(Duration::from_millis(500), posts.recv()).await.is_err(), "nothing held sent later");
 }

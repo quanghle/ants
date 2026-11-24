@@ -42,7 +42,8 @@
 //!
 //! A reply is not notified as it comes but once its thread has been quiet for the human's `completion_window`, folded
 //! with the other replies on the thread meanwhile ([`replies`]): held in memory by the process that took it, so a
-//! restart drops what waits.
+//! restart drops what waits. A trail run's human() question that quiet hours hold back is kept in memory the same way
+//! and pushed once they end, checked every [`DIGEST_EVERY`], unless a snooze or a mute holds it then.
 //!
 //! Each human's reminders ([`ants_proto::Reminders`]) are checked every [`REMIND_EVERY`]: one process marks those due
 //! pushed with compare-and-set and sends them, neither a snooze nor quiet hours holding them back.
@@ -68,8 +69,8 @@ use futures::StreamExt as _;
 use tokio::sync::OnceCell;
 
 use self::notices::{
-    About, Notice, action_notice, approval_notice, completion_notice, digest_notice, escalation_notice, held, holding,
-    question_notice, relayed, reminder_notice, unserved_notice,
+    About, Notice, approval_notice, digest_notice, held, holding, inbox_notice, relayed, reminder_notice,
+    unserved_notice,
 };
 use self::sinks::send;
 use crate::cas;
@@ -124,6 +125,10 @@ const DIGEST_PENDING: usize = 10;
 const REMIND_EVERY: Duration = if cfg!(test) { Duration::from_millis(200) } else { Duration::from_secs(30) };
 /// How many times a held notice is counted again when another process counted or claimed meanwhile.
 const CONFLICTS: usize = 10;
+/// Most trail runs' questions a human's process keeps for the end of quiet hours: the oldest goes first.
+const LATER: usize = 64;
+/// How long the notifier waits for the humans bucket's first read before taking notices.
+const HUMANS_WAIT: Duration = Duration::from_secs(2);
 
 // ---- watching --------------------------------------------------------------------------------------------------
 
@@ -149,11 +154,42 @@ pub struct Notified {
     bus: OnceCell<HumanBus>,
     recent: Mutex<VecDeque<u64>>,
     replies: Mutex<replies::Replies>,
+    /// The trail runs' questions quiet hours held back, with their stream sequences, pushed once they end.
+    later: Mutex<VecDeque<(Notice, u64)>>,
 }
 
 impl Notified {
     pub fn new(config: Human) -> Self {
-        Self { config, bus: OnceCell::new(), recent: Mutex::default(), replies: Mutex::default() }
+        Self {
+            config,
+            bus: OnceCell::new(),
+            recent: Mutex::default(),
+            replies: Mutex::default(),
+            later: Mutex::default(),
+        }
+    }
+
+    /// Keep `notice`, of the message at `seq`, for the end of quiet hours, dropping the oldest past [`LATER`].
+    fn keep_for_later(&self, notice: Notice, seq: u64) {
+        let mut later = self.later.locked();
+        if later.len() == LATER {
+            later.pop_front();
+        }
+        later.push_back((notice, seq));
+    }
+
+    /// The notices kept for the end of quiet hours that no longer wait at `now`, given the holds `prefs`, with why
+    /// each is still held, if it is: what quiet hours still hold stays.
+    fn due_later(&self, prefs: &NotifyPrefs, now: DateTime<Utc>) -> Vec<(Notice, u64, Option<&'static str>)> {
+        let mut later = self.later.locked();
+        let mut due = Vec::new();
+        for (notice, seq) in std::mem::take(&mut *later) {
+            match held(&self.config, &notice.about, prefs, now) {
+                Some("quiet hours") => later.push_back((notice, seq)),
+                why => due.push((notice, seq, why)),
+            }
+        }
+        due
     }
 
     /// Whether its connection is made and up.
@@ -214,6 +250,8 @@ pub async fn run(
     let unserved = unserved_watch(&human.config, &js, js_domain.as_ref()).await;
     let humans = Registry::new(name.clone()).verifying_grants(ants_daemon::people::humans::account(creds));
     let _watching = humans.watch(js.clone(), ants_daemon::people::humans::RETRY);
+    // Whether a message comes from a human is the bucket's say: its first read is waited for, not for ever.
+    let _ = tokio::time::timeout(HUMANS_WAIT, humans.loaded()).await;
     let _ = human.bus.set(HumanBus { client, js, stream, present, prefs, humans, _watching, held });
     let bus = human.bus.get().expect("just set");
     tracing::info!(human = %name, sinks = ?human.config.sinks, "notifying");
@@ -222,6 +260,7 @@ pub async fn run(
     let mut digests = Box::pin(digests(&human.config, bus));
     let mut reminders = Box::pin(remind(&human.config, bus, js_domain.as_ref()));
     let mut replies = Box::pin(replies_due(&human, bus));
+    let mut later = Box::pin(later_due(&human, bus));
     let mut delay = Duration::from_secs(1);
     loop {
         let watched = tokio::select! {
@@ -231,6 +270,7 @@ pub async fn run(
             never = &mut digests => match never {},
             never = &mut reminders => match never {},
             never = &mut replies => match never {},
+            never = &mut later => match never {},
         };
         match watched {
             Ok(()) => delay = Duration::from_secs(1),
@@ -292,17 +332,8 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
     let notice = if inbox {
         match ants_client::inbox::parse(subject, payload) {
             Ok(envelope) if is_recent(&envelope.id, now) => {
-                match (envelope.escalation.is_some(), envelope.question.is_some()) {
-                    (true, _) if config.escalations => {
-                        escalation_notice(&envelope).filter(|notice| !config.gets_relayed_request(&notice.about))
-                    }
-                    (false, true) if config.questions => question_notice(&envelope),
-                    (false, false) if envelope.notice.is_some() => {
-                        action_notice(&envelope).filter(|_| config.escalations)
-                    }
-                    (false, false) if config.completions => completion_notice(&envelope),
-                    _ => None,
-                }
+                let from_human = bus.humans.sender_role(&envelope).is_human();
+                inbox_notice(config, &envelope, from_human)
             }
             _ => None,
         }
@@ -337,12 +368,22 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
         human.replies.locked().add(notice, seq, now);
         return;
     }
-    deliver(config, bus, &notice, seq, inbox, now).await;
+    if deliver(config, bus, &notice, seq, inbox, now).await == Some("quiet hours") && notice.about.is_run_question() {
+        human.keep_for_later(notice, seq);
+    }
 }
 
 /// Send `notice`, of the message at `seq` (in the human's inbox if `inbox`, else a tool request), at `now`, unless a
-/// mute, a snooze or quiet hours hold it back, to the sinks of the devices not reading what it is about.
-async fn deliver(config: &Human, bus: &HumanBus, notice: &Notice, seq: u64, inbox: bool, now: DateTime<Utc>) {
+/// mute, a snooze or quiet hours hold it back, to the sinks of the devices not reading what it is about. Returns why it
+/// was held back, if it was.
+async fn deliver(
+    config: &Human,
+    bus: &HumanBus,
+    notice: &Notice,
+    seq: u64,
+    inbox: bool,
+    now: DateTime<Utc>,
+) -> Option<&'static str> {
     let prefs = holds(config, bus).await;
     if let Some(why) = held(config, &notice.about, &prefs, now) {
         // Dropped, not sent later: the message stays unread and a request pending, as for a notice never sent.
@@ -352,9 +393,16 @@ async fn deliver(config: &Human, bus: &HumanBus, notice: &Notice, seq: u64, inbo
             count_held(config, bus, notice.about.kind(), now).await;
         }
         relay(config, bus, notice, why, seq).await;
-        return;
+        return Some(why);
     }
-    digest(config, bus, &prefs, now).await;
+    push(config, bus, notice, inbox, &prefs, now).await;
+    None
+}
+
+/// Send `notice` (of the human's inbox if `inbox`, else a tool request) at `now`, which the holds `prefs` let through,
+/// after the digest if due, to the sinks of the devices not reading what it is about.
+async fn push(config: &Human, bus: &HumanBus, notice: &Notice, inbox: bool, prefs: &NotifyPrefs, now: DateTime<Utc>) {
+    digest(config, bus, prefs, now).await;
     let what = if inbox { Following::Inbox } else { Following::Approvals };
     let reading = bus.present.following(&config.name, config.devices(), what).await;
     if !reading.is_empty() {
@@ -372,6 +420,32 @@ async fn replies_due(human: &Notified, bus: &HumanBus) -> std::convert::Infallib
             let due = human.replies.locked().due(Utc::now(), window);
             for (notice, seq) in due {
                 deliver(&human.config, bus, &notice, seq, true, Utc::now()).await;
+            }
+        }
+    }
+    std::future::pending().await
+}
+
+/// Check every [`DIGEST_EVERY`] whether quiet hours still hold back the trail runs' questions kept for their end, and
+/// push those they no longer do; one a snooze or a mute holds then was counted already, and is dropped.
+async fn later_due(human: &Notified, bus: &HumanBus) -> std::convert::Infallible {
+    if human.config.quiet.is_some() {
+        loop {
+            tokio::time::sleep(DIGEST_EVERY).await;
+            if human.later.locked().is_empty() {
+                continue;
+            }
+            let (prefs, now) = (holds(&human.config, bus).await, Utc::now());
+            for (notice, seq, why) in human.due_later(&prefs, now) {
+                match why {
+                    Some(why) => {
+                        tracing::info!(human = %human.config.name, why, seq, title = notice.title, "held back a notice");
+                    }
+                    None => {
+                        tracing::info!(human = %human.config.name, seq, title = notice.title, "quiet hours ended");
+                        push(&human.config, bus, &notice, true, &prefs, now).await;
+                    }
+                }
             }
         }
     }

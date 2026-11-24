@@ -40,6 +40,92 @@ fn a_reply_is_a_completion_and_nothing_else_is() {
 }
 
 #[test]
+fn a_message_from_another_human_a_mention_and_a_run_end_are_notices_of_their_own_kinds() {
+    let alice =
+        human(&format!("name = \"alice\"\ncompletions = true\ncompletion_window = \"0\"\n{NTFY_SINK}")).unwrap();
+    let (bob, dev_a, now) = (p("bob"), p("dev-a"), at("2026-03-10T12:00:00Z"));
+    let asked = Envelope::new(p("alice"), bob.clone(), "lunch?");
+    let wrote = asked.reply(bob.clone(), "at noon", ants_proto::Role::Human).unwrap();
+    let notice = inbox_notice(&alice, &wrote, true).unwrap();
+    let thread = &asked.thread_id;
+    assert_eq!((notice.title.as_str(), notice.urgent), ("bob wrote", false));
+    assert_eq!(notice.text, format!("at noon\n\nthread {thread}; answer with ants ask --thread {thread} @bob TEXT"));
+    let json = notice_json(&notice, now);
+    assert_eq!(
+        (&json["kind"], &json["id"], &json["from"], &json["thread"]),
+        (&json!("message"), &json!(wrote.id), &json!("bob"), &json!(thread))
+    );
+    assert_eq!(inbox_notice(&alice, &wrote, false).unwrap().about.kind(), "completion", "from an ant, a reply");
+    let started = Envelope::new(bob, p("alice"), "hello");
+    assert_eq!(inbox_notice(&alice, &started, true).unwrap().title, "bob wrote", "a reply or not");
+    assert!(inbox_notice(&alice, &started, false).is_none(), "an ant's message answering nothing");
+    let to_self = Envelope::new(p("alice"), p("alice"), "note");
+    assert!(inbox_notice(&alice, &to_self, true).is_none());
+
+    let mut sealed = wrote.clone();
+    sealed.text = String::new();
+    sealed.title = Some("Lunch plans".to_owned());
+    sealed.sealed = Some(Box::new(ants_proto::Sealed {
+        v: ants_proto::SEALED_VERSION,
+        device: ants_proto::DeviceId::generate(),
+        keys: Vec::new(),
+        body: "c2VjcmV0".to_owned(),
+    }));
+    let notice = inbox_notice(&alice, &sealed, true).unwrap();
+    assert_eq!(notice.title, "bob wrote");
+    assert!(notice.text.starts_with("a sealed message arrived\n\nthread "), "{}", notice.text);
+    let json = notice_json(&notice, now).to_string();
+    assert!(!json.contains("Lunch") && !json.contains("c2VjcmV0"), "{json}");
+
+    let post = Uuid::now_v7();
+    let mention = ants_proto::Mention { channel: "ops".parse().unwrap(), post, author: Some(p("carol")) };
+    let mentioned = Envelope { mention: Some(mention), ..Envelope::new(dev_a, p("alice"), "@alice look") };
+    let notice = inbox_notice(&alice, &mentioned, false).unwrap();
+    assert_eq!(notice.title, "carol mentions alice in #ops");
+    let mention_thread = &mentioned.thread_id;
+    assert_eq!(notice.text, format!("@alice look\n\nchannel ops, thread {mention_thread}"));
+    let json = notice_json(&notice, now);
+    assert_eq!(
+        (&json["kind"], &json["from"], &json["channel"], &json["post"], &json["thread"]),
+        (&json!("mention"), &json!("carol"), &json!("ops"), &json!(post), &json!(mention_thread))
+    );
+    assert_eq!(inbox_notice(&alice, &mentioned, true).unwrap().about.kind(), "mention", "from a human too");
+
+    let end = ants_proto::TrailEnd {
+        run: "r1".parse().unwrap(),
+        trail: Some("release".parse().unwrap()),
+        state: ants_proto::RunEnd::Failed,
+    };
+    let told = Envelope::new(p("lead"), p("alice"), "Run r1 of trail release failed: no tests").ending(Some(end));
+    let notice = inbox_notice(&alice, &told, false).unwrap();
+    assert_eq!(notice.title, "lead: run of trail release failed");
+    assert!(notice.text.ends_with("; ants trail show r1 shows the run"), "{}", notice.text);
+    let json = notice_json(&notice, now);
+    assert_eq!(
+        (&json["kind"], &json["ant"], &json["run"], &json["trail"], &json["state"]),
+        (&json!("run"), &json!("lead"), &json!("r1"), &json!("release"), &json!("failed"))
+    );
+    let replying = Envelope { in_reply_to: Some(Uuid::now_v7()), ..told.clone() };
+    assert!(completion_notice(&replying).is_none(), "a run's end is no reply");
+    let inline = Envelope {
+        trail_end: told.trail_end.clone().map(|end| Box::new(ants_proto::TrailEnd { trail: None, ..*end })),
+        ..told.clone()
+    };
+    assert_eq!(run_notice(&inline).unwrap().title, "lead: run of an inline script failed");
+
+    let off = "name = \"alice\"\ncompletions = true\nmessages = false\nmentions = false\nruns = false\n";
+    let off = human(&format!("{off}{NTFY_SINK}")).unwrap();
+    for (envelope, from_human) in [(&wrote, true), (&mentioned, false), (&told, false)] {
+        assert!(inbox_notice(&off, envelope, from_human).is_none(), "{envelope:?}");
+    }
+    assert_eq!(inbox_notice(&off, &wrote, false).unwrap().about.kind(), "completion");
+    assert!(message_notice(&Envelope { webhook: true, ..wrote.clone() }).is_none());
+    assert!(mention_notice(&wrote).is_none() && run_notice(&wrote).is_none());
+    let only = "name = \"alice\"\napprovals = false\nescalations = false\nmessages = false\nmentions = false\n";
+    assert_eq!(human(&format!("{only}{NTFY_SINK}")).unwrap().subjects(), ["ants.inbox.alice.>"], "runs read the inbox");
+}
+
+#[test]
 fn a_notice_of_several_questions_lists_them_all_and_how_to_answer_each() {
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let options = ["eu".to_owned(), "us".to_owned()];

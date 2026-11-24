@@ -5,6 +5,7 @@
 //! steps.
 
 use super::*;
+use ants_daemon::monitoring::metrics::Runs;
 
 const FAN_OUT: &str = r#"await parallel(agent("a", ant="dev"), agent("b", ant="ops"))"#;
 
@@ -452,11 +453,14 @@ await human([{"question": "Ship it?", "options": ["yes", "no"]}])
     assert_eq!(asked.to, ants_test_support::human());
     assert!(asked.asks().is_some(), "the step asks its questions as ask_human does");
     eventually("the run waits for its human", async || lead.header(&run).await.state == RunState::Waiting).await;
+    let waiting = Runs { waiting: 1, questions: 1, ..Runs::default() };
+    assert_eq!(lead.trails.measured(), waiting, "the metrics count the run waiting and its question");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     let answer = Envelope::answering(&asked, ants_test_support::human(), vec![Pick::option(1)]).unwrap();
     assert!(lead.trails.take(&answer).await.unwrap());
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("yes") });
+    eventually("an ended run is no longer counted", async || lead.trails.measured() == Runs::default()).await;
 }
 
 #[tokio::test]
@@ -476,6 +480,7 @@ async fn a_stopped_run_gives_up_its_steps_and_resumes_with_fresh_ones() {
     sent.sort_unstable();
     assert_eq!(messages, sent, "the steps waited on are for the human to withdraw");
     assert_eq!(lead.header(&run).await.state, RunState::Stopped { by: human.clone() });
+    assert_eq!(lead.trails.measured(), Runs { stopped: 1, ..Runs::default() });
     let told = lead.told().await;
     assert_eq!((&told.to, &told.thread_id), (&human, &lead.header(&run).await.thread), "{told:?}");
     assert!(told.text.contains("was stopped by human") && told.text.contains("ants trail resume"), "{}", told.text);

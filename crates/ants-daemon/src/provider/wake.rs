@@ -230,6 +230,7 @@ impl Waker {
         let envelope = Envelope { id: mark.message, ..envelope };
         (self.outbox)(envelope).await.map_err(|e| unavailable(&format!("sending the wake: {e:#}")))?;
         tracing::info!(%thread, provider = self.provider, id = request.id, "woke the ant");
+        crate::monitoring::metrics::ant(&self.ant).woken();
         if let Some(replaced) = &request.replaces {
             self.withdraw(replaced).await;
         }

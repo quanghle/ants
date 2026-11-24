@@ -341,21 +341,42 @@ fn ended_sealing(before: &VerifiedGrant, config: Option<&Path>) {
     }
 }
 
-/// `ants assistant show [HUMAN]`.
-pub async fn show(nats: &Nats<'_>, human: Option<UserId>) -> Result<()> {
+/// `ants assistant show [HUMAN] [--json]`.
+pub async fn show(nats: &Nats<'_>, human: Option<UserId>, json: bool) -> Result<()> {
     let human = human.unwrap_or_else(|| nats.me.id.clone());
     let (_, js) = nats.connect("ants-assistant").await?;
+    let shown = |assistant: Option<&UserId>, verified: bool| serde_json::json!({ "human": human, "assistant": assistant, "verified": verified });
     let Some(grant) = read(&js, &human).await? else {
-        println!("{human} has no assistant");
+        if json {
+            println!("{}", shown(None, false));
+        } else {
+            println!("{human} has no assistant");
+        }
         return Ok(());
     };
     let Some(account) = &nats.account else {
+        if json {
+            println!("{}", shown(grant.assistant.as_ref(), false));
+            return Ok(());
+        }
         let named = grant.assistant.as_ref().map_or_else(|| "no assistant".to_owned(), ToString::to_string);
         println!("{human}: {named}, not verified without credentials");
         return Ok(());
     };
     match grant.verify(&assistant_grant_key(&human), account, Utc::now()) {
+        Ok(verified) if json => {
+            let mut json = shown(verified.assistant.as_ref(), true);
+            json["issued_at"] = serde_json::json!(verified.issued_at);
+            json["device"] = serde_json::json!(verified.device);
+            json["sealing"] = serde_json::json!(verified.sealing);
+            println!("{json}");
+        }
         Ok(verified) => println!("{}", describe(&verified)),
+        Err(e) if json => {
+            let mut json = shown(None, false);
+            json["refused"] = serde_json::json!(e.to_string());
+            println!("{json}");
+        }
         Err(e) => println!("{human} has no assistant: its grant is not honoured ({e})"),
     }
     Ok(())

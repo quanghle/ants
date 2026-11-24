@@ -674,6 +674,7 @@ impl Inbox<'_> {
     async fn conduct_trails(&self) {
         let Some(trails) = &self.trails else { return std::future::pending().await };
         let _conducted = self.restarts.conduct(self.ant, trails);
+        let _measured = self.metrics.conducting(trails.clone());
         trails.serve().await;
     }
 

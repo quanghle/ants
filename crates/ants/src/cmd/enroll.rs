@@ -19,6 +19,10 @@ pub(crate) enum EnrollCommand {
         /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
+        /// One JSON object per request: `ant`, `public_key`, `host`, `sent_at`, and `leaf` and `host_creds` naming
+        /// the machine when the request has them.
+        #[arg(long)]
+        json: bool,
     },
     /// Sign the credentials an ant asks for, with the rights `ants auth user` gives, for the hub's --js-domain if
     /// it has one, and send them to the asking machine, with the machine's host credentials when it asks for them too
@@ -54,6 +58,9 @@ pub(crate) enum EnrollCommand {
         /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
+        /// One JSON object per request: `name`, `holder`, `public_key`, `host` and `sent_at`.
+        #[arg(long)]
+        json: bool,
     },
     /// Renew the credentials NAME asks for (`ants renew`): valid, unrevoked credentials of the bus, for the new key,
     /// with the same name, kind, members, device and --js-domain, and the permissions their kind has in this version.
@@ -92,8 +99,8 @@ pub(crate) async fn run(conn: &Connection<'_>, command: EnrollCommand) -> Result
     let domain = conn.js_domain;
     let dir = |dir| team_dir(dir);
     match command {
-        EnrollCommand::List { dir: d } => {
-            approver::Approver::connect(conn.nats, &dir(d)?, domain, approver::LISTEN).await?.list().await
+        EnrollCommand::List { dir: d, json } => {
+            approver::Approver::connect(conn.nats, &dir(d)?, domain, approver::LISTEN).await?.list(json).await
         }
         EnrollCommand::Approve { ant, public_key, webhook: true, to, channels, dir: d, .. } => {
             let dir = dir(d)?;
@@ -122,9 +129,9 @@ pub(crate) async fn run(conn: &Connection<'_>, command: EnrollCommand) -> Result
             }
             Ok(())
         }
-        EnrollCommand::Renewals { dir: d } => {
+        EnrollCommand::Renewals { dir: d, json } => {
             let approver = approver::Approver::connect(conn.nats, &dir(d)?, domain, approver::LISTEN).await?;
-            approver.list_renewals().await
+            approver.list_renewals(json).await
         }
         EnrollCommand::Renew { name: None, auto: true, dir: d, .. } => {
             let dir = dir(d)?;

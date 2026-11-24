@@ -249,12 +249,27 @@ async fn stopping_a_run_stops_its_child_and_resuming_it_resumes_the_child() {
     init(&server).await;
     let dir = scratch_dir("trail-child-stop");
     let mut lead = conductor_with_saved(&server, &dir, &[("echo", ECHO)]).await;
+    let mut status = lead.client.subscribe(subject::status_of(&ant("lead"))).await.unwrap();
     let run = lead.start("await trail(\"echo\", args={\"say\": \"a\"})", TrailLimits::default()).await;
     let step = lead.step().await;
     let child = step.trail_step.as_ref().unwrap().run.clone();
 
     let human = ants_test_support::human();
     let waiting = lead.trails.stop(&run, &human).await.unwrap();
+    let mut stopped = Vec::new();
+    for _ in 0..2 {
+        let StatusUpdate::RunEnded { run, parent, state, by, .. } = run_ended(&mut status).await.update else {
+            unreachable!()
+        };
+        stopped.push((run, parent, state, by));
+    }
+    stopped.sort_by_key(|(_, parent, ..)| parent.is_none());
+    let by = Some(human.clone());
+    assert_eq!(
+        stopped,
+        [(child.clone(), Some(run.clone()), RunEnd::Stopped, by.clone()), (run.clone(), None, RunEnd::Stopped, by)],
+        "the stop is told of the run and its child"
+    );
     let waiting: Vec<_> = waiting.iter().map(|step| (step.to.clone(), step.message)).collect();
     assert_eq!(waiting, [(ant("dev"), step.id)], "the child's step is for the human to withdraw");
     assert_eq!(lead.header(&child).await.state, RunState::Stopped { by: human.clone() });

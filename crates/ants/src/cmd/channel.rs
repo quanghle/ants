@@ -87,7 +87,12 @@ pub(crate) enum ChannelCommand {
     /// List the channels with the members, the messenger and the owner of each; for a human member of any, also the
     /// unread posts its notify level of each channel it is a member of counts (by default, those by humans or
     /// @mentioning it), with how many @mention it, and the other unread posts, those on archived threads left out.
-    List,
+    List {
+        /// One JSON object per channel: the `ChannelEntry`, with `unread` (`posts`, `mentions`, `other`) where
+        /// counted.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show or set which unread posts of a channel count for the CLI's human, on all its devices: `all`, `humans`
     /// (posts by humans and @mentions, the default) or `mentions` (@mentions only). The others show apart and dim.
     Notify {
@@ -97,6 +102,9 @@ pub(crate) enum ChannelCommand {
         channel: ChannelId,
         /// The level: `all`, `humans` or `mentions`; without one, show the channel's.
         level: Option<ChannelNotify>,
+        /// Show the level as one JSON object: `channel`, `human` and `level`.
+        #[arg(long, conflicts_with = "level")]
+        json: bool,
     },
     /// Print the posts of a channel kept in the stream, by thread: the post that started each thread, then the
     /// replies on the thread, indented. A human's printed posts are marked read on all its devices. The threads the
@@ -120,6 +128,10 @@ pub(crate) enum ChannelCommand {
         /// Print without marking read.
         #[arg(long)]
         peek: bool,
+        /// One JSON object per post, in the order printed: the `ChannelPost`, with `by` naming its author as the
+        /// text does.
+        #[arg(long)]
+        json: bool,
     },
     /// Delete a channel. The posts to the channel stay in the stream.
     Delete {
@@ -183,16 +195,20 @@ async fn manage(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
             let change = channel::Change { remove: users, ..channel::Change::default() };
             write(&js, &kv, &humans, teams, &channel, &change).await?;
         }
-        ChannelCommand::List => {
+        ChannelCommand::List { json } => {
             let entries = channel::list(&kv).await?;
-            if entries.is_empty() {
+            let unread = if entries.is_empty() { None } else { unread(nats, &js, &entries).await };
+            if json {
+                for entry in &entries {
+                    println!("{}", entry_json(entry, unread.as_ref().and_then(|u| u.get(&entry.channel))));
+                }
+            } else if entries.is_empty() {
                 println!("no channels");
             } else {
-                let unread = unread(nats, &js, &entries).await;
                 println!("{}", channel::table(&entries, unread.as_ref()));
             }
         }
-        ChannelCommand::Notify { channel, level } => {
+        ChannelCommand::Notify { channel, level, json } => {
             nats.me.must_be_human("a channel's notify level")?;
             if channel::get(&kv, &channel).await?.is_none() {
                 tracing::warn!("no channel #{channel}");
@@ -201,12 +217,17 @@ async fn manage(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
                 Some(level) => println!("{}", quiet::channel_notify(&js, &nats.me.id, &channel, level).await?),
                 None => {
                     let level = quiet::prefs(&js, &nats.me.id).await?.channel(&channel);
-                    println!("#{channel} notifies {}: {level} ({})", nats.me.id, level.describe());
+                    if json {
+                        let shown = serde_json::json!({ "channel": channel, "human": nats.me.id, "level": level });
+                        println!("{shown}");
+                    } else {
+                        println!("#{channel} notifies {}: {level} ({})", nats.me.id, level.describe());
+                    }
                 }
             }
         }
-        ChannelCommand::Read { channel, thread, limit, archived, peek } => {
-            read(nats, &js, &kv, &channel, Pick { thread, limit, archived }, peek).await?;
+        ChannelCommand::Read { channel, thread, limit, archived, peek, json } => {
+            read(nats, &js, &kv, &channel, Pick { thread, limit, archived }, Printed { peek, json }).await?;
         }
         ChannelCommand::Delete { channel } => {
             channel::delete(&kv, &channel).await?;
@@ -271,6 +292,23 @@ async fn write(
     Ok(())
 }
 
+/// A channel as `ants channel list --json` prints it: its entry, with the posts `unread` when counted.
+fn entry_json(entry: &ants_proto::ChannelEntry, unread: Option<&reads::Unread>) -> String {
+    let mut json = serde_json::to_value(entry).unwrap_or_default();
+    if let Some(unread) = unread {
+        json["unread"] =
+            serde_json::json!({ "posts": unread.posts, "mentions": unread.mentions, "other": unread.other });
+    }
+    json.to_string()
+}
+
+/// How `ants channel read` prints: marking the posts read unless `peek`, as text or one JSON object a post.
+#[derive(Clone, Copy)]
+struct Printed {
+    peek: bool,
+    json: bool,
+}
+
 /// Which threads `ants channel read` prints.
 struct Pick {
     thread: Option<thread::Pick>,
@@ -279,15 +317,14 @@ struct Pick {
     archived: bool,
 }
 
-/// `ants channel read`: print the posts of `channel` by thread, as `pick` picks the threads, marking those printed
-/// read unless `peek`.
+/// `ants channel read`: print the posts of `channel` by thread, as `pick` picks the threads, as `printed` says.
 async fn read(
     nats: &Nats<'_>,
     js: &async_nats::jetstream::Context,
     kv: &async_nats::jetstream::kv::Store,
     channel: &ChannelId,
     pick: Pick,
-    peek: bool,
+    printed: Printed,
 ) -> Result<()> {
     if channel::get(kv, channel).await?.is_none() {
         tracing::warn!("no channel #{channel}; showing the posts kept for #{channel} anyway");
@@ -322,7 +359,7 @@ async fn read(
     if let Some(limit) = pick.limit {
         threads.drain(..threads.len().saturating_sub(limit));
     }
-    if threads.is_empty() {
+    if threads.is_empty() && !printed.json {
         match thread {
             Some(thread) => println!("no posts on thread {thread} of #{channel}"),
             None if pick.archived => println!("no archived threads in #{channel}"),
@@ -335,8 +372,17 @@ async fn read(
     for post in threads.iter().flat_map(|t| &t.posts) {
         by.insert(post.id, behalf.label(&post.from, post.on_behalf_of.as_ref()).await);
     }
-    print!("{}", channel::render(&threads, &|post| by.get(&post.id).cloned().unwrap_or_else(|| post.from.to_string())));
-    if !peek && reads::allowed(nats) {
+    let label = |post: &ants_proto::ChannelPost| by.get(&post.id).cloned().unwrap_or_else(|| post.from.to_string());
+    if printed.json {
+        for post in threads.iter().flat_map(|t| &t.posts) {
+            let mut json = serde_json::to_value(post).unwrap_or_default();
+            json["by"] = serde_json::json!(label(post));
+            println!("{json}");
+        }
+    } else {
+        print!("{}", channel::render(&threads, &label));
+    }
+    if !printed.peek && reads::allowed(nats) {
         mark_read(js, &nats.me.id, channel, &read, &threads).await;
     }
     Ok(())
@@ -436,5 +482,22 @@ pub(crate) async fn warn_unserved<'a>(
     let users: Vec<&UserId> = users.into_iter().filter(|u| !humans.contains(u)).collect();
     for warning in colony::unserved_warnings(js, &users).await {
         tracing::warn!("{warning}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_channel_in_json_is_its_entry_with_the_unread_posts_counted() {
+        let mut entry = ants_proto::ChannelEntry::new("ops".parse().unwrap());
+        entry.members = vec!["dev-a".parse().unwrap(), "alice".parse().unwrap()];
+        let json: serde_json::Value = serde_json::from_str(&entry_json(&entry, None)).unwrap();
+        assert_eq!((json["channel"].as_str(), json["members"][1].as_str()), (Some("ops"), Some("alice")));
+        assert!(json.get("unread").is_none(), "{json}");
+        let unread = reads::Unread { posts: 3, mentions: 1, other: 2 };
+        let json: serde_json::Value = serde_json::from_str(&entry_json(&entry, Some(&unread))).unwrap();
+        assert_eq!(json["unread"], serde_json::json!({ "posts": 3, "mentions": 1, "other": 2 }));
     }
 }

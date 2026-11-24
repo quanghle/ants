@@ -1,0 +1,18 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "type": "run_ended",
+  "run": "019a7d2f-0000-7000-8000-000000000001",
+  "trail": "release",
+  "parent": "019a7d2f-0000-7000-8000-000000000002",
+  "state": "failed",
+  "error": "ValueError: no tests",
+  "limit": "turns",
+  "steps": 4,
+  "turns": 9,
+  "at": "2025-01-01T12:00:00Z"
+}

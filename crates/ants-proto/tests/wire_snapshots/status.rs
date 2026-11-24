@@ -80,6 +80,82 @@ fn status() {
     }
 }
 
+/// What observers hear of the bus besides an ant's work: a trail run's end, an admin order settled, a team changed.
+#[test]
+fn observed_status() {
+    snap("run_end_variants", &[RunEnd::Done, RunEnd::Failed, RunEnd::Stopped]);
+    snap("team_change_variants", &[TeamChange::Created, TeamChange::Changed, TeamChange::Deleted]);
+    let updates = [
+        (
+            "run_ended",
+            StatusUpdate::RunEnded {
+                run: run(),
+                trail: Some("release".parse().unwrap()),
+                parent: Some("019a7d2f-0000-7000-8000-000000000002".parse().unwrap()),
+                state: RunEnd::Failed,
+                error: Some("ValueError: no tests".to_owned()),
+                limit: Some(RunLimit::Turns),
+                by: None,
+                steps: 4,
+                turns: 9,
+            },
+        ),
+        (
+            "run_ended_stopped",
+            StatusUpdate::RunEnded {
+                run: run(),
+                trail: None,
+                parent: None,
+                state: RunEnd::Stopped,
+                error: None,
+                limit: None,
+                by: Some(user("alice")),
+                steps: 1,
+                turns: 2,
+            },
+        ),
+        (
+            "order_settled",
+            StatusUpdate::OrderSettled {
+                order: id(20),
+                machine: machine(),
+                op: Some("restart".to_owned()),
+                admin: Some(user("pa")),
+                on_behalf_of: Some(user("alice")),
+                state: OrderState::Refused,
+                reason: Some("denied by alice".to_owned()),
+            },
+        ),
+        (
+            "team_changed",
+            StatusUpdate::TeamChanged {
+                team: user("backend"),
+                change: TeamChange::Created,
+                entry: Some(Box::new(Team {
+                    team: user("backend"),
+                    description: Some("The backend team.".to_owned()),
+                    members: vec![user("dev-a")],
+                    lead: Some(user("dev-a")),
+                    owner: Some(user("alice")),
+                    avatar: Some("seed".to_owned()),
+                    color: Some("teal".to_owned()),
+                    created_by: user("lead"),
+                    created_at: at(0),
+                })),
+                parent: Some(user("eng")),
+            },
+        ),
+        (
+            "team_changed_deleted",
+            StatusUpdate::TeamChanged { team: user("backend"), change: TeamChange::Deleted, entry: None, parent: None },
+        ),
+    ];
+    for (kind, update) in updates {
+        let event = StatusEvent { ant: user("dev-a"), thread_id: thread(), update, at: at(0) };
+        snap(&format!("status_event_{kind}"), &event);
+    }
+}
+
 #[test]
 fn timeline() {
     let call = TimelineCall {

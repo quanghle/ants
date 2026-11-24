@@ -551,6 +551,7 @@ pub(crate) async fn notes(
     thread: thread::Pick,
     attach: attachments::Attach,
     text: Vec<String>,
+    json: bool,
 ) -> Result<()> {
     if text.is_empty() && !attach.paths.is_empty() {
         bail!("--attach posts to the notes: give TEXT to post with the files");
@@ -560,22 +561,37 @@ pub(crate) async fn notes(
     let thread = thread.resolve(nats, &js).await?;
     if !text.is_empty() {
         let post = post_notes(&js, &nats.me.id, thread, text.join(" "), &files, ATTACH).await?;
+        if json {
+            println!("{}", notes_json(&post, post.from.as_str()));
+            return Ok(());
+        }
         println!("{}", notes_posted(&post));
         print_attached(&files, |id| post.attachment_handle(id));
         return Ok(());
     }
     let read = notes::read(&js, &nats.me.id, nats.me.reading(), &thread).await?;
-    if read.posts.is_empty() {
+    if read.posts.is_empty() && !json {
         println!("thread {thread} has no notes");
     }
     let behalf = crate::people::behalf::Checker::new(nats, &js);
     for post in &read.posts {
         let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
         let by = behalf.label(&post.from, post.on_behalf_of.as_ref()).await;
+        if json {
+            println!("{}", notes_json(post, &by));
+            continue;
+        }
         println!("{}", said(&format!("{time} {by} ({} turns left)", post.turn_budget), &post.text));
         print!("{}", attachments::render(&listed_on(&post.subject(), &post.attachments), "  "));
     }
     Ok(())
+}
+
+/// A post of the notes as `ants notes --json` prints it: the post, with `by` naming its author as its text does.
+fn notes_json(post: &ants_proto::NotesPost, by: &str) -> String {
+    let mut json = serde_json::to_value(post).unwrap_or_default();
+    json["by"] = serde_json::json!(by);
+    json.to_string()
 }
 
 /// How the command line attaches a file, as [`check_fits`] suggests it.
@@ -659,6 +675,15 @@ mod tests {
 
     fn words(s: &str) -> Vec<String> {
         s.split(' ').map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn a_note_in_json_is_the_post_with_its_author_as_shown() {
+        let post = ants_proto::NotesPost::new("t1".parse().unwrap(), "dev-a".parse().unwrap(), "split the work");
+        let json: serde_json::Value = serde_json::from_str(&notes_json(&post, "dev-a for alice")).unwrap();
+        assert_eq!((json["thread_id"].as_str(), json["text"].as_str()), (Some("t1"), Some("split the work")));
+        assert_eq!((json["from"].as_str(), json["by"].as_str()), (Some("dev-a"), Some("dev-a for alice")));
+        assert_eq!(json["turn_budget"], post.turn_budget);
     }
 
     #[test]

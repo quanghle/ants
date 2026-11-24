@@ -20,8 +20,8 @@ use ants_daemon::trail::{Conducting, StartRun, Trails};
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     AdminOp, AdminOrder, AdminOutcome, AssistantGrant, ColonyEntry, DeviceId, Envelope, MACHINES_BUCKET, Machine,
-    NotesPost, NoticeKind, OrderState, Pick, Role, RunId, RunLimit, RunState, StatusEvent, StatusUpdate, StepStage,
-    TRAIL_RUNS_BUCKET, ThreadId, TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailRun,
+    NotesPost, NoticeKind, OrderState, Pick, Role, RunEnd, RunId, RunLimit, RunState, StatusEvent, StatusUpdate,
+    StepStage, TRAIL_RUNS_BUCKET, ThreadId, TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailRun,
     TrailRunIndex, TrailSession, TrailSource, TrailStart, TrailStepThread, UserId, WaitingStep, subject, trail_run_key,
     trail_runs_index_key, trail_session_key, trail_thread_step_key,
 };
@@ -396,6 +396,17 @@ async fn step_status(status: &mut async_nats::Subscriber) -> (StatusEvent, StepS
         let event: StatusEvent = serde_json::from_slice(&event.payload).unwrap();
         if let StatusUpdate::Step { stage, .. } = event.update {
             return (event, stage);
+        }
+    }
+}
+
+/// The next run end told on `status`, skipping other updates.
+async fn run_ended(status: &mut async_nats::Subscriber) -> StatusEvent {
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), status.next()).await.expect("a status").unwrap();
+        let event: StatusEvent = serde_json::from_slice(&event.payload).unwrap();
+        if let StatusUpdate::RunEnded { .. } = event.update {
+            return event;
         }
     }
 }

@@ -33,8 +33,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use ants_proto::provider::Origin;
 use ants_proto::{
-    CallAnswer, JsDomain, PendingCall, QueuedCall, RunId, RunLimit, SpendsFrom, ThreadId, TrailFunction, TrailLimits,
-    TrailRun, TrailSession, TrailSource, UserId,
+    CallAnswer, JsDomain, PendingCall, QueuedCall, RunId, RunLimit, RunState, SpendsFrom, ThreadId, TrailFunction,
+    TrailLimits, TrailRun, TrailSession, TrailSource, UserId,
 };
 use ants_trail::{Limits, Run, Worker};
 use anyhow::Result;
@@ -399,6 +399,24 @@ impl Trails {
         let slots: Vec<Arc<Slot>> = locked(&self.inner.runs).values().cloned().collect();
         let mut runs: Vec<TrailRun> = slots.iter().map(|slot| slot.header()).collect();
         runs.sort_by(|a, b| (a.started_at, a.run.as_str()).cmp(&(b.started_at, b.run.as_str())));
+        runs
+    }
+
+    /// The runs held, by state, and the questions their `human()` steps sent wait on, for the metrics.
+    pub fn measured(&self) -> crate::monitoring::metrics::Runs {
+        let slots: Vec<Arc<Slot>> = locked(&self.inner.runs).values().cloned().collect();
+        let mut runs = crate::monitoring::metrics::Runs::default();
+        for slot in slots {
+            let book = slot.book();
+            match book.header.state {
+                RunState::Running => runs.running += 1,
+                RunState::Waiting => runs.waiting += 1,
+                RunState::Stopped { .. } => runs.stopped += 1,
+                RunState::Done { .. } | RunState::Failed { .. } => {}
+            }
+            runs.questions +=
+                book.pending.iter().filter(|call| call.function == TrailFunction::Human && call.sent).count();
+        }
         runs
     }
 

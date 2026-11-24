@@ -196,6 +196,7 @@ impl Trails {
         // the next leg.
         let left = std::mem::take(&mut slot.book().left);
         waiting.extend(self.stop_steps(&header, &left, by).await);
+        self.report_ended(&slot.header());
         self.report_end(&slot.header()).await;
         self.tell_spent_stopped(slot.header());
         tracing::info!(run = %run, by = %by, "trail run stopped");

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     Answer, ApprovalDecision, ApprovalRequest, Attachment, DEFAULT_TURN_BUDGET, Error, Escalation, Humans, Questions,
-    Role, RunId, Sealed, ThreadId, TrailSpent, TrailStart, TrailStep, UserId, subject,
+    Role, RunId, Sealed, ThreadId, TrailEnd, TrailSpent, TrailStart, TrailStep, UserId, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -185,6 +185,12 @@ pub struct Envelope {
     /// sets it. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating_of: Option<RunId>,
+    /// The trail run whose end the message tells its owner of, on the conductor's message on the run's thread: a
+    /// human's notifier pushes it as a run's end rather than as a reply. Only the conductor's daemon sets it, with
+    /// [`Envelope::ending`]; a reader takes it as the sender's claim only. Never copied by [`Envelope::reply`] or
+    /// [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail_end: Option<Box<TrailEnd>>,
     /// On a message from an ant narrowed to [`REVIEW_ALLOW`], the dream whose review it asks for and what is new
     /// since the sender's last review in the verdicts and outcomes of the recipient's earlier findings for it: the
     /// recipient's daemon tells the recipient's sense, which keeps a record of each review. Never copied by
@@ -283,10 +289,17 @@ impl Envelope {
             trail_spent: None,
             trail_start: None,
             rating_of: None,
+            trail_end: None,
             review_outcomes: None,
             team: None,
             sent_at: Utc::now(),
         }
+    }
+
+    /// The envelope as telling the end of a trail run ([`Envelope::trail_end`]).
+    #[must_use]
+    pub fn ending(self, end: Option<TrailEnd>) -> Self {
+        Self { trail_end: end.map(Box::new), ..self }
     }
 
     /// The envelope as a daemon's notice of `kind` ([`Envelope::notice`]).
@@ -483,6 +496,7 @@ impl Envelope {
             trail_spent: None,
             trail_start: None,
             rating_of: None,
+            trail_end: None,
             review_outcomes: None,
             team: None,
             sent_at: Utc::now(),

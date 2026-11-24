@@ -1,9 +1,10 @@
 //! Tests of teams as humans run them: the forest as `ants team list` and `ants team show` print it, the team named
-//! by `ants ant show`, the checks of a change, and `ants team` and a retirement changing the directory of a bus.
+//! by `ants ant show`, the checks of a change, and `ants team` and a retirement changing the directory of a bus, each
+//! change of `ants team` told on the human's status.
 
 use std::collections::BTreeSet;
 
-use ants_proto::{AntIdentity, IDENTITIES_BUCKET, Role, Team, TeamDirectory, UserId};
+use ants_proto::{AntIdentity, IDENTITIES_BUCKET, Role, Team, TeamChange, TeamDirectory, UserId};
 use async_nats::jetstream;
 use chrono::Utc;
 
@@ -143,9 +144,25 @@ async fn a_human_creates_and_changes_a_team_of_known_ants_only() {
     let a_human = run(&nats, create("backend", "dev-a", &["alice"])).await.unwrap_err();
     assert!(a_human.to_string().starts_with("alice is a human"), "{a_human}");
 
+    let (watching, _) = nats.connect("test").await.unwrap();
+    let mut status = watching.subscribe(ants_proto::subject::status_of(&p("alice"))).await.unwrap();
+    watching.flush().await.unwrap();
     run(&nats, create("backend", "dev-a", &["dev-b"])).await.unwrap();
     run(&nats, create("eng", "dev-c", &[])).await.unwrap();
     run(&nats, TeamCommand::Add { team: p("eng"), names: vec![p("backend")] }).await.unwrap();
+    let mut told = Vec::new();
+    for _ in 0..3 {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), futures::StreamExt::next(&mut status)).await;
+        let event: ants_proto::StatusEvent = serde_json::from_slice(&msg.unwrap().unwrap().payload).unwrap();
+        let ants_proto::StatusUpdate::TeamChanged { team, change, entry, .. } = event.update else { panic!() };
+        told.push((event.thread_id.to_string(), team, change, entry.map(|e| e.members.len())));
+    }
+    let tc = |thread: &str, change, members| (thread.to_owned(), p(thread), change, Some(members));
+    assert_eq!(
+        told,
+        [tc("backend", TeamChange::Created, 2), tc("eng", TeamChange::Created, 1), tc("eng", TeamChange::Changed, 2)],
+        "each change told on the human's own status, on the thread the team names"
+    );
     let directory = directory_of(&js).await;
     assert_eq!(forest_of(&directory), [(0, "eng"), (1, "backend")]);
     assert_eq!(directory.team(&p("backend")).unwrap().description.as_deref(), Some("the services"));

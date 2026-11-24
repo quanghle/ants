@@ -204,6 +204,11 @@ fn envelope() -> Envelope {
             limits: TrailLimits { steps: 100, wall_secs: 2 * 24 * 3600, ..TrailLimits::DEFAULT },
         })),
         rating_of: Some(run()),
+        trail_end: Some(Box::new(TrailEnd {
+            run: run(),
+            trail: Some("release".parse().unwrap()),
+            state: RunEnd::Failed,
+        })),
         review_outcomes: Some(ReviewOutcomes {
             dream: 7,
             findings: vec![
@@ -255,6 +260,7 @@ fn plain_envelope() -> Envelope {
         trail_spent: None,
         trail_start: None,
         rating_of: None,
+        trail_end: None,
         review_outcomes: None,
         team: None,
         ..envelope()

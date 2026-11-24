@@ -171,6 +171,27 @@ fn channel_line(post: &ChannelPost, acting: &Acting, forged: &str) -> String {
     format!("[{thread}] {from} -> #{channel} ({left} turns left{created}){forged}: {}", post.text)
 }
 
+/// A run's end, an order settled or a team changed, as `ants watch` prints it after who told it.
+fn observed(update: &StatusUpdate) -> String {
+    match update {
+        StatusUpdate::RunEnded { run, state, error, by, steps, turns, .. } => {
+            let why = match (error, by) {
+                (Some(error), _) => format!(": {error}"),
+                (None, Some(by)) => format!(" by {by}"),
+                (None, None) => String::new(),
+            };
+            format!("trail run {run} {} ({steps} steps, {turns} turns){why}", state.as_str())
+        }
+        StatusUpdate::OrderSettled { order, machine, op, state, reason, .. } => {
+            let op = op.as_deref().map_or_default(|op| format!(" ({op})"));
+            let reason = reason.as_deref().map_or_default(|reason| format!(": {reason}"));
+            format!("admin order {order}{op} on {machine} {}{reason}", state.as_str())
+        }
+        StatusUpdate::TeamChanged { team, change, .. } => format!("team {team} {}", change.as_str()),
+        _ => String::new(),
+    }
+}
+
 /// Renders watched traffic, continuing an ant's streamed text on one line until something else arrives.
 #[derive(Default)]
 struct Printer {
@@ -264,6 +285,11 @@ impl Printer {
             StatusUpdate::Leg { run, leg, trail, waypoint } => {
                 let entry = ants_proto::leg_entry(trail.as_ref(), waypoint.as_deref());
                 return self.line(&format!("[{thread}] {named}{forged}: trail run {run} leg {leg} {entry} started"));
+            }
+            update @ (StatusUpdate::RunEnded { .. }
+            | StatusUpdate::OrderSettled { .. }
+            | StatusUpdate::TeamChanged { .. }) => {
+                return self.line(&format!("[{thread}] {named}{forged}: {}", observed(update)));
             }
         };
         let key = (who.clone(), thread.clone(), verb);
@@ -419,5 +445,45 @@ mod tests {
             told(DecidedBy::Human, Some(p("alice")), Some(p("pa"))),
             format!("[t1] dev-a: approval dev-a/{id} decided allow-once by alice via pa\n")
         );
+    }
+
+    #[test]
+    fn watched_run_ends_orders_settled_and_team_changes_print_on_one_line() {
+        let p = |s: &str| -> UserId { s.parse().unwrap() };
+        let mut printer = Printer::default();
+        let mut line = |who: &str, update| printer.status(&StatusEvent::new(p(who), "t1".parse().unwrap(), update), "");
+        let stopped = StatusUpdate::RunEnded {
+            run: "r1".parse().unwrap(),
+            trail: None,
+            parent: None,
+            state: ants_proto::RunEnd::Stopped,
+            error: None,
+            limit: None,
+            by: Some(p("alice")),
+            steps: 2,
+            turns: 3,
+        };
+        assert_eq!(line("lead", stopped), "[t1] lead: trail run r1 stopped (2 steps, 3 turns) by alice\n");
+        let refused = StatusUpdate::OrderSettled {
+            order: ants_proto::Uuid::nil(),
+            machine: "m1".parse().unwrap(),
+            op: Some("restart".into()),
+            admin: Some(p("alice")),
+            on_behalf_of: None,
+            state: ants_proto::OrderState::Refused,
+            reason: Some("no such ant".into()),
+        };
+        let nil = ants_proto::Uuid::nil();
+        assert_eq!(
+            line("dev-a", refused),
+            format!("[t1] dev-a: admin order {nil} (restart) on m1 refused: no such ant\n")
+        );
+        let deleted = StatusUpdate::TeamChanged {
+            team: p("backend"),
+            change: ants_proto::TeamChange::Deleted,
+            entry: None,
+            parent: None,
+        };
+        assert_eq!(line("alice", deleted), "[t1] alice: team backend deleted\n");
     }
 }

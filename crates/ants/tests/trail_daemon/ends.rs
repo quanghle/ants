@@ -160,6 +160,7 @@ async fn a_run_s_result_or_error_past_its_record_fails_or_is_cut_and_its_owner_i
     assert_eq!(lead.header(&run).await.phase.map(|phase| phase.chars().count()), Some(1000), "the phase is cut");
     let told = lead.end_message(&run).await;
     assert!(told.text.contains(" failed (") && told.text.contains("holds at most"), "{}", told.text);
+    assert_eq!(told.trail_end.map(|end| end.state), Some(RunEnd::Failed));
     assert!(lead.invitation().await.text.contains(&run.to_string()));
 
     let raising = lead.start("raise ValueError(\"e\" * 1100000)\n", TrailLimits::default()).await;
@@ -291,6 +292,12 @@ log("built")
     let result = "```json\n{\n  \"built\": \"done\",\n  \"count\": 2\n}\n```";
     assert!(told.text.starts_with(&format!("Run {run}")), "{}", told.text);
     assert!(told.text.ends_with(&format!(" is done (1 steps, 1 turns):\n\n{result}")), "{}", told.text);
+    let end = told.trail_end.as_deref().expect("marked as the run's end");
+    assert_eq!((&end.run, &end.trail, end.state), (&run, &None, RunEnd::Done));
+    let ended = run_ended(&mut status).await;
+    assert_eq!((&ended.ant, &ended.thread_id), (&ant("lead"), &thread));
+    let StatusUpdate::RunEnded { run: of, state, error, by, steps, turns, .. } = ended.update else { unreachable!() };
+    assert_eq!((of, state, error, by, steps, turns), (run, RunEnd::Done, None, None, 1, 1));
 }
 
 #[tokio::test]

@@ -1,10 +1,13 @@
 //! The team directory as daemons, `ants signer` and the CLI read and write it: the one entry of [`TEAMS_BUCKET`],
 //! read by direct gets naming no subject past a message a stream relayed onto its key, and written by compare-and-set
-//! on the stream sequence of the key's last message.
+//! on the stream sequence of the key's last message. Who changed it tells observers what it changed, on its own status
+//! ([`tell`]).
 
 use std::time::Duration;
 
-use ants_proto::{JsDomain, TEAM_DIRECTORY_KEY, TEAMS_BUCKET, TeamDirectory, TeamRefusal, UserId};
+use ants_proto::{
+    JsDomain, StatusUpdate, TEAM_DIRECTORY_KEY, TEAMS_BUCKET, TeamChange, TeamDirectory, TeamOp, TeamRefusal, UserId,
+};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 
@@ -93,6 +96,28 @@ impl Note {
     pub async fn text(&self) -> Option<String> {
         read_quickly(&self.kv).await?.note_for(&self.ant)
     }
+}
+
+/// Tell observers what befell the teams of `changes`, on the status of `by`, who changed them, one update a team on the
+/// thread the team names, each with the team as `directory`, read after, holds it ([`StatusUpdate::TeamChanged`]):
+/// best effort, as all status is.
+pub fn tell(client: &async_nats::Client, by: &UserId, directory: &TeamDirectory, changes: &[(UserId, TeamChange)]) {
+    for (team, change) in changes {
+        let (thread, update) = StatusUpdate::team_changed(directory, team, *change);
+        crate::monitoring::status::publish(client, by, &thread, update);
+    }
+}
+
+/// The teams a change of `team` by `ops` changes, and how: `team` itself, and each team created or deleted as one of
+/// its members.
+pub fn changes_of(team: &UserId, ops: &[TeamOp]) -> Vec<(UserId, TeamChange)> {
+    let mut changes = vec![(team.clone(), TeamChange::Changed)];
+    changes.extend(ops.iter().filter_map(|op| match op {
+        TeamOp::CreateTeam { team, .. } => Some((team.clone(), TeamChange::Created)),
+        TeamOp::DeleteTeam { team } => Some((team.clone(), TeamChange::Deleted)),
+        _ => None,
+    }));
+    changes
 }
 
 /// Change the directory of `kv` with `change` and store it by compare-and-set, reading it again and changing it anew

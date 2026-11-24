@@ -132,9 +132,24 @@ impl Approver {
         Ok(heard)
     }
 
-    /// Print the requests heard.
-    pub async fn list(&self) -> Result<()> {
+    /// Print the requests heard, with `json` one JSON object a line.
+    pub async fn list(&self, json: bool) -> Result<()> {
         let pending = self.pending(None).await?;
+        if json {
+            for r in &pending {
+                let mut shown = serde_json::json!({
+                    "ant": r.ant, "public_key": r.public_key, "host": r.host, "sent_at": r.sent_at,
+                });
+                if let Some(leaf) = &r.leaf {
+                    shown["leaf"] = serde_json::json!(leaf.machine);
+                }
+                if let Some(host) = &r.host_creds {
+                    shown["host_creds"] = serde_json::json!(host.machine);
+                }
+                println!("{shown}");
+            }
+            return Ok(());
+        }
         if pending.is_empty() {
             println!("no enrollment requests heard in {}s", self.listen.as_secs());
         }

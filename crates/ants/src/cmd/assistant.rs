@@ -35,6 +35,10 @@ pub(crate) enum AssistantCommand {
     Show {
         #[arg(value_name = "HUMAN")]
         human: Option<UserId>,
+        /// One JSON object: `human`, `assistant` (null for none), `verified`, and of a grant that verifies
+        /// `issued_at`, `device` and `sealing`, else `refused` saying why when it is refused.
+        #[arg(long)]
+        json: bool,
     },
     /// Enroll the human's assistant as one of its devices (`on`), so messages sealed for the human are sealed for it
     /// too and it seals those it sends for the human, or end that (`off`). Off unless enrolled; `clear` ends it too.
@@ -55,6 +59,11 @@ pub(crate) enum AssistantCommand {
         /// Drop the decision instead.
         #[arg(long, requires = "act")]
         deny: bool,
+        /// Without ACT, one JSON object per act waiting: `act` (as ACT takes it), `kind` (`order` or `decision`),
+        /// `assistant`, `expires_at`, and the order's `ant` and `op` or the decision's `verdict`, `tool_kind` and
+        /// `title`.
+        #[arg(long, conflicts_with = "act")]
+        json: bool,
     },
     /// Show the human's pre-allow rules, or add RULES: a decision of the assistant on a tool request a rule covers takes
     /// effect unconfirmed, unless it allows always. A rule is `ANT/RULE` or `*/RULE` for every ant, RULE an allow rule
@@ -69,6 +78,10 @@ pub(crate) enum AssistantCommand {
         /// Remove every rule.
         #[arg(long, conflicts_with_all = ["rules", "remove"])]
         clear: bool,
+        /// Without RULES, one JSON object: `human`, the `assistant` the rules are for (null for none), whether they
+        /// `stand`, and the `rules`.
+        #[arg(long, conflicts_with_all = ["rules", "clear"])]
+        json: bool,
     },
 }
 
@@ -92,15 +105,15 @@ pub(crate) async fn run(conn: &Connection<'_>, command: AssistantCommand) -> Res
         AssistantCommand::Disable(args) => assistant::dedicated::disable(&nats()?, args).await,
         AssistantCommand::Set { ant } => assistant::set(&nats()?, &ant).await,
         AssistantCommand::Clear => assistant::clear(&nats()?).await,
-        AssistantCommand::Show { human } => assistant::show(&nats()?, human).await,
+        AssistantCommand::Show { human, json } => assistant::show(&nats()?, human, json).await,
         AssistantCommand::Seal(SealCommand::On { key }) => assistant::seal_on(&nats()?, key).await,
         AssistantCommand::Seal(SealCommand::Off) => assistant::seal_off(&nats()?).await,
         AssistantCommand::Key { ant } => assistant::key(&ant),
-        AssistantCommand::Confirm { act, deny } => {
-            Box::pin(assistant::consent::confirm(&nats()?, act.as_deref(), deny)).await
+        AssistantCommand::Confirm { act, deny, json } => {
+            Box::pin(assistant::consent::confirm(&nats()?, act.as_deref(), deny, json)).await
         }
-        AssistantCommand::Allow { rules, remove, clear } => {
-            assistant::consent::allow(&nats()?, rules, remove, clear).await
+        AssistantCommand::Allow { rules, remove, clear, json } => {
+            assistant::consent::allow(&nats()?, rules, remove, clear, json).await
         }
     }
 }
