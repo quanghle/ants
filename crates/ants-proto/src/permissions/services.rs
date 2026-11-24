@@ -7,8 +7,8 @@ use super::{Permissions, kv_stream, ordered_consumer_subjects};
 use crate::{AntRequest, MACHINES_BUCKET, ReactionsRequest, SaveTrailRequest, channel_manager_serving_key};
 use crate::{
     CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, ENROLL_INBOX, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET,
-    INTAKE_STREAM, LINKS_BUCKET, REACTIONS_BUCKET, STREAM, THREADS_BUCKET, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, UserId,
-    chan_consumer, done_reader, inbox_consumer, inbox_prefix, subject,
+    INTAKE_STREAM, LINKS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET, STREAM, THREADS_BUCKET, TRAIL_RUNS_BUCKET,
+    TRAILS_BUCKET, UserId, chan_consumer, done_reader, inbox_consumer, inbox_prefix, subject,
 };
 
 impl Permissions {
@@ -176,6 +176,20 @@ impl Permissions {
     /// [`Permissions::for_enroll_approver`], with which it is issued.
     pub fn for_account_holder() -> Self {
         Self { publish: vec![subject::account_holder()], subscribe: vec![format!("{ENROLL_INBOX}.>")] }
+    }
+
+    /// What `ants signer` also allows itself on the hub, to keep the buckets held in memory ([`COLONY_BUCKET`],
+    /// [`PRESENCE_BUCKET`]), which a restart of nats-server drops and whose writers, ants and web pages, may create no
+    /// stream: creating them as `ants init` does, which looks up the account's JetStream limits first and denies the
+    /// rollups by an update right after. The signer issues these credentials itself from the account key, which may
+    /// sign any credentials, so they trust no more than the key's holder. Leaf uplinks never carry these.
+    pub fn for_bucket_keeper() -> Self {
+        let mut publish = vec!["$JS.API.INFO".to_owned()];
+        for bucket in [COLONY_BUCKET, PRESENCE_BUCKET] {
+            publish.push(format!("$JS.API.STREAM.CREATE.{}", kv_stream(bucket)));
+            publish.push(format!("$JS.API.STREAM.UPDATE.{}", kv_stream(bucket)));
+        }
+        Self { publish, subscribe: Vec::new() }
     }
 
     /// What `ants signer` allows itself on top of [`Permissions::for_enroll_approver`]: hearing every registration

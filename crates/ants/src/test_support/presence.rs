@@ -20,3 +20,19 @@ pub(crate) async fn device(server: &Server, human: &UserId, label: &str) -> (jet
     js.set_timeout(Duration::from_secs(1));
     (js, device)
 }
+
+/// A connection of a new web page of `human`, with web credentials of its own ([`Permissions::for_web`]), and the
+/// device's id.
+///
+/// [`Permissions::for_web`]: ants_proto::Permissions::for_web
+pub(crate) async fn page(server: &Server, human: &UserId) -> (jetstream::Context, DeviceId) {
+    let creds = server.dir().join(format!("{human}-web.creds"));
+    let team = server.dir().join("auth");
+    let new = crate::auth::Registered { label: Some("browser"), web: true, ..Default::default() };
+    let permissions = ants_proto::Permissions::for_web(human);
+    let issued = crate::auth::Issue::new(&team, human, Role::Human.into(), permissions).with(&new).into_file(&creds);
+    let device = issued.unwrap().expect("a page's device");
+    let (_, mut js) = bus::connect(&server.url, Some(&creds), None, human, "test").await.unwrap();
+    js.set_timeout(Duration::from_secs(1));
+    (js, device)
+}

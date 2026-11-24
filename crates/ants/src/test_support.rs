@@ -53,12 +53,13 @@ impl Server {
     /// A server trusting a fresh team, with `jetstream` added to its JetStream block and `extra` to its
     /// configuration.
     pub(crate) fn start_with(jetstream: &str, extra: &str) -> Option<Self> {
-        NatsServer::spawn_with(|dir| {
-            init(&dir.join("auth")).unwrap();
-            let store = dir.join("js");
-            format!("jetstream {{ store_dir: {store:?}\n{jetstream} }}\ninclude \"auth/{SERVER_CONF}\"\n{extra}")
-        })
-        .map(Self)
+        NatsServer::spawn_with(|dir| team_conf(dir, jetstream, extra)).map(Self)
+    }
+
+    /// A server trusting a fresh team on a port of its own, which a client connected to it reconnects to after a
+    /// [`NatsServer::stop`] and [`NatsServer::start_again`].
+    pub(crate) fn start_restartable() -> Option<Self> {
+        NatsServer::spawn_on(ants_test_support::free_port(), |dir| team_conf(dir, "", "")).map(Self)
     }
 
     /// A server trusting a fresh team on the layout from before the store account: the team's account holds
@@ -133,6 +134,14 @@ impl Server {
 
 /// A hub with the JetStream domain `hub` trusting a fresh team, taking leaf nodes on `leaf_port` (see
 /// [`ants_test_support::free_port`]), with `extra` added to its configuration.
+/// The configuration of a server trusting a fresh team set up in `dir`, with `jetstream` added to its JetStream block
+/// and `extra` to it.
+fn team_conf(dir: &Path, jetstream: &str, extra: &str) -> String {
+    init(&dir.join("auth")).unwrap();
+    let store = dir.join("js");
+    format!("jetstream {{ store_dir: {store:?}\n{jetstream} }}\ninclude \"auth/{SERVER_CONF}\"\n{extra}")
+}
+
 pub(crate) fn spawn_hub(leaf_port: u16, extra: &str) -> Option<NatsServer> {
     NatsServer::spawn_with(|dir| {
         init(&dir.join("auth")).unwrap();

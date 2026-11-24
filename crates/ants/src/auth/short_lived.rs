@@ -65,11 +65,14 @@ pub fn approver_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String
 
 /// [`approver_creds`] for `ants signer`, which also answers ants' reactions requests
 /// ([`Permissions::for_reactions_responder`]) and trail saves ([`Permissions::for_trail_keeper`]), and humans'
-/// registration requests ([`Permissions::for_registrar`]).
+/// registration requests ([`Permissions::for_registrar`]), and keeps the buckets held in memory
+/// ([`Permissions::for_bucket_keeper`]).
 pub fn signer_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
     let mut permissions = signer_permissions();
-    // Registration happens on the hub only: a leaf uplink with signer_permissions never carries it.
+    // Registration and keeping the buckets happen on the hub only: a leaf uplink with signer_permissions never carries
+    // them.
     merge(&mut permissions, Permissions::for_registrar());
+    merge(&mut permissions, Permissions::for_bucket_keeper());
     short_lived_creds(dir, js_domain, permissions)
 }
 
