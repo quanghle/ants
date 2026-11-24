@@ -12,7 +12,7 @@ use crate::daemon::Config;
 pub(crate) use pick::pick;
 pub use pick::{STALE_AFTER, has_capability, is_live, list_entries, naming_as_sage};
 pub use registration::{
-    LOOK_AGAIN, Registration, hold, leave_unserved, may_start, register, stand_unserved, wait_for_turn,
+    LOOK_AGAIN, Recreate, Registration, hold, leave_unserved, may_start, register, stand_unserved, wait_for_turn,
 };
 pub use workload::{Working, Workload};
 

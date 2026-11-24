@@ -102,7 +102,7 @@ async fn turning_working_or_idle_shows_before_the_next_beat() {
     let workload = Arc::new(Workload::default());
     workload.set_harnesses(1);
     let beat = Duration::from_secs(60);
-    let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone())).await.unwrap();
+    let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone()), None).await.unwrap();
     let first = read(&kv, "dev-a").await.unwrap();
     assert_eq!((first.activity, first.handling, first.harnesses), (Activity::Idle, 0, 1));
 
@@ -127,7 +127,7 @@ async fn a_signed_out_harness_shows_until_it_signs_in_before_the_next_beat() {
     let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let workload = Arc::new(Workload::default());
     let beat = Duration::from_secs(60);
-    let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone())).await.unwrap();
+    let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone()), None).await.unwrap();
     assert_eq!(read(&kv, "dev-a").await.unwrap().signed_out, None);
 
     let out = SignInNeeded { since: chrono::Utc::now(), sign_in: Some("copilot login".to_owned()) };
@@ -144,7 +144,7 @@ async fn memory_turning_low_or_recovering_shows_before_the_next_beat() {
     let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let workload = Arc::new(Workload::default());
     let beat = Duration::from_secs(60);
-    let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone())).await.unwrap();
+    let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone()), None).await.unwrap();
     assert_eq!(read(&kv, "dev-a").await.unwrap().memory_low, None);
 
     let limit = Duration::from_secs(5);
@@ -271,7 +271,7 @@ async fn the_builtin_messenger_hands_over_to_a_messenger_started_later() {
 
     let mut builtin = entry_on("messenger", "here");
     let revision = colony::wait_for_turn(&kv, &mut builtin, every).await.unwrap();
-    let held = Registration::hold(kv.clone(), builtin.clone(), revision, beat, None).await.unwrap();
+    let held = Registration::hold(kv.clone(), builtin.clone(), revision, beat, None, None).await.unwrap();
 
     // Deleted under it, the entry is put back at once.
     kv.delete("messenger").await.unwrap();
@@ -314,11 +314,11 @@ async fn of_two_builtin_messengers_only_the_latest_put_serves() {
     kv.delete("messenger").await.unwrap();
     let mut b = entry_on("messenger", "here");
     let revision = colony::wait_for_turn(&kv, &mut b, every).await.unwrap();
-    let b_held = Registration::hold(kv.clone(), b.clone(), revision, beat, None).await.unwrap();
+    let b_held = Registration::hold(kv.clone(), b.clone(), revision, beat, None, None).await.unwrap();
 
     let first = read(&kv, "messenger").await.unwrap();
 
-    let a_held = Registration::hold(kv.clone(), a, stale, beat, None).await.unwrap();
+    let a_held = Registration::hold(kv.clone(), a, stale, beat, None, None).await.unwrap();
     assert!(a_held.is_lost(), "its entry was put by another daemon");
     a_held.deregister().await;
     let mut later = None;
@@ -330,4 +330,27 @@ async fn of_two_builtin_messengers_only_the_latest_put_serves() {
     let later = later.unwrap();
     assert_eq!(later.instance, b.instance, "its heartbeats go on");
     assert!(!b_held.is_lost());
+}
+
+/// Over a server taking no credentials, a daemon's heartbeats create the colony again when nats-server lost it, as a
+/// restart drops the buckets held in memory, and put their entries in it: one listed regardless and one held.
+#[tokio::test]
+async fn heartbeats_create_a_lost_colony_again() {
+    let Some(server) = Server::start() else { return };
+    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
+    let beat = Duration::from_millis(200);
+
+    let _listed = Registration::start_with(kv.clone(), entry("dev-a"), beat, None, Some(js.clone())).await.unwrap();
+    let mut messenger = entry_on("messenger", "here");
+    let revision = colony::wait_for_turn(&kv, &mut messenger, beat).await.unwrap();
+    let held = Registration::hold(kv.clone(), messenger, revision, beat, None, Some(js.clone())).await.unwrap();
+
+    js.delete_key_value(ants_proto::COLONY_BUCKET).await.unwrap();
+    let listed_again = async || {
+        let Ok(kv) = js.get_key_value(ants_proto::COLONY_BUCKET).await else { return false };
+        read(&kv, "dev-a").await.is_some() && read(&kv, "messenger").await.is_some()
+    };
+    eventually_within(Duration::from_secs(10), "both entries put in a new colony", listed_again).await;
+    assert!(!held.is_lost(), "its own entry, put again");
 }

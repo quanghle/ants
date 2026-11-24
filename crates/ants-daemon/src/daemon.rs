@@ -184,7 +184,10 @@ async fn wait_unserved(config: &Config, js: Option<&jetstream::Context>, unserve
     entry.unserved = Some(ants_proto::Unserved { since, error, retry_at });
     let standing = async {
         match js {
-            Some(js) => colony::stand_unserved(js, entry.clone(), ants_proto::COLONY_HEARTBEAT).await,
+            Some(js) => {
+                let open = config.connection.creds.is_none();
+                colony::stand_unserved(js, entry.clone(), ants_proto::COLONY_HEARTBEAT, open).await;
+            }
             None => std::future::pending().await,
         }
     };
@@ -273,7 +276,10 @@ async fn serve(
     let publisher = publisher(config, &js, redactor, &pool).await;
     let (messages, channels) = inbox_messages(&js, &stream, config).await?;
     let provider = services.provider(providers.sense_of(&config.provider));
-    let registration = enter_colony(&js, entry.clone(), claimed, &workload, provider.sense).await?;
+    let registration = {
+        let open = config.connection.creds.is_none();
+        enter_colony(&js, entry.clone(), claimed, &workload, provider.sense, open).await?
+    };
     let inbox = Inbox {
         client: &client,
         js: &js,
