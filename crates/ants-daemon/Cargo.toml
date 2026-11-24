@@ -22,7 +22,7 @@ data-encoding.workspace = true
 futures.workspace = true
 # Copilot CLI's server protocol (crate::harness::native::copilot), without features: no bundled CLI, TLS or HTTP. Pinned
 # exactly, the SDK and the CLI agreeing on a protocol version; SDK_VERSION in copilot.rs names it.
-github-copilot-sdk = { version = "=1.0.29", default-features = false }
+github-copilot-sdk = { version = "=1.0.34", default-features = false }
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
