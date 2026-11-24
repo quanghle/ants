@@ -74,7 +74,8 @@ pub trait HumanStore: Send + Sync {
     /// each checked against its subject.
     fn messages(&self, human: UserId, assistant: UserId, since: SystemTime)
     -> BoxFuture<'_, Result<Vec<HumanMessage>>>;
-    /// The tool requests stored since `since`, and the ids of those a human decided.
+    /// The tool requests stored since `since`, and the ids of those a human decided or the cancellation of their
+    /// prompt settled.
     fn approvals(&self, since: SystemTime) -> BoxFuture<'_, Result<(Vec<ApprovalRequest>, HashSet<Uuid>)>>;
     /// Which of `human`'s inbox messages it read.
     fn read_marker(&self, human: UserId) -> BoxFuture<'_, Result<ReadMarker>>;

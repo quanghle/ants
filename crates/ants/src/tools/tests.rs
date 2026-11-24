@@ -1,5 +1,5 @@
 //! Tests of `ants tools`: pending requests listed and answered, colliding ids, the first decision winning, rejection
-//! notes, chain decisions, allow rule suggestions, following, and time left.
+//! notes, chain decisions, requests their cancelled prompts settled, allow rule suggestions, following, and time left.
 
 use std::time::Duration;
 
@@ -313,6 +313,50 @@ async fn following_reports_new_requests_and_how_each_ends() {
         ended = following => panic!("following ended: {ended:?}"),
         () = script => {}
     }
+}
+
+/// The cancelled copy an ant publishes of a request whose prompt was cancelled ends it for those following, takes it
+/// off the pending ones, and a decision on it is refused as on a request gone, however the request was read.
+#[tokio::test]
+async fn a_request_its_cancelled_prompt_settled_is_gone() {
+    let Some(server) = Server::start() else { return };
+    let dev_a: UserId = "dev-a".parse().unwrap();
+    let (client, human) = server.connect(&ants_test_support::human()).await;
+    let stream = bus::ensure_stream(&human).await.unwrap();
+    let (_, ant_js) = server.connect(&dev_a).await;
+    let minute = Duration::from_secs(60);
+    let [push, rm] = ["git push", "rm -rf build"].map(|title| request(&dev_a, title, vec![Verdict::AllowOnce], minute));
+    for r in [&push, &rm] {
+        bus::publish_json(&ant_js, r.subject(), r, None).await.unwrap();
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let following = follow(&client, &human, |update| {
+        tx.send(update.clone()).unwrap();
+        Ok(())
+    });
+    let at = Utc::now();
+    let script = async {
+        let mut next = async || tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+        assert_eq!(next().await, Update::Pending(push.clone()));
+        assert_eq!(next().await, Update::Pending(rm.clone()));
+        bus::publish_json(&ant_js, push.subject(), &push.cancelled(at), None).await.unwrap();
+        assert_eq!(next().await, Update::Resolved(push.cancelled(at), State::Cancelled(at)));
+    };
+    tokio::select! {
+        ended = following => panic!("following ended: {ended:?}"),
+        () = script => {}
+    }
+
+    assert_eq!(titles(&pending(&human, &stream, Utc::now()).await.unwrap()), ["rm -rf build"]);
+    let listed = requests(&stream).await.unwrap();
+    assert_eq!(listed.iter().map(|(_, r)| r.cancelled_at).collect::<Vec<_>>(), [Some(at), None], "one each");
+    let gone = answer(&human, &stream, &qualified(&push), Verdict::AllowOnce, Utc::now()).await.unwrap_err();
+    assert!(gone.to_string().contains(&format!("request {} is gone", qualified(&push))), "{gone:#}");
+    assert_eq!(super::decision(&stream, &push).await.unwrap(), None, "nothing stored");
+    // Read as stored at its own sequence, as a notice's link does, it is gone too.
+    let (seq, _) = listed[0];
+    assert_eq!(state(&human, &stream, seq, &push, Utc::now()).await.unwrap(), State::Cancelled(at));
 }
 
 #[test]

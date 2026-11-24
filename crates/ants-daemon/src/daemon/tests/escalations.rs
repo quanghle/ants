@@ -1,5 +1,5 @@
 //! Caps and turn budgets: spend warnings, escalations up the chain and to the owner, and the leader's answers that
-//! renew a thread.
+//! renew a thread; and a tool request settled by the steer cancelling its prompt.
 
 use super::*;
 
@@ -662,4 +662,68 @@ async fn a_provider_s_wake_is_prompted_on_a_thread_out_of_turns_and_answered_to_
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(bus.unacked().await, 0);
     assert_eq!(log.locked().answered, ["standup"]);
+}
+
+/// A steer cancelling a prompt while its tool request waits settles the request: the ant stores it again, cancelled,
+/// which takes it off every reader's pending requests, and tells the thread's status it was settled by the
+/// cancellation, while the steer runs next.
+#[tokio::test]
+async fn a_steer_cancelling_a_prompt_settles_its_waiting_tool_request() {
+    use ants_proto::{ApprovalRequest, DecidedBy, StatusEvent, StatusUpdate, Verdict};
+
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let wait = Duration::from_secs(30);
+    let approver = crate::approvals::NatsApprover::new(
+        bus.client.clone(),
+        bus.js.clone(),
+        bus.dev.clone(),
+        wait,
+        bus.humans.clone(),
+    );
+    let policy = PermissionPolicy::new(crate::permission::Allowlist::default(), Some(Arc::new(approver)));
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch.with_policy(policy), SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    let mut requests = bus.client.subscribe(subject::approvals(&bus.dev)).await.unwrap();
+    let mut statuses = bus.client.subscribe(subject::status(&bus.dev, &t1)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    bus.send(&t1, "ask send").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let msg = timeout(wait, requests.next()).await.unwrap().unwrap();
+        let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
+        assert_eq!((&request.thread_id, request.cancelled_at), (&t1, None));
+        let (sent, _) = bus.send(&t1, "go left").await;
+        let msg = timeout(wait, requests.next()).await.unwrap().unwrap();
+        let copy: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
+        assert!(copy.cancelled_at.is_some(), "{copy:?}");
+        assert_eq!(copy, ApprovalRequest { cancelled_at: copy.cancelled_at, ..request.clone() }, "the same request");
+        let decided = loop {
+            let msg = timeout(wait, statuses.next()).await.unwrap().unwrap();
+            let update = serde_json::from_slice::<StatusEvent>(&msg.payload).unwrap().update;
+            if matches!(update, StatusUpdate::Decided { .. }) {
+                break update;
+            }
+        };
+        let settled = StatusUpdate::Decided {
+            request_id: request.id,
+            verdict: Verdict::Reject,
+            by: DecidedBy::Cancelled,
+            decider: None,
+            via: None,
+        };
+        assert_eq!(decided, settled);
+        let reply = next_envelope(&mut to_human).await;
+        assert!(reply.text.contains("asked send: cancelled"), "the harness was told: {}", reply.text);
+        let steered = next_envelope(&mut to_human).await;
+        assert_eq!(steered.in_reply_to, Some(sent.id));
+        let stream = bus.js.get_stream(ants_proto::STREAM).await.unwrap();
+        let stored = stream.get_last_raw_message_by_subject(&request.subject()).await.unwrap();
+        let stored: ApprovalRequest = serde_json::from_slice(&stored.payload).unwrap();
+        assert_eq!(stored, copy, "the cancelled copy is stored");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().prompted, 2);
 }

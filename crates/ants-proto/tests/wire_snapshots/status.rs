@@ -6,7 +6,7 @@ use super::*;
 #[test]
 fn status() {
     snap("state_variants", &[State::Working, State::WaitingApproval, State::Idle, State::Failed, State::SignedOut]);
-    snap("decided_by_variants", &[DecidedBy::Human, DecidedBy::Chain, DecidedBy::Expiry]);
+    snap("decided_by_variants", &[DecidedBy::Human, DecidedBy::Chain, DecidedBy::Expiry, DecidedBy::Cancelled]);
     snap("plan_step", &PlanStep { content: "write tests".to_owned(), status: "in_progress".to_owned() });
     let updates = [
         ("state", StatusUpdate::State { state: State::WaitingApproval }),

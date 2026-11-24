@@ -88,6 +88,20 @@ pub(super) fn expired_member_notice(
         .as_notice(ants_proto::NoticeKind::RequestExpired)
 }
 
+/// The message on `request`'s thread that tells `member`, an ant of the chain or an assistant asked to decide it,
+/// that the prompt that asked was cancelled, which settled it. It carries no escalation: there is nothing left to
+/// decide.
+pub(super) fn cancelled_member_notice(ant: &UserId, request: &ApprovalRequest, member: &UserId) -> Envelope {
+    let (id, thread, tool) = (request.id, &request.thread_id, &request.tool);
+    let text = format!(
+        "[ants] Approval request {id} on thread {thread} is gone: the prompt of {ant} that asked to run {} ({}) was \
+         cancelled. decide_approval no longer applies to it, and no answer is needed.",
+        tool.title, tool.kind,
+    );
+    Envelope::on_thread(thread.clone(), ant.clone(), member.clone(), text)
+        .as_notice(ants_proto::NoticeKind::RequestCancelled)
+}
+
 /// What every ant of the chain, `to`, gets about `request`: how to decide it, and the tool call.
 pub(super) fn chain_text(request: &ApprovalRequest, to: &[UserId]) -> String {
     let verdicts: Vec<&str> = request.options.iter().map(|v| v.as_str()).collect();

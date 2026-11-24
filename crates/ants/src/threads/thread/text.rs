@@ -248,6 +248,7 @@ fn rejection(rejected: &ToolRejection, title: &str) -> String {
     let args = args.map_or_default(|args| format!("({args})"));
     let how = match rejected.by {
         DecidedBy::Expiry => "expired".to_owned(),
+        DecidedBy::Cancelled => "cancelled with its prompt".to_owned(),
         DecidedBy::Human => {
             let decider = rejected.decider.as_ref().map_or("a human", UserId::as_str);
             let via = rejected.via.as_ref().map_or_default(|via| format!(" via {via}"));

@@ -36,10 +36,15 @@
 //! `ants tools reject --note` sends the ant a note on the request's thread once the rejection is stored
 //! (`send_note` of `cmd/tools.rs`), as ACP's answer to a permission request carries no message.
 //!
+//! A prompt cancelled while its request waits settles the request: its ant publishes it again with `cancelled_at`
+//! set, and the request is read as that copy says, pending no more, a decision on it refused as on a request gone
+//! ([`State::Cancelled`]).
+//!
 //! `ants tools list --follow` and `ants inbox --follow` follow the requests alike ([`follow`]); the inbox also shows
 //! how each ends.
 
 use ants_proto::{ApprovalDecision, UserId};
+use chrono::{DateTime, Utc};
 
 mod answer;
 mod assisted;
@@ -67,6 +72,9 @@ pub enum State {
     DecidedByAnt(UserId, ApprovalDecision),
     /// No decision in time; the ant rejected it.
     Expired,
+    /// The prompt that asked was cancelled while it waited, at the time named: the harness was told so, and the
+    /// request is gone.
+    Cancelled(DateTime<Utc>),
 }
 
 #[cfg(test)]

@@ -23,14 +23,14 @@ macro_rules! named_as_on_the_wire {
 fn every_wire_enum_s_as_str_is_the_name_serde_writes() {
     named_as_on_the_wire!(Activity: Idle, Working, Unknown);
     named_as_on_the_wire!(ChannelNotify: All, Humans, Mentions);
-    named_as_on_the_wire!(DecidedBy: Human, Chain, Expiry);
+    named_as_on_the_wire!(DecidedBy: Human, Chain, Expiry, Cancelled);
     named_as_on_the_wire!(EscalationReason:
         TurnBudget, Cap, Notes, DeadLetter, Approval, Asked, ContextWindow, Harness, Storage, Question, Unknown
     );
     named_as_on_the_wire!(Following: Inbox, Approvals);
     named_as_on_the_wire!(NoticeKind:
         Spend, SignedOut, Quota, Failing, NoFallback, GaveUp, Withdrawn, Expired, Unserved, Assistant, InPlace,
-        RequestExpired, Steered, McpSignIn, RunSpent
+        RequestExpired, RequestCancelled, Steered, McpSignIn, RunSpent
     );
     named_as_on_the_wire!(OrderState: Pending, Held, Applied, Refused);
     named_as_on_the_wire!(PromptEnd: Replied, NoReply, Cancelled, Capped, Failed, Unknown);
