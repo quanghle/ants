@@ -25,8 +25,8 @@ const SPEND_TRIES: usize = 16;
 impl Inbox<'_> {
     /// Whether `incoming` is another ant's reply to a message or post the ant sent, which is prompted but not answered
     /// back, so that two ants answering each other stop after one reply: given what was read of a post's thread.
-    /// Never a message carrying an escalation or an approval request, a webhook's, nor the resume of a channel thread
-    /// after an escalation ([`Inbox::always_answered`]).
+    /// Never a message carrying an escalation or an approval request, a webhook's, a trail step, nor the resume of a
+    /// channel thread after an escalation ([`Inbox::always_answered`]).
     pub(super) fn replies_to_own(&self, incoming: &Incoming, read: Option<&Context>) -> bool {
         if self.always_answered(incoming).is_some() {
             return false;
@@ -43,8 +43,8 @@ impl Inbox<'_> {
     }
 
     /// Why `incoming` is always answered, if it is: a human's message, or one an assistant sent for its human, a
-    /// webhook's, one carrying an escalation or an approval request, and the resume of a channel thread after an
-    /// escalation.
+    /// webhook's, one carrying an escalation or an approval request, a trail step (a re-ask among them, which replies
+    /// to the ant's own reply), and the resume of a channel thread after an escalation.
     pub(super) fn always_answered(&self, incoming: &Incoming) -> Option<&'static str> {
         let envelope = &incoming.envelope;
         if envelope.on_behalf_of.is_some() || self.humans.sender_role(envelope).is_human() {
@@ -55,6 +55,8 @@ impl Inbox<'_> {
             Some("a message carrying an escalation")
         } else if envelope.approval.is_some() {
             Some("an approval request")
+        } else if envelope.trail_step.is_some() {
+            Some("a trail step")
         } else if incoming.resume.is_some() {
             Some("the resume of a channel thread after an escalation")
         } else {

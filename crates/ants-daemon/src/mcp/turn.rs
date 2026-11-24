@@ -185,6 +185,10 @@ fn always_answered(hub: &Hub, current: &Envelope) -> Option<&'static str> {
         Some("the message being handled carries an escalation, which is always answered; answer it or escalate")
     } else if current.approval.is_some() {
         Some("the message being handled carries an approval request, which is always answered; answer it or escalate")
+    } else if current.trail_step.is_some() {
+        Some(
+            "the message being handled is a trail step, which is always answered: its reply answers the step; reply to it",
+        )
     } else {
         None
     }

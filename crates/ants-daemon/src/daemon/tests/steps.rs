@@ -69,3 +69,24 @@ async fn a_step_to_a_capped_ant_or_out_of_turns_is_turned_away_with_a_notice_to_
     assert!(timeout(quiet, to_human.next()).await.is_err(), "nothing escalated to the human");
     assert!(timeout(quiet, to_lead.next()).await.is_err(), "one notice each");
 }
+
+#[tokio::test]
+async fn a_re_ask_replying_to_the_ant_s_answer_is_prompted_and_answered() {
+    let Some((bus, _to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let [lead] = ants(["lead"]);
+    let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
+    let mut again = step_of(&bus, &lead, "again");
+    again.in_reply_to = Some(Uuid::now_v7());
+    bus::publish_json(&bus.js, again.subject(), &again, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let reply = next_envelope(&mut to_lead).await;
+        assert_eq!((&reply.from, reply.in_reply_to, reply.notice), (&bus.dev, Some(again.id), None), "{reply:?}");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().prompts.len(), 1);
+}
