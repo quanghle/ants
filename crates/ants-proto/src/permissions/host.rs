@@ -5,8 +5,8 @@ use super::{Permissions, ack_subjects, kv_stream, ordered_consumer_subjects};
 #[cfg(doc)]
 use crate::admin_outcome_key;
 use crate::{
-    AdminPayload, COLONY_BUCKET, DEVICES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, MACHINES_BUCKET,
-    Machine, SENSE_STREAM, STREAM, admin_consumer, host_inbox_prefix, subject,
+    ACCOUNT_HOLDER_KEY, AdminPayload, COLONY_BUCKET, DEVICES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET,
+    MACHINES_BUCKET, Machine, SENSE_STREAM, STREAM, admin_consumer, host_inbox_prefix, subject,
 };
 
 impl Permissions {
@@ -31,7 +31,8 @@ impl Permissions {
     /// sequence, and reads them by direct gets, the last of a subject by its subject or a batch from a sequence by the
     /// request. Readers verify each event as signed with the ant's own credentials and chained to the one before. It
     /// stores and reads the payloads of the machine's admin orders in [`FILES_STREAM`] ([`AdminPayload::chunks_of`]):
-    /// the exports of its ants' providers.
+    /// the exports of its ants' providers. It reads the record of the machine holding the account key
+    /// ([`subject::account_holder`]) for the version `ants signer` runs, which `auto_update = "install"` installs up to.
     /// Nothing else: no other machine's record or outcomes, no ant's identity record, no message to or from an ant. No
     /// ant gets any of it.
     pub fn for_host(machine: &Machine) -> Self {
@@ -58,6 +59,7 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{SENSE_STREAM}.{}", subject::ALL_SENSE),
             AdminPayload::chunks_of(machine),
             format!("$JS.API.DIRECT.GET.{FILES_STREAM}.{}", AdminPayload::chunks_of(machine)),
+            subject::kv_get(MACHINES_BUCKET, ACCOUNT_HOLDER_KEY),
         ];
         let humans = kv_stream(HUMANS_BUCKET);
         publish.extend([format!("$JS.API.STREAM.INFO.{humans}"), format!("$JS.API.DIRECT.GET.{humans}.>")]);

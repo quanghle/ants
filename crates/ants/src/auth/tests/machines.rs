@@ -109,6 +109,8 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
     assert!(as_host.put("m2", b"{}".to_vec()).await.is_err(), "a host writes only its own machine's record");
     let holder = ants_proto::ACCOUNT_HOLDER_KEY;
     assert!(as_host.put(holder, b"{}".to_vec()).await.is_err(), "a host never says it holds the account key");
+    assert!(as_host.get(holder).await.is_ok(), "a host reads the version the bus runs from the record");
+    assert!(as_host.get("m2").await.is_err(), "and no other machine's record");
     let as_ant = DirectKv::new(&a_js, None, ants_proto::MACHINES_BUCKET).await.unwrap();
     assert!(as_ant.put("m1", b"{}".to_vec()).await.is_err(), "an ant has no host powers");
 

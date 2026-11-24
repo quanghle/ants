@@ -40,9 +40,11 @@ The top-level `auto_update` of `~/.ants/config.toml` ([config.md](config.md)) le
 |---|---|
 | `"off"` (default) | No polling. |
 | `"check"` | Logs a warning naming a newer stable release; `ants doctor` reports it as the `update` check (`warn`, fix `ants update`). |
-| `"install"` | Installs a newer stable release as `ants update` does; the daemon's upgrade check then drains prompts in flight and exits with status `75` for its service to start the new executable (with `--upgrade-check 0` it keeps running the old one until restarted). |
+| `"install"` | Installs a newer stable release as `ants update` does, up to the version the bus runs: the latest release, but none newer than the one `ants signer` runs; the daemon's upgrade check then drains prompts in flight and exits with status `75` for its service to start the new executable (with `--upgrade-check 0` it keeps running the old one until restarted). |
 
 The first poll comes within 10 minutes of the start, then about every 24 hours (± 1 hour, at random, so a bus's machines do not poll together). Only stable releases count and an older release is never installed. A failed poll or install logs a warning and is retried after 1 hour, doubling up to 24 hours. A change to `auto_update` takes effect on a daemon restart. With `auto_update` on, `ants doctor` asks GitHub for the latest release too.
+
+The version the bus runs is the one `ants signer` records running in `ants_machines` (`_account`, with the machine holding the account key), each time it connects. The daemon's host connection ([host credentials](auth.md), `ants auth host`) reads it on connecting and every hour. Until 1.0 a release may change the wire, so a bus moves by its operator updating the hub and the signer's machine first, the other machines following: on a bus whose signer runs 0.4.0, `"install"` does not take 0.5.0, and takes it at the first poll after the signer runs it. A machine behind the bus catches up to the bus's version, even with a newer release out. Without host credentials, or before `ants signer` recorded a version, `"install"` installs nothing and says why in its warning. Both `"check"` and `"install"` log a warning at each poll while the machine runs behind or ahead of the bus.
 
 ### Moving the streams into the store account
 
